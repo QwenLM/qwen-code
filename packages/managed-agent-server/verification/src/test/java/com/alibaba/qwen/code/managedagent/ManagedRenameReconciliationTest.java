@@ -8,9 +8,9 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.ParkedOperation;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.RenameDelivery;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionMutationCommand;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -100,7 +100,7 @@ class ManagedRenameReconciliationTest {
             }
         };
         store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, new ObjectMapper(), clock,
-                ignored -> {}, new ManagedWorkspaceRegistry(jdbc),
+                ignored -> {}, new JdbcManagedWorkspaceRegistry(jdbc),
                 new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         ProxyFactory proxy = new ProxyFactory(store);
         proxy.setInterfaces(AgentStateStore.class);

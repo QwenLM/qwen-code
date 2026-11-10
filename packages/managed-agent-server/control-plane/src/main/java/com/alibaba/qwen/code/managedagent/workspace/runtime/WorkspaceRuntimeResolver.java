@@ -27,6 +27,7 @@ public final class WorkspaceRuntimeResolver {
     private final Map<Storage, Mount> mounts = new LinkedHashMap<>();
     private final String boundSessionIsolationClass;
     private final boolean local;
+    private final boolean measuredTools;
     private final ManagedAgentSettings.ManagedExtensions managedExtensions;
 
     public WorkspaceRuntimeResolver(SessionQueryStore sessions, WorkspaceExecutionStore authority,
@@ -38,6 +39,7 @@ public final class WorkspaceRuntimeResolver {
             ManagedAgentSettings properties, SshWorkspaceService ssh) {
         this.ssh = ssh;
         this.managedExtensions = properties.getManagedExtensions();
+        this.measuredTools = properties.getRuntimeBroker().isToolMeasurements();
         if (managedExtensions.isEnabled() && !properties.getExtensions().isEnabled()) {
             throw new IllegalStateException("Managed extension execution requires extensions to be enabled");
         }
@@ -47,7 +49,9 @@ public final class WorkspaceRuntimeResolver {
         this.local = com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.LOCAL_PROCESS.equals(broker.getProvisioner());
         this.boundSessionIsolationClass = broker.getBoundSessionIsolationClass();
         this.residents = new com.alibaba.qwen.code.managedagent.contracts.workspace.ResidentWorkspaceCatalog(broker.getResidentWorkspaces());
-        if (WorkspaceExecutionProfile.CAPABILITY_DIGEST.equals(
+        if (WorkspaceExecutionProfile.MEASURED_CAPABILITY_DIGEST.equals(
+                        properties.getHarness().getCapabilityDigest())
+                || WorkspaceExecutionProfile.CAPABILITY_DIGEST.equals(
                 properties.getHarness().getCapabilityDigest())
                 || com.alibaba.qwen.code.runtimebroker.ResidentWorkspaceProfile.CAPABILITY_DIGEST.equals(
                         properties.getHarness().getCapabilityDigest())) {
@@ -98,7 +102,7 @@ public final class WorkspaceRuntimeResolver {
 
     private Resolved resolve(String sessionId, com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority lifecycle, boolean hook) {
         SessionRecord session = sessions.findSessionById(sessionId)
-                .orElseThrow(com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore::unavailable);
+                .orElseThrow(WorkspaceExecutionStore::unavailable);
         if (lifecycle == null && hook && "CLOSING".equals(session.status())) {
             authority.authorizeLegacyClose(session);
         } else if (lifecycle == null) {
@@ -109,7 +113,7 @@ public final class WorkspaceRuntimeResolver {
         ContextBinding binding = session.workspace();
         if (ssh != null && ssh.runtimeStorage(binding) != null) {
             if (hook && !managedExtensions.isEnabled()) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                throw WorkspaceExecutionStore.unavailable();
             }
             ssh.verifyBinding(binding);
             return new Resolved(binding, new RuntimeScope(session.tenantId(), binding.getWorkspaceId(),
@@ -123,7 +127,7 @@ public final class WorkspaceRuntimeResolver {
         }
         Mount mount = mount(binding);
         if (mount == null) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
         verifyMountIntact(mount);
         return new Resolved(binding, new RuntimeScope(session.tenantId(), binding.getWorkspaceId(),
@@ -133,7 +137,9 @@ public final class WorkspaceRuntimeResolver {
 
     private String extensionDigest(String platform) {
         if (!managedExtensions.isEnabled()) {
-            return WorkspaceExecutionProfile.CAPABILITY_DIGEST;
+            return measuredTools
+                    ? WorkspaceExecutionProfile.MEASURED_CAPABILITY_DIGEST
+                    : WorkspaceExecutionProfile.CAPABILITY_DIGEST;
         }
         if ("linux".equals(platform)) {
             return com.alibaba.qwen.code.runtimebroker.ManagedExtensionExecutionProfile.LINUX_CAPABILITY_DIGEST;
@@ -142,6 +148,22 @@ public final class WorkspaceRuntimeResolver {
             return com.alibaba.qwen.code.runtimebroker.ManagedExtensionExecutionProfile.DEVELOPER_CAPABILITY_DIGEST;
         }
         throw new IllegalStateException("Native extension execution requires an explicit supported platform mode");
+    }
+
+    static boolean matchesRecordedScope(RuntimeScope resolved, RuntimeScope recorded) {
+        if (resolved.equals(recorded)) {
+            return true;
+        }
+        // Existing ordinary leases retain their attested profile across a measurement rollout.
+        var ordinary = java.util.Set.of(WorkspaceExecutionProfile.CAPABILITY_DIGEST,
+                WorkspaceExecutionProfile.MEASURED_CAPABILITY_DIGEST);
+        return ordinary.contains(resolved.getCapabilityDigest())
+                && ordinary.contains(recorded.getCapabilityDigest())
+                && resolved.getTenantId().equals(recorded.getTenantId())
+                && resolved.getWorkspaceId().equals(recorded.getWorkspaceId())
+                && resolved.getWorkspaceGeneration().equals(recorded.getWorkspaceGeneration())
+                && resolved.getCanonicalCwd().equals(recorded.getCanonicalCwd())
+                && resolved.getIsolationClass().equals(recorded.getIsolationClass());
     }
 
     /**
@@ -164,7 +186,7 @@ public final class WorkspaceRuntimeResolver {
         }
         Mount mount = mount(binding);
         if (mount == null) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
         verifyMountIntactForProbe(mount);
         requireDirectoryForProbe(mount.root().toString(), targetCwdRelative);
@@ -179,7 +201,7 @@ public final class WorkspaceRuntimeResolver {
                     binding.getContextRevision()));
         } catch (com.alibaba.qwen.code.runtimebroker.managedworkspace
                 .WorkspaceException error) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
     }
 
@@ -191,7 +213,7 @@ public final class WorkspaceRuntimeResolver {
     public java.nio.file.Path storageRoot(ContextBinding binding) {
         Mount mount = mount(binding);
         if (mount == null) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
         verifyMountIntact(mount);
         return mount.root();
@@ -210,16 +232,16 @@ public final class WorkspaceRuntimeResolver {
         if (mount == null) {
             Path root = authority.createdStorageRoot(scope.getTenantId(), storageId);
             if (root == null) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                throw WorkspaceExecutionStore.unavailable();
             }
             try {
                 mount = new Mount(root, Files.readAttributes(root, BasicFileAttributes.class).fileKey());
             } catch (IOException error) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable(error);
+                throw WorkspaceExecutionStore.unavailable(error);
             }
         }
         if (!mount.root().toString().equals(scope.getCanonicalCwd())) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
         verifyMountIntact(mount);
     }
@@ -239,7 +261,7 @@ public final class WorkspaceRuntimeResolver {
         try {
             return new Mount(root, Files.readAttributes(root, BasicFileAttributes.class).fileKey());
         } catch (IOException error) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable(error);
+            throw WorkspaceExecutionStore.unavailable(error);
         }
     }
 
@@ -251,10 +273,10 @@ public final class WorkspaceRuntimeResolver {
             if (!mount.root().equals(mount.root().toRealPath())
                     || !Objects.equals(mount.fileKey(), Files.readAttributes(
                             mount.root(), BasicFileAttributes.class).fileKey())) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                throw WorkspaceExecutionStore.unavailable();
             }
         } catch (IOException error) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
     }
 
@@ -263,14 +285,14 @@ public final class WorkspaceRuntimeResolver {
             if (!mount.root().equals(mount.root().toRealPath())
                     || !Objects.equals(mount.fileKey(), Files.readAttributes(
                             mount.root(), BasicFileAttributes.class).fileKey())) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                throw WorkspaceExecutionStore.unavailable();
             }
         // The mount root itself being gone is a permanent configuration
         // fact, not a momentary blip — only a genuine I/O hiccup retries.
         } catch (java.nio.file.NoSuchFileException error) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         } catch (IOException error) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailableTransient(error);
+            throw WorkspaceExecutionStore.unavailableTransient(error);
         }
     }
 
@@ -290,13 +312,13 @@ public final class WorkspaceRuntimeResolver {
                     || !directory.toRealPath().equals(directory)
                     || !Files.isReadable(directory)
                     || !Files.isExecutable(directory)) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                throw WorkspaceExecutionStore.unavailable();
             }
         // The missing-directory shape (NoSuchFileException) and every
         // other I/O anomaly share the terminal verdict.
         } catch (IOException | IllegalArgumentException
                 | SecurityException error) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
     }
 
@@ -318,7 +340,7 @@ public final class WorkspaceRuntimeResolver {
                             BasicFileAttributes.class,
                             LinkOption.NOFOLLOW_LINKS).isDirectory()
                     || !directory.toRealPath().equals(directory)) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                throw WorkspaceExecutionStore.unavailable();
             }
             directory.getFileSystem().provider().checkAccess(directory,
                     java.nio.file.AccessMode.READ,
@@ -326,11 +348,11 @@ public final class WorkspaceRuntimeResolver {
         } catch (java.nio.file.NoSuchFileException
                 | java.nio.file.AccessDeniedException | SecurityException
                 | IllegalArgumentException error) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         } catch (IOException error) {
             throw hasStructuralAncestor(base, directory)
-                    ? com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable()
-                    : com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailableTransient(error);
+                    ? WorkspaceExecutionStore.unavailable()
+                    : WorkspaceExecutionStore.unavailableTransient(error);
         }
     }
 
@@ -353,7 +375,7 @@ public final class WorkspaceRuntimeResolver {
 
     public ContextBinding savedBinding(String sessionId) {
         return sessions.findSessionById(sessionId).map(SessionRecord::workspace)
-                .orElseThrow(com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore::unavailable);
+                .orElseThrow(WorkspaceExecutionStore::unavailable);
     }
 
     public record Resolved(ContextBinding binding, RuntimeScope scope) {

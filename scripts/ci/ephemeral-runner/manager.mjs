@@ -57,6 +57,7 @@ export function command(
         );
         error.status = status;
         error.exitCode = code;
+        error.stderr = stderr.slice(0, 8192);
         reject(error);
       }
     });
@@ -241,6 +242,12 @@ export function createManager(config, dependencies = {}) {
       // unique suffix; accept that legacy shape so a deploy over a running
       // host loads (and then cleans up) its existing slots. The next start()
       // writes the suffixed name.
+      //
+      // This naming scheme is spelled out in three places: here, the
+      // identity-less sweep's `owned` filter, and the label-recovery matcher
+      // below. They must agree — a registration one of them accepts and
+      // another rejects is either leaked or deleted by guesswork — so change
+      // all three together (or lift them into one predicate) rather than one.
       const validRunnerName = (value) =>
         value === runnerName(slot) ||
         (value.startsWith(`${runnerName(slot)}-`) &&
@@ -290,11 +297,31 @@ export function createManager(config, dependencies = {}) {
     return (await run('docker', args)).trim().split('\n').filter(Boolean);
   }
 
-  // A killed `docker create` CLI can still leave a container behind after the
-  // slot state is gone, so the instance label is the surviving identity.
-  async function recoverIdentity(slot, containers, networks) {
-    const prefix = `qwen-${config.poolId}-${slot}-`;
-    const names = new Set();
+  // The labels are the identity anchor label recovery reads back, so
+  // provisioning and the refusal-path retry anchor must create identical
+  // networks.
+  async function createNetwork(slot, name) {
+    return (
+      await run('docker', [
+        'network',
+        'create',
+        '--driver',
+        'bridge',
+        '--opt',
+        'com.docker.network.bridge.enable_icc=false',
+        '--label',
+        `qwen.pool=${config.poolId}`,
+        '--label',
+        `qwen.slot=${slot}`,
+        '--label',
+        `qwen.instance=${name}`,
+        name,
+      ])
+    ).trim();
+  }
+
+  async function collectIdentities(containers, networks) {
+    const names = [];
     const inspect = async (args, id) => {
       try {
         return (await run('docker', [...args, id])).trim();
@@ -303,14 +330,14 @@ export function createManager(config, dependencies = {}) {
       }
     };
     for (const id of containers)
-      names.add(
+      names.push(
         await inspect(
           ['inspect', '--format', '{{index .Config.Labels "qwen.instance"}}'],
           id,
         ),
       );
     for (const id of networks)
-      names.add(
+      names.push(
         await inspect(
           [
             'network',
@@ -321,7 +348,14 @@ export function createManager(config, dependencies = {}) {
           id,
         ),
       );
-    const identified = [...names].filter((name) => {
+    return names;
+  }
+
+  // A killed `docker create` CLI can still leave a container behind after the
+  // slot state is gone, so the instance label is the surviving identity.
+  async function recoverIdentity(slot, names) {
+    const prefix = `qwen-${config.poolId}-${slot}-`;
+    const identified = [...new Set(names)].filter((name) => {
       const bare = name.replace(/^ecs-/, '');
       return (
         bare.startsWith(prefix) &&
@@ -394,53 +428,99 @@ export function createManager(config, dependencies = {}) {
   async function cleanup(slot, state) {
     const containers = await listContainers(slot);
     const networks = await listNetworks(slot);
-    if ((containers.length || networks.length) && !state?.name)
-      state = await recoverIdentity(slot, containers, networks);
-    for (const id of containers) {
+    let orphanLabels = null;
+    if ((containers.length || networks.length) && !state?.name) {
+      orphanLabels = await collectIdentities(containers, networks);
       try {
-        const logs = await run('docker', ['logs', '--tail', '10000', id]);
-        await writeFile(
-          join(
-            logDir,
-            `${state?.name || `slot-${slot}`}-${id.slice(0, 12)}.log`,
-          ),
-          logs.slice(-1024 * 1024),
-          { mode: 0o600 },
-        );
-        await pruneLogs();
-      } catch {
-        log(`slot ${slot}: container logs unavailable`);
-      }
-      try {
-        const archive = await run(
-          'docker',
-          ['cp', `${id}:/home/node/actions-runner/_diag`, '-'],
-          { binary: true },
-        );
-        await writeFile(
-          join(logDir, `${state.name}-${id.slice(0, 12)}.tar`),
-          archive,
-          { mode: 0o600 },
-        );
-        await pruneLogs();
-      } catch {
+        state = await recoverIdentity(slot, orphanLabels);
+      } catch (error) {
+        // No slot state means no cycle of this manager is live for the
+        // slot (cycles are serial per slot), so EVERY leftover resource
+        // is an orphan — including the multi-identity pile a wedged
+        // Docker left behind on hz4 (several `Created` containers per
+        // slot after address-pool exhaustion). Refusing to pick one
+        // identity there stalled 15/30 slots for 960 identical retries
+        // each. Delete the resources without a GitHub identity instead;
+        // any registrations they owned are swept by name below. A
+        // partially-failed sweep throws and the next cycle retries.
         log(
-          `slot ${slot}: runner diagnostics unavailable or larger than 4 MiB`,
+          `slot ${slot}: ${error.message}; sweeping orphaned resources without a recorded identity`,
         );
+        state = null;
       }
-      await run('docker', ['rm', '-f', '-v', id]);
     }
-    if ((await listContainers(slot)).length)
-      throw new Error('Container cleanup failed');
-    for (const id of networks) await run('docker', ['network', 'rm', id]);
-    if ((await listNetworks(slot)).length)
-      throw new Error('Network cleanup failed');
-    if (state?.name) {
+    let orphanSweepBlocked = false;
+    if (!state?.name && orphanLabels) {
+      // Sweep the registrations BEFORE removing the resources: a rejected
+      // DELETE must stay reachable on the next cycle, and the leftover
+      // pile is what keeps cleanup() running. After removal the slot has
+      // neither state nor leftovers, so a post-removal sweep would never
+      // retry a rejected deletion and would leak the registration.
+      const prefix = `qwen-${config.poolId}-${slot}-`;
+      const identifiable = (name) =>
+        typeof name === 'string' &&
+        name.replace(/^ecs-/, '').startsWith(prefix);
+      // Only sweep when every leftover carried this slot's identity
+      // prefix (the scheme assumes poolId is unique per host). A foreign
+      // or missing instance label means the pile may belong to another
+      // pool sharing the host; deleting our slot's registrations by name
+      // would then be guesswork, so stay blocked until the pile is gone.
+      if (!orphanLabels.every(identifiable)) orphanSweepBlocked = true;
+      else {
+        // A registration not reported offline may belong to a live runner
+        // outside this host's view; only sweep ones GitHub already reports
+        // offline. The name test is the same naming scheme as
+        // `validRunnerName` in the slot-state validation above (bare legacy
+        // display name, or that name plus a `-<8 hex>` suffix); the three
+        // copies change together.
+        const owned = (await listRunners()).filter(
+          (runner) =>
+            typeof runner.name === 'string' &&
+            runner.status === 'offline' &&
+            (runner.name === runnerName(slot) ||
+              (runner.name.startsWith(`${runnerName(slot)}-`) &&
+                /^[0-9a-f]{8}$/.test(
+                  runner.name.slice(runnerName(slot).length + 1),
+                ))),
+        );
+        for (const runner of owned) {
+          if (!Number.isSafeInteger(runner.id) || runner.id < 1)
+            throw new Error(
+              'Ambiguous runner identity; manual reconciliation required',
+            );
+          try {
+            await gh([
+              '-X',
+              'DELETE',
+              `/repos/${config.repo}/actions/runners/${runner.id}`,
+            ]);
+          } catch (error) {
+            if (error.status === 404) continue;
+            // Carry the status through the rewrap so a rate-limited sweep
+            // picks the same backoff ladder as any other 403/429.
+            const rejected = new Error(
+              `Runner ${runner.id} deletion was rejected${
+                error.status ? ` (HTTP ${error.status})` : ''
+              }; retrying on the next cycle`,
+              { cause: error },
+            );
+            rejected.status = error.status;
+            throw rejected;
+          }
+        }
+      }
+    }
+    // Reconcile the slot's GitHub registration. Both call sites below use
+    // it; each site's comment explains its placement and what a thrown
+    // refusal leaves behind to retry — see `resourceAnchoredIdentity`.
+    const reconcileRegistration = async () => {
       const all = await listRunners();
       // A recorded runnerName is exact. A label-recovered identity carries
       // only the instance name: main registered under the bare display name,
       // this version under a suffixed one, so match either form and let the
-      // runnerId checks below reject anything ambiguous.
+      // runnerId checks below reject anything ambiguous. This is the third
+      // copy of the naming scheme (`validRunnerName` in the slot-state
+      // validation is the reference); the three change together.
       const matches = state.runnerName
         ? (runner) => runner.name === state.runnerName
         : (runner) =>
@@ -476,6 +556,18 @@ export function createManager(config, dependencies = {}) {
           'JIT response was lost; runner not found, manual reconciliation required',
         );
       for (const runner of runners) {
+        // A label-recovered identity (no recorded runnerName or runnerId) is
+        // not state-anchored: an online match may belong to a live runner
+        // outside this host's view, and a missing or unknown status must fail
+        // closed. Nothing about this identity is persisted, so the check only
+        // retries because the call below runs before the resources are
+        // removed: the leftover pile is what brings the next cycle back here.
+        // Identity checks above still see every match, so a mismatch stays
+        // blocking.
+        if (!state.runnerName && !state.runnerId && runner.status !== 'offline')
+          throw new Error(
+            `Runner ${runner.id} is not reported offline; keeping the recovered resources to retry`,
+          );
         try {
           await gh([
             '-X',
@@ -485,22 +577,148 @@ export function createManager(config, dependencies = {}) {
         } catch (error) {
           if (error.status === 404) continue;
           // GitHub rejects deletion while it still considers the runner busy.
-          // Keep the state so the next cycle retries the same identity instead
-          // of orphaning a registration that blocks its own replacement.
-          // Carry the status through the rewrap: the retry loop picks the
+          // Fail the cycle instead of dropping the identity: the retained slot
+          // state — or, for a label-recovered identity, the retained resources
+          // — comes back to this same check on the next cycle, instead of
+          // orphaning a registration that blocks its own replacement. Carry
+          // the status through the rewrap: the retry loop picks the
           // rate-limit ladder from it, and a 403/429 DELETE is exactly the
           // shape a rate-limit storm produces here.
           const rejected = new Error(
             `Runner ${runner.id} deletion was rejected${
               error.status ? ` (HTTP ${error.status})` : ''
-            }; retaining slot state to retry`,
+            }; retrying on the next cycle`,
             { cause: error },
           );
           rejected.status = error.status;
           throw rejected;
         }
       }
+    };
+    // A container whose storage layer is gone (dockerd restart left
+    // `RWLayer ... is unexpectedly nil`) can never yield logs or a `_diag`
+    // archive, and it may vanish from under us mid-cleanup. Detect that
+    // from stderr instead of retrying every diagnostic call each cycle.
+    const layerless = (error) =>
+      /RWLayer of container .* is unexpectedly nil/.test(error?.stderr || '');
+    const alreadyGone = (error) =>
+      /No such container/i.test(error?.stderr || '');
+    // Diagnostics run before any reconciliation refusal so a wedged slot
+    // still exports the one container an operator must inspect.
+    const captureDiagnostics = async (id) => {
+      try {
+        const logs = await run('docker', ['logs', '--tail', '10000', id]);
+        await writeFile(
+          join(
+            logDir,
+            `${state?.name || `qwen-${config.poolId}-${slot}-orphan`}-${id.slice(0, 12)}.log`,
+          ),
+          logs.slice(-1024 * 1024),
+          { mode: 0o600 },
+        );
+        await pruneLogs();
+      } catch (error) {
+        if (layerless(error) || alreadyGone(error)) {
+          log(
+            `slot ${slot}: container ${id.slice(0, 12)} lost its storage layer or is already gone; skipping diagnostics`,
+          );
+          return;
+        } else log(`slot ${slot}: container logs unavailable`);
+      }
+      try {
+        const archive = await run(
+          'docker',
+          ['cp', `${id}:/home/node/actions-runner/_diag`, '-'],
+          { binary: true },
+        );
+        await writeFile(
+          join(
+            logDir,
+            `${state?.name || `qwen-${config.poolId}-${slot}-orphan`}-${id.slice(0, 12)}.tar`,
+          ),
+          archive,
+          { mode: 0o600 },
+        );
+        await pruneLogs();
+      } catch (error) {
+        if (layerless(error) || alreadyGone(error))
+          log(
+            `slot ${slot}: container ${id.slice(0, 12)} lost its storage layer or is already gone; skipping diagnostics`,
+          );
+        else
+          log(
+            `slot ${slot}: runner diagnostics unavailable or larger than 4 MiB`,
+          );
+      }
+    };
+    const removeContainer = async (id) => {
+      try {
+        await run('docker', ['rm', '-f', '-v', id]);
+      } catch (error) {
+        if (alreadyGone(error)) return;
+        if (layerless(error))
+          throw new Error(
+            `container ${id.slice(0, 12)} has no storage layer; removal deferred until Docker drops the record`,
+            { cause: error },
+          );
+        throw error;
+      }
+    };
+    // A label-recovered identity lives only in the resource labels, never in a
+    // slot state file. Once the container and network are gone the next cycle
+    // finds nothing to clean up and just replenishes the slot, leaking the
+    // registration for good. Reconcile it while the resources still exist, so
+    // a refusal or a rejected deletion leaves an anchor that keeps this slot
+    // re-entering cleanup(). A state-anchored identity stays on the later
+    // call site: deleting its registration before the container is stopped
+    // would hit GitHub's "runner is busy" rejection for every watchdog kill.
+    const resourceAnchoredIdentity =
+      Boolean(state?.name) && !state.runnerName && !state.runnerId;
+    if (resourceAnchoredIdentity) {
+      for (const id of containers) await captureDiagnostics(id);
+      try {
+        await reconcileRegistration();
+      } catch (error) {
+        // No refusal keeps the CONTAINER. An online match backed by this
+        // slot's OWN leftover container would otherwise never clear: the
+        // retained container keeps heartbeating, so every cycle throws the
+        // same gate. Remove the containers and keep the labelled network
+        // as the retry anchor — the runner can now actually reach offline,
+        // and the network keeps the next cycle in cleanup(). A permanent
+        // identity refusal pins no compute either: the same error
+        // resurfaces from the network anchor until a human reconciles, and
+        // the registration is never deleted.
+        // Persist nothing: a label-recovered identity has no valid state
+        // shape (load() requires a runnerId unless uncertain), so the
+        // labelled network alone anchors the retry for both refusal kinds.
+        // Secure the anchor BEFORE removing the containers: a killed
+        // `docker create` leaves a container-only pile, and if the anchor
+        // creation failed after removal the slot would replenish and leak
+        // the registration. With this order a failed creation still leaves
+        // the containers to bring the next cycle back.
+        if (!networks.length) {
+          await createNetwork(slot, state.name);
+        }
+        for (const id of containers) await removeContainer(id);
+        if ((await listContainers(slot)).length)
+          throw new Error('Container cleanup failed');
+        throw error;
+      }
     }
+    for (const id of containers) {
+      if (!resourceAnchoredIdentity) await captureDiagnostics(id);
+      await removeContainer(id);
+    }
+    if ((await listContainers(slot)).length)
+      throw new Error('Container cleanup failed');
+    for (const id of networks) await run('docker', ['network', 'rm', id]);
+    if ((await listNetworks(slot)).length)
+      throw new Error('Network cleanup failed');
+    if (orphanSweepBlocked)
+      throw new Error(
+        'Orphaned resources carry no unambiguous slot identity; manual reconciliation required',
+      );
+    if (state?.name && !resourceAnchoredIdentity) await reconcileRegistration();
     await rm(slotPath(slot), { force: true });
     log(`slot ${slot}: cleaned`);
   }
@@ -586,23 +804,7 @@ export function createManager(config, dependencies = {}) {
       await save(slot, state);
       if (!result.encoded_jit_config)
         throw new Error('GitHub returned no JIT configuration');
-      const networkId = (
-        await run('docker', [
-          'network',
-          'create',
-          '--driver',
-          'bridge',
-          '--opt',
-          'com.docker.network.bridge.enable_icc=false',
-          '--label',
-          `qwen.pool=${config.poolId}`,
-          '--label',
-          `qwen.slot=${slot}`,
-          '--label',
-          `qwen.instance=${state.name}`,
-          state.name,
-        ])
-      ).trim();
+      const networkId = await createNetwork(slot, state.name);
       if (!networkId) throw new Error('Docker returned no network ID');
       state.networkId = networkId;
       await save(slot, state);
