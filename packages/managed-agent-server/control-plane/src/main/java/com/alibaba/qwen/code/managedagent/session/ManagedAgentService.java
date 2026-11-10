@@ -1991,6 +1991,36 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
     }
 
     /**
+     * The Managed Web Terminal handshake admission: a readable, active,
+     * Workspace-bound Shell Session whose Shell opt-ins and persisted
+     * approval are valid, and whose caller holds OPERATOR on the Workspace.
+     * The terminal deployment opt-in and the terminal-capable Runtime
+     * binding are checked by the relay, not here. A human terminal is not a
+     * model tool call, so the per-command approval mode does not gate it;
+     * the OPERATOR grant plus the deployment opt-in are the boundary.
+     */
+    public SessionRecord admitTerminalSession(String tenantId, String actorId,
+            String sessionId) {
+        SessionRecord session = requireReadableSession(tenantId, actorId, sessionId);
+        if (!"ACTIVE".equals(session.status())) {
+            throw new ManagedAgentException(409, "session_operation_active",
+                    "The Session is not active.");
+        }
+        var worktree = store.findSessionWorktree(tenantId, sessionId);
+        if (!Boolean.TRUE.equals(foregroundShell(session, worktree))) {
+            throw new ManagedAgentException(409, "workspace_unavailable",
+                    "The Session does not admit a terminal.");
+        }
+        if (session.workspace() != null && !workspaces.accessOf(session.tenantId(),
+                actorId, session.workspace().getWorkspaceId())
+                .atLeast(WorkspaceAccess.OPERATOR)) {
+            throw new ManagedAgentException(403, "session_operation_forbidden",
+                    "Only a Workspace operator may open a terminal.");
+        }
+        return session;
+    }
+
+    /**
      * Reads the next catch-up page of a stream.
      *
      * @throws ReplayCursorExpired when the cursor is below the replay floor
