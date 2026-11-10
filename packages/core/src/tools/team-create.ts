@@ -19,6 +19,8 @@ import {
   getTeamDir,
   getTasksDir,
   tryReclaimStaleTeam,
+  readTeamFile,
+  hasUnreadLeaderMail,
 } from '../agents/team/teamHelpers.js';
 import { resetTaskList } from '../agents/team/tasks.js';
 import { clearAllInboxes } from '../agents/team/mailbox.js';
@@ -120,12 +122,23 @@ class TeamCreateInvocation extends BaseToolInvocation<
       if (isNodeError(err) && err.code === 'EEXIST') {
         const reclaimed = await tryReclaimStaleTeam(teamName);
         if (!reclaimed) {
-          const msg =
-            `Team "${teamName}" already exists and appears to be ` +
-            `owned by a live qwen-code session. Pick a different ` +
-            `name, or — if you're sure no other session is using ` +
-            `it — remove the on-disk artifacts manually:\n` +
-            `  rm -rf "${getTeamDir(teamName)}" "${getTasksDir(teamName)}"`;
+          const hasUnread = await hasUnreadLeaderMail(teamName).catch(
+            () => false,
+          );
+          const oldSessionId = hasUnread
+            ? (await readTeamFile(teamName).catch(() => undefined))
+                ?.leadSessionId
+            : undefined;
+          const msg = hasUnread
+            ? `Team "${teamName}" has unread teammate reports in its leader ` +
+              `inbox, so it was not reclaimed. Load the owning session` +
+              (oldSessionId ? ` (${oldSessionId})` : '') +
+              ` to receive them, or pick a different name.`
+            : `Team "${teamName}" already exists and appears to be ` +
+              `owned by a live qwen-code session. Pick a different ` +
+              `name, or — if you're sure no other session is using ` +
+              `it — remove the on-disk artifacts manually:\n` +
+              `  rm -rf "${getTeamDir(teamName)}" "${getTasksDir(teamName)}"`;
           return {
             llmContent: msg,
             returnDisplay: msg,

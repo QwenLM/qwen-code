@@ -140,6 +140,9 @@ import {
   type BranchPoint,
   type CodeModeToolResult,
   type AdmissibleNotification,
+  type TeamManager,
+  type TeammateApprovalRequestEvent,
+  TeamEventType,
   AuthType,
   getGptReasoningCapabilities,
   parseModelReasoningCapabilities,
@@ -466,6 +469,10 @@ import {
   parseAcpModelOption,
   resolveAcpModelOption,
 } from '../../utils/acpModelUtils.js';
+import {
+  decideTeammateApprovalFallback,
+  type TeammateApprovalHostCopy,
+} from '../../utils/teammate-approval-fallback.js';
 import { classifyApiError } from '../../utils/classify-api-error.js';
 import {
   getPersistScopeForModelSelection,
@@ -2084,13 +2091,20 @@ class BackgroundTurnAdmissionTimeoutError extends Error {
   }
 }
 
+const ACP_TEAMMATE_APPROVAL_COPY: TeammateApprovalHostCopy = {
+  surface: 'an ACP session',
+  explicitApprovalHint:
+    'The connected client cannot show a teammate approval request.',
+  allowHint: 'Switch the session to YOLO mode to allow teammate tool calls.',
+};
+
 export interface BackgroundNotificationQueueItem {
   sourceTurnId?: string;
   displayText: string;
   modelText: string;
   taskId: string;
   status: string;
-  kind: 'agent' | 'monitor' | 'shell' | 'workflow';
+  kind: 'agent' | 'monitor' | 'shell' | 'workflow' | 'teammate';
   toolUseId?: string;
   todoWorkChainId?: string;
   label?: string;
@@ -2836,6 +2850,14 @@ export class Session implements SessionContext {
   /** The exact status-change callback this Session installed, so dispose can
    *  retract its own and nobody else's. */
   #statusChangeCallback: (() => void) | undefined;
+  #teamManagerChangeHandler:
+    | ((manager: TeamManager | null) => void)
+    | undefined;
+  #teamBoundManager: TeamManager | null = null;
+  #teamApprovalListener:
+    | ((event: TeammateApprovalRequestEvent) => void)
+    | undefined;
+  #teamActiveWorkListener: (() => void) | undefined;
   #workflowStatusChangeCallback: ((entry?: WorkflowTask) => void) | undefined;
   private workflowHistory: WorkflowSnapshot[];
   /**
@@ -5077,9 +5099,22 @@ export class Session implements SessionContext {
       .listUnfinalizedBackgroundAgentIds()) {
       holds.push({ category: 'agent', id: agentId });
     }
+    // The leader inbox poll is the only thing that turns a teammate's final
+    // report into a turn, so a Session that stopped listening for it would
+    // strand that report if the daemon reaped the Session first.
+    if (this.#teamBoundManager?.isLeaderInboxPolling()) {
+      holds.push({
+        category: 'agent',
+        id: `team:${this.#teamBoundManager.getTeamFile().name}`,
+      });
+    }
     const notificationIds = new Set<string>();
     for (const item of this.notificationQueue) {
-      if (item.kind === 'agent' || item.kind === 'workflow') {
+      if (
+        item.kind === 'agent' ||
+        item.kind === 'workflow' ||
+        item.kind === 'teammate'
+      ) {
         notificationIds.add(item.taskId);
       }
     }
@@ -5374,6 +5409,10 @@ export class Session implements SessionContext {
       this.#stopCronSchedulerInRuntime();
     }
 
+    this.config.onTeamManagerChange(null, this.#teamManagerChangeHandler);
+    this.#teamManagerChangeHandler = undefined;
+    if (this.#teamBoundManager) this.#unbindTeamManager(this.#teamBoundManager);
+    this.#teamBoundManager = null;
     this.config.getBackgroundTaskRegistry().abortAll({ notify: false });
     this.config.getBackgroundTaskRegistry().setNotificationCallback(undefined);
     if (this.#statusChangeCallback) {
@@ -9200,7 +9239,10 @@ export class Session implements SessionContext {
    */
   async #runAutomaticTurnOnSharedLoop(turn: {
     message: Content;
-    type: SendMessageType.Cron | SendMessageType.Notification;
+    type:
+      | SendMessageType.Cron
+      | SendMessageType.Notification
+      | SendMessageType.Teammate;
     /** The send options of the turn's first round. */
     options: Partial<SendMessageOptions>;
     interactionSpanByHost: boolean;
@@ -13523,6 +13565,11 @@ export class Session implements SessionContext {
       });
     });
 
+    this.#teamManagerChangeHandler = (manager) =>
+      this.#bindTeamManager(manager);
+    this.config.onTeamManagerChange(this.#teamManagerChangeHandler);
+    this.#bindTeamManager(this.config.getTeamManager());
+
     const workflowRegistry = this.config.getWorkflowRunRegistry();
     this.#workflowStatusChangeCallback = (entry) => {
       this.#activeWorkChanged();
@@ -13631,6 +13678,127 @@ export class Session implements SessionContext {
     }
   }
 
+  #bindTeamManager(manager: TeamManager | null): void {
+    const previous = this.#teamBoundManager;
+    if (previous) this.#unbindTeamManager(previous);
+    this.#teamBoundManager = manager;
+    if (previous || manager) this.#activeWorkChanged();
+    if (!manager) return;
+
+    const teamName = manager.getTeamFile().name;
+    const emitter = manager.getEventEmitter();
+    manager.setLeaderMessageCallback((modelText, displayText) =>
+      this.#enqueueTeammateReport(teamName, modelText, displayText),
+    );
+    this.#teamApprovalListener = (event) =>
+      this.#resolveTeammateApproval(teamName, event);
+    emitter.on(
+      TeamEventType.TEAMMATE_APPROVAL_REQUEST,
+      this.#teamApprovalListener,
+    );
+    this.#teamActiveWorkListener = () => this.#activeWorkChanged();
+    emitter.on(TeamEventType.TEAMMATE_JOINED, this.#teamActiveWorkListener);
+    emitter.on(TeamEventType.TEAMMATE_EXITED, this.#teamActiveWorkListener);
+    emitter.on(
+      TeamEventType.ALL_TEAMMATES_TERMINATED,
+      this.#teamActiveWorkListener,
+    );
+    // Nobody polls a team with no members, so reports its previous leader
+    // never read have to be pulled in once.
+    if (manager.getTeamFile().members.length === 0) {
+      manager.drainLeaderInbox().catch((error) => {
+        debugLogger.warn('Failed to drain the leader inbox:', error);
+      });
+    }
+  }
+
+  #unbindTeamManager(manager: TeamManager): void {
+    manager.setLeaderMessageCallback(null);
+    const emitter = manager.getEventEmitter();
+    if (this.#teamApprovalListener) {
+      emitter.off(
+        TeamEventType.TEAMMATE_APPROVAL_REQUEST,
+        this.#teamApprovalListener,
+      );
+      this.#teamApprovalListener = undefined;
+    }
+    if (this.#teamActiveWorkListener) {
+      emitter.off(TeamEventType.TEAMMATE_JOINED, this.#teamActiveWorkListener);
+      emitter.off(TeamEventType.TEAMMATE_EXITED, this.#teamActiveWorkListener);
+      emitter.off(
+        TeamEventType.ALL_TEAMMATES_TERMINATED,
+        this.#teamActiveWorkListener,
+      );
+      this.#teamActiveWorkListener = undefined;
+    }
+  }
+
+  /**
+   * Teammate reports and notices queue as one item per team, so a burst of
+   * them starts one turn and cannot crowd tasks out of the queue. Text is
+   * appended only while the item has not started its turn.
+   */
+  #enqueueTeammateReport(
+    teamName: string,
+    modelText: string,
+    displayText: string,
+  ): void {
+    if (this.disposed) return;
+    const taskId = `team:${teamName}`;
+    const toPlainLabel = (text: string) =>
+      truncateNotificationLabel(text.replace(/\*\*/g, ''));
+    const pending = this.notificationQueue.find(
+      (item) =>
+        item.kind === 'teammate' && item.taskId === taskId && !item.turn,
+    );
+    if (pending) {
+      pending.modelText += `\n\n${modelText}`;
+      pending.displayText += `; ${displayText}`;
+      pending.label = toPlainLabel(pending.displayText);
+      return;
+    }
+    this.#enqueueBackgroundNotification({
+      displayText,
+      modelText,
+      taskId,
+      status: 'completed',
+      kind: 'teammate',
+      label: toPlainLabel(displayText),
+      continuesTodoStopGuardWorkChain: false,
+    });
+  }
+
+  #resolveTeammateApproval(
+    teamName: string,
+    event: TeammateApprovalRequestEvent,
+  ): void {
+    if (this.disposed) return;
+    const decision = decideTeammateApprovalFallback(
+      event,
+      this.config.getApprovalMode(),
+      ACP_TEAMMATE_APPROVAL_COPY,
+    );
+    if (decision.action === 'proceed') {
+      // respond() rejects when the teammate ended between request and answer.
+      event.respond(ToolConfirmationOutcome.ProceedOnce).catch((error) => {
+        debugLogger.warn('Teammate approval ProceedOnce failed:', error);
+      });
+      return;
+    }
+    this.#enqueueTeammateReport(
+      teamName,
+      `<team_notice>\n${decision.reason}\n</team_notice>`,
+      decision.reason,
+    );
+    event
+      .respond(ToolConfirmationOutcome.Cancel, {
+        cancelMessage: decision.reason,
+      })
+      .catch((error) => {
+        debugLogger.warn('Teammate approval Cancel failed:', error);
+      });
+  }
+
   #enqueueBackgroundNotification(item: QueuedBackgroundNotification): void {
     while (this.notificationQueue.length >= MAX_BACKGROUND_NOTIFICATION_QUEUE) {
       // While the todo-stop guard defers unrelated automatic turns, a queued
@@ -13650,11 +13818,16 @@ export class Session implements SessionContext {
         toAdmissibleNotification(item),
         {
           max: MAX_BACKGROUND_NOTIFICATION_QUEUE,
-          isProtected: (_projected, index) =>
-            guardDefersUnrelatedWork &&
-            this.#notificationContinuesTodoStopGuardWorkChain(
-              this.notificationQueue[index]!,
-            ),
+          isProtected: (_projected, index) => {
+            const queued = this.notificationQueue[index]!;
+            // A teammate report is consumed from the inbox before it is
+            // queued, so evicting it loses the only copy.
+            return (
+              queued.kind === 'teammate' ||
+              (guardDefersUnrelatedWork &&
+                this.#notificationContinuesTodoStopGuardWorkChain(queued))
+            );
+          },
         },
       );
       if (admission.action === 'drop') {
@@ -14472,7 +14645,10 @@ export class Session implements SessionContext {
           if (this.config.isUnifiedAgentLoopEnabled?.() === true) {
             const result = await this.#runAutomaticTurnOnSharedLoop({
               message: nextMessage,
-              type: SendMessageType.Notification,
+              type:
+                item.kind === 'teammate'
+                  ? SendMessageType.Teammate
+                  : SendMessageType.Notification,
               options: {
                 userTurnRecordedByHost: true,
                 todoWorkChainId: item.todoWorkChainId,

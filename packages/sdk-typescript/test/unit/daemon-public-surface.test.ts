@@ -702,6 +702,7 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
       'shell',
       'workflow',
       'peer',
+      'teammate',
     ] as const) {
       expect(
         Public.parseDaemonBackgroundTurn({

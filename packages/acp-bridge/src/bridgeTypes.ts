@@ -448,7 +448,8 @@ export function parseBackgroundNotificationTurn(
       kind !== 'monitor' &&
       kind !== 'shell' &&
       kind !== 'workflow' &&
-      kind !== 'peer') ||
+      kind !== 'peer' &&
+      kind !== 'teammate') ||
     typeof startedAt !== 'number' ||
     !Number.isFinite(startedAt) ||
     startedAt < 0

@@ -30,6 +30,7 @@ import {
   getTasksDir,
 } from './teamHelpers.js';
 import { TEAMMATE_COLORS } from './types.js';
+import { writeMessage } from './mailbox.js';
 import { Storage } from '../../config/storage.js';
 
 vi.mock('../../config/storage.js', async (importOriginal) => {
@@ -500,6 +501,43 @@ describe('file I/O', () => {
 
       await expect(tryReclaimStaleTeam('live')).resolves.toBe(false);
       expect(await readTeamFile('live')).toBeDefined();
+    });
+
+    it('does not reclaim a stale team with unread leader mail', async () => {
+      await writeTeamFile('unread', makeTeamFile({ leadPid: deadPid() }));
+      await writeMessage('unread', 'leader', {
+        from: 'worker',
+        text: 'final report',
+        timestamp: new Date().toISOString(),
+        read: false,
+      });
+
+      await expect(tryReclaimStaleTeam('unread')).resolves.toBe(false);
+      expect(await readTeamFile('unread')).toBeDefined();
+    });
+
+    it('reclaims a stale team whose leader mail is all read', async () => {
+      await writeTeamFile('read', makeTeamFile({ leadPid: deadPid() }));
+      await writeMessage('read', 'leader', {
+        from: 'worker',
+        text: 'old report',
+        timestamp: new Date().toISOString(),
+        read: true,
+      });
+
+      await expect(tryReclaimStaleTeam('read')).resolves.toBe(true);
+    });
+
+    it('does not reclaim when the leader inbox is unreadable', async () => {
+      await writeTeamFile('badbox', makeTeamFile({ leadPid: deadPid() }));
+      await fs.mkdir(getInboxesDir('badbox'), { recursive: true });
+      await fs.writeFile(
+        path.join(getInboxesDir('badbox'), 'leader.json'),
+        '{ torn',
+      );
+
+      await expect(tryReclaimStaleTeam('badbox')).resolves.toBe(false);
+      expect(await readTeamFile('badbox')).toBeDefined();
     });
 
     it('does not reclaim a pre-leadPid team file', async () => {

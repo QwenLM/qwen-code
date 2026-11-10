@@ -78,6 +78,7 @@ import {
   WorkspaceMcpBudget,
   DiscoveredMCPTool,
   restoreWorktreeContext,
+  reattachTeamForSession,
   uiTelemetryService,
   McpBudgetWouldExceedError,
   McpServerSpawnFailedError,
@@ -6652,6 +6653,7 @@ class QwenAgent implements Agent {
                   config,
                   createdSession,
                 );
+                await this.#reattachTeamOnResume(config, createdSession);
               });
             },
           }),
@@ -6919,6 +6921,7 @@ class QwenAgent implements Agent {
                   config,
                   createdSession,
                 );
+                await this.#reattachTeamOnResume(config, createdSession);
               });
             },
           }),
@@ -6982,6 +6985,34 @@ class QwenAgent implements Agent {
     await config.loadPausedBackgroundAgents(config.getSessionId());
     session.pendingRecoveredAgentsNotice =
       config.consumePendingRecoveredAgentsNotice();
+  }
+
+  /**
+   * Best-effort: teammates ran in the previous process, so the session's team
+   * is re-bound empty and the model is told once. A failure must not fail the
+   * load.
+   */
+  async #reattachTeamOnResume(config: Config, session: Session): Promise<void> {
+    try {
+      const result = await reattachTeamForSession(config);
+      if (!result) return;
+      const notice =
+        result.status === 'owned_elsewhere'
+          ? `Agent team "${result.teamName}" from this session is still led by another running qwen-code process, so it was not re-attached here. Do not create a team with the same name.`
+          : `Agent team "${result.teamName}" from this session was re-attached after a restart. Its teammates ran in the previous process and are gone${
+              result.deadMembers.length > 0
+                ? ` (${result.deadMembers.join(', ')})`
+                : ''
+            }. ${result.unassignedTaskCount} in-progress task(s) were returned to pending. Reports they left unread are delivered to you now. Spawn new teammates to continue the work.`;
+      session.pendingRecoveredAgentsNotice = [
+        session.pendingRecoveredAgentsNotice,
+        notice,
+      ]
+        .filter(Boolean)
+        .join('\n\n');
+    } catch (error) {
+      debugLogger.debug(`Team reattach failed: ${error}`);
+    }
   }
 
   async unstable_listSessions(

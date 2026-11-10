@@ -8395,7 +8395,7 @@ export function App({
         // the transcript already on screen, and no task registry entry can
         // hydrate a pending tab for it. A rendering of its own is a
         // follow-up; until then there is nothing to open.
-        if (turn.kind === 'peer') return;
+        if (turn.kind === 'peer' || turn.kind === 'teammate') return;
         const tab: ArtifactPanelTab =
           turn.kind === 'workflow'
             ? {

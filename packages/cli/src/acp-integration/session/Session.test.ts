@@ -1219,6 +1219,8 @@ describe('Session', () => {
         .fn()
         .mockReturnValue(mockBackgroundShellRegistry),
       getMonitorRegistry: vi.fn().mockReturnValue(mockMonitorRegistry),
+      getTeamManager: vi.fn().mockReturnValue(null),
+      onTeamManagerChange: vi.fn(),
       getWorkflowRunRegistry: vi.fn().mockReturnValue(mockWorkflowRunRegistry),
       getFileHistoryService: vi.fn().mockReturnValue(mockFileHistoryService),
       getFileReadCache: vi.fn().mockReturnValue({ clear: vi.fn() }),
@@ -6421,6 +6423,416 @@ describe('Session', () => {
         ).toEqual(['agent done', '']);
         // Not streamed piece by piece as a prompt's response is.
         expect(agentText()).not.toContain('agent ');
+      });
+
+      describe('team leader inbox delivery', () => {
+        type Listener = (payload?: unknown) => void;
+
+        function createFakeTeamManager(
+          options: { teamName?: string; memberCount?: number } = {},
+        ) {
+          const listeners = new Map<string, Set<Listener>>();
+          let leaderCallback:
+            | ((model: string, display: string) => void)
+            | null = null;
+          const manager = {
+            polling: false,
+            getTeamFile: () => ({
+              name: options.teamName ?? 'crew',
+              members: Array.from({ length: options.memberCount ?? 1 }),
+            }),
+            getEventEmitter: () => ({
+              on: (event: string, listener: Listener) => {
+                if (!listeners.has(event)) listeners.set(event, new Set());
+                listeners.get(event)!.add(listener);
+              },
+              off: (event: string, listener: Listener) => {
+                listeners.get(event)?.delete(listener);
+              },
+            }),
+            setLeaderMessageCallback: vi.fn(
+              (cb: ((model: string, display: string) => void) | null) => {
+                leaderCallback = cb;
+              },
+            ),
+            isLeaderInboxPolling: () => manager.polling,
+            drainLeaderInbox: vi.fn().mockResolvedValue(undefined),
+            deliver: (model: string, display: string) =>
+              leaderCallback?.(model, display),
+            hasCallback: () => leaderCallback !== null,
+            emit: (event: string, payload?: unknown) =>
+              listeners.get(event)?.forEach((listener) => listener(payload)),
+            listenerCount: () =>
+              [...listeners.values()].reduce((n, set) => n + set.size, 0),
+          };
+          return manager;
+        }
+
+        /** What config.setTeamManager does to the Session's subscription. */
+        const installTeamManager = (
+          manager: ReturnType<typeof createFakeTeamManager> | null,
+        ) =>
+          (
+            mockConfig.onTeamManagerChange as unknown as ReturnType<
+              typeof vi.fn
+            >
+          ).mock.calls[0][0](manager);
+
+        const startTurns = () =>
+          vi
+            .mocked(mockClient.extMethod)
+            .mock.calls.filter(([method]) => method === '_qwencode/start_turn');
+
+        const holds = (category: string) =>
+          session
+            .collectActiveWorkHolds()
+            .filter((hold) => hold.category === category)
+            .map((hold) => hold.id);
+
+        it('merges queued reports into one teammate turn sent as a Teammate round', async () => {
+          const manager = createFakeTeamManager();
+          const sends = automaticRounds(() => [text('noted'), finished()]);
+          installTeamManager(manager);
+
+          manager.deliver(
+            '<teammate_message from="a">one</teammate_message>',
+            '**a**: one',
+          );
+          manager.deliver(
+            '<teammate_message from="b">two</teammate_message>',
+            '**b**: two',
+          );
+
+          await vi.waitFor(() => expect(sends).toHaveLength(1));
+          await vi.waitFor(() =>
+            expect(
+              mockChatRecordingService.recordNotification,
+            ).toHaveBeenCalled(),
+          );
+
+          expect(startTurns()).toHaveLength(1);
+          expect(startTurns()[0][1]).toMatchObject({
+            source: 'background_notification',
+            kind: 'teammate',
+            taskId: 'team:crew',
+            label: 'a: one; b: two',
+          });
+          expect(sends[0][3]).toMatchObject({
+            type: core.SendMessageType.Teammate,
+            userTurnRecordedByHost: true,
+          });
+          expect(sends[0][0]).toContainEqual({
+            text: '<teammate_message from="a">one</teammate_message>\n\n<teammate_message from="b">two</teammate_message>',
+          });
+          expect(
+            mockChatRecordingService.recordNotification,
+          ).toHaveBeenCalledWith(
+            [
+              {
+                text: '<teammate_message from="a">one</teammate_message>\n\n<teammate_message from="b">two</teammate_message>',
+              },
+            ],
+            '**a**: one; **b**: two',
+            expect.objectContaining({ taskId: 'team:crew', kind: 'teammate' }),
+          );
+        });
+
+        it('starts a second turn for a report that arrives after the first turn began', async () => {
+          const manager = createFakeTeamManager();
+          let release!: () => void;
+          const gate = new Promise<void>((resolve) => {
+            release = resolve;
+          });
+          const sends = automaticRounds(
+            () => [text('noted'), finished()],
+            () => true,
+            (index) => (index === 0 ? gate : undefined),
+          );
+          installTeamManager(manager);
+
+          manager.deliver('FIRST', 'first');
+          await vi.waitFor(() => expect(sends).toHaveLength(1));
+          manager.deliver('SECOND', 'second');
+          expect(sends).toHaveLength(1);
+
+          release();
+          await vi.waitFor(() => expect(sends).toHaveLength(2));
+          expect(sends[0][0]).toContainEqual({ text: 'FIRST' });
+          expect(sends[1][0]).toContainEqual({ text: 'SECOND' });
+        });
+
+        it('never evicts a queued teammate report when the queue overflows', async () => {
+          const manager = createFakeTeamManager();
+          let release!: () => void;
+          const gate = new Promise<void>((resolve) => {
+            release = resolve;
+          });
+          const sends = automaticRounds(
+            () => [text('noted'), finished()],
+            () => true,
+            (index) => (index === 0 ? gate : undefined),
+          );
+          installTeamManager(manager);
+          const agentCallback = mockBackgroundTaskRegistry
+            .setNotificationCallback.mock.calls[0][0] as (
+            display: string,
+            model: string,
+            meta: { agentId: string; status: string },
+          ) => void;
+
+          agentCallback('gate', 'GATE', {
+            agentId: 'gate',
+            status: 'completed',
+          });
+          await vi.waitFor(() => expect(sends).toHaveLength(1));
+          manager.deliver('REPORT', 'report');
+          for (let i = 0; i < 20; i++) {
+            agentCallback(`a${i}`, `A${i}`, {
+              agentId: `a${i}`,
+              status: 'completed',
+            });
+          }
+
+          const queued = holds('notification');
+          expect(queued).toContain('team:crew');
+          expect(queued).not.toContain('a0');
+          expect(queued).toContain('a19');
+          release();
+          await vi.waitFor(() => expect(sends.length).toBeGreaterThan(1));
+        });
+
+        it('holds the session for a queued report, a polling manager and the running turn', async () => {
+          const manager = createFakeTeamManager();
+          let release!: () => void;
+          const gate = new Promise<void>((resolve) => {
+            release = resolve;
+          });
+          const sends = automaticRounds(
+            () => [text('noted'), finished()],
+            () => true,
+            (index) => (index === 0 ? gate : undefined),
+          );
+          installTeamManager(manager);
+          expect(session.collectActiveWorkHolds()).toEqual([]);
+
+          manager.polling = true;
+          expect(holds('agent')).toEqual(['team:crew']);
+
+          // The last teammate wrote its report and became terminal: polling
+          // is off, so only the report itself keeps the session alive.
+          manager.deliver('REPORT', 'report');
+          manager.polling = false;
+          expect(holds('agent')).toEqual([]);
+          expect(
+            holds('notification').length + holds('session').length,
+          ).toBeGreaterThan(0);
+          await vi.waitFor(() => expect(sends).toHaveLength(1));
+          expect(holds('session')).toEqual(['session:active-turn']);
+
+          release();
+          await vi.waitFor(() =>
+            expect(session.collectActiveWorkHolds()).toEqual([]),
+          );
+        });
+
+        it('holds the session for a report that is still queued behind a running turn', async () => {
+          const manager = createFakeTeamManager();
+          let release!: () => void;
+          const gate = new Promise<void>((resolve) => {
+            release = resolve;
+          });
+          const sends = automaticRounds(
+            () => [text('noted'), finished()],
+            () => true,
+            (index) => (index === 0 ? gate : undefined),
+          );
+          installTeamManager(manager);
+          const agentCallback = mockBackgroundTaskRegistry
+            .setNotificationCallback.mock.calls[0][0] as (
+            display: string,
+            model: string,
+            meta: { agentId: string; status: string },
+          ) => void;
+          agentCallback('gate', 'GATE', {
+            agentId: 'gate',
+            status: 'completed',
+          });
+          await vi.waitFor(() => expect(sends).toHaveLength(1));
+
+          manager.deliver('REPORT', 'report');
+
+          expect(holds('notification')).toContain('team:crew');
+          release();
+          await vi.waitFor(() => expect(sends).toHaveLength(2));
+        });
+
+        it('reports team membership changes to the owner', () => {
+          session.dispose();
+          let changes = 0;
+          session = new Session(
+            'test-session-id',
+            mockConfig,
+            mockClient,
+            mockSettings,
+            undefined,
+            () => {
+              changes++;
+            },
+          );
+          const manager = createFakeTeamManager();
+          const handler = vi
+            .mocked(mockConfig.onTeamManagerChange!)
+            .mock.calls.at(-1)![0]!;
+          handler(manager as never);
+
+          for (const event of [
+            core.TeamEventType.TEAMMATE_JOINED,
+            core.TeamEventType.TEAMMATE_EXITED,
+            core.TeamEventType.ALL_TEAMMATES_TERMINATED,
+          ]) {
+            const before = changes;
+            manager.emit(event);
+            expect(changes).toBe(before + 1);
+          }
+        });
+
+        it('binds a manager that already exists when the session is created', () => {
+          const manager = createFakeTeamManager({ memberCount: 0 });
+          mockConfig.getTeamManager = vi.fn().mockReturnValue(manager);
+          session.dispose();
+          session = new Session(
+            'test-session-id',
+            mockConfig,
+            mockClient,
+            mockSettings,
+          );
+
+          expect(manager.hasCallback()).toBe(true);
+          // No members to poll: unread reports left by a previous leader
+          // are pulled in once.
+          expect(manager.drainLeaderInbox).toHaveBeenCalledTimes(1);
+        });
+
+        it('does not drain a manager that already has members', () => {
+          const manager = createFakeTeamManager({ memberCount: 2 });
+          installTeamManager(manager);
+
+          expect(manager.hasCallback()).toBe(true);
+          expect(manager.drainLeaderInbox).not.toHaveBeenCalled();
+        });
+
+        it('unbinds the previous manager when the manager is swapped or removed', () => {
+          const first = createFakeTeamManager();
+          const second = createFakeTeamManager({ teamName: 'other' });
+          installTeamManager(first);
+          expect(first.listenerCount()).toBe(4);
+
+          installTeamManager(second);
+          expect(first.hasCallback()).toBe(false);
+          expect(first.listenerCount()).toBe(0);
+          expect(second.hasCallback()).toBe(true);
+
+          installTeamManager(null);
+          expect(second.hasCallback()).toBe(false);
+          expect(second.listenerCount()).toBe(0);
+        });
+
+        it('unsubscribes from the config and detaches the manager on dispose', () => {
+          const manager = createFakeTeamManager();
+          installTeamManager(manager);
+          const capturedBeforeDispose =
+            manager.setLeaderMessageCallback.mock.calls[0]![0]!;
+          const handler = vi.mocked(mockConfig.onTeamManagerChange!).mock
+            .calls[0][0];
+
+          session.dispose();
+          vi.mocked(mockClient.sessionUpdate).mockClear();
+          capturedBeforeDispose('LATE', 'late');
+
+          expect(mockConfig.onTeamManagerChange).toHaveBeenLastCalledWith(
+            null,
+            handler,
+          );
+          expect(manager.hasCallback()).toBe(false);
+          expect(manager.listenerCount()).toBe(0);
+          expect(startTurns()).toHaveLength(0);
+          expect(session.collectActiveWorkHolds()).toEqual([]);
+          expect(mockClient.sessionUpdate).not.toHaveBeenCalled();
+        });
+
+        describe('teammate tool approval', () => {
+          const approvalEvent = (respond: ReturnType<typeof vi.fn>) => ({
+            teammateName: 'worker',
+            toolName: 'run_shell_command',
+            toolInput: {},
+            respond,
+            timestamp: 0,
+          });
+
+          it('lets a teammate tool through in YOLO mode', () => {
+            mockConfig.getApprovalMode = vi
+              .fn()
+              .mockReturnValue(core.ApprovalMode.YOLO);
+            const manager = createFakeTeamManager();
+            installTeamManager(manager);
+            const respond = vi.fn().mockResolvedValue(undefined);
+
+            manager.emit(
+              core.TeamEventType.TEAMMATE_APPROVAL_REQUEST,
+              approvalEvent(respond),
+            );
+
+            expect(respond).toHaveBeenCalledTimes(1);
+            expect(respond).toHaveBeenCalledWith(
+              core.ToolConfirmationOutcome.ProceedOnce,
+            );
+            expect(startTurns()).toHaveLength(0);
+          });
+
+          it('cancels outside YOLO and tells the leader why', async () => {
+            const manager = createFakeTeamManager();
+            const sends = automaticRounds(() => [text('noted'), finished()]);
+            installTeamManager(manager);
+            const respond = vi.fn().mockResolvedValue(undefined);
+
+            manager.emit(
+              core.TeamEventType.TEAMMATE_APPROVAL_REQUEST,
+              approvalEvent(respond),
+            );
+
+            expect(respond).toHaveBeenCalledWith(
+              core.ToolConfirmationOutcome.Cancel,
+              { cancelMessage: expect.stringContaining('run_shell_command') },
+            );
+            await vi.waitFor(() => expect(sends).toHaveLength(1));
+            expect(sends[0][3]).toMatchObject({
+              type: core.SendMessageType.Teammate,
+            });
+            expect(sends[0][0]).toContainEqual({
+              text: expect.stringMatching(
+                /^<team_notice>\nAuto-cancelling tool run_shell_command requested by teammate "worker"/,
+              ),
+            });
+          });
+
+          it('survives a respond() that rejects because the teammate ended', async () => {
+            const manager = createFakeTeamManager();
+            automaticRounds(() => [text('noted'), finished()]);
+            installTeamManager(manager);
+            const unhandled = vi.fn();
+            process.on('unhandledRejection', unhandled);
+            try {
+              manager.emit(
+                core.TeamEventType.TEAMMATE_APPROVAL_REQUEST,
+                approvalEvent(vi.fn().mockRejectedValue(new Error('gone'))),
+              );
+              await new Promise((resolve) => setTimeout(resolve, 20));
+              expect(unhandled).not.toHaveBeenCalled();
+            } finally {
+              process.off('unhandledRejection', unhandled);
+            }
+          });
+        });
       });
 
       it('ends a notification turn that loop protection stopped as partial', async () => {

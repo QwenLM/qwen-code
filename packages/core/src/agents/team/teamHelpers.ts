@@ -19,6 +19,7 @@ import { Storage } from '../../config/storage.js';
 import { isNodeError } from '../../utils/errors.js';
 import { atomicWriteJSON } from '../../utils/atomicFileWrite.js';
 import { isPidAlive } from '../../utils/process-liveness.js';
+import { readInbox } from './mailbox.js';
 import type { TeamFile, TeamMember } from './types.js';
 import {
   TEAMS_DIR,
@@ -295,6 +296,12 @@ export async function createTeamFile(
   });
 }
 
+/** True when teammates left unread reports in the leader's inbox. */
+export async function hasUnreadLeaderMail(teamName: string): Promise<boolean> {
+  const messages = await readInbox(teamName, LEADER_NAME);
+  return messages.some((m) => !m.read);
+}
+
 /**
  * Reclaim a stale team so its name can be reused.
  *
@@ -312,6 +319,10 @@ export async function createTeamFile(
  * staleness check and the delete — that change means another creator
  * already reclaimed the name and created a new live generation, which
  * a by-name delete would destroy (#10209).
+ *
+ * Also refuses when the leader inbox still holds unread teammate
+ * reports: deleting would discard work the owning session never saw.
+ * An unreadable inbox is treated the same way.
  */
 export async function tryReclaimStaleTeam(teamName: string): Promise<boolean> {
   const configPath = getTeamFilePath(teamName);
@@ -366,6 +377,11 @@ export async function tryReclaimStaleTeam(teamName: string): Promise<boolean> {
     // The config vanished or became unreadable after the inspection —
     // ambiguous, and a by-name delete could hit a generation this
     // reclaim never inspected.
+    return false;
+  }
+  try {
+    if (await hasUnreadLeaderMail(teamName)) return false;
+  } catch {
     return false;
   }
   await deleteTeamDirs(teamName);
