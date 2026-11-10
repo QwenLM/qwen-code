@@ -51,6 +51,8 @@ const mocks = vi.hoisted(() => {
     widthMethod: 'unicode',
     addInputHandler: vi.fn(),
     removeInputHandler: vi.fn(),
+    on: vi.fn(),
+    off: vi.fn(),
     keyInput: { on: vi.fn(), off: vi.fn() },
   };
 
