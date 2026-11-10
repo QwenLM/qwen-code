@@ -846,7 +846,7 @@ test('edits GitHub bound-session action templates on demand and toggles fullscre
   expect(secondBody.config['boundSessionActions']).toBeUndefined();
 });
 
-test('lists a configured Email channel and hides its inert group controls', async ({
+test('lists a configured Email channel and hides its inert group controls @smoke', async ({
   page,
 }, testInfo) => {
   const scenario = createWebShellDaemonScenario({

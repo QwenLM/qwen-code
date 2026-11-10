@@ -14,6 +14,7 @@ export const PLATFORM_MARKS: Record<string, string> = {
   feishu: 'F',
   github: 'GH',
   gitlab: 'GL',
+  email: 'E',
 };
 
 const SUPPORTED_CHANNEL_TYPES = new Set([
