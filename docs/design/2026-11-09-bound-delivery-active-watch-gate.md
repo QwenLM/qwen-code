@@ -79,10 +79,13 @@ but are not delivery targets.
   retire at drain through the existing no-candidate paths. Skipping their
   `pulls.get` is a possible follow-up optimization, not part of this change.
 - The comment watch (`prCommentWatch`, default-on) is covered through the
-  same target resolution: its fan-out consumes `resolveBoundTargets`, and a
-  comment whose every bound target is ineligible (or authored by all of
-  them) is skipped with the existing `comment_watch_no_target` journal row
-  and the cursor advances — private, never a public reply.
+  same target resolution: its fan-out consumes `resolveBoundTargets`. A
+  comment whose every bound follower is gate-excluded is skipped with a
+  `bound_watch_required` journal row, and the FIRST such skip holds the
+  cursor one grace cycle (§5) so a watch installed after the snapshot can
+  still deliver it; a comment authored by all of its followers is an
+  authorship-only skip, keeps `comment_watch_no_target`, and advances the
+  cursor immediately. Both are private, never a public reply.
 - Detection is best-effort and fail-open (decision D3): it is a noise gate,
   not a security boundary.
 
@@ -234,12 +237,14 @@ complete fresh snapshot:
 - `deliverToBoundSession` delivery-time revalidation: legacy comments keep
   the frozen target today when revalidation finds no candidate; under the
   gate, `!current` retires privately (`bound_no_candidate`) ONLY when the
-  gate actually excluded the target — raw followers still exist and EVERY
-  one is gate-ineligible (a watch stopped between claim and delivery). A
-  merely author-excluded winner (the retry's newest follower authored the
-  comment) or a REMOVED binding (no raw followers left) keeps the legacy
-  frozen-target contract, so the gate never changes behavior for the
-  fix/untyped sessions it exempts; the gone path below owns that fallback.
+  gate excluded the FROZEN TARGET itself — its own binding is a review/verify
+  row with `watching: false` (a watch stopped between claim and delivery).
+  The decision is about the target, not the follower set: an exempt
+  fix/untyped target keeps the legacy contract even when some other
+  ineligible review/verify follower still lists the PR; a merely
+  author-excluded winner or a REMOVED binding (the target no longer follows)
+  also keeps it. The gate never changes behavior for the fix/untyped
+  sessions it exempts; the gone path below owns that fallback.
 - Gone-fallback exhaustion: the `siblings_still_follow` retire branch extends
   to gate mode — raw followers still listed (the ineligible ones) mean
   private retire, not the public fallback — but only on a COMPLETE snapshot:
@@ -274,7 +279,9 @@ absent target under a partial scan) or unclaimed (role-aware drain), and the
 next pass re-resolves against a fresh snapshot. A watch installed after the
 snapshot was fetched therefore delivers the event it was installed to catch;
 a second gate-only exclusion retires as before. The grace is an in-memory
-per-key set, cleared on delivery or final retire.
+map of key → the snapshot generation at the deferral, cleared on delivery or
+final retire; it is spent only once a NEWER generation still finds the event
+gated, so a second drain of the same PR in one poll does not consume it.
 
 The comment watch (`watchPrComments`) resolves targets through the same
 gated `resolveBoundTargets` and queries posted-comment attribution over the
@@ -347,14 +354,20 @@ origin` when a verify-pr watch needs keying. Same machinery the Web Shell
   cost per 5-minute tick without reading `watching`; it is inert today
   (`SESSION_PR_WATCH_OBSERVATION_ENABLED` is false) and would need a guard
   before that flag flips.
-- **Stale `watching` under partial snapshots.** Retained rows keep their last
-  known value; a watch installed during a permanent partial is not seen until
-  a complete snapshot. Consistent with the existing fail-closed retention
-  model; self-heals. On COMPLETE snapshots the one-cycle grace (see §5)
-  covers the install window: the first gate-only exclusion holds the event
-  so the next pass's fresh snapshot can deliver it. The grace is one cycle,
-  not a guarantee — a watch installed later than that still misses the event,
-  which is the same window every snapshot-derived signal has.
+- **Stale `watching` under partial snapshots.** A retained row's last-stamped
+  `watching` is stale evidence — the scan that would refresh it cannot read
+  that session's sidecar — so retention DROPS the flag (the row still names
+  its PRs and competes by recency). The gate then fails open on the retained
+  row: a watch installed during a permanent partial is not read as a
+  confirmed `false` that would ban the session for the partial's life. The
+  row keeps its PRs and recency; only the watch flag becomes unknown until
+  the session is listed again. On COMPLETE snapshots the one-cycle grace
+  (see §5) covers the install window: the first gate-only exclusion holds the
+  event so a newer snapshot can deliver it. The grace is scoped to the
+  snapshot generation (a second drain of the same PR in one poll does not
+  spend it) and is one cycle, not a guarantee — a watch installed later than
+  that still misses the event, the same window every snapshot-derived signal
+  has.
 - **`available: false` conflates two states.** The worktree listing swallows
   both "git failed" (transient) and "not a repository" (permanent) into
   `available: false`, and detection fails open for both. In a non-repo

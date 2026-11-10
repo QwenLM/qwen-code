@@ -503,6 +503,8 @@ export function ChannelEditorDialog({
       return t('channels.editor.validation.invalidOption');
     if (code === 'requiresBoundDelivery')
       return t('channels.editor.validation.requiresBoundDelivery');
+    if (code === 'requiresBoundDeliveryForWatchGate')
+      return t('channels.editor.validation.requiresBoundDeliveryForWatchGate');
     if (code === 'number') return t('channels.editor.validation.number');
     if (code === 'outOfRange') {
       const numberField = field && field.kind === 'number' ? field : undefined;
@@ -760,17 +762,21 @@ export function ChannelEditorDialog({
       // instead of letting the daemon reject the whole draft after submit.
       // A stored true stays switchable OFF while gated, so turning delivery
       // off never strands the operator with a flag they cannot clear.
+      const gateField =
+        field.key === 'requireBoundWatch' && descriptor.type === 'github';
       const gatedBoundWatch =
-        field.key === 'requireBoundWatch' &&
-        descriptor.type === 'github' &&
-        draft.values['deliverToBoundSessions'] !== true;
+        gateField && draft.values['deliverToBoundSessions'] !== true;
       const updateSwitch = (checked: boolean) => {
-        if (field.key === 'deliverToBoundSessions') {
+        if (
+          field.key === 'deliverToBoundSessions' ||
+          field.key === 'requireBoundWatch'
+        ) {
           // Both directions re-derive shown errors: on retires the dependency
           // instruction, off keeps a shown one instead of dropping it silently.
+          // Unticking the gate is itself a remedy for its dependency error.
           refreshErrors({
             ...draft.values,
-            deliverToBoundSessions: checked,
+            [field.key]: checked,
           });
         }
         if (!isLocalGhSwitch) {
@@ -821,7 +827,10 @@ export function ChannelEditorDialog({
               ? t('channels.editor.field.github.requireBoundWatch.disabledHint')
               : undefined
           }
-          hintId={gatedBoundWatch ? `${id}-disabled-hint` : undefined}
+          // Keep the live region mounted from first render (keyed off the
+          // field, not the gated state): a region that enters the DOM already
+          // filled is never announced when the hint appears.
+          hintId={gateField ? `${id}-disabled-hint` : undefined}
           error={error}
         >
           <Switch
@@ -829,9 +838,7 @@ export function ChannelEditorDialog({
             checked={value === true}
             aria-required={field.required}
             disabled={gatedBoundWatch && value !== true}
-            aria-describedby={
-              gatedBoundWatch ? `${id}-disabled-hint` : undefined
-            }
+            aria-describedby={gateField ? `${id}-disabled-hint` : undefined}
             onCheckedChange={updateSwitch}
           />
         </FieldShell>

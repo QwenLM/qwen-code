@@ -5098,6 +5098,8 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
     "Remove values that aren't in the allowed list.",
   'channels.editor.validation.requiresBoundDelivery':
     'Enable "Deliver To PR-Bound Sessions" to save the selected watch events.',
+  'channels.editor.validation.requiresBoundDeliveryForWatchGate':
+    'Enable "Deliver To PR-Bound Sessions" to require an active watch.',
   'channels.editor.validation.repoFilterRequired':
     'List at least one repository, or set Repository Filter to Off.',
   'channels.editor.validation.number': 'Enter a valid number.',
@@ -9878,6 +9880,8 @@ const ZH: Messages = {
   'channels.editor.validation.invalidOption': '请移除不在允许列表中的值。',
   'channels.editor.validation.requiresBoundDelivery':
     '需开启「投递到 PR 绑定会话」才能保存所选的监视事件。',
+  'channels.editor.validation.requiresBoundDeliveryForWatchGate':
+    '需开启「投递到 PR 绑定会话」才能要求活跃监视。',
   'channels.editor.validation.repoFilterRequired':
     '请至少列出一个仓库，或把「按仓库过滤」设为关闭。',
   'channels.editor.validation.number': '请输入有效数字。',

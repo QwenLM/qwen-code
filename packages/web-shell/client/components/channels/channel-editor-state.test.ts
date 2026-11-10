@@ -1061,7 +1061,7 @@ describe('GitHub requireBoundWatch requires bound delivery', () => {
 
   it('refuses the gate while bound delivery is off', () => {
     expect(validateChannelEditorDraft(BOUND, draftWithGate(true), [])).toEqual({
-      requireBoundWatch: 'requiresBoundDelivery',
+      requireBoundWatch: 'requiresBoundDeliveryForWatchGate',
     });
   });
 

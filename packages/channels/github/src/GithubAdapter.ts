@@ -1636,14 +1636,47 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   // a hint before the dead-letter alert hours later (doudouOUC).
   private partialSnapshotStreak = 0;
   /**
-   * Comment/watch keys the gate has already deferred ONCE. A watch installed
-   * after the bindings snapshot was fetched surfaces on the next pass; the
-   * first gate-only exclusion holds the event (cursor unmoved / pending kept)
-   * so that pass can deliver it, and the second consumes it like any other
-   * no-target event. In-memory: a restart resets the one-cycle grace, which
-   * is harmless. Keys are removed when the event delivers or finally skips.
+   * Snapshot generation, bumped on every successful binding refresh. The
+   * gate grace is scoped to a generation, not to a drain call: pollOnce can
+   * drain the same PR twice against one snapshot, and a per-call grace would
+   * be spent by the second drain before any newer snapshot exists.
    */
-  private gateDeferredOnce = new Set<string>();
+  private bindingsGeneration = 0;
+  /**
+   * Comment/watch keys the gate has deferred, mapped to the snapshot
+   * generation at the deferral. A watch installed after the bindings
+   * snapshot was fetched surfaces on the next refresh; the first gate-only
+   * exclusion holds the event (cursor unmoved / pending kept), and it stays
+   * held until a NEWER generation still finds it gated — then it is consumed
+   * like any other no-target event. In-memory: a restart resets the grace,
+   * which is harmless. Keys are removed when the event delivers or is
+   * consumed.
+   */
+  private gateDeferredOnce = new Map<string, number>();
+
+  /**
+   * Whether a gate-excluded event should keep being held. Defers on first
+   * sight and while the snapshot generation is unchanged; once a newer
+   * generation has landed and the event is still gated, the grace is spent
+   * (returns false and clears the key) so the caller consumes it.
+   */
+  private gateGraceShouldHold(key: string): boolean {
+    const deferredAt = this.gateDeferredOnce.get(key);
+    if (deferredAt === undefined) {
+      this.gateDeferredOnce.set(key, this.bindingsGeneration);
+      return true;
+    }
+    if (deferredAt === this.bindingsGeneration) {
+      return true;
+    }
+    this.gateDeferredOnce.delete(key);
+    return false;
+  }
+
+  /** Clear any grace for an event that delivered (or is being consumed). */
+  private gateGraceClear(key: string): void {
+    this.gateDeferredOnce.delete(key);
+  }
   /**
    * True while the most recent pending-watch reconciliation FAILED (e.g.
    * the watch file is unreadable). Generic recovery must then leave watch
@@ -4829,10 +4862,16 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
             // snapshot: the operator's subscription scoping retires this
             // event, not an absence. Under a partial or failing scan an
             // unscanned role might still match — leave the task untargeted
-            // so the absence gate keeps deferring it as backpressure.
+            // so the absence gate keeps deferring it as backpressure. Name
+            // the gate when the gate (not the templates) excluded everyone.
             this.retireBoundTask(
               task,
-              'no role matched the event class (operator subscription)',
+              this.gateExcludedAllFollowers(
+                task.envelope.chatId,
+                task.issueNumber,
+              )
+                ? 'no watch-eligible bound session (requireBoundWatch)'
+                : 'no role matched the event class (operator subscription)',
             );
             continue;
           }
@@ -5921,6 +5960,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       this.boundRefreshFailed = false;
       this.boundSnapshotSeen = true;
       this.boundSnapshotFailureStreak = 0;
+      this.bindingsGeneration += 1;
       if (!snapshot.partial) this.boundSnapshotTrusted = true;
       const map = new Map<string, PrBindingSummary>();
       for (const summary of snapshot.bindings) {
@@ -5965,14 +6005,24 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         const retained = this.lastBindings.filter(
           (b) => !seen.has(b.sessionId),
         );
-        const retainedCapped =
+        const retainedCapped = (
           retained.length > MAX_PARTIAL_RETAINED
             ? [...retained]
                 .sort((a, b) =>
                   (b.updatedAt ?? '').localeCompare(a.updatedAt ?? ''),
                 )
                 .slice(0, MAX_PARTIAL_RETAINED)
-            : retained;
+            : retained
+        ).map((summary) => ({
+          ...summary,
+          // A retained row's last-stamped `watching` is stale evidence: the
+          // scan that would refresh it cannot read this session's sidecar.
+          // Keep the row (it still names its PRs and competes by recency)
+          // but reset the flag to unknown so the gate fails open on it — a
+          // watch installed during a permanent partial must not read as a
+          // confirmed false and ban the session for the partial's life.
+          prs: summary.prs.map((pr) => ({ ...pr, watching: undefined })),
+        }));
         retainedSessionCount = retainedCapped.length;
         if (retainedCapped.length < retained.length) {
           process.stderr.write(
@@ -6076,13 +6126,12 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       // No authoritative map exists: either no snapshot has ever succeeded,
       // or only empty partials / failures have (boundSnapshotSeen may already
       // be true). The cold-start gate defers the comment lane, so every
-      // notification is stalled. Under the gate, raw bindings left by the
-      // last successful scan prove the sidecars were readable — the empty
-      // map is gate filtering, not an absence of bindings.
+      // notification is stalled. The gate's raw-presence suppression is NOT
+      // applied here: a raw row left by an earlier scan says nothing about
+      // THIS failing lookup, so the failure accounting and the
+      // bindings_unreachable row must still run.
       const noAuthoritativeMap =
-        !this.boundSnapshotTrusted &&
-        this.boundSessionByPr.size === 0 &&
-        !(this.requireBoundWatch && this.hasRawBoundPrs());
+        !this.boundSnapshotTrusted && this.boundSessionByPr.size === 0;
       if (noAuthoritativeMap) {
         // A failing refresh with no authoritative map is as non-authoritative
         // as an empty partial: advance the SAME bounded cold-empty escape so
@@ -6275,13 +6324,43 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   }
 
   /**
-   * Whether any raw binding row names a PR. The routing map is gate-filtered,
-   * so its emptiness alone cannot prove "no bindings exist": cold-start
-   * decisions must read raw presence, or a fully-ineligible snapshot stalls
-   * the lane as if the sidecars were unreadable.
+   * Whether any non-channel raw binding row names a PR — the population the
+   * gate can actually filter. The routing map is gate-filtered, so its
+   * emptiness alone cannot prove "no bindings exist": cold-start decisions
+   * must read raw presence, or a fully-ineligible snapshot stalls the lane
+   * as if the sidecars were unreadable. Channel-owned rows are excluded
+   * because the routing map deliberately skips them.
    */
   private hasRawBoundPrs(): boolean {
-    return this.lastBindings.some((b) => b.prs.length > 0);
+    return this.lastBindings.some(
+      (b) => b.sourceType !== 'channel' && b.prs.length > 0,
+    );
+  }
+
+  /**
+   * Whether the gate excluded the FROZEN delivery target itself. The
+   * delivery-time retire must be about the target the event was frozen to,
+   * not the whole follower set: an exempt fix/untyped target keeps the
+   * legacy frozen-target contract even when some other ineligible
+   * review/verify follower still lists the PR, and a removed binding (the
+   * target no longer follows) keeps it too. Only a target whose own binding
+   * the gate excludes retires.
+   */
+  private frozenTargetGateExcluded(
+    delivery: NonNullable<InboundTaskRecord['delivery']>,
+    chatId: string,
+    issueNumber: number,
+  ): boolean {
+    if (!this.requireBoundWatch || delivery.kind !== 'bound-session') {
+      return false;
+    }
+    const follower = this.boundFollowersOf(chatId, issueNumber).find(
+      (f) => f.summary.sessionId === delivery.sessionId,
+    );
+    return (
+      follower !== undefined &&
+      this.watchGateExcludes(follower.role, follower.watching)
+    );
   }
 
   /**
@@ -6899,7 +6978,11 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         !current &&
         (isWatch ||
           this.boundRoleAware ||
-          this.gateExcludedAllFollowers(envelope.chatId, task.issueNumber))
+          this.frozenTargetGateExcluded(
+            delivery,
+            envelope.chatId,
+            task.issueNumber,
+          ))
       ) {
         // On a complete snapshot with no candidate left for the task's role,
         // retire privately. Watch events are private-only by contract; a
@@ -6907,10 +6990,10 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         // changed, or the operator removed the template) must not keep
         // injecting the obsolete role's instruction into the frozen session
         // either. Under the watch gate a legacy comment retires too, but
-        // ONLY when the gate actually excluded the target: raw followers
-        // still exist and EVERY one is ineligible (the frozen target stopped
-        // watching between claim and delivery). A merely author-excluded
-        // winner or a REMOVED binding (no raw followers left) keeps the
+        // ONLY when the gate excluded the FROZEN TARGET itself (it stopped
+        // watching between claim and delivery). The decision is about the
+        // target, not the follower set: an exempt fix/untyped target, a
+        // merely author-excluded winner, or a REMOVED binding all keep the
         // legacy contract — the frozen target stands and the gone path below
         // owns the fallback — so the gate never changes behavior for the
         // fix/untyped sessions it exempts.
@@ -8267,28 +8350,28 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     for (const candidate of candidates) {
       const exclude = excludeFor(candidate);
       if (targets.some((target) => !exclude.has(target.sessionId))) {
-        this.gateDeferredOnce.delete(candidate.key);
+        this.gateGraceClear(candidate.key);
         deliverable.push(candidate);
         continue;
       }
-      if (gateBlocked && !this.gateDeferredOnce.has(candidate.key)) {
-        this.gateDeferredOnce.add(candidate.key);
+      // A comment every raw follower authored can never be delivered, no
+      // matter what watch is installed: authorship, not the gate, is the
+      // cause. Skip the grace (holding it would be futile and would suppress
+      // its only journal row) and journal it as comment_watch_no_target.
+      const gateCaused = gateBlocked && exclude.size !== followerIds.size;
+      if (gateCaused && this.gateGraceShouldHold(candidate.key)) {
         gateHoldCursor ??= candidate.createdAt;
         continue;
       }
-      this.gateDeferredOnce.delete(candidate.key);
-      // Every bound target authored this same-account comment itself (or the
-      // gate excluded them all and the grace cycle is spent), so no session
-      // is left to receive it. The notification lanes cannot see it either
-      // (same account => no notification), so this skip row is the comment's
-      // only journal trace — record it instead of consuming silently, naming
-      // the gate when the gate is the cause.
+      this.gateGraceClear(candidate.key);
+      // No session is left to receive this comment. The notification lanes
+      // cannot see it either (same account => no notification), so this skip
+      // row is the comment's only journal trace — record it instead of
+      // consuming silently, naming the gate when the gate is the cause.
       this.recordChannelEvent({
         type: 'inbound',
         outcome: 'skipped',
-        reason: gateBlocked
-          ? 'bound_watch_required'
-          : 'comment_watch_no_target',
+        reason: gateCaused ? 'bound_watch_required' : 'comment_watch_no_target',
         repository: chatId,
         thread: threadId,
         number,
@@ -8336,17 +8419,14 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     } else {
       // Resume just before the last processed comment when capped so the
       // unprocessed tail is re-fetched next pass (a second of overlap is
-      // deduped, never lost); a gate-held comment holds the cursor before
-      // itself for its one grace cycle. The earliest hold wins.
-      let next = nowIso;
-      if (capped) {
-        const last = batch[batch.length - 1]!;
-        next = new Date(Date.parse(last.createdAt) - 1000).toISOString();
-      }
-      if (gateHoldCursor !== undefined && gateHoldCursor < next) {
-        next = gateHoldCursor;
-      }
-      commitCursor(next);
+      // deduped, never lost). A gate-held comment never reaches here: a hold
+      // implies an empty deliverable, which returned above.
+      const last = batch[batch.length - 1]!;
+      commitCursor(
+        capped
+          ? new Date(Date.parse(last.createdAt) - 1000).toISOString()
+          : nowIso,
+      );
     }
   }
 
@@ -8421,22 +8501,23 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         );
         if (current) {
           delivery = current;
-          this.gateDeferredOnce.delete(pending.key);
+          this.gateGraceClear(pending.key);
         } else {
           // One grace cycle when the gate is the cause: a watch installed
-          // after the snapshot was fetched surfaces on the next pass, and
+          // after the snapshot was fetched surfaces on the next refresh, and
           // the transition it was installed to catch must not retire first.
+          // The grace is scoped to the snapshot generation, so a second drain
+          // of the same PR in the same poll does not spend it.
           if (
             this.gateExcludedAllFollowers(
               pending.envelope.chatId,
               pending.issueNumber,
             ) &&
-            !this.gateDeferredOnce.has(pending.key)
+            this.gateGraceShouldHold(pending.key)
           ) {
-            this.gateDeferredOnce.add(pending.key);
             return;
           }
-          this.gateDeferredOnce.delete(pending.key);
+          this.gateGraceClear(pending.key);
           process.stderr.write(
             `[Channel:${this.name}] watch event ${pending.key} has no bound candidate left; retiring without public fallback\n`,
           );
@@ -8495,9 +8576,8 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           pending.envelope.chatId,
           pending.issueNumber,
         ) &&
-        !this.gateDeferredOnce.has(pending.key)
+        this.gateGraceShouldHold(pending.key)
       ) {
-        this.gateDeferredOnce.add(pending.key);
         return;
       }
       let task: InboundTaskRecord;
@@ -8608,18 +8688,19 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           return;
         }
         // One grace cycle when the gate is the cause: a watch installed
-        // after the snapshot was fetched surfaces on the next pass.
+        // after the snapshot was fetched surfaces on the next refresh. The
+        // grace is scoped to the snapshot generation (a second drain of the
+        // same PR in the same poll must not spend it).
         if (
           this.gateExcludedAllFollowers(
             pending.envelope.chatId,
             pending.issueNumber,
           ) &&
-          !this.gateDeferredOnce.has(pending.key)
+          this.gateGraceShouldHold(pending.key)
         ) {
-          this.gateDeferredOnce.add(pending.key);
           return;
         }
-        this.gateDeferredOnce.delete(pending.key);
+        this.gateGraceClear(pending.key);
         process.stderr.write(
           `[Channel:${this.name}] watch event ${pending.key} has no matching role target; retiring without public fallback\n`,
         );
@@ -8628,7 +8709,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         this.savePrWatchState();
         continue;
       }
-      this.gateDeferredOnce.delete(pending.key);
+      this.gateGraceClear(pending.key);
       const tasksBefore = this.readInboundTasks();
       const knownIds = new Set(tasksBefore.map((task) => task.id));
       const claimable = targets.filter(

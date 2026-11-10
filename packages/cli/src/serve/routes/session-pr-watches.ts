@@ -50,11 +50,13 @@ export function prWatchKey(url: string, pr: number): string | undefined {
 
 /**
  * Split a simple shell command into the words the shell would pass as
- * argv, honoring single quotes (literal), double quotes (backslash escapes
- * only `$`, backtick, `"`, `\`, and newline), backslash escapes and
- * backslash-newline continuations outside quotes (both characters vanish
- * without starting a word), and a word-start `#` comment, which ends the
- * command. Returns undefined when the argv CANNOT be determined:
+ * argv, splitting only on the shell's default IFS (space and tab; newline
+ * is an operator), honoring single quotes (literal), double quotes
+ * (backslash escapes only `$`, backtick, `"`, `\`, and newline), backslash
+ * escapes and backslash-newline continuations outside quotes (both
+ * characters vanish without starting a word), and a word-start `#` comment,
+ * which ends the command. Returns undefined when the argv CANNOT be
+ * determined:
  * unterminated quotes, variable/command expansion (`$`, backticks),
  * glob/brace expansion characters (`*?[]{}`), or shell
  * operators/redirections/newlines outside quotes — a whitespace split
@@ -133,7 +135,11 @@ export function shellWords(input: string): string[] | undefined {
     if ('*?[]{}'.includes(ch)) return undefined; // glob/brace expansion
     if (';|&><()'.includes(ch) || ch === '\n') return undefined; // operator
     if (ch === '#' && !started) return words; // comment: the rest is not argv
-    if (/\s/.test(ch)) {
+    // The shell's default IFS is space, tab, newline (newline is an operator
+    // above). Other Unicode whitespace (NBSP, CR, BOM, …) is a literal word
+    // character, not a separator — splitting on it would invent argv the
+    // real gate never sees.
+    if (ch === ' ' || ch === '\t') {
       push();
       i += 1;
       continue;
@@ -175,11 +181,15 @@ export function parseVerifyPrWatchGate(
   gate: string | undefined,
 ): VerifyPrWatchGateParse {
   const SCRIPT = 'verify-pr-watch-gate.mjs';
-  if (!gate || !gate.includes(SCRIPT)) {
-    return { kind: 'none' };
-  }
+  if (!gate) return { kind: 'none' };
+  // Parse FIRST: the probe name can be assembled by a continuation or sit
+  // across a quote boundary, so a raw-text substring check would misread a
+  // live watch as a confirmed none. The raw text is only the fallback for an
+  // argv we cannot determine at all.
   const tokens = shellWords(gate);
-  if (tokens === undefined) return { kind: 'unknown' };
+  if (tokens === undefined) {
+    return gate.includes(SCRIPT) ? { kind: 'unknown' } : { kind: 'none' };
+  }
   // The EXECUTED script word: the command itself, or the word right after
   // the node interpreter, skipping leading environment assignments. A name
   // embedded in another word (a lookalike script, another command's quoted

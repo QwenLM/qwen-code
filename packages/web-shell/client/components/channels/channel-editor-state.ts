@@ -62,7 +62,8 @@ export type ChannelEditorValidationCode =
   | 'number'
   | 'outOfRange'
   | 'policy'
-  | 'requiresBoundDelivery';
+  | 'requiresBoundDelivery'
+  | 'requiresBoundDeliveryForWatchGate';
 
 export type ChannelEditorValidationErrors = Record<
   string,
@@ -591,7 +592,9 @@ export function validateChannelEditorDraft(
       draft.values['requireBoundWatch'] === true &&
       draft.values['deliverToBoundSessions'] !== true
     ) {
-      errors['requireBoundWatch'] = 'requiresBoundDelivery';
+      // Its own code: the shared requiresBoundDelivery message names "the
+      // selected watch events", a control this field's operator never touched.
+      errors['requireBoundWatch'] = 'requiresBoundDeliveryForWatchGate';
     }
     // Mirror validateRepoFilterConfig: an active mode needs a non-empty list
     // of owner/repo entries. While the mode is off the list is ignored (and

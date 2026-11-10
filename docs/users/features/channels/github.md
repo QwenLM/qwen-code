@@ -251,14 +251,19 @@ thread is re-read once the turn settles.
   watch or a `/verify-pr <n> --watch` standing trigger it installed itself.
   Sessions without a watch stay bound (the badge and the binding remain) but
   are not delivery targets; an event whose PR has followers but no eligible
-  session retires privately with a `bound_watch_required` journal row — never
-  a public reply. `fix` and untyped bindings are unaffected. Watch state is
-  derived at scan time from the artifacts the watch flows already write; when
-  detection cannot determine it (a failing scan, an older daemon, an
-  unparseable gate), delivery continues as if the gate were off (fail-open).
-  A watch installed just after a snapshot was fetched earns the first gated
-  event one grace cycle, so the event it was installed to catch is delivered
-  on the next pass instead of being skipped.
+  session retires privately — never a public reply. The pre-claim skip lanes
+  (dispatch, comment watch, mention lane) journal `bound_watch_required`;
+  delivery-time and gone-fallback retirements keep their own reasons
+  (`bound_no_candidate`, `watch_no_candidate`, `watch_no_target`,
+  `siblings_still_follow`). `fix` and untyped bindings are unaffected. Watch
+  state is derived at scan time from the artifacts the watch flows already
+  write; when detection cannot determine it (a failing scan, an older daemon,
+  an unparseable gate), delivery continues as if the gate were off
+  (fail-open). In the comment watch and the PR-watch drains, a watch installed
+  just after a snapshot was fetched earns the first gated event one grace
+  cycle, so the event it was installed to catch is delivered on the next pass
+  instead of being skipped; notification- and mention-lane events are not
+  held.
 - A plain conversation comment on a bound PR reaches the session without a
   mention when the repository's group sender policy is an allowlist that lists
   the sender: the mention requirement (`groups.*.requireMention`) keeps ambient

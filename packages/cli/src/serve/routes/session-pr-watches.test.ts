@@ -167,6 +167,19 @@ describe('shellWords', () => {
     ]);
   });
 
+  it('splits only on shell IFS, keeping other Unicode whitespace literal', () => {
+    // NBSP / CR are not shell word separators: splitting on them would invent
+    // an argv the real gate never sees (a false live watch).
+    expect(shellWords('node x.mjs --repo acme/widgets\u00A042')).toEqual([
+      'node',
+      'x.mjs',
+      '--repo',
+      'acme/widgets\u00A042',
+    ]);
+    expect(shellWords('node x.mjs\ra/b')).toEqual(['node', 'x.mjs\ra/b']);
+    expect(shellWords('node\tx.mjs 42')).toEqual(['node', 'x.mjs', '42']);
+  });
+
   it('returns undefined when argv cannot be determined', () => {
     expect(shellWords("node 'unterminated")).toBeUndefined();
     expect(shellWords('node "unterminated')).toBeUndefined();
@@ -319,6 +332,35 @@ describe('parseVerifyPrWatchGate', () => {
     ).toEqual({ kind: 'unknown' });
   });
 
+  it('reads a probe name assembled by a continuation or across a quote boundary', () => {
+    // The raw text does not contain the contiguous script name, but the
+    // shell joins it into the executed word — a raw-text pre-check would
+    // misread these live watches as a confirmed none.
+    expect(
+      parseVerifyPrWatchGate(
+        'node /clone/scripts/verify-pr-watch-\\\ngate.mjs 42 --repo acme/widgets --cli /bin/qwen',
+      ),
+    ).toEqual({ kind: 'watch', repo: 'acme/widgets', pr: 42 });
+    expect(
+      parseVerifyPrWatchGate(
+        'node "/clone/scripts/verify-pr-watch-"gate.mjs 42 --repo acme/widgets',
+      ),
+    ).toEqual({ kind: 'watch', repo: 'acme/widgets', pr: 42 });
+  });
+
+  it('reads an absolute interpreter path and an in-quote continued value', () => {
+    expect(
+      parseVerifyPrWatchGate(
+        '/usr/local/bin/node scripts/verify-pr-watch-gate.mjs 42 --repo acme/widgets',
+      ),
+    ).toEqual({ kind: 'watch', repo: 'acme/widgets', pr: 42 });
+    expect(
+      parseVerifyPrWatchGate(
+        'node scripts/verify-pr-watch-gate.mjs 42 --repo "acme/\\\nwidgets"',
+      ),
+    ).toEqual({ kind: 'watch', repo: 'acme/widgets', pr: 42 });
+  });
+
   it('returns unknown when the gate names the script but argv is undeterminable', () => {
     expect(
       parseVerifyPrWatchGate(
@@ -433,6 +475,25 @@ describe('collectActivePrWatches', () => {
     expect(watches?.get(SESSION)).toEqual(
       new Set([prWatchKey('https://github.com/acme/widgets/pull/42', 42)]),
     );
+  });
+
+  it('keys each session only its own watches (per-session attribution)', async () => {
+    // Swapping the session attribution would hand one session's watch to the
+    // other and gate the wrong bindings.
+    const OTHER = '00000000-0000-4000-8000-00000000000b';
+    mocks.readCronTasks.mockResolvedValue([
+      cronTask({ id: 't-a', sessionId: SESSION }),
+      cronTask({
+        id: 't-b',
+        sessionId: OTHER,
+        gate: 'node scripts/verify-pr-watch-gate.mjs 7 --repo acme/gadgets --cli /bin/qwen',
+      }),
+    ]);
+    const watches = await collectActivePrWatches('/ws');
+    expect(watches?.get(SESSION)).toEqual(
+      new Set(['github.com/acme/widgets#42']),
+    );
+    expect(watches?.get(OTHER)).toEqual(new Set(['github.com/acme/gadgets#7']));
   });
 
   it('collects a watch whose gate ends in a comment naming --check', async () => {

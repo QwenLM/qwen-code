@@ -71,9 +71,11 @@ GitHub channel 开启 `deliverToBoundSessions` 后，每个绑定了某 PR 的 d
   其事件在 drain 处经既有无候选路径退役。省掉它们的 `pulls.get` 是可能的
   后续优化，不属于本次改动。
 - 评论监视（`prCommentWatch`，默认开启）经同一目标解析覆盖：其扇出消费
-  `resolveBoundTargets`，所有绑定目标都不合格（或评论由它们全部发出）的
-  评论走既有 `comment_watch_no_target` 日志行跳过并推进游标——私下退役，
-  绝不公开回复。
+  `resolveBoundTargets`。所有绑定跟随者都被门排除的评论以
+  `bound_watch_required` 日志行跳过，且第一次此类跳过把游标留住一个宽限
+  周期（§5），让快照之后安装的 watch 仍能投递它；评论由所有跟随者自己发出
+  的属纯作者排除跳过，保留 `comment_watch_no_target` 并立即推进游标。两者
+  都私下退役，绝不公开回复。
 - 检测是尽力而为且 fail-open（决策 D3）：它是噪音门，不是安全边界。
 
 ## 提议的改动
@@ -191,11 +193,13 @@ i18n 文案（en + zh）与编辑器字段顺序。适配器在 `deliverToBoundS
   保留其本义——role-aware 模板链确实什么都没匹配。partial/失败扫描下该分支
   不触发（未扫到的跟随者可能合格）——无目标 claim 照旧经 absence 门推迟。
 - `deliverToBoundSession` 投递时复核：legacy 评论今天复核无候选时保留冻结
-  目标；门开启下 `!current` 仅在门控确实排除了目标时才私下退役
-  （`bound_no_candidate`）——原始跟随者仍在且**每一个**都不合格（claim 与
-  投递之间停掉了 watch）。仅因作者排除而无候选（重试时最新跟随者正是评论
-  作者）、或绑定被移除（无原始跟随者），都保留 legacy 冻结目标契约，门绝不
-  改变其豁免的 fix/无类型会话的行为；该回退由下方 Gone 路径负责。
+  目标；门开启下 `!current` 仅在门控排除了**冻结目标本身**时才私下退役
+  （`bound_no_candidate`）——它自己的绑定是 `watching: false` 的 review/verify
+  行（claim 与投递之间停掉了 watch）。判断针对目标而非跟随者集合：豁免的
+  fix/无类型目标即使还有别的不合格 review/verify 跟随者列出该 PR 也保留
+  legacy 契约；仅因作者排除而无候选（重试时最新跟随者正是评论作者）、或绑定
+  被移除（目标不再跟随）同样保留。门绝不改变其豁免的 fix/无类型会话的
+  行为；该回退由下方 Gone 路径负责。
 - Gone 回退耗尽：`siblings_still_follow` retire 分支扩展到门模式——原始列表
   仍有跟随者（那些不合格的）即私下退役，而非公共回退——但仅限**完整**快照：
   驱逐后刷新为 partial/失败时，未扫描的 workspace 可能还有合格跟随者，事件
@@ -220,7 +224,9 @@ watch 事件：检测冻结 `resolveBoundDelivery`（已过滤），两种 drain
 但纯门排除先获得**一个宽限周期**：转换留在 pending（legacy drain，含 partial
 扫描下冻结的缺失目标）或不认领（role-aware drain），下一轮对新快照重解析。
 快照抓取之后才安装的 watch 因此能投递它要抓的事件；第二次纯门排除照旧退役。
-宽限是内存里的按键集合，投递或最终退役时清除。
+宽限是内存里「键 → 延迟时的快照代际」的映射，投递或最终退役时清除；只有
+更新的代际仍判定该事件被门排除时才消耗它，因此同一轮里对同一 PR 的第二次
+drain 不会消耗宽限。
 
 评论监视（`watchPrComments`）经同一个已门控的 `resolveBoundTargets` 解析
 目标，对原始跟随者集合（而非仅目标）查询已发评论归属（保证 Gone 回退的排除
@@ -282,11 +288,15 @@ watch 能在下一轮投递该评论；第二轮跳过并推进。两种情形�
   同样的每 workspace 成本却不读 `watching`；它目前是惰性的
   （`SESSION_PR_WATCH_OBSERVATION_ENABLED` 为 false），该开关翻开前需要先加
   守卫。
-- **partial 快照下 `watching` 陈旧。** 保留行沿用最后已知值；永久 partial
-  期间安装的 watch 要到完整快照才被看见。与既有 fail-closed 保留模型一致；
-  自愈。**完整**快照上，一个宽限周期（见 §5）覆盖安装窗口：第一次纯门排除
-  留住事件，让下一轮的新快照能投递它。宽限只有一个周期，不是保证——更晚
-  安装的 watch 仍会错过该事件，这与任何快照派生信号的窗口相同。
+- **partial 快照下 `watching` 陈旧。** 保留行上次盖上的 `watching` 是陈旧
+  证据——能刷新它的那次扫描读不到该会话的 sidecar——因此保留时**剥掉**该
+  标志（行仍命名其 PR、仍按新旧竞争）。门随后对保留行 fail-open：永久
+  partial 期间安装的 watch 不会被读成确认的 `false` 从而在该 partial 持续
+  期间禁投该会话。行保留其 PR 与新旧顺序，只有 watch 标志变为未知，直到该
+  会话再次被列出。**完整**快照上，一个宽限周期（见 §5）覆盖安装窗口：第一次
+  纯门排除留住事件，让更新的快照能投递它。宽限按快照代际计（同一轮里对同一
+  PR 的第二次 drain 不会消耗它），且只有一个周期，不是保证——更晚安装的
+  watch 仍会错过该事件，这与任何快照派生信号的窗口相同。
 - **`available: false` 混淆两种状态。** worktree 列举把「git 失败」（瞬时）
   与「不是仓库」（永久）都吞成 `available: false`，检测对两者都 fail-open。
   非仓库 workspace 里不可能有 `/autofix-pr` watch，但 `/verify-pr --watch`

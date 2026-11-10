@@ -12753,6 +12753,47 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
         }
       });
 
+      it('an unlisted sender stays mention_required under the gate, not bound_watch_required', async () => {
+        // The waiver would not admit an unlisted sender regardless of the
+        // gate, so the skip is mention_required. Collapsing the reason to
+        // gateExcludedAllFollowers alone would misname it bound_watch_required.
+        await initChannel(
+          { deliverToBoundSessions: true, requireBoundWatch: true, ...listed },
+          { boundSessions },
+        );
+        boundSessions.listPrBindings.mockResolvedValue({
+          bindings: [
+            makeBinding({
+              sessionId: 'watchless-verify',
+              prs: [
+                {
+                  number: 42,
+                  url: 'https://github.com/owner/repo/pull/42',
+                  state: 'open',
+                  role: 'verify',
+                  watching: false,
+                },
+              ],
+            }),
+          ],
+          partial: false,
+        });
+        mockOctokit.paginate
+          .mockResolvedValueOnce([prNotification()])
+          .mockResolvedValueOnce([plainReview('mallory')]);
+
+        await pollOnce();
+
+        expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+        const events = readChannelEvents();
+        expect(
+          events.some((event) => event['reason'] === 'mention_required'),
+        ).toBe(true);
+        expect(
+          events.some((event) => event['reason'] === 'bound_watch_required'),
+        ).toBe(false);
+      });
+
       // A mention thread drops the comment at the lane itself; any other
       // reason reaches the public path, whose preflight drops it.
       it.each([
@@ -18127,11 +18168,12 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       expect(existsSync(inboundTaskPath())).toBe(false);
     });
 
-    it('partial retention never routes to a retained watch-ineligible winner', async () => {
+    it('partial retention fails open on a retained row whose watching went stale', async () => {
       await initChannel(
         { deliverToBoundSessions: true, requireBoundWatch: true },
         { boundSessions },
       );
+      // A complete scan stamps the session watching:false.
       boundSessions.listPrBindings.mockResolvedValue({
         bindings: [verifyBinding('watchless-verify', false)],
         partial: false,
@@ -18139,8 +18181,11 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       mockOctokit.paginate.mockResolvedValueOnce([]);
       await pollOnce();
 
-      // The partial answer does not list the session: retention keeps its
-      // row, and the rebuilt routing map must still exclude it.
+      // The session's sidecar becomes unreadable: every later scan is
+      // partial and omits it. Its retained row must NOT keep the stale
+      // watching:false — that would ban the session for the partial's life
+      // even after it installs a watch. The flag is dropped, so the gate
+      // fails open and the retained session still receives the event.
       boundSessions.listPrBindings.mockResolvedValue({
         bindings: [],
         partial: true,
@@ -18151,8 +18196,13 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
 
       await pollOnce();
 
-      expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+      expect(boundSessions.deliverPrompt).toHaveBeenCalledWith(
+        'watchless-verify',
+        expect.any(String),
+        expect.any(String),
+      );
       expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
+      expect(existsSync(inboundTaskPath())).toBe(false);
     });
 
     it('gates a watch-less review binding too, with the gate stderr line', async () => {
@@ -18421,6 +18471,82 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
         ),
       ).toBe(false);
       expect(existsSync(inboundTaskPath())).toBe(true);
+    });
+
+    it('records bindings_unreachable when a cold gated lookup keeps failing', async () => {
+      // The gate's raw-presence suppression must NOT apply in the
+      // refresh-failure branch: a raw row from an earlier scan says nothing
+      // about THIS failing lookup, so the failure accounting and the
+      // bindings_unreachable row must still run.
+      await initChannel(
+        { deliverToBoundSessions: true, requireBoundWatch: true },
+        { boundSessions },
+      );
+      // Only ever a partial snapshot listing a watch-less verify: the map is
+      // empty (gated) and no complete snapshot has trusted it.
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [verifyBinding('watchless-verify', false)],
+        partial: true,
+      });
+      mockOctokit.paginate.mockResolvedValueOnce([]);
+      await pollOnce();
+
+      boundSessions.listPrBindings.mockRejectedValue(new Error('daemon down'));
+      mockOctokit.paginate.mockResolvedValueOnce([]);
+      await pollOnce();
+
+      expect(
+        readChannelEvents().some(
+          (event) => event['reason'] === 'bindings_unreachable',
+        ),
+      ).toBe(true);
+    });
+
+    it('role-aware: a mixed follower set is not gate-excluded (every, not some)', async () => {
+      // An exempt fix follower means the gate did NOT exclude everyone, even
+      // though a watch-less verify is present. With only a verify template,
+      // no role matches: the retire reason is no_role_matched, not
+      // bound_watch_required. Collapsing every→some would misname it.
+      await initChannel(
+        {
+          deliverToBoundSessions: true,
+          requireBoundWatch: true,
+          boundSessionActions: { 'verify:default': 'verify it' },
+        },
+        { boundSessions },
+      );
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [
+          verifyBinding('watchless-verify', false),
+          makeBinding({
+            sessionId: 'exempt-fix',
+            prs: [
+              {
+                number: 42,
+                url: 'https://github.com/owner/repo/pull/42',
+                state: 'open',
+                role: 'fix',
+                watching: false,
+              },
+            ],
+          }),
+        ],
+        partial: false,
+      });
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification('comment')])
+        .mockResolvedValueOnce([makeComment()]);
+
+      await pollOnce();
+
+      expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+      const events = readChannelEvents();
+      expect(
+        events.some((event) => event['reason'] === 'no_role_matched'),
+      ).toBe(true);
+      expect(
+        events.some((event) => event['reason'] === 'bound_watch_required'),
+      ).toBe(false);
     });
 
     it('accepts requireBoundWatch: false without bound delivery (=== true boundary)', () => {
@@ -18758,6 +18884,107 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
         'watchless-verify',
       );
       expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
+    });
+
+    it('a seeded pending watch event keeps its grace across both drains of one poll', async () => {
+      // pollOnce drains the same PR twice (reconcile + watchOnePr tail)
+      // against one snapshot. The grace is scoped to the snapshot generation,
+      // so the second drain must not spend it and retire the event before any
+      // newer snapshot exists.
+      await initChannel(
+        { ...watchConfig, requireBoundWatch: true },
+        { boundSessions },
+      );
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [
+          makeBinding({
+            sessionId: 'watchless-verify',
+            prs: [
+              {
+                number: 42,
+                url: 'https://github.com/owner/repo/pull/42',
+                state: 'open',
+                role: 'verify',
+                watching: false,
+              },
+            ],
+          }),
+        ],
+        partial: false,
+      });
+      seedWatchState({
+        'owner/repo#42': {
+          headSha: 'sha-1',
+          ci: 'success',
+          mergeableState: 'clean',
+          prState: 'open',
+          prUpdatedAt: '2026-07-02T09:00:00.000Z',
+          fired: [],
+          pending: [makePendingWatch({ sessionId: 'watchless-verify' })],
+        },
+      });
+      mockPull({ head: { sha: 'sha-1' } });
+      mockNotificationsOnce([]);
+      await pollOnce();
+
+      expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+      expect(
+        readChannelEvents().some(
+          (event) => event['reason'] === 'watch_no_candidate',
+        ),
+      ).toBe(false);
+      expect(
+        (readWatchState().entries['owner/repo#42']!['pending'] as unknown[])
+          .length,
+      ).toBe(1);
+    });
+
+    it('role-aware: a gated watch event keeps its grace across both drains of one poll', async () => {
+      await initChannel(
+        {
+          ...watchConfig,
+          requireBoundWatch: true,
+          boundSessionActions: { 'verify:default': 'verify it' },
+        },
+        { boundSessions },
+      );
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [
+          makeBinding({
+            sessionId: 'watchless-verify',
+            prs: [
+              {
+                number: 42,
+                url: 'https://github.com/owner/repo/pull/42',
+                state: 'open',
+                role: 'verify',
+                watching: false,
+              },
+            ],
+          }),
+        ],
+        partial: false,
+      });
+      seedWatchState({
+        'owner/repo#42': {
+          headSha: 'sha-1',
+          ci: 'success',
+          mergeableState: 'clean',
+          prState: 'open',
+          prUpdatedAt: '2026-07-02T09:00:00.000Z',
+          fired: [],
+          pending: [makePendingWatch({ sessionId: 'watchless-verify' })],
+        },
+      });
+      mockPull({ head: { sha: 'sha-1' } });
+      mockNotificationsOnce([]);
+      await pollOnce();
+
+      expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+      expect(
+        (readWatchState().entries['owner/repo#42']!['pending'] as unknown[])
+          .length,
+      ).toBe(1);
     });
 
     it('delivers a head_change to a watching verify session', async () => {
@@ -26842,6 +27069,53 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
         expect(entry['commentSince']).not.toBe('2026-07-02T10:00:00.000Z');
       });
 
+      it('journals an authorship-undeliverable comment on the first pass, no grace (gate)', async () => {
+        // The only follower authored the comment itself: no watch install can
+        // ever make it deliverable, so the grace would be futile and would
+        // suppress its only journal row. Skip it immediately as
+        // comment_watch_no_target and advance the cursor.
+        await initChannel(
+          { ...commentWatchConfig, requireBoundWatch: true },
+          { boundSessions },
+        );
+        boundSessions.listPrBindings.mockResolvedValue({
+          bindings: [
+            makeBinding({
+              prs: [
+                {
+                  number: 42,
+                  url: 'https://github.com/owner/repo/pull/42',
+                  state: 'open',
+                  role: 'verify',
+                  watching: false,
+                },
+              ],
+            }),
+          ],
+          partial: false,
+        });
+        boundSessions.postedCommentIds = vi
+          .fn()
+          .mockResolvedValue(new Set(['ic:555']));
+        seedCommentBaseline();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue([
+          conversationComment(),
+        ]);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+        expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+        const rows = readChannelEvents().filter(
+          (event) => event['reason'] === 'comment_watch_no_target',
+        );
+        expect(rows).toHaveLength(1);
+        // The cursor advanced past the comment on the first pass (no hold).
+        expect(
+          readWatchState().entries['owner/repo#42']!['commentSince'],
+        ).not.toBe('2026-07-02T10:00:00.000Z');
+      });
+
       it('delivers a grace-cycle comment once the next snapshot shows the watch (gate)', async () => {
         // The watch-install window: the snapshot says watching:false, the
         // comment arrives, and the NEXT snapshot shows the freshly installed
@@ -27003,6 +27277,107 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
             boundSessions.deliverPrompt.mock.calls.length - 1
           ]!;
         expect(lastCall[0]).toBe('frozen-session');
+        expect(
+          readChannelEvents().some(
+            (event) => event['reason'] === 'bound_no_candidate',
+          ),
+        ).toBe(false);
+        expect(existsSync(inboundTaskPath())).toBe(false);
+      });
+
+      it('keeps an exempt frozen fix target even when a watch-less verify follower remains (gate)', async () => {
+        // The retire decision is about the FROZEN TARGET, not the follower
+        // set: an exempt fix target must not retire just because some other
+        // ineligible review/verify follower still lists the PR.
+        await initChannel(
+          { ...commentWatchConfig, requireBoundWatch: true },
+          { boundSessions },
+        );
+        const binding = (
+          sessionId: string,
+          role: 'fix' | 'verify',
+          watching: boolean,
+          updatedAt: string,
+        ) =>
+          makeBinding({
+            sessionId,
+            updatedAt,
+            prs: [
+              {
+                number: 42,
+                url: 'https://github.com/owner/repo/pull/42',
+                state: 'open',
+                role,
+                watching,
+              },
+            ],
+          });
+        boundSessions.listPrBindings.mockResolvedValue({
+          bindings: [
+            binding(
+              'watchless-verify',
+              'verify',
+              false,
+              '2026-07-03T00:00:00.000Z',
+            ),
+            binding('frozen-fix', 'fix', false, '2026-07-01T00:00:00.000Z'),
+          ],
+          partial: false,
+        });
+        boundSessions.postedCommentIds = vi
+          .fn()
+          .mockImplementation(async (sessionId: string) =>
+            sessionId === 'watchless-verify' ? new Set(['ic:555']) : new Set(),
+          );
+        let queueFull = true;
+        boundSessions.deliverPrompt.mockImplementation(
+          async (sessionId: string) => {
+            if (queueFull) throw new BoundSessionQueueFullError(sessionId);
+          },
+        );
+        seedCommentBaseline();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue([
+          conversationComment(),
+        ]);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+
+        await pollOnce();
+
+        // Claimed for the exempt fix session (the newer verify is gated out).
+        expect(existsSync(inboundTaskPath())).toBe(true);
+        for (const [id] of boundSessions.deliverPrompt.mock.calls) {
+          expect(id).toBe('frozen-fix');
+        }
+
+        // The fix binding is removed before the retry; only the watch-less
+        // verify follower remains, so the map has no winner (!current). The
+        // frozen fix target is exempt and its binding is gone — the gate did
+        // not exclude it, so it must still receive the comment.
+        boundSessions.listPrBindings.mockResolvedValue({
+          bindings: [
+            binding(
+              'watchless-verify',
+              'verify',
+              false,
+              '2026-07-03T00:00:00.000Z',
+            ),
+          ],
+          partial: false,
+        });
+        queueFull = false;
+        mockOctokit.paginate
+          .mockResolvedValueOnce([])
+          .mockResolvedValueOnce([]);
+
+        await pollOnce();
+
+        const lastCall =
+          boundSessions.deliverPrompt.mock.calls[
+            boundSessions.deliverPrompt.mock.calls.length - 1
+          ]!;
+        expect(lastCall[0]).toBe('frozen-fix');
         expect(
           readChannelEvents().some(
             (event) => event['reason'] === 'bound_no_candidate',
