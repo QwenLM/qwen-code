@@ -267,6 +267,7 @@ from N`, and bounding an engagement with `@qwen-code /takeover for N`.
 - [160. (top level) · Env constant commentary — Moved out of the workflow verbatim to keep the file under GitHub's start-runs gate…](#af-160)
 - [161. review-address · Prepare branch and feedback — Failed-check evidence: the agent gets check NAMES only and holds no GitHub…](#af-161)
 - [162. review-scan · Scan for PRs with new feedback — review-pr is excluded from STALE_BASE_REDS: a review timeout is a verdict on THIS diff, not…](#af-162)
+- [163. takeover-command, retry-command, takeover-ack — The command lane joins the persistent pool: an accepted command's visible half…](#af-163)
 
 ---
 
@@ -5071,3 +5072,149 @@ green-on-main 前提对 review-pr 特别不成立：它评审的是本 PR 自己
 保持不变的部分：review-pr 处于 IN_PROGRESS 时，#8888 门禁仍扣住本轮（推送会取消评审）；一旦有一轮运行，红色 review-pr 仍会出现在 feedback.md 的失败检查段；其余所有红色检查保持原有 stale-base 行为。权衡：真正由 base 过期导致的 review-pr 红不再自动合入 main——但反馈轮仍会把它列在失败检查里，address agent 可在证据支持时自行合入 main。meta-test 钉住两个方向：仅 review-pr 红且 main 上绿时不再更新；review-pr + Test 混合红时仍会为 Test 更新。
 
 </details>
+
+<a id="af-163"></a>
+
+### 163. takeover-command, retry-command, takeover-ack — The command lane joins the persistent pool: route accepting a command in seconds is invisible while its only visible half sits in the hosted queue.
+
+In `takeover-command`, `retry-command` and `takeover-ack`.
+
+```text
+af-148 took the SCAN lane off the hosted pool because route
+gates the whole fan-out. It left the COMMAND lane hosted
+under the "short jobs stay hosted" rule. That rule missed
+what these three jobs are: the visible half of a command
+route has already accepted. Route decides, and then the
+maintainer sees nothing until a hosted runner arrives.
+
+On 2026-11-08 a maintainer commented '@qwen-code /takeover'
+on PR #16408. The prefilter matched, route ran on ecs-qwen
+in 9 seconds and logged "takeover command accepted: add
+autofix/takeover on PR #16408 by sorrycc (pr-author/write)"
+— and takeover-command then sat queued on ubuntu-latest
+with no runner. The PR carried no label and no ack, which
+is exactly what an UNRECOGNISED command looks like from the
+comment thread. Concurrent hosted jobs in this repo were
+measured waiting 39-49 minutes for a runner that same hour,
+so the silence was going to last most of an hour. Nothing
+was broken; the feedback was simply queued behind a pool
+the loop does not control.
+
+All three move together because they are one class: a
+maintainer-facing ack, only gh and jq, five-minute budget.
+Fixing only /takeover would leave /retry and the label ack
+silent in the same backlog. They share the scan
+lane's expression byte for byte — fork-trust clause and
+MAINTAINER_ECS_RUNNER_DISABLED kill-switch included — so a
+pull_request or pull_request_review from an untrusted fork
+still resolves to hosted, and the kill-switch still wins
+everywhere.
+
+The af-148 premise holds for them too: none of the three
+checks code out, so the reused workspace needs no restore
+or wipe step. Every scratch path comes from mktemp (O_EXCL,
+owner-only): the error-capture files are removed inline and
+the gh config dir is removed by an EXIT trap. That trap is
+not optional on this pool. Nothing reclaims RUNNER_TEMP
+here, and the pool's only age sweep walks /tmp, which cannot
+reach it, so without the trap each command would leave one
+more directory behind for good — free on a hosted VM that
+dies with the job, unbounded on a persistent host. It rides
+EXIT rather than a trailing rm because these steps return
+early on several refusal paths, and it stays step-scoped
+rather than per call because every gh call below reuses that
+one dir. No per-run WORKDIR is needed all the same: mktemp
+names are unpredictable, unlike review-scan's run_id-derived
+path. They call gh and jq, both already used by route on
+this pool; they run no node, docker or tmux, so they get no
+'Check runner environment' capability preflight.
+
+The rule is file-wide, so it is pinned file-wide. Thirteen
+sites mint this dir: ten in the workflow, two in
+autofix-push-and-report.sh and one in
+autofix-status-heartbeat.sh. Seven clean up after themselves
+— route, the three moved jobs, review-scan, the workflow's
+per-call post_status wrapper and the heartbeat's per-tick
+removal. Six do not, and they are the recorded follow-up:
+issue-autofix's publish, review-address's prepare, dry-run
+report and finalize, plus the script's two sites.
+
+route and review-scan are fixed here because they are the
+highest-volume leakers — route alone runs up to 144 times a
+day. review-scan cannot carry a second `trap … EXIT`: bash
+keeps one handler per shell, so its removal joins the
+existing fleet/WORKDIR trap and that merged line is pinned
+verbatim. The merged trap is installed AT THE MINT, not down
+beside FLEET_FILE (R3-1): the empty-PAT guard and the WORKDIR
+pre-clean both exit before that later point, and each would
+otherwise leave the dir behind — a mis-scoped secret would
+leak one per scan tick while a substring census still called
+the site clean. FLEET_FILE does not exist on those paths, so
+the merged line reads it with a `:-` default. Every step that
+gained a trap is pinned to exactly ONE EXIT handler (R3-3):
+a second one silently replaces the first, and neither the
+census nor the lazy preamble match would notice.
+
+Every removal in those traps carries `|| true`. Under the
+runner's `bash -e` a genuinely failing `rm` inside an EXIT
+handler both aborts the rest of the handler and replaces the
+step's own status — probed on bash 5 with a permission-denied
+removal: the second removal never ran and a deliberate
+`exit 0` came out as 1. Cleanup is best-effort; it must not
+decide the step's verdict, and in the chained scan trap it
+must not stop the gh config dir from being removed.
+
+The census took four rounds to get right, and the shape it
+settled on is the point — each earlier fix had widened one
+hand-maintained list, which is why the finding kept growing
+siblings. It now matches the mint by SHAPE rather than by one
+RUNNER_TEMP spelling, so `$RUNNER_TEMP`, `${RUNNER_TEMP}` and
+`${RUNNER_TEMP:-/tmp}` all land, while the literal
+`autofix-gh-config.XXXXXX` keeps unrelated temp dirs
+(weaken.*, qwen-font-probe.*) out of scope. It DISCOVERS the
+script sources by scanning .github/scripts/*.sh instead of
+naming two. And it judges each site on its own region AND
+requires the cleanup to remove that site's OWN variable, so
+an unrelated later `rm` cannot vouch for it. Both lists stay
+exact: an unrecognised site lands in `leaking` and forces a
+recorded decision.
+
+One bound on all of this: an EXIT trap covers bash's own
+exits, not a SIGKILLed shell. That is why the scan lane also
+puts WORKDIR where the age sweep can reach it. The gh config
+dir has no second net, so a hard-killed run leaves one
+behind — empty and owner-only, a directory inode rather than
+a live reroute channel.
+
+The pool's price is the one af-148 paid: gh reads its
+config from the shared, attacker-writable $HOME, and every
+gh call in these three jobs carries CI_DEV_BOT_PAT. A
+planted ~/.config/gh/config.yml with an http_unix_socket
+reroute would capture the PAT in the Authorization header
+and could forge the identity check that gates the label
+write. So each step carries the scan lane's reroute
+preamble BEFORE its first gh call: pin GH_HOST, drop
+planted GH_ENTERPRISE_TOKEN/GH_TOKEN, and mint a fresh
+empty GH_CONFIG_DIR. The mint is guarded rather than
+`export VAR="$(mktemp ...)"`, which reports export's status
+instead of the substitution's — a failing mktemp would
+sail through bash -e with an empty value, and an empty
+GH_CONFIG_DIR is precisely gh's fallback to the shared
+config the preamble exists to close.
+
+One residual is accepted here deliberately, and it is the
+scan lane's, not a new posture: the dir is minted once per
+step and reused across that step's gh calls. RUNNER_TEMP is
+same-UID-writable, so a process left behind on the pool can
+plant a config.yml into it between two calls. The EXIT trap
+ends the dir with the step, so nothing is left to plant into
+afterwards; it does not close the between-calls gap itself.
+takeover-command has two 5-second comment-retry backoffs,
+which is the same bounded window review-scan's retry sleeps
+already leave. The heartbeat is the case that could not take
+it — its 600-second sleep made the window a certainty, so
+af-149 mints per call through a wrapper instead. These steps
+are seconds long and hold no loop; if that window is ever
+judged unacceptable for them, the same wrapper is the
+remedy, not a return to hosted.
+```
