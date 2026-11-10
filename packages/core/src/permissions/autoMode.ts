@@ -333,7 +333,7 @@ export function shouldForceAutoModeReviewForAllow(
     ) {
       return false;
     }
-    if (op.pathUnknown || (op.cwdUnknown && op.pathMayDependOnCwd)) {
+    if (op.cwdUnknown && op.pathMayDependOnCwd) {
       return true;
     }
     return Boolean(op.filePath && isAutoModeProtectedWritePath(op.filePath));
@@ -908,7 +908,25 @@ export async function evaluateAutoMode(
     return { via: 'fallback', reason: 'ask_rule' };
   }
 
-  // L5.2.6: External writes must never be auto-approved by the classifier.
+  // L5.2.6: a path containing undecodable bytes cannot be matched or explained
+  // to the classifier losslessly. Keep the manual-approval floor deterministic
+  // instead of letting an LLM approve the raw spelling.
+  if (SHELL_LIKE_TOOL_NAMES.has(input.ctx.toolName) && input.ctx.command) {
+    const command =
+      input.ctx.toolName === ToolNames.MONITOR
+        ? normalizeMonitorCommand(input.ctx.command).safetyCommand
+        : input.ctx.command;
+    const cwd = input.ctx.cwd ?? input.config.getTargetDir?.() ?? process.cwd();
+    if (
+      extractShellOperationsAcrossCommand(command, cwd).some(
+        (op) => op.pathUnknown,
+      )
+    ) {
+      return { via: 'fallback', reason: 'safety_check' };
+    }
+  }
+
+  // L5.2.7: External writes must never be auto-approved by the classifier.
   // If a write tool targets a path outside the workspace, force a fallback to
   // manual approval (ask) instead of risking an LLM classifier auto-approval.
   if (
@@ -921,7 +939,7 @@ export async function evaluateAutoMode(
     return { via: 'fallback', reason: 'external_write' };
   }
 
-  // L5.2.7: the same floor for a shell-like tool whose `directory` is outside
+  // L5.2.8: the same floor for a shell-like tool whose `directory` is outside
   // the workspace. The classifier sees that directory as the call's cwd and is
   // never told the workspace root, so a build there would read as routine.
   if (

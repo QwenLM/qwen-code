@@ -631,6 +631,22 @@ describe.skipIf(process.platform === 'win32')(
       expect(lastLog('%s', otherDir)).toBe('other seed');
     });
 
+    it('refuses an ANSI-C wrapped background commit beside an undecodable argument', async () => {
+      const preHead = writeFeature(true);
+      const result = await shellTool
+        .build({
+          command: String.raw`sh -c $'git commit -m "feature"; cat \xff'`,
+          is_background: true,
+        })
+        .execute(mockAbortSignal);
+
+      expect(result.llmContent).toContain(
+        'Refusing to run `git commit` in background mode',
+      );
+      expect(realExecute).not.toHaveBeenCalled();
+      expect(headSha()).toBe(preHead);
+    });
+
     it('registers a commit landed by a Ctrl+B-promoted foreground command once it settles (issue #12514)', async () => {
       // #12514-A.3: `handlePromotedForeground` returns before the
       // attribution/registration block in `execute()`, so a commit landed by

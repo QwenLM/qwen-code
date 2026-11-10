@@ -20,6 +20,7 @@ import {
   getCommandRoots,
   getShellConfiguration,
   hasNonFinalTopLevelBackgroundOperator,
+  hasUnpairedSurrogate,
   hasUnsafeMonitorBackgroundOperator,
   isCommandAllowed,
   isCommandNeedsPermission,
@@ -769,14 +770,12 @@ describe('stripShellWrapper', () => {
     expect(stripShellWrapper('sh -c --')).toEqual('--');
   });
 
-  // Invalid UTF-8 stays unresolved instead of becoming a path the rule API
-  // cannot represent losslessly.
-  it('leaves undecodable ANSI-C words unresolved', () => {
-    expect(stripShellWrapper(String.raw`sh -c $'\xff'`)).toEqual(
-      String.raw`$'\xff'`,
-    );
+  // Invalid UTF-8 is decoded losslessly for the operation scanner. The path
+  // layer separately marks it unknown instead of treating it as an expansion.
+  it('decodes undecodable ANSI-C words without treating them as expansions', () => {
+    expect(stripShellWrapper(String.raw`sh -c $'\xff'`)).toEqual('\udcff');
     expect(stripShellWrapper(String.raw`sh -c $'\uD800'`)).toEqual(
-      String.raw`$'\uD800'`,
+      '\udced\udca0\udc80',
     );
   });
 
@@ -810,6 +809,15 @@ describe('stripTrailingBackgroundAmp', () => {
   });
 });
 
+describe('hasUnpairedSurrogate', () => {
+  it('detects lone high and low surrogates without rejecting valid pairs', () => {
+    expect(hasUnpairedSurrogate('a\uD800b')).toBe(true);
+    expect(hasUnpairedSurrogate('\uD800')).toBe(true);
+    expect(hasUnpairedSurrogate('\uDCFF')).toBe(true);
+    expect(hasUnpairedSurrogate('a\u{1F600}b')).toBe(false);
+  });
+});
+
 describe('detectSelfKillCommand', () => {
   it('detects broad Windows taskkill patterns that target qwen-code hosts', () => {
     expectEach(detectSelfKillCommand, true, [
@@ -826,6 +834,7 @@ describe('detectSelfKillCommand', () => {
       'pkill -f /usr/bin/node',
       'pkill -9f node',
       "bash -lc 'pkill -f qwen'",
+      String.raw`sh -c $'pkill -f qwen; cat \xff'`,
     ]);
   });
 

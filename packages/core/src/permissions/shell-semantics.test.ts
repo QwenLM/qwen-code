@@ -918,6 +918,18 @@ describe('ANSI-C bytes that are not valid UTF-8', () => {
       ]);
     },
   );
+  it('does not pair a raw lone high surrogate with a decoded invalid byte', () => {
+    const command = 'cat \uD800' + String.raw`$'\xff'`;
+    expect(extractShellOperations(command, '/repo')).toEqual([
+      { ...read('/repo/\uDC00\uDCFF'), pathUnknown: true },
+    ]);
+  });
+
+  it('marks a redirect-only undecodable target unresolved', () => {
+    expect(extractShellOperations(String.raw`> $'\xff'`, '/repo')).toEqual([
+      { ...write('/repo/\udcff'), pathUnknown: true },
+    ]);
+  });
 });
 
 describe('ANSI-C wrapper payloads', () => {
@@ -969,6 +981,21 @@ describe('ANSI-C wrapper payloads', () => {
     ['a brace-expanded terminator', "sh -c {--,'cat > /etc/motd'}"],
   ])('extracts the write inside %s', (_what, command) => {
     expect(across(command)).toEqual([write('/etc/motd')]);
+  });
+
+  it('keeps a protected write visible beside an undecodable wrapper argument', () => {
+    expect(
+      across(String.raw`sh -c $'echo {} > .qwen/settings.json; cat \xff'`),
+    ).toEqual([
+      write(REPO_SETTINGS),
+      { ...read('/repo/\udcff'), pathUnknown: true },
+    ]);
+  });
+
+  it('extracts writes from a multi-word payload carrying an undecodable byte', () => {
+    expect(
+      across(String.raw`sh -c $'printf x > secrets/real_file \xff'`),
+    ).toEqual([write('/repo/secrets/real_file')]);
   });
 
   it('treats a decoded operator as data, not a redirect', () => {

@@ -28,6 +28,7 @@ import {
   shouldRunAutoModeForCall,
 } from './autoMode.js';
 import { clearSessionCommits } from './destructive-commands.js';
+import { classifyAction } from './classifier.js';
 import { ApprovalMode } from '../config/config.js';
 import { ToolNames } from '../tools/tool-names.js';
 import type { Config } from '../config/config.js';
@@ -512,11 +513,6 @@ describe('shouldForceAutoModeReviewForAllow', () => {
     );
   });
 
-  it('returns true for writes whose paths cannot be decoded losslessly', () => {
-    expect(forcesReview(String.raw`printf x > $'\xff'`)).toBe(true);
-    expect(forcesReview(String.raw`printf x > $'\xc3\xa9'`)).toBe(false);
-  });
-
   it('returns false for ordinary writes after `cd` into project subdirs', () => {
     // Counter-case for the cd-tracking check: cd-into-src + write a generated
     // file must NOT force review, or every workspace-internal compound command
@@ -821,6 +817,17 @@ describe('evaluateAutoMode — fast-path gating', () => {
       { skipClassifierReason: 'total_denial' },
     );
     expect(decision).toEqual({ via: 'fallback', reason: 'total_denial' });
+  });
+
+  it('routes undecodable shell paths to manual fallback without the classifier', async () => {
+    vi.mocked(classifyAction).mockClear();
+    const decision = await evaluate({
+      toolName: ToolNames.SHELL,
+      command: String.raw`printf x > $'\xff'`,
+      cwd,
+    });
+    expect(decision).toEqual({ via: 'fallback', reason: 'safety_check' });
+    expect(classifyAction).not.toHaveBeenCalled();
   });
 
   // ─── New tests for external write fallback ───

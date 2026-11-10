@@ -3481,6 +3481,15 @@ describe('PermissionManager — compound shell write attribution', () => {
     expect(await pm.evaluate(ctx)).toBe('deny');
   });
 
+  it('keeps a protected write visible beside an undecodable wrapper argument', async () => {
+    const pm = repoPm({ permissionsAllow: ['Bash(*)'], ...denySettings });
+    const ctx = sh(
+      String.raw`sh -c $'echo {} > .qwen/settings.json; cat \xff'`,
+      '/repo',
+    );
+    expect(await pm.evaluate(ctx)).toBe('deny');
+  });
+
   it.each([
     [String.raw`cat $'\xff'`, 'ask'],
     [String.raw`printf x > $'\uD800'`, 'ask'],
