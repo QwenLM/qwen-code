@@ -1,7 +1,7 @@
 package com.alibaba.qwen.code.managedagent.session;
 
+import com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.workspace.runtime.WorkspaceRecoveryContract;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -21,7 +21,7 @@ class WorkspaceRecoveryTest {
     @Qualifier("managedJdbcTemplate")
     @Autowired private JdbcTemplate jdbc;
     @Autowired private ManagedAgentStore store;
-    @Autowired private WorkspaceExecutionStore authority;
+    @Autowired private JdbcWorkspaceExecutionStore authority;
 
     @Test
     void sharedExecutionRetainsEveryPhysicalMaintenanceBlocker() throws Exception {

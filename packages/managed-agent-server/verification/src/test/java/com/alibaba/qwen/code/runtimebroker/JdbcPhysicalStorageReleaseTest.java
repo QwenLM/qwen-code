@@ -1,7 +1,7 @@
 package com.alibaba.qwen.code.runtimebroker;
 
+import com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
-import com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
@@ -163,7 +163,7 @@ public class JdbcPhysicalStorageReleaseTest {
             observing.armed = true;
             var pending = pool.submit(() -> {
                 if (lost) {
-                    com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new WorkspaceExecutionStore(new ManagedSchemaJdbcTemplate(observing),
+                    com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new JdbcWorkspaceExecutionStore(new ManagedSchemaJdbcTemplate(observing),
                             new DataSourceTransactionManager(observing))).releaseLost(original);
                 } else {
                     fixture.release();

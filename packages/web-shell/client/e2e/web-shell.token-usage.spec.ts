@@ -57,12 +57,15 @@ for (const { width, language, theme } of [
       const timeline = (count: number, speed: number, ttftMs: number) =>
         Array.from({ length: count }, (_, index) => {
           const generationMs = 2_000 + (index % 5) * 300;
+          const sampleTtftMs = ttftMs + (index % 4) * 150;
           const rate = speed * (1 + 0.25 * Math.sin(index * 1.7));
           return {
             at: at((index * 24) / count),
-            ttftMs: ttftMs + (index % 4) * 150,
+            ttftMs: sampleTtftMs,
             generationMs,
-            outputTokens: Math.round((rate * generationMs) / 1000),
+            outputTokens: Math.round(
+              (rate * (sampleTtftMs + generationMs)) / 1000,
+            ),
           };
         });
       const stats: DaemonSessionStatsStatus = {
@@ -80,6 +83,9 @@ for (const { width, language, theme } of [
               totalTtftMs: 4800,
               totalGenerationDurationMs: 2000,
               totalThroughputOutputTokens: 898,
+              totalTimedGenerationDurationMs: 2000,
+              totalOutputSpeedTokens: 898,
+              totalOutputSpeedDurationMs: 6800,
             },
           },
           'qwen3.8-max-0902': {
@@ -195,7 +201,7 @@ for (const { width, language, theme } of [
       const timing = zh
         ? [
             ['首 token', '1.2s'],
-            ['输出速度', '449.0 tok/s'],
+            ['输出速度', '132.1 tok/s'],
             ['生成', '500ms'],
             ['请求', '105'],
             ['成功率', '100%'],
@@ -203,7 +209,7 @@ for (const { width, language, theme } of [
           ]
         : [
             ['First token', '1.2s'],
-            ['Output speed', '449.0 tok/s'],
+            ['Output speed', '132.1 tok/s'],
             ['Generation', '500ms'],
             ['Requests', '105'],
             ['Success rate', '100%'],

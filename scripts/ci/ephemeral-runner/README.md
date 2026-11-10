@@ -118,13 +118,28 @@ output exceeding the capture limits is discarded.
 `minDiskBytes` applies to the Docker data filesystem. Configure and verify
 disk quotas or a dedicated data volume as appropriate for the host.
 
-`stallAlertRetries` (default 30, roughly five minutes at the ten-second retry
-interval) sets how many consecutive identical failures a slot may accumulate
-before the manager logs `STALL ALERT` instead of the ordinary retry line. The
-counter resets whenever a cycle succeeds or the failure changes. A stall alert
-means the slot is serving no jobs and needs reconciliation; the manager keeps
-retrying and never exits on its own, so systemd does not restart it. Alert on
-that journal marker rather than on service state.
+Failed cycles retry with jittered exponential backoff: 10 s doubling to a
+60 s cap, or 30 s doubling to a 300 s cap while GitHub answers HTTP 403/429,
+so a rate-limited pool stops sustaining its own rate limit. The backoff
+sleep stays interruptible and a shutdown cuts it short.
+
+`stallAlertSeconds` (default 1800, thirty minutes) sets how long a slot may
+repeat the same failure before the manager logs `STALL ALERT` instead of the
+ordinary retry line. The threshold is wall-clock, so it holds under any retry
+cadence, and the default sits well above the 300 s backoff ceiling on purpose:
+a pool-wide rate-limit storm stalls every slot at once, and a threshold shorter
+than the cadence would put one alert per slot in the journal simultaneously.
+The clock resets whenever a cycle succeeds or the failure changes, and each
+stall episode alerts once. Because the check happens when a failure is
+observed, the alert lands on the first failure at or after the threshold, so
+the reported duration is the threshold rounded up to the current cadence. A
+stall alert means the slot is serving no jobs and needs reconciliation; the
+manager keeps retrying and never exits on its own, so systemd does not restart
+it. Alert on that journal marker rather than on service state.
+
+Upgrading: `stallAlertRetries`, the earlier retry-count threshold, is no longer
+read. A config that still carries it has no effect and falls back to the
+1800 s default, so set `stallAlertSeconds` explicitly if you had tuned it.
 
 ## Install and operate
 
@@ -162,15 +177,41 @@ remove unrelated runners or run a global Docker prune.
 
 A container or network whose slot state was lost is reconciled from its
 `qwen.instance` label, so an interrupted `docker create` no longer wedges the
-slot permanently. Resources whose label does not identify this pool and slot,
-or that disagree about the identity, still block it for manual reconciliation.
-The label carries the instance name, not the registration's display name, so
+slot permanently. With no slot state, every leftover in the slot's namespace
+is an orphan: when the labels disagree about the identity, the whole pile is
+swept without a GitHub identity and the slot replenishes. Registrations are
+then swept by the slot's naming scheme, but only when every leftover carried
+this slot's identity prefix and GitHub reports the registration offline —
+this relies on each host having a unique `poolId`, so the prefix cannot name
+another host's runners. A foreign or missing identity label still blocks
+registration sweeping for manual reconciliation (the foreign resource itself
+is removed from the slot namespace). The label carries the instance name, not
+the registration's display name, so
 recovery matches registrations under both the bare display name written by
 older versions and the current suffixed one; an ambiguous match still blocks
-the slot rather than deleting anything.
-A runner deletion GitHub rejects (for example while it still reports the runner
-busy) keeps the slot state and is retried, instead of dropping the only record
-that can remove the registration.
+the slot rather than deleting anything. A label-recovered match (no recorded
+registration name or id) is only deleted when GitHub explicitly reports it
+offline; an online, status-less or unknown-status match blocks the slot
+instead, because it may belong to a live runner outside this host's view. That
+refusal never keeps the container: a retained container would keep its own
+runner heartbeating, so an online match backed by this slot's leftover runner
+could never reach offline and the refusal would sustain itself. The containers
+are removed and a labelled network is kept (or created first, when the pile
+had none) as the retry anchor — nothing about a label-recovered identity is
+written to a state file, so that network is what brings the slot back into
+cleanup on the next cycle. A permanent identity refusal (an ambiguous or
+mismatched identity) reclaims the containers the same way and keeps reporting
+the same error from the network anchor until a human reconciles; it never
+deletes a registration. Because the containers are gone by the time anyone
+investigates a wedged slot, the diagnostics to inspect are the `.log` and
+`.tar` exports written to the log directory before the refusal, not a live
+container. A runner deletion GitHub rejects (for example while it
+still reports the runner busy) keeps either the slot state or, for a
+label-recovered identity, the network anchor, and is retried, instead of
+dropping the only record that can remove the registration. The identity-less
+sweep deletes registrations before removing the resources for the same
+reason: a rejected deletion is still retried on the next cycle while the pile
+remains.
 
 ```sh
 sudo systemctl stop qwen-ephemeral-runner.service
