@@ -136,6 +136,28 @@ export function hasAgentSkillBridge(context: AgentSkillContext): boolean {
   );
 }
 
+/**
+ * Whether the deferred-tool bridge (`tool_search` + `tool_call`) reaches the
+ * Skill tool.
+ *
+ * `isBridgeHalfUsable` answers for each wrapper and `isSkillTargetUsable` for
+ * the resolved target, at the caller's own level: the declaration-level
+ * `ToolConfig` in {@link toolConfigAllowsSkill}, the invocation-level
+ * declarations and execution allowlist in `AgentCore.canInvokeSkill`. One
+ * helper, so the announcement predicate and the activation gate cannot
+ * disagree about this route.
+ */
+export function deferredBridgeReachesSkill(
+  isBridgeHalfUsable: (toolName: string) => boolean,
+  isSkillTargetUsable: (toolName: string) => boolean,
+): boolean {
+  return (
+    isBridgeHalfUsable(ToolNames.TOOL_SEARCH) &&
+    isBridgeHalfUsable(ToolNames.TOOL_CALL) &&
+    isSkillTargetUsable(ToolNames.SKILL)
+  );
+}
+
 export function hasAgentSkillExecBinding(
   context: AgentSkillContext,
   registryWillBeRebuilt = false,
@@ -229,34 +251,25 @@ export function toolConfigAllowsSkill(
   // list holding only inline declarations inherits: both take the explicit
   // branch there, which declares no registry tool.
   const inheritsRegistry = !toolConfig || names.includes('*');
-  const bridgeBlocked =
-    matchesAgentToolBlocklist(
-      toolConfig?.disallowedTools,
-      ToolNames.TOOL_SEARCH,
-    ) ||
-    matchesAgentToolBlocklist(toolConfig?.disallowedTools, ToolNames.TOOL_CALL);
   // The execution allowlist also bounds the bridge: under hybrid code_mode it
   // narrows the declarations, and a half outside it cannot be called in Direct
-  // or Hybrid (an empty list denies every direct call).
-  const bridgeExecutionAllowed =
-    toolConfig?.executionAllowedTools === undefined ||
-    (toolConfig.executionAllowedTools.includes(ToolNames.TOOL_SEARCH) &&
-      toolConfig.executionAllowedTools.includes(ToolNames.TOOL_CALL));
-  // The bridge resolves to `skill` itself, and the scheduler re-checks that
-  // resolved target against the same execution allowlist (direct form). A
-  // defined list is authoritative for non-MCP names, so `tools: ['*']` must
-  // not re-admit a target the list omits.
-  const bridgeTargetAllowed =
-    toolConfig?.executionAllowedTools === undefined ||
-    toolConfig.executionAllowedTools.includes(ToolNames.SKILL);
+  // or Hybrid (an empty list denies every direct call). The bridge resolves to
+  // `skill` itself, and the scheduler re-checks that resolved target against
+  // the same execution allowlist (direct form); a defined list is
+  // authoritative for non-MCP names, so `tools: ['*']` must not re-admit a
+  // target the list omits.
   const bridgeReachesSkill =
     deferredBridgeAvailable &&
-    !bridgeBlocked &&
-    bridgeExecutionAllowed &&
-    bridgeTargetAllowed &&
-    (inheritsRegistry ||
-      (names.includes(ToolNames.TOOL_SEARCH) &&
-        names.includes(ToolNames.TOOL_CALL)));
+    deferredBridgeReachesSkill(
+      (toolName) =>
+        !matchesAgentToolBlocklist(toolConfig?.disallowedTools, toolName) &&
+        (toolConfig?.executionAllowedTools === undefined ||
+          toolConfig.executionAllowedTools.includes(toolName)) &&
+        (inheritsRegistry || names.includes(toolName)),
+      (toolName) =>
+        toolConfig?.executionAllowedTools === undefined ||
+        toolConfig.executionAllowedTools.includes(toolName),
+    );
   if (skillEagerHidden && !bridgeReachesSkill) {
     return false;
   }

@@ -15,8 +15,60 @@ import { MockTool } from '../../test-utils/mock-tool.js';
 import { ToolRegistry } from '../../tools/tool-registry.js';
 import { ExecTool } from '../../tools/exec.js';
 import { ToolMode } from '../../tools/code-mode.js';
+import { ToolNames } from '../../tools/tool-names.js';
+import {
+  buildForkExecutionAllowlist,
+  resolveForkExecutionAllowedTools,
+} from '../../tools/agent/fork-subagent.js';
 
 describe('fork MCP policy inheritance', () => {
+  it.each([ToolMode.CodeMode, ToolMode.CodeModeOnly])(
+    'treats a non-empty fork_tools list that derives to empty as deny-all in %s',
+    async (mode) => {
+      const config = makeFakeConfig({ toolMode: mode });
+      const registry = new ToolRegistry(config);
+      vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
+      registry.registerTool(new ExecTool(config));
+      registry.registerTool(new MockTool({ name: ToolNames.READ_FILE }));
+      registry.registerTool(
+        new MockTool({ name: ToolNames.ASK_USER_QUESTION }),
+      );
+      const parentToolNames = registry.getAllToolNames();
+      // `ask_user_question` never executes in a fork, and this parent
+      // declares neither bridge half, so a one-entry list derives to `[]` —
+      // the same deny-all shape as `fork_tools: []`.
+      const executionAllowedTools = resolveForkExecutionAllowedTools(
+        parentToolNames,
+        buildForkExecutionAllowlist(
+          [ToolNames.ASK_USER_QUESTION],
+          [ToolNames.READ_FILE],
+          parentToolNames,
+        ),
+      );
+      expect(executionAllowedTools).toEqual([]);
+
+      const core = new AgentCore(
+        'fork-empty-derived',
+        config,
+        { systemPrompt: '' },
+        { model: 'test' },
+        { max_turns: 1 },
+        {
+          tools: parentToolNames,
+          executionAllowedTools,
+          nestedExecutionAllowedTools: [],
+        },
+      );
+      const executable = (
+        core as unknown as {
+          isToolExecutionAllowed: (name: string) => boolean;
+        }
+      ).isToolExecutionAllowed.bind(core);
+      expect(executable(ToolNames.EXEC)).toBe(false);
+      expect(await core.prepareTools()).toEqual([]);
+    },
+  );
+
   it.each([ToolMode.CodeMode, ToolMode.CodeModeOnly])(
     'does not turn the %s exec wrapper into an inherited grant',
     async (mode) => {

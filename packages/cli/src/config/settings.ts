@@ -754,28 +754,39 @@ function mergeSettings(
     delete merged.tools.executionSandbox;
   }
   // `tools.mode` and the legacy `tools.codeModeOnly` name one setting but
-  // merge as independent keys, so an operator's enforced legacy value would
-  // otherwise sit beside a lower-scope `mode` that every key-first reader
-  // prefers. Keep the highest-precedence scope's choice.
+  // merge as independent keys, so an operator's enforced value would
+  // otherwise sit beside a lower-scope key that every key-first reader
+  // prefers. Keep the highest-precedence scope's choice, and rebuild the
+  // section when a project replaced `tools` with null, a scalar, or an array
+  // during the ordinary merge.
   const toolModeChoice = [systemDefaults, user, safeWorkspace, system].reduce<
-    'mode' | 'legacy-true' | 'legacy-false' | undefined
+    | { kind: 'mode'; value: unknown }
+    | { kind: 'legacy'; value: boolean }
+    | undefined
   >((choice, scope) => {
     const tools = scope.tools as
       | { mode?: unknown; codeModeOnly?: unknown }
       | undefined;
-    if (tools?.mode !== undefined) return 'mode';
-    if (tools?.codeModeOnly === true) return 'legacy-true';
-    if (tools?.codeModeOnly === false) return 'legacy-false';
+    if (tools?.mode !== undefined) return { kind: 'mode', value: tools.mode };
+    if (typeof tools?.codeModeOnly === 'boolean') {
+      return { kind: 'legacy', value: tools.codeModeOnly };
+    }
     return choice;
   }, undefined);
-  if (
-    (toolModeChoice === 'legacy-true' || toolModeChoice === 'legacy-false') &&
-    merged.tools &&
-    typeof merged.tools === 'object'
-  ) {
-    const tools = merged.tools as { mode?: unknown; codeModeOnly?: unknown };
+  if (toolModeChoice) {
+    const existing = merged.tools;
+    const tools: { mode?: unknown; codeModeOnly?: unknown } =
+      existing && typeof existing === 'object' && !Array.isArray(existing)
+        ? { ...existing }
+        : {};
     delete tools.mode;
-    tools.codeModeOnly = toolModeChoice === 'legacy-true';
+    delete tools.codeModeOnly;
+    if (toolModeChoice.kind === 'mode') {
+      tools.mode = toolModeChoice.value;
+    } else {
+      tools.codeModeOnly = toolModeChoice.value;
+    }
+    merged.tools = tools as Settings['tools'];
   }
   const operatorCatalogRefresh = selectOperatorCatalogRefresh(
     systemDefaults,

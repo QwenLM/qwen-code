@@ -110,6 +110,58 @@ describe('legacy tool mode settings', () => {
     expect(getEffectiveValue('tools.mode', {}, loaded.merged)).toBe('direct');
   });
 
+  it.each([null, false, 'replace', []])(
+    'keeps an operator tools.mode when a project replaces tools with %j',
+    (tools) => {
+      const loaded = new LoadedSettings(
+        file({}),
+        file({}),
+        file({ tools: { mode: 'code_mode_only' } }),
+        file({ tools } as unknown as Settings),
+        true,
+        new Set(),
+      );
+
+      expect(getEffectiveValue('tools.mode', {}, loaded.merged)).toBe(
+        'code_mode_only',
+      );
+    },
+  );
+
+  it.each([null, false, 'replace', []])(
+    'keeps an operator legacy mode when a project replaces tools with %j',
+    (tools) => {
+      const loaded = new LoadedSettings(
+        file({ tools: { codeModeOnly: true } } as unknown as Settings),
+        file({}),
+        file({}),
+        file({ tools } as unknown as Settings),
+        true,
+        new Set(),
+      );
+
+      expect(getEffectiveValue('tools.mode', {}, loaded.merged)).toBe(
+        'code_mode_only',
+      );
+    },
+  );
+
+  it('re-adds only the operator mode key to a project tools section', () => {
+    const loaded = new LoadedSettings(
+      file({}),
+      file({}),
+      file({ tools: { codeModeOnly: true } } as unknown as Settings),
+      file({ tools: { approvalMode: 'yolo' } } as unknown as Settings),
+      true,
+      new Set(),
+    );
+
+    expect(loaded.merged.tools?.approvalMode).toBe('yolo');
+    expect(
+      (loaded.merged.tools as { codeModeOnly?: unknown })?.codeModeOnly,
+    ).toBe(true);
+  });
+
   it('keeps a higher-precedence tools.mode over a lower legacy mode', () => {
     const loaded = new LoadedSettings(
       file({ tools: { mode: 'direct' } }),

@@ -150,6 +150,7 @@ import {
   getExcludedToolsForCurrentContext,
   getLeaderOnlyToolUnavailableMessage,
   getSubagentPlanToolUnavailableMessage,
+  deferredBridgeReachesSkill,
   hasAgentSkillBridge,
   hasAgentSkillExecBinding,
   isLeaderOnlyToolUnavailableInSubagent,
@@ -1932,15 +1933,28 @@ export class AgentCore {
   private canInvokeSkill(
     declaredToolNames: ReadonlySet<string | undefined>,
   ): boolean {
+    const registry = this.runtimeContext.getToolRegistry();
     return (
       (declaredToolNames.has(ToolNames.SKILL) &&
         this.runtimeContext.getToolMode?.() !== ToolMode.CodeModeOnly &&
         this.isToolExecutionAllowed(ToolNames.SKILL)) ||
       (isCodeModeEnabled(this.runtimeContext.getToolMode?.()) &&
         declaredToolNames.has(ToolNames.EXEC) &&
-        !!this.runtimeContext.getToolRegistry().getTool(ToolNames.SKILL) &&
+        !!registry.getTool(ToolNames.SKILL) &&
         this.codeModeAllowedToolNames?.includes(ToolNames.SKILL) === true &&
-        this.isToolExecutionAllowed(ToolNames.SKILL, true))
+        this.isToolExecutionAllowed(ToolNames.SKILL, true)) ||
+      // CodeModeOnly hides and refuses `tool_call`, so the bridge is a
+      // direct-call route only outside it.
+      (this.runtimeContext.getToolMode?.() !== ToolMode.CodeModeOnly &&
+        hasAgentSkillBridge(this.runtimeContext) &&
+        deferredBridgeReachesSkill(
+          (toolName) =>
+            declaredToolNames.has(toolName) &&
+            this.isToolExecutionAllowed(toolName),
+          (toolName) =>
+            !!registry.getTool(toolName) &&
+            this.isToolExecutionAllowed(toolName),
+        ))
     );
   }
 

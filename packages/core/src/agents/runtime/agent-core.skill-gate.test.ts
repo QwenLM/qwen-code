@@ -477,6 +477,53 @@ describe('AgentCore skill-gate inputs', () => {
       expect(declared.has(ToolNames.SKILL)).toBe(false);
       expect(declared.has(ToolNames.TOOL_SEARCH)).toBe(true);
       expect(declared.has(ToolNames.TOOL_CALL)).toBe(true);
+      // The announcement is only useful if the activation gate agrees: the
+      // bridge can invoke the skill, so it must not withhold the details.
+      expect(gate(core, declared)).toBe(true);
+    });
+
+    it('refuses the bridge route under CodeModeOnly, where tool_call is hidden', () => {
+      const config = makeFakeConfig({ toolMode: ToolMode.CodeModeOnly });
+      const registry = new ToolRegistry(config);
+      vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
+      registry.registerTool(new ExecTool(config));
+      registry.registerTool(new MockTool({ name: ToolNames.SKILL }));
+      registry.registerTool(new MockTool({ name: ToolNames.TOOL_SEARCH }));
+      registry.registerTool(new MockTool({ name: ToolNames.TOOL_CALL }));
+      const core = new AgentCore(
+        'skill-bridge-code-mode-only',
+        config,
+        { systemPrompt: '' },
+        { model: 'test-model' },
+        { max_turns: 1 },
+        { tools: ['*'] },
+      );
+      // `prepareTools()` never declares `tool_call` in this mode, so the
+      // declaration set is supplied directly to pin the mode rule.
+      expect(
+        gate(core, new Set([ToolNames.TOOL_SEARCH, ToolNames.TOOL_CALL])),
+      ).toBe(false);
+    });
+
+    it('refuses declarations whose bridge halves are not registered', () => {
+      const config = makeFakeConfig({ toolMode: ToolMode.CodeMode });
+      const registry = new ToolRegistry(config);
+      vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
+      registry.registerTool(new ExecTool(config));
+      registry.registerTool(new MockTool({ name: ToolNames.SKILL }));
+      const core = new AgentCore(
+        'skill-bridge-unregistered',
+        config,
+        { systemPrompt: '' },
+        { model: 'test-model' },
+        { max_turns: 1 },
+        { tools: ['*'] },
+      );
+      // Inline declarations can name the bridge without registering it; such
+      // a `tool_call` resolves nothing, so the gate must not open on it.
+      expect(
+        gate(core, new Set([ToolNames.TOOL_SEARCH, ToolNames.TOOL_CALL])),
+      ).toBe(false);
     });
 
     it('stays silent when the eager-hidden Skill has no declared bridge', () => {
