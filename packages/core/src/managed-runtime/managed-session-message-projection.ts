@@ -4,7 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { createHash } from 'node:crypto';
 import type { ChatRecord } from '../services/chatRecordingService.js';
+import {
+  getManagedExecutionDiagnostics,
+  executionDiagnosticDigest,
+  type ManagedInvocationObservation,
+} from './managed-execution-diagnostics.js';
 import {
   assertManagedSessionDurableRef,
   MANAGED_SESSION_FORMAT_VERSION,
@@ -25,6 +31,7 @@ import {
   type ManagedSessionCommitReceipt,
 } from './managed-session-authority.js';
 import {
+  MANAGED_MESSAGE_KIND,
   publishManagedMessageBody,
   readManagedMessageBody,
 } from './managed-message-chunks.js';
@@ -69,16 +76,29 @@ interface StoreBodies {
   oversized: boolean;
 }
 
+function bodyKey(ref: ManagedSessionDurableRef): string {
+  return [
+    ref.resourceId,
+    ref.kind,
+    ref.schemaVersion,
+    ref.byteLength,
+    ref.digest,
+  ].join('\u0000');
+}
+
 /**
- * Message bodies already read through a projection. A body is immutable and
+ * Message bodies already read through a projection, or handed over by a caller
+ * that read them through the same store (`remember`). A body is immutable and
  * its ref names its kind, length and digest, so an entry is exactly the body
  * the store's verified read returned for that ref, assembled whole for a
  * chunked one. A cached body is not read through the store again, so a store
  * check that runs on every read, such as a writer fence, no longer runs for
  * it. Entries are kept per resource store, so Sessions never share them, and a
  * store's entries are released when the store itself is collected. Only reads
- * fill the cache: a body a projection has never read is still read from the
- * store, and fails the projection if the store no longer has it.
+ * fill the cache, a projection's own or one the caller made through the same
+ * store and hands over (`remember`): a body nobody has read through the store
+ * is still read from it, and fails the projection if the store no longer has
+ * it.
  *
  * The resource store's own read contract does not change. Readers that open
  * their own store, such as `readManagedSessionRecords`, read it on every call,
@@ -137,19 +157,8 @@ export class ManagedMessageBodyCache {
     resources: ManagedSessionResourceStore,
     ref: ManagedSessionDurableRef,
   ): Promise<Buffer> {
-    let bodies = this.stores.get(resources);
-    if (bodies === undefined) {
-      bodies = { entries: new Map(), bytes: 0, oversized: false };
-      this.stores.set(resources, bodies);
-      this.collected.register(resources, bodies);
-    }
-    const key = [
-      ref.resourceId,
-      ref.kind,
-      ref.schemaVersion,
-      ref.byteLength,
-      ref.digest,
-    ].join('\u0000');
+    const bodies = this.bodiesOf(resources);
+    const key = bodyKey(ref);
     const cached = bodies.entries.get(key);
     if (cached !== undefined) {
       bodies.entries.delete(key);
@@ -161,8 +170,50 @@ export class ManagedMessageBodyCache {
       (bodyRef) => resources.read(bodyRef),
       ref,
     );
+    return this.keep(bodies, key, body);
+  }
+
+  /**
+   * Keeps a body as if a projection had read it, so the next projection of
+   * that store does not read it again. The caller must have read `body`
+   * through `resources.read` itself, the store's verified read, for example
+   * while verifying the resources a journal references before projecting it.
+   *
+   * Only a `managed-message` body qualifies. The entry of a chunked one
+   * (`managed-message-chunks`) is the body assembled from its parts, not the
+   * manifest its ref names. Bytes that do not match the ref's length and
+   * digest are not kept. The cache may keep `body` itself, so the caller must
+   * not modify it afterwards; a slice of a larger buffer is kept as a copy.
+   */
+  remember(
+    resources: ManagedSessionResourceStore,
+    ref: ManagedSessionDurableRef,
+    body: Buffer,
+  ): void {
+    if (
+      ref.kind !== MANAGED_MESSAGE_KIND ||
+      body.byteLength !== ref.byteLength ||
+      createHash('sha256').update(body).digest('hex') !== ref.digest
+    )
+      return;
+    this.keep(this.bodiesOf(resources), bodyKey(ref), body);
+  }
+
+  private bodiesOf(resources: ManagedSessionResourceStore): StoreBodies {
+    let bodies = this.stores.get(resources);
+    if (bodies === undefined) {
+      bodies = { entries: new Map(), bytes: 0, oversized: false };
+      this.stores.set(resources, bodies);
+      this.collected.register(resources, bodies);
+    }
+    return bodies;
+  }
+
+  /** Keeps `body` under `key` if the bound allows, and returns what to serve. */
+  private keep(bodies: StoreBodies, key: string, body: Buffer): Buffer {
     const cost = body.byteLength + this.entryBytes;
-    // A concurrent read of the same ref may have kept it while this one waited.
+    // An entry may exist already: a concurrent read of the same ref, or a
+    // handed-over body, kept it.
     if (cost > this.limitBytes || bodies.entries.has(key)) return body;
     if (bodies.bytes + cost > this.limitBytes) {
       bodies.oversized = true;
@@ -241,7 +292,11 @@ export class ManagedSessionMessageProjection {
    */
   async commit(
     command: ManagedSessionCommand,
-    input: { record: ChatRecord; modelAttemptId?: string | null },
+    input: {
+      record: ChatRecord;
+      modelAttemptId?: string | null;
+      diagnostics?: readonly ManagedInvocationObservation[];
+    },
     actor: ManagedSessionActor,
   ): Promise<{ receipt: ManagedSessionCommitReceipt; messageId: string }> {
     const record = input.record;
@@ -252,6 +307,9 @@ export class ManagedSessionMessageProjection {
     }
     const body = Buffer.from(JSON.stringify(record), 'utf8');
     const contentRef = await publishManagedMessageBody(this.resources, body);
+    const diagnosticsRef = await getManagedExecutionDiagnostics(
+      this.authority,
+    )?.message(record, input.diagnostics);
     const subject =
       actor.class === 'harness' && actor.activation !== undefined
         ? {
@@ -262,7 +320,15 @@ export class ManagedSessionMessageProjection {
           }
         : undefined;
     const receipt = await this.authority.appendExecutionEvent(
-      command,
+      diagnosticsRef
+        ? {
+            ...command,
+            contentDigest: executionDiagnosticDigest(
+              contentRef.digest,
+              diagnosticsRef,
+            ),
+          }
+        : command,
       (sequence) => ({
         v: MANAGED_SESSION_FORMAT_VERSION,
         sequence,
@@ -275,6 +341,7 @@ export class ManagedSessionMessageProjection {
           messageId: record.uuid,
           role: record.type,
           contentRef,
+          ...(diagnosticsRef ? { diagnosticsRef } : {}),
           parentMessageId: record.parentUuid,
           ...(input.modelAttemptId === undefined
             ? {}
@@ -301,6 +368,15 @@ export class ManagedSessionMessageProjection {
    */
   async project(throughSequence?: number): Promise<ChatRecord[]> {
     return this.projectRecords(throughSequence, false);
+  }
+
+  /**
+   * Hands a message body the caller read through this projection's own
+   * store to the body cache, so that projecting does not read it again (see
+   * `ManagedMessageBodyCache.remember`).
+   */
+  rememberBody(ref: ManagedSessionDurableRef, body: Buffer): void {
+    this.bodies.remember(this.resources, ref, body);
   }
 
   async projectModelRecords(throughSequence?: number): Promise<ChatRecord[]> {

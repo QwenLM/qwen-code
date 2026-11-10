@@ -6,6 +6,7 @@ import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageGuard;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
@@ -1501,7 +1502,7 @@ class HostedMcpRestartFaultGatesIT {
     }
 
     private JsonNode published(String session, JsonNode ref) {
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session);
+        String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
         String body = jdbc.queryForObject(
                 "SELECT CONVERT(inline_bytes USING utf8mb4) FROM ma_resource"
                         + " WHERE session_scope_key = ? AND resource_id = ?"

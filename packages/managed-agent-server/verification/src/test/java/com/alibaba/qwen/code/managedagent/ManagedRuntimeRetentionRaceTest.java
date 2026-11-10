@@ -1,9 +1,9 @@
 package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiRegistration;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedRuntimeRetentionGuard;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceCsiReservationStore;
-import com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceOperatorRecoveryStore;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceTestStorage;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
@@ -240,7 +240,7 @@ class ManagedRuntimeRetentionRaceTest {
                     new RuntimeSession("harness", "session", "bootstrap", scope), binding.getBindingId(), binding.getGeneration(),
                     RuntimeSessionRecord.State.ACQUIRING, 0, Instant.now()));
             var context = new ContextBinding("tenant", "workspace", 1, "storage", ".", "context", 1);
-            var holders = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new WorkspaceExecutionStore(jdbc, manager));
+            var holders = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new JdbcWorkspaceExecutionStore(jdbc, manager));
             if (reference == Reference.HOLDER) {
                 write = () -> holders.claim(context, session);
                 return;
