@@ -339,7 +339,10 @@ import {
   withChildAgentConsumption,
 } from './hosted-monitor-wake-turn.js';
 import { hasPlanModeBlock, inputBodyText } from './hosted-member-chain.js';
-import { pendingSessionInputs } from './hosted-wake-intake.js';
+import {
+  pendingSessionInputs,
+  type PendingSessionInput,
+} from './hosted-wake-intake.js';
 import { ManagedHookActivationController } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-activation.js';
 import {
   parseHookExecution,
@@ -6965,19 +6968,42 @@ export function registerHostedHarnessSessionRoutes(
         const stoppedMessage = (source: string | undefined) =>
           session.messagesStopped === true &&
           source === SESSION_MESSAGE_INPUT_SOURCE;
+        // The earliest future notBefore among the wake inputs the pick
+        // below skips as not yet due. The pump's deferUntil reads the value
+        // this same journal pass computed, so deferral costs no second read.
+        let deferredUntil: number | undefined;
         session.monitorWake = new HostedMonitorWakeScheduler({
           next: async () => {
             // The whole committed prefix, not a bounded page: a notification
             // input lands late in the log, and a default-sized read would
             // hide every one of them once the Session passes that page.
             const authority = session.managed.authority;
-            const first = pendingSessionInputs(
+            const now = Date.now();
+            let first: PendingSessionInput | undefined;
+            let earliestDeferred: number | undefined;
+            for (const input of pendingSessionInputs(
               authority.eventsInSequenceRange(1, authority.committedSequence),
-            ).find(
-              (input) =>
-                isWakeInputSource(input.source) &&
-                !stoppedMessage(input.source),
-            );
+            )) {
+              if (
+                !isWakeInputSource(input.source) ||
+                stoppedMessage(input.source)
+              ) {
+                continue;
+              }
+              if (input.notBefore !== null && input.notBefore > now) {
+                // Not yet due: defer this input without parking a due one
+                // behind it — deferral is per input, not head-of-line.
+                if (
+                  earliestDeferred === undefined ||
+                  input.notBefore < earliestDeferred
+                ) {
+                  earliestDeferred = input.notBefore;
+                }
+                continue;
+              }
+              if (first === undefined) first = input;
+            }
+            deferredUntil = earliestDeferred;
             if (first === undefined) return undefined;
             if (isHostedWakeContinuationId(first.turnId)) {
               return {
@@ -7027,6 +7053,7 @@ export function registerHostedHarnessSessionRoutes(
               source: first.source,
             };
           },
+          deferUntil: () => deferredUntil,
           state: () =>
             wakeBlocked() ? 'blocked' : wakeBusy() ? 'busy' : 'idle',
           runTurn: (() => {

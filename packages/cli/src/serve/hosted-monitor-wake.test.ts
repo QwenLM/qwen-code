@@ -673,6 +673,128 @@ describe('HostedMonitorWakeScheduler', () => {
   });
 });
 
+describe('HostedMonitorWakeScheduler deferral', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('arms one timer at the earliest future notBefore instead of polling', async () => {
+    vi.useFakeTimers();
+    const fireAt = Date.now() + 3_600_000;
+    const queue: HostedMonitorWakeTurn[] = [];
+    const ran: string[] = [];
+    let nextCalls = 0;
+    let deferred: number | undefined = fireAt;
+    const scheduler = new HostedMonitorWakeScheduler({
+      next: async () => {
+        nextCalls += 1;
+        return queue[0];
+      },
+      deferUntil: () => deferred,
+      state: () => 'idle',
+      runTurn: async (turn) => {
+        ran.push(turn.turnId);
+        queue.shift();
+        deferred = undefined;
+        return 'settled';
+      },
+      failed: (cause) => {
+        throw cause instanceof Error ? cause : new Error(String(cause));
+      },
+    });
+    scheduler.kick();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(nextCalls).toBe(1);
+    // No 500ms retry polls while the only pending input is not yet due.
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(nextCalls).toBe(1);
+    expect(ran).toEqual([]);
+    // The single deferral timer fires at notBefore and delivers the input.
+    queue.push({ turnId: 'loop:1', text: 'tick' });
+    await vi.advanceTimersByTimeAsync(3_600_000 - 5_000);
+    expect(ran).toEqual(['loop:1']);
+    scheduler.close();
+  });
+
+  it('runs a due input even while another input is deferred', async () => {
+    vi.useFakeTimers();
+    const queue: HostedMonitorWakeTurn[] = [{ turnId: 'm:1', text: 'x' }];
+    const ran: string[] = [];
+    const scheduler = new HostedMonitorWakeScheduler({
+      next: async () => queue[0],
+      deferUntil: () => Date.now() + 3_600_000,
+      state: () => 'idle',
+      runTurn: async (turn) => {
+        ran.push(turn.turnId);
+        queue.shift();
+        return 'settled';
+      },
+      failed: (cause) => {
+        throw cause instanceof Error ? cause : new Error(String(cause));
+      },
+    });
+    scheduler.kick();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(ran).toEqual(['m:1']);
+    scheduler.close();
+  });
+
+  it('a kick re-evaluates the deferral so a new due input is not held behind it', async () => {
+    vi.useFakeTimers();
+    const fireAt = Date.now() + 3_600_000;
+    const queue: HostedMonitorWakeTurn[] = [];
+    const ran: string[] = [];
+    let deferred: number | undefined = fireAt;
+    const scheduler = new HostedMonitorWakeScheduler({
+      next: async () => queue[0],
+      deferUntil: () => deferred,
+      state: () => 'idle',
+      runTurn: async (turn) => {
+        ran.push(turn.turnId);
+        queue.shift();
+        deferred = undefined;
+        return 'settled';
+      },
+      failed: (cause) => {
+        throw cause instanceof Error ? cause : new Error(String(cause));
+      },
+    });
+    scheduler.kick();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(ran).toEqual([]);
+    // A new due input lands and kicks well before the deferred fire time.
+    queue.push({ turnId: 'm:2', text: 'y' });
+    scheduler.kick();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(ran).toEqual(['m:2']);
+    scheduler.close();
+  });
+
+  it('close cancels a pending deferral timer', async () => {
+    vi.useFakeTimers();
+    const fireAt = Date.now() + 3_600_000;
+    let nextCalls = 0;
+    const scheduler = new HostedMonitorWakeScheduler({
+      next: async () => {
+        nextCalls += 1;
+        return undefined;
+      },
+      deferUntil: () => fireAt,
+      state: () => 'idle',
+      runTurn: async () => 'settled',
+      failed: (cause) => {
+        throw cause instanceof Error ? cause : new Error(String(cause));
+      },
+    });
+    scheduler.kick();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(nextCalls).toBe(1);
+    scheduler.close();
+    await vi.advanceTimersByTimeAsync(3_600_000);
+    expect(nextCalls).toBe(1);
+  });
+});
+
 describe('wakeHasPriorAttempt', () => {
   it('knows an attempt by its wake turn id', () => {
     expect(wakeHasPriorAttempt([{ daemonPromptId: 'm:1' }], 'm:1')).toBe(true);
