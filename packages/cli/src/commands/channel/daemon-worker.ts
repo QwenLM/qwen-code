@@ -442,7 +442,10 @@ export function createBoundSessionsAccessor(
       const entries: PrBindingSummary['prs'] = [];
       for (const pr of prs) {
         if (pr === null || typeof pr !== 'object') continue;
-        const { number, url, state, role } = pr as Record<string, unknown>;
+        const { number, url, state, role, watching } = pr as Record<
+          string,
+          unknown
+        >;
         if (
           typeof number !== 'number' ||
           !Number.isSafeInteger(number) ||
@@ -468,6 +471,10 @@ export function createBoundSessionsAccessor(
           // The vocabulary check above proved the value; includes() does
           // not narrow unknown, so assert the validated type here.
           ...(role !== undefined ? { role: role as PrBindingRole } : {}),
+          // Only a strict boolean is knowledge; any other value is unknown
+          // and drops the FIELD, not the entry — a malformed watching must
+          // not fabricate the binding's absence. Unknown stays eligible.
+          ...(typeof watching === 'boolean' ? { watching } : {}),
         });
       }
       if (entries.length < prs.length) {

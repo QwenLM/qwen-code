@@ -114,6 +114,13 @@ const GITHUB_BOUND: DaemonChannelTypeDescriptor = {
       description: 'Descriptor description for bound sessions',
     },
     {
+      key: 'requireBoundWatch',
+      label: 'Bound watch gate (descriptor)',
+      kind: 'boolean',
+      default: 'false',
+      description: 'Descriptor description for the bound watch gate',
+    },
+    {
       key: 'prWatchEvents',
       label: 'Watch events (descriptor)',
       kind: 'string-list',
@@ -827,6 +834,11 @@ describe('ChannelEditorDialog', () => {
     expect(labels.some((t) => t.includes('Deliver To PR-Bound Sessions'))).toBe(
       true,
     );
+    expect(
+      labels.some((t) =>
+        t.includes('Require Active Watch For Review/Verify Sessions'),
+      ),
+    ).toBe(true);
     expect(labels.some((t) => t.includes('PR Watch Events'))).toBe(true);
     // No descriptor fallback may leak through for these keys.
     expect(labels.some((t) => t.includes('(descriptor)'))).toBe(false);
@@ -850,6 +862,9 @@ describe('ChannelEditorDialog', () => {
       (l) => l.textContent ?? '',
     );
     expect(labels.some((t) => t.includes('投递到 PR 绑定会话'))).toBe(true);
+    expect(labels.some((t) => t.includes('评审/验证会话须有活跃监视'))).toBe(
+      true,
+    );
     expect(labels.some((t) => t.includes('PR 状态监视事件'))).toBe(true);
     expect(labels.some((t) => t.includes('(descriptor)'))).toBe(false);
     // With the `.description` keys dropped from BOTH locale maps the
