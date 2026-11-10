@@ -707,6 +707,8 @@ describe('qwen-autofix workflow', () => {
           env: {
             ...process.env,
             PENDING_CUTOFF: '2026-07-21T00:00:00Z',
+            // 120 minutes earlier, mirroring 495 - 375 in production.
+            PENDING_LONG_CUTOFF: '2026-07-20T22:00:00Z',
             NON_BLOCKING_CHECKS: JSON.stringify(nonBlocking),
             DISPATCH_STATUS_CONTEXT: 'qwen-autofix/dispatch-pending',
           },
@@ -23266,6 +23268,10 @@ exit 0
           '--arg',
           'cut',
           '2026-07-16T00:00:00Z',
+          // 120 minutes earlier, mirroring 495 - 375 in production.
+          '--arg',
+          'cut_long',
+          '2026-07-15T22:00:00Z',
           '--argjson',
           'nonblocking',
           '[]',
@@ -23300,6 +23306,28 @@ exit 0
     expect(runStaleness([{ status: 'QUEUED', workflowName: 'CI' }])).toBe(
       'false',
     );
+    // The two tiers bind per NAME here too: a non-autofix check started
+    // BETWEEN the cutoffs ages out at the general bound, while the same
+    // start time on a review-address row still blocks under the long one.
+    expect(
+      runStaleness([
+        {
+          status: 'IN_PROGRESS',
+          startedAt: '2026-07-15T23:00:00Z',
+          workflowName: 'CI',
+        },
+      ]),
+    ).toBe('false');
+    expect(
+      runStaleness([
+        {
+          name: 'review-address (16408, feat/x)',
+          status: 'IN_PROGRESS',
+          startedAt: '2026-07-15T23:00:00Z',
+          workflowName: 'Qwen Autofix',
+        },
+      ]),
+    ).toBe('true');
   });
 
   it('writes agent output to a log and marks loop guard failures for handoff', () => {
