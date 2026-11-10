@@ -72,11 +72,11 @@ class ManagedExtensionProtocolTest {
         var prepare = prepare();
         var command = new LinkedHashMap<>((Map<String, Object>) prepare.get("command"));
         command.put("mcpChange", Map.of("action", "disable", "serverId", "server-0", "expectedRevision", 0,
-                "servers", selections(32, 192)));
+                "servers", selections(32, 64)));
         prepare.put("command", command);
         ManagedExtensionProtocol.validateOperation(prepare);
         command.put("mcpChange", Map.of("action", "disable", "serverId", "server-0", "expectedRevision", 0,
-                "servers", selections(32, 193)));
+                "servers", selections(32, 65)));
         assertEquals(400, assertThrows(RuntimeBrokerException.class,
                 () -> ManagedExtensionProtocol.validateOperation(prepare)).getStatusCode());
     }

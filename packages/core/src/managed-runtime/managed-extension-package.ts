@@ -14,9 +14,11 @@ import type { ManagedHookCatalogPin } from './managed-hook-protocol.js';
 import type { ManagedPackageContributions } from '../extension/managed-package.js';
 import type { OperationGrant } from './managed-extension-record.js';
 
-// 224 项使最坏情况的 legacy MCP 设置记录低于 64 KiB；扩展 bundle
-// 还包含包、目录与重复选择数组，仍独立受资源字节上限约束。
-export const MAX_MCP_SELECTION_ENTRIES = 224;
+// 96 entries (32 live + 64 tombstones) is the largest total whose worst-case
+// effective bundle - widest ids, revisions and digests, plus 32 package views,
+// 32 prepared pins and 16 base pins - stays inside the 64 KiB inline bound. The
+// bundle carries the retained array once, from independentMcpSelections.
+export const MAX_MCP_SELECTION_ENTRIES = 96;
 
 export interface ManagedExtensionCommandControl {
   readonly kind: 'extension-command';

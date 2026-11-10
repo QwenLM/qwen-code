@@ -2730,7 +2730,7 @@ export interface components {
             revision: number;
             supported: boolean;
             availableServers: components["schemas"]["ManagedMcpPublishedServer"][];
-            /** @description The selected MCP server snapshot, including retained removed entries. Only non-removed entries count toward the 32-server live capacity, and the retained snapshot is capped at 224 total entries. */
+            /** @description The selected MCP server snapshot, including retained removed entries. Only non-removed entries count toward the 32-server live capacity, and the retained snapshot is capped at 96 total entries. */
             servers: components["schemas"]["ManagedMcpManagementServer"][];
             operation?: components["schemas"]["ManagedMcpManagementOperation"];
         };

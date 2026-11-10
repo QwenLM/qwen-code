@@ -7,9 +7,11 @@
 import { describe, expect, it } from 'vitest';
 import {
   parseManagedExtensionApplyCommand,
+  parseManagedExtensionEffectiveBundle,
   parseManagedExtensionPin,
   parseManagedExtensionPins,
 } from './managed-extension-package.js';
+import { managedSessionInlineResourceBytes } from './http-managed-session-store.js';
 
 const pin = {
   extensionId: 'reviewer',
@@ -123,23 +125,72 @@ describe('Managed extension apply commands', () => {
     const atTotal = parseManagedExtensionApplyCommand(
       mcpChangeFor([
         ...Array.from({ length: 32 }, (_, index) => server(index, 'disabled')),
-        ...Array.from({ length: 192 }, (_, index) =>
+        ...Array.from({ length: 64 }, (_, index) =>
           server(32 + index, 'removed'),
         ),
       ]),
     );
-    expect(atTotal.mcpChange?.servers).toHaveLength(224);
+    expect(atTotal.mcpChange?.servers).toHaveLength(96);
     expect(() =>
       parseManagedExtensionApplyCommand(
         mcpChangeFor([
           ...Array.from({ length: 32 }, (_, index) =>
             server(index, 'disabled'),
           ),
-          ...Array.from({ length: 193 }, (_, index) =>
+          ...Array.from({ length: 65 }, (_, index) =>
             server(32 + index, 'removed'),
           ),
         ]),
       ),
     ).toThrow(/MCP selection/);
+  });
+
+  it('composes the retained snapshot once, inside the bundle byte limit', () => {
+    const widestId = (prefix: string, index: number) =>
+      `${prefix}${index}`.padEnd(128, 'x');
+    const pin = (serverId: string) => ({
+      serverId,
+      serverRevision: 9_007_199_254_740_990,
+      definitionDigest: 'a'.repeat(64),
+    });
+    const bundle = parseManagedExtensionEffectiveBundle({
+      kind: 'managed-extension-config-bundle',
+      formatVersion: 1,
+      configRevision: 1,
+      executionMode: 'linux-cgroup',
+      mcpRevision: 1,
+      independentMcpSelections: Array.from({ length: 96 }, (_, index) => ({
+        ...pin(widestId(index < 32 ? 'live-' : 'removed-', index)),
+        state: index === 0 ? 'enabled' : index < 32 ? 'disabled' : 'removed',
+      })),
+      baseMcpServers: Array.from({ length: 16 }, (_, index) =>
+        pin(widestId('base-', index)),
+      ),
+      baseHookCatalog: null,
+      packages: Array.from({ length: 32 }, (_, index) => ({
+        pin: {
+          extensionId: widestId('package-', index),
+          packageRevision: 9_007_199_254_740_990,
+          packageDigest: 'a'.repeat(64),
+        },
+        assetRoot: `extension://${widestId('package-', index)}/`,
+        contributionsRef: {
+          resourceId: widestId('contributions-', index),
+          kind: 'managed-extension-contributions',
+          schemaVersion: 1,
+          byteLength: 4096,
+          digest: 'a'.repeat(64),
+        },
+      })),
+      mcpServers: Array.from({ length: 32 }, (_, index) =>
+        pin(widestId('live-', index)),
+      ),
+      hookCatalog: null,
+    });
+    expect(JSON.stringify(bundle)).not.toContain('mcpChange');
+    const bytes = Buffer.byteLength(JSON.stringify(bundle));
+    expect(bytes).toBeLessThanOrEqual(
+      managedSessionInlineResourceBytes('managed-extension-config-bundle'),
+    );
   });
 });

@@ -119,7 +119,7 @@ class ManagedMcpSettingsStoreTest {
     void boundsRetainedTombstonesAtThePersistenceBoundary() throws Exception {
         String id = UUID.randomUUID().toString();
         var journal = publicJournal(id);
-        ObjectNode settings = settingsWithServers(32, 192);
+        ObjectNode settings = settingsWithServers(32, 64);
         assertThat(json.writeValueAsBytes(settings).length).isLessThan(64 * 1024);
         var request = journal.requestOrdinary(settings.path("operationId").asText(), "config_install", settings,
                 event -> {}, records -> records, 0);

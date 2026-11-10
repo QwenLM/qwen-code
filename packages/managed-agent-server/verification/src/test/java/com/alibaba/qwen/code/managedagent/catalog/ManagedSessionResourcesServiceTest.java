@@ -114,13 +114,13 @@ class ManagedSessionResourcesServiceTest {
     @Test
     void boundsRetainedTombstonesInIndependentSelections() throws Exception {
         ObjectNode active = bundle(1);
-        addSelections(active, 32, 192);
+        addSelections(active, 32, 64);
         ObjectNode activeRef = resource("managed-extension-config-bundle", active);
         latest(config(1, 1, "active", null, activeRef, null));
         assertThat(get().path("configCoverage").asText()).isEqualTo("complete");
 
         ObjectNode overfilled = bundle(1);
-        addSelections(overfilled, 32, 193);
+        addSelections(overfilled, 32, 65);
         ObjectNode overfilledRef = resource("managed-extension-config-bundle", overfilled);
         latest(config(1, 1, "active", null, overfilledRef, null));
         JsonNode rejected = get();

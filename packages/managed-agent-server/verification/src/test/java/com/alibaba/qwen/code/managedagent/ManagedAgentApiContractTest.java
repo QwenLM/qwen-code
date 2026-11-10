@@ -495,10 +495,10 @@ class ManagedAgentApiContractTest {
 
         assertThat(CONTRACT.validate(
                 "/components/schemas/ManagedMcpManagementSnapshot",
-                mcpManagementSnapshot(32, 192))).isEmpty();
+                mcpManagementSnapshot(32, 64))).isEmpty();
         assertThat(CONTRACT.validate(
                 "/components/schemas/ManagedMcpManagementSnapshot",
-                mcpManagementSnapshot(32, 193))).isNotEmpty();
+                mcpManagementSnapshot(32, 65))).isNotEmpty();
     }
 
     @Test

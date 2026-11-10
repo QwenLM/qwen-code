@@ -2197,7 +2197,7 @@ it('refuses a durable record whose live selections exceed the reader capacity', 
 });
 
 it('commits a tombstone-heavy snapshot under the total capacity and reads it back', async () => {
-  const previous = Array.from({ length: 224 }, (_, index) => ({
+  const previous = Array.from({ length: 96 }, (_, index) => ({
     ...pin,
     serverId: `${index < 32 ? 'live' : 'removed'}-${index}`.padEnd(128, 'x'),
     serverRevision: Number.MAX_SAFE_INTEGER,
@@ -2213,9 +2213,9 @@ it('commits a tombstone-heavy snapshot under the total capacity and reads it bac
     definitionDigest: previous[0].definitionDigest,
   });
   const servers = selectedMcpServers(previous, command);
-  expect(servers).toHaveLength(224);
+  expect(servers).toHaveLength(96);
   expect(servers.filter((entry) => entry.state === 'removed')).toHaveLength(
-    192,
+    64,
   );
   const body = JSON.stringify({
     kind: 'hosted-mcp-settings',
@@ -2229,14 +2229,14 @@ it('commits a tombstone-heavy snapshot under the total capacity and reads it bac
   expect(Buffer.byteLength(body)).toBeLessThan(64 * 1024);
   await commitHostedMcpSettings(session, command, servers);
   const history = await readHostedMcpSettings(session);
-  expect(history.at(-1)?.servers).toHaveLength(224);
+  expect(history.at(-1)?.servers).toHaveLength(96);
   expect(
     history.at(-1)?.servers.filter((entry) => entry.state === 'removed'),
-  ).toHaveLength(192);
+  ).toHaveLength(64);
 });
 
 it('refuses a durable record whose retained snapshot exceeds the total capacity', async () => {
-  const overfilled = Array.from({ length: 225 }, (_, index) => ({
+  const overfilled = Array.from({ length: 97 }, (_, index) => ({
     ...pin,
     serverId: `${index < 32 ? 'live' : 'removed'}-${index}`.padEnd(128, 'x'),
     serverRevision: Number.MAX_SAFE_INTEGER,
