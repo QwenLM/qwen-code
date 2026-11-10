@@ -753,6 +753,7 @@ public class ManagedAutomationService {
             throw notFound;
         }
         SessionRecord session = found.get();
+        ManagedWorkspaceRegistry.requireSessionVisibility(session, actorId, workspaces);
         // The owner family's refusal, as lifecycle and cwd answer a
         // non-creator (SurfaceRegistry rule class OWNER).
         if (!workspaces.createdSession(tenantId, actorId, sessionId)) {
@@ -781,7 +782,9 @@ public class ManagedAutomationService {
                 .orElseThrow(() -> new ManagedAgentException(404,
                         "automation_not_found",
                         "The automation was not found."));
-        if (!workspaces.canRead(tenantId, actorId, row.workspaceId())) {
+        SessionRecord session = sessions.findSession(tenantId, row.sessionId()).orElse(null);
+        if (!workspaces.canRead(tenantId, actorId, row.workspaceId()) || session == null
+                || session.ownerOnly() && !workspaces.isSessionOwner(tenantId, actorId, row.sessionId())) {
             throw new ManagedAgentException(404,
                     "automation_not_found", "The automation was not found.");
         }
@@ -837,7 +840,7 @@ public class ManagedAutomationService {
      * and the command row meets the definition it already created.
      */
     public static String scheduleIdFor(String tenantId, String idempotencyKey) {
-        return "asch_" + com.alibaba.qwen.code.managedagent.repository.AutomationLedgerStore.sha256(tenantId + '\0'
+        return "asch_" + AutomationLedgerStore.sha256(tenantId + '\0'
                 + idempotencyKey).substring(0, 32);
     }
 

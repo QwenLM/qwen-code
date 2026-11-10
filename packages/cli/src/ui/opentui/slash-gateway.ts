@@ -137,9 +137,14 @@ export class OpenTuiSlashGateway {
 
   /**
    * Waits for readiness, then runs one input through the dispatcher. Rejects
-   * while initialization failed or another command is in flight.
+   * while initialization failed or another command is in flight. `onCommand`
+   * runs when the dispatcher takes the input as a command, before handling it.
    */
-  async dispatch(text: string, typed?: TypedInput): Promise<SlashSettlement> {
+  async dispatch(
+    text: string,
+    typed?: TypedInput,
+    onCommand?: () => void,
+  ): Promise<SlashSettlement> {
     await this.ready;
     if (!this.dispatcher) {
       return {
@@ -158,6 +163,8 @@ export class OpenTuiSlashGateway {
     }
     this.busy = true;
     try {
+      if (onCommand && this.dispatcher.takesAsSlashCommand(text.trim()))
+        onCommand();
       const outcome = await this.dispatcher.handle(text, typed);
       return { kind: 'dispatched', outcome };
     } finally {

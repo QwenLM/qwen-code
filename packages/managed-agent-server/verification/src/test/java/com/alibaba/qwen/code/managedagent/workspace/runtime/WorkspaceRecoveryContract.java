@@ -3,8 +3,9 @@ package com.alibaba.qwen.code.managedagent.workspace.runtime;
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcChildWorkspaceStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceOperatorRecoveryStore;
 import com.alibaba.qwen.code.runtimebroker.*;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
@@ -44,7 +45,7 @@ public final class WorkspaceRecoveryContract {
     private WorkspaceRecoveryContract() { }
 
     public static void verifySharedExecution(DataSource source, JdbcTemplate jdbc, ManagedAgentStore store,
-            WorkspaceExecutionStore authority) throws Exception {
+            JdbcWorkspaceExecutionStore authority) throws Exception {
         var fixture = new Fixture(source, jdbc, store);
         var first = fixture.runtime("first");
         var transaction = new org.springframework.transaction.support.TransactionTemplate(
@@ -58,7 +59,7 @@ public final class WorkspaceRecoveryContract {
                 .selection(new WorkspaceSelection("workspace", "."))
                 .build()));
         var second = fixture.runtime("second", created.sessionId());
-        var other = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new WorkspaceExecutionStore(jdbc, new org.springframework.jdbc.datasource.DataSourceTransactionManager(source)));
+        var other = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new JdbcWorkspaceExecutionStore(jdbc, new org.springframework.jdbc.datasource.DataSourceTransactionManager(source)));
         var start = new java.util.concurrent.CyclicBarrier(2);
         try (var pool = Executors.newFixedThreadPool(2)) {
             var a = pool.submit(() -> {
@@ -79,7 +80,7 @@ public final class WorkspaceRecoveryContract {
         other.beginRewind(fixture.session.workspace(), second.session());
         assertThat(authority.hasPendingRewind(first.session())).isTrue();
         assertThat(authority.hasPendingRewind(second.session())).isTrue();
-        var children = new com.alibaba.qwen.code.managedagent.persistence.ChildWorkspaceStore(jdbc,
+        var children = new JdbcChildWorkspaceStore(jdbc,
                 new org.springframework.jdbc.datasource.DataSourceTransactionManager(source));
         var admitted = children.admit(fixture.tenant, fixture.session.sessionId(), UUID.randomUUID().toString(),
                 fixture.session.workspace(), System.currentTimeMillis());
@@ -106,7 +107,7 @@ public final class WorkspaceRecoveryContract {
     }
 
     public static void verifyOperatorPrepare(DataSource source, JdbcTemplate jdbc, ManagedAgentStore store,
-            WorkspaceExecutionStore authority) throws Exception {
+            JdbcWorkspaceExecutionStore authority) throws Exception {
         var fixture = new Fixture(source, jdbc, store);
         var original = fixture.runtime("operator");
         authority.claim(fixture.session.workspace(), original.session());
@@ -265,7 +266,7 @@ public final class WorkspaceRecoveryContract {
     }
 
     public static void verify(DataSource source, JdbcTemplate jdbc, ManagedAgentStore store,
-            WorkspaceExecutionStore authority) throws Exception {
+            JdbcWorkspaceExecutionStore authority) throws Exception {
         var fixture = new Fixture(source, jdbc, store);
         var original = fixture.runtime("original");
         var rival = fixture.runtime("rival");
@@ -291,7 +292,7 @@ public final class WorkspaceRecoveryContract {
         // names the original storage. Its live claim survives the later
         // registry change; that change cannot authorize a new child.
         // Unique per run: the contract may run twice against one database.
-        var childStore = new com.alibaba.qwen.code.managedagent.persistence.ChildWorkspaceStore(jdbc,
+        var childStore = new JdbcChildWorkspaceStore(jdbc,
                 new org.springframework.jdbc.datasource.DataSourceTransactionManager(source));
         var admitted = childStore.admit(fixture.tenant, fixture.session.sessionId(), UUID.randomUUID().toString(),
                 fixture.session.workspace(), System.currentTimeMillis());
@@ -347,7 +348,7 @@ public final class WorkspaceRecoveryContract {
     }
 
     private static void verifyLateClaim(DataSource source, JdbcTemplate jdbc, ManagedAgentStore store,
-            WorkspaceExecutionStore authority) throws Exception {
+            JdbcWorkspaceExecutionStore authority) throws Exception {
         var fixture = new Fixture(source, jdbc, store);
         var original = fixture.runtime("late");
         try (var pool = Executors.newSingleThreadExecutor(); var connection = source.getConnection()) {

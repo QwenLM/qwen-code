@@ -272,7 +272,7 @@ export interface CreateDaemonSessionActionsArgs {
     workspaceCwd?: string,
     overrides?: Pick<
       CreateSessionRequest,
-      'approvalMode' | 'sourceType' | 'worktree' | 'branch'
+      'approvalMode' | 'sourceType' | 'worktree' | 'branch' | 'startupConfig'
     >,
   ) => Promise<DaemonSessionClient>;
   createDetachedStandaloneSession: (
@@ -2623,6 +2623,7 @@ export function createDaemonSessionActions({
       getCurrentWorkspaceCwd?: () => string | undefined;
       sessionContext?: DaemonProductSessionContext;
       modelServiceId?: string;
+      startupConfig?: CreateSessionRequest['startupConfig'];
       approvalMode?: DaemonApprovalMode;
       sourceType?: string;
       worktree?: { slug?: string };
@@ -2716,6 +2717,9 @@ export function createDaemonSessionActions({
             ? { worktree: options.worktree }
             : {}),
           ...(options?.branch !== undefined ? { branch: options.branch } : {}),
+          ...(options?.startupConfig
+            ? { startupConfig: options.startupConfig }
+            : {}),
         };
         const session = sessionRef.current;
         const activeSession =

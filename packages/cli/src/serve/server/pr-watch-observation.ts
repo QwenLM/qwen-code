@@ -47,6 +47,8 @@ export interface DetectedPrTransition {
   key: string;
   summary: string;
   detectedAt: string;
+  /** The new head, for `head_change` only (delivery's self-push judgement). */
+  headSha?: string;
 }
 
 export interface PrWatchDetection {
@@ -119,6 +121,7 @@ export function detectPrTransitions(
         ),
         summary: `head changed ${prevHead} → ${observation.headSha}`,
         detectedAt,
+        headSha: observation.headSha,
       });
     }
 
@@ -187,11 +190,12 @@ export function detectPrTransitions(
 
   const pending = [
     ...(previous?.pending ?? []),
-    ...transitions.map(({ type, key, summary, detectedAt: at }) => ({
+    ...transitions.map(({ type, key, summary, detectedAt: at, headSha }) => ({
       type,
       key,
       summary,
       detectedAt: at,
+      ...(headSha !== undefined ? { headSha } : {}),
     })),
   ].slice(-PR_WATCH_PENDING_CAP);
 
