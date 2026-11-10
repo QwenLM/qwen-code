@@ -470,29 +470,29 @@ describe('isDestructiveCommand — git commit --amend', () => {
   it('reads substitutions from the raw text, not from a dequoted word', () => {
     // Quoted parens inside a substitution body must not end it early.
     expect(
-      amendNeedsApproval('git commit -m "\$(printf \')\' ; git commit --\$x)"'),
+      amendNeedsApproval('git commit -m "$(printf \')\' ; git commit --$x)"'),
     ).toBe(true);
     expect(
-      amendNeedsApproval('git commit -m "\$(printf \'(\' ; git commit --\$x)"'),
+      amendNeedsApproval('git commit -m "$(printf \'(\' ; git commit --$x)"'),
     ).toBe(true);
     expect(
       amendNeedsApproval(
-        'git commit --author="\$(echo \')\' && git commit --\$x)"',
+        'git commit --author="$(echo \')\' && git commit --$x)"',
       ),
     ).toBe(true);
     // A literal or escaped substitution never runs.
-    expect(amendNeedsApproval("git commit -m '\$(git commit --\$x)'")).toBe(
+    expect(amendNeedsApproval("git commit -m '$(git commit --$x)'")).toBe(
       false,
     );
-    expect(amendNeedsApproval('git commit -m "\\$(git commit --\$x)"')).toBe(
+    expect(amendNeedsApproval('git commit -m "\\$(git commit --$x)"')).toBe(
       false,
     );
-    expect(amendNeedsApproval('git commit -m "\\`git commit --\$x\\`"')).toBe(
+    expect(amendNeedsApproval('git commit -m "\\`git commit --$x\\`"')).toBe(
       false,
     );
     // Nesting still reaches the inner command.
     expect(
-      amendNeedsApproval('git commit -m "\$(echo \$(git commit --\$x))"'),
+      amendNeedsApproval('git commit -m "$(echo $(git commit --$x))"'),
     ).toBe(true);
   });
 
@@ -504,7 +504,7 @@ describe('isDestructiveCommand — git commit --amend', () => {
     ).toBe(true);
     expect(
       amendNeedsApproval(
-        'git commit -m "\$(cat <<\'EOF\'\n)\nEOF\ngit commit --\$x\n)"',
+        'git commit -m "$(cat <<\'EOF\'\n)\nEOF\ngit commit --$x\n)"',
       ),
     ).toBe(true);
   });
@@ -515,14 +515,38 @@ describe('isDestructiveCommand — git commit --amend', () => {
       false,
     );
     expect(
-      amendNeedsApproval("git commit -m x <<'EOF'\n\$(git commit --\$x)\nEOF"),
+      amendNeedsApproval("git commit -m x <<'EOF'\n$(git commit --$x)\nEOF"),
     ).toBe(false);
     // An unquoted delimiter expands its body, so a substitution there runs;
     // a plain body has nothing to run.
-    expect(amendNeedsApproval('cat <<EOF\n\$(git commit --\$x)\nEOF')).toBe(
-      true,
-    );
+    expect(amendNeedsApproval('cat <<EOF\n$(git commit --$x)\nEOF')).toBe(true);
     expect(amendNeedsApproval('cat <<EOF\nhello\nEOF')).toBe(false);
+  });
+
+  it('matches a heredoc terminator the way bash does', () => {
+    // A terminator line must be the whole line: ` EOF` is body content, so
+    // the substitution below it still runs.
+    expect(
+      amendNeedsApproval(
+        'git commit -m x <<EOF\n EOF\n# $(git commit --$x)\nEOF',
+      ),
+    ).toBe(true);
+    // Quote removal names `EOF` for all of these, and any quoted or escaped
+    // character keeps the body literal.
+    expect(
+      amendNeedsApproval('git commit -m x <<\\EOF\n$(git commit --$x)\nEOF'),
+    ).toBe(false);
+    expect(
+      amendNeedsApproval("git commit -m x <<E'OF'\n$(git commit --$x)\nEOF"),
+    ).toBe(false);
+    // Normal and tab-stripping forms still terminate where they should.
+    expect(amendNeedsApproval('git commit -m x <<EOF\nhello\nEOF')).toBe(false);
+    expect(amendNeedsApproval('git commit -m x <<-EOF\n\thello\n\tEOF')).toBe(
+      false,
+    );
+    expect(
+      amendNeedsApproval('git commit -m x <<-EOF\n\t$(git commit --$x)\n\tEOF'),
+    ).toBe(true);
   });
 
   it('keeps a substitution that becomes a flag from being skipped', () => {

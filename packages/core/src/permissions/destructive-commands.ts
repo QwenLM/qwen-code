@@ -365,7 +365,11 @@ function mentionsGitCommitWords(command: string): boolean {
 function scanExecutedSubstitutions(text: string): ScannedSubstitutions {
   const bodies: string[] = [];
   const edits: Edit[] = [];
-  const pending: Array<{ delimiter: string; quoted: boolean }> = [];
+  const pending: Array<{
+    delimiter: string;
+    quoted: boolean;
+    stripTabs: boolean;
+  }> = [];
   let unprovable = false;
   let single = false;
   let double = false;
@@ -406,7 +410,12 @@ function scanExecutedSubstitutions(text: string): ScannedSubstitutions {
       let failed = false;
       while (pending.length > 0) {
         const heredoc = pending.shift()!;
-        const body = findHeredocBody(text, position, heredoc.delimiter);
+        const body = findHeredocBody(
+          text,
+          position,
+          heredoc.delimiter,
+          heredoc.stripTabs,
+        );
         if (!body) {
           unprovable = true;
           failed = true;
@@ -434,7 +443,11 @@ function scanExecutedSubstitutions(text: string): ScannedSubstitutions {
     if (char === '<' && text[index + 1] === '<') {
       const opener = readHeredocOpener(text, index);
       if (opener) {
-        pending.push({ delimiter: opener.delimiter, quoted: opener.quoted });
+        pending.push({
+          delimiter: opener.delimiter,
+          quoted: opener.quoted,
+          stripTabs: opener.stripTabs,
+        });
         index = opener.end;
         continue;
       }
@@ -501,53 +514,80 @@ function isCommentStart(text: string, index: number): boolean {
 interface HeredocOpener {
   delimiter: string;
   quoted: boolean;
+  stripTabs: boolean;
   end: number;
 }
 
 function readHeredocOpener(text: string, start: number): HeredocOpener | null {
   let index = start + 2;
   if (text[index] === '<') return null; // here-string
-  if (text[index] === '-') index++;
+  let stripTabs = false;
+  if (text[index] === '-') {
+    stripTabs = true;
+    index++;
+  }
   while (text[index] === ' ' || text[index] === '\t') index++;
-  const first = text[index];
-  let quoted = false;
+
+  // Quote removal: `<<\EOF`, `<<E'OF'` and `<<"EOF"` all name `EOF`, and any
+  // quoted or escaped character turns the body literal.
   let delimiter = '';
-  if (first === "'" || first === '"') {
-    quoted = true;
-    const quote = first;
-    index++;
-    while (index < text.length && text[index] !== quote) {
-      delimiter += text[index];
+  let quoted = false;
+  while (index < text.length) {
+    const char = text[index]!;
+    if (/[\s;&|<>()]/.test(char)) break;
+    if (char === "'") {
+      quoted = true;
       index++;
-    }
-    if (index >= text.length) return null;
-    index++;
-  } else if (first === '\\') {
-    quoted = true;
-    delimiter = text[index + 1] ?? '';
-    index += 2;
-  } else {
-    while (index < text.length && !/[\s;&|<>)]/.test(text[index]!)) {
-      delimiter += text[index];
+      while (index < text.length && text[index] !== "'") {
+        delimiter += text[index];
+        index++;
+      }
+      if (index >= text.length) return null;
       index++;
+      continue;
     }
+    if (char === '"') {
+      quoted = true;
+      index++;
+      while (index < text.length && text[index] !== '"') {
+        if (text[index] === '\\' && /[$`"\\]/.test(text[index + 1] ?? '')) {
+          index++;
+        }
+        delimiter += text[index];
+        index++;
+      }
+      if (index >= text.length) return null;
+      index++;
+      continue;
+    }
+    if (char === '\\') {
+      quoted = true;
+      delimiter += text[index + 1] ?? '';
+      index += 2;
+      continue;
+    }
+    delimiter += char;
+    index++;
   }
   if (!delimiter) return null;
-  return { delimiter, quoted, end: index };
+  return { delimiter, quoted, stripTabs, end: index };
 }
 
 function findHeredocBody(
   text: string,
   start: number,
   delimiter: string,
+  stripTabs: boolean,
 ): { bodyEnd: number; end: number } | null {
   let position = start;
   while (position <= text.length) {
     const newline = text.indexOf('\n', position);
     const lineEnd = newline === -1 ? text.length : newline;
-    if (text.slice(position, lineEnd).trim() === delimiter) {
-      return { bodyEnd: position, end: lineEnd };
-    }
+    const line = text.slice(position, lineEnd);
+    // The terminator must be the whole line. `<<-` strips leading tabs only;
+    // spaces and trailing blanks keep the line inside the body.
+    const candidate = stripTabs ? line.replace(/^\t+/, '') : line;
+    if (candidate === delimiter) return { bodyEnd: position, end: lineEnd };
     if (newline === -1) return null;
     position = newline + 1;
   }
