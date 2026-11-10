@@ -8532,9 +8532,11 @@ export function registerHostedHarnessSessionRoutes(
                 throw cause;
               }
             }
-          // The Hook owner is released here only on a delete; a close hands
-          // its mount back, and Spring's drain after this phase releases its
-          // Runtime Session. The MCP owner below is released here on both.
+          // A Hook owner of its own is released here only on a delete; a close
+          // hands its mount back, and Spring's drain after this phase
+          // releases its Runtime Session. The MCP owner below is released
+          // here on both, and so is a Hook owner that shares its broker: the
+          // tombstone is inert, since nothing acquires either after a close.
           await session.hooks?.close({ terminal: kind === 'delete' });
           await releaseLeaseNow(session);
           // Neither an unprovable drain nor a Session whose own settlement
