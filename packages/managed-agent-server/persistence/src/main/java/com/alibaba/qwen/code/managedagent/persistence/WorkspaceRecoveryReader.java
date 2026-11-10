@@ -61,6 +61,12 @@ final class WorkspaceRecoveryReader {
     }
 
     JsonNode resource(JsonNode source, JsonNode ref) {
+        return resource(source, ref, () -> {
+            throw new IllegalStateException("External recovery reads require durable operation protection");
+        });
+    }
+
+    JsonNode resource(JsonNode source, JsonNode ref, Runnable guard) {
         validateRef(ref);
         JsonNode head = head(source);
         String sessionScope = ManagedSessionStore.sessionScopeKey(text(head, "tenantId"), text(head, "sessionId"));
@@ -83,7 +89,7 @@ final class WorkspaceRecoveryReader {
                         "COLLECTED".equals(row.get("capture_state")) ? "resource_collected" : "publication_object_unverified");
             }
             if (captured && "PUBLISHED".equals(row.get("state"))) {
-                JsonNode object = publicationResource(source, ref);
+                JsonNode object = publicationResource(source, ref, guard);
                 bytes = Base64.getDecoder().decode(object.path("bytesBase64").asText());
             } else if ("MYSQL_INLINE".equals(row.get("storage_kind"))) {
                 boolean published = "PUBLISHED".equals(row.get("state"))
@@ -118,15 +124,30 @@ final class WorkspaceRecoveryReader {
                     check(collected != null && collected > 0, "resource_corrupt");
                     throw com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceRecoveryProtocol.failure("resource_collected");
                 }
+            } else if ("OBJECT_STORE".equals(row.get("storage_kind"))) {
+                check(objects instanceof com.alibaba.qwen.code.managedagent.contracts.storage.ToolPublicationObjectStoreAdapter,
+                        "object_store_unavailable");
+                var provider = ((com.alibaba.qwen.code.managedagent.contracts.storage.ToolPublicationObjectStoreAdapter) objects).store();
+                check("REFERENCED".equals(row.get("state")) || "PUBLISHED".equals(row.get("state")), "resource_layout_unsupported");
+                var references = jdbc.queryForList("SELECT resource_key FROM ma_resource_ref WHERE resource_key = ? AND session_scope_key = ?"
+                        + " AND owner_kind IN ('JOURNAL','SESSION_RECORD') AND journal_revision <= ? LIMIT 1", String.class,
+                        resourceKey, sessionScope, head.path("journalRevision").asLong());
+                boolean published = "PUBLISHED".equals(row.get("state")) && Set.of("managed-tool-result-content",
+                        "managed-tool-result-page", "managed-tool-result-manifest", "managed-agent-skills").contains(row.get("kind"));
+                check(!references.isEmpty() || published, "resource_out_of_cut");
+                guard.run();
+                bytes = new SessionResourceBodies(jdbc, provider).read(text(head, "tenantId"), text(head, "workspaceId"),
+                        text(head, "sessionId"), text(ref, "resourceId"), guard);
+                guard.run();
             } else {
                 check("TOOL_PUBLICATION".equals(row.get("storage_kind")) && "REFERENCED".equals(row.get("state"))
                         && row.get("inline_bytes") == null && row.get("object_version_id") == null
                         && row.get("encryption_key_id") == null, "resource_layout_unsupported");
-                JsonNode object = publicationResource(source, ref);
+                JsonNode object = publicationResource(source, ref, guard);
                 bytes = Base64.getDecoder().decode(object.path("bytesBase64").asText());
             }
         } else {
-            JsonNode object = publicationResource(source, ref);
+            JsonNode object = publicationResource(source, ref, guard);
             bytes = Base64.getDecoder().decode(object.path("bytesBase64").asText());
         }
         verifyBytes(bytes, ref.path("byteLength").asLong(), text(ref, "digest"));
@@ -135,7 +156,7 @@ final class WorkspaceRecoveryReader {
         return response.put("bytesBase64", Base64.getEncoder().encodeToString(bytes));
     }
 
-    private JsonNode publicationResource(JsonNode source, JsonNode ref) {
+    private JsonNode publicationResource(JsonNode source, JsonNode ref, Runnable guard) {
         JsonNode head = head(source);
         var rows = WorkspaceOperations.rows(jdbc, "SELECT publication_id, slot_key FROM ma_resource"
                 + " WHERE resource_key = ? AND scope_key = ? AND resource_id = ?",
@@ -143,7 +164,7 @@ final class WorkspaceRecoveryReader {
                 scope(head), text(ref, "resourceId"));
         check(rows.size() == 1, "resource_missing");
         var row = rows.getFirst();
-        JsonNode object = publicationObject(source, (String) row.get("publication_id"), (String) row.get("slot_key"));
+        JsonNode object = publicationObject(source, (String) row.get("publication_id"), (String) row.get("slot_key"), guard);
         check(ref.path("schemaVersion").asInt() == 1 && ref.path("resourceId").equals(object.path("resourceId"))
                 && ref.path("kind").equals(object.path("kind")) && ref.path("byteLength").asLong() == object.path("byteLength").asLong()
                 && ref.path("digest").equals(object.path("digest")), "resource_reference_conflict");
@@ -151,6 +172,11 @@ final class WorkspaceRecoveryReader {
     }
 
     JsonNode publicationObject(JsonNode source, String publicationId, String slot) {
+        return publicationObject(source, publicationId, slot, () -> {});
+    }
+
+    JsonNode publicationObject(JsonNode source, String publicationId, String slot, Runnable guard) {
+        guard.run();
         JsonNode head = head(source);
         publication(source, publicationId);
         var rows = WorkspaceOperations.rows(jdbc, "SELECT " + ManagedSchemaProjection.RESOURCE.columns("r") + ", r.kind AS resource_kind, r.capture_state AS state, CASE WHEN r.inline_bytes IS NULL THEN r.capture_object_key ELSE NULL END AS object_key"
@@ -173,13 +199,15 @@ final class WorkspaceRecoveryReader {
         check((bytes == null) != (key == null), "publication_object_layout");
         if (key != null) {
             check(objects != null, "publication_objects_unavailable");
-            try (InputStream input = objects.open(key)) {
+            objects.requireIdentity((String) row.get("store_id"));
+            try (InputStream input = objects.open(key, guard)) {
                 bytes = input.readNBytes((int) length + 1);
             } catch (IOException error) {
                 throw com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceRecoveryProtocol.failure("publication_object_io_failed");
             }
         }
         verifyBytes(bytes, length, (String) row.get("sha256"));
+        guard.run();
         ObjectNode result = JSON.createObjectNode().put("slotKey", slot).put("byteLength", length)
                 .put("digest", (String) row.get("sha256")).put("bytesBase64", Base64.getEncoder().encodeToString(bytes));
         result.set("resourceId", JSON.valueToTree(row.get("resource_id")));

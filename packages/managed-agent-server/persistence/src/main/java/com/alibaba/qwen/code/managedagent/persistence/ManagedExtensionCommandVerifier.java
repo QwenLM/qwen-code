@@ -44,7 +44,12 @@ public final class ManagedExtensionCommandVerifier implements RuntimeExtensionCo
         ManagedExtensionCommandProtocol.validateSession(session, operation);
         try {
             verifyCommitted(runtime, session, json.valueToTree(operation));
-        } catch (ManagedExtensionRecords.InvalidRecordException | ManagedAgentException error) {
+        } catch (ManagedAgentException error) {
+            if (error.getStatus() == 503) {
+                throw new RuntimeBrokerException(503, error.getCode(), error.getMessage(), true);
+            }
+            throw denied();
+        } catch (ManagedExtensionRecords.InvalidRecordException error) {
             throw denied();
         }
     }

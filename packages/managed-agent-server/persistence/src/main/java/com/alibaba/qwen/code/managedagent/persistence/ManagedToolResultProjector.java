@@ -3,7 +3,6 @@ package com.alibaba.qwen.code.managedagent.persistence;
 import com.alibaba.qwen.code.managedagent.contracts.artifact.ManagedArtifactPolicy;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.EventIdentity;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.repository.ManagedToolResultStore;
 import com.alibaba.qwen.code.managedagent.repository.ManagedToolResultStore.Artifact;
 import com.alibaba.qwen.code.managedagent.repository.ManagedToolResultStore.Claim;
@@ -42,6 +41,20 @@ public class ManagedToolResultProjector {
                     + "|\\x1B[ -/]*[0-~]");
     private static final Pattern CONTROLS = Pattern.compile("[\\p{Cc}&&[^\\n\\t]]");
     private final JdbcManagedToolResultStore store;
+    private com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedJournalAccess journalAccess;
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    public void configureJournalAccess(com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedJournalAccess access) {
+        this.journalAccess = access;
+    }
+
+    private JdbcManagedExtensionRecordStore resourceReader;
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    public void configureResourceReader(JdbcManagedExtensionRecordStore reader) {
+        this.resourceReader = reader;
+    }
+
     private final JdbcTemplate jdbc;
     private final ObjectProvider<ToolPublicationDataStore> publications;
     private final ToolPublicationArtifactReader reader;
@@ -53,6 +66,7 @@ public class ManagedToolResultProjector {
             ManagedArtifactPolicy policy, ManagedAgentSettings properties) {
         this.store = store;
         this.jdbc = jdbc;
+        this.resourceReader = new JdbcManagedExtensionRecordStore(jdbc);
         this.publications = publications;
         this.reader = reader;
         this.policy = policy;
@@ -81,6 +95,13 @@ public class ManagedToolResultProjector {
     }
 
     public void project(Claim claim) {
+        JournalResidencyGuard.read(jdbc, journalAccess, claim.source().tenantId(), claim.source().sessionId(), () -> {
+            projectHot(claim);
+            return null;
+        });
+    }
+
+    private void projectHot(Claim claim) {
         if (!store.admitsLegacyProjection(claim)) {
             return;
         }
@@ -301,19 +322,9 @@ public class ManagedToolResultProjector {
     }
 
     private JsonNode inlineOutcome(Source source) {
-        var rows = jdbc.query("SELECT kind, schema_version, byte_length, sha256, inline_bytes, storage_kind, state"
-                        + " FROM ma_resource WHERE session_scope_key = ? AND resource_id = ?"
-                        + " AND tenant_id = ? AND workspace_id = ? AND session_id = ? AND deletion_operation_key IS NULL",
-                (schemaRow, schemaIndex) -> com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.read(schemaRow),
-                ManagedSessionStore.sessionScopeKey(source.tenantId(), source.sessionId()), source.outcomeRef().path("resourceId").asText(),
-                source.tenantId(), source.workspaceId(), source.sessionId());
-        require(rows.size() == 1, "Not-started outcome is missing");
-        var row = rows.getFirst();
-        require("MYSQL_INLINE".equals(row.get("storage_kind")) && "REFERENCED".equals(row.get("state"))
-                        && "managed-tool-outcome".equals(row.get("kind")) && number(row.get("schema_version")) == 1,
-                "Not-started outcome is not retained inline");
-        byte[] bytes = (byte[]) row.get("inline_bytes");
-        return verifyBytes(source.outcomeRef(), bytes);
+        var resource = resourceReader.readCommittedResource(source.tenantId(), source.sessionId(), source.outcomeRef());
+        require("managed-tool-outcome".equals(resource.kind()) && resource.schemaVersion() == 1, "Not-started outcome kind conflicts");
+        return verifyBytes(source.outcomeRef(), resource.bytes());
     }
 
     private static JsonNode exact(ToolPublicationDataStore data, Source source, String publication, JsonNode ref, ToolPublicationRetentionStore.ReadLease lease, Runnable guard) {

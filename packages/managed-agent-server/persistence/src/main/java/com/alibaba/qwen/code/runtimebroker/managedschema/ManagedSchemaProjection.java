@@ -80,7 +80,7 @@ public enum ManagedSchemaProjection {
                     + "result_operation_key, result_json, gmt_create, gmt_modified"),
     RESOURCE(
             "resource_key, session_scope_key, tenant_id, workspace_id, session_id, resource_id, "
-                    + "kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, object_key, "
+                    + "kind, schema_version, byte_length, sha256, storage_kind, store_id, inline_bytes, object_key, "
                     + "object_version_id, encryption_key_id, publish_command_id, state, "
                     + "scope_key, publication_id, slot_key, capture_state, capture_object_key, "
                     + "operation_id, quarantine_reason, deletion_operation_key, gmt_create, "
@@ -139,7 +139,7 @@ public enum ManagedSchemaProjection {
                     + "writer_id, writer_lease_until, lease_token_hash, journal_revision, "
                     + "committed_sequence, last_commit_digest, activation_epoch, "
                     + "latest_checkpoint_resource_id, compacted_through_revision, recovery_status, "
-                    + "recovery_detail_code, gmt_create, gmt_modified, activation_id, "
+                    + "recovery_detail_code, journal_residency, journal_archive_epoch, journal_archive_operation_key, gmt_create, gmt_modified, activation_id, "
                     + "activation_phase, activation_event_epoch, activation_expires_at, "
                     + "activation_head_revision, tenant_key, harness_key, harness_session_id, head_kind, "
                     + "phase, operation_id, claim_generation, claim_lease_until, is_wake_pending, "

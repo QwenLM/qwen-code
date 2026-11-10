@@ -212,6 +212,18 @@ final class AgentSessionPolicies {
         return ManagedMcpSettings.find(jdbc, session.tenantId(), session.sessionId()) != null || pinned;
     }
 
+    void authorizeResourceManagement(String tenantId, String actorId, String sessionId, boolean mutation) {
+        SessionRecord session = sessionQueries.requireSession(tenantId, sessionId);
+        ManagedWorkspaceRegistry.requireSessionVisibility(session, actorId, workspaces);
+        if (session.workspace() == null || "DELETED".equals(session.status())
+                || !workspaces.accessOf(tenantId, actorId, session.workspace().getWorkspaceId()).canRead()) {
+            throw new ManagedAgentException(404, "session_not_found", "The Session was not found.");
+        }
+        if (mutation && !workspaces.accessOf(tenantId, actorId, session.workspace().getWorkspaceId()).atLeast(WorkspaceAccess.OPERATOR)) {
+            throw new ManagedAgentException(403, "session_operation_forbidden", "Only a Workspace operator may apply configuration.");
+        }
+    }
+
     SessionRecord requireMcpManagement(String tenantId, String actorId, String sessionId, String operationId) {
         SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
         ManagedWorkspaceRegistry.requireSessionVisibility(
@@ -356,6 +368,12 @@ final class AgentSessionPolicies {
         if (configRecords == null) {
             throw new ManagedAgentException(409, "child_launch_snapshot_invalid", "Package agent validation is unavailable");
         }
+        SessionResourceBodies.authorizeDependency(child.tenantId(), lineage.parentSessionId(), () -> {
+            if (jdbc.queryForObject("SELECT COUNT(*) FROM ma_session WHERE tenant_id = ? AND session_id = ? AND parent_session_id = ? AND parent_child_run_id = ? AND retired_at IS NULL AND deleted_at IS NULL",
+                    Integer.class, child.tenantId(), child.sessionId(), lineage.parentSessionId(), lineage.parentChildRunId()) != 1) {
+                throw new ManagedAgentException(409, "child_launch_snapshot_invalid", "The child no longer owns its launch snapshot");
+            }
+        });
         var run = configRecords.findRecord(child.tenantId(), lineage.parentSessionId(), "child_run", lineage.parentChildRunId()).orElseThrow();
         var envelope = configRecords.readRecordResource(child.tenantId(), lineage.parentSessionId(), run.required("inputRef"));
         var launch = envelope.path("publicLaunch");

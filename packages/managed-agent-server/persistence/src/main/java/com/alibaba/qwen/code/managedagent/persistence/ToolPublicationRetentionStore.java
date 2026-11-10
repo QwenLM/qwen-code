@@ -372,6 +372,7 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
         var input = objects.open(objectKey, () -> {
             lease.check();
             guard.run();
+            requireObjectIdentity(objectKey, objects);
         });
         return new java.io.FilterInputStream(input) {
             @Override
@@ -391,6 +392,15 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
         };
     }
 
+    private void requireObjectIdentity(String objectKey, ToolPublicationObjectStore objects) {
+        if (objects.identity() == null) {
+            return;
+        }
+        var identities = jdbc.query("SELECT store_id FROM ma_resource WHERE capture_object_key = ?", (row, index) -> row.getString(1), objectKey);
+        ToolPublicationContract.require(identities.size() == 1, "The publication object identity is unavailable");
+        objects.requireIdentity(identities.getFirst());
+    }
+
     public ReadLease read(JsonNode key) {
         return read(key.path("tenantId").asText(), key.path("sessionId").asText());
     }
@@ -404,9 +414,17 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
      * root (design 2026-11-04-managed-publication-tenant-guards).
      */
     public ReadLease read(String tenant, String session) {
+        return read(tenant, session, true);
+    }
+
+    ReadLease readSessionResources(String tenant, String session) {
+        return read(tenant, session, false);
+    }
+
+    private ReadLease read(String tenant, String session, boolean legacyMutation) {
         return transactions.execute(
                 status -> {
-                    lockSessionHead(jdbc, tenant, session, true, false);
+                    lockSessionHead(jdbc, tenant, session, legacyMutation, false);
                     requireLive(jdbc, tenant, session);
                     long generation =
                             jdbc.queryForObject(
@@ -531,6 +549,8 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
 
     public void put(JsonNode key, String scope, String publication, String objectKey,
             byte[] bytes, ToolPublicationObjectStore objects) {
+        SessionResourceBodies.requireOutsideTransaction(jdbc);
+        requireObjectIdentity(objectKey, objects);
         String bodyDigest = ToolPublicationContract.sha256(bytes);
         String request =
                 JSON.createObjectNode()
@@ -624,10 +644,17 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
         if (attempt == null) {
             return;
         }
+        Runnable guard = () -> {
+            requireObjectIdentity(objectKey, objects);
+            requireLive(jdbc, key.path("tenantId").asText(), key.path("sessionId").asText());
+            if (jdbc.queryForList("SELECT 1 FROM ma_operation WHERE operation_key = ? AND state IN ('IN_FLIGHT','UNKNOWN','RETURNED') AND claim_generation = ?", Integer.class, attempt.key(), attempt.generation()).isEmpty()) {
+                throw unresolvedPut();
+            }
+        };
         if (attempt.reconcile()) {
             // This operation exclusively owns one non-retried physical create. Its complete
             // immutable object proves that create committed, even if its SQL receipt was lost.
-            try (var original = objects.open(objectKey)) {
+            try (var original = objects.open(objectKey, guard)) {
                 byte[] observed = original.readNBytes(bytes.length + 1);
                 if (observed.length != bytes.length || !bodyDigest.equals(ToolPublicationContract.sha256(observed))) {
                     throw unresolvedPut();
@@ -664,7 +691,7 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
             return;
         }
         try {
-            objects.putIfAbsent(objectKey, bytes);
+            objects.putIfAbsent(objectKey, bytes, guard);
         } catch (RuntimeException error) {
             jdbc.update(
                     "UPDATE ma_operation SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", state = 'UNKNOWN' WHERE operation_key = ?"

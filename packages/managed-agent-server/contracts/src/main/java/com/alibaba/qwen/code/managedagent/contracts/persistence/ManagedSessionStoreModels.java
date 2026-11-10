@@ -15,6 +15,7 @@ public final class ManagedSessionStoreModels {
     public static final String WRITER_TOKEN_HEADER =
             "X-Qwen-Managed-Writer-Token";
     public static final int MAX_INLINE_RESOURCE_BYTES = 64 * 1024;
+    public static final int MAX_OBJECT_RESOURCE_BYTES = 64 * 1024 * 1024;
     public static final int MAX_ATTACHMENT_INPUT_BYTES = 8 * 1024 * 1024;
     public static final int MAX_MODEL_REQUEST_BYTES = 32 * 1024 * 1024;
     public static final int MAX_INLINE_RESOURCE_BASE64_CHARS = ((MAX_MODEL_REQUEST_BYTES + 2) / 3) * 4;
@@ -76,6 +77,30 @@ public final class ManagedSessionStoreModels {
             default -> MAX_INLINE_RESOURCE_BYTES;
         };
     }
+
+    public static int resourceBytes(String kind) {
+        return switch (kind) {
+            case "managed-checkpoint", "managed-input", "managed-agent-skills", "hosted-model-request" -> inlineResourceBytes(kind);
+            case "managed-agent-instructions" -> MAX_AGENT_INSTRUCTIONS_BYTES;
+            case "managed-native-journal-snapshot-page" -> 16 * 1024 * 1024;
+            case "managed-tool-result-content" -> 1024 * 1024;
+            case "managed-tool-result-page" -> 256 * 1024;
+            case "managed-tool-result-manifest", "managed-config_install" -> MAX_INLINE_RESOURCE_BYTES;
+            default -> MAX_OBJECT_RESOURCE_BYTES;
+        };
+    }
+
+    public record AllocateResourceRequest(
+            @NotBlank @Size(max = 512) String workspaceId,
+            @NotBlank @Size(max = 512) String writerId,
+            @Min(1) @Max(MAX_SAFE_COUNTER) long writerGeneration,
+            @NotBlank @Size(max = 512) String resourceId,
+            @NotBlank @Size(max = 512) String kind,
+            @Min(1) int schemaVersion,
+            @Min(0) @Max(MAX_OBJECT_RESOURCE_BYTES) long byteLength,
+            @NotBlank @Pattern(regexp = DIGEST_PATTERN) String digest) { }
+
+    public record ResourceAllocation(String uploadId, ToolResultResourceRef resource) { }
 
     public record AuthorizeLifecycleRequest(
             @NotBlank @Size(max = 512) String workspaceId,
@@ -150,7 +175,14 @@ public final class ManagedSessionStoreModels {
     public record WriterGrant(long writerGeneration, long leaseUntil,
             long journalRevision, long committedSequence,
             String lastCommitDigest, long activationEpoch,
-            boolean replayed, int supportedStorageVersion, boolean activationLeaseRenewal, ActivationLease activationLease) {
+            boolean replayed, int supportedStorageVersion, boolean activationLeaseRenewal, ActivationLease activationLease,
+            boolean externalResources) {
+        public WriterGrant(long writerGeneration, long leaseUntil, long journalRevision,
+                long committedSequence, String lastCommitDigest, long activationEpoch, boolean replayed,
+                int supportedStorageVersion, boolean activationLeaseRenewal, ActivationLease activationLease) {
+            this(writerGeneration, leaseUntil, journalRevision, committedSequence, lastCommitDigest, activationEpoch,
+                    replayed, supportedStorageVersion, activationLeaseRenewal, activationLease, false);
+        }
         public WriterGrant(long writerGeneration, long leaseUntil, long journalRevision,
                 long committedSequence, String lastCommitDigest, long activationEpoch, boolean replayed,
                 int supportedStorageVersion) {

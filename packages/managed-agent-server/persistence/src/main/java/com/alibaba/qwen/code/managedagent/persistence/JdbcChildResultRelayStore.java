@@ -95,11 +95,26 @@ public class JdbcChildResultRelayStore
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
+    private com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedJournalAccess journalAccess;
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    public void configureJournalAccess(com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedJournalAccess access) {
+        this.journalAccess = access;
+    }
+
+    private JdbcManagedExtensionRecordStore resourceReader;
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    public void configureResourceReader(JdbcManagedExtensionRecordStore reader) {
+        this.resourceReader = reader;
+    }
+
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transactions;
 
     public JdbcChildResultRelayStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc) {
         this.jdbc = jdbc;
+        this.resourceReader = new JdbcManagedExtensionRecordStore(jdbc);
         this.transactions = new TransactionTemplate(new DataSourceTransactionManager(jdbc.getDataSource()));
     }
 
@@ -258,11 +273,11 @@ public class JdbcChildResultRelayStore
 
     public byte[] readResourceBytes(String tenantId, String sessionId, String resourceId) {
         String scope = ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
-        return jdbc.query("SELECT inline_bytes FROM ma_resource WHERE resource_key = ? AND session_scope_key = ?"
-                        + " AND tenant_id = ? AND session_id = ? AND resource_id = ? AND storage_kind = 'MYSQL_INLINE'"
-                        + " AND state = 'REFERENCED' AND deletion_operation_key IS NULL",
-                (row, index) -> row.getBytes(1), ManagedSchemaKeys.key(scope, resourceId), scope, tenantId, sessionId, resourceId)
-                .stream().findFirst().orElse(null);
+        if (jdbc.queryForList("SELECT 1 FROM ma_resource WHERE session_scope_key = ? AND tenant_id = ? AND session_id = ? AND resource_id = ? AND state = 'REFERENCED' AND deletion_operation_key IS NULL",
+                Integer.class, scope, tenantId, sessionId, resourceId).isEmpty()) {
+            return null;
+        }
+        return resourceReader.readResource(tenantId, sessionId, resourceId).bytes();
     }
 
     public String readResource(String tenantId, String resourceId) {
@@ -271,13 +286,11 @@ public class JdbcChildResultRelayStore
     }
 
     public byte[] readResourceBytes(String tenantId, String resourceId) {
-        List<byte[]> rows = jdbc.query("SELECT inline_bytes FROM ma_resource WHERE tenant_id = ? AND resource_id = ?"
-                        + " AND storage_kind = 'MYSQL_INLINE' AND state = 'REFERENCED' AND deletion_operation_key IS NULL",
-                (row, index) -> row.getBytes(1), tenantId, resourceId);
-        if (rows.size() > 1) {
+        List<String> sessions = jdbc.queryForList("SELECT session_id FROM ma_resource WHERE tenant_id = ? AND resource_id = ? AND state = 'REFERENCED' AND deletion_operation_key IS NULL", String.class, tenantId, resourceId);
+        if (sessions.size() > 1) {
             throw new IllegalStateException("Resource identity requires its Session scope");
         }
-        return rows.isEmpty() ? null : rows.getFirst();
+        return sessions.isEmpty() ? null : readResourceBytes(tenantId, sessions.getFirst(), resourceId);
     }
 
     /** The newest settled Turn of a Session's own journal, with the
@@ -403,6 +416,10 @@ public class JdbcChildResultRelayStore
      * dropped and answers by refusal, never by guess.
      */
     public JournalTurns journalTurns(String tenantId, String sessionId) {
+        return JournalResidencyGuard.read(jdbc, journalAccess, tenantId, sessionId, () -> journalTurnsHot(tenantId, sessionId));
+    }
+
+    private JournalTurns journalTurnsHot(String tenantId, String sessionId) {
         Set<String> pending = new HashSet<>();
         Set<String> messages = new HashSet<>();
         Map<String, String> sources = new HashMap<>();
@@ -444,8 +461,11 @@ public class JdbcChildResultRelayStore
 
     /** The joined text of the newest assistant message one journal Turn
      * committed, or null while it committed none. */
-    public String journalTurnText(String tenantId, String sessionId,
-            String turnId) {
+    public String journalTurnText(String tenantId, String sessionId, String turnId) {
+        return JournalResidencyGuard.read(jdbc, journalAccess, tenantId, sessionId, () -> journalTurnTextHot(tenantId, sessionId, turnId));
+    }
+
+    private String journalTurnTextHot(String tenantId, String sessionId, String turnId) {
         List<JsonNode> refs = new ArrayList<>();
         forEachJournalEvent(tenantId, sessionId, event -> {
             if ("message.committed".equals(event.path("kind").asText())

@@ -44,6 +44,20 @@ public final class JdbcToolExecutionRepository
     private final DataSource dataSource;
     private final JdbcRuntimeBindingRepository csiBindings;
 
+    private com.alibaba.qwen.code.managedagent.persistence.SessionResourceTransactions objectTransactions;
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    public void configureObjectStore(com.alibaba.qwen.code.managedagent.contracts.storage.ImmutableObjectStore objects) {
+        objectTransactions = new com.alibaba.qwen.code.managedagent.persistence.SessionResourceTransactions(
+                new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(dataSource),
+                new org.springframework.jdbc.datasource.DataSourceTransactionManager(dataSource), objects);
+    }
+
+    private <T> T objectTransaction(JdbcRepositorySupport.SqlWork<T> work) {
+        return objectTransactions == null ? JdbcRepositorySupport.transaction(dataSource, work)
+                : objectTransactions.protectedRead(() -> JdbcRepositorySupport.transaction(dataSource, work), () -> {});
+    }
+
     public JdbcToolExecutionRepository(DataSource dataSource) {
         this(dataSource, null);
     }
@@ -148,8 +162,7 @@ public final class JdbcToolExecutionRepository
             return existing;
         }
         try {
-            return JdbcRepositorySupport.transaction(dataSource,
-                    connection -> {
+            return objectTransaction(connection -> {
                         JdbcCsiActivationAdmission.refuseUnqualifiedWriter(
                                 connection, candidate.getBindingId());
                         insertExecution(connection, candidate);
@@ -237,9 +250,7 @@ public final class JdbcToolExecutionRepository
             ToolExecutionRecord replacement, String owner,
             long dispatchGeneration) {
         requireReplacement(expected, replacement);
-        return JdbcRepositorySupport.transaction(
-                dataSource,
-                connection -> {
+        return objectTransaction(connection -> {
                     ToolExecutionRecord hint =
                             selectByExecutionId(connection, expected.getExecutionCallId(), false);
                     if (hint == null) {
@@ -335,9 +346,7 @@ public final class JdbcToolExecutionRepository
         String ownerId = BrokerValues.requireId(owner, "owner");
         Duration duration = JdbcRepositorySupport.requireDuration(
                 leaseDuration);
-        return JdbcRepositorySupport.transaction(
-                dataSource,
-                connection -> {
+        return objectTransaction(connection -> {
                     ToolExecutionRecord hint = selectByExecutionId(connection, id, false);
                     if (hint == null) {
                         return null;
@@ -408,9 +417,7 @@ public final class JdbcToolExecutionRepository
         String ownerId = BrokerValues.requireId(owner, "owner");
         Duration duration = JdbcRepositorySupport.requireDuration(
                 leaseDuration);
-        return JdbcRepositorySupport.transaction(
-                dataSource,
-                connection -> {
+        return objectTransaction(connection -> {
                     ToolExecutionRecord hint = selectByExecutionId(connection, id, false);
                     if (hint == null) {
                         return null;
@@ -463,9 +470,7 @@ public final class JdbcToolExecutionRepository
             long expectedVersion) {
         String id = BrokerValues.requireId(executionCallId,
                 "executionCallId");
-        return JdbcRepositorySupport.transaction(
-                dataSource,
-                connection -> {
+        return objectTransaction(connection -> {
                     ToolExecutionRecord hint = selectByExecutionId(connection, id, false);
                     if (hint == null) {
                         return null;
@@ -532,9 +537,7 @@ public final class JdbcToolExecutionRepository
             throw new IllegalArgumentException(
                     "expected, result and time are required");
         }
-        return JdbcRepositorySupport.transaction(
-                dataSource,
-                connection -> {
+        return objectTransaction(connection -> {
                     JdbcCsiActivationAdmission.refuseUnqualifiedWriter(
                             connection, expected.getBindingId());
                     ToolExecutionRecord current =

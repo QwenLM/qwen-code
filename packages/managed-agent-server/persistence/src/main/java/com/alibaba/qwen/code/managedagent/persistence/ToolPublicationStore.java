@@ -120,7 +120,9 @@ public final class ToolPublicationStore {
         String operation = text(request, "operation");
         String hash = ("reserve".equals(operation) || "renew".equals(operation))
                 ? ToolPublicationContract.tokenHash(publicationToken) : null;
-        return transactions.execute(status -> applyLocked(request, writerToken, hash));
+        JsonNode key = request.has("binding") ? request.path("binding").path("sessionKey") : request.path("sessionKey");
+        return sessions.resourceTransaction(text(key, "tenantId"), text(key, "sessionId"), transactions,
+                () -> applyLocked(request, writerToken, hash));
     }
 
     /** Rechecks the saved grant and original execution before installing it on a worker. */

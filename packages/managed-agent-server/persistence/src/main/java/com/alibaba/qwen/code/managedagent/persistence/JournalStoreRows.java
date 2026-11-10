@@ -79,7 +79,8 @@ final class JournalStoreRows {
                                 result.getString("encryption_key_id"),
                                 result.getString("state"),
                                 result.getString("capture_state"),
-                                result.getString("deletion_operation_key"));
+                                result.getString("deletion_operation_key"),
+                                result.getString("store_id"));
     }
 
     static final int STORAGE_VERSION = 1;
@@ -215,7 +216,7 @@ final class JournalStoreRows {
         verifyStoredResource(resource);
         return new StoredResource(resource.resourceId(), resource.kind(),
                 resource.schemaVersion(), resource.byteLength(),
-                resource.digest(), resource.bytes());
+                resource.digest(), new SessionResourceBodies(jdbc, null).read(resource, () -> {}));
     }
 
     HeadRow findHeadForUpdate(String tenantId, String sessionId) {
@@ -441,6 +442,10 @@ final class JournalStoreRows {
                 || resource.resourceId().startsWith("capture-seal-")) {
             throw resourceCorrupt();
         }
+        if ("OBJECT_STORE".equals(resource.storageKind())) {
+            SessionResourceBodies.verifyLayout(resource);
+            return;
+        }
         if ("TOOL_PUBLICATION".equals(resource.storageKind())) {
             if (!"REFERENCED".equals(resource.state()) || resource.bytes() != null
                     || resource.objectKey() == null || resource.objectVersionId() != null
@@ -486,6 +491,7 @@ final class JournalStoreRows {
                                 && resource.byteLength() <= ManagedSessionStoreModels.MAX_AGENT_SKILLS_BYTES))
                 || resource.bytes() == null
                 || resource.objectKey() != null
+                || resource.storeId() != null
                 || resource.objectVersionId() != null
                 || resource.encryptionKeyId() != null
                 || resource.bytes().length != resource.byteLength()
@@ -702,7 +708,15 @@ final class JournalStoreRows {
             String sessionId, String resourceId, String kind,
             int schemaVersion, long byteLength, String digest,
             String storageKind, byte[] bytes, String objectKey,
-            String objectVersionId, String encryptionKeyId, String state, String captureState, String deletionOperation) {
+            String objectVersionId, String encryptionKeyId, String state, String captureState, String deletionOperation,
+            String storeId) {
+        ResourceRow(String tenantId, String workspaceId, String sessionId, String resourceId, String kind,
+                int schemaVersion, long byteLength, String digest, String storageKind, byte[] bytes,
+                String objectKey, String objectVersionId, String encryptionKeyId, String state,
+                String captureState, String deletionOperation) {
+            this(tenantId, workspaceId, sessionId, resourceId, kind, schemaVersion, byteLength, digest,
+                    storageKind, bytes, objectKey, objectVersionId, encryptionKeyId, state, captureState, deletionOperation, null);
+        }
     }
 
     /**

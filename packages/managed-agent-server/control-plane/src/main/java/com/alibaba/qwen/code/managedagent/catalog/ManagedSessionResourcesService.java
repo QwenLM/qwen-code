@@ -19,8 +19,6 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Isolation;
-import org.springframework.transaction.annotation.Transactional;
 
 import java.nio.charset.StandardCharsets;
 import java.util.HashSet;
@@ -42,6 +40,12 @@ public class ManagedSessionResourcesService {
     private final ManagedAgentDefinitionStore definitions;
     private final ManagedExtensionRecordStore records;
     private final ObjectMapper json;
+    private com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedResourceAccess resources;
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    public void configureResourceAccess(com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedResourceAccess access) {
+        this.resources = access;
+    }
 
     public ManagedSessionResourcesService(ManagedAgentService sessions, ManagedSessionSkills skills,
             ManagedAgentDefinitionStore definitions, ManagedExtensionRecordStore records,
@@ -53,10 +57,11 @@ public class ManagedSessionResourcesService {
         this.json = json;
     }
 
-    @Transactional(transactionManager = "managedAgentTransactionManager", readOnly = true, isolation = Isolation.REPEATABLE_READ)
     public JsonNode get(String tenant, String actor, String sessionId) {
-        SessionRecord session = sessions.requireReadableSession(tenant, actor, sessionId);
-        return new Query(tenant, sessionId).get(session);
+        sessions.requireReadableSession(tenant, actor, sessionId);
+        java.util.function.Supplier<JsonNode> read = () -> new Query(tenant, sessionId)
+                .get(sessions.requireReadableSession(tenant, actor, sessionId));
+        return resources == null ? read.get() : resources.readSnapshot(tenant, sessionId, read);
     }
 
     private final class Query {

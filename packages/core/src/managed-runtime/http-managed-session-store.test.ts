@@ -2769,7 +2769,7 @@ describe('HTTP Managed Session store', () => {
         expect(headers.get('X-Qwen-Tenant-Id')).toBe(SESSION_KEY.tenantId);
         expect(headers.get('X-Qwen-Managed-Writer-Token')).toBe(TOKEN_A);
         expect(headers.get('X-Qwen-Managed-Max-Readable-Storage-Version')).toBe(
-          '5',
+          '6',
         );
         expect(init?.method).toBe('POST');
         expect(JSON.parse(String(init?.body))).toEqual(request);
@@ -3129,7 +3129,7 @@ describe('HTTP Managed Session store', () => {
       expect(server.commits).toHaveLength(0);
       await expect(
         stores.resourceStore.publish('ordinary', bytes),
-      ).rejects.toThrow('inline limit');
+      ).resolves.toMatchObject({ byteLength: bytes.length });
       const checkpoint = await stores.resourceStore.publish(
         'managed-checkpoint',
         Buffer.alloc(MANAGED_SESSION_LIMITS.maxEventBytes, 0x61),
@@ -3155,7 +3155,7 @@ describe('HTTP Managed Session store', () => {
           'managed-input',
           Buffer.alloc(8 * 1024 * 1024 + 1),
         ),
-      ).rejects.toThrow('inline limit');
+      ).rejects.toThrow('byte limit');
       const snapshot = await stores.resourceStore.publish(
         'hosted-model-request',
         Buffer.alloc(9 * 1024 * 1024, 0x61),
@@ -3168,7 +3168,7 @@ describe('HTTP Managed Session store', () => {
           'hosted-model-request',
           Buffer.alloc(32 * 1024 * 1024 + 1),
         ),
-      ).rejects.toThrow('inline limit');
+      ).rejects.toThrow('byte limit');
       await expect(
         stores.toolResultResources.publish('ordinary', bytes),
       ).rejects.toThrow('Unsupported');
@@ -6009,6 +6009,42 @@ describe('HTTP Managed Session store', () => {
     }
   });
 
+  it('keeps retrying an explicit journal hydration refusal within the request budget', async () => {
+    const server = new FakeManagedSessionStore();
+    let attempts = 0;
+    const fetchFn = vi.fn<typeof fetch>(async (input, init) => {
+      if (requestUrl(input).includes('/restore?') && ++attempts <= 4) {
+        return jsonResponse(
+          {
+            error: {
+              code: 'managed_session_journal_rehydrating',
+              message: 'restoring',
+            },
+          },
+          503,
+        );
+      }
+      return server.fetch(input, init);
+    });
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'http://session-store.test',
+      allowInsecureHttp: true,
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      fetchFn,
+    });
+    try {
+      const handle = await stores.journalStore.open({
+        sessionKey: SESSION_KEY,
+      });
+      await handle.read();
+      expect(attempts).toBe(5);
+    } finally {
+      await stores.close();
+    }
+  });
+
   it('keeps retrying a contended tenant guard past the attempt cap within one request budget', async () => {
     const server = new FakeManagedSessionStore();
     let contended = 5;
@@ -8686,13 +8722,14 @@ describe('HTTP Managed Session store', () => {
     await session.close();
   });
 
-  it('rejects resources that require the unimplemented OSS path', async () => {
+  it('stages large resources without acquiring a writer and enforces the object limit', async () => {
+    const fetchFn = vi.fn<typeof fetch>();
     const stores = createHttpManagedSessionStores({
       baseUrl: 'http://127.0.0.1:8080',
       sessionKey: SESSION_KEY,
       writerId: 'harness-a',
       writerToken: TOKEN_A,
-      fetchFn: vi.fn<typeof fetch>(),
+      fetchFn,
     });
 
     await expect(
@@ -8700,8 +8737,92 @@ describe('HTTP Managed Session store', () => {
         'managed-context',
         Buffer.alloc(64 * 1024 + 1),
       ),
-    ).rejects.toThrow(/OSS storage is not enabled/);
+    ).resolves.toMatchObject({ byteLength: 65537 });
+    expect(fetchFn).not.toHaveBeenCalled();
+    await expect(
+      stores.resourceStore.publish(
+        'managed-config_install',
+        Buffer.alloc(64 * 1024 + 1),
+      ),
+    ).rejects.toThrow('byte limit');
+    await expect(
+      stores.resourceStore.publish(
+        'managed-context',
+        Buffer.alloc(64 * 1024 * 1024 + 1),
+      ),
+    ).rejects.toThrow('byte limit');
   });
+
+  it.each([true, false])(
+    'negotiates external resources before any backend write: %s',
+    async (enabled) => {
+      const server = new FakeManagedSessionStore();
+      server.supportedStorageVersion = 6;
+      server.externalResources = enabled;
+      const open = await createSessionOpener(server);
+      const session = await open('harness-a', TOKEN_A);
+      const bytes = Buffer.alloc(65537, 0x61);
+      const ref = await session.resources.publish(
+        'managed-tool-outcome',
+        bytes,
+      );
+      const append = session.authority.appendExecutionEvent(
+        {
+          operation: 'recordToolResult',
+          commandId: 'external',
+          sessionKey: SESSION_KEY,
+          contentDigest: ref.digest,
+        },
+        (sequence) => ({
+          v: 1,
+          sequence,
+          eventId: 'tool-receipt:external',
+          sessionKey: SESSION_KEY,
+          kind: 'tool.receipt',
+          occurredAt: 1,
+          payload: {
+            executionCallId: 'external',
+            toolOutcomeRef: ref,
+            resultRef: null,
+            resources: [],
+            historyRevision: sequence,
+          },
+        }),
+        { class: 'trusted_entry' },
+      );
+      try {
+        if (enabled) {
+          await append;
+          expect(server.allocations.size).toBe(1);
+          const stored = (
+            server.commits.at(-1)!['resources'] as Array<
+              Record<string, unknown>
+            >
+          ).find((resource) => resource['resourceId'] === ref.resourceId)!;
+          expect(stored['bytesBase64']).toBeUndefined();
+          expect(await session.resources.read(ref)).toEqual(bytes);
+          expect(
+            server.fetch.mock.calls.find(
+              ([input, init]) =>
+                requestUrl(input).includes('/content?') &&
+                init?.method === 'PUT',
+            ),
+          ).toBeDefined();
+        } else {
+          await expect(append).rejects.toThrow(
+            'does not support external resource writes',
+          );
+          expect(server.allocations.size).toBe(0);
+        }
+      } finally {
+        if (enabled) await session.close();
+        else
+          await expect(session.close()).rejects.toThrow(
+            'does not support external resource writes',
+          );
+      }
+    },
+  );
 
   it('commits and reuses every part of a private outcome manifest after reopen', async () => {
     const server = new FakeManagedSessionStore();
@@ -8923,6 +9044,8 @@ describe('HTTP Managed Session store', () => {
 
 class FakeManagedSessionStore {
   activationLeaseRenewal = false;
+  externalResources = false;
+  readonly allocations = new Map<string, ManagedSessionDurableRef>();
   private activationLease?: ManagedSessionActivationLease;
   supportedStorageVersion: number | undefined = 2;
   enforceReaderCeiling = false;
@@ -8971,10 +9094,41 @@ class FakeManagedSessionStore {
           .length,
     );
     expect(headers.get('Accept')).toBe(
-      suffix.startsWith('/resources/')
+      suffix.startsWith('/resources/') && init?.method !== 'PUT'
         ? 'application/octet-stream, application/json'
         : 'application/json',
     );
+    if (suffix === '/resources:allocate') {
+      expect(this.externalResources).toBe(true);
+      const body = JSON.parse(String(init?.body)) as ManagedSessionDurableRef;
+      const ref = {
+        resourceId: body.resourceId,
+        kind: body.kind,
+        schemaVersion: body.schemaVersion,
+        byteLength: body.byteLength,
+        digest: body.digest,
+      };
+      this.allocations.set(ref.resourceId, ref);
+      return jsonResponse({
+        uploadId: `upload-${ref.resourceId}`,
+        resource: ref,
+      });
+    }
+    if (suffix.endsWith('/content') && init?.method === 'PUT') {
+      const id = decodeURIComponent(suffix.split('/')[2]!);
+      const ref = this.allocations.get(id)!;
+      expect(url.searchParams.get('uploadId')).toBe(`upload-${id}`);
+      expect(headers.get('Content-Type')).toBe('application/octet-stream');
+      const bytes = Buffer.from(init.body as Uint8Array);
+      expect(bytes.byteLength).toBe(ref.byteLength);
+      this.resources.set(id, {
+        bytes,
+        kind: ref.kind,
+        schemaVersion: ref.schemaVersion,
+        digest: ref.digest,
+      });
+      return jsonResponse(ref);
+    }
     if (suffix === '/writers:acquire') {
       const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
       const token = headers.get('X-Qwen-Managed-Writer-Token');
@@ -9268,6 +9422,7 @@ class FakeManagedSessionStore {
 
   private grant(): Record<string, unknown> {
     return {
+      externalResources: this.externalResources,
       activationLeaseRenewal: this.activationLeaseRenewal,
       ...(this.activationLease
         ? { activationLease: this.activationLease }

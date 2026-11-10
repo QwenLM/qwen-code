@@ -22,6 +22,11 @@ final class JournalResourceReads {
     private final JdbcTemplate jdbc;
     private final ToolPublicationObjectStore publicationObjects;
     private final ToolPublicationRetentionStore outputRetention;
+    private SessionResourceBodies resourceBodies;
+
+    void installResourceBodies(SessionResourceBodies bodies) {
+        this.resourceBodies = bodies;
+    }
     private final org.springframework.transaction.support.TransactionTemplate ownerReads;
 
     JournalResourceReads(JournalFencing fencing,
@@ -35,6 +40,9 @@ final class JournalResourceReads {
         this.jdbc = jdbc;
         this.publicationObjects = publicationObjects;
         this.outputRetention = outputRetention;
+        this.resourceBodies = new SessionResourceBodies(jdbc,
+                publicationObjects instanceof com.alibaba.qwen.code.managedagent.contracts.storage.ToolPublicationObjectStoreAdapter adapter
+                        ? adapter.store() : null);
         this.ownerReads = ownerReads;
     }
 
@@ -70,14 +78,24 @@ final class JournalResourceReads {
             JournalStoreRows.requireResourceScope(resource, tenantId, workspaceId, sessionId,
                     resourceId);
             storeRows.verifyStoredResource(resource);
-            if (updateVerification) {
-                jdbc.update("UPDATE ma_resource SET"
-                            + " last_verified_at = ? WHERE session_scope_key = ?"
-                            + " AND resource_id = ?",
-                        storeRows.databaseNow(), scopeKey, resourceId);
-            }
+            Runnable guard = () -> {
+                lease.check();
+                fencing.requireReadGrant(storeRows.requireHead(tenantId, sessionId), writerToken);
+            };
             byte[] bytes = "TOOL_PUBLICATION".equals(resource.storageKind())
-                    ? readPublicationObject(resource, lease, updateVerification) : resource.bytes();
+                    ? readPublicationObject(resource, lease, updateVerification) : resourceBodies.read(resource, guard);
+            guard.run();
+            if ("OBJECT_STORE".equals(resource.storageKind())) {
+                var current = storeRows.findResource(scopeKey, resourceId, false);
+                if (current == null || !SessionResourceBodies.same(resource, current)) {
+                    throw JournalStoreRows.resourceCorrupt();
+                }
+                storeRows.verifyStoredResource(current);
+            }
+            if (updateVerification) {
+                jdbc.update("UPDATE ma_resource SET last_verified_at = ? WHERE session_scope_key = ? AND resource_id = ?",
+                        storeRows.databaseNow().getTime(), scopeKey, resourceId);
+            }
             var result = new StoredResource(resource.resourceId(), resource.kind(),
                     resource.schemaVersion(), resource.byteLength(),
                     resource.digest(), bytes);
@@ -147,8 +165,8 @@ final class JournalResourceReads {
                             }
                             JournalStoreRows.requireResourceScope(
                                     resource, tenantId, workspaceId, sessionId, resourceId);
-                            if (!"MYSQL_INLINE".equals(resource.storageKind())
-                                    || resource.objectKey() != null
+                            if (!("MYSQL_INLINE".equals(resource.storageKind()) && resource.objectKey() == null
+                                    || "OBJECT_STORE".equals(resource.storageKind()) && com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile.supportsStorage(original.request().getScope(), 6))
                                     || resource.objectVersionId() != null
                                     || resource.encryptionKeyId() != null) {
                                 throw JournalStoreRows.conflict(
@@ -189,6 +207,9 @@ final class JournalResourceReads {
                                             .put("resource_state", resource.state())
                                             .put("started_at", started)
                                             .put("delivery_expires_at", expires);
+                            if ("OBJECT_STORE".equals(resource.storageKind())) {
+                                evidence.put("store_id", resource.storeId()).put("object_key", resource.objectKey());
+                            }
                             String encoded = evidence.toString();
                             String receipt =
                                     com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key("csi-read", id);
@@ -219,8 +240,13 @@ final class JournalResourceReads {
                             return new NativeRead(id, original, head, resource, persisted, expires);
                         });
         JournalStoreRows.ResourceRow fetched;
+        byte[] verified;
         try {
             fetched = fetchNativeResource(admission);
+            if (!sameNativeResource(admission.resource(), fetched)) {
+                throw JournalStoreRows.resourceCorrupt();
+            }
+            verified = resourceBodies.read(fetched, () -> checkNativeRead(admission, writerToken));
         } catch (RuntimeException | Error failure) {
             try {
                 finishNativeRead(admission, null, false, writerToken);
@@ -239,7 +265,20 @@ final class JournalResourceReads {
                 fetched.schemaVersion(),
                 fetched.byteLength(),
                 fetched.digest(),
-                fetched.bytes());
+                verified);
+    }
+
+    private void checkNativeRead(NativeRead admission, String writerToken) {
+        ownerReads.executeWithoutResult(status -> {
+            var continuation = fencing.lockCsiContinuation(admission.head().tenantId(), admission.head().sessionId());
+            var head = fencing.requireHeadAfterCsiCheck(admission.head().tenantId(), admission.head().sessionId());
+            fencing.requireCsiReadGrant(continuation, head, writerToken);
+            if (admission.expires() <= ToolPublicationRetentionStore.now(jdbc)
+                    || !nativeReadReceipt(admission.id(), false).equals(admission.persisted())
+                    || !sameNativeResource(admission.resource(), nativeResourceMetadata(head.tenantId(), head.sessionId(), admission.resource().resourceId()))) {
+                throw JournalFencing.nativeReadConflict();
+            }
+        });
     }
 
     java.util.Map<String, Object> nativeReadReceipt(String id, boolean lock) {
@@ -279,7 +318,7 @@ final class JournalResourceReads {
                         "SELECT tenant_id, workspace_id, session_id, resource_id, kind,"
                             + " schema_version, byte_length, sha256, storage_kind, NULL AS"
                             + " inline_bytes, object_key, object_version_id, encryption_key_id,"
-                            + " state, capture_state, deletion_operation_key FROM ma_resource WHERE"
+                            + " state, capture_state, deletion_operation_key, store_id FROM ma_resource WHERE"
                             + " session_scope_key = ? AND resource_id = ? AND resource_key = ? FOR"
                             + " UPDATE",
                         storeRows.resourceMapper,
@@ -426,7 +465,9 @@ final class JournalResourceReads {
                 && Objects.equals(expected.digest(), actual.digest())
                 && Objects.equals(expected.storageKind(), actual.storageKind())
                 && Objects.equals(expected.state(), actual.state())
-                && actual.objectKey() == null
+                && Objects.equals(expected.storeId(), actual.storeId())
+                && Objects.equals(expected.objectKey(), actual.objectKey())
+                && actual.deletionOperation() == null
                 && actual.objectVersionId() == null
                 && actual.encryptionKeyId() == null;
     }

@@ -53,6 +53,12 @@ public class ManagedNativeJournalSnapshots {
     private final ObjectMapper json;
     private final TransactionTemplate isolated;
     private final ToolPublicationRetentionStore retention;
+    private SessionObjectResources objectResources;
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    public void configureObjectResources(SessionObjectResources resources) {
+        this.objectResources = resources;
+    }
 
     public ManagedNativeJournalSnapshots(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc, JdbcManagedSessionStore sessions, @Qualifier("managedAgentObjectMapper") ObjectMapper json) {
         this.jdbc = jdbc;
@@ -89,6 +95,7 @@ public class ManagedNativeJournalSnapshots {
     public record PageResult(List<StoredPage> pages, long nextRevision, boolean hasMore) { }
 
     public Descriptor publish(String tenant, String session, String token, PublishRequest request) {
+        SessionResourceBodies.requireOutsideTransaction(jdbc);
         Basis basis = isolated.execute(status -> new Basis(sessions.lockSnapshotWriter(tenant, session, token, request),
                 retention.read(tenant, session)));
         try {
@@ -100,7 +107,7 @@ public class ManagedNativeJournalSnapshots {
             // descriptor, unless the winner rolled back too.
             for (int attempt = 1; ; attempt++) {
                 try {
-                    return isolated.execute(status -> build(tenant, session, token, request, basis));
+                    return build(tenant, session, token, request, basis);
                 } catch (RuntimeException error) {
                     if (attempt >= CLAIM_ATTEMPTS || !JournalFencing.deadlockVictim(error)) {
                         throw error;
@@ -118,11 +125,14 @@ public class ManagedNativeJournalSnapshots {
         RestoreHead head = basis.head();
         String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
         String owner = ownerKey(scope, request.snapshotId());
-        claim(tenant, request.workspaceId(), session, request.snapshotId());
+        isolated.executeWithoutResult(status -> {
+            sessions.lockSnapshotWriter(tenant, session, token, request);
+            claim(tenant, request.workspaceId(), session, request.snapshotId());
+        });
         Descriptor existing = find(tenant, request.workspaceId(), session, token, request.snapshotId());
         if (existing != null) {
             require(matches(existing.snapshot(), request), "managed_session_snapshot_conflict");
-            sessions.lockSnapshotWriter(tenant, session, token, request);
+            isolated.executeWithoutResult(status -> sessions.lockSnapshotWriter(tenant, session, token, request));
             return new Descriptor(existing.snapshot(), existing.manifest(), true);
         }
         byte[] claimed = jdbc.queryForObject("SELECT inline_bytes FROM ma_resource WHERE resource_key = ?", byte[].class,
@@ -140,6 +150,7 @@ public class ManagedNativeJournalSnapshots {
         String commit = null;
         String checkpoint = null;
         String previousPage = null;
+        List<SnapshotPage> pages = new ArrayList<>();
         while (revision < head.journalRevision()) {
             basis.lease().checkReadView();
             long after = revision;
@@ -164,9 +175,14 @@ public class ManagedNativeJournalSnapshots {
                 verifyPage(tenant, request.workspaceId(), session, token, owner, head.journalRevision(), page, true);
                 byte[] bytes = encode(page);
                 require(bytes.length <= MAX_PAGE_BYTES, "managed_session_snapshot_page_too_large");
-                StoredResource stored = put(tenant, request.workspaceId(), session, PAGE_KIND, bytes);
-                pin(scope, owner, head.journalRevision(), stored, transaction.journalRevision(), tenant,
-                        request.workspaceId(), session);
+                StoredResource stored = objectResources != null && objectResources.externalPublication(tenant, session,
+                        PAGE_KIND + ":" + DigestUtils.sha256Hex(bytes), bytes.length)
+                        ? objectResources.publishSnapshot(tenant, session, token, request, bytes)
+                        : isolated.execute(status -> {
+                            sessions.lockSnapshotWriter(tenant, session, token, request);
+                            return put(tenant, request.workspaceId(), session, PAGE_KIND, bytes);
+                        });
+                pages.add(new SnapshotPage(ref(stored), transaction.journalRevision()));
                 previousPage = stored.digest();
                 revision = transaction.journalRevision();
                 sequence = transaction.lastSequence();
@@ -190,6 +206,40 @@ public class ManagedNativeJournalSnapshots {
         String id = manifestId(scope, request.snapshotId());
         StoredResource stored = new StoredResource(id, MANIFEST_KIND, 1, manifestBytes.length,
                 DigestUtils.sha256Hex(manifestBytes), manifestBytes);
+        return isolated.execute(status -> finish(tenant, session, token, request, basis, manifest, stored, pages));
+    }
+
+    private record SnapshotPage(ToolResultResourceRef resource, long revision) { }
+
+    private Descriptor finish(String tenant, String session, String token, PublishRequest request, Basis basis,
+            Manifest manifest, StoredResource stored, List<SnapshotPage> pages) {
+        String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
+        String owner = ownerKey(scope, request.snapshotId());
+        String id = stored.resourceId();
+        long revision = manifest.coveredJournalRevision();
+        long resourceCount = manifest.resourceCount();
+        byte[] manifestBytes = stored.bytes();
+        basis.lease().checkReadView();
+        sessions.lockSnapshotWriter(tenant, session, token, request);
+        claim(tenant, request.workspaceId(), session, request.snapshotId());
+        byte[] currentManifest = jdbc.queryForObject("SELECT inline_bytes FROM ma_resource WHERE resource_key = ? FOR UPDATE", byte[].class,
+                ManagedSessionStore.resourceKey(scope, id));
+        if (!java.util.Arrays.equals(currentManifest, "{}".getBytes(StandardCharsets.UTF_8))) {
+            require(java.util.Arrays.equals(currentManifest, manifestBytes), "managed_session_snapshot_conflict");
+            return new Descriptor(manifest, ref(stored), true);
+        }
+        for (SnapshotPage page : pages) {
+            var current = new JournalStoreRows(com.alibaba.qwen.code.managedagent.contracts.persistence.StorageReadPolicy.inProcess(), jdbc)
+                    .findResource(scope, page.resource().resourceId());
+            require(current != null && current.deletionOperation() == null
+                    && List.of("PUBLISHED", "REFERENCED").contains(current.state())
+                    && current.digest().equals(page.resource().digest()) && current.byteLength() == page.resource().byteLength(), "managed_session_snapshot_corrupt");
+            var descriptor = page.resource();
+            pin(scope, owner, revision, new StoredResource(descriptor.resourceId(), descriptor.kind(), descriptor.schemaVersion(),
+                    descriptor.byteLength(), descriptor.digest(), null), page.revision(), tenant, request.workspaceId(), session);
+            jdbc.update("UPDATE ma_resource SET state = 'REFERENCED', retention_until = NULL WHERE resource_key = ?",
+                    ManagedSessionStore.resourceKey(scope, page.resource().resourceId()));
+        }
         jdbc.update("UPDATE ma_resource SET inline_bytes = ?, byte_length = ?, sha256 = ?, kind = ? WHERE resource_key = ?",
                 manifestBytes, manifestBytes.length, stored.digest(), MANIFEST_KIND, ManagedSessionStore.resourceKey(scope, id));
         basis.lease().checkReadView();
@@ -523,25 +573,9 @@ public class ManagedNativeJournalSnapshots {
     }
 
     /**
-     * Claims the manifest row. A second publication of the same snapshot
-     * waits here until the first commits and then replays it, or, when the
-     * first rolls back, finds no row and claims it itself. The wait lasts at
-     * most innodb_lock_wait_timeout from when it queues: a Build that holds
-     * the row longer fails the waiting publication with a lock wait timeout
-     * (MySQL error 1205), which publish does not retry; it retries only
-     * deadlock victims (1213).
-     *
-     * <p>An upsert that meets the first publication's uncommitted row queues
-     * for it with a next-key lock, since resource_key is a secondary unique
-     * index. The first Build's page inserts can fall into that lock's gap,
-     * and InnoDB then rolls the waiting publication back, once per such
-     * insert while it waits. So the claim first locks the row by key: at READ
-     * COMMITTED, which publications run at, that takes the row's record lock
-     * when the row exists, committed or not, waiting while another
-     * transaction holds it, and takes no lock when it does not; only a
-     * missing row is upserted. Two publications that both pass the read
-     * before either row exists can still meet in the upsert; publish retries
-     * the one rolled back.
+     * Serializes manifest creation under the Session lock. The placeholder commits before page
+     * staging; only finish publishes its complete bytes and references. Lock an existing row before
+     * considering an insert to avoid unnecessary InnoDB next-key locks on the unique resource key.
      */
     private void claim(String tenant, String workspace, String session, String snapshotId) {
         String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
@@ -569,7 +603,7 @@ public class ManagedNativeJournalSnapshots {
     }
 
     private StoredResource resource(String tenant, String workspace, String session, String id, String token) {
-        return isolated.execute(status -> sessions.readSnapshotResource(tenant, workspace, session, id, token));
+        return sessions.readSnapshotResource(tenant, workspace, session, id, token);
     }
 
     private static String manifestId(String scope, String id) {

@@ -68,12 +68,12 @@ public final class ToolPublicationCollector {
         try {
             var page =
                     jdbc.query(
-                            "SELECT slot_key, capture_object_key AS object_key FROM ma_resource"
+                            "SELECT slot_key, capture_object_key AS object_key, store_id FROM ma_resource"
                                     + " WHERE scope_key = ? AND publication_id = ? AND slot_key > ?"
                                     + " ORDER BY slot_key LIMIT 100",
                             (row, index) ->
                                     new ObjectKey(
-                                            row.getString("slot_key"), row.getString("object_key")),
+                                            row.getString("slot_key"), row.getString("object_key"), row.getString("store_id")),
                             claim.scope(),
                             claim.publication(),
                             claim.cursor());
@@ -86,7 +86,12 @@ public final class ToolPublicationCollector {
                     return false;
                 }
                 if (object.key() != null) {
-                    objects.deleteIfPresent(object.key());
+                    objects.deleteIfPresent(object.key(), () -> {
+                        objects.requireIdentity(object.storeId());
+                        if (!renew(claim)) {
+                            throw new IllegalStateException("The publication deletion claim expired");
+                        }
+                    });
                 }
             }
             boolean confirmed = Boolean.TRUE.equals(transactions.execute(status -> confirm(claim, page)));
@@ -414,5 +419,5 @@ public final class ToolPublicationCollector {
     }
 
     private record Claim(String scope, String publication, String tenant, String session, long generation, String cursor) {}
-    private record ObjectKey(String slot, String key) {}
+    private record ObjectKey(String slot, String key, String storeId) {}
 }

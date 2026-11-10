@@ -34,6 +34,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -51,6 +52,8 @@ public class ManagedSessionStoreController {
     private final ManagedNativeJournalSnapshots snapshots;
     @org.springframework.beans.factory.annotation.Autowired
     private com.alibaba.qwen.code.managedagent.persistence.ManagedSessionModelConfigs modelConfigs;
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private com.alibaba.qwen.code.managedagent.persistence.SessionObjectResources objectResources;
 
     public ManagedSessionStoreController(JdbcManagedSessionStore store, JdbcManagedUserMessageStore userMessages,
             ManagedNativeJournalSnapshots snapshots) {
@@ -229,6 +232,33 @@ public class ManagedSessionStoreController {
             @RequestHeader(ManagedSessionStoreModels.WRITER_TOKEN_HEADER) String writerToken,
             @Valid @RequestBody PublishToolResultRequest request, @RequestHeader HttpHeaders headers) {
         return store.publishToolResult(tenant.tenantId(), sessionId, writerToken, request, lifecycleAuthority(headers));
+    }
+
+    @PostMapping("/resources:allocate")
+    public ManagedSessionStoreModels.ResourceAllocation allocateResource(TenantContext tenant, @PathVariable String sessionId,
+            @RequestHeader(ManagedSessionStoreModels.WRITER_TOKEN_HEADER) String writerToken,
+            @Valid @RequestBody ManagedSessionStoreModels.AllocateResourceRequest request, @RequestHeader HttpHeaders headers) {
+        requireObjectResources();
+        return objectResources.allocate(tenant.tenantId(), sessionId, writerToken, request, lifecycleAuthority(headers));
+    }
+
+    @PutMapping(value = "/resources/{resourceId}/content", consumes = MediaType.APPLICATION_OCTET_STREAM_VALUE)
+    public ToolResultResourceRef uploadResource(TenantContext tenant, @PathVariable String sessionId,
+            @PathVariable String resourceId, @RequestParam String uploadId,
+            @RequestHeader(ManagedSessionStoreModels.WRITER_TOKEN_HEADER) String writerToken,
+            @RequestHeader HttpHeaders headers, jakarta.servlet.http.HttpServletRequest request) throws java.io.IOException {
+        requireObjectResources();
+        if (request.getContentLengthLong() < 0 || request.getContentLengthLong() > ManagedSessionStoreModels.MAX_OBJECT_RESOURCE_BYTES) {
+            throw new ManagedAgentException(413, ManagedSessionStoreModels.ERROR_PAYLOAD_TOO_LARGE, "A bounded Content-Length is required for resource upload.");
+        }
+        return objectResources.upload(tenant.tenantId(), sessionId, resourceId, uploadId, writerToken,
+                request.getInputStream(), lifecycleAuthority(headers));
+    }
+
+    private void requireObjectResources() {
+        if (objectResources == null) {
+            throw new ManagedAgentException(501, ManagedSessionStoreModels.ERROR_OSS_DISABLED, "External Session resources are disabled.");
+        }
     }
 
     @GetMapping("/transactions")

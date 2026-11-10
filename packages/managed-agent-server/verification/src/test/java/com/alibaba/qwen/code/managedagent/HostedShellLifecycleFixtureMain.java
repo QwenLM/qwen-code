@@ -82,7 +82,8 @@ public final class HostedShellLifecycleFixtureMain {
                         case "toString" -> "l4-publication-fixture";
                         default -> throw new AssertionError("Unexpected object I/O: " + invocation.getMethod().getName());
                     });
-                    context.addBeanFactoryPostProcessor(factory -> factory.registerSingleton("toolPublicationOss", new AliyunObjectStoreClient(oss)));
+                    context.addBeanFactoryPostProcessor(factory -> factory.registerSingleton("toolPublicationObjects", new AliyunObjectStoreClient(oss).objects(
+                            context.getEnvironment().getRequiredProperty("qwen.managed-agent.tool-publication.oss-bucket"))));
                 }).run(arguments.toArray(String[]::new));
         Path ready = Path.of(config.path("ready").asText());
         Path writing = ready.resolveSibling(ready.getFileName() + ".tmp");

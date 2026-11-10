@@ -27,8 +27,8 @@ class ManagedNativeSnapshotRetirementTest {
         for (String session : java.util.List.of("retiring", "protected")) {
             tx.executeWithoutResult(status -> new ExtensionRecordJournal(sessions, "tenant", "workspace", session).open());
             for (String id : java.util.List.of("one", "two")) {
-                tx.executeWithoutResult(status -> snapshots.publish("tenant", session, "extension-writer-token-0123456789",
-                        new ManagedNativeJournalSnapshots.PublishRequest("workspace", "writer-extension", 1, id, 1, 0, null)));
+                snapshots.publish("tenant", session, "extension-writer-token-0123456789",
+                        new ManagedNativeJournalSnapshots.PublishRequest("workspace", "writer-extension", 1, id, 1, 0, null));
             }
         }
         jdbc.update("UPDATE ma_session SET retired_at = 1 WHERE tenant_id = ? AND session_id = ?", "tenant", "retiring");

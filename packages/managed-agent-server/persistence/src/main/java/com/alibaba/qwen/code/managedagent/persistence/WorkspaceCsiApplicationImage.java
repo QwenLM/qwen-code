@@ -206,7 +206,8 @@ final class WorkspaceCsiApplicationImage {
     }
 
     static Row sole(Snapshot snapshot, String table) {
-        var rows = snapshot.table(table).rows().stream().filter(row -> row.membership() == Membership.ORIGINAL).toList();
+        var rows = snapshot.table(table).rows().stream().filter(row -> row.membership() == Membership.ORIGINAL)
+                .filter(row -> !"ma_operation".equals(table) || "CSI_RETIREMENT".equals(row.text("operation_kind"))).toList();
         require(rows.size() == 1);
         return rows.getFirst();
     }

@@ -537,6 +537,8 @@ public final class JdbcCsiActivationAdmission {
 
     private static History activeHistoryThrough(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
             long expectedRevision, long expectedSequence, String expectedDigest, String writerId, JournalRead read) throws SQLException {
+        com.alibaba.qwen.code.managedagent.persistence.JournalResidencyGuard.requireHot(connection,
+                original.request().getScope().getTenantId(), original.request().getIsolationKey());
         require(connection != null && !connection.getAutoCommit() && writerId != null && expectedRevision >= 0
                 && expectedRevision <= MAX_HISTORY);
         long revision = 0;
@@ -849,14 +851,17 @@ public final class JdbcCsiActivationAdmission {
             JdbcRepositorySupport.setIdentity(statement, 13, resourceId);
             try (ResultSet row = statement.executeQuery()) {
                 require(row.next() && original.request().getScope().getWorkspaceId().equals(com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.identity(row, "workspace_id"))
-                        && "REFERENCED".equals(row.getString("state")) && "MYSQL_INLINE".equals(row.getString("storage_kind"))
-                        && com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.identity(row, "object_key") == null && com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.identity(row, "object_version_id") == null
+                        && "REFERENCED".equals(row.getString("state"))
+                        && ("MYSQL_INLINE".equals(row.getString("storage_kind")) && com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.identity(row, "object_key") == null
+                                || "OBJECT_STORE".equals(row.getString("storage_kind")) && CsiFilesRetirementProfile.supportsStorage(original.request().getScope(), 6))
+                        && com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.identity(row, "object_version_id") == null
                         && com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.identity(row, "encryption_key_id") == null
                         && ref.path("kind").textValue().equals(com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.identity(row, "kind"))
                         && row.getLong("schema_version") == ref.path("schemaVersion").longValue()
                         && row.getLong("byte_length") == ref.path("byteLength").longValue()
                         && ref.path("digest").textValue().equals(row.getString("sha256")));
-                byte[] bytes = row.getBytes("inline_bytes");
+                byte[] bytes = com.alibaba.qwen.code.managedagent.persistence.SessionResourceBodies.preparedBody(
+                        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.read(row));
                 require(!row.next());
                 return bytes;
             }

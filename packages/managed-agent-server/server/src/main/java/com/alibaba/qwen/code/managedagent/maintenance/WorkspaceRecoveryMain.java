@@ -10,7 +10,6 @@ import com.fasterxml.jackson.databind.JsonNode;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.SingleConnectionDataSource;
 
-import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
@@ -34,7 +33,7 @@ public final class WorkspaceRecoveryMain {
                 "invalid_request_file");
         byte[] bytes = Files.readAllBytes(input);
         JsonNode request = com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceRecoveryProtocol.parse(bytes);
-        com.alibaba.qwen.code.managedagent.adapters.artifact.AliyunObjectStoreClient oss = null;
+        com.alibaba.qwen.code.managedagent.contracts.storage.ImmutableObjectStore objectStore = null;
         // The private RPC loop is single-threaded; transactions still commit separately.
         try (var source = new SingleConnectionDataSource(required("W1_JDBC_URL"), required("W1_JDBC_USER"),
                 requiredPresent("W1_JDBC_PASSWORD"), true)) {
@@ -47,14 +46,10 @@ public final class WorkspaceRecoveryMain {
                         new WorkspaceMount(text(request, "tenantId"), text(request, "storageId"), text(request, "sourceRoot"))));
             }
             ToolPublicationObjectStore objects = null;
-            if ("capture".equals(args[0]) && System.getenv("W1_OSS_ENDPOINT") != null) {
-                URI endpoint = URI.create(required("W1_OSS_ENDPOINT"));
-                String region = required("W1_OSS_REGION");
-                check("https".equals(endpoint.getScheme()) && ("oss-" + region + ".aliyuncs.com").equals(endpoint.getHost())
-                        && (endpoint.getRawPath() == null || endpoint.getRawPath().isEmpty())
-                        && endpoint.getRawQuery() == null && endpoint.getRawUserInfo() == null, "invalid_oss_endpoint");
-                oss = com.alibaba.qwen.code.managedagent.adapters.artifact.AliyunObjectStoreClient.regional(endpoint, region);
-                objects = oss.objects(required("W1_OSS_BUCKET"));
+            if (!"inspect".equals(args[0])) {
+                objectStore = OperatorObjectStores.open("W1_OSS_");
+                objects = objectStore == null ? null
+                        : OperatorObjectStores.publication(objectStore);
             }
             var store = new WorkspaceRecoveryStore(jdbc, manager, new WorkspaceStorageGuard(jdbc, manager, properties, new com.alibaba.qwen.code.runtimebroker.provisioning.NativeStorageIdentityReader()),
                     objects, args[0], bytes);
@@ -66,8 +61,8 @@ public final class WorkspaceRecoveryMain {
             new com.alibaba.qwen.code.managedagent.adapters.workspace.LocalRecoveryWorker().execute(request, store, store::call);
             System.out.println(store.inspect());
         } finally {
-            if (oss != null) {
-                oss.shutdown();
+            if (objectStore != null) {
+                objectStore.close();
             }
         }
     }

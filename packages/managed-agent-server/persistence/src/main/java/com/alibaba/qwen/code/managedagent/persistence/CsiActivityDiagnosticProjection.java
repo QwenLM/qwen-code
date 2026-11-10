@@ -101,7 +101,7 @@ final class CsiActivityDiagnosticProjection {
             requireEncoded(resource != null && tenant.equals(resource.text("tenant_id"))
                     && workspace.equals(resource.text("workspace_id")) && session.equals(resource.text("session_id"))
                     && "REFERENCED".equals(resource.text("state")) && resource.number("schema_version") == 1
-                    && Arrays.equals(utf8(value.body().toString()), resource.binary("inline_bytes")));
+                    && Arrays.equals(utf8(value.body().toString()), resource.resourceBody()));
             if (!ManagedActivityDiagnostics.LINKS.equals(value.domain())) {
                 requireEncoded(ManagedActivityDiagnostics.PROJECTION_KIND.equals(resource.text("kind")));
                 projectionResources.add(value.resource());

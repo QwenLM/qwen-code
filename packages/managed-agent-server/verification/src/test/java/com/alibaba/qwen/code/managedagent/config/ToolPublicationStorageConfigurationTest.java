@@ -1,7 +1,5 @@
 package com.alibaba.qwen.code.managedagent.config;
 
-import com.alibaba.qwen.code.managedagent.adapters.artifact.AliyunObjectStoreClient;
-import com.alibaba.qwen.code.managedagent.adapters.artifact.AliyunToolPublicationObjectStore;
 import com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObjectStore;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.StorageReadPolicy;
 import com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy;
@@ -13,8 +11,6 @@ import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationDataStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
 import com.aliyun.oss.OSS;
-import com.aliyun.oss.model.AccessControlList;
-import com.aliyun.oss.model.CannedAccessControlList;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
@@ -35,7 +31,6 @@ import org.springframework.transaction.PlatformTransactionManager;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
 
 class ToolPublicationStorageConfigurationTest {
     private static final String PREFIX = "qwen.managed-agent.tool-publication.";
@@ -114,26 +109,18 @@ class ToolPublicationStorageConfigurationTest {
     }
 
     @Test
-    void theDefaultAdapterOwnsAndClosesItsOssClient() {
-        var client = mock(OSS.class);
-        var managedClient = new AliyunObjectStoreClient(client);
-        var acl = new AccessControlList();
-        acl.setCannedACL(CannedAccessControlList.Private);
-        when(client.getBucketAcl("private-test-bucket")).thenReturn(acl);
-        runner.withPropertyValues(PREFIX + "enabled=true", PREFIX + "oss-bucket=private-test-bucket")
-                .withBean("unrelatedOss", OSS.class, () -> mock(OSS.class))
+    void theDefaultAdapterOwnsAndClosesItsProvider() {
+        var store = mock(com.alibaba.qwen.code.managedagent.contracts.storage.ImmutableObjectStore.class);
+        runner.withPropertyValues(PREFIX + "enabled=true")
                 .withBean(BeanFactoryPostProcessor.class, () -> beanFactory ->
-                        ((AbstractBeanDefinition) beanFactory.getBeanDefinition("toolPublicationOss"))
-                                .setInstanceSupplier(() -> managedClient))
+                        ((AbstractBeanDefinition) beanFactory.getBeanDefinition("legacyPublicationObjectStore"))
+                                .setInstanceSupplier(() -> store))
                 .run(context -> {
                     assertThat(context).hasNotFailed().hasSingleBean(ToolPublicationObjectStore.class);
-                    assertThat(context.getBeansOfType(OSS.class)).containsOnlyKeys("unrelatedOss");
-                    assertThat(context.getBean("toolPublicationOss", AliyunObjectStoreClient.class))
-                            .isSameAs(managedClient);
-                    assertThat(context.getBean(ToolPublicationObjectStore.class))
-                            .isInstanceOf(AliyunToolPublicationObjectStore.class);
+                    assertThat(((com.alibaba.qwen.code.managedagent.contracts.storage.ToolPublicationObjectStoreAdapter)
+                            context.getBean(ToolPublicationObjectStore.class)).store()).isSameAs(store);
                 });
-        verify(client).shutdown();
+        verify(store).close();
     }
 
     @TestConfiguration(proxyBeanMethods = false)

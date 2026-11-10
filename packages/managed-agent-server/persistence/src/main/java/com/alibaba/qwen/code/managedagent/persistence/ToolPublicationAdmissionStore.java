@@ -97,7 +97,9 @@ public final class ToolPublicationAdmissionStore {
                 && usesDataSource(jdbc.getDataSource()),
                 "Acknowledgement verification requires native stores outside a transaction");
         var verified = data.verifyOriginalAcknowledgementResources(execution);
-        JsonNode catalog = acknowledgementReceiptCatalog(verified, false);
+        JsonNode sessionKey = verified.finished().path("binding").path("sessionKey");
+        JsonNode catalog = sessions.journalData(text(sessionKey, "tenantId"), text(sessionKey, "sessionId"),
+                () -> acknowledgementReceiptCatalog(verified, false));
         long revision = catalog.path("publication").path("receipt_revision").longValue();
         long sequence = catalog.path("publication").path("receipt_sequence").longValue();
         ObjectNode receipt = JSON.createObjectNode().put("executionCallId", execution.getExecutionCallId())
@@ -126,6 +128,7 @@ public final class ToolPublicationAdmissionStore {
         JsonNode finished = verified.finished();
         JsonNode binding = finished.path("binding");
         JsonNode key = binding.path("sessionKey");
+        JournalResidencyGuard.requireHot(jdbc, text(key, "tenantId"), text(key, "sessionId"));
         String id = text(finished, "publicationId");
         String suffix = locked ? " FOR UPDATE" : "";
         var publication = jdbc.query("SELECT scope_key, publication_id, tenant_id, workspace_id, session_id, producer_phase,"
@@ -282,6 +285,10 @@ public final class ToolPublicationAdmissionStore {
     public JsonNode verifyReceipt(JsonNode key, String writerToken, JsonNode request) {
         sessions.restore(text(key, "tenantId"), text(key, "workspaceId"),
                 text(key, "sessionId"), writerToken);
+        return sessions.journalData(text(key, "tenantId"), text(key, "sessionId"), () -> verifyReceiptHot(key, writerToken, request));
+    }
+
+    private JsonNode verifyReceiptHot(JsonNode key, String writerToken, JsonNode request) {
         JsonNode expected = request.path("toolOutcomeRef");
         var rows = jdbc.query("SELECT publication_id, admission_resource_id,"
                 + " receipt_sequence, receipt_revision FROM ma_output_capture"
@@ -369,7 +376,7 @@ public final class ToolPublicationAdmissionStore {
                     && manifestBytes.length <= ManagedSessionStoreModels.MAX_INLINE_RESOURCE_BYTES,
                     "Original manifest resource conflicts");
         }
-        return transactions.execute(status -> {
+        return sessions.resourceTransaction(text(key, "tenantId"), text(key, "sessionId"), transactions, () -> {
             boolean placement = data.lockPublicationPlacement(key, publicationId, authority != null);
             sessions.lockCsiOriginal(text(key, "tenantId"), text(key, "sessionId"));
             boolean csi = data.lockOriginalSettledResult(key, publicationId, finished);

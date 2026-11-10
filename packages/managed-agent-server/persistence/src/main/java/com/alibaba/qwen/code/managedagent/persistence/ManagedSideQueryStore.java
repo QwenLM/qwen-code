@@ -37,6 +37,20 @@ import java.util.UUID;
 @Transactional(transactionManager = "managedAgentTransactionManager")
 public class ManagedSideQueryStore implements ManagedSideQueries {
     private static final Set<String> INPUT_KINDS = Set.of("managed-side-query-input", "managed-side-query-chunk");
+    private com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedJournalAccess journalAccess;
+    private final org.springframework.transaction.support.TransactionTemplate readTransactions;
+    private SessionResourceTransactions resourceTransactions;
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public void configureResourceTransactions(SessionResourceTransactions resources) {
+        this.resourceTransactions = resources;
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    public void configureJournalAccess(com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedJournalAccess access) {
+        this.journalAccess = access;
+    }
+
     private final JdbcTemplate jdbc;
     private final ObjectMapper json;
     private final AgentStoreRows sessions;
@@ -51,6 +65,8 @@ public class ManagedSideQueryStore implements ManagedSideQueries {
             ManagedWorkspaceRegistry workspaces, ManagedSessionModelConfigs models,
             @Qualifier("managedAgentTransactionManager") PlatformTransactionManager manager) {
         this.jdbc = jdbc;
+        this.readTransactions = new org.springframework.transaction.support.TransactionTemplate(manager);
+        this.resourceTransactions = new SessionResourceTransactions(jdbc, manager, null);
         this.json = json;
         this.sessions = new AgentStoreRows(rules, jdbc, json);
         this.sessionQueries = new AgentSessionQueries(sessions, null, jdbc, List.of());
@@ -61,7 +77,14 @@ public class ManagedSideQueryStore implements ManagedSideQueries {
     }
 
     @Override
+    @Transactional(propagation = org.springframework.transaction.annotation.Propagation.NEVER)
     public Context context(String tenant, String actor, String session) {
+        authorize(tenant, actor, session, false);
+        return JournalResidencyGuard.read(jdbc, journalAccess, tenant, session,
+                () -> readTransactions.execute(status -> contextHot(tenant, actor, session)));
+    }
+
+    private Context contextHot(String tenant, String actor, String session) {
         SessionRecord visible = authorize(tenant, actor, session, false);
         Prefix prefix;
         try {
@@ -85,7 +108,14 @@ public class ManagedSideQueryStore implements ManagedSideQueries {
     }
 
     @Override
+    @Transactional(propagation = org.springframework.transaction.annotation.Propagation.NEVER)
     public Admission admit(String tenant, String actor, String session, Create request, boolean generationAvailable) {
+        authorize(tenant, actor, session, false);
+        return JournalResidencyGuard.read(jdbc, journalAccess, tenant, session,
+                () -> readTransactions.execute(status -> admitHot(tenant, actor, session, request, generationAvailable)));
+    }
+
+    private Admission admitHot(String tenant, String actor, String session, Create request, boolean generationAvailable) {
         validate(request);
         authorize(tenant, actor, session, false);
         String scope = actorScope(tenant, actor, session);
@@ -230,6 +260,7 @@ public class ManagedSideQueryStore implements ManagedSideQueries {
     @Override
     public TransactionPage transactions(String tenant, String session, String id, Claim claim, long after, int limit) {
         Row row = checked(tenant, session, id, claim, true);
+        JournalResidencyGuard.requireHot(jdbc, tenant, session);
         if (after < 0 || after > row.query().source().journalRevision() || limit < 1 || limit > 100) {
             throw error(400, "invalid_side_query_request");
         }
@@ -258,7 +289,12 @@ public class ManagedSideQueryStore implements ManagedSideQueries {
     }
 
     @Override
+    @Transactional(propagation = org.springframework.transaction.annotation.Propagation.NEVER)
     public StoredResource resource(String tenant, String session, String id, Claim claim, String resourceId) {
+        return resourceTransactions.read(tenant, session, () -> resourceHot(tenant, session, id, claim, resourceId));
+    }
+
+    private StoredResource resourceHot(String tenant, String session, String id, Claim claim, String resourceId) {
         Row row = checked(tenant, session, id, claim, true);
         String scope = SideQueryConversation.scope(tenant, session);
         String key = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.resourceKey(scope, resourceId);
@@ -545,6 +581,7 @@ public class ManagedSideQueryStore implements ManagedSideQueries {
     }
 
     private Prefix prefix(String tenant, String session) {
+        JournalResidencyGuard.requireHot(jdbc, tenant, session);
         var heads = jdbc.queryForList("SELECT journal_revision,committed_sequence,last_commit_digest,storage_version FROM ma_session_head"
                 + " WHERE tenant_id=? AND session_id=? AND head_kind='MANAGED_SESSION' FOR UPDATE", tenant, session);
         if (heads.size() != 1) {
@@ -617,15 +654,16 @@ public class ManagedSideQueryStore implements ManagedSideQueries {
     }
 
     private StoredResource loadResource(String tenant, String session, String id) {
-        var rows = jdbc.query("SELECT kind,schema_version,byte_length,sha256,inline_bytes,storage_kind,state"
+        var rows = jdbc.query("SELECT " + ManagedSchemaProjection.RESOURCE.columns()
                         + " FROM ma_resource WHERE tenant_id=? AND session_id=? AND resource_id=?",
                 (row, index) -> {
-                    byte[] bytes = row.getBytes(5);
-                    if (!"MYSQL_INLINE".equals(row.getString(6)) || !"REFERENCED".equals(row.getString(7))
-                            || bytes == null || bytes.length != row.getLong(3) || !JournalStoreRows.sha256(bytes).equals(row.getString(4))) {
+                    var descriptor = com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.read(row);
+                    byte[] bytes = SessionResourceBodies.preparedBody(descriptor);
+                    if (!List.of("MYSQL_INLINE", "OBJECT_STORE").contains(row.getString("storage_kind")) || !"REFERENCED".equals(row.getString("state"))
+                            || bytes == null || bytes.length != row.getLong("byte_length") || !JournalStoreRows.sha256(bytes).equals(row.getString("sha256"))) {
                         throw error(409, "side_query_resource_unavailable");
                     }
-                    return new StoredResource(id, row.getString(1), row.getInt(2), row.getLong(3), row.getString(4), bytes);
+                    return new StoredResource(id, row.getString("kind"), row.getInt("schema_version"), row.getLong("byte_length"), row.getString("sha256"), bytes);
                 }, tenant, session, id);
         if (rows.size() != 1) {
             throw error(404, "side_query_resource_not_found");

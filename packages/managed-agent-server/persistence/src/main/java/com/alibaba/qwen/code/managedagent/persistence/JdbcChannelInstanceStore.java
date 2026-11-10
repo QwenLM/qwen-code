@@ -50,9 +50,16 @@ public class JdbcChannelInstanceStore
                     row.getString("session_id"), row.getLong("claimed_at"), row.getLong("claim_generation"));
 
     private final JdbcTemplate jdbc;
+    private SessionResourceTransactions resources;
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public void configureResourceTransactions(SessionResourceTransactions access) {
+        this.resources = access;
+    }
 
     public JdbcChannelInstanceStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc) {
         this.jdbc = jdbc;
+        this.resources = new SessionResourceTransactions(jdbc, new org.springframework.jdbc.datasource.DataSourceTransactionManager(jdbc.getDataSource()), null);
     }
 
     /** Registers or refreshes a connection; the generation never moves back. */
@@ -273,17 +280,25 @@ public class JdbcChannelInstanceStore
                 limit);
     }
 
-    /** One inline resource's text, or null when it is not inline-held. */
+    /** One referenced resource's verified text, or null when it is absent. */
     public String readResource(String tenantId, String sessionId, String resourceId) {
-        List<byte[]> rows = jdbc.query(
-                "SELECT inline_bytes FROM ma_resource"
-                        + " WHERE session_scope_key = ? AND tenant_id = ? AND session_id = ? AND resource_id = ?"
-                        + " AND storage_kind = 'MYSQL_INLINE'"
-                        + " AND state = 'REFERENCED'",
-                (row, index) -> row.getBytes("inline_bytes"),
-                ManagedSessionStore.sessionScopeKey(tenantId, sessionId), tenantId, sessionId, resourceId);
-        return rows.isEmpty() ? null
+        return resources.read(tenantId, sessionId, () -> {
+            List<byte[]> rows = jdbc.query(
+                    "SELECT " + com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection.RESOURCE.columns() + " FROM ma_resource"
+                            + " WHERE session_scope_key = ? AND tenant_id = ? AND session_id = ? AND resource_id = ?"
+                            + " AND storage_kind IN ('MYSQL_INLINE', 'OBJECT_STORE') AND deletion_operation_key IS NULL"
+                            + " AND state = 'REFERENCED'",
+                    (row, index) -> {
+                        byte[] bytes = SessionResourceBodies.preparedBody(com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.read(row));
+                        if (bytes == null || bytes.length != row.getLong("byte_length") || !JournalStoreRows.sha256(bytes).equals(row.getString("sha256"))) {
+                            throw JournalStoreRows.resourceCorrupt();
+                        }
+                        return bytes;
+                    },
+                    ManagedSessionStore.sessionScopeKey(tenantId, sessionId), tenantId, sessionId, resourceId);
+            return rows.isEmpty() ? null
                 : new String(rows.getFirst(), StandardCharsets.UTF_8);
+        });
     }
 
     public ChannelClaim claim(String tenantId, String channelId,

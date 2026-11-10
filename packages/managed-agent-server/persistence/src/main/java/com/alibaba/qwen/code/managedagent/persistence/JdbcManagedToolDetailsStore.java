@@ -20,6 +20,13 @@ import java.util.List;
 public class JdbcManagedToolDetailsStore
         implements ManagedToolDetailsStore {
     private static final int READ_LIMIT = 8 * 1024 * 1024;
+    private com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedJournalAccess journalAccess;
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    public void configureJournalAccess(com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedJournalAccess access) {
+        this.journalAccess = access;
+    }
+
     private final JdbcTemplate jdbc;
     private final JdbcManagedExtensionRecordStore resources;
     private final ObjectMapper json;
@@ -31,8 +38,11 @@ public class JdbcManagedToolDetailsStore
         this.json = json;
     }
 
-    public WebShellToolDetails read(String tenant, String workspace,
-            String session, String itemId) {
+    public WebShellToolDetails read(String tenant, String workspace, String session, String itemId) {
+        return JournalResidencyGuard.read(jdbc, journalAccess, tenant, session, () -> readHot(tenant, workspace, session, itemId));
+    }
+
+    private WebShellToolDetails readHot(String tenant, String workspace, String session, String itemId) {
         var items = jdbc.query("SELECT t.prompt_id, m.attributes_json FROM ma_message m"
                         + " JOIN ma_turn t ON t.tenant_id = m.tenant_id AND t.session_id = m.session_id"
                         + " AND t.turn_id = m.turn_id WHERE m.tenant_id = ? AND m.session_id = ?"

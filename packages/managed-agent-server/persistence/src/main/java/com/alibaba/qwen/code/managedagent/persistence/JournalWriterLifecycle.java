@@ -255,6 +255,7 @@ final class JournalWriterLifecycle {
         }
         JournalStoreRows.HeadRow head = storeRows.requireHeadForUpdate(tenantId, sessionId);
         storeRows.requireHeadScope(head, tenantId, request.workspaceId(), sessionId);
+        JournalResidencyGuard.requireHot(jdbc, tenantId, sessionId);
         String scope = ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
         JournalFencing.requireCsiWriter(csiOriginal, head);
         if ("DELETING".equals(head.state())

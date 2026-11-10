@@ -21,6 +21,13 @@ import java.util.Optional;
 /** Reconciles coalesced Turn cancels from that prompt's durable terminal event. */
 @Component
 public class CancelEvidence implements AcceptanceEvidence {
+    private com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedJournalAccess journalAccess;
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    public void configureJournalAccess(com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedJournalAccess access) {
+        this.journalAccess = access;
+    }
+
     private final JdbcTemplate jdbc;
     private final ObjectMapper json;
 
@@ -36,6 +43,11 @@ public class CancelEvidence implements AcceptanceEvidence {
 
     @Override
     public Optional<AcceptanceVerdict> read(ParkedOperation parked) {
+        return com.alibaba.qwen.code.managedagent.persistence.JournalResidencyGuard.read(jdbc, journalAccess,
+                parked.tenantId(), parked.sessionId(), () -> readHot(parked));
+    }
+
+    private Optional<AcceptanceVerdict> readHot(ParkedOperation parked) {
         if (!kind().equals(parked.kind())) {
             return Optional.empty();
         }

@@ -35,6 +35,7 @@ import { resolveManagedRuntimeBrokerBaseUrl } from './managed-runtime-broker-url
 import {
   CSI_FILES_DIAGNOSTICS_CAPABILITY_DIGEST,
   CSI_FILES_ACTIVITY_CAPABILITY_DIGEST,
+  CSI_FILES_OBJECTS_CAPABILITY_DIGEST,
   CSI_FILES_RETIREMENT_CAPABILITY_DIGEST,
   readHostedCsiFileProfile,
   type CsiFilesProfile,
@@ -211,6 +212,7 @@ async function acquire(
       CSI_FILES_RETIREMENT_CAPABILITY_DIGEST,
       CSI_FILES_DIAGNOSTICS_CAPABILITY_DIGEST,
       CSI_FILES_ACTIVITY_CAPABILITY_DIGEST,
+      CSI_FILES_OBJECTS_CAPABILITY_DIGEST,
     ].includes(String(scope['capabilityDigest'])) ||
     scope['isolationClass'] !== 'session' ||
     typeof cwd !== 'string' ||
@@ -228,11 +230,14 @@ async function acquire(
     throw new Refusal('csi_runtime_identity_conflict');
   return {
     profile:
-      scope['capabilityDigest'] === CSI_FILES_ACTIVITY_CAPABILITY_DIGEST
-        ? 'csi-files-retirement/3'
-        : scope['capabilityDigest'] === CSI_FILES_DIAGNOSTICS_CAPABILITY_DIGEST
-          ? 'csi-files-retirement/2'
-          : 'csi-files-retirement/1',
+      scope['capabilityDigest'] === CSI_FILES_OBJECTS_CAPABILITY_DIGEST
+        ? 'csi-files-retirement/4'
+        : scope['capabilityDigest'] === CSI_FILES_ACTIVITY_CAPABILITY_DIGEST
+          ? 'csi-files-retirement/3'
+          : scope['capabilityDigest'] ===
+              CSI_FILES_DIAGNOSTICS_CAPABILITY_DIGEST
+            ? 'csi-files-retirement/2'
+            : 'csi-files-retirement/1',
     cwd,
     bindingId: runtime['bindingId'],
     generation: '1',
@@ -271,14 +276,18 @@ async function initialize(
     owner.stores = stores;
     const journal = await stores.journalStore.open({ sessionKey: owner.key });
     if (
-      owner.admission.profile === 'csi-files-retirement/3' &&
+      ['csi-files-retirement/3', 'csi-files-retirement/4'].includes(
+        owner.admission.profile,
+      ) &&
       !stores.supportsExecutionDiagnostics()
     )
       throw new Refusal('csi_activity_storage_unavailable');
     if (
-      ['csi-files-retirement/2', 'csi-files-retirement/3'].includes(
-        owner.admission.profile,
-      ) &&
+      [
+        'csi-files-retirement/2',
+        'csi-files-retirement/3',
+        'csi-files-retirement/4',
+      ].includes(owner.admission.profile) &&
       !stores.supportsModelDiagnostics()
     )
       throw new Refusal('csi_diagnostics_storage_unavailable');
@@ -350,12 +359,18 @@ async function initialize(
     if ((await readHostedCsiFileProfile(managed)) !== owner.admission.profile)
       throw new Refusal('csi_runtime_identity_conflict');
     if (
-      ['csi-files-retirement/2', 'csi-files-retirement/3'].includes(
-        owner.admission.profile,
-      )
+      [
+        'csi-files-retirement/2',
+        'csi-files-retirement/3',
+        'csi-files-retirement/4',
+      ].includes(owner.admission.profile)
     ) {
       await enableManagedSessionDiagnostics(managed);
-      if (owner.admission.profile === 'csi-files-retirement/3') {
+      if (
+        ['csi-files-retirement/3', 'csi-files-retirement/4'].includes(
+          owner.admission.profile,
+        )
+      ) {
         await enableManagedExecutionDiagnostics(managed);
       }
     }
