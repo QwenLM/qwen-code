@@ -125,6 +125,15 @@ public class ManagedSchemaPublicationStoreTest {
             assertThat(TransactionSynchronizationManager.isActualTransactionActive()).isFalse();
             return new ByteArrayInputStream(objects.get(key));
         }
+        @Override public InputStream openRange(String key, long offset, long length, Runnable guard) {
+            guard.run();
+            assertThat(TransactionSynchronizationManager.isActualTransactionActive()).isFalse();
+            byte[] value = objects.get(key);
+            if (value == null || offset < 0 || length < 0 || offset + length > value.length) {
+                throw new IllegalArgumentException("Invalid object range");
+            }
+            return new ByteArrayInputStream(value, (int) offset, (int) length);
+        }
         @Override public void validateConfiguration() { }
     }
 }

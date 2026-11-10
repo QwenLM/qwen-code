@@ -111,6 +111,11 @@ public final class WorkspaceCsiWorkerAckMain {
             }
 
             @Override
+            public InputStream openRange(String key, long offset, long length, Runnable guard) {
+                throw new IllegalStateException("External publication objects require OSS configuration");
+            }
+
+            @Override
             public void validateConfiguration() {
             }
         };

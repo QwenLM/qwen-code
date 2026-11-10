@@ -54,6 +54,7 @@ final class JournalStoreRows {
                         result.getLong("activation_epoch"),
                         result.getString("latest_checkpoint_resource_id"),
                         result.getLong("compacted_through_revision"),
+                        result.getLong("packed_through_revision"),
                         result.getString("recovery_status"),
                         result.getString("recovery_detail_code"),
                         result.getString("activation_id"),
@@ -681,7 +682,7 @@ final class JournalStoreRows {
             long journalRevision, long committedSequence,
             String lastCommitDigest, long activationEpoch,
             String latestCheckpointResourceId,
-            long compactedThroughRevision, String recoveryStatus,
+            long compactedThroughRevision, long packedThroughRevision, String recoveryStatus,
             String recoveryDetailCode, String activationId,
             String activationPhase, Long activationEventEpoch,
             Long activationExpiresAt, Long activationHeadRevision) {

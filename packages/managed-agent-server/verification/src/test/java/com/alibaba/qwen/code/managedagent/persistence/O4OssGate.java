@@ -172,6 +172,9 @@ public class O4OssGate extends O4MySqlGate {
             objects.putIfAbsent(key, bytes);
         }
         @Override public InputStream open(String key) { return objects.open(key); }
+        @Override public InputStream openRange(String key, long offset, long length, Runnable guard) {
+            return objects.openRange(key, offset, length, guard);
+        }
         @Override public void deleteIfPresent(String key) {
             objects.deleteIfPresent(key);
             keys.remove(key);
