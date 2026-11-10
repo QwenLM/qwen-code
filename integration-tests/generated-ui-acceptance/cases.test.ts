@@ -229,24 +229,29 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
     );
 
     it.each([
-      { mode: 'in-place', resetFault: 'none', initialAnnual: false },
-      { mode: 'new-card', resetFault: 'none', initialAnnual: false },
-      { mode: 'in-place', resetFault: 'none', initialAnnual: true },
-      { mode: 'in-place', resetFault: 'billing', initialAnnual: false },
-      { mode: 'in-place', resetFault: 'plan', initialAnnual: false },
-      { mode: 'in-place', resetFault: 'amounts', initialAnnual: false },
+      { mode: 'in-place', resetFault: 'none', initialPlan: 'basic' },
+      { mode: 'new-card', resetFault: 'none', initialPlan: 'basic' },
+      { mode: 'in-place', resetFault: 'none', initialPlan: 'pro' },
+      { mode: 'in-place', resetFault: 'billing', initialPlan: 'basic' },
+      { mode: 'in-place', resetFault: 'plan', initialPlan: 'basic' },
+      { mode: 'in-place', resetFault: 'amounts', initialPlan: 'basic' },
+      { mode: 'in-place', resetFault: 'none', initialPlan: null },
+      { mode: 'new-card', resetFault: 'none', initialPlan: null },
+      { mode: 'in-place', resetFault: 'plan', initialPlan: null },
     ] as const)(
-      'observes $mode comparator updates (reset=$resetFault, initialAnnual=$initialAnnual)',
-      async ({ mode, resetFault, initialAnnual }) => {
+      'observes $mode comparator updates (reset=$resetFault, initialPlan=$initialPlan)',
+      async ({ mode, resetFault, initialPlan }) => {
+        const initialAnnual = initialPlan === 'pro';
         const page = await browser.newPage();
+        page.setDefaultTimeout(1_000);
         try {
           vi.spyOn(page, 'waitForTimeout').mockResolvedValue();
           const html = `
             <input id="seats" value="6">
             <input type="radio" name="billing" id="billing-monthly" ${initialAnnual ? '' : 'checked'}>
             <input type="radio" name="billing" id="billing-annual" ${initialAnnual ? 'checked' : ''}>
-            <input type="radio" name="plan" id="plan-basic" ${initialAnnual ? '' : 'checked'}>
-            <input type="radio" name="plan" id="plan-pro" ${initialAnnual ? 'checked' : ''}>
+            <input type="radio" name="plan" id="plan-basic" ${initialPlan === 'basic' ? 'checked' : ''}>
+            <input type="radio" name="plan" id="plan-pro" ${initialPlan === 'pro' ? 'checked' : ''}>
             <input type="radio" name="plan" id="plan-team">
             <input id="support" type="checkbox"><button id="export">Export</button>
             <span id="basic-monthly"></span><span id="basic-payment"></span>
@@ -280,7 +285,7 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
               const reset = prompt === 'reset';
               if (mode === 'new-card') view = await newView(page, html);
               await view.evaluate(
-                ({ reset, resetFault, initialAnnual }) => {
+                ({ reset, resetFault, initialAnnual, initialPlan }) => {
                   (
                     document.getElementById('support') as HTMLInputElement
                   ).checked = !reset;
@@ -293,19 +298,22 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
                         : 'billing-monthly',
                     ) as HTMLInputElement
                   ).checked = true;
-                  (
-                    document.getElementById(
-                      !reset || resetFault === 'plan'
-                        ? 'plan-team'
-                        : initialAnnual
-                          ? 'plan-pro'
-                          : 'plan-basic',
-                    ) as HTMLInputElement
-                  ).checked = true;
+                  const plan =
+                    !reset || resetFault === 'plan' ? 'team' : initialPlan;
+                  for (const input of document.querySelectorAll<HTMLInputElement>(
+                    'input[name="plan"]',
+                  ))
+                    input.checked = false;
+                  if (plan)
+                    (
+                      document.getElementById(
+                        `plan-${plan}`,
+                      ) as HTMLInputElement
+                    ).checked = true;
                   if (!reset || resetFault !== 'amounts')
                     document.dispatchEvent(new Event('input'));
                 },
-                { reset, resetFault, initialAnnual },
+                { reset, resetFault, initialAnnual, initialPlan },
               );
             },
           } as unknown as AcceptanceEnv;
@@ -325,9 +333,12 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
           expect(await view.locator('#billing-annual').isChecked()).toBe(
             initialAnnual || resetFault === 'billing',
           );
-          expect(await view.locator('#plan-team').isChecked()).toBe(
-            resetFault === 'plan',
-          );
+          const expectedPlan = resetFault === 'plan' ? 'team' : initialPlan;
+          expect(
+            await view
+              .locator('input[name="plan"]:checked')
+              .evaluateAll((inputs) => inputs.map((input) => input.id)),
+          ).toEqual(expectedPlan ? [`plan-${expectedPlan}`] : []);
           expect(await view.locator('#team-payment').textContent()).toBe(
             resetFault === 'amounts'
               ? '14227.20'

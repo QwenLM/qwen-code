@@ -696,6 +696,17 @@ function describeComparator(
   ).join('; ');
 }
 
+async function selectedRadioId(view: Frame, group: 'billing' | 'plan') {
+  return view
+    .locator(`input[id^="${group}-"]:checked`)
+    .evaluateAll((inputs) => {
+      if (inputs.length > 1) {
+        throw new Error('Expected at most one checked radio per group');
+      }
+      return inputs[0]?.id ?? null;
+    });
+}
+
 /** Comparator: monthly equivalent vs payment, extension across turns, export, reset. */
 export async function runComparator(
   env: AcceptanceEnv,
@@ -706,12 +717,8 @@ export async function runComparator(
   const first = await env.waitForCard(0);
   await env.waitForIdle();
   const initialSeats = await first.view.locator('#seats').inputValue();
-  const initialBilling = await first.view
-    .locator('input[id^="billing-"]:checked')
-    .getAttribute('id');
-  const initialPlan = await first.view
-    .locator('input[id^="plan-"]:checked')
-    .getAttribute('id');
+  const initialBilling = await selectedRadioId(first.view, 'billing');
+  const initialPlan = await selectedRadioId(first.view, 'plan');
   const initialInputs: ComparatorInputs = {
     seats: Number(initialSeats),
     billing: initialBilling === 'billing-annual' ? 'annual' : 'monthly',
@@ -816,12 +823,8 @@ export async function runComparator(
       (value) => comparatorMatches(value, initialInputs),
     );
     const seats = await reset.view.locator('#seats').inputValue();
-    const billing = await reset.view
-      .locator('input[id^="billing-"]:checked')
-      .getAttribute('id');
-    const plan = await reset.view
-      .locator('input[id^="plan-"]:checked')
-      .getAttribute('id');
+    const billing = await selectedRadioId(reset.view, 'billing');
+    const plan = await selectedRadioId(reset.view, 'plan');
     const support = await reset.view
       .locator('#support')
       .isChecked()
