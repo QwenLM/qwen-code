@@ -6738,25 +6738,31 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
             /^comment truncated: 0 /,
             'comment truncated: (\\d+) ',
           )}\\]\\n?$`,
+          'gm',
         );
-        summary = summary
-          .split(/(?=^- @)/m)
-          .map((chunk) => {
-            const match = chunk.match(truncationPattern);
-            if (!match) return chunk;
-            const count = match[1]!;
-            // Genuine only at the composer's own cut: the WHOLE bullet's
-            // rendered content (including continuation lines) then holds
-            // exactly MAX_AGGREGATE_COMMENT_CHARS code points. Any other
-            // length is quoted user text, left verbatim.
-            const rendered = chunk
-              .slice(0, chunk.length - match[0].length)
+        // Track bullet starts sequentially instead of splitting on `- @`:
+        // a continuation line can itself start with `- @name:`, and treating
+        // it as a new bullet would lose a genuine multi-line truncation.
+        let bulletStart = 0;
+        summary = summary.replace(
+          truncationPattern,
+          (match, count, offset, whole) => {
+            const start = whole.indexOf('- @', bulletStart);
+            if (start < 0) return match;
+            bulletStart = offset;
+            const rendered = whole
+              .slice(start, offset)
               .replace(/^- @[^:]*: /, '');
+            // Genuine only at the composer's own cut: the WHOLE bullet's
+            // rendered content (including any `- @name:` continuation lines)
+            // then holds exactly MAX_AGGREGATE_COMMENT_CHARS code points.
             return Array.from(rendered).length === MAX_AGGREGATE_COMMENT_CHARS
-              ? `${rendered}… [${copy.commentTruncated(Number(count))}]`
-              : chunk;
-          })
-          .join('');
+              ? `${whole.slice(start, offset)}… [${copy.commentTruncated(
+                  Number(count),
+                )}]`
+              : match;
+          },
+        );
       }
       text = `${header}\n${summary}`;
     }

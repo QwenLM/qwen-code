@@ -239,8 +239,9 @@ thread is re-read once the turn settles.
   follows the channel's UI language: it is Chinese when `general.language`
   resolves to Chinese (`zh`, `zh-*`, `中文`), and keeps the previous English
   wording for every other value. Structural markers (the
-  `Type:`/`Title:`/`URL:`/`Trigger:`/`Event:`/`Author:`/`Role:` data lines,
-  `[Operator instruction — trusted]` and `Source:`) and platform-derived
+  `Type:`/`Title:`/`URL:`/`Trigger:`/`Event:`/`Author:`/`Role:` data lines, the
+  `File:` and `Comment:` labels used by the comment watch, the trusted-block
+  label `[Operator instruction — trusted]` and `Source:`) and platform-derived
   values (PR titles, comment bodies, check names) are never translated, and
   operator templates render verbatim in the language they were written in.
   The language is read at channel startup; a watch summary already detected
