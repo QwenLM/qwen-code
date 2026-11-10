@@ -200,6 +200,35 @@ describe('submitInput loop wakeup', () => {
     });
   });
 
+  it('omits notBefore for callers that do not set it (closed readers)', async () => {
+    const harness = await createHarness();
+    await withAuthority(harness, async (authority) => {
+      const input = await loopInput(harness, 'w1', 61_000);
+      await authority.submitInput(command('arm-plain'), {
+        ...input,
+        notBefore: undefined,
+      });
+      const accepted = events(authority).find(
+        (e) => e.kind === 'input.accepted',
+      );
+      expect(accepted).toBeDefined();
+      // Closed readers (the CSI native-activation proof, older parsers)
+      // require exactly the six legacy fields; an explicit null would be a
+      // seventh field and break ordinary input admission.
+      expect('notBefore' in accepted!.payload).toBe(false);
+      expect(Object.keys(accepted!.payload).sort()).toEqual(
+        [
+          'admissionRef',
+          'contentRef',
+          'deadline',
+          'inputId',
+          'source',
+          'turnId',
+        ].sort(),
+      );
+    });
+  });
+
   it('settles the replaced input and arms the new one in one transaction', async () => {
     const harness = await createHarness();
     await withAuthority(harness, async (authority) => {

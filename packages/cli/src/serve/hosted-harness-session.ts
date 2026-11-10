@@ -1476,6 +1476,26 @@ function firstPendingWakeInput(session: HostedSession) {
 }
 
 /**
+ * The pending wake input a crash aftermath should target: the one that
+ * carries a prior attempt. The pump may have skipped an older not-yet-due
+ * input to run a later due one, so the attempted wake is not necessarily the
+ * first by journal order; recovering the wrong one leaves the real crash
+ * blocked. Falls back to the first pending wake when none has an attempt.
+ */
+async function attemptedPendingWakeInput(session: HostedSession) {
+  const authority = session.managed.authority;
+  const pending = pendingSessionInputs(
+    authority.eventsInSequenceRange(1, authority.committedSequence),
+  ).filter((input) => isWakeInputSource(input.source));
+  if (pending.length === 0) return undefined;
+  const projected = await session.managed.sink.project();
+  return (
+    pending.find((input) => wakeHasPriorAttempt(projected, input.turnId)) ??
+    pending[0]
+  );
+}
+
+/**
  * Whether a still-pending wake input holds the Session's checkpoint
  * parked at `await_runtime` with in-progress Runtime executions: the
  * crash residue that makes every later turn die at "not a model-start
@@ -7229,9 +7249,9 @@ export function registerHostedHarnessSessionRoutes(
               }
               if (!session.blocked) return;
             }
-            const first = firstPendingWakeInput(session);
-            if (first === undefined) return;
-            const aftermath = await wakeAftermath(first.turnId);
+            const target = await attemptedPendingWakeInput(session);
+            if (target === undefined) return;
+            const aftermath = await wakeAftermath(target.turnId);
             if (aftermath === 'settled') {
               liftRecoveryBlock(session);
             }
@@ -8489,6 +8509,7 @@ export function registerHostedHarnessSessionRoutes(
             ...(session.messages ? [SESSION_MESSAGE_INPUT_SOURCE] : []),
             ...(session.automations ? [AUTOMATION_INPUT_SOURCE] : []),
             ...(session.channels ? [CHANNEL_INPUT_SOURCE] : []),
+            LOOP_INPUT_SOURCE,
           ],
         });
         await session.automations?.reconcileRuns();
@@ -13551,6 +13572,7 @@ export function registerHostedHarnessSessionRoutes(
               ...(session.messages ? [SESSION_MESSAGE_INPUT_SOURCE] : []),
               ...(session.automations ? [AUTOMATION_INPUT_SOURCE] : []),
               ...(session.channels ? [CHANNEL_INPUT_SOURCE] : []),
+              LOOP_INPUT_SOURCE,
             ],
           });
           // A refused settle revision never blocks the close: the next open
@@ -13785,7 +13807,7 @@ export function registerHostedHarnessSessionRoutes(
               abort: new AbortController(),
             };
             try {
-              const first = firstPendingWakeInput(session);
+              const first = await attemptedPendingWakeInput(session);
               if (first !== undefined) {
                 const aftermath = await aftermathOf(first.turnId);
                 if (aftermath === 'settled') {

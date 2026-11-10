@@ -4533,7 +4533,13 @@ function inputEvents(
         contentRef: input.contentRef,
         deadline: input.deadline,
         admissionRef: input.admissionRef,
-        notBefore: input.notBefore ?? null,
+        // Omit the field for callers that do not set it: closed readers
+        // (the CSI native-activation proof, older parsers) require exactly
+        // the six legacy fields, so an explicit null would break ordinary
+        // input admission even with the loop feature off.
+        ...(input.notBefore !== undefined
+          ? { notBefore: input.notBefore }
+          : {}),
       },
     },
     {
