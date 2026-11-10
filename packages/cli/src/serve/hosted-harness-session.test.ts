@@ -4443,6 +4443,7 @@ describe('Hosted Harness no-tool session', () => {
   // fixture deterministically declines its Broker identity.
   async function prewriteAutomationParkedWakeSession(
     tooling: 'read_file' | 'run_shell_command' = 'read_file',
+    withOlderLoopInput = false,
   ): Promise<string> {
     state.approvalSelections.set(SESSION_ID, { mode: 'yolo', revision: 0 });
     const shellArg = tooling === 'run_shell_command';
@@ -4496,6 +4497,35 @@ describe('Hosted Harness no-tool session', () => {
       // so the turn's before_model lands before the automation records.
       const handle = createManagedHarnessHandle(managed);
       await handle.ensureRunnable();
+      if (withOlderLoopInput) {
+        // An older, not-yet-due loop wakeup: first by journal order but never
+        // attempted. Recovery must target the crashed automation below, not
+        // this skipped input.
+        await managed.authority.submitInput(
+          {
+            operation: 'submitInput',
+            commandId: 'loop-older-1',
+            sessionKey: key,
+            contentDigest: 'b'.repeat(64),
+          },
+          {
+            inputId: 'loop:older-1',
+            turnId: 'loop:older-1',
+            source: 'loop',
+            contentRef: await managed.resources.publish(
+              'managed-input',
+              Buffer.from(JSON.stringify({ text: '/loop tick' }), 'utf8'),
+            ),
+            admissionRef: await managed.resources.publish(
+              'managed-admission',
+              Buffer.from('{}', 'utf8'),
+            ),
+            deadline: null,
+            wakeReason: 'input',
+            notBefore: Date.now() + 3_600_000,
+          },
+        );
+      }
       const automations = new HostedAutomationSession(
         {
           authority: managed.authority,
@@ -6194,8 +6224,13 @@ describe('Hosted Harness no-tool session', () => {
     await headers(supertest(server).delete(`/session/${SESSION_ID}`));
   }, 45_000);
 
-  it('has the reconcile route itself repair a crash the pump left blocked', async () => {
-    const inputId = await prewriteAutomationParkedWakeSession();
+  it('has the reconcile route itself repair a crash the pump left blocked, past an older deferred loop input', async () => {
+    // The older not-yet-due loop input is first by journal order but never
+    // attempted: the repair must target the crashed automation, not it.
+    const inputId = await prewriteAutomationParkedWakeSession(
+      'read_file',
+      true,
+    );
     mockBrokerBroker();
     vi.spyOn(HostedWorkspaceBroker.prototype, 'status').mockResolvedValue({
       state: 'settled',
