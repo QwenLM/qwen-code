@@ -53002,13 +53002,22 @@ describe('settings-derived theme and language (#11955)', () => {
   it('resolves general.language and ui.theme from settings when no workspaces are present (#16398)', async () => {
     mockWorkspace.capabilities = {
       workspaces: [],
-      features: ['standalone_sessions'],
+      features: ['standalone_sessions_v1'],
     };
     testState.settings = [languageSetting('ru'), themeSetting('Qwen Light')];
     const onLanguageResolved = vi.fn();
     const onThemeResolved = vi.fn();
     const { container } = renderApp({ onLanguageResolved, onThemeResolved });
     await flush();
+
+    expect(testState.latestSettingsHookOptions).toEqual({
+      autoLoad: true,
+      enabled: true,
+    });
+    expect(testState.latestProvidersHookOptions).toEqual({
+      autoLoad: false,
+      enabled: false,
+    });
 
     expect(
       container.querySelector('[data-web-shell-root]')?.getAttribute('lang'),
@@ -53020,6 +53029,14 @@ describe('settings-derived theme and language (#11955)', () => {
         ?.classList.contains('dark'),
     ).toBe(false);
     expect(onThemeResolved).toHaveBeenCalledWith('light');
+
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+    expect(testState.latestProvidersHookOptions).toEqual({
+      autoLoad: true,
+      enabled: true,
+    });
   });
 
   it('lets an explicit language prop win over general.language', async () => {
