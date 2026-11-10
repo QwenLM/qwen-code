@@ -978,6 +978,52 @@ const GITHUB: DaemonChannelTypeDescriptor = {
   ],
 };
 
+// GitLab declares groupPolicy itself and receives the same injected
+// privatePolicy/allowedUsers as GitHub; its adapter is group-only too.
+const GITLAB: DaemonChannelTypeDescriptor = {
+  type: 'gitlab',
+  displayName: 'GitLab',
+  manageable: true,
+  fields: [
+    {
+      key: 'token',
+      label: 'Personal Access Token',
+      kind: 'secret',
+    },
+    {
+      key: 'groupPolicy',
+      label: 'Group Policy',
+      kind: 'enum',
+      required: true,
+      default: 'open',
+      options: [
+        { value: 'open', label: 'Open' },
+        { value: 'allowlist', label: 'Allowlist' },
+        { value: 'pairing', label: 'Pairing' },
+        { value: 'disabled', label: 'Disabled' },
+      ],
+    },
+    {
+      key: 'privatePolicy',
+      label: 'Private Policy',
+      kind: 'enum',
+      required: true,
+      default: 'allowlist',
+      options: [
+        { value: 'disabled', label: 'Disabled' },
+        { value: 'allowlist', label: 'Allowlist' },
+        { value: 'pairing', label: 'Pairing' },
+        { value: 'open', label: 'Open' },
+      ],
+    },
+    {
+      key: 'allowedUsers',
+      label: 'Allowed Users',
+      kind: 'string-list',
+    },
+  ],
+};
+
 describe('GitHub watch events require bound delivery', () => {
   const BOUND: DaemonChannelTypeDescriptor = {
     ...GITHUB,
@@ -1303,6 +1349,64 @@ describe('Repository-only channel access config', () => {
     const request = buildChannelUpsertRequest(GITHUB, draft, 'rev-2', instance);
     expect(request.config).not.toHaveProperty('privatePolicy');
     expect(request.config).not.toHaveProperty('allowedUsers');
+  });
+
+  it('drops the private-access residue for GitLab too', () => {
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'release-bot',
+      config: {
+        type: 'gitlab',
+        groupPolicy: 'open',
+        privatePolicy: 'pairing',
+        allowedUsers: ['alice'],
+      },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    const draft = createChannelEditorDraft(GITLAB, instance);
+
+    const request = buildChannelUpsertRequest(GITLAB, draft, 'rev-2', instance);
+    expect(request.config).not.toHaveProperty('privatePolicy');
+    expect(request.config).not.toHaveProperty('allowedUsers');
+  });
+
+  it('admits a nested GitLab project path and saves it as a group key', () => {
+    const draft = createChannelEditorDraft(GITLAB);
+    draft.name = 'release-bot';
+    draft.secrets.token = { operation: 'replace', value: 'glpat-test' };
+    draft.values.groupPolicy = 'allowlist';
+    draft.allowedGroupIds = 'mygroup/subgroup/project';
+
+    expect(validateChannelEditorDraft(GITLAB, draft, [])).toEqual({});
+    const request = buildChannelUpsertRequest(GITLAB, draft, 'rev-1');
+    expect(request.config['groups']).toEqual({
+      'mygroup/subgroup/project': {},
+    });
+  });
+
+  it('still rejects a malformed GitLab allowlist entry', () => {
+    const draft = createChannelEditorDraft(GITLAB);
+    draft.name = 'release-bot';
+    draft.secrets.token = { operation: 'replace', value: 'glpat-test' };
+    draft.values.groupPolicy = 'allowlist';
+    draft.allowedGroupIds = 'solo';
+
+    expect(validateChannelEditorDraft(GITLAB, draft, [])).toEqual({
+      allowedGroupIds: 'invalidRepoId',
+    });
+  });
+
+  it('keeps GitHub strict to owner/repo for the allowlist', () => {
+    const draft = createChannelEditorDraft(GITHUB);
+    draft.name = 'release-bot';
+    draft.secrets.token = { operation: 'replace', value: 'ghp_test' };
+    draft.values.groupPolicy = 'allowlist';
+    draft.allowedGroupIds = 'owner/repo/extra';
+
+    expect(validateChannelEditorDraft(GITHUB, draft, [])).toEqual({
+      allowedGroupIds: 'invalidRepoId',
+    });
   });
 
   it('requires owner/repo for an allowlisted repository', () => {
@@ -2193,8 +2297,27 @@ describe('Per-repository overrides', () => {
     expect(
       repositoryAllowlistIds(
         'QwenLM/qwen-code, qwen-code, acme/widgets, QwenLM/Qwen-Code',
+        'github',
       ),
     ).toEqual(['qwenlm/qwen-code', 'acme/widgets']);
+  });
+
+  it('names nested GitLab project paths the allowlist can admit', () => {
+    expect(
+      repositoryAllowlistIds(
+        'MyGroup/SubGroup/Project, mygroup/project, solo, a/b/c/d',
+        'gitlab',
+      ),
+    ).toEqual(['mygroup/subgroup/project', 'mygroup/project', 'a/b/c/d']);
+  });
+
+  it('keeps GitHub strict to owner/repo while GitLab accepts nested paths', () => {
+    // The same multi-segment id is rejected for GitHub (no repository has that
+    // shape) but admitted for GitLab (a project in a subgroup).
+    expect(repositoryAllowlistIds('owner/repo/extra', 'github')).toEqual([]);
+    expect(repositoryAllowlistIds('owner/repo/extra', 'gitlab')).toEqual([
+      'owner/repo/extra',
+    ]);
   });
 
   // Invariant sweep over stored shapes x single-field edits, run through the

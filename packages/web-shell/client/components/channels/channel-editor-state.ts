@@ -89,15 +89,26 @@ export const PRIVATE_ONLY_FIELD_KEYS = new Set([
 export const GROUP_ONLY_FIELD_KEYS = new Set(['groupPolicy']);
 
 const REPOSITORY_FULL_NAME_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+// GitLab project paths nest subgroups (group/subgroup/project); GitHub
+// repositories are exactly owner/repo. The runtime matches arbitrary group
+// keys, so this shape is a usability guard keyed on the channel, not a
+// security boundary.
+const GITLAB_PROJECT_PATH_RE = /^[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)+$/;
+
+function repositoryIdPattern(type: unknown): RegExp {
+  return type === 'gitlab' ? GITLAB_PROJECT_PATH_RE : REPOSITORY_FULL_NAME_RE;
+}
 
 /**
  * Canonical repository IDs the allowlist currently names, in typing order.
- * Entries that are not `owner/repo` are left out: the save path rejects them,
- * and a row for a half-typed repository would only flicker.
+ * Entries that do not match the channel's repository shape are left out: the
+ * save path rejects them, and a row for a half-typed repository would only
+ * flicker.
  */
-export function repositoryAllowlistIds(value: string): string[] {
+export function repositoryAllowlistIds(value: string, type: unknown): string[] {
+  const pattern = repositoryIdPattern(type);
   return [...new Set(toList(value.toLowerCase()))].filter((id) =>
-    REPOSITORY_FULL_NAME_RE.test(id),
+    pattern.test(id),
   );
 }
 
@@ -641,10 +652,9 @@ export function validateChannelEditorDraft(
     isRepositoryOnlyChannelType(descriptor.type) &&
     String(draft.values['groupPolicy'] ?? '') === 'allowlist'
   ) {
+    const pattern = repositoryIdPattern(descriptor.type);
     if (
-      splitList(draft.allowedGroupIds).some(
-        (groupId) => !REPOSITORY_FULL_NAME_RE.test(groupId),
-      )
+      splitList(draft.allowedGroupIds).some((groupId) => !pattern.test(groupId))
     ) {
       errors['allowedGroupIds'] = 'invalidRepoId';
     }
@@ -923,6 +933,7 @@ function removeGroupAllowlistMembership(
   instance: DaemonChannelInstanceSnapshot | undefined,
   overrides?: Record<string, ChannelGroupOverrideDraft>,
   allowedGroupIds = '',
+  type: unknown = undefined,
 ): void {
   const previous = instance?.config['groups'];
   const previousGroups = isRecord(previous) ? previous : {};
@@ -939,7 +950,7 @@ function removeGroupAllowlistMembership(
     const storedIds = new Set(
       [...entries.keys()].map((id) => id.toLowerCase()),
     );
-    for (const groupId of repositoryAllowlistIds(allowedGroupIds)) {
+    for (const groupId of repositoryAllowlistIds(allowedGroupIds, type)) {
       if (!storedIds.has(groupId)) entries.set(groupId, {});
     }
   }
@@ -1081,6 +1092,7 @@ export function buildChannelUpsertRequest(
         instance,
         repositoryOnly ? draft.groupOverrides : undefined,
         draft.allowedGroupIds,
+        descriptor.type,
       );
     }
     assignGroupSenders(config, draft);

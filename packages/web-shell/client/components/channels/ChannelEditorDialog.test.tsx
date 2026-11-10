@@ -242,6 +242,60 @@ const GITHUB_CONFIGURED: DaemonChannelTypeDescriptor = {
   ],
 };
 
+// GitLab mirrors GitHub's shape: it declares groupPolicy itself and receives
+// the injected privatePolicy/allowedUsers that its group-only adapter never
+// reads (GitlabAdapter builds every envelope with isGroup: true).
+const GITLAB_CONFIGURED: DaemonChannelTypeDescriptor = {
+  type: 'gitlab',
+  displayName: 'GitLab',
+  manageable: true,
+  fields: [
+    {
+      key: 'token',
+      label: 'Personal Access Token',
+      kind: 'secret',
+      envResolvable: true,
+    },
+    {
+      key: 'baseUrl',
+      label: 'Base URL',
+      kind: 'string',
+      envResolvable: true,
+    },
+    {
+      key: 'groupPolicy',
+      label: 'Group Policy',
+      kind: 'enum',
+      required: true,
+      default: 'open',
+      options: [
+        { value: 'open', label: 'Open' },
+        { value: 'allowlist', label: 'Allowlist' },
+        { value: 'pairing', label: 'Pairing' },
+        { value: 'disabled', label: 'Disabled' },
+      ],
+    },
+    {
+      key: 'privatePolicy',
+      label: 'Private Policy',
+      kind: 'enum',
+      required: true,
+      default: 'pairing',
+      options: [
+        { value: 'disabled', label: 'Disabled' },
+        { value: 'allowlist', label: 'Allowlist' },
+        { value: 'pairing', label: 'Pairing' },
+        { value: 'open', label: 'Open' },
+      ],
+    },
+    {
+      key: 'allowedUsers',
+      label: 'Allowed Users',
+      kind: 'string-list',
+    },
+  ],
+};
+
 const EXCLUSIVE_MINIMUM: DaemonChannelTypeDescriptor = {
   type: 'example',
   displayName: 'Example',
@@ -2585,6 +2639,64 @@ describe('ChannelEditorDialog', () => {
 
     expect(document.body.textContent).not.toContain('Direct message policy');
     expect(document.body.textContent).not.toContain('Allowed user IDs');
+  });
+
+  it('hides the direct-message policy for repository-only GitLab too', async () => {
+    // GitLab builds every envelope with isGroup: true, exactly like GitHub, so
+    // the injected private controls must be suppressed for it as well.
+    await renderDialog({ descriptor: GITLAB_CONFIGURED });
+
+    expect(document.body.textContent).not.toContain('Direct message policy');
+    expect(document.body.textContent).not.toContain('Allowed user IDs');
+    // The group axis stays editable: only the private axis is inert.
+    expect(document.body.textContent).toContain('Group Policy');
+  });
+
+  it('shows project-path copy and a row for a nested GitLab allowlist', async () => {
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'gitlab-bot',
+      config: {
+        type: 'gitlab',
+        groupPolicy: 'allowlist',
+        groups: { 'mygroup/subgroup/project': {} },
+      },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    await renderDialog({ descriptor: GITLAB_CONFIGURED, instance });
+
+    // The allowlist field uses GitLab project-path wording, not owner/repo.
+    const allowlist = fieldByLabel('Allowed projects');
+    expect(allowlist).not.toBeNull();
+    expect(allowlist?.getAttribute('placeholder')).toBe('group/project');
+    expect(descriptionOf(allowlist)).toContain('group/subgroup/project');
+    expect(document.body.textContent).not.toContain('owner/repo');
+    // The nested project path gets a per-repository override row.
+    expect(document.body.textContent).toContain('mygroup/subgroup/project');
+  });
+
+  it('localizes the GitLab allowlist copy for zh-CN', async () => {
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'gitlab-bot',
+      config: {
+        type: 'gitlab',
+        groupPolicy: 'allowlist',
+        groups: { 'mygroup/subgroup/project': {} },
+      },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    await renderDialog({
+      descriptor: GITLAB_CONFIGURED,
+      instance,
+      language: 'zh-CN',
+    });
+
+    const allowlist = fieldByLabel('允许的项目');
+    expect(allowlist).not.toBeNull();
+    expect(descriptionOf(allowlist)).toContain('项目路径');
   });
 
   it('asks a repository-only channel to save group pairing before showing approvals', async () => {

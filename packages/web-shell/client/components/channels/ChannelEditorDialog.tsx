@@ -1254,7 +1254,10 @@ export function ChannelEditorDialog({
   };
 
   const renderRepositoryOverrides = () => {
-    const repositories = repositoryAllowlistIds(draft.allowedGroupIds);
+    const repositories = repositoryAllowlistIds(
+      draft.allowedGroupIds,
+      descriptor.type,
+    );
     if (repositories.length === 0) return null;
     const groups = instance?.config['groups'];
     // Fold the stored keys the same way the save path does, so a mixed-case
@@ -1723,6 +1726,11 @@ export function ChannelEditorDialog({
               const repositoryOnly = isRepositoryOnlyChannelType(
                 descriptor.type,
               );
+              // GitLab allowlists nested project paths; GitHub lists owner/repo.
+              const repositoryAllowlistKey =
+                descriptor.type === 'gitlab'
+                  ? 'channels.editor.field.gitlab.allowedRepos'
+                  : 'channels.editor.field.github.allowedRepos';
               const privateOnly = isPrivateOnlyChannelType(descriptor.type);
               const descriptorPolicy = hasDescriptorPrivatePolicy(descriptor);
               const effectivePolicy = repositoryOnly
@@ -1838,12 +1846,12 @@ export function ChannelEditorDialog({
                       id={`${formId}-allowedGroupIds`}
                       label={t(
                         repositoryOnly
-                          ? 'channels.editor.field.github.allowedRepos'
+                          ? repositoryAllowlistKey
                           : 'channels.editor.field.shared.allowedGroupIds',
                       )}
                       description={t(
                         repositoryOnly
-                          ? 'channels.editor.field.github.allowedRepos.description'
+                          ? `${repositoryAllowlistKey}.description`
                           : 'channels.editor.field.shared.allowedGroupIds.description',
                       )}
                       error={errors['allowedGroupIds']}
@@ -1854,7 +1862,7 @@ export function ChannelEditorDialog({
                         aria-invalid={Boolean(errors['allowedGroupIds'])}
                         placeholder={t(
                           repositoryOnly
-                            ? 'channels.editor.field.github.allowedRepos.placeholder'
+                            ? `${repositoryAllowlistKey}.placeholder`
                             : 'channels.editor.field.shared.allowedGroupIds.placeholder',
                         )}
                         onChange={(event) =>

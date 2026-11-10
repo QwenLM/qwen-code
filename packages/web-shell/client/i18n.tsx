@@ -4763,6 +4763,10 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'channels.editor.field.github.allowedRepos.description':
     'Comma-separated repository full names, for example owner/repo.',
   'channels.editor.field.github.allowedRepos.placeholder': 'owner/repo',
+  'channels.editor.field.gitlab.allowedRepos': 'Allowed projects',
+  'channels.editor.field.gitlab.allowedRepos.description':
+    'Comma-separated project paths, for example group/subgroup/project.',
+  'channels.editor.field.gitlab.allowedRepos.placeholder': 'group/project',
   'channels.editor.field.github.useLocalGh':
     'Use local GitHub CLI authentication',
   'channels.editor.field.github.useLocalGh.description':
@@ -9589,6 +9593,10 @@ const ZH: Messages = {
   'channels.editor.field.github.allowedRepos.description':
     '逗号分隔的仓库全名，例如 owner/repo。',
   'channels.editor.field.github.allowedRepos.placeholder': 'owner/repo',
+  'channels.editor.field.gitlab.allowedRepos': '允许的项目',
+  'channels.editor.field.gitlab.allowedRepos.description':
+    '逗号分隔的项目路径，例如 group/subgroup/project。',
+  'channels.editor.field.gitlab.allowedRepos.placeholder': 'group/project',
   'channels.editor.field.github.useLocalGh': '使用本地 GitHub CLI 认证',
   'channels.editor.field.github.useLocalGh.description':
     '未配置令牌时，显式复用 daemon 主机上账户级的 gh 登录',
