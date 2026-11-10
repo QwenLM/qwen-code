@@ -26,7 +26,8 @@ import { listAutofixPrWatches } from './autofix-pr-watches.js';
  * the channel keeps delivering as it did before the gate existed. That
  * includes the listing's NON-throwing failure shapes: `available: false`
  * (the clone's worktrees could not be enumerated) and a non-empty
- * `unreadable` (individual state files failed to read).
+ * `unreadable` (individual state files failed to read), and any gate whose
+ * shell words cannot be determined (see `parseVerifyPrWatchGate`).
  */
 export type ActivePrWatches = Map<string, Set<string>>;
 
@@ -43,34 +44,133 @@ export function prWatchKey(url: string, pr: number): string | undefined {
 }
 
 /**
- * The PR a `/verify-pr --watch` gate names, or undefined when the gate is
- * not a standing watch. Mirrors the gate script's own `parseArgs`
+ * Split a simple shell command into the words the shell would pass as
+ * argv, honoring single quotes (literal), double quotes (backslash escapes
+ * only `$`, backtick, `"`, `\`, and newline), backslash escapes and
+ * backslash-newline continuations outside quotes. Returns undefined when
+ * the argv CANNOT be determined: unterminated quotes, variable/command
+ * expansion (`$`, backticks), or shell operators/redirections/newlines
+ * outside quotes — a whitespace split would silently disagree with the
+ * real argv there (e.g. `--state-root '/tmp/pr 16772' 42` is ONE argument
+ * followed by the PR number, not a PR named 16772).
+ */
+export function shellWords(input: string): string[] | undefined {
+  const words: string[] = [];
+  let current = '';
+  let started = false;
+  let i = 0;
+  const push = (): void => {
+    if (started) words.push(current);
+    current = '';
+    started = false;
+  };
+  while (i < input.length) {
+    const ch = input[i]!;
+    if (ch === "'") {
+      started = true;
+      i += 1;
+      while (i < input.length && input[i] !== "'") {
+        current += input[i];
+        i += 1;
+      }
+      if (i >= input.length) return undefined; // unterminated single quote
+      i += 1;
+      continue;
+    }
+    if (ch === '"') {
+      started = true;
+      i += 1;
+      while (i < input.length && input[i] !== '"') {
+        const c = input[i]!;
+        if (c === '\\') {
+          const next = input[i + 1];
+          if (next === undefined) return undefined;
+          if (next === '\n') {
+            i += 2; // line continuation inside double quotes
+            continue;
+          }
+          if ('$`"\\'.includes(next)) {
+            current += next;
+            i += 2;
+            continue;
+          }
+          current += c; // backslash is literal before other characters
+          i += 1;
+          continue;
+        }
+        if (c === '$' || c === '`') return undefined; // expansion
+        current += c;
+        i += 1;
+      }
+      if (i >= input.length) return undefined; // unterminated double quote
+      i += 1;
+      continue;
+    }
+    if (ch === '\\') {
+      const next = input[i + 1];
+      if (next === undefined) return undefined; // trailing backslash
+      started = true;
+      if (next !== '\n') current += next; // backslash-newline: continuation
+      i += 2;
+      continue;
+    }
+    if (ch === '$' || ch === '`') return undefined; // expansion
+    if (';|&><()'.includes(ch) || ch === '\n') return undefined; // operator
+    if (/\s/.test(ch)) {
+      push();
+      i += 1;
+      continue;
+    }
+    started = true;
+    current += ch;
+    i += 1;
+  }
+  push();
+  return words;
+}
+
+/**
+ * What a scheduled task's gate says about a standing verify-pr watch:
+ * - `watch`: the gate runs the probe for this (repo, PR);
+ * - `none`: confirmed NOT a standing watch (not the probe script, a
+ *   one-shot `--check`/`--claim`/`--release` invocation, or arguments the
+ *   script itself would reject — such a gate never fires);
+ * - `unknown`: the gate names the probe script but its shell words cannot
+ *   be determined. The collector must fail open on `unknown` — turning it
+ *   into `none` would stamp `watching: false` on a PR that may be watched.
+ */
+export type VerifyPrWatchGateParse =
+  | { kind: 'watch'; repo: string; pr: number }
+  | { kind: 'none' }
+  | { kind: 'unknown' };
+
+/**
+ * Parse a `/verify-pr --watch` gate with the shell's own word semantics
+ * (`shellWords`), then mirror the gate script's `parseArgs`
  * (scripts/verify-pr-watch-gate.mjs): `--repo`/`--cli`/`--state-root`
- * consume the following token, the first non-flag positional is the PR
+ * consume the following word, the first non-flag positional is the PR
  * number, and `--check`/`--claim`/`--release` are one-shot probe
- * invocations (setup/teardown), never a standing watch. The gate is
- * model-authored — flag order varies and the script path may be quoted —
- * so the parse is token-based with edge quotes stripped. A gate missing
- * the number or the repo contributes nothing (fail-open for that task).
+ * invocations (setup/teardown), never a standing watch.
  */
 export function parseVerifyPrWatchGate(
   gate: string | undefined,
-): { repo: string; pr: number } | undefined {
-  if (!gate) return undefined;
-  const tokens = gate
-    .split(/\s+/)
-    .map((token) => token.replace(/^["']+|["']+$/g, ''));
+): VerifyPrWatchGateParse {
+  if (!gate || !gate.includes('verify-pr-watch-gate.mjs')) {
+    return { kind: 'none' };
+  }
+  const tokens = shellWords(gate);
+  if (tokens === undefined) return { kind: 'unknown' };
   const scriptIndex = tokens.findIndex((token) =>
     token.endsWith('verify-pr-watch-gate.mjs'),
   );
-  if (scriptIndex === -1) return undefined;
+  if (scriptIndex === -1) return { kind: 'unknown' };
   let pr: number | undefined;
   let repo: string | undefined;
   for (let i = scriptIndex + 1; i < tokens.length; i++) {
     const token = tokens[i]!;
     if (token === '') continue;
     if (token === '--check' || token === '--claim' || token === '--release') {
-      return undefined;
+      return { kind: 'none' };
     }
     if (token === '--repo' || token === '--cli' || token === '--state-root') {
       const value = tokens[++i];
@@ -83,16 +183,16 @@ export function parseVerifyPrWatchGate(
       // watch, so a non-numeric first positional must not fall through to a
       // later number.
       const value = Number(token);
-      if (!Number.isInteger(value) || value <= 0) return undefined;
+      if (!Number.isInteger(value) || value <= 0) return { kind: 'none' };
       pr = value;
     }
   }
-  if (pr === undefined) return undefined;
+  if (pr === undefined) return { kind: 'none' };
   if (!repo || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) {
-    return undefined;
+    return { kind: 'none' };
   }
   // The gate script takes no --host; its probe reads github.com.
-  return { repo, pr };
+  return { kind: 'watch', repo, pr };
 }
 
 export async function collectActivePrWatches(
@@ -131,7 +231,8 @@ export async function collectActivePrWatches(
         continue;
       }
       const parsed = parseVerifyPrWatchGate(task.gate);
-      if (parsed) {
+      if (parsed.kind === 'unknown') return undefined;
+      if (parsed.kind === 'watch') {
         const key = prWatchKey(
           `https://github.com/${parsed.repo}/pull/${parsed.pr}`,
           parsed.pr,

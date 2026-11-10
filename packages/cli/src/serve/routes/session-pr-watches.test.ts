@@ -30,6 +30,7 @@ import {
   collectActivePrWatches,
   parseVerifyPrWatchGate,
   prWatchKey,
+  shellWords,
 } from './session-pr-watches.js';
 
 const SESSION = '00000000-0000-4000-8000-00000000000a';
@@ -91,13 +92,48 @@ describe('prWatchKey', () => {
   });
 });
 
+describe('shellWords', () => {
+  it('keeps quoted whitespace as one word', () => {
+    expect(shellWords("node x.mjs --state-root '/tmp/pr 16772' 42")).toEqual([
+      'node',
+      'x.mjs',
+      '--state-root',
+      '/tmp/pr 16772',
+      '42',
+    ]);
+  });
+
+  it('honors double-quote escapes and backslash-newline continuations', () => {
+    expect(shellWords('node "a\\"b" c')).toEqual(['node', 'a"b', 'c']);
+    expect(shellWords('node \\\n42 --repo a/b')).toEqual([
+      'node',
+      '42',
+      '--repo',
+      'a/b',
+    ]);
+    expect(shellWords('node a\\ b')).toEqual(['node', 'a b']);
+  });
+
+  it('returns undefined when argv cannot be determined', () => {
+    expect(shellWords("node 'unterminated")).toBeUndefined();
+    expect(shellWords('node "unterminated')).toBeUndefined();
+    expect(shellWords('node $HOME/x.mjs')).toBeUndefined();
+    expect(shellWords('node `which x`')).toBeUndefined();
+    expect(shellWords('node "a$HOME"')).toBeUndefined();
+    expect(shellWords('node x.mjs | tee log')).toBeUndefined();
+    expect(shellWords('node x.mjs > out')).toBeUndefined();
+    expect(shellWords('node x.mjs\nnode y.mjs')).toBeUndefined();
+    expect(shellWords('node trailing\\')).toBeUndefined();
+  });
+});
+
 describe('parseVerifyPrWatchGate', () => {
   it('reads the PR and repo from the skill-contract gate', () => {
     expect(
       parseVerifyPrWatchGate(
         'node /clone/scripts/verify-pr-watch-gate.mjs 42 --repo acme/widgets --cli /bin/qwen',
       ),
-    ).toEqual({ repo: 'acme/widgets', pr: 42 });
+    ).toEqual({ kind: 'watch', repo: 'acme/widgets', pr: 42 });
   });
 
   it('accepts a quoted script path and varied flag order', () => {
@@ -105,7 +141,7 @@ describe('parseVerifyPrWatchGate', () => {
       parseVerifyPrWatchGate(
         'node "/path with space/scripts/verify-pr-watch-gate.mjs" --cli /bin/qwen --repo acme/widgets 42',
       ),
-    ).toEqual({ repo: 'acme/widgets', pr: 42 });
+    ).toEqual({ kind: 'watch', repo: 'acme/widgets', pr: 42 });
   });
 
   it('consumes value flags like the gate script parseArgs', () => {
@@ -114,49 +150,85 @@ describe('parseVerifyPrWatchGate', () => {
       parseVerifyPrWatchGate(
         'node /clone/scripts/verify-pr-watch-gate.mjs --state-root 2026 42 --repo acme/widgets --cli /bin/qwen',
       ),
-    ).toEqual({ repo: 'acme/widgets', pr: 42 });
+    ).toEqual({ kind: 'watch', repo: 'acme/widgets', pr: 42 });
   });
 
-  it('rejects a gate whose first positional is not a positive integer', () => {
+  it('reads the real PR when a quoted flag value contains digits and spaces', () => {
+    // The shell passes '/tmp/pr 16772' as ONE argument; a whitespace split
+    // would misread 16772 as the PR and stamp the real PR watching:false.
+    expect(
+      parseVerifyPrWatchGate(
+        "node scripts/verify-pr-watch-gate.mjs --state-root '/tmp/pr 16772' 42 --repo acme/widgets --cli /bin/echo",
+      ),
+    ).toEqual({ kind: 'watch', repo: 'acme/widgets', pr: 42 });
+  });
+
+  it('reads a gate written with backslash-newline continuations', () => {
+    expect(
+      parseVerifyPrWatchGate(
+        'node scripts/verify-pr-watch-gate.mjs \\\n42 --repo acme/widgets',
+      ),
+    ).toEqual({ kind: 'watch', repo: 'acme/widgets', pr: 42 });
+  });
+
+  it('returns unknown when the gate names the script but argv is undeterminable', () => {
+    expect(
+      parseVerifyPrWatchGate(
+        "node scripts/verify-pr-watch-gate.mjs '/tmp/pr 16772 42 --repo acme/widgets",
+      ),
+    ).toEqual({ kind: 'unknown' });
+    expect(
+      parseVerifyPrWatchGate(
+        'node scripts/verify-pr-watch-gate.mjs "$PR" --repo acme/widgets',
+      ),
+    ).toEqual({ kind: 'unknown' });
+    expect(
+      parseVerifyPrWatchGate(
+        'node scripts/verify-pr-watch-gate.mjs 42 --repo acme/widgets | tee log',
+      ),
+    ).toEqual({ kind: 'unknown' });
+  });
+
+  it('confirms no watch for a gate whose first positional is not a positive integer', () => {
     // The script throws on 'foo' (NaN) — the gate never runs, so it is no
     // watch; detection must not skip ahead to the later 42.
     expect(
       parseVerifyPrWatchGate(
         'node /clone/scripts/verify-pr-watch-gate.mjs foo 42 --repo acme/widgets',
       ),
-    ).toBeUndefined();
+    ).toEqual({ kind: 'none' });
   });
 
-  it('rejects one-shot probe invocations (check/claim/release)', () => {
+  it('confirms no watch for one-shot probe invocations (check/claim/release)', () => {
     for (const flag of ['--check', '--claim', '--release']) {
       expect(
         parseVerifyPrWatchGate(
           `node /clone/scripts/verify-pr-watch-gate.mjs 42 ${flag} --repo acme/widgets`,
         ),
-      ).toBeUndefined();
+      ).toEqual({ kind: 'none' });
     }
   });
 
-  it('rejects gates without the script, the number, or the repo', () => {
-    expect(parseVerifyPrWatchGate(undefined)).toBeUndefined();
+  it('confirms no watch for gates without the script, the number, or the repo', () => {
+    expect(parseVerifyPrWatchGate(undefined)).toEqual({ kind: 'none' });
     expect(
       parseVerifyPrWatchGate('node /clone/scripts/other.mjs 42 --repo a/b'),
-    ).toBeUndefined();
+    ).toEqual({ kind: 'none' });
     expect(
       parseVerifyPrWatchGate(
         'node /clone/scripts/verify-pr-watch-gate.mjs --repo acme/widgets',
       ),
-    ).toBeUndefined();
+    ).toEqual({ kind: 'none' });
     expect(
       parseVerifyPrWatchGate(
         'node /clone/scripts/verify-pr-watch-gate.mjs 42 --cli /bin/qwen',
       ),
-    ).toBeUndefined();
+    ).toEqual({ kind: 'none' });
     expect(
       parseVerifyPrWatchGate(
         'node /clone/scripts/verify-pr-watch-gate.mjs 42 --repo not-a-repo',
       ),
-    ).toBeUndefined();
+    ).toEqual({ kind: 'none' });
   });
 
   it('does not read an autofix-pr snapshot gate as a verify-pr watch', () => {
@@ -164,7 +236,7 @@ describe('parseVerifyPrWatchGate', () => {
       parseVerifyPrWatchGate(
         '"${QWEN_CODE_CLI:-qwen}" autofix-pr snapshot 42 --gate --repo acme/widgets --host github.com --session s',
       ),
-    ).toBeUndefined();
+    ).toEqual({ kind: 'none' });
   });
 });
 
@@ -224,6 +296,19 @@ describe('collectActivePrWatches', () => {
     ]);
     const watches = await collectActivePrWatches('/ws');
     expect(watches?.size).toBe(0);
+  });
+
+  it('fails open when any task gate names the script but is unparseable', async () => {
+    // An undeterminable argv must not become a known "no watch" map: the
+    // real PR would be stamped watching:false and lose its events.
+    mocks.readCronTasks.mockResolvedValue([
+      cronTask(),
+      cronTask({
+        id: 't-unknown',
+        gate: 'node scripts/verify-pr-watch-gate.mjs "$PR" --repo acme/widgets',
+      }),
+    ]);
+    expect(await collectActivePrWatches('/ws')).toBeUndefined();
   });
 
   it('unions both sources per session and lowercases the repo key', async () => {

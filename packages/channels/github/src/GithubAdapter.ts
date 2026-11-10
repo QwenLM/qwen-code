@@ -6642,18 +6642,24 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         delivery = current;
       } else if (
         !current &&
-        (isWatch || this.boundRoleAware || this.requireBoundWatch)
+        (isWatch ||
+          this.boundRoleAware ||
+          (this.requireBoundWatch &&
+            this.boundFollowersOf(envelope.chatId, task.issueNumber).length >
+              0))
       ) {
         // On a complete snapshot with no candidate left for the task's role,
         // retire privately. Watch events are private-only by contract; a
         // role-aware COMMENT whose role lost its match (the binding's role
         // changed, or the operator removed the template) must not keep
         // injecting the obsolete role's instruction into the frozen session
-        // either. Under the watch gate a legacy comment retires too: its
-        // frozen target stopped watching between claim and delivery, and no
-        // eligible follower remains. Without the gate, legacy single-winner
-        // comments keep the frozen target — their public fallback contract
-        // is handled by the gone path below.
+        // either. Under the watch gate a legacy comment retires too, but
+        // ONLY when the gate actually excluded the target: raw followers
+        // still exist and none is eligible (the frozen target stopped
+        // watching between claim and delivery). A REMOVED binding (no raw
+        // followers left) keeps the legacy contract — the frozen target
+        // stands and the gone path below owns the fallback — so the gate
+        // never changes behavior for the fix/untyped sessions it exempts.
         process.stderr.write(
           `[Channel:${this.name}] ${isWatch ? 'watch' : 'bound'} event ${envelope.messageId} has no bound candidate left for its role; retiring without public fallback\n`,
         );

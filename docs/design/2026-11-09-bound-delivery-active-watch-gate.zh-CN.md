@@ -91,11 +91,19 @@ GitHub channel 开启 `deliverToBoundSessions` 后，每个绑定了某 PR 的 d
    `sessionId` 是权威）。
 2. **verify-pr watch** — `readCronTasks(workspaceCwd)`；保留
    `enabled !== false`、`recurring === true`、`sessionId` 非空、且 `gate`
-   指名 `verify-pr-watch-gate.mjs` 的任务。gate 解析镜像脚本自身的
-   `parseArgs`：`--repo`/`--cli`/`--state-root` 消费后一个 token，第一个非
-   旗标位置参数是 PR 号，带 `--check`/`--claim`/`--release` 的 gate 是一次性
-   探针调用（安装/收尾），绝不是常驻 watch。按 token 解析（空白切分、剥边缘
-   引号），因为 gate 由模型撰写；缺 PR 号或缺 repo 的 gate 不贡献任何 watch。
+   指名 `verify-pr-watch-gate.mjs` 的任务。gate 先按 shell 自身的语义分词
+   （`shellWords`：单引号字面、双引号 POSIX 反斜杠转义、引号外的反斜杠转义
+   与反斜杠换行续行）——空白切分会与真实 argv 不一致，例如
+   `--state-root '/tmp/pr 16772' 42` 是一个参数后跟 PR 号，而非名为 16772
+   的 PR。分词后镜像脚本自身的 `parseArgs`：`--repo`/`--cli`/`--state-root`
+   消费后一个词，第一个非旗标位置参数是 PR 号，带
+   `--check`/`--claim`/`--release` 的 gate 是一次性探针调用（安装/收尾），
+   绝不是常驻 watch。结果为三态：`watch`（repo + PR）、`none`（确认非
+   常驻 watch——不是该脚本、一次性调用、或脚本自身会拒绝的参数，这样的
+   gate 永不触发）、`unknown`（gate 指名该脚本但 argv 无法确定：未闭合引号、
+   `$`/反引号展开、shell 操作符）。任一 `unknown` 任务使整个 workspace 的
+   答案为 `undefined`（fail-open）——无法确定的 gate 绝不能变成已知的
+   「无 watch」，给可能正在被 watch 的 PR 盖上 `watching: false`。
 
 键推导：两个来源都用 `prWatchKey(url, number)` = `repoKeyFromWebUrl(url)#number`
 给 watch 建键——与绑定路由对绑定 URL 用的是同一个函数，因此 host 拼写
@@ -166,8 +174,10 @@ i18n 文案（en + zh）与编辑器字段顺序。适配器在 `deliverToBoundS
   `bound_watch_required` 退役。partial/失败扫描下该分支不触发（未扫到的跟随者
   可能合格）——无目标 claim 照旧经 absence 门推迟。
 - `deliverToBoundSession` 投递时复核：legacy 评论今天复核无候选时保留冻结
-  目标；门开启下 `!current` 与 watch/role-aware 事件一样私下退役
-  （`bound_no_candidate`），claim 与投递之间停掉的 watch 不会漏过。
+  目标；门开启下 `!current` 仅在门控确实排除了目标时才私下退役
+  （`bound_no_candidate`）——原始跟随者仍在且无一合格（claim 与投递之间
+  停掉了 watch）。绑定被移除（无原始跟随者）则保留 legacy 冻结目标契约，
+  门绝不改变其豁免的 fix/无类型会话的行为；该回退由下方 Gone 路径负责。
 - Gone 回退耗尽：`siblings_still_follow` retire 分支扩展到门模式——原始列表
   仍有跟随者（那些不合格的）即私下退役，而非公共回退。
 - 恢复的 legacy 背压重解析：门开启下过滤后的 map 无 delivery、但完整快照上

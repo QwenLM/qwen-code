@@ -101,13 +101,24 @@ keyed `sessionId` → set of PR keys, the union of:
    and honors takeover (the state file's `sessionId` is authoritative).
 2. **verify-pr watches** — `readCronTasks(workspaceCwd)`; keep tasks with
    `enabled !== false`, `recurring === true`, non-empty `sessionId`, and a
-   `gate` that names `verify-pr-watch-gate.mjs`. The gate parse MIRRORS the
-   script's own `parseArgs`: `--repo`/`--cli`/`--state-root` consume the
-   following token, the first non-flag positional is the PR number, and a
-   gate carrying `--check`/`--claim`/`--release` is a one-shot probe
-   invocation, never a standing watch. Token-based (whitespace split, edge
-   quotes stripped) because the gate is model-authored; a gate missing the
-   number or the repo contributes nothing.
+   `gate` that names `verify-pr-watch-gate.mjs`. The gate is first split
+   into words with the SHELL's own semantics (`shellWords`: single quotes
+   literal, double quotes with POSIX backslash escapes, backslash escapes
+   and backslash-newline continuations outside quotes) — a whitespace split
+   would disagree with the real argv, e.g. `--state-root '/tmp/pr 16772' 42`
+   is one argument followed by the PR number, not a PR named 16772. The
+   word parse then MIRRORS the script's own `parseArgs`:
+   `--repo`/`--cli`/`--state-root` consume the following word, the first
+   non-flag positional is the PR number, and a gate carrying
+   `--check`/`--claim`/`--release` is a one-shot probe invocation, never a
+   standing watch. The result is THREE-state: `watch` (repo + PR),
+   `none` (confirmed not a standing watch — not the script, a one-shot
+   invocation, or arguments the script itself would reject, so the gate
+   never fires), and `unknown` (the gate names the script but its argv
+   cannot be determined: unterminated quotes, `$`/backtick expansion,
+   shell operators). Any `unknown` task makes the whole workspace answer
+   `undefined` (fail-open) — an undeterminable gate must never become a
+   known "no watch" that stamps `watching: false` on a possibly-watched PR.
 
 Key derivation: both sources key a watch by `prWatchKey(url, number)` =
 `repoKeyFromWebUrl(url)#number` — the SAME function the bindings route
@@ -195,9 +206,12 @@ complete fresh snapshot:
   today.
 - `deliverToBoundSession` delivery-time revalidation: legacy comments keep
   the frozen target today when revalidation finds no candidate; under the
-  gate, `!current` retires privately (`bound_no_candidate`) exactly like
-  watch/role-aware events, so a watch stopped between claim and delivery does
-  not slip through.
+  gate, `!current` retires privately (`bound_no_candidate`) ONLY when the
+  gate actually excluded the target — raw followers still exist and none is
+  eligible (a watch stopped between claim and delivery). A REMOVED binding
+  (no raw followers left) keeps the legacy frozen-target contract, so the
+  gate never changes behavior for the fix/untyped sessions it exempts; the
+  gone path below owns that fallback.
 - Gone-fallback exhaustion: the `siblings_still_follow` retire branch extends
   to gate mode — raw followers still listed (the ineligible ones) mean
   private retire, not the public fallback.

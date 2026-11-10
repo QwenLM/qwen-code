@@ -17922,6 +17922,58 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       expect(existsSync(inboundTaskPath())).toBe(false);
     });
 
+    it('keeps the frozen target when the binding was removed, even under the gate', async () => {
+      // The gate exempts fix/untyped sessions: a REMOVED binding (no raw
+      // followers left) must keep the legacy frozen-target contract, not
+      // retire as bound_no_candidate. Only a gate-excluded target (raw
+      // followers still present, none eligible) retires.
+      await initChannel(
+        { deliverToBoundSessions: true, requireBoundWatch: true },
+        { boundSessions },
+      );
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [
+          makeBinding({
+            sessionId: 'fix-session',
+            prs: [
+              {
+                number: 42,
+                url: 'https://github.com/owner/repo/pull/42',
+                state: 'open',
+                role: 'fix',
+              },
+            ],
+          }),
+        ],
+        partial: false,
+      });
+      boundSessions.deliverPrompt.mockRejectedValueOnce(
+        new BoundSessionQueueFullError('fix-session'),
+      );
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification()])
+        .mockResolvedValueOnce([makeComment()]);
+
+      await pollOnce();
+
+      expect(existsSync(inboundTaskPath())).toBe(true);
+      // The binding is REMOVED before the retry (empty complete snapshot).
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [],
+        partial: false,
+      });
+      mockOctokit.paginate.mockResolvedValueOnce([]).mockResolvedValueOnce([]);
+
+      await pollOnce();
+
+      // The retry delivers to the frozen fix session, exactly as with the
+      // gate off — no bound_no_candidate retirement.
+      expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(2);
+      expect(boundSessions.deliverPrompt.mock.calls[1]![0]).toBe('fix-session');
+      expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
+      expect(existsSync(inboundTaskPath())).toBe(false);
+    });
+
     it('role-aware: revalidation retires a frozen verify target that stopped watching', async () => {
       await initChannel(
         {
