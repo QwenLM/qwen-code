@@ -9885,10 +9885,10 @@ const ZH: Messages = {
           ? `大于 ${v.min}`
           : undefined;
     if (lower !== undefined && v?.max !== undefined) {
-      return `请输入${lower}且不超过 ${v.max} 的数字。`;
+      return `请输入${lower} 且不超过 ${v.max} 的数字。`;
     }
     if (v?.max !== undefined) return `请输入不超过 ${v.max} 的数字。`;
-    return `请输入${lower ?? '大于 0'}的数字。`;
+    return `请输入${lower ?? '大于 0'} 的数字。`;
   },
   'channels.editor.validation.policy': '请选择准入策略。',
   'channels.editor.saveError': '未能保存更改',

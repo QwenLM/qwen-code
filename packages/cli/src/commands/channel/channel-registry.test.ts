@@ -869,6 +869,48 @@ describe('channel registry', () => {
     });
   });
 
+  it('registers a single-value interval whose maximum equals its inclusive floor', async () => {
+    // The inclusive clause must stay strict `<`. Copying the exclusive
+    // sibling's `<=` one line above would refuse a field with exactly one
+    // legal value and drop that channel's whole management surface — and
+    // every other new case here is a rejection, so nothing else notices.
+    const plugin: ChannelPlugin = {
+      channelType: 'valid-single-value-interval',
+      displayName: 'valid-single-value-interval',
+      defaultSessionScope: 'thread',
+      management: {
+        fields: [
+          {
+            key: 'retries',
+            label: 'Retries',
+            kind: 'number',
+            minimum: 5,
+            maximum: 5,
+          },
+        ],
+      },
+      createChannel() {
+        throw new Error('not used');
+      },
+    };
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+
+    registerPlugin(plugin);
+
+    expect(stderr).not.toHaveBeenCalledWith(
+      expect.stringContaining('Invalid management metadata'),
+    );
+    stderr.mockRestore();
+
+    const entry = (await supportedChannelCatalog()).find(
+      (candidate) => candidate.type === 'valid-single-value-interval',
+    );
+    expect(entry?.manageable).toBe(true);
+    expect(
+      entry?.fields.find((field) => field.key === 'retries'),
+    ).toMatchObject({ minimum: 5, maximum: 5 });
+  });
+
   it('only marks the manually configurable built-in types as manageable', async () => {
     const catalog = await supportedChannelCatalog();
     const builtinCatalog = catalog.filter(

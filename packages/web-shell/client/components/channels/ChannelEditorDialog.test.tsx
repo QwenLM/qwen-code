@@ -3475,6 +3475,95 @@ describe('GitHub per-repository settings', () => {
     );
     expect(document.body.textContent).not.toContain('greater than');
   });
+
+  it('names the exclusive floor on a tie, because equality is rejected', async () => {
+    // Both bounds at 5: the validator rejects 5, so "at least 5" would name a
+    // floor it does not enforce — the very defect this change removes.
+    const tie: DaemonChannelTypeDescriptor = {
+      type: 'example',
+      displayName: 'Example',
+      manageable: true,
+      fields: [
+        {
+          key: 'reserve',
+          label: 'Reserve',
+          kind: 'number',
+          exclusiveMinimum: 5,
+          minimum: 5,
+          maximum: 10,
+        },
+      ],
+    };
+    await renderDialog({ descriptor: tie });
+    await act(async () => {
+      setInputValue(inputByLabel('Reserve')!, '5');
+    });
+    await save();
+
+    expect(document.body.textContent).toContain(
+      'Enter a number greater than 5 and at most 10.',
+    );
+    expect(document.body.textContent).not.toContain('at least');
+  });
+
+  it('names the exclusive floor when it is stricter than the inclusive one', async () => {
+    // Dropping the comparison entirely would always name the inclusive bound,
+    // and here that is the weaker one: the validator rejects 5, so "at least
+    // 2" would advertise a value the save refuses.
+    const weakerInclusive: DaemonChannelTypeDescriptor = {
+      type: 'example',
+      displayName: 'Example',
+      manageable: true,
+      fields: [
+        {
+          key: 'reserve',
+          label: 'Reserve',
+          kind: 'number',
+          exclusiveMinimum: 5,
+          minimum: 2,
+          maximum: 10,
+        },
+      ],
+    };
+    await renderDialog({ descriptor: weakerInclusive });
+    await act(async () => {
+      setInputValue(inputByLabel('Reserve')!, '3');
+    });
+    await save();
+
+    expect(document.body.textContent).toContain(
+      'Enter a number greater than 5 and at most 10.',
+    );
+    expect(document.body.textContent).not.toContain('at least');
+  });
+
+  it('names the inclusive floor when it is strictly above the exclusive one', async () => {
+    const both: DaemonChannelTypeDescriptor = {
+      type: 'example',
+      displayName: 'Example',
+      manageable: true,
+      fields: [
+        {
+          key: 'reserve',
+          label: 'Reserve',
+          kind: 'number',
+          exclusiveMinimum: 0,
+          minimum: 2,
+          maximum: 10,
+        },
+      ],
+    };
+    await renderDialog({ descriptor: both });
+    await act(async () => {
+      setInputValue(inputByLabel('Reserve')!, '1');
+    });
+    await save();
+
+    expect(document.body.textContent).toContain(
+      'Enter a number at least 2 and at most 10.',
+    );
+    expect(document.body.textContent).not.toContain('greater than');
+  });
 });
 
 describe('Channel editor progressive disclosure', () => {

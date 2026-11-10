@@ -39,17 +39,19 @@
 
 ## 涉及文件
 
-| 文件                                                                    | 改动                                      |
-| ----------------------------------------------------------------------- | ----------------------------------------- |
-| `packages/channels/base/src/types.ts`                                   | 数字描述符上的可选 `minimum`。            |
-| `packages/sdk-typescript/src/daemon/types.ts`                           | SDK 线上镜像类型上的同一可选字段。        |
-| `packages/cli/src/commands/channel/channel-registry.ts`                 | 注册期守卫校验这个新下界。                |
-| `packages/cli/src/serve/channel-settings-store.ts`                      | daemon 基于描述符的校验尊重该下界。       |
-| `packages/web-shell/client/components/channels/channel-editor-state.ts` | 拒绝低于包含式下界的值。                  |
-| `packages/web-shell/client/components/channels/ChannelEditorDialog.tsx` | 报出生效的下界。                          |
-| `packages/web-shell/client/i18n.tsx`                                    | 包含式措辞，中英双版。                    |
-| `packages/channels/github/src/index.ts`                                 | 预留字段改为 `minimum: 0`；更正要求子句。 |
-| `packages/channels/github/src/GithubAdapter.ts`                         | 注释：该检查现在是兜底，而非补偿。        |
+| 文件                                                                      | 改动                                      |
+| ------------------------------------------------------------------------- | ----------------------------------------- |
+| `packages/channels/base/src/types.ts`                                     | 数字描述符上的可选 `minimum`。            |
+| `packages/sdk-typescript/src/daemon/types.ts`                             | SDK 线上镜像类型上的同一可选字段。        |
+| `packages/cli/src/commands/channel/channel-registry.ts`                   | 注册期守卫校验这个新下界。                |
+| `packages/cli/src/commands/channel/channel-descriptor-sdk-mirror.test.ts` | 线上形状白名单接纳新键。                  |
+| `docs/developers/qwen-serve-protocol.md`                                  | 面向客户端的词汇表契约。                  |
+| `packages/cli/src/serve/channel-settings-store.ts`                        | daemon 基于描述符的校验尊重该下界。       |
+| `packages/web-shell/client/components/channels/channel-editor-state.ts`   | 拒绝低于包含式下界的值。                  |
+| `packages/web-shell/client/components/channels/ChannelEditorDialog.tsx`   | 报出生效的下界。                          |
+| `packages/web-shell/client/i18n.tsx`                                      | 包含式措辞，中英双版。                    |
+| `packages/channels/github/src/index.ts`                                   | 预留字段改为 `minimum: 0`；更正要求子句。 |
+| `packages/channels/github/src/GithubAdapter.ts`                           | 注释：该检查现在是兜底，而非补偿。        |
 
 ## 约束与风险
 
@@ -62,12 +64,14 @@
 - daemon 存储：低于包含式下界的值在 upsert 时被拒，下界本身被放行。这个消费者是靠枚举下界的读取方找到的，不是原始报告点名的——不补它，把字段从 `exclusiveMinimum: -1` 改成 `minimum: 0` 会静默丢掉 daemon 描述符级的下界。
 - 编辑器状态：低于包含式下界的值被拒，下界本身与正分数被放行。
 - 编辑器状态：两个下界都声明时，由更严者裁决。
-- 对话框：包含式下界措辞为「不小于 N」，且不出现排他式措辞。
+- 对话框：只有包含式下界时措辞为「不小于 N」；相等时报排他界；包含式严格更高时它胜出；严格更低时它落败。四种形状都需要——相等那条把 `>` 与 `>=` 区分开，严格更低那条则钉住「比较不能被整个丢掉」。
+- 范围文案：两种语言里既有的排他式下界字符串按原样钉住，使「把下界子句折进一个变量」不会静默改变它们的空格。
 - 描述符：预留字段声明 `minimum: 0` 且不带 `exclusiveMinimum`。
 - 适配器：负值、非数字与 NaN 仍被拒；0 与正分数仍通过。
-- 注册期：非有限的 `minimum`、非数字字段上的 `minimum`、以及低于包含式下界的 `maximum`，各自在注册时被拒。
+- 注册期：非有限的 `minimum`、非数字字段上的 `minimum`、以及低于包含式下界的 `maximum`，各自在注册时被拒；而 `maximum === minimum` 的单值区间**必须可注册**——这正是包含式判据保持严格 `<` 的理由。
+- 线上形状：内置描述符白名单在 number 字段上接纳 `minimum`，在其它类型上仍拒绝。
 
-五处运行时修复站点各有变异见证：去掉 daemon 分支、去掉编辑器分支、强制排他式措辞、退回 `exclusiveMinimum: -1`、停用注册守卫，各自恰好让对应用例变红。SDK 类型镜像没有可变异的行为，由类型检查钉住——而缺失的镜像正是这样被发现的：单元套件会剥掉类型，没有它照样全绿。
+每一处运行时修复站点都有变异见证：daemon 分支、编辑器分支、对话框的相等裁决与更严者比较、注册守卫的拒绝集与其严格 `<`、中文空格、线上形状白名单、以及描述符自身的声明。SDK 类型镜像没有可变异的行为，由类型检查钉住——缺失的镜像正是这样被发现的：单元套件会剥掉类型，没有它照样全绿。
 
 ### 靠枚举而非报告找到的消费者
 
@@ -76,6 +80,10 @@
 - **daemon 存储**独立于编辑器、按描述符校验。把字段改成 `minimum: 0` 却不教会它这个下界，会让该层的下界整个消失。
 - **注册期守卫**本会放行非有限或放错位置的 `minimum`，以及低于它的 `maximum`。
 - **SDK 线上镜像**是另一份手写接口。没有它 web-shell 无法编译——这是 `npm run build` 抓到的，任何测试都没抓到。
+
+随后评审又找出上述枚举**仍然漏掉的第四个**，而它正是让 CI 变红的那个：`channel-descriptor-sdk-mirror.test.ts` 用白名单列出内置描述符可以发出的键，并断言每个自有键都在集合内。给内置描述符加了 `minimum` 却不扩白名单，该断言就失败；而 `packages/cli` 的 `test:ci` 带 `--bail=1`，一条断言就掀掉整个 CLI 作业。教训在验证方式而不在代码：在该包只跑两个手挑的文件根本够不到它。要跑整个渠道目录。
+
+**协议文档**是第五个读取方——客户端作者据以实现的契约，独立于任何 TypeScript 类型。不改它，就等于把「接受后失败」的不一致原样复制给每一个照文档实现的客户端。
 
 ## 验收标准
 

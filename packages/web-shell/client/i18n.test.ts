@@ -97,6 +97,33 @@ describe('web-shell i18n catalog', () => {
     );
   });
 
+  it('keeps the channel range message spacing in both locales', () => {
+    const en = getTranslator('en');
+    const zh = getTranslator('zh-CN');
+    const key = 'channels.editor.validation.outOfRange';
+
+    // The exclusive-floor shapes predate the inclusive bound. Folding the
+    // lower clause into one variable moved a space inside the interpolation
+    // and silently changed these two existing zh strings; pin them verbatim.
+    expect(zh(key, { min: 0, max: 86_400_000 })).toBe(
+      '请输入大于 0 且不超过 86400000 的数字。',
+    );
+    expect(zh(key, { min: 0 })).toBe('请输入大于 0 的数字。');
+    expect(zh(key, { max: 4 })).toBe('请输入不超过 4 的数字。');
+    expect(en(key, { min: 0, max: 86_400_000 })).toBe(
+      'Enter a number greater than 0 and at most 86400000.',
+    );
+
+    // The inclusive floor is worded differently but padded the same way.
+    expect(zh(key, { minInclusive: 0, max: 5000 })).toBe(
+      '请输入不小于 0 且不超过 5000 的数字。',
+    );
+    expect(zh(key, { minInclusive: 0 })).toBe('请输入不小于 0 的数字。');
+    expect(en(key, { minInclusive: 0, max: 5000 })).toBe(
+      'Enter a number at least 0 and at most 5000.',
+    );
+  });
+
   it('keeps every browser notification translation in both locales', () => {
     const en = getTranslator('en');
     const zh = getTranslator('zh-CN');

@@ -39,17 +39,19 @@ The adapter check **stays**. It is not redundant: configuration also arrives fro
 
 ## Files affected
 
-| File                                                                    | Change                                                     |
-| ----------------------------------------------------------------------- | ---------------------------------------------------------- |
-| `packages/channels/base/src/types.ts`                                   | Optional `minimum` on the number descriptor.               |
-| `packages/sdk-typescript/src/daemon/types.ts`                           | The same optional field on the SDK's wire mirror.          |
-| `packages/cli/src/commands/channel/channel-registry.ts`                 | Registration guard validates the new bound.                |
-| `packages/cli/src/serve/channel-settings-store.ts`                      | The daemon's descriptor-driven check honours the floor.    |
-| `packages/web-shell/client/components/channels/channel-editor-state.ts` | Reject below the inclusive floor.                          |
-| `packages/web-shell/client/components/channels/ChannelEditorDialog.tsx` | Name the effective floor.                                  |
-| `packages/web-shell/client/i18n.tsx`                                    | Inclusive wording, EN and ZH.                              |
-| `packages/channels/github/src/index.ts`                                 | `minimum: 0` on the reserve; corrected requirement clause. |
-| `packages/channels/github/src/GithubAdapter.ts`                         | Comment: the check is now a backstop, not a compensation.  |
+| File                                                                      | Change                                                     |
+| ------------------------------------------------------------------------- | ---------------------------------------------------------- |
+| `packages/channels/base/src/types.ts`                                     | Optional `minimum` on the number descriptor.               |
+| `packages/sdk-typescript/src/daemon/types.ts`                             | The same optional field on the SDK's wire mirror.          |
+| `packages/cli/src/commands/channel/channel-registry.ts`                   | Registration guard validates the new bound.                |
+| `packages/cli/src/commands/channel/channel-descriptor-sdk-mirror.test.ts` | Wire-shape allowlist admits the new key.                   |
+| `docs/developers/qwen-serve-protocol.md`                                  | The client-facing vocabulary contract.                     |
+| `packages/cli/src/serve/channel-settings-store.ts`                        | The daemon's descriptor-driven check honours the floor.    |
+| `packages/web-shell/client/components/channels/channel-editor-state.ts`   | Reject below the inclusive floor.                          |
+| `packages/web-shell/client/components/channels/ChannelEditorDialog.tsx`   | Name the effective floor.                                  |
+| `packages/web-shell/client/i18n.tsx`                                      | Inclusive wording, EN and ZH.                              |
+| `packages/channels/github/src/index.ts`                                   | `minimum: 0` on the reserve; corrected requirement clause. |
+| `packages/channels/github/src/GithubAdapter.ts`                           | Comment: the check is now a backstop, not a compensation.  |
 
 ## Constraints and risks
 
@@ -62,12 +64,14 @@ The adapter check **stays**. It is not redundant: configuration also arrives fro
 - Daemon store: a value below an inclusive floor is refused at upsert, and the bound itself is admitted. This consumer was found by enumerating readers of the bound, not by the original report — without it, moving a field from `exclusiveMinimum: -1` to `minimum: 0` would silently drop the daemon's descriptor-level floor.
 - Editor state: values below an inclusive floor are refused, the bound itself and positive fractions are admitted.
 - Editor state: with both bounds declared, the stricter one decides.
-- Dialog: an inclusive floor is worded "at least N", and the exclusive wording is absent.
+- Dialog: an inclusive-only floor is worded "at least N"; a tie names the exclusive bound; a strictly-higher inclusive bound wins; a strictly-lower one loses. All four shapes are needed — the tie pins the `>` against `>=`, and the strictly-lower shape pins the comparison against being dropped altogether.
+- Range message: the pre-existing exclusive-floor strings are pinned verbatim in both locales, so folding the lower clause into one variable cannot silently respace them.
 - Descriptor: the reserve declares `minimum: 0` and no `exclusiveMinimum`.
 - Adapter: negatives, non-numbers and NaN are still refused; 0 and positive fractions still pass.
-- Registration: a non-finite `minimum`, a `minimum` on a non-number field, and a `maximum` below the inclusive floor are each refused at registration.
+- Registration: a non-finite `minimum`, a `minimum` on a non-number field, and a `maximum` below the inclusive floor are each refused; a single-value interval where `maximum === minimum` **registers**, which is what keeps the inclusive clause strict `<`.
+- Wire shape: the built-in descriptor allowlist admits `minimum` on number fields and still refuses it elsewhere.
 
-Five runtime fix sites have mutation witnesses: dropping the daemon clause, dropping the editor clause, forcing the exclusive wording, restoring `exclusiveMinimum: -1`, and disabling the registration guard each turn exactly their own cases red. The SDK type mirror has no runtime behaviour to mutate; it is pinned by the typecheck, which is in fact how the missing mirror was found — the unit suites strip types and stayed green without it.
+Every runtime fix site has a mutation witness: the daemon clause, the editor clause, the dialog's tie-break and its stricter-floor comparison, the registration guard's rejection set and its strict `<`, the zh spacing, the wire-shape allowlist, and the descriptor's own declaration. The SDK type mirror has no runtime behaviour to mutate; it is pinned by the typecheck, which is how the missing mirror was found — the unit suites strip types and stayed green without it.
 
 ### Consumers found by enumeration, not by the report
 
@@ -76,6 +80,10 @@ The original finding named only the editor and the adapter. Three more readers o
 - The **daemon store** validates against the descriptor independently of the editor. Moving the field to `minimum: 0` without teaching it the bound would have dropped that layer's floor entirely.
 - The **registration guard** would have accepted a non-finite or misplaced `minimum`, and a `maximum` below it.
 - The **SDK wire mirror** is a separate hand-written interface. Without it the web-shell does not compile — caught by `npm run build`, not by any test.
+
+Review then found a **fourth** that the enumeration above still missed, and it was the one that turned CI red: `channel-descriptor-sdk-mirror.test.ts` allowlists the keys a built-in descriptor may emit and asserts every own key is in that set. Adding `minimum` to a built-in descriptor without extending the allowlist fails that assertion, and `packages/cli`'s `test:ci` runs with `--bail=1`, so one assertion took down the whole CLI job. The lesson is about the verification, not the code: running two hand-picked files in that package could not reach it. Run the package's whole channel directory.
+
+The **protocol document** is a fifth reader — the contract a client author implements against, independent of any TypeScript type. Leaving it unchanged reproduces the accept-then-fail mismatch for every client built from the docs.
 
 ## Acceptance criteria
 
