@@ -29,6 +29,12 @@ file type, the local validation, and the tool surface are missing.
 
 ## Current state
 
+The `qq_send_file` layer this section describes — `file-tools.ts` with
+`readOutboundFile` and the `qq_send_file` tool — is the first commit of this
+same PR (commit `d6ed97812c`), not something `main` already ships. Read
+"current state" as the branch state the media work is layered on, not as the
+state of `main`.
+
 - `QQ_FILE_TYPE_FILE = 4` is a module constant applied in both the
   `upload_prepare` body (`api.ts:263`) and the merge body (`api.ts:367`); the
   comment at `api.ts:192` records why only type 4 was chosen ("the only type
@@ -63,8 +69,11 @@ fileName, bytes})`; the adapter supplies it from `registerFileTools`
 2. `qq_send_video` sends a local MP4 as a QQ video message.
 3. `qq_send_voice` sends a local SILK, MP3, WAV, or OGG file as a QQ voice
    message.
-4. `qq_send_file` keeps its current behaviour byte for byte: file card,
-   optional `file_name`, 20 MiB cap, same failure text.
+4. `qq_send_file` keeps its current behaviour byte for byte — file card,
+   optional `file_name`, 20 MiB cap, same failure text — with one deliberate
+   exception: the display name is sanitized as described in §3, because review
+   rounds 6–7 established that an invisible or blank-rendering name makes two
+   byte-distinct names render identically on the card and in the tool result.
 5. Each tool validates format and size locally before uploading, and reports a
    failure to the model instead of downgrading the message, matching the
    existing "a file that cannot be sent is reported" rule
@@ -158,8 +167,18 @@ keeps its current name and value.
   the same four-value union.
 - `buildFileTools` returns four definitions. The three new ones have a `path`
   property only; `file_name` stays exclusive to `qq_send_file` because an image,
-  video, or voice message does not display a name. The upload's `file_name`
-  field is the resolved basename.
+  video, or voice message does not display a name.
+- The upload's `file_name` field, and the name echoed in the tool result, are
+  the **sanitized display name**, not a raw path component: the caller's
+  `file_name` when it is supplied and non-blank, otherwise the resolved
+  basename, with every invisible, format, control, and blank-rendering code
+  point stripped (`\p{Cf}`, `\p{Cc}`, `\p{Zl}`, `\p{Zp}`, `\p{Cs}`, plus
+  U+115F, U+1160, U+3164, U+FFA0, U+2800). The result is truncated to 100 code
+  points; when nothing survives, the name falls back to the sanitized basename
+  and then to the fixed placeholder `file`. Two consequences are accepted
+  deliberately: a name made only of invisible characters is rendered as
+  `file` rather than as an unnamed card, and U+200D is `Cf`, so a ZWJ emoji
+  sequence loses its ligature (`👨‍👩‍👧` renders as three separate emoji).
 - Each description states the accepted formats, the size cap, and that the
   file must be inside the session workspace or the system temporary directory,
   mirroring the current `qq_send_file` description
@@ -280,11 +299,14 @@ Unit tests, in the existing files:
   `qq_send_file`; the existing path-boundary and TOCTOU tests still pass with
   the new `kind` argument; each handler forwards the right `kind` to
   `sendMedia` and renders the right success line.
-- `QQChannel.test.ts`: the four tools are registered only with
-  `fileTools: true`; `sendQQMedia` maps each `kind` to the right `file_type`;
+- `send.test.ts`: `sendQQMedia` maps each `kind` to the right `file_type`;
   upload/send failures are prefixed with the right tool name; the
   anchored-send fallback and `msg_seq` rollback still behave as they do for
   `qq_send_file`.
+- `events.test.ts`: the four tools are registered only with `fileTools: true`,
+  tagged with the owning channel, and re-offered to a replacement bridge
+  (`setBridge`), which is the crash-recovery path; `file-tools-target.test.ts`
+  covers the turn-chat binding the tools resolve through the router.
 
 No new platform calls are made by tests; the upload and message endpoints are
 stubbed as they are today. Live verification of the three types stays manual,
@@ -303,7 +325,11 @@ verified against the live API.
    video cap).
 4. A GIF or WEBP passed to `qq_send_image` is rejected with the same fallback
    guidance, and `qq_send_file` sends it as a file card.
-5. `qq_send_file` output, limits, and failure text are unchanged.
+5. `qq_send_file` output, limits, and failure text are unchanged, except the
+   display-name sanitization in §3: a caller `file_name` carrying invisible or
+   blank-rendering characters is sent and echoed sanitized, and a name that
+   sanitizes away becomes the sanitized basename or the fixed placeholder
+   `file`. No other visible behaviour moves.
 6. A group send and a C2C send both pick the right upload scene; an expired
    handle still re-uploads on the retried call; a rejected anchored send still
    falls back to one active send.

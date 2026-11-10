@@ -438,14 +438,48 @@ describe('buildFileTools', () => {
     expect(textOf(result)).toBe('File sent (invoicegnp.exe).');
   });
 
+  it('sanitizes the on-disk basename for a media kind too', async () => {
+    // The three media tools have no display name, so the basename is the only
+    // name source; the card still renders it, so it gets the same filter.
+    const path = join(workspace, 'char\u200Bt\u202E.png');
+    writeFileSync(path, PNG);
+    const { callTool, sent } = harness();
+
+    const result = await callTool('qq_send_image', { path });
+
+    expect(isError(result)).toBe(false);
+    expect(sent[0]!.fileName).toBe('chart.png');
+    expect(textOf(result)).toBe('Image sent (chart.png).');
+  });
+
+  it('uses the fixed placeholder for a media-kind basename that sanitizes away', async () => {
+    // The kind is decided by magic bytes, not by the name, so a file whose
+    // whole basename is invisible is still a valid image.
+    const path = join(workspace, '\u200B\u202E');
+    writeFileSync(path, PNG);
+    const { callTool, sent } = harness();
+
+    const result = await callTool('qq_send_image', { path });
+
+    expect(isError(result)).toBe(false);
+    expect(sent[0]!.fileName).toBe('file');
+    expect(textOf(result)).toBe('Image sent (file).');
+  });
+
   it('strips a lone surrogate from a display name', async () => {
     const path = join(workspace, 'report.txt');
     writeFileSync(path, 'payload');
     const { call, sent } = harness();
 
+    // Both halves of the surrogate range: a high-only predicate would leave a
+    // lone low surrogate (also category Cs) in the name.
     await call({ path, file_name: 'report\uD83D.txt' });
+    await call({ path, file_name: 'report\uDC00.txt' });
 
-    expect(sent[0]!.fileName).toBe('report.txt');
+    expect(sent.map((entry) => entry.fileName)).toEqual([
+      'report.txt',
+      'report.txt',
+    ]);
   });
 
   it('fails as a tool result when no chat is bound', async () => {

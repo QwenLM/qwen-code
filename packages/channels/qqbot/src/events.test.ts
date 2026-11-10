@@ -5187,6 +5187,47 @@ describe('outbound media tool registration', () => {
     );
   });
 
+  it('re-registers the media tools on a replacement bridge', () => {
+    // Crash recovery replaces the bridge instance, so the adapter's setBridge
+    // must re-offer the tools to the new one. Without this the tools silently
+    // disappear after a recovery and no tool test notices.
+    const first: string[] = [];
+    const ch = makeChannel(
+      { fileTools: true },
+      {
+        registerChannelTool: (tool: { name: string }) => first.push(tool.name),
+      },
+    );
+    expect(first.filter((name) => OUTBOUND_TOOL_NAMES.includes(name))).toEqual(
+      OUTBOUND_TOOL_NAMES,
+    );
+
+    const second: string[] = [];
+    ch.setBridge({
+      registerChannelTool: (tool: { name: string }) => second.push(tool.name),
+    } as never);
+
+    expect(second.filter((name) => OUTBOUND_TOOL_NAMES.includes(name))).toEqual(
+      OUTBOUND_TOOL_NAMES,
+    );
+  });
+
+  it('does not re-register the media tools on a replacement bridge when disabled', () => {
+    const second: string[] = [];
+    const ch = makeChannel(
+      { fileTools: false },
+      {
+        registerChannelTool: (tool: { name: string }) => second.push(tool.name),
+      },
+    );
+    ch.setBridge({
+      registerChannelTool: (tool: { name: string }) => second.push(tool.name),
+    } as never);
+    expect(second.filter((name) => OUTBOUND_TOOL_NAMES.includes(name))).toEqual(
+      [],
+    );
+  });
+
   it('skips registration on bridges without channel tool support', () => {
     expect(() => makeChannel({ fileTools: true })).not.toThrow();
   });

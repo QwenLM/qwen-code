@@ -16,6 +16,8 @@ QQ Bot 通道目前只能发送一种富媒体：文件。`qq_send_file` 工具�
 
 ## 现状
 
+本节描述的 `qq_send_file` 层（`file-tools.ts` 与 `readOutboundFile`、`qq_send_file` 工具）就是本 PR 的第一个提交（`d6ed97812c`），并不在 `main` 上。这里的"现状"指媒体工作叠加之前的**分支状态**，而不是 `main` 的状态。
+
 - `QQ_FILE_TYPE_FILE = 4` 是模块常量，同时用于 `upload_prepare` 请求体（`api.ts:263`）与合并请求体（`api.ts:367`）；`api.ts:192` 的注释记录了当初只选类型 4 的原因（“唯一接受任意格式的类型”）。
 - `uploadQQRichMedia`（`api.ts:247`）拥有整套分片流程并返回 `{ fileInfo, ttl }`。它没有文件类型入参。
 - `qq_send_file`（`file-tools.ts:61`）是唯一的出站媒体工具。schema 接受 `path` 与可选的 `file_name`；`readOutboundFile`（`file-tools.ts:155`）执行边界校验：绝对路径、realpath 位于会话工作区或 `tmpdir()` 内、普通文件、单一硬链接、最终组件非符号链接、非空、不超过 `QQ_OUTBOUND_FILE_MAX_BYTES`（20 MiB，`file-tools.ts:34`），且两次 `fstat` 之间 size/mtime 不变。
@@ -29,7 +31,7 @@ QQ Bot 通道目前只能发送一种富媒体：文件。`qq_send_file` 工具�
 1. `qq_send_image` 把本地 PNG 或 JPEG 作为 QQ 图片消息发送。
 2. `qq_send_video` 把本地 MP4 作为 QQ 视频消息发送。
 3. `qq_send_voice` 把本地 SILK、MP3、WAV 或 OGG 文件作为 QQ 语音消息发送。
-4. `qq_send_file` 保持当前行为逐字节不变：文件卡、可选 `file_name`、20 MiB 上限、相同的失败文案。
+4. `qq_send_file` 保持当前行为逐字节不变——文件卡、可选 `file_name`、20 MiB 上限、相同的失败文案——只有一个有意为之的例外：显示名按第 3 节做净化，因为评审第 6–7 轮确认，含不可见/空白渲染字符的名字会让两个字节不同的名称在文件卡和工具结果里渲染成同一个。
 5. 每个工具在上传前做本地格式与大小校验，失败时向模型报告而不是降级消息，与现有“无法发送的文件必须报告”的规则一致（`QQChannel.ts:5098` 的文档注释）。
 6. 四个工具共用现有 `fileTools: true` 开关；不新增配置键。
 
@@ -85,7 +87,8 @@ QQ Bot 通道目前只能发送一种富媒体：文件。`qq_send_file` 工具�
 ### 3. 工具层 —— `packages/channels/qqbot/src/file-tools.ts`
 
 - `QQFileToolDeps.sendFile` 改为 `sendMedia({ sessionId, chatId, kind, fileName, bytes })`，其中 `kind` 是同一个四值联合类型。
-- `buildFileTools` 返回四个定义。三个新工具只有 `path` 属性；`file_name` 仍为 `qq_send_file` 独占，因为图片、视频、语音消息不展示名称。上传的 `file_name` 字段使用解析后的 basename。
+- `buildFileTools` 返回四个定义。三个新工具只有 `path` 属性；`file_name` 仍为 `qq_send_file` 独占，因为图片、视频、语音消息不展示名称。
+- 上传的 `file_name` 字段与工具结果里回显的名称都是**净化后的显示名**，而不是原始路径组件：调用方提供了非空白 `file_name` 时用它，否则用解析后的 basename，并剥离所有不可见、格式、控制与空白渲染码点（`\p{Cf}`、`\p{Cc}`、`\p{Zl}`、`\p{Zp}`、`\p{Cs}`，外加 U+115F、U+1160、U+3164、U+FFA0、U+2800）。结果按码点截断到 100；若一个字符都不剩，则回退到净化后的 basename，再回退到固定占位名 `file`。有两项后果是刻意接受的：整名不可见时渲染为 `file` 而不是"无名文件卡"；U+200D 属于 `Cf`，因此 ZWJ emoji 序列会失去连字（`👨‍👩‍👧` 渲染成三个独立 emoji）。
 - 每个描述都说明接受的格式、大小上限，以及文件必须位于会话工作区或系统临时目录内，与当前 `qq_send_file` 的描述（`file-tools.ts:61-82`）一致。
 - 各 handler 共用一段实现：解析会话、按 kind 读取并校验、推导显示名、调用 `sendMedia`、失败时记录日志、成功时返回 `Image sent (<name>).` / `Video sent (<name>).` / `Voice sent (<name>).`。
 
@@ -129,7 +132,8 @@ QQ Bot 通道目前只能发送一种富媒体：文件。`qq_send_file` 工具�
 
 - `api.test.ts`：`uploadQQRichMedia` 在 `upload_prepare` 与合并请求体中都发送请求的 `file_type`（每种类型一个用例），且现有流程断言（分片、`md5_10m`、重试、`ttl`）在加入新的必填参数后仍然成立。
 - `file-tools.test.ts`：四个工具定义及其 schema（`qq_send_file` 保留 `file_name`；新的三个只有 `path`）；每种 kind 的 magic bytes 接受与拒绝；每个媒体字节上限各测一个超过上限的用例（文件上限保留现有的恰在上限与超过上限用例）；拒绝消息说明接受的格式并指向 `qq_send_file`；现有路径边界与 TOCTOU 测试在新的 `kind` 参数下仍然通过；每个 handler 把正确的 `kind` 传给 `sendMedia` 并渲染正确的成功行。
-- `QQChannel.test.ts`：四个工具只在 `fileTools: true` 时注册；`sendQQMedia` 把每种 `kind` 映射到正确的 `file_type`；上传/发送失败带正确的工具名前缀；锚定发送回退与 `msg_seq` 回滚的行为与 `qq_send_file` 一致。
+- `send.test.ts`：`sendQQMedia` 把每种 `kind` 映射到正确的 `file_type`；上传/发送失败带正确的工具名前缀；锚定发送回退与 `msg_seq` 回滚的行为与 `qq_send_file` 一致。
+- `events.test.ts`：四个工具只在 `fileTools: true` 时注册、带所属通道标签，并在桥实例被替换（`setBridge`，即崩溃恢复路径）后重新提供；`file-tools-target.test.ts` 覆盖工具经 router 解析的当轮 chat 绑定。
 
 测试不发起新的平台调用；上传与消息端点像现在一样被桩接。三种类型的真机验证保持手动，设计会记录这一空白，而不是暗示格式清单已对线上 API 验证过。
 
@@ -139,5 +143,5 @@ QQ Bot 通道目前只能发送一种富媒体：文件。`qq_send_file` 工具�
 2. MP4 作为可播放的视频消息发出；SILK/MP3/WAV/OGG 作为语音条发出。
 3. 21 MB 的 PNG 在上传前被拒绝，消息说明接受的格式与 `qq_send_file` 兜底；25 MB 的 MP4 被接受（在 30 MB 视频上限内）。
 4. 传给 `qq_send_image` 的 GIF 或 WEBP 被拒绝并给出同样的兜底指引，`qq_send_file` 可将其作为文件卡发送。
-5. `qq_send_file` 的输出、限制与失败文案不变。
+5. `qq_send_file` 的输出、限制与失败文案不变，但第 3 节的显示名净化除外：调用方 `file_name` 中若含不可见或空白渲染字符，发送与回显时会被净化；整名净化为空时回退到净化后的 basename 或固定占位名 `file`。其余可见行为不变。
 6. 群聊发送与单聊发送都选择正确的上传场景；过期句柄在重试调用时仍然重新上传；被拒绝的锚定发送仍然回退为一次主动发送。
