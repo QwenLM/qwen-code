@@ -95,6 +95,8 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -153,7 +155,7 @@ class ManagedAgentApiContractTest {
     private static final String RESYNC = "agent.session.resync_required";
     private static final OpenApiContract CONTRACT = OpenApiContract.load();
     private static final Map<Class<?>, List<String>> RECORD_SCHEMAS =
-            Map.ofEntries(
+            Map.<Class<?>, List<String>>ofEntries(
                     entry(com.alibaba.qwen.code.managedagent.contracts.memory.MemoryModels.Store.class,
                             List.of("MemoryStore")),
                     entry(com.alibaba.qwen.code.managedagent.contracts.memory.MemoryModels.StoreList.class,
@@ -1745,6 +1747,21 @@ class ManagedAgentApiContractTest {
                                 operation.status()))
                         .map(Operation::operationId).toList());
         assertKnownGaps(drift, "request", "response");
+    }
+
+    @Test
+    void activityMeasurementsExtendEveryClosedDetailSchemaWithoutExposingPrivateEvidence() throws Exception {
+        JsonNode fixture = json(Files.readString(Path.of("..", "..", "core", "src", "managed-runtime", "contracts", "managed-tool-measurements-v1.fixtures.json")));
+        ObjectNode call = objectMapper.createObjectNode().put("id", "call").put("name", "edit");
+        ObjectNode fact = com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedActivityDiagnostics.request("tenant", "session", "message", 0, call, 1, 1000);
+        fact.set("measurements", com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedToolMeasurements.publicMeasurements(fixture.path("evidence"), 2));
+        assertThat(CONTRACT.validate("/components/schemas/ManagedActivityInvocation", fact)).isEmpty();
+        fact.put("_measurementEvidenceDigest", "a".repeat(64));
+        assertThat(CONTRACT.validate("/components/schemas/ManagedActivityInvocation", fact)).isNotEmpty();
+        for (String schema : List.of("ManagedActivityFilesPage", "ManagedActivitySkillsPage")) {
+            assertThat(CONTRACT.node("/components/schemas/" + schema + "/properties/items/items/properties/measurements/$ref").asText())
+                    .isEqualTo("#/components/schemas/ManagedActivityMeasurement");
+        }
     }
 
     private void exchangeDiagnostics(Map<String, String> drift, String tenant, String otherTenant,
