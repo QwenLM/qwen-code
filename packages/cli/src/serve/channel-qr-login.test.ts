@@ -254,7 +254,7 @@ describe('ChannelQrLoginRegistry', () => {
     expect(() => h.start('after-cycles')).not.toThrow();
   });
 
-  it('stays cancelled when cancel lands during an in-flight persist', async () => {
+  it('reports succeeded when a cancel lands during an in-flight persist', async () => {
     const h = harness();
     let release: (() => void) | undefined;
     h.persist.mockImplementationOnce(
@@ -269,6 +269,18 @@ describe('ChannelQrLoginRegistry', () => {
     h.registry.cancel(view.loginId);
     release!();
     await flush();
+    // The credential is already committed, so 'cancelled' would be a lie.
+    expect(h.persist).toHaveBeenCalledOnce();
+    expect(h.registry.get(view.loginId)!.status).toBe('succeeded');
+  });
+
+  it('does not write at all when cancel lands before the scan reports', async () => {
+    const h = harness();
+    const { view } = h.start();
+    h.registry.cancel(view.loginId);
+    h.emit().onSuccess({ appID: 'a', appSecret: 's' });
+    await flush();
+    expect(h.persist).not.toHaveBeenCalled();
     expect(h.registry.get(view.loginId)!.status).toBe('cancelled');
   });
 

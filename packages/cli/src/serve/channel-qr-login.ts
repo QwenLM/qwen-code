@@ -143,8 +143,17 @@ export class ChannelQrLoginRegistry {
     };
     this.entries.set(loginId, entry);
 
-    const terminal = (status: ChannelQrLoginStatus, error?: string): void => {
-      if (entry.view.status !== 'pending') return;
+    const terminal = (
+      status: ChannelQrLoginStatus,
+      error?: string,
+      // A committed credential write is a fact about the world, so it outranks
+      // a cancel that landed while the write was in flight. Reporting
+      // 'cancelled' there would tell the operator the bind did not happen when
+      // the channel is in fact bound.
+      committed = false,
+    ): void => {
+      if (entry.view.status !== 'pending' && !committed) return;
+      if (committed && entry.view.status === 'succeeded') return;
       entry.view.status = status;
       entry.terminalAt = this.now();
       if (error !== undefined) entry.view.error = error;
@@ -178,7 +187,7 @@ export class ChannelQrLoginRegistry {
             if (entry.view.status !== 'pending') return;
             void this.deps
               .persist(options.channelName, values)
-              .then(() => terminal('succeeded'))
+              .then(() => terminal('succeeded', undefined, true))
               .catch((persistError: unknown) => {
                 terminal('failed', message(persistError));
               });
