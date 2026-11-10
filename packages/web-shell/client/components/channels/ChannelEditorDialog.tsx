@@ -67,6 +67,8 @@ import { Spinner } from '../ui/spinner';
 import { Switch } from '../ui/switch';
 import styles from './ChannelEditorDialog.module.css';
 import { ChannelPairingRequests } from './ChannelPairingRequests';
+import { ChannelQrLogin } from './ChannelQrLogin';
+import type { DaemonChannelQrLoginActions } from '../../daemon/workspace/types';
 import {
   buildChannelUpsertRequest,
   createChannelEditorDraft,
@@ -228,6 +230,7 @@ export interface ChannelEditorDialogProps {
     request: DaemonChannelUpsertRequest,
   ) => Promise<unknown>;
   onReload: () => Promise<unknown>;
+  qrLoginActions?: DaemonChannelQrLoginActions;
   listPairingRequests: (
     name: string,
   ) => Promise<DaemonChannelPairingRequestsSnapshot>;
@@ -337,6 +340,7 @@ export function ChannelEditorDialog({
   onOpenChange,
   onSave,
   onReload,
+  qrLoginActions,
   listPairingRequests,
   approvePairingRequest,
   listPairingApprovals,
@@ -1875,6 +1879,14 @@ export function ChannelEditorDialog({
                     </FieldShell>
                   ) : null}
                   {operatorsField ? renderField(operatorsField) : null}
+                  {descriptor.supportsQrLogin && instance && qrLoginActions ? (
+                    <ChannelQrLogin
+                      channelName={instance.name}
+                      actions={qrLoginActions}
+                      onBound={() => void onReload()}
+                    />
+                  ) : null}
+
                   {showPairing ? (
                     instance &&
                     ((!repositoryOnly &&

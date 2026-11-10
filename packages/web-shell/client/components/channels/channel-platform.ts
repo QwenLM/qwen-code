@@ -14,6 +14,7 @@ export const PLATFORM_MARKS: Record<string, string> = {
   feishu: 'F',
   github: 'GH',
   gitlab: 'GL',
+  qq: 'QQ',
 };
 
 const SUPPORTED_CHANNEL_TYPES = new Set([
@@ -24,6 +25,7 @@ const SUPPORTED_CHANNEL_TYPES = new Set([
   'feishu',
   'github',
   'gitlab',
+  'qq',
 ]);
 
 export function isSupportedChannelType(
@@ -35,7 +37,8 @@ export function isSupportedChannelType(
   | 'wecom-callback'
   | 'feishu'
   | 'github'
-  | 'gitlab' {
+  | 'gitlab'
+  | 'qq' {
   return typeof type === 'string' && SUPPORTED_CHANNEL_TYPES.has(type);
 }
 
