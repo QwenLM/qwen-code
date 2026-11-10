@@ -742,6 +742,8 @@ async function hostCall(
   const plugin = realms[call.plugin].plugin;
   if (model && !runsModels)
     throw new Error('Mod model.complete: this host runs no model calls.');
+  const store = MOD_STORE_EVENTS.includes(method);
+  if (store && !keepsStore) throw new Error('This host keeps no Mod store.');
   // A submitted prompt raises prompt.submit as a typed one does, through
   // every hook but the caller's. What arrives beneath them last is queued once
   // they have all answered. Its hooks do not run beneath the caller's, so a
@@ -838,7 +840,7 @@ async function hostCall(
         }
         if (model && modelScope)
           return { value: await completeModel(e, modelScope, owner) };
-        if (MOD_STORE_EVENTS.includes(method)) {
+        if (store) {
           const key = String(e['key']);
           return {
             value: await storeCall(

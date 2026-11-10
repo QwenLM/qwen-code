@@ -2458,6 +2458,30 @@ describe('ModRuntime with the real QuickJS worker', () => {
       expect(await go(runtime, 'mod-1')).toEqual([[], true]);
     });
 
+    it('rejects a new key before it would make keys() too large to return', async () => {
+      const runtime = await createStore(
+        [
+          command(`
+            const key = 'a'.repeat(140_000);
+            await $.store.set(key, 1);
+            let error;
+            try { await $.store.set('b'.repeat(140_000), 2); }
+            catch (caught) { error = String(caught); }
+            return [error, (await $.store.keys()).map(k => k.length), await $.store.get(key)];
+          `),
+          `export function register(on) {
+            on('store.keys', ($, e, next) => next(e));
+          }`,
+        ],
+        storeDir(),
+      );
+      expect(await go(runtime)).toEqual([
+        expect.stringContaining('the key list would be over'),
+        [140_000],
+        1,
+      ]);
+    });
+
     it.each([
       [
         'undefined',
@@ -2594,16 +2618,22 @@ describe('ModRuntime with the real QuickJS worker', () => {
       expect(keys).toEqual(['note', 'moved']);
     });
 
-    it('rejects every call, and lists no store methods, where the host keeps no store', async () => {
+    it('rejects store calls before middleware where the host keeps no store', async () => {
       const runtime = await createStore([
         command(`
-          const methods = (await $.session.version()).qwen.methods;
+          const { methods, events } = (await $.session.version()).qwen;
           try { await $.store.get('k'); return 'no rejection'; }
-          catch (error) { return [String(error), methods.filter((m) => m.startsWith('store.'))]; }
+          catch (error) {
+            return [String(error), methods.filter(m => m.startsWith('store.')), events.filter(e => e.startsWith('store.'))];
+          }
         `),
+        `export function register(on) {
+          on('store.get', () => ({ value: 'intercepted' }));
+        }`,
       ]);
       expect(await go(runtime)).toEqual([
         expect.stringContaining('This host keeps no Mod store.'),
+        [],
         [],
       ]);
       const kept = await createStore(

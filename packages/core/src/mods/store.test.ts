@@ -4,12 +4,26 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { createHash, randomUUID } from 'node:crypto';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  statSync,
+  symlinkSync,
+  utimesSync,
+  writeFileSync,
+} from 'node:fs';
 import { rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import lockfile from 'proper-lockfile';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import * as noFollow from '../utils/no-follow-open.js';
+import {
+  readLocalBootId,
+  readPidNamespaceId,
+} from '../utils/process-liveness.js';
 import { MOD_STORE_MAX_BYTES, ModStore } from './store.js';
 
 describe('ModStore', () => {
@@ -25,24 +39,49 @@ describe('ModStore', () => {
     return dir;
   };
 
-  it('waits for a write another process holds, then keeps what it wrote', async () => {
+  const heldLock = (dir: string, pid: number) => {
+    const bootId = process.platform === 'linux' ? readLocalBootId() : null;
+    const scope = createHash('sha256')
+      .update(JSON.stringify([hostname(), readPidNamespaceId(), bootId]))
+      .digest('hex')
+      .slice(0, 16);
+    const lock = join(dir, 'mod.json.lock');
+    const owner = join(lock, `${scope}.${pid}.-.${randomUUID()}`);
+    mkdirSync(owner, { recursive: true });
+    return { lock, owner };
+  };
+
+  it('waits for a live owner even if its lock is old, then keeps what it wrote', async () => {
     const dir = storeDir();
     const file = join(dir, 'mod.json');
-    const release = await lockfile.lock(file, { realpath: false });
+    const { lock } = heldLock(dir, process.pid);
+    utimesSync(lock, 1, 1);
     let landed = false;
     const write = new ModStore(dir).set('mod', 'mine', 2).then(() => {
       landed = true;
     });
+    void write.catch(() => {});
     await new Promise((resolve) => setTimeout(resolve, 100));
     expect(landed).toBe(false);
-    // The other process writes while it holds the lock.
     writeFileSync(
       file,
       JSON.stringify({ version: 1, entries: [['theirs', 1]] }),
     );
-    await release();
+    await rm(lock, { recursive: true });
     await write;
     expect(await new ModStore(dir).keys('mod')).toEqual(['theirs', 'mine']);
+  });
+
+  it('recovers a dead owner and its unfinished temporary file', async () => {
+    const dir = storeDir();
+    const child = spawnSync(process.execPath, ['-e', '']);
+    expect(child.status).toBe(0);
+    const { lock, owner } = heldLock(dir, child.pid);
+    writeFileSync(join(owner, 'store.json'), 'incomplete');
+    const store = new ModStore(dir);
+    await store.set('mod', 'mine', 2);
+    expect(await store.keys('mod')).toEqual(['mine']);
+    expect(() => statSync(lock)).toThrow();
   });
 
   it('keeps every write when writes come at once', async () => {
@@ -66,6 +105,56 @@ describe('ModStore', () => {
       store.set('mod', 'big', 'x'.repeat(MOD_STORE_MAX_BYTES)),
     ).rejects.toThrow(/over 4194304 bytes/);
     expect(await store.keys('mod')).toEqual(['kept']);
+  });
+
+  it('lets a plugin delete keys from a previously oversized key list', async () => {
+    const dir = storeDir();
+    const first = 'a'.repeat(140_000);
+    const second = 'b'.repeat(140_000);
+    writeFileSync(
+      join(dir, 'mod.json'),
+      JSON.stringify({
+        version: 1,
+        entries: [
+          [first, 1],
+          [second, 2],
+        ],
+      }),
+    );
+    const store = new ModStore(dir);
+    await store.delete('mod', second);
+    expect(await store.keys('mod')).toEqual([first]);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'rejects reads and writes through a symlink to another store',
+    async () => {
+      const dir = storeDir();
+      const store = new ModStore(dir);
+      await store.set('target', 'kept', 1);
+      symlinkSync('target.json', join(dir, 'alias.json'));
+      await expect(store.get('alias', 'kept')).rejects.toThrow(/cannot read/);
+      await expect(store.set('alias', 'kept', 2)).rejects.toThrow(
+        /cannot read/,
+      );
+      expect(await store.get('target', 'kept')).toBe(1);
+    },
+  );
+
+  it('retries a store replaced during the no-follow identity check', async () => {
+    const store = new ModStore(storeDir());
+    await store.set('mod', 'kept', 1);
+    const open = vi
+      .spyOn(noFollow, 'openNoFollow')
+      .mockRejectedValueOnce(
+        Object.assign(new Error('file identity changed'), { code: 'ELOOP' }),
+      );
+    try {
+      await expect(store.get('mod', 'kept')).resolves.toBe(1);
+      expect(open).toHaveBeenCalledTimes(2);
+    } finally {
+      open.mockRestore();
+    }
   });
 
   it('names the file after the plugin, without case, and only inside its directory', async () => {

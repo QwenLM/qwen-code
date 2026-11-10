@@ -594,16 +594,25 @@ cycle. Keys are strings; `"10"` and `__proto__` are keys like any other.
 
 Each plugin has one store, a JSON file named after the plugin under
 `~/.qwen/mods/store/` (or `$QWEN_HOME/mods/store/`), shared by all its sessions.
-Two sessions writing at once both land, since a write takes a lock on the file
-and re-reads it first. A read sees the store as it is at that moment, so a
-value another session wrote shows up at the next `get`. Uninstalling the plugin
-leaves its store in place.
+Concurrent writes to different keys preserve both updates. Each writer takes
+the store lock and re-reads the file before updating it. A read followed by a
+write can race with another session updating the same key. A value another
+session wrote shows up at the next `get`. Uninstalling the plugin leaves its
+store in place.
 
 - A plugin's store holds at most 4 MiB of JSON. A `set` that would take it
   over rejects, and the store keeps what it had. One value is also bound by the
   256 KiB limit on what a Mod passes to Qwen Code.
+- A new key must keep the serialized key list within the Mod reply budget of
+  256 KiB, including the reply envelope. Deleting an existing key can shrink
+  a list that already exceeds the budget.
 - A store file Qwen Code cannot read fails every call on that store, and the
-  file is left as it is.
+  file is left as it is. A symlink at the store file path also causes the
+  call to reject.
+- A paused process still holds its write lock. Acquiring the lock across
+  processes times out after eight seconds. A later writer can recover a lock
+  from a dead process on the same host. On Linux, recovery also requires the
+  same boot and PID namespace.
 - A `set` or `delete` whose dispatch ends while it runs rejects, so the caller
   cannot tell whether it landed. The session waits for it before it closes; a
   write the process is killed during may or may not land, and the file is
