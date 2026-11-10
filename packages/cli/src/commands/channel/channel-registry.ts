@@ -329,6 +329,7 @@ function assertManagementDescriptor(plugin: ChannelPlugin): void {
       (target.type !== 'user' && target.type !== 'chat') ||
       typeof target.id !== 'string' ||
       target.id.trim().length === 0 ||
+      /^[a-z][a-z0-9+.-]*:\/\//i.test(target.id.trim()) ||
       target.id.length > MAX_CHANNEL_DELIVERY_TARGET_ID_LENGTH ||
       (target.label !== undefined && typeof target.label !== 'string') ||
       Object.keys(target).some(
