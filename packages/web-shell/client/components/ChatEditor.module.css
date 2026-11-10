@@ -1828,10 +1828,20 @@
 }
 
 .dropdownItemActive,
+.dropdownItemActive:hover,
 .reasoningEffortRowActive,
 .reasoningEffortRowActive:hover:not(:disabled) {
   font-weight: 500;
   background: color-mix(in oklab, var(--accent), var(--foreground) 6%);
+}
+
+.dropdownItemActive .dropdownItemLabel {
+  font-weight: 500;
+}
+
+.reasoningEffortRowActive:disabled {
+  font-weight: inherit;
+  background: transparent;
 }
 
 .reasoningEffortRow:disabled {
