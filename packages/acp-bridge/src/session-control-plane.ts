@@ -9845,6 +9845,7 @@ export function createSessionControlPlane(
     context?: BridgeClientRequestContext,
     closeOpts?: CloseSessionOpts,
   ): Promise<void> {
+    if (shuttingDown) throw new WorkspaceDrainingError(boundWorkspace ?? '');
     if (closeOpts?.cause !== 'workspace_runtime_stop')
       assertRuntimeNotStopping();
     const entry = byId.get(sessionId);

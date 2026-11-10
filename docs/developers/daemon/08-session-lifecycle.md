@@ -130,6 +130,10 @@ A successful update fans `session_metadata_updated` to every subscriber.
 
 ### Termination
 
+During workspace draining or replacement, session-owner routing returns `503 workspace_runtime_unavailable` until the old runtime has finished shutting down. An early bridge removal event or a best-effort kill signal does not clear that ownership. A close request that already resolved its runtime also returns `503 workspace_draining` if bridge shutdown has begun, even when the bridge has cleared its session map. A failed shutdown keeps the owner unavailable; cancelling a drain before it commits restores normal routing.
+
+`DELETE /session/:id` returns `204` when close succeeds. `404 session_not_found` only describes absence from the current daemon; it does not prove a child from a previous daemon process has exited. `404 session_closing` means another close is still in progress.
+
 | Terminal frame   | Trigger                                                                                                                                                                                                                                                                          |
 | ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `session_closed` | `DELETE /session/:id` (client_close), programmatic close, or confirmed workspace runtime stop (`cause: workspace_runtime_stop`). A stop-associated fatal exit also carries `persistenceUnconfirmed: true`.                                                                       |
