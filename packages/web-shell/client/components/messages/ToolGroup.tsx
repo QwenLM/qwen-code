@@ -1336,21 +1336,27 @@ export const ToolLine = memo(function ToolLine({
       (!summaryOnly && shouldAutoExpand(tool) && !locksPendingEditApproval),
   );
   const monitorDetailsRequestRef = useRef<object | null>(null);
-  // Set once the user explicitly toggles this row, so auto-collapse-on-
-  // completion never silently overrides their choice.
+  // Set once the user explicitly toggles this row, so regrouping or
+  // auto-collapse-on-completion never silently overrides their choice.
   const userToggledRef = useRef(false);
   const isWorkflow = isWorkflowToolName(tool.toolName);
 
+  useEffect(() => {
+    userToggledRef.current = false;
+  }, [locksPendingEditApproval, tool.callId, tool.toolName]);
+
   useEffect(
     () => {
-      setExpanded(
-        isForcedExpanded ||
-          (!summaryOnly && shouldAutoExpand(tool) && !locksPendingEditApproval),
-      );
+      if (!userToggledRef.current || isForcedExpanded) {
+        setExpanded(
+          isForcedExpanded ||
+            (!summaryOnly &&
+              shouldAutoExpand(tool) &&
+              !locksPendingEditApproval),
+        );
+      }
       setMonitorDetailsUnavailable(false);
       monitorDetailsRequestRef.current = null;
-      // A new tool identity resets the manual latch.
-      userToggledRef.current = false;
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [

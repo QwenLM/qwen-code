@@ -1,4 +1,7 @@
-import type { DaemonSessionWorkflowTaskStatus } from '@qwen-code/sdk/daemon';
+import type {
+  DaemonEvent,
+  DaemonSessionWorkflowTaskStatus,
+} from '@qwen-code/sdk/daemon';
 import { test, expect, type Page, type TestInfo } from '@playwright/test';
 import {
   assistantTextEvent,
@@ -72,8 +75,7 @@ async function openSession(
   page: Page,
   testInfo: TestInfo,
   tasks: DaemonSessionWorkflowTaskStatus[],
-) {
-  const events = [
+  events: DaemonEvent[] = [
     userTextEvent('Review my change and fix what you find.', { id: 1 }),
     toolCallEvent(
       'workflow-call',
@@ -83,7 +85,8 @@ async function openSession(
     ),
     ...laterTurns,
     turnCompleteEvent('review', { id: 30 }),
-  ];
+  ],
+) {
   const scenario = createWebShellDaemonScenario({
     supportedCommands: { workflowsEnabled: true, savedWorkflows: [] },
     workflowTasks: tasks,
@@ -105,7 +108,7 @@ async function openSession(
       replayedCount: events.length,
     }),
   );
-  return { tasksPolled };
+  return { daemon, tasksPolled };
 }
 
 test('a workflow chip above the composer locates and opens the run', async ({
@@ -132,6 +135,43 @@ test('a workflow chip above the composer locates and opens the run', async ({
     body: await page.screenshot(),
     contentType: 'image/png',
   });
+});
+
+test('a located workflow stays open as the same turn adds tools @smoke', async ({
+  page,
+}, testInfo) => {
+  const { daemon } = await openSession(
+    page,
+    testInfo,
+    [workflowTask()],
+    [
+      userTextEvent('Start a background review, then inspect the project.', {
+        id: 1,
+      }),
+      toolCallEvent(
+        'workflow-call',
+        'workflow',
+        { name: 'Review and fix' },
+        { id: 2, rawOutput: { runId: 'workflow-review' } },
+      ),
+    ],
+  );
+  const chip = page
+    .getByTestId('composer-task-chips')
+    .getByRole('button', { name: '1 workflow' });
+  const node = page.locator('[data-workflow-dispatch="correctness"]');
+  await chip.click();
+  await expect(node).toBeVisible();
+
+  await daemon.sendEvent(
+    toolCallEvent('shell-call', 'shell', { command: 'pwd' }, { id: 3 }),
+  );
+
+  await expect(
+    page.locator('[data-transcript-tool-call-id="shell-call"]'),
+  ).toBeVisible();
+  await expect(node).toBeVisible();
+  await expect(chip).toBeVisible();
 });
 
 test('a chip for several runs lists them to pick from', async ({

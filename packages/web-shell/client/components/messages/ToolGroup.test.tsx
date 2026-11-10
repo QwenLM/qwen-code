@@ -1076,13 +1076,13 @@ describe('tool row rendering', () => {
       const container = document.createElement('div');
       document.body.appendChild(container);
       const root = createRoot(container);
-      const render = () =>
+      const render = (nextTools = tools) =>
         act(() => {
           root.render(
             <I18nProvider language="en">
               <ToolRevealProvider store={store}>
                 <WorkflowDetailsProvider tasks={[workflowTask(toolUseId)]}>
-                  <ToolGroup tools={tools} />
+                  <ToolGroup tools={nextTools} />
                 </WorkflowDetailsProvider>
               </ToolRevealProvider>
             </I18nProvider>,
@@ -1165,6 +1165,45 @@ describe('tool row rendering', () => {
         container.querySelector('button')?.getAttribute('aria-expanded'),
       ).toBe('true');
       expect(container.textContent).toContain('Reveal Agent');
+    });
+
+    it('keeps the revealed workflow open when its group gains tools', () => {
+      const workflow = makeTool({
+        callId: 'wf-call',
+        toolName: 'workflow',
+        status: 'completed',
+      });
+      const { container, store, render } = renderGroup([workflow], 'wf-call');
+      act(() => store.request('wf-call'));
+      expect(container.textContent).toContain('Reveal Agent');
+
+      render([workflow, makeTool({ callId: 'shell-call', toolName: 'Shell' })]);
+
+      expect(container.querySelector('[data-workflow-summary]')).not.toBeNull();
+      expect(container.textContent).toContain('Reveal Agent');
+    });
+
+    it('keeps a manually collapsed workflow closed until it is requested again', () => {
+      const tools = [
+        makeTool({ callId: 'shell-call', toolName: 'Shell' }),
+        makeTool({ callId: 'wf-call', toolName: 'workflow' }),
+      ];
+      const { container, store, render } = renderGroup(tools, 'wf-call');
+      act(() => store.request('wf-call'));
+      const row = container.querySelector<HTMLElement>(
+        '[data-transcript-tool-call-id="wf-call"] [role="button"]',
+      )!;
+      act(() => row.click());
+      expect(container.querySelector('[data-workflow-summary]')).toBeNull();
+
+      render([
+        ...tools,
+        makeTool({ callId: 'next-shell-call', toolName: 'Shell' }),
+      ]);
+      expect(container.querySelector('[data-workflow-summary]')).toBeNull();
+
+      act(() => store.request('wf-call'));
+      expect(container.querySelector('[data-workflow-summary]')).not.toBeNull();
     });
   });
 
@@ -1469,6 +1508,32 @@ describe('tool row rendering', () => {
     act(() => shell.click());
     expect(shell.getAttribute('aria-expanded')).toBe('true');
     expect(container.querySelector('[class*="expandedCard"]')).not.toBeNull();
+  });
+
+  it('resets a manually expanded row when its tool identity changes', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const render = (callId: string) => {
+      act(() => {
+        root.render(
+          <I18nProvider language="en">
+            <ToolLine tool={makeTool({ callId })} summaryOnly />
+          </I18nProvider>,
+        );
+      });
+    };
+    mounted.push({ root, container });
+
+    render('first-call');
+    act(() => container.querySelector<HTMLElement>('[role="button"]')!.click());
+    expect(container.querySelector('[class*="expandedCard"]')).not.toBeNull();
+
+    render('next-call');
+    expect(container.querySelector('[class*="expandedCard"]')).toBeNull();
+    expect(
+      container.querySelector('[role="button"]')?.getAttribute('aria-expanded'),
+    ).toBe('false');
   });
 
   it.each(['glob', 'todo_write'])(
@@ -3329,46 +3394,52 @@ describe('pending edit approval rows', () => {
       ],
     });
 
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const render = (hostOwnsEditDiffPreview: boolean) => {
+      act(() => {
+        root.render(
+          <I18nProvider language="en">
+            <WebShellCustomizationProvider value={{ hostOwnsEditDiffPreview }}>
+              <ToolLine
+                tool={tool}
+                approval={{
+                  id: 'perm-write',
+                  toolCallId: tool.callId,
+                  toolName: 'write',
+                  hasDiffPreview: true,
+                  content: [],
+                  options: [],
+                }}
+              />
+            </WebShellCustomizationProvider>
+          </I18nProvider>,
+        );
+      });
+    };
+    mounted.push({ root, container });
+
+    render(false);
+    act(() => container.querySelector<HTMLElement>('[role="button"]')!.click());
+    expect(container.querySelector('[aria-expanded="false"]')).not.toBeNull();
+
     // While the host shows the diff natively the row is deliberately locked:
     // `write` is an edit alias, so the native editor owns the interaction.
-    const hostOwned = renderToolLine(
-      tool,
-      {
-        approval: {
-          id: 'perm-write',
-          toolCallId: tool.callId,
-          toolName: 'write',
-          hasDiffPreview: true,
-          content: [],
-          options: [],
-        },
-      },
-      { hostOwnsEditDiffPreview: true },
-    );
-    expect(hostOwned.querySelector('[class*="lineExpandable"]')).toBeNull();
+    render(true);
+    expect(container.querySelector('[class*="lineExpandable"]')).toBeNull();
 
     // Handing the preview back has to unlock *and* auto-expand it, or the user
     // is left with an approval whose content is nowhere on screen. The expanded
     // renderer already handles the bare name, so only shouldAutoExpand has to
     // agree with isEditToolName about it.
-    const handedBack = renderToolLine(tool, {
-      approval: {
-        id: 'perm-write',
-        toolCallId: tool.callId,
-        toolName: 'write',
-        hasDiffPreview: true,
-        content: [],
-        options: [],
-      },
-    });
-    expect(
-      handedBack.querySelector('[class*="lineExpandable"]'),
-    ).not.toBeNull();
-    expect(handedBack.querySelector('[aria-expanded="true"]')).not.toBeNull();
+    render(false);
+    expect(container.querySelector('[class*="lineExpandable"]')).not.toBeNull();
+    expect(container.querySelector('[aria-expanded="true"]')).not.toBeNull();
     // ...and the edit itself is lookable again — the whole point of the
     // hand-back (#10557). Without content in the fixture the expanded card is
     // empty and the two assertions above pass with nothing on screen.
-    expect(handedBack.textContent).toContain('handed back content');
+    expect(container.textContent).toContain('handed back content');
   });
 });
 
