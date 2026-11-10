@@ -56,7 +56,10 @@ import {
   ResponsesStreamState,
 } from './openaiResponsesContentGenerator/responses-converter.js';
 import type { ResponsesSSEEvent } from './openaiResponsesContentGenerator/types.js';
-import { getToolCallFingerprint } from './toolCallIdUtils.js';
+import {
+  getToolCallFingerprint,
+  normalizeModelToolCallIds,
+} from './toolCallIdUtils.js';
 import {
   buildApiHistoryFromConversation,
   findApiHistoryPromptIndex,
@@ -83,7 +86,12 @@ import {
 } from '../config/config.js';
 import { setSimulate429 } from '../utils/testUtils.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
-import { CompressionStatus, type ChatCompressionInfo } from './turn.js';
+import {
+  CompressionStatus,
+  TOOL_LOOP_SKIPPED_MESSAGE,
+  TOOL_LOOP_SKIPPED_METADATA,
+  type ChatCompressionInfo,
+} from './turn.js';
 import {
   ChatCompressionService,
   MAX_CONSECUTIVE_FAILURES,
@@ -7008,6 +7016,145 @@ describe('LlmChat', async () => {
       expect([...fingerprints.keys()]).toEqual(['cid_a']);
       expect(fingerprints.get('cid_a')).toBe(
         getToolCallFingerprint('read_file', { file_path: 'a.ts' }),
+      );
+    });
+
+    it.each(['marked', 'legacy'])(
+      'excludes %s loop-stopped calls until the provider id is handled',
+      (format) => {
+        const stoppedResponse = (id: string): Part => ({
+          ...fnResponse('read_file', { error: TOOL_LOOP_SKIPPED_MESSAGE }, id),
+          ...(format === 'marked'
+            ? { partMetadata: { [TOOL_LOOP_SKIPPED_METADATA]: true } }
+            : {}),
+        });
+        const stoppedHistory = [
+          content('model', readCall('handled', 'handled.ts')),
+          content(
+            'user',
+            fnResponse(
+              'read_file',
+              { error: TOOL_LOOP_SKIPPED_MESSAGE },
+              'handled',
+            ),
+          ),
+          content(
+            'model',
+            readCall('fresh', 'fresh.ts'),
+            readCall('loop-end', 'handled.ts'),
+          ),
+          content('user', stoppedResponse('fresh')),
+          content('user', stoppedResponse('loop-end')),
+        ];
+        const endIds = format === 'legacy' ? ['loop-end'] : [];
+        chat.setHistory(stoppedHistory, endIds);
+        expect(chat.getHistoryFunctionResponseIds()).toContain('fresh');
+        expect([...chat.getHistoryToolCallFingerprints().keys()]).toEqual([
+          'handled',
+        ]);
+
+        const [retried] = normalizeModelToolCallIds(
+          [readCall('fresh', 'retry.ts')],
+          new Set(['fresh']),
+          new Set(),
+        );
+        const id = retried.functionCall!.id!;
+        const history = [
+          ...stoppedHistory,
+          content('model', redactStructuredOutputArgsForRecording(retried)!),
+          content('user', fnResponse('read_file', { output: 'retried' }, id)),
+        ];
+        chat.setHistory(JSON.parse(JSON.stringify(history)), endIds);
+        const fingerprints = chat.getHistoryToolCallFingerprints();
+        const fingerprint = getToolCallFingerprint('read_file', {
+          file_path: 'retry.ts',
+        });
+        expect(fingerprints.get('fresh')).toBe(fingerprint);
+        expect(fingerprints.get(id)).toBe(fingerprint);
+        expect(fingerprints.has('loop-end')).toBe(false);
+        expect(chat.getHistoryToolCallFingerprints(new Set([id]))).toEqual(
+          new Map([
+            [id, fingerprint],
+            ['fresh', fingerprint],
+          ]),
+        );
+        expect(
+          chat.getHistoryToolCallFingerprints(new Set(['fresh', 'loop-end'])),
+        ).toEqual(new Map());
+
+        chat.setHistory(JSON.parse(JSON.stringify(history.slice(-2))));
+        expect(chat.getHistoryToolCallFingerprints()).toEqual(
+          new Map([
+            [id, fingerprint],
+            ['fresh', fingerprint],
+          ]),
+        );
+      },
+    );
+
+    it('chooses a retained provider alias before filtering to retry results', () => {
+      const rawId = 'reused';
+      const usedIds = new Set([rawId]);
+      const pair = (file: string, response: Record<string, unknown>) => {
+        const [call] = normalizeModelToolCallIds(
+          [readCall(rawId, file)],
+          usedIds,
+          new Set(),
+        );
+        return [
+          content('model', call),
+          content(
+            'user',
+            fnResponse('read_file', response, call.functionCall!.id),
+          ),
+        ];
+      };
+      const firstResult = pair('first.ts', { output: 'first' });
+      const secondResult = pair('second.ts', { output: 'second' });
+      const firstId = firstResult[0].parts![0].functionCall!.id!;
+      const secondId = secondResult[0].parts![0].functionCall!.id!;
+      const history = [...firstResult, ...secondResult];
+      const firstFingerprint = getToolCallFingerprint('read_file', {
+        file_path: 'first.ts',
+      });
+      const secondFingerprint = getToolCallFingerprint('read_file', {
+        file_path: 'second.ts',
+      });
+
+      chat.setHistory(history);
+      expect(chat.getHistoryToolCallFingerprints().get(rawId)).toBe(
+        firstFingerprint,
+      );
+      expect(chat.getHistoryToolCallFingerprints(new Set([secondId]))).toEqual(
+        new Map([[secondId, secondFingerprint]]),
+      );
+
+      chat.setHistory([
+        ...history,
+        content('model', readCall(rawId, 'original.ts')),
+        content('user', fnResponse('read_file', { output: 'original' }, rawId)),
+      ]);
+      expect(chat.getHistoryToolCallFingerprints().get(rawId)).toBe(
+        getToolCallFingerprint('read_file', { file_path: 'original.ts' }),
+      );
+      expect(chat.getHistoryToolCallFingerprints(new Set([firstId]))).toEqual(
+        new Map([[firstId, firstFingerprint]]),
+      );
+
+      chat.setHistory([
+        firstResult[0],
+        content(
+          'user',
+          fnResponse(
+            'read_file',
+            { error: ORPHAN_TOOL_USE_REPAIR_REASON },
+            firstId,
+          ),
+        ),
+        ...secondResult,
+      ]);
+      expect(chat.getHistoryToolCallFingerprints().get(rawId)).toBe(
+        secondFingerprint,
       );
     });
 
