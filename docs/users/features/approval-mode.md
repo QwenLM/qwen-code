@@ -12,6 +12,8 @@ Qwen Code offers five distinct permission modes that allow you to flexibly contr
 | **Auto**​            | ✅ Classifier-evaluated     | ✅ Classifier-evaluated     | • Long autonomous sessions <br>• When Auto-Edit is too cautious but YOLO is too risky                  | Medium     |
 | **YOLO**​            | ✅ Auto-approved            | ✅ Auto-approved            | • Trusted personal projects <br>• Automated scripts/CI/CD <br>• Batch processing tasks                 | Highest    |
 
+> Auto-Edit's automatic approval is a mode default, not an override for matching `permissions.ask` rules.
+
 > [!NOTE]
 >
 > The mode previously named **Default** has been renamed to **Ask Permissions** to better describe its behavior. The underlying configuration value (`tools.approvalMode: "default"`) and the `/approval-mode default` command are unchanged for backward compatibility.
@@ -169,7 +171,7 @@ You can review each proposed change and approve or reject it individually.
 
 Auto-Edit Mode instructs Qwen Code to automatically approve file edits while requiring manual approval for shell commands, ideal for accelerating development workflows while maintaining system safety.
 
-Auto-approved edit tools include `edit`, `write_file`, and `notebook_edit`.
+Auto-approved edit tools include `edit`, `write_file`, and `notebook_edit`. A matching [`permissions.ask`](../configuration/settings.md#permissions) rule still requires confirmation in Auto-Edit mode; YOLO is the only mode that bypasses these ask rules.
 
 ### When to use Auto-Accept Edits Mode
 
@@ -191,7 +193,7 @@ Shift+Tab (or Tab on Windows) # Switch from other modes
 
 1. You ask Qwen Code to refactor a function
 2. AI analyzes the code and proposes changes
-3. **Automatically**​ applies all file changes without confirmation
+3. **Automatically**​ applies file changes that do not match a `permissions.ask` rule; matching changes require confirmation
 4. If tests need to be run, it will **request approval**​ to execute `npm test`
 
 ## 4. Auto Mode - Classifier-Driven Approval

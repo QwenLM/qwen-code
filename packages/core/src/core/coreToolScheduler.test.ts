@@ -11747,49 +11747,63 @@ describe('CoreToolScheduler telemetry spans', () => {
     expect(execute).not.toHaveBeenCalled();
   });
 
-  it('does not let AUTO_EDIT auto-approve a call a permissions.ask rule forces to confirm (#16795)', async () => {
-    const execute = vi.fn().mockResolvedValue(textResult('ok'));
-    const { onToolCallsUpdate, onAllToolCallsComplete } = await scheduleWithAsk(
-      {
-        approvalMode: ApprovalMode.AUTO_EDIT,
-        // A neutral bus: no PreToolUse ask, so the only ask signal is the PM
-        // rule below — the same shape as a user's `permissions.ask` entry.
-        messageBus: allowAllHookBus(),
-        configOverrides: {
-          getPermissionManager: () => ({
-            isToolEnabled: vi.fn().mockResolvedValue(true),
-            hasRelevantRules: vi.fn().mockReturnValue(true),
-            evaluate: vi.fn().mockResolvedValue('ask'),
-            hasMatchingAskRule: vi.fn().mockReturnValue(true),
-            findMatchingDenyRule: vi.fn(),
-          }),
-        },
-        tools: [
-          new MockTool({
-            name: 'mockTool',
-            execute,
-            getConfirmationDetails: infoConfirmation,
-          }),
-        ],
-      },
-    );
+  it.each(['info', 'edit'] as const)(
+    'does not let AUTO_EDIT auto-approve a %s-type call a permissions.ask rule forces to confirm (#16795)',
+    async (confirmationType) => {
+      const execute = vi.fn().mockResolvedValue(textResult('ok'));
+      const { onToolCallsUpdate, onAllToolCallsComplete } =
+        await scheduleWithAsk({
+          approvalMode: ApprovalMode.AUTO_EDIT,
+          // A neutral bus: no PreToolUse ask, so the only ask signal is the PM
+          // rule below — the same shape as a user's `permissions.ask` entry.
+          messageBus: allowAllHookBus(),
+          configOverrides: {
+            getPermissionManager: () => ({
+              isToolEnabled: vi.fn().mockResolvedValue(true),
+              hasRelevantRules: vi.fn().mockReturnValue(true),
+              evaluate: vi.fn().mockResolvedValue('ask'),
+              hasMatchingAskRule: vi.fn().mockReturnValue(true),
+              findMatchingDenyRule: vi.fn(),
+            }),
+          },
+          tools: [
+            new MockTool({
+              name: 'mockTool',
+              execute,
+              getConfirmationDetails:
+                confirmationType === 'info'
+                  ? infoConfirmation
+                  : async () => ({
+                      type: 'edit' as const,
+                      title: 'Confirm guarded edit',
+                      fileName: 'guarded.txt',
+                      filePath: '/guarded.txt',
+                      fileDiff: '-before\n+after',
+                      originalContent: 'before',
+                      newContent: 'after',
+                      onConfirm: async () => {},
+                    }),
+            }),
+          ],
+        });
 
-    // The `!pmForcedAsk` term is the only thing between AUTO_EDIT and a
-    // silently executed call an `ask` rule demands confirmation for. AUTO
-    // mode already honors the rule; without this term AUTO_EDIT is the one
-    // mode where the same rule is bypassed.
-    const waiting = await waitForApproval(onToolCallsUpdate);
-    expect(waiting.confirmationDetails.type).toBe('info');
-    expect(execute).not.toHaveBeenCalled();
+      // The `!pmForcedAsk` term is the only thing between AUTO_EDIT and a
+      // silently executed call an `ask` rule demands confirmation for. AUTO
+      // mode already honors the rule; without this term AUTO_EDIT is the one
+      // mode where the same rule is bypassed.
+      const waiting = await waitForApproval(onToolCallsUpdate);
+      expect(waiting.confirmationDetails.type).toBe(confirmationType);
+      expect(execute).not.toHaveBeenCalled();
 
-    // The prompt is the normal one: approving it runs the tool exactly once.
-    await waiting.confirmationDetails.onConfirm(
-      ToolConfirmationOutcome.ProceedOnce,
-    );
-    const completed = await settledLastBatch(onAllToolCallsComplete);
-    expect(completed[0].status).toBe('success');
-    expect(execute).toHaveBeenCalledTimes(1);
-  });
+      // The prompt is the normal one: approving it runs the tool exactly once.
+      await waiting.confirmationDetails.onConfirm(
+        ToolConfirmationOutcome.ProceedOnce,
+      );
+      const completed = await settledLastBatch(onAllToolCallsComplete);
+      expect(completed[0].status).toBe('success');
+      expect(execute).toHaveBeenCalledTimes(1);
+    },
+  );
 
   it('executes the tool exactly once when the user approves an ask (no re-ask loop)', async () => {
     const execute = vi.fn().mockResolvedValue(textResult('ok'));
