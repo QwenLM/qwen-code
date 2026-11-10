@@ -368,6 +368,14 @@ describe('isDestructiveCommand — git commit --amend', () => {
     expect(performance.now() - start).toBeLessThan(500);
   });
 
+  it('does not ask for an amend whose only dollar sign is an argument value', () => {
+    // Rule 3 keys on `$` positions that can restructure the command, not on
+    // the presence of `$`: a variable commit message is the most common
+    // legitimate case.
+    expect(amendNeedsApproval('git commit -m "$msg"')).toBe(false);
+    expect(amendNeedsApproval('git commit -m "$(cat msg)"')).toBe(false);
+  });
+
   it.each([
     'git status',
     'git commit -m "a normal commit"',

@@ -189,6 +189,13 @@ export function amendNeedsApproval(command: string): boolean {
 function mentionsGitCommitAmend(command: string): boolean {
   let seenGit = false;
   let inCommit = false;
+  // Rule 3 (R25-2): a `$` that can change the command's *structure* keeps the
+  // mention unprovable. Only two positions qualify: before the first `commit`
+  // word (program/subcommand/flag assembly), and a flag built from an
+  // expansion (handled by `isUnprovableFlag`). A `$` in an ordinary argument
+  // value — `-m "$msg"`, `-m "$(cat msg)"` — does not change what the guard
+  // reads and must not ask.
+  let dollarBeforeCommit = false;
   // `${IFS}`/`$IFS` expand to whitespace at run time, so a command that
   // assembles `git`, `commit` and `--amend` this way cannot be read from the
   // text; treat the expansion as whitespace so the words are seen (R25-2).
@@ -205,21 +212,15 @@ function mentionsGitCommitAmend(command: string): boolean {
           // A flag assembled by an expansion cannot be proven inert; ask.
           // The escalation stays gated on a seen `git` + `commit` prefix.
           if (isUnprovableFlag(bare)) return true;
+        } else if (bare.includes('$')) {
+          dollarBeforeCommit = true;
         }
         if (isGitWord(bare)) seenGit = true;
         else if (seenGit && bare === 'commit') inCommit = true;
       }
     }
   }
-  // Rule 3 (R25-2): any `$` expansion — IFS assembly, an indirect word, a
-  // flag built from a variable — next to a `git` + `commit` mention keeps the
-  // text unprovable: ask, never silently allow. Bash word-splits the expansion
-  // result, so an assembly that changes the words always carries a `$`.
-  return (
-    command.includes('$') &&
-    /(?:^|[^\w])git(?:\.exe)?(?:[^\w]|$)/.test(command) &&
-    /(?:^|[^\w])commit(?:[^\w]|$)/.test(command)
-  );
+  return dollarBeforeCommit;
 }
 
 /** A word that expands at run time and starts like a flag (R25-2). */
