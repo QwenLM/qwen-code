@@ -295,6 +295,16 @@ bot 还在其收敛姿态下记录了一份 deferred 清单（本轮不要求修
 
 **CI（base，非本 diff）。** Linux build / TUI / 原生 Windows 前置失败是 document-export 渲染器超字节预算（2,066,342 对 2,060,000）。本 PR 只改 `packages/core` shell 归因与文档、不碰任何 web 构建输入，故该失败属 main，且已被 main 上的 `4c84f269d1`（#16774「lift the export renderer budget to the merged size」）修复；合入当前 main 即带入该修复。本 PR 不改 web-templates。
 
+### 第十一轮评审（2026-11-10，复评 `865e22501f1`）
+
+复评确认第十轮修复（20 条保留见证通过），并报出三条 P2——两条 readonly 状态不完整、一条是第十轮 declaration 子树守卫引入的回归：
+
+1. **readonly 状态不完整。** `readonly -f 'cd'` 提供引号（`raw_string`）目标，declaration 分支此前忽略；`if true; then readonly -f cd; fi` 位于通用分支不记录的控制流里。现用共享 `readonlyFunctionDeclaration` helper 解码字面目标（variable_name / word / raw_string / string），当前 shell 控制流扫描也记录 readonly 声明（跳过嵌套子上下文）。目标不可解码时置 `readonlyUncertain` 标志，状态未确立前不解除任何阴影。
+2. **lastpipe 非末元素。** `lastpipe` 只让**末**元素在当前 shell 运行；此前代码对每个元素都禁用状态恢复。管道分支现在隔离每个非末元素的函数/readonly/shopt 状态，仅让末元素（lastpipe 下）影响当前 shell。
+3. **declaration 子树守卫过宽（回归）。** 第十轮守卫用 `subtreeMayChangeDirectory`，把 `export WT_PATH="$(cd … && pwd)"` 里无害的子 shell cd 也标记了。新 `subtreeCreatesWorktree` helper 只标记 worktree 创建（其文件系统效应在子 shell 后存活），子 shell cd 不再强制回退。
+
+第十一轮验证：**509 passed**（495 单测 + 14 真实文件系统），core typecheck exit 0，ESLint 与 Prettier 干净。变异见证 AO（控制流 readonly 记录）、AP（引号目标解码）、AQ（lastpipe 逐元素隔离）、AR（declaration 仅 worktree 守卫）各自杀掉点名用例、其余对照绿；从字节级备份还原（最终 `shell.ts` SHA-256 `7a46b770e0123e48d3de806fc2ce5f1f8fb753a9978f540479f30aa8243f49a8`）。
+
 ## 验收标准
 
 - 两条事故命令形状都绑定到其 worktree 分支所解析出的 PR。

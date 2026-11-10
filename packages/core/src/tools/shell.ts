@@ -1028,6 +1028,56 @@ function commandCreatesWorktree(node: ShellSyntaxNode): boolean {
 }
 
 /**
+ * Whether a subtree creates a git worktree anywhere, including inside command
+ * substitutions. A worktree's filesystem effect survives the child shell, so it
+ * matters even when the surrounding cd does not. A child-only cd (no worktree)
+ * is deliberately NOT flagged here.
+ */
+function subtreeCreatesWorktree(node: ShellSyntaxNode): boolean {
+  const stack: ShellSyntaxNode[] = [node];
+  while (stack.length > 0) {
+    const current = stack.pop()!;
+    if (commandCreatesWorktree(current)) return true;
+    stack.push(...current.namedChildren);
+  }
+  return false;
+}
+
+/**
+ * If a declaration marks a function readonly (`readonly -f`, `declare -r -f`,
+ * clustered options), return its literal function-name targets. Returns
+ * undefined when the declaration does not mark a function readonly, and
+ * `{ targets: undefined }` when it does but a target cannot be decoded (the
+ * readonly state is then unestablished and removal must stay conservative).
+ */
+function readonlyFunctionDeclaration(
+  node: ShellSyntaxNode,
+): { targets: string[] | undefined } | undefined {
+  if (node.type !== 'declaration_command') return undefined;
+  const keyword = node.firstChild?.text;
+  const optionChars = new Set<string>();
+  for (const c of node.namedChildren) {
+    if (c.type === 'word' && c.text.startsWith('-')) {
+      for (const ch of c.text.slice(1)) optionChars.add(ch);
+    }
+  }
+  const marksReadonly =
+    (keyword === 'readonly' && optionChars.has('f')) ||
+    ((keyword === 'declare' || keyword === 'typeset') &&
+      optionChars.has('r') &&
+      optionChars.has('f'));
+  if (!marksReadonly) return undefined;
+  const targets: string[] = [];
+  for (const c of node.namedChildren) {
+    if (c.type === 'word' && c.text.startsWith('-')) continue;
+    const value = c.type === 'variable_name' ? c.text : literalShellValue(c);
+    if (value === undefined) return { targets: undefined };
+    targets.push(value);
+  }
+  return { targets };
+}
+
+/**
  * Decode a literal shell value (a `--repo` argument) to the string Bash would
  * pass, or undefined when it carries an expansion we cannot evaluate. Handles
  * the quoted equals form `--repo='o/r'`, which tree-sitter spells as a
@@ -1234,6 +1284,9 @@ async function resolveGhPrCreateDirectory(
     // Functions marked readonly (`readonly -f`, `declare -r -f`) cannot be
     // removed by `unset -f`, so their shadow must survive an unset attempt.
     const readonlyFunctions = new Set<string>();
+    // Set when a readonly declaration's target cannot be decoded: the readonly
+    // state is then unestablished, so no shadow may be lifted.
+    let readonlyUncertain = false;
 
     const visit = (
       node: ShellSyntaxNode,
@@ -1311,23 +1364,27 @@ async function resolveGhPrCreateDirectory(
         }
         case 'pipeline': {
           // Bash runs pipeline elements in subshells, so a `cd` inside one
-          // does not leak; every element sees the incoming directory. With
-          // `shopt -s lastpipe` the last element runs in THIS shell instead.
-          const pipelineInCurrentShell = lastpipeEnabled;
-          const inheritedShadowed = new Set(shadowed);
-          const inheritedReadonly = new Set(readonlyFunctions);
-          // Pipeline elements run in subshells: an `unset -f` there cannot lift
-          // a shadow in this shell, so never treat it as guaranteed.
-          for (const child of node.namedChildren) visit(child, dir, false);
-          if (!pipelineInCurrentShell) {
-            // Function definitions, readonly marks and shopt inside ordinary
-            // pipeline elements die with their subshell and cannot affect the
-            // outer shell, so restore both pieces of function state.
-            lastpipeEnabled = false;
+          // does not leak. With `shopt -s lastpipe` ONLY the final element runs
+          // in THIS shell; every preceding element is still a subshell, so its
+          // function/readonly/shopt state must be isolated, not leaked.
+          const elements = node.namedChildren;
+          for (let i = 0; i < elements.length; i++) {
+            const isLast = i === elements.length - 1;
+            if (isLast && lastpipeEnabled) {
+              visit(elements[i]!, dir, guaranteed);
+              continue;
+            }
+            const savedShadowed = new Set(shadowed);
+            const savedReadonly = new Set(readonlyFunctions);
+            const savedUncertain = readonlyUncertain;
+            const savedLastpipe = lastpipeEnabled;
+            visit(elements[i]!, dir, false);
             shadowed.clear();
-            for (const name of inheritedShadowed) shadowed.add(name);
+            for (const name of savedShadowed) shadowed.add(name);
             readonlyFunctions.clear();
-            for (const name of inheritedReadonly) readonlyFunctions.add(name);
+            for (const name of savedReadonly) readonlyFunctions.add(name);
+            readonlyUncertain = savedUncertain;
+            lastpipeEnabled = savedLastpipe;
           }
           if (lastpipeEnabled && subtreeMayChangeDirectory(node)) opaque = true;
           return dir;
@@ -1352,33 +1409,23 @@ async function resolveGhPrCreateDirectory(
           return dir;
         }
         case 'declaration_command': {
-          // `readonly -f cd` / `declare -r -f cd` mark a function readonly; a
-          // later `unset -f` cannot remove it, so its shadow must survive.
-          // Marking conservatively (even if the declaration is skipped) only
-          // ever keeps a shadow, which is the safe direction. Bash accepts
-          // clustered options (`declare -rf cd`, `typeset -fr cd`), so decode
-          // the option characters rather than matching whole flag words.
-          const keyword = node.firstChild?.text;
-          const optionChars = new Set<string>();
-          for (const c of node.namedChildren) {
-            if (c.type === 'word' && c.text.startsWith('-')) {
-              for (const ch of c.text.slice(1)) optionChars.add(ch);
-            }
-          }
-          const marksReadonly =
-            (keyword === 'readonly' && optionChars.has('f')) ||
-            ((keyword === 'declare' || keyword === 'typeset') &&
-              optionChars.has('r') &&
-              optionChars.has('f'));
-          if (marksReadonly) {
-            for (const c of node.namedChildren) {
-              if (c.type === 'variable_name') readonlyFunctions.add(c.text);
+          // `readonly -f cd` / `declare -r -f cd` (including clustered options
+          // and quoted targets) mark a function readonly; a later `unset -f`
+          // cannot remove it, so its shadow must survive. Marking conservatively
+          // (even if the declaration is skipped) only ever keeps a shadow.
+          const readonlyDecl = readonlyFunctionDeclaration(node);
+          if (readonlyDecl) {
+            if (readonlyDecl.targets === undefined) {
+              readonlyUncertain = true;
+            } else {
+              for (const t of readonlyDecl.targets) readonlyFunctions.add(t);
             }
           }
           // A declaration can create a worktree inside a command substitution
-          // (`export WT="$(git worktree add …)"`); keep the same subtree guard
-          // the default arm applies so that is not silently resolved.
-          if (subtreeMayChangeDirectory(node)) opaque = true;
+          // (`export WT="$(git worktree add …)"`); that filesystem effect
+          // survives the child and must fail closed. A child-only cd (no
+          // worktree) cannot move this shell and must NOT force a fallback.
+          if (subtreeCreatesWorktree(node)) opaque = true;
           return dir;
         }
         case 'unset_command': {
@@ -1398,9 +1445,13 @@ async function resolveGhPrCreateDirectory(
           if (hasFunctionFlag) {
             const targets = node.namedChildren.filter((c) => c.type !== 'word');
             if (targets.every((c) => c.type === 'variable_name')) {
-              // If any target is readonly the removal is not provably
-              // successful, so keep the shadows rather than clearing them.
-              if (!targets.some((t) => readonlyFunctions.has(t.text))) {
+              // If the readonly state is unestablished, or any target is
+              // readonly, the removal is not provably successful, so keep the
+              // shadows rather than clearing them.
+              if (
+                !readonlyUncertain &&
+                !targets.some((t) => readonlyFunctions.has(t.text))
+              ) {
                 for (const t of targets) shadowed.delete(t.text);
               }
             } else {
@@ -1593,30 +1644,46 @@ async function resolveGhPrCreateDirectory(
             node.type === 'command_substitution' ||
             node.type === 'process_substitution'
           ) {
-            const stack = [node];
-            while (stack.length > 0) {
-              const current = stack.pop()!;
-              if (commandCreatesWorktree(current)) {
-                opaque = true;
-                break;
-              }
-              stack.push(...current.namedChildren);
-            }
+            if (subtreeCreatesWorktree(node)) opaque = true;
             return dir;
           }
           // Compound statements and control flow run in THIS shell: a directory
           // change inside them is not attributable from here, but a subtree
           // that never moves the directory cannot cost us a binding either.
           // A function definition inside can still shadow a later builtin even
-          // when its body contains no cd; register it conservatively.
-          const stack = [node];
+          // when its body contains no cd; register it conservatively. A readonly
+          // declaration in current-shell control flow (`if true; then readonly
+          // -f cd; fi`) also blocks a later unset, so record it — but not when it
+          // sits inside a nested child context, whose effects die with it.
+          const stack: Array<{ n: ShellSyntaxNode; child: boolean }> = [
+            { n: node, child: false },
+          ];
           while (stack.length > 0) {
-            const current = stack.pop()!;
+            const { n: current, child } = stack.pop()!;
             if (current.type === 'function_definition') {
               const name = current.childForFieldName('name')?.text;
               if (name) shadowed.add(name);
             }
-            stack.push(...current.namedChildren);
+            const nowChild =
+              child ||
+              current.type === 'subshell' ||
+              current.type === 'command_substitution' ||
+              current.type === 'process_substitution' ||
+              current.type === 'pipeline';
+            if (!nowChild) {
+              const readonlyDecl = readonlyFunctionDeclaration(current);
+              if (readonlyDecl) {
+                if (readonlyDecl.targets === undefined) {
+                  readonlyUncertain = true;
+                } else {
+                  for (const t of readonlyDecl.targets)
+                    readonlyFunctions.add(t);
+                }
+              }
+            }
+            for (const c of current.namedChildren) {
+              stack.push({ n: c, child: nowChild });
+            }
           }
           if (subtreeMayChangeDirectory(node)) opaque = true;
           return dir;

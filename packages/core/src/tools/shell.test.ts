@@ -1419,19 +1419,22 @@ describe('ShellTool', () => {
 
       it.each([
         'cd() { :; }; readonly -f cd; unset -f cd; cd /test/dir/nested && gh pr create --fill',
+        "cd() { :; }; readonly -f 'cd'; unset -f cd; cd /test/dir/nested && gh pr create --fill",
         'cd() { :; }; declare -r -f cd; unset -f cd; cd /test/dir/nested && gh pr create --fill',
         'cd() { :; }; declare -rf cd; unset -f cd; cd /test/dir/nested && gh pr create --fill',
         'cd() { :; }; typeset -fr cd; unset -f cd; cd /test/dir/nested && gh pr create --fill',
+        'cd() { :; }; if true; then readonly -f cd; fi; unset -f cd; cd /test/dir/nested && gh pr create --fill',
         'cd() { :; }; unset -f cd > /missing-parent/output; cd /test/dir/nested && gh pr create --fill',
       ])(
         'keeps the function shadow when the unset cannot provably succeed: %s',
         async (command) => {
           // A readonly function cannot be unset (including clustered options
-          // like `declare -rf`), and a failed output redirection means the
-          // unset never runs; in both the no-op function survives, so the later
-          // cd does NOT move the shell. Keep the shadow and fall back
-          // conservatively instead of clearing it from the execution-order flag
-          // alone.
+          // like `declare -rf`, quoted targets like `readonly -f 'cd'`, and
+          // declarations inside current-shell control flow), and a failed
+          // output redirection means the unset never runs; in all of these the
+          // no-op function survives, so the later cd does NOT move the shell.
+          // Keep the shadow and fall back conservatively instead of clearing it
+          // from the execution-order flag alone.
           mockCreatedPr(77);
           const result = await runShell(command, PR_77);
           expectOpaqueFallback(result);
@@ -1451,6 +1454,18 @@ describe('ShellTool', () => {
         await expectAttributedIn(resolved('/test/dir/nested'));
       });
 
+      it('isolates non-final pipeline elements even under lastpipe', async () => {
+        // lastpipe runs only the FINAL element in the current shell; the first
+        // element's readonly mark is still subshell-only, so the parent unset
+        // succeeds and the create runs in the worktree.
+        mockCreatedPr(77);
+        await runShell(
+          'cd() { :; }; shopt -s lastpipe; readonly -f cd | cat; unset -f cd; cd /test/dir/nested && gh pr create --fill',
+          PR_77,
+        );
+        await expectAttributedIn(resolved('/test/dir/nested'));
+      });
+
       it('fails closed for a worktree created inside a declaration substitution', async () => {
         // `export WT="$(git worktree add …)"` creates the worktree before the
         // snapshot; the declaration arm must keep the subtree worktree guard so
@@ -1461,6 +1476,19 @@ describe('ShellTool', () => {
           PR_77,
         );
         expectOpaqueFallback(result);
+      });
+
+      it('does not fall back for a child-only cd inside a declaration substitution', async () => {
+        // `export WT_PATH="$(cd … && pwd)"` runs the cd in a child shell; it
+        // cannot move the parent, and the later literal cd determines the create
+        // directory. Only worktree creation (a surviving filesystem effect)
+        // should force a fallback, not a harmless child cd.
+        mockCreatedPr(77);
+        await runShell(
+          'export WT_PATH="$(cd /test/dir/nested && pwd)" && cd /test/dir/nested && gh pr create --fill',
+          PR_77,
+        );
+        await expectAttributedIn(resolved('/test/dir/nested'));
       });
 
       it('binds from launch without a notice when only a subshell cds', async () => {

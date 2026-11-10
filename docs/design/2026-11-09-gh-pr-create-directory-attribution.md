@@ -710,6 +710,38 @@ docs — no web build input — so the failure is main's, already fixed on main 
 `4c84f269d1` (#16774, "lift the export renderer budget to the merged size"); merging
 current main brings that fix in. No web-templates change is made in this PR.
 
+### Review round 11 (2026-11-10, re-review of `865e22501f1`)
+
+The re-review confirmed the round-10 fixes (20 retained witnesses pass) and
+reported three P2s — two incomplete readonly-state cases and one regression from
+the round-10 declaration subtree guard:
+
+1. **Incomplete readonly state.** `readonly -f 'cd'` supplies a quoted
+   (`raw_string`) target the declaration arm ignored, and `if true; then readonly
+-f cd; fi` sits in control flow the generic arm did not record. A shared
+   `readonlyFunctionDeclaration` helper now decodes literal targets
+   (variable_name / word / raw_string / string), and the current-shell
+   control-flow scan records readonly declarations too (skipping nested child
+   contexts). A non-decodable readonly target sets a `readonlyUncertain` flag so
+   no shadow is lifted while the state is unestablished.
+2. **lastpipe non-final elements.** `lastpipe` runs only the FINAL pipeline
+   element in the current shell; the previous code disabled state restoration for
+   every element. The pipeline arm now isolates each non-final element's
+   function/readonly/shopt state and only lets the final element (under lastpipe)
+   affect the current shell.
+3. **Declaration subtree guard too broad (regression).** The round-10 guard used
+   `subtreeMayChangeDirectory`, which also flagged a harmless child-only cd in
+   `export WT_PATH="$(cd … && pwd)"`. A new `subtreeCreatesWorktree` helper flags
+   only worktree creation (whose filesystem effect survives the child), so a
+   child-only cd no longer forces a fallback.
+
+Round-11 verification: **509 passed** (495 unit + 14 real-filesystem), core
+typecheck exit 0, ESLint and Prettier clean. Mutation witnesses AO (control-flow
+readonly record), AP (quoted-target decode), AQ (lastpipe per-element isolation)
+and AR (worktree-only declaration guard) each red their named cases with the other
+controls green; restored from a byte-level backup (final `shell.ts` SHA-256
+`7a46b770e0123e48d3de806fc2ce5f1f8fb753a9978f540479f30aa8243f49a8`).
+
 ## Acceptance criteria
 
 - Both incident command shapes bind the PR their worktree branch resolves to.
