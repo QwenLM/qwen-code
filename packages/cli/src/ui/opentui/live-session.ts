@@ -45,6 +45,10 @@ import {
   LoopReason,
   LoopType,
 } from '@qwen-code/qwen-code-core/telemetry/types.js';
+import {
+  endInteractionSpan,
+  getActiveInteractionSpan,
+} from '@qwen-code/qwen-code-core/telemetry/session-tracing.js';
 import { formatInteractiveLoopDetectedMessage } from '../../utils/loop-detected-message.js';
 import type { HumanPromptInput } from '@qwen-code/qwen-code-core/core/workflow-intent.js';
 import type { ModQueuedPrompt } from '@qwen-code/qwen-code-core/mods/types.js';
@@ -1163,7 +1167,52 @@ export async function* livePromptEvents(
       }
       if (round) pending.push(...round.calls);
     }
-    if (pending.length === 0 || abort.aborted) return;
+    if (
+      pending.length === 0 ||
+      abort.aborted ||
+      (sharedRound && !isCurrentSession())
+    )
+      return;
+
+    if (duplicates && sendOptions.type === SendMessageType.Retry) {
+      const { handled } = duplicates;
+      const retryIds = normalizeParts(nextPrompt).flatMap(
+        ({ functionResponse }) => {
+          const id = functionResponse?.id;
+          return id && !handled.has(id) ? [id] : [];
+        },
+      );
+      if (retryIds.length > 0) {
+        // A retried continuation can pair a tool result the pre-send snapshot
+        // did not yet see. Only import the real results it carried.
+        const fingerprints = client.getHistoryToolCallFingerprints();
+        const repaired = client.getSynthesizedRepairCallIds();
+        for (const id of retryIds) {
+          const fingerprint = fingerprints.get(id);
+          if (fingerprint !== undefined && !repaired.has(id))
+            handled.set(id, fingerprint);
+        }
+      }
+    }
+
+    const interactionOwner = sharedRound
+      ? getActiveInteractionSpan(promptId)
+      : undefined;
+    const endBatchInteraction = (
+      status: 'ok' | 'cancelled' | 'error',
+      failure?: { errorMessage: string; errorType: string },
+    ) => {
+      if (
+        !interactionOwner ||
+        getActiveInteractionSpan(promptId) !== interactionOwner
+      )
+        return;
+      if (abort.aborted || !isCurrentSession()) {
+        endInteractionSpan('cancelled', { promptId });
+      } else {
+        endInteractionSpan(status, { promptId, ...failure });
+      }
+    };
 
     // Live output bridge (ink outputUpdateHandler parity): scheduler output
     // chunks are mapped to neutral events and yielded WHILE the tools run.
@@ -1524,11 +1573,15 @@ export async function* livePromptEvents(
                       status: call.status,
                       request: call.request,
                       response: call.response,
-                      // The Mod tool middleware counts each native attempt;
-                      // a cancelled call is not counted.
-                      recorded:
-                        call.nativeAttemptsObserved === true ||
-                        call.status === 'cancelled',
+                      // Check ownership when the shared loop reads the count
+                      // flag, since the session can change after settlement.
+                      get recorded() {
+                        return (
+                          !isCurrentSession() ||
+                          call.nativeAttemptsObserved === true ||
+                          call.status === 'cancelled'
+                        );
+                      },
                     }),
                   ),
                 );
@@ -1608,6 +1661,10 @@ export async function* livePromptEvents(
     if (shared?.stop === 'duplicate_provider_call') {
       // The batch ran nothing: the model repeated a call id it was already
       // answered for, which stops the turn as a loop, as Ink does.
+      endBatchInteraction('error', {
+        errorMessage: 'loop detected',
+        errorType: 'loop_detected',
+      });
       const message = 'Tool skipped because the model repeated a tool-call id.';
       const skipped = skippedCalls('cancelled', message);
       const history = toolHistoryEvent(skipped);
@@ -1784,7 +1841,10 @@ export async function* livePromptEvents(
       }
       return;
     }
-    if (shared && !isCurrentSession()) return;
+    if (shared && !isCurrentSession()) {
+      endBatchInteraction('cancelled');
+      return;
+    }
     // Replay answers keep a declined batch going. Esc stops the whole batch
     // and pairs its retained results without sending another request.
     const cancelled =
@@ -1809,28 +1869,43 @@ export async function* livePromptEvents(
         dualOutput?.emitToolResult(request, response);
     }
     if (cancelled || shared?.stop === 'tool_ended_turn') {
-      if (responseParts.length > 0) {
-        await client.addHistory({ role: 'user', parts: responseParts });
-      }
-      if (cancelled && (!shared || isCurrentSession()))
-        options?.onToolsCancelled?.();
       const permit =
         shared &&
         completed.find((call) => call.response.terminateTurn)?.request
           .goalContext;
-      if (permit) {
-        const events = await finishToolGoalTurn(
-          config,
-          promptId,
-          permit,
-          abort,
-          isCurrentSession,
-        );
-        for (const event of events) {
-          if (!isCurrentSession()) return;
-          dualOutput?.processEvent(event);
-          yield* map(event);
+      let events: ServerLlmStreamEvent[] = [];
+      try {
+        if (responseParts.length > 0) {
+          await client.addHistory({ role: 'user', parts: responseParts });
         }
+        if (cancelled && (!shared || isCurrentSession()))
+          options?.onToolsCancelled?.();
+        if (permit) {
+          events = await finishToolGoalTurn(
+            config,
+            promptId,
+            permit,
+            abort,
+            isCurrentSession,
+          );
+        }
+      } catch (error) {
+        endBatchInteraction(
+          'error',
+          permit
+            ? {
+                errorMessage: 'Goal tool continuation could not finish',
+                errorType: 'continuation_goal_finish_failed',
+              }
+            : undefined,
+        );
+        throw error;
+      }
+      endBatchInteraction(cancelled ? 'cancelled' : 'ok');
+      for (const event of events) {
+        if (!isCurrentSession()) return;
+        dualOutput?.processEvent(event);
+        yield* map(event);
       }
       return;
     }

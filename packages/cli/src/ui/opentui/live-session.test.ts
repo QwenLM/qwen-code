@@ -64,6 +64,7 @@ import type { HandleAtCommandResult } from '../hooks/atCommandProcessor.js';
 import { ToolCallStatus, type IndividualToolCallDisplay } from '../types.js';
 import type { Part } from '@google/genai';
 import { getToolCallFingerprint } from '@qwen-code/qwen-code-core/core/toolCallIdUtils.js';
+import * as sessionTracing from '@qwen-code/qwen-code-core/telemetry/session-tracing.js';
 
 function steering(...texts: string[]): OpenTuiSteeringSubmission[] {
   return texts.map((text) => ({ text, content: text }));
@@ -4357,6 +4358,51 @@ describe('livePromptEvents on the shared agent loop (experimental.unifiedAgentLo
     },
   );
 
+  it('suppresses replays of tool results admitted by a retry', async () => {
+    const history = new Map<string, string>();
+    const ids = ['retried', 'repaired', 'unrelated'];
+    let sends = 0;
+    const send = vi.fn(function* () {
+      if (++sends > 1) return;
+      // Only the retried real result should seed replay detection, even
+      // when the new history also contains repaired or unrelated pairs.
+      for (const id of ids)
+        history.set(id, getToolCallFingerprint('test_tool', {}));
+      for (const id of ids) {
+        yield {
+          type: 'tool_call_request',
+          value: { ...call(`${id}__qwen_dup_2`).value, providerCallId: id },
+        };
+      }
+    });
+    const config = shared(createFakeConfig(send), history);
+    Object.assign(config.getGeminiClient(), {
+      getSynthesizedRepairCallIds: () => new Set(['repaired']),
+    });
+    await drain(
+      livePromptEvents(config, '', undefined, {
+        retry: {
+          content: ids.slice(0, 2).map((id) => ({
+            functionResponse: {
+              id,
+              name: 'test_tool',
+              response: { output: 'previous result' },
+            },
+          })),
+          inlineModelOverride: false,
+        },
+      }),
+    );
+    expect(sentResponses(send)).toEqual([ids.map((id) => `${id}__qwen_dup_2`)]);
+    const parts = (send.mock.calls[1] as unknown[])[0] as Part[];
+    expect(JSON.stringify(parts[0].functionResponse?.response)).toContain(
+      'was already handled',
+    );
+    expect(
+      parts.slice(1).map((part) => part.functionResponse?.response),
+    ).toEqual([{ ok: true }, { ok: true }]);
+  });
+
   it('settles tool cards when a round detects a loop', async () => {
     const runs = [];
     for (const onShared of [false, true]) {
@@ -4539,6 +4585,26 @@ describe('livePromptEvents on the shared agent loop (experimental.unifiedAgentLo
       recordCompletedToolCall: ReturnType<typeof vi.fn>;
     };
     expect(client.recordCompletedToolCall).toHaveBeenCalledOnce();
+  });
+
+  it('does not count a native completion against a replacement session', async () => {
+    schedulerControl.finish = null;
+    let session = 'session-1';
+    const send = batchStream([
+      { callId: 't1', name: 'test_tool', args: { __deferred: true } },
+    ]);
+    const config = shared(createFakeConfig(send));
+    const recordCompletedToolCall = vi.fn();
+    Object.assign(config, { getSessionId: () => session });
+    Object.assign(config.getGeminiClient(), { recordCompletedToolCall });
+    const turn = drain(livePromptEvents(config, 'start'));
+    await vi.waitFor(() => expect(schedulerControl.finish).not.toBeNull());
+    const completion = schedulerControl.finish!();
+    session = 'session-2';
+    await completion;
+    await turn;
+    expect(recordCompletedToolCall).not.toHaveBeenCalled();
+    expect(send).toHaveBeenCalledOnce();
   });
 
   /** The calls made to the fake sidecar, by method. */
@@ -4802,12 +4868,23 @@ describe('livePromptEvents on the shared agent loop (experimental.unifiedAgentLo
         getSnapshot: () => ({ goal: permit, activity: 'verifying' }),
         subscribe: () => unsubscribe,
       };
+      const span = {} as NonNullable<
+        ReturnType<typeof sessionTracing.getActiveInteractionSpan>
+      >;
+      const activeSpan = vi
+        .spyOn(sessionTracing, 'getActiveInteractionSpan')
+        .mockReturnValue(span);
+      const endSpan = vi
+        .spyOn(sessionTracing, 'endInteractionSpan')
+        .mockImplementation(() => {});
       const recordToolResult = vi.fn();
       const flush = vi.fn(async () => {
         expect(recordToolResult).toHaveBeenCalledOnce();
         if (outcome === 'interrupt') controller.abort();
-        if (outcome === 'replace')
+        if (outcome === 'replace') {
           permitForTurn.mockReturnValue({ ...permit, turnId: 'other-turn' });
+          activeSpan.mockReturnValue({ ...span });
+        }
       });
       const send = batchStream([
         {
@@ -4825,11 +4902,22 @@ describe('livePromptEvents on the shared agent loop (experimental.unifiedAgentLo
         }),
       );
       Object.assign(config, { getGoalRuntime: () => runtime });
-      await drain(
-        livePromptEvents(config, 'start', controller.signal, {
-          promptId: 'prompt',
-        }),
-      );
+      try {
+        await drain(
+          livePromptEvents(config, 'start', controller.signal, {
+            promptId: 'prompt',
+          }),
+        );
+        if (outcome === 'replace') expect(endSpan).not.toHaveBeenCalled();
+        else
+          expect(endSpan).toHaveBeenCalledExactlyOnceWith(
+            outcome === 'finish' ? 'ok' : 'cancelled',
+            { promptId: 'prompt' },
+          );
+      } finally {
+        endSpan.mockRestore();
+        activeSpan.mockRestore();
+      }
       expect(send).toHaveBeenCalledOnce();
       expect(config.getGeminiClient().addHistory).toHaveBeenCalledOnce();
       expect(permitForTurn).toHaveBeenCalledWith('prompt');
