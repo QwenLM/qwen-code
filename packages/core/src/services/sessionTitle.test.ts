@@ -872,9 +872,7 @@ describe('tryGenerateSessionTitle output language (#16793)', () => {
   const PLAIN_RULES =
     '- 3-7 words.\n- Sentence case: capitalize only the first word and proper nouns. NOT Title Case.\n- No trailing punctuation.';
 
-  async function systemInstructionFor(
-    outputLanguage: string | undefined | null,
-  ): Promise<string> {
+  async function titleRequestFor(outputLanguage: string | undefined | null) {
     const dir = await mkdtemp(path.join(tmpdir(), 'session-title-lang-'));
     try {
       let outputLanguageFilePath: string | undefined;
@@ -898,10 +896,15 @@ describe('tryGenerateSessionTitle output language (#16793)', () => {
         new AbortController().signal,
       );
       expect(outcome.ok).toBe(true);
-      const { systemInstruction } = generateJson.mock.calls[0][0] as {
+      const request = generateJson.mock.calls[0][0] as {
         systemInstruction: string;
+        schema: { properties: { title: { description: string } } };
       };
-      return systemInstruction;
+      return {
+        ...request,
+        preferencePathReads: vi.mocked(config.getOutputLanguageFilePath).mock
+          .calls.length,
+      };
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
@@ -911,7 +914,10 @@ describe('tryGenerateSessionTitle output language (#16793)', () => {
 <!-- qwen-code:llm-output-language: auto -->
 
 ## Rule
-Respond in the same language as the user's input.`;
+Respond in the same language as the user's input.
+
+## Exception
+If the user explicitly requests a response in a specific language, switch to that language.`;
   const FIXED_FILE = `# Output language preference: English
 <!-- qwen-code:llm-output-language: English -->
 
@@ -919,16 +925,53 @@ Respond in the same language as the user's input.`;
 You MUST always respond in **English** regardless of the user's input language.`;
 
   it('asks for the conversation language under the auto preference', async () => {
-    const instruction = await systemInstructionFor(AUTO_FILE);
+    const { systemInstruction: instruction, schema } =
+      await titleRequestFor(AUTO_FILE);
     expect(instruction).toContain(CONVERSATION_LANGUAGE_RULE);
     expect(instruction).toContain(
       '- 3-7 words, or about 8-20 characters for Chinese, Japanese or Korean.',
     );
-    expect(instruction).toContain('do not translate or transliterate them');
+    expect(instruction).toContain('Do not translate or transliterate them');
     expect(instruction).not.toContain(PLAIN_RULES);
-    // The preference itself is still appended after the title rules.
-    expect(instruction.indexOf(CONVERSATION_LANGUAGE_RULE)).toBeLessThan(
-      instruction.indexOf("Respond in the same language as the user's input."),
+    expect(instruction).toMatch(/^Generate a concise title that captures/);
+    expect(schema.properties.title.description).toContain('8-20 characters');
+    expect(instruction).toContain(
+      "This preference overrides any earlier language-selection rule in this system instruction.\n\nFor this title, the user's input means the human user's messages in the conversation transcript. Apply any language exception to those same messages.",
+    );
+    expect(instruction).toContain(AUTO_FILE);
+  });
+
+  it('uses one preference snapshot to choose the prompt and append the rule', async () => {
+    const request = await titleRequestFor(AUTO_FILE);
+    expect(request.preferencePathReads).toBe(1);
+  });
+
+  it('finds a complete marker after an unterminated marker', async () => {
+    const malformed = '<!-- qwen-code:llm-output-language:' + ' '.repeat(4000);
+    const { systemInstruction } = await titleRequestFor(
+      `${malformed}x <!-- qwen-code:llm-output-language: auto -->`,
+    );
+    expect(systemInstruction).toContain(CONVERSATION_LANGUAGE_RULE);
+  });
+
+  it('keeps the selected fast model when the setting changes during setup', async () => {
+    const { config, generateJson } = makeConfig({
+      history: DIALOG_HISTORY,
+      fastModel: 'qwen-turbo',
+      generateJsonResult: { title: 'Fix mobile login' },
+    });
+    const outcome = tryGenerateSessionTitle(
+      config,
+      new AbortController().signal,
+    );
+    vi.mocked(config.getFastModel).mockReturnValue(undefined);
+
+    await expect(outcome).resolves.toMatchObject({
+      ok: true,
+      modelUsed: 'qwen-turbo',
+    });
+    expect(generateJson).toHaveBeenCalledWith(
+      expect.objectContaining({ model: 'qwen-turbo' }),
     );
   });
 
@@ -939,9 +982,11 @@ You MUST always respond in **English** regardless of the user's input language.`
   ])(
     'asks for the conversation language when %s',
     async (_label, outputLanguage) => {
-      const instruction = await systemInstructionFor(outputLanguage);
+      const { systemInstruction: instruction, schema } =
+        await titleRequestFor(outputLanguage);
       expect(instruction).toContain(CONVERSATION_LANGUAGE_RULE);
       expect(instruction).not.toContain(PLAIN_RULES);
+      expect(schema.properties.title.description).toContain('8-20 characters');
     },
   );
 
@@ -949,11 +994,15 @@ You MUST always respond in **English** regardless of the user's input language.`
     ['a fixed language', FIXED_FILE],
     ['a hand-written rule without the marker', '请始终用中文回答。'],
   ])('keeps the plain title rules for %s', async (_label, outputLanguage) => {
-    const instruction = await systemInstructionFor(outputLanguage);
+    const { systemInstruction: instruction, schema } =
+      await titleRequestFor(outputLanguage);
     expect(instruction).toContain(PLAIN_RULES);
     expect(instruction).not.toContain(CONVERSATION_LANGUAGE_RULE);
     expect(instruction).not.toContain('Chinese, Japanese or Korean');
     expect(instruction).toContain(outputLanguage.trim());
+    expect(schema.properties.title.description).toBe(
+      'A concise sentence-case session title, 3-7 words, no trailing punctuation.',
+    );
   });
 });
 

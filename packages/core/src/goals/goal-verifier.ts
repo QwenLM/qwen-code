@@ -11,7 +11,7 @@ import { runSideQuery } from '../utils/sideQuery.js';
 import {
   isBcp47LanguageTag,
   isKnownOutputLanguageDesignation,
-  OUTPUT_LANGUAGE_MARKER,
+  parseOutputLanguageMarker,
 } from '../utils/output-language-table.js';
 import type { GoalVerifierEvidenceRecord } from './goal-evidence.js';
 import type { GoalTerminalProposal } from './goal-protocol.js';
@@ -243,7 +243,7 @@ const OUTPUT_LANGUAGE_TOKEN_MAX_LENGTH = 64;
  * instruction material.
  */
 function parseOutputLanguageToken(content: string): string | undefined {
-  const token = content.match(OUTPUT_LANGUAGE_MARKER)?.[1]?.trim();
+  const token = parseOutputLanguageMarker(content);
   if (!token || token.length > OUTPUT_LANGUAGE_TOKEN_MAX_LENGTH) {
     return undefined;
   }

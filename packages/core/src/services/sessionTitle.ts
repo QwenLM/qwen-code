@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { readFile } from 'node:fs/promises';
 import type { Content, Part } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { withoutAutoMemorySnapshots } from '../memory/request-context.js';
@@ -14,7 +13,11 @@ import {
   getStartupContextLength,
   stripSystemReminderBlocks,
 } from '../core/environmentContext.js';
-import { OUTPUT_LANGUAGE_MARKER } from '../utils/output-language-table.js';
+import { parseOutputLanguageMarker } from '../utils/output-language-table.js';
+import {
+  formatOutputLanguageInstruction,
+  readOutputLanguagePreference,
+} from '../utils/side-query-output-language.js';
 import { runSideQuery } from '../utils/sideQuery.js';
 import { stripTerminalControlSequences } from '../utils/terminalSafe.js';
 import { SESSION_TITLE_MAX_LENGTH } from './sessionService.js';
@@ -44,22 +47,16 @@ const TITLE_PROMPT_EXAMPLE_TITLES = [
 // conversation, most often when the request is short or full of identifiers.
 // A fixed language gets the prompt unchanged: with these rules added, a fast
 // model broke a fixed English preference more often on Chinese conversations.
-const TITLE_LENGTH_RULE = '- 3-7 words.';
 const TITLE_LENGTH_RULE_ANY_SCRIPT =
-  '- 3-7 words, or about 8-20 characters for Chinese, Japanese or Korean.';
-const TITLE_CASE_RULE =
-  '- Sentence case: capitalize only the first word and proper nouns. NOT Title Case.';
-const TITLE_CONVERSATION_LANGUAGE_RULES = [
-  `${TITLE_CASE_RULE} (Applies only to languages with letter case.)`,
-  "- Write the title in the main language of the user's messages in the conversation, not the language of these instructions. If a language preference is given below, it wins.",
-  '- Keep personal names, code identifiers, file paths and product names exactly as written; do not translate or transliterate them.',
-].join('\n');
+  '3-7 words, or about 8-20 characters for Chinese, Japanese or Korean.';
+const TITLE_AUTO_LANGUAGE_CONTEXT =
+  "For this title, the user's input means the human user's messages in the conversation transcript. Apply any language exception to those same messages.";
 
-const TITLE_SYSTEM_PROMPT = `Generate a concise, sentence-case title (3-7 words) that captures what this programming-assistant session is about. Think of it as a git commit subject for the session.
+function titleSystemPrompt(description: string, rules: string): string {
+  return `Generate ${description} that captures what this programming-assistant session is about. Think of it as a git commit subject for the session.
 
 Rules:
-${TITLE_LENGTH_RULE}
-${TITLE_CASE_RULE}
+${rules}
 - No trailing punctuation.
 - No quotes, backticks, or markdown.
 - Be specific about the user's actual goal — name the feature, bug, or subject area. Avoid vague "Code changes", "Help request", "Conversation".
@@ -75,46 +72,44 @@ Bad (wrong case): {"title": "Fix Login Button On Mobile"}
 Bad (trailing punctuation): {"title": "Fix login button."}
 
 Return ONLY a JSON object with a single "title" key. No preamble, no reasoning, no closing remarks.`;
-
-const TITLE_SYSTEM_PROMPT_CONVERSATION_LANGUAGE = TITLE_SYSTEM_PROMPT.replace(
-  `${TITLE_LENGTH_RULE}\n${TITLE_CASE_RULE}\n`,
-  `${TITLE_LENGTH_RULE_ANY_SCRIPT}\n${TITLE_CONVERSATION_LANGUAGE_RULES}\n`,
-);
-
-/**
- * Whether the title should be written in the conversation's language, i.e.
- * the output-language preference is `auto` or there is none. A fixed language,
- * or a hand-written rule file without the `auto` marker, keeps the plain
- * prompt and is applied by `runSideQuery` as usual.
- */
-async function followsConversationLanguage(config: Config): Promise<boolean> {
-  const filePath = config.getOutputLanguageFilePath?.();
-  if (!filePath) return true;
-  let content: string;
-  try {
-    content = await readFile(filePath, 'utf8');
-  } catch {
-    return true;
-  }
-  if (!content.trim()) return true;
-  const token = content.match(OUTPUT_LANGUAGE_MARKER)?.[1]?.trim();
-  return token?.toLowerCase() === 'auto';
 }
+
+const TITLE_SYSTEM_PROMPT = titleSystemPrompt(
+  'a concise, sentence-case title (3-7 words)',
+  '- 3-7 words.\n- Sentence case: capitalize only the first word and proper nouns. NOT Title Case.',
+);
+const TITLE_SYSTEM_PROMPT_CONVERSATION_LANGUAGE = titleSystemPrompt(
+  'a concise title',
+  [
+    `- ${TITLE_LENGTH_RULE_ANY_SCRIPT}`,
+    '- Use sentence case only for languages with letter case. Capitalize only the first word and proper nouns.',
+    "- Write the title in the main language of the user's messages in the conversation.",
+    '- Keep personal names, code identifiers, file paths and product names exactly as written. Do not translate or transliterate them.',
+  ].join('\n'),
+);
 
 const TITLE_USER_PROMPT =
   'Generate the session title now. Populate the schema with a single short title string.';
 
-const TITLE_SCHEMA = {
-  type: 'object',
-  properties: {
-    title: {
-      type: 'string',
-      description:
-        'A concise sentence-case session title, 3-7 words, no trailing punctuation.',
+function titleSchema(description: string) {
+  return {
+    type: 'object',
+    properties: {
+      title: {
+        type: 'string',
+        description,
+      },
     },
-  },
-  required: ['title'],
-} as const;
+    required: ['title'],
+  } as const;
+}
+
+const TITLE_SCHEMA = titleSchema(
+  'A concise sentence-case session title, 3-7 words, no trailing punctuation.',
+);
+const TITLE_SCHEMA_CONVERSATION_LANGUAGE = titleSchema(
+  `A concise session title. ${TITLE_LENGTH_RULE_ANY_SCRIPT} Use sentence case for languages with letter case. No trailing punctuation.`,
+);
 
 const LEADING_MARKERS_RE = /^[\s>*\-#`"'_]+/;
 const TRAILING_MARKERS_RE = /[\s*`"'_]+$/;
@@ -158,8 +153,8 @@ export type SessionTitleOutcome =
   | { ok: false; reason: SessionTitleFailureReason };
 
 /**
- * Generate a short (3-7 word, sentence-case) title for the current session
- * using the configured fast model. Best-effort — never throws.
+ * Generate a short title for the current session using the configured fast
+ * model. Best-effort — never throws.
  *
  * Returns a discriminated result so callers can either handle failures
  * generically (`if (!outcome.ok) return null`) or map failure reasons to
@@ -207,12 +202,29 @@ export async function tryGenerateSessionTitle(
     );
     if (!conversationText.trim()) return { ok: false, reason: 'empty_history' };
 
+    const preference = await readOutputLanguagePreference(
+      config.getOutputLanguageFilePath?.(),
+    );
+    const isAuto =
+      parseOutputLanguageMarker(preference ?? '')?.toLowerCase() === 'auto';
+    const useConversationLanguage = preference === undefined || isAuto;
+    const titlePrompt = useConversationLanguage
+      ? TITLE_SYSTEM_PROMPT_CONVERSATION_LANGUAGE
+      : TITLE_SYSTEM_PROMPT;
+    const outputLanguageInstruction = formatOutputLanguageInstruction(
+      isAuto ? `${TITLE_AUTO_LANGUAGE_CONTEXT}\n\n${preference}` : preference,
+    );
+
     const result = await runSideQuery<{ title?: string }>(config, {
       purpose: 'session-title',
-      systemInstruction: (await followsConversationLanguage(config))
-        ? TITLE_SYSTEM_PROMPT_CONVERSATION_LANGUAGE
-        : TITLE_SYSTEM_PROMPT,
-      schema: TITLE_SCHEMA as unknown as Record<string, unknown>,
+      model,
+      systemInstruction: outputLanguageInstruction
+        ? `${titlePrompt}\n\n${outputLanguageInstruction}`
+        : titlePrompt,
+      skipOutputLanguagePreference: true,
+      schema: useConversationLanguage
+        ? TITLE_SCHEMA_CONVERSATION_LANGUAGE
+        : TITLE_SCHEMA,
       contents: [
         {
           role: 'user',
