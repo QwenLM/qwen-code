@@ -305,6 +305,16 @@ bot 还在其收敛姿态下记录了一份 deferred 清单（本轮不要求修
 
 第十一轮验证：**509 passed**（495 单测 + 14 真实文件系统），core typecheck exit 0，ESLint 与 Prettier 干净。变异见证 AO（控制流 readonly 记录）、AP（引号目标解码）、AQ（lastpipe 逐元素隔离）、AR（declaration 仅 worktree 守卫）各自杀掉点名用例、其余对照绿；从字节级备份还原（最终 `shell.ts` SHA-256 `7a46b770e0123e48d3de806fc2ce5f1f8fb753a9978f540479f30aa8243f49a8`）。
 
+### 第十二轮评审（2026-11-10，对 `865e22501f1` 的验证报告）
+
+一次独立的容器隔离验证（head / base / trial-merge 三臂 A/B、28 格矩阵、12 变异）确认中心主张承重，并独立复现了第十一轮的三条 P2（已在 `adc8ac6fe14` 修复）。另提出一条 Suggestion，本轮处理：
+
+**S1——移动 subshell 内的 create 曾是静默漏绑。** `(cd WT && gh pr create)` 的 create 跑在 subshell 的目录里，走查不归因该目录，却不发 notice——而花括号 / `if` / `||` 兄弟形状都会发可见回退。subshell 分支现在在子树**既含 `gh pr create` 又可能移动目录**时判 `opaque`（`subtreeRunsGhPrCreate` && `subtreeMayChangeDirectory`）。限定为「create 在 subshell 内」，因此 `(cd WT); gh pr create`（create 在外、可证在启动目录）不被误标——实测「移动 subshell 一律 opaque」会在该形状上过度触发。
+
+报告还记录了一条**先于本 PR 存在**的静默漏绑、非本 PR 引入、保持不改：`cd WT & gh pr create` 因执行闸门不把 `&` 当分隔符而完全没有归因腿。
+
+第十二轮验证：**511 passed**（497 单测 + 14 真实文件系统），core typecheck exit 0，ESLint 与 Prettier 干净。变异见证 AS（去 subshell 内 create 判定）杀掉 create-内用例、create-外对照绿；从字节级备份还原（最终 `shell.ts` SHA-256 `4abc04141add1d39574aff5a18c615d84f97cb8ee9b4e369e601728df5b58dad`）。
+
 ## 验收标准
 
 - 两条事故命令形状都绑定到其 worktree 分支所解析出的 PR。

@@ -1505,6 +1505,32 @@ describe('ShellTool', () => {
         );
       });
 
+      it('surfaces a create inside a moving subshell as a visible fallback', async () => {
+        // S1: `(cd WT && gh pr create)` runs the create in the subshell's
+        // directory, which this walk does not attribute; like the brace/if body
+        // siblings it must emit the fallback notice, not stay silent.
+        mockCreatedPr(77);
+        const result = await runShell(
+          '(cd /test/dir/nested && gh pr create --fill)',
+          PR_77,
+        );
+        expectOpaqueFallback(result);
+      });
+
+      it('does not flag a moving subshell when the create is outside it', async () => {
+        // S1 control: `(cd WT); gh pr create` — the subshell's cd cannot leak,
+        // so the create provably runs at launch and binds there with no notice.
+        mockCreatedPr(77);
+        const result = await runShell(
+          '(cd /test/dir/nested); gh pr create --fill',
+          PR_77,
+        );
+        await expectAttributedIn('/test/dir');
+        expect(result.llmContent).not.toContain(
+          SHELL_PR_BINDING_DIRECTORY_NOTICE,
+        );
+      });
+
       it.each([
         'git "worktree" add /test/dir/new -b fix/w',
         "git worktree 'add' /test/dir/new -b fix/w",

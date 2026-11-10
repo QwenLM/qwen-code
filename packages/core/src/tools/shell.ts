@@ -1043,6 +1043,22 @@ function subtreeCreatesWorktree(node: ShellSyntaxNode): boolean {
   return false;
 }
 
+/** Whether a subtree contains a `gh pr create` invocation. */
+function subtreeRunsGhPrCreate(node: ShellSyntaxNode): boolean {
+  const stack: ShellSyntaxNode[] = [node];
+  while (stack.length > 0) {
+    const current = stack.pop()!;
+    if (
+      current.type === 'command' &&
+      commandRunsGhPrCreate(createCandidateText(current))
+    ) {
+      return true;
+    }
+    stack.push(...current.namedChildren);
+  }
+  return false;
+}
+
 /**
  * If a declaration marks a function readonly (`readonly -f`, `declare -r -f`,
  * clustered options), return its literal function-name targets. Returns
@@ -1635,16 +1651,26 @@ async function resolveGhPrCreateDirectory(
         }
         default: {
           // A subshell / command substitution / process substitution runs in a
-          // child: its cd cannot leak to this shell, so the directory is
-          // provably unchanged and no fallback notice is warranted. A worktree
+          // child: its cd cannot leak to this shell, so a create OUTSIDE it is
+          // provably at the incoming directory and needs no notice. A worktree
           // created inside it still lands on disk before spawn, though, so a
           // later cd into it would snapshot the wrong branch — stay fail-closed.
+          // A create INSIDE a moving subshell runs in a directory this walk does
+          // not attribute; like the brace/if body siblings, surface that as a
+          // visible fallback rather than a silent miss. Scope it to a create
+          // inside so `(cd WT); gh pr create` (create outside) is not flagged.
           if (
             node.type === 'subshell' ||
             node.type === 'command_substitution' ||
             node.type === 'process_substitution'
           ) {
             if (subtreeCreatesWorktree(node)) opaque = true;
+            else if (
+              subtreeRunsGhPrCreate(node) &&
+              subtreeMayChangeDirectory(node)
+            ) {
+              opaque = true;
+            }
             return dir;
           }
           // Compound statements and control flow run in THIS shell: a directory

@@ -742,6 +742,34 @@ and AR (worktree-only declaration guard) each red their named cases with the oth
 controls green; restored from a byte-level backup (final `shell.ts` SHA-256
 `7a46b770e0123e48d3de806fc2ce5f1f8fb753a9978f540479f30aa8243f49a8`).
 
+### Review round 12 (2026-11-10, verification report on `865e22501f1`)
+
+An independent container-isolated verification (head / base / trial-merge A/B,
+28-cell matrix, 12 mutants) confirmed the central claim load-bearing and
+independently reproduced the three round-11 P2s (already fixed in `adc8ac6fe14`).
+It raised one additional Suggestion, addressed here:
+
+**S1 — a create inside a moving subshell was a silent miss.** `(cd WT && gh pr
+create)` runs the create in the subshell's directory, which the walk does not
+attribute, yet it emitted no notice — while the brace / `if` / `||` body siblings
+all surface a visible fallback. The subshell branch now marks `opaque` when the
+subtree both contains a `gh pr create` and may change directory
+(`subtreeRunsGhPrCreate` && `subtreeMayChangeDirectory`). It is scoped to a create
+INSIDE, so `(cd WT); gh pr create` (create outside, provably at launch) is not
+flagged — a blind "moving subshell → opaque" was measured to over-fire on that
+shape.
+
+The report also recorded a PRE-EXISTING silent miss, not introduced by this PR and
+left unchanged: `cd WT & gh pr create` gets no attribution leg because the
+execution gate does not treat `&` as a separator.
+
+Round-12 verification: **511 passed** (497 unit + 14 real-filesystem), core
+typecheck exit 0, ESLint and Prettier clean. Mutation witness AS (drop the
+create-inside-subshell condition) reds the create-inside case while the
+create-outside control stays green; restored from a byte-level backup (final
+`shell.ts` SHA-256
+`4abc04141add1d39574aff5a18c615d84f97cb8ee9b4e369e601728df5b58dad`).
+
 ## Acceptance criteria
 
 - Both incident command shapes bind the PR their worktree branch resolves to.
