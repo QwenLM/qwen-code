@@ -3445,6 +3445,36 @@ describe('GitHub per-repository settings', () => {
       'Enter a number greater than 0 and at most 86400000.',
     );
   });
+
+  it('words an inclusive floor as "at least", not "greater than"', async () => {
+    // Naming the exclusive bound here would tell the operator "greater than
+    // -1" — a floor the validator does not enforce, and one that reads as if
+    // -0.5 were legal.
+    const inclusive: DaemonChannelTypeDescriptor = {
+      type: 'example',
+      displayName: 'Example',
+      manageable: true,
+      fields: [
+        {
+          key: 'reserve',
+          label: 'Reserve',
+          kind: 'number',
+          minimum: 0,
+          maximum: 5000,
+        },
+      ],
+    };
+    await renderDialog({ descriptor: inclusive });
+    await act(async () => {
+      setInputValue(inputByLabel('Reserve')!, '-0.5');
+    });
+    await save();
+
+    expect(document.body.textContent).toContain(
+      'Enter a number at least 0 and at most 5000.',
+    );
+    expect(document.body.textContent).not.toContain('greater than');
+  });
 });
 
 describe('Channel editor progressive disclosure', () => {

@@ -553,6 +553,7 @@ export function validateChannelEditorDraft(
         !unchanged &&
         ((field.exclusiveMinimum !== undefined &&
           parsed <= field.exclusiveMinimum) ||
+          (field.minimum !== undefined && parsed < field.minimum) ||
           (field.maximum !== undefined && parsed > field.maximum))
       ) {
         errors[field.key] = 'outOfRange';

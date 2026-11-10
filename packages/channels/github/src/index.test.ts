@@ -62,9 +62,25 @@ describe('github plugin validateConfig', () => {
     ).toBeUndefined();
   });
 
-  it('rejects a reserve the descriptor admits but the getter would silently default', () => {
-    // exclusiveMinimum: -1 lets 0 disable the gate, but it also admits
-    // (-1, 0); those must be refused rather than becoming the default 200.
+  it('declares the reserve floor inclusively, so the editor refuses what the adapter refuses', () => {
+    // exclusiveMinimum: -1 was the only way to admit 0 before the vocabulary
+    // had an inclusive bound, and it also admitted (-1, 0) — the editor took
+    // -0.5 and the save failed. Pin the descriptor, not just the validator.
+    const reserve = plugin.management?.fields?.find(
+      (field) => field.key === 'prWatchBudgetReserve',
+    );
+    expect(reserve).toBeDefined();
+    expect(reserve).toMatchObject({ kind: 'number', minimum: 0 });
+    expect(
+      (reserve as { exclusiveMinimum?: number }).exclusiveMinimum,
+    ).toBeUndefined();
+  });
+
+  it('rejects a reserve the getter would silently default', () => {
+    // The descriptor declares minimum: 0, so the editor refuses these too.
+    // The adapter check is the backstop for config that never sees the editor
+    // (hand-edited settings.json, a daemon API call): a negative must be
+    // refused rather than becoming the default 200.
     for (const reserve of [-0.5, -1, 'abc', Number.NaN]) {
       expect(
         validate({

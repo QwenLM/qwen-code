@@ -5095,12 +5095,19 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'channels.editor.validation.repoFilterRequired':
     'List at least one repository, or set Repository Filter to Off.',
   'channels.editor.validation.number': 'Enter a valid number.',
-  'channels.editor.validation.outOfRange': (v) =>
-    v?.min !== undefined && v?.max !== undefined
-      ? `Enter a number greater than ${v.min} and at most ${v.max}.`
-      : v?.max !== undefined
-        ? `Enter a number at most ${v.max}.`
-        : `Enter a number greater than ${v?.min ?? 0}.`,
+  'channels.editor.validation.outOfRange': (v) => {
+    const lower =
+      v?.minInclusive !== undefined
+        ? `at least ${v.minInclusive}`
+        : v?.min !== undefined
+          ? `greater than ${v.min}`
+          : undefined;
+    if (lower !== undefined && v?.max !== undefined) {
+      return `Enter a number ${lower} and at most ${v.max}.`;
+    }
+    if (v?.max !== undefined) return `Enter a number at most ${v.max}.`;
+    return `Enter a number ${lower ?? 'greater than 0'}.`;
+  },
   'channels.editor.validation.policy': 'Choose an access policy.',
   'channels.editor.saveError': 'Changes were not saved',
   'channels.editor.reloadLatest': 'Reload latest',
@@ -9870,12 +9877,19 @@ const ZH: Messages = {
   'channels.editor.validation.repoFilterRequired':
     '请至少列出一个仓库，或把「按仓库过滤」设为关闭。',
   'channels.editor.validation.number': '请输入有效数字。',
-  'channels.editor.validation.outOfRange': (v) =>
-    v?.min !== undefined && v?.max !== undefined
-      ? `请输入大于 ${v.min} 且不超过 ${v.max} 的数字。`
-      : v?.max !== undefined
-        ? `请输入不超过 ${v.max} 的数字。`
-        : `请输入大于 ${v?.min ?? 0} 的数字。`,
+  'channels.editor.validation.outOfRange': (v) => {
+    const lower =
+      v?.minInclusive !== undefined
+        ? `不小于 ${v.minInclusive}`
+        : v?.min !== undefined
+          ? `大于 ${v.min}`
+          : undefined;
+    if (lower !== undefined && v?.max !== undefined) {
+      return `请输入${lower}且不超过 ${v.max} 的数字。`;
+    }
+    if (v?.max !== undefined) return `请输入不超过 ${v.max} 的数字。`;
+    return `请输入${lower ?? '大于 0'}的数字。`;
+  },
   'channels.editor.validation.policy': '请选择准入策略。',
   'channels.editor.saveError': '未能保存更改',
   'channels.editor.reloadLatest': '加载最新配置',

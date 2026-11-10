@@ -132,6 +132,13 @@ describe('WorkspaceChannelSettingsStore', () => {
             maximum: 10,
           },
           {
+            key: 'inclusiveFloor',
+            label: 'Inclusive floor',
+            kind: 'number',
+            minimum: 0,
+            maximum: 10,
+          },
+          {
             key: 'mode',
             label: 'Mode',
             kind: 'enum',
@@ -3389,6 +3396,32 @@ describe('WorkspaceChannelSettingsStore', () => {
         secrets: { clientSecret: { operation: 'replace', value: 'secret' } },
       });
       expect(next.channels['bounded']['boundedSeconds']).toBe(10);
+    });
+
+    it('enforces a declared inclusive minimum, admitting the bound itself', async () => {
+      // The daemon validates against the descriptor too, not just the editor.
+      // A field that moved from exclusiveMinimum: -1 to minimum: 0 would lose
+      // its floor here if this layer only knew the exclusive bound.
+      const store = new WorkspaceChannelSettingsStore(workspace);
+
+      for (const value of [-0.5, -1]) {
+        await expect(
+          store.upsert('bounded', {
+            expectedRevision: store.snapshot().revision,
+            config: { ...baseConfig, inclusiveFloor: value } as never,
+            secrets: {
+              clientSecret: { operation: 'replace', value: 'secret' },
+            },
+          }),
+        ).rejects.toMatchObject({ code: 'channel_settings_invalid_config' });
+      }
+
+      const next = await store.upsert('bounded', {
+        expectedRevision: store.snapshot().revision,
+        config: { ...baseConfig, inclusiveFloor: 0 } as never,
+        secrets: { clientSecret: { operation: 'replace', value: 'secret' } },
+      });
+      expect(next.channels['bounded']['inclusiveFloor']).toBe(0);
     });
 
     it('tolerates re-sending a stored number above a newly declared maximum', async () => {

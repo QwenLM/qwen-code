@@ -414,6 +414,45 @@ describe('channel registry', () => {
         'Channel field "retries" declares a maximum that leaves no valid value.',
     },
     {
+      type: 'invalid-non-finite-minimum',
+      fields: [
+        {
+          key: 'retries',
+          label: 'Retries',
+          kind: 'number',
+          minimum: Number.NaN,
+        },
+      ],
+      message: 'Channel field "retries" must declare a finite minimum.',
+    },
+    {
+      type: 'invalid-minimum-on-string',
+      fields: [
+        {
+          key: 'retentionDays',
+          label: 'Retention days',
+          kind: 'string',
+          minimum: 0,
+        },
+      ],
+      message:
+        'Channel field "retentionDays" can only declare minimum on number fields.',
+    },
+    {
+      type: 'invalid-maximum-below-inclusive-minimum',
+      fields: [
+        {
+          key: 'retries',
+          label: 'Retries',
+          kind: 'number',
+          minimum: 6,
+          maximum: 5,
+        },
+      ],
+      message:
+        'Channel field "retries" declares a maximum that leaves no valid value.',
+    },
+    {
       type: 'invalid-env-resolvable-number',
       fields: [
         {
