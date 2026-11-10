@@ -770,7 +770,7 @@ describe('ProcessRegistry', () => {
   it('still fails at the deadline when an EPERM-refused group is verifiably alive', async () => {
     vi.useFakeTimers();
     setPlatform('linux');
-    setAsyncProcessTable('1235 1 1234 S 1');
+    setAsyncProcessTable(['1234 1 1234', '1235 1234 1234'].join('\n'));
     const child = fakeChild(1234);
     vi.mocked(child.kill).mockImplementation(() => true);
     vi.spyOn(process, 'kill').mockImplementation(((
@@ -796,6 +796,35 @@ describe('ProcessRegistry', () => {
     // refusal the deadline error cannot be told apart from a wedged tree.
     await expect(terminating).resolves.toMatchObject({
       message: expect.stringContaining('was refused SIGTERM to pgid=1234'),
+    });
+    await expect(terminating).resolves.toMatchObject({
+      message: expect.stringContaining('surviving pgids=1234'),
+    });
+  });
+
+  it('keeps a group whose liveness probe is refused with EPERM', async () => {
+    vi.useFakeTimers();
+    setPlatform('linux');
+    setAsyncProcessTable(['1234 1 1234', '1235 1234 1234'].join('\n'));
+    const child = fakeChild(1234);
+    vi.mocked(child.kill).mockImplementation(() => true);
+    // Both the liveness probe and the signals are refused, which is what a
+    // reused pgid owned by a foreign process looks like.
+    vi.spyOn(process, 'kill').mockImplementation(((
+      _pid: number,
+      _signal?: NodeJS.Signals | number,
+    ) => {
+      throw errno('EPERM');
+    }) as typeof process.kill);
+    const tracked = new ProcessRegistry()
+      .reserve()
+      .attach(child, { ownsProcessTree: true });
+
+    const terminating = tracked.terminate().catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    await expect(terminating).resolves.toMatchObject({
+      message: expect.stringContaining('surviving pgids=1234'),
     });
   });
 
