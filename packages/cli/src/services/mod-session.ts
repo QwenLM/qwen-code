@@ -50,10 +50,6 @@ import {
   LlmEventType,
   type ServerLlmStreamEvent,
 } from '@qwen-code/qwen-code-core/core/turn.js';
-import {
-  getGenAiUsageProvenance,
-  outputTokenCount,
-} from '@qwen-code/qwen-code-core/telemetry/gen-ai-usage.js';
 import type { ApiResponseEvent } from '@qwen-code/qwen-code-core/telemetry/types.js';
 import {
   EVENT_API_RESPONSE,
@@ -75,6 +71,7 @@ import {
 import { registerCleanup } from '../utils/cleanup.js';
 import { flushOutput } from '../utils/flush-output.js';
 import { projectJsonStringToByteBudget } from '../utils/json-string-byte-projection.js';
+import { completeModModel, modModelUsage } from './mod-model.js';
 import type { JsonOutputAdapterInterface } from '../nonInteractive/io/BaseJsonOutputAdapter.js';
 
 const logger = createDebugLogger('MODS');
@@ -434,6 +431,16 @@ export class ModSession implements ICommandLoader {
           this.terminal && this.terminal.runsPrompts?.() !== true
             ? undefined
             : (prompt) => this.queuePrompt(prompt),
+          (input, modelSignal) =>
+            completeModModel(
+              this.config,
+              input,
+              // During a session switch, the old session.end still runs
+              // after Config has already adopted the new identity.
+              this.sessionId === this.config.getSessionId()
+                ? modelSignal
+                : AbortSignal.abort(),
+            ),
         );
         this.mods.push(
           ...ordered.map(({ extension }) => ({
@@ -535,6 +542,7 @@ export class ModSession implements ICommandLoader {
     await this.toolQueue;
     if (!this.closing && this.sessionId === this.config.getSessionId()) {
       this.toolGeneration = new AbortController();
+      this.requestRender();
     }
   }
 
@@ -647,6 +655,12 @@ export class ModSession implements ICommandLoader {
       runtime.renderHooks.length === 1 ? runtime.renderHooks[0] : 'hooks';
     band.state = 'running';
     band.startedAt = Date.now();
+    const signal = AbortSignal.any([
+      this.lifetime.signal,
+      this.toolGeneration.signal,
+    ]);
+    const isCurrent = () =>
+      !signal.aborted && this.sessionId === this.config.getSessionId();
     try {
       // A switch in progress renders once it is done.
       if (this.closing || this.sessionId !== this.config.getSessionId()) return;
@@ -654,16 +668,13 @@ export class ModSession implements ICommandLoader {
         this.terminal?.draw?.(ENGINE_NODE, owner);
         return;
       }
-      const { tree, notes } = await runtime.render(
-        band.input!,
-        this.lifetime.signal,
-      );
+      const { tree, notes } = await runtime.render(band.input!, signal);
       for (const note of notes) logger.debug(note);
-      if (!this.closing) this.terminal?.draw?.(tree, owner);
+      if (isCurrent()) this.terminal?.draw?.(tree, owner);
     } catch (error) {
       // The worker has failed or closed; the band draws nothing.
       logger.debug(`Mod ui.render: ${String(error)}`);
-      if (!this.closing) this.terminal?.draw?.(ENGINE_NODE, owner);
+      if (isCurrent()) this.terminal?.draw?.(ENGINE_NODE, owner);
     } finally {
       if (Date.now() - band.startedAt > RENDER_LIVE_MS)
         band.steadyUntil = Date.now() + RENDER_SLOW_MS;
@@ -1234,45 +1245,24 @@ export class ModSession implements ICommandLoader {
   }
 }
 
-// A provider's count as the Mods take it: a whole number, or 0 when it is
-// missing or not a count at all.
-function tokenCount(value: unknown): number {
-  return typeof value === 'number' && Number.isFinite(value) && value >= 0
-    ? Math.floor(value)
-    : 0;
-}
-
-// The API's four counts. Cache reads and writes are separated from input.
-// Anthropic sums writes into its prompt total; OpenAI Chat already includes
-// them in prompt_tokens.
+// The API's four counts, summed over the turn's responses. Cache reads and
+// writes are separated from input. Anthropic sums writes into its prompt
+// total; OpenAI Chat already includes them in prompt_tokens.
 function addTurnUsage(
   usage: RunningTurn['usage'],
   metadata: GenerateContentResponseUsageMetadata | undefined,
   authType: string | undefined,
 ): RunningTurn['usage'] {
   if (!metadata) return usage;
-  const prompt = tokenCount(metadata.promptTokenCount);
-  const read = tokenCount(metadata.cachedContentTokenCount);
-  const written = tokenCount(
-    getGenAiUsageProvenance(metadata)?.cacheCreationInputTokens,
-  );
-  // Counted as the session's billable output counts it.
-  const output = outputTokenCount(
-    {
-      input: prompt,
-      output: tokenCount(metadata.candidatesTokenCount),
-      thoughts: tokenCount(metadata.thoughtsTokenCount),
-      total: tokenCount(metadata.totalTokenCount),
-    },
-    authType,
-  );
+  const added = modModelUsage(metadata, authType);
   return {
-    input_tokens:
-      (usage?.input_tokens ?? 0) + Math.max(0, prompt - read - written),
-    output_tokens: (usage?.output_tokens ?? 0) + output,
-    cache_read_input_tokens: (usage?.cache_read_input_tokens ?? 0) + read,
+    input_tokens: (usage?.input_tokens ?? 0) + added.input_tokens,
+    output_tokens: (usage?.output_tokens ?? 0) + added.output_tokens,
+    cache_read_input_tokens:
+      (usage?.cache_read_input_tokens ?? 0) + added.cache_read_input_tokens,
     cache_creation_input_tokens:
-      (usage?.cache_creation_input_tokens ?? 0) + written,
+      (usage?.cache_creation_input_tokens ?? 0) +
+      added.cache_creation_input_tokens,
   };
 }
 

@@ -51,6 +51,7 @@ export const MUST_TRANSLATE_KEYS = [
   'Consulting advisor...',
   'Advisor review failed: {{error}}',
   'No conversation context available for /advisor',
+  'No conversation context available for /btw',
   'Focus too long (max {{max}} chars)',
   'Another operation is in progress, wait for it to complete before running /advisor',
   'No response received.',

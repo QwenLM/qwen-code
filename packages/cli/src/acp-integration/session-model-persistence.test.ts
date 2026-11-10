@@ -618,6 +618,92 @@ describe('session-model-persistence', () => {
     );
   });
 
+  it.each([
+    {
+      originalModel: 'legacy-api-model',
+      models: ['qwen3.8-max'],
+      healthy: false,
+    },
+    {
+      originalModel: 'qwen3.8-plus',
+      models: ['qwen3.8-plus', 'qwen3.8-max'],
+      healthy: false,
+    },
+    {
+      originalModel: 'legacy-api-model',
+      models: ['qwen3.8-plus'],
+      healthy: false,
+    },
+    { originalModel: 'legacy-api-model', models: [], healthy: true },
+  ])(
+    'restores subscription settings after API auth failure ($originalModel, $models, healthy=$healthy)',
+    async ({ originalModel, models, healthy }) => {
+      let currentAuth = AuthType.QWEN_SUBSCRIPTION;
+      let currentModel = originalModel;
+      const switchModel = vi.fn(async (authType: AuthType, modelId: string) => {
+        if (
+          authType === AuthType.QWEN_SUBSCRIPTION &&
+          !models.includes(modelId)
+        ) {
+          throw new Error('Model not found');
+        }
+        currentAuth = authType;
+        currentModel = modelId;
+      });
+      const refreshSubscriptionModels = vi.fn().mockResolvedValue({ models });
+      const authenticate = vi.fn(async () => {
+        if (!healthy && currentAuth === AuthType.USE_OPENAI) {
+          throw new Error('Missing API key');
+        }
+      });
+      const config = {
+        getModel: () => currentModel,
+        getAuthType: () => currentAuth,
+        switchModel,
+        refreshSubscriptionModels,
+      } as unknown as Config;
+      const restore = restoreSessionModelThenAuthenticate(
+        config,
+        recordingProjection({
+          lastCompletedUuid: 'leaf',
+          turnParentUuids: [],
+          sessionModel: {
+            modelId: 'recorded-api-model',
+            authType: AuthType.USE_OPENAI,
+          },
+        }),
+        authenticate,
+        'qwen3.8-max',
+      );
+      if (
+        !healthy &&
+        !models.includes(originalModel) &&
+        !models.includes('qwen3.8-max')
+      ) {
+        await expect(restore).rejects.toThrow('Run /model');
+        await expect(restore).rejects.toMatchObject({
+          code: -32000,
+          data: { authMethods: expect.any(Array) },
+        });
+        expect(switchModel).toHaveBeenCalledTimes(1);
+        return;
+      }
+      await restore;
+      if (healthy) {
+        expect(currentModel).toBe('recorded-api-model');
+        expect(currentAuth).toBe(AuthType.USE_OPENAI);
+        expect(refreshSubscriptionModels).not.toHaveBeenCalled();
+        expect(authenticate).toHaveBeenCalledTimes(1);
+      } else {
+        expect(currentModel).toBe(
+          models.includes(originalModel) ? originalModel : 'qwen3.8-max',
+        );
+        expect(currentAuth).toBe(AuthType.QWEN_SUBSCRIPTION);
+        expect(authenticate).toHaveBeenCalledTimes(2);
+      }
+    },
+  );
+
   it('does not retry authentication when restore did not change the live model', async () => {
     const switchModel = vi.fn().mockResolvedValue(undefined);
     const authenticate = vi.fn().mockRejectedValue(new Error('auth required'));
