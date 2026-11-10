@@ -187,7 +187,7 @@ class ManagedNativeJournalSnapshotsTest {
     void immutablePagesPreserveCommandReplayAndResourcesAcrossAppendAndReopen() throws Exception {
         commitMonitor();
         var before = sessions.restore(TENANT, WORKSPACE, SESSION, TOKEN);
-        var original = tx.execute(status -> snapshots.publish(TENANT, SESSION, TOKEN, request("first")));
+        var original = snapshots.publish(TENANT, SESSION, TOKEN, request("first"));
         assertThat(original.snapshot().pageCount()).isEqualTo(2);
         assertThat(original.snapshot().resourceCount()).isPositive();
         assertThat(sessions.restore(TENANT, WORKSPACE, SESSION, TOKEN)).isEqualTo(before);
@@ -207,19 +207,19 @@ class ManagedNativeJournalSnapshotsTest {
                 .get(0).required("revisions").get(1);
         tx.executeWithoutResult(status -> journal.commitMonitor("snapshot-next", resource.required("monitorRun"),
                 resource.required("occurredAt").longValue()));
-        assertThat(tx.execute(status -> snapshots.publish(TENANT, SESSION, TOKEN, old)).replayed()).isTrue();
+        assertThat(snapshots.publish(TENANT, SESSION, TOKEN, old).replayed()).isTrue();
         assertThat(new ManagedNativeJournalSnapshots(jdbc, sessions, JSON)
                 .read(TENANT, WORKSPACE, SESSION, TOKEN, "first").snapshot()).isEqualTo(original.snapshot());
-        assertThat(tx.execute(status -> snapshots.publish(TENANT, SESSION, TOKEN, request("second")))
+        assertThat(snapshots.publish(TENANT, SESSION, TOKEN, request("second"))
                 .snapshot().pageCount()).isEqualTo(3);
-        assertThatThrownBy(() -> tx.execute(status -> snapshots.publish(TENANT, SESSION, TOKEN, request("first"))))
+        assertThatThrownBy(() -> snapshots.publish(TENANT, SESSION, TOKEN, request("first")))
                 .isInstanceOf(ManagedAgentException.class).hasMessageContaining("refused");
     }
 
     @Test
     void snapshotReadsUseIndependentPagesAfterOriginalTransactionsAreUnavailable() {
         commitMonitor();
-        tx.executeWithoutResult(status -> snapshots.publish(TENANT, SESSION, TOKEN, request("independent")));
+        snapshots.publish(TENANT, SESSION, TOKEN, request("independent"));
         jdbc.update("DELETE FROM ma_session_journal_tx WHERE tenant_id = ? AND session_id = ?", TENANT, SESSION);
         var restored = snapshots.pages(TENANT, WORKSPACE, SESSION, TOKEN, "independent", 0, 100);
         assertThat(restored.pages()).hasSize(2);
@@ -230,16 +230,16 @@ class ManagedNativeJournalSnapshotsTest {
     void staleHeadAndWriterCannotPublishAndTakeoverCanReadOldSnapshot() {
         var request = request("writer");
         var stale = new PublishRequest(WORKSPACE, WRITER, 1, "stale", 2, 0, null);
-        assertThatThrownBy(() -> tx.execute(status -> snapshots.publish(TENANT, SESSION, TOKEN, stale)))
+        assertThatThrownBy(() -> snapshots.publish(TENANT, SESSION, TOKEN, stale))
                 .isInstanceOf(ManagedAgentException.class);
-        tx.executeWithoutResult(status -> snapshots.publish(TENANT, SESSION, TOKEN, request));
+        snapshots.publish(TENANT, SESSION, TOKEN, request);
         tx.executeWithoutResult(status -> sessions.sealWriter(TENANT, SESSION, TOKEN,
                 new ManagedSessionStoreModels.SealWriterRequest(WORKSPACE, WRITER, 1)));
         String nextToken = "snapshot-second-writer-0123456789012";
         var grant = tx.execute(status -> sessions.acquireWriter(TENANT, SESSION, nextToken,
                 new ManagedSessionStoreModels.AcquireWriterRequest(WORKSPACE, "second-writer", 60_000L)));
         assertThat(grant.writerGeneration()).isEqualTo(2);
-        assertThatThrownBy(() -> tx.execute(status -> snapshots.publish(TENANT, SESSION, TOKEN, request)))
+        assertThatThrownBy(() -> snapshots.publish(TENANT, SESSION, TOKEN, request))
                 .isInstanceOf(ManagedAgentException.class);
         assertThatThrownBy(() -> snapshots.read(TENANT, WORKSPACE, SESSION, TOKEN, "writer"))
                 .isInstanceOf(ManagedAgentException.class);
@@ -255,7 +255,7 @@ class ManagedNativeJournalSnapshotsTest {
             new PublishRequest("foreign-workspace", WRITER, 1, "scope", 1, 0, null),
             new PublishRequest(WORKSPACE, WRITER, 2, "generation", 1, 0, null)
         }) {
-            assertThatThrownBy(() -> tx.execute(status -> snapshots.publish(TENANT, SESSION, TOKEN, bad)))
+            assertThatThrownBy(() -> snapshots.publish(TENANT, SESSION, TOKEN, bad))
                     .isInstanceOf(ManagedAgentException.class);
         }
         assertThat(snapshotPins()).isZero();
@@ -263,24 +263,26 @@ class ManagedNativeJournalSnapshotsTest {
 
     @ParameterizedTest
     @ValueSource(strings = {"INSERT INTO ma_resource (", "INSERT INTO ma_resource_ref ("})
-    void persistenceFailureRollsBackEveryNewSnapshotRow(String boundary) {
+    void persistenceFailureKeepsSnapshotUnpublishedAndCanResume(String boundary) {
         commitMonitor();
         long resources = jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource", Long.class);
         jdbc.boundary = boundary;
-        assertThatThrownBy(() -> tx.execute(status -> snapshots.publish(TENANT, SESSION, TOKEN, request("atomic"))))
+        assertThatThrownBy(() -> snapshots.publish(TENANT, SESSION, TOKEN, request("atomic")))
                 .isInstanceOf(SimulatedCrash.class);
         assertThat(jdbc.injected).isTrue();
         assertThat(snapshotPins()).isZero();
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource", Long.class)).isEqualTo(resources);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource", Long.class)).isGreaterThanOrEqualTo(resources);
+        assertThatThrownBy(() -> snapshots.read(TENANT, WORKSPACE, SESSION, TOKEN, "atomic"))
+                .isInstanceOf(ManagedAgentException.class);
         jdbc.boundary = null;
-        var retried = tx.execute(status -> snapshots.publish(TENANT, SESSION, TOKEN, request("atomic")));
+        var retried = snapshots.publish(TENANT, SESSION, TOKEN, request("atomic"));
         assertThat(retried).isNotNull();
     }
 
     @Test
     void leaseExpiringAfterManifestInsertCannotPublish() {
         jdbc.expireOnManifest = true;
-        assertThatThrownBy(() -> tx.execute(status -> snapshots.publish(TENANT, SESSION, TOKEN, request("expired"))))
+        assertThatThrownBy(() -> snapshots.publish(TENANT, SESSION, TOKEN, request("expired")))
                 .isInstanceOf(ManagedAgentException.class);
         assertThat(jdbc.injected).isTrue();
         assertThat(snapshotPins()).isZero();
@@ -291,7 +293,7 @@ class ManagedNativeJournalSnapshotsTest {
         commitMonitor();
         String id = jdbc.queryForObject("SELECT resource_id FROM ma_resource WHERE kind = ?", String.class, "managed-monitor_run");
         jdbc.update("UPDATE ma_resource SET inline_bytes = ? WHERE resource_id = ?", new byte[] {0}, id);
-        assertThatThrownBy(() -> tx.execute(status -> snapshots.publish(TENANT, SESSION, TOKEN, request("corrupt"))))
+        assertThatThrownBy(() -> snapshots.publish(TENANT, SESSION, TOKEN, request("corrupt")))
                 .isInstanceOf(ManagedAgentException.class);
         assertThat(snapshotPins()).isZero();
     }
@@ -301,14 +303,14 @@ class ManagedNativeJournalSnapshotsTest {
         commitMonitor();
         jdbc.update("DELETE FROM ma_resource_ref WHERE owner_kind = 'JOURNAL' AND resource_id IN"
                 + " (SELECT resource_id FROM ma_resource WHERE kind = ?)", "managed-monitor_run");
-        assertThatThrownBy(() -> tx.execute(status -> snapshots.publish(TENANT, SESSION, TOKEN, request("missing"))))
+        assertThatThrownBy(() -> snapshots.publish(TENANT, SESSION, TOKEN, request("missing")))
                 .isInstanceOf(ManagedAgentException.class);
         assertThat(snapshotPins()).isZero();
     }
 
     @Test
     void corruptOrMissingPageAndPinsAreNeverEndOfStream() {
-        tx.executeWithoutResult(status -> snapshots.publish(TENANT, SESSION, TOKEN, request("damaged")));
+        snapshots.publish(TENANT, SESSION, TOKEN, request("damaged"));
         String page = snapshots.pages(TENANT, WORKSPACE, SESSION, TOKEN, "damaged", 0, 1)
                 .pages().getFirst().resource().resourceId();
         jdbc.update("UPDATE ma_resource SET inline_bytes = ? WHERE resource_id = ?", new byte[] {0}, page);
@@ -321,7 +323,7 @@ class ManagedNativeJournalSnapshotsTest {
 
     @Test
     void paginationBoundsAndExhaustedCursorAreExplicit() {
-        tx.executeWithoutResult(status -> snapshots.publish(TENANT, SESSION, TOKEN, request("pages")));
+        snapshots.publish(TENANT, SESSION, TOKEN, request("pages"));
         assertThat(snapshots.pages(TENANT, WORKSPACE, SESSION, TOKEN, "pages", 1, 1).pages()).isEmpty();
         for (long cursor : new long[] {-1, 2}) {
             assertThatThrownBy(() -> snapshots.pages(TENANT, WORKSPACE, SESSION, TOKEN, "pages", cursor, 1))
@@ -331,6 +333,14 @@ class ManagedNativeJournalSnapshotsTest {
             assertThatThrownBy(() -> snapshots.pages(TENANT, WORKSPACE, SESSION, TOKEN, "pages", 0, limit))
                     .isInstanceOf(ManagedAgentException.class);
         }
+    }
+
+    @Test
+    void publicationRejectsAnOuterTransactionBeforeTakingPublisherLocks() {
+        var frozen = request("outer-transaction");
+        assertThatThrownBy(() -> tx.execute(status -> snapshots.publish(TENANT, SESSION, TOKEN, frozen)))
+                .isInstanceOf(IllegalStateException.class).hasMessageContaining("transaction-free");
+        assertThat(snapshotPins()).isZero();
     }
 
     protected PublishRequest request(String id) {
@@ -439,7 +449,13 @@ class ManagedNativeJournalSnapshotsTest {
                     && pagesBeforePause-- == 0) {
                 Runnable callback = afterPage;
                 afterPage = null;
-                callback.run();
+                org.springframework.transaction.support.TransactionSynchronizationManager.registerSynchronization(
+                        new org.springframework.transaction.support.TransactionSynchronization() {
+                            @Override
+                            public void afterCommit() {
+                                callback.run();
+                            }
+                        });
             }
             if (expireOnManifest && sql.startsWith("UPDATE ma_resource SET")
                     && java.util.Arrays.asList(arguments).contains("managed-native-journal-snapshot")) {

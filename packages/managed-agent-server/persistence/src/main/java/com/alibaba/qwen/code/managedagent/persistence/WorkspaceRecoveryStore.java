@@ -41,6 +41,7 @@ public final class WorkspaceRecoveryStore implements com.alibaba.qwen.code.manag
     private final TransactionTemplate transactions;
     private final WorkspaceStorageGuard guard;
     private final WorkspaceRecoveryReader reader;
+    private final JournalColdStorage journalAccess;
     private final JsonNode request;
     private final String mode;
     private final String id;
@@ -56,6 +57,9 @@ public final class WorkspaceRecoveryStore implements com.alibaba.qwen.code.manag
         this.transactions = new TransactionTemplate(manager);
         this.guard = guard;
         this.reader = new WorkspaceRecoveryReader(jdbc, objects);
+        this.journalAccess = new JournalColdStorage(jdbc, manager,
+                objects instanceof com.alibaba.qwen.code.managedagent.contracts.storage.ToolPublicationObjectStoreAdapter adapter ? adapter.store() : null,
+                null, JSON);
         this.request = parse(requestBytes);
         this.mode = mode;
         check(Set.of("capture", "verify", "inspect").contains(mode), "invalid_request");
@@ -164,21 +168,38 @@ public final class WorkspaceRecoveryStore implements com.alibaba.qwen.code.manag
                 case "sessions" -> sessions(params.path("afterSessionId").asText(""));
                 case "transaction" -> {
                     requireCapture();
-                    JsonNode source = pinned(text(params, "sessionId"));
-                    yield reader.transaction(source, positive(params, "revision"));
+                    String session = text(params, "sessionId");
+                    JsonNode source = pinned(session);
+                    journalAccess.ensureHot(tenant, session);
+                    recheckSession(session);
+                    var result = reader.transaction(source, positive(params, "revision"));
+                    recheckSession(session);
+                    yield result;
                 }
                 case "resource" -> {
                     requireCapture();
-                    yield reader.resource(pinned(text(params, "sessionId")), params.path("ref"));
+                    String session = text(params, "sessionId");
+                    yield reader.resource(pinned(session), params.path("ref"), () -> {
+                        requireCapture();
+                        recheckSession(session);
+                    });
                 }
                 case "publicationReceipt" -> {
                     requireCapture();
-                    yield reader.publicationReceipt(pinned(text(params, "sessionId")), params);
+                    String session = text(params, "sessionId");
+                    JsonNode source = pinned(session);
+                    journalAccess.ensureHot(tenant, session);
+                    recheckSession(session);
+                    yield reader.publicationReceipt(source, params);
                 }
                 case "publicationObject" -> {
                     requireCapture();
-                    yield reader.publicationObject(pinned(text(params, "sessionId")),
-                            text(params, "publicationId"), text(params, "slotKey"));
+                    String session = text(params, "sessionId");
+                    yield reader.publicationObject(pinned(session),
+                            text(params, "publicationId"), text(params, "slotKey"), () -> {
+                                requireCapture();
+                                recheckSession(session);
+                            });
                 }
                 case "enqueueRef" -> enqueue(params);
                 case "nextRef" -> nextRef(text(params, "sessionId"));
@@ -613,7 +634,7 @@ public final class WorkspaceRecoveryStore implements com.alibaba.qwen.code.manag
             Timestamp lease = (Timestamp) head.get("writer_lease_until");
             check(!"ACTIVE".equals(head.get("state")) || lease != null && !lease.after(now(jdbc)), "source_drift");
             check(Set.of("ACTIVE", "SEALED", "DELETED").contains(head.get("state"))
-                    && List.of(1, 2, 3, 4, 5).contains(((Number) head.get("storage_version")).intValue())
+                    && List.of(1, 2, 3, 4, 5, 6).contains(((Number) head.get("storage_version")).intValue())
                     && ((Number) head.get("compacted_through_revision")).longValue() >= 0
                     && ((Number) head.get("compacted_through_revision")).longValue() <= ((Number) head.get("journal_revision")).longValue()
                     && "READY".equals(head.get("recovery_status")), "source_drift");

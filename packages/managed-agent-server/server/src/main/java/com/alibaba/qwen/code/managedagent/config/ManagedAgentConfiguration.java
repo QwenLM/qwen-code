@@ -28,6 +28,7 @@ import org.springframework.transaction.annotation.EnableTransactionManagement;
     ToolPublicationConfiguration.class,
     EventTransportConfiguration.class,
     ManagedMemoryConfiguration.class,
+    ImmutableObjectStorageConfiguration.class,
     AliyunToolPublicationStorageAutoConfiguration.class
 })
 @ComponentScan(

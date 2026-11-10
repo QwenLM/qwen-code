@@ -112,6 +112,12 @@ final class JournalResourceWrites {
     ToolResultResourceRef publishToolResult(String tenantId, String sessionId,
             String writerToken, PublishToolResultRequest request,
             com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
+        return publishToolResult(tenantId, sessionId, writerToken, request, authority, false);
+    }
+
+    ToolResultResourceRef publishToolResult(String tenantId, String sessionId,
+            String writerToken, PublishToolResultRequest request,
+            com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority, boolean authorizeOnly) {
         JournalStoreRows.validateScope(tenantId, request.workspaceId(), sessionId);
         fencing.requireCredential(tenantId, request.workspaceId(), sessionId,
                 writerToken);
@@ -166,6 +172,10 @@ final class JournalResourceWrites {
         }
         fencing.requireCsiWriterCurrent(
                 continuation, head, request.writerId(), request.writerGeneration(), writerToken);
+        if (authorizeOnly) {
+            fencing.requireCsiCurrentTime(continuation);
+            return new ToolResultResourceRef(request.resourceId(), request.kind(), request.schemaVersion(), request.byteLength(), request.digest());
+        }
         if (existing == null) {
             try {
                 jdbc.update(
@@ -273,6 +283,8 @@ final class JournalResourceWrites {
                     revision,
                     resource.resourceId(),
                     now.getTime());
+            jdbc.update("UPDATE ma_resource SET state = 'REFERENCED', retention_until = NULL WHERE resource_key = ? AND storage_kind = 'OBJECT_STORE' AND state IN ('PUBLISHED','REFERENCED') AND deletion_operation_key IS NULL",
+                    ManagedSessionStore.resourceKey(scopeKey, resource.resourceId()));
         }
     }
 

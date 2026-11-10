@@ -84,18 +84,31 @@ public final class AliyunToolPublicationObjectStore implements ToolPublicationOb
 
     @Override
     public void putIfAbsent(String key, byte[] bytes) {
-        validateConfiguration();
+        try {
+            putIfAbsent(key, new ByteArrayInputStream(bytes), bytes.length, () -> {});
+        } catch (ToolPublicationStorageException error) {
+            if (!(error.getCause() instanceof OSSException service)
+                    || !"FileAlreadyExists".equals(service.getErrorCode())) {
+                throw error;
+            }
+        }
+    }
+
+    public void putIfAbsent(String key, InputStream source, long length, Runnable guard) {
+        if (length < 0) {
+            throw new IllegalArgumentException("Negative object length");
+        }
+        validateConfiguration(guard);
         ObjectMetadata metadata = new ObjectMetadata();
-        metadata.setContentLength(bytes.length);
+        metadata.setContentLength(length);
         metadata.setHeader("x-oss-forbid-overwrite", "true");
-        PutObjectRequest request = new PutObjectRequest(bucket, key, new ByteArrayInputStream(bytes));
+        PutObjectRequest request = new PutObjectRequest(bucket, key, source);
         request.setMetadata(metadata);
         try {
+            guard.run();
             client.putObject(request);
         } catch (OSSException error) {
-            if (!"FileAlreadyExists".equals(error.getErrorCode())) {
-                throw storageFailure(error);
-            }
+            throw storageFailure(error);
         } catch (ClientException error) {
             throw storageFailure(error);
         }
@@ -103,8 +116,13 @@ public final class AliyunToolPublicationObjectStore implements ToolPublicationOb
 
     @Override
     public void deleteIfPresent(String key) {
-        validateConfiguration();
+        deleteIfPresent(key, () -> {});
+    }
+
+    public void deleteIfPresent(String key, Runnable guard) {
+        validateConfiguration(guard);
         try {
+            guard.run();
             client.deleteObject(bucket, key);
         } catch (OSSException | ClientException error) {
             throw storageFailure(error);

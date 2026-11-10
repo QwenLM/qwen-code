@@ -4,7 +4,6 @@ import com.alibaba.qwen.code.managedagent.artifact.ToolPublicationRetentionObser
 import com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObjectStore;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionStore;
-import com.alibaba.qwen.code.managedagent.persistence.SessionResourceCollectionCollector;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationAdmissionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationCollector;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationDataStore;
@@ -109,12 +108,6 @@ public class ToolPublicationConfiguration {
     public ToolPublicationCollector toolPublicationCollector(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc, @Qualifier("managedAgentTransactionManager") PlatformTransactionManager manager,
             ToolPublicationRetentionStore retention, ToolPublicationObjectStore objects, ManagedAgentProperties properties) {
         return new ToolPublicationCollector(jdbc, manager, retention, objects, properties);
-    }
-
-    @Bean
-    public SessionResourceCollectionCollector sessionResourceCollectionCollector(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc,
-            @Qualifier("managedAgentTransactionManager") PlatformTransactionManager manager, ManagedAgentProperties properties) {
-        return new SessionResourceCollectionCollector(jdbc, manager, properties);
     }
 
     private static String required(String value, String label) {

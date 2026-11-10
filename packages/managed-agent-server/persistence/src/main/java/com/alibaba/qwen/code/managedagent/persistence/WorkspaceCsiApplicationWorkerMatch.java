@@ -202,7 +202,7 @@ final class WorkspaceCsiApplicationWorkerMatch {
                         && text(ref, "resourceId").equals(row.text("resource_id"))).toList();
         require(rows.size() == 1);
         var row = rows.getFirst();
-        byte[] bytes = row.binary("inline_bytes");
+        byte[] bytes = row.resourceBody();
         require(text(ref, "kind").equals(row.text("kind")) && number(ref.get("schemaVersion")) == row.number("schema_version")
                 && number(ref.get("byteLength")) == row.number("byte_length") && bytes != null
                 && bytes.length == number(ref.get("byteLength")) && CsiNativeActivationProof.sha256(bytes).equals(text(ref, "digest")));

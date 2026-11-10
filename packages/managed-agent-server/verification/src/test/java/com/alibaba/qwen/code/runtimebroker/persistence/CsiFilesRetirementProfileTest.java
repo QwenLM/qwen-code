@@ -75,6 +75,19 @@ class CsiFilesRetirementProfileTest {
     }
 
     @Test
+    void objectsRequireTheExplicitFourthProfile() {
+        String session = UUID.randomUUID().toString();
+        var objects = CsiFilesRetirementProfile.request(workspace, "/workspace", session, CsiFilesRetirementProfile.OBJECTS_PROFILE);
+        assertEquals("sha256:bcbc78f4ecd3eed5dbabc74fcf6e86ff424b9f0b74f801838ba178984075975c", objects.getScope().getCapabilityDigest());
+        assertTrue(CsiFilesRetirementProfile.supportsStorage(objects.getScope(), 6));
+        assertTrue(CsiFilesRetirementProfile.hasActivityDiagnostics(objects.getScope()));
+        for (String profile : java.util.List.of(CsiFilesRetirementProfile.PROFILE, CsiFilesRetirementProfile.DIAGNOSTICS_PROFILE, CsiFilesRetirementProfile.ACTIVITY_PROFILE)) {
+            assertFalse(CsiFilesRetirementProfile.supportsStorage(CsiFilesRetirementProfile.request(workspace, "/workspace", session, profile).getScope(), 6));
+            assertFalse(CsiFilesRetirementProfile.matches(profile, objects.getScope().getCapabilityDigest()));
+        }
+    }
+
+    @Test
     void rejectsNoncanonicalOriginalIdentity() {
         String id = UUID.randomUUID().toString();
         var subdirectory = new ContextBinding("tenant", "workspace", 3,

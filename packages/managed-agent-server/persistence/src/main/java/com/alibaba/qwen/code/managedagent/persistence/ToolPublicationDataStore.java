@@ -652,11 +652,14 @@ public final class ToolPublicationDataStore {
         if (finishing == null || finishing == 0) {
             return null;
         }
-        var terminal = jdbc.query("SELECT resource_key, byte_length, capture_object_key AS object_key FROM ma_resource"
+        var terminal = jdbc.query("SELECT resource_key, byte_length, capture_object_key AS object_key, store_id FROM ma_resource"
                 + " WHERE scope_key = ? AND publication_id = ? AND slot_key = X'7465726d696e616c' AND operation_id = ?", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow),
                 scope, publicationId, operationId);
         long rollback = terminal.isEmpty() ? 0 : ((Number) terminal.get(0).get("byte_length")).longValue();
         String objectKey = terminal.isEmpty() ? null : (String) terminal.get(0).get("object_key");
+        if (objectKey != null) {
+            objects.requireIdentity((String) terminal.getFirst().get("store_id"));
+        }
         if (!terminal.isEmpty()) {
             // A non-VERIFIED row blocks collection forever. Drop it with the
             // charge so a later successful finish can be reclaimed.
@@ -1014,6 +1017,10 @@ public final class ToolPublicationDataStore {
         }
         JsonNode binding = finished.path("binding");
         JsonNode key = binding.path("sessionKey");
+        return sessions.journalData(text(key, "tenantId"), text(key, "sessionId"), () -> receiptForBrokerHot(execution, finished, binding, key));
+    }
+
+    private JsonNode receiptForBrokerHot(com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord execution, JsonNode finished, JsonNode binding, JsonNode key) {
         String publicationId = text(binding, "publicationId");
         String scope = scope(key);
         var row = jdbc.query("SELECT producer_phase, admission_resource_id, receipt_sequence,"
@@ -2072,11 +2079,11 @@ public final class ToolPublicationDataStore {
         String resourceKey = ManagedSchemaKeys.key(sessionScope, resourceId);
         jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id,"
                         + " scope_key, publication_id, slot_key, resource_id, kind, schema_version, byte_length, sha256,"
-                        + " storage_kind, capture_object_key, state, capture_state, operation_id, gmt_create)"
-                        + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, 'PUBLISHED', 'CANDIDATE', ?, ?)",
+                        + " storage_kind, store_id, capture_object_key, state, capture_state, operation_id, gmt_create)"
+                        + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, 'PUBLISHED', 'CANDIDATE', ?, ?)",
                 resourceKey, sessionScope, tenant, capture.get("workspace_id"), session, scope, publicationId, slot,
                 resourceId, kind == null ? "managed-tool-segment" : kind, length, digest,
-                objectKey == null ? "MYSQL_INLINE" : "TOOL_PUBLICATION", objectKey, operationId, createdAt);
+                objectKey == null ? "MYSQL_INLINE" : "TOOL_PUBLICATION", objectKey == null ? null : objects.identity(), objectKey, operationId, createdAt);
         jdbc.update("INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key, owner_revision,"
                         + " resource_key, tenant_id, workspace_id, session_id, resource_id, gmt_create)"
                         + " VALUES (?, 'CAPTURE', ?, 0, ?, ?, ?, ?, ?, ?)",
@@ -2551,10 +2558,7 @@ public final class ToolPublicationDataStore {
         MessageDigest hash = sha256();
         lease.check();
         try (InputStream input = resource.objectKey() == null
-                ? new java.io.ByteArrayInputStream(resource.inlineBytes()) : objects.open(resource.objectKey(), () -> {
-                    lease.check();
-                    heartbeat.run();
-                })) {
+                ? new java.io.ByteArrayInputStream(resource.inlineBytes()) : retention.open(resource.objectKey(), objects, lease, heartbeat)) {
             byte[] buffer = new byte[1024 * 1024];
             long position = 0;
             for (;;) {

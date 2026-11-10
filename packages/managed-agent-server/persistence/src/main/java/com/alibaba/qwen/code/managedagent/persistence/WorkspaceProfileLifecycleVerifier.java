@@ -449,7 +449,7 @@ public class WorkspaceProfileLifecycleVerifier {
     }
 
     private byte[] readContent(OperationRecord operation, String id, JsonNode expected) {
-        var rows = jdbc.queryForList("SELECT resource_id, kind, schema_version, byte_length, sha256, inline_bytes, storage_kind, state"
+        var rows = jdbc.queryForList("SELECT " + com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection.RESOURCE.columns()
                 + " FROM ma_resource WHERE session_scope_key = ? AND tenant_id = ? AND session_id = ?"
                 + " AND resource_id = ? FOR UPDATE", ManagedSessionStore.sessionScopeKey(operation.tenantId(), operation.sessionId()),
                 operation.tenantId(), operation.sessionId(), id);
@@ -457,12 +457,15 @@ public class WorkspaceProfileLifecycleVerifier {
             unsettled();
         }
         var row = rows.getFirst();
-        if (!"MYSQL_INLINE".equals(row.get("storage_kind")) || !List.of("PUBLISHED", "REFERENCED").contains(row.get("state"))
-                || ((Number) row.get("schema_version")).intValue() != 1 || !(row.get("inline_bytes") instanceof byte[])
+        if (!List.of("MYSQL_INLINE", "OBJECT_STORE").contains(row.get("storage_kind")) || !List.of("PUBLISHED", "REFERENCED").contains(row.get("state"))
+                || ((Number) row.get("schema_version")).intValue() != 1
                 || expected == null && !"managed-tool-result-content".equals(row.get("kind"))) {
             unsettled();
         }
-        byte[] bytes = (byte[]) row.get("inline_bytes");
+        byte[] bytes = SessionResourceBodies.preparedBody(row);
+        if (bytes == null || bytes.length > com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.resourceBytes((String) row.get("kind"))) {
+            unsettled();
+        }
         String hash = ToolPublicationContract.sha256(bytes);
         if (((Number) row.get("byte_length")).longValue() != bytes.length || !hash.equals(row.get("sha256"))) {
             unsettled();

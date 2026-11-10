@@ -100,7 +100,7 @@ public final class WorkspaceCsiApplicationStore {
     }
 
     public Status status(String tenant, String session, String workspace, String retirement, String token) {
-        Status result = tx(target -> {
+        Status result = tx(tenant, session, workspace, retirement, token, target -> {
             var locked = lock(target, tenant, session, workspace, retirement);
             nativeStore.requireCsiApplicationCredential(target, locked.authority(), token);
             verifySaved(locked);
@@ -114,7 +114,7 @@ public final class WorkspaceCsiApplicationStore {
 
     public Status freeze(String tenant, String session, String workspace, String retirement, String token, byte[] body) {
         WorkspaceCsiApplicationJson.object(body, 128 * 1024);
-        var plan = tx(target -> {
+        var plan = tx(tenant, session, workspace, retirement, token, target -> {
             var locked = lock(target, tenant, session, workspace, retirement);
             nativeStore.requireCsiApplicationCredential(target, locked.authority(), token);
             if (locked.authority().stage() != Stage.SETTLING) {
@@ -132,7 +132,7 @@ public final class WorkspaceCsiApplicationStore {
             return plan.status();
         }
         byte[] observation = rpc(plan.binding(), plan.context(), operation(plan.request()));
-        return tx(target -> {
+        return tx(tenant, session, workspace, retirement, token, target -> {
             var locked = lock(target, tenant, session, workspace, retirement);
             nativeStore.requireCsiApplicationCredential(target, locked.authority(), token);
             if (locked.authority().stage() != Stage.SETTLING) {
@@ -179,7 +179,7 @@ public final class WorkspaceCsiApplicationStore {
 
     public Status cut(String tenant, String session, String workspace, String retirement, String token, String frozenDigest) {
         digest(frozenDigest);
-        return tx(target -> {
+        return tx(tenant, session, workspace, retirement, token, target -> {
             var locked = lock(target, tenant, session, workspace, retirement);
             nativeStore.requireCsiApplicationCredential(target, locked.authority(), token);
             var authority = locked.authority();
@@ -208,7 +208,7 @@ public final class WorkspaceCsiApplicationStore {
 
     public Status finalizeApplication(String tenant, String session, String workspace, String retirement, String token, String cutDigest) {
         digest(cutDigest);
-        var plan = tx(target -> {
+        var plan = tx(tenant, session, workspace, retirement, token, target -> {
             var locked = lock(target, tenant, session, workspace, retirement);
             nativeStore.requireCsiApplicationCredential(target, locked.authority(), token);
             var authority = locked.authority();
@@ -225,7 +225,7 @@ public final class WorkspaceCsiApplicationStore {
         }
         byte[] receipt = rpc(plan.binding(), plan.context(), operation(plan.request()));
         require(receipt.length <= RECEIPT_LIMIT);
-        return tx(target -> {
+        return tx(tenant, session, workspace, retirement, token, target -> {
             var locked = lock(target, tenant, session, workspace, retirement);
             nativeStore.requireCsiApplicationCredential(target, locked.authority(), token);
             var authority = locked.authority();
@@ -256,9 +256,9 @@ public final class WorkspaceCsiApplicationStore {
 
     public Map<String, Object> workerAuthority(String tenant, String session, String token, byte[] body) {
         JsonNode request = WorkspaceCsiApplicationJson.object(body, CsiFileFinalizeProtocol.REQUEST_LIMIT);
-        return tx(target -> {
-            String workspace = request.path("context").path("workspaceId").textValue();
-            String retirement = request.path("retirementId").textValue();
+        String workspace = request.path("context").path("workspaceId").textValue();
+        String retirement = request.path("retirementId").textValue();
+        return tx(tenant, session, workspace, retirement, token, true, target -> {
             var locked = lock(target, tenant, session, workspace, retirement);
             var authority = locked.authority();
             require(authority.stage() == Stage.CUT || authority.stage() == Stage.DRAINED);
@@ -399,8 +399,33 @@ public final class WorkspaceCsiApplicationStore {
         }
     }
 
-    private <T> T tx(Sql<T> work) {
+    private <T> T tx(String tenant, String session, String workspace, String retirement, String token, Sql<T> work) {
+        return tx(tenant, session, workspace, retirement, token, false, work);
+    }
+
+    private <T> T tx(String tenant, String session, String workspace, String retirement, String token, boolean worker, Sql<T> work) {
         require(!TransactionSynchronizationManager.isActualTransactionActive());
+        return nativeStore.protectedResources(() -> sql(work), () -> sql(target -> {
+            var candidates = jdbc.queryForList("SELECT target_id FROM ma_operation WHERE operation_key = ? AND operation_kind = 'CSI_RETIREMENT' AND tenant_id = ? AND operation_id = ?",
+                    String.class, WorkspaceOperations.key(WorkspaceOperations.Kind.CSI_RETIREMENT, tenant, retirement), tenant, retirement);
+            require(candidates.size() == 1);
+            var authority = JdbcCsiApplicationRetirement.lock(target, tenant, session, candidates.getFirst(), retirement);
+            require(workspace.equals(authority.original().request().getScope().getWorkspaceId()));
+            if (worker) {
+                var binding = bindings.findByIdForUpdate(target, authority.original().bindingId());
+                byte[] credential = token == null ? new byte[0] : token.getBytes(StandardCharsets.UTF_8);
+                if (!MessageDigest.isEqual(credential, binding.getProvisionSeed().getToken().getBytes(StandardCharsets.UTF_8))
+                        || !MessageDigest.isEqual(credential, binding.getLease().getToken().getBytes(StandardCharsets.UTF_8))) {
+                    throw new RuntimeBrokerException(401, "csi_application_authority_unauthorized", "Original Runtime authentication failed.", false);
+                }
+            } else {
+                nativeStore.requireCsiApplicationCredential(target, authority, token);
+            }
+            return null;
+        }));
+    }
+
+    private <T> T sql(Sql<T> work) {
         long started = System.nanoTime();
         return transaction.execute(status -> jdbc.execute((ConnectionCallback<T>) connection -> {
             Connection target = DataSourceUtils.getTargetConnection(connection);

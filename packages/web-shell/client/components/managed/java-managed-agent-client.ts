@@ -1320,13 +1320,38 @@ export class JavaManagedAgentClient {
     signal: AbortSignal | undefined,
     stream: boolean,
   ): Promise<Response> {
-    return this.fetchRequest(
-      path,
-      JSON.stringify(body),
-      signal,
-      stream,
-      'application/json',
-    );
+    for (;;) {
+      signal?.throwIfAborted();
+      try {
+        return await this.fetchRequest(
+          path,
+          JSON.stringify(body),
+          signal,
+          stream,
+          'application/json',
+        );
+      } catch (error) {
+        if (
+          !(error instanceof JavaManagedAgentHttpError) ||
+          error.status !== 503 ||
+          error.code !== 'managed_session_journal_rehydrating'
+        ) {
+          throw error;
+        }
+        signal?.throwIfAborted();
+        await new Promise<void>((resolve, reject) => {
+          const onAbort = () => {
+            clearTimeout(timer);
+            reject(signal?.reason ?? new DOMException('Aborted', 'AbortError'));
+          };
+          const timer = setTimeout(() => {
+            signal?.removeEventListener('abort', onAbort);
+            resolve();
+          }, 1000);
+          signal?.addEventListener('abort', onAbort, { once: true });
+        });
+      }
+    }
   }
 
   private async fetchRequest(

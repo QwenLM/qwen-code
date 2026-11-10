@@ -230,6 +230,7 @@ export function managedSessionNestedResourceRefs(
       'csi-files-retirement/1',
       'csi-files-retirement/2',
       'csi-files-retirement/3',
+      'csi-files-retirement/4',
     ].includes(String((record as Record<string, unknown>)['profile']))
       ? [
           'preparation.intentRef',

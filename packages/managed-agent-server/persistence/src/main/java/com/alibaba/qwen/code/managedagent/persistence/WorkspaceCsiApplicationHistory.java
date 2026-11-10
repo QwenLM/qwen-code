@@ -70,6 +70,16 @@ final class WorkspaceCsiApplicationHistory {
     /** Reads the closed application while its original binding and holder remain DRAINING. */
     Snapshot readApplication(String tenant, String workspace, String session, String retirement, String token) {
         require(!TransactionSynchronizationManager.isActualTransactionActive());
+        return nativeStore.protectedResources(() -> readApplicationHot(tenant, workspace, session, retirement, token), () -> {
+            var frozen = jdbc.queryForList("SELECT frozen_request_bytes FROM ma_operation WHERE operation_kind = 'CSI_RETIREMENT' AND tenant_id = ? AND operation_id = ? AND session_id = ?", byte[].class,
+                    tenant, retirement, session);
+            require(frozen.size() == 1);
+            var envelope = WorkspaceCsiApplicationJson.object(frozen.getFirst(), WorkspaceCsiApplicationInventory.MAX_BYTES);
+            nativeStore.requireCsiHistoricalCredential(tenant, workspace, session, token, envelope.path("writerTokenSha256").textValue());
+        });
+    }
+
+    private Snapshot readApplicationHot(String tenant, String workspace, String session, String retirement, String token) {
         long started = System.nanoTime();
         return transaction.execute(status -> jdbc.execute((ConnectionCallback<Snapshot>) current -> {
             var target = DataSourceUtils.getTargetConnection(current);
@@ -273,13 +283,12 @@ final class WorkspaceCsiApplicationHistory {
     }
 
     private static byte[] storedResource(Row row, JsonNode ref, String state) {
-        require(row != null && state.equals(row.text("state")) && "MYSQL_INLINE".equals(row.text("storage_kind"))
-                && row.text("object_key") == null && row.text("object_version_id") == null && row.text("encryption_key_id") == null
+        require(row != null && state.equals(row.text("state")) && row.nativeStorage()
                 && text(ref, "kind").equals(row.text("kind"))
                 && Objects.equals(row.number("schema_version"), number(ref.get("schemaVersion")))
                 && Objects.equals(row.number("byte_length"), number(ref.get("byteLength")))
                 && text(ref, "digest").equals(row.text("sha256")));
-        byte[] raw = row.binary("inline_bytes");
+        byte[] raw = row.resourceBody();
         require(raw != null && Objects.equals(row.number("byte_length"), (long) raw.length) && hash(raw).equals(row.text("sha256")));
         return raw;
     }

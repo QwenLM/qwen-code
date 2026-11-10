@@ -15,6 +15,7 @@ public interface ManagedAgentSettings {
     public Channels getChannels();
     public EventTransport getEventTransport();
     public SessionStore getSessionStore();
+    public ObjectStore getObjectStore();
     public ToolPublication getToolPublication();
     public Artifacts getArtifacts();
     public ManagedExtensions getManagedExtensions();
@@ -78,6 +79,15 @@ public interface ManagedAgentSettings {
         public Duration getWriterLeaseDuration();
         public String getBindingKey();
         public boolean isAllowInsecureHttp();
+    }
+    public interface ObjectStore {
+        String getProvider();
+        java.util.Map<String, String> getProviderOptions();
+        boolean isResourceWritesEnabled();
+        boolean isGcEnabled();
+        Duration getDeletionGrace();
+        boolean isJournalColdStorageEnabled();
+        boolean isJournalEvictionEnabled();
     }
     public interface ToolPublication {
         public boolean isAsyncVerificationEnabled();

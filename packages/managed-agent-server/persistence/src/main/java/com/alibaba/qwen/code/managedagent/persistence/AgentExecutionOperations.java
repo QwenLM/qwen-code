@@ -163,7 +163,8 @@ final class AgentExecutionOperations {
                 operations.isEmpty() ? null : operations.getFirst());
     }
 
-    Map<String, ContextCompressionState> contextCompressionStates(String tenantId, List<String> sessionIds) {
+    Map<String, ContextCompressionState> contextCompressionStates(String tenantId, List<String> sessionIds,
+            java.util.function.Function<String, ContextCompressionState> read) {
         if (sessionIds.isEmpty()) {
             return Map.of();
         }
@@ -189,7 +190,7 @@ final class AgentExecutionOperations {
                     + " AND session_id IN (" + AgentStoreRows.placeholders(missing.size()) + ") AND head_kind = 'MANAGED_SESSION'",
                     String.class, heads.toArray())) {
                 try {
-                    result.put(id, contextCompressionState(tenantId, id));
+                    result.put(id, read.apply(id));
                 } catch (ManagedAgentException unavailable) {
                     if (!"context_compression_state_unavailable".equals(unavailable.getCode())) {
                         throw unavailable;

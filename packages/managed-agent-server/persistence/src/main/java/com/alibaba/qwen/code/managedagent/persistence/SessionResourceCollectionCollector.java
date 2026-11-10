@@ -24,6 +24,7 @@ import java.util.function.LongSupplier;
  * Collects unreferenced immutable SQL resources of permanently retired Sessions; every page commits
  * atomically because no object store is involved.
  */
+@org.springframework.stereotype.Component
 public final class SessionResourceCollectionCollector {
     private static final Logger LOG = LoggerFactory.getLogger(SessionResourceCollectionCollector.class);
     private static final long CLAIM_MILLIS = 60_000;
@@ -48,14 +49,16 @@ public final class SessionResourceCollectionCollector {
     private final String owner = UUID.randomUUID().toString();
     private long lastLedgerScanNanos;
 
-    public SessionResourceCollectionCollector(JdbcTemplate jdbc, PlatformTransactionManager manager,
+    @org.springframework.beans.factory.annotation.Autowired
+    public SessionResourceCollectionCollector(@org.springframework.beans.factory.annotation.Qualifier("managedJdbcTemplate") JdbcTemplate jdbc,
+            @org.springframework.beans.factory.annotation.Qualifier("managedAgentTransactionManager") PlatformTransactionManager manager,
             ManagedAgentSettings properties) {
         this(jdbc, manager, properties, System::nanoTime);
     }
 
     SessionResourceCollectionCollector(JdbcTemplate jdbc, PlatformTransactionManager manager,
             ManagedAgentSettings properties, LongSupplier clock) {
-        Duration grace = properties.getToolPublication().getDeletionGrace();
+        Duration grace = deletionGrace(properties);
         if (grace == null || grace.isNegative()) {
             throw new IllegalStateException("Tool output deletion grace must be nonnegative");
         }
@@ -70,7 +73,16 @@ public final class SessionResourceCollectionCollector {
         this.clock = clock;
     }
 
-    @Scheduled(fixedDelay = 1000, scheduler = "managedToolOutputScheduler")
+    private static Duration deletionGrace(ManagedAgentSettings settings) {
+        if (!settings.getObjectStore().isGcEnabled()) {
+            return settings.getToolPublication().getDeletionGrace();
+        }
+        Duration objects = settings.getObjectStore().getDeletionGrace();
+        Duration publications = settings.getToolPublication().getDeletionGrace();
+        return settings.getToolPublication().isGcEnabled() && publications.compareTo(objects) > 0 ? publications : objects;
+    }
+
+    @Scheduled(fixedDelay = 1000)
     public void tick() {
         try {
             runOnce();
@@ -80,7 +92,7 @@ public final class SessionResourceCollectionCollector {
     }
 
     public synchronized boolean runOnce() {
-        if (!properties.getToolPublication().isGcEnabled()) {
+        if (!properties.getToolPublication().isGcEnabled() && !properties.getObjectStore().isGcEnabled()) {
             return false;
         }
         boolean projectionChanged = projections.runOnce();
@@ -135,7 +147,7 @@ public final class SessionResourceCollectionCollector {
 
     private void ensureLedgers() {
         long due = ToolPublicationRetentionStore.now(jdbc)
-                - properties.getToolPublication().getDeletionGrace().toMillis();
+                - deletionGrace(properties).toMillis();
         var rows =
                 jdbc.query(
                         "SELECT s.tenant_id, s.session_id, s.session_scope_key FROM ma_session s"
@@ -237,9 +249,7 @@ public final class SessionResourceCollectionCollector {
                                         next =
                                                 Math.addExact(
                                                         retiredAt,
-                                                        properties
-                                                                .getToolPublication()
-                                                                .getDeletionGrace()
+                                                        deletionGrace(properties)
                                                                 .toMillis());
                                     } else if ("reader_active".equals(blocker)) {
                                         // A graceful close deletes the row without moving the
@@ -302,7 +312,7 @@ public final class SessionResourceCollectionCollector {
             return "recovery_protected";
         }
         if (ToolPublicationRetentionStore.number(roots.getFirst(), "retired_at")
-                > now - properties.getToolPublication().getDeletionGrace().toMillis()) {
+                > now - deletionGrace(properties).toMillis()) {
             return "grace_period";
         }
         // A missing head is a closed writer: publishing requires one, and retirement fences
@@ -439,6 +449,10 @@ public final class SessionResourceCollectionCollector {
             jdbc.update(
                     "UPDATE ma_operation SET result_json = ?, claim_until = ?, gmt_modified = ? WHERE operation_key = ? AND claim_generation = ?",
                     result, now + CLAIM_MILLIS, now, operationKey(claim.scope()), claim.generation());
+        } else if (!jdbc.queryForList("SELECT resource_key FROM ma_resource WHERE session_scope_key = ? AND storage_kind = 'OBJECT_STORE' AND state <> 'COLLECTED' LIMIT 1",
+                String.class, claim.scope()).isEmpty()) {
+            jdbc.update("UPDATE ma_operation SET result_json = ?, phase = 'OBJECTS_PENDING', state = 'PENDING', claim_owner = NULL, claim_until = NULL, available_at = ?, gmt_modified = ? WHERE operation_key = ? AND claim_generation = ?",
+                    result, now + 10000, now, operationKey(claim.scope()), claim.generation());
         } else {
             jdbc.update(
                     "UPDATE ma_operation SET result_json = ?, state = 'SUCCEEDED', completed_at = ?, claim_owner = NULL, claim_until = NULL, available_at = "

@@ -27,6 +27,11 @@ public final class CsiFilesRetirementProfile {
             + "\"tools\":[\"read_file\",\"write_file\",\"edit\"],\"fileHistory\":true,"
             + "\"invocationProtocol\":2,\"resultRetention\":\"until-finalize\",\"diagnostics\":\"model-v1\",\"activityDiagnostics\":\"activity-v1\"}";
     public static final String ACTIVITY_DIGEST = digest(ACTIVITY_MANIFEST);
+    public static final String OBJECTS_PROFILE = "csi-files-retirement/4";
+    public static final String OBJECTS_MANIFEST = "{\"profile\":\"csi-files-retirement/4\","
+            + "\"tools\":[\"read_file\",\"write_file\",\"edit\"],\"fileHistory\":true,"
+            + "\"invocationProtocol\":2,\"resultRetention\":\"until-finalize\",\"diagnostics\":\"model-v1\",\"activityDiagnostics\":\"activity-v1\",\"sessionObjects\":\"immutable-v1\"}";
+    public static final String OBJECTS_DIGEST = digest(OBJECTS_MANIFEST);
 
     private CsiFilesRetirementProfile() {
     }
@@ -53,7 +58,7 @@ public final class CsiFilesRetirementProfile {
         }
         RuntimeScope scope = new RuntimeScope(workspace.getTenantId(), workspace.getWorkspaceId(),
                 Long.toString(workspace.getWorkspaceGeneration()), mountRoot,
-                ACTIVITY_PROFILE.equals(profile) ? ACTIVITY_DIGEST : DIAGNOSTICS_PROFILE.equals(profile) ? DIAGNOSTICS_DIGEST : CAPABILITY_DIGEST, "session");
+                OBJECTS_PROFILE.equals(profile) ? OBJECTS_DIGEST : ACTIVITY_PROFILE.equals(profile) ? ACTIVITY_DIGEST : DIAGNOSTICS_PROFILE.equals(profile) ? DIAGNOSTICS_DIGEST : CAPABILITY_DIGEST, "session");
         return new RuntimeProvisionRequest(scope, sessionId, PROVISIONER_KIND, workspace.getStorageId());
     }
 
@@ -65,17 +70,18 @@ public final class CsiFilesRetirementProfile {
     }
 
     public static boolean isCapabilityDigest(String digest) {
-        return CAPABILITY_DIGEST.equals(digest) || DIAGNOSTICS_DIGEST.equals(digest) || ACTIVITY_DIGEST.equals(digest);
+        return CAPABILITY_DIGEST.equals(digest) || DIAGNOSTICS_DIGEST.equals(digest) || ACTIVITY_DIGEST.equals(digest) || OBJECTS_DIGEST.equals(digest);
     }
 
     public static boolean matches(Object profile, Object digest) {
         return PROFILE.equals(profile) && CAPABILITY_DIGEST.equals(digest)
                 || DIAGNOSTICS_PROFILE.equals(profile) && DIAGNOSTICS_DIGEST.equals(digest)
-                || ACTIVITY_PROFILE.equals(profile) && ACTIVITY_DIGEST.equals(digest);
+                || ACTIVITY_PROFILE.equals(profile) && ACTIVITY_DIGEST.equals(digest)
+                || OBJECTS_PROFILE.equals(profile) && OBJECTS_DIGEST.equals(digest);
     }
 
     public static boolean isProfile(String profile) {
-        return PROFILE.equals(profile) || DIAGNOSTICS_PROFILE.equals(profile) || ACTIVITY_PROFILE.equals(profile);
+        return PROFILE.equals(profile) || DIAGNOSTICS_PROFILE.equals(profile) || ACTIVITY_PROFILE.equals(profile) || OBJECTS_PROFILE.equals(profile);
     }
 
     public static boolean hasDiagnostics(RuntimeScope scope) {
@@ -83,18 +89,19 @@ public final class CsiFilesRetirementProfile {
     }
 
     public static boolean hasActivityDiagnostics(RuntimeScope scope) {
-        return scope != null && ACTIVITY_DIGEST.equals(scope.getCapabilityDigest());
+        return scope != null && (ACTIVITY_DIGEST.equals(scope.getCapabilityDigest()) || OBJECTS_DIGEST.equals(scope.getCapabilityDigest()));
     }
 
     public static String profile(RuntimeScope scope) {
         if (!isProfile(scope)) {
             throw new IllegalArgumentException("Unknown private CSI profile");
         }
-        return hasActivityDiagnostics(scope) ? ACTIVITY_PROFILE : hasDiagnostics(scope) ? DIAGNOSTICS_PROFILE : PROFILE;
+        return OBJECTS_DIGEST.equals(scope.getCapabilityDigest()) ? OBJECTS_PROFILE : hasActivityDiagnostics(scope) ? ACTIVITY_PROFILE : hasDiagnostics(scope) ? DIAGNOSTICS_PROFILE : PROFILE;
     }
 
     public static boolean supportsStorage(RuntimeScope scope, long version) {
-        return isProfile(scope) && (version == 1 || version == 3 && hasDiagnostics(scope) || version == 4 && hasActivityDiagnostics(scope));
+        return isProfile(scope) && (version == 1 || version == 3 && hasDiagnostics(scope) || version == 4 && hasActivityDiagnostics(scope)
+                || version == 6 && OBJECTS_DIGEST.equals(scope.getCapabilityDigest()));
     }
 
     public static RuntimeBrokerException releaseUnavailable() {

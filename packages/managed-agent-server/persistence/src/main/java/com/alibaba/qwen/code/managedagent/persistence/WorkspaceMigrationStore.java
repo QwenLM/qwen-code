@@ -46,7 +46,12 @@ public final class WorkspaceMigrationStore {
     private final String storage;
 
     private final WorkspaceOperations operations;
+    private com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObjectStore objects;
     private static final WorkspaceOperations.Kind KIND = WorkspaceOperations.Kind.STORAGE_MIGRATION;
+
+    public void configureObjectStore(com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObjectStore store) {
+        this.objects = store;
+    }
 
     public WorkspaceMigrationStore(JdbcTemplate jdbc, PlatformTransactionManager manager,
             WorkspaceStorageGuard guard, RuntimeBindingRepository bindings, byte[] bytes, boolean create, RecoveryWorker worker) {
@@ -217,7 +222,7 @@ public final class WorkspaceMigrationStore {
         ObjectNode verifyRequest = ((ObjectNode) request).deepCopy();
         verifyRequest.remove(List.of("migrationOperationId", "targetRoot", "stateDirectory"));
         verifyRequest.put("operationId", attempt);
-        var recovery = new WorkspaceRecoveryStore(jdbc, manager, guard, null, "verify",
+        var recovery = new WorkspaceRecoveryStore(jdbc, manager, guard, objects, "verify",
                 verifyRequest.toString().getBytes(StandardCharsets.UTF_8));
         byte[] marker = guard.migrationMarker(tenant, storage, target, (String) saved.get("target_registration_id"));
         String temporary = WorkspaceStorageGuard.migrationTemporary(path("targetRoot"), id).getFileName().toString();

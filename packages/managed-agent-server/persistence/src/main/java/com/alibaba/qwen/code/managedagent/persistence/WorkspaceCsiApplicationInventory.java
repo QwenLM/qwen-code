@@ -181,7 +181,7 @@ final class WorkspaceCsiApplicationInventory {
             declaration("ma_resource", "resource_key",
                     "resource_key:CHAR,session_scope_key:CHAR,tenant_id:VARBINARY,workspace_id:VARBINARY,"
                     + "session_id:VARBINARY,resource_id:VARBINARY,kind:VARBINARY,schema_version:INT,byte_length:BIGINT,"
-                    + "sha256:CHAR,storage_kind:VARCHAR,inline_bytes:LONGBLOB,object_key:VARBINARY,"
+                    + "sha256:CHAR,storage_kind:VARCHAR,store_id:VARCHAR,inline_bytes:LONGBLOB,object_key:VARBINARY,"
                     + "object_version_id:VARBINARY,encryption_key_id:VARBINARY,publish_command_id:VARBINARY,state:VARCHAR,"
                     + "scope_key:CHAR,publication_id:VARBINARY,slot_key:VARBINARY,"
                     + "capture_state:VARCHAR,capture_object_key:VARBINARY,operation_id:VARBINARY,quarantine_reason:VARCHAR,"
@@ -257,7 +257,7 @@ final class WorkspaceCsiApplicationInventory {
                     + "writer_generation:BIGINT,writer_id:VARBINARY,writer_lease_until:BIGINT,lease_token_hash:CHAR,"
                     + "journal_revision:BIGINT,committed_sequence:BIGINT,last_commit_digest:CHAR,activation_epoch:BIGINT,"
                     + "latest_checkpoint_resource_id:VARBINARY,compacted_through_revision:BIGINT,recovery_status:VARCHAR,"
-                    + "recovery_detail_code:VARCHAR,gmt_create:BIGINT,gmt_modified:BIGINT,"
+                    + "recovery_detail_code:VARCHAR,journal_residency:VARCHAR,journal_archive_epoch:BIGINT,journal_archive_operation_key:CHAR,gmt_create:BIGINT,gmt_modified:BIGINT,"
                     + "activation_id:VARBINARY,activation_phase:VARCHAR,activation_event_epoch:BIGINT,"
                     + "activation_expires_at:BIGINT,activation_head_revision:BIGINT,tenant_key:CHAR,harness_key:CHAR,"
                     + "harness_session_id:VARBINARY,head_kind:VARCHAR,phase:VARCHAR,operation_id:VARBINARY,"
@@ -466,6 +466,29 @@ final class WorkspaceCsiApplicationInventory {
         byte[] binary(String name) {
             Cell value = cell(name);
             return value == null ? null : value.bytes();
+        }
+
+        byte[] resourceBody() {
+            if (!"OBJECT_STORE".equals(text("storage_kind"))) {
+                return binary("inline_bytes");
+            }
+            Map<String, Object> descriptor = new LinkedHashMap<>();
+            for (String field : List.of("tenant_id", "workspace_id", "session_id", "resource_id", "kind", "sha256", "storage_kind",
+                    "store_id", "object_key", "object_version_id", "encryption_key_id", "state", "capture_state", "deletion_operation_key")) {
+                descriptor.put(field, text(field));
+            }
+            descriptor.put("schema_version", number("schema_version"));
+            descriptor.put("byte_length", number("byte_length"));
+            descriptor.put("inline_bytes", binary("inline_bytes"));
+            return SessionResourceBodies.preparedBody(descriptor);
+        }
+
+        boolean nativeStorage() {
+            return text("object_version_id") == null && text("encryption_key_id") == null
+                    && text("deletion_operation_key") == null
+                    && ("MYSQL_INLINE".equals(text("storage_kind")) && text("object_key") == null && text("store_id") == null
+                            || "OBJECT_STORE".equals(text("storage_kind")) && text("object_key") != null
+                            && text("store_id") != null && binary("inline_bytes") == null);
         }
 
         private Row withMembership(Membership value) { return new Row(key, fields, bytes, value); }
@@ -690,9 +713,7 @@ final class WorkspaceCsiApplicationInventory {
                     && Objects.equals(part.number("schema_version"), ref.path("schemaVersion").longValue())
                     && Objects.equals(part.number("byte_length"), ref.path("byteLength").longValue())
                     && Objects.equals(part.text("sha256"), ref.path("digest").textValue())
-                    && "MYSQL_INLINE".equals(part.text("storage_kind"))
-                    && part.text("object_key") == null && part.text("object_version_id") == null
-                    && part.text("encryption_key_id") == null && Set.of("PUBLISHED", "REFERENCED").contains(part.text("state")));
+                    && part.nativeStorage() && Set.of("PUBLISHED", "REFERENCED").contains(part.text("state")));
             byte[] bytes = HistoricalScan.payload(part, "inline_bytes", "sha256", 8 * 1024 * 1024);
             if (chunkPart(part.text("kind"))) {
                 consumed.add(key(part));
@@ -733,6 +754,11 @@ final class WorkspaceCsiApplicationInventory {
                 "writer_token_hash", "journal_revision", "activation_id", "activation_epoch", "resource_id", "kind",
                 "schema_version", "byte_length", "sha256", "storage_kind", "resource_state", "started_at", "delivery_expires_at"));
         String state = row.text("state");
+        if ("OBJECT_STORE".equals(evidence.path("storage_kind").asText())) {
+            fields.addAll(Set.of("store_id", "object_key"));
+            requireEncoded(evidence.path("store_id").isTextual() && !evidence.path("store_id").asText().isBlank()
+                    && evidence.path("object_key").isTextual() && !evidence.path("object_key").asText().isBlank());
+        }
         requireEncoded(Set.of("OPEN", "UNKNOWN", "RETURNED").contains(state));
         if (!"OPEN".equals(state)) {
             fields.addAll(Set.of("ended_at", "outcome_code"));
@@ -811,7 +837,7 @@ final class WorkspaceCsiApplicationInventory {
             }
         }
         if ("ma_resource".equals(table) && "managed-tool-input".equals(row.text("kind"))) {
-            JsonNode wrapper = parse(row.binary("inline_bytes"));
+            JsonNode wrapper = parse(row.resourceBody());
             WorkspaceCsiApplicationJson.closed(wrapper, Set.of("harnessSessionId", "runtimeSessionId", "payloadJson"));
             requireEncoded(wrapper.path("payloadJson").isTextual());
             JsonNode payload = parse(wrapper.path("payloadJson").textValue());
@@ -1206,6 +1232,9 @@ final class WorkspaceCsiApplicationInventory {
                             try {
                                 nativeMembers.put(key(row), com.alibaba.qwen.code.runtimebroker.persistence.JdbcCsiExecutionAdmission.readHistoricalMember(rows));
                             } catch (RuntimeException malformed) {
+                                if (malformed instanceof SessionResourceBodies.PreparationRequired) {
+                                    throw malformed;
+                                }
                                 block(declaration.name(), row, "invalid_historical_execution");
                             }
                         }
@@ -1259,6 +1288,7 @@ final class WorkspaceCsiApplicationInventory {
                         block(table, row, "extra_historical_reference");
                     }
                 } else if ("ma_session_journal_tx".equals(table)) {
+                    SessionResourceBodies.requireJournal(row.text("tenant_id"), row.text("session_id"));
                     byte[] raw = payload(row, "record_bytes", "record_digest", 8 * 1024 * 1024);
                     requireEncoded("identity".equals(row.text("record_encoding")));
                     var records = CsiNativeActivationProof.records(raw);
@@ -1280,6 +1310,10 @@ final class WorkspaceCsiApplicationInventory {
                     block(table, row, "unsupported_historical_payload");
                 }
             } catch (RuntimeException malformed) {
+                if (malformed instanceof SessionResourceBodies.PreparationRequired
+                        || malformed instanceof SessionResourceBodies.JournalPreparationRequired) {
+                    throw malformed;
+                }
                 block(table, row, "invalid_historical_payload");
             }
             historyRemaining(started);
@@ -1288,6 +1322,32 @@ final class WorkspaceCsiApplicationInventory {
         private void nativeResource(Row row) throws SQLException {
             resourceMetadata(row);
             String kind = row.text("kind");
+            if ("managed-journal-pack".equals(kind)) {
+                Row work = one("ma_operation_work", "operation_key = ? AND work_kind = 'RESOURCE' AND target_key = ?",
+                        List.of(new Cell(Kind.CHAR, utf8(row.text("publish_command_id"))),
+                                new Cell(Kind.CHAR, utf8(row.text("resource_key")))));
+                JsonNode pack = parse(work.text("payload_json"));
+                requireEncoded(pack != null && row.text("resource_key").equals(pack.path("resource").asText())
+                        && row.text("object_key").equals(pack.path("key").asText())
+                        && row.text("store_id").equals(pack.path("store").asText())
+                        && row.number("byte_length") == pack.path("length").asLong(-1)
+                        && row.text("sha256").equals(pack.path("digest").asText()));
+                byte[] packed = payload(row, "inline_bytes", "sha256", 64 * 1024 * 1024);
+                try {
+                    for (var transaction : JournalPackCodec.decode(packed, pack.path("first").asLong(-1), pack.path("last").asLong(-1),
+                            () -> historyRemaining(started))) {
+                        for (JsonNode record : CsiNativeActivationProof.records(transaction.bytes())) {
+                            requireEncoded(row.text("session_id").equals(record.path("sessionId").textValue()));
+                            if (savedJsonReference(record, references, 0, false)) {
+                                block("ma_resource", row, "extra_historical_reference");
+                            }
+                        }
+                    }
+                } catch (IOException malformed) {
+                    throw new IllegalArgumentException("Invalid historical journal pack", malformed);
+                }
+                return;
+            }
             if (Set.of("managed-agent-instructions", "managed-agent-skills").contains(kind)) {
                 agentResource(row);
                 return;
@@ -1336,8 +1396,7 @@ final class WorkspaceCsiApplicationInventory {
                     .equals(row.text("session_scope_key"))
                     && ManagedSessionStore.resourceKey(row.text("session_scope_key"), row.text("resource_id")).equals(row.text("resource_key"))
                     && Objects.equals(row.number("schema_version"), 1L)
-                    && "MYSQL_INLINE".equals(row.text("storage_kind")) && row.text("object_key") == null
-                    && row.text("object_version_id") == null && row.text("encryption_key_id") == null
+                    && row.nativeStorage()
                     && Set.of("PUBLISHED", "REFERENCED").contains(row.text("state")));
         }
 
@@ -1391,12 +1450,12 @@ final class WorkspaceCsiApplicationInventory {
 
         private void agentResource(Row row) {
             boolean instructions = "managed-agent-instructions".equals(row.text("kind"));
-            byte[] raw = row.binary("inline_bytes");
+            byte[] raw = row.resourceBody();
             requireEncoded(raw != null && raw.length <= (instructions ? ManagedSessionStoreModels.MAX_AGENT_INSTRUCTIONS_BYTES
                     : ManagedSessionStoreModels.MAX_AGENT_SKILLS_BYTES)
                     && Objects.equals(row.number("byte_length"), (long) raw.length) && hash(raw).equals(row.text("sha256"))
                     && ((instructions ? "agent-instructions-" : "agent-skills-") + hash(raw)).equals(row.text("resource_id"))
-                    && row.text("resource_id").equals(row.text("publish_command_id"))
+                    && ("OBJECT_STORE".equals(row.text("storage_kind")) || row.text("resource_id").equals(row.text("publish_command_id")))
                     && row.text("workspace_id") != null && !row.text("workspace_id").isEmpty());
             absent(row, "scope_key", "publication_id", "slot_key", "capture_state", "capture_object_key", "operation_id",
                     "quarantine_reason", "deletion_operation_key");
@@ -1547,14 +1606,14 @@ final class WorkspaceCsiApplicationInventory {
                                     row.text("scope_key"), row.text("publication_id"), slot) : "result-"
                             + hash(utf8(row.text("scope_key") + ":" + row.text("publication_id") + ":" + slot)).substring(0, 32)));
             if (row.text("capture_object_key") != null) {
-                requireEncoded(row.binary("inline_bytes") == null && row.text("capture_object_key").equals("managed-tool-results/"
+                requireEncoded(row.resourceBody() == null && row.text("capture_object_key").equals("managed-tool-results/"
                         + row.text("scope_key") + "/" + row.text("publication_id") + "/" + hash(utf8(slot))));
                 if (!opaque) {
                     block("ma_resource", row, "unsupported_historical_payload");
                 }
                 return;
             }
-            byte[] raw = row.binary("inline_bytes");
+            byte[] raw = row.resourceBody();
             requireEncoded(raw != null && Objects.equals(row.number("byte_length"), (long) raw.length)
                     && hash(raw).equals(row.text("sha256")));
             if (opaque) {
@@ -1588,7 +1647,7 @@ final class WorkspaceCsiApplicationInventory {
         }
 
         static byte[] payload(Row row, String field, String digest, int limit) {
-            byte[] raw = row.binary(field);
+            byte[] raw = "inline_bytes".equals(field) ? row.resourceBody() : row.binary(field);
             requireEncoded(raw != null && raw.length > 0 && raw.length <= limit
                     && Objects.equals(row.number("byte_length"), (long) raw.length) && hash(raw).equals(row.text(digest)));
             return raw;
@@ -2167,6 +2226,20 @@ final class WorkspaceCsiApplicationInventory {
                     case "ma_operation_work" -> {
                         Row parent = lookup("ma_operation", "operation_key = ?", row.text("operation_key"));
                         JsonNode payload = parse(row.text("payload_json"));
+                        if (parent != null && "JOURNAL_ARCHIVE".equals(parent.text("operation_kind"))) {
+                            Row resource = lookup("ma_resource", "resource_key = ?", row.text("target_key"));
+                            yield otherOperation(parent) && resource != null && payload != null
+                                    && Objects.equals(parent.text("tenant_id"), row.text("tenant_id"))
+                                    && Objects.equals(parent.text("session_id"), row.text("session_id"))
+                                    && Objects.equals(resource.text("tenant_id"), row.text("tenant_id"))
+                                    && Objects.equals(resource.text("session_id"), row.text("session_id"))
+                                    && "RESOURCE".equals(row.text("work_kind"))
+                                    && row.text("target_key").equals(payload.path("resource").asText())
+                                    && resource.text("resource_id").equals(row.text("target_id"))
+                                    && resource.text("sha256").equals(payload.path("digest").asText())
+                                    && resource.text("object_key").equals(payload.path("key").asText())
+                                    && resource.text("store_id").equals(payload.path("store").asText());
+                        }
                         yield parent != null && otherOperation(parent)
                                 && !savedOriginalReference("ma_operation", parent, liveReferences())
                                 && Objects.equals(parent.text("tenant_id"), row.text("tenant_id"))
@@ -2188,6 +2261,9 @@ final class WorkspaceCsiApplicationInventory {
                     default -> false;
                 };
             } catch (RuntimeException invalid) {
+                if (invalid instanceof SessionResourceBodies.PreparationRequired) {
+                    throw invalid;
+                }
                 return false;
             }
         }
@@ -2409,6 +2485,15 @@ final class WorkspaceCsiApplicationInventory {
                 return false;
             }
             var kind = com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.OperationKind.valueOf(row.text("operation_kind"));
+            if (kind == com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.OperationKind.JOURNAL_ARCHIVE
+                    || kind == com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.OperationKind.JOURNAL_HYDRATE) {
+                return otherId.equals(row.text("operation_key")) && otherId.matches("[0-9a-f]{64}")
+                        && row.text("session_scope_key").equals(row.text("scope_key"))
+                        && row.text("scope_key").equals(row.text("target_key"))
+                        && "SESSION".equals(row.text("target_kind"))
+                        && com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(row.text("request_json"))
+                                .equals(row.text("request_digest"));
+            }
             return com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.operationKey(kind,
                     row.text("scope_key"), row.text("target_key"), otherId).equals(row.text("operation_key"));
         }
@@ -2601,11 +2686,14 @@ final class WorkspaceCsiApplicationInventory {
                         seedJson(record);
                     }
                 } catch (RuntimeException exception) {
+                    if (exception instanceof SessionResourceBodies.PreparationRequired) {
+                        throw exception;
+                    }
                     block(table, key(row), "malformed_native_records");
                 }
             }
-            if (table.equals("ma_resource") && row.binary("inline_bytes") != null && !chunkPart(row.text("kind"))) {
-                JsonNode json = parse(row.binary("inline_bytes"));
+            if (table.equals("ma_resource") && row.resourceBody() != null && !chunkPart(row.text("kind"))) {
+                JsonNode json = parse(row.resourceBody());
                 if (json == null) {
                     block(table, key(row), "malformed_native_resource");
                 } else {
@@ -2620,6 +2708,9 @@ final class WorkspaceCsiApplicationInventory {
                 try {
                     seedJson(chunkBody(manifest, ref -> chunkMember(manifest, ref, resources), new LinkedHashSet<>()));
                 } catch (RuntimeException invalid) {
+                    if (invalid instanceof SessionResourceBodies.PreparationRequired) {
+                        throw invalid;
+                    }
                     // Discovery can precede loading all members; final validation refuses an incomplete group.
                 }
             }
@@ -2634,6 +2725,9 @@ final class WorkspaceCsiApplicationInventory {
                     chunkBody(manifest, ref -> chunkMember(manifest, ref, resources), consumed);
                     covered.addAll(consumed);
                 } catch (RuntimeException invalid) {
+                    if (invalid instanceof SessionResourceBodies.PreparationRequired) {
+                        throw invalid;
+                    }
                     block("ma_resource", key(manifest), "invalid_native_chunks");
                 }
             }
@@ -2719,7 +2813,8 @@ final class WorkspaceCsiApplicationInventory {
             }
             for (String table : List.of("ma_session", "ma_public_event", "ma_event_stream", "ma_storage",
                     "ma_operation", "ma_storage_owner", "ma_runtime_binding", "ma_runtime_slot", "ma_runtime_session", "ma_session_head")) {
-                if (rows(table).stream().filter(row -> row.membership == Membership.ORIGINAL).count() != 1) {
+                if (rows(table).stream().filter(row -> row.membership == Membership.ORIGINAL)
+                        .filter(row -> !"ma_operation".equals(table) || "CSI_RETIREMENT".equals(row.text("operation_kind"))).count() != 1) {
                     block(table, null, "missing_or_extra_original");
                 }
             }
@@ -2736,6 +2831,35 @@ final class WorkspaceCsiApplicationInventory {
                 }
             }
             validateNativeMembership();
+        }
+
+        private void validateObjectPut(Row row) {
+            JsonNode request = parse(row.text("request_json"));
+            String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
+            Row resource = rows("ma_resource").stream().filter(value -> Objects.equals(value.text("resource_key"), row.text("target_key")))
+                    .findFirst().orElse(null);
+            expect("ma_operation", row, resource != null && request != null && request.isObject()
+                    && CsiFilesRetirementProfile.supportsStorage(original.request().getScope(), 6)
+                    && rawSession(row) && workspace.equals(row.text("workspace_id"))
+                    && scope.equals(row.text("scope_key")) && scope.equals(row.text("session_scope_key"))
+                    && "SESSION_RESOURCE".equals(row.text("phase")) && "RESOURCE".equals(row.text("target_kind"))
+                    && "RETURNED".equals(row.text("state")) && row.number("completed_at") != null
+                    && row.number("claim_generation") != null && row.number("claim_generation") > 0
+                    && hash(utf8(row.text("request_json"))).equals(row.text("request_digest"))
+                    && "OBJECT_STORE".equals(resource.text("storage_kind")) && resource.nativeStorage()
+                    && oneOf(resource.text("state"), "PUBLISHED", "REFERENCED")
+                    && Objects.equals(resource.text("publish_command_id"), row.text("operation_id"))
+                    && resource.text("resource_id").equals(request.path("resourceId").asText())
+                    && workspace.equals(request.path("workspaceId").asText())
+                    && resource.text("kind").equals(request.path("kind").asText())
+                    && Objects.equals(resource.number("schema_version"), request.path("schemaVersion").longValue())
+                    && Objects.equals(resource.number("byte_length"), request.path("byteLength").longValue())
+                    && resource.text("sha256").equals(request.path("digest").asText())
+                    && com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.operationKey(
+                            com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.OperationKind.OBJECT_PUT,
+                            scope, row.text("target_key"), row.text("operation_id")).equals(row.text("operation_key"))
+                    && ("sessions/" + scope + "/resources/" + resource.text("resource_key") + "/" + row.text("operation_id"))
+                            .equals(resource.text("object_key")));
         }
 
         private void validateRow(String table, Row row) {
@@ -2815,6 +2939,10 @@ final class WorkspaceCsiApplicationInventory {
                             && original.request().getScope().getCanonicalCwd().equals(registration.mountRoot()));
                 }
                 case "ma_operation" -> {
+                    if ("OBJECT_PUT".equals(row.text("operation_kind"))) {
+                        validateObjectPut(row);
+                        break;
+                    }
                     var value = parse(row.text("request_json"));
                     expect(table, row, intent.operationId().equals(row.text("operation_id"))
                             && original.bindingId().equals(row.text("target_id"))
@@ -2887,12 +3015,10 @@ final class WorkspaceCsiApplicationInventory {
                         && row.cell("deletion_operation_key").isNull()
                         && row.cell("scope_key").isNull() && row.cell("publication_id").isNull() && row.cell("capture_state").isNull()
                         && has("J", row.text("session_scope_key"))
-                        && "MYSQL_INLINE".equals(row.text("storage_kind")) && "REFERENCED".equals(row.text("state"))
-                        && row.binary("inline_bytes") != null
-                        && Objects.equals((long) row.binary("inline_bytes").length, row.number("byte_length"))
-                        && hash(row.binary("inline_bytes")).equals(row.text("sha256"))
-                        && row.cell("object_key").isNull() && row.cell("object_version_id").isNull()
-                        && row.cell("encryption_key_id").isNull());
+                        && row.nativeStorage() && "REFERENCED".equals(row.text("state"))
+                        && row.resourceBody() != null
+                        && Objects.equals((long) row.resourceBody().length, row.number("byte_length"))
+                        && hash(row.resourceBody()).equals(row.text("sha256")));
                 case "ma_session_record" -> expect(table, row, rawNative(row) && has("J", row.text("session_scope_key")));
                 case "ma_resource_ref" -> expect(table, row, rawNative(row)
                         && has("J", row.text("session_scope_key"))
@@ -3063,11 +3189,14 @@ final class WorkspaceCsiApplicationInventory {
                     }
                     long expectedRows = (modelContext == null ? 0 : 1) + (modelStatistics == null ? 0 : 1) + activityReferences.size();
                     requireEncoded(rows("ma_session_record").stream().filter(row -> row.membership == Membership.ORIGINAL).count() == expectedRows);
-                    long expectedVersion = resources.values().stream().anyMatch(row -> "managed-execution-diagnostics".equals(row.text("kind"))) ? 4 : resources.values().stream().anyMatch(row ->
+                    long expectedVersion = resources.values().stream().anyMatch(row -> "OBJECT_STORE".equals(row.text("storage_kind"))) ? 6 : resources.values().stream().anyMatch(row -> "managed-execution-diagnostics".equals(row.text("kind"))) ? 4 : resources.values().stream().anyMatch(row ->
                             com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedModelDiagnostics.KINDS.contains(row.text("kind"))) ? 3 : 1;
                     requireEncoded(head != null && Objects.equals(expectedVersion, head.number("storage_version")));
                 }
             } catch (RuntimeException invalid) {
+                if (invalid instanceof SessionResourceBodies.PreparationRequired) {
+                    throw invalid;
+                }
                 block("ma_session_record", null, "invalid_hosted_model_context");
             }
             Set<String> referenced = new LinkedHashSet<>();
@@ -3089,6 +3218,9 @@ final class WorkspaceCsiApplicationInventory {
                 try {
                     read = nativeReadEvidence(receipt);
                 } catch (RuntimeException invalid) {
+                    if (invalid instanceof SessionResourceBodies.PreparationRequired) {
+                        throw invalid;
+                    }
                     block("ma_request_receipt", key(receipt), "invalid_native_read_receipt");
                     continue;
                 }
@@ -3105,6 +3237,8 @@ final class WorkspaceCsiApplicationInventory {
                         && Objects.equals(head.text("activation_id"), read.text("activation_id"))
                         && Objects.equals(resource.text("state"), read.text("resource_state"))
                         && Objects.equals(resource.text("storage_kind"), read.text("storage_kind"))
+                        && Objects.equals(resource.text("store_id"), read.text("store_id"))
+                        && Objects.equals(resource.text("object_key"), read.text("object_key"))
                         && Objects.equals(resource.text("kind"), read.text("kind"))
                         && Objects.equals(resource.number("schema_version"), read.number("schema_version"))
                         && Objects.equals(resource.number("byte_length"), read.number("byte_length"))

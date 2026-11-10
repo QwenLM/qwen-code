@@ -363,6 +363,13 @@ final class JournalHistoryQueries {
             return revision == head.journalRevision() && sequence == head.committedSequence()
                     && activationEpoch == head.activationEpoch()
                     && Objects.equals(digest, head.lastCommitDigest()) && head.equals(storeRows.requireHead(tenantId, sessionId));
+        } catch (SessionResourceBodies.PreparationRequired missing) {
+            throw missing;
+        } catch (com.alibaba.qwen.code.managedagent.exception.ManagedAgentException failure) {
+            if (failure.getStatus() == 503) {
+                throw failure;
+            }
+            return false;
         } catch (IOException | RuntimeException unverified) {
             return false;
         }
@@ -386,14 +393,15 @@ final class JournalHistoryQueries {
         }
         JournalStoreRows.ResourceRow resource = resources.getFirst();
         JournalStoreRows.requireResourceScope(resource, head.tenantId(), head.workspaceId(), head.sessionId(), ref.path("resourceId").asText());
-        if (!"MYSQL_INLINE".equals(resource.storageKind()) || !kind.equals(resource.kind())
+        if (!java.util.List.of("MYSQL_INLINE", "OBJECT_STORE").contains(resource.storageKind()) || !kind.equals(resource.kind())
                 || !kind.equals(ref.path("kind").asText()) || resource.schemaVersion() != ref.path("schemaVersion").asInt()
                 || resource.byteLength() != ref.path("byteLength").asLong() || !resource.digest().equals(ref.path("digest").asText())) {
             throw JournalStoreRows.journalCorrupt();
         }
         storeRows.verifyStoredResource(resource);
+        byte[] bytes = new SessionResourceBodies(jdbc, null).read(resource, () -> {});
         if ("managed-definition".equals(kind)) {
-            JsonNode definition = JournalStoreRows.CSI_TERMINAL_JSON.readTree(resource.bytes());
+            JsonNode definition = JournalStoreRows.CSI_TERMINAL_JSON.readTree(bytes);
             if (definition == null || !definition.isObject()) {
                 throw JournalStoreRows.journalCorrupt();
             }

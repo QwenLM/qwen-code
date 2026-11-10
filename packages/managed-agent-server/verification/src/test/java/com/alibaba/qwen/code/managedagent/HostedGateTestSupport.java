@@ -450,7 +450,8 @@ public final class HostedGateTestSupport {
                                     + invocation.getMethod().getName());
                 });
         context.addBeanFactoryPostProcessor(beanFactory -> beanFactory
-                .registerSingleton("toolPublicationOss", new AliyunObjectStoreClient(oss)));
+                .registerSingleton("toolPublicationObjects", new AliyunObjectStoreClient(oss).objects(
+                        context.getEnvironment().getRequiredProperty("qwen.managed-agent.tool-publication.oss-bucket"))));
     }
 
     // The extension-record JDBC read, led by the Session's scope key: the

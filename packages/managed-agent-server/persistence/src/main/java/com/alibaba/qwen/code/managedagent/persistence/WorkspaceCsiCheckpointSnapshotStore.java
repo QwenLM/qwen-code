@@ -51,12 +51,20 @@ public final class WorkspaceCsiCheckpointSnapshotStore {
     private final DataSource source;
     private final JdbcRuntimeBindingRepository bindings;
     private final ObjectMapper json;
+    private final SessionResourceTransactions resources;
 
     public WorkspaceCsiCheckpointSnapshotStore(DataSource source,
             JdbcRuntimeBindingRepository bindings, ObjectMapper json) {
+        this(source, bindings, json, null);
+    }
+
+    public WorkspaceCsiCheckpointSnapshotStore(DataSource source, JdbcRuntimeBindingRepository bindings,
+            ObjectMapper json, com.alibaba.qwen.code.managedagent.contracts.storage.ImmutableObjectStore objects) {
         require(source != null && bindings != null && bindings.usesDataSource(source) && json != null);
         this.source = source;
         this.bindings = bindings;
+        this.resources = new SessionResourceTransactions(new ManagedSchemaJdbcTemplate(source),
+                new org.springframework.jdbc.datasource.DataSourceTransactionManager(source), objects);
         this.json = json.copy().enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
                 .enable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
                 .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
@@ -71,6 +79,15 @@ public final class WorkspaceCsiCheckpointSnapshotStore {
                 && id(sessionId, 512) && id(publicationId, 128));
         ObjectNode key = json.createObjectNode().put("tenantId", tenantId)
                 .put("workspaceId", workspaceId).put("sessionId", sessionId);
+        return resources.protectedRead(() -> exportSnapshot(retirementId, key, publicationId), () -> {
+            var jdbc = new ManagedSchemaJdbcTemplate(source);
+            JournalResidencyGuard.requireHot(jdbc, tenantId, sessionId);
+            require(Boolean.TRUE.equals(jdbc.queryForObject("SELECT is_csi_guard FROM ma_session WHERE tenant_id = ? AND session_id = ?",
+                    Boolean.class, tenantId, sessionId)));
+        });
+    }
+
+    private ObjectNode exportSnapshot(String retirementId, ObjectNode key, String publicationId) {
         try (Connection connection = source.getConnection()) {
             require(connection.getAutoCommit()
                     && "MySQL".equals(connection.getMetaData().getDatabaseProductName()));
@@ -82,10 +99,13 @@ public final class WorkspaceCsiCheckpointSnapshotStore {
                     statement.execute("START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY");
                 }
                 requireEngines(connection);
+                JournalResidencyGuard.requireHot(connection, key.path("tenantId").asText(), key.path("sessionId").asText());
                 return export(connection, retirementId, key, publicationId);
             } finally {
                 connection.rollback();
             }
+        } catch (SessionResourceBodies.PreparationRequired missing) {
+            throw missing;
         } catch (SQLException | RuntimeException error) {
             throw unavailable();
         }
@@ -143,7 +163,9 @@ public final class WorkspaceCsiCheckpointSnapshotStore {
                 JdbcRuntimeBindingRepository.harnessDrainKey(key.path("tenantId").asText()),
                 JdbcRuntimeBindingRepository.harnessDrainKey(key.path("sessionId").asText()));
         scope(head, key);
-        require(List.of(1L, 2L, 3L, 4L).contains(number(head, "storage_version")) && "READY".equals(head.get("recovery_status"))
+        require((List.of(1L, 2L, 3L, 4L).contains(number(head, "storage_version"))
+                || number(head, "storage_version") == 6 && com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile.supportsStorage(runtime.getRequest().getScope(), 6))
+                && "READY".equals(head.get("recovery_status"))
                 && Set.of("ACTIVE", "SEALED").contains(text(head, "state"))
                 && number(head, "compacted_through_revision") == 0
                 && number(head, "activation_epoch") == binding.path("activationEpoch").longValue());
@@ -401,9 +423,11 @@ public final class WorkspaceCsiCheckpointSnapshotStore {
                 + " WHERE r.session_scope_key = ? AND r.state = 'REFERENCED' AND r.deletion_operation_key IS NULL"
                 + " ORDER BY r.resource_id LIMIT 4097", scope, scope)) {
             scope(row, key);
-            require("MYSQL_INLINE".equals(row.get("storage_kind")) && number(row, "schema_version") == 1
-                    && row.get("object_key") == null && row.get("object_version_id") == null && row.get("encryption_key_id") == null);
-            byte[] bytes = bytes(row, "inline_bytes", ManagedSessionStoreModels.inlineResourceBytes(text(row, "kind")));
+            require(number(row, "schema_version") == 1 && row.get("object_version_id") == null && row.get("encryption_key_id") == null
+                    && ("MYSQL_INLINE".equals(row.get("storage_kind")) && row.get("object_key") == null && row.get("store_id") == null
+                            || "OBJECT_STORE".equals(row.get("storage_kind"))));
+            byte[] bytes = SessionResourceBodies.preparedBody(row);
+            require(bytes != null && bytes.length <= ManagedSessionStoreModels.resourceBytes(text(row, "kind")));
             total += bytes.length;
             require(total <= MAX_BYTES && bytes.length == number(row, "byte_length") && hash(bytes).equals(row.get("sha256")));
             ArrayNode revisions = references.remove(text(row, "resource_id"));

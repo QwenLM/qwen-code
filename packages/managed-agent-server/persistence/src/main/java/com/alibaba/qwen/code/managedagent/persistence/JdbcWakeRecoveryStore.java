@@ -33,6 +33,13 @@ public class JdbcWakeRecoveryStore
     private static final long RETRY_MS = 30_000;
     private static final String UNOWNED = " (h.state = 'SEALED' OR (h.state = 'ACTIVE'"
             + " AND (h.writer_lease_until IS NULL OR h.writer_lease_until <= " + ManagedSchemaTime.SQL_NOW + ")))";
+    private com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedJournalAccess journalAccess;
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    public void configureJournalAccess(com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedJournalAccess access) {
+        this.journalAccess = access;
+    }
+
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transactions;
     private final LinkedHashMap<Candidate, Proof> pendingProofs = new LinkedHashMap<>(128, 0.75f, true);
@@ -109,6 +116,10 @@ public class JdbcWakeRecoveryStore
 
     /** An empty result yields a partial proof without certifying consumption. */
     public synchronized Optional<Boolean> hasPendingInput(Candidate candidate) {
+        return JournalResidencyGuard.read(jdbc, journalAccess, candidate.tenantId(), candidate.sessionId(), () -> hasPendingInputHot(candidate));
+    }
+
+    private Optional<Boolean> hasPendingInputHot(Candidate candidate) {
         if (candidate.compactedThroughRevision() != 0) {
             throw corrupt();
         }

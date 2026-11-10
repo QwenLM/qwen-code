@@ -64,6 +64,7 @@ public class ManagedAgentProperties
 
     private final Harness harness = new Harness();
     private final SessionStore sessionStore = new SessionStore();
+    private final ObjectStore objectStore = new ObjectStore();
     private final Memory memory = new Memory();
     private final ToolPublication toolPublication = new ToolPublication();
     private final Artifacts artifacts = new Artifacts();
@@ -701,6 +702,19 @@ public class ManagedAgentProperties
         private Duration writerLeaseDuration = Duration.ofSeconds(60);
         private String bindingKey = "";
         private boolean allowInsecureHttp;
+    }
+
+    @Getter
+    @Setter
+    public static class ObjectStore implements com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings.ObjectStore {
+        private String provider = "";
+        private Map<String, String> providerOptions = new LinkedHashMap<>();
+        private boolean resourceWritesEnabled;
+        private boolean gcEnabled;
+        @DurationUnit(ChronoUnit.SECONDS)
+        private Duration deletionGrace = Duration.ofHours(24);
+        private boolean journalColdStorageEnabled;
+        private boolean journalEvictionEnabled;
     }
 
     @Getter

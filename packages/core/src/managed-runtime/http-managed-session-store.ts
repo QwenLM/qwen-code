@@ -102,6 +102,7 @@ export const HTTP_MANAGED_SESSION_STORE_CONTRACT = {
 
 const MAX_ATTACHMENT_INPUT_BYTES = 8 * 1024 * 1024;
 const MAX_NATIVE_SNAPSHOT_PAGE_BYTES = 16 * 1024 * 1024;
+const MAX_OBJECT_RESOURCE_BYTES = 64 * 1024 * 1024;
 
 export function managedSessionInlineResourceBytes(kind: string): number {
   if (kind === 'managed-checkpoint')
@@ -110,6 +111,28 @@ export function managedSessionInlineResourceBytes(kind: string): number {
   if (kind === 'managed-agent-skills') return 2 * 1024 * 1024;
   if (kind === 'hosted-model-request') return HOSTED_MODEL_REQUEST_BYTES;
   return HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes;
+}
+
+function resourceBytes(kind: string): number {
+  if (
+    [
+      'managed-checkpoint',
+      'managed-input',
+      'managed-agent-skills',
+      'hosted-model-request',
+      'managed-agent-instructions',
+    ].includes(kind)
+  )
+    return managedSessionInlineResourceBytes(kind);
+  if (kind === 'managed-tool-result-content') return 1024 * 1024;
+  if (kind === 'managed-tool-result-page') return 256 * 1024;
+  if (
+    kind === 'managed-tool-result-manifest' ||
+    kind === 'managed-config_install'
+  )
+    return 64 * 1024;
+  if (kind === 'managed-native-journal-snapshot-page') return 16 * 1024 * 1024;
+  return MAX_OBJECT_RESOURCE_BYTES;
 }
 
 const WRITER_TOKEN = new RegExp(
@@ -353,7 +376,7 @@ export function readOnlyManagedSessionSnapshot(value: unknown) {
   );
   const head = parseRestoreHead(snapshot['head']);
   if (
-    ![1, 2, 3, 4, 5].includes(head.storageVersion) ||
+    ![1, 2, 3, 4, 5, 6].includes(head.storageVersion) ||
     !['ACTIVE', 'SEALED'].includes(head.state) ||
     head.recoveryStatus !== 'READY' ||
     head.compactedThroughRevision !== 0
@@ -551,6 +574,10 @@ export function readOnlyManagedSessionSnapshot(value: unknown) {
         head.storageVersion !== (diagnosticsPresent ? 3 : 1))) ||
     (profile === 'csi-files-retirement/3' &&
       head.storageVersion !==
+        (executionPresent ? 4 : diagnosticsPresent ? 3 : 1)) ||
+    (profile === 'csi-files-retirement/4' &&
+      head.storageVersion !== 6 &&
+      head.storageVersion !==
         (executionPresent ? 4 : diagnosticsPresent ? 3 : 1))
   )
     throw corrupt('snapshot CSI profile storage floor conflicts.');
@@ -715,7 +742,7 @@ const LEGACY_EXTENSION_CLOSURE_KINDS = new Set([
 class HttpManagedSessionResourceStore implements ManagedSessionResourceStore {
   private readonly staged = new Map<
     string,
-    { ref: ManagedSessionDurableRef; bytes: Buffer }
+    { ref: ManagedSessionDurableRef; bytes: Buffer; uploaded?: boolean }
   >();
   private client: ManagedSessionStoreHttpClient | undefined;
 
@@ -728,10 +755,10 @@ class HttpManagedSessionResourceStore implements ManagedSessionResourceStore {
     source: Buffer,
   ): Promise<ManagedSessionDurableRef> {
     const safeKind = assertManagedSessionStableId(kind, 'resource kind');
-    const maxBytes = managedSessionInlineResourceBytes(safeKind);
+    const maxBytes = resourceBytes(safeKind);
     if (source.byteLength > maxBytes) {
       throw new ManagedSessionRecordError(
-        `resource bytes exceed the ${maxBytes}-byte inline limit (kind=${safeKind}, bytes=${source.byteLength}); OSS storage is not enabled.`,
+        `resource bytes exceed the ${maxBytes}-byte limit (kind=${safeKind}, bytes=${source.byteLength}).`,
       );
     }
     const bytes = Buffer.from(source);
@@ -839,20 +866,39 @@ class HttpManagedSessionResourceStore implements ManagedSessionResourceStore {
         }
       }
     }
-    return [...closure.values()].map((ref) => {
+    const committed: CommitResource[] = [];
+    for (const ref of closure.values()) {
       const staged = this.staged.get(ref.resourceId);
       if (staged !== undefined) requireSameRef(staged.ref, ref);
-      return {
+      if (
+        staged &&
+        !staged.uploaded &&
+        staged.bytes.length >
+          HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes
+      ) {
+        if (this.client?.supportsExternalResources()) {
+          await this.client.uploadResource(ref, staged.bytes);
+          staged.uploaded = true;
+        } else if (
+          staged.bytes.length > managedSessionInlineResourceBytes(ref.kind)
+        ) {
+          throw new ManagedSessionRecordError(
+            'The Managed Session reader does not support external resource writes.',
+          );
+        }
+      }
+      committed.push({
         resourceId: ref.resourceId,
         kind: ref.kind,
         schemaVersion: ref.schemaVersion,
         byteLength: ref.byteLength,
         digest: ref.digest,
-        ...(staged === undefined
+        ...(staged === undefined || staged.uploaded
           ? {}
           : { bytesBase64: staged.bytes.toString('base64') }),
-      };
-    });
+      });
+    }
+    return committed;
   }
 
   releaseCommitted(refs: readonly ManagedSessionDurableRef[]): void {
@@ -865,6 +911,7 @@ class HttpManagedSessionResourceStore implements ManagedSessionResourceStore {
 }
 
 interface WriterGrant {
+  readonly externalResources: boolean;
   readonly activationLeaseRenewal: boolean;
   readonly activationLease?: ManagedSessionActivationLease;
   readonly supportedStorageVersion: number;
@@ -928,6 +975,12 @@ interface TransactionDescriptor {
 }
 
 class ManagedSessionStoreHttpClient {
+  supportsExternalResources(): boolean {
+    return (
+      this.grant?.externalResources === true &&
+      this.grant.supportedStorageVersion >= 6
+    );
+  }
   supportsExecutionDiagnostics(): boolean {
     return (this.grant?.supportedStorageVersion ?? 1) >= 4;
   }
@@ -1604,7 +1657,7 @@ class ManagedSessionStoreHttpClient {
       raw['sessionId'] !== this.sessionKey.sessionId ||
       snapshot.snapshotId.length === 0 ||
       Buffer.byteLength(snapshot.snapshotId, 'utf8') > 512 ||
-      ![1, 2, 3, 4, 5].includes(storageVersion) ||
+      ![1, 2, 3, 4, 5, 6].includes(storageVersion) ||
       storageVersion > head.storageVersion ||
       snapshot.coveredJournalRevision < 1 ||
       snapshot.coveredJournalRevision > head.journalRevision ||
@@ -2449,7 +2502,7 @@ class ManagedSessionStoreHttpClient {
           method,
           headers: {
             Accept: 'application/json',
-            'X-Qwen-Managed-Max-Readable-Storage-Version': '5',
+            'X-Qwen-Managed-Max-Readable-Storage-Version': '6',
             ...(readOnly ? {} : { 'Content-Type': 'application/json' }),
             [HTTP_MANAGED_SESSION_STORE_CONTRACT.tenantHeader]:
               this.sessionKey.tenantId,
@@ -2487,6 +2540,42 @@ class ManagedSessionStoreHttpClient {
       },
       contentionDeadline,
     );
+  }
+
+  async uploadResource(
+    ref: ManagedSessionDurableRef,
+    bytes: Buffer,
+  ): Promise<void> {
+    const grant = this.requireGrant();
+    if (!this.supportsExternalResources())
+      throw corrupt('External resource writes require storage version 6.');
+    const allocation = asRecord(
+      await this.json('/resources:allocate', 'POST', {
+        workspaceId: this.sessionKey.workspaceId,
+        writerId: this.writerId,
+        writerGeneration: grant.writerGeneration,
+        ...ref,
+      }),
+      'resource allocation',
+    );
+    const allocated = assertManagedSessionDurableRef(
+      allocation['resource'] as ManagedSessionJsonValue,
+      'allocated resource',
+    );
+    requireSameRef(ref, allocated);
+    const uploadId = assertManagedSessionStableId(
+      allocation['uploadId'] as ManagedSessionJsonValue,
+      'uploadId',
+    );
+    const path = `/resources/${encodeURIComponent(ref.resourceId)}/content?uploadId=${encodeURIComponent(uploadId)}`;
+    await this.withRetry(true, 'PUT', path, async (timeoutMs) => {
+      const response = await this.request(path, 'PUT', bytes, timeoutMs);
+      const published = assertManagedSessionDurableRef(
+        (await response.json()) as ManagedSessionJsonValue,
+        'published resource',
+      );
+      requireSameRef(ref, published);
+    });
   }
 
   async readResource(ref: ManagedSessionDurableRef): Promise<Buffer> {
@@ -2940,6 +3029,7 @@ class ManagedSessionStoreHttpClient {
         ...this.requireGrant(),
         leaseUntil: renewed.leaseUntil,
         supportedStorageVersion: renewed.supportedStorageVersion,
+        externalResources: renewed.externalResources,
       };
       this.scheduleRenewal();
     })();
@@ -3036,7 +3126,7 @@ class ManagedSessionStoreHttpClient {
     const grant = this.requireGrant();
     if (
       head.state !== 'ACTIVE' ||
-      ![1, 2, 3, 4, 5].includes(head.storageVersion) ||
+      ![1, 2, 3, 4, 5, 6].includes(head.storageVersion) ||
       head.storageVersion > grant.supportedStorageVersion ||
       head.writerGeneration !== grant.writerGeneration ||
       head.recoveryStatus !== 'READY' ||
@@ -3073,7 +3163,9 @@ class ManagedSessionStoreHttpClient {
     contentionDeadline?: number,
   ): Promise<unknown> {
     return this.withRetry(
-      method === 'GET' || path === '/writers:renew',
+      method === 'GET' ||
+        path === '/writers:renew' ||
+        path === '/resources:allocate',
       method,
       path,
       async (timeoutMs) => {
@@ -3116,7 +3208,7 @@ class ManagedSessionStoreHttpClient {
    */
   private async withRetry<T>(
     retryable: boolean,
-    method: 'GET' | 'POST',
+    method: 'GET' | 'POST' | 'PUT',
     path: string,
     run: (timeoutMs: number) => Promise<T>,
     contentionDeadline?: number,
@@ -3152,6 +3244,15 @@ class ManagedSessionStoreHttpClient {
         // it — on any route — for the rest of this request budget instead of
         // spending the three-attempt cap in ~15 s and latching the Session's
         // writes behind a contention window it could have outlasted (#13800).
+        if (
+          error instanceof ManagedSessionStoreHttpError &&
+          error.status === 503 &&
+          error.remoteCode === 'managed_session_journal_rehydrating'
+        ) {
+          if (deadline - Date.now() <= 250) throw error;
+          await new Promise((resolve) => setTimeout(resolve, 250));
+          continue;
+        }
         const contended =
           error instanceof ManagedSessionStoreHttpError &&
           error.status === 503 &&
@@ -3231,8 +3332,8 @@ class ManagedSessionStoreHttpClient {
 
   private async request(
     path: string,
-    method: 'GET' | 'POST',
-    body?: Readonly<Record<string, unknown>>,
+    method: 'GET' | 'POST' | 'PUT',
+    body?: Readonly<Record<string, unknown>> | Buffer,
     timeoutMs = this.requestTimeoutMs,
     accept = 'application/json',
   ): Promise<Response> {
@@ -3250,7 +3351,7 @@ class ManagedSessionStoreHttpClient {
         redirect: 'error',
         headers: {
           Accept: accept,
-          'X-Qwen-Managed-Max-Readable-Storage-Version': '5',
+          'X-Qwen-Managed-Max-Readable-Storage-Version': '6',
           [HTTP_MANAGED_SESSION_STORE_CONTRACT.tenantHeader]:
             this.sessionKey.tenantId,
           [HTTP_MANAGED_SESSION_STORE_CONTRACT.writerTokenHeader]:
@@ -3264,9 +3365,22 @@ class ManagedSessionStoreHttpClient {
                 ),
               }
             : {}),
-          ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
+          ...(body === undefined
+            ? {}
+            : Buffer.isBuffer(body)
+              ? {
+                  'Content-Type': 'application/octet-stream',
+                  'Content-Length': String(body.length),
+                }
+              : { 'Content-Type': 'application/json' }),
         },
-        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        ...(body === undefined
+          ? {}
+          : {
+              body: Buffer.isBuffer(body)
+                ? new Uint8Array(body)
+                : JSON.stringify(body),
+            }),
         signal: AbortSignal.timeout(timeoutMs),
       });
     } catch (error) {
@@ -3582,6 +3696,7 @@ export function requireStoredTransactionMatches(
 function parseWriterGrant(value: unknown): WriterGrant {
   const record = asRecord(value, 'writer grant');
   return {
+    externalResources: record['externalResources'] === true,
     activationLeaseRenewal: record['activationLeaseRenewal'] === true,
     ...(record['activationLease'] == null
       ? {}
@@ -3740,6 +3855,7 @@ export function collectNestedResourceRefs(
         'csi-files-retirement/1',
         'csi-files-retirement/2',
         'csi-files-retirement/3',
+        'csi-files-retirement/4',
       ].includes(String(record['profile']))
       ? collectRefs([record['preparation']])
       : [];

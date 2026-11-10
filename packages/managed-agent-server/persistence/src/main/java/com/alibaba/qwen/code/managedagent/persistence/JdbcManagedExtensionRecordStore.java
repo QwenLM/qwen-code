@@ -125,6 +125,12 @@ public class JdbcManagedExtensionRecordStore
     // that the authority could not read back.
 
     private final JdbcTemplate jdbc;
+    private com.alibaba.qwen.code.managedagent.contracts.storage.ImmutableObjectStore objectStore;
+
+    @Autowired(required = false)
+    public void configureObjectStore(com.alibaba.qwen.code.managedagent.contracts.storage.ImmutableObjectStore store) {
+        this.objectStore = store;
+    }
     private final AgentStateStore sessions;
     private final JdbcManagedTaskEventStore taskEvents;
     private final ManagedModelDiagnosticProjection modelDiagnostics;
@@ -311,16 +317,27 @@ public class JdbcManagedExtensionRecordStore
 
     StoredResource readResource(String tenantId, String sessionId,
             String resourceId) {
-        StoredResource resource = jdbc.query(
-                                "SELECT " + ManagedSchemaProjection.RESOURCE.columns() + " FROM ma_resource WHERE session_scope_key = ? AND tenant_id = ? AND session_id = ? AND resource_id = ? AND state = 'REFERENCED' AND storage_kind = 'MYSQL_INLINE' AND object_key IS NULL AND object_version_id IS NULL AND encryption_key_id IS NULL",
-                (result, row) -> new StoredResource(
-                        result.getString("resource_id"),
-                        result.getString("kind"), result.getInt("schema_version"),
-                        result.getLong("byte_length"), result.getString("sha256"),
-                        result.getBytes("inline_bytes")),
+        var rows = new JournalStoreRows(com.alibaba.qwen.code.managedagent.contracts.persistence.StorageReadPolicy.inProcess(), jdbc);
+        var row = jdbc.query(
+                                "SELECT " + ManagedSchemaProjection.RESOURCE.columns() + " FROM ma_resource WHERE session_scope_key = ? AND tenant_id = ? AND session_id = ? AND resource_id = ? AND state = 'REFERENCED'",
+                rows.resourceMapper,
                 ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
                 tenantId, sessionId, resourceId).stream().findFirst()
                 .orElseThrow(() -> rejected("Missing committed MCP resource."));
+        rows.verifyStoredResource(row);
+        var bodies = new SessionResourceBodies(jdbc, objectStore);
+        byte[] bytes;
+        if ("OBJECT_STORE".equals(row.storageKind()) && !org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive()) {
+            try (var lease = new ToolPublicationRetentionStore(jdbc, new org.springframework.jdbc.datasource.DataSourceTransactionManager(jdbc.getDataSource())).read(tenantId, sessionId)) {
+                bytes = bodies.read(row, lease::check);
+                var current = rows.findResource(ManagedSessionStore.sessionScopeKey(tenantId, sessionId), resourceId, false);
+                require(current != null && SessionResourceBodies.same(row, current) && "REFERENCED".equals(current.state()), "The committed resource changed.");
+                lease.check();
+            }
+        } else {
+            bytes = bodies.read(row, () -> {});
+        }
+        StoredResource resource = new StoredResource(row.resourceId(), row.kind(), row.schemaVersion(), row.byteLength(), row.digest(), bytes);
         require(resource.bytes() != null
                 && resource.bytes().length == resource.byteLength()
                 && sha256(resource.bytes()).equals(resource.digest()),

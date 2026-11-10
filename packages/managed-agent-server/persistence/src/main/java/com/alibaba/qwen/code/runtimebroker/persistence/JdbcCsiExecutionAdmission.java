@@ -426,6 +426,8 @@ public final class JdbcCsiExecutionAdmission {
 
     private static DispatchCheckpoint dispatchCheckpoint(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
             long maximumRevision, String batchId, JdbcCsiActivationAdmission.JournalRead read) throws SQLException {
+        com.alibaba.qwen.code.managedagent.persistence.JournalResidencyGuard.requireHot(connection,
+                original.request().getScope().getTenantId(), original.request().getIsolationKey());
         DispatchCheckpoint result = null;
         try (PreparedStatement statement = read.statement(connection,
                 "SELECT " + ManagedSchemaProjection.SESSION_JOURNAL_TX.columns() + " FROM ma_session_journal_tx WHERE tenant_id = ? AND session_id = ?"

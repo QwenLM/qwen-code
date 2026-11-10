@@ -19,10 +19,73 @@ function jsonResponse(value: unknown, status = 200): Response {
 }
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.unstubAllGlobals();
 });
 
 describe('JavaManagedAgentClient', () => {
+  it('keeps a journal request pending while hydration is in progress', async () => {
+    vi.useFakeTimers();
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        jsonResponse(
+          {
+            error: {
+              code: 'managed_session_journal_rehydrating',
+              message: 'restoring',
+            },
+          },
+          503,
+        ),
+      )
+      .mockResolvedValueOnce(jsonResponse({ items: [] }));
+    const client = new JavaManagedAgentClient({
+      baseUrl: 'https://product.example',
+      fetch: fetchImpl,
+    });
+    let settled = false;
+    const pending = client.queryUserMessages('session-a').then((result) => {
+      settled = true;
+      return result;
+    });
+    await vi.advanceTimersByTimeAsync(999);
+    expect(settled).toBe(false);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(pending).resolves.toEqual({ items: [] });
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  it('cancels a pending journal hydration when navigation aborts', async () => {
+    vi.useFakeTimers();
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
+      jsonResponse(
+        {
+          error: {
+            code: 'managed_session_journal_rehydrating',
+            message: 'restoring',
+          },
+        },
+        503,
+      ),
+    );
+    const client = new JavaManagedAgentClient({
+      baseUrl: 'https://product.example',
+      fetch: fetchImpl,
+    });
+    const controller = new AbortController();
+    const pending = client.queryUserMessages('session-a', controller.signal);
+    const rejected = pending.then(
+      () => null,
+      (error: unknown) => error,
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    controller.abort();
+    expect(await rejected).toMatchObject({ name: 'AbortError' });
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
   it('sends Session file locators without a caller-selected Workspace or cwd', async () => {
     const fetchImpl = vi
       .fn<typeof fetch>()

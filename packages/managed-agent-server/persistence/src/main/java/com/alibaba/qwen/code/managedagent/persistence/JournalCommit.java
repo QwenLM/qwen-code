@@ -88,6 +88,14 @@ final class JournalCommit {
         JdbcHarnessPlacementStore.Placement placement = fencing.requirePlacement(tenantId, request.workspaceId(),
                 sessionId, writerToken, request.writerId(), false);
         int storageFloor = ManagedModelDiagnosticProjection.storageFloor(validated.recordBytes(), request.resources(), validated.resources());
+        if (request.resources() != null) {
+            for (var resource : request.resources()) {
+                var stored = storeRows.findResource(ManagedSessionStore.sessionScopeKey(tenantId, sessionId), resource.resourceId(), false);
+                if (stored != null && "OBJECT_STORE".equals(stored.storageKind())) {
+                    storageFloor = Math.max(storageFloor, 6);
+                }
+            }
+        }
         if (storageFloor > 1) {
             readerVersion.requireReadable(storageFloor);
         }
@@ -761,7 +769,8 @@ final class JournalCommit {
                 throw JournalStoreRows.invalid("Resource version or length is invalid.");
             }
             int maxResourceBytes = ManagedSessionStoreModels.inlineResourceBytes(resource.kind());
-            if (resource.byteLength() > maxResourceBytes
+            if (resource.byteLength() > (resource.bytesBase64() == null
+                    ? ManagedSessionStoreModels.resourceBytes(resource.kind()) : maxResourceBytes)
                     && !("managed-tool-outcome".equals(resource.kind())
                     && resource.bytesBase64() == null)) {
                 throw new ManagedAgentException(501,

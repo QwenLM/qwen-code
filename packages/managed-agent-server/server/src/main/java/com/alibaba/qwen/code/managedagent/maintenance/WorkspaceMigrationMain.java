@@ -67,7 +67,9 @@ public final class WorkspaceMigrationMain {
             System.out.println(store.inspect());
             return;
         }
-        try {
+        try (var objects = OperatorObjectStores.open("W1_OSS_")) {
+            bindings.configureObjectStore(objects);
+            store.configureObjectStore(OperatorObjectStores.publication(objects));
             switch (args[0]) {
                 case "abort" -> store.abort();
                 case "prepare" -> store.verify(false);
@@ -75,6 +77,7 @@ public final class WorkspaceMigrationMain {
                 case "retire" -> {
                     var sessions = new JdbcRuntimeSessionRepository(source);
                     var executions = new JdbcToolExecutionRepository(source);
+                    executions.configureObjectStore(objects);
                     var ownership = new JdbcWorkspaceExecutionStore(jdbc, manager);
                     var http = new HttpRuntimeTransport();
                     Path stateDirectory = Path.of(request.path("stateDirectory").asText());

@@ -37,6 +37,21 @@ public class JdbcWorkspaceLifecycleStore
         return !WorkspaceOperations.rows(jdbc, "SELECT o.operation_id FROM ma_operation o JOIN ma_session s ON s.tenant_id = o.tenant_id AND s.session_id = o.session_id JOIN ma_session_head f ON f.tenant_id = o.tenant_id AND f.harness_session_id = o.session_id WHERE o.tenant_id = ? AND o.session_id = ? AND o.operation_kind = 'CLOSE' AND o.lifecycle_protocol_version = 0 AND o.delivery_state = 'LEASED' AND o.claim_until > ? AND s.status = 'CLOSING' AND f.tenant_key = ? AND f.harness_key = ? AND f.phase = 'DRAINING' AND f.operation_id IS NULL FOR UPDATE", tenant, session, now,
                 JdbcRuntimeBindingRepository.harnessDrainKey(tenant), JdbcRuntimeBindingRepository.harnessDrainKey(session)).isEmpty();
     }
+    private SessionResourceTransactions resourceTransactions;
+    private com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedJournalAccess journalAccess;
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    public void configureStorageAccess(SessionResourceTransactions resources,
+            com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedJournalAccess journals) {
+        this.resourceTransactions = resources;
+        this.journalAccess = journals;
+    }
+
+    private <T> T operationData(OperationRecord operation, java.util.function.Supplier<T> action) {
+        return JournalResidencyGuard.read(jdbc, journalAccess, operation.tenantId(), operation.sessionId(),
+                () -> resourceTransactions.read(operation.tenantId(), operation.sessionId(), action));
+    }
+
     private final JdbcTemplate jdbc;
     private final ObjectMapper json;
     private final JdbcManagedExtensionRecordStore records;
@@ -54,6 +69,8 @@ public class JdbcWorkspaceLifecycleStore
 
     public JdbcWorkspaceLifecycleStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc, @Qualifier("managedAgentObjectMapper") ObjectMapper json, ObjectProvider<RuntimeBindingRepository> bindings) {
         this.jdbc = jdbc;
+        this.resourceTransactions = new SessionResourceTransactions(jdbc,
+                new org.springframework.jdbc.datasource.DataSourceTransactionManager(jdbc.getDataSource()), null);
         this.json = json;
         this.records = new JdbcManagedExtensionRecordStore(jdbc);
         this.bindings = bindings;
@@ -117,6 +134,7 @@ public class JdbcWorkspaceLifecycleStore
     }
 
     public static java.util.Set<String> requireIdleJournal(JdbcTemplate jdbc, ObjectMapper json, String tenant, String session, boolean allowCleanup, boolean v2) {
+        JournalResidencyGuard.requireHot(jdbc, tenant, session);
         var heads = WorkspaceOperations.rows(jdbc, "SELECT tenant_id, session_id, compacted_through_revision, journal_revision"
                 + " FROM ma_session_head"
                 + " WHERE tenant_key = ? AND harness_key = ? AND head_kind = 'MANAGED_SESSION' FOR UPDATE",
@@ -200,8 +218,11 @@ public class JdbcWorkspaceLifecycleStore
         return new JournalScan(maxScanned[0], pending, cleanup, accepted);
     }
 
-    @Transactional
     public JsonNode recoverEffects(OperationRecord operation) {
+        return operationData(operation, () -> recoverEffectsHot(operation));
+    }
+
+    private JsonNode recoverEffectsHot(OperationRecord operation) {
         lock(operation);
         requireClaim(jdbc, operation.tenantId(), operation.sessionId(), WorkspaceLifecycleStore.authority(operation), true);
         String saved = jdbc.queryForObject("SELECT lifecycle_effects_receipt_json FROM ma_operation"
@@ -251,8 +272,14 @@ public class JdbcWorkspaceLifecycleStore
         return receipt;
     }
 
-    @Transactional
     public void saveEffects(OperationRecord operation, JsonNode receipt) {
+        operationData(operation, () -> {
+            saveEffectsHot(operation, receipt);
+            return null;
+        });
+    }
+
+    private void saveEffectsHot(OperationRecord operation, JsonNode receipt) {
         lock(operation);
         requireClaim(jdbc, operation.tenantId(), operation.sessionId(), WorkspaceLifecycleStore.authority(operation), false);
         saveLocked(operation, receipt);
@@ -328,8 +355,14 @@ public class JdbcWorkspaceLifecycleStore
         }
     }
 
-    @Transactional
     public void verifyResources(OperationRecord operation) {
+        operationData(operation, () -> {
+            verifyResourcesHot(operation);
+            return null;
+        });
+    }
+
+    private void verifyResourcesHot(OperationRecord operation) {
         lock(operation);
         requireClaim(jdbc, operation.tenantId(), operation.sessionId(), WorkspaceLifecycleStore.authority(operation), true);
         if (!resourceClaim(jdbc, operation.tenantId(), operation.sessionId(), WorkspaceLifecycleStore.authority(operation)) || profiles == null) {

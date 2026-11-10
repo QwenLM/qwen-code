@@ -16,6 +16,7 @@ import {
   CSI_FILES_RETIREMENT_CAPABILITY_DIGEST,
   CSI_FILES_DIAGNOSTICS_CAPABILITY_DIGEST,
   CSI_FILES_ACTIVITY_CAPABILITY_DIGEST,
+  CSI_FILES_OBJECTS_CAPABILITY_DIGEST,
   matchesCsiFilesProfile,
 } from './managed-csi-file-profile.js';
 import { parseManagedCsiBoot } from './managed-csi-envelope.js';
@@ -69,6 +70,33 @@ afterEach(async () => {
 });
 
 describe('reserved private CSI file profile', () => {
+  it('requires the fourth profile for immutable Session objects', () => {
+    const manifest = JSON.stringify({
+      profile: 'csi-files-retirement/4',
+      tools: ['read_file', 'write_file', 'edit'],
+      fileHistory: true,
+      invocationProtocol: 2,
+      resultRetention: 'until-finalize',
+      diagnostics: 'model-v1',
+      activityDiagnostics: 'activity-v1',
+      sessionObjects: 'immutable-v1',
+    });
+    expect(
+      `sha256:${createHash('sha256').update(manifest).digest('hex')}`,
+    ).toBe(CSI_FILES_OBJECTS_CAPABILITY_DIGEST);
+    expect(
+      matchesCsiFilesProfile(
+        'csi-files-retirement/4',
+        CSI_FILES_OBJECTS_CAPABILITY_DIGEST,
+      ),
+    ).toBe(true);
+    expect(
+      matchesCsiFilesProfile(
+        'csi-files-retirement/3',
+        CSI_FILES_OBJECTS_CAPABILITY_DIGEST,
+      ),
+    ).toBe(false);
+  });
   it('pins activity diagnostics without upgrading earlier profile semantics', () => {
     const manifest = JSON.stringify({
       profile: 'csi-files-retirement/3',

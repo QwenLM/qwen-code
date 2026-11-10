@@ -107,35 +107,41 @@ public final class WorkspaceCsiRuntimeMain {
                 com.alibaba.qwen.code.managedagent.contracts.persistence.StorageReadPolicy.inProcess(),
                 null, null, null, null, null,
                 com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy.unbound(), bindings);
-        var application = new WorkspaceCsiApplicationStore(jdbc, manager, nativeStore, bindings, sessions, new com.alibaba.qwen.code.runtimebroker.adapter.HttpRuntimeTransport());
-        var access = new WorkspaceCsiRuntimeAccess(jdbc, manager, json, properties, request.registration(),
-                request.sessionId(), request.runtimeRequestKey(), bindings, sessions, http, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
-        access.resolve(request.sessionId()).toCompletableFuture().join();
-        var api = support.createClient(URI.create(required("K2_KUBERNETES_API_URL")),
-                Path.of(required("K2_KUBERNETES_TOKEN_FILE")), Path.of(required("K2_KUBERNETES_CA_FILE")));
-        var storage = new WorkspaceCsiReservationStore(jdbc, manager, json);
-        var spec = new com.alibaba.qwen.code.runtimebroker.spi.WorkspaceCsiRuntimeSpec(request.registration(),
-                request.protection(), required("K2_CLUSTER_DOMAIN"), request.image(), request.command(), request.artifacts(),
-                Duration.ofSeconds(30), authorityOrigin);
-        var provider = support.createWorkspaceRuntime(spec, api, storage, bindings);
-        try (var service = new RuntimeBrokerService(access, provider, access, bindings, sessions,
-                new JdbcToolExecutionRepository(source, bindings), UUID.randomUUID().toString(),
-                Duration.ofSeconds(30), Duration.ofSeconds(30));
-                var server = new RuntimeBrokerHttpServer(new InetSocketAddress(InetAddress.getLoopbackAddress(), port),
-                        token, service, false, access::readNative)) {
-            requireAuthorityOrigin(authorityOrigin, server.getBaseUri());
-            server.registerCsiApplicationAuthority(request.registration().tenantId(), request.sessionId(),
-                    (credential, body) -> application.workerAuthority(request.registration().tenantId(), request.sessionId(), credential, body));
-            var stopped = new CountDownLatch(1);
-            var shutdown = new Thread(() -> {
-                server.close();
-                stopped.countDown();
-            }, "csi-runtime-shutdown");
-            Runtime.getRuntime().addShutdownHook(shutdown);
-            server.start();
-            System.out.println(json.writeValueAsString(Map.of("sessionId", request.sessionId(),
-                    "runtimeRequestKey", request.runtimeRequestKey(), "baseUri", server.getBaseUri().toString())));
-            stopped.await();
+        try (var objects = OperatorObjectStores.open("QWEN_MANAGED_AGENT_TOOL_PUBLICATION_OSS_")) {
+            bindings.configureObjectStore(objects);
+            OperatorObjectStores.configure(jdbc, manager, nativeStore, objects);
+            var application = new WorkspaceCsiApplicationStore(jdbc, manager, nativeStore, bindings, sessions, new com.alibaba.qwen.code.runtimebroker.adapter.HttpRuntimeTransport());
+            var access = new WorkspaceCsiRuntimeAccess(jdbc, manager, json, properties, request.registration(),
+                    request.sessionId(), request.runtimeRequestKey(), bindings, sessions, http, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+            access.resolve(request.sessionId()).toCompletableFuture().join();
+            var api = support.createClient(URI.create(required("K2_KUBERNETES_API_URL")),
+                    Path.of(required("K2_KUBERNETES_TOKEN_FILE")), Path.of(required("K2_KUBERNETES_CA_FILE")));
+            var storage = new WorkspaceCsiReservationStore(jdbc, manager, json);
+            var spec = new com.alibaba.qwen.code.runtimebroker.spi.WorkspaceCsiRuntimeSpec(request.registration(),
+                    request.protection(), required("K2_CLUSTER_DOMAIN"), request.image(), request.command(), request.artifacts(),
+                    Duration.ofSeconds(30), authorityOrigin);
+            var provider = support.createWorkspaceRuntime(spec, api, storage, bindings);
+            var executions = new JdbcToolExecutionRepository(source, bindings);
+            executions.configureObjectStore(objects);
+            try (var service = new RuntimeBrokerService(access, provider, access, bindings, sessions,
+                    executions, UUID.randomUUID().toString(),
+                    Duration.ofSeconds(30), Duration.ofSeconds(30));
+                    var server = new RuntimeBrokerHttpServer(new InetSocketAddress(InetAddress.getLoopbackAddress(), port),
+                            token, service, false, access::readNative)) {
+                requireAuthorityOrigin(authorityOrigin, server.getBaseUri());
+                server.registerCsiApplicationAuthority(request.registration().tenantId(), request.sessionId(),
+                        (credential, body) -> application.workerAuthority(request.registration().tenantId(), request.sessionId(), credential, body));
+                var stopped = new CountDownLatch(1);
+                var shutdown = new Thread(() -> {
+                    server.close();
+                    stopped.countDown();
+                }, "csi-runtime-shutdown");
+                Runtime.getRuntime().addShutdownHook(shutdown);
+                server.start();
+                System.out.println(json.writeValueAsString(Map.of("sessionId", request.sessionId(),
+                        "runtimeRequestKey", request.runtimeRequestKey(), "baseUri", server.getBaseUri().toString())));
+                stopped.await();
+            }
         }
     }
 

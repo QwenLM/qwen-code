@@ -138,6 +138,22 @@ final class ManagedSessionRetirementStore {
                     session);
             return true;
         }
+        var archiveOwners = jdbc.queryForList("SELECT f.owner_key, f.owner_revision, f.resource_key FROM ma_resource_ref f"
+                + " JOIN ma_operation o ON o.operation_key = f.owner_key AND o.operation_kind = 'JOURNAL_ARCHIVE'"
+                + " WHERE f.session_scope_key = ? AND f.owner_kind = 'OPERATION' ORDER BY f.owner_key, f.owner_revision, f.resource_key LIMIT ? FOR UPDATE", scope, limit);
+        if (!archiveOwners.isEmpty()) {
+            if (jdbc.update("UPDATE ma_session_head SET journal_residency = 'HOT', journal_archive_epoch = journal_archive_epoch + 1, journal_archive_operation_key = NULL"
+                    + " WHERE tenant_id = ? AND session_id = ? AND head_kind = 'MANAGED_SESSION' AND state = 'DELETED' AND compacted_through_revision >= journal_revision", tenant, session) != 1) {
+                throw new IllegalStateException("The retired journal still owns its packs");
+            }
+            for (var row : archiveOwners) {
+                jdbc.update("DELETE FROM ma_resource_ref WHERE session_scope_key = ? AND owner_kind = 'OPERATION' AND owner_key = ? AND owner_revision = ? AND resource_key = ?",
+                        scope, row.get("owner_key"), row.get("owner_revision"), row.get("resource_key"));
+                jdbc.update("UPDATE ma_operation SET state = 'SUCCEEDED', phase = 'RETIRED', completed_at = " + ManagedSchemaTime.SQL_NOW
+                        + ", gmt_modified = " + ManagedSchemaTime.SQL_NOW + " WHERE operation_key = ? AND operation_kind = 'JOURNAL_ARCHIVE'", row.get("owner_key"));
+            }
+            return true;
+        }
         var cleanupOwners = jdbc.queryForList("SELECT owner_key, owner_revision, resource_key"
                 + " FROM ma_resource_ref WHERE session_scope_key = ? AND owner_kind = 'HOSTED_CLEANUP'"
                 + " ORDER BY owner_key, owner_revision, resource_key LIMIT ? FOR UPDATE", scope, limit);

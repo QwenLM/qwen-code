@@ -82,34 +82,16 @@ final class CsiNativeToolReservation {
                                                         .ManagedSchemaRows.identity(rows, "kind"))
                                 .put("schemaVersion", rows.getLong("schema_version"))
                                 .put("byteLength", rows.getLong("byte_length")).put("digest", rows.getString("sha256"));
-                        require(result.put(cursor, new Resource(ref, rows.getBytes("inline_bytes"),
+                        boolean external = "OBJECT_STORE".equals(rows.getString("storage_kind"));
+                        require(!external || com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile.supportsStorage(original.request().getScope(), 6));
+                        byte[] body = external ? com.alibaba.qwen.code.managedagent.persistence.SessionResourceBodies.preparedBody(
+                                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.read(rows)) : rows.getBytes("inline_bytes");
+                        require(result.put(cursor, new Resource(ref, body,
                                 rows.getString("state"), rows.getString("storage_kind"),
-                                                        com.alibaba.qwen.code.runtimebroker
-                                                                .managedschema.ManagedSchemaRows
-                                                                .identity(
-                                                                        rows, "publish_command_id"),
-                                                        com.alibaba.qwen.code.runtimebroker
-                                                                                .managedschema
-                                                                                .ManagedSchemaRows
-                                                                                .identity(
-                                                                                        rows,
-                                                                                        "object_key")
-                                                                        == null
-                                                                && com.alibaba.qwen.code
-                                                                                .runtimebroker
-                                                                                .managedschema
-                                                                                .ManagedSchemaRows
-                                                                                .identity(
-                                                                                        rows,
-                                                                                        "object_version_id")
-                                                                        == null
-                                                                && com.alibaba.qwen.code
-                                                                                .runtimebroker
-                                                                                .managedschema
-                                                                                .ManagedSchemaRows
-                                                                                .identity(
-                                                                                        rows,
-                                                                                        "encryption_key_id") == null)) == null);
+                                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.identity(rows, "publish_command_id"),
+                                (external || com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.identity(rows, "object_key") == null)
+                                        && com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.identity(rows, "object_version_id") == null
+                                        && com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.identity(rows, "encryption_key_id") == null)) == null);
                         count++;
                     }
                 }
@@ -403,8 +385,8 @@ final class CsiNativeToolReservation {
 
     private static byte[] bytes(Map<String, Resource> resources, JsonNode ref, String kind) {
         Resource resource = resources.get(id(ref, "resourceId"));
-        require(resource != null && "PUBLISHED".equals(resource.state) && "MYSQL_INLINE".equals(resource.storage)
-                && resource.inlineOnly && id(ref, "resourceId").equals(resource.commandId)
+        require(resource != null && "PUBLISHED".equals(resource.state) && ("MYSQL_INLINE".equals(resource.storage) || "OBJECT_STORE".equals(resource.storage))
+                && resource.inlineOnly && ("OBJECT_STORE".equals(resource.storage) || id(ref, "resourceId").equals(resource.commandId))
                 && canonical(ref).equals(canonical(resource.ref)));
         return reference(ref, kind, ignored -> resource.bytes);
     }
@@ -433,8 +415,8 @@ final class CsiNativeToolReservation {
                 return bytes(resources, ref, kind);
             }
             Resource resource = resources.get(id(ref, "resourceId"));
-            require(resource != null && "REFERENCED".equals(resource.state) && "MYSQL_INLINE".equals(resource.storage)
-                    && resource.inlineOnly && id(ref, "resourceId").equals(resource.commandId)
+            require(resource != null && "REFERENCED".equals(resource.state) && ("MYSQL_INLINE".equals(resource.storage) || "OBJECT_STORE".equals(resource.storage))
+                    && resource.inlineOnly && ("OBJECT_STORE".equals(resource.storage) || id(ref, "resourceId").equals(resource.commandId))
                     && canonical(ref).equals(canonical(resource.ref)));
             byte[] associated = JdbcCsiActivationAdmission.resource(connection, original, ref, intent.revision(), read);
             require(Arrays.equals(resource.bytes, associated));
@@ -444,8 +426,8 @@ final class CsiNativeToolReservation {
                 canonical(invocation.path("inputRef")).equals(canonical(ref))
                         || canonical(invocation.path("toolDefinitionRef")).equals(canonical(ref))));
         Resource resource = resources.get(id(ref, "resourceId"));
-        require(resource != null && "REFERENCED".equals(resource.state) && "MYSQL_INLINE".equals(resource.storage)
-                && resource.inlineOnly && id(ref, "resourceId").equals(resource.commandId)
+        require(resource != null && "REFERENCED".equals(resource.state) && ("MYSQL_INLINE".equals(resource.storage) || "OBJECT_STORE".equals(resource.storage))
+                && resource.inlineOnly && ("OBJECT_STORE".equals(resource.storage) || id(ref, "resourceId").equals(resource.commandId))
                 && canonical(ref).equals(canonical(resource.ref)));
         byte[] associated = candidateHistorySequence > 0 && frozen.intentSequence() == candidateHistorySequence
                 ? JdbcCsiActivationAdmission.resource(connection, original, ref, candidateHistoryRevision, read)
@@ -456,7 +438,7 @@ final class CsiNativeToolReservation {
 
     static byte[] candidateBytes(Map<String, Resource> resources, JsonNode ref) {
         Resource resource = resources.get(id(ref, "resourceId"));
-        require(resource != null && resource.inlineOnly && "MYSQL_INLINE".equals(resource.storage)
+        require(resource != null && resource.inlineOnly && ("MYSQL_INLINE".equals(resource.storage) || "OBJECT_STORE".equals(resource.storage))
                 && canonical(ref).equals(canonical(resource.ref)));
         return reference(ref, text(ref, "kind"), ignored -> resource.bytes);
     }
