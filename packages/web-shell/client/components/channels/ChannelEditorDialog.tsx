@@ -540,7 +540,11 @@ export function ChannelEditorDialog({
     if (code === 'invalidGroupId')
       return t('channels.editor.validation.invalidGroupId');
     if (code === 'invalidRepoId')
-      return t('channels.editor.validation.invalidRepoId');
+      return t(
+        descriptor.type === 'gitlab'
+          ? 'channels.editor.validation.invalidProjectPath'
+          : 'channels.editor.validation.invalidRepoId',
+      );
     if (code === 'repoFilterRequired')
       return t('channels.editor.validation.repoFilterRequired');
     if (code === 'conflictingRepoAliases')
@@ -1259,6 +1263,11 @@ export function ChannelEditorDialog({
       descriptor.type,
     );
     if (repositories.length === 0) return null;
+    // Speakers are GitHub logins or GitLab usernames; only the copy differs.
+    const speakerCopyKey =
+      descriptor.type === 'gitlab'
+        ? 'channels.editor.field.gitlab.repositorySpeakers'
+        : 'channels.editor.field.github.repositorySpeakers';
     const groups = instance?.config['groups'];
     // Fold the stored keys the same way the save path does, so a mixed-case
     // stored repository still finds its own row.
@@ -1396,8 +1405,8 @@ export function ChannelEditorDialog({
                   label={t('channels.editor.field.github.repositorySpeakers')}
                   description={t(
                     ownsSpeakerList
-                      ? 'channels.editor.field.github.repositorySpeakers.description'
-                      : 'channels.editor.field.github.repositorySpeakers.inherited',
+                      ? `${speakerCopyKey}.description`
+                      : `${speakerCopyKey}.inherited`,
                   )}
                 >
                   <Input

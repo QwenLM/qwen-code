@@ -4800,6 +4800,10 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
     'GitHub logins allowed to start tasks in this repository. Empty means nobody.',
   'channels.editor.field.github.repositorySpeakers.inherited':
     'GitHub logins allowed in this repository. Leave empty to use the channel-wide list.',
+  'channels.editor.field.gitlab.repositorySpeakers.description':
+    'GitLab usernames allowed to start tasks in this project. Empty means nobody.',
+  'channels.editor.field.gitlab.repositorySpeakers.inherited':
+    'GitLab usernames allowed in this project. Leave empty to use the channel-wide list.',
   'channels.editor.field.github.retainedRepositorySettings.title':
     'Repository settings still apply',
   'channels.editor.field.github.retainedRepositorySettings.description': (v) =>
@@ -5118,6 +5122,8 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
     'Enter a group ID other than __proto__, constructor, or prototype.',
   'channels.editor.validation.invalidRepoId':
     'Enter each repository as owner/repo.',
+  'channels.editor.validation.invalidProjectPath':
+    'Enter each project as a path, for example group/subgroup/project.',
   'channels.editor.validation.conflictingRepoAliases':
     'This channel lists one repository twice with different settings, spelled differently (for example Owner/repo and owner/repo). Remove one of the entries from settings.json before saving.',
   'channels.editor.validation.invalidGroupEntry': (v) =>
@@ -9628,6 +9634,10 @@ const ZH: Messages = {
     '可以在该仓库发起任务的 GitHub 登录名。留空表示没有人。',
   'channels.editor.field.github.repositorySpeakers.inherited':
     '可以在该仓库发言的 GitHub 登录名。留空则使用渠道级列表。',
+  'channels.editor.field.gitlab.repositorySpeakers.description':
+    '可以在该项目发起任务的 GitLab 用户名。留空表示没有人。',
+  'channels.editor.field.gitlab.repositorySpeakers.inherited':
+    '可以在该项目发言的 GitLab 用户名。留空则使用渠道级列表。',
   'channels.editor.field.github.retainedRepositorySettings.title':
     '按仓库设置仍然生效',
   'channels.editor.field.github.retainedRepositorySettings.description': (v) =>
@@ -9927,6 +9937,8 @@ const ZH: Messages = {
   'channels.editor.validation.invalidGroupId':
     '群聊 ID 不能是 __proto__、constructor 或 prototype。',
   'channels.editor.validation.invalidRepoId': '仓库需写成 owner/repo 形式。',
+  'channels.editor.validation.invalidProjectPath':
+    '项目需写成路径形式，例如 group/subgroup/project。',
   'channels.editor.validation.conflictingRepoAliases':
     '该渠道把同一个仓库以不同大小写写了两次且设置不同（例如 Owner/repo 与 owner/repo）。请先在 settings.json 里删掉其中一条再保存。',
   'channels.editor.validation.invalidGroupEntry': (v) =>

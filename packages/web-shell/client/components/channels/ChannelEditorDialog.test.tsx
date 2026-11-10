@@ -2697,6 +2697,62 @@ describe('ChannelEditorDialog', () => {
     const allowlist = fieldByLabel('允许的项目');
     expect(allowlist).not.toBeNull();
     expect(descriptionOf(allowlist)).toContain('项目路径');
+    expect(allowlist?.getAttribute('placeholder')).toBe('group/project');
+  });
+
+  it('shows a project-path remedy for a malformed GitLab allowlist entry', async () => {
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'gitlab-bot',
+      config: {
+        type: 'gitlab',
+        groupPolicy: 'allowlist',
+        groups: { 'mygroup/subgroup/project': {} },
+      },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    await renderDialog({ descriptor: GITLAB_CONFIGURED, instance, onSave });
+
+    // Replace the valid path with a single segment and submit: the remedy must
+    // describe a project path, not GitHub's owner/repo.
+    const allowlist = fieldByLabel('Allowed projects') as HTMLInputElement;
+    await act(async () => {
+      setInputValue(allowlist, 'solo');
+    });
+    await act(async () => {
+      Array.from(document.querySelectorAll('button'))
+        .find((button) => button.textContent?.trim() === 'Save')
+        ?.click();
+    });
+
+    expect(onSave).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain('group/subgroup/project');
+    expect(document.body.textContent).not.toContain('owner/repo');
+  });
+
+  it('describes GitLab project speakers as GitLab usernames', async () => {
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'gitlab-bot',
+      config: {
+        type: 'gitlab',
+        groupPolicy: 'allowlist',
+        groups: {
+          'mygroup/subgroup/project': {
+            senders: 'allowlist',
+            allowedUsers: ['alice'],
+          },
+        },
+      },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    await renderDialog({ descriptor: GITLAB_CONFIGURED, instance });
+
+    expect(document.body.textContent).toContain('GitLab usernames');
+    expect(document.body.textContent).not.toContain('GitHub logins');
   });
 
   it('asks a repository-only channel to save group pairing before showing approvals', async () => {
