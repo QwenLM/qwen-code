@@ -6,9 +6,8 @@ Status: proposed. This is the API slice that follows the
 [multi-segment delivery ledger](2026-11-10-managed-channel-multi-segment-ledger.md)
 under the H5 channel domains of [#12827](https://github.com/QwenLM/qwen-code/issues/12827)
 (Managed Agent proposal [#12380](https://github.com/QwenLM/qwen-code/issues/12380)).
-It is stacked on the ledger slice: the public projection reads the
-`ma_channel_segment` table that the ledger slice introduces, so its base is
-the ledger branch until that PR merges, after which it retargets to `main`.
+It builds on the landed ledger slice (#16797): the public projection reads
+the `ma_channel_segment` table that the ledger slice introduced.
 
 ## Problem
 

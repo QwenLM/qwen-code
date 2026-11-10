@@ -2,7 +2,7 @@
 
 [English](2026-11-10-managed-channel-segments-projection.md) | [简体中文](2026-11-10-managed-channel-segments-projection.zh-CN.md)
 
-状态：提议中。本文是 [#12827](https://github.com/QwenLM/qwen-code/issues/12827)（Managed Agent 提案 [#12380](https://github.com/QwenLM/qwen-code/issues/12380)）H5 channel 域中，接续[多分段交付台账](2026-11-10-managed-channel-multi-segment-ledger.zh-CN.md)的 API 切片。它堆叠在台账切片之上：公开投影读取台账切片引入的 `ma_channel_segment` 表，因此其 base 在台账 PR 合入前是台账分支，合入后 retarget 到 `main`。
+状态：提议中。本文是 [#12827](https://github.com/QwenLM/qwen-code/issues/12827)（Managed Agent 提案 [#12380](https://github.com/QwenLM/qwen-code/issues/12380)）H5 channel 域中，接续[多分段交付台账](2026-11-10-managed-channel-multi-segment-ledger.zh-CN.md)的 API 切片。它建立在已合入的台账切片（#16797）之上：公开投影读取台账切片引入的 `ma_channel_segment` 表。
 
 ## 问题
 
