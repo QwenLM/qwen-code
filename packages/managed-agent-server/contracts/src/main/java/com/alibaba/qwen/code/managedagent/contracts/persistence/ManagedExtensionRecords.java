@@ -53,11 +53,8 @@ public final class ManagedExtensionRecords {
     public static final int MAX_GRANT_PHASES = 16;
     public static final int MAX_PHASE_LENGTH = 64;
     /**
-     * The selected MCP snapshot retains removed tombstones. 224 keeps a
-     * worst-case serialized record (128-char ids, 16-digit revisions, 64-hex
-     * digests and add/edit's duplicate pin) below the 64 KiB inline resource
-     * bound, with room for the durable predecessor reference a later revision
-     * carries.
+     * 224 项使最坏情况的 legacy MCP 设置记录低于 64 KiB，并预留前序引用空间。
+     * 扩展 bundle 还包含包、目录与重复选择数组，仍独立受资源字节上限约束。
      */
     public static final int MAX_MCP_SELECTION_ENTRIES = 224;
     public static final int MAX_MONITOR_EVENTS = 10_000;

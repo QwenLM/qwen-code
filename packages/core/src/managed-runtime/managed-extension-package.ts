@@ -14,9 +14,8 @@ import type { ManagedHookCatalogPin } from './managed-hook-protocol.js';
 import type { ManagedPackageContributions } from '../extension/managed-package.js';
 import type { OperationGrant } from './managed-extension-record.js';
 
-// Large enough to retain a long-lived Session's tombstones, small enough that a
-// worst-case record (128-char ids, 16-digit revisions, add/edit's duplicate
-// pin) stays below the 64 KiB inline resource bound.
+// 224 项使最坏情况的 legacy MCP 设置记录低于 64 KiB；扩展 bundle
+// 还包含包、目录与重复选择数组，仍独立受资源字节上限约束。
 export const MAX_MCP_SELECTION_ENTRIES = 224;
 
 export interface ManagedExtensionCommandControl {
