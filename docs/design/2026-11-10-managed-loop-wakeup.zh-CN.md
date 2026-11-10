@@ -48,6 +48,7 @@ Managed Session 今天无法运行这条路径：
   在首次成功安排时设置，仅由 `stop()`/`destroy()` 重置；触发时刻将超过
   锚点加 `WAKEUP_CHAIN_MAX_AGE_MS`（24 h）的安排会被拒绝，且先丢弃原有
   pending 唤醒*再*做预算检查，因此被拒绝的重新安排不会留下任何东西。
+  已触发的唤醒在其 turn 运行前就立即离开 pending map。
   `cancelWakeup(id)` 与 `cancelAllWakeups()` 不经过模型 turn 即消费
   pending 唤醒。工具的 `getDefaultPermission()` 返回 `'ask'`，
   `toAutoClassifierInput()` 把续跑 prompt 转交 AUTO 分类器，因为调度
@@ -86,7 +87,7 @@ Managed Session 今天无法运行这条路径：
   唤醒恰好迟触发一次。
 - 复用 H3 嵌入式 wake pump 作为唯一投递机制；不引入控制面 scanner、
   `schedule`/`automation_run` 记录，不引入第二个调度器。
-- 以结构约束预算：每 Session 一个 pending 唤醒、24 h 链、现有 input
+- 以结构约束预算：每 Session 一个未触发唤醒、24 h 链、现有 input
   尺寸限制。
 
 ## 非目标
@@ -136,13 +137,20 @@ Managed Session 今天无法运行这条路径：
 4. **准入以原子方式强制执行本地语义。** 延迟 clamp 到 `[60, 3600]` s，
    非有限输入取 1200 s 默认；prompt 必须非空、至多 10000 字符，且包装
    后的 envelope 至多 `MANAGED_AUTOMATION_LIMITS.maxInputBytes`
-   （64 KiB）。每 Session 一个 pending loop input：一次安排在提交新
-   input 的同一事务中替换它（被替换 input 的 `turnId` 以 stop reason
-   `loop_replaced` settle 为 `cancelled`）。链锚点是 Session 首个已提交
-   `loop` input 的 `occurredAt`——从 journal 推导，跨重启稳定；取消不
-   重置它。触发时刻（`now + clampedDelay`）超过锚点加 24 h 的安排被
-   拒绝，且替换在同一判定中丢弃，因此被拒绝的重新安排不留下任何
-   pending——本地的先丢弃后检查规则，由事务使其原子化。
+   （64 KiB）。每 Session 至多一个未触发的 loop input——即一个没有
+   先前尝试的 pending input。一次安排在提交新 input 的同一事务中替换
+   这样的 input（被替换 input 的 `turnId` 以 stop reason
+   `loop_replaced` settle 为 `cancelled`），受与 close 路径相同的
+   `wakeHasPriorAttempt` 守卫。turn 已启动的 input 绝不被替换：正常的
+   续跑正是在 firing turn 中安排下一个唤醒，而该 input 保持 pending
+   直到 `turn.settled` 消费它——本地已触发的唤醒在触发时就离开
+   pending map，journal 模型通过让 firing input 自然 settle、新 input
+   与其共存来复现这一点。链锚点是 Session 首个已提交 `loop` input 的
+   `occurredAt`——从 journal 推导，跨重启稳定；取消不重置它。触发时刻
+   （`now + clampedDelay`）超过锚点加 24 h 的安排被拒绝，且未触发的
+   替换在同一判定中丢弃，因此被拒绝的重新安排不留下任何未触发的
+   pending 唤醒——本地的先丢弃后检查规则，由事务使其原子化；firing
+   input 绝不被丢弃。
 5. **触发是普通文本 turn；续跑是模型的事。** 现有 `runTurn` 路径在该
    input 的 `turnId` 下投递 envelope 文本；`turn.settled` 消费该
    input。loop 仅在该 turn 安排了另一个唤醒时才继续。loop turn 内部的
@@ -151,7 +159,7 @@ Managed Session 今天无法运行这条路径：
    tick 终结 loop，除非后续 turn 将其复活。
 6. **过期唤醒恰好迟触发一次。** 重启从 journal 重新推导 pending 集；
    `notBefore` 在过去即立即到期。无需维护 catch-up 计数：任何时刻至多
-   一个唤醒 pending，且其 turn 消费它，故至多触发一次。链预算在安排时
+   一个未触发唤醒 pending，且其 turn 消费它，故至多触发一次。链预算在安排时
    检查，因此预算内安排的唤醒可能在 24 h 标记之后触发——本地契约的
    读法相同。
 7. **取消是仅走 journal 的消费。** `loop_cancel` 把 pending input 的
@@ -159,7 +167,7 @@ Managed Session 今天无法运行这条路径：
    受与 close 路径相同的 `wakeHasPriorAttempt` 守卫：turn 已启动的唤醒
    归恢复机制所有，取消被拒绝。应答是幂等的——不 pending 的 id 应答
    「未取消」，对应 `cancelWakeup` 的布尔值。`/loop clear` 取消那一个
-   pending 唤醒。close 路径把 `loop` 加入其无模型 settle 的 source 集，
+   未触发的 pending 唤醒。close 路径把 `loop` 加入其无模型 settle 的 source 集，
    关闭中的 Session 绝不会把唤醒遗留为下次打开时的
    `hosted_turn_recovery_required`。
 8. **工具面是新 profile 修订版上的 loop 三件套。** `loop_wakeup`、
@@ -169,7 +177,7 @@ Managed Session 今天无法运行这条路径：
    [固定间隔姊妹设计](2026-11-10-managed-loop-schedule.zh-CN.md)为其
    cron 三件套钉住下一批修订版号，本切片的 loop 三件套取其后的一批
    （版号在落地时按落地顺序分配）。read profile 永不声明它们。
-   `loop_list` 从 journal 读取 pending loop input
+   `loop_list` 从 journal 读取未触发的 pending loop input
    （id、触发时刻、prompt）；它就是全部列表，因为决策 4 把它约束为一。
    部署开关 `qwen.managed-agent.loop.enabled`（环境变量
    `QWEN_MANAGED_AGENT_LOOP_ENABLED`）在验收证据落地前默认 false，
@@ -181,7 +189,7 @@ Managed Session 今天无法运行这条路径：
    Hosted 权限分类器提交，显式 deny 规则在任何模式下都拒绝安排。裁决
    记录在该次安排的 `managed-admission` 资源中。调度未来模型输入保留
    本地工具注释所要求的审查；未经准入的东西不会触发。
-10. **预算是结构性的，不是新的配额表。** 一个 pending 唤醒（决策 4）、
+10. **预算是结构性的，不是新的配额表。** 一个未触发唤醒（决策 4）、
     24 h 链（决策 4）、prompt 与 envelope 界限（决策 4）、部署开关
     （决策 8）就是全部预算。不消耗 definition 配额，因为不存在
     definition；Session 现有的 turn 与工具预算像对待任何其他 turn 一样
@@ -233,10 +241,12 @@ Managed Session 今天无法运行这条路径：
 - 准入矩阵：59 s clamp 到 60，3601 s 到 3600，非有限到 1200；空
   prompt、10001 字符 prompt、超过 64 KiB 的包装 envelope 各自被拒绝。
 - 链：锚点是首个已提交 `loop` input；24 h 边界上的安排被准入，越过的
-  被拒绝*且* pending 唤醒被丢弃（原子性见证）；取消不重置锚点；重启
-  保留锚点。
-- 替换：第二次安排消费第一个（`loop_replaced`），恰好一个 input 保持
-  pending；被拒绝的重新安排留下零个。
+  被拒绝*且*未触发的 pending 唤醒被丢弃（原子性见证）；取消不重置
+  锚点；重启保留锚点。
+- 替换：第二次安排消费第一个未触发 input（`loop_replaced`），恰好一个
+  未触发 input 保持 pending；firing turn 中的安排不触动运行中 turn 的
+  input，该 turn settle 后恰好只剩新 input pending；被拒绝的重新安排
+  不留下未触发 input，也绝不丢弃 firing input。
 - pump，用假时钟：3600 s 唤醒安排一个定时器，不产生 500 ms 轮询；
   未到期 loop input 之后已到期的 monitor input 先执行；安排或取消的
   kick 重新求值延迟；瞬时 envelope 读取故障按现有节奏重试。
@@ -245,18 +255,19 @@ Managed Session 今天无法运行这条路径：
 - loop turn 内部崩溃：善后将其 settle 为 `failed`/`outcome_unknown`；
   不自动重新安排唤醒。
 - 取消：幂等；turn 有先前尝试后被拒绝；`/loop clear` 消费那一个
-  pending 唤醒。
+  未触发的 pending 唤醒。
 - close：pending loop input 以无模型方式 settle；下次打开不被卡死。
 - 分类器：deny 规则拒绝安排；admission 资源记录裁决。
 - 变异检查：逐个禁用各决策的守卫都会使某个测试失败（延迟跳过、替换
-  settle、先丢弃后检查、链锚点、先前尝试守卫、开关）。
+  settle、先丢弃后检查、链锚点、取消与替换的先前尝试守卫、开关）。
 
 ## 验收标准
 
 - 带 loop profile 的 Managed Session 安排一个唤醒，Harness 在其到期前
   重启，重载后该唤醒恰好触发一次。
-- 任何时刻每 Session 至多一个 loop input pending；被拒绝的重新安排
-  不留下任何 pending。
+- 任何时刻每 Session 至多一个未触发 loop input（无先前尝试）pending；
+  被拒绝的重新安排不留下任何未触发 input，firing turn 中的安排绝不
+  取消运行中 turn 的 input。
 - 任何 loop 操作都不创建 `schedule` 记录、`automation_run` 记录或控制面
   scanner 行。
 - 3600 s 唤醒只花一个定时器，而非轮询节奏。
@@ -267,8 +278,12 @@ Managed Session 今天无法运行这条路径：
 ## 开放问题
 
 1. **链锚点作用域。** 本地锚点在 `stop()` 时重置（cron 重载也会触发
-   它）；提案的 journal 锚点是每 Session 的，永不重置。确认这一更严格
-   的读法可以接受，或指明应当重置它的 Managed 事件。
+   它）；提案的 journal 锚点是每 Session 的，永不重置。Hosted Session
+   可以比 TUI 会话多活数天：首个 loop input 之后 24 h，即使上一个
+   loop 早已结束，也无法再安排任何新 loop。确认这一更严格的读法，或
+   采用可从 journal 推导的重置规则——例如，一次安排发现没有存活的
+   loop（既无未触发 pending input，也无 firing loop turn）时开启新链
+   ——并在实现前钉住该规则。
 2. **profile 修订版号。** loop 三件套按落地顺序取
    [固定间隔姊妹设计](2026-11-10-managed-loop-schedule.zh-CN.md)的
    cron 三件套之后的一批修订版；切片落地时与控制面的 profile 准入核对

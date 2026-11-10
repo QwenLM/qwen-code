@@ -54,7 +54,8 @@ The facts below are from this repository at `488845a4a81`.
   arm and reset only by `stop()`/`destroy()`; an arm whose fire time would
   exceed the anchor plus `WAKEUP_CHAIN_MAX_AGE_MS` (24 h) is refused, and
   the prior pending wakeup is dropped _before_ the budget check so a
-  rejected re-arm leaves nothing behind. `cancelWakeup(id)` and
+  rejected re-arm leaves nothing behind. A fired wakeup leaves the
+  pending map immediately, before its turn runs. `cancelWakeup(id)` and
   `cancelAllWakeups()` consume pending wakeups without a model turn. The
   tool's `getDefaultPermission()` returns `'ask'` and
   `toAutoClassifierInput()` forwards the continuation prompt to the AUTO
@@ -98,7 +99,7 @@ The facts below are from this repository at `488845a4a81`.
 - Reuse the H3 embedded wake pump as the only delivery mechanism; no
   control-plane scanner, no `schedule`/`automation_run` records, no second
   scheduler.
-- Bound the budget structurally: one pending wakeup per Session, a 24 h
+- Bound the budget structurally: one unfired wakeup per Session, a 24 h
   chain, and the existing input size limits.
 
 ## Non-goals
@@ -156,16 +157,24 @@ The facts below are from this repository at `488845a4a81`.
 4. **Admission enforces the local semantics, atomically.** The delay is
    clamped to `[60, 3600]` s with the 1200 s non-finite default; the prompt
    must be non-empty, at most 10000 characters, and its wrapped envelope
-   at most `MANAGED_AUTOMATION_LIMITS.maxInputBytes` (64 KiB). One pending
-   loop input per Session: an arm replaces it in the same transaction
-   that commits the new input (the replaced input's `turnId` settles
-   `cancelled` with stop reason `loop_replaced`). The chain anchor is the
+   at most `MANAGED_AUTOMATION_LIMITS.maxInputBytes` (64 KiB). At most one
+   unfired loop input per Session — one pending input with no prior
+   attempt. An arm replaces such an input in the same transaction that
+   commits the new one (the replaced input's `turnId` settles `cancelled`
+   with stop reason `loop_replaced`), under the same `wakeHasPriorAttempt`
+   guard as the close path. An input whose turn already started is never
+   replaced: the normal continuation arms during the firing turn, whose
+   input stays pending until `turn.settled` consumes it — locally the
+   fired wakeup leaves the pending map at fire time, and the journal
+   model reproduces that by leaving the firing input to settle naturally
+   while the new input coexists with it. The chain anchor is the
    `occurredAt` of the Session's first committed `loop` input — derived
    from the journal, stable across restarts; a cancel does not reset it.
    An arm whose fire time (`now + clampedDelay`) exceeds the anchor plus
-   24 h is refused, and the replacement is dropped in the same decision,
-   so a rejected re-arm leaves nothing pending — the local
-   drop-before-check rule, made atomic by the transaction.
+   24 h is refused, and the unfired replacement is dropped in the same
+   decision, so a rejected re-arm leaves no unfired wakeup pending — the
+   local drop-before-check rule, made atomic by the transaction; a firing
+   input is never dropped.
 5. **Firing is an ordinary text turn; continuation is the model's job.**
    The existing `runTurn` path delivers the envelope text under the
    input's `turnId`; `turn.settled` consumes the input. The loop continues
@@ -176,8 +185,8 @@ The facts below are from this repository at `488845a4a81`.
    revives it.
 6. **An overdue wakeup fires once late.** A restart re-derives the pending
    set from the journal; a `notBefore` in the past is due immediately.
-   There is no catch-up count to keep: at most one wakeup is ever pending,
-   and it fires at most once because its turn consumes it. The chain
+   There is no catch-up count to keep: at most one unfired wakeup is ever
+   pending, and it fires at most once because its turn consumes it. The chain
    budget is checked at arm time, so a wakeup armed within budget may
    fire past the 24 h mark — the local contract reads the same way.
 7. **Cancel is a journal-only consume.** `loop_cancel` settles the pending
@@ -186,7 +195,7 @@ The facts below are from this repository at `488845a4a81`.
    turn already started belongs to recovery and the cancel is refused.
    The answer is idempotent — an id that is not pending answers "not
    cancelled", mirroring `cancelWakeup`'s boolean. `/loop clear` cancels
-   the single pending wakeup. The close path adds `loop` to its
+   the single unfired pending wakeup. The close path adds `loop` to its
    model-free settle sources, so a closing Session never strands a
    wakeup as `hosted_turn_recovery_required` at its next open.
 8. **The tool surface is a loop trio on new profile revisions.**
@@ -197,9 +206,10 @@ The facts below are from this repository at `488845a4a81`.
    [fixed-interval sibling](2026-11-10-managed-loop-schedule.md) pins the
    next revisions for its cron trio, and this slice's loop trio takes the
    revisions after them (numbering assigned at landing, in landing
-   order). The read profile never declares them. `loop_list` reads the pending loop input
-   (id, fire time, prompt) from the journal; it is the whole list, because
-   decision 4 bounds it to one. A deployment gate,
+   order). The read profile never declares them. `loop_list` reads the
+   unfired pending loop input (id, fire time, prompt) from the journal;
+   it is the whole list, because decision 4 bounds it to one. A
+   deployment gate,
    `qwen.managed-agent.loop.enabled` (environment
    `QWEN_MANAGED_AGENT_LOOP_ENABLED`), defaults to false until the
    acceptance evidence lands, mirroring the automation opt-in history;
@@ -214,7 +224,7 @@ The facts below are from this repository at `488845a4a81`.
    arm's `managed-admission` resource. Scheduling future model input keeps
    the scrutiny the local tool's comment demands; nothing fires that was
    not admitted.
-10. **The budget is structural, not a new quota table.** One pending
+10. **The budget is structural, not a new quota table.** One unfired
     wakeup (decision 4), a 24 h chain (decision 4), the prompt and
     envelope bounds (decision 4), and the deployment gate (decision 8)
     are the whole budget. No definition quota is consumed because no
@@ -269,11 +279,14 @@ The facts below are from this repository at `488845a4a81`.
   1200; an empty prompt, a 10001-character prompt, and a wrapped envelope
   over 64 KiB are each refused.
 - Chain: the anchor is the first committed `loop` input; an arm at the
-  24 h boundary is admitted, one past it refused _and_ the pending
-  wakeup dropped (the atomicity witness); a cancel does not reset the
-  anchor; a restart preserves it.
-- Replacement: a second arm consumes the first (`loop_replaced`) and
-  exactly one input stays pending; a rejected re-arm leaves zero.
+  24 h boundary is admitted, one past it refused _and_ the unfired
+  pending wakeup dropped (the atomicity witness); a cancel does not
+  reset the anchor; a restart preserves it.
+- Replacement: a second arm consumes the unfired first input
+  (`loop_replaced`) and exactly one unfired input stays pending; an arm
+  during the firing turn leaves the running turn's input untouched and,
+  after the turn settles, exactly the new input remains pending; a
+  rejected re-arm leaves no unfired input, and never drops a firing one.
 - Pump, on a fake clock: a 3600 s wakeup arms one timer and costs no
   500 ms polls; a due monitor input behind a not-yet-due loop input runs
   first; an arm or cancel kick re-evaluates the deferral; a transient
@@ -284,22 +297,24 @@ The facts below are from this repository at `488845a4a81`.
 - Crash inside the loop turn: the aftermath settles it
   `failed`/`outcome_unknown`; no wakeup is re-armed automatically.
 - Cancel: idempotent; refused once the turn has a prior attempt;
-  `/loop clear` consumes the single pending wakeup.
+  `/loop clear` consumes the single unfired pending wakeup.
 - Close: the pending loop input settles model-free; the next open is not
   wedged.
 - Classifier: a deny rule refuses the arm; the admission resource
   records the verdict.
 - Mutation checks: each decision's guard disabled in turn fails a test
   (the deferral skip, the replacement settle, the drop-before-check, the
-  chain anchor, the prior-attempt guard, the gate).
+  chain anchor, the prior-attempt guards on cancel and replacement, the
+  gate).
 
 ## Acceptance criteria
 
 - A Managed Session with a loop profile arms a wakeup, the Harness
   restarts before it is due, and the wakeup fires exactly once after
   reload.
-- At most one loop input is pending per Session at any time; a rejected
-  re-arm leaves none.
+- At most one unfired loop input (no prior attempt) is pending per
+  Session at any time; a rejected re-arm leaves none, and an arm during
+  a firing turn never cancels the running turn's input.
 - No loop operation creates a `schedule` record, an `automation_run`
   record, or a control-plane scanner row.
 - A 3600 s wakeup costs one timer, not a poll cadence.
@@ -311,8 +326,12 @@ The facts below are from this repository at `488845a4a81`.
 
 1. **Chain anchor scope.** The local anchor resets on `stop()` (which a
    cron reload also triggers); the proposed journal anchor is
-   per-Session and never resets. Confirm that the stricter reading is
-   acceptable, or name the Managed event that should reset it.
+   per-Session and never resets. A Hosted Session can outlive a TUI
+   session by days: 24 h after its first loop input, no new loop could
+   arm even though the previous one ended long ago. Confirm the stricter
+   reading, or adopt a journal-derivable reset — for example, an arm that
+   finds no live loop (no unfired pending input and no firing loop turn)
+   starts a new chain — and name the rule before implementation.
 2. **Profile revision numbers.** The loop trio takes the revisions after
    the [fixed-interval sibling](2026-11-10-managed-loop-schedule.md)'s
    cron trio, in landing order; confirm the assigned numbers against the

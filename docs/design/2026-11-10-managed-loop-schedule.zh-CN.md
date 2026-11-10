@@ -118,8 +118,9 @@ Session 内部的模型没有任何创建途径。
    funnel。
 3. **Idempotency-Key 从工具执行的身份推导。** 每个变更使用从其
    `executionCallId` 与动词推导的 key（例如
-   `loop:<executionCallId>:create`）。receipt 丢失后被重驱动的执行复用
-   该 key，因此控制面重放已提交的 definition，而不是铸造第二个；重试
+   `loop:<executionCallId>:create`，符合 key 的 1–128 可打印 ASCII
+   界限）。receipt 丢失后被重驱动的执行复用该 key，因此控制面重放已
+   提交的 definition，而不是铸造第二个；重试
    绝不铸造新 key。工具执行器的 journal 拥有至多一次执行语义，推导的
    key 把该保证延伸到控制面，无需新状态。
 4. **参数契约映射到 definition，拒绝 H6 无法表示者。** `recurring`
@@ -137,8 +138,8 @@ Session 内部的模型没有任何创建途径。
    监视变便宜的 gate 探针。该对等差距记录为开放问题，不予隐藏：
    managed skill 变体告知用户任务会一直运行直到取消。
 6. **list 读 scanner 的真相；delete 即 retire。** `cron_list` 从控制面
-   账本应答——与 scanner 读取的同一批行——且 `create` 在应答前完成
-   镜像，因此创建后的 list 是一致的。`cron_delete` 即退役：中继提交
+   账本应答——与 scanner 读取的同一批行，按公开 list 的方式分页——且
+   `create` 在应答前完成镜像，因此创建后的 list 是一致的。`cron_delete` 即退役：中继提交
    终态 journal 修订版，镜像随之退役；退役已退役的 definition 应答
    重放，非 ACTIVE 的 Session 走继承的本地退役兜底。唤醒取消属于姊妹
    切片的 `loop_cancel`，不属于本工具。

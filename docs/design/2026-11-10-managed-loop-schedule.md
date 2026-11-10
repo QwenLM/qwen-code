@@ -136,8 +136,9 @@ The facts below are from this repository at `488845a4a81`.
    a definition discoverable.
 3. **The Idempotency-Key derives from the tool execution's identity.**
    Each mutation uses a key derived from its `executionCallId` and verb
-   (for example `loop:<executionCallId>:create`). A re-driven execution
-   whose receipt was lost reuses the key, so the control plane replays
+   (for example `loop:<executionCallId>:create`, within the key's 1–128
+   printable-ASCII bound). A re-driven execution whose receipt was lost
+   reuses the key, so the control plane replays
    the committed definition instead of minting a second one; a retry
    never mints a fresh key. The tool executor's journal owns
    at-most-once execution, and the derived key extends that guarantee
@@ -164,8 +165,8 @@ The facts below are from this repository at `488845a4a81`.
    schedule runs until cancelled.
 6. **List reads the scanner's truth; delete is retire.** `cron_list`
    answers from the control plane ledger — the same rows the scanner
-   reads — and `create` mirrors before it answers, so a list after a
-   create is consistent. `cron_delete` retires: the relay commits the
+   reads, paged as the public list is — and `create` mirrors before it
+   answers, so a list after a create is consistent. `cron_delete` retires: the relay commits the
    terminal journal revision and the mirror retires with it; retiring a
    retired definition answers the replay, and a Session that is not
    ACTIVE takes the inherited local-retire fallback. Wakeup cancellation
