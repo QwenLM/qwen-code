@@ -30,17 +30,16 @@ import java.time.Clock;
         name = "enabled", havingValue = "true")
 public class TerminalWebSocketConfig implements WebSocketConfigurer {
     private final RuntimeBrokerService broker;
-    private final TerminalTicketStore tickets;
+    private final Clock clock;
 
     public TerminalWebSocketConfig(RuntimeBrokerService broker,
-            TerminalTicketStore tickets) {
+            @Qualifier("managedAgentClock") Clock clock) {
         this.broker = broker;
-        this.tickets = tickets;
+        this.clock = clock;
     }
 
     @Bean
-    public TerminalTicketStore terminalTicketStore(
-            @Qualifier("managedAgentClock") Clock clock) {
+    public TerminalTicketStore terminalTicketStore() {
         return new TerminalTicketStore(clock);
     }
 
@@ -53,8 +52,11 @@ public class TerminalWebSocketConfig implements WebSocketConfigurer {
 
     @Override
     public void registerWebSocketHandlers(WebSocketHandlerRegistry registry) {
+        // The intercepted @Bean call returns the singleton the ticket
+        // controller also injects; mint and consume must share one store.
         registry.addHandler(new TerminalRelayHandler(broker),
                         "/api/agent/web-shell/v1/sessions/*/terminal")
-                .addInterceptors(new TerminalRelayHandshakeInterceptor(tickets));
+                .addInterceptors(
+                        new TerminalRelayHandshakeInterceptor(terminalTicketStore()));
     }
 }
