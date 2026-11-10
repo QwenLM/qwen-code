@@ -269,6 +269,8 @@ export interface ManagedAgentSessionSummary {
     contextCompression?: boolean;
     approvalModeChange?: boolean;
     inputAttachments?: boolean;
+    btw?: boolean;
+    recap?: boolean;
   };
   failure?: { code: string; message: string };
   recovery?: ManagedSessionRecovery;
@@ -411,6 +413,7 @@ export interface ManagedAgentQuestionResponse {
 export type ManagedAgentActionResponse = string | ManagedAgentQuestionResponse;
 
 export interface ManagedAgentProvider {
+  readonly sideQueries?: import('./managed-side-query-types').ManagedSideQueriesProvider;
   readonly diagnostics?: ManagedDiagnosticsProvider;
   readonly userMessages?: {
     query(

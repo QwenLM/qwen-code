@@ -5730,6 +5730,29 @@ describe('AgentTool', () => {
       expect(mockAgent.execute).not.toHaveBeenCalled();
     });
 
+    it('does not register a background agent after cancellation during SubagentStart', async () => {
+      const hookSystem = installHookSystem();
+      let releaseHook!: () => void;
+      vi.mocked(hookSystem.fireSubagentStartEvent).mockReturnValueOnce(
+        new Promise((resolve) => {
+          releaseHook = () => resolve(undefined);
+        }),
+      );
+      const controller = new AbortController();
+      const result = invoke(monitor()).execute(controller.signal);
+      await vi.waitFor(() =>
+        expect(hookSystem.fireSubagentStartEvent).toHaveBeenCalledOnce(),
+      );
+
+      controller.abort();
+      releaseHook();
+
+      expectDisplay(await result, { status: 'failed' });
+      expect(mockRegistry.releaseBackgroundSlot).toHaveBeenCalledOnce();
+      expect(mockRegistry.register).not.toHaveBeenCalled();
+      expect(mockAgent.execute).not.toHaveBeenCalled();
+    });
+
     it('waits for a background slot before hooks and subagent setup', async () => {
       let releaseSlot:
         | ((reservation: { readonly id: symbol }) => void)
