@@ -3494,9 +3494,13 @@ export class LocalManagedSessionAuthority {
               event.payload['compactionId'] !== maintenance.operationId)) ||
           (event.kind === 'input.accepted' &&
             !isChildNotificationSource(source) &&
-            !['monitor', 'automation', 'channel', 'session_message'].includes(
-              String(source),
-            ))
+            ![
+              'monitor',
+              'automation',
+              'channel',
+              'session_message',
+              'loop',
+            ].includes(String(source)))
         )
           throw new ManagedSessionConflictError(
             'Session history maintenance is active.',

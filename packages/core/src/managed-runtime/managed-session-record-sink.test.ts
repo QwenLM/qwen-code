@@ -308,6 +308,18 @@ describe('managed session record sink', () => {
       admissionRef: inputRef,
       wakeReason: 'input',
     });
+    // A self-paced loop wakeup is a wake source like automation: it arms
+    // during active maintenance too (its notBefore defers the fire).
+    await harness.authority.submitInput(command('wake-loop'), {
+      inputId: 'wake-loop',
+      turnId: 'wake-loop',
+      source: 'loop',
+      contentRef: inputRef,
+      deadline: null,
+      admissionRef: inputRef,
+      wakeReason: 'input',
+      notBefore: Date.now() + 60_000,
+    });
     maintenance = {
       ...maintenance,
       phase: 'generating',

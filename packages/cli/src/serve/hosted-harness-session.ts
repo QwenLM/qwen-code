@@ -343,6 +343,7 @@ import {
   pendingSessionInputs,
   type PendingSessionInput,
 } from './hosted-wake-intake.js';
+import { LOOP_INPUT_SOURCE } from './hosted-loop-session.js';
 import { ManagedHookActivationController } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-activation.js';
 import {
   parseHookExecution,
@@ -1460,7 +1461,8 @@ function isWakeInputSource(source: string): boolean {
     source === CHANNEL_INPUT_SOURCE ||
     source === AUTOMATION_INPUT_SOURCE ||
     isChildNotificationSource(source) ||
-    source === SESSION_MESSAGE_INPUT_SOURCE
+    source === SESSION_MESSAGE_INPUT_SOURCE ||
+    source === LOOP_INPUT_SOURCE
   );
 }
 
