@@ -53,6 +53,7 @@ import {
   normalizeParts,
 } from '@qwen-code/qwen-code-core/services/visionBridge/image-part-utils.js';
 import { ToolConfirmationOutcome } from '@qwen-code/qwen-code-core/tools/tools.js';
+import { goalRequiresExactPermit } from '@qwen-code/qwen-code-core/goals/goal-protocol.js';
 import type { Part, PartListUnion } from '@google/genai';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import type { DualOutputBridge } from '../../dualOutput/DualOutputBridge.js';
@@ -68,6 +69,11 @@ import {
   MODS_FAILED_TO_INITIALIZE,
 } from '../../services/interactive-mod-session.js';
 import type { ModTurn } from '../../services/mod-session.js';
+import {
+  frameModPrompt,
+  modPromptRow,
+} from '../../services/mod-prompt-frame.js';
+import type { ModQueuedPrompt } from '@qwen-code/qwen-code-core/mods/types.js';
 import type { ServerLlmStreamEvent } from '@qwen-code/qwen-code-core';
 import {
   livePromptEvents,
@@ -177,6 +183,8 @@ export interface OpenTuiSubmitOptions {
    * starts this turn; it rides the turn's first send.
    */
   promptContext?: readonly string[];
+  /** The prompt a Mod submitted with `$.prompt.submit` that the turn runs. */
+  modPrompt?: ModQueuedPrompt;
 }
 
 export interface ForegroundShellOwner {
@@ -219,6 +227,11 @@ export interface OpenTuiLiveTurn {
     imagePaths?: readonly string[],
     options?: OpenTuiSubmitOptions,
   ): boolean;
+  /**
+   * Runs the next prompt a Mod submitted with `$.prompt.submit` as a turn of
+   * its own. False when a turn is in flight or no prompt waits.
+   */
+  runModPrompt(): boolean;
   /** Aborts the in-flight turn (Esc). */
   interrupt(onSettled?: OpenTuiCancelSettled): void;
   retryLastPrompt(): void;
@@ -289,6 +302,20 @@ export function foldBatch(
   return items;
 }
 
+/**
+ * True while a Goal owns the session's turns: core would run any
+ * `UserQuery` sent now as the person's Goal turn, so a Mod's prompt, which
+ * is neither the person's words nor a turn the Goal asked for, waits.
+ */
+export function goalOwnsSessionTurns(config: Config): boolean {
+  try {
+    return goalRequiresExactPermit(config.getGoalRuntime().getSnapshot());
+  } catch {
+    // The Goal runtime is optional (early initialization, persistence off).
+    return false;
+  }
+}
+
 export function useOpenTuiLiveTurn(
   options: UseOpenTuiLiveTurnOptions,
 ): OpenTuiLiveTurn {
@@ -322,6 +349,17 @@ export function useOpenTuiLiveTurn(
     promptId: string;
     options?: OpenTuiSubmitOptions;
   } | null>(null);
+  // A Mod's prompt went back after its turn could not start; it waits for the
+  // next turn, or the next prompt a Mod submits, rather than retry at once on
+  // the busy edge and fail the same way in a loop, as ink's does.
+  const modPromptHeldRef = useRef(false);
+  useEffect(
+    () =>
+      getInteractiveModSession(config)?.subscribePrompts(() => {
+        modPromptHeldRef.current = false;
+      }),
+    [config],
+  );
   const activeTurnRef = useRef<{
     seq: number;
     prompt?: OpenTuiInputSubmission;
@@ -536,6 +574,17 @@ export function useOpenTuiLiveTurn(
       abortRef.current = abort;
       // The Mods hear the turn from its admission to its end below.
       const mods = getInteractiveModSession(config);
+      const modPrompt = retry ? undefined : turnOptions?.modPrompt;
+      if (!turnOptions?.modPrompt) {
+        modPromptHeldRef.current = false;
+        // The person's own turn, a command's prompt too, lets the Mods'
+        // prompts start turns again. As in ink's submitQuery, a queued prompt
+        // counts when it runs, after any stop the turn before it made.
+        if (!retry && !turnOptions?.toolCall) mods?.notePersonPrompt();
+      }
+      // Whether the request reached the model client: a Mod's prompt that a
+      // UserPromptSubmit hook blocked there is spent, as in ink.
+      let sent = false;
       let modTurn: ModTurn | undefined;
       let modEnded = false;
       // Declining every tool ends the turn as a cancel, as it does in ink.
@@ -702,6 +751,8 @@ export function useOpenTuiLiveTurn(
           retry,
           onAcceptedSteering: (messages) => {
             if (seq !== turnSeqRef.current) return;
+            // The person's words reached the model inside this turn.
+            mods?.notePersonPrompt();
             active.canUndoLog = false;
             for (const message of messages) {
               void logger
@@ -712,16 +763,26 @@ export function useOpenTuiLiveTurn(
             }
           },
           onPreparedRequest: (request) => {
+            sent = true;
             if (seq === turnSeqRef.current) prepared = request;
           },
           submittedPrompt: turnOptions?.submittedPrompt,
           humanInput: turnOptions?.humanInput,
           promptContext,
+          modPrompt: turnOptions?.modPrompt,
           workflowModeEligible: editablePrompt !== undefined,
           refreshContextFilesOnWrite: turnOptions?.refreshContextFilesOnWrite,
           isCurrentTurn: () => seq === turnSeqRef.current,
           ...(mods && {
             onPromptAdmitted: () => {
+              // A notice naming the Mod, not a row the person typed: it is not
+              // recalled, rewound to or logged as the person's input. It shows
+              // once the prompt is admitted, so one that goes back has none.
+              if (modPrompt && seq === turnSeqRef.current)
+                apply({
+                  type: 'info',
+                  text: modPromptRow(modPrompt.plugin, modPrompt.text),
+                });
               // A retry, like ink's, has no typed prompt.
               modTurn = mods.startTurn(
                 retry
@@ -743,6 +804,9 @@ export function useOpenTuiLiveTurn(
             onStreamEvent: (event: ServerLlmStreamEvent) => modTurn?.saw(event),
             onToolsCancelled: () => {
               toolsCancelled = true;
+              // The person declined every tool, which stops the session's
+              // work as Esc does; Esc and a Mod's `$.turn.abort` abort first.
+              if (!abort.signal.aborted) mods.stopSubmittedPrompts();
             },
           }),
           // Steering reaches the model mid-turn as no prompt of its own, so
@@ -848,6 +912,17 @@ export function useOpenTuiLiveTurn(
               ? 'error'
               : undefined,
         );
+        // A Mod's prompt whose turn could not start (the Mods failed, the
+        // prompt failed to prepare, the transcript was reset) goes back to the
+        // queue and no longer counts toward the limit, as in ink; one the
+        // person stopped is dropped there.
+        const returned = !!modPrompt && !sent;
+        if (returned && mods) {
+          mods.returnSubmittedPrompt(modPrompt);
+          // Only the current turn holds it: a turn the transcript reset left
+          // behind must not undo the reset's release, or hold a later turn's.
+          if (seq === turnSeqRef.current) modPromptHeldRef.current = true;
+        }
         // A stale turn must not clear a successor's controller.
         if (abortRef.current === abort) abortRef.current = null;
         if (seq === turnSeqRef.current) {
@@ -856,7 +931,7 @@ export function useOpenTuiLiveTurn(
             apply({ type: 'segment-end' });
           }
           skipRetryDelayRef.current = undefined;
-          if (failed && prepared && !abort.signal.aborted) {
+          if (failed && prepared && !abort.signal.aborted && !returned) {
             failedRequestRef.current = {
               request: prepared,
               promptId,
@@ -871,6 +946,10 @@ export function useOpenTuiLiveTurn(
           // An interrupt settles as a cancel whether or not a Mod ended the
           // turn first; only a Mod's end alone lets the queue go on.
           if (abort.signal.aborted && (!modEnded || active.interrupted)) {
+            // A Mod's prompt the person stopped has no row to take back, but
+            // the next prompt must not reach the model behind it.
+            if (turnOptions?.modPrompt)
+              config.getLlmClient()?.stripOrphanedUserEntriesFromHistory(true);
             const settled = active.onCancelSettled;
             let queued = settled ? popQueue() : null;
             // A prompt the hooks still held was never shown or sent, so it
@@ -1113,12 +1192,34 @@ export function useOpenTuiLiveTurn(
     [config, apply, pushQueue, runTurn, hooksHear],
   );
 
+  const runModPrompt = useCallback((): boolean => {
+    if (
+      !mountedRef.current ||
+      streamingRef.current ||
+      modPromptHeldRef.current ||
+      goalOwnsSessionTurns(config)
+    )
+      return false;
+    const prompt = getInteractiveModSession(config)?.takeSubmittedPrompt();
+    if (!prompt) return false;
+    const promptId = nextLivePromptId(config);
+    void runTurn(frameModPrompt(prompt), promptId, {
+      submittedPrompt: prompt.text,
+      ...(prompt.context?.length ? { promptContext: prompt.context } : {}),
+      modPrompt: prompt,
+    });
+    return true;
+  }, [config, runTurn]);
+
   const interrupt = useCallback(
     (onSettled?: OpenTuiCancelSettled) => {
       skipRetryDelayRef.current = undefined;
       failedRequestRef.current = null;
       const active = activeTurnRef.current;
       if (active && active.seq === turnSeqRef.current) {
+        // The person stopped the session's work: the Mods' prompts still
+        // queued do not start, nor do those the stopped turn's hooks submit.
+        getInteractiveModSession(config)?.stopSubmittedPrompts();
         active.interrupted = true;
         active.onCancelSettled ??= onSettled;
         updateExecutingShells([]);
@@ -1127,7 +1228,7 @@ export function useOpenTuiLiveTurn(
         onSettled?.({ kind: 'cancelled', queued: null, prompt: null });
       }
     },
-    [updateExecutingShells],
+    [config, updateExecutingShells],
   );
 
   const scheduleTool = useCallback(
@@ -1191,6 +1292,7 @@ export function useOpenTuiLiveTurn(
   const resetTranscript = useCallback(
     (events: readonly OpenTuiStreamEvent[]) => {
       const onReset = activeTurnRef.current?.onCancelSettled;
+      modPromptHeldRef.current = false;
       skipRetryDelayRef.current = undefined;
       failedRequestRef.current = null;
       // Commit the accepted partial before invalidating its generation; a late
@@ -1282,6 +1384,7 @@ export function useOpenTuiLiveTurn(
     messageQueue: queue,
     popQueue,
     submit,
+    runModPrompt,
     interrupt,
     retryLastPrompt,
     notifyInputProcessed,

@@ -82,22 +82,22 @@ public class ManagedAgentStore implements AgentStateStore {
     private final AgentExecutionOperations executionOperations;
 
     public ManagedAgentStore(JdbcTemplate jdbc, ObjectMapper objectMapper, Clock clock,
-            CommittedEventPublisher eventPublisher, ManagedWorkspaceRegistry workspaces,
+            CommittedEventPublisher eventPublisher, JdbcManagedWorkspaceRegistry workspaces,
             ManagedAgentSettings properties, HarnessRules harnessRules) {
         this(jdbc, objectMapper, clock, eventPublisher, workspaces, properties, harnessRules,
-                null, new ManagedSessionSkills(jdbc, objectMapper, new RequestDigests(), null), null,
+                null, new JdbcManagedSessionSkills(jdbc, objectMapper, new RequestDigests(), null), null,
                 null, null, null, null, null);
     }
 
     public ManagedAgentStore(JdbcTemplate jdbc, ObjectMapper objectMapper,
             Clock clock, CommittedEventPublisher eventPublisher,
-            ManagedWorkspaceRegistry workspaces, ManagedAgentSettings properties, HarnessRules harnessRules,
+            JdbcManagedWorkspaceRegistry workspaces, ManagedAgentSettings properties, HarnessRules harnessRules,
             com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles worktreeFiles,
-            ManagedSessionSkills creationSkills,
+            JdbcManagedSessionSkills creationSkills,
             com.alibaba.qwen.code.managedagent.contracts.extensions.ExtensionPackages extensionPackages,
-            WorkspaceLifecycleStore lifecycle, ManagedAgentDefinitionStore definitions,
-            SessionWorktreeStore sessionWorktrees, JournalEventTransport journalEventTransport,
-            ManagedExtensionRecordStore configRecords) {
+            JdbcWorkspaceLifecycleStore lifecycle, JdbcManagedAgentDefinitionStore definitions,
+            JdbcSessionWorktreeStore sessionWorktrees, JournalEventTransport journalEventTransport,
+            JdbcManagedExtensionRecordStore configRecords) {
         this(jdbc, objectMapper, clock, eventPublisher, workspaces, properties, harnessRules,
                 worktreeFiles, creationSkills, extensionPackages, lifecycle, definitions,
                 sessionWorktrees, journalEventTransport, configRecords, null);
@@ -106,15 +106,14 @@ public class ManagedAgentStore implements AgentStateStore {
     @Autowired
     public ManagedAgentStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc, @Qualifier("managedAgentObjectMapper") ObjectMapper objectMapper,
             @Qualifier("managedAgentClock") Clock clock, CommittedEventPublisher eventPublisher,
-            ManagedWorkspaceRegistry workspaces, ManagedAgentSettings properties, HarnessRules harnessRules,
+            JdbcManagedWorkspaceRegistry workspaces, ManagedAgentSettings properties, HarnessRules harnessRules,
             com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles worktreeFiles,
-            ManagedSessionSkills creationSkills,
+            JdbcManagedSessionSkills creationSkills,
             com.alibaba.qwen.code.managedagent.contracts.extensions.ExtensionPackages extensionPackages,
-            @Nullable WorkspaceLifecycleStore lifecycle, @Nullable ManagedAgentDefinitionStore definitions,
-            @Nullable SessionWorktreeStore sessionWorktrees, @Nullable JournalEventTransport journalEventTransport,
-            @Lazy @Nullable ManagedExtensionRecordStore configRecords, ManagedSessionModelConfigs modelConfigs) {
-        String approvalMode =
-                properties.getHarness().getApprovalMode().toLowerCase(Locale.ROOT);
+            @Nullable JdbcWorkspaceLifecycleStore lifecycle, @Nullable JdbcManagedAgentDefinitionStore definitions,
+            @Nullable JdbcSessionWorktreeStore sessionWorktrees, @Nullable JournalEventTransport journalEventTransport,
+            @Lazy @Nullable JdbcManagedExtensionRecordStore configRecords, ManagedSessionModelConfigs modelConfigs) {
+        String approvalMode = properties.getHarness().getApprovalMode().toLowerCase(Locale.ROOT);
         String agentRevision = properties.getAgentRevision();
         List<String> definitionToolProfiles = properties.getDefinitionToolProfiles();
         List<String> definitionModels = properties.getDefinitionModels();
@@ -130,9 +129,7 @@ public class ManagedAgentStore implements AgentStateStore {
         WorkspaceCreationRoots createdRoots = new WorkspaceCreationRoots(jdbc, properties);
         if (StringUtils.isBlank(agentRevision)
                 || agentRevision.length() > 128) {
-            throw new IllegalArgumentException(
-                    "qwen.managed-agent.agent-revision must contain 1-128"
-                            + " characters");
+            throw new IllegalArgumentException("qwen.managed-agent.agent-revision must contain 1-128 characters");
         }
 
         AgentStoreRows storeRows = new AgentStoreRows(harnessRules, jdbc, objectMapper);
@@ -148,12 +145,12 @@ public class ManagedAgentStore implements AgentStateStore {
     }
 
     @Override
-    public SessionWorktreeStore.Descriptor findSessionWorktree(String tenantId, String sessionId) {
+    public JdbcSessionWorktreeStore.Descriptor findSessionWorktree(String tenantId, String sessionId) {
         return sessionQueries.findSessionWorktree(tenantId, sessionId);
     }
 
     @Override
-    public Map<String, SessionWorktreeStore.Descriptor> findSessionWorktrees(String tenantId, List<String> sessionIds) {
+    public Map<String, JdbcSessionWorktreeStore.Descriptor> findSessionWorktrees(String tenantId, List<String> sessionIds) {
         return sessionQueries.findSessionWorktrees(tenantId, sessionIds);
     }
 
@@ -163,7 +160,7 @@ public class ManagedAgentStore implements AgentStateStore {
             String operation, String idempotencyKey, String requestDigest,
             String agentId, String requestedRevision, String title,
             List<Map<String, Object>> input, String payloadDigest) {
-        return sessionAdmissions.insertSessionCommand(tenantId, actorId, operation, idempotencyKey, requestDigest, agentId, requestedRevision, title, input, payloadDigest);
+        return sessionAdmissions.insertSessionCommand(tenantId, actorId, operation, idempotencyKey, requestDigest, agentId, requestedRevision, title, input, payloadDigest, null, null);
     }
 
     @Override
@@ -172,7 +169,17 @@ public class ManagedAgentStore implements AgentStateStore {
             String operation, String idempotencyKey, String requestDigest,
             String agentId, String requestedRevision, String title,
             List<Map<String, Object>> input, String payloadDigest, SessionModelConfig modelConfig) {
-        return sessionAdmissions.insertSessionCommand(tenantId, actorId, operation, idempotencyKey, requestDigest, agentId, requestedRevision, title, input, payloadDigest, modelConfig);
+        return sessionAdmissions.insertSessionCommand(tenantId, actorId, operation, idempotencyKey, requestDigest, agentId, requestedRevision, title, input, payloadDigest, modelConfig, null);
+    }
+
+    @Override
+    @Transactional
+    public Admission insertSessionCommand(String tenantId, String actorId,
+            String operation, String idempotencyKey, String requestDigest,
+            String agentId, String requestedRevision, String title,
+            List<Map<String, Object>> input, String payloadDigest, SessionModelConfig modelConfig, String memoryStoreId) {
+        return sessionAdmissions.insertSessionCommand(tenantId, actorId, operation, idempotencyKey,
+                requestDigest, agentId, requestedRevision, title, input, payloadDigest, modelConfig, memoryStoreId);
     }
 
     @Override

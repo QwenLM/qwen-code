@@ -158,6 +158,7 @@ import { registerSessionRoutes } from './routes/session.js';
 import { registerSessionCatalogRoutes } from './routes/session-catalog.js';
 import { registerSessionPrBackfillRoutes } from './routes/session-pr-backfill.js';
 import { registerSessionPrBindingsRoutes } from './routes/session-pr-bindings.js';
+import { registerSessionPostedCommentsRoutes } from './routes/session-posted-comments.js';
 import { registerStandaloneSessionRoutes } from './routes/standalone-sessions.js';
 import {
   createRequestedSessionIdAdmission,
@@ -721,11 +722,7 @@ export interface ServeAppDeps {
   ) => Promise<void | import('../config/settings.js').LoadedSettings>;
   persistSettings?: (
     workspace: string,
-    writes: Array<{
-      scope: import('../config/settings.js').SettingScope;
-      key: string;
-      value: unknown;
-    }>,
+    writes: import('./workspace-service/types.js').WorkspaceSettingsWrites,
     assertGenerationOpen?: () => void,
   ) => Promise<void>;
   updateModelContextWindow?: import('./routes/workspace-models.js').WorkspaceModelsRouteDeps['updateModelContextWindow'];
@@ -3098,6 +3095,13 @@ export function createServeApp(
     workspaceRegistry,
     sendBridgeError,
   });
+  // Read-only authorship lookup (which comments a session posted) for the
+  // bound PR comment watch, so a bound session receives every other author's
+  // comments but not its own.
+  registerSessionPostedCommentsRoutes(app, {
+    workspaceRegistry,
+    sendBridgeError,
+  });
 
   // Workspace memory + agents CRUD routes.
   mountMemoryImportRoutes(app, { workspaceRegistry, mutate });
@@ -3587,8 +3591,10 @@ export function createServeApp(
 
   registerWorkspaceSubscriptionRoutes(app, {
     workspaceRegistry,
+    qwenCodeVersion: deps.qwenCodeVersion,
     mutate,
     persistSettings: deps.persistSettings,
+    syncModelProvidersRuntime,
     sendBridgeError,
   });
   const stopSubscriptionAuth = registerSubscriptionAuthRoutes(

@@ -29,6 +29,7 @@ import {
   createHttpManagedSessionStores,
   ManagedSessionStoreHttpError,
   type HttpToolPublicationOwner,
+  type ManagedMemoryQuery,
 } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 import { LocalJsonlManagedSessionJournalHandle } from '@qwen-code/qwen-code-core/managed-runtime/local-jsonl-managed-session-journal-store.js';
 import { readManagedSessionRecords } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-message-projection.js';
@@ -76,6 +77,7 @@ import {
   hostedActionAllowed,
   hostedApprovalAsks,
   resolveHostedAction,
+  readHostedActionOptions,
   type HostedApprovalMode,
   type HostedApprovalSettings,
 } from './hosted-tool-approval.js';
@@ -87,6 +89,12 @@ import {
   HostedSkillCatalog,
 } from './hosted-skill-catalog.js';
 import { answerResumedTurnCalls } from './hosted-runtime-recovery.js';
+import {
+  HostedMemorySession,
+  HOSTED_MEMORY_TOOLS,
+  findHostedMemoryResults,
+} from './hosted-memory-session.js';
+import { readHostedApprovalContinuation } from './hosted-approval-continuation.js';
 import { writeHostedTodos } from './hosted-todo-session.js';
 import { HostedCsiToolTurn } from './hosted-csi-tool-turn.js';
 import * as hostedPlan from './hosted-plan-mode.js';
@@ -97,12 +105,15 @@ import {
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-execution-diagnostics.js';
 import {
   RESIDENT_WORKSPACE_CAPABILITY_DIGEST,
+  MEASURED_WORKSPACE_CAPABILITY_DIGEST,
   WORKSPACE_CAPABILITY_DIGEST,
 } from './managed-workspace-activation.js';
 
 const broker = vi.hoisted(() => ({
   capabilityDigest:
     'sha256:7df3981fa14b397fe09f6ba84ed0c096c71902394da667bf47f3b315866e7f91',
+  toolMeasurements: vi.fn(),
+  releaseToolMeasurements: vi.fn(),
   fileHistory: vi.fn(),
   authorizeLifecycle: vi.fn(),
   workspaceContext: vi.fn(),
@@ -140,6 +151,8 @@ vi.mock('./hosted-workspace-broker.js', async (importOriginal) => ({
     // request leaves, so a lost reply still names it.
     private claim?: string;
     mountClaim = () => this.claim;
+    toolMeasurements = broker.toolMeasurements;
+    releaseToolMeasurements = broker.releaseToolMeasurements;
     fileHistory = broker.fileHistory;
     authorizeLifecycle = broker.authorizeLifecycle;
     workspaceContext = broker.workspaceContext;
@@ -661,6 +674,61 @@ it.each([
     expect(session.authority.lastEventOfKind('tool.receipt')).toBeUndefined();
   },
 );
+
+it('persists frozen executor measurements before model result delivery fails', async () => {
+  await enableManagedExecutionDiagnostics(session);
+  broker.capabilityDigest = MEASURED_WORKSPACE_CAPABILITY_DIGEST;
+  broker.toolMeasurements.mockReturnValue({
+    resultDigest: 'a'.repeat(64),
+    measurements: {
+      protocol: 'managed-tool-measurements/1',
+      executionDurationMs: 0,
+      executionOutcome: 'success',
+      file: {
+        operation: 'read',
+        status: 'measured',
+        modelLinesAdded: null,
+        modelLinesRemoved: null,
+        appliedLinesAdded: null,
+        appliedLinesRemoved: null,
+      },
+    },
+  });
+  const original = commit;
+  commit = async (...args) => {
+    if (args[0] === 'tool_result') throw new Error('delivery unavailable');
+    return original(...args);
+  };
+  turn = createTurn();
+  await expect(
+    turn.execute([calls[0]], [parts[0]], 'model', new AbortController().signal),
+  ).rejects.toThrow();
+  const event = session.authority.lastEventOfKind('tool.measured')!;
+  expect(event).toBeDefined();
+  const packet = JSON.parse(
+    (
+      await session.resources.read(
+        assertManagedSessionDurableRef(
+          event.payload['measurementsRef'],
+          'measurement',
+        ),
+      )
+    ).toString(),
+  );
+  expect(packet.measurements).toMatchObject({
+    executionDurationMs: 0,
+    executionOutcome: 'success',
+    file: { operation: 'read' },
+  });
+  expect(broker.releaseToolMeasurements).toHaveBeenCalledWith(
+    event.payload['executionCallId'],
+  );
+  expect(
+    session.authority.committedReceipt(
+      String(event.payload['executionCallId']),
+    ),
+  ).toBeUndefined();
+});
 
 it('refuses a mixed Skill and Workspace batch before approval Hooks or tool dispatch', async () => {
   const fire = vi.fn<HostedHookSession['fire']>().mockResolvedValue(undefined);
@@ -5898,6 +5966,7 @@ it('admits exactly the declared native tools to the version 3 input preview', ()
     'edit',
     'run_shell_command',
     'todo_write',
+    ...HOSTED_MEMORY_TOOLS,
     'agent',
     'send_message',
     'team_create',
@@ -5911,6 +5980,7 @@ it('admits exactly the declared native tools to the version 3 input preview', ()
   const declared = [
     ...HOSTED_WORKSPACE_SHELL_TOOLS.map((tool) => tool.name),
     HOSTED_TODO_WRITE_TOOL.name,
+    ...HOSTED_MEMORY_TOOLS,
     HOSTED_AGENT_TOOL.name,
     HOSTED_SEND_MESSAGE_TO_CHILD_TOOL.name,
     HOSTED_SEND_MESSAGE_TO_PARENT_TOOL.name,
@@ -13380,4 +13450,442 @@ it('records an unavailable path for a rejected lone-surrogate file name', async 
     ),
   );
   expect(evidence.observations[0].file?.path).toBeNull();
+});
+
+function createMemoryTurn(
+  query: (input: ManagedMemoryQuery) => Promise<unknown>,
+  mode: HostedApprovalMode = 'yolo',
+  planMode = false,
+) {
+  broker.warm.mockClear();
+  return new HostedWorkspaceToolTurn(
+    planMode ? { baseUrl: 'http://127.0.0.1:1', token: 'test' } : undefined,
+    session,
+    harness,
+    'prompt',
+    commit,
+    messageFitsInline,
+    undefined,
+    undefined,
+    { settings: { mode, timeoutMs: 60_000 }, waiters },
+    {
+      memory: new HostedMemorySession({ memory: query }, 'memstore_personal'),
+      memoryOnly: !planMode,
+      ...(planMode
+        ? { profile: 'hosted-workspace-files/1', publicPlanMode: true }
+        : {}),
+    },
+  );
+}
+
+const personalMemoryCall = (
+  name = 'context_remember',
+  args: Record<string, unknown> = { content: 'remember this' },
+): ToolCallRequestInfo => ({
+  ...calls[0],
+  name,
+  args,
+});
+const memoryParts = (call: ToolCallRequestInfo): Part[] => [
+  { functionCall: { id: call.callId, name: call.name, args: call.args } },
+];
+const memoryQuery = (result: Record<string, unknown>) =>
+  vi.fn(async (request: ManagedMemoryQuery) =>
+    request.operation === 'binding'
+      ? { enabled: true, memoryStoreId: 'memstore_personal' }
+      : result,
+  );
+
+it('does not declare personal memory tools without an explicit binding', async () => {
+  const names = (await turn.declarations(new AbortController().signal)).map(
+    (tool) => tool.name,
+  );
+  expect(
+    names.some((name) =>
+      HOSTED_MEMORY_TOOLS.includes(
+        name as (typeof HOSTED_MEMORY_TOOLS)[number],
+      ),
+    ),
+  ).toBe(false);
+});
+
+it('runs personal memory without a Broker and persists a runtime-free continuation', async () => {
+  const query = memoryQuery({ status: 'unknown' });
+  turn = createMemoryTurn(query);
+  const call = personalMemoryCall();
+  const result = await turn.execute(
+    [call],
+    memoryParts(call),
+    'model',
+    new AbortController().signal,
+  );
+  expect(result[0].functionResponse?.response).toMatchObject({
+    status: 'unknown',
+    executionStatus: 'error',
+  });
+  expect(broker.warm).not.toHaveBeenCalled();
+  expect(broker.acquire).not.toHaveBeenCalled();
+  expect(broker.prepare).not.toHaveBeenCalled();
+  expect(broker.execute).not.toHaveBeenCalled();
+  const planned = session.authority
+    .eventsInSequenceRange(1, session.authority.committedSequence)
+    .findLast((event) => event.kind === 'hosted.batch.planned')!;
+  const saved = await readHostedApprovalContinuation(
+    session,
+    planned.payload['planRef'] as unknown as ManagedSessionDurableRef,
+    'prompt',
+  );
+  expect(saved.plan.runtime).toBeNull();
+  expect(saved.plan.calls[0].call.name).toBe('context_remember');
+  expect(await findHostedMemoryResults(session, 'prompt')).toEqual(
+    JSON.parse(JSON.stringify(result)),
+  );
+  await turn.resumeCommittedResults();
+  await turn.finish();
+  await turn.cleanup();
+  expect(
+    query.mock.calls.filter(([request]) => request.operation === 'remember'),
+  ).toHaveLength(1);
+});
+
+it('requires personal memory write approval and does not dispatch denied content', async () => {
+  const query = memoryQuery({ status: 'stored', memoryId: 'entry' });
+  turn = createMemoryTurn(query, 'default');
+  const call = personalMemoryCall();
+  const running = turn.execute(
+    [call],
+    memoryParts(call),
+    'model',
+    new AbortController().signal,
+  );
+  const requestId = await requested();
+  expect(query.mock.calls.map(([request]) => request.operation)).toEqual([
+    'binding',
+  ]);
+  await resolveHostedAction(session, waiters, requestId, answer('deny'));
+  expect(JSON.stringify(await running)).toContain('denied');
+  expect(query.mock.calls.map(([request]) => request.operation)).toEqual([
+    'binding',
+  ]);
+  expect(broker.acquire).not.toHaveBeenCalled();
+});
+
+it('preapproves personal memory reads under the ordinary default policy', async () => {
+  const query = memoryQuery({
+    status: 'ok',
+    items: [{ memoryId: 'entry', content: 'known' }],
+  });
+  turn = createMemoryTurn(query, 'default');
+  const call = personalMemoryCall('context_search', { query: 'known' });
+  const result = await turn.execute(
+    [call],
+    memoryParts(call),
+    'model',
+    new AbortController().signal,
+  );
+  expect(result[0].functionResponse?.response?.['status']).toBe('ok');
+  expect(
+    session.authority
+      .eventsInSequenceRange(1, session.authority.committedSequence)
+      .some(
+        (event) =>
+          event.kind === 'action.changed' &&
+          event.payload['state'] === 'requested',
+      ),
+  ).toBe(false);
+  expect(broker.warm).not.toHaveBeenCalled();
+});
+
+it('withholds personal memory mutations in Plan Mode', async () => {
+  vi.spyOn(hostedPlan, 'hostedPublicPlanActive').mockResolvedValue(true);
+  const query = memoryQuery({ status: 'stored', memoryId: 'entry' });
+  turn = createMemoryTurn(query, 'yolo', true);
+  const declarations = await turn.declarations(new AbortController().signal);
+  expect(declarations.map((tool) => tool.name)).toEqual(
+    expect.arrayContaining(['context_search', 'context_get']),
+  );
+  expect(declarations.map((tool) => tool.name)).not.toContain(
+    'context_remember',
+  );
+  const call = personalMemoryCall();
+  await turn.execute(
+    [call],
+    memoryParts(call),
+    'model',
+    new AbortController().signal,
+  );
+  expect(query.mock.calls.map(([request]) => request.operation)).toEqual([
+    'binding',
+  ]);
+  expect(broker.acquire).not.toHaveBeenCalled();
+});
+
+it('replays personal memory results after losing the local tool result without repeating the provider write', async () => {
+  let providerWrites = 0;
+  const remembered = new Map<string, Record<string, unknown>>();
+  const query = vi.fn(async (request: ManagedMemoryQuery): Promise<unknown> => {
+    if (request.operation === 'binding')
+      return { enabled: true, memoryStoreId: 'memstore_personal' };
+    expect(request.operation).toBe('remember');
+    const key = JSON.stringify([request.inputId, request.callId]);
+    let result = remembered.get(key);
+    if (!result) {
+      providerWrites++;
+      result = { status: 'stored', memoryId: `entry-${providerWrites}` };
+      remembered.set(key, result);
+    }
+    return result;
+  });
+  const originalCommit = commit;
+  let loseResponse = true;
+  commit = async (...args) => {
+    if (args[0] === 'tool_result' && loseResponse) {
+      loseResponse = false;
+      throw new Error('lost before tool result persistence');
+    }
+    return originalCommit(...args);
+  };
+  turn = createMemoryTurn(query);
+  const call = personalMemoryCall();
+  await expect(
+    turn.execute(
+      [call],
+      memoryParts(call),
+      'model',
+      new AbortController().signal,
+    ),
+  ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+  const planned = session.authority
+    .eventsInSequenceRange(1, session.authority.committedSequence)
+    .findLast((event) => event.kind === 'hosted.batch.planned')!;
+  const saved = await readHostedApprovalContinuation(
+    session,
+    planned.payload['planRef'] as unknown as ManagedSessionDurableRef,
+    'prompt',
+  );
+  commit = originalCommit;
+  turn = createMemoryTurn(query);
+  const result = await turn.resumeSavedNativeBatch(
+    saved,
+    saved.plan.calls.length,
+    new AbortController().signal,
+  );
+  expect(result[0].functionResponse?.response?.['memoryId']).toBe('entry-1');
+  expect(
+    query.mock.calls
+      .filter(([request]) => request.operation === 'remember')
+      .map(([request]) => ({
+        inputId: request.inputId,
+        callId: request.callId,
+      })),
+  ).toEqual([
+    { inputId: 'prompt', callId: call.callId },
+    { inputId: 'prompt', callId: call.callId },
+  ]);
+  expect(providerWrites).toBe(1);
+  expect(broker.warm).not.toHaveBeenCalled();
+  expect(broker.acquire).not.toHaveBeenCalled();
+  await turn.finish();
+});
+
+it('reuses committed memory results when recovering a partially completed batch', async () => {
+  const query = memoryQuery({ status: 'stored', memoryId: 'entry' });
+  const batch = [
+    personalMemoryCall(),
+    { ...personalMemoryCall(), callId: 'second', args: { content: 'next' } },
+  ];
+  const originalCommit = commit;
+  let commits = 0;
+  commit = async (...args) => {
+    if (args[0] === 'tool_result' && ++commits === 2)
+      throw new Error('lost second result');
+    return originalCommit(...args);
+  };
+  turn = createMemoryTurn(query);
+  await expect(
+    turn.execute(
+      batch,
+      batch.flatMap(memoryParts),
+      'model',
+      new AbortController().signal,
+    ),
+  ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+  expect(await findHostedMemoryResults(session, 'prompt')).toBeUndefined();
+  await session.sink.write({
+    uuid: 'umsg_later:1',
+    parentUuid: null,
+    sessionId: session.authority.sessionHeader.sessionKey.sessionId,
+    timestamp: new Date().toISOString(),
+    type: 'user',
+    subtype: 'mid_turn_user_message',
+    cwd: root,
+    version: 'test',
+    daemonPromptId: 'prompt',
+    message: { role: 'user', parts: [{ text: 'A later input' }] },
+  });
+  const planned = session.authority
+    .eventsInSequenceRange(1, session.authority.committedSequence)
+    .findLast((event) => event.kind === 'hosted.batch.planned')!;
+  const saved = await readHostedApprovalContinuation(
+    session,
+    planned.payload['planRef'] as unknown as ManagedSessionDurableRef,
+    'prompt',
+  );
+  commit = originalCommit;
+  turn = createMemoryTurn(query);
+  const result = await turn.resumeSavedNativeBatch(
+    saved,
+    saved.plan.calls.length,
+    new AbortController().signal,
+  );
+  expect(result.map((part) => part.functionResponse?.id)).toEqual([
+    'call-0',
+    'second',
+  ]);
+  expect(
+    query.mock.calls
+      .filter(([request]) => request.operation === 'remember')
+      .map(([request]) => [request.callId, request.inputId]),
+  ).toEqual([
+    ['call-0', 'prompt'],
+    ['second', 'prompt'],
+    ['second', 'prompt'],
+  ]);
+  expect(
+    (await session.sink.project()).filter(
+      (entry) => entry.type === 'tool_result',
+    ),
+  ).toHaveLength(2);
+  expect(await findHostedMemoryResults(session, 'prompt')).toHaveLength(2);
+  expect(broker.acquire).not.toHaveBeenCalled();
+});
+
+it('associates each memory batch with its preceding queued input', async () => {
+  const query = memoryQuery({ status: 'stored', memoryId: 'entry' });
+  turn = createMemoryTurn(query);
+  const inputIds = ['umsg_queued:2', 'umsg_next:3'];
+  for (const inputId of inputIds) {
+    await session.sink.write({
+      uuid: inputId,
+      parentUuid: null,
+      sessionId: session.authority.sessionHeader.sessionKey.sessionId,
+      timestamp: new Date().toISOString(),
+      type: 'user',
+      subtype: 'mid_turn_user_message',
+      cwd: root,
+      version: 'test',
+      daemonPromptId: 'prompt',
+      message: { role: 'user', parts: [{ text: 'Please remember this' }] },
+    });
+    const batch = [0, 1].map((index) => ({
+      ...personalMemoryCall(),
+      callId: `${inputId}:${index}`,
+    }));
+    await turn.execute(
+      batch,
+      batch.flatMap(memoryParts),
+      'model',
+      new AbortController().signal,
+    );
+    await turn.consumeResults();
+  }
+  expect(
+    query.mock.calls
+      .filter(([request]) => request.operation === 'remember')
+      .map(([request]) => [request.callId, request.inputId]),
+  ).toEqual(
+    inputIds.flatMap((inputId) =>
+      [0, 1].map((index) => [`${inputId}:${index}`, inputId]),
+    ),
+  );
+});
+
+it('refuses restored personal memory mutations while Plan Mode is active', async () => {
+  const query = memoryQuery({ status: 'stored', memoryId: 'entry' });
+  const originalCommit = commit;
+  commit = async (...args) => {
+    if (args[0] === 'tool_result') throw new Error('lost result');
+    return originalCommit(...args);
+  };
+  turn = createMemoryTurn(query);
+  const call = personalMemoryCall();
+  await expect(
+    turn.execute(
+      [call],
+      memoryParts(call),
+      'model',
+      new AbortController().signal,
+    ),
+  ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+  const planned = session.authority
+    .eventsInSequenceRange(1, session.authority.committedSequence)
+    .findLast((event) => event.kind === 'hosted.batch.planned')!;
+  const saved = await readHostedApprovalContinuation(
+    session,
+    planned.payload['planRef'] as unknown as ManagedSessionDurableRef,
+    'prompt',
+  );
+  expect(saved.plan.runtime).toBeNull();
+  commit = originalCommit;
+  vi.spyOn(hostedPlan, 'hostedPublicPlanActive').mockResolvedValue(true);
+  turn = createMemoryTurn(query, 'yolo', true);
+  await expect(
+    turn.resumeSavedNativeBatch(
+      saved,
+      saved.plan.calls.length,
+      new AbortController().signal,
+    ),
+  ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+  expect(
+    query.mock.calls.filter(([request]) => request.operation === 'remember'),
+  ).toHaveLength(1);
+  expect(broker.acquire).not.toHaveBeenCalled();
+});
+
+it('restores an approved personal memory action without a Runtime or a second approval', async () => {
+  const query = memoryQuery({ status: 'stored', memoryId: 'entry' });
+  vi.spyOn(waiters, 'wait').mockRejectedValueOnce(
+    new Error('Harness replaced'),
+  );
+  turn = createMemoryTurn(query, 'default');
+  const call = personalMemoryCall();
+  await expect(
+    turn.execute(
+      [call],
+      memoryParts(call),
+      'model',
+      new AbortController().signal,
+    ),
+  ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+  const [actionId] = actionIds();
+  const options = await readHostedActionOptions(
+    session,
+    session.authority.action(actionId)!,
+  );
+  expect(options.v).toBe(3);
+  if (options.v !== 3) throw new Error('Missing saved approval');
+  expect(query.mock.calls.map(([request]) => request.operation)).toEqual([
+    'binding',
+  ]);
+  await resolveHostedAction(session, waiters, actionId, answer('allow'));
+  await harness.resolveDurableWait();
+  const saved = await readHostedApprovalContinuation(
+    session,
+    options.continuationRef,
+    'prompt',
+  );
+  expect(saved.plan.runtime).toBeNull();
+  turn = createMemoryTurn(query, 'default');
+  const result = await turn.resumeSavedNativeBatch(
+    saved,
+    saved.plan.approvalOrdinal + 1,
+    new AbortController().signal,
+  );
+  expect(result[0].functionResponse?.response?.['status']).toBe('stored');
+  expect(actionIds()).toEqual([actionId]);
+  expect(
+    query.mock.calls.filter(([request]) => request.operation === 'remember'),
+  ).toHaveLength(1);
+  expect(broker.warm).not.toHaveBeenCalled();
+  expect(broker.acquire).not.toHaveBeenCalled();
 });

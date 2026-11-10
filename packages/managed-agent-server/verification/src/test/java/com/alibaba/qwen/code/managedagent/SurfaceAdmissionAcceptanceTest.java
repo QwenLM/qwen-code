@@ -12,12 +12,15 @@ import com.alibaba.qwen.code.managedagent.contracts.artifact.ManagedArtifactPoli
 import com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObjectStore;
 import com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy;
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedToolResultStore;
-import com.alibaba.qwen.code.managedagent.persistence.SshWorkspaceStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedToolResultStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcSshWorkspaceStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationAdmissionStore;
+import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationArtifactReader;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationDataStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationStore;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.repository.SshWorkspaceStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
@@ -157,7 +160,7 @@ public class SurfaceAdmissionAcceptanceTest {
     private AgentStateStore store;
 
     @Autowired
-    private SshWorkspaceStore sshWorkspaces;
+    private JdbcSshWorkspaceStore sshWorkspaces;
 
     private final String tenant = "acc-" + UUID.randomUUID();
     private final AtomicInteger keys = new AtomicInteger();
@@ -264,7 +267,7 @@ public class SurfaceAdmissionAcceptanceTest {
                         + " VALUES (?, ?, ?, 'ws', ?, 'child_run',"
                         + " 'run-retained', ?, 1, 'resource-retained',"
                         + " 'child_agent', 'running', 'session', 'planned', 1)",
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session),
+                ManagedSessionStore.sessionScopeKey(tenant, session),
                 recordKey, tenant, session, "f".repeat(64));
         String key = nextKey();
         java.util.function.Supplier<MockHttpServletRequestBuilder> cancel =
@@ -315,11 +318,11 @@ public class SurfaceAdmissionAcceptanceTest {
                         + " 'run-settled', ?, 1, 'resource-settled',"
                         + " 'child_agent', 'completed', 'session',"
                         + " 'consumed', 1, 2)",
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session),
+                ManagedSessionStore.sessionScopeKey(tenant, session),
                 recordKey, tenant, session, "b".repeat(64));
         // The task view reads a child task's committed body for its child
         // Session link (#13746 F2), so the list probes need one.
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session);
+        String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
         byte[] body = "{\"childSessionId\":null}".getBytes(
                 StandardCharsets.UTF_8);
         jdbc.update("INSERT INTO ma_resource (resource_key,"
@@ -366,6 +369,10 @@ public class SurfaceAdmissionAcceptanceTest {
             belowReadAndBelowFamilyProbesFollowTheRuleClass(SurfaceRegistry entry)
                     throws Exception {
         switch (entry.ruleClass()) {
+            case PERSONAL_MEMORY -> {
+                expect(entry, null, 401, "actor_required");
+                expect(entry, STRANGER, 503, "memory_disabled");
+            }
             case SESSION_WORKTREE -> {
                 expect(entry, null, 401, "actor_required");
                 if (entry.template().endsWith("/options")) {
@@ -1347,7 +1354,7 @@ public class SurfaceAdmissionAcceptanceTest {
      */
     private void expectInternal(SurfaceRegistry entry) throws Exception {
         int status = switch (entry.capabilities().iterator().next()) {
-            case STORE_USER_MESSAGE_CLAIM, STORE_WRITER_ACQUIRE, STORE_WRITER_RENEW, STORE_WRITER_SEAL,
+            case STORE_MEMORY_QUERY, STORE_USER_MESSAGE_CLAIM, STORE_WRITER_ACQUIRE, STORE_WRITER_RENEW, STORE_WRITER_SEAL,
                     STORE_RECOVERY_BLOCK, STORE_TRANSACTION_COMMIT,
                     STORE_RESTORE, STORE_TOOL_RESULT_PUBLISH,
                     STORE_TRANSACTION_LIST, STORE_RESOURCE_GET, STORE_SNAPSHOT_PUBLISH,
@@ -1620,6 +1627,8 @@ public class SurfaceAdmissionAcceptanceTest {
         Capability capability = entry.capabilities().iterator().next();
         boolean publicSurface = entry.surface() == Surface.PUBLIC;
         return switch (capability) {
+            case MEMORY_STORE_CREATE, MEMORY_STORE_LIST -> "{}";
+            case STORE_MEMORY_QUERY -> "{\"workspaceId\":\"ws\",\"writerId\":\"writer-probe\",\"writerGeneration\":1,\"operation\":\"binding\"}";
             case SESSION_WORKTREE -> "{\"workspaceId\":\"ws\",\"cwdRelative\":\".\",\"worktreeId\":\"worktree-probe\",\"idempotencyKey\":\"cleanup-probe\"}";
             case STORE_SNAPSHOT_PUBLISH -> "{\"workspaceId\":\"ws\",\"writerId\":\"writer-probe\","
                     + "\"writerGeneration\":1,\"snapshotId\":\"snapshot-probe\",\"expectedJournalRevision\":1,"
@@ -1640,6 +1649,8 @@ public class SurfaceAdmissionAcceptanceTest {
             }
             case EXTENSION_LIST -> "{\"workspaceId\":\"ws\"}";
             case EXTENSION_GET, EXTENSION_INSPECTION -> "{\"workspaceId\":\"ws\",\"pin\":{\"extensionId\":\"ext_11111111-1111-4111-8111-111111111111\",\"packageRevision\":1,\"packageDigest\":\"" + digest() + "\"}}";
+            case RUNTIME_SKILL_IMPORT -> publicSurface ? "{}" : "{\"sessionId\":\"" + session + "\""
+                    + (entry.template().endsWith("/imports") ? ",\"idempotencyKey\":\"skills-probe\"" : "") + "}";
             case EXTENSION_SETTINGS_GET -> "{\"workspaceId\":\"ws\",\"extensionId\":\"ext_11111111-1111-4111-8111-111111111111\"}";
             case EXTENSION_SETTINGS_SET -> publicSurface ? "{\"expectedRevision\":0,\"values\":{}}"
                     : "{\"workspaceId\":\"ws\",\"extensionId\":\"ext_11111111-1111-4111-8111-111111111111\",\"idempotencyKey\":\"settings-probe\",\"expectedRevision\":0,\"values\":{}}";
@@ -1853,7 +1864,7 @@ public class SurfaceAdmissionAcceptanceTest {
         jdbc.update("INSERT INTO ma_session_record (record_kind, session_scope_key, record_key, domain, record_id, revision, tenant_id,"
                 + " session_id, action_id, action_version, state, options_json, gmt_create)"
                 + " VALUES ('ACTION', ?, ?, 'action', ?, 1, ?, ?, ?, 1, 'requested', ?, 0)",
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session),
+                ManagedSessionStore.sessionScopeKey(tenant, session),
                 com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(tenant, session, "action", action),
                 action, tenant, session, action, JSON.writeValueAsString(Map.of("expiresAt",
                         System.currentTimeMillis() + 3_600_000L,
@@ -1939,11 +1950,11 @@ public class SurfaceAdmissionAcceptanceTest {
         public com.alibaba.qwen.code.managedagent.persistence
                         .ManagedToolResultProjector
                 acceptanceProjector(
-                        ManagedToolResultStore store,
+                        JdbcManagedToolResultStore store,
                         @Qualifier("managedJdbcTemplate") JdbcTemplate jdbc,
                         org.springframework.beans.factory.ObjectProvider<ToolPublicationDataStore>
                                 publications,
-                        com.alibaba.qwen.code.managedagent.persistence.ManagedArtifactReader reader,
+                        ToolPublicationArtifactReader reader,
                         ManagedArtifactPolicy acceptancePolicy,
                         ManagedAgentProperties properties) {
             return new com.alibaba.qwen.code.managedagent.persistence.ManagedToolResultProjector(store, jdbc, publications,
@@ -1962,7 +1973,7 @@ public class SurfaceAdmissionAcceptanceTest {
         public ToolPublicationStore acceptancePublicationGrants(
                 @Qualifier("managedJdbcTemplate") JdbcTemplate jdbc,
                 @Qualifier("managedAgentTransactionManager") PlatformTransactionManager manager,
-                ManagedSessionStore sessions) {
+                JdbcManagedSessionStore sessions) {
             return new ToolPublicationStore(jdbc, manager, sessions,
                     mock(ToolExecutionRepository.class),
                     mock(RuntimeBindingRepository.class),
@@ -1979,7 +1990,7 @@ public class SurfaceAdmissionAcceptanceTest {
                 @Qualifier("managedJdbcTemplate") JdbcTemplate jdbc,
                 @Qualifier("managedAgentTransactionManager") PlatformTransactionManager manager,
                 ToolPublicationStore acceptancePublicationGrants,
-                ManagedSessionStore sessions,
+                JdbcManagedSessionStore sessions,
                 ToolPublicationObjectStore acceptanceObjects) {
             return new ToolPublicationDataStore(jdbc, manager,
                     acceptancePublicationGrants, sessions, acceptanceObjects,
@@ -1999,7 +2010,7 @@ public class SurfaceAdmissionAcceptanceTest {
                 @Qualifier("managedAgentTransactionManager") PlatformTransactionManager manager,
                 ToolPublicationStore acceptancePublicationGrants,
                 ToolPublicationDataStore acceptancePublicationData,
-                ManagedSessionStore sessions,
+                JdbcManagedSessionStore sessions,
                 ManagedAgentProperties properties) {
             return new ToolPublicationController(
                     acceptancePublicationGrants, acceptancePublicationData,
@@ -2010,7 +2021,7 @@ public class SurfaceAdmissionAcceptanceTest {
     }
 
     public static java.util.Map<String, Object> reservedRegistration(
-            com.alibaba.qwen.code.managedagent.repository.SshWorkspaceStore.Intent intent, String tenant) {
+            SshWorkspaceStore.Intent intent, String tenant) {
         java.util.Map<String, Object> identity = java.util.Map.of("root", "/work/project",
                 "hostId", "host-" + tenant, "device", "1", "inode", "2", "birthTime", "3");
         var marker = new java.util.LinkedHashMap<String, Object>(identity);
