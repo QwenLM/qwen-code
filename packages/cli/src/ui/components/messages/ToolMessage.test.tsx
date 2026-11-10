@@ -579,6 +579,27 @@ describe('<ToolMessage />', () => {
       expect(lastFrame()).not.toContain('MockMarkdown:');
     });
 
+    it('keeps shell output on the plain-text path with no budget and no cap', () => {
+      // ShellTool does not declare `isOutputMarkdown: false` — it inherits
+      // DeclarativeTool's `true` — so without the `isShellTool` branch this
+      // result (no availableTerminalHeight, no `Capped` status) would take the
+      // markdown path and lose the MaxSizedBox hidden-lines cue.
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...baseProps}
+          name="Shell"
+          resultDisplay={'**not markdown**'}
+          renderOutputAsMarkdown
+          availableTerminalHeight={undefined}
+        />,
+        StreamingState.Idle,
+      );
+
+      const output = lastFrame()!;
+      expect(output).not.toContain('MockMarkdown:');
+      expect(output).toContain('**not markdown**');
+    });
+
     it('measures the object shape ask_user_question actually returns', () => {
       // #13956's real shape: `returnDisplay` is
       // `{ type: 'ask_user_question_answers', text, answers }`, which
@@ -2008,6 +2029,10 @@ describe('<ToolMessage />', () => {
   });
 
   it('does not pre-slice string output that exactly fits available height', () => {
+    // Plain-text path: this result fits its budget, so `sliceTextForMaxHeight`
+    // must slice nothing. `renderOutputAsMarkdown={false}` keeps the case on
+    // the branch the boundary lives on — with markdown on, a short result now
+    // takes `MarkdownDisplay` instead and the slice never runs (#13956).
     const exactFitString = Array.from(
       { length: 6 },
       (_, i) => `line ${i + 1}`,
@@ -2018,6 +2043,7 @@ describe('<ToolMessage />', () => {
         name="some-other-tool"
         resultDisplay={exactFitString}
         status={ToolCallStatus.Success}
+        renderOutputAsMarkdown={false}
         availableTerminalHeight={12}
         forceShowResult
       />,
@@ -2025,6 +2051,7 @@ describe('<ToolMessage />', () => {
     );
     const output = lastFrame()!;
 
+    expect(output).not.toContain('MockMarkdown:');
     expect(output).not.toContain('lines hidden');
     expect(output).toContain('line 1');
     expect(output).toContain('line 6');
