@@ -5,6 +5,8 @@ import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.servlet.http.HttpServletRequest;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.boot.autoconfigure.web.ServerProperties;
 import org.springframework.boot.autoconfigure.web.servlet.WebMvcProperties;
 import org.springframework.core.Ordered;
@@ -28,8 +30,13 @@ public class SignatureAuthFilterTest {
             "0123456789abcdef0123456789abcdef";
     private static final ObjectMapper JSON = new ObjectMapper();
 
-    @Test
-    public void authenticatesExtensionArchivesFromADiskSpoolAndSignsTheirManifestQuery()
+    @ParameterizedTest
+    @ValueSource(strings = {"/v1/agents/workspaces/workspace/extensions",
+        "/v1/agents/workspaces/workspace/extensions/imports",
+        "/v1/agents/workspaces/workspace/extensions/imports/preview",
+        "/api/agent/web-shell/v1/workspace-extensions/imports",
+        "/api/agent/web-shell/v1/workspace-extensions/imports/preview"})
+    public void authenticatesExtensionArchivesFromADiskSpoolAndSignsTheirMetadataQuery(String path)
             throws Exception {
         ManagedAgentProperties properties = new ManagedAgentProperties();
         properties.getAuth().setMode("signed");
@@ -39,8 +46,12 @@ public class SignatureAuthFilterTest {
         server.setAddress(InetAddress.getByName("127.0.0.1"));
         SignatureAuthFilter filter = filter(new BrokerSecurity(properties, server, new WebMvcProperties()));
         byte[] archive = "a binary archive larger than the JSON body limit".getBytes(StandardCharsets.UTF_8);
-        String path = "/v1/agents/workspaces/workspace/extensions";
-        String query = "packageDigest=" + sha256Hex(archive) + "&manifest=eyJzY2hlbWFWZXJzaW9uIjoxfQ";
+        String metadata = "{\"sourceKind\":\"skill\",\"sourceDigest\":\"" + sha256Hex(archive)
+                + "\",\"compilerVersion\":1,\"target\":{\"platform\":\"linux\",\"arch\":\"any\"}}";
+        String query = path.endsWith("/extensions")
+                ? "packageDigest=" + sha256Hex(archive) + "&manifest=eyJzY2hlbWFWZXJzaW9uIjoxfQ"
+                : "metadata=" + java.util.Base64.getUrlEncoder().withoutPadding()
+                        .encodeToString(metadata.getBytes(StandardCharsets.UTF_8));
         String timestamp = now();
         String signature = sign("POST", path, query, "tenant-a", "actor-a", timestamp, archive, "publish");
         for (boolean tamper : new boolean[] {false, true}) {

@@ -49,6 +49,7 @@ import type {
   ManagedMonitorOperationView,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-monitor-protocol.js';
 import type { ManagedExtensionRuntimeControl } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-package.js';
+import type { ManagedRuntimeSkillControl } from './managed-runtime-skill-source.js';
 import {
   MANAGED_EXTENSION_LINUX_CAPABILITY_DIGEST,
   MANAGED_EXTENSION_DEVELOPER_CAPABILITY_DIGEST,
@@ -265,6 +266,35 @@ export class HostedWorkspaceBroker {
         this.capabilityResolution = undefined;
         throw cause;
       }));
+  }
+
+  async readWorkspaceContext(): Promise<{
+    cwdRelative: string;
+    contextRevision: string;
+  } | null> {
+    const response = await this.harnessRequest('/runtimes:capabilities', {});
+    this.readRuntime(response);
+    if (response['workspaceContext'] == null) return null;
+    const context = object(response['workspaceContext']);
+    const cwd = context['cwdRelative'];
+    const revision = context['contextRevision'];
+    if (
+      typeof cwd === 'string' &&
+      [...cwd].some((character) => character.codePointAt(0)! < 32)
+    )
+      throw new Error('Invalid saved Workspace context.');
+    if (
+      typeof cwd !== 'string' ||
+      !cwd ||
+      cwd.startsWith('/') ||
+      cwd.includes('\\') ||
+      cwd.includes('://') ||
+      cwd.split('/').some((part) => !part || part === '..') ||
+      typeof revision !== 'string' ||
+      !/^[1-9][0-9]{0,18}$/.test(revision)
+    )
+      throw new Error('Invalid saved Workspace context.');
+    return { cwdRelative: cwd, contextRevision: revision };
   }
 
   async mcpDefinitions(
@@ -804,6 +834,18 @@ export class HostedWorkspaceBroker {
 
   async extensionControl(
     operation: ManagedExtensionRuntimeControl,
+  ): Promise<Record<string, unknown>> {
+    return this.runtimeMetadataControl(operation);
+  }
+
+  async skillControl(
+    operation: ManagedRuntimeSkillControl,
+  ): Promise<Record<string, unknown>> {
+    return this.runtimeMetadataControl(operation);
+  }
+
+  private async runtimeMetadataControl(
+    operation: ManagedExtensionRuntimeControl | ManagedRuntimeSkillControl,
   ): Promise<Record<string, unknown>> {
     const envelope = await this.request(
       `/harness-sessions/${encodeURIComponent(this.key.sessionId)}/extensions/control`,

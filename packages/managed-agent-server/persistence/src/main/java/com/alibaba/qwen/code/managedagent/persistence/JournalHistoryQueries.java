@@ -5,6 +5,7 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.StoredTransaction;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.TransactionPage;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.fasterxml.jackson.databind.JsonNode;
 import org.apache.commons.lang3.StringUtils;
@@ -376,10 +377,10 @@ final class JournalHistoryQueries {
 
     void requireInitialResource(JsonNode ref, JournalStoreRows.HeadRow head, String kind) throws IOException {
         WorkspaceRecoveryReader.validateRef(ref);
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(head.tenantId(), head.sessionId());
+        String scope = ManagedSessionStore.sessionScopeKey(head.tenantId(), head.sessionId());
         var resources = jdbc.query("SELECT " + ManagedSchemaProjection.RESOURCE.columns()
                         + " FROM ma_resource WHERE resource_key = ? AND session_scope_key = ? AND resource_id = ?",
-                storeRows.resourceMapper, com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.resourceKey(scope, ref.path("resourceId").asText()), scope, ref.path("resourceId").asText());
+                storeRows.resourceMapper, ManagedSessionStore.resourceKey(scope, ref.path("resourceId").asText()), scope, ref.path("resourceId").asText());
         if (resources.size() != 1) {
             throw JournalStoreRows.journalCorrupt();
         }
