@@ -22,6 +22,7 @@
 import type { Content, Part } from '@google/genai';
 import { execSync } from 'node:child_process';
 
+import { splitCompoundCommandSegments } from './rule-parser.js';
 import { shellWords } from './shell-semantics.js';
 
 /**
@@ -187,16 +188,23 @@ export function amendNeedsApproval(command: string): boolean {
 }
 
 function mentionsGitCommitAmend(command: string): boolean {
+  // A `$` only speaks about the simple command it sits in: `echo $HOME;
+  // git commit -m x` cannot turn the second command into an amend. Split at
+  // the shell's own boundaries first, then walk each segment with fresh state
+  // (R25-2).
+  for (const segment of splitCompoundCommandSegments(command)) {
+    if (mentionsGitCommitAmendInSegment(segment.command)) return true;
+  }
+  return false;
+}
+
+function mentionsGitCommitAmendInSegment(command: string): boolean {
   let seenGit = false;
   let inCommit = false;
   let previousWord: string | undefined;
   // The previous raw token, used to recognise a mandatory flag's value at
   // token granularity (its internal spaces must not re-open the scan).
   let previousToken: string | undefined;
-  // Any word that spells `commit`, including one an expansion split
-  // (`${x}commit`); without it a `$` before it is just another command's
-  // variable (`git push origin $BRANCH`).
-  let commitText = false;
   // Rule 3 (R25-2): a `$` that can change the command's *structure* keeps the
   // mention unprovable. Three positions qualify: before the first `commit`
   // word (program/subcommand/flag assembly), a flag built from an expansion,
@@ -204,6 +212,11 @@ function mentionsGitCommitAmend(command: string): boolean {
   // flag value. A `$` in an ordinary argument value — `-m "$msg"`,
   // `-m "$(cat msg)"` — does not change what the guard reads and must not ask.
   let dollarBeforeCommit = false;
+  // A `$` before the commit word only matters when this segment can reach an
+  // amend flag through it (`$X commit --amend`, `git $SUB --amend`). Without
+  // one, `git push origin $BRANCH` and `$X commit -m x` cannot amend, and
+  // asking would be the false positive #13570 is about.
+  let dollarCanAssemble = false;
   // `${IFS}`/`$IFS` expand to whitespace at run time, so a command that
   // assembles `git`, `commit` and `--amend` this way cannot be read from the
   // text; treat the expansion as whitespace so the words are seen (R25-2).
@@ -222,7 +235,6 @@ function mentionsGitCommitAmend(command: string): boolean {
         const bare = bareShellWord(word);
         if (!bare) continue;
         tokenBare ??= bare;
-        if (bare.toLowerCase().includes('commit')) commitText = true;
         if (inCommit) {
           if (isAmendFlag(bare)) return true;
           if (!valueToken) {
@@ -244,14 +256,15 @@ function mentionsGitCommitAmend(command: string): boolean {
         }
         if (isGitWord(bare)) seenGit = true;
         else if (seenGit && bare === 'commit') inCommit = true;
+        else if (dollarBeforeCommit && isAmendFlag(bare)) {
+          dollarCanAssemble = true;
+        }
         previousWord = bare;
       }
     }
     previousToken = tokenBare;
   }
-  // Only a `$` in a git command that also spells `commit` can affect an amend;
-  // `awk '{print $1}'`, `echo $HOME` and `git push origin $BRANCH` cannot.
-  return seenGit && commitText && dollarBeforeCommit;
+  return dollarCanAssemble;
 }
 
 /** A word that expands at run time and starts like a flag (R25-2). */

@@ -393,6 +393,34 @@ describe('isDestructiveCommand — git commit --amend', () => {
     }
   });
 
+  it('keeps a dollar sign inside the command it belongs to', () => {
+    // R25-2 negative space: a `$` in an earlier simple command cannot turn a
+    // later `git commit` into an amend (`echo $HOME; git commit -m x`), and a
+    // `$` that never reaches an amend flag is not an amend either.
+    for (const command of [
+      'echo $HOME; git commit -m x',
+      'git push $BRANCH; git commit -m x',
+      '$X commit -m x',
+      'git push $BRANCH; echo commit $msg',
+    ]) {
+      expect(amendNeedsApproval(command)).toBe(false);
+    }
+  });
+
+  it('still asks when a dollar sign can assemble the amend', () => {
+    // The positive direction the gate must not lose: an expansion in the
+    // program, subcommand or amend position is unprovable, not inert.
+    for (const command of [
+      '$X commit --amend',
+      'git $SUB --amend',
+      'git commit -m "$msg" --amend',
+      'git >| /dev/null commit --amend',
+      'git commit -S --amend',
+    ]) {
+      expect(amendNeedsApproval(command)).toBe(true);
+    }
+  });
+
   it('does not ask for an amend whose only dollar sign is an argument value', () => {
     // Rule 3 keys on `$` positions that can restructure the command, not on
     // the presence of `$`: a variable commit message is the most common
