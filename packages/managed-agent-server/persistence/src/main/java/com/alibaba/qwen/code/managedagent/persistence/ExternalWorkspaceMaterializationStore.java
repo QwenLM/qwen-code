@@ -1,6 +1,5 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
-import com.alibaba.qwen.code.managedagent.contracts.persistence.ExternalStorageRegistration;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
@@ -72,10 +71,20 @@ public final class ExternalWorkspaceMaterializationStore {
             if (registrations.size() != 1) {
                 throw conflict("external_workspace_conflict");
             }
-            var registration = decode(registrations.getFirst(), ExternalStorageRegistration.class);
-            String physical = registration.identity().ownerKey();
-            long revision = registration.identity().registrationRevision();
-            if (!registeredAliasId.equals(registration.alias().tenantWorkspaceId())
+            // The shared strict decoder is the one every other reader of this
+            // column uses; a lenient scalar coercion here would commit an
+            // ACTIVE Workspace that every later consumer permanently refuses.
+            final com.alibaba.qwen.code.runtimebroker.spi.ExternalStorageRegistry.RegisteredExternalStorage registration;
+            try {
+                registration = com.alibaba.qwen.code.runtimebroker.spi.ExternalStorageRegistry
+                        .decodeRegistration(registrations.getFirst());
+            } catch (RuntimeException unreadable) {
+                throw conflict("external_workspace_conflict");
+            }
+            String physical = ManagedSchemaKeys.key("external-storage/1",
+                    registration.providerId(), registration.physicalKey());
+            long revision = registration.registrationRevision();
+            if (!registeredAliasId.equals(registration.tenantWorkspaceId())
                     || jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage WHERE alias_key = ?"
                             + " AND tenant_key = ? AND storage_key = ? AND physical_key = ? AND registration_revision = ?",
                             Long.class, aliasKey, JdbcRuntimeBindingRepository.storageFenceKey(tenant),
@@ -86,7 +95,7 @@ public final class ExternalWorkspaceMaterializationStore {
                             + " AND holder_key IS NULL AND binding_id IS NULL AND runtime_generation IS NULL"
                             + " AND runtime_session_id IS NULL AND maintenance_id IS NULL AND maintenance_generation IS NULL FOR UPDATE",
                             String.class, physical, physical, tenant, registeredAliasId, revision,
-                            registration.alias().mountRoot()).size() != 1
+                            registration.mountRoot()).size() != 1
                     || !jdbc.queryForList("SELECT workspace_id FROM ma_workspace WHERE tenant_id = ?"
                             + " AND (workspace_id = ? OR storage_id = ?)", tenant, registeredAliasId, registeredAliasId).isEmpty()
                     || !jdbc.queryForList("SELECT binding_id FROM ma_runtime_binding WHERE storage_alias_key = ?"

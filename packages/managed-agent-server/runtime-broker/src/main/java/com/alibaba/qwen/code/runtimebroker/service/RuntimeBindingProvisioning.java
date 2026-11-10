@@ -184,9 +184,7 @@ final class RuntimeBindingProvisioning {
             return failed(unavailable("runtime_binding_unavailable",
                     "Runtime binding is not available"));
         }
-        if (RuntimeBrokerSupport.shouldReconcileExternalWorkspace(request, record)) {
-            return reconcileBinding(record);
-        }
+        if (RuntimeBrokerSupport.shouldReconcileExternalWorkspace(request, record)) return reconcileBinding(record);
         CompletableFuture<BindingContext> created =
                 new CompletableFuture<>();
         CompletableFuture<BindingContext> existing =
@@ -406,19 +404,7 @@ final class RuntimeBindingProvisioning {
                     }
                     RuntimeBindingRecord currentClaim = renewal.stopAndGet();
                     try {
-                        if (error != null) {
-                            if (request.isManagedContext()
-                                    && RuntimeBrokerSupport.retryableExternalWorkspaceProvision(request, cause)) {
-                                // A retryable external-workspace failure keeps the
-                                // binding recoverable instead of blocking it.
-                                if (cause instanceof RuntimeBrokerException brokerFailure) {
-                                    throw new CompletionException(brokerFailure);
-                                }
-                                throw unavailable("runtime_provision_failed",
-                                        "Runtime provisioning failed", cause);
-                            }
-                            throw provisionFailureHandler.failure(claimed, currentClaim, cause, localCapacityRefused.get());
-                        }
+                        if (error != null) throw provisionFailureHandler.failure(claimed, currentClaim, cause, localCapacityRefused.get());
                         if (currentClaim == null) {
                             releaseQuietly(request, outcome.lease());
                             throw unavailable("runtime_provision_fenced",
