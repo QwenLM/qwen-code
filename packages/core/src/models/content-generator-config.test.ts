@@ -12,9 +12,15 @@ import {
   createRuntimeContentGeneratorView,
   resolveCredentialField,
 } from './content-generator-config.js';
-import { createContentGenerator } from '../core/contentGenerator.js';
+import { AuthType, createContentGenerator } from '../core/contentGenerator.js';
 import type { ContentGeneratorConfig } from '../core/contentGenerator.js';
+import {
+  DEFAULT_DASHSCOPE_BASE_URL,
+  DEFAULT_OPENAI_BASE_URL,
+} from '../core/openaiContentGenerator/constants.js';
+import { determineProvider } from '../core/openaiContentGenerator/index.js';
 import type { Config } from '../config/config.js';
+import { preloadRuntimeFetchModule } from '../utils/runtimeFetchOptions.js';
 import type { ResolvedModelConfig } from './types.js';
 import { ModelsConfig } from './modelsConfig.js';
 
@@ -387,6 +393,154 @@ describe('buildAgentContentGeneratorConfig', () => {
         expect(result.reasoning).toBeUndefined();
       },
     );
+
+    it('uses only the alternate model’s headers on an isolated route with the same credential', () => {
+      vi.stubEnv('PARENT_KEY_ENV', undefined);
+      const parent = {
+        ...parentConfig,
+        baseUrl: 'https://parent.example.com/v1',
+        customHeaders: { Authorization: 'Bearer parent-secret' },
+      };
+      const model = {
+        ...openaiResolved,
+        baseUrl: parent.baseUrl,
+        registryBaseUrl: parent.baseUrl,
+        envKey: parent.apiKeyEnvKey,
+        generationConfig: {},
+      };
+      const auth = { authType: 'openai', registryBaseUrl: parent.baseUrl };
+      const ordinary = buildRegistry(model, auth, parent);
+      const isolated = buildRegistry(
+        model,
+        { ...auth, isolatedRoute: true },
+        parent,
+      );
+
+      expect(ordinary.customHeaders).toEqual(parent.customHeaders);
+      expect(isolated.apiKey).toBe(parent.apiKey);
+      expect(isolated.customHeaders).toBeUndefined();
+    });
+
+    describe('isolated OpenAI API prefixes', () => {
+      const gateway = 'https://gateway.example/proxy';
+      const chat = AuthType.USE_OPENAI;
+      const responses = AuthType.USE_OPENAI_RESPONSES;
+      function buildAtPrefix(
+        parentAuth: AuthType,
+        parentUrl: string | undefined,
+        targetAuth: AuthType,
+        targetUrl: string,
+        envKey?: string,
+      ) {
+        const registryBaseUrl = targetUrl || undefined;
+        return buildRegistry(
+          {
+            ...openaiResolved,
+            authType: targetAuth,
+            baseUrl: targetUrl,
+            registryBaseUrl,
+            envKey,
+            generationConfig: {},
+          },
+          {
+            authType: targetAuth,
+            registryBaseUrl: registryBaseUrl ?? null,
+            isolatedRoute: true,
+          },
+          {
+            ...parentConfig,
+            authType: parentAuth,
+            baseUrl: parentUrl,
+            customHeaders: { Authorization: 'Bearer parent-secret' },
+          },
+        );
+      }
+
+      beforeEach(() => {
+        vi.stubEnv('OPENAI_BASE_URL', undefined);
+        vi.stubEnv('OPENAI_API_KEY', parentConfig.apiKey);
+      });
+
+      it.each([
+        [chat, `${gateway}/v1/`, chat, `${gateway}/v1`],
+        [chat, `${gateway}/v1/`, responses, gateway],
+        [responses, `${gateway}/`, chat, `${gateway}/v1`],
+        [chat, '', responses, ''],
+      ])(
+        'allows the same provider default key for %s at %s and %s at %s',
+        (parentAuth, parentUrl, targetAuth, targetUrl) => {
+          const result = buildAtPrefix(
+            parentAuth,
+            parentUrl,
+            targetAuth,
+            targetUrl,
+          );
+          expect(result.apiKey).toBe(parentConfig.apiKey);
+          expect(result.apiKeyEnvKey).toBeUndefined();
+          expect(result.customHeaders).toBeUndefined();
+          expect(result.extra_body).toBeUndefined();
+        },
+      );
+
+      it('retains a resolved key only for the same declared envKey across wires', () => {
+        vi.stubEnv('PARENT_KEY_ENV', undefined);
+        const result = buildAtPrefix(
+          chat,
+          `${gateway}/v1/`,
+          responses,
+          gateway,
+          'PARENT_KEY_ENV',
+        );
+        expect(result.apiKey).toBe(parentConfig.apiKey);
+        expect(result.customHeaders).toBeUndefined();
+        expect(result.extra_body).toBeUndefined();
+      });
+
+      it('does not share the primary default key when the Responses wire adds a distinct path', () => {
+        expect(() => buildAtPrefix(chat, gateway, responses, gateway)).toThrow(
+          'cannot use the primary model',
+        );
+      });
+
+      it.each([
+        [undefined, DEFAULT_DASHSCOPE_BASE_URL],
+        ['', DEFAULT_OPENAI_BASE_URL],
+      ])(
+        'matches the actual Chat SDK endpoint for baseUrl %j',
+        async (baseUrl, expected) => {
+          vi.stubEnv('OPENAI_BASE_URL', gateway);
+          await preloadRuntimeFetchModule();
+          const config = createMockConfig({
+            ...parentConfig,
+            authType: chat,
+            baseUrl,
+          });
+          config.getCliVersion = () => 'fixture';
+          config.getProxy = () => undefined;
+          const client = determineProvider(
+            config.getContentGeneratorConfig(),
+            config,
+          ).buildClient();
+
+          expect(client.baseURL).toBe(expected);
+          expect(
+            buildAtPrefix(chat, baseUrl, chat, client.baseURL).apiKey,
+          ).toBe(parentConfig.apiKey);
+        },
+      );
+
+      it.each([
+        [chat, DEFAULT_OPENAI_BASE_URL],
+        [responses, ''],
+      ])(
+        'does not share a DashScope default credential with native %s',
+        (targetAuth, targetUrl) => {
+          expect(() =>
+            buildAtPrefix(chat, undefined, targetAuth, targetUrl),
+          ).toThrow('cannot use the primary model');
+        },
+      );
+    });
 
     it.each(['image', 'voice'] as const)(
       'rejects %s-only models for agent content generation',

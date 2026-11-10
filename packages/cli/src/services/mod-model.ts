@@ -59,10 +59,13 @@ export function resolveModModel(
   config: Config,
   name: string,
 ): { selector: string; modelId: string; authType?: string } {
-  const context = buildModelIdContext(config);
   const modelName = name.trim();
   const wanted = ALIASES.get(modelName) ?? modelName;
-  const target = wanted === 'fast' ? (context.fastModel ?? 'inherit') : wanted;
+  const target =
+    wanted === 'fast'
+      ? (config.getFastModel?.({ requirePinnedEndpoint: true }) ?? 'inherit')
+      : wanted;
+  const context = buildModelIdContext(config);
   const [modelSelector, endpoint, extra] = target.split('\0');
   if (!modelSelector?.trim() || endpoint === '' || extra !== undefined) {
     throw new Error(`invalid model endpoint selector ${JSON.stringify(name)}`);

@@ -641,7 +641,11 @@ export class ModRuntime {
     reply: Extract<ModReply, { type: 'model-complete' }>,
     root: NonNullable<ModRuntime['root']>,
   ): void {
-    if (Atomics.load(this.cancelled, 0) !== 0) return;
+    if (
+      Atomics.load(this.cancelled, 0) !== 0 ||
+      Atomics.load(reply.cancellation, 0) !== 0
+    )
+      return;
     // The worker and host share the process clock. A queued request may
     // already have expired before the host gets to start it.
     const remainingMs = reply.deadline - performance.now();

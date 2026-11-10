@@ -10,6 +10,7 @@ import type { ExtendedChatCompletionAssistantMessageParam } from '../converter.j
 
 const ISOLATED_MODEL_REQUEST_FIELDS = new Set([
   'model',
+  'models',
   'messages',
   'input',
   'instructions',
@@ -24,7 +25,9 @@ const ISOLATED_MODEL_REQUEST_FIELDS = new Set([
   'web_search_options',
   'enable_search',
   'search_options',
+  'plugins',
   'n',
+  'background',
   'stream',
   'stream_options',
 ]);

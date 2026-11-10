@@ -86,12 +86,13 @@ const modelOperations = new Map<
   number,
   {
     parent?: ModInvocation;
+    cancellation: Int32Array;
     resolve: (result: unknown) => void;
     reject: (error: Error) => void;
   }
 >();
 // The AbortController behind each running call's `options.signal`, by the
-// caller's plugin and the token its guest gave the call.
+// caller's invocation and the token its guest gave the call.
 const modelSignals = new Map<string, AbortController>();
 let serial = 0;
 let epoch = 0;
@@ -198,16 +199,28 @@ class Realm {
         active !== undefined && (active.budget.expired || callAbandoned(active))
       );
     });
-    const bridge = this.vm.newFunction('modCall', (id, kind, data) => {
+    const bridge = this.vm.newFunction('modCall', (id, kind, data, token) => {
       const callId = this.vm.getNumber(id);
       const method = this.vm.getString(kind);
+      if (method === 'model.abort') {
+        modelSignals.get(`${callId}:${this.vm.getNumber(data)}`)?.abort();
+        return this.vm.undefined;
+      }
       const json = this.vm.getString(data);
       if (Buffer.byteLength(json) > MOD_MAX_BYTES)
         throw new Error('Mod API input is too large.');
       assertModDepth(json, 'Mod API input');
       const deferred = this.vm.newPromise();
+      let modelKey: string | undefined;
+      let model: AbortController | undefined;
+      // Register before yielding so the same guest slice can cancel the call.
+      if (method === 'model.complete') {
+        modelKey = `${callId}:${this.vm.getNumber(token)}`;
+        model = new AbortController();
+        modelSignals.set(modelKey, model);
+      }
       const task = Promise.resolve().then(() =>
-        hostCall(callId, method, JSON.parse(json)),
+        hostCall(callId, method, JSON.parse(json), model),
       );
       notifications.add(task);
       // A model call waits on the host as a next does, so its clock may stop.
@@ -232,6 +245,7 @@ class Realm {
           value.dispose();
         })
         .finally(() => {
+          if (modelKey !== undefined) modelSignals.delete(modelKey);
           notifications.delete(task);
           guestNotifications.delete(task);
           deferred.dispose();
@@ -675,11 +689,11 @@ async function hostCall(
   id: number,
   method: string,
   payload: unknown,
+  model?: AbortController,
 ): Promise<unknown> {
-  const models = method === 'model.complete';
   const call = calls.get(id);
-  if (!call?.live || callAbandoned(call)) {
-    if (models) return ABORTED_MODEL_CALL;
+  if (!call?.live || callAbandoned(call) || model?.signal.aborted) {
+    if (model) return ABORTED_MODEL_CALL;
     throw new Error('Mod continuation is no longer active.');
   }
   if (
@@ -695,11 +709,6 @@ async function hostCall(
       registration,
     })),
   ];
-  // A caller's `options.signal` aborted: not an event, so no hook hears it.
-  if (method === 'model.abort') {
-    modelSignals.get(call.plugin + ':' + String(payload['token']))?.abort();
-    return undefined;
-  }
   assertBudget(call);
   const value = payload['value'];
   if (method === 'next') {
@@ -722,7 +731,7 @@ async function hostCall(
   }
   if (!isModMethod(method)) throw new Error('Mod API not supported: ' + method);
   const plugin = realms[call.plugin].plugin;
-  if (models && !runsModels)
+  if (model && !runsModels)
     throw new Error('Mod model.complete: this host runs no model calls.');
   // A submitted prompt raises prompt.submit as a typed one does, through
   // every hook but the caller's. What arrives beneath them last is queued once
@@ -731,7 +740,7 @@ async function hostCall(
   const submits = method === 'prompt.submit';
   const input = submits
     ? promptSubmitCall(value, plugin.name)
-    : models
+    : model
       ? modelCompleteCall(value)
       : value;
   if (!submits) validateInput(method, input, {});
@@ -745,8 +754,6 @@ async function hostCall(
   const detached = notice(method) || submits;
   let arrived: ModInput | undefined;
   // The original call's deadline applies even while a hook is rewriting it.
-  const model = models ? new AbortController() : undefined;
-  const signalKey = call.plugin + ':' + String(payload['token']);
   let modelScope = call.modelScope;
   let modelTimer: ReturnType<typeof setTimeout> | undefined;
   if (model) {
@@ -761,7 +768,6 @@ async function hostCall(
     };
     if (typeof timeout === 'number')
       modelTimer = setTimeout(() => model.abort(), timeout);
-    modelSignals.set(signalKey, model);
   }
   const invoke = async () => {
     const result = await dispatch(
@@ -769,7 +775,7 @@ async function hostCall(
       input as ModInput,
       { plugin: plugin.name, tier: 'user' },
       frames,
-      async (e) => {
+      async (e, _frames, owner) => {
         assertLive(detached ? undefined : call, modelScope);
         if (call.epoch !== epoch)
           throw new Error('Mod call belongs to an ended dispatch.');
@@ -817,7 +823,7 @@ async function hostCall(
           return { value: undefined };
         }
         if (model && modelScope)
-          return { value: await completeModel(e, modelScope, call) };
+          return { value: await completeModel(e, modelScope, owner) };
         if (submits) {
           arrived = {
             text: e['text'],
@@ -870,8 +876,6 @@ async function hostCall(
     throw error;
   } finally {
     clearTimeout(modelTimer);
-    if (model && modelSignals.get(signalKey) === model)
-      modelSignals.delete(signalKey);
   }
 }
 
@@ -958,6 +962,7 @@ function cancelAbandonedOperations(): void {
   }
   for (const [id, operation] of modelOperations) {
     if (!callAbandoned(operation.parent)) continue;
+    Atomics.store(operation.cancellation, 0, 1);
     modelOperations.delete(id);
     cancelled.push(id);
     operation.reject(new Error('Mod model call ended with its dispatch.'));
@@ -987,6 +992,8 @@ async function completeModel(
   if (++operations > 4096 || hostOperations.size + modelOperations.size >= 32)
     throw new Error('Mod host operation limit exceeded.');
   const id = ++serial;
+  // The host can receive the request after its cancellation has already run.
+  const cancellation = new Int32Array(new SharedArrayBuffer(4));
   // A hook that passed `null` or `false` down sends no system prompt.
   const { system, ...request } = input;
   const sent = {
@@ -997,15 +1004,16 @@ async function completeModel(
   let abort: (() => void) | undefined;
   try {
     return await new Promise((resolve, reject) => {
-      modelOperations.set(id, { parent, resolve, reject });
+      modelOperations.set(id, { parent, cancellation, resolve, reject });
       abort = () => {
         if (!modelOperations.delete(id)) return;
+        Atomics.store(cancellation, 0, 1);
         send({ type: 'host-cancel', ids: [id] });
         resolve(ABORTED_MODEL_CALL);
       };
       signal.addEventListener('abort', abort, { once: true });
       timer = setInterval(cancelAbandonedOperations, 5);
-      send({ type: 'model-complete', id, input: sent, deadline });
+      send({ type: 'model-complete', id, input: sent, deadline, cancellation });
       updateActivity();
     });
   } finally {
@@ -1331,6 +1339,8 @@ port.on('message', async (request: ModWorkerRequest) => {
   } catch (error) {
     send({ type: 'error', message: String(error).slice(0, 4000) });
   } finally {
+    for (const operation of modelOperations.values())
+      Atomics.store(operation.cancellation, 0, 1);
     for (const call of calls.values()) {
       call.closed = true;
       call.aborted = true;

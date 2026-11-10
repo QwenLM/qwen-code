@@ -961,12 +961,14 @@ describe('BaseLlmClient', () => {
         async (authType, envKey, baseUrl) => {
           const apiKey = 'native-key';
           vi.stubEnv(envKey, apiKey);
+          const primaryBaseUrl =
+            authType === AuthType.USE_OPENAI ? baseUrl : undefined;
           const { config } = resolveModelConfig({
             authType,
             env: { [envKey]: apiKey },
-            cli: { model: 'main-model' },
+            cli: { model: 'main-model', baseUrl: primaryBaseUrl },
           });
-          expect(config.baseUrl).toBeUndefined();
+          expect(config.baseUrl).toBe(primaryBaseUrl);
           crossProviderConfig.getContentGeneratorConfig.mockReturnValue(config);
           crossProviderConfig.getModelsConfig.mockReturnValue(
             new ModelsConfig({
@@ -993,6 +995,7 @@ describe('BaseLlmClient', () => {
         const primary = {
           id: 'main-model',
           envKey: 'MOD_MAIN_KEY',
+          baseUrl: DEFAULT_OPENAI_BASE_URL,
           generationConfig: {
             customHeaders: { authorization: 'primary-header' },
             extra_body: { user: 'primary' },
@@ -1047,11 +1050,12 @@ describe('BaseLlmClient', () => {
           const apiKey = 'ambient-key';
           vi.stubEnv(envKey, apiKey);
           vi.stubEnv(overrideKey, override);
-          crossProviderConfig.getContentGeneratorConfig.mockReturnValue({
-            model: 'main-model',
+          const { config } = resolveModelConfig({
             authType,
-            apiKey,
+            cli: { model: 'main-model' },
+            env: { [envKey]: apiKey, [overrideKey]: override },
           });
+          crossProviderConfig.getContentGeneratorConfig.mockReturnValue(config);
           crossProviderConfig.getModelsConfig.mockReturnValue(
             new ModelsConfig({
               modelProvidersConfig: { [authType]: [{ id: fastModel }] },

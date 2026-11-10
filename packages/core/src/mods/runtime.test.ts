@@ -1668,6 +1668,14 @@ describe('ModRuntime with the real QuickJS worker', () => {
           catch (error) { results.push(String(error)); }
         }
         return {text: JSON.stringify(results)};`);
+    const guestSignal = `
+      const listeners = new Set();
+      const stop = {aborted: false, addEventListener: (_, f) => listeners.add(f),
+        removeEventListener: (_, f) => listeners.delete(f)};
+      const abort = () => {
+        stop.aborted = true;
+        for (const listener of listeners) listener();
+      };`;
 
     it('runs a request on the host, its blocks joined and kept beside it', async () => {
       const asked: ModModelCompleteInput[] = [];
@@ -1768,6 +1776,51 @@ describe('ModRuntime with the real QuickJS worker', () => {
       expect(asked).toEqual([{ model: 'm', prompt: 'x!' }]);
     });
 
+    it('cuts a discarded downstream call when model middleware returns', async () => {
+      let markStarted!: () => void;
+      const started = new Promise<void>((resolve) => {
+        markStarted = resolve;
+      });
+      let downstream: AbortSignal | undefined;
+      let cancelledBeforeWitness: boolean | undefined;
+      const host = vi.fn<ModModelHost>(async ({ prompt }, active) => {
+        if (prompt === 'discarded') {
+          downstream = active;
+          markStarted();
+          await new Promise<never>((_, reject) => {
+            active.addEventListener('abort', () => reject(active.reason), {
+              once: true,
+            });
+          });
+        }
+        if (prompt === 'ready') await started;
+        if (prompt === 'witness') cancelledBeforeWitness = downstream?.aborted;
+        return { isAnswered: true, text: prompt, usage };
+      });
+      const runtime = await createModels(
+        [
+          `export function register(on) {
+            on('model.complete', {prompt:'outer'}, async ($, e, next) => {
+              void next({...e, prompt:'discarded'}).catch(() => {});
+              await $.model.complete({model:'m', prompt:'ready'});
+              return {value:{isAnswered:true, text:'local', usage:${JSON.stringify(usage)}}};
+            });
+          }`,
+          fixture(`
+            const local = await $.model.complete({model:'m', prompt:'outer'});
+            const witness = await $.model.complete({model:'m', prompt:'witness'});
+            return {text:JSON.stringify([local.text, witness.text])};`),
+        ],
+        host,
+      );
+      expect(
+        JSON.parse(
+          await runtime.runCommand('hello', '', AbortSignal.timeout(3000)),
+        ),
+      ).toEqual(['local', 'witness']);
+      expect(cancelledBeforeWitness).toBe(true);
+    });
+
     it("cuts the call when the caller's signal aborts", async () => {
       const cut: boolean[] = [];
       const runtime = await createModels(
@@ -1796,6 +1849,29 @@ describe('ModRuntime with the real QuickJS worker', () => {
       ).toEqual([aborted, aborted]);
       // One request was made and cut; the already-aborted one was never sent.
       expect(cut).toEqual([true]);
+    });
+
+    it('skips a model call aborted in the same guest execution slice', async () => {
+      const host = vi.fn<ModModelHost>(async ({ prompt }) => ({
+        isAnswered: true,
+        text: prompt,
+        usage,
+      }));
+      const runtime = await createModels(
+        [
+          fixture(`
+            ${guestSignal}
+            const pending = $.model.complete({model:'m', prompt:'skip'}, {signal:stop});
+            const sibling = $.model.complete({model:'m', prompt:'keep'});
+            abort();
+            return {text:JSON.stringify(await Promise.all([pending, sibling]))};`),
+        ],
+        host,
+      );
+      expect(
+        JSON.parse(await runtime.runCommand('hello', '', signal())),
+      ).toEqual([aborted, { isAnswered: true, text: 'keep', usage }]);
+      expect(host.mock.calls.map(([input]) => input.prompt)).toEqual(['keep']);
     });
 
     it('skips a model request whose signal aborts during serialization', async () => {
@@ -2086,6 +2162,70 @@ describe('ModRuntime with the real QuickJS worker', () => {
           }
         } finally {
           worker.removeListener('message', onQueued);
+        }
+      },
+    );
+
+    it.each(['signal', 'owner'])(
+      'skips a queued model call cancelled by its %s before host admission',
+      async (mode) => {
+        const host = vi.fn<ModModelHost>(async () => ({
+          isAnswered: true,
+          text: 'too late',
+          usage,
+        }));
+        const runtime = await createModels(
+          [
+            `let retained;${fixture(`
+              if (e.args === 'read') return {text:JSON.stringify(await retained)};
+              ${guestSignal}
+              retained = $.model.complete({model:'m', prompt:'skip'}, {signal:stop});
+              await $.clock.sleep(1);
+              if (e.args === 'owner') return {text:'started'};
+              abort();
+              return {text:JSON.stringify(await retained)};`)}`,
+          ],
+          host,
+        );
+        const worker = Reflect.get(runtime, 'worker') as Worker;
+        const [receive] = worker.listeners('message') as Array<
+          (reply: ModWorkerReply) => void
+        >;
+        const queued: ModWorkerReply[] = [];
+        let released = false;
+        // Delay handling without changing the FIFO order of worker messages.
+        const delay = (reply: ModWorkerReply) => {
+          if (reply.type !== 'model-complete' && !queued.length) {
+            receive(reply);
+            return;
+          }
+          queued.push(reply);
+          if (reply.type === 'host-cancel') {
+            released = true;
+            for (const pending of queued.splice(0)) receive(pending);
+          }
+        };
+        worker.off('message', receive);
+        worker.on('message', delay);
+        try {
+          const answer = await runtime.runCommand(
+            'hello',
+            mode,
+            AbortSignal.timeout(3000),
+          );
+          if (mode === 'owner') {
+            expect(answer).toBe('started');
+            expect(
+              JSON.parse(await runtime.runCommand('hello', 'read', signal())),
+            ).toEqual(aborted);
+          } else {
+            expect(JSON.parse(answer)).toEqual(aborted);
+          }
+          expect(released).toBe(true);
+          expect(host).not.toHaveBeenCalled();
+        } finally {
+          worker.off('message', delay);
+          worker.on('message', receive);
         }
       },
     );

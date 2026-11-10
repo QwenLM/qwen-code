@@ -158,7 +158,7 @@ export const MOD_GUEST_FACTORY = String.raw`
     const envelope = parse(json);
     return frozen(envelope.voidValue ? {value: undefined} : envelope.value);
   };
-  const call = (id, frames, kind, value, extra) => bridge(id, kind, encode({ ...extra, value, frames })).then(unpack);
+  const call = (id, frames, kind, value) => bridge(id, kind, encode({ value, frames })).then(unpack);
   const api = (id, frames) => {
     const invoke = (name, value) => call(id, frames, name, value);
     const namespaces = {
@@ -204,14 +204,14 @@ export const MOD_GUEST_FACTORY = String.raw`
           let published = false;
           const abort = () => {
             aborted = true;
-            if (published) call(id, frames, 'model.abort', {}, { token }).catch(() => {});
+            if (published) bridge(id, 'model.abort', token);
           };
           try {
             signal?.addEventListener('abort', abort);
             if (signal?.aborted || aborted) return abortedModel;
-            const json = encode({ token, value: request, frames });
+            const json = encode({ value: request, frames });
             if (signal?.aborted || aborted) return abortedModel;
-            const pending = bridge(id, 'model.complete', json);
+            const pending = bridge(id, 'model.complete', json, token);
             published = true;
             return await pending.then(unpack);
           } finally {

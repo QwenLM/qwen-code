@@ -542,6 +542,7 @@ export class ModSession implements ICommandLoader {
     await this.toolQueue;
     if (!this.closing && this.sessionId === this.config.getSessionId()) {
       this.toolGeneration = new AbortController();
+      this.requestRender();
     }
   }
 
@@ -654,6 +655,12 @@ export class ModSession implements ICommandLoader {
       runtime.renderHooks.length === 1 ? runtime.renderHooks[0] : 'hooks';
     band.state = 'running';
     band.startedAt = Date.now();
+    const signal = AbortSignal.any([
+      this.lifetime.signal,
+      this.toolGeneration.signal,
+    ]);
+    const isCurrent = () =>
+      !signal.aborted && this.sessionId === this.config.getSessionId();
     try {
       // A switch in progress renders once it is done.
       if (this.closing || this.sessionId !== this.config.getSessionId()) return;
@@ -661,16 +668,13 @@ export class ModSession implements ICommandLoader {
         this.terminal?.draw?.(ENGINE_NODE, owner);
         return;
       }
-      const { tree, notes } = await runtime.render(
-        band.input!,
-        this.lifetime.signal,
-      );
+      const { tree, notes } = await runtime.render(band.input!, signal);
       for (const note of notes) logger.debug(note);
-      if (!this.closing) this.terminal?.draw?.(tree, owner);
+      if (isCurrent()) this.terminal?.draw?.(tree, owner);
     } catch (error) {
       // The worker has failed or closed; the band draws nothing.
       logger.debug(`Mod ui.render: ${String(error)}`);
-      if (!this.closing) this.terminal?.draw?.(ENGINE_NODE, owner);
+      if (isCurrent()) this.terminal?.draw?.(ENGINE_NODE, owner);
     } finally {
       if (Date.now() - band.startedAt > RENDER_LIVE_MS)
         band.steadyUntil = Date.now() + RENDER_SLOW_MS;

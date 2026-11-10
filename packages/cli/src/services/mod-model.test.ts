@@ -84,6 +84,20 @@ describe('resolveModModel', () => {
     });
   });
 
+  it('requires the fast model endpoint to remain configured', () => {
+    const { config } = fakeConfig();
+    config.getFastModel = vi.fn<Config['getFastModel']>(
+      ({ requirePinnedEndpoint } = {}) => {
+        if (requirePinnedEndpoint) throw new Error('stale fast endpoint');
+        return 'qwen-flash';
+      },
+    );
+    expect(() => resolveModModel(config, 'haiku')).toThrow(
+      'stale fast endpoint',
+    );
+    expect(resolveModModel(config, 'sonnet').modelId).toBe('qwen-max');
+  });
+
   it('takes configured ids and refuses any other', () => {
     const { config } = fakeConfig();
     expect(resolveModModel(config, 'deepseek-chat').modelId).toBe(

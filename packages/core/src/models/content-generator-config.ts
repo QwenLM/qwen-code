@@ -23,6 +23,7 @@ import {
   type ContentGeneratorConfig,
 } from '../core/contentGenerator.js';
 import {
+  DEFAULT_DASHSCOPE_BASE_URL,
   DEFAULT_OPENAI_BASE_URL,
   normalizeOpenAiWireBaseUrl,
 } from '../core/openaiContentGenerator/constants.js';
@@ -340,23 +341,41 @@ export async function createRuntimeContentGeneratorView(
   return { contentGenerator, contentGeneratorConfig };
 }
 
+function openAiApiPrefix(
+  authType: AuthType,
+  baseUrl: string | undefined,
+): string | undefined {
+  if (authType === AuthType.USE_OPENAI) {
+    // DashScope supplies a URL when the setting is absent. An explicit empty
+    // string goes to the OpenAI SDK, which uses its native default instead.
+    const sdkBaseUrl =
+      baseUrl === undefined ? DEFAULT_DASHSCOPE_BASE_URL : baseUrl;
+    return (sdkBaseUrl || DEFAULT_OPENAI_BASE_URL).replace(/\/$/, '');
+  }
+  if (authType === AuthType.USE_OPENAI_RESPONSES) {
+    // Responses appends /v1 even when the configured URL has another prefix.
+    return `${normalizeOpenAiWireBaseUrl(baseUrl)}/v1`;
+  }
+  return undefined;
+}
+
 function matchesIsolatedEndpoint(
   parent: ContentGeneratorConfig,
+  targetAuthType: AuthType,
   targetBaseUrl: string | undefined,
 ): boolean {
   const { authType, baseUrl } = parent;
-  if (authType === AuthType.USE_OPENAI) {
+  if (
+    authType === AuthType.USE_OPENAI ||
+    authType === AuthType.USE_OPENAI_RESPONSES
+  ) {
+    const prefix = openAiApiPrefix(authType, baseUrl);
     return (
-      (baseUrl !== undefined || !process.env['OPENAI_BASE_URL']?.trim()) &&
-      (baseUrl || DEFAULT_OPENAI_BASE_URL) === targetBaseUrl
+      prefix !== undefined &&
+      prefix === openAiApiPrefix(targetAuthType, targetBaseUrl)
     );
   }
-  if (authType === AuthType.USE_OPENAI_RESPONSES) {
-    return (
-      normalizeOpenAiWireBaseUrl(baseUrl) ===
-      normalizeOpenAiWireBaseUrl(targetBaseUrl)
-    );
-  }
+  if (authType !== targetAuthType) return false;
   if (authType === AuthType.USE_GEMINI || authType === AuthType.USE_VERTEX_AI) {
     const useVertex = authType === AuthType.USE_VERTEX_AI;
     // The isolated transport fixes the protocol and rejects ambient URLs.
@@ -382,16 +401,22 @@ function applyResolvedModelConfig(
 ): void {
   const sameProvider = authOverrides.authType === parentConfig.authType;
   const targetBaseUrl = authOverrides.baseUrl ?? resolvedModel.baseUrl;
-  const sameEndpoint =
-    sameProvider &&
-    (authOverrides.isolatedRoute
-      ? matchesIsolatedEndpoint(parentConfig, targetBaseUrl)
-      : resolvedModel.baseUrl === parentConfig.baseUrl);
+  const sameEndpoint = authOverrides.isolatedRoute
+    ? matchesIsolatedEndpoint(
+        parentConfig,
+        resolvedModel.authType,
+        targetBaseUrl,
+      )
+    : sameProvider && resolvedModel.baseUrl === parentConfig.baseUrl;
   const inheritCredentials =
-    sameProvider &&
-    (authOverrides.registryBaseUrl === undefined ||
-      (sameEndpoint && resolvedModel.envKey === parentConfig.apiKeyEnvKey));
-  if (!inheritCredentials) targetConfig.customHeaders = undefined;
+    !authOverrides.isolatedRoute && authOverrides.registryBaseUrl === undefined
+      ? sameProvider
+      : sameEndpoint &&
+        resolvedModel.envKey === parentConfig.apiKeyEnvKey &&
+        (sameProvider || !!resolvedModel.envKey);
+  if (authOverrides.isolatedRoute || !inheritCredentials) {
+    targetConfig.customHeaders = undefined;
+  }
   targetConfig.reasoningRouteBaseUrl = resolvedModel.registryBaseUrl ?? null;
   targetConfig.model = resolvedModel.id;
   targetConfig.authType = resolvedModel.authType;
@@ -433,7 +458,7 @@ function applyResolvedModelConfig(
         ? apiKey
         : resolveCredentialField(
             apiKey,
-            sameProvider ? parentConfig.apiKey : undefined,
+            inheritCredentials ? parentConfig.apiKey : undefined,
             authOverrides.authType,
             'apiKey',
           );

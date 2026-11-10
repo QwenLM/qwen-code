@@ -279,6 +279,7 @@ export type ModReply =
       id: number;
       input: ModModelCompleteInput;
       deadline: number;
+      cancellation: Int32Array;
     }
   | { type: 'invalidate'; plugin: string; event: string }
   | ({ type: 'log'; plugin: string } & ModLog);
