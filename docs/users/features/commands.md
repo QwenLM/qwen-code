@@ -136,7 +136,7 @@ Commands for managing AI tools and models.
 
 > [!warning]
 >
-> The `auto-edit`, `auto`, and `yolo` approval modes bypass approval prompts for tool executions. In `yolo` mode, all actions — including shell commands, file writes, and network requests — run without confirmation. Only use these modes in trusted, sandboxed, or disposable environments.
+> The `auto-edit`, `auto`, and `yolo` approval modes reduce approval prompts for tool executions — a matching `permissions.ask` rule still requires confirmation in `auto-edit` and `auto` mode, and only `yolo` bypasses those rules. In `yolo` mode, all actions — including shell commands, file writes, and network requests — run without confirmation. Only use these modes in trusted, sandboxed, or disposable environments.
 
 > [!note]
 >

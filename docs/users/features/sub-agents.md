@@ -350,7 +350,7 @@ Use the optional `approvalMode` frontmatter field to control how a subagent's to
 
 - `default`: Tools require interactive approval (same as the main session default)
 - `plan`: Analyze-only mode — the agent plans but does not execute changes
-- `auto-edit`: Tools are auto-approved without prompting (recommended for most agents)
+- `auto-edit`: Tools are auto-approved without prompting unless they match a `permissions.ask` rule (recommended for most agents)
 - `yolo`: All tools auto-approved, including potentially destructive ones
 - `bubble`: Background-agent tool approvals are surfaced in the parent session
 
