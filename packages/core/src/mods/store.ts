@@ -4,7 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, createHmac, randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import { hostname } from 'node:os';
 import * as path from 'node:path';
@@ -32,7 +33,22 @@ const lockScope = createHash('sha256')
   .update(JSON.stringify([hostname(), pidNamespace, bootId]))
   .digest('hex')
   .slice(0, 16);
+const machineScope = readMachineScope();
 const fileLocks = new Map<string, Mutex>();
+
+function readMachineScope(): string | null {
+  if (process.platform !== 'linux') return null;
+  try {
+    const id = readFileSync('/etc/machine-id', 'utf8').trim();
+    if (!/^[a-f0-9]{32}$/i.test(id) || /^0+$/.test(id)) return null;
+    return createHmac('sha256', 'Qwen-Code/ModStore/lock-host')
+      .update(Buffer.from(id, 'hex'))
+      .digest('hex')
+      .slice(0, 32);
+  } catch {
+    return null;
+  }
+}
 
 function processStart(pid: number): string {
   const token = readProcStartToken(pid);
@@ -40,14 +56,26 @@ function processStart(pid: number): string {
 }
 
 function deadOwner(owner: string): boolean {
+  const match =
+    /^([a-f0-9]{16})\.([1-9]\d{0,9})\.([\w-]+)\.[a-f0-9-]{36}(?:\.([a-f0-9]{32})\.([a-f0-9-]+))?$/.exec(
+      owner,
+    );
+  if (!match) return false;
+  if (match[1] !== lockScope) {
+    // A PID is meaningful only within its boot and namespace. A verified
+    // earlier boot of this machine is already gone, regardless of its PID.
+    return (
+      machineScope !== null &&
+      bootId !== null &&
+      match[4] === machineScope &&
+      match[5] !== bootId
+    );
+  }
   if (
     process.platform === 'linux' &&
     (pidNamespace === null || bootId === null)
   )
     return false;
-  const match =
-    /^([a-f0-9]{16})\.([1-9]\d{0,9})\.([\w-]+)\.[a-f0-9-]{36}$/.exec(owner);
-  if (match?.[1] !== lockScope) return false;
   const pid = Number(match[2]);
   if (pid > 2_147_483_647) return false;
   try {
@@ -74,16 +102,22 @@ async function removeLock(lock: string, owner?: string): Promise<void> {
   }
 }
 
-async function acquireLock(lock: string): Promise<string> {
+async function acquireLock(
+  lock: string,
+  signal?: AbortSignal,
+): Promise<string> {
+  signal?.throwIfAborted();
   const nonce = randomUUID();
   const staging = `${lock}.${nonce}`;
-  const owner = `${lockScope}.${process.pid}.${processStart(process.pid)}.${nonce}`;
+  const recovery = machineScope && bootId ? `.${machineScope}.${bootId}` : '';
+  const owner = `${lockScope}.${process.pid}.${processStart(process.pid)}.${nonce}${recovery}`;
   await fs.mkdir(staging, { mode: 0o700 });
   let acquired = false;
   try {
     await fs.mkdir(path.join(staging, owner));
     const deadline = performance.now() + LOCK_WAIT_MS;
     do {
+      signal?.throwIfAborted();
       try {
         // Publish ownership in one rename. A held lock is nonempty and
         // cannot be replaced, even if the owner has stopped running.
@@ -110,13 +144,37 @@ async function acquireLock(lock: string): Promise<string> {
         else if (owners.length === 1 && deadOwner(owners[0]))
           await removeLock(lock, owners[0]);
       }
-      await delay(50);
+      await delay(50, undefined, { signal });
     } while (performance.now() < deadline);
     throw new Error(`Mod store: timed out waiting for ${lock}.`);
   } finally {
     if (!acquired)
       await fs.rm(staging, { recursive: true, force: true }).catch(() => {});
   }
+}
+
+function acquireLocalLock(
+  mutex: Mutex,
+  signal?: AbortSignal,
+): Promise<() => void> {
+  if (!signal) return mutex.acquire();
+  signal.throwIfAborted();
+  return new Promise((resolve, reject) => {
+    const abort = () => reject(signal.reason);
+    signal.addEventListener('abort', abort, { once: true });
+    void mutex.acquire().then(
+      (release) => {
+        signal.removeEventListener('abort', abort);
+        // A cancelled waiter still reaches the mutex's front eventually.
+        if (signal.aborted) release();
+        else resolve(release);
+      },
+      (error: unknown) => {
+        signal.removeEventListener('abort', abort);
+        reject(error);
+      },
+    );
+  });
 }
 
 // Entries are kept as pairs, so a key such as "10" keeps its place and
@@ -141,8 +199,13 @@ export class ModStore {
     return [...(await this.read(this.file(plugin))).keys()];
   }
 
-  async set(plugin: string, key: string, value: unknown): Promise<void> {
-    await this.change(plugin, (entries) => {
+  async set(
+    plugin: string,
+    key: string,
+    value: unknown,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    await this.change(plugin, signal, (entries) => {
       if (
         !entries.has(key) &&
         Buffer.byteLength(JSON.stringify([...entries.keys(), key])) >
@@ -156,8 +219,12 @@ export class ModStore {
     });
   }
 
-  async delete(plugin: string, key: string): Promise<void> {
-    await this.change(plugin, (entries) => entries.delete(key));
+  async delete(
+    plugin: string,
+    key: string,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    await this.change(plugin, signal, (entries) => entries.delete(key));
   }
 
   private file(plugin: string): string {
@@ -172,13 +239,17 @@ export class ModStore {
   private async read(file: string): Promise<Map<string, unknown>> {
     let text: string;
     try {
-      const handle = await openNoFollow(file).catch((error: unknown) => {
-        // The no-follow fallback can observe a regular file being replaced.
-        if (isNodeError(error) && error.code === 'ELOOP')
-          return openNoFollow(file);
-        throw error;
-      });
+      const handle = await openNoFollow(file, { nonBlocking: true }).catch(
+        (error: unknown) => {
+          // The no-follow fallback can observe a regular file being replaced.
+          if (isNodeError(error) && error.code === 'ELOOP')
+            return openNoFollow(file, { nonBlocking: true });
+          throw error;
+        },
+      );
       try {
+        if (!(await handle.stat()).isFile())
+          throw new Error('The store is not a regular file.');
         text = await handle.readFile('utf8');
       } finally {
         await handle.close();
@@ -216,16 +287,20 @@ export class ModStore {
 
   private async change(
     plugin: string,
+    signal: AbortSignal | undefined,
     apply: (entries: Map<string, unknown>) => boolean,
   ): Promise<void> {
     const file = this.file(plugin);
     let mutex = fileLocks.get(file);
     if (!mutex) fileLocks.set(file, (mutex = new Mutex()));
-    await mutex.runExclusive(async () => {
+    const release = await acquireLocalLock(mutex, signal);
+    try {
+      signal?.throwIfAborted();
       await fs.mkdir(this.dir, { recursive: true, mode: 0o700 });
       const lock = `${file}.lock`;
-      const owner = await acquireLock(lock);
+      const owner = await acquireLock(lock, signal);
       try {
+        signal?.throwIfAborted();
         const entries = await this.read(file);
         if (!apply(entries)) return;
         const stored: StoreFile = { version: 1, entries: [...entries] };
@@ -244,6 +319,8 @@ export class ModStore {
       } finally {
         await removeLock(lock, path.basename(owner));
       }
-    });
+    } finally {
+      release();
+    }
   }
 }

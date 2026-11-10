@@ -116,6 +116,7 @@ export class ModRuntime {
     refresh: () => void;
     // `$.model.complete` calls the host is running for the root.
     models: Map<number, AbortController>;
+    storeWrites: AbortController;
   };
   private tool?: {
     next: ModToolNext;
@@ -167,7 +168,7 @@ export class ModRuntime {
       else if (reply.type === 'prompt-queue')
         this.answerPromptQueue(reply, root.id);
       else if (reply.type === 'store') {
-        const task = this.answerStore(reply, root.id);
+        const task = this.answerStore(reply, root.id, root.storeWrites.signal);
         this.storeCalls.add(task);
         void task.finally(() => this.storeCalls.delete(task));
       } else if (reply.type === 'invalidate') {
@@ -745,30 +746,36 @@ export class ModRuntime {
     this.post({ type: 'prompt-queue-result', id: reply.id, refused }, root);
   }
 
-  // The file is the host's: a call runs to its end even when the dispatch
-  // that made it ends first, and the answer then goes nowhere.
   private async answerStore(
     reply: Extract<ModReply, { type: 'store' }>,
     root: number,
+    signal: AbortSignal,
   ): Promise<void> {
     const { operation } = reply;
     let value: unknown;
     let error: string | undefined;
     try {
+      signal.throwIfAborted();
       if (!this.store) throw new Error('This host keeps no Mod store.');
       if (operation.method === 'store.get')
         value = await this.store.get(operation.plugin, operation.key);
       else if (operation.method === 'store.keys')
         value = await this.store.keys(operation.plugin);
       else if (operation.method === 'store.set')
-        await this.store.set(operation.plugin, operation.key, operation.value);
-      else await this.store.delete(operation.plugin, operation.key);
+        await this.store.set(
+          operation.plugin,
+          operation.key,
+          operation.value,
+          signal,
+        );
+      else await this.store.delete(operation.plugin, operation.key, signal);
     } catch (caught) {
       error = (caught instanceof Error ? caught.message : String(caught)).slice(
         0,
         4000,
       );
     }
+    if (signal.aborted) return;
     try {
       this.post({ type: 'store-result', id: reply.id, value, error }, root);
     } catch (caught) {
@@ -806,7 +813,7 @@ export class ModRuntime {
       ...[...(this.tool?.operations.values() ?? [])].map(
         (operation) => operation.task,
       ),
-      // A write the session's end cut off still finishes before it closes.
+      // Let a store update that acquired its lock finish before closing.
       ...this.storeCalls,
     ]);
   }
@@ -814,6 +821,7 @@ export class ModRuntime {
   private fail(error: Error): void {
     this.failure ??= error;
     this.tool?.controller.abort();
+    this.root?.storeWrites.abort();
     this.pending?.({ type: 'error', message: this.failure.message });
   }
 
@@ -850,6 +858,7 @@ export class ModRuntime {
       revision: 0,
       phase: 0,
       models: new Map(),
+      storeWrites: new AbortController(),
       refresh: () => {
         if (aborted || this.root !== root) return;
         const lending =
@@ -873,6 +882,7 @@ export class ModRuntime {
       Atomics.store(this.cancelled, 0, 1);
       this.tool?.controller.abort();
       for (const model of root.models.values()) model.abort();
+      root.storeWrites.abort();
       if (timer) clearTimeout(timer);
       cancelTimer = setTimeout(stop, 250);
     };
@@ -903,6 +913,7 @@ export class ModRuntime {
       });
     } finally {
       this.root = undefined;
+      root.storeWrites.abort();
       for (const model of root.models.values()) model.abort();
       root.models.clear();
       if (timer) clearTimeout(timer);

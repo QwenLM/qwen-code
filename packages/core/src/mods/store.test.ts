@@ -5,8 +5,9 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, createHmac, randomUUID } from 'node:crypto';
 import {
+  constants,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -15,9 +16,9 @@ import {
   utimesSync,
   writeFileSync,
 } from 'node:fs';
-import { rm } from 'node:fs/promises';
+import { open, readdir, rm } from 'node:fs/promises';
 import { hostname, tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as noFollow from '../utils/no-follow-open.js';
 import {
@@ -39,14 +40,38 @@ describe('ModStore', () => {
     return dir;
   };
 
-  const heldLock = (dir: string, pid: number) => {
-    const bootId = process.platform === 'linux' ? readLocalBootId() : null;
+  const bootId = process.platform === 'linux' ? readLocalBootId() : null;
+  const machineScope = (() => {
+    if (bootId === null) return null;
+    try {
+      const id = readFileSync('/etc/machine-id', 'utf8').trim();
+      if (!/^[a-f0-9]{32}$/i.test(id) || /^0+$/.test(id)) return null;
+      return createHmac('sha256', 'Qwen-Code/ModStore/lock-host')
+        .update(Buffer.from(id, 'hex'))
+        .digest('hex')
+        .slice(0, 32);
+    } catch {
+      return null;
+    }
+  })();
+  const heldLock = (
+    dir: string,
+    pid: number,
+    recovery?: { boot: string; machine: string },
+  ) => {
     const scope = createHash('sha256')
-      .update(JSON.stringify([hostname(), readPidNamespaceId(), bootId]))
+      .update(
+        JSON.stringify([
+          hostname(),
+          readPidNamespaceId(),
+          recovery?.boot ?? bootId,
+        ]),
+      )
       .digest('hex')
       .slice(0, 16);
     const lock = join(dir, 'mod.json.lock');
-    const owner = join(lock, `${scope}.${pid}.-.${randomUUID()}`);
+    const suffix = recovery ? `.${recovery.machine}.${recovery.boot}` : '';
+    const owner = join(lock, `${scope}.${pid}.-.${randomUUID()}${suffix}`);
     mkdirSync(owner, { recursive: true });
     return { lock, owner };
   };
@@ -82,6 +107,80 @@ describe('ModStore', () => {
     await store.set('mod', 'mine', 2);
     expect(await store.keys('mod')).toEqual(['mine']);
     expect(() => statSync(lock)).toThrow();
+  });
+
+  it.runIf(machineScope !== null)(
+    'recovers an earlier boot of this machine even if its PID is in use',
+    async () => {
+      const dir = storeDir();
+      const { lock, owner } = heldLock(dir, process.pid, {
+        boot: randomUUID(),
+        machine: machineScope!,
+      });
+      writeFileSync(join(owner, 'store.json'), 'incomplete');
+      const store = new ModStore(dir);
+      await store.set('mod', 'kept', 1);
+      expect(await store.get('mod', 'kept')).toBe(1);
+      expect(() => statSync(lock)).toThrow();
+    },
+  );
+
+  it('cancels both lock waits while preserving the existing owner', async () => {
+    const dir = storeDir();
+    const { lock, owner } = heldLock(dir, process.pid, {
+      boot: randomUUID(),
+      machine: randomUUID().replaceAll('-', ''),
+    });
+    const store = new ModStore(dir);
+    const fileWait = new AbortController();
+    const localWait = new AbortController();
+    const first = store.set('mod', 'first', 1, fileWait.signal);
+    void first.catch(() => {});
+    const second = store.delete('mod', 'second', localWait.signal);
+    let localCancelled = false;
+    void second.catch(() => {
+      localCancelled = true;
+    });
+    try {
+      await vi.waitFor(async () => {
+        expect(
+          (await readdir(dir)).some((name) =>
+            name.startsWith('mod.json.lock.'),
+          ),
+        ).toBe(true);
+      });
+      localWait.abort();
+      await vi.waitFor(() => expect(localCancelled).toBe(true));
+      await expect(second).rejects.toMatchObject({ name: 'AbortError' });
+      fileWait.abort();
+      await expect(first).rejects.toMatchObject({ name: 'AbortError' });
+      expect(await readdir(dir)).toEqual(['mod.json.lock']);
+      expect(await readdir(lock)).toEqual([basename(owner)]);
+      expect(await store.keys('mod')).toEqual([]);
+    } finally {
+      fileWait.abort();
+      localWait.abort();
+      await Promise.allSettled([first, second]);
+    }
+  });
+
+  it('finishes an update when cancellation arrives after acquiring both locks', async () => {
+    const store = new ModStore(storeDir());
+    const controller = new AbortController();
+    const original = noFollow.openNoFollow;
+    const opened = vi
+      .spyOn(noFollow, 'openNoFollow')
+      .mockImplementationOnce((...args) => {
+        controller.abort();
+        return original(...args);
+      });
+    try {
+      await store.set('mod', 'kept', 1, controller.signal);
+      expect(controller.signal.aborted).toBe(true);
+      expect(await store.get('mod', 'kept')).toBe(1);
+    } finally {
+      opened.mockRestore();
+    }
   });
 
   it('keeps every write when writes come at once', async () => {
@@ -138,6 +237,30 @@ describe('ModStore', () => {
         /cannot read/,
       );
       expect(await store.get('target', 'kept')).toBe(1);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a named pipe before waiting for a writer',
+    async () => {
+      const dir = storeDir();
+      const file = join(dir, 'mod.json');
+      expect(spawnSync('mkfifo', [file]).status).toBe(0);
+      let unblocked = false;
+      const timer = setTimeout(() => {
+        unblocked = true;
+        void open(file, constants.O_WRONLY | constants.O_NONBLOCK)
+          .then((handle) => handle.close())
+          .catch(() => {});
+      }, 1500);
+      try {
+        await expect(new ModStore(dir).get('mod', 'k')).rejects.toThrow(
+          /not a regular file/,
+        );
+        expect(unblocked).toBe(false);
+      } finally {
+        clearTimeout(timer);
+      }
     },
   );
 

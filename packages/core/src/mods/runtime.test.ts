@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { once } from 'node:events';
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -2375,7 +2376,10 @@ describe('ModRuntime with the real QuickJS worker', () => {
         catch (error) { return {text: JSON.stringify('rejected: ' + String(error))}; }
       });
     }`;
-    const createStore = async (sources: string[], dir?: string) => {
+    const createStore = async (
+      sources: string[],
+      store?: string | ModStore,
+    ) => {
       const runtime = await ModRuntime.createGroup(
         sources.map((source, index) => ({
           id: `mod-${index}`,
@@ -2395,7 +2399,7 @@ describe('ModRuntime with the real QuickJS worker', () => {
         false,
         undefined,
         undefined,
-        dir === undefined ? undefined : new ModStore(dir),
+        typeof store === 'string' ? new ModStore(store) : store,
       );
       runtimes.push(runtime);
       return runtime;
@@ -2540,6 +2544,46 @@ describe('ModRuntime with the real QuickJS worker', () => {
       expect(readFileSync(join(dir, 'mod-0.json'), 'utf8')).toBe(
         '{"not": "a store"}',
       );
+    });
+
+    it('cancels waiting store writes with their dispatch', async () => {
+      const cleanup = new AbortController();
+      let started: (signal?: AbortSignal) => void = () => {};
+      const waiting = new Promise<AbortSignal | undefined>(
+        (resolve) => (started = resolve),
+      );
+      class WaitingStore extends ModStore {
+        override async set(
+          _plugin: string,
+          _key: string,
+          _value: unknown,
+          dispatch?: AbortSignal,
+        ) {
+          const signal = dispatch
+            ? AbortSignal.any([dispatch, cleanup.signal])
+            : cleanup.signal;
+          started(dispatch);
+          if (!signal.aborted) await once(signal, 'abort');
+          signal.throwIfAborted();
+        }
+      }
+      const runtime = await createStore(
+        [command(`await $.store.set('k', 1); return 'set';`)],
+        new WaitingStore(storeDir()),
+      );
+      const dispatch = new AbortController();
+      const ran = runtime.runCommand('go-mod-0', '', dispatch.signal);
+      void ran.catch(() => {});
+      try {
+        const pending = await waiting;
+        expect(pending?.aborted).toBe(false);
+        dispatch.abort();
+        expect(pending?.aborted).toBe(true);
+        await expect(ran).rejects.toThrow('Mod dispatch cancelled.');
+        await runtime.dispose();
+      } finally {
+        cleanup.abort();
+      }
     });
 
     it('finishes a write the session closes on before it is closed', async () => {

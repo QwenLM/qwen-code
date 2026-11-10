@@ -606,17 +606,16 @@ store in place.
 - A new key must keep the serialized key list within the Mod reply budget of
   256 KiB, including the reply envelope. Deleting an existing key can shrink
   a list that already exceeds the budget.
-- A store file Qwen Code cannot read fails every call on that store, and the
-  file is left as it is. A symlink at the store file path also causes the
-  call to reject.
+- A store path must point to a readable regular file. Calls reject symlinks,
+  named pipes, and invalid store data and leave the entry in place.
 - A paused process still holds its write lock. Acquiring the lock across
   processes times out after eight seconds. A later writer can recover a lock
-  from a dead process on the same host. On Linux, recovery also requires the
-  same boot and PID namespace.
-- A `set` or `delete` whose dispatch ends while it runs rejects, so the caller
-  cannot tell whether it landed. The session waits for it before it closes; a
-  write the process is killed during may or may not land, and the file is
-  never left half-written.
+  from a verified dead process. On Linux, locks from an earlier boot can
+  also be recovered when the recorded machine identity matches.
+- Ending a dispatch cancels `set` and `delete` calls that are waiting for a
+  lock. An update already started under the lock may still land, and the
+  session waits for it before closing. A process exit during the update
+  leaves either the old file or the new one.
 
 The calls are API events, so another plugin's hooks hear them with `{key}` or
 `{key, value}`. A hook may pass on another `value` for `store.set`, answer with
