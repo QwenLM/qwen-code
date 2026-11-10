@@ -209,6 +209,10 @@
       "zh": "单条排队 JSON-RPC 请求等待浏览器应答的时长，到期后过期并向 Runtime 返回结构化离线错误。接受 `25s` 这类时长；不带单位的数字按秒计。",
       "type": "duration"
     },
+    "qwen.managed-agent.client-files.relay-url": {
+      "en": "The base URL of this control plane's internal listener as reachable from the Hosted Harness, used to build the relay MCP endpoint the Harness connects back to (`<relay-url>/internal/managed-client-files/v1/sessions/<id>/mcp`). Required while `qwen.managed-agent.client-files.enabled` is true; registration is refused when it is blank. Must be an http(s) URL without credentials, query or fragment.",
+      "zh": "从 Hosted Harness 可达的本控制面内部监听器基地址，用于构造 Harness 回连的 relay MCP 端点（`<relay-url>/internal/managed-client-files/v1/sessions/<id>/mcp`）。`qwen.managed-agent.client-files.enabled` 为 true 时必填；为空时拒绝注册。必须是不带凭据、查询串或片段的 http(s) URL。"
+    },
     "qwen.managed-agent.definition-models": {
       "en": "The model IDs a stored AgentDefinition may name in `model.id`, as a comma-separated list; a Session whose definition names any other model is refused at admission. Each ID should match a model provider route configured in the Harness. Empty admits only definitions without a model.",
       "zh": "存储的 AgentDefinition 可在 `model.id` 中指定的模型 ID，以逗号分隔；定义中指定其他模型的 Session 会在准入时被拒绝。每个 ID 应对应 Harness 中配置的一个模型提供方路由。为空时只接受未指定模型的定义。"

@@ -716,6 +716,7 @@ public class ManagedAgentProperties
         @DurationUnit(ChronoUnit.SECONDS)
         private Duration bindingTtl = Duration.ofHours(8);
         private int maxPayloadBytes = 60 * 1024;
+        private String relayUrl = "";
     }
 
     @Getter

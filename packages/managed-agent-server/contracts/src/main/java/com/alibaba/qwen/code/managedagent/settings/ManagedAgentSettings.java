@@ -86,6 +86,7 @@ public interface ManagedAgentSettings {
         public Duration getRequestTtl();
         public Duration getBindingTtl();
         public int getMaxPayloadBytes();
+        public String getRelayUrl();
     }
     public interface ToolPublication {
         public boolean isAsyncVerificationEnabled();

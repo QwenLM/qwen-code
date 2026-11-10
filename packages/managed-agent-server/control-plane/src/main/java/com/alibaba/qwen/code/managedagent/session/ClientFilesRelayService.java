@@ -5,6 +5,7 @@ import com.alibaba.qwen.code.managedagent.contracts.clientfiles.ClientFilesModel
 import com.alibaba.qwen.code.managedagent.contracts.clientfiles.ClientFilesModels.QueuedRequest;
 import com.alibaba.qwen.code.managedagent.contracts.clientfiles.ClientFilesModels.Registration;
 import com.alibaba.qwen.code.managedagent.contracts.clientfiles.ClientFilesModels.Status;
+import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.repository.ClientFilesRelay;
@@ -18,11 +19,13 @@ import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
+import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.SecureRandom;
 import java.util.Base64;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 /**
@@ -42,15 +45,18 @@ public class ClientFilesRelayService {
     private final ManagedAgentService agentService;
     private final ManagedWorkspaceRegistry workspaces;
     private final ManagedAgentSettings settings;
+    private final HarnessConnector harness;
     private final ObjectMapper json;
 
     public ClientFilesRelayService(ClientFilesRelay relay, ManagedAgentService agentService,
             ManagedWorkspaceRegistry workspaces, ManagedAgentSettings settings,
+            HarnessConnector harness,
             @Qualifier("managedAgentObjectMapper") ObjectMapper json) {
         this.relay = relay;
         this.agentService = agentService;
         this.workspaces = workspaces;
         this.settings = settings;
+        this.harness = harness;
         this.json = json;
     }
 
@@ -58,6 +64,7 @@ public class ClientFilesRelayService {
         requireEnabled();
         requireSessionId(session);
         requireExecutionAuthority(tenant, actor, session);
+        String relayUrl = requireRelayUrl();
         long now = System.currentTimeMillis();
         Binding previous = relay.find(tenant, session);
         byte[] secret = new byte[32];
@@ -68,6 +75,16 @@ public class ClientFilesRelayService {
                 DigestUtils.sha256Hex(token), expiresAt, now);
         if (previous != null && previous.active() && previous.generation() != binding.generation()) {
             relay.failQueued(tenant, session, previous.generation(), ClientFilesModels.ERROR_OFFLINE, now);
+        }
+        try {
+            harness.clientFilesOperation(tenant, session, Map.of(
+                    "action", "register",
+                    "serverId", binding.serverId(),
+                    "generation", binding.generation(),
+                    "url", relayEndpoint(relayUrl, session),
+                    "token", token));
+        } catch (RuntimeException cause) {
+            throw error(503, "client_files_relay_unavailable");
         }
         return new Registration(binding.serverId(), binding.generation(), token, binding.expiresAt());
     }
@@ -87,6 +104,13 @@ public class ClientFilesRelayService {
         long now = System.currentTimeMillis();
         relay.close(tenant, session, binding.generation(), now);
         relay.failQueued(tenant, session, binding.generation(), ClientFilesModels.ERROR_OFFLINE, now);
+        // The binding is already closed, so a Harness that cannot be reached
+        // must not fail the teardown; its own session cleanup drops the tools.
+        try {
+            harness.clientFilesOperation(tenant, session, Map.of("action", "unregister"));
+        } catch (RuntimeException ignored) {
+            // best-effort dispatch
+        }
         return new Status(binding.serverId(), binding.generation(), ClientFilesModels.STATE_CLOSED,
                 binding.expiresAt());
     }
@@ -283,6 +307,29 @@ public class ClientFilesRelayService {
         if (!settings.getClientFiles().isEnabled()) {
             throw error(503, "client_files_disabled");
         }
+    }
+
+    private String requireRelayUrl() {
+        String configured = settings.getClientFiles().getRelayUrl();
+        if (configured == null || configured.isBlank()) {
+            throw error(503, "client_files_relay_unconfigured");
+        }
+        URI uri;
+        try {
+            uri = URI.create(configured);
+        } catch (IllegalArgumentException invalid) {
+            throw error(503, "client_files_relay_unconfigured");
+        }
+        if ((!"http".equals(uri.getScheme()) && !"https".equals(uri.getScheme()))
+                || uri.getHost() == null || uri.getUserInfo() != null
+                || uri.getQuery() != null || uri.getFragment() != null) {
+            throw error(503, "client_files_relay_unconfigured");
+        }
+        return configured.replaceAll("/+$", "");
+    }
+
+    private static String relayEndpoint(String relayUrl, String session) {
+        return relayUrl + "/internal/managed-client-files/v1/sessions/" + session + "/mcp";
     }
 
     private static void requireSessionId(String session) {

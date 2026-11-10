@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent.session;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.clientfiles.ClientFilesModels.QueuedRequest;
 import com.alibaba.qwen.code.managedagent.contracts.clientfiles.ClientFilesModels.Registration;
+import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.persistence.ClientFilesRelayStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
@@ -19,14 +20,19 @@ import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.time.Duration;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class ClientFilesRelayServiceTest {
@@ -36,6 +42,7 @@ class ClientFilesRelayServiceTest {
     private ManagedAgentProperties properties;
     private ManagedAgentService agentService;
     private ManagedWorkspaceRegistry workspaces;
+    private HarnessConnector harness;
     private ClientFilesRelayService service;
     private String tenant;
     private final String session = "session";
@@ -51,12 +58,16 @@ class ClientFilesRelayServiceTest {
         properties = new ManagedAgentProperties();
         properties.getClientFiles().setEnabled(true);
         properties.getClientFiles().setRequestTtl(Duration.ofMillis(300));
+        properties.getClientFiles().setRelayUrl("http://127.0.0.1:4170");
         agentService = mock(ManagedAgentService.class);
         workspaces = mock(ManagedWorkspaceRegistry.class);
+        harness = mock(HarnessConnector.class);
         when(agentService.requireReadableSession(anyString(), anyString(), anyString()))
                 .thenAnswer(invocation -> session(invocation.getArgument(0), invocation.getArgument(2)));
         when(workspaces.accessOf(anyString(), anyString(), anyString())).thenReturn(WorkspaceAccess.OPERATOR);
-        service = new ClientFilesRelayService(store, agentService, workspaces, properties, new ObjectMapper());
+        when(harness.clientFilesOperation(anyString(), anyString(), any()))
+                .thenReturn(Map.of("registered", true, "toolCount", 1));
+        service = new ClientFilesRelayService(store, agentService, workspaces, properties, harness, new ObjectMapper());
         tenant = "tenant-" + UUID.randomUUID();
     }
 
@@ -84,6 +95,33 @@ class ClientFilesRelayServiceTest {
         when(workspaces.accessOf(anyString(), anyString(), anyString())).thenReturn(WorkspaceAccess.READER);
         assertThatThrownBy(() -> service.register(tenant, ACTOR, session))
                 .hasFieldOrPropertyWithValue("code", "client_files_execution_forbidden");
+    }
+
+    @Test
+    void registerRefusedWithoutRelayUrl() {
+        properties.getClientFiles().setRelayUrl("");
+        assertThatThrownBy(() -> service.register(tenant, ACTOR, session))
+                .hasFieldOrPropertyWithValue("code", "client_files_relay_unconfigured");
+    }
+
+    @Test
+    void registerDispatchesTheRelayEndpointAndTokenToTheHarness() {
+        Registration registration = service.register(tenant, ACTOR, session);
+        verify(harness).clientFilesOperation(eq(tenant), eq(session), argThat(body ->
+                "register".equals(body.get("action"))
+                        && "local-files".equals(body.get("serverId"))
+                        && Long.valueOf(1L).equals(body.get("generation"))
+                        && registration.token().equals(body.get("token"))
+                        && ("http://127.0.0.1:4170/internal/managed-client-files/v1/sessions/"
+                                + session + "/mcp").equals(body.get("url"))));
+    }
+
+    @Test
+    void registerFailsWhenTheHarnessCannotBeReached() {
+        when(harness.clientFilesOperation(anyString(), anyString(), any()))
+                .thenThrow(new UnsupportedOperationException("unavailable"));
+        assertThatThrownBy(() -> service.register(tenant, ACTOR, session))
+                .hasFieldOrPropertyWithValue("code", "client_files_relay_unavailable");
     }
 
     @Test

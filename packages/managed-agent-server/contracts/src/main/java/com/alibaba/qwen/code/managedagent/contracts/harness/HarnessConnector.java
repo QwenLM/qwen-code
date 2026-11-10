@@ -112,6 +112,13 @@ public interface HarnessConnector extends AutoCloseable {
         throw new UnsupportedOperationException("MCP management is unavailable");
     }
 
+    public default boolean supportsClientFiles() { return false; }
+
+    /** Registers or unregisters the Session's client filesystem relay. */
+    public default Map<String, Object> clientFilesOperation(String tenantId, String sessionId, Map<String, Object> body) {
+        throw new UnsupportedOperationException("Client files registration is unavailable");
+    }
+
     public default boolean supportsSessionExtensions() { return false; }
 
     public default boolean supportsPackagePreparation() { return false; }
