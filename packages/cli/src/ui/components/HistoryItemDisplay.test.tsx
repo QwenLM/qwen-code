@@ -1111,7 +1111,7 @@ it.each([true, false])(
       'qwen3.8-max',
     );
     const ui = renderWithProviders(
-      <Box width={140}>
+      <Box width={180}>
         <HistoryItemDisplay
           item={{
             id: 1,
@@ -1121,7 +1121,7 @@ it.each([true, false])(
               ? { presentation: 'subscription-success' as const }
               : {}),
           }}
-          terminalWidth={140}
+          terminalWidth={180}
           isPending={false}
         />
       </Box>,
@@ -1139,11 +1139,11 @@ it.each([true, false])(
         );
         expect(frame).toContain(
           inkChalk.hex(theme.text.secondary)(
-            'Model: qwen3.8-max. Run /upgrade to upgrade your plan, /usage to view usage, or /model to switch models.',
+            'Model: qwen3.8-max. Run /upgrade to upgrade your plan, /usage to view usage, /model to switch models, or /effort to change reasoning effort.',
           ),
         );
         expect(frame).toContain(
-          '/usage   /upgrade   /model   /status   /logout',
+          '/usage   /upgrade   /model   /effort   /status   /logout',
         );
       } else {
         expect(stripAnsi(frame)).toMatch(/[●•]/u);

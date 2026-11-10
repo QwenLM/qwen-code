@@ -5,7 +5,7 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.CommitTransactionRequest;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.persistence.IsolatedManagedSchemaMySqlTestDatabase;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationAdmissionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationDataStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
@@ -270,7 +270,7 @@ class ToolPublicationStorageMySqlIT {
         };
     }
 
-    private ManagedSessionStore transactionalSessions() {
+    private JdbcManagedSessionStore transactionalSessions() {
         var beans = new DefaultListableBeanFactory();
         beans.registerSingleton("managedAgentTransactionManager", journal.manager);
         var interceptor = new TransactionInterceptor();
@@ -281,7 +281,7 @@ class ToolPublicationStorageMySqlIT {
         var factory = new ProxyFactory(journal.sessions);
         factory.setProxyTargetClass(true);
         factory.addAdvice(interceptor);
-        var result = (ManagedSessionStore) factory.getProxy();
+        var result = (JdbcManagedSessionStore) factory.getProxy();
         assertThat(AopUtils.isCglibProxy(result)).isTrue();
         return result;
     }
