@@ -2700,6 +2700,68 @@ describe('ChannelEditorDialog', () => {
     expect(allowlist?.getAttribute('placeholder')).toBe('group/project');
   });
 
+  it('localizes the GitLab speakers copy for zh-CN', async () => {
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'gitlab-bot',
+      config: {
+        type: 'gitlab',
+        groupPolicy: 'allowlist',
+        groups: {
+          'mygroup/subgroup/project': {
+            senders: 'allowlist',
+            allowedUsers: ['alice'],
+          },
+        },
+      },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    await renderDialog({
+      descriptor: GITLAB_CONFIGURED,
+      instance,
+      language: 'zh-CN',
+    });
+
+    expect(document.body.textContent).toContain('GitLab 用户名');
+    expect(document.body.textContent).not.toContain('GitHub 登录名');
+  });
+
+  it('localizes the GitLab project-path remedy for zh-CN', async () => {
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'gitlab-bot',
+      config: {
+        type: 'gitlab',
+        groupPolicy: 'allowlist',
+        groups: { 'mygroup/subgroup/project': {} },
+      },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    await renderDialog({
+      descriptor: GITLAB_CONFIGURED,
+      instance,
+      language: 'zh-CN',
+      onSave,
+    });
+
+    const allowlist = fieldByLabel('允许的项目') as HTMLInputElement;
+    await act(async () => {
+      setInputValue(allowlist, 'solo');
+    });
+    await act(async () => {
+      Array.from(document.querySelectorAll('button'))
+        .find((button) => button.textContent?.trim() === '保存')
+        ?.click();
+    });
+
+    expect(onSave).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain('项目需写成路径形式');
+    expect(document.body.textContent).not.toContain('owner/repo');
+  });
+
   it('shows a project-path remedy for a malformed GitLab allowlist entry', async () => {
     const instance: DaemonChannelInstanceSnapshot = {
       name: 'gitlab-bot',
