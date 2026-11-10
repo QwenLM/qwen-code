@@ -8608,6 +8608,7 @@ export function registerHostedHarnessSessionRoutes(
           // Only a delete is terminal; a close keeps the deterministic owner
           // re-acquirable across the reload (R14-1).
           await session.hooks?.close({ terminal: kind === 'delete' });
+          if (kind === 'delete') await releaseOrphanedConfigOwners(session);
           heldDrainUnproven =
             (await releaseLeaseNow(session, kind === 'delete')) ||
             heldDrainUnproven;
@@ -10504,6 +10505,40 @@ export function registerHostedHarnessSessionRoutes(
       },
     );
     return unproven;
+  };
+
+  // A delete must release every config-scoped owner the durable chain names.
+  // HostedHookSession.close() is what sweeps the earlier ones, so an apply
+  // that moves to a bundle with no Hook catalog — drain nils the session and
+  // enable does not rebuild it — leaves no object to run that sweep, and the
+  // delete answers 204 having released nothing (R7-1). Reachable without any
+  // recovery: install hooks, fire one, then apply a hook-free revision.
+  // Only the orphan case is handled here; a live Hooks session already swept
+  // them, and a live MCP broker owns its own id until its own close.
+  const releaseOrphanedConfigOwners = async (
+    session: HostedSession,
+  ): Promise<void> => {
+    if (!brokerOptions || session.hooks) return;
+    const sessionKey = session.managed.authority.sessionHeader.sessionKey;
+    for (const revision of session.extensions?.configRevisions ?? []) {
+      const id = hostedConfigScopedOwnerId(sessionKey, revision);
+      if (id === session.mcp?.broker.runtimeSessionId) continue;
+      try {
+        await new HostedWorkspaceBroker(brokerOptions, sessionKey, id).release({
+          drain: true,
+        });
+      } catch (cause) {
+        // The owner may never have been acquired, or the Broker may have
+        // forgotten it. Both mean nothing remains to stop — the tolerance
+        // the sibling owner release carries (R17-1).
+        if (
+          !(cause instanceof HostedWorkspaceBrokerRejection) ||
+          cause.status !== 404 ||
+          cause.code !== 'runtime_session_not_found'
+        )
+          throw cause;
+      }
+    }
   };
 
   /**
@@ -13572,6 +13607,7 @@ export function registerHostedHarnessSessionRoutes(
         // The held-Runtime drain above ran first so a turn's background run no
         // longer fences the non-terminal mount handback (R14-2).
         await session.hooks?.close({ terminal: req.method === 'DELETE' });
+        if (req.method === 'DELETE') await releaseOrphanedConfigOwners(session);
         // Deferred until the close is known terminal: a Hook fence refusal
         // above keeps the Session attached and retryable, and its wake pump
         // with it. wakeBusy() holds mcpClosing for the whole drain, so no
