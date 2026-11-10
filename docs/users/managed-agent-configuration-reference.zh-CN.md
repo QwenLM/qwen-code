@@ -42,7 +42,7 @@ Managed Agent 服务端的顶层设置：内置 agent 的修订号、存储的 A
 | `message-relay.scan-delay` | — | 时长 | `2s` | Session 消息中继两次运行之间的间隔；每次运行推进 Session 之间待投递的消息（移交、回执、接受），并结算无法投递的消息。没有可用 Hosted Harness 的节点会跳过。接受 `2s` 这类时长；不带单位的数字按毫秒计。 |
 | `model-catalog` | — | YAML 列表 | *（空）* | 为内置 `qwen-code` agent 的 Session 提供的可选模型，可在创建 Session 时选择，之后也可由 Workspace operator 更改。元素为对象列表，包含 `model-id`（Harness 中配置的模型 ID；必填、唯一、最多 512 字节）和 `label`（显示名称，默认等于 `model-id`，最多 512 个字符）；条目无效或重复时启动时拒绝。需在 YAML 配置文件中设置，没有对应的环境变量。模型选择还要求开启 `qwen.managed-agent.harness.workspace-files-enabled`，且 Harness 支持模型选择。 |
 | `model-config-base-urls` | — | YAML 列表 | *（空）* | 允许完整 Session 模型配置使用的 HTTP(S) API 地址，按完整字符串精确匹配，以 YAML 列表设置。为空时禁止准入新配置。公共创建接口接受 `model_config`，WebShell 创建接口接受 `modelConfig`。要求启用 Session Store、Harness 能力 `session-model-config/1` 和 `SecretProtector`（标准服务由已启用的 Runtime Broker 及其凭据密钥环提供）。模型 ID 和 API key 无需在 Harness 注册。参见 [Session 模型配置设计](../design/managed-session-model-config.zh-CN.md)。 |
-| `service-user` | `QWEN_MANAGED_AGENT_SERVICE_USER` | 字符串 | *（空）* | 服务端运行所用的操作系统账号。仅预检会读取该值：确认账号存在，并按该账号（而非运行预检的账号）检查配置文件和凭据文件是否可读。为空时按运行预检的账号检查访问权限。 |
+| `service-user` | `QWEN_MANAGED_AGENT_SERVICE_USER` | 字符串 | *（空）* | 服务端运行所用的操作系统账号。仅预检会读取该值：确认账号存在，并按该账号（而非运行预检的账号）检查配置文件和凭据文件是否可读。运行预检的账号看不到这类文件，或读不了检查要读取的文件时，该行为 FAIL，并提示以该账号运行检查。为空时按运行预检的账号检查访问权限。 |
 | `session-worktree.scan-delay` | — | 时长 | `1000` | Session worktree 任务两次运行之间的间隔；每次运行继续未完成的单 Session Git worktree 步骤，并使 worktree 未能准备好的 Session 的初始 Turn 失败。接受 `1s` 这类时长；不带单位的数字按毫秒计。 |
 | `trusted-actor-header` | `QWEN_MANAGED_AGENT_TRUSTED_ACTOR_HEADER` | 字符串 | *（空）* | 一个请求头名称（例如 `X-Qwen-Actor-Id`），在没有上游认证主体时，其值连同 `X-Qwen-Tenant-Id` 一起被信任为调用方的 actor ID。仅在 open 认证模式下使用；与 signed 模式同时配置时启动时拒绝。open 模式下开启 `qwen.managed-agent.runtime-broker.local-directory-import-enabled` 时必须设置本项。切勿在不可信客户端能访问服务端的环境中设置。为空时禁用。 |
 | `wake-recovery.scan-delay` | — | 时长 | `2s` | 唤醒恢复扫描两次运行之间的间隔；每次运行最多找出 8 个存有已提交输入但无写入者持有的 Session，并重新挂接以运行其唤醒。仅在开启 `qwen.managed-agent.session-store.enabled` 且 Hosted Harness 可用时运行。接受 `2s` 这类时长；不带单位的数字按毫秒计。 |
@@ -154,6 +154,8 @@ Workspace 扩展包的发布与管理，以及哪些 actor 有权执行这些操
 | `allowed-actors` | `QWEN_MANAGED_AGENT_EXTENSION_ALLOWED_ACTORS` | 列表 | *（空）* | 允许发布扩展包、保存其设置以及为 Session 选择或应用扩展包的 actor ID，以逗号分隔；`*` 表示允许所有 actor。该 actor 还需具备 Workspace OPERATOR 权限。为空时不允许任何人。 |
 | `artifact-directory` | `QWEN_MANAGED_AGENT_EXTENSION_ARTIFACT_DIRECTORY` | 字符串 | *（空）* | 存放已发布扩展包归档的目录，每个租户与 Workspace 各占一个私有（`0700`）子目录。为空时禁用扩展管理。根目录或子目录为符号链接时归档不可用。多个副本必须共享该目录。 |
 | `enabled` | `QWEN_MANAGED_AGENT_EXTENSION_PACKAGES_ENABLED` | 布尔 | `false` | 是否允许通过公开扩展 API 为 Workspace 发布和管理扩展包。管理操作还需要设置 `qwen.managed-agent.extensions.artifact-directory`、actor 位于 `qwen.managed-agent.extensions.allowed-actors` 中，并具备 Workspace OPERATOR 权限。开启 `qwen.managed-agent.runtime-broker.enabled` 时，开启 `qwen.managed-agent.managed-extensions.enabled` 而未开启本项会在启动时拒绝；否则扩展执行只是保持关闭。 |
+| `runtime-skill-import-enabled` | — | 布尔 | `false` | 是否允许符合条件的 Session 从原始 ready 执行 Runtime 显式发现项目 Skill 并制作快照。需要开启 `qwen.managed-agent.extensions.self-service-enabled`，且 Hosted 支持 `managed-runtime-skill-import/1`。owner 变化或不可用时直接失败，不回退或申请新实例。关闭本项不会删除已发布包，也不会监视或自动更新来源目录。 |
+| `self-service-enabled` | — | 布尔 | `false` | 是否允许在没有 daemon 时准备和导入上传的 Skill/扩展归档及用户编写的 MCP 配置。需要启用扩展管理、配置归档目录、actor 位于 allowlist 且具备 Workspace OPERATOR 权限，并要求 Hosted 支持 `managed-package-preparation/1`。关闭此入口保留已发布内容及现有包应用/恢复能力。 |
 
 ## `qwen.managed-agent.harness`
 
@@ -218,6 +220,16 @@ Workspace 扩展包的发布与管理，以及哪些 actor 有权执行这些操
 | `enabled` | `QWEN_MANAGED_AGENT_EXTENSION_EXECUTION_ENABLED` | 布尔 | `false` | Workspace Runtime 是否以托管扩展执行配置运行，使所选扩展包能在 Runtime worker 中运行其进程（如 Hook 和 MCP 服务器）。需要开启 `qwen.managed-agent.extensions.enabled`（否则启动时拒绝）并设置 `qwen.managed-agent.managed-extensions.cache-directory`，Linux 上还需设置 `qwen.managed-agent.managed-extensions.cgroup-root`。 |
 | `mode` | `QWEN_MANAGED_AGENT_EXTENSION_EXECUTION_MODE` | 字符串 | `linux-cgroup` | 扩展执行模式：`linux-cgroup` 将扩展进程限制在已委派的 cgroup v2 子树中；`developer-process-group` 是面向原生 macOS 开发、隔离较弱的进程组模式。Linux worker 始终使用 `linux-cgroup`；macOS worker 只有在该值为 `developer-process-group` 时才被接受。 |
 
+## `qwen.managed-agent.memory`
+
+显式启用的个人 MemoryStore：由服务端访问 Mem0，供明确绑定且仅所属用户可见的 Session 使用。
+
+| 属性 | 环境变量 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- | --- |
+| `api-key` | — | 字符串 | — | 开启记忆时，Control Plane 调用 Mem0 使用的服务凭据。必填、非空且不能含 CR 或 LF。应保存在服务端密钥配置中，不传入模型、Hosted Harness、沙箱或 MCP 配置。 |
+| `enabled` | — | 布尔 | `false` | 是否提供个人记忆，默认为 false。仅在验证专用 Mem0 服务并关闭跨服务共享后启用。要求开启 Session Store 且 Hosted 声明 session-memory/1 能力；Session 必须在创建时明确选择 Store。 |
+| `endpoint` | — | 字符串 | — | 专用 Mem0 服务的基础 URL，仅在开启记忆时读取。除回环 HTTP 测试外要求 HTTPS；拒绝内嵌凭据、查询参数和片段。该地址仅保留在 Control Plane。 |
+
 ## `qwen.managed-agent.runtime-broker`
 
 内嵌 Runtime Broker：包括面向 Hosted Harness 的私有 HTTP 监听器、放置并恢复执行 Hosted 工具的 Runtime worker 的 provisioner、worker 的 Workspace 挂载与隔离方式，以及加密其持久化 Runtime 凭据的密钥。
@@ -262,6 +274,7 @@ Workspace 扩展包的发布与管理，以及哪些 actor 有权执行这些操
 | `static-runtime-instance-id` | — | 字符串 | `standalone-runtime` | static Runtime worker 租约中的 Runtime 实例 ID；worker 的证明（attestation）必须回报相同的值。须为非空字符串，最长 512 个字符。仅当 `qwen.managed-agent.runtime-broker.provisioner` 为 `static` 时读取。 |
 | `static-token` | `QWEN_MANAGED_AGENT_STATIC_RUNTIME_TOKEN` | 字符串 | *（空）* | Broker 访问 static Runtime worker 时出示的 Bearer 令牌，属于密钥；已保存的绑定用 Runtime 凭据密钥（`qwen.managed-agent.runtime-broker.credential-key`）加密存储它。`qwen.managed-agent.runtime-broker.provisioner` 为 `static` 时必填，最长 512 个字符。 |
 | `token` | `QWEN_MANAGED_AGENT_RUNTIME_BROKER_TOKEN` | 字符串 | *（空）* | Hosted Harness 访问内嵌 Runtime Broker 私有监听端口时出示的 Bearer 令牌；它也用于授权仅限回环地址的外部存储登记接口。属于密钥。`qwen.managed-agent.runtime-broker.enabled` 为 true 时必填，最长 512 个字符。也可以改由 `qwen.managed-agent.harness.credentials-file` 中的 `QWEN_MANAGED_RUNTIME_BROKER_TOKEN` 提供；两处同时设置时启动时拒绝。 |
+| `tool-measurements` | `QWEN_MANAGED_AGENT_RUNTIME_TOOL_MEASUREMENTS` | 布尔 | `false` | 是否让新解析的普通 Workspace binding 选择经过 attestation 的 managed-workspace-execution/2 profile 和 Tool v4 数值执行/文件测量。默认 false；已有 binding、extension/MCP owner、resident 和 CSI profile 保留原契约。先部署兼容 Worker/Broker reader。测量提交复用现有 activity evidence，并要求 storage grant 支持 version 5；不引入独立 collector 开关。参见[执行诊断设计](../design/2026-11-07-managed-execution-diagnostics.zh-CN.md)。 |
 | `trusted-local-reboot-recovery` | `QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY` | 布尔 | `true` | Linux 主机整机重启后，Broker 是否把内核 boot ID 的变化视为原本地 worker 已停止的证据，并在所有执行都已终结后清除这些已保存 Runtime 绑定的持有者。它每 5 秒扫描 8 个已保存的绑定，从不启动替代 worker，也不重放执行。要求 `qwen.managed-agent.runtime-broker.durable-local-process` 和 `local-process` provisioner；不满足条件、在 macOS 上或配置了常驻 Workspace 时启动时拒绝。 |
 | `v3-result-window` | `QWEN_MANAGED_AGENT_RUNTIME_BROKER_V3_RESULT_WINDOW` | 时长 | `30m` | Runtime Broker 等待 worker 返回已派发的、会发布输出的 Shell 或 Monitor 执行（Tool v3，开启 `qwen.managed-agent.tool-publication.enabled` 时使用）结果的最长时间，超时后把该执行标记为 `UNKNOWN`；若短于最长的此类调用，该调用会变成 `UNKNOWN`。其他工具执行不使用此窗口。大于 `30m` 在随发行版提供的执行路径上没有作用：Hosted Harness 自身等待 Tool v3 执行的期限固定为 30 分钟。不带单位的数字按秒解析。低于 `1s` 时启动时拒绝。 |
 | `verified-workspace-recovery-enabled` | `QWEN_MANAGED_AGENT_RUNTIME_VERIFIED_WORKSPACE_RECOVERY_ENABLED` | 布尔 | `false` | LOCAL Workspace 的执行是否以已验证的物理存储登记为前提：在工具、文件访问或子 Git 操作运行前，服务端检查 Workspace 根目录是否仍与登记的身份和标记一致，否则以 `409 workspace_unavailable` 拒绝。`qwen.managed-agent.runtime-broker.workspace-creation-root` 和 `qwen.managed-agent.runtime-broker.local-directory-import-enabled` 都依赖它；未配置 `qwen.managed-agent.runtime-broker.workspace-mounts` 时，它也满足 `qwen.managed-agent.harness.workspace-files-enabled` 对 Workspace 来源的要求。与外部 provisioner 或常驻 Workspace 同时使用时启动时拒绝。 |

@@ -11,7 +11,7 @@ final class ManagedLegacySessionGuard {
         // A locking read of the root: behind a tenant guard it can close a
         // cycle with a pinned CSI Session's continuation, so a deadlock
         // victim here is named like the guard side (#13800 R1-1).
-        return ManagedSessionStore.namedRootDeadlock(() -> Boolean.TRUE.equals(
+        return JdbcManagedSessionStore.namedRootDeadlock(() -> Boolean.TRUE.equals(
                 jdbc.execute(
                         (ConnectionCallback<Boolean>)
                                 connection -> {

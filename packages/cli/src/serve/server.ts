@@ -158,6 +158,7 @@ import { registerSessionRoutes } from './routes/session.js';
 import { registerSessionCatalogRoutes } from './routes/session-catalog.js';
 import { registerSessionPrBackfillRoutes } from './routes/session-pr-backfill.js';
 import { registerSessionPrBindingsRoutes } from './routes/session-pr-bindings.js';
+import { registerSessionPostedCommentsRoutes } from './routes/session-posted-comments.js';
 import { registerStandaloneSessionRoutes } from './routes/standalone-sessions.js';
 import {
   createRequestedSessionIdAdmission,
@@ -213,6 +214,10 @@ import {
 } from './hosted-harness-contract.js';
 import { validateHostedHarnessProfile } from './hosted-harness-profile.js';
 import { registerHostedHarnessSessionRoutes } from './hosted-harness-session.js';
+import {
+  registerHostedPackagePreparation,
+  HOSTED_PACKAGE_PREPARATION_PREFIX,
+} from './hosted-package-preparation.js';
 import { registerHostedCsiSessionRoutes } from './hosted-csi-session.js';
 import {
   registerWorkspacePermissionsRoutes,
@@ -717,11 +722,7 @@ export interface ServeAppDeps {
   ) => Promise<void | import('../config/settings.js').LoadedSettings>;
   persistSettings?: (
     workspace: string,
-    writes: Array<{
-      scope: import('../config/settings.js').SettingScope;
-      key: string;
-      value: unknown;
-    }>,
+    writes: import('./workspace-service/types.js').WorkspaceSettingsWrites,
     assertGenerationOpen?: () => void,
   ) => Promise<void>;
   updateModelContextWindow?: import('./routes/workspace-models.js').WorkspaceModelsRouteDeps['updateModelContextWindow'];
@@ -2378,6 +2379,7 @@ export function createServeApp(
         req.path === '/health' ||
         req.path === '/capabilities' ||
         req.path === '/session' ||
+        req.path.startsWith(`${HOSTED_PACKAGE_PREPARATION_PREFIX}/`) ||
         (poolEnabled && req.path.startsWith('/internal/hosted-harness/v1/')) ||
         req.path.startsWith('/session/')
       )
@@ -2608,6 +2610,7 @@ export function createServeApp(
       : undefined;
   installHostedHarnessContractMiddleware(app, hostedHarness);
   let stopHostedCsiSessions: (() => Promise<void>) | undefined;
+  let stopHostedPackagePreparation: (() => Promise<void>) | undefined;
   if (hostedHarness) {
     const broker =
       opts.managedRuntimeBrokerUrl && opts.managedRuntimeBrokerToken
@@ -2632,6 +2635,11 @@ export function createServeApp(
       hostedHarness,
       primaryBoundWorkspace,
       broker,
+    );
+    stopHostedPackagePreparation = registerHostedPackagePreparation(
+      app,
+      hostedHarness,
+      ordinary,
     );
     app.use((req, res, next) => {
       if (req.path === '/capabilities' || req.path === '/health') next();
@@ -3021,6 +3029,7 @@ export function createServeApp(
     workspaceRegistry,
     gitState: workspaceGitState,
     sendBridgeError,
+    daemonEnv: daemonEnvAtBoot,
   });
   registerWorkspaceLocalOpenRoutes(app, {
     workspaceRegistry,
@@ -3083,6 +3092,13 @@ export function createServeApp(
   // Read-only reverse lookup (PR bindings → sessions) for channel workers
   // that deliver GitHub events into the session following a PR.
   registerSessionPrBindingsRoutes(app, {
+    workspaceRegistry,
+    sendBridgeError,
+  });
+  // Read-only authorship lookup (which comments a session posted) for the
+  // bound PR comment watch, so a bound session receives every other author's
+  // comments but not its own.
+  registerSessionPostedCommentsRoutes(app, {
     workspaceRegistry,
     sendBridgeError,
   });
@@ -3575,8 +3591,10 @@ export function createServeApp(
 
   registerWorkspaceSubscriptionRoutes(app, {
     workspaceRegistry,
+    qwenCodeVersion: deps.qwenCodeVersion,
     mutate,
     persistSettings: deps.persistSettings,
+    syncModelProvidersRuntime,
     sendBridgeError,
   });
   const stopSubscriptionAuth = registerSubscriptionAuthRoutes(
@@ -4418,6 +4436,8 @@ export function createServeApp(
     ]);
   };
   serveAppLifecycle.addAppDrain(disposeSkillsConfigStatus);
+  if (stopHostedPackagePreparation)
+    serveAppLifecycle.addAppDrain(stopHostedPackagePreparation);
   if (!deps.serveAppLifecycle)
     serveAppLifecycle.setAppDrain(async () => {
       if (appDrainComplete) return;
