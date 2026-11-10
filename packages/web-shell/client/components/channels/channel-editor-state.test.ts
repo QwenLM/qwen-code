@@ -1522,6 +1522,237 @@ describe('Repository-only channel access config', () => {
 });
 
 /**
+ * Email's descriptor as the daemon ships it. The plugin declares its own
+ * `privatePolicy` without `pairing`, so the registry injects `groupPolicy` and
+ * the other shared access fields but no private policy. The parity suite drives
+ * the real plugin; this fixture keeps the projection cases readable.
+ */
+const EMAIL: DaemonChannelTypeDescriptor = {
+  type: 'email',
+  displayName: 'Email',
+  manageable: true,
+  fields: [
+    {
+      key: 'address',
+      label: 'Mailbox Address',
+      kind: 'string',
+      required: true,
+    },
+    {
+      key: 'imapHost',
+      label: 'IMAP Host',
+      kind: 'string',
+      required: true,
+    },
+    {
+      key: 'imapPassword',
+      label: 'IMAP Password',
+      kind: 'secret',
+      required: true,
+    },
+    {
+      key: 'smtpPassword',
+      label: 'SMTP Password',
+      kind: 'secret',
+      required: true,
+    },
+    {
+      key: 'proactiveRecipients',
+      label: 'Proactive Recipients',
+      kind: 'string-list',
+    },
+    {
+      key: 'privatePolicy',
+      label: 'Private Policy',
+      kind: 'enum',
+      required: true,
+      default: 'allowlist',
+      options: [
+        { value: 'disabled', label: 'Disabled' },
+        { value: 'allowlist', label: 'Allowlist' },
+        { value: 'open', label: 'Open' },
+      ],
+    },
+    {
+      key: 'groupPolicy',
+      label: 'Group Policy',
+      kind: 'enum',
+      required: true,
+      default: 'disabled',
+      options: [
+        { value: 'disabled', label: 'Disabled' },
+        { value: 'pairing', label: 'Pairing' },
+        { value: 'allowlist', label: 'Allowlist' },
+        { value: 'open', label: 'Open' },
+      ],
+    },
+    {
+      key: 'allowedUsers',
+      label: 'Allowed Users',
+      kind: 'string-list',
+    },
+    {
+      key: 'operators',
+      label: 'Session Operators',
+      kind: 'string-list',
+    },
+  ],
+};
+
+describe('Private-only channel access config', () => {
+  function emailDraft(): ChannelEditorDraft {
+    const draft = createChannelEditorDraft(EMAIL);
+    draft.name = 'agent-mail';
+    draft.values.address = 'agent@example.com';
+    draft.values.imapHost = 'imap.example.com';
+    draft.secrets.imapPassword = { operation: 'replace', value: 'imap-secret' };
+    draft.secrets.smtpPassword = { operation: 'replace', value: 'smtp-secret' };
+    return draft;
+  }
+
+  function emailInstance(
+    config: Record<string, unknown>,
+  ): DaemonChannelInstanceSnapshot {
+    return {
+      name: 'agent-mail',
+      config: {
+        type: 'email',
+        address: 'agent@example.com',
+        imapHost: 'imap.example.com',
+        privatePolicy: 'allowlist',
+        ...config,
+      },
+      secrets: {
+        imapPassword: { present: true, source: 'environment' },
+        smtpPassword: { present: true, source: 'environment' },
+      },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+  }
+
+  it('does not persist the injected group policy', () => {
+    const request = buildChannelUpsertRequest(EMAIL, emailDraft(), 'rev-1');
+    expect(request.config).not.toHaveProperty('groupPolicy');
+    expect(request.config).not.toHaveProperty('groups');
+    expect(request.config['privatePolicy']).toBe('allowlist');
+  });
+
+  it('takes the plugin private policy, never the shared pairing default', () => {
+    const draft = createChannelEditorDraft(EMAIL);
+    expect(draft.values['privatePolicy']).toBe('allowlist');
+    // '' selects the descriptor-declared enum instead of the four-card radio
+    // group, which is the only place `pairing` is offered.
+    expect(draft.privatePolicy).toBe('');
+    expect(draft.values).not.toHaveProperty('groupPolicy');
+  });
+
+  it('does not ask for the group policy it never renders', () => {
+    expect(validateChannelEditorDraft(EMAIL, emailDraft(), [])).toEqual({});
+  });
+
+  it('does not flag a required group policy the draft deliberately omits', () => {
+    // Pins the validator's private-only skip: with a blank groupPolicy value
+    // present, the required-check would otherwise report 'required' for a
+    // control the editor never renders. Without the skip this goes red.
+    const draft = emailDraft();
+    draft.values['groupPolicy'] = '';
+    expect(
+      validateChannelEditorDraft(EMAIL, draft, [])['groupPolicy'],
+    ).toBeUndefined();
+  });
+
+  it('leaves a non-record stored group entry untouched on save', () => {
+    // Pins the save-path private-only guard: without it, assignGroups() would
+    // rebuild groups and coerce a non-record entry to {}, rewriting stored
+    // data the editor does not model. Email has no invalidGroupEntry backstop.
+    const instance = emailInstance({
+      groupPolicy: 'allowlist',
+      groups: { g1: 'not-a-record' },
+    });
+    const draft = createChannelEditorDraft(EMAIL, instance);
+    const request = buildChannelUpsertRequest(EMAIL, draft, 'rev-9', instance);
+    expect(request.config['groups']).toEqual({ g1: 'not-a-record' });
+  });
+
+  it('preserves a stored group policy and groups on an unrelated save', () => {
+    // Skipping the field in the draft but not in the save would let
+    // assignField() read an absent key as empty and delete both.
+    const instance = emailInstance({
+      groupPolicy: 'allowlist',
+      groups: { 'legacy-group': { senders: 'open' } },
+    });
+    const draft = createChannelEditorDraft(EMAIL, instance);
+    draft.values.address = 'renamed@example.com';
+
+    const request = buildChannelUpsertRequest(EMAIL, draft, 'rev-2', instance);
+    expect(request.config['groupPolicy']).toBe('allowlist');
+    expect(request.config['groups']).toEqual({
+      'legacy-group': { senders: 'open' },
+    });
+    expect(request.config['address']).toBe('renamed@example.com');
+  });
+
+  it('preserves a stored pairing group policy without validating against it', () => {
+    const instance = emailInstance({
+      groupPolicy: 'pairing',
+      groups: { '*': { senders: 'allowlist', allowedUsers: ['alice'] } },
+    });
+    const draft = createChannelEditorDraft(EMAIL, instance);
+
+    expect(validateChannelEditorDraft(EMAIL, draft, [], instance)).toEqual({});
+    const request = buildChannelUpsertRequest(EMAIL, draft, 'rev-3', instance);
+    expect(request.config['groupPolicy']).toBe('pairing');
+    expect(request.config['groups']).toEqual({
+      '*': { senders: 'allowlist', allowedUsers: ['alice'] },
+    });
+  });
+
+  it('keeps both password secrets preserved on an existing channel', () => {
+    const instance = emailInstance({});
+    const draft = createChannelEditorDraft(EMAIL, instance);
+
+    expect(
+      buildChannelUpsertRequest(EMAIL, draft, 'rev-4', instance).secrets,
+    ).toEqual({
+      imapPassword: { operation: 'preserve' },
+      smtpPassword: { operation: 'preserve' },
+    });
+  });
+
+  it('round-trips proactive recipients through the comma-separated input', () => {
+    const draft = emailDraft();
+    draft.values.proactiveRecipients = 'a@x.com, b@x.com';
+
+    const request = buildChannelUpsertRequest(EMAIL, draft, 'rev-5');
+    expect(request.config['proactiveRecipients']).toEqual([
+      'a@x.com',
+      'b@x.com',
+    ]);
+
+    const reopened = createChannelEditorDraft(
+      EMAIL,
+      emailInstance({ proactiveRecipients: ['a@x.com', 'b@x.com'] }),
+    );
+    expect(reopened.values['proactiveRecipients']).toBe('a@x.com, b@x.com');
+  });
+
+  it('still writes the group policy for a group-capable sibling', () => {
+    const draft = createChannelEditorDraft(DINGTALK_WITH_ACCESS);
+    draft.name = 'release-bot';
+    draft.values.clientId = 'id';
+    draft.secrets.clientSecret = { operation: 'replace', value: 'secret' };
+
+    const request = buildChannelUpsertRequest(
+      DINGTALK_WITH_ACCESS,
+      draft,
+      'rev-6',
+    );
+    expect(request.config['groupPolicy']).toBe('disabled');
+  });
+});
+
+/**
  * Stored per-repository shapes the sweeps cross with edits and policies. Shared
  * by the override, non-Allowlist and conflicting-alias sweeps so a new shape
  * reaches every one of them.
