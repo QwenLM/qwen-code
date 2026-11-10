@@ -28,6 +28,7 @@ import {
   channelEventFilePath,
   DEFAULT_BOUND_ROLE_GUIDANCE,
   getWorkspaceScopeDirName,
+  MAX_POLL_INTERVAL_MS,
   PairingStore,
   type ChannelAgentBridge,
   type ChannelBoundSessions,
@@ -115,7 +116,13 @@ vi.mock('@qwen-code/channel-base', async (importOriginal) => {
   };
 });
 
-import { GithubChannel, validateBoundSessionConfig } from './GithubAdapter.js';
+import {
+  CONDITIONAL_CACHE_MAX_ENTRIES,
+  CONDITIONAL_CACHE_MAX_TOTAL_BYTES,
+  GithubChannel,
+  MAX_PR_WATCH_LIMIT,
+  validateBoundSessionConfig,
+} from './GithubAdapter.js';
 
 const octokitModule = (await import('@octokit/rest')) as unknown as {
   Octokit: Mock;
@@ -19877,6 +19884,659 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
 
       expect(mockOctokit.rest.pulls.get).not.toHaveBeenCalled();
       expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+    });
+
+    describe('conditional requests', () => {
+      afterEach(() => {
+        vi.unstubAllGlobals();
+      });
+
+      const prUrl = 'https://api.github.com/repos/owner/repo/pulls/42';
+
+      /** The production transport, bound to the live adapter instance. */
+      function adapterFetch(): typeof fetch {
+        return (channel as unknown as { conditionalFetch: typeof fetch })
+          .conditionalFetch;
+      }
+
+      type WireReply = {
+        status: number;
+        body?: unknown;
+        headers?: Record<string, string>;
+      };
+
+      /**
+       * Replace only the HTTP transport. Every assertion here is about what
+       * actually went on the wire, so a stubbed paginate cannot satisfy it.
+       */
+      function installTransport(reply: (url: URL) => WireReply) {
+        const calls: Array<{ url: string; ifNoneMatch: string | null }> = [];
+        vi.stubGlobal(
+          'fetch',
+          vi.fn(async (input: unknown, init?: RequestInit) => {
+            const url = String(input);
+            calls.push({
+              url,
+              ifNoneMatch: new Headers(init?.headers).get('if-none-match'),
+            });
+            const wire = reply(new URL(url));
+            return new Response(
+              wire.body === undefined ? null : JSON.stringify(wire.body),
+              {
+                status: wire.status,
+                headers: {
+                  'content-type': 'application/json',
+                  ...wire.headers,
+                },
+              },
+            );
+          }),
+        );
+        return calls;
+      }
+
+      /** 200 once per URL, then 304 — the quiet-PR steady state. */
+      function installRevalidatingTransport(body: unknown) {
+        const seen = new Set<string>();
+        return installTransport((url) => {
+          if (seen.has(url.href)) {
+            return { status: 304, headers: { etag: '"v1"' } };
+          }
+          seen.add(url.href);
+          return { status: 200, body, headers: { etag: '"v1"' } };
+        });
+      }
+
+      /**
+       * A paged notifications list that answers 304 on every re-read. GitHub
+       * omits Link on a 304 (measured against the live API: the same URL's
+       * 200 carried next+last, the 304 carried neither), so the fixture omits
+       * it too — that omission is the attack this group defends against.
+       */
+      function installPagedNotifications(pages: number) {
+        const seen = new Set<string>();
+        return installTransport((url) => {
+          const page = Number(url.searchParams.get('page') ?? '1');
+          if (seen.has(url.href)) {
+            return {
+              status: 304,
+              headers: { etag: `"p${page}"`, 'x-poll-interval': '60' },
+            };
+          }
+          seen.add(url.href);
+          const next = new URL(url);
+          next.searchParams.set('page', String(page + 1));
+          return {
+            status: 200,
+            body: [
+              { id: String(page), updated_at: '2026-07-02T09:00:00.000Z' },
+            ],
+            headers: {
+              etag: `"p${page}"`,
+              ...(page < pages ? { link: `<${next}>; rel="next"` } : {}),
+            },
+          };
+        });
+      }
+
+      /** Real Octokit + real pagination plugin over the production transport. */
+      async function realClient(log?: { error: (message: unknown) => void }) {
+        const { Octokit } =
+          await vi.importActual<typeof import('@octokit/rest')>(
+            '@octokit/rest',
+          );
+        return new Octokit({
+          auth: 'test-token',
+          request: { fetch: adapterFetch() },
+          // @octokit/core binds console.error at module evaluation, so a
+          // console-level spy installed after import can never see a plugin
+          // log line. Anything asserting on logging must inject the logger.
+          ...(log ? { log } : {}),
+        });
+      }
+
+      function notificationsList(
+        client: Awaited<ReturnType<typeof realClient>>,
+      ) {
+        return client.paginate(
+          client.rest.activity.listNotificationsForAuthenticatedUser,
+          { per_page: 100 },
+        );
+      }
+
+      /** Feed the registered request hook, as a real response would. */
+      async function feedHeaders(
+        headers: Record<string, string>,
+      ): Promise<void> {
+        const wrap = mockOctokit.__requestWrapper as
+          | ((
+              request: (opts: unknown) => Promise<unknown>,
+              opts: unknown,
+            ) => Promise<unknown>)
+          | undefined;
+        if (!wrap) throw new Error('request hook was not registered');
+        await wrap(async () => ({ headers }), {});
+      }
+
+      function pollIntervalMs(): number {
+        return (channel as unknown as { pollInterval: number }).pollInterval;
+      }
+
+      it('sends If-None-Match on the second read and serves the 304 from cache', async () => {
+        await initChannel(watchConfig, { boundSessions });
+        const calls = installRevalidatingTransport(makePrMeta({}));
+        const transport = adapterFetch();
+
+        const first = await transport(prUrl, { method: 'GET' });
+        const second = await transport(prUrl, { method: 'GET' });
+
+        expect(calls).toHaveLength(2);
+        expect(calls[0]!.ifNoneMatch).toBeNull();
+        expect(calls[1]!.ifNoneMatch).toBe('"v1"');
+        // A 304 must surface as a normal success carrying the retained body,
+        // never as a thrown RequestError githubApi would retry.
+        expect(second.status).toBe(200);
+        expect(await second.json()).toEqual(await first.json());
+      });
+
+      it('wires the conditional transport into the client connect() builds', async () => {
+        // Every other case here pulls conditionalFetch off the instance and
+        // builds its own client, so none of them would notice the wiring being
+        // deleted: @octokit/request falls back to globalThis.fetch, requests
+        // still succeed, and the feature ships inert with a green suite.
+        const wired = new TestableGithubChannel(
+          'test-github',
+          makeConfig(watchConfig),
+          makeBridge(),
+        );
+        mockOctokit.paginate.mockResolvedValue([]);
+        try {
+          await wired.connect();
+          // Pin identity, not type: `expect.any(Function)` also admits a
+          // passthrough, so rewiring to globalThis.fetch would keep this green
+          // while no validator is ever sent. Deleting the wiring is only half
+          // the failure mode; replacing it is the other half.
+          const options = mockOctokitConstructor.mock.calls.at(-1)![0] as {
+            request: { fetch: unknown };
+          };
+          expect(options.request.fetch).toBe(
+            (wired as unknown as { conditionalFetch: unknown })
+              .conditionalFetch,
+          );
+        } finally {
+          wired.disconnect();
+        }
+      });
+
+      it('serves the fresh body and re-caches when the ETag changes', async () => {
+        await initChannel(watchConfig, { boundSessions });
+        let version = 1;
+        const calls = installTransport(() => ({
+          status: 200,
+          body: makePrMeta({ title: `v${version}` }),
+          headers: { etag: `"v${version}"` },
+        }));
+        const transport = adapterFetch();
+        const titleOf = async (response: Response) =>
+          ((await response.json()) as { title: string }).title;
+
+        expect(await titleOf(await transport(prUrl, { method: 'GET' }))).toBe(
+          'v1',
+        );
+
+        // The resource changed, so GitHub answers 200 despite the validator.
+        // Serving the retained body here would freeze the watch on the old
+        // head/state forever.
+        version = 2;
+        const second = await transport(prUrl, { method: 'GET' });
+        expect(calls[1]!.ifNoneMatch).toBe('"v1"');
+        expect(await titleOf(second)).toBe('v2');
+
+        // The new validator replaced the old one rather than being ignored.
+        await transport(prUrl, { method: 'GET' });
+        expect(calls[2]!.ifNoneMatch).toBe('"v2"');
+      });
+
+      it('leaves out-of-scope endpoints and every write unconditional', async () => {
+        await initChannel(watchConfig, { boundSessions });
+        const calls = installTransport(() => ({
+          status: 200,
+          body: {},
+          headers: { etag: '"x"' },
+        }));
+        const transport = adapterFetch();
+        const comments =
+          'https://api.github.com/repos/owner/repo/issues/42/comments';
+        const thread = 'https://api.github.com/notifications/threads/1';
+        // The pull-scoped comments path shares the watched PR's prefix, so it
+        // is what the `$` anchor on the pulls pattern actually protects.
+        // Without it, dropping that anchor survives the whole group.
+        const reviewComments =
+          'https://api.github.com/repos/owner/repo/pulls/42/comments';
+
+        await transport(prUrl, { method: 'GET' });
+        // Same URL as the primed cache entry, but a write must not revalidate.
+        await transport(prUrl, { method: 'POST' });
+        await transport(comments, { method: 'GET' });
+        await transport(comments, { method: 'GET' });
+        await transport(thread, { method: 'GET' });
+        await transport(thread, { method: 'GET' });
+        await transport(reviewComments, { method: 'GET' });
+        await transport(reviewComments, { method: 'GET' });
+
+        expect(calls.map((call) => call.ifNoneMatch)).toEqual([
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+        ]);
+      });
+
+      it('returns every notifications page when every page answers 304', async () => {
+        await initChannel(watchConfig, { boundSessions });
+        const calls = installPagedNotifications(3);
+        const client = await realClient();
+
+        const first = await notificationsList(client);
+        const second = await notificationsList(client);
+
+        expect(first.map((n) => n.id)).toEqual(['1', '2', '3']);
+        // Dropping the cached Link stops this at ['1'] — silently, with no
+        // error raised. The full page set is the only thing that notices.
+        expect(second.map((n) => n.id)).toEqual(['1', '2', '3']);
+        expect(calls).toHaveLength(6);
+        expect(calls.slice(3).every((c) => c.ifNoneMatch !== null)).toBe(true);
+      });
+
+      it('produces no error-level log for a 304', async () => {
+        await initChannel(watchConfig, { boundSessions });
+        const seen = new Set<string>();
+        installTransport((url) => {
+          if (url.pathname !== '/notifications') {
+            // Out of scope, so the transport forwards it untouched and the
+            // 304 reaches Octokit as a RequestError.
+            return { status: 304, headers: { etag: '"x"' } };
+          }
+          if (seen.has(url.href)) {
+            return { status: 304, headers: { etag: '"n"' } };
+          }
+          seen.add(url.href);
+          return {
+            status: 200,
+            body: [{ id: '1', updated_at: '2026-07-02T09:00:00.000Z' }],
+            headers: { etag: '"n"' },
+          };
+        });
+        const errors: string[] = [];
+        const client = await realClient({
+          error: (message) => errors.push(String(message)),
+        });
+
+        await notificationsList(client);
+        await notificationsList(client);
+
+        // plugin-request-log logs every RequestError at error level. Handling
+        // the 304 above the transport would emit one line per 304
+        // (~1,800/hour at the watch cap).
+        expect(errors).toEqual([]);
+
+        // Positive control: the injected logger really does receive
+        // plugin-request-log output. Without this the assertion above could
+        // be green merely because nothing is wired to the logger — which is
+        // exactly how a console-level spy behaves here.
+        await expect(
+          client.rest.issues.listComments({
+            owner: 'owner',
+            repo: 'repo',
+            issue_number: 42,
+          }),
+        ).rejects.toThrow();
+        expect(errors.length).toBeGreaterThan(0);
+      });
+
+      it('keys the cache on the full URL so a moved since cursor is a fresh read', async () => {
+        await initChannel(watchConfig, { boundSessions });
+        const calls = installTransport(() => ({
+          status: 200,
+          body: [],
+          headers: { etag: '"n"' },
+        }));
+        const transport = adapterFetch();
+
+        await transport(
+          'https://api.github.com/notifications?since=2026-07-01T00:00:00.000Z',
+          { method: 'GET' },
+        );
+        await transport(
+          'https://api.github.com/notifications?since=2026-07-02T00:00:00.000Z',
+          { method: 'GET' },
+        );
+
+        expect(calls.map((call) => call.ifNoneMatch)).toEqual([null, null]);
+      });
+
+      it('drops the cache and the poll floor on disconnect', async () => {
+        await initChannel(
+          { ...watchConfig, pollInterval: 10_000 },
+          { boundSessions },
+        );
+        const calls = installRevalidatingTransport(makePrMeta({}));
+        const transport = adapterFetch();
+
+        await transport(prUrl, { method: 'GET' });
+        await feedHeaders({ 'x-poll-interval': '60' });
+        expect(pollIntervalMs()).toBe(60_000);
+
+        channel.disconnect();
+        await transport(prUrl, { method: 'GET' });
+
+        expect(calls).toHaveLength(2);
+        expect(calls[1]!.ifNoneMatch).toBeNull();
+        // The floor came from the previous connection's endpoint; a reconnect
+        // must re-learn it rather than inherit it.
+        expect(pollIntervalMs()).toBe(10_000);
+      });
+
+      it('evicts the oldest entry past the cap while keeping the newest', async () => {
+        await initChannel(watchConfig, { boundSessions });
+        const calls = installTransport(() => ({
+          status: 200,
+          body: makePrMeta({}),
+          headers: { etag: '"v1"' },
+        }));
+        const transport = adapterFetch();
+        const pull = (n: number) =>
+          `https://api.github.com/repos/owner/repo/pulls/${n}`;
+        const newest = CONDITIONAL_CACHE_MAX_ENTRIES + 1;
+
+        // One past the cap, read from the producer rather than restated here.
+        for (let n = 1; n <= newest; n++) {
+          await transport(pull(n), { method: 'GET' });
+        }
+        await transport(pull(1), { method: 'GET' });
+        expect(calls.at(-1)!.ifNoneMatch).toBeNull();
+
+        // Control: the newest entry survived, so an all-unconditional result
+        // above is eviction rather than a cache that never stored anything.
+        await transport(pull(newest), { method: 'GET' });
+        expect(calls.at(-1)!.ifNoneMatch).toBe('"v1"');
+      });
+
+      it('keeps hitting across a full watch sweep larger than the default limit', async () => {
+        await initChannel(watchConfig, { boundSessions });
+        const calls = installTransport(() => ({
+          status: 200,
+          body: makePrMeta({}),
+          headers: { etag: '"v1"' },
+        }));
+        const transport = adapterFetch();
+        // One full worst-case sweep, derived from the producer: the open set
+        // plus the terminal-drain slice. A literal below that (200) would let
+        // a cap sized at the open-PR ceiling alone pass, while a real 600-URL
+        // sweep collapses to zero hits.
+        const sweep =
+          MAX_PR_WATCH_LIMIT + Math.max(1, Math.ceil(MAX_PR_WATCH_LIMIT * 0.2));
+        const urls = Array.from(
+          { length: sweep },
+          (_, i) => `https://api.github.com/repos/owner/repo/pulls/${i + 1}`,
+        );
+
+        for (const url of urls) await transport(url, { method: 'GET' });
+        const secondSweep = calls.length;
+        for (const url of urls) await transport(url, { method: 'GET' });
+
+        // A cache smaller than the sweep does not degrade proportionally, it
+        // collapses: each miss evicts the entry the sweep is about to read, so
+        // every read of every later pass misses and the saving is zero for
+        // exactly the high-fan-out deployments this change is meant to help.
+        expect(
+          calls.slice(secondSweep).every((c) => c.ifNoneMatch !== null),
+        ).toBe(true);
+      });
+
+      it('keeps a live PR cached while dead cursor entries churn past the cap', async () => {
+        await initChannel(watchConfig, { boundSessions });
+        let prServed = false;
+        const calls = installTransport((url) => {
+          // The PR must answer 304 from the second read on: a 200 re-inserts
+          // through the write path and would hide the hit-path refresh.
+          if (url.href === prUrl && prServed) {
+            return { status: 304, headers: { etag: '"v1"' } };
+          }
+          if (url.href === prUrl) prServed = true;
+          return {
+            status: 200,
+            body: makePrMeta({}),
+            headers: { etag: '"v1"' },
+          };
+        });
+        const transport = adapterFetch();
+
+        await transport(prUrl, { method: 'GET' });
+        // Each moved `since` cursor mints an entry that is never read again.
+        // Interleaving a PR read with each one means the PR is the most
+        // recently used entry every round, so write-order eviction would
+        // wrongly drop it while recency-on-hit keeps it.
+        for (let i = 0; i <= CONDITIONAL_CACHE_MAX_ENTRIES; i++) {
+          await transport(prUrl, { method: 'GET' });
+          await transport(
+            `https://api.github.com/notifications?since=cursor-${i}`,
+            { method: 'GET' },
+          );
+        }
+
+        await transport(prUrl, { method: 'GET' });
+        expect(calls.at(-1)!.ifNoneMatch).toBe('"v1"');
+      });
+
+      it('leaves a 200 without an ETag unconditional', async () => {
+        await initChannel(watchConfig, { boundSessions });
+        // No validator means nothing to revalidate against: the response must
+        // pass through untouched and must not occupy a cache slot.
+        const calls = installTransport(() => ({
+          status: 200,
+          body: makePrMeta({}),
+        }));
+        const transport = adapterFetch();
+
+        const first = await transport(prUrl, { method: 'GET' });
+        const second = await transport(prUrl, { method: 'GET' });
+
+        expect(calls).toHaveLength(2);
+        expect(calls.map((call) => call.ifNoneMatch)).toEqual([null, null]);
+        expect(second.status).toBe(200);
+        expect(await second.json()).toEqual(await first.json());
+        expect(
+          (channel as unknown as { conditionalCacheBytes: number })
+            .conditionalCacheBytes,
+        ).toBe(0);
+      });
+
+      it('evicts on total bytes even while under the entry cap', async () => {
+        await initChannel(watchConfig, { boundSessions });
+        // One shared string keeps the fixture cheap while the accounting still
+        // sums per entry: enough maximum-size bodies to cross the byte budget
+        // without approaching the entry cap.
+        const filler = 'x'.repeat(256 * 1024 - 64);
+        const needed =
+          Math.ceil(CONDITIONAL_CACHE_MAX_TOTAL_BYTES / (256 * 1024)) + 1;
+        expect(needed).toBeLessThan(CONDITIONAL_CACHE_MAX_ENTRIES);
+        const calls = installTransport(() => ({
+          status: 200,
+          body: { title: filler },
+          headers: { etag: '"v1"' },
+        }));
+        const transport = adapterFetch();
+        const pull = (n: number) =>
+          `https://api.github.com/repos/owner/repo/pulls/${n}`;
+
+        for (let n = 1; n <= needed; n++) {
+          await transport(pull(n), { method: 'GET' });
+        }
+
+        // The oldest was evicted by bytes, not by count.
+        await transport(pull(1), { method: 'GET' });
+        expect(calls.at(-1)!.ifNoneMatch).toBeNull();
+        // Control: the newest survived, and the running total stayed in step
+        // with the map rather than drifting negative or over-counting.
+        await transport(pull(needed), { method: 'GET' });
+        expect(calls.at(-1)!.ifNoneMatch).toBe('"v1"');
+        expect(
+          (channel as unknown as { conditionalCacheBytes: number })
+            .conditionalCacheBytes,
+        ).toBeLessThanOrEqual(CONDITIONAL_CACHE_MAX_TOTAL_BYTES);
+      });
+
+      it('declines to cache an oversized body', async () => {
+        await initChannel(watchConfig, { boundSessions });
+        // 100k characters but 300 KB of UTF-8: under the cap when measured in
+        // code units, over it when measured in bytes. A PR title is
+        // operator-controlled text, so multibyte is the realistic case.
+        const calls = installTransport(() => ({
+          status: 200,
+          body: { title: '中'.repeat(100_000) },
+          headers: { etag: '"big"' },
+        }));
+        const transport = adapterFetch();
+
+        await transport(prUrl, { method: 'GET' });
+        await transport(prUrl, { method: 'GET' });
+
+        expect(calls).toHaveLength(2);
+        expect(calls[1]!.ifNoneMatch).toBeNull();
+      });
+
+      it('records the fresh budget from a 304, not the cached reading', async () => {
+        await initChannel(watchConfig, { boundSessions });
+        let served = 0;
+        installTransport(() => {
+          served++;
+          return served === 1
+            ? {
+                status: 200,
+                body: makePrMeta({}),
+                headers: { etag: '"v1"', 'x-ratelimit-remaining': '5000' },
+              }
+            : {
+                status: 304,
+                headers: { etag: '"v1"', 'x-ratelimit-remaining': '4321' },
+              };
+        });
+        const client = await realClient();
+        // Reproduce production wiring: the budget hook sits above the
+        // transport, so it must see the 304's own budget header.
+        const wrap = mockOctokit.__requestWrapper as Parameters<
+          typeof client.hook.wrap
+        >[1];
+        client.hook.wrap('request', wrap);
+        (channel as unknown as { octokit: unknown }).octokit = client;
+
+        await client.rest.pulls.get({
+          owner: 'owner',
+          repo: 'repo',
+          pull_number: 42,
+        });
+        expect(
+          (channel as unknown as { lastRateLimitRemaining: number })
+            .lastRateLimitRemaining,
+        ).toBe(5000);
+        await client.rest.pulls.get({
+          owner: 'owner',
+          repo: 'repo',
+          pull_number: 42,
+        });
+        expect(
+          (channel as unknown as { lastRateLimitRemaining: number })
+            .lastRateLimitRemaining,
+        ).toBe(4321);
+      });
+
+      it('raises the poll interval to X-Poll-Interval', async () => {
+        await initChannel(
+          { ...watchConfig, pollInterval: 10_000 },
+          { boundSessions },
+        );
+        expect(pollIntervalMs()).toBe(10_000);
+        await feedHeaders({ 'x-poll-interval': '60' });
+        expect(pollIntervalMs()).toBe(60_000);
+      });
+
+      it('never lowers a slower configured poll', async () => {
+        await initChannel(
+          { ...watchConfig, pollInterval: 300_000 },
+          { boundSessions },
+        );
+        await feedHeaders({ 'x-poll-interval': '60' });
+        expect(pollIntervalMs()).toBe(300_000);
+      });
+
+      it('never raises the poll interval past the runtime ceiling', async () => {
+        await initChannel(
+          { ...watchConfig, pollInterval: 10_000 },
+          { boundSessions },
+        );
+        // The header is server-controlled, and the base class bounds both
+        // ends of the configured value for a reason: Node clamps a timeout
+        // above its 32-bit range to 1ms, so an unbounded floor would turn the
+        // poll loop into a hot loop that burns the very quota this saves.
+        // 2_147_484s is just past that range.
+        await feedHeaders({ 'x-poll-interval': '2147484' });
+        expect(pollIntervalMs()).toBe(MAX_POLL_INTERVAL_MS);
+      });
+
+      it('still re-checks CI on its interval while every PR read is a 304', async () => {
+        vi.useFakeTimers();
+        vi.setSystemTime(new Date('2026-07-02T09:00:00.000Z'));
+        await initChannel(watchConfig, { boundSessions });
+        const prSeen = new Set<string>();
+        const checkCalls: string[] = [];
+        installTransport((url) => {
+          if (url.pathname.endsWith('/check-runs')) {
+            checkCalls.push(url.href);
+            return {
+              status: 200,
+              body: {
+                total_count: 1,
+                check_runs: [
+                  { name: 'build', status: 'completed', conclusion: 'success' },
+                ],
+              },
+            };
+          }
+          if (url.pathname.endsWith('/status')) {
+            return { status: 200, body: { state: 'success', total_count: 0 } };
+          }
+          if (url.pathname === '/notifications') {
+            return { status: 200, body: [] };
+          }
+          if (prSeen.has(url.href)) {
+            return { status: 304, headers: { etag: '"pr"' } };
+          }
+          prSeen.add(url.href);
+          return {
+            status: 200,
+            body: makePrMeta({}),
+            headers: { etag: '"pr"' },
+          };
+        });
+        (channel as unknown as { octokit: unknown }).octokit =
+          await realClient();
+
+        await pollOnce();
+        expect(checkCalls).toHaveLength(1);
+
+        // Same head, same updated_at, and every pulls.get from here is a 304.
+        // GitHub does not advance updated_at on check activity, so only the
+        // periodic timer can trigger this re-fetch.
+        vi.setSystemTime(new Date('2026-07-02T09:11:00.000Z'));
+        await pollOnce();
+        expect(checkCalls).toHaveLength(2);
+        expect(prSeen.size).toBe(1);
+      });
     });
 
     function watchStatePath(): string {
