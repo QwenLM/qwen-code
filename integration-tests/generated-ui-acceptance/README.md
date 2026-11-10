@@ -30,6 +30,8 @@ The live prompts (`prompts.ts`) end with a contract that names the element IDs t
 
 The contract also mentions the interactive view, so it overstates how often a model would choose a view unprompted. The report therefore records whether the model called `generated_ui_show` as its own column.
 
+Both replay and live set `QWEN_CODE_LEGACY_MCP_BLOCKING=1` in the isolated daemon environment so MCP discovery finishes before the first prompt. This gives both modes the same ready tool surface; otherwise the replay can mistake the first main request for a side request while the Generated UI tool is still loading. These runs do not evaluate progressive MCP startup.
+
 ## Running
 
 Both modes need a bundled CLI (`npm run build && npm run bundle`) and Playwright Chromium.

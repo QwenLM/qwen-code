@@ -95,10 +95,10 @@ async function chartState(view: Frame) {
         `chart-id-${index}`,
       ]),
     );
-    for (const node of clone.querySelectorAll('*')) {
+    for (const node of [clone, ...clone.querySelectorAll('*')]) {
       for (const attribute of [...node.attributes]) {
         if (attribute.name === 'id') {
-          node.id = ids.get(attribute.value)!;
+          node.id = ids.get(attribute.value) ?? attribute.value;
         } else {
           node.setAttribute(
             attribute.name,
@@ -110,10 +110,11 @@ async function chartState(view: Frame) {
       }
     }
     return JSON.stringify({
-      html: clone.innerHTML,
-      canvases: [...element.querySelectorAll('canvas')].map((canvas) =>
-        canvas.toDataURL(),
-      ),
+      html: clone.outerHTML,
+      canvases: [
+        ...(element instanceof HTMLCanvasElement ? [element] : []),
+        ...element.querySelectorAll('canvas'),
+      ].map((canvas) => canvas.toDataURL()),
     });
   });
 }
@@ -306,7 +307,11 @@ async function itemStates(view: Frame) {
             element.id.replace(/-text$/, '-check'),
           ) as HTMLInputElement | null
         )?.checked,
-      })),
+      }))
+      .sort(
+        (a, b) =>
+          a.text.localeCompare(b.text) || Number(a.checked) - Number(b.checked),
+      ),
   );
 }
 
@@ -518,7 +523,11 @@ export async function runChecklist(
     'after reopening the conversation in a new tab',
     async () => {
       const page = await env.context.newPage();
-      await page.goto(sessionUrl);
+      const reopenedUrl = new URL(sessionUrl);
+      reopenedUrl.hash = new URLSearchParams({
+        token: env.daemon.token,
+      }).toString();
+      await page.goto(reopenedUrl.toString());
       // The page is closed after the check has read it through `settle`.
       setTimeout(() => void page.close(), 30_000);
       return waitForCardOn(page, 0);
@@ -769,10 +778,16 @@ export async function runActivityForm(
       );
     }
     const body = replies.slice(repliesBefore).join('\n');
+    const participants = FORM_VALUES.participants;
+    const participantCount = new RegExp(
+      `(?:\\b${participants}\\s*[-–]?\\s*(?:people|persons?|participants?|attendees?)\\b|(?<!\\d)${participants}\\s*(?:人|位)|(?:\\b(?:participants?|attendees?)|人数)\\s*[:：为是]?\\s*${participants}(?![\\d.]))`,
+      'i',
+    );
     return checks.expect(
       'answer-uses-values',
       'case 3',
-      body.includes(FORM_VALUES.participants) && /escape|密室/i.test(body),
+      participantCount.test(body.replace(/[*_`]/g, '')) &&
+        /escape|密室/i.test(body),
       `reply after submission: "${body.slice(0, 160)}"`,
     );
   });

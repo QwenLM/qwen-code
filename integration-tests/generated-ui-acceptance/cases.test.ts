@@ -55,9 +55,44 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
       { submissions: 1, batched: false },
       { submissions: 2, batched: false },
       { submissions: 2, batched: true },
+      {
+        submissions: 1,
+        batched: false,
+        answer: '**12** people should try the escape room',
+      },
+      {
+        submissions: 1,
+        batched: false,
+        answer: 'A 12-person team should try the escape room',
+      },
+      { submissions: 1, batched: false, answer: '建议 12 人一起体验密室逃脱' },
+      { submissions: 1, batched: false, answer: '人数：12，建议密室逃脱' },
+      {
+        submissions: 1,
+        batched: false,
+        answer: 'Participants: 12; activity: escape room',
+      },
+      {
+        submissions: 1,
+        batched: false,
+        answer:
+          'For 8 people at CNY 150 each on 2026-12-05, choose an escape room; no dietary needs.',
+        answerUsesValues: false,
+      },
+      {
+        submissions: 1,
+        batched: false,
+        answer: 'For 112 people on 2026-12-05, choose an escape room.',
+        answerUsesValues: false,
+      },
     ])(
-      'counts $submissions identical user submissions (batched=$batched)',
-      async ({ submissions, batched }) => {
+      'counts $submissions submissions (batched=$batched) and checks answer=$answer',
+      async ({
+        submissions,
+        batched,
+        answer = '12 people should try the escape room',
+        answerUsesValues = true,
+      }) => {
         const page = await browser.newPage();
         try {
           vi.spyOn(page, 'waitForTimeout').mockResolvedValue();
@@ -124,9 +159,7 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
             waitForIdle: async () => {},
             mainRequests: () => requests,
             assistantTexts: async () =>
-              didSubmit
-                ? ['Form ready', '12 people should try the escape room']
-                : ['Form ready'],
+              didSubmit ? ['Form ready', answer] : ['Form ready'],
           } as unknown as AcceptanceEnv;
 
           const results = await runActivityForm(env, 'form');
@@ -137,6 +170,10 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
             results.find((check) => check.id === 'form.submits-every-field')
               ?.status,
           ).toBe('pass');
+          expect(
+            results.find((check) => check.id === 'form.answer-uses-values')
+              ?.status,
+          ).toBe(answerUsesValues ? 'pass' : 'fail');
         } finally {
           await page.close();
         }
@@ -147,11 +184,14 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
       'control',
       'reversed',
       'regenerated-chart-id',
+      'canvas-chart',
       'stale-subtotal',
       'stale-discount',
       'stale-service-rate',
       'stale-chart',
       'stale-chart-data',
+      'stale-chart-root',
+      'stale-chart-canvas',
     ] as const)(
       'checks bill allocation order and complete reset behavior: %s',
       async (mode) => {
@@ -177,6 +217,8 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
             <p id="error"></p><output id="total"></output><ul id="shares"></ul><div id="chart"></div>
             <button id="reset">Reset</button><button id="copy">Copy</button>
             <script>
+              const canvasChart = ['canvas-chart', 'stale-chart-canvas'].includes(${JSON.stringify(mode)});
+              if (canvasChart) document.getElementById('chart').outerHTML = '<canvas id="chart" width="200" height="100"></canvas>';
               function render() {
                 const food = Math.round(Number(document.getElementById('subtotal').value) * 100);
                 const people = Number(document.getElementById('people').value);
@@ -194,6 +236,12 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
                 document.getElementById('total').textContent = (total / 100).toFixed(2);
                 document.getElementById('shares').innerHTML = shares.map((share, i) => '<li>Person ' + (i + 1) + ': ' + (share / 100).toFixed(2) + '</li>').join('');
                 document.getElementById('chart').innerHTML = '<svg viewBox="0 0 ' + people * 30 + ' 100"><rect width="' + people + '" height="10"></rect></svg>';
+                if (canvasChart) {
+                  const context = document.getElementById('chart').getContext('2d');
+                  context.clearRect(0, 0, 200, 100);
+                  context.fillRect(0, 0, people * 10, 10);
+                }
+                if (${JSON.stringify(mode)} === 'stale-chart-root') document.getElementById('chart').style.transform = 'scaleX(' + people / 6 + ')';
                 if (${JSON.stringify(mode)} === 'regenerated-chart-id') {
                   const svg = document.querySelector('#chart svg');
                   svg.id = 'chart-' + Math.random();
@@ -216,11 +264,15 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
                 const staleInput = document.getElementById(fault)?.value;
                 const staleChart = document.getElementById('chart').innerHTML;
                 const staleChartData = document.querySelector('#chart rect').dataset.people;
+                const staleChartStyle = document.getElementById('chart').getAttribute('style');
+                const stalePixels = canvasChart ? document.getElementById('chart').getContext('2d').getImageData(0, 0, 200, 100) : null;
                 for (const [id, value] of Object.entries({ subtotal: '900', people: '6', discount: '60', 'service-rate': '10' })) document.getElementById(id).value = value;
                 render();
                 if (staleInput !== undefined) document.getElementById(fault).value = staleInput;
                 if (fault === 'chart') document.getElementById('chart').innerHTML = staleChart;
                 if (fault === 'chart-data') document.querySelector('#chart rect').dataset.people = staleChartData;
+                if (fault === 'chart-root') document.getElementById('chart').setAttribute('style', staleChartStyle);
+                if (fault === 'chart-canvas') document.getElementById('chart').getContext('2d').putImageData(stalePixels, 0, 0);
               };
               document.getElementById('copy').onclick = () => parent.navigator.clipboard.writeText(document.getElementById('total').textContent);
               render();
@@ -256,17 +308,41 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
           expect(results.find(({ id }) => id === 'bill.reset')?.status).toBe(
             mode.startsWith('stale-') ? 'fail' : 'pass',
           );
+          if (mode === 'stale-chart-root') {
+            expect(
+              await view
+                .locator('#chart')
+                .evaluate((element) => getComputedStyle(element).transform),
+            ).not.toBe('matrix(1, 0, 0, 1, 0, 0)');
+          }
+          if (mode === 'canvas-chart' || mode === 'stale-chart-canvas') {
+            const alpha = await view
+              .locator('#chart')
+              .evaluate(
+                (element) =>
+                  (element as HTMLCanvasElement)
+                    .getContext('2d')!
+                    .getImageData(65, 5, 1, 1).data[3],
+              );
+            expect(alpha).toBe(mode === 'canvas-chart' ? 0 : 255);
+          }
         } finally {
           await page.close();
         }
       },
     );
 
-    it.each(['control', 'progress-loss', 'history-loss'] as const)(
+    it.each([
+      'control',
+      'completed-last',
+      'progress-loss',
+      'history-loss',
+    ] as const)(
       'checks checklist progress and undo persistence: %s',
       async (mode) => {
         const context = await browser.newContext();
         const page = await context.newPage();
+        const token = 'acceptance-test-token';
         try {
           const html = `
             <input id="new-item"><select id="filter"><option value="all">All</option><option value="open">Open</option><option value="done">Done</option></select>
@@ -281,7 +357,9 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
               function render() {
                 byId('empty').hidden = !!items.length;
                 byId('items').innerHTML = '';
-                items.forEach((item, index) => {
+                const ordered = items.map((item, index) => ({ item, index }));
+                if (${JSON.stringify(mode)} === 'completed-last') ordered.sort((a, b) => Number(a.item.done) - Number(b.item.done));
+                ordered.forEach(({ item, index }) => {
                   const slot = 'item-' + (index + 1);
                   const row = document.createElement('li');
                   const filter = byId('filter').value;
@@ -310,11 +388,37 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
               body:
                 url.pathname === '/view'
                   ? html
-                  : `<iframe name="view" src="/view${url.search}"></iframe>`,
+                  : `<body><script>
+                      const supplied = new URLSearchParams(location.hash.slice(1)).get('token');
+                      if (supplied) sessionStorage.setItem('daemon-token', supplied);
+                      history.replaceState(null, '', location.pathname + location.search);
+                      if (sessionStorage.getItem('daemon-token') === ${JSON.stringify(token)}) {
+                        document.body.insertAdjacentHTML('beforeend', '<iframe name="view" src="/view' + location.search + '"></iframe>');
+                      }
+                    </script></body>`,
             });
           });
           let starts = 0;
           let checkedBeforeReload = false;
+          let reopenedAuthenticated = false;
+          const newPage = context.newPage.bind(context);
+          vi.spyOn(context, 'newPage').mockImplementation(async () => {
+            const reopened = await newPage();
+            const goto = reopened.goto.bind(reopened);
+            vi.spyOn(reopened, 'goto').mockImplementation(
+              async (url, options) => {
+                const response = await goto(url, options);
+                reopenedAuthenticated =
+                  (await reopened.evaluate(() =>
+                    sessionStorage.getItem('daemon-token'),
+                  )) === token;
+                expect(reopenedAuthenticated).toBe(true);
+                expect(new URL(reopened.url()).hash).toBe('');
+                return response;
+              },
+            );
+            return reopened;
+          });
           const reload = page.reload.bind(page);
           vi.spyOn(page, 'reload').mockImplementation(async (options) => {
             const card = await waitForCardOn(page, 0);
@@ -326,8 +430,11 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
           const env = {
             page,
             context,
+            daemon: { token },
             startSession: async () => {
-              await page.goto(`http://acceptance.test/?session=${++starts}`);
+              await page.goto(
+                `http://acceptance.test/?session=${++starts}#token=${token}`,
+              );
             },
             waitForCard: (index: number) => waitForCardOn(page, index),
             waitForIdle: async () => {},
@@ -335,10 +442,13 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
 
           const results = await runChecklist(env, 'checklist');
           expect(checkedBeforeReload).toBe(true);
+          expect(reopenedAuthenticated).toBe(true);
           for (const id of ['persists-after-reload', 'persists-after-reopen']) {
             expect(
               results.find((check) => check.id === `checklist.${id}`)?.status,
-            ).toBe(mode === 'control' ? 'pass' : 'fail');
+            ).toBe(
+              mode === 'control' || mode === 'completed-last' ? 'pass' : 'fail',
+            );
           }
           for (const id of [
             'add',

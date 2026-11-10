@@ -347,6 +347,7 @@ export async function startAcceptanceEnv(options: {
         QWEN_CODE_SYSTEM_DEFAULTS_PATH: path.join(root, 'system.json'),
         QWEN_CODE_TRUSTED_FOLDERS_PATH: path.join(home, 'trustedFolders.json'),
         QWEN_CODE_DISABLE_CRON: '1',
+        QWEN_CODE_LEGACY_MCP_BLOCKING: '1',
         OPENAI_API_KEY: backend.apiKey,
         OPENAI_BASE_URL: backend.baseUrl,
         OPENAI_MODEL: backend.model,

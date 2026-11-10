@@ -76,6 +76,42 @@ const options = {
   mode: { kind: 'replay', script: () => ({ content: '' }) },
 } as const;
 
+describe('acceptance environment startup', () => {
+  it.each(['replay', 'live'] as const)(
+    'waits for MCP discovery before the first %s prompt',
+    async (kind) => {
+      vi.stubEnv('QWEN_CODE_LEGACY_MCP_BLOCKING', '0');
+      let env: AcceptanceEnv | undefined;
+      try {
+        env = await startAcceptanceEnv({
+          mode:
+            kind === 'replay'
+              ? options.mode
+              : {
+                  kind,
+                  model: {
+                    label: 'test',
+                    baseUrl: 'http://127.0.0.1:1',
+                    apiKey: 'test-key',
+                    model: 'test',
+                  },
+                },
+        });
+        expect(mocks.spawnDaemon).toHaveBeenCalledWith(
+          expect.objectContaining({
+            env: expect.objectContaining({
+              QWEN_CODE_LEGACY_MCP_BLOCKING: '1',
+            }),
+          }),
+        );
+      } finally {
+        await env?.close();
+        vi.unstubAllEnvs();
+      }
+    },
+  );
+});
+
 describe('acceptance environment setup cleanup', () => {
   it.each([
     ['daemon creation', mocks.spawnDaemon, false, false],
