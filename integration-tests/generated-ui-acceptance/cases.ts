@@ -1,0 +1,809 @@
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/**
+ * The four #14019 acceptance cases. Each runner drives a real card through
+ * the harness and records one result per check. A check observes behavior;
+ * it never assumes a capability is missing. When a precondition fails (for
+ * example nothing was persisted, so isolation cannot be judged), dependent
+ * checks report `not-applicable` with the reason.
+ *
+ * Harness contract: the prompts in `prompts.ts` name the element IDs used
+ * here. Amounts are compared in integer cents.
+ */
+
+import type { Frame } from 'playwright';
+import {
+  BILL_DEFAULTS,
+  BILL_SCENARIO,
+  COMPARATOR_SCENARIO,
+  COMPARATOR_SELECTED_PLAN,
+  PLANS,
+  billShares,
+  billTotal,
+  comparatorMonthlyEquivalent,
+  comparatorPayment,
+  type ComparatorInputs,
+} from './fixtures.js';
+import {
+  setValue,
+  settle,
+  text,
+  waitForCardOn,
+  type AcceptanceEnv,
+  type Card,
+} from './harness.js';
+import { formatCents, parseLastAmount, parseSingleAmount } from './money.js';
+import type { CheckResult, CheckStatus } from './report.js';
+
+class Checks {
+  readonly results: CheckResult[] = [];
+  constructor(private readonly prefix: string) {}
+
+  add(id: string, covers: string, status: CheckStatus, detail?: string) {
+    this.results.push({ id: `${this.prefix}.${id}`, covers, status, detail });
+    return status === 'pass';
+  }
+
+  expect(id: string, covers: string, ok: boolean, detail: string) {
+    return this.add(id, covers, ok ? 'pass' : 'fail', ok ? undefined : detail);
+  }
+
+  async guard(id: string, covers: string, run: () => Promise<boolean>) {
+    try {
+      return await run();
+    } catch (error) {
+      return this.add(
+        id,
+        covers,
+        'fail',
+        `error: ${String(error instanceof Error ? error.message : error).split('\n')[0]}`,
+      );
+    }
+  }
+}
+
+async function shareAmounts(view: Frame): Promise<number[]> {
+  const items = view.locator('#shares > *');
+  const texts = await items.allTextContents();
+  return texts
+    .map((value) => parseLastAmount(value))
+    .filter((value): value is number => value !== undefined);
+}
+
+async function readBill(view: Frame) {
+  return {
+    total: parseSingleAmount(await text(view, 'total')),
+    shares: await shareAmounts(view),
+  };
+}
+
+function describeBill(observed: { total?: number; shares: number[] }) {
+  return `total=${observed.total === undefined ? 'unreadable' : formatCents(observed.total)} shares=[${observed.shares.map(formatCents).join(', ')}]`;
+}
+
+/** Bill splitter: immediate updates, cent conservation, invalid input, copy, reset. */
+export async function runBillSplitter(
+  env: AcceptanceEnv,
+  prompt: string,
+): Promise<CheckResult[]> {
+  const checks = new Checks('bill');
+  await env.startSession(prompt);
+  const card = await env.waitForCard(0);
+  await env.waitForIdle();
+  const before = env.mainRequests().length;
+  const { view } = card;
+
+  const expectedDefault = billShares(BILL_DEFAULTS);
+  const defaults = await settle(
+    () => readBill(view),
+    (bill) => bill.total === billTotal(BILL_DEFAULTS),
+  );
+  checks.expect(
+    'defaults',
+    'case 1',
+    defaults.total === billTotal(BILL_DEFAULTS) &&
+      JSON.stringify(defaults.shares) === JSON.stringify(expectedDefault),
+    `expected total ${formatCents(billTotal(BILL_DEFAULTS))} and ${BILL_DEFAULTS.people}×${formatCents(expectedDefault[0])}; saw ${describeBill(defaults)}`,
+  );
+
+  const chartBefore = await view
+    .locator('#chart')
+    .innerHTML()
+    .catch(() => '');
+
+  await checks.guard('scenario', 'case 1', async () => {
+    await setValue(view, 'people', String(BILL_SCENARIO.people));
+    await setValue(view, 'discount', formatCents(BILL_SCENARIO.discount));
+    await setValue(view, 'service-rate', String(BILL_SCENARIO.serviceRate));
+    const total = billTotal(BILL_SCENARIO);
+    const observed = await settle(
+      () => readBill(view),
+      (bill) =>
+        bill.total === total && bill.shares.length === BILL_SCENARIO.people,
+    );
+    const ok =
+      observed.total === total &&
+      JSON.stringify([...observed.shares].sort((a, b) => b - a)) ===
+        JSON.stringify(billShares(BILL_SCENARIO));
+    checks.expect(
+      'scenario',
+      'case 1',
+      ok,
+      `expected total ${formatCents(total)} with 4×137.84 + 3×137.83; saw ${describeBill(observed)}`,
+    );
+    const sum = observed.shares.reduce((a, b) => a + b, 0);
+    checks.expect(
+      'conserves-cents',
+      'case 1',
+      observed.total !== undefined &&
+        sum === observed.total &&
+        observed.shares.length === BILL_SCENARIO.people,
+      `shares sum to ${formatCents(sum)} over ${observed.shares.length} people; total ${observed.total === undefined ? 'unreadable' : formatCents(observed.total)}`,
+    );
+    const spread = observed.shares.length
+      ? Math.max(...observed.shares) - Math.min(...observed.shares)
+      : Infinity;
+    checks.expect(
+      'fair-rounding',
+      'case 1',
+      spread <= 1,
+      `shares differ by ${spread} cents`,
+    );
+    const chartAfter = await view
+      .locator('#chart')
+      .innerHTML()
+      .catch(() => '');
+    checks.expect(
+      'chart-updates',
+      'case 1 / R1',
+      /<(svg|canvas)\b/i.test(chartAfter) && chartAfter !== chartBefore,
+      chartAfter
+        ? 'the chart did not change with the inputs'
+        : 'no #chart content',
+    );
+    return true;
+  });
+
+  await checks.guard('rejects-invalid', 'case 1', async () => {
+    await setValue(view, 'people', '0');
+    const error = await settle(
+      () => text(view, 'error'),
+      (value) => value.length > 0,
+    );
+    const total = await text(view, 'total');
+    checks.expect(
+      'rejects-invalid',
+      'case 1',
+      error.length > 0 && !/NaN|Infinity/.test(total),
+      `error="${error}" total="${total}"`,
+    );
+    await setValue(view, 'people', String(BILL_SCENARIO.people));
+    return true;
+  });
+
+  await checks.guard('copies-current', 'case 1 / R5', async () => {
+    await env.page.evaluate(() => navigator.clipboard.writeText(''));
+    await view.locator('#copy').click();
+    await env.page.waitForTimeout(500);
+    const copied = await env.page.evaluate(() =>
+      navigator.clipboard.readText(),
+    );
+    return checks.expect(
+      'copies-current',
+      'case 1 / R5',
+      copied.includes(formatCents(billTotal(BILL_SCENARIO))),
+      copied
+        ? `clipboard holds "${copied.slice(0, 80)}"`
+        : 'nothing reached the clipboard',
+    );
+  });
+
+  await checks.guard('reset', 'case 1', async () => {
+    await view.locator('#reset').click();
+    const reset = await settle(
+      () => readBill(view),
+      (bill) => bill.total === billTotal(BILL_DEFAULTS),
+    );
+    const people = await view.locator('#people').inputValue();
+    return checks.expect(
+      'reset',
+      'case 1',
+      reset.total === billTotal(BILL_DEFAULTS) &&
+        JSON.stringify(reset.shares) === JSON.stringify(expectedDefault) &&
+        people === String(BILL_DEFAULTS.people),
+      `after reset: ${describeBill(reset)} people=${people}`,
+    );
+  });
+
+  checks.expect(
+    'edits-start-no-turn',
+    'R3',
+    env.mainRequests().length === before,
+    `${env.mainRequests().length - before} model request(s) followed local edits`,
+  );
+  return checks.results;
+}
+
+async function itemTexts(view: Frame): Promise<string[]> {
+  return view
+    .locator('[id^="item-"][id$="-text"]')
+    .evaluateAll((elements) =>
+      elements
+        .filter((element) => (element as HTMLElement).offsetParent !== null)
+        .map((element) => (element.textContent ?? '').trim())
+        .filter(Boolean),
+    )
+    .catch(() => []);
+}
+
+async function itemSlot(
+  view: Frame,
+  label: string,
+): Promise<string | undefined> {
+  const ids = await view
+    .locator('[id^="item-"][id$="-text"]')
+    .evaluateAll((elements, wanted) => {
+      const match = elements.find(
+        (element) => (element.textContent ?? '').trim() === wanted,
+      );
+      return match ? [match.id] : [];
+    }, label);
+  return ids[0]?.replace(/-text$/, '');
+}
+
+async function addItem(view: Frame, label: string) {
+  await setValue(view, 'new-item', label);
+  await view.locator('#add').click();
+  await settle(
+    () => itemTexts(view),
+    (texts) => texts.includes(label),
+  );
+}
+
+/** Checklist: editing, filtering, repeated undo, persistence and isolation. */
+export async function runChecklist(
+  env: AcceptanceEnv,
+  prompt: string,
+): Promise<CheckResult[]> {
+  const checks = new Checks('checklist');
+  await env.startSession(prompt);
+  const card = await env.waitForCard(0);
+  await env.waitForIdle();
+  const sessionUrl = env.page.url();
+  const { view } = card;
+
+  const emptyText = await text(view, 'empty');
+  checks.expect(
+    'empty-state',
+    'case 2',
+    emptyText.length > 0,
+    'no empty-state message before items exist',
+  );
+
+  const added = await checks.guard('add', 'case 2', async () => {
+    for (const label of ['Agenda', 'Notes', 'Actions']) {
+      await addItem(view, label);
+    }
+    const texts = await itemTexts(view);
+    return checks.expect(
+      'add',
+      'case 2',
+      ['Agenda', 'Notes', 'Actions'].every((label) => texts.includes(label)),
+      `items: ${JSON.stringify(texts)}`,
+    );
+  });
+
+  if (added) {
+    await checks.guard('check-and-filter', 'case 2', async () => {
+      const slot = await itemSlot(view, 'Notes');
+      await view.locator(`#${slot}-check`).check();
+      await env.page.waitForTimeout(300);
+      await setValue(view, 'filter', 'done');
+      const done = await settle(
+        () => itemTexts(view),
+        (texts) => texts.length === 1,
+      );
+      await setValue(view, 'filter', 'open');
+      const open = await settle(
+        () => itemTexts(view),
+        (texts) => texts.length === 2,
+      );
+      await setValue(view, 'filter', 'all');
+      return checks.expect(
+        'check-and-filter',
+        'case 2',
+        JSON.stringify(done) === '["Notes"]' &&
+          JSON.stringify([...open].sort()) === '["Actions","Agenda"]',
+        `done=${JSON.stringify(done)} open=${JSON.stringify(open)}`,
+      );
+    });
+
+    await checks.guard('delete', 'case 2', async () => {
+      const slot = await itemSlot(view, 'Actions');
+      await view.locator(`#${slot}-delete`).click();
+      const texts = await settle(
+        () => itemTexts(view),
+        (value) => !value.includes('Actions'),
+      );
+      return checks.expect(
+        'delete',
+        'case 2',
+        !texts.includes('Actions') && texts.length === 2,
+        `items after delete: ${JSON.stringify(texts)}`,
+      );
+    });
+
+    await checks.guard('repeated-undo', 'case 2', async () => {
+      await view.locator('#undo').click();
+      const afterFirst = await settle(
+        () => itemTexts(view),
+        (value) => value.includes('Actions'),
+      );
+      await view.locator('#undo').click();
+      await env.page.waitForTimeout(500);
+      const slot = await itemSlot(view, 'Notes');
+      const notesChecked = slot
+        ? await view.locator(`#${slot}-check`).isChecked()
+        : undefined;
+      return checks.expect(
+        'repeated-undo',
+        'case 2',
+        afterFirst.includes('Actions') && notesChecked === false,
+        `after one undo: ${JSON.stringify(afterFirst)}; after two, Notes checked=${notesChecked}`,
+      );
+    });
+  }
+
+  const saved = await itemTexts(view);
+  const persistenceChecks = async (
+    id: string,
+    label: string,
+    open: () => Promise<Card>,
+  ) =>
+    checks.guard(id, 'case 2 / R4', async () => {
+      const reopened = await open();
+      const texts = await settle(
+        () => itemTexts(reopened.view),
+        (value) => value.length === saved.length,
+        5_000,
+      );
+      return checks.expect(
+        id,
+        'case 2 / R4',
+        saved.length > 0 && JSON.stringify(texts) === JSON.stringify(saved),
+        `${label}: expected ${JSON.stringify(saved)}, saw ${JSON.stringify(texts)}`,
+      );
+    });
+
+  const persistedAfterReload = await persistenceChecks(
+    'persists-after-reload',
+    'after reloading the page',
+    async () => {
+      await env.page.reload();
+      return env.waitForCard(0);
+    },
+  );
+
+  const persistedAfterReopen = await persistenceChecks(
+    'persists-after-reopen',
+    'after reopening the conversation in a new tab',
+    async () => {
+      const page = await env.context.newPage();
+      await page.goto(sessionUrl);
+      // The page is closed after the check has read it through `settle`.
+      setTimeout(() => void page.close(), 30_000);
+      return waitForCardOn(page, 0);
+    },
+  );
+
+  if (!persistedAfterReload && !persistedAfterReopen) {
+    checks.add(
+      'save-acknowledged',
+      'case 2 / R4',
+      'not-applicable',
+      'nothing was persisted, so there is no save to acknowledge',
+    );
+    checks.add(
+      'isolated-across-sessions',
+      'case 2 / R4',
+      'not-applicable',
+      'nothing was persisted, so isolation cannot be distinguished from loss',
+    );
+  } else {
+    checks.add(
+      'save-acknowledged',
+      'case 2 / R4',
+      'fail',
+      'no save acknowledgement is observable to the harness yet',
+    );
+    await checks.guard('isolated-across-sessions', 'case 2 / R4', async () => {
+      await env.startSession(prompt);
+      const other = await env.waitForCard(0);
+      const texts = await itemTexts(other.view);
+      return checks.expect(
+        'isolated-across-sessions',
+        'case 2 / R4',
+        texts.length === 0,
+        `the same task in a new conversation shows ${JSON.stringify(texts)}`,
+      );
+    });
+  }
+  return checks.results;
+}
+
+/** Values of a parameters message: `"id": { "value": "...", "checked": ... }`. */
+export function parseSubmittedInputs(
+  message: string,
+): Record<string, { value: string; checked: boolean }> {
+  const inputs: Record<string, { value: string; checked: boolean }> = {};
+  const pattern =
+    /"([A-Za-z][\w-]{0,63})":\s*\{\s*"value":\s*"((?:[^"\\]|\\.)*)",\s*"checked":\s*(true|false)\s*\}/g;
+  for (const match of message.matchAll(pattern)) {
+    inputs[match[1]] = {
+      value: JSON.parse(`"${match[2]}"`) as string,
+      checked: match[3] === 'true',
+    };
+  }
+  return inputs;
+}
+
+export const FORM_VALUES: Record<string, string> = {
+  activity: 'escape-room',
+  date: '2026-12-05',
+  participants: '12',
+  budget: '180',
+  notes: 'two vegetarians',
+};
+
+/** Activity form: edits send nothing; one explicit submission sends every field once. */
+function submittedTurns(env: AcceptanceEnv, before: number) {
+  return env
+    .mainRequests()
+    .slice(before)
+    .filter((request) => request.lastUserText.includes('"inputs"'));
+}
+
+interface ContinuationEntry {
+  state: string | null;
+  text: string;
+}
+
+/** Records every change of the card's continuation status from now on. */
+async function recordContinuation(app: Frame): Promise<void> {
+  await app.evaluate(() => {
+    const status = document.getElementById('continuation-status');
+    const log: Array<{ state: string | null; text: string }> = [];
+    const push = () => {
+      const entry = {
+        state: status?.getAttribute('data-state') ?? null,
+        text: (status?.textContent ?? '').trim(),
+      };
+      const last = log[log.length - 1];
+      if (!last || last.state !== entry.state || last.text !== entry.text)
+        log.push(entry);
+    };
+    push();
+    if (status)
+      new MutationObserver(push).observe(status, {
+        attributes: true,
+        childList: true,
+        characterData: true,
+        subtree: true,
+      });
+    (globalThis as { __continuationLog?: typeof log }).__continuationLog = log;
+  });
+}
+
+async function continuationLog(app: Frame): Promise<ContinuationEntry[]> {
+  return app
+    .evaluate(
+      () =>
+        (globalThis as { __continuationLog?: ContinuationEntry[] })
+          .__continuationLog ?? [],
+    )
+    .catch(() => []);
+}
+
+function describeLog(log: ContinuationEntry[]): string {
+  return log
+    .map((entry) =>
+      entry.text
+        ? `${entry.state} ("${entry.text.slice(0, 60)}")`
+        : `${entry.state}`,
+    )
+    .join(' → ');
+}
+
+export async function runActivityForm(
+  env: AcceptanceEnv,
+  prompt: string,
+): Promise<CheckResult[]> {
+  const checks = new Checks('form');
+  await env.startSession(prompt);
+  const card = await env.waitForCard(0);
+  await env.waitForIdle();
+  const { view, app } = card;
+  const before = env.mainRequests().length;
+
+  await checks.guard('edits-start-no-turn', 'case 3 / R3', async () => {
+    for (const [id, value] of Object.entries(FORM_VALUES)) {
+      await setValue(view, id, value);
+    }
+    await env.page.waitForTimeout(2_000);
+    return checks.expect(
+      'edits-start-no-turn',
+      'case 3 / R3',
+      env.mainRequests().length === before,
+      `${env.mainRequests().length - before} model request(s) followed edits`,
+    );
+  });
+
+  let repliesBefore = 0;
+  await checks.guard('one-submission', 'case 3 / R3', async () => {
+    const button = app.locator('#continue-analysis');
+    await settle(
+      () => button.isEnabled(),
+      (enabled) => enabled,
+      10_000,
+    );
+    await button.scrollIntoViewIfNeeded();
+    await recordContinuation(app);
+    repliesBefore = (await env.assistantTexts()).length;
+    // First attempt straight after typing, as a user would. It counts only
+    // if it reaches a submitted model request without another click.
+    await button.click();
+    // A click that changes nothing within 5 s did nothing; one that started a
+    // send gets the host's review and admission windows to settle.
+    let afterFirst = await settle(
+      () => continuationLog(app),
+      (log) => log.length > 1,
+      5_000,
+    );
+    if (afterFirst.length > 1) {
+      afterFirst = await settle(
+        () => continuationLog(app),
+        (log) => {
+          const last = log[log.length - 1]?.state;
+          return last !== 'pending' && last !== null;
+        },
+        200_000,
+      );
+      await settle(
+        () => Promise.resolve(submittedTurns(env, before).length),
+        (count) => count > 0,
+        afterFirst.some((entry) => entry.state === 'accepted') ? 30_000 : 0,
+      );
+    }
+    const firstSubmitted = submittedTurns(env, before).length > 0;
+    checks.expect(
+      'first-click-submits',
+      'case 3',
+      firstSubmitted,
+      `the first click straight after editing a field sent nothing; status: ${describeLog(afterFirst)}`,
+    );
+    if (!firstSubmitted) {
+      await env.page.waitForTimeout(1_500);
+      await button.click();
+    }
+    await settle(
+      () => Promise.resolve(submittedTurns(env, before).length),
+      (count) => count > 0,
+      60_000,
+    );
+    await env.waitForIdle();
+    const submitted = submittedTurns(env, before);
+    const distinctTurns = new Set(submitted.map((r) => r.lastUserText)).size;
+    const log = await continuationLog(app);
+    checks.expect(
+      'one-submission',
+      'case 3 / R3',
+      distinctTurns === 1,
+      `${distinctTurns} distinct submitted turn(s); status: ${describeLog(log)}`,
+    );
+    const inputs = parseSubmittedInputs(submitted[0]?.lastUserText ?? '');
+    const missing = Object.entries(FORM_VALUES).filter(
+      ([id, value]) => inputs[id]?.value !== value,
+    );
+    checks.expect(
+      'submits-every-field',
+      'case 3',
+      submitted.length > 0 && missing.length === 0,
+      `missing or different: ${JSON.stringify(Object.fromEntries(missing.map(([id]) => [id, inputs[id]?.value])))}`,
+    );
+    const status = log[log.length - 1]?.state ?? null;
+    checks.expect(
+      'reports-acceptance',
+      'case 3',
+      status === 'accepted',
+      `continuation status: ${describeLog(log)}`,
+    );
+    return true;
+  });
+
+  await checks.guard('answer-uses-values', 'case 3', async () => {
+    // The answer to the submission is the first reply after it; a long
+    // thinking phase can outlast the idle wait, so wait for the reply itself.
+    const replies = await settle(
+      () => env.assistantTexts(),
+      (texts) => texts.length > repliesBefore,
+      env.cardTimeoutMs,
+    );
+    if (replies.length <= repliesBefore) {
+      return checks.expect(
+        'answer-uses-values',
+        'case 3',
+        false,
+        'no assistant reply followed the submission',
+      );
+    }
+    const body = replies.slice(repliesBefore).join('\n');
+    return checks.expect(
+      'answer-uses-values',
+      'case 3',
+      body.includes(FORM_VALUES.participants) && /escape|密室/i.test(body),
+      `reply after submission: "${body.slice(0, 160)}"`,
+    );
+  });
+  return checks.results;
+}
+
+async function selectComparator(
+  view: Frame,
+  inputs: { seats: number; billing: string; plan: string },
+) {
+  await setValue(view, 'seats', String(inputs.seats));
+  await view.locator(`#billing-${inputs.billing}`).check();
+  await view.locator(`#plan-${inputs.plan}`).check();
+  await view.page().waitForTimeout(500);
+}
+
+async function readComparator(view: Frame) {
+  const result: Record<string, { monthly?: number; payment?: number }> = {};
+  for (const plan of PLANS) {
+    result[plan] = {
+      monthly: parseSingleAmount(await text(view, `${plan}-monthly`)),
+      payment: parseSingleAmount(await text(view, `${plan}-payment`)),
+    };
+  }
+  return result;
+}
+
+function comparatorMatches(
+  observed: Awaited<ReturnType<typeof readComparator>>,
+  inputs: ComparatorInputs,
+) {
+  return PLANS.every(
+    (plan) =>
+      observed[plan].payment === comparatorPayment(plan, inputs) &&
+      observed[plan].monthly === comparatorMonthlyEquivalent(plan, inputs),
+  );
+}
+
+function describeComparator(
+  observed: Awaited<ReturnType<typeof readComparator>>,
+) {
+  return PLANS.map(
+    (plan) =>
+      `${plan}: monthly=${observed[plan].monthly === undefined ? '?' : formatCents(observed[plan].monthly!)} payment=${observed[plan].payment === undefined ? '?' : formatCents(observed[plan].payment!)}`,
+  ).join('; ');
+}
+
+/** Comparator: monthly equivalent vs payment, extension across turns, export, reset. */
+export async function runComparator(
+  env: AcceptanceEnv,
+  prompts: { initial: string; support: string; reset: string },
+): Promise<CheckResult[]> {
+  const checks = new Checks('comparator');
+  await env.startSession(prompts.initial);
+  const first = await env.waitForCard(0);
+  await env.waitForIdle();
+  const initialSeats = await first.view.locator('#seats').inputValue();
+  const withoutSupport: ComparatorInputs = {
+    ...COMPARATOR_SCENARIO,
+    support: false,
+  };
+
+  await checks.guard('monthly-vs-payment', 'case 4', async () => {
+    await selectComparator(first.view, {
+      seats: COMPARATOR_SCENARIO.seats,
+      billing: COMPARATOR_SCENARIO.billing,
+      plan: COMPARATOR_SELECTED_PLAN,
+    });
+    const observed = await settle(
+      () => readComparator(first.view),
+      (value) => comparatorMatches(value, withoutSupport),
+    );
+    return checks.expect(
+      'monthly-vs-payment',
+      'case 4',
+      comparatorMatches(observed, withoutSupport),
+      `13 seats annual: ${describeComparator(observed)}`,
+    );
+  });
+
+  // Let the applied values settle into the composer before the follow-up.
+  await env.page.waitForTimeout(1_500);
+  await env.send(prompts.support);
+  const views = () => env.page.frames().filter((f) => f.name() === 'view');
+  let second: Card | undefined;
+  await checks.guard('extends-after-follow-up', 'case 4 / R5', async () => {
+    second = await env.waitForCard(1);
+    await env.waitForIdle();
+    const observed = await settle(
+      () => readComparator(second!.view),
+      (value) => comparatorMatches(value, COMPARATOR_SCENARIO),
+    );
+    checks.expect(
+      'support-totals',
+      'case 4',
+      comparatorMatches(observed, COMPARATOR_SCENARIO),
+      `with support: ${describeComparator(observed)}`,
+    );
+    const seats = await second.view.locator('#seats').inputValue();
+    const annual = await second.view.locator('#billing-annual').isChecked();
+    const team = await second.view
+      .locator(`#plan-${COMPARATOR_SELECTED_PLAN}`)
+      .isChecked();
+    checks.expect(
+      'keeps-choices',
+      'case 4 / R5',
+      seats === String(COMPARATOR_SCENARIO.seats) && annual && team,
+      `seats=${seats} annual=${annual} team=${team}`,
+    );
+    return checks.expect(
+      'extends-existing-card',
+      'R5',
+      views().length === 1,
+      `the follow-up produced ${views().length} independent cards; the earlier card was not extended`,
+    );
+  });
+
+  await checks.guard('exports-current-csv', 'case 4 / R5', async () => {
+    const target = second ?? first;
+    const download = env.page
+      .waitForEvent('download', { timeout: 5_000 })
+      .catch(() => undefined);
+    await target.view.locator('#export').click();
+    const file = await download;
+    if (!file) {
+      return checks.expect(
+        'exports-current-csv',
+        'case 4 / R5',
+        false,
+        'clicking export produced no download',
+      );
+    }
+    const stream = await file.createReadStream();
+    let csv = '';
+    for await (const chunk of stream) csv += chunk.toString();
+    return checks.expect(
+      'exports-current-csv',
+      'case 4 / R5',
+      csv.includes(formatCents(comparatorPayment('team', COMPARATOR_SCENARIO))),
+      `CSV did not contain the current team total: ${csv.slice(0, 120)}`,
+    );
+  });
+
+  await checks.guard('reset-via-follow-up', 'case 4', async () => {
+    const count = views().length;
+    await env.send(prompts.reset);
+    const reset = await env.waitForCard(count);
+    await env.waitForIdle();
+    const seats = await reset.view.locator('#seats').inputValue();
+    const support = await reset.view
+      .locator('#support')
+      .isChecked()
+      .catch(() => false);
+    return checks.expect(
+      'reset-via-follow-up',
+      'case 4',
+      seats === initialSeats && !support,
+      `after reset: seats=${seats} (initial ${initialSeats}) support=${support}`,
+    );
+  });
+  return checks.results;
+}
