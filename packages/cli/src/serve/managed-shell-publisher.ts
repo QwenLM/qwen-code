@@ -6,16 +6,14 @@
 
 import type { Application, Request, Response } from 'express';
 import type { ShellExecutionResult } from '@qwen-code/qwen-code-core/services/shellExecutionService.js';
-import type {
-  LocalShellCaptureRequest,
-  LocalShellReceipt,
-} from '@qwen-code/qwen-code-core/managed-runtime/managed-shell-result-session.js';
+import type { LocalShellCaptureRequest } from '@qwen-code/qwen-code-core/managed-runtime/managed-shell-result-session.js';
 import {
   MANAGED_TOOL_RESULT_PROTOCOL,
   parseToolResultEnvelope,
   type ToolResultEnvelope,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
 import type { ToolResultExpectedIdentity } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result-store.js';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import {
   authorizeManagedRuntime,
   managedRuntimeJsonBody,
@@ -26,7 +24,9 @@ import {
 import type {
   ManagedShellCapturePublisher,
   ManagedShellCaptureSink,
+  ToolResultAcknowledgement,
 } from './managed-runtime-tool-executor.js';
+import { processGroupLiveness } from './managed-runtime-ledger.js';
 
 export const HOSTED_SHELL_PUBLISHER_PATH =
   '/internal/hosted-shell-publisher/v1';
@@ -42,6 +42,7 @@ export const MANAGED_SHELL_PUBLISHER_ROUTE = Object.freeze({
 const PREFIX = { protocolVersion: 3, toolResult: MANAGED_TOOL_RESULT_PROTOCOL };
 export const SHELL_PUBLISHER_BODY_LIMIT = 256 * 1024;
 const CHUNK_BYTES = 64 * 1024;
+const debugLogger = createDebugLogger('ManagedShellPublisher');
 
 export interface ShellPublisherDescriptor {
   readonly url: string;
@@ -130,6 +131,15 @@ async function rpc(
   return JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown;
 }
 
+function publisherUnreachable(cause: unknown): boolean {
+  return (
+    cause instanceof Error &&
+    cause.cause instanceof Error &&
+    'code' in cause.cause &&
+    cause.cause.code === 'ECONNREFUSED'
+  );
+}
+
 const PREVIEW_BYTES = 8 * 1024;
 const PREVIEW_HEAD_BYTES = 2 * 1024;
 const PREVIEW_GAP =
@@ -174,6 +184,9 @@ export function boundedShellPreview(parts: readonly unknown[]): unknown[] {
 
 class RemoteShellCapture implements ManagedShellCaptureSink {
   private started = false;
+  private startedPid?: number;
+  private lostCaptureResult?: ToolResultEnvelope;
+  private finalizedResult?: ToolResultEnvelope;
   private processResult: ShellExecutionResult | null = null;
   private failed = false;
   private stopRequested = false;
@@ -189,8 +202,41 @@ class RemoteShellCapture implements ManagedShellCaptureSink {
     readonly identity: ToolResultExpectedIdentity,
     private readonly descriptor: ShellPublisherDescriptor,
   ) {}
-  setStarted(_pid: number): void {
+  setStarted(pid: number): void {
     this.started = true;
+    this.startedPid = Number.isSafeInteger(pid) && pid > 1 ? pid : undefined;
+  }
+  isLostCaptureResult(envelope: ToolResultEnvelope): boolean {
+    return (
+      this.lostCaptureResult !== undefined &&
+      this.lostCaptureResult === envelope
+    );
+  }
+  recordPublisherLoss(envelope: ToolResultEnvelope): boolean {
+    if (
+      this.finalizedResult === undefined ||
+      this.finalizedResult !== envelope ||
+      !this.isStoppedCancellation(envelope.executionStatus)
+    )
+      return false;
+    this.lostCaptureResult = envelope;
+    return true;
+  }
+  private isStoppedCancellation(
+    executionStatus: ToolResultEnvelope['executionStatus'],
+  ): boolean {
+    const physical = this.processResult;
+    return (
+      executionStatus === 'cancelled' &&
+      physical?.aborted === true &&
+      physical.promoted !== true &&
+      this.startedPid !== undefined &&
+      (physical.pid === undefined
+        ? physical.executionMethod === 'child_process'
+        : physical.pid === this.startedPid) &&
+      process.platform !== 'win32' &&
+      processGroupLiveness(this.startedPid) === 'gone'
+    );
   }
   setProcessResult(result: ShellExecutionResult): void {
     this.processResult = result;
@@ -267,36 +313,69 @@ class RemoteShellCapture implements ManagedShellCaptureSink {
     await Promise.all(Object.values(this.queues));
     const physical = this.processResult;
     const preview = shellPreview(responseParts);
-    return parseToolResultEnvelope(
-      await rpc(this.descriptor, {
-        operation: 'finalize',
-        executionCallId: this.identity.executionCallId,
-        started: this.started,
-        failed: this.failed,
-        process:
-          this.started && physical
-            ? {
-                exitCode: physical.exitCode,
-                signal: physical.signal,
-                previewBytes: physical.rawOutput.byteLength,
-                // Present only when the platform asked for the stop: the
-                // foreground lane's exact key set never sees it (#13856 A8).
-                ...(this.stopRequested ? { stopRequested: true } : {}),
-              }
-            : null,
-        executionStatus: this.started ? executionStatus : 'not_started',
+    const boundedError = error
+      ? {
+          message: new TextDecoder().decode(
+            Buffer.from(error.message).subarray(0, 1024),
+            { stream: true },
+          ),
+          ...(error.type ? { type: error.type.slice(0, 128) } : {}),
+        }
+      : undefined;
+    try {
+      return (this.finalizedResult = parseToolResultEnvelope(
+        await rpc(this.descriptor, {
+          operation: 'finalize',
+          executionCallId: this.identity.executionCallId,
+          started: this.started,
+          failed: this.failed,
+          process:
+            this.started && physical
+              ? {
+                  exitCode: physical.exitCode,
+                  signal: physical.signal,
+                  previewBytes: physical.rawOutput.byteLength,
+                  // Present only when the platform asked for the stop: the
+                  // foreground lane's exact key set never sees it (#13856 A8).
+                  ...(this.stopRequested ? { stopRequested: true } : {}),
+                }
+              : null,
+          executionStatus: this.started ? executionStatus : 'not_started',
+          responseParts: preview.parts,
+          previewTruncated: preview.truncated,
+          error: boundedError ?? null,
+        }),
+      ));
+    } catch (cause) {
+      // Capture loss cannot erase a witnessed cancellation, but a leader's
+      // exit alone cannot certify that its original process group stopped.
+      if (
+        !publisherUnreachable(cause) ||
+        !this.isStoppedCancellation(executionStatus)
+      )
+        throw cause;
+      debugLogger.debug(
+        `Managed Shell publisher connection refused while finalizing ${this.identity.executionCallId}.`,
+        cause,
+      );
+      return (this.lostCaptureResult = parseToolResultEnvelope({
+        executionStatus: 'cancelled',
         responseParts: preview.parts,
-        previewTruncated: preview.truncated,
-        error: error
-          ? {
-              message: Buffer.from(error.message)
-                .subarray(0, 1024)
-                .toString('utf8'),
-              ...(error.type ? { type: error.type.slice(0, 128) } : {}),
-            }
-          : null,
-      }),
-    );
+        error: {
+          ...boundedError,
+          message:
+            boundedError?.message ||
+            'The command was cancelled, but its captured output is unavailable.',
+        },
+        capture: {
+          captureStatus: 'unavailable',
+          captureReason: 'producer_lost',
+          manifest: null,
+          previewTruncated: true,
+          deliveryStatus: 'blocked',
+        },
+      }));
+    }
   }
 }
 
@@ -304,7 +383,10 @@ export class ManagedShellPublisherRegistry
   implements ManagedShellCapturePublisher
 {
   private readonly sessions = new Map<string, ShellPublisherDescriptor>();
-  private readonly executions = new Map<string, ShellPublisherDescriptor>();
+  private readonly executions = new Map<
+    string,
+    { descriptor: ShellPublisherDescriptor; sink: RemoteShellCapture }
+  >();
 
   get hasInstalledPublication(): boolean {
     return this.sessions.size > 0 || this.executions.size > 0;
@@ -388,25 +470,48 @@ export class ManagedShellPublisherRegistry
     )
       throw new Error('Shell publisher identity changed.');
     const previous = this.executions.get(identity.executionCallId);
-    if (previous && previous !== descriptor)
+    if (previous && previous.descriptor !== descriptor)
       throw new Error('Shell publisher execution conflicts.');
-    this.executions.set(identity.executionCallId, descriptor);
-    return { identity, sink: new RemoteShellCapture(identity, descriptor) };
+    const sink = previous?.sink ?? new RemoteShellCapture(identity, descriptor);
+    this.executions.set(identity.executionCallId, { descriptor, sink });
+    return { identity, sink };
   }
 
   async accept(
     identity: ToolResultExpectedIdentity,
     envelope: ToolResultEnvelope,
-  ): Promise<LocalShellReceipt> {
-    const descriptor = this.executions.get(identity.executionCallId);
-    if (!descriptor) throw new Error('Shell capture was not prepared.');
-    const receipt = publisherObject(
-      await rpc(descriptor, {
+  ): Promise<ToolResultAcknowledgement> {
+    const execution = this.executions.get(identity.executionCallId);
+    if (!execution) throw new Error('Shell capture was not prepared.');
+    const blocked = (): ToolResultAcknowledgement => ({
+      executionCallId: identity.executionCallId,
+      manifest: envelope.capture?.manifest ?? null,
+      deliveryStatus: 'blocked',
+      historyRevision: null,
+    });
+    if (execution.sink.isLostCaptureResult(envelope)) return blocked();
+    let response: unknown;
+    try {
+      response = await rpc(execution.descriptor, {
         operation: 'accept',
         executionCallId: identity.executionCallId,
         envelope,
-      }),
-    ) as unknown as LocalShellReceipt;
+      });
+    } catch (cause) {
+      if (
+        !publisherUnreachable(cause) ||
+        !execution.sink.recordPublisherLoss(envelope)
+      )
+        throw cause;
+      debugLogger.debug(
+        `Managed Shell publisher connection refused while accepting ${identity.executionCallId}.`,
+        cause,
+      );
+      return blocked();
+    }
+    const receipt = publisherObject(
+      response,
+    ) as unknown as ToolResultAcknowledgement;
     if (
       receipt.executionCallId !== identity.executionCallId ||
       JSON.stringify(receipt.manifest) !==

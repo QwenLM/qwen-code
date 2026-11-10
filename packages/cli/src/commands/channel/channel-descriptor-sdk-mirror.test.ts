@@ -87,12 +87,14 @@ function assertDescriptorWireShape(
     }
     if (descriptor.kind === 'number') {
       allowedKeys.add('exclusiveMinimum');
+      allowedKeys.add('maximum');
     }
     expect((descriptor as { properties?: unknown }).properties).toBeUndefined();
     if (descriptor.kind !== 'number') {
       expect(
         (descriptor as { exclusiveMinimum?: unknown }).exclusiveMinimum,
       ).toBeUndefined();
+      expect((descriptor as { maximum?: unknown }).maximum).toBeUndefined();
     }
   }
   for (const key of Object.keys(descriptor)) {

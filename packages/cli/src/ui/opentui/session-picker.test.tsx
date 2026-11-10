@@ -97,6 +97,7 @@ vi.mock('@opentui/react', async () => {
       width: mocks.state.width,
       height: mocks.state.height,
     }),
+    useRenderer: () => null,
   };
 });
 vi.mock('@opentui/core', () => ({
@@ -591,6 +592,31 @@ describe('OpenTuiSessionPicker Space-to-preview', () => {
     press({ name: 'space', sequence: ' ' });
     await flush();
     expect(screen.getByText('3 messages · just now · main')).toBeTruthy();
+  });
+
+  it('anchors the preview at the head of the session', async () => {
+    // The preview has no scroll host and no way to scroll, so a window anchored
+    // at the tail would show a long session's last turns and leave its first
+    // ones out of reach for good.
+    const loadSession = vi.fn().mockResolvedValue(
+      loadedSession(
+        Array.from({ length: 40 }, (_, index) => ({
+          type: 'user' as const,
+          uuid: `u${index}`,
+          text: `REC_${String(index).padStart(2, '0')}`,
+        })),
+      ),
+    );
+    renderPicker([session(1)], {
+      enablePreview: true,
+      sessionService: serviceWith(loadSession),
+    });
+
+    press({ name: 'space', sequence: ' ' });
+    await flush();
+
+    expect(screen.queryAllByText(/REC_00/).length).toBeGreaterThan(0);
+    expect(screen.queryAllByText(/REC_39/)).toHaveLength(0);
   });
 
   it('leaves Space to the checkboxes and the hint off in multi-select', () => {

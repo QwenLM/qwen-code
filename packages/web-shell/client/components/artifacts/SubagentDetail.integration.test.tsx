@@ -4,6 +4,12 @@ import { act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, expect, it, vi } from 'vitest';
 import type { ACPToolCall, Message } from '../../adapters/types';
+import {
+  DaemonUnavailableError,
+  type DaemonAvailability,
+} from '../../daemon/availability.js';
+import { offlineDaemon } from '../../daemon/availability.test-fixtures.js';
+import { DaemonAvailabilityContext } from '../../daemon/availability-context.js';
 import { I18nProvider } from '../../i18n';
 
 const {
@@ -20,6 +26,7 @@ const {
 } = vi.hoisted(() => ({
   previewTest: { enabled: false },
   previewCapabilities: {
+    features: [] as string[],
     workspaceCwd: '/work/project',
     workspaces: [
       { id: 'primary', cwd: '/work/project', trusted: true, primary: true },
@@ -27,6 +34,7 @@ const {
   },
   animationFrameBlocks: [{ id: 'frame-block' }],
   connection: {
+    status: 'connected',
     sessionId: 'subagent-session',
     workspaceCwd: '/work/project',
     loadingTranscript: false,
@@ -38,6 +46,8 @@ const {
     stat: vi.fn().mockResolvedValue({ type: 'file' }),
   },
   workspaceClient: {
+    sessionStatus: vi.fn().mockResolvedValue({}),
+    workspaceByCwd: vi.fn(),
     resolveSubagentSession: vi.fn(),
     cancelSubagentSession: vi.fn(),
   },
@@ -45,7 +55,9 @@ const {
     current: undefined as Record<string, unknown> | undefined,
   },
   latestOpenSubagent: {
-    current: undefined as ((tool: ACPToolCall) => void) | undefined,
+    current: undefined as
+      | ((tool: ACPToolCall, parentSessionId?: string) => void)
+      | undefined,
   },
   messages: [
     {
@@ -152,10 +164,192 @@ afterEach(() => {
   latestOpenSubagent.current = undefined;
   messagesFromBlocks.mockClear();
   previewTest.enabled = false;
+  connection.status = 'connected';
   connection.sessionId = 'subagent-session';
   workspaceActions.stat.mockReset().mockResolvedValue({ type: 'file' });
   workspaceClient.resolveSubagentSession.mockReset();
+  workspaceClient.sessionStatus.mockReset().mockResolvedValue({});
+  workspaceClient.workspaceByCwd.mockReset();
+  previewCapabilities.features = [];
+  messages.splice(1);
   vi.useRealTimers();
+});
+
+it.each([false, true])(
+  'uses a virtual subagent real parent to classify worktree edits (recovery=%s)',
+  async (recover) => {
+    const virtual = `subagent.${btoa('parent-session').replace(/=+$/, '')}.YWdlbnQ`;
+    connection.sessionId = virtual;
+    const cwd = '/work/project/.qwen/worktrees/one';
+    previewCapabilities.features = ['workspace_git_check_ignore'];
+    workspaceClient.sessionStatus.mockImplementation(async (id: string) => {
+      if (id !== 'parent-session')
+        throw new Error('virtual session has no status');
+      return { worktree: { path: cwd } };
+    });
+    if (recover)
+      workspaceClient.sessionStatus.mockRejectedValueOnce(new Error('offline'));
+    const ignored = vi.fn().mockResolvedValue({ v: 1, ignoredPaths: [] });
+    workspaceClient.workspaceByCwd.mockReturnValue({
+      workspaceGitIgnoredPaths: ignored,
+    });
+    workspaceClient.resolveSubagentSession.mockResolvedValue({
+      sessionId: virtual,
+      status: 'completed',
+    });
+    messages.push(
+      { id: 'turn', role: 'user', content: 'edit' },
+      {
+        id: 'write',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'write-file',
+            toolName: 'write_file',
+            status: 'completed',
+            args: { file_path: `${cwd}/src/app.ts`, content: 'source' },
+          },
+        ],
+      },
+    );
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    const renderDetail = () =>
+      root!.render(
+        <I18nProvider language="en">
+          <SubagentDetail
+            sessionId="parent-session"
+            rootToolCallId="agent-1"
+            initialRootTool={
+              (messages[0] as Extract<Message, { role: 'tool_group' }>).tools[0]
+            }
+            workspaceCwd="/work/project"
+          />
+        </I18nProvider>,
+      );
+    await act(async () => renderDetail());
+    if (recover) {
+      expect(ignored).not.toHaveBeenCalled();
+      connection.status = 'disconnected';
+      await act(async () => renderDetail());
+      connection.status = 'connected';
+      await act(async () => renderDetail());
+    }
+    expect(workspaceClient.sessionStatus).toHaveBeenCalledWith(
+      'parent-session',
+    );
+    expect(ignored).toHaveBeenCalledWith(['src/app.ts'], cwd, 'parent-session');
+    const changes = latestMessageListProps.current?.[
+      'turnFileChanges'
+    ] as ReadonlyMap<string, readonly { path: string }[]>;
+    expect(changes.get('turn')?.[0].path).toBe(`${cwd}/src/app.ts`);
+  },
+);
+
+async function mountRecoveringDetail(
+  availability: DaemonAvailability,
+  workspaceCwd?: string,
+) {
+  container = document.createElement('div');
+  root = createRoot(container);
+  await act(async () => {
+    root!.render(
+      <DaemonAvailabilityContext.Provider value={availability}>
+        <I18nProvider language="en">
+          <SubagentDetail
+            sessionId="parent-session"
+            rootToolCallId="agent-1"
+            initialRootTool={
+              (messages[0] as Extract<Message, { role: 'tool_group' }>).tools[0]
+            }
+            workspaceCwd={workspaceCwd}
+          />
+        </I18nProvider>
+      </DaemonAvailabilityContext.Provider>,
+    );
+  });
+  return container;
+}
+
+it('keeps the transcript while paused and refreshes after an in-flight request crosses recovery', async () => {
+  vi.useFakeTimers();
+  const { server, availability } = offlineDaemon();
+  let rejectRequest!: (reason: unknown) => void;
+  const pending = new Promise((_, reject) => {
+    rejectRequest = reject;
+  });
+  workspaceClient.resolveSubagentSession
+    .mockResolvedValueOnce({ sessionId: 'subagent-session', status: 'running' })
+    .mockReturnValueOnce(pending)
+    .mockResolvedValue({ sessionId: 'subagent-session', status: 'completed' });
+  try {
+    const container = await mountRecoveringDetail(
+      availability,
+      '/work/project',
+    );
+    server.healthy = true;
+    await act(async () => {
+      await availability.check(true);
+      await availability.check(true);
+    });
+    expect(workspaceClient.resolveSubagentSession).toHaveBeenCalledTimes(1);
+    server.healthy = false;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3_000);
+    });
+    expect(workspaceClient.resolveSubagentSession).toHaveBeenCalledTimes(2);
+    await act(async () => {
+      await availability.check(true);
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+    expect(workspaceClient.resolveSubagentSession).toHaveBeenCalledTimes(2);
+    expect(
+      container.querySelector('[data-testid="subagent-transcript"]'),
+    ).not.toBeNull();
+    server.healthy = true;
+    await act(async () => {
+      await availability.check(true);
+    });
+    await act(async () => {
+      rejectRequest(new DaemonUnavailableError());
+    });
+    expect(workspaceClient.resolveSubagentSession).toHaveBeenCalledTimes(3);
+    expect(container.textContent).not.toContain('Loading');
+  } finally {
+    act(() => availability.dispose());
+  }
+});
+
+it('clears an exhausted initial load error after automatic recovery', async () => {
+  vi.useFakeTimers();
+  const { server, availability } = offlineDaemon();
+  workspaceClient.resolveSubagentSession.mockRejectedValue(
+    Object.assign(new Error('Not found'), { status: 404 }),
+  );
+  try {
+    const container = await mountRecoveringDetail(availability);
+    await act(async () => vi.advanceTimersByTimeAsync(9_000));
+    expect(workspaceClient.resolveSubagentSession).toHaveBeenCalledTimes(4);
+    expect(container.textContent).toContain('Failed to load agent details');
+    await act(async () => availability.check(true));
+    workspaceClient.resolveSubagentSession.mockResolvedValue({
+      sessionId: 'subagent-session',
+      status: 'completed',
+    });
+    server.healthy = true;
+    await act(async () => vi.advanceTimersByTimeAsync(5_000));
+    expect(workspaceClient.resolveSubagentSession).toHaveBeenCalledTimes(5);
+    expect(availability.getSnapshot()).toBe('available');
+    expect(container.textContent).not.toContain('Failed to load agent details');
+    expect(
+      container.querySelector('[data-testid="subagent-transcript"]'),
+    ).not.toBeNull();
+  } finally {
+    act(() => availability.dispose());
+  }
 });
 
 it('opens subagent and fork transcript outputs in source-scoped panel tabs', async () => {
@@ -236,6 +430,7 @@ it('opens subagent and fork transcript outputs in source-scoped panel tabs', asy
     title: 'Review',
     turnId: 'turn-1',
     changes: [],
+    unfilteredChanges: [],
     sourceSessionId: 'subagent-session',
     workspaceCwd: '/work/project',
     workspaceId: 'project-id',
@@ -315,6 +510,12 @@ it('opens a nested subagent within the parent session scope', async () => {
   expect(onOpenSubagent).toHaveBeenCalledWith(
     nestedTool,
     'parent-session',
+    '/work/project',
+  );
+  act(() => latestOpenSubagent.current?.(nestedTool, 'original-chat-a'));
+  expect(onOpenSubagent).toHaveBeenLastCalledWith(
+    nestedTool,
+    'original-chat-a',
     '/work/project',
   );
 });
@@ -447,6 +648,52 @@ it.each([false, true])(
           workspaceCwd: '/work/project',
           sourceSessionId: 'subagent-session',
         }),
+      );
+    }
+  },
+);
+
+it.each([true, false])(
+  'only offers standalone agent cancellation (workflow=%s)',
+  async (workflow) => {
+    workspaceClient.resolveSubagentSession.mockResolvedValue({
+      sessionId: 'subagent-session',
+      status: 'running',
+    });
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    await act(async () => {
+      root!.render(
+        <I18nProvider language="en">
+          <SubagentDetail
+            sessionId="parent-session"
+            rootToolCallId="workflow-agent"
+            initialRootTool={{
+              callId: 'workflow-agent',
+              toolName: 'agent',
+              status: 'in_progress',
+              rawOutput: {
+                type: 'task_execution',
+                ...(workflow ? { workflowRunId: 'wf-1' } : {}),
+              },
+            }}
+          />
+        </I18nProvider>,
+      );
+    });
+    const stop = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent === 'Stop',
+    );
+    expect(Boolean(stop)).toBe(!workflow);
+    if (stop) {
+      workspaceClient.cancelSubagentSession.mockResolvedValue({
+        cancelled: true,
+      });
+      await act(async () => stop.click());
+      expect(workspaceClient.cancelSubagentSession).toHaveBeenCalledWith(
+        'parent-session',
+        'workflow-agent',
       );
     }
   },

@@ -24,9 +24,11 @@ import {
 import { useI18n } from '../../i18n';
 import { measureSessionTitleScroll } from '../sidebar/sessionTitleScroll';
 import { WorkspaceSection } from '../sidebar/WorkspaceSection';
+import { readSessionSort } from '../sidebar/SessionSortMenu';
 import sectionStyles from '../sidebar/WorkspaceSection.module.css';
 import sidebarStyles from '../sidebar/WebShellSidebar.module.css';
 import { HostLabel } from './HostLabel';
+import { useDaemonAvailability } from '../../daemon/availability-context.js';
 
 const GROUP_LABEL_CLASS =
   'flex w-full min-w-0 items-center gap-1.5 px-2 pb-1 pt-3 text-left text-[11px] font-medium text-muted-foreground';
@@ -69,6 +71,19 @@ function CurrentHostHeading() {
   const { t } = useI18n();
   const origin = useCurrentHostOrigin();
   const others = useOtherOrigins(origin);
+  const availability = useDaemonAvailability();
+  const statusLabel =
+    availability === 'unavailable'
+      ? t('workspaceHost.statusOffline')
+      : availability === 'auth-required'
+        ? t('workspaceHost.statusUnauthorized')
+        : t('workspaceHost.focused');
+  const statusHint =
+    availability === 'unavailable'
+      ? t('workspaceHost.offlineHint')
+      : availability === 'auth-required'
+        ? t('workspaceHost.unauthorizedHint')
+        : t('workspaceHost.focusedHint');
   if (others.length === 0) return null;
   return (
     <div className={GROUP_LABEL_CLASS} title={origin}>
@@ -76,9 +91,9 @@ function CurrentHostHeading() {
       <span
         className={sectionStyles.badge}
         data-testid="host-focused-badge"
-        title={t('workspaceHost.focusedHint')}
+        title={statusHint}
       >
-        {t('workspaceHost.focused')}
+        {statusLabel}
       </span>
     </div>
   );
@@ -177,8 +192,13 @@ function FanoutHostGroup({
   order?: number;
 }) {
   const { t } = useI18n();
-  const { workspaces, status, generation, refresh } =
+  const { workspaces, features, status, generation, refresh } =
     useHostCapabilities(origin);
+  // The sidebar's preference is per host, so a group must read its own value
+  // and only ask for question ordering when that host advertises it.
+  const sortBy = features?.includes('session_last_user_prompt_sort')
+    ? readSessionSort(origin)
+    : undefined;
   const openHostWorkspace = useOpenHostedWorkspaceFlow();
   // Workspace removal runs over the host's own client: it is catalog
   // management with the user's own per-origin token, distinct from the
@@ -246,6 +266,7 @@ function FanoutHostGroup({
               origin={origin}
               workspace={workspace}
               generation={generation}
+              sortBy={sortBy}
               onOpenHostSession={onOpenHostSession}
               onRemoveWorkspace={removal.request}
             />
@@ -278,12 +299,14 @@ function LiveHostWorkspace({
   origin,
   workspace,
   generation,
+  sortBy,
   onOpenHostSession,
   onRemoveWorkspace,
 }: {
   origin: string;
   workspace: DaemonWorkspaceCapability;
   generation: number;
+  sortBy?: 'updatedAt' | 'lastUserPromptAt';
   onOpenHostSession?: OpenHostSessionHandler;
   onRemoveWorkspace?: (workspace: DaemonWorkspaceCapability) => void;
 }) {
@@ -309,6 +332,8 @@ function LiveHostWorkspace({
       trustToOpenLabel={t('sidebar.workspaceTrustToOpen')}
       noSessionsLabel={t('sidebar.noSessions')}
       loadErrorLabel={t('sidebar.loadFailed')}
+      untitledSessionLabel={t('sidebar.untitledSession')}
+      sortBy={sortBy}
       organizationEnabled={false}
       channelGroupingEnabled={false}
       ungroupedLabel={t('sidebar.groupUngrouped')}
@@ -394,13 +419,20 @@ function FanoutSessionRow({
   session: DaemonSessionSummary;
   onOpen: () => void;
 }) {
-  const label = session.displayName?.trim() || session.sessionId.slice(0, 8);
+  const { t } = useI18n();
+  const displayName = session.displayName?.trim();
+  const label = displayName || t('sidebar.untitledSession');
+  // No visible id and no details tooltip on this row: two nameless sessions
+  // must still be distinguishable by the one surface that can carry the id.
+  const title = displayName
+    ? label
+    : `${label} · ${session.sessionId.slice(0, 8)}`;
   return (
     <div
       className={sidebarStyles.sessionRow}
       role="button"
       tabIndex={0}
-      title={label}
+      title={title}
       onClick={onOpen}
       onKeyDown={(event) => {
         if (event.key === 'Enter') onOpen();

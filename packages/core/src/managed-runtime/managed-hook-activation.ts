@@ -5,6 +5,7 @@
  */
 
 import type { HookExecutionResult } from '../hooks/types.js';
+import type { ChatRecord } from '../services/chatRecordingService.js';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   extractTurnBudgetDirectiveText,
@@ -19,6 +20,13 @@ import {
 import type { ManagedSession } from './managed-session-assembly.js';
 import { ManagedSessionConflictError } from './managed-session-authority.js';
 import type { ManagedSessionDurableRef } from './managed-session-records.js';
+import { publishManagedMessageBody } from './managed-message-chunks.js';
+import { getManagedSessionDiagnostics } from './managed-session-diagnostics.js';
+import { getManagedExecutionDiagnostics } from './managed-execution-diagnostics.js';
+import {
+  MANAGED_MODEL_STATISTICS_KINDS,
+  type ManagedCommittedContext,
+} from './managed-model-statistics.js';
 
 export interface ManagedHookModelOperation {
   readonly operationId: string;
@@ -46,12 +54,13 @@ export function managedHookRestoreActivationId(activationId: string): string {
 
 export type ManagedHookModelScope = Pick<
   LocalManagedHookModelScope,
-  'evaluate' | 'bindBudget' | 'beginMainAttempt'
+  'evaluate' | 'bindBudget' | 'beginMainAttempt' | 'diagnosticsEnabled'
 >;
 
 export type ManagedMainModelAttempt = ((
   success: boolean,
   usage: unknown,
+  finalChatRecord?: ChatRecord,
 ) => Promise<void>) & { readonly attemptId: string };
 
 const sessionBudgets = new WeakMap<
@@ -77,13 +86,19 @@ class LocalManagedHookModelScope {
     private readonly isOwner: () => boolean,
   ) {}
 
+  get diagnosticsEnabled(): boolean {
+    return getManagedSessionDiagnostics(this.session.authority) !== undefined;
+  }
+
   async bindBudget(budget: TurnBudget, prompt?: string): Promise<void> {
     this.assertOwner();
     const sessionId = this.session.authority.sessionHeader.sessionKey.sessionId;
     let shared = sessionBudgets.get(this.session.authority);
     if (!shared) {
       shared = { snapshot: null };
-      let restoredModels = false;
+      const diagnostics = getManagedSessionDiagnostics(this.session.authority);
+      shared.snapshot = diagnostics?.getBudget() ?? null;
+      let restoredModels = diagnostics !== undefined;
       const events = this.session.authority.eventsInSequenceRange(
         1,
         this.session.authority.committedSequence,
@@ -100,7 +115,7 @@ class LocalManagedHookModelScope {
             models?: SessionMetrics['models'];
           };
           shared.snapshot ??= saved.budget ?? null;
-          if (!restoredModels && saved.models) {
+          if (!diagnostics && !restoredModels && saved.models) {
             uiTelemetryService.restoreSessionModelMetrics(
               sessionId,
               saved.models,
@@ -130,11 +145,15 @@ class LocalManagedHookModelScope {
       };
     }
     if (shared.snapshot) budget.beginTurn(shared.snapshot);
+    getManagedSessionDiagnostics(this.session.authority)?.setBudget(
+      shared.snapshot,
+    );
   }
 
   async beginMainAttempt(
     model: string,
     recoveryRef?: ManagedSessionDurableRef,
+    context?: Omit<ManagedCommittedContext, 'attemptId'>,
   ): Promise<ManagedMainModelAttempt> {
     this.assertOwner();
     if (this.operation)
@@ -151,6 +170,7 @@ class LocalManagedHookModelScope {
           model,
         },
         recoveryRef,
+        context ? { ...context, attemptId } : null,
       ),
       { attemptId },
     );
@@ -161,13 +181,28 @@ class LocalManagedHookModelScope {
     kind: 'hook' | 'hosted',
     route: object,
     recoveryRef?: ManagedSessionDurableRef,
-  ): Promise<(success: boolean, usage: unknown) => Promise<void>> {
+    context: ManagedCommittedContext | null = null,
+  ): Promise<
+    (
+      success: boolean,
+      usage: unknown,
+      finalChatRecord?: ChatRecord,
+    ) => Promise<void>
+  > {
     const authority = this.session.authority;
     const activation = this.session.activation;
     const budget = sessionBudgets.get(authority)?.snapshot ?? null;
+    const diagnostics = getManagedSessionDiagnostics(authority);
+    if (kind === 'hosted') diagnostics?.setMainContext(context);
     const routeRef = await this.session.resources.publish(
       `managed-${kind}-model-route`,
-      Buffer.from(JSON.stringify({ version: 1, ...route, budget })),
+      Buffer.from(
+        JSON.stringify({
+          version: 1,
+          ...route,
+          budget: diagnostics ? diagnostics.getBudget() : budget,
+        }),
+      ),
     );
     const inputCheckpointRef = authority.latestCheckpoint?.stateRef ?? null;
     const commit = async (
@@ -207,23 +242,170 @@ class LocalManagedHookModelScope {
       );
     };
     await commit('started', null);
-    return async (success, usage) => {
-      const usageRef = await this.session.resources.publish(
-        `managed-${kind}-model-usage`,
-        Buffer.from(
-          JSON.stringify({
-            version: 1,
-            ...route,
-            attempts: usage,
-            budget,
-            models: uiTelemetryService.getMetricsForSession(
-              authority.sessionHeader.sessionKey.sessionId,
-            ).models,
-          }),
+    let diagnosticsRef: ManagedSessionDurableRef | undefined;
+    let finalOutput:
+      | {
+          recordBytes: Buffer;
+          usageBytes: Buffer;
+          usageRef: ManagedSessionDurableRef;
+          contentRef: ManagedSessionDurableRef;
+          executionDiagnosticsRef?: ManagedSessionDurableRef;
+        }
+      | undefined;
+    const finish = async (
+      success: boolean,
+      usage: unknown,
+      finalChatRecord?: ChatRecord,
+    ) => {
+      if (finalChatRecord && (!success || kind !== 'hosted'))
+        throw new ManagedSessionConflictError(
+          'Only successful main output can carry a final message.',
+        );
+      const usageKind = diagnostics
+        ? kind === 'hosted'
+          ? MANAGED_MODEL_STATISTICS_KINDS.main
+          : MANAGED_MODEL_STATISTICS_KINDS.hook
+        : `managed-${kind}-model-usage`;
+      if (diagnostics)
+        diagnosticsRef ??= await diagnostics.publish(
+          usageKind,
+          route,
+          success ? context : null,
+        );
+      const usageBytes = diagnosticsRef
+        ? await this.session.resources.read(diagnosticsRef)
+        : Buffer.from(
+            JSON.stringify({
+              version: 1,
+              ...route,
+              attempts: usage,
+              budget,
+              models: uiTelemetryService.getMetricsForSession(
+                authority.sessionHeader.sessionKey.sessionId,
+              ).models,
+            }),
+          );
+      if (!finalChatRecord) {
+        const usageRef =
+          diagnosticsRef ??
+          (await this.session.resources.publish(usageKind, usageBytes));
+        await commit(success ? 'output_committed' : 'abandoned', usageRef);
+        return;
+      }
+      this.assertOwner();
+      const recordBytes = Buffer.from(JSON.stringify(finalChatRecord));
+      if (
+        finalOutput &&
+        (!finalOutput.recordBytes.equals(recordBytes) ||
+          !finalOutput.usageBytes.equals(usageBytes))
+      )
+        throw new ManagedSessionConflictError(
+          'Final model output replay differs.',
+        );
+      finalOutput ??= {
+        recordBytes,
+        usageBytes,
+        usageRef:
+          diagnosticsRef ??
+          (await this.session.resources.publish(usageKind, usageBytes)),
+        contentRef: await publishManagedMessageBody(
+          this.session.resources,
+          recordBytes,
         ),
+        executionDiagnosticsRef:
+          await getManagedExecutionDiagnostics(authority)?.message(
+            finalChatRecord,
+          ),
+      };
+      const { usageRef, contentRef, executionDiagnosticsRef } = finalOutput;
+      const contentDigest = createHash('sha256')
+        .update(
+          JSON.stringify([
+            executionDiagnosticsRef
+              ? 'managed-final-output/2'
+              : 'managed-final-output/1',
+            attemptId,
+            ...[
+              routeRef,
+              inputCheckpointRef,
+              usageRef,
+              contentRef,
+              ...(executionDiagnosticsRef ? [executionDiagnosticsRef] : []),
+            ].map((ref) =>
+              ref === null
+                ? null
+                : [
+                    ref.resourceId,
+                    ref.kind,
+                    ref.schemaVersion,
+                    ref.byteLength,
+                    ref.digest,
+                  ],
+            ),
+          ]),
+        )
+        .digest('hex');
+      await authority.appendExecutionEvents(
+        {
+          operation: 'hostedModelAttempt',
+          commandId: `${attemptId}:output_committed`,
+          sessionKey: authority.sessionHeader.sessionKey,
+          contentDigest,
+        },
+        (sequence) => {
+          const subject = {
+            type: 'activation',
+            scopeId: activation.activationId,
+            ...activation,
+          };
+          return [
+            {
+              v: 1,
+              sequence,
+              eventId: `${attemptId}:output_committed`,
+              sessionKey: authority.sessionHeader.sessionKey,
+              kind: 'model.attempt',
+              occurredAt: Date.now(),
+              subject,
+              payload: {
+                attemptId,
+                routeRef,
+                inputCheckpointRef,
+                state: 'output_committed',
+                usageRef,
+                ...(recoveryRef ? { recoveryRef } : {}),
+              },
+            },
+            {
+              v: 1,
+              sequence: sequence + 1,
+              eventId: `message:${finalChatRecord.uuid}`,
+              sessionKey: authority.sessionHeader.sessionKey,
+              kind: 'message.committed',
+              occurredAt: Date.parse(finalChatRecord.timestamp),
+              subject,
+              payload: {
+                messageId: finalChatRecord.uuid,
+                role: finalChatRecord.type,
+                contentRef,
+                ...(executionDiagnosticsRef
+                  ? { diagnosticsRef: executionDiagnosticsRef }
+                  : {}),
+                parentMessageId: finalChatRecord.parentUuid,
+                modelAttemptId: attemptId,
+              },
+            },
+          ];
+        },
+        { class: 'harness', activation },
       );
-      await commit(success ? 'output_committed' : 'abandoned', usageRef);
     };
+    return (success, usage, finalChatRecord) =>
+      diagnostics
+        ? diagnostics.serialCommit(() =>
+            finish(success, usage, finalChatRecord),
+          )
+        : finish(success, usage, finalChatRecord);
   }
 
   evaluate(
@@ -266,7 +448,11 @@ class LocalManagedHookModelScope {
       const usage: unknown[] = [];
       let result: HookExecutionResult | undefined;
       try {
-        result = await evaluate((entry) => usage.push(entry));
+        const run = () => evaluate((entry) => usage.push(entry));
+        result = await (getManagedSessionDiagnostics(authority)?.run(
+          'hook',
+          run,
+        ) ?? run());
         return result;
       } finally {
         await complete(
@@ -366,7 +552,11 @@ export class ManagedHookActivationController {
           'Prompt Hook requires the current Session activation.',
         );
       }
-      return await run(scope);
+      const execute = () => run(scope);
+      return await (getManagedSessionDiagnostics(this.session.authority)?.run(
+        operation ? 'hook' : 'main',
+        execute,
+      ) ?? execute());
     } finally {
       await scope.close();
       try {

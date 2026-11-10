@@ -2,7 +2,7 @@
 
 [English](./2026-10-06-managed-event-envelope.md)
 
-> **状态：** proposed 契约，以 schema + fixtures 形式合入，含结构性非启用门禁（无生产消费方）。属于跨节点 EventTransport 设计（`2026-10-04-managed-agent-event-transport.*`，#12380 推迟的 MQ/Redis transport 范围）；本设计不宣称传输存在。
+> **状态：** 契约以 schema + fixtures 形式合入，含结构性门禁，证明没有 TypeScript 生产消费方。属于跨节点 EventTransport 设计（`2026-10-04-managed-agent-event-transport.*`，#12380 推迟的 MQ/Redis transport 范围）。Java 控制面镜像该契约，并在默认关闭的 event-transport 开关之后生产与消费它（MQ2b、MQ2c）；MQ2c 为其增加了 `public_event` 流（见下文「扩展」一节）。
 
 ## 问题
 
@@ -10,11 +10,21 @@ Managed 路径上每个异步能力都是「持久资源 + 触发意图」，因
 
 ## 决策
 
-1. **只载已提交事实。** 信封携带 `tenantId`/`workspaceId`/`sessionId`(由行内 `sessionKey` 平铺）、`v: 1`、`stream`（v1 唯一取值 `authoritative_journal`）、`sequence`（从 1 起）、`eventId`、`kind`（与记录契约同一套 17-kind 词表精确镜像——镜像由 fixture 钉死，任一镜像漂移立即失败）、`occurredAt`、以及 `payloadRef.digest`，而绝不是正文——正文留在 SQL 记录。该 digest 是对「所通告的单个事件作为单元素列表」的规范 JSON 取 SHA-256——与提交标记那个覆盖整个事务的 `eventsDigest` 使用同一规范形式，但不是那个标记值：两者仅在单事件事务中相等，因此多事件事务中不存在与它相等的列。接收方通过对自己读回的单个事件重算 digest 来校验所通告的事实。
+1. **只载已提交事实。** 信封携带 `tenantId`/`workspaceId`/`sessionId`(由行内 `sessionKey` 平铺）、`v: 1`、`stream`（`authoritative_journal`；MQ2c 新增 `public_event`，见「扩展」一节）、`sequence`（从 1 起）、`eventId`、`kind`（journal 流上与记录契约同一套 kind 词表精确镜像——镜像由 fixture 钉死，任一镜像漂移立即失败）、`occurredAt`、以及 `payloadRef.digest`，而绝不是正文——正文留在 SQL 记录。该 digest 是对「所通告的单个事件作为单元素列表」的规范 JSON 取 SHA-256——与提交标记那个覆盖整个事务的 `eventsDigest` 使用同一规范形式，但不是那个标记值：两者仅在单事件事务中相等，因此多事件事务中不存在与它相等的列。接收方通过对自己读回的单个事件重算 digest 来校验所通告的事实。
 2. **时间。** `occurredAt` 是事件写方（recorder）随事件提交的时间戳——原事件的时间，不是 commit 时间，也不是 Session 次序；次序在同一 stream 内按 `(tenantId, sessionId, stream, sequence)` 决定。
-3. **去重键含租户。** 精确键判等 `(tenantId, sessionId, stream, sequence)` —— `stream` 即父设计（`2026-10-04-managed-agent-event-transport.md` §6）的来源区分：journal 提交序与公开 `managed_agent_event.sequence_id` 两个计数器会用同一数字指不同事实。v1 写明其唯一的 stream `authoritative_journal`；携带任何其他 stream 取值（含 `public_event`）的通知在解析期就被封闭的 stream 词表拒绝（fixture `stream-public-event`），所以 journal 与公开事件的碰撞今天根本到不了去重键——v1 交付的保证是解析期拒绝，而不是键上的 `stream` 项：该项在单成员词表下恒真，只在引入第二个 stream 后承重，那次改动必须同时补上有区分度的去重 fixture。Session 只在租户内结束身份(journal head 按 `(tenant_id, session_id)` 键），因此跨租户的同 sessionId 是另一会话，判绝不重投递（fixture `different-tenant-same-key` 翻为 false 钉边界）；同键异环境仍指向同一事实——且每个去重行都声明其操作数的可解析性，`false` 恒等于「因声明的原因被拒」，而非操作数退化得根本到不了比较。
+3. **去重键含租户。** 精确键判等 `(tenantId, sessionId, stream, sequence)` —— `stream` 即父设计（`2026-10-04-managed-agent-event-transport.md` §6）的来源区分：journal 提交序与公开 `managed_agent_event.sequence_id` 两个计数器会用同一数字指不同事实。最初冻结时，v1 只写明 `authoritative_journal`，任何其他 stream 在解析期即被拒绝，键上的 `stream` 项因而恒真；MQ2c 接纳 `public_event`，并钉死了所欠的区分性去重行 `same-sequence-different-stream`，该项从此承重（见「扩展」一节）。词表之外的 stream 仍在解析期被拒绝（fixture `stream-unknown`）。Session 只在租户内结束身份(journal head 按 `(tenant_id, session_id)` 键），因此跨租户的同 sessionId 是另一会话，判绝不重投递（fixture `different-tenant-same-key` 翻为 false 钉边界）；同键异环境仍指向同一事实——且每个去重行都声明其操作数的可解析性，`false` 恒等于「因声明的原因被拒」，而非操作数退化得根本到不了比较。
 4. **不泄内部。** 命名字段禁集（`absolutePath`、`localPath`、`pid`、`pod`、`runtimeBindingId`、`runtimeEndpoint`、`secretHandle`、`sidecar`）在形状检查前按名拒绝，逐字段带 fixture；信封不暴露任何 Runtime 内部、本地路径或凭据。
-5. **从构造上不启用。** 契约不加注册项、无运行路径消费——结构性门禁（源码扫描：断言没有生产文件 import 本模块）就是「传输切片自己的阶段落地前不会被悄悄挂上」的证明。扫描遍历每个 workspace 包的 `src/`（无 `src/` 时退而遍历包树，由此覆盖 `packages/web-shell/client`），外加仓库根的 `scripts/` 与 `integration-tests/` 树，只跳过 `node_modules/`、`dist/`、符号链接与测试文件，并用 TypeScript AST 匹配 import/export/动态 `import()`/`require()` 说明符而非裸文本，因此注释、字符串与插值模板既不能掩盖也不能伪造 import；消失的 workspace 会让门禁失败而不是被静默跳过。盲区明言而非隐含：re-export、计算或插值式说明符、符号链接（决不进入，目录链接会隐藏其目标）、以及扫描扩展名集之外的语言——父设计指派的 Java 镜像在构造上就不在这次扫描的视野内。
+5. **从构造上不启用。** 契约不加注册项、无 TypeScript 运行路径消费——结构性门禁（源码扫描：断言没有生产文件 import 本模块）就是「传输切片自己的阶段落地前不会被悄悄挂上」的证明。扫描遍历每个 workspace 包的 `src/`（无 `src/` 时退而遍历包树，由此覆盖 `packages/web-shell/client`），外加仓库根的 `scripts/` 与 `integration-tests/` 树，只跳过 `node_modules/`、`dist/`、符号链接与测试文件，并用 TypeScript AST 匹配 import/export/动态 `import()`/`require()` 说明符而非裸文本，因此注释、字符串与插值模板既不能掩盖也不能伪造 import；消失的 workspace 会让门禁失败而不是被静默跳过。盲区明言而非隐含：re-export、计算或插值式说明符、符号链接（决不进入，目录链接会隐藏其目标）、以及扫描扩展名集之外的语言——MQ2b、MQ2c 传输所运行的 Java 镜像在构造上就不在这次扫描的视野内。
+
+## 扩展：`public_event` 流（MQ2c）
+
+[2026-10-12-managed-agent-event-transport-mq2](2026-10-12-managed-agent-event-transport-mq2.zh-CN.md) 的 MQ2c 切片接纳了去重键本就为之预留的第二条 stream。扩展在 v1 内增量进行（`v`、`contract`、`contractVersion` 均不变）：此前合法的每个信封仍合法、含义不变。
+
+- **词表。** `streams` 为 `authoritative_journal`、`public_event`。kind 词表随 stream 而定：journal 保持封闭的记录词表；`public_event` 的 kind 是公开事件类型，为开放集合、按形状校验——小写、以点分段、每段以字母开头、至多 128 字符（`managed_agent_event.event_type` 与公开 API 都把类型上限定为 128）。journal 信封携带公开类型仍被拒绝（fixture `journal-stream-public-kind`）。
+- **行与 digest。** `public_event` 信封指向 `managed_agent_event` 的一行已提交记录：`sequence` 即 `sequence_id`，`kind` 即 `event_type`，`occurredAt` 即 `created_at`。`payloadRef.digest` 是对单元素列表 `[row]` 的规范 JSON 做 SHA-256——与 journal 推导同一规范形式——覆盖九个字段（`tenantId`、`sessionId`、`sequence`、`eventId`、`turnId`、`type`、`data`、`terminal`、`createdAt`）。Item/Part 标识与 schema/projection 版本不纳入。stream 对账会原地改写行——被撤回的 delta 的 `data` 也会被清空——因此 digest 绑定的是发布时的行：接收方重算出不同 digest 时，把该行视为发布后已变更。
+- **Workspace。** 公开行不带 workspace，因此 `workspaceId` 取 Session 的绑定——未绑定 workspace 的 Session 取其 journal 记录携带的 workspace（session store 配置的 workspace），使同一 Session 的两条 stream 指向同一 workspace。两者皆无的 Session 没有信封身份、不分发，由定时 SQL 物化扫描覆盖。
+- **去重。** 键中的 `stream` 项从此真正承重，所欠的区分性 fixture 已钉死：`same-sequence-different-stream`（同一租户、Session、序号分处两条 stream）判为不同。原拒绝行 `stream-public-event` 改为合法，新增 `stream-unknown` 保留封闭词表的拒绝。
+- **启用。** TypeScript 模块仍无生产消费方（结构性门禁不变）；Java 控制面生产并消费两条 stream，其 fixture 消费方覆盖新增的 `fromPublicEventCases`。
 
 ## 暂不冻结（明确记录）
 

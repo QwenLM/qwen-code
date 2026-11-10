@@ -95,6 +95,7 @@ export class SkillManager {
   private slashReloadSuppressed = false;
   private parseErrors: Map<string, SkillError> = new Map();
   private discoveryHasErrors = false;
+  private discoveryHasReadErrors = false;
   private readonly watchers: Map<string, FSWatcher> = new Map();
   private watchStarted = false;
   private refreshTimer: NodeJS.Timeout | null = null;
@@ -307,6 +308,11 @@ export class SkillManager {
     return this.discoveryHasErrors;
   }
 
+  /** Whether discovery could not read every enabled source. */
+  hasDiscoveryReadErrors(): boolean {
+    return this.discoveryHasReadErrors;
+  }
+
   private collectCachedSkills(level?: SkillLevel): SkillConfig[] {
     const skills: SkillConfig[] = [];
     const seenNames = new Set<string>();
@@ -322,6 +328,12 @@ export class SkillManager {
       );
 
       for (const skill of levelSkills) {
+        if (
+          level === 'bundled' &&
+          skill.name === 'generated-ui' &&
+          !this.config.isSkillEnabled(skill)
+        )
+          continue;
         // Skip if we've already seen this name (precedence: project > user > extension > bundled)
         if (seenNames.has(skill.name)) {
           debugLogger.debug(
@@ -449,8 +461,17 @@ export class SkillManager {
     const skillsCache = new Map<SkillLevel, SkillConfig[]>();
     this.parseErrors.clear();
     let discoveryHasErrors = false;
-    const onDiscoveryError = () => {
+    let discoveryHasReadErrors = false;
+    const onDiscoveryError = (error?: unknown) => {
       discoveryHasErrors = true;
+      if (
+        !(
+          error instanceof SkillError &&
+          error.code === SkillErrorCode.PARSE_ERROR
+        )
+      ) {
+        discoveryHasReadErrors = true;
+      }
     };
 
     // Safe mode: only load bundled (system) skills
@@ -494,6 +515,7 @@ export class SkillManager {
 
     // Publish completeness with the cache produced by this scan.
     this.discoveryHasErrors = discoveryHasErrors;
+    this.discoveryHasReadErrors = discoveryHasReadErrors;
     this.skillsCache = skillsCache;
 
     // Rebuild the activation registry so that newly added/removed `paths:`
@@ -1004,7 +1026,7 @@ export class SkillManager {
    */
   private async listSkillsAtLevel(
     level: SkillLevel,
-    onDiscoveryError?: () => void,
+    onDiscoveryError?: (error?: unknown) => void,
   ): Promise<SkillConfig[]> {
     if (this.config.getBareMode()) {
       debugLogger.debug(`Skipping ${level} level skills in bare mode`);
@@ -1082,6 +1104,16 @@ export class SkillManager {
         'bundled',
         onDiscoveryError,
       );
+      const generatedUiDir = this.config.getBundledGeneratedUiSkillsDir?.();
+      if (generatedUiDir) {
+        skills.push(
+          ...(await this.loadSkillsFromDir(
+            generatedUiDir,
+            'bundled',
+            onDiscoveryError,
+          )),
+        );
+      }
       debugLogger.debug(`Loaded ${skills.length} bundled skills`);
       return skills;
     }
@@ -1119,7 +1151,7 @@ export class SkillManager {
   async loadSkillsFromDir(
     baseDir: string,
     level: SkillLevel,
-    onDiscoveryError?: () => void,
+    onDiscoveryError?: (error?: unknown) => void,
   ): Promise<SkillConfig[]> {
     debugLogger.debug(`Loading skills from directory: ${baseDir}`);
     try {
@@ -1194,7 +1226,7 @@ export class SkillManager {
             return await this.parseSkillFileInternal(skillManifest, level);
           } catch (error) {
             if (!(isNodeError(error) && error.code === 'ENOENT')) {
-              onDiscoveryError?.();
+              onDiscoveryError?.(error);
             }
             if (error instanceof SkillError) {
               debugLogger.error(
@@ -1245,7 +1277,15 @@ export class SkillManager {
     const levelSkills = this.skillsCache?.get(level) || [];
 
     // Find the skill with matching name
-    return levelSkills.find((skill) => skill.name === name) || null;
+    return (
+      levelSkills.find(
+        (skill) =>
+          skill.name === name &&
+          (level !== 'bundled' ||
+            name !== 'generated-ui' ||
+            this.config.isSkillEnabled(skill)),
+      ) || null
+    );
   }
 
   /**

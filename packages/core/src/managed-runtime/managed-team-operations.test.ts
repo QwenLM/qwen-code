@@ -6,6 +6,8 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  isTeamPlanStart,
+  isTeamPlanSuccessor,
   isTeamStateStart,
   isTeamStateSuccessor,
   isTeamTaskStart,
@@ -16,6 +18,9 @@ import {
   teamJoinBody,
   teamLifecycleBody,
   teamOpenBody,
+  teamPlanOpenBody,
+  teamPlanDecisionBody,
+  teamPlanWithdrawBody,
   teamTaskOpenBlockers,
   teamTaskOpenBody,
   teamTaskRevisionBody,
@@ -41,6 +46,26 @@ function openTask(number: number): TeamTask {
     metadataRef: null,
   });
 }
+
+describe('team plan bodies', () => {
+  it('opens waiting, settles once or withdraws without changing identity', () => {
+    const plan = teamPlanOpenBody({
+      teamId: 'team-1',
+      requestId: 'command-1',
+      member: 'alice',
+      planRevision: 1,
+      planRef: ref('plan'),
+    });
+    expect(isTeamPlanStart(plan)).toBe(true);
+    const decided = teamPlanDecisionBody(plan, 'approved', ref('feedback'));
+    expect(isTeamPlanSuccessor(plan, decided)).toBe(true);
+    expect(isTeamPlanSuccessor(plan, teamPlanWithdrawBody(plan))).toBe(true);
+    expect(isTeamPlanSuccessor(decided, teamPlanWithdrawBody(decided))).toBe(
+      false,
+    );
+    expect(decided.requestId).toBe(plan.requestId);
+  });
+});
 
 describe('team state bodies', () => {
   it('opens, joins one member per step, closes and deletes lawfully', () => {

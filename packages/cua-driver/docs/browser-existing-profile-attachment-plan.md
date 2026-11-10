@@ -1,5 +1,10 @@
 # Existing-Profile Browser Attachment and Reconnect Plan
 
+> Historical record, superseded by the 2026-10 X11-only upgrade. Native Wayland
+> implementations, helpers, dependencies and validation lanes described below
+> have been removed; these historical results do not describe current support.
+
+
 ## Status
 
 - **State:** Implemented and accepted from exact source SHA `7fa6c80f` across macOS, Windows, Linux X11, and Linux Wayland on Sway

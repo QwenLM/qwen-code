@@ -8,6 +8,10 @@
 // Ключ служит одновременно ключом перевода и текстом по умолчанию
 
 export default {
+  'Generated UI': 'Generated UI',
+  'Enable bundled Generated UI in supported local sessions. Restart the owning session to apply changes.':
+    'Включает встроенный Generated UI в поддерживаемых локальных сеансах. Перезапустите соответствующий сеанс, чтобы применить изменения.',
+
   // ============================================================================
   // Справка / Компоненты интерфейса
   // ============================================================================
@@ -1133,6 +1137,8 @@ export default {
   'disabled (bare mode)': 'отключен (минимальный режим)',
   'disabled (safe mode)': 'отключен (безопасный режим)',
   'disabled (disableAllHooks)': 'отключен (disableAllHooks)',
+  'disabled (not approved)': 'отключен (не одобрен)',
+  'disabled (rejected)': 'отключен (отклонён)',
   'disabled (folder not trusted)': 'отключен (папка не доверенная)',
   'disabled (turned off for this session)': 'отключен (выключен в этой сессии)',
   'Server:': 'Сервер:',
@@ -1439,6 +1445,7 @@ export default {
   Reqs: 'Запросов',
   'Input Tokens': 'Входных токенов',
   'Output Tokens': 'Выходных токенов',
+  'Output (incl. Reasoning)': 'Вывод (с рассуждением)',
   'Savings Highlight:': 'Экономия:',
   'of input tokens were served from the cache, reducing costs.':
     'входных токенов обслужено из кэша, снижая затраты.',
@@ -1820,6 +1827,8 @@ export default {
   'System prompt': 'Системная подсказка',
   'Built-in tools': 'Встроенные инструменты',
   'MCP tools': 'MCP tools',
+  'Instruction files': 'Файлы инструкций',
+  'Auto memory': 'Автопамять',
   'Memory files': 'Файлы памяти',
   Skills: 'Навыки',
   Messages: 'Сообщения',
@@ -2033,6 +2042,8 @@ export default {
   'Advisor review failed: {{error}}': 'Ошибка обзора советника: {{error}}',
   'No conversation context available for /advisor':
     'Нет контекста разговора, доступного для /advisor',
+  'No conversation context available for /btw':
+    'Нет контекста разговора, доступного для /btw',
   'Focus too long (max {{max}} chars)':
     'Фокус слишком длинный (макс. {{max}} символов)',
   'Another operation is in progress, wait for it to complete before running /advisor':
@@ -2115,6 +2126,10 @@ export default {
   'to retry last request': 'чтобы повторить последний запрос',
   'Invalid API key. Coding Plan API keys start with "sk-sp-". Please check.':
     'Недействительный API Key. Coding Plan API Keys начинаются с "sk-sp-". Проверьте.',
+  'Invalid API key. Pay-as-you-go keys start with "sk-" or "sk-ws-". Token Plan keys ("sk-sp-") need the Token Plan entry instead.':
+    'Недействительный API Key. Ключи с оплатой по использованию начинаются с "sk-" или "sk-ws-". Для ключей Token Plan ("sk-sp-") используйте запись Token Plan.',
+  'Invalid API key. Token Plan API keys start with "sk-sp-". Generate one from the Token Plan console, or use the Standard API Key entry for a pay-as-you-go key.':
+    'Недействительный API Key. Token Plan API Keys начинаются с "sk-sp-". Создайте ключ в консоли Token Plan или используйте запись Standard API Key для ключа с оплатой по использованию.',
   'Lock release warning': 'Предупреждение о снятии блокировки',
   'Metadata write warning': 'Предупреждение о записи метаданных',
   "Subsequent dreams may be skipped as locked until the next session's staleness sweep cleans the file.":
@@ -2184,6 +2199,8 @@ export default {
   out: 'вых.',
   'In/Out': 'Вх/Вых',
   // Update command
+  'Exact-version updates require a standalone installation. Install version {{version}} manually using your installation method.':
+    'Обновление до указанной версии требует автономной установки. Установите версию {{version}} вручную, используя текущий способ установки.',
   'Check for Qwen Code updates and install if available':
     'Проверить обновления Qwen Code и установить при наличии',
   'Qwen Code update available! {{current}} → {{latest}}':

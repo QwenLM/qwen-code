@@ -7,6 +7,10 @@
 // Traduccions en català per al CLI de Qwen Code per Jordi Mas i Hernàndez <jmas@softcatala.org>
 
 export default {
+  'Generated UI': 'Generated UI',
+  'Enable bundled Generated UI in supported local sessions. Restart the owning session to apply changes.':
+    'Activa el Generated UI integrat a les sessions locals compatibles. Reinicieu la sessió corresponent per aplicar els canvis.',
+
   // ============================================================================
   // Ajuda / Components de la interfície
   // ============================================================================
@@ -437,6 +441,8 @@ export default {
   'disabled (bare mode)': 'desactivada (mode mínim)',
   'disabled (safe mode)': 'desactivada (mode segur)',
   'disabled (disableAllHooks)': 'desactivada (disableAllHooks)',
+  'disabled (not approved)': 'desactivada (no aprovada)',
+  'disabled (rejected)': 'desactivada (rebutjada)',
   'disabled (folder not trusted)': 'desactivada (carpeta no fiable)',
   'disabled (turned off for this session)':
     'desactivada (apagada en aquesta sessió)',
@@ -1551,6 +1557,7 @@ export default {
   Reqs: 'Sol·licituds',
   'Input Tokens': "Tokens d'entrada",
   'Output Tokens': 'Tokens de sortida',
+  'Output (incl. Reasoning)': 'Sortida (amb raonament)',
   'Savings Highlight:': 'Estalvis destacats:',
   'of input tokens were served from the cache, reducing costs.':
     "dels tokens d'entrada s'han servit des de la memòria cau, reduint els costos.",
@@ -1855,6 +1862,10 @@ export default {
   'API key cannot be empty.': 'La API Key no pot estar buida.',
   'Invalid API key. Coding Plan API keys start with "sk-sp-". Please check.':
     'API Key no vàlida. Les API Keys de Coding Plan comencen per "sk-sp-". Comproveu-la.',
+  'Invalid API key. Pay-as-you-go keys start with "sk-" or "sk-ws-". Token Plan keys ("sk-sp-") need the Token Plan entry instead.':
+    'API Key no vàlida. Les claus pay-as-you-go comencen per "sk-" o "sk-ws-". Les claus Token Plan ("sk-sp-") necessiten l\'entrada Token Plan.',
+  'Invalid API key. Token Plan API keys start with "sk-sp-". Generate one from the Token Plan console, or use the Standard API Key entry for a pay-as-you-go key.':
+    'API Key no vàlida. Les Token Plan API Keys comencen per "sk-sp-". Genereu-ne una des de la consola Token Plan o useu l\'entrada Standard API Key per a una clau pay-as-you-go.',
   'You can get your Coding Plan API key here':
     'Podeu obtenir la vostra API Key de Coding Plan aquí',
   'Failed to update Coding Plan configuration: {{message}}':
@@ -1910,6 +1921,8 @@ export default {
   'System prompt': 'Missatge del sistema',
   'Built-in tools': 'Eines integrades',
   'MCP tools': 'MCP tools',
+  'Instruction files': 'Fitxers d’instruccions',
+  'Auto memory': 'Memòria automàtica',
   'Memory files': 'Fitxers de memòria',
   Skills: 'Habilitats',
   Messages: 'Missatges',
@@ -2034,6 +2047,8 @@ export default {
     "La revisió de l'assessor ha fallat: {{error}}",
   'No conversation context available for /advisor':
     'No hi ha context de conversa disponible per a /advisor',
+  'No conversation context available for /btw':
+    'No hi ha context de conversa disponible per a /btw',
   'Focus too long (max {{max}} chars)':
     'El focus és massa llarg (màx. {{max}} caràcters)',
   'Another operation is in progress, wait for it to complete before running /advisor':
@@ -2162,6 +2177,8 @@ export default {
   'History collapsed: {{n}} messages hidden. Use /history expand-now to show.':
     'Història reduïda: {{n}} missatges ocults. Utilitzeu /history expand-now per mostrar.',
   // Update command
+  'Exact-version updates require a standalone installation. Install version {{version}} manually using your installation method.':
+    'Les actualitzacions a una versió concreta requereixen una instal·lació independent. Instal·leu manualment la versió {{version}} amb el vostre mètode d’instal·lació.',
   'Check for Qwen Code updates and install if available':
     'Comprova les actualitzacions de Qwen Code i instal·la si estan disponibles',
   'Qwen Code update available! {{current}} → {{latest}}':
@@ -2455,6 +2472,7 @@ export default {
   'toolDisplayName.CronCreate': 'Crea tasca programada',
   'toolDisplayName.CronList': 'Llista tasques programades',
   'toolDisplayName.CronDelete': 'Suprimeix tasca programada',
+  'toolDisplayName.AutofixPr': 'Autocorrecció de PR',
   'toolDisplayName.LoopWakeup': 'Desperta el bucle',
   'toolDisplayName.CreateSubSession': 'Crea subsessió',
   'toolDisplayName.ListAgents': "Llista d'agents",

@@ -7,6 +7,10 @@
 // Japanese translations for Qwen Code CLI
 
 export default {
+  'Generated UI': 'Generated UI（生成 UI）',
+  'Enable bundled Generated UI in supported local sessions. Restart the owning session to apply changes.':
+    '対応するローカルセッションで内蔵 Generated UI を有効にします。変更を適用するには対象のセッションを再起動してください。',
+
   // ============================================================================
   // Help / UI Components
   // ============================================================================
@@ -888,6 +892,8 @@ export default {
   'disabled (bare mode)': '無効（ベアモード）',
   'disabled (safe mode)': '無効（セーフモード）',
   'disabled (disableAllHooks)': '無効（disableAllHooks）',
+  'disabled (not approved)': '無効（未承認）',
+  'disabled (rejected)': '無効（拒否済み）',
   'disabled (folder not trusted)': '無効（フォルダーが信頼されていません）',
   'disabled (turned off for this session)': '無効（このセッションでオフ）',
   'Server:': 'サーバー:',
@@ -1254,6 +1260,7 @@ export default {
   Reqs: 'リクエスト',
   'Input Tokens': '入力トークン',
   'Output Tokens': '出力トークン',
+  'Output (incl. Reasoning)': '出力（推論を含む）',
   'Savings Highlight:': '節約ハイライト:',
   'of input tokens were served from the cache, reducing costs.':
     '入力トークンがキャッシュから提供され、コストを削減しました',
@@ -1403,6 +1410,8 @@ export default {
   'System prompt': 'システムプロンプト',
   'Built-in tools': '組み込みツール',
   'MCP tools': 'MCP tools',
+  'Instruction files': '指示ファイル',
+  'Auto memory': '自動メモリ',
   'Memory files': 'メモリファイル',
   Skills: 'スキル',
   Messages: 'メッセージ',
@@ -1619,6 +1628,8 @@ export default {
     'アドバイザーレビューに失敗しました：{{error}}',
   'No conversation context available for /advisor':
     '/advisor に使用できる会話コンテキストがありません',
+  'No conversation context available for /btw':
+    '/btw に使用できる会話コンテキストがありません',
   'Focus too long (max {{max}} chars)':
     'フォーカスが長すぎます（最大 {{max}} 文字）',
   'Another operation is in progress, wait for it to complete before running /advisor':
@@ -1907,6 +1918,10 @@ export default {
   'to retry last request': '最後のリクエストを再試行',
   'Invalid API key. Coding Plan API keys start with "sk-sp-". Please check.':
     '無効な API Key です。Coding Plan の API Key は "sk-sp-" で始まります。確認してください。',
+  'Invalid API key. Pay-as-you-go keys start with "sk-" or "sk-ws-". Token Plan keys ("sk-sp-") need the Token Plan entry instead.':
+    '無効な API Key です。従量課金キーは "sk-" または "sk-ws-" で始まります。Token Plan キー（"sk-sp-"）は Token Plan エントリを使用してください。',
+  'Invalid API key. Token Plan API keys start with "sk-sp-". Generate one from the Token Plan console, or use the Standard API Key entry for a pay-as-you-go key.':
+    '無効な API Key です。Token Plan API Key は "sk-sp-" で始まります。Token Plan コンソールから生成するか、Standard API Key エントリで従量課金キーを使用してください。',
   'Lock release warning': 'ロック解除の警告',
   'Metadata write warning': 'メタデータ書き込みの警告',
   "Subsequent dreams may be skipped as locked until the next session's staleness sweep cleans the file.":
@@ -1975,6 +1990,8 @@ export default {
   out: '出力',
   'In/Out': '入力/出力',
   // Update command
+  'Exact-version updates require a standalone installation. Install version {{version}} manually using your installation method.':
+    '指定バージョンへの更新にはスタンドアロン版が必要です。現在のインストール方法でバージョン {{version}} を手動インストールしてください。',
   'Check for Qwen Code updates and install if available':
     'Qwen Codeのアップデートを確認し、利用可能な場合はインストールします',
   'Qwen Code update available! {{current}} → {{latest}}':

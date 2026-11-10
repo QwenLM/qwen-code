@@ -3,6 +3,7 @@
 # channel join the pnpm layout silently while npm still ignores it.
 packages:
   - 'packages/*'
+  - 'packages/cua-driver/typescript'
   - 'packages/channels/base'
   - 'packages/channels/dingtalk'
   - 'packages/channels/dws'
@@ -18,6 +19,7 @@ packages:
   - 'integrations/external-context'
   - 'integrations/external-context-mem0'
   - 'integrations/test-failure-explorer'
+  - 'integrations/generated-ui'
   - '!packages/desktop'
   - '!packages/live-host'
   - '!packages/mobile-shell'
@@ -39,6 +41,13 @@ nodeLinker: 'hoisted'
 # entry untouched while patch-package edits only the worktree's own copy.
 packageImportMethod: 'clone-or-copy'
 linkWorkspacePackages: true
+# packages/cli's `tsc --build` exhausts V8's default heap when a build runs
+# through pnpm: the heap cap the root build script sets lives in NODE_OPTIONS
+# for the root process, but each package script starts its own `node`, so the
+# compile gets whatever pnpm hands it. `npm run build` observed the same
+# growth past 4 GB (#14823), so package scripts get headroom here rather than
+# on the one entry point that happened to fail first.
+nodeOptions: '--max-old-space-size=6144'
 verifyDepsBeforeRun: false
 fetchRetries: 5
 fetchRetryMintimeout: 20000
@@ -46,6 +55,8 @@ fetchRetryMaxtimeout: 120000
 fetchTimeout: 300000
 
 overrides:
+  'brace-expansion@1': '1.1.21'
+  'brace-expansion@2': '2.1.7'
   typescript: '5.8.3'
   '@microsoft/api-extractor>typescript': '5.9.3'
   '@qwen-code/mobile-mcp>typescript': '5.8.2'

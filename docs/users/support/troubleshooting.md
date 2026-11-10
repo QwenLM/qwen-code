@@ -9,12 +9,6 @@ This guide provides solutions to common issues and debugging tips, including top
 
 ## Authentication or login errors
 
-- **Error: `Qwen OAuth free tier was discontinued on 2026-04-15`**
-  - **Cause:** Qwen OAuth is no longer available as of April 15, 2026.
-  - **Solution:** Switch to a different authentication method. Run `qwen` → `/auth` and choose one of:
-    - **API Key**: Use an API key from Alibaba Cloud Model Studio ([Beijing](https://bailian.console.aliyun.com/) / [intl](https://modelstudio.console.alibabacloud.com/)). See the API setup guide ([Beijing](https://bailian.console.aliyun.com/cn-beijing/?tab=doc#/doc/?type=model&url=3023091) / [intl](https://modelstudio.console.alibabacloud.com/ap-southeast-1?tab=doc#/doc/?type=model&url=2974721)).
-    - **Alibaba Cloud Coding Plan**: Subscribe for a fixed monthly fee with higher quotas. See the Coding Plan guide ([Beijing](https://bailian.console.aliyun.com/cn-beijing/?tab=coding-plan#/efm/coding-plan-index) / [intl](https://modelstudio.console.alibabacloud.com/?tab=coding-plan#/efm/coding-plan-index)).
-
 - **Error: `UNABLE_TO_GET_ISSUER_CERT_LOCALLY`, `UNABLE_TO_VERIFY_LEAF_SIGNATURE`, or `unable to get local issuer certificate`**
   - **Cause:** You may be on a corporate network with a firewall that intercepts and inspects SSL/TLS traffic. This often requires a custom root CA certificate to be trusted by Node.js.
   - **Solution:** Set the `NODE_EXTRA_CA_CERTS` environment variable to the absolute path of your corporate root CA certificate file.
@@ -56,7 +50,7 @@ This guide provides solutions to common issues and debugging tips, including top
   - A: Cached token information is only displayed when cached tokens are being used. This feature is available for API key users (e.g., Alibaba Cloud Model Studio API key or Google Cloud Vertex AI). You can still view your total token usage using the `/stats` command.
 
 - **Q: A customization (extension, hook, skill, MCP server, or subagent) seems to be breaking Qwen Code. How do I isolate it?**
-  - A: Start Qwen Code with the `--safe-mode` flag to disable all customizations — context files, hooks, extensions, skills, MCP servers, custom subagents (only built-in subagents load), permission rules, settings-sourced approval mode overrides, memory features, cross-session messaging, and sandbox settings — for the session. Note: the CLI flags `--yolo` and `--approval-mode` still take effect in safe mode. If the problem disappears in safe mode, re-enable your customizations one at a time to find the culprit.
+  - A: Start Qwen Code with the `--safe-mode` flag to disable all customizations — context files, hooks, extensions, skills, MCP servers, custom subagents (only built-in subagents load), permission rules, settings-sourced approval mode overrides, memory features, cross-session messaging, LSP, and sandbox settings — for the session. Note: the CLI flags `--yolo` and `--approval-mode` still take effect in safe mode. If the problem disappears in safe mode, re-enable your customizations one at a time to find the culprit.
     - Example: `qwen --safe-mode`
     - Alternative: set the environment variable `QWEN_CODE_SAFE_MODE=true` if the CLI cannot accept flags.
     - Note: unlike the flag, an exported `QWEN_CODE_SAFE_MODE` is inherited by child processes. A `qwen serve` daemon or an editor started from that shell hosts every one of its sessions in safe mode, so those sessions are suppressed too: they write no session record, and other sessions can neither list nor message them. Unset the variable for the daemon rather than leaving it exported in the shell that starts it.
@@ -109,7 +103,7 @@ The attachment limit remains 8 MiB. If an upload expires or the daemon restarts,
 - **Trackpad scrolling in tmux changes prompt history instead of scrolling the conversation**
   - **Issue:** In a tmux session, trackpad or wheel scrolling may cycle through previous prompts, similar to pressing `Up Arrow` or `Down Arrow`.
   - **Cause:** tmux can translate wheel gestures into plain arrow-key sequences. Those sequences are indistinguishable from real arrow-key presses by the time qwen-code receives them.
-  - **Solution:** If screen reader mode is disabled, make sure `ui.useTerminalBuffer` is enabled; then use `Shift+Up` / `Shift+Down`, or the mouse wheel when tmux forwards wheel events to the app (requires `ui.mouseTracking`). If you prefer host scrollback, adjust your tmux mouse bindings for wheel events.
+  - **Solution:** If screen reader mode is disabled, make sure `ui.useTerminalBuffer` is enabled; then use `Shift+Up` / `Shift+Down`, or the mouse wheel when tmux forwards wheel events to the app (requires `ui.mouseTracking`). To hand plain `Up Arrow` / `Down Arrow` to the viewport while the composer is empty, set `ui.arrowKeysScrollTranscript` to `true`; input history is then reachable with `Ctrl+P` / `Ctrl+N`. If you prefer host scrollback, adjust your tmux mouse bindings for wheel events.
 
 - **Right-click does nothing, links do not open, or text cannot be selected in the terminal**
   - **Issue:** Native right-click context menus, OSC 8 hyperlink clicks, and terminal-native text selection stop working while Qwen Code is running.

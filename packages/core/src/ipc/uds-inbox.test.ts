@@ -48,6 +48,7 @@ import {
 import type { PeerControllerIdentity } from './peer-controllers.js';
 import { expectWithinLatencyBudget } from '../test-utils/latency-budget.js';
 import { leaveStaleSocket } from '../test-utils/stale-socket.js';
+import { arePermissionBitsEnforced } from '../test-utils/permission-bits.js';
 
 /**
  * A PID no process can ever hold.
@@ -331,7 +332,7 @@ describe.skipIf(isWindows)('startPeerInbox', () => {
     expectFailure('path_too_long', 'shorter directory');
   });
 
-  it.skipIf(process.getuid?.() === 0)(
+  it.skipIf(!arePermissionBitsEnforced())(
     'names the cause when a parent directory is not writable',
     async () => {
       const locked = path.join(tmpDir, 'locked');
@@ -1132,7 +1133,7 @@ describe.skipIf(isWindows)('orphan socket sweeps', () => {
   // it. The existing "keeps a listening socket even when its filename PID
   // is absent" pins only the case where the probe reaches a definitive
   // answer, and stays green whether or not `unknown` is honoured.
-  it.skipIf(process.getuid?.() === 0)(
+  it.skipIf(!arePermissionBitsEnforced())(
     'keeps a socket whose probe could not reach a verdict',
     async () => {
       const dir = await socksDir();
@@ -1147,7 +1148,7 @@ describe.skipIf(isWindows)('orphan socket sweeps', () => {
     },
   );
 
-  it.skipIf(process.getuid?.() === 0)(
+  it.skipIf(!arePermissionBitsEnforced())(
     'keeps a fallback directory whose probe could not reach a verdict',
     async () => {
       const parent = await makeShortTmpDir('qwen-inbox-unknown-');
@@ -1401,7 +1402,7 @@ describe.skipIf(isWindows)('PID-keyed path collisions', () => {
     }
   });
 
-  it.skipIf(process.getuid?.() === 0)(
+  it.skipIf(!arePermissionBitsEnforced())(
     'binds a sibling when the requested path cannot be verified free',
     async () => {
       const taken = sockAt('4242.sock');
@@ -1556,7 +1557,7 @@ describe.skipIf(isWindows)('PID-keyed path collisions', () => {
     }
   });
 
-  it.skipIf(process.getuid?.() === 0)(
+  it.skipIf(!arePermissionBitsEnforced())(
     'reports sibling overflow when the requested path cannot be verified free',
     async (ctx) => {
       const { root, taken } = await paddedTaken();

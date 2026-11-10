@@ -13,12 +13,19 @@ import type {
 } from './managed-session-authority.js';
 import {
   createNextTurnReadyHarnessCheckpoint,
-  encodeHarnessCheckpointV1,
   HARNESS_MODEL_START_PHASES,
   HARNESS_TURN_COMPLETE_BOUNDARY,
 } from './managed-harness-checkpoint.js';
 import { ManagedSessionMessageProjection } from './managed-session-message-projection.js';
+import { buildSessionHistoryFromConversation } from '../services/session-api-history.js';
+import {
+  MANAGED_MESSAGE_INLINE_BYTES,
+  publishManagedMessageBody,
+} from './managed-message-chunks.js';
+import type { ManagedSessionDurableRef } from './managed-session-records.js';
 import type { ManagedSessionResourceStore } from './managed-session-storage.js';
+import { getManagedSessionDiagnostics } from './managed-session-diagnostics.js';
+import type { ManagedInvocationObservation } from './managed-execution-diagnostics.js';
 
 /**
  * The record shapes the message projection can carry today.
@@ -30,10 +37,12 @@ import type { ManagedSessionResourceStore } from './managed-session-storage.js';
  * than falling back to a direct append.
  */
 const CARRIED_SYSTEM_SUBTYPES = new Set([
+  'memory_catalog_snapshot',
   'slash_command',
   'at_command',
   'ui_telemetry',
   'attribution_snapshot',
+  'turn_attempt',
 ]);
 
 /**
@@ -138,7 +147,10 @@ export class ManagedSessionRecordSink {
    * would put content in the transcript that the authoritative log does not
    * account for, which is the divergence this layer exists to prevent.
    */
-  async write(record: ChatRecord): Promise<void> {
+  async write(
+    record: ChatRecord,
+    diagnostics?: readonly ManagedInvocationObservation[],
+  ): Promise<void> {
     if (!this.canCarry(record)) {
       throw new ManagedSessionUnmappedRecordError(record);
     }
@@ -177,7 +189,7 @@ export class ManagedSessionRecordSink {
         sessionKey: this.authority.sessionHeader.sessionKey,
         contentDigest: this.authority.sessionHeader.definitionRef.digest,
       },
-      { record },
+      { record, diagnostics },
       this.actor(),
     );
   }
@@ -310,6 +322,12 @@ export class ManagedSessionRecordSink {
    * carries beyond the fields the event indexes.
    */
   private async commitTurnSettled(record: ChatRecord): Promise<void> {
+    const diagnostics = getManagedSessionDiagnostics(this.authority);
+    const commit = () => this.commitTurnSettledOwned(record);
+    return diagnostics ? diagnostics.serialCommit(commit) : commit();
+  }
+
+  private async commitTurnSettledOwned(record: ChatRecord): Promise<void> {
     const payload = record.systemPayload as
       | { promptId?: unknown; state?: unknown; stopReason?: unknown }
       | undefined;
@@ -344,6 +362,10 @@ export class ManagedSessionRecordSink {
       occurredAt: Date.parse(record.timestamp) || Date.now(),
       eventId: `turn:${turnId}`,
     };
+    const usageRef =
+      (await getManagedSessionDiagnostics(this.authority)?.publishTurnFallback(
+        turnId,
+      )) ?? null;
     if (actor.class === 'harness' && held !== undefined) {
       const authorization = await this.authority.harnessRunAuthorization();
       if (
@@ -355,18 +377,16 @@ export class ManagedSessionRecordSink {
         await this.authority.commitTurnComplete(
           command,
           {
-            turn,
+            turn: { ...turn, usageRef },
             boundary: HARNESS_TURN_COMPLETE_BOUNDARY,
             state: (identity, previous) =>
-              encodeHarnessCheckpointV1(
-                createNextTurnReadyHarnessCheckpoint({
-                  previous,
-                  ...identity,
-                  activationId: held.activationId,
-                  turnId,
-                  promptId: turnId,
-                }),
-              ),
+              createNextTurnReadyHarnessCheckpoint({
+                previous,
+                ...identity,
+                activationId: held.activationId,
+                turnId,
+                promptId: turnId,
+              }),
           },
           actor,
         );
@@ -397,7 +417,7 @@ export class ManagedSessionRecordSink {
           outcome: turn.outcome,
           stopReason: turn.stopReason,
           resultRef,
-          usageRef: null,
+          usageRef,
           pendingOwnersRef: null,
         },
       }),
@@ -428,10 +448,11 @@ export class ManagedSessionRecordSink {
       .eventsInSequenceRange(fromSequence, toSequence)
       .filter((event) => event.kind === 'message.committed')
       .map((event) => event.payload['messageId'] as string);
-    const summaryRef = await this.resources.publish(
-      'managed-compaction-summary',
-      Buffer.from(JSON.stringify(record), 'utf8'),
-    );
+    const bytes = Buffer.from(JSON.stringify(record), 'utf8');
+    const summaryRef =
+      bytes.byteLength <= MANAGED_MESSAGE_INLINE_BYTES
+        ? await this.resources.publish('managed-compaction-summary', bytes)
+        : await publishManagedMessageBody(this.resources, bytes);
     const actor = this.actor();
     const held = actor.activation;
     await this.authority.appendExecutionEvent(
@@ -493,5 +514,32 @@ export class ManagedSessionRecordSink {
   /** Reader-facing records rebuilt from the authoritative log. */
   project(throughSequence?: number): Promise<ChatRecord[]> {
     return this.projection.project(throughSequence);
+  }
+
+  /** See `ManagedSessionMessageProjection.rememberBody`. */
+  rememberMessageBody(ref: ManagedSessionDurableRef, body: Buffer): void {
+    this.projection.rememberBody(ref, body);
+  }
+
+  projectModelRecords(throughSequence?: number): Promise<ChatRecord[]> {
+    return this.projection.projectModelRecords(throughSequence);
+  }
+
+  async projectModelHistory(
+    options: {
+      throughSequence?: number;
+      includeRecord?: (record: ChatRecord) => boolean;
+    } = {},
+  ) {
+    const records = await this.projectModelRecords(options.throughSequence);
+    return buildSessionHistoryFromConversation({
+      messages: options.includeRecord
+        ? records.filter(
+            (record) =>
+              record.subtype === 'chat_compression' ||
+              options.includeRecord!(record),
+          )
+        : records,
+    });
   }
 }

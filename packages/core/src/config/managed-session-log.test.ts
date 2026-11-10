@@ -58,14 +58,25 @@ import { ManagedSessionRecordSink } from '../managed-runtime/managed-session-rec
 import { readManagedSessionRecords } from '../managed-runtime/managed-session-message-projection.js';
 import {
   isManagedSessionTranscriptSync,
+  LITE_READ_BUF_SIZE,
   localManagedSessionKey,
   managedSessionResourceRoot,
 } from '../utils/sessionStorageUtils.js';
+import { arePermissionBitsEnforced } from '../test-utils/permission-bits.js';
+import { isSlowTestHost } from '../test-utils/slow-test-host.js';
 
 const SESSION_ID = '3f2504e0-4f89-41d3-9a0c-0305e82c3301';
 
 // Mirrors METADATA_REANCHOR_BYTES in chatRecordingService.ts.
 const REANCHOR_GROWTH_BYTES = 32 * 1024 + 2 * 1024;
+
+// The title tests below push tens of KiB through the writer — via a renewal
+// loop or a burst of records — so their duration is set by per-append cost
+// under host contention, not by the assertions. The renewal loops overran the
+// 60 s ecs-qwen lane ceiling in #14581, and the record burst overran it on
+// shard 7/8 of run 42569326136. Slow hosts get double the ceiling; fast hosts
+// keep the lane default.
+const heavyTitleTimeoutMs = isSlowTestHost() ? 120_000 : undefined;
 
 let root: string;
 let projectDir: string;
@@ -223,10 +234,11 @@ describe('Managed Session log recording', () => {
         MANAGED_SESSION_COMMIT_SUBTYPE,
       ]).toContain(record['subtype']);
     }
-    const scan = await LocalJsonlManagedSessionJournalStore.read(
-      sessionService().getSessionTranscriptPath(SESSION_ID),
-      localManagedSessionKey(projectDir, SESSION_ID),
-    );
+    const scan = await LocalJsonlManagedSessionJournalStore.read({
+      transcriptPath: sessionService().getSessionTranscriptPath(SESSION_ID),
+      runtimeBaseDir: runtimeDir,
+      sessionKey: localManagedSessionKey(projectDir, SESSION_ID),
+    });
     expect(scan.uncommitted).toBe(0);
     // The session is the activation's worker, with a five-minute horizon.
     expect(scan.activation?.workerId).toBe(SESSION_ID);
@@ -282,10 +294,11 @@ describe('Managed Session log recording', () => {
     const sealed = await lockRecord();
     expect(sealed).toMatchObject({ state: 'sealed', schema_version: 3 });
     // The log records that the session stopped advancing before the seal.
-    const scan = await LocalJsonlManagedSessionJournalStore.read(
-      sessionService().getSessionTranscriptPath(SESSION_ID),
-      localManagedSessionKey(projectDir, SESSION_ID),
-    );
+    const scan = await LocalJsonlManagedSessionJournalStore.read({
+      transcriptPath: sessionService().getSessionTranscriptPath(SESSION_ID),
+      runtimeBaseDir: runtimeDir,
+      sessionKey: localManagedSessionKey(projectDir, SESSION_ID),
+    });
     expect(scan.activation?.phase).toBe('released');
     expect(scan.uncommitted).toBe(0);
     const bytesAtClose = (
@@ -391,111 +404,138 @@ describe('Managed Session log recording', () => {
     expect(await lockRecord()).toMatchObject({ state: 'sealed' });
   });
 
-  it('keeps its title where the session list and a restore read it', async () => {
-    const config = await start(managedConfig());
-    const recorder = config.getChatRecordingService()!;
-    const titleRecords = async () =>
-      (
-        await readFile(
-          sessionService().getSessionTranscriptPath(SESSION_ID),
-          'utf8',
-        )
-      ).split('"domain":"session_metadata"').length - 1;
-    await expect(
-      recorder.recordCustomTitle('Early title', 'auto'),
-    ).resolves.toBe(true);
-    // The session list scans 64 KiB at each end of the log. The rename lands
-    // past the head window, and the records after it would push it past the tail
-    // window too if the recorder did not re-anchor it.
-    for (let index = 0; index < 45; index++) {
-      recordUser(config, `before the rename ${index}`);
-    }
-    await recorder.flush();
-    const transcriptPath =
-      sessionService().getSessionTranscriptPath(SESSION_ID);
-    const renamedAt = (await stat(transcriptPath)).size;
-    await expect(
-      recorder.recordCustomTitle('Renamed title', 'manual'),
-    ).resolves.toBe(true);
-    for (let index = 0; index < 45; index++) {
-      recordUser(config, `after the rename ${index}`);
-    }
-    await recorder.flush();
-    expect(sessionService().getSessionTitleInfo(SESSION_ID)).toMatchObject({
-      title: 'Renamed title',
-      source: 'manual',
-    });
-    // Re-anchors come no more often than every 32 KiB of growth.
-    const offsets: number[] = [];
-    let offset = 0;
-    for (const line of (await readFile(transcriptPath, 'utf8')).split('\n')) {
-      if (line.includes('"domain":"session_metadata"')) offsets.push(offset);
-      offset += Buffer.byteLength(line, 'utf8') + 1;
-    }
-    expect(offsets.length).toBeGreaterThan(4);
-    for (let index = 1; index < offsets.length; index++) {
-      if (offsets[index] === renamedAt) continue;
-      expect(offsets[index]! - offsets[index - 1]!).toBeGreaterThanOrEqual(
-        32 * 1024,
+  it(
+    'keeps its title where the session list and a restore read it',
+    async () => {
+      // This case reads the log by byte offset, so its own records must be the
+      // only writers. The activation renewal ticks at a third of the lease
+      // (100 s), which this case's raised ceiling admits: one tick both moves
+      // the rename off the offset sampled for it and charges its growth after
+      // the title reset, landing the next anchor a record early. Renewal-driven
+      // anchoring has its own cases below.
+      vi.spyOn(
+        LocalManagedSessionAuthority.prototype,
+        'renewActivation',
+      ).mockResolvedValue(undefined);
+      const config = await start(managedConfig());
+      const recorder = config.getChatRecordingService()!;
+      const titleRecords = async () =>
+        (
+          await readFile(
+            sessionService().getSessionTranscriptPath(SESSION_ID),
+            'utf8',
+          )
+        ).split('"domain":"session_metadata"').length - 1;
+      await expect(
+        recorder.recordCustomTitle('Early title', 'auto'),
+      ).resolves.toBe(true);
+      // The session list scans 64 KiB at each end of the log. The rename lands
+      // past the head window, and the records after it would push it past the tail
+      // window too if the recorder did not re-anchor it. The burst is counted in
+      // records, not bytes: a message body goes to the resource store and the
+      // log carries only its ref, so every record adds the same ~2 KiB here no
+      // matter how much text it holds.
+      for (let index = 0; index < 45; index++) {
+        recordUser(config, `before the rename ${index}`);
+      }
+      await recorder.flush();
+      const transcriptPath =
+        sessionService().getSessionTranscriptPath(SESSION_ID);
+      const renamedAt = (await stat(transcriptPath)).size;
+      await expect(
+        recorder.recordCustomTitle('Renamed title', 'manual'),
+      ).resolves.toBe(true);
+      for (let index = 0; index < 45; index++) {
+        recordUser(config, `after the rename ${index}`);
+      }
+      await recorder.flush();
+      // Both windows must actually miss the rename, or the read below would
+      // pass without any re-anchor having happened.
+      expect(renamedAt).toBeGreaterThan(LITE_READ_BUF_SIZE);
+      expect(renamedAt).toBeLessThan(
+        (await stat(transcriptPath)).size - LITE_READ_BUF_SIZE,
       );
-    }
-    await config.closeSessionWriter();
+      expect(sessionService().getSessionTitleInfo(SESSION_ID)).toMatchObject({
+        title: 'Renamed title',
+        source: 'manual',
+      });
+      // Re-anchors come no more often than every 32 KiB of growth.
+      const offsets: number[] = [];
+      let offset = 0;
+      for (const line of (await readFile(transcriptPath, 'utf8')).split('\n')) {
+        if (line.includes('"domain":"session_metadata"')) offsets.push(offset);
+        offset += Buffer.byteLength(line, 'utf8') + 1;
+      }
+      expect(offsets.length).toBeGreaterThan(4);
+      for (let index = 1; index < offsets.length; index++) {
+        if (offsets[index] === renamedAt) continue;
+        expect(offsets[index]! - offsets[index - 1]!).toBeGreaterThanOrEqual(
+          32 * 1024,
+        );
+      }
+      await config.closeSessionWriter();
 
-    const restored = await start(restoringConfig());
-    expect(restored.getChatRecordingService()!.getCurrentCustomTitle()).toBe(
-      'Renamed title',
-    );
-    // A restored rename commits one record, not the rename and a re-anchor.
-    const before = await titleRecords();
-    await expect(
-      restored
-        .getChatRecordingService()!
-        .recordCustomTitle('Final title', 'manual'),
-    ).resolves.toBe(true);
-    await restored.getChatRecordingService()!.flush();
-    expect(await titleRecords()).toBe(before + 1);
-    expect(sessionService().getSessionTitleInfo(SESSION_ID)).toMatchObject({
-      title: 'Final title',
-    });
-    await restored.closeSessionWriter();
-  });
+      const restored = await start(restoringConfig());
+      expect(restored.getChatRecordingService()!.getCurrentCustomTitle()).toBe(
+        'Renamed title',
+      );
+      // A restored rename commits one record, not the rename and a re-anchor.
+      const before = await titleRecords();
+      await expect(
+        restored
+          .getChatRecordingService()!
+          .recordCustomTitle('Final title', 'manual'),
+      ).resolves.toBe(true);
+      await restored.getChatRecordingService()!.flush();
+      expect(await titleRecords()).toBe(before + 1);
+      expect(sessionService().getSessionTitleInfo(SESSION_ID)).toMatchObject({
+        title: 'Final title',
+      });
+      await restored.closeSessionWriter();
+    },
+    heavyTitleTimeoutMs,
+  );
 
-  it('re-anchors its title on finalize after renewals alone moved the log on', async () => {
-    const config = await start(managedConfig());
-    const recorder = config.getChatRecordingService()!;
-    for (let index = 0; index < 40; index++) {
-      recordUser(config, `prompt ${index}`);
-    }
-    await recorder.flush();
-    await expect(
-      recorder.recordCustomTitle('Idle title', 'manual'),
-    ).resolves.toBe(true);
-    const transcriptPath =
-      sessionService().getSessionTranscriptPath(SESSION_ID);
-    const titledAt = (await stat(transcriptPath)).size;
-    // While the session is idle, the renewal timer is the only writer.
-    const { authority } = (
-      config as unknown as { managedSession: ManagedSession }
-    ).managedSession;
-    while ((await stat(transcriptPath)).size - titledAt < 70 * 1024) {
-      await authority.renewActivation({ leaseDurationMs: 5 * 60 * 1000 });
-    }
-    expect(sessionService().getSessionTitleInfo(SESSION_ID)?.title).not.toBe(
-      'Idle title',
-    );
+  it(
+    're-anchors its title on finalize after renewals alone moved the log on',
+    async () => {
+      const config = await start(managedConfig());
+      const recorder = config.getChatRecordingService()!;
+      for (let index = 0; index < 40; index++) {
+        recordUser(config, `prompt ${index}`);
+      }
+      await recorder.flush();
+      await expect(
+        recorder.recordCustomTitle('Idle title', 'manual'),
+      ).resolves.toBe(true);
+      const transcriptPath =
+        sessionService().getSessionTranscriptPath(SESSION_ID);
+      const titledAt = (await stat(transcriptPath)).size;
+      // While the session is idle, the renewal timer is the only writer.
+      const { authority } = (
+        config as unknown as { managedSession: ManagedSession }
+      ).managedSession;
+      while ((await stat(transcriptPath)).size - titledAt < 70 * 1024) {
+        await authority.renewActivation({ leaseDurationMs: 5 * 60 * 1000 });
+      }
+      expect(sessionService().getSessionTitleInfo(SESSION_ID)?.title).not.toBe(
+        'Idle title',
+      );
 
-    recorder.finalize();
-    await recorder.flush();
-    expect(sessionService().getSessionTitleInfo(SESSION_ID)).toMatchObject({
-      title: 'Idle title',
-    });
-    // The title it wrote is not on the chain the next record continues.
-    recordUser(config, 'after finalize');
-    const texts = await activeChatTexts(config);
-    expect(texts[0]).toBe('prompt 0');
-    expect(texts.at(-1)).toBe('after finalize');
-    await config.closeSessionWriter();
-  });
+      recorder.finalize();
+      await recorder.flush();
+      expect(sessionService().getSessionTitleInfo(SESSION_ID)).toMatchObject({
+        title: 'Idle title',
+      });
+      // The title it wrote is not on the chain the next record continues.
+      recordUser(config, 'after finalize');
+      const texts = await activeChatTexts(config);
+      expect(texts[0]).toBe('prompt 0');
+      expect(texts.at(-1)).toBe('after finalize');
+      await config.closeSessionWriter();
+    },
+    heavyTitleTimeoutMs,
+  );
 
   it.each([
     'a handoff close',
@@ -574,6 +614,7 @@ describe('Managed Session log recording', () => {
         title: 'Renamed title',
       });
     },
+    heavyTitleTimeoutMs,
   );
 
   it('adds no title on finalize right behind an anchor', async () => {
@@ -630,17 +671,24 @@ describe('Managed Session log recording', () => {
       false,
     );
     await recorder.flush();
-    const raw = await readFile(
-      sessionService().getSessionTranscriptPath(SESSION_ID),
-      'utf8',
-    );
-    expect(raw.split('"domain":"session_source"')).toHaveLength(2);
+    const journal = await LocalJsonlManagedSessionJournalStore.read({
+      transcriptPath: sessionService().getSessionTranscriptPath(SESSION_ID),
+      runtimeBaseDir: runtimeDir,
+      sessionKey: localManagedSessionKey(projectDir, SESSION_ID),
+    });
+    expect(
+      journal.events.filter(
+        (event) =>
+          event.kind === 'domain.committed' &&
+          event.payload['domain'] === 'session_source',
+      ),
+    ).toHaveLength(1);
     await restored.closeSessionWriter();
   });
 
   // An unreadable file is made with chmod, which neither Windows nor root
-  // honours.
-  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+  // with its DAC capabilities honours.
+  it.skipIf(!arePermissionBitsEnforced())(
     'keeps a reclaimed lock when it cannot read the log',
     async () => {
       const first = await start(managedConfig());
@@ -704,93 +752,102 @@ describe('Managed Session log recording', () => {
     await config.closeSessionWriter();
   });
 
-  it('does not anchor the title that a rename in flight replaces', async () => {
-    const config = await start(managedConfig());
-    const recorder = config.getChatRecordingService()!;
-    await recorder.recordCustomTitle('Old title', 'manual');
-    const transcriptPath =
-      sessionService().getSessionTranscriptPath(SESSION_ID);
-    const { authority } = (
-      config as unknown as { managedSession: ManagedSession }
-    ).managedSession;
-    // The log moves past the re-anchor threshold while the rename is written,
-    // so the anchor falls due as the rename lands.
-    const write = ManagedSessionRecordSink.prototype.write;
-    vi.spyOn(ManagedSessionRecordSink.prototype, 'write').mockImplementation(
-      async function (this: ManagedSessionRecordSink, record: ChatRecord) {
-        const payload = record.systemPayload as
-          | { customTitle?: unknown }
-          | undefined;
-        if (payload?.customTitle === 'New title') {
-          const from = (await stat(transcriptPath)).size;
-          while ((await stat(transcriptPath)).size - from < 34 * 1024) {
-            await authority.renewActivation({
-              leaseDurationMs: 5 * 60 * 1000,
-            });
+  it(
+    'does not anchor the title that a rename in flight replaces',
+    async () => {
+      const config = await start(managedConfig());
+      const recorder = config.getChatRecordingService()!;
+      await recorder.recordCustomTitle('Old title', 'manual');
+      const transcriptPath =
+        sessionService().getSessionTranscriptPath(SESSION_ID);
+      const { authority } = (
+        config as unknown as { managedSession: ManagedSession }
+      ).managedSession;
+      // The log moves past the re-anchor threshold while the rename is written,
+      // so the anchor falls due as the rename lands.
+      const write = ManagedSessionRecordSink.prototype.write;
+      vi.spyOn(ManagedSessionRecordSink.prototype, 'write').mockImplementation(
+        async function (this: ManagedSessionRecordSink, record: ChatRecord) {
+          const payload = record.systemPayload as
+            | { customTitle?: unknown }
+            | undefined;
+          if (payload?.customTitle === 'New title') {
+            const from = (await stat(transcriptPath)).size;
+            while ((await stat(transcriptPath)).size - from < 34 * 1024) {
+              await authority.renewActivation({
+                leaseDurationMs: 5 * 60 * 1000,
+              });
+            }
           }
-        }
-        return write.call(this, record);
-      },
-    );
+          return write.call(this, record);
+        },
+      );
 
-    await expect(
-      recorder.recordCustomTitle('New title', 'manual'),
-    ).resolves.toBe(true);
-    await recorder.flush();
-    expect(sessionService().getSessionTitleInfo(SESSION_ID)).toMatchObject({
-      title: 'New title',
-    });
-    vi.restoreAllMocks();
-    await config.closeSessionWriter();
-  });
-
-  it('seals the log when the title anchor written on close fails', async () => {
-    const config = await start(managedConfig());
-    const recorder = config.getChatRecordingService()!;
-    await recorder.recordCustomTitle('Managed title', 'manual');
-    recordUser(config, 'committed prompt');
-    await recorder.flush();
-    // Renewals alone make the title due, so its anchor is written on close.
-    const transcriptPath =
-      sessionService().getSessionTranscriptPath(SESSION_ID);
-    const from = (await stat(transcriptPath)).size;
-    const { authority } = (
-      config as unknown as { managedSession: ManagedSession }
-    ).managedSession;
-    while ((await stat(transcriptPath)).size - from < REANCHOR_GROWTH_BYTES) {
-      await authority.renewActivation({ leaseDurationMs: 5 * 60 * 1000 });
-    }
-    const write = ManagedSessionRecordSink.prototype.write;
-    const failing = vi
-      .spyOn(ManagedSessionRecordSink.prototype, 'write')
-      .mockImplementation(async function (
-        this: ManagedSessionRecordSink,
-        record: ChatRecord,
-      ) {
-        if (record.subtype === 'custom_title') throw new Error('disk full');
-        return write.call(this, record);
+      await expect(
+        recorder.recordCustomTitle('New title', 'manual'),
+      ).resolves.toBe(true);
+      await recorder.flush();
+      expect(sessionService().getSessionTitleInfo(SESSION_ID)).toMatchObject({
+        title: 'New title',
       });
+      vi.restoreAllMocks();
+      await config.closeSessionWriter();
+    },
+    heavyTitleTimeoutMs,
+  );
 
-    await config.closeSessionWriter();
-    expect(failing).toHaveBeenCalledWith(
-      expect.objectContaining({ subtype: 'custom_title' }),
-    );
-    failing.mockRestore();
-    expect(await lockRecord()).toMatchObject({
-      state: 'sealed',
-      schema_version: 3,
-    });
-    // The failed anchor does not skip the stop: the log records that the
-    // session stopped advancing before the seal.
-    const scan = await LocalJsonlManagedSessionJournalStore.read(
-      sessionService().getSessionTranscriptPath(SESSION_ID),
-      localManagedSessionKey(projectDir, SESSION_ID),
-    );
-    expect(scan.activation?.phase).toBe('released');
-    const restored = await start(restoringConfig());
-    expect(await activeChatTexts(restored)).toEqual(['committed prompt']);
-    await restored.closeSessionWriter();
-  });
+  it(
+    'seals the log when the title anchor written on close fails',
+    async () => {
+      const config = await start(managedConfig());
+      const recorder = config.getChatRecordingService()!;
+      await recorder.recordCustomTitle('Managed title', 'manual');
+      recordUser(config, 'committed prompt');
+      await recorder.flush();
+      // Renewals alone make the title due, so its anchor is written on close.
+      const transcriptPath =
+        sessionService().getSessionTranscriptPath(SESSION_ID);
+      const from = (await stat(transcriptPath)).size;
+      const { authority } = (
+        config as unknown as { managedSession: ManagedSession }
+      ).managedSession;
+      while ((await stat(transcriptPath)).size - from < REANCHOR_GROWTH_BYTES) {
+        await authority.renewActivation({ leaseDurationMs: 5 * 60 * 1000 });
+      }
+      const write = ManagedSessionRecordSink.prototype.write;
+      const failing = vi
+        .spyOn(ManagedSessionRecordSink.prototype, 'write')
+        .mockImplementation(async function (
+          this: ManagedSessionRecordSink,
+          record: ChatRecord,
+        ) {
+          if (record.subtype === 'custom_title') throw new Error('disk full');
+          return write.call(this, record);
+        });
+
+      await config.closeSessionWriter();
+      expect(failing).toHaveBeenCalledWith(
+        expect.objectContaining({ subtype: 'custom_title' }),
+      );
+      failing.mockRestore();
+      expect(await lockRecord()).toMatchObject({
+        state: 'sealed',
+        schema_version: 3,
+      });
+      // The failed anchor does not skip the stop: the log records that the
+      // session stopped advancing before the seal.
+      const scan = await LocalJsonlManagedSessionJournalStore.read({
+        transcriptPath: sessionService().getSessionTranscriptPath(SESSION_ID),
+        runtimeBaseDir: runtimeDir,
+        sessionKey: localManagedSessionKey(projectDir, SESSION_ID),
+      });
+      expect(scan.activation?.phase).toBe('released');
+      const restored = await start(restoringConfig());
+      expect(await activeChatTexts(restored)).toEqual(['committed prompt']);
+      await restored.closeSessionWriter();
+    },
+    heavyTitleTimeoutMs,
+  );
 
   it('keeps a record committed when the anchor behind it fails', async () => {
     const first = await start(managedConfig());
@@ -995,6 +1052,14 @@ describe('Managed Session log recording', () => {
       expect.objectContaining({ kind: 'prompt', promptId: 'daemon-prompt-1' }),
       expect.objectContaining({ kind: 'prompt', promptId: 'prompt-2' }),
     ]);
+    const projection = await sessionService().readRestoreProjection(
+      SESSION_ID,
+      { replay: { kind: 'none' } },
+    );
+    expect(projection?.runtime.recording.turnDaemonPromptIds).toEqual([
+      'daemon-prompt-1',
+      undefined,
+    ]);
   });
 
   it('skips a malformed file-history record instead of failing the managed restore', async () => {
@@ -1013,7 +1078,10 @@ describe('Managed Session log recording', () => {
     });
     try {
       const authority = await LocalManagedSessionAuthority.open({
-        lease,
+        journal: LocalJsonlManagedSessionJournalStore.fromLease(
+          lease,
+          sessionKey,
+        ),
         sessionKey,
         cwd: projectDir,
         version: 'test',
@@ -1111,7 +1179,7 @@ describe('Managed Session log recording', () => {
         { replay: { kind: 'none' } },
       );
       expect(projection).toBeDefined();
-      expect(projection?.runtime.apiHistory).toEqual([
+      expect(projection?.runtime.apiHistory).toMatchObject([
         { role: 'user', parts: [{ text: 'before the damage' }] },
         { role: 'user', parts: [{ text: 'after the damage' }] },
       ]);
@@ -1380,7 +1448,7 @@ describe('Managed Session log recording', () => {
     await restored.closeSessionWriter();
   });
 
-  it('restores a session whose title body is missing', async () => {
+  it('refuses snapshot conversion when the title dependency is missing', async () => {
     const first = await start(managedConfig());
     await first
       .getChatRecordingService()!
@@ -1401,12 +1469,11 @@ describe('Managed Session log recording', () => {
         replay: { kind: 'none' },
       }),
     ).resolves.toBeDefined();
-    const restored = await start(restoringConfig());
-    expect(
-      restored.getChatRecordingService()!.getCurrentCustomTitle(),
-    ).toBeUndefined();
-    expect(await activeChatTexts(restored)).toEqual(['first prompt']);
-    await restored.closeSessionWriter();
+    await expect(start(restoringConfig())).rejects.toThrow(/not present/);
+    expect(await lockRecord()).toMatchObject({
+      state: 'sealed',
+      format_version: 2,
+    });
   });
 
   it('gives back the seal it took over when the log does not match it', async () => {
@@ -1560,13 +1627,14 @@ describe('Managed Session log recording', () => {
     }
     expect(zeroed).toBeGreaterThan(0);
 
-    // The restore repair leaves the unreadable checkpoint to the gate: the
-    // session opens blocked rather than failing to open at all.
-    const restored = await start(restoringConfig());
-    const block = restored.getManagedSessionBlock();
-    expect(block).toBeInstanceOf(ManagedRuntimeOutcomeUnknownError);
-    expect(block?.message).toContain('cannot be read');
-    await restored.closeSessionWriter();
+    // Conversion refuses an incomplete resource closure before admitting work.
+    await expect(start(restoringConfig())).rejects.toThrow(
+      /on disk where|digest|not present/,
+    );
+    expect(await lockRecord()).toMatchObject({
+      state: 'sealed',
+      format_version: 2,
+    });
   });
 
   it('restores a log whose Runtime calls settled, without blocking', async () => {
