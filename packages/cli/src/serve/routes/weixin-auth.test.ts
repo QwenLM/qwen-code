@@ -20,6 +20,7 @@ import type { AddressInfo } from 'node:net';
 import express, { type RequestHandler } from 'express';
 import request from 'supertest';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { QR_MINT_TIMEOUT_MS } from '@qwen-code/channel-weixin/login';
 import {
   registerWeixinAuthRoutes,
   TERMINAL_RETENTION_MS,
@@ -113,6 +114,26 @@ class FakeIlink {
     for (const dispose of this.disposes) dispose();
     this.disposes = [];
   }
+}
+
+/**
+ * A client constant read from its source rather than mirrored as a literal: a
+ * copy here would stay green when either side moved. Same cross-package
+ * contract pattern as `workspace-settings-i18n.test.ts`.
+ */
+function readClientConstant(file: string, name: string): number {
+  const source = readFileSync(
+    fileURLToPath(
+      new URL(
+        `../../../../web-shell/client/components/channels/${file}`,
+        import.meta.url,
+      ),
+    ),
+    'utf8',
+  );
+  const match = new RegExp(`const ${name} = ([\\d_]+);`).exec(source);
+  if (!match?.[1]) throw new Error(`Cannot locate ${name} in ${file}`);
+  return Number(match[1].replaceAll('_', ''));
 }
 
 function mount(
@@ -606,26 +627,11 @@ describe('weixin auth routes', () => {
     // this daemon serves by that much. A bound sized against the cadence alone
     // reaps a login the operator is still watching, and the panel reads the
     // resulting 404 as "logged out" with no error.
-    //
-    // Read from the client source rather than mirrored as a literal: a copy
-    // here would stay green when either side moved. Same cross-package
-    // contract pattern as `workspace-settings-i18n.test.ts`.
-    const read = (file: string, name: string): number => {
-      const source = readFileSync(
-        fileURLToPath(
-          new URL(
-            `../../../../web-shell/client/components/channels/${file}`,
-            import.meta.url,
-          ),
-        ),
-        'utf8',
-      );
-      const match = new RegExp(`const ${name} = ([\\d_]+);`).exec(source);
-      if (!match?.[1]) throw new Error(`Cannot locate ${name} in ${file}`);
-      return Number(match[1].replaceAll('_', ''));
-    };
-    const interval = read('WeixinLoginPanel.tsx', 'POLL_INTERVAL_MS');
-    const requestBudget = read(
+    const interval = readClientConstant(
+      'WeixinLoginPanel.tsx',
+      'POLL_INTERVAL_MS',
+    );
+    const requestBudget = readClientConstant(
       'weixin-auth-api.ts',
       'WEIXIN_REQUEST_TIMEOUT_MS',
     );
@@ -637,10 +643,20 @@ describe('weixin auth routes', () => {
     // gap above would let the bound drop to 60 s — under the window it was
     // sized for — with the suite still green.
     expect(UNWATCHED_FLOW_MS).toBeGreaterThanOrEqual(75_000);
-    // The retention window the protocol doc promises. The behavioural case
-    // below drives the test seam, so it cannot notice this default being
-    // shortened — a 5 s window would break the documented contract silently.
-    expect(TERMINAL_RETENTION_MS).toBe(60_000);
+  });
+
+  it('keeps the client start budget above the daemon mint bound', () => {
+    // The start handler awaits the mint and then renders the QR before it
+    // answers, so its wall clock exceeds the mint bound. A client budget equal
+    // to that bound aborts a mint the daemon was about to complete, and the
+    // pre-response disconnect then cancels the flow — the failure this budget
+    // split exists to remove, relocated to the boundary.
+    const startBudget = readClientConstant(
+      'weixin-auth-api.ts',
+      'WEIXIN_START_TIMEOUT_MS',
+    );
+
+    expect(startBudget).toBeGreaterThan(QR_MINT_TIMEOUT_MS);
   });
 
   it('keeps a terminal view readable past the abandonment bound', async () => {
@@ -666,12 +682,16 @@ describe('weixin auth routes', () => {
   it('drops a terminal view once the retention window elapses', async () => {
     // The retention timer in `finish()` is the only thing that reaps a
     // terminal view: the GET handler skips the watchdog for terminal statuses
-    // and nothing else cancels it. Without this case, deleting that timer —
-    // or shortening the documented 60 s window — leaves the suite green.
+    // and nothing else cancels it. Without this case, deleting that timer
+    // leaves the suite green.
+    //
+    // The window this case drives is the seam, so it cannot notice the
+    // production default being shortened — pin the documented value too.
+    expect(TERMINAL_RETENTION_MS).toBe(60_000);
     fake.statusResponses = [{ status: 'confirmed', bot_token: BOT_TOKEN }];
     const watched = mount(fake, {
-      unwatchedFlowMs: 5_000,
-      terminalRetentionMs: 600,
+      unwatchedFlowMs: 10_000,
+      terminalRetentionMs: 1_500,
     });
     const started = await auth(
       request(watched).post('/auth/weixin/flows'),
@@ -683,7 +703,8 @@ describe('weixin auth routes', () => {
     const during = await auth(request(watched).get(`/auth/weixin/flows/${id}`));
     expect(during.status).toBe(200);
 
-    await new Promise((resolve) => setTimeout(resolve, 900));
+    // Well past the window, so a loaded runner cannot land the read inside it.
+    await new Promise((resolve) => setTimeout(resolve, 2_500));
 
     // …and gone after it, with the same shape an unknown id gets.
     const after = await auth(request(watched).get(`/auth/weixin/flows/${id}`));

@@ -61,7 +61,7 @@ describe('weixin auth API wiring', () => {
     try {
       respond({ id: 'flow-1', status: 'waiting' });
       await startWeixinLogin(target);
-      expect(timeout).toHaveBeenLastCalledWith(30_000);
+      expect(timeout).toHaveBeenLastCalledWith(35_000);
 
       respond({ id: 'flow-1', status: 'waiting' });
       await getWeixinLoginFlow(target, 'flow-1');

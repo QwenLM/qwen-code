@@ -37,8 +37,15 @@ const WEIXIN_REQUEST_TIMEOUT_MS = 15_000;
  * then cancelled the flow it was about to return — a failure on a request it
  * was designed to allow. Only the poll budget feeds the abandonment contract,
  * so this one can be longer without moving that bound.
+ *
+ * The mint bound plus headroom, not the bound itself: after the mint resolves
+ * the handler still renders the QR before it answers, so matching the bound
+ * exactly lets the client abort a mint the daemon was about to complete — the
+ * same race, moved from 15 s to 30 s. Same rule as the SDK's
+ * `MCP_RESTART_DEFAULT_TIMEOUT_MS`. Pinned against the daemon's own bound by
+ * `weixin-auth.test.ts` in the CLI package.
  */
-const WEIXIN_START_TIMEOUT_MS = 30_000;
+const WEIXIN_START_TIMEOUT_MS = 35_000;
 
 export class WeixinAuthError extends Error {
   constructor(

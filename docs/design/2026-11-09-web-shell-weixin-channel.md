@@ -173,8 +173,9 @@ Flow lifecycle:
   is sized against the worst gap between two _serviced_ polls, not the cadence:
   the panel schedules its next poll only after the previous one settles and
   each poll carries a 15 s budget (16.5 s from one stalled poll; starting a
-  flow has its own 30 s budget, matching the daemon's mint bound), and a tab
-  hidden for five minutes is throttled to about one timer per minute
+  flow has its own 35 s budget — the daemon's 30 s mint bound plus headroom
+  for the render that follows it), and a tab hidden for five minutes is
+  throttled to about one timer per minute
   (~75 s). Sizing it against the 1.5 s interval alone would reap a login the
   operator is still watching, and the panel would read the resulting 404 as
   "logged out" with no error. Terminal views are governed by the retention
