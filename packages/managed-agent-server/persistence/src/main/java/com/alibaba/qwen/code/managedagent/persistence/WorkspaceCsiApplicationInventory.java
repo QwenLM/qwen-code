@@ -239,7 +239,8 @@ final class WorkspaceCsiApplicationInventory {
                     + "creator_actor_key:VARBINARY,owner_actor_key:VARBINARY,memory_store_id:VARBINARY,owner_only:TINYINT,parent_session_id:VARBINARY,"
                     + "root_session_id:VARBINARY,parent_child_run_id:VARBINARY,child_depth:INT,"
                     + "agent_definition_digest:CHAR,session_kind:VARCHAR,tenant_key:CHAR,session_key:CHAR,"
-                    + "session_scope_key:CHAR,title_revision:BIGINT,retirement_operation_id:VARBINARY,"
+                    + "session_scope_key:CHAR,title_revision:BIGINT,preview:VARCHAR,preview_revision:BIGINT,"
+                    + "retirement_operation_id:VARBINARY,"
                     + "retirement_generation:BIGINT,retired_at:BIGINT,is_recovery_protected:BOOLEAN,"
                     + "is_resource_gc_completed:BOOLEAN,runtime_request_key:CHAR,is_csi_guard:BOOLEAN,"
                     + "model_id:VARBINARY,model_revision:BIGINT,"
@@ -251,7 +252,8 @@ final class WorkspaceCsiApplicationInventory {
                     "tenant_id:VARBINARY,workspace_id:VARBINARY,session_id:VARBINARY,storage_version:INT,state:VARCHAR,"
                     + "writer_generation:BIGINT,writer_id:VARBINARY,writer_lease_until:BIGINT,lease_token_hash:CHAR,"
                     + "journal_revision:BIGINT,committed_sequence:BIGINT,last_commit_digest:CHAR,activation_epoch:BIGINT,"
-                    + "latest_checkpoint_resource_id:VARBINARY,compacted_through_revision:BIGINT,recovery_status:VARCHAR,"
+                    + "latest_checkpoint_resource_id:VARBINARY,compacted_through_revision:BIGINT,"
+                    + "packed_through_revision:BIGINT,recovery_status:VARCHAR,"
                     + "recovery_detail_code:VARCHAR,gmt_create:BIGINT,gmt_modified:BIGINT,"
                     + "activation_id:VARBINARY,activation_phase:VARCHAR,activation_event_epoch:BIGINT,"
                     + "activation_expires_at:BIGINT,activation_head_revision:BIGINT,tenant_key:CHAR,harness_key:CHAR,"
@@ -322,7 +324,7 @@ final class WorkspaceCsiApplicationInventory {
                     + "request_digest:CHAR,result_json:LONGTEXT"),
             declaration("ma_user_message_queue", "tenant_id,session_id",
                     "tenant_id:VARBINARY,session_id:VARBINARY,is_paused:BOOLEAN,resumed_turn_id:VARBINARY,"
-                    + "next_sequence:BIGINT,last_dispatch_at:BIGINT"),
+                    + "next_sequence:BIGINT,last_dispatch_at:BIGINT,queue_revision:BIGINT"),
             declaration("ma_workspace", "tenant_id,workspace_id",
                     "tenant_id:VARBINARY,workspace_id:VARBINARY,workspace_generation:BIGINT,storage_id:VARBINARY,"
                     + "display_name:VARCHAR,config_ref:VARBINARY,policy_ref:VARBINARY,state:VARCHAR,workspace_kind:VARCHAR,"
