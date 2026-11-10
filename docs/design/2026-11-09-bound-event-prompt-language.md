@@ -89,7 +89,9 @@ live producer of bound event prompts today.
   exactly like the existing permission-copy locale. Changing `general.language`
   takes effect on the next channel start. Watch summaries are rendered at
   detection time and persisted in the pending envelope, so a pending event
-  keeps the language of its detection.
+  keeps the language of its detection. Accepted aggregate and comment-watch
+  tasks likewise retain their producer-composed `boundText` across recovery;
+  markers are not later re-derived from untrusted text under a new locale.
 
 ## Proposed solution
 
@@ -121,18 +123,20 @@ live producer of bound event prompts today.
   failed-checks suffix and the incomplete-list note.
 - `buildBoundSessionPrompt` passes `language: this.locale` and picks
   `DEFAULT_BOUND_ROLE_GUIDANCE_BY_LANGUAGE[this.locale][role]`.
-- The aggregate lane's batch-omission notice is lifted ONTO the header line
-  (a line-start bracketed copy would be peeled by the sanitizer), and the
-  per-comment truncation marker is rewritten only where the WHOLE bullet's
-  rendered content (including continuation lines) is exactly
-  `MAX_AGGREGATE_COMMENT_CHARS` code points long — the composer's own cut —
-  so quoted marker text inside a comment body stays verbatim. The direct-lane
-  instructions are keyed by the `event-` message id (the only lane that emits
-  it), never by body text or by the shared `Trigger:` line (every lane's
-  reason). The direct lane's own text comes from the en copy table
-  (byte-identical), so en entries are genuinely read. All of these rewrites
-  happen on the bound path only; the shared aggregate summary the public lane
-  publishes is never touched.
+- Aggregate omission/truncation notices and comment-watch leads are composed
+  in the adapter's locale at the producer, while it still knows the omission
+  count, each real cut, the author and the event lane. The durable bound task
+  carries the resulting body as the internal optional `boundText`; the
+  original envelope stays English for the public lane and a bound-session-gone
+  fallback. Recovery and reconstructed fan-out siblings preserve this variant,
+  and its persisted string shape is validated. `buildBoundSessionPrompt`
+  never infers a truncation or watch event from rendered comment text, so a
+  quoted marker, a bullet-like line or a Comment URL in an ordinary comment
+  cannot acquire product-authored localization. Direct-lane instructions
+  remain keyed by the `event-` message id (the only lane that emits it), never
+  by body text or by the shared `Trigger:` line. The direct lane's own text
+  comes from the en copy table (byte-identical). Only bound delivery consumes
+  the localized variant; the shared public text is never localized in place.
 - `watchOnePr` renders summaries in `this.locale` at detection time. The
   English renderings stay byte-identical.
 

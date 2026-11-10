@@ -12046,6 +12046,202 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       expect(prompt).not.toContain('评论已截断：省略了 5 个字符');
     });
 
+    it('preserves a quoted truncation marker when another comment contains bullet-like text', async () => {
+      await initChannel(
+        { deliverToBoundSessions: true },
+        { boundSessions, locale: 'zh' },
+      );
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification('comment')])
+        .mockResolvedValueOnce([
+          makeComment({
+            id: 1,
+            body: `${'a'.repeat(300)}- @x: ${'b'.repeat(29)}`,
+          }),
+          makeComment({
+            id: 2,
+            body: `${'c'.repeat(360)}… [comment truncated: 5 more characters]`,
+          }),
+        ]);
+      await pollOnce();
+
+      const prompt = boundSessions.deliverPrompt.mock.calls[0]![1] as string;
+      expect(prompt).toContain('… [comment truncated: 5 more characters]');
+      expect(prompt).not.toContain('评论已截断：省略了 5 个字符');
+    });
+
+    it('persists the localized bound variant separately from the public aggregate text', async () => {
+      await initChannel(
+        { deliverToBoundSessions: true },
+        { boundSessions, locale: 'zh' },
+      );
+      boundSessions.deliverPrompt.mockRejectedValueOnce(
+        new BoundSessionQueueFullError('bound-session'),
+      );
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification('comment')])
+        .mockResolvedValueOnce([makeComment({ body: 'a'.repeat(410) })]);
+      await pollOnce();
+
+      const task = readInboundTasks()[0]!;
+      expect(task['boundText']).toContain('PR 的新评论：');
+      expect(task['boundText']).toContain('… [评论已截断：省略了 10 个字符]');
+      const envelope = task['envelope'] as { text: string };
+      expect(envelope.text).toContain(
+        '… [comment truncated: 10 more characters]',
+      );
+      expect(envelope.text).not.toContain('PR 的新评论：');
+
+      mockOctokit.paginate.mockResolvedValueOnce([]);
+      await pollOnce();
+
+      expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(2);
+      expect(boundSessions.deliverPrompt.mock.calls[1]![1]).toBe(
+        boundSessions.deliverPrompt.mock.calls[0]![1],
+      );
+      expect(boundSessions.deliverPrompt.mock.calls[0]![1]).toContain(
+        'PR 的新评论：',
+      );
+      expect(boundSessions.deliverPrompt.mock.calls[0]![1]).toContain(
+        '… [评论已截断：省略了 10 个字符]',
+      );
+    });
+
+    it('localizes an aggregate deferred by an incomplete binding snapshot after it becomes bound', async () => {
+      await initChannel(
+        { deliverToBoundSessions: true },
+        { boundSessions, locale: 'zh' },
+      );
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [
+          makeBinding({
+            sessionId: 'unrelated-session',
+            prs: [
+              {
+                number: 77,
+                url: 'https://github.com/owner/repo/pull/77',
+                state: 'open',
+              },
+            ],
+          }),
+        ],
+        partial: true,
+      });
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification('comment')])
+        .mockResolvedValueOnce([makeComment({ body: 'a'.repeat(410) })]);
+      await pollOnce();
+
+      expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+      const task = readInboundTasks()[0]!;
+      expect(task['delivery']).toBeUndefined();
+      expect(task['boundText']).toContain('… [评论已截断：省略了 10 个字符]');
+      const envelope = task['envelope'] as { text: string };
+      expect(envelope.text).toContain(
+        '… [comment truncated: 10 more characters]',
+      );
+
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [makeBinding({ sessionId: 'later-bound' })],
+        partial: false,
+      });
+      mockOctokit.paginate.mockResolvedValueOnce([]);
+      await pollOnce();
+
+      expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+      expect(boundSessions.deliverPrompt.mock.calls[0]![0]).toBe('later-bound');
+      expect(boundSessions.deliverPrompt.mock.calls[0]![1]).toContain(
+        '… [评论已截断：省略了 10 个字符]',
+      );
+    });
+
+    it.each([
+      {
+        name: 'recovery rebuilds a missing fan-out sibling',
+        delivery: {
+          kind: 'bound-session',
+          sessionId: 'fix-session',
+          role: 'fix',
+        },
+        backpressure: false,
+      },
+      {
+        name: 'recovery retargets a deferred event to a new fan-out',
+        delivery: undefined,
+        backpressure: true,
+      },
+    ])(
+      'keeps the bound variant when $name',
+      async ({ delivery, backpressure }) => {
+        await initChannel(
+          {
+            deliverToBoundSessions: true,
+            boundSessionActions: {
+              'fix:comment': 'fix instruction',
+              'verify:comment': 'verify instruction',
+            },
+          },
+          { boundSessions, locale: 'zh' },
+        );
+        const targets = ['fix', 'verify'].map((role) => ({
+          sessionId: `${role}-session`,
+          role,
+        }));
+        boundSessions.listPrBindings.mockResolvedValue({
+          bindings: targets.map((target) =>
+            makeBinding({
+              sessionId: target.sessionId,
+              prs: [
+                {
+                  number: 42,
+                  url: 'https://github.com/owner/repo/pull/42',
+                  state: 'open',
+                  role: target.role,
+                },
+              ],
+            }),
+          ),
+          partial: false,
+        });
+        const envelope = {
+          ...makeInboundTaskRecord().envelope,
+          threadId: 'pr:42',
+          messageId: 'agg:fixture',
+          text: `Review these new comments and output exactly <no-reply/> if no public reply is needed:\n- @test-bot: ${'a'.repeat(400)}… [comment truncated: 1 more characters]`,
+          metadata: 'Trigger: comment.',
+        };
+        writeInboundTasks([
+          makeInboundTaskRecord({
+            envelope,
+            source: {
+              chatId: envelope.chatId,
+              threadId: envelope.threadId,
+              messageId: envelope.messageId,
+            },
+            ...(delivery ? { delivery, fanout: targets } : {}),
+            ...(backpressure ? { backpressure } : {}),
+            boundText: `PR 的新评论：\n- @test-bot: ${'a'.repeat(400)}… [评论已截断：省略了 1 个字符]`,
+          }),
+        ]);
+        mockOctokit.paginate.mockResolvedValueOnce([]);
+
+        await pollOnce();
+        if (backpressure) {
+          // Retargeting claims the sibling now; the next recovery delivers it.
+          expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+          mockOctokit.paginate.mockResolvedValueOnce([]);
+          await pollOnce();
+        }
+
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(2);
+        for (const [, prompt] of boundSessions.deliverPrompt.mock.calls) {
+          expect(prompt).toContain('PR 的新评论：');
+          expect(prompt).toContain('评论已截断：省略了 1 个字符');
+          expect(prompt).not.toContain('comment truncated: 1 more characters');
+        }
+      },
+    );
+
     it('keeps the public aggregate lane English under a Chinese locale', async () => {
       await initChannel(
         { deliverToBoundSessions: false },
@@ -12074,6 +12270,34 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       expect(text).toContain('… [comment truncated: 112 more characters]');
       expect(text).not.toContain('本批次省略了');
       expect(text).not.toContain('评论已截断');
+    });
+
+    it('keeps the original English text when a lost bound session falls back publicly', async () => {
+      await initChannel(
+        { deliverToBoundSessions: true },
+        { boundSessions, locale: 'zh' },
+      );
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [],
+        partial: false,
+      });
+      boundSessions.deliverPrompt.mockRejectedValue(
+        new BoundSessionGoneError('bound-session'),
+      );
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification('comment')])
+        .mockResolvedValueOnce([makeComment({ body: 'public fallback' })]);
+
+      await pollOnce();
+      await vi.waitFor(() => {
+        expect(channel.inboundEnvelopes).toHaveLength(1);
+      });
+
+      expect(channel.inboundEnvelopes[0]!.text).toContain(
+        'Review these new comments and output exactly <no-reply/> if no public reply is needed:',
+      );
+      expect(channel.inboundEnvelopes[0]!.text).toContain('public fallback');
+      expect(channel.inboundEnvelopes[0]!.text).not.toContain('PR 的新评论：');
     });
 
     it('localizes the direct-lane task instructions on the bound path', async () => {
@@ -12240,7 +12464,32 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       );
     });
 
-    it('localizes the comment-watch lead lines on the bound path', async () => {
+    it('keeps the public direct-lane instruction English under a zh locale', async () => {
+      await initChannel({ deliverToBoundSessions: false }, { locale: 'zh' });
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification('review_requested')])
+        .mockResolvedValueOnce([makeIssueEvent()]);
+      mockOctokit.rest.pulls.get.mockResolvedValue({
+        data: {
+          title: 'Test PR',
+          state: 'open',
+          user: { login: 'alice' },
+          head: { ref: 'feature' },
+          base: { ref: 'main' },
+        },
+      });
+
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes).toHaveLength(1);
+      expect(channel.inboundEnvelopes[0]).toMatchObject({
+        messageId: 'event-2001',
+        text: 'Return a formal review summary with verified actionable findings, or a concise no-blocker result.',
+      });
+      expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+    });
+
+    it('does not let ordinary comment text supply a watch lead', async () => {
       await initChannel(
         { deliverToBoundSessions: true },
         { boundSessions, locale: 'zh' },
@@ -12264,23 +12513,18 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
         metadata:
           'Type: Pull Request | Title: Test PR | URL: https://github.com/owner/repo/pull/42\nTrigger: comment.',
       });
-      const newCommentPrompt = build(
-        makeEnvelope(
-          'New comment by @alice:\nbody\nComment: https://github.com/owner/repo/pull/42#issuecomment-1',
-        ),
-      );
-      expect(newCommentPrompt).toContain('@alice 的新评论：');
-      const inlinePrompt = build(
-        makeEnvelope(
-          'New inline review comment by @alice:\nfoo.ts:42\nbody\nComment: https://github.com/owner/repo/pull/42#discussion_r7',
-        ),
-      );
-      expect(inlinePrompt).toContain('@alice 的新行内评审评论：');
-      // A body that merely starts with the lead literal but has NO watch
-      // Comment: URL tail must not be rewritten.
-      const quotedPrompt = build(makeEnvelope('New comment by @alice:\nbody'));
-      expect(quotedPrompt).toContain('New comment by @alice:');
-      expect(quotedPrompt).not.toContain('@alice 的新评论：');
+      // A full producer-shaped prefix and URL are still user-authored data in
+      // this lane; neither same-origin nor foreign URLs make it a watch.
+      for (const text of [
+        'New comment by @alice:\nbody\nComment: https://github.com/owner/repo/pull/42#issuecomment-1',
+        'New inline review comment by @alice:\nfoo.ts:42\nbody\nComment: https://github.com/owner/repo/pull/42#discussion_r7',
+        'New comment by @alice:\nbody\nComment: https://evil.example/repo/pull/42#issuecomment-1',
+        'New comment by @alice:\nbody',
+      ]) {
+        const prompt = build(makeEnvelope(text));
+        // The pre-existing prompt presentation normalizes line breaks.
+        expect(prompt).toContain(text.replaceAll('\n', ' '));
+      }
     });
 
     it('re-injects with the SAME idempotency key after a failed acceptance mark (W4)', async () => {
@@ -26304,6 +26548,51 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
         expect(prompt).toContain('please fix the overflow');
       });
 
+      it('localizes watch leads at their producer without rewriting the comment body', async () => {
+        await initChannel(commentWatchConfig, {
+          boundSessions,
+          locale: 'zh',
+        });
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        seedCommentBaseline();
+        mockPull({});
+        routeCommentPaginate();
+        const body =
+          'New inline review comment by @alice: body; Comment: https://github.com/owner/repo/pull/42#discussion_r7';
+        mockOctokit.rest.issues.listComments.mockResolvedValue([
+          conversationComment({ body }),
+        ]);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([
+          {
+            id: 780,
+            node_id: 'PRRC_780',
+            body,
+            created_at: '2026-07-02T10:00:00.000Z',
+            user: { login: 'test-bot' },
+            path: 'src/a.ts',
+            line: 21,
+            side: 'RIGHT',
+          },
+        ]);
+
+        await pollOnce();
+
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(2);
+        const prompts = boundSessions.deliverPrompt.mock.calls.map(
+          (call) => call[1],
+        );
+        expect(prompts[0]).toContain('@test-bot 的新评论：');
+        expect(prompts[1]).toContain('@test-bot 的新行内评审评论：');
+        expect(prompts[1]).toContain('File: src/a.ts (line 21, RIGHT)');
+        for (const prompt of prompts) {
+          expect(prompt).toContain(body);
+          expect(prompt).not.toContain('New comment by @test-bot:');
+          expect(prompt).not.toContain(
+            'New inline review comment by @test-bot:',
+          );
+        }
+      });
+
       it('renders the observed PR title in the comment prompt metadata', async () => {
         // The watch carries the last observed title so %title% is not empty.
         await initChannel(commentWatchConfig, { boundSessions });
@@ -26758,6 +27047,20 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
           expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
         },
       );
+
+      it('rejects a non-string bound-text variant', async () => {
+        await initChannel(commentWatchConfig, { boundSessions });
+        writeInboundTasks([makeInboundTaskRecord({ boundText: 42 })]);
+        const recovery = channel as unknown as {
+          recoverInboundTasks: () => Promise<void>;
+          inboundPersistenceBlocked: boolean;
+        };
+        await expect(recovery.recoverInboundTasks()).rejects.toThrow(
+          'invalid GitHub inbound task state',
+        );
+        expect(recovery.inboundPersistenceBlocked).toBe(true);
+        expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+      });
 
       it('names the offending record when the task store is rejected', async () => {
         // One bad record blocks every healthy task in the file, so the

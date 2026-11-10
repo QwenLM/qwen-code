@@ -77,7 +77,9 @@ daemon PR-state watch（观测 + drain）在生产中关闭：
 - **不做运行时语言切换**：locale 在 channel worker 启动时读取，与既有
   权限文案 locale 完全一致。修改 `general.language` 在下次 channel 启动
   时生效。watch 摘要在检测时渲染并持久化在 pending 信封里，因此 pending
-  事件保持其检测时的语言。
+  事件保持其检测时的语言。已接受的聚合评论／comment-watch 任务在恢复
+  时同样保留生成时的 `boundText`；不会在新 locale 下再对不可信正文
+  推导标记归属。
 
 ## 提议方案
 
@@ -104,14 +106,16 @@ daemon PR-state watch（观测 + drain）在生产中关闭：
   （含失败检查后缀与列表不完整注记）。
 - `buildBoundSessionPrompt` 传 `language: this.locale` 并选取
   `DEFAULT_BOUND_ROLE_GUIDANCE_BY_LANGUAGE[this.locale][role]`。
-- 聚合通道的批次省略提示被移到头部行（行首的方括号副本会被 sanitizer
-  剥掉），单条评论截断标记只在整个 bullet 的渲染内容（含续行）恰为
-  `MAX_AGGREGATE_COMMENT_CHARS` 码点时才重写——即 composer 的真实截断处——
-  因此评论正文里引用形态的标记文本保持原样。direct lane 的指令由 `event-`
-  消息 id（唯一直通道入口）决定，不依据正文或共享的 `Trigger:` 行（每个
-  lane 都有 reason）。direct lane 的正文取自 en 文案表（逐字节一致），en
-  条目因此被真实读取。以上重写全部只发生在绑定投递路径；公共通道发布的
-  共享聚合 summary 不受影响。
+- 在生产者仍掌握批次省略数、每条真实截断数、作者和事件通道时，直接按
+  本 channel 的 locale 生成聚合省略／截断提示与评论监视 lead。durable
+  绑定 task 用内部可选 `boundText` 保存该文案；原始信封保留英文，供公共
+  通道及绑定会话消失后的公开回退使用。恢复路径与重建 fan-out sibling
+  都保留该变体，并校验其持久化为字符串。`buildBoundSessionPrompt` 不再从
+  已渲染评论正文推断截断或 watch 事件归属：普通评论中的引用标记、形似
+  bullet 的行或 Comment URL 都不会获得产品文案翻译。direct lane 的指令
+  仍由 `event-` 消息 id（唯一直通道入口）决定，不依据正文或共享的
+  `Trigger:` 行；正文取自 en 文案表（逐字节一致）。只有绑定投递消费
+  本地化变体，公共文案不做就地翻译。
 - `watchOnePr` 在检测时按 `this.locale` 渲染摘要。英文渲染逐字节不变。
 
 ### daemon drain 生产方
