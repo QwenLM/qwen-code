@@ -208,18 +208,16 @@ class ManagedSchemaMySqlIT {
                 remove.setString(1, resourceKey);
                 remove.executeUpdate();
             }
-            statement.execute("CREATE TABLE managed_schema_foreign_witness (value INT NOT NULL)");
+            statement.execute("CREATE TABLE managed_agent_session (value INT NOT NULL)");
             try {
-                statement.execute("INSERT INTO managed_schema_foreign_witness VALUES (42)");
+                statement.execute("INSERT INTO managed_agent_session VALUES (42)");
                 assertThrows(IllegalStateException.class, () -> ManagedSchema.initialize(source));
-                try (var row =
-                        statement.executeQuery(
-                                "SELECT value FROM managed_schema_foreign_witness")) {
+                try (var row = statement.executeQuery("SELECT value FROM managed_agent_session")) {
                     assertTrue(row.next());
                     assertEquals(42, row.getInt(1));
                 }
             } finally {
-                statement.execute("DROP TABLE managed_schema_foreign_witness");
+                statement.execute("DROP TABLE managed_agent_session");
             }
             ManagedSchema.initialize(source);
             statement.execute(
