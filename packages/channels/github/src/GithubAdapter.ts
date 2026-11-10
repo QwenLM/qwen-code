@@ -1307,6 +1307,8 @@ const BOUND_DELIVERY_COPY: Readonly<
       provenance(channelName: string): string;
       instructionSource: string;
       newCommentsHeader: string;
+      omittedNotice(count: number): string;
+      commentTruncated(count: number): string;
       headChange(fromSha: string, toSha: string): string;
       ciFailure(headSha: string): string;
       failedChecks(names: string, namesIncomplete: boolean): string;
@@ -1321,6 +1323,9 @@ const BOUND_DELIVERY_COPY: Readonly<
       `Delivered by the "${channelName}" GitHub channel because this session is bound to the PR below.`,
     instructionSource: "this channel's configuration",
     newCommentsHeader: 'New comments on the PR:',
+    omittedNotice: (count) =>
+      `${count} earlier comment(s) omitted from this batch; list the PR comments to see them`,
+    commentTruncated: (count) => `comment truncated: ${count} more characters`,
     headChange: (fromSha, toSha) =>
       `New commits pushed: head moved from ${fromSha} to ${toSha}.`,
     ciFailure: (headSha) => `CI failed on head ${headSha}.`,
@@ -1339,8 +1344,11 @@ const BOUND_DELIVERY_COPY: Readonly<
       `由 "${channelName}" GitHub channel 投递，因为本会话绑定了下面的 PR。`,
     instructionSource: '本 channel 的配置',
     newCommentsHeader: 'PR 的新评论：',
+    omittedNotice: (count) =>
+      `本批次省略了 ${count} 条较早的评论；请列出 PR 评论查看`,
+    commentTruncated: (count) => `评论已截断：省略了 ${count} 个字符`,
     headChange: (fromSha, toSha) =>
-      `有新提交推送：head 从 ${fromSha} 前进到 ${toSha}。`,
+      `有新提交推送：head 从 ${fromSha} 变为 ${toSha}。`,
     ciFailure: (headSha) => `head ${headSha} 的 CI 失败。`,
     failedChecks: (names, namesIncomplete) =>
       `失败的检查：${names}${
@@ -6496,6 +6504,21 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     let text = envelope.text;
     if (text.startsWith(AGGREGATE_COMMENTS_PROMPT_PREFIX)) {
       text = `${copy.newCommentsHeader}\n${text.slice(AGGREGATE_COMMENTS_PROMPT_PREFIX.length)}`;
+      if (this.locale !== 'en') {
+        // Only the bound path localizes: the shared summary is also consumed
+        // by the public channel lane, which the design pins unchanged, so the
+        // batch-omission and per-comment truncation markers are rewritten
+        // HERE, not where the body is composed.
+        text = text.replace(
+          /\[(\d+) earlier comment\(s\) omitted from this batch; list the PR comments to see them\]/,
+          (_match, count: string) => `[${copy.omittedNotice(Number(count))}]`,
+        );
+        text = text.replaceAll(
+          /… \[comment truncated: (\d+) more characters\]/g,
+          (_match, count: string) =>
+            `… [${copy.commentTruncated(Number(count))}]`,
+        );
+      }
     }
     // The shared envelope caps the body VISIBLY: the aggregate lane can
     // compose more than 6,000 code points (20 comments x 400 chars), every
@@ -7420,6 +7443,8 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           : '';
       events.push({
         type: 'ci_failure',
+        // ciResult is assigned only inside the headSha-guarded fetch block,
+        // so ci === 'failure' proves headSha is defined.
         summary: `${copy.ciFailure(headSha!)}${failedChecks}`,
       });
     }

@@ -614,7 +614,7 @@ describe('buildBoundEventPrompt in Chinese', () => {
       'Type: Pull Request | Title: Fixture PR | URL: https://h/o/r/pull/7',
       'Event: head_change.',
     ],
-    body: '有新提交推送：head 从 aaa 前进到 bbb。',
+    body: '有新提交推送：head 从 aaa 变为 bbb。',
   };
 
   it('renders the generic prompt in Chinese, keeping structural markers English', () => {

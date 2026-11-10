@@ -150,16 +150,18 @@ Role guidance (shared table):
 
 Channel-authored strings:
 
-| Key                   | en (unchanged)                                                                                                              | zh                                                                                                  |
-| --------------------- | --------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
-| provenance            | `Delivered by the "<name>" GitHub channel because this session is bound to the PR below.`                                   | `由 "<name>" GitHub channel 投递，因为本会话绑定了下面的 PR。`                                      |
-| instruction source    | `this channel's configuration`                                                                                              | `本 channel 的配置`                                                                                 |
-| aggregate header      | `New comments on the PR:`                                                                                                   | `PR 的新评论：`                                                                                     |
-| head_change           | `New commits pushed: head moved from <a> to <b>.`                                                                           | `有新提交推送：head 从 <a> 前进到 <b>。`                                                            |
-| ci_failure            | `CI failed on head <sha>.` + ` Failed checks: <names>` + ` (list may be incomplete: later check pages were not read)` + `.` | `head <sha> 的 CI 失败。` + `失败的检查：<names>` + `（列表可能不完整：未读取后续检查分页）` + `。` |
-| merge_conflict        | `Merge conflicts detected (mergeable_state: dirty).`                                                                        | `检测到合并冲突（mergeable_state: dirty）。`                                                        |
-| state_change (merged) | `The PR was merged.`                                                                                                        | `PR 已合并。`                                                                                       |
-| state_change (closed) | `The PR was closed without merging.`                                                                                        | `PR 已关闭，未合并。`                                                                               |
+| Key                    | en (unchanged)                                                                                                              | zh                                                                                                  |
+| ---------------------- | --------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| provenance             | `Delivered by the "<name>" GitHub channel because this session is bound to the PR below.`                                   | `由 "<name>" GitHub channel 投递，因为本会话绑定了下面的 PR。`                                      |
+| instruction source     | `this channel's configuration`                                                                                              | `本 channel 的配置`                                                                                 |
+| aggregate header       | `New comments on the PR:`                                                                                                   | `PR 的新评论：`                                                                                     |
+| batch omission notice  | `[<n> earlier comment(s) omitted from this batch; list the PR comments to see them]`                                        | `[本批次省略了 <n> 条较早的评论；请列出 PR 评论查看]`                                               |
+| per-comment truncation | `… [comment truncated: <n> more characters]`                                                                                | `… [评论已截断：省略了 <n> 个字符]`                                                                 |
+| head_change            | `New commits pushed: head moved from <a> to <b>.`                                                                           | `有新提交推送：head 从 <a> 变为 <b>。`                                                              |
+| ci_failure             | `CI failed on head <sha>.` + ` Failed checks: <names>` + ` (list may be incomplete: later check pages were not read)` + `.` | `head <sha> 的 CI 失败。` + `失败的检查：<names>` + `（列表可能不完整：未读取后续检查分页）` + `。` |
+| merge_conflict         | `Merge conflicts detected (mergeable_state: dirty).`                                                                        | `检测到合并冲突（mergeable_state: dirty）。`                                                        |
+| state_change (merged)  | `The PR was merged.`                                                                                                        | `PR 已合并。`                                                                                       |
+| state_change (closed)  | `The PR was closed without merging.`                                                                                        | `PR 已关闭，未合并。`                                                                               |
 
 Check names keep their `, ` join in both languages; they are platform data.
 
@@ -224,8 +226,9 @@ Check names keep their `, ` join in both languages; they are platform data.
 ## Constraints and risks
 
 - **Prompt text is a model-facing contract.** zh-UI sessions will see Chinese
-  event text after upgrade; pending watch envelopes detected before the upgrade
-  deliver in English. Both are intended.
+  event text after upgrade. A watch event pending across an upgrade or a locale
+  change keeps its detection-time SUMMARY language, while the envelope prose
+  follows the locale in force at delivery; both are intended.
 - **Detection-time language is persisted.** A watch summary rendered at
   detection keeps its language until delivered, even if the operator changes
   `general.language` and restarts the channel in between. Re-rendering pending

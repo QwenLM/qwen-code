@@ -137,7 +137,9 @@ channel 撰写的字符串：
 | 来源说明               | `Delivered by the "<name>" GitHub channel because this session is bound to the PR below.`                                   | `由 "<name>" GitHub channel 投递，因为本会话绑定了下面的 PR。`                                      |
 | 指令来源               | `this channel's configuration`                                                                                              | `本 channel 的配置`                                                                                 |
 | 聚合头部               | `New comments on the PR:`                                                                                                   | `PR 的新评论：`                                                                                     |
-| head_change            | `New commits pushed: head moved from <a> to <b>.`                                                                           | `有新提交推送：head 从 <a> 前进到 <b>。`                                                            |
+| 批次省略提示           | `[<n> earlier comment(s) omitted from this batch; list the PR comments to see them]`                                        | `[本批次省略了 <n> 条较早的评论；请列出 PR 评论查看]`                                               |
+| 单条评论截断           | `… [comment truncated: <n> more characters]`                                                                                | `… [评论已截断：省略了 <n> 个字符]`                                                                 |
+| head_change            | `New commits pushed: head moved from <a> to <b>.`                                                                           | `有新提交推送：head 从 <a> 变为 <b>。`                                                              |
 | ci_failure             | `CI failed on head <sha>.` + ` Failed checks: <names>` + ` (list may be incomplete: later check pages were not read)` + `.` | `head <sha> 的 CI 失败。` + `失败的检查：<names>` + `（列表可能不完整：未读取后续检查分页）` + `。` |
 | merge_conflict         | `Merge conflicts detected (mergeable_state: dirty).`                                                                        | `检测到合并冲突（mergeable_state: dirty）。`                                                        |
 | state_change（已合并） | `The PR was merged.`                                                                                                        | `PR 已合并。`                                                                                       |
@@ -192,8 +194,9 @@ channel 撰写的字符串：
 
 ## 约束与风险
 
-- **提示词文本是面向模型的契约。** zh UI 的会话升级后会看到中文事件文本；
-  升级前检测的 pending watch 信封以英文投递。两者都是预期行为。
+- **提示词文本是面向模型的契约。** zh UI 的会话升级后会看到中文事件文本。
+  跨升级或语言切换而 pending 的 watch 事件保留其检测时的摘要语言，信封
+  正文跟随投递时的 locale；两者都是预期行为。
 - **检测时语言被持久化。** 检测时渲染的 watch 摘要保持其语言直到投递，
   即使运维期间修改了 `general.language` 并重启 channel。重新渲染 pending
   信封需要状态文件里有结构化转移数据；不值得为此改格式。

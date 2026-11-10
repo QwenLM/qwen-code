@@ -11960,6 +11960,52 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       expect(prompt).not.toContain('REQ0 ');
     });
 
+    it('localizes the batch cap and per-comment truncation markers inside a zh aggregate prompt', async () => {
+      await initChannel(
+        { deliverToBoundSessions: true },
+        { boundSessions, locale: 'zh' },
+      );
+      // 25 comments: the batch cap keeps the newest 20, and their composed
+      // text exceeds the 6,000 code-point prompt cap. Index 5 also exceeds
+      // the 400-char display cap (5 + 490 + 17 = 512 code points, cut 112).
+      // Every marker must be Chinese on the bound path; the public lane's
+      // shared summary is deliberately untouched (see the en pin above).
+      const comments = Array.from({ length: 25 }, (_, i) =>
+        makeComment({
+          id: 2000 + i,
+          body:
+            i === 5
+              ? `HEAD ${'b'.repeat(490)} TAIL-INSTRUCTION`
+              : `REQ${i} ${'x'.repeat(390)}`,
+          created_at: `2026-07-02T09:${String(i).padStart(2, '0')}:00.000Z`,
+          updated_at: `2026-07-02T09:${String(i).padStart(2, '0')}:00.000Z`,
+        }),
+      );
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification('comment')])
+        .mockResolvedValueOnce(comments);
+      await pollOnce();
+
+      expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+      const prompt = boundSessions.deliverPrompt.mock.calls[0]![1] as string;
+      expect(prompt).toContain('PR 的新评论：');
+      // The zh omission notice is under the sanitizer's 64-code-point tag
+      // window, so a line-start bracketed copy is peeled — unlike the longer
+      // English original, which keeps its brackets.
+      expect(prompt).toContain(
+        '本批次省略了 5 条较早的评论；请列出 PR 评论查看',
+      );
+      expect(prompt).not.toContain('[本批次省略了');
+      expect(prompt).toContain('… [评论已截断：省略了 112 个字符]');
+      expect(prompt).toMatch(/\[提示词已截断：省略了 \d+ 个字符\]/);
+      expect(prompt).not.toContain('earlier comment(s) omitted');
+      expect(prompt).not.toContain('comment truncated');
+      expect(prompt).not.toContain('prompt truncated');
+      expect(prompt).not.toContain('TAIL-INSTRUCTION');
+      expect(prompt).toContain('REQ6 ');
+      expect(prompt).not.toContain('REQ0 ');
+    });
+
     it('re-injects with the SAME idempotency key after a failed acceptance mark (W4)', async () => {
       await initChannel({ deliverToBoundSessions: true }, { boundSessions });
       // Fail exactly the deliveredAt write once: the prompt was already
@@ -18287,7 +18333,7 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
         expect(prompt).toContain(
           '你的回复只留在本会话中，不会自动发布到 GitHub。 请按你的正常工作流处理该事件，仅在该工作流要求时才在 GitHub 上采取行动。',
         );
-        expect(prompt).toContain('有新提交推送：head 从 sha-A 前进到 sha-B。');
+        expect(prompt).toContain('有新提交推送：head 从 sha-A 变为 sha-B。');
         // Structural markers and platform data stay English/verbatim.
         expect(prompt).toContain(
           'Type: Pull Request | Title: Test PR | URL: https://github.com/owner/repo/pull/42',
@@ -18297,6 +18343,36 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
           '[GitHub event for a PR this session follows]',
         );
         expect(prompt).not.toContain('New commits pushed');
+      });
+
+      it('uses direction-neutral wording when a force-push rewinds the head', async () => {
+        await initZh();
+        mockPull({ head: { sha: 'sha-A' } });
+        mockNotificationsOnce([]);
+        await pollOnce();
+        mockPull({ head: { sha: 'sha-B' } });
+        mockNotificationsOnce([]);
+        await pollOnce();
+        // Force-push back to an older SHA: headChanged is a plain !==, so
+        // the same event fires for a rewind — the summary must not claim a
+        // forward move.
+        mockPull({ head: { sha: 'sha-A' } });
+        mockNotificationsOnce([]);
+        await pollOnce();
+
+        const prompts = boundSessions.deliverPrompt.mock.calls.map(
+          (call) => call[1] as string,
+        );
+        expect(prompts).toHaveLength(2);
+        expect(prompts[0]).toContain(
+          '有新提交推送：head 从 sha-A 变为 sha-B。',
+        );
+        expect(prompts[1]).toContain(
+          '有新提交推送：head 从 sha-B 变为 sha-A。',
+        );
+        expect(prompts.every((prompt) => !prompt.includes('前进到'))).toBe(
+          true,
+        );
       });
 
       it('delivers ci_failure with a Chinese summary and untranslated check names', async () => {
