@@ -35,6 +35,7 @@ import com.alibaba.qwen.code.runtimebroker.transport.ManagedHookProtocol;
 import com.alibaba.qwen.code.runtimebroker.transport.ManagedMcpProtocol;
 import com.alibaba.qwen.code.runtimebroker.transport.ManagedMonitorProtocol;
 import com.alibaba.qwen.code.runtimebroker.transport.ManagedShellProtocol;
+import com.alibaba.qwen.code.runtimebroker.transport.ManagedTerminalProtocol;
 
 import java.io.EOFException;
 import java.io.IOException;
@@ -1293,6 +1294,20 @@ public final class HttpRuntimeTransport implements WorkspacePhysicalTransport {
             }
             return post(lease, ManagedMonitorProtocol.PATH, encoded, TOOL_RESULT_LIMIT_BYTES)
                     .thenApply(bytes -> ManagedMonitorProtocol.response(bytes, session, immutable));
+        }
+        if (ManagedTerminalProtocol.isOperation(immutable)) {
+            ManagedTerminalProtocol.validateSession(session, immutable);
+            Map<String, Object> body = Map.of("protocolVersion", 1,
+                    "runtimeSessionId", session.getRuntimeSessionId(), "operation", immutable);
+            byte[] encoded;
+            try {
+                encoded = encodeToolRequest(body, 16 * 1024);
+            } catch (IllegalArgumentException tooLarge) {
+                throw new RuntimeBrokerException(413, "runtime_control_operation_too_large",
+                        "Runtime Terminal operation exceeds its size limit.", false);
+            }
+            return post(lease, ManagedTerminalProtocol.PATH, encoded, TOOL_RESULT_LIMIT_BYTES)
+                    .thenApply(bytes -> ManagedTerminalProtocol.response(bytes, session, immutable));
         }
         ProviderRuntimeProtocol.control(immutable, session.getHarnessSessionId(), session.getRuntimeSessionId());
         // Workspace context reads the Session's files directly, as file history

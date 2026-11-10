@@ -2070,6 +2070,33 @@ class RuntimeBrokerServiceTest {
     }
 
     @Test
+    void terminalHoldStopProvesExitWithTerminalKinds() throws Exception {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            join(fixture.service.acquire("harness", "runtime", "bootstrap"));
+            join(fixture.service.admitTerminalHold("harness", "runtime", "term-1"));
+            Map<String, Object> exited = new LinkedHashMap<>();
+            exited.put("operationId", "term-1");
+            exited.put("state", "exited");
+            exited.put("evidence", Map.of("exitCode", 0));
+            fixture.transport.controlHandler = operation ->
+                    CompletableFuture.completedFuture(
+                            "terminal-terminate".equals(operation.get("kind"))
+                                    ? exited
+                                    : Map.of("operationId", "term-1",
+                                            "state", "running"));
+            ToolExecutionRecord stopped = join(fixture.service.stopBackgroundProcess(
+                    "tenant", "harness", "terminal-attach:term-1"));
+            assertEquals(ToolExecutionRecord.State.SETTLED, stopped.getState());
+            assertEquals(java.util.List.of("terminal-status", "terminal-terminate"),
+                    fixture.transport.controls.stream()
+                            .map(operation -> operation.get("kind")).toList());
+            assertEquals("term-1", fixture.transport.controls.get(1)
+                    .get("targetOperationId"));
+            assertTrue(join(fixture.service.release("harness", "runtime")));
+        }
+    }
+
+    @Test
     void unprovenProcessStatusKeepsItsHold() throws Exception {
         String payload = "{\"toolName\":\"run_shell_command\",\"input\":{\"command\":\"pwd\",\"is_background\":true}}";
         String digest = "sha256:" + HexFormat.of().formatHex(

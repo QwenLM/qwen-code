@@ -60,6 +60,61 @@ function refuseUpgrade(
   socket.destroy();
 }
 
+interface ParsedTerminalOperation {
+  readonly kind: 'terminal-status' | 'terminal-terminate';
+  readonly operationId: string;
+  readonly targetOperationId: string;
+  readonly sessionKey: {
+    readonly tenantId: string;
+    readonly sessionId: string;
+  };
+}
+
+const OPERATION_KEYS = [
+  'kind',
+  'operationId',
+  'sessionKey',
+  'targetOperationId',
+];
+
+function parseTerminalOperation(value: unknown): ParsedTerminalOperation {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('managed_terminal_invalid');
+  }
+  const object = value as Record<string, unknown>;
+  if (
+    Object.keys(object).sort().join(',') !==
+    [...OPERATION_KEYS].sort().join(',')
+  ) {
+    throw new Error('managed_terminal_invalid');
+  }
+  const kind = object['kind'];
+  if (kind !== 'terminal-status' && kind !== 'terminal-terminate') {
+    throw new Error('managed_terminal_invalid');
+  }
+  const sessionKey = object['sessionKey'];
+  if (
+    !sessionKey ||
+    typeof sessionKey !== 'object' ||
+    typeof (sessionKey as Record<string, unknown>)['tenantId'] !== 'string' ||
+    typeof (sessionKey as Record<string, unknown>)['sessionId'] !== 'string'
+  ) {
+    throw new Error('managed_terminal_invalid');
+  }
+  for (const key of ['operationId', 'targetOperationId'] as const) {
+    const field = object[key];
+    if (typeof field !== 'string' || !field || field.length > 512) {
+      throw new Error('managed_terminal_invalid');
+    }
+  }
+  return {
+    kind,
+    operationId: object['operationId'] as string,
+    targetOperationId: object['targetOperationId'] as string,
+    sessionKey: sessionKey as { tenantId: string; sessionId: string },
+  };
+}
+
 /**
  * Hosts the worker's interactive terminals. Terminals are tagged with the
  * Runtime Session selector the relay supplies; an attach may only address a
@@ -126,11 +181,7 @@ export class ManagedRuntimeTerminals {
     for (const [terminalId, owner] of this.owners) {
       if (owner !== selector) continue;
       const snapshot = this.registry.readSnapshot(terminalId);
-      if (!snapshot) {
-        this.owners.delete(terminalId);
-        continue;
-      }
-      if (!snapshot.exited && !snapshot.failed) live += 1;
+      if (snapshot && !snapshot.exited && !snapshot.failed) live += 1;
     }
     return live;
   }
@@ -208,11 +259,6 @@ export class ManagedRuntimeTerminals {
     }
     this.owners.set(terminalId, selector);
     this.wss.handleUpgrade(req, socket, head, (ws) => {
-      ws.once('close', () => {
-        if (!this.registry.readSnapshot(terminalId)) {
-          this.owners.delete(terminalId);
-        }
-      });
       Promise.resolve(this.connection(ws, req)).catch(() => {
         try {
           ws.terminate();
@@ -221,6 +267,55 @@ export class ManagedRuntimeTerminals {
         }
       });
     });
+  }
+
+  /**
+   * Answers the hold's maintenance controls about one terminal. `running` is
+   * registered-live; `exited` is a proven end (a native exit, or a terminal
+   * this Session admitted that is no longer registered); `unknown` is anything
+   * it cannot prove — never a claimed exit. The owners record is retained after
+   * a terminal ends so a released/reclaimed terminal still answers `exited`
+   * instead of wedging its hold.
+   */
+  control(value: unknown): {
+    operationId: string;
+    state: 'exited' | 'running' | 'unknown';
+    evidence?: { exitCode: number | null; exitSignal: string | null };
+  } {
+    const operation = parseTerminalOperation(value);
+    const terminalId = operation.targetOperationId;
+    const selector = operation.sessionKey.sessionId;
+    const owner = this.owners.get(terminalId);
+    if (owner !== undefined && owner !== selector) {
+      return { operationId: terminalId, state: 'unknown' };
+    }
+    const snapshot = this.registry.readSnapshot(terminalId);
+    if (snapshot && !snapshot.exited && !snapshot.failed) {
+      if (operation.kind === 'terminal-status') {
+        return { operationId: terminalId, state: 'running' };
+      }
+      this.registry.release(terminalId, this.workspaceCwd);
+      return {
+        operationId: terminalId,
+        state: 'exited',
+        evidence: { exitCode: null, exitSignal: null },
+      };
+    }
+    if (snapshot) {
+      return {
+        operationId: terminalId,
+        state: 'exited',
+        evidence: { exitCode: snapshot.exitCode ?? null, exitSignal: null },
+      };
+    }
+    if (owner !== undefined) {
+      return {
+        operationId: terminalId,
+        state: 'exited',
+        evidence: { exitCode: null, exitSignal: null },
+      };
+    }
+    return { operationId: terminalId, state: 'unknown' };
   }
 
   /** Kills every terminal; used by the worker close path. */

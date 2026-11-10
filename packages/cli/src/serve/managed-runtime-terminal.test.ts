@@ -221,3 +221,48 @@ describe('ManagedRuntimeTerminals', () => {
     await replayed;
   });
 });
+
+describe('ManagedRuntimeTerminals control', () => {
+  const op = (kind: string, terminalId: string, sessionId: string) => ({
+    kind,
+    operationId: `terminal-attach:${terminalId}:process`,
+    sessionKey: { tenantId: 'tenant', sessionId },
+    targetOperationId: terminalId,
+  });
+
+  it('reports running live, exited after terminate, and stays exited', async () => {
+    const port = await start();
+    const ws = await attachAndEcho(port, 'ctl-1', 'session-a');
+    expect(
+      terminals!.control(op('terminal-status', 'ctl-1', 'session-a')),
+    ).toMatchObject({ state: 'running' });
+    expect(
+      terminals!.control(op('terminal-terminate', 'ctl-1', 'session-a')),
+    ).toMatchObject({ state: 'exited' });
+    expect(
+      terminals!.control(op('terminal-status', 'ctl-1', 'session-a')),
+    ).toMatchObject({ state: 'exited' });
+    ws.terminate();
+  });
+
+  it('answers unknown for a terminal it never admitted', async () => {
+    await start();
+    expect(
+      terminals!.control(op('terminal-status', 'never', 'session-a')),
+    ).toMatchObject({ state: 'unknown' });
+  });
+
+  it('does not answer for another Session’s terminal', async () => {
+    const port = await start();
+    const ws = await attachAndEcho(port, 'ctl-2', 'session-a');
+    expect(
+      terminals!.control(op('terminal-status', 'ctl-2', 'session-b')),
+    ).toMatchObject({ state: 'unknown' });
+    ws.terminate();
+  });
+
+  it('rejects a malformed operation', async () => {
+    await start();
+    expect(() => terminals!.control({ kind: 'terminal-status' })).toThrow();
+  });
+});

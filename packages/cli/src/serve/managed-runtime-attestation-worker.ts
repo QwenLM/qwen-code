@@ -40,6 +40,7 @@ import {
   MEASURED_WORKSPACE_TERMINAL_CAPABILITY_DIGEST,
 } from './managed-workspace-activation.js';
 import { ManagedRuntimeTerminals } from './managed-runtime-terminal.js';
+import { registerManagedTerminalRoutes } from './managed-terminal-routes.js';
 import { ManagedShellPublisherRegistry } from './managed-shell-publisher.js';
 import { registerManagedRuntimeToolRoutes } from './managed-runtime-tool-routes.js';
 import { resolveManagedRuntimeWorkerRoutePlan } from './managed-runtime-worker-routes.js';
@@ -392,7 +393,10 @@ export async function startManagedRuntimeAttestationWorker(
           process.env,
         )
       : undefined;
-  terminals?.register(server);
+  if (terminals) {
+    terminals.register(server);
+    registerManagedTerminalRoutes(app, boot, terminals);
+  }
 
   try {
     await new Promise<void>((resolve, reject) => {
