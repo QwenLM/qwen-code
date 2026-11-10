@@ -9,7 +9,7 @@
 .reading {
   display: inline-flex;
   align-items: center;
-  gap: 16px;
+  gap: 8px;
   min-width: 0;
   max-width: 100%;
   padding: 2px 8px;

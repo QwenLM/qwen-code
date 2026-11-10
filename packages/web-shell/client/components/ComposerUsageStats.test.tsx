@@ -156,6 +156,9 @@ describe('formatSpeed', () => {
   it('drops decimals from 10 tok/s up', () => {
     expect(formatSpeed(26.4)).toBe('26');
     expect(formatSpeed(9.46)).toBe('9.5');
+    expect(formatSpeed(9.94)).toBe('9.9');
+    expect(formatSpeed(9.96)).toBe('10');
+    expect(formatSpeed(10.46)).toBe('10');
   });
 });
 
@@ -165,16 +168,41 @@ describe('ComposerUsageStats', () => {
     await flush();
     const button = container.querySelector('button')!;
     // 140,000 tok over 5,380 s; 3,864,000 of 4,200,000 input tokens cached.
-    expect(button.textContent).toBe('2 turns·26 tok/s4.36M tok·92% cache hit');
+    expect(button.textContent).toBe(
+      '2 turns·26 tok/s · 4.36M tok·92% cache hit',
+    );
     expect(button.getAttribute('title')).toBe(
-      'Total 4.36M · Input 4.2M · Cache 3.86M · Output 160K',
+      'Total 4.36M · Input 4.2M (cache 3.86M) · Output 160K',
     );
   });
 
   it('localizes the reading', async () => {
     const { container } = render({}, 'zh-CN');
     await flush();
-    expect(container.textContent).toBe('2 轮·26 tok/s4.36M tok·缓存命中 92%');
+    expect(container.textContent).toBe(
+      '2 轮·26 tok/s · 4.36M tok·缓存命中 92%',
+    );
+    expect(container.querySelector('button')!.getAttribute('title')).toBe(
+      '总计 4.36M · 输入 4.2M（缓存 3.86M） · 输出 160K',
+    );
+  });
+
+  it('uses the singular label for a single turn', async () => {
+    const { container } = render({
+      loadStats: vi.fn(async () => stats({ promptCount: 1 })),
+    });
+    await flush();
+    expect(container.textContent).toContain('1 turn·');
+    expect(container.textContent).not.toContain('1 turns');
+  });
+
+  it('omits zero turns while still showing recorded usage', async () => {
+    const { container } = render({
+      loadStats: vi.fn(async () => stats({ promptCount: 0 })),
+    });
+    await flush();
+    expect(container.textContent).toContain('4.36M tok');
+    expect(container.textContent).not.toContain('turn');
   });
 
   it('renders nothing before the session has used tokens', async () => {
@@ -299,7 +327,7 @@ describe('ComposerUsageStats', () => {
     });
     await flush();
     expect(loadStats).toHaveBeenCalledTimes(4);
-    const settled = loadStats.mock.calls.length;
+    const settled = vi.mocked(loadStats).mock.calls.length;
     await act(async () => {
       vi.advanceTimersByTime(20_000);
     });

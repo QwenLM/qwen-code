@@ -73,7 +73,7 @@ export const TOKEN_USAGE_MESSAGES_EN: Record<string, TokenUsageMessage> = {
   'tokenUsage.bar.tokens': (v) => `${v?.count ?? 0} tok`,
   'tokenUsage.bar.cacheHit': (v) => `${v?.percent ?? 0}% cache hit`,
   'tokenUsage.bar.detailTokens': (v) =>
-    `Total ${v?.total ?? 0} · Input ${v?.input ?? 0} · Cache ${v?.cached ?? 0} · Output ${v?.output ?? 0}`,
+    `Total ${v?.total ?? 0} · Input ${v?.input ?? 0} (cache ${v?.cached ?? 0}) · Output ${v?.output ?? 0}`,
 };
 
 export const TOKEN_USAGE_MESSAGES_ZH: Record<string, TokenUsageMessage> = {
@@ -139,5 +139,5 @@ export const TOKEN_USAGE_MESSAGES_ZH: Record<string, TokenUsageMessage> = {
   'tokenUsage.bar.tokens': (v) => `${v?.count ?? 0} tok`,
   'tokenUsage.bar.cacheHit': (v) => `缓存命中 ${v?.percent ?? 0}%`,
   'tokenUsage.bar.detailTokens': (v) =>
-    `总计 ${v?.total ?? 0} · 输入 ${v?.input ?? 0} · 缓存 ${v?.cached ?? 0} · 输出 ${v?.output ?? 0}`,
+    `总计 ${v?.total ?? 0} · 输入 ${v?.input ?? 0}（缓存 ${v?.cached ?? 0}） · 输出 ${v?.output ?? 0}`,
 };

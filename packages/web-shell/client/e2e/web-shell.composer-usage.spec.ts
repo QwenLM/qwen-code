@@ -101,8 +101,8 @@ for (const { width, language, theme } of [
     // 120,000 tok over 4,615 s; 92% of 4.08M input tokens cached.
     await expect(bar).toHaveText(
       zh
-        ? '2 轮·26 tok/s4.2M tok·缓存命中 92%'
-        : '2 turns·26 tok/s4.2M tok·92% cache hit',
+        ? '2 轮·26 tok/s · 4.2M tok·缓存命中 92%'
+        : '2 turns·26 tok/s · 4.2M tok·92% cache hit',
     );
     await page.screenshot({
       path: testInfo.outputPath(
@@ -113,6 +113,15 @@ for (const { width, language, theme } of [
     expect(box).not.toBeNull();
     expect(box!.x).toBeGreaterThanOrEqual(0);
     expect(box!.x + box!.width).toBeLessThanOrEqual(width);
+    if (width === 390) {
+      const overflows = await bar
+        .locator('[data-stat] > span')
+        .evaluateAll((elements) =>
+          elements.map((element) => element.scrollWidth - element.clientWidth),
+        );
+      expect(overflows).toHaveLength(2);
+      expect(overflows.every((overflow) => overflow <= 0)).toBe(true);
+    }
 
     // A usage update from a model response reads the stats again.
     stats = statsFor(scenario.sessionId, scenario.workspaceCwd, 8_000_000);
@@ -139,6 +148,8 @@ for (const { width, language, theme } of [
 test('composer usage reading stays hidden and silent when stats fail @smoke', async ({
   page,
 }, testInfo) => {
+  await page.clock.install({ time: new Date('2026-11-10T00:00:00Z') });
+  await page.clock.pauseAt(new Date('2026-11-10T01:00:00Z'));
   const scenario = createWebShellDaemonScenario({
     events: [
       userTextEvent('Hello', { id: 1 }),
@@ -149,9 +160,12 @@ test('composer usage reading stays hidden and silent when stats fail @smoke', as
   const daemon = await installMockDaemon(page, scenario, {
     baseURL: String(testInfo.project.use.baseURL),
   });
-  let reads = 0;
+  const failedStats = page.waitForResponse(
+    (response) =>
+      response.url().endsWith(`/session/${scenario.sessionId}/stats`) &&
+      response.status() === 500,
+  );
   await page.route('**/session/*/stats', (route) => {
-    reads++;
     return route.fulfill({ status: 500, json: { error: 'boom' } });
   });
   await page.goto(`/session/${encodeURIComponent(scenario.sessionId)}`);
@@ -160,9 +174,11 @@ test('composer usage reading stays hidden and silent when stats fail @smoke', as
     replayCompleteEvent({ sessionId: connection.sessionId, replayedCount: 3 }),
   );
   await expect(page.getByText('Hi.', { exact: true })).toBeVisible();
-  await expect.poll(() => reads).toBeGreaterThan(0);
-  await expect(page.locator('[data-web-shell-composer-usage]')).toHaveCount(0);
-  await expect(page.getByText(/Load stats failed/)).toHaveCount(0);
+  await (await failedStats).finished();
+  // Let the rejection render without reaching the toast's 5 s dismissal.
+  await page.clock.runFor(1_000);
+  expect(await page.locator('[data-web-shell-composer-usage]').count()).toBe(0);
+  expect(await page.getByText(/Load stats failed/).count()).toBe(0);
 });
 
 test('composer usage follows background work and refreshes when it settles @smoke', async ({

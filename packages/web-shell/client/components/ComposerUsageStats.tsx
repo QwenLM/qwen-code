@@ -55,7 +55,8 @@ export function formatCacheHitPercent(
 
 /** Whole numbers from 10 tok/s up, one decimal below. */
 export function formatSpeed(speed: number): string {
-  return speed >= 10 ? String(Math.round(speed)) : speed.toFixed(1);
+  const rounded = speed.toFixed(1);
+  return Number(rounded) >= 10 ? String(Math.round(speed)) : rounded;
 }
 
 /**
@@ -213,6 +214,7 @@ export function ComposerUsageStats({
             <Segments parts={activity} />
           </span>
         )}
+        {activity.length > 0 && <span aria-hidden="true"> · </span>}
         <span className={styles.group} data-stat="usage">
           <DatabaseIcon
             className={styles.icon}
