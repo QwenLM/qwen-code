@@ -41,6 +41,8 @@ import * as sessionListModule from './session-list.js';
 import { PathMutexRegistry } from '../fs/path-mutex-registry.js';
 import {
   prWatchOwnerPath,
+  buildPrWatchOwnerRecord,
+  prWatchFileKey,
   readPrWatchStateSync,
   writePrWatchStateSync,
 } from './pr-watch-store.js';
@@ -1923,6 +1925,193 @@ describe('refreshWorkspaceSessionPrStates', () => {
     } finally {
       await fsp.rm(parent, { recursive: true, force: true });
     }
+  });
+
+  describe('PR watch listing write', () => {
+    const identity42 = {
+      host: 'github.com',
+      repo: 'o/r',
+      number: 42,
+    } as const;
+
+    async function seedBinding(): Promise<void> {
+      await seedSession(SESSION_A);
+      const prPath = sessionService.getPrSessionPathForArchiveState(
+        SESSION_A,
+        'active',
+      );
+      await upsertSessionPr(prPath, {
+        number: 42,
+        url: 'https://github.com/o/r/pull/42',
+        state: 'open',
+      });
+    }
+
+    it('records each listed state and returns the keys it covered', async () => {
+      await seedBinding();
+      const watchDir = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'pr-watch-listing-'),
+      );
+      fetchGitHubPullRequestsMock.mockResolvedValue({
+        kind: 'ok',
+        pullRequests: [
+          pr(42, 'closed'),
+          { ...pr(43, 'open'), state: 'draft' },
+          pr(44, 'merged'),
+        ],
+      });
+      try {
+        const result = await refreshWorkspaceSessionPrStates(
+          runtime,
+          undefined,
+          { prWatch: { watchDir, locks: new PathMutexRegistry() } },
+        );
+
+        expect(result.listedKeys).toEqual(
+          new Set([
+            'github.com/o/r#42',
+            'github.com/o/r#43',
+            'github.com/o/r#44',
+          ]),
+        );
+        const closed = readPrWatchStateSync(watchDir, identity42);
+        expect(closed.kind).toBe('state');
+        if (closed.kind !== 'state') throw new Error('unreachable');
+        expect(closed.state.state).toBe('closed');
+        expect(closed.state.observedAt).toBeDefined();
+        // A draft is still open in the watch snapshot.
+        const draft = readPrWatchStateSync(watchDir, {
+          ...identity42,
+          number: 43,
+        });
+        expect(draft.kind === 'state' && draft.state.state).toBe('open');
+        const merged = readPrWatchStateSync(watchDir, {
+          ...identity42,
+          number: 44,
+        });
+        expect(merged.kind === 'state' && merged.state.state).toBe('merged');
+      } finally {
+        await removeTempTree(watchDir);
+      }
+    });
+
+    it('preserves an existing watch file rather than replacing it', async () => {
+      await seedBinding();
+      const watchDir = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'pr-watch-listing-'),
+      );
+      writePrWatchStateSync(watchDir, identity42, {
+        pr: identity42,
+        state: 'open',
+        headSha: 'b'.repeat(40),
+        delivered: ['ci_failure@old'],
+      });
+      fetchGitHubPullRequestsMock.mockResolvedValue({
+        kind: 'ok',
+        pullRequests: [pr(42, 'closed')],
+      });
+      try {
+        await refreshWorkspaceSessionPrStates(runtime, undefined, {
+          prWatch: { watchDir, locks: new PathMutexRegistry() },
+        });
+        const after = readPrWatchStateSync(watchDir, identity42);
+        expect(after.kind).toBe('state');
+        if (after.kind !== 'state') throw new Error('unreachable');
+        expect(after.state.state).toBe('closed');
+        // The listing observes state only; the view's own fields survive.
+        expect(after.state.headSha).toBe('b'.repeat(40));
+        expect(after.state.delivered).toEqual(['ci_failure@old']);
+      } finally {
+        await removeTempTree(watchDir);
+      }
+    });
+
+    it('writes nothing while another daemon holds the owner record', async () => {
+      await seedBinding();
+      const watchDir = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'pr-watch-listing-'),
+      );
+      // A record this machine cannot verify — a foreign PID namespace — blocks
+      // the claim outright. A foreign pid alone would not: the claim only
+      // treats a record as live when its process token matches, so a stale
+      // pid with our own token is swept rather than honoured.
+      const record = buildPrWatchOwnerRecord();
+      await fsp.writeFile(
+        prWatchOwnerPath(watchDir),
+        JSON.stringify({ ...record, pidNs: (record.pidNs ?? 0) + 1 }),
+        'utf8',
+      );
+      fetchGitHubPullRequestsMock.mockResolvedValue({
+        kind: 'ok',
+        pullRequests: [pr(42, 'closed')],
+      });
+      try {
+        const result = await refreshWorkspaceSessionPrStates(
+          runtime,
+          undefined,
+          { prWatch: { watchDir, locks: new PathMutexRegistry() } },
+        );
+        // The keys are still reported: they describe what the listing saw,
+        // not what this daemon was allowed to write.
+        expect(result.listedKeys).toEqual(new Set(['github.com/o/r#42']));
+        expect(readPrWatchStateSync(watchDir, identity42).kind).toBe('absent');
+      } finally {
+        await removeTempTree(watchDir);
+      }
+    });
+
+    it('takes the per-PR lock before writing', async () => {
+      await seedBinding();
+      const watchDir = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'pr-watch-listing-lock-'),
+      );
+      const locks = new PathMutexRegistry();
+      let openGate: () => void = () => {};
+      const gate = new Promise<void>((resolve) => {
+        openGate = resolve;
+      });
+      let holding = false;
+      const held = locks.runExclusive(prWatchFileKey(identity42), async () => {
+        holding = true;
+        await gate;
+      });
+      const flush = async (): Promise<void> => {
+        await new Promise<void>((r) => setImmediate(r));
+      };
+      for (let i = 0; i < 200 && !holding; i++) await flush();
+      expect(holding).toBe(true);
+      fetchGitHubPullRequestsMock.mockResolvedValue({
+        kind: 'ok',
+        pullRequests: [pr(42, 'closed')],
+      });
+      try {
+        const pending = refreshWorkspaceSessionPrStates(runtime, undefined, {
+          prWatch: { watchDir, locks },
+        });
+        for (let i = 0; i < 20; i++) await flush();
+        // The lock is held by someone else, so the write must still be waiting.
+        expect(readPrWatchStateSync(watchDir, identity42).kind).toBe('absent');
+        openGate();
+        await held;
+        await pending;
+        expect(readPrWatchStateSync(watchDir, identity42).kind).toBe('state');
+      } finally {
+        openGate();
+        await held;
+        await removeTempTree(watchDir);
+      }
+    });
+
+    it('leaves the result shape untouched without the watch seam', async () => {
+      await seedBinding();
+      fetchGitHubPullRequestsMock.mockResolvedValue({
+        kind: 'ok',
+        pullRequests: [pr(42, 'closed')],
+      });
+      const result = await refreshWorkspaceSessionPrStates(runtime);
+      expect(result).toEqual({ scanned: 1, updated: 1 });
+      expect('listedKeys' in result).toBe(false);
+    });
   });
 });
 

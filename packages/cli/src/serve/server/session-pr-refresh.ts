@@ -39,8 +39,17 @@ import {
 import { invalidateWorkspaceSessionListCache } from './session-list.js';
 import { pullRequestKey, samePullRequest } from './session-pr-url.js';
 import {
+  claimPrWatchOwnershipSync,
+  prWatchFileKey,
+  readPrWatchStateSync,
+  writePrWatchStateSync,
+  type PrWatchIdentity,
+} from './pr-watch-store.js';
+import type { PathMutexRegistry } from '../fs/path-mutex-registry.js';
+import {
   runPrWatchObservationTick,
   type PrWatchObservationTickDeps,
+  prWatchIdentityFromUrl,
 } from './pr-watch-observation.js';
 import {
   createPrWatchDrainState,
@@ -106,6 +115,17 @@ export interface SessionPrRefreshOptions {
   sweepStart?: number;
   /** Injectable clock for the aggregate view budget (tests substitute). */
   now?: () => number;
+  /**
+   * The PR watch's storage seam. Present only when the watch is enabled, so
+   * the listing records each listed PR's state in its watch file and returns
+   * the keys it covered. Omitted by every other caller, which keeps the
+   * refresh's own behaviour unchanged.
+   */
+  prWatch?: {
+    watchDir: string;
+    locks: PathMutexRegistry;
+    log?: (message: string) => void;
+  };
 }
 
 /**
@@ -149,6 +169,13 @@ export interface SessionPrRefreshResult {
    * GitHub path.
    */
   aoneConsumed?: number;
+  /**
+   * PR keys the slim listing returned this sweep. The timer carries them into
+   * the next tick's observation so a closed PR the listing covered leaves the
+   * view rotation, while a closed PR outside the listing stays to catch a
+   * reopen. Absent on the Aone path and when the listing did not run or failed.
+   */
+  listedKeys?: ReadonlySet<string>;
 }
 
 /**
@@ -164,6 +191,79 @@ export interface SessionPrRefreshResult {
  * reopen reappears as opened and self-heals). Rewritten in place (order and
  * createdAt preserved).
  */
+/**
+ * Records what the slim listing already observed, and returns the keys it
+ * covered. The listing is an observation of every PR it returns, so its state
+ * is recorded without spending a `gh pr view`; the returned keys are what lets
+ * the observation drop a closed PR from the view rotation while keeping one the
+ * listing did not cover.
+ *
+ * Writes only while this daemon holds the owner record — a non-owner records
+ * nothing, exactly as it views nothing — and each write takes the same per-PR
+ * lock the observation uses, so a listing write and a view write of one PR
+ * cannot interleave. A PR whose file cannot be read is skipped rather than
+ * overwritten: the same fail-closed rule the observation applies before it
+ * spends a view.
+ */
+async function recordListedPrStates(
+  listed: ReadonlyArray<{
+    number: number;
+    state: 'open' | 'closed' | 'merged' | 'draft';
+    url: string;
+  }>,
+  prWatch: SessionPrRefreshOptions['prWatch'],
+  assertGenerationOpen: () => void,
+  now: () => number,
+): Promise<Set<string>> {
+  const keys = new Set<string>();
+  const rows: Array<{
+    identity: PrWatchIdentity;
+    key: string;
+    state: 'open' | 'merged' | 'closed';
+  }> = [];
+  for (const pr of listed) {
+    const identity = prWatchIdentityFromUrl(pr.url);
+    if (!identity) continue;
+    const key = prWatchFileKey(identity);
+    keys.add(key);
+    // The watch snapshot has no 'draft' variant — a draft is still open.
+    const state = pr.state === 'draft' ? 'open' : pr.state;
+    rows.push({ identity, key, state });
+  }
+  if (!prWatch || rows.length === 0) return keys;
+  const log = prWatch.log ?? (() => {});
+  if (claimPrWatchOwnershipSync(prWatch.watchDir, log).kind === 'blocked') {
+    return keys;
+  }
+  const observedAt = new Date(now()).toISOString();
+  for (const { identity, key, state } of rows) {
+    try {
+      assertGenerationOpen();
+      await prWatch.locks.runExclusive(key, async () => {
+        const existing = readPrWatchStateSync(prWatch.watchDir, identity);
+        if (existing.kind === 'error') {
+          log(
+            `PR watch: read error for ${existing.filePath}; listing write skipped: ${String(existing.error)}`,
+          );
+          return;
+        }
+        const base =
+          existing.kind === 'state' ? existing.state : { pr: identity };
+        writePrWatchStateSync(prWatch.watchDir, identity, {
+          ...base,
+          state,
+          observedAt,
+        });
+      });
+    } catch (error) {
+      log(
+        `PR watch: listing write failed for ${identity.repo}#${identity.number}: ${String(error)}`,
+      );
+    }
+  }
+  return keys;
+}
+
 export async function refreshWorkspaceSessionPrStates(
   runtime: WorkspaceRuntime,
   fetchPullRequests: typeof fetchGitHubPullRequests = fetchGitHubPullRequests,
@@ -278,6 +378,7 @@ export async function refreshWorkspaceSessionPrStates(
     runtime.env.effectiveEnv,
   );
   let aoneConsumed: number | undefined;
+  let listedKeys: Set<string> | undefined;
   if (aoneRepo) {
     // A number whose every stored URL misses the detailUrl shape of THIS
     // repo — a foreign manual binding, a legacy fabricated entry awaiting
@@ -355,6 +456,16 @@ export async function refreshWorkspaceSessionPrStates(
         }
         const sample = result.pullRequests[0]?.url;
         if (sample !== undefined) repoKey = pullRequestKey(sample)?.repo;
+        // Only the watch consumes these keys, so a caller without the seam
+        // keeps the exact result shape it had before the watch existed.
+        if (options.prWatch) {
+          listedKeys = await recordListedPrStates(
+            result.pullRequests,
+            options.prWatch,
+            assertGenerationOpen,
+            options.now ?? Date.now,
+          );
+        }
       }
     }
     const issueNumbers = [
@@ -468,7 +579,12 @@ export async function refreshWorkspaceSessionPrStates(
     });
     runtime.bridge.markSessionCatalogChanged();
   }
-  return { scanned, updated, aoneConsumed };
+  return {
+    scanned,
+    updated,
+    aoneConsumed,
+    ...(listedKeys !== undefined ? { listedKeys } : {}),
+  };
 }
 
 /**
@@ -531,6 +647,11 @@ export function startSessionPrRefreshTimer(deps: {
   // observation, and a tick counter that rotates the workspace order so a
   // persistent deadline overrun starves no workspace (master design §1).
   const githubSweepOffsets = new Map<string, number>();
+  // The observation runs before the refresh, so the keys one tick's listing
+  // produced are consumed by the next tick's observation. Kept per workspace
+  // for the same reason the view offsets are.
+  const listedKeysByWorkspace = new Map<string, ReadonlySet<string>>();
+  let watchSeam: { watchDir: string; locks: PathMutexRegistry } | undefined;
   let watchTickCount = 0;
   // Retained binding rows, in-flight marks and restore slots for the delivery
   // drain, kept across ticks (master §4/§5).
@@ -573,6 +694,10 @@ export function startSessionPrRefreshTimer(deps: {
         const watchDeps = deps.getPrWatchDeps?.();
         if (watchDeps) {
           activeWatchDir = watchDeps.watchDir;
+          watchSeam = {
+            watchDir: watchDeps.watchDir,
+            locks: watchDeps.locks,
+          };
           const watchWorkspaces = live.filter((r) => r.trusted || r.primary);
           const rotation = watchTickCount % Math.max(watchWorkspaces.length, 1);
           const ordered = [
@@ -584,6 +709,7 @@ export function startSessionPrRefreshTimer(deps: {
             await runPrWatchObservationTick(ordered, watchDeps, {
               intervalMs,
               sweepOffsets: githubSweepOffsets,
+              listedKeysByWorkspace,
               deadline: tickStart + intervalMs / 2,
             });
           } catch (error) {
@@ -598,6 +724,9 @@ export function startSessionPrRefreshTimer(deps: {
           }
           for (const cwd of [...githubSweepOffsets.keys()]) {
             if (!liveCwds.has(cwd)) githubSweepOffsets.delete(cwd);
+          }
+          for (const cwd of [...listedKeysByWorkspace.keys()]) {
+            if (!liveCwds.has(cwd)) listedKeysByWorkspace.delete(cwd);
           }
           // Delivery drain (master §4/§5): runs after the observation so it
           // can deliver the transitions this tick detected. Behind the same
@@ -641,8 +770,17 @@ export function startSessionPrRefreshTimer(deps: {
               sweepStart,
               aoneBackend: deps.aoneBackend,
               now: deps.now,
+              ...(watchSeam ? { prWatch: watchSeam } : {}),
             },
           );
+          // Only trusted workspaces are refreshed, so the untrusted primary
+          // never contributes keys. Its closed PRs therefore stay in the view
+          // rotation — more views, never a missed reopen.
+          if (result.listedKeys !== undefined) {
+            listedKeysByWorkspace.set(runtime.workspaceCwd, result.listedKeys);
+          } else {
+            listedKeysByWorkspace.delete(runtime.workspaceCwd);
+          }
           // Only the Aone path reports a consumed window — the GitHub path
           // never reads the offset, so don't write one for it.
           if (result.aoneConsumed !== undefined) {
