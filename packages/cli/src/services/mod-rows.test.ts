@@ -54,7 +54,7 @@ describe('ModRows', () => {
       releases[i]!();
     }
     await dispatches.settled();
-    expect(rows.get('AssistantMessage', '3')).toEqual({
+    expect(rows.get(row('3'))).toEqual({
       text: '译 3',
       isFirstOfReply: true,
     });
@@ -70,22 +70,26 @@ describe('ModRows', () => {
       render(input as ModAssistantMessageInput),
     );
     const heard = vi.fn();
-    rows.watch(row('1'), heard);
+    const releaseFirst = rows.watch(row('1'), heard);
     const release = rows.watch(row('2'), () => {});
     release();
     await dispatches.settled();
     expect(render.mock.calls.map(([input]) => input.requestId)).toEqual(['1']);
     expect(heard).toHaveBeenCalledTimes(1);
-    // Shown again with the same input, the row draws its answer at once.
+    // A remount can read the answer before its subscription runs.
+    releaseFirst();
+    expect(rows.get(row('1'))).toEqual({
+      text: '译 1',
+      isFirstOfReply: true,
+    });
+    const edited = row('1', 'edited');
+    expect(rows.get(edited)).toBeUndefined();
     rows.watch(row('1'), () => {});
     await dispatches.settled();
     expect(render).toHaveBeenCalledTimes(1);
-    expect(
-      (rows.get('AssistantMessage', '1') as { text: string } | undefined)?.text,
-    ).toBe('译 1');
     // A changed input renders again.
-    rows.watch(row('1', 'edited'), () => {});
-    expect(rows.get('AssistantMessage', '1')).toBeUndefined();
+    rows.watch(edited, () => {});
+    expect(rows.get(edited)).toBeUndefined();
     await dispatches.settled();
     expect(render).toHaveBeenCalledTimes(2);
   });
@@ -106,6 +110,18 @@ describe('ModRows', () => {
     expect(render).toHaveBeenCalledOnce();
   });
 
+  it('trims the cache once queued rows are skipped', async () => {
+    const dispatches = queue();
+    const render = vi.fn(async () => undefined);
+    const rows = new ModRows(dispatches.schedule, render);
+    dispatches.other('tool.call');
+    for (let id = 0; id < 1_100; id++) rows.watch(row(String(id)), () => {})();
+
+    await dispatches.settled();
+    expect(render).not.toHaveBeenCalled();
+    expect(rows['rows'].size).toBeLessThanOrEqual(1_000);
+  });
+
   it('renders shown rows again on invalidate, drawing the old answer meanwhile', async () => {
     const dispatches = queue();
     let round = 0;
@@ -115,21 +131,19 @@ describe('ModRows', () => {
       if (round === 1) await new Promise<void>((r) => releases.push(r));
       return answer;
     });
-    const text = () =>
-      (rows.get('AssistantMessage', '1') as { text: string } | undefined)?.text;
     const heard = vi.fn();
     rows.watch(row('1'), heard);
     await dispatches.settled();
     round = 1;
     rows.invalidate('AssistantMessage');
     await vi.waitFor(() => expect(releases).toHaveLength(1));
-    expect(text()).toBe('round 0');
+    expect(rows.get(row('1'))).toMatchObject({ text: 'round 0' });
     // Asked again while it renders: it renders once more after.
     round = 2;
     rows.invalidate('AssistantMessage');
     releases[0]!();
     await dispatches.settled();
-    expect(text()).toBe('round 2');
+    expect(rows.get(row('1'))).toMatchObject({ text: 'round 2' });
     expect(heard).toHaveBeenCalledTimes(3);
   });
 
@@ -150,16 +164,14 @@ describe('ModRows', () => {
     expect(render).toHaveBeenCalledTimes(1);
     session = 'new';
     rows.clear();
-    expect(rows.get('AssistantMessage', '1')).toBeUndefined();
+    expect(rows.get(row('1'))).toBeUndefined();
     await dispatches.settled();
     expect(render).toHaveBeenCalledTimes(1);
 
     rows.watch(row('1'), heard);
     releaseOld();
     await dispatches.settled();
-    expect(
-      (rows.get('AssistantMessage', '1') as { text: string } | undefined)?.text,
-    ).toBe('new 1');
+    expect(rows.get(row('1'))).toMatchObject({ text: 'new 1' });
     expect(render.mock.calls.map(([input]) => input.requestId)).toEqual([
       '1',
       '1',
@@ -175,6 +187,6 @@ describe('ModRows', () => {
     });
     rows.watch(row('1'), () => {});
     await dispatches.settled();
-    expect(rows.get('AssistantMessage', '1')).toBeUndefined();
+    expect(rows.get(row('1'))).toBeUndefined();
   });
 });

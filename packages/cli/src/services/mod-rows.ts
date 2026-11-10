@@ -29,8 +29,11 @@ interface Row {
 // Rows answered and no longer shown are kept for a remount up to this many.
 const KEPT_ROWS = 1_000;
 
-const rowId = (component: string, requestId: string) =>
-  `${component}\0${requestId}`;
+const rowId = (input: ModRenderInput) =>
+  `${input.component}\0${input.requestId}`;
+
+const rowKey = (input: ModRenderInput) =>
+  stableJson({ ...input, viewport: undefined });
 
 /**
  * The transcript rows a terminal asks the Mods to draw. Each row renders once
@@ -54,8 +57,8 @@ export class ModRows {
    * calls `listener` when the answer changes. Returns the release.
    */
   watch(input: ModRenderInput, listener: () => void): () => void {
-    const id = rowId(input.component, input.requestId);
-    const key = stableJson({ ...input, viewport: undefined });
+    const id = rowId(input);
+    const key = rowKey(input);
     let row = this.rows.get(id);
     if (row) {
       this.rows.delete(id);
@@ -69,16 +72,16 @@ export class ModRows {
     this.prune();
     return () => {
       row.listeners.delete(listener);
+      if (!this.running) this.prune();
     };
   }
 
   /** The props a row draws with, once its hooks answered its input. */
-  get(
-    component: ModRenderSite,
-    requestId: string,
-  ): ModRenderInput['props'] | undefined {
-    const row = this.rows.get(rowId(component, requestId));
-    return row && row.answerKey === row.key ? row.answer : undefined;
+  get(input: ModRenderInput): ModRenderInput['props'] | undefined {
+    const row = this.rows.get(rowId(input));
+    return row?.answer && row.answerKey === rowKey(input)
+      ? row.answer
+      : undefined;
   }
 
   /**
@@ -122,6 +125,7 @@ export class ModRows {
         break;
       }
     }
+    this.prune();
     if (!row || id === undefined) return;
     const ready = row;
     const readyId = id;

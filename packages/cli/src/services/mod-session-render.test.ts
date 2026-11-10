@@ -446,10 +446,9 @@ describe('Mod session renders', () => {
       await vi.advanceTimersByTimeAsync(0);
       expect(runtime.render).toHaveBeenCalledTimes(2);
       expect(runtime.render.mock.lastCall?.[0]).toEqual(adoptedRow);
-      expect(
-        session.rowProps('session-1', 'AssistantMessage', '1'),
-      ).toBeUndefined();
-      expect(session.rowProps('session-2', 'AssistantMessage', '1')).toEqual({
+      expect(session.rowProps('session-1', adoptedRow)).toBeUndefined();
+      expect(session.rowProps('session-2', replyRow)).toBeUndefined();
+      expect(session.rowProps('session-2', adoptedRow)).toEqual({
         ...replyRow.props,
         text: 'Rewritten',
       });
@@ -485,9 +484,7 @@ describe('Mod session renders', () => {
       deadline.abort();
       await tool;
       expect(runtime.runTool).toHaveBeenCalledOnce();
-      expect(
-        session.rowProps('session-1', 'AssistantMessage', '1'),
-      ).toBeUndefined();
+      expect(session.rowProps('session-1', replyRow)).toBeUndefined();
     } finally {
       timeout.mockRestore();
     }

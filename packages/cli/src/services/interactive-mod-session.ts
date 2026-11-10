@@ -225,12 +225,9 @@ export class InteractiveModSession implements ICommandLoader {
   /** The props a row draws with, when its hooks rewrote them. */
   rowProps(
     sessionId: string,
-    component: ModRenderSite,
-    requestId: string,
+    input: ModRenderInput,
   ): ModRenderInput['props'] | undefined {
-    return this.closing
-      ? undefined
-      : this.session.rowProps(sessionId, component, requestId);
+    return this.closing ? undefined : this.session.rowProps(sessionId, input);
   }
 
   readonly subscribeBand = (listener: () => void): (() => void) => {

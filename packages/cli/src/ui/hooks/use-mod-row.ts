@@ -63,9 +63,7 @@ export function useModRow<T extends ModRenderInput>(
   const snapshot = useCallback(
     () =>
       stable && sessionId !== undefined
-        ? (session?.rowProps(sessionId, stable.component, stable.requestId) as
-            | T['props']
-            | undefined)
+        ? (session?.rowProps(sessionId, stable) as T['props'] | undefined)
         : undefined,
     [session, sessionId, stable],
   );

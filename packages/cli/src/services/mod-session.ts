@@ -728,12 +728,9 @@ export class ModSession implements ICommandLoader {
   /** The props a row draws with once its hooks answered, if they rewrote it. */
   rowProps(
     sessionId: string,
-    component: ModRenderSite,
-    requestId: string,
+    input: ModRenderInput,
   ): ModRenderInput['props'] | undefined {
-    return sessionId === this.sessionId
-      ? this.rows.get(component, requestId)
-      : undefined;
+    return sessionId === this.sessionId ? this.rows.get(input) : undefined;
   }
 
   // Rows answered while dispatches were cancelled render again.
