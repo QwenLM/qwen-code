@@ -18502,6 +18502,31 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       ).toBe(true);
     });
 
+    it('a channel-owned-only partial snapshot still advances the cold-empty escape', async () => {
+      // hasRawBoundPrs must ignore channel-owned rows (the routing map skips
+      // them): a partial listing only a channel binding is still a cold empty
+      // answer, so the bounded escape advances and journals bindings_cold_empty.
+      // Counting channel rows would suppress the escape and wedge the lane.
+      await initChannel(
+        { deliverToBoundSessions: true, requireBoundWatch: true },
+        { boundSessions },
+      );
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [
+          makeBinding({ sessionId: 'channel-owned', sourceType: 'channel' }),
+        ],
+        partial: true,
+      });
+      mockOctokit.paginate.mockResolvedValueOnce([]);
+      await pollOnce();
+
+      expect(
+        readChannelEvents().some(
+          (event) => event['reason'] === 'bindings_cold_empty',
+        ),
+      ).toBe(true);
+    });
+
     it('role-aware: a mixed follower set is not gate-excluded (every, not some)', async () => {
       // An exempt fix follower means the gate did NOT exclude everyone, even
       // though a watch-less verify is present. With only a verify template,
