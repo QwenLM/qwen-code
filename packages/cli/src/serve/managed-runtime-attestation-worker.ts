@@ -11,9 +11,7 @@ import path from 'node:path';
 import type { AddressInfo } from 'node:net';
 import type { Readable } from 'node:stream';
 import express from 'express';
-import { MANAGED_TOOL_RESULT_ROUTES } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
 import {
-  OWNED_MANAGED_RUNTIME_ROUTES,
   ownedManagedRuntimeRouteGate,
   registerManagedRuntimeAttestationRoute,
   type ManagedRuntimeAttestationIdentity,
@@ -25,7 +23,6 @@ import {
   type ManagedContextReady,
 } from './managed-context-envelope.js';
 import {
-  MANAGED_CONTEXT_WORKER_ROUTES,
   ManagedContextMount,
   registerManagedContextRoutes,
 } from './managed-context-worker.js';
@@ -38,25 +35,11 @@ import {
   managedRuntimeLedgerFromEnvironment,
 } from './managed-runtime-ledger.js';
 import type { ManagedSshRuntime } from './managed-runtime-ssh-worker.js';
-import {
-  MANAGED_EXTENSION_RETIRE_ROUTE,
-  MANAGED_EXTENSION_RUNTIME_ROUTE,
-  MANAGED_EXTENSION_UPLOAD_ROUTE,
-} from './managed-extension-runtime.js';
-import { MANAGED_EXTENSION_COMMAND_ROUTE } from './managed-extension-command-runtime.js';
-import { PUBLICATION_INSTALL_ROUTE } from './remote-shell-result-publication.js';
-import {
-  isWorkspaceToolCapability,
-  MEASURED_WORKSPACE_CAPABILITY_DIGEST,
-} from './managed-workspace-activation.js';
-import { MANAGED_RUNTIME_TOOL_V4_ROUTES } from './managed-runtime-tool-v4-routes.js';
-import {
-  ManagedShellPublisherRegistry,
-  MANAGED_SHELL_PUBLISHER_ROUTE,
-} from './managed-shell-publisher.js';
+import { isWorkspaceToolCapability } from './managed-workspace-activation.js';
+import { ManagedShellPublisherRegistry } from './managed-shell-publisher.js';
 import { registerManagedRuntimeToolRoutes } from './managed-runtime-tool-routes.js';
+import { resolveManagedRuntimeWorkerRoutePlan } from './managed-runtime-worker-routes.js';
 import { scrubAndReportInheritedLoaderEnv } from '../config/shared-env-keys.js';
-import { MANAGED_RUNTIME_PROVIDER_ROUTE } from './managed-runtime-provider-protocol.js';
 import { registerManagedRuntimeProviderRoute } from './managed-runtime-provider-worker.js';
 import {
   parseManagedCsiBoot,
@@ -74,9 +57,6 @@ import {
   type ManagedCsiFileWorkerHandle,
 } from './managed-csi-file-worker.js';
 import {
-  MANAGED_CSI_ATTEST_ROUTE,
-  MANAGED_CSI_DRAIN_ROUTE,
-  MANAGED_CSI_ACK_ROUTE,
   registerManagedCsiAttestationRoute,
   registerManagedCsiDrainRoute,
   registerManagedCsiAckRoute,
@@ -375,7 +355,6 @@ export async function startManagedRuntimeAttestationWorker(
           : { directory, workspaceRoot: directory, preapproved: false };
       });
     }
-    publication?.register(app, executor);
     if (csiBoot) {
       registerManagedCsiDrainRoute(app, csiBoot, executor);
       registerManagedCsiAckRoute(app, csiBoot, executor);
@@ -383,65 +362,19 @@ export async function startManagedRuntimeAttestationWorker(
   } catch (error) {
     return closeCsiMountAfterError(csiMount, error);
   }
+  const routePlan = resolveManagedRuntimeWorkerRoutePlan({
+    bootVersion: boot.version === 2 ? 2 : 1,
+    capabilityDigest: boot.capabilityDigest,
+    managedExtensions:
+      boot.version === 2 && boot.managedExtensions !== undefined,
+    csi: csiBoot !== undefined,
+    sshRoute: sshRuntime?.route,
+    capturePublisher: capturePublisher !== undefined,
+    remotePublishers: remotePublishers !== undefined,
+    publication: publication !== undefined,
+  });
   const server = createServer(
-    ownedManagedRuntimeRouteGate(
-      app,
-      boot.version === 2
-        ? capturePublisher ||
-          remotePublishers ||
-          isWorkspaceToolCapability(boot.capabilityDigest) ||
-          boot.managedExtensions !== undefined
-          ? [
-              ...MANAGED_CONTEXT_WORKER_ROUTES,
-              ...(boot.capabilityDigest === MEASURED_WORKSPACE_CAPABILITY_DIGEST
-                ? MANAGED_RUNTIME_TOOL_V4_ROUTES
-                : []),
-              ...(boot.managedExtensions
-                ? [
-                    MANAGED_EXTENSION_RUNTIME_ROUTE,
-                    MANAGED_EXTENSION_UPLOAD_ROUTE,
-                    MANAGED_EXTENSION_RETIRE_ROUTE,
-                    MANAGED_EXTENSION_COMMAND_ROUTE,
-                  ]
-                : []),
-              ...(csiBoot
-                ? [
-                    MANAGED_CSI_ATTEST_ROUTE,
-                    MANAGED_CSI_DRAIN_ROUTE,
-                    MANAGED_CSI_ACK_ROUTE,
-                  ]
-                : []),
-              ...MANAGED_TOOL_RESULT_ROUTES,
-              ...(publication ? EXTERNAL_PUBLICATION_ROUTES : []),
-              ...(sshRuntime ? [sshRuntime.route] : []),
-              ...(remotePublishers ? [MANAGED_SHELL_PUBLISHER_ROUTE] : []),
-              ...(!capturePublisher &&
-              !publication &&
-              (isWorkspaceToolCapability(boot.capabilityDigest) ||
-                boot.managedExtensions !== undefined)
-                ? [PUBLICATION_INSTALL_ROUTE]
-                : []),
-            ]
-          : [
-              ...MANAGED_CONTEXT_WORKER_ROUTES,
-              ...(boot.managedExtensions
-                ? [
-                    MANAGED_EXTENSION_RUNTIME_ROUTE,
-                    MANAGED_EXTENSION_UPLOAD_ROUTE,
-                    MANAGED_EXTENSION_RETIRE_ROUTE,
-                    MANAGED_EXTENSION_COMMAND_ROUTE,
-                  ]
-                : []),
-              ...(csiBoot
-                ? [
-                    MANAGED_CSI_ATTEST_ROUTE,
-                    MANAGED_CSI_DRAIN_ROUTE,
-                    MANAGED_CSI_ACK_ROUTE,
-                  ]
-                : []),
-            ]
-        : [...OWNED_MANAGED_RUNTIME_ROUTES, MANAGED_RUNTIME_PROVIDER_ROUTE],
-    ),
+    ownedManagedRuntimeRouteGate(app, routePlan.routes),
   );
   server.maxHeadersCount = 32;
   server.headersTimeout = 5_000;
