@@ -441,7 +441,7 @@ OpenTUI's live turn, `livePromptEvents` in `live-session.ts`, already has the lo
 | ---- | --------------------------------------------------------------------------------------------------------------------- |
 | 4a   | every model round on the loop's `runModelRound`; the turn keeps its tool step; the parity suite runs on OpenTUI too   |
 | 4b   | a round's tool calls as one shared batch over `InteractiveModToolScheduler`, with the loop's finalizing and recording |
-| 4c   | the turn on the loop, whose next round takes the steering input queued for the tool boundary; a retry                 |
+| 4c   | verify the turn behavior already present after 4b: steering input at a tool boundary and a retry                      |
 | 4d   | default on, then remove the current loop                                                                              |
 
 PR 4a sends each model round of the live turn through `runModelRound`. The turn reads the round's events one at a time, as it reads the client's stream, and maps each as before. A turn that stops reading, because a newer turn replaced it or it was cancelled, ends the round, which closes the client's stream. What moves:
@@ -473,7 +473,7 @@ PR 4c covers the rest of the turn. The live turn already sends the round its bat
 | a batch that ends the turn sends no round                                                                                                       | the input stays queued when a tool ends the turn, when Esc cancels the batch and when the model replays an answered call again  |
 | a retry with Ctrl+Y sends its round with the `Retry` type on the shared round and runs its calls on the shared batch                            | the retry's turn takes the steering input after its batch as a fresh turn does                                                  |
 
-The turn's code therefore does not change. PR 4c adds unit tests for these cases on the shared path, each against the current path where both run; the parity suite already runs its retry scenarios and the scenario for input queued while a tool runs on OpenTUI.
+The turn's code therefore does not change. PR 4c adds unit tests for these cases on the shared path; the fresh-turn and retry cases compare both paths, while the remaining cases check the shared path only. The parity suite already runs its retry scenarios and the scenario for input queued while a tool runs on OpenTUI.
 
 ## Migration
 
@@ -499,7 +499,7 @@ The turn's code therefore does not change. PR 4c adds unit tests for these cases
 | 3d    | Ink TUI: default on, then remove its current loop                                                                                                   |
 | 4a    | OpenTUI: every model round on the loop's round; the turn keeps its tool step; the parity suite on OpenTUI                                           |
 | 4b    | OpenTUI: a round's tool calls as one shared batch                                                                                                   |
-| 4c    | OpenTUI: the turn on the loop, with steering input at a tool boundary; a retry                                                                      |
+| 4c    | OpenTUI: verify the turn behavior already present after 4b, including steering input at a tool boundary and a retry                                 |
 | 4d    | OpenTUI: default on, then remove its current loop                                                                                                   |
 | 5     | AgentCore on a `Turn` round (subagents, background and forked agents, workflows)                                                                    |
 | 6     | speculation                                                                                                                                         |

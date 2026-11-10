@@ -4295,6 +4295,13 @@ describe('live checkpoint producer and approval ownership', () => {
 });
 
 describe('livePromptEvents on the shared agent loop (experimental.unifiedAgentLoop)', () => {
+  beforeEach(() => {
+    atMocks.calls.length = 0;
+    atMocks.result = { processedQuery: null, shouldProceed: true };
+    atMocks.hang = null;
+    atMocks.abortAfter = null;
+  });
+
   /**
    * The config with the setting on. Its client answers the calls `history`
    * holds by provider id and fingerprint, and counts completed calls.
@@ -5268,9 +5275,10 @@ describe('livePromptEvents on the shared agent loop (experimental.unifiedAgentLo
     expect(restoreSteering).not.toHaveBeenCalled();
   });
 
-  it.each(['stops', 'is cancelled'])(
-    'puts the steering input back when the next round %s before taking it',
+  it.each(['stops', 'is cancelled', 'restores before stopping'])(
+    'restores only carried steering input when the next round %s',
     async (outcome) => {
+      atMocks.result = { processedQuery: null, shouldProceed: false };
       const controller = new AbortController();
       let sends = 0;
       const send = vi.fn(function* (...args: unknown[]) {
@@ -5282,7 +5290,8 @@ describe('livePromptEvents on the shared agent loop (experimental.unifiedAgentLo
           controller.abort();
           return;
         }
-        (args[3] as SendMessageOptions).steerInput?.restore();
+        if (outcome === 'restores before stopping')
+          (args[3] as SendMessageOptions).steerInput?.restore();
         yield { type: 'max_session_turns' };
       });
       const recordMidTurnUserMessage = vi.fn();
@@ -5295,12 +5304,16 @@ describe('livePromptEvents on the shared agent loop (experimental.unifiedAgentLo
       const onAcceptedSteering = vi.fn();
       await drain(
         livePromptEvents(config, 'start', controller.signal, {
-          drainSteering: () => steering('steer me'),
+          drainSteering: () => steering('steer me', '@declined.ts'),
           restoreSteering,
           onAcceptedSteering,
         }),
       );
       expect(send).toHaveBeenCalledTimes(2);
+      expect(atMocks.calls).toEqual(['@declined.ts']);
+      expect(requestsOf(send)[1].options.steerInput).toEqual([
+        { text: 'steer me' },
+      ]);
       expect(restoreSteering).toHaveBeenCalledExactlyOnceWith(
         steering('steer me'),
       );
