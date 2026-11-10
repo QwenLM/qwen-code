@@ -1098,6 +1098,38 @@ public final class HostedHarnessClient implements AutoCloseable {
         }
     }
 
+    /** Instance-scoped work: these calls never create or load a Session attachment. */
+    public Map<String, Object> submitSideQuery(Map<String, Object> body) {
+        return sideQueryCall("/side-queries", body, 202, requireBoundedRecoveryText((String) body.get("queryId"), "queryId"));
+    }
+
+    public Map<String, Object> readSideQuery(String queryId, Map<String, Object> claim) {
+        return sideQueryCall("/side-queries/" + java.net.URLEncoder.encode(
+                requireBoundedRecoveryText(queryId, "queryId"), StandardCharsets.UTF_8) + "/status",
+                Map.of("claim", claim), 200, queryId);
+    }
+
+    public Map<String, Object> cancelSideQuery(String queryId, Map<String, Object> claim) {
+        return sideQueryCall("/side-queries/" + java.net.URLEncoder.encode(
+                requireBoundedRecoveryText(queryId, "queryId"), StandardCharsets.UTF_8) + "/cancel",
+                Map.of("claim", claim), 202, queryId);
+    }
+
+    private Map<String, Object> sideQueryCall(String path, Map<String, Object> body, int expectedStatus, String queryId) {
+        if (!capabilities().getFeatures().contains("side-query/1")) {
+            throw new DaemonProtocolException("Hosted side-query capability is required");
+        }
+        String operation = "POST " + path;
+        var response = sendMutation(path, body, capabilities.getBootId(), null, operation);
+        requireMutationStatus(response, expectedStatus, operation);
+        var result = JsonSupport.parseObject(response.getBody(), operation);
+        if (!queryId.equals(result.get("queryId")) || !(result.get("active") instanceof Boolean)
+                || !List.of("accepted", "running", "settled").contains(result.get("state"))) {
+            throw new DaemonProtocolException("Invalid side-query response");
+        }
+        return result;
+    }
+
     public Map<String, Object> compressContext(HarnessSessionRef session, Map<String, Object> body) {
         HarnessSessionRef ref = requireSessionRef(session);
         if (!capabilities().getFeatures().contains("context-compression/1")) {

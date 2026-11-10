@@ -77,7 +77,7 @@ jobs:
                 /^integration-tests\/interactive\/tui-(foreground-shell|extension-acquisition|dual-output)/i,
               ],
             };
-            const sharedTurn = /^packages\/cli\/src\/(ui\/(opentui\/(live-turn|live-session|event-adapter)|hooks\/(use-llm-stream|useReactToolScheduler))|services\/interactive-mod)|^packages\/core\/src\/core\/(client|turn|llm-chat|coreToolScheduler)/;
+            const sharedTurn = /^packages\/cli\/src\/(ui\/(opentui\/(live-turn|live-session|event-adapter|shared-model-round)|hooks\/(use-llm-stream|useReactToolScheduler))|services\/interactive-mod)|^packages\/core\/src\/core\/(client|turn|llm-chat|coreToolScheduler)/;
             const broad = [
               /(^|\/)(package\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml|tsconfig[^/]*\.json)$/,
               /^(\.npmrc|\.nvmrc|esbuild\.config\.js)$/,

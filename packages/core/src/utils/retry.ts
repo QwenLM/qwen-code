@@ -57,6 +57,7 @@ export interface RetryAttemptInfo {
 
 export interface RetryOptions {
   maxAttempts: number;
+  singleAttempt?: boolean;
   initialDelayMs: number;
   maxDelayMs: number;
   shouldRetryOnError: (error: Error) => boolean;
@@ -269,7 +270,8 @@ export async function retryWithBackoff<T>(
     : {};
 
   const {
-    maxAttempts,
+    maxAttempts: configuredMaxAttempts,
+    singleAttempt,
     initialDelayMs,
     maxDelayMs,
     authType,
@@ -290,7 +292,8 @@ export async function retryWithBackoff<T>(
   const hasCustomShouldRetryOnError =
     typeof options?.shouldRetryOnError === 'function';
 
-  const persistent = persistentMode ?? false;
+  const maxAttempts = singleAttempt ? 1 : configuredMaxAttempts;
+  const persistent = !singleAttempt && (persistentMode ?? false);
   const maxBackoff = persistentMaxBackoffMs ?? PERSISTENT_MAX_BACKOFF_MS;
   const capMs = persistentCapMs ?? PERSISTENT_CAP_MS;
   const heartbeatInterval = heartbeatIntervalMs ?? HEARTBEAT_INTERVAL_MS;
@@ -320,11 +323,17 @@ export async function retryWithBackoff<T>(
     const requestSetupMs = Date.now() - requestEntryTime;
     try {
       const result = await retryContext.run(
-        { attempt: iterationCount, retryTotalDelayMs, requestSetupMs },
+        {
+          attempt: iterationCount,
+          retryTotalDelayMs,
+          requestSetupMs,
+          ...(singleAttempt && { singleAttempt }),
+        },
         () => fn(),
       );
 
       if (
+        !singleAttempt &&
         shouldRetryOnContent &&
         shouldRetryOnContent(result as GenerateContentResponse)
       ) {
@@ -392,6 +401,7 @@ export async function retryWithBackoff<T>(
             `  - Fireworks AI:  https://docs.fireworks.ai/api-reference/introduction\n` +
             `  - ModelStudio:   https://help.aliyun.com/zh/model-studio/coding-plan\n\n` +
             `After setting up your API key, run /auth to configure your provider.`,
+          singleAttempt ? { cause: error } : undefined,
         );
       }
 
