@@ -799,6 +799,20 @@ describe('extractShellOperationsAcrossCommand', () => {
       [write('/repo/out.txt')],
     ],
     [
+      // The escaped space keeps `#` inside the word, so the redirect is real.
+      // Because that boundary is unproven, the write must be reported with an
+      // unknown cwd rather than as a clean `/repo/evil.txt`.
+      'keeps a redirect after an escaped-space hash as unproven',
+      'echo a\\ # x > evil.txt',
+      [uncertainWrite('/repo/evil.txt')],
+    ],
+    [
+      // A definite comment tail is never executed, so its `>` is not a write.
+      'drops a redirect inside a definite comment',
+      'echo a # x > evil.txt',
+      [],
+    ],
+    [
       // A real opener after the ambiguous form is still unproven: the body's
       // `cd` can relocate a later relative write.
       'marks the cwd unknown when a real opener follows an ambiguous form',

@@ -609,9 +609,14 @@ describe('shouldForceAutoModeReviewForAllow', () => {
       'echo $(echo SUB)#note; echo hi > out.txt',
       "echo $((8<<2)); printf %s $'a\\'b'; echo hi > out.txt",
       "echo '<<EOF'; printf %s $'a\\'b'; echo hi > out.txt",
+      'echo a # x > evil.txt',
     ]) {
       expect(forcesReview(command)).toBe(false);
     }
+
+    // The escaped space makes the `#` word data, so the redirect is real; the
+    // unproven boundary must ask rather than report a clean path.
+    expect(forcesReview('echo a\\ # x > evil.txt')).toBe(true);
   });
 
   it('does not force review for awk field references', () => {

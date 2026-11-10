@@ -2596,6 +2596,12 @@ function stripHeredocBodies(command: string): StrippedHeredocs {
 
     kept.push(line);
     pendingDelimiters.push(...lexer.scan(line));
+    const commentStart = lexer.takeCommentStart();
+    if (commentStart !== null) {
+      // bash never executes a commented tail; dropping it keeps a `>` inside
+      // it from being read as a write.
+      kept[kept.length - 1] = line.slice(0, commentStart);
+    }
   }
 
   return {
@@ -2668,6 +2674,17 @@ class HeredocLexer {
   /** Sticky: a `$'…'` with an escaped quote made the quote state untrusted. */
   private ansiCQuoteUntrusted = false;
   /**
+   * True for the rest of a line whose `#` looked like a comment boundary but
+   * belongs to the previous word. The tail is scanned (so a real write after
+   * it stays visible) but it cannot open a heredoc: guessing that boundary is
+   * exactly what is unproven, and swallowing lines could hide a real command.
+   */
+  private ambiguousCommentTail = false;
+  /** Offset of a definitively-commented tail on the line just scanned. */
+  private commentStart: number | null = null;
+  /** Sticky: a `#` boundary was ambiguous, so this command's own parse is. */
+  private ambiguousCommentBoundary = false;
+  /**
    * True when the previous line ended with an unescaped `$` and a
    * backslash-newline, so a leading `$` on this line forms `$$` (the PID)
    * rather than opening an ANSI-C literal.
@@ -2689,9 +2706,22 @@ class HeredocLexer {
     return this.possibleOpener;
   }
 
+  hasAmbiguousCommentBoundary(): boolean {
+    return this.ambiguousCommentBoundary;
+  }
+
+  /** Offset where a definite comment starts on the last scanned line. */
+  takeCommentStart(): number | null {
+    const start = this.commentStart;
+    this.commentStart = null;
+    return start;
+  }
+
   scan(line: string): string[] {
     const dollarFromPreviousLine = this.continuedDollar;
     this.continuedDollar = false;
+    this.ambiguousCommentTail = false;
+    this.commentStart = null;
     const delimiters: string[] = [];
     // Bash removes a backslash-newline before reading the next line, so
     // nothing stays escaped across the boundary (R25-1).
@@ -2800,11 +2830,15 @@ class HeredocLexer {
             this.closedCommandSubstitution,
           )
         ) {
+          // The `#` may belong to the previous word, so the rest of the line
+          // is real text: keep scanning it instead of dropping it, and let the
+          // caller treat the resulting paths as unproven.
           this.uncertain = true;
-          // The wrong comment break hides the rest of the line, so an opener
-          // there is still possible.
-          if (line.indexOf('<<', index) !== -1) this.possibleOpener = true;
+          this.ambiguousCommentBoundary = true;
+          this.ambiguousCommentTail = true;
+          continue;
         }
+        this.commentStart = index;
         break;
       }
       if (char !== '<' || line[index + 1] !== '<') continue;
@@ -2813,6 +2847,12 @@ class HeredocLexer {
         continue;
       }
       this.possibleOpener = true;
+      if (this.ambiguousCommentTail) {
+        // Seen, but not trusted as a boundary: keep the following lines as
+        // code and let the uncertainty drive the approval.
+        index++;
+        continue;
+      }
       const delimiter = this.readDelimiter(line, index + 2);
       if (delimiter === null) {
         // Keep what this line already found instead of discarding it
@@ -2884,6 +2924,19 @@ class HeredocLexer {
   }
 }
 
+/**
+ * True when this simple command contains a `#` the lexer cannot classify.
+ * Such a `#` may hide or reveal a write in the same command, so the operations
+ * extracted from it are unproven even without a heredoc. An ANSI-C quote alone
+ * does not qualify: the tokenizer decodes it, so the paths it produces are
+ * exact and only the heredoc boundary is in question.
+ */
+function segmentHasAmbiguousComment(command: string): boolean {
+  const lexer = new HeredocLexer();
+  lexer.scan(command);
+  return lexer.hasAmbiguousCommentBoundary();
+}
+
 function walkCompoundCommand(
   command: string,
   cwd: string,
@@ -2950,7 +3003,7 @@ function walkCompoundCommand(
     }
 
     const subOps = extractShellOperations(sub, effectiveCwd);
-    if (cwdUnknown) {
+    if (cwdUnknown || segmentHasAmbiguousComment(sub)) {
       ops.push(...markCwdUnknownOps(subOps, sub, effectiveCwd));
     } else {
       ops.push(...subOps);
