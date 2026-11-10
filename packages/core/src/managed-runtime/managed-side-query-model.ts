@@ -317,7 +317,7 @@ export async function generateManagedSideQuery(
   async function* convertedStream() {
     for await (const chunk of stream) {
       const response = convertOpenAIChunkToLlm(chunk, context);
-      const refusal = chunk.choices[0]?.delta.refusal;
+      const refusal = chunk.choices?.[0]?.delta?.refusal;
       if (typeof refusal === 'string') {
         response.candidates ??= [{}];
         const candidate = response.candidates[0]!;

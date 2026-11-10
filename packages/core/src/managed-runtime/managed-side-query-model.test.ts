@@ -311,6 +311,49 @@ describe('isolated Managed model attempt', () => {
     expect(JSON.stringify(progress.mock.calls)).not.toContain('hidden thought');
     expect(mocks.create.mock.calls[0]?.[0]).toMatchObject({ stream: true });
   });
+  it('settles success when the terminal Chat chunk carries no delta', async () => {
+    mocks.create.mockResolvedValueOnce(
+      (async function* () {
+        yield {
+          id: 'r',
+          object: 'chat.completion.chunk',
+          model: 'explicit',
+          created: 1,
+          choices: [
+            {
+              index: 0,
+              delta: { content: 'complete answer' },
+              finish_reason: null,
+            },
+          ],
+        };
+        yield {
+          id: 'r',
+          object: 'chat.completion.chunk',
+          model: 'explicit',
+          created: 1,
+          choices: [{ index: 0, finish_reason: 'stop' }],
+        };
+      })(),
+    );
+    const result = await generateManagedSideQuery(
+      {
+        model: 'explicit',
+        authType: AuthType.USE_OPENAI,
+        apiKey: 'literal-key',
+        baseUrl: 'https://model.example/v1',
+      },
+      {
+        model: 'explicit',
+        contents: [{ role: 'user', parts: [{ text: 'q' }] }],
+      },
+      new AbortController().signal,
+    );
+    expect(result).toMatchObject({
+      outcome: 'success',
+      text: 'complete answer',
+    });
+  });
   it.each([
     [FinishReason.STOP, 'success'],
     [FinishReason.MAX_TOKENS, 'truncated'],
