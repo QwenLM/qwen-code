@@ -144,6 +144,29 @@ final class ManagedSchemaCatalog {
         return tables;
     }
 
+    /**
+     * True when the catalog holds nothing but a Flyway history table. An embedding application's
+     * own history table is not evidence of a Managed catalog: once business objects are present
+     * the catalog is shared and initialized in place.
+     */
+    static boolean hasOnlyHistory(Connection connection) throws SQLException {
+        try (var result =
+                connection
+                        .getMetaData()
+                        .getTables(
+                                connection.getCatalog(),
+                                connection.getSchema(),
+                                "%",
+                                new String[] {"TABLE", "VIEW"})) {
+            while (result.next()) {
+                if (!"flyway_schema_history".equalsIgnoreCase(result.getString("TABLE_NAME"))) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
     static boolean hasHistory(Connection connection) throws SQLException {
         try (var rows =
                 connection

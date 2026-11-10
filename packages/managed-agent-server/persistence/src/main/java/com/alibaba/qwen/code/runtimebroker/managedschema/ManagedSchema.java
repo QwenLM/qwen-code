@@ -28,7 +28,11 @@ public final class ManagedSchema {
                 ManagedSchemaCatalog.validate(connection, ddl);
                 return;
             }
-            if (ManagedSchemaCatalog.hasHistory(connection)) {
+            // Only a catalog that holds nothing but Flyway history is refused. An
+            // application database that also carries business objects is the shared
+            // catalog this initializer now supports, and its history stays untouched.
+            if (ManagedSchemaCatalog.hasHistory(connection)
+                    && ManagedSchemaCatalog.hasOnlyHistory(connection)) {
                 throw new SQLException("A history-only catalog is not a fresh Managed database");
             }
             execute(connection, ddl);
