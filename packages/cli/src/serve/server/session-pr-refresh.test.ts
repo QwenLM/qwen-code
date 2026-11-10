@@ -2074,6 +2074,36 @@ describe('startSessionPrRefreshTimer', () => {
     }
   });
 
+  it('stopWatch stops the refresh timer while the switch is off', async () => {
+    // The off path's early return calls the same dispose(); pin it by effect.
+    // Stop before any tick runs, like 'stops ticking after dispose' — once a
+    // sweep is in flight its `running` guard skips later ticks under fake
+    // timers, so a post-sweep count would not distinguish armed from stopped.
+    const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
+    const registry = createWorkspaceRegistry([trustedRuntime]);
+    await seedPendingBinding(trustedRuntime, SESSION_A);
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(42, 'merged')],
+    });
+    vi.useFakeTimers();
+    const handle = startSessionPrRefreshTimer({
+      workspaceRegistry: registry,
+      env: {},
+      getPrWatchDeps: () => undefined,
+      getPrDrainDeps: () => undefined,
+    });
+    try {
+      await handle?.stopWatch();
+      // Far past the first-run delay and many default intervals: a still-armed
+      // timer would have swept long before this point.
+      await vi.advanceTimersByTimeAsync(24 * 60 * 60 * 1000);
+      expect(fetchGitHubPullRequestsMock).not.toHaveBeenCalled();
+    } finally {
+      handle?.dispose();
+    }
+  });
+
   it('stopWatch releases the owner record after the watch has run', async () => {
     const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
     const registry = createWorkspaceRegistry([trustedRuntime]);
