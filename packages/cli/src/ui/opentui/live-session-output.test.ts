@@ -568,7 +568,19 @@ describe('logical tools and actual permission transitions', () => {
         const call = h.client.sendMessageStream.mock.calls[index + 1];
         expect(call[0]).toBe(failed.content);
         expect(call[2]).toBe('ordinary-tool');
-        expect(call[3]).toEqual({ type });
+        if (type === SendMessageType.ToolResult) {
+          const sendOptions = call[3] as SendMessageOptions;
+          expect(sendOptions).toEqual({
+            type,
+            toolResultParts: failed.content,
+          });
+          expect(sendOptions.toolResultParts).not.toBe(failed.content);
+          expect(sendOptions.toolResultParts?.[0]).toBe(
+            (failed.content as Part[])[0],
+          );
+        } else {
+          expect(call[3]).toEqual({ type });
+        }
       }
       const frames = await h.frames();
       expect(users(frames)).toHaveLength(3);
@@ -949,9 +961,13 @@ describe('logical tools and actual permission transitions', () => {
       );
       expect(h.client.sendMessageStream).toHaveBeenCalledTimes(2);
       expect(h.client.sendMessageStream.mock.calls[1][0]).toEqual(finalParts);
-      expect(h.client.sendMessageStream.mock.calls[1][3]).toEqual({
+      const sendOptions = h.client.sendMessageStream.mock
+        .calls[1][3] as SendMessageOptions;
+      expect(sendOptions).toEqual({
         type: SendMessageType.ToolResult,
+        toolResultParts: finalParts,
       });
+      expect(sendOptions.toolResultParts?.[0]).toBe(finalParts[0]);
       expect(h.recorder.recordToolResult).toHaveBeenCalledOnce();
       expect(h.recorder.recordToolResult).toHaveBeenCalledWith(
         finalParts,

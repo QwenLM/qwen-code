@@ -1950,7 +1950,7 @@ describe('runNonInteractive', () => {
     mockCoreExecuteToolCall.mockImplementation(async () => {
       leaderMessageCallback?.('Teammate finished the delegated task.');
       return {
-        responseParts: [{ text: 'tool response' }],
+        responseParts: [{ text: 'Teammate finished the delegated task.' }],
       };
     });
     let requestCount = 0;
@@ -1998,7 +1998,7 @@ describe('runNonInteractive', () => {
 
     expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(2);
     const firstOptions = mockLlmClient.sendMessageStream.mock.calls[0]![3];
-    const [, , secondPromptId, secondOptions] =
+    const [secondParts, , secondPromptId, secondOptions] =
       mockLlmClient.sendMessageStream.mock.calls[1]!;
     expect(secondPromptId).toBe('goal-teammate-handoff/teammate/2');
     expect(secondOptions).toMatchObject({
@@ -2007,6 +2007,12 @@ describe('runNonInteractive', () => {
       goalTurnKey: firstOptions.goalTurnKey,
       goalOrigin: 'runtime',
     });
+    expect(firstOptions.toolResultParts).toBeUndefined();
+    expect(secondOptions.toolResultParts).toHaveLength(1);
+    expect(secondOptions.toolResultParts?.[0]).toBe(secondParts[0]);
+    expect(secondParts[1]).toEqual(secondParts[0]);
+    expect(secondParts[1]).not.toBe(secondParts[0]);
+    expect(secondOptions.toolResultParts).not.toContain(secondParts[1]);
     expect(endInteractionSpanSpy).toHaveBeenCalledWith('ok', {
       promptId: 'goal-teammate-handoff',
     });
@@ -2015,7 +2021,7 @@ describe('runNonInteractive', () => {
     );
   });
 
-  it('ends a Goal turn without another model call after update_goal', async () => {
+  it.each([false, true])('ends Goal at update_goal (%s)', async (rejects) => {
     setupMetricsMock();
     mockGetCommands.mockReturnValue([goalCommand]);
     await prepareGoalState('paused');
@@ -2024,7 +2030,15 @@ describe('runNonInteractive', () => {
       .mockResolvedValue(undefined);
     mockCoreExecuteToolCall.mockResolvedValue({
       callId: 'update-goal-terminal',
-      responseParts: [{ text: 'proposal recorded' }],
+      responseParts: [
+        {
+          functionResponse: {
+            id: 'update-goal-terminal',
+            name: 'update_goal',
+            response: { output: 'proposal recorded' },
+          },
+        },
+      ],
       resultDisplay: 'proposal recorded',
       error: undefined,
       errorType: undefined,
@@ -2052,18 +2066,56 @@ describe('runNonInteractive', () => {
         ]),
     );
 
-    const exitCode = await runNonInteractive(
+    let release!: () => void;
+    const barrier = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const recordToolResultAdmission = vi.fn(async (parts: readonly Part[]) => {
+      await barrier;
+      if (rejects) throw new Error('terminal admission write failed');
+      return [{ parts, decision: 'admitted' as const }];
+    });
+    mockConfig.getChatRecordingService.mockReturnValue({
+      ...mockConfig.getChatRecordingService(),
+      recordToolResultAdmission,
+      flush: vi.fn().mockResolvedValue(undefined),
+    });
+    const pending = runNonInteractive(
       mockConfig,
       mockSettings,
       '/goal resume',
       'goal-terminal-tool-result',
     );
 
+    await vi.waitFor(() =>
+      expect(recordToolResultAdmission).toHaveBeenCalledOnce(),
+    );
+    try {
+      expect(mockLlmClient.addHistory).not.toHaveBeenCalled();
+      expect(finishTurn).not.toHaveBeenCalled();
+    } finally {
+      release();
+      await pending;
+    }
+    const exitCode = await pending;
     expect(exitCode).toBe(0);
     expect(mockLlmClient.sendMessageStream).toHaveBeenCalledOnce();
     expect(mockLlmClient.addHistory).toHaveBeenCalledWith({
       role: 'user',
-      parts: [{ text: 'proposal recorded' }],
+      parts: [
+        {
+          functionResponse: {
+            id: 'update-goal-terminal',
+            name: 'update_goal',
+            response: rejects
+              ? {
+                  error:
+                    'The tool had already completed; its output was discarded.',
+                }
+              : { output: 'proposal recorded' },
+          },
+        },
+      ],
     });
     expect(finishTurn).toHaveBeenCalledOnce();
     expect(endInteractionSpanSpy).toHaveBeenCalledWith('ok', {
@@ -4165,7 +4217,11 @@ describe('runNonInteractive', () => {
         [{ text: 'Tool response' }],
         expect.any(AbortSignal),
         'prompt-id-2',
-        { type: SendMessageType.ToolResult, workflowModeEligible: false },
+        {
+          type: SendMessageType.ToolResult,
+          toolResultParts: toolResponse,
+          workflowModeEligible: false,
+        },
       );
       expect(processStdoutSpy).toHaveBeenCalledWith('Final answer\n');
       // Verify recordCompletedToolCall is called with the tool name and args.
@@ -5594,6 +5650,10 @@ describe('runNonInteractive', () => {
         'prompt-tool-image',
         {
           type: SendMessageType.ToolResult,
+          toolResultParts: [
+            { text: 'Tool response with image' },
+            { text: 'Skill response' },
+          ],
           workflowModeEligible: false,
           modelOverride: model,
         },
@@ -5686,6 +5746,7 @@ describe('runNonInteractive', () => {
         'prompt-tool-image',
         {
           type: SendMessageType.ToolResult,
+          toolResultParts: [{ text: 'first image' }, { text: 'second image' }],
           workflowModeEligible: false,
           modelOverride: first,
         },
@@ -7319,7 +7380,18 @@ describe('runNonInteractive', () => {
       ],
       expect.any(AbortSignal),
       'prompt-id-3',
-      { type: SendMessageType.ToolResult, workflowModeEligible: false },
+      {
+        type: SendMessageType.ToolResult,
+        toolResultParts: [
+          {
+            functionResponse: {
+              name: 'errorTool',
+              response: { output: 'Error: Execution failed' },
+            },
+          },
+        ],
+        workflowModeEligible: false,
+      },
     );
     expect(processStdoutSpy).toHaveBeenCalledWith('Sorry, let me try again.\n');
   });
@@ -7613,6 +7685,7 @@ describe('runNonInteractive', () => {
       'prompt-vision-route',
       {
         type: SendMessageType.ToolResult,
+        toolResultParts: [{ text: 'tool response' }],
         workflowModeEligible: false,
         modelOverride: selector,
       },

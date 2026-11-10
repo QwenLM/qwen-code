@@ -30,6 +30,8 @@ import {
   type SessionModelRecordPayload,
   type TurnResultRecordPayload,
 } from './chatRecordingService.js';
+import { buildApiHistoryFromConversation } from './session-api-history.js';
+import { buildSyntheticToolResponseParts } from '../core/turn-interruption.js';
 import { MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS } from '../utils/toolResultDisplayCompaction.js';
 import * as jsonl from '../utils/jsonl-utils.js';
 import {
@@ -2291,6 +2293,369 @@ describe('ChatRecordingService', () => {
       svc.recordToolResult(...args);
       return flushed();
     }
+    describe('strict tool admission', () => {
+      const parts = () => [
+        fnResponse('read_file', { output: 'private body' }, 'read'),
+      ];
+
+      it('rejects a sticky failure even when the tool completion was dropped before matching', async () => {
+        const failure = new Error('earlier record failed');
+        vi.mocked(jsonl.writeLine).mockRejectedValueOnce(failure);
+        user('failed earlier record');
+        await expect(svc.flush()).rejects.toBe(failure);
+        const output = parts();
+        svc.recordToolResult(output);
+        await expect(svc.recordToolResultAdmission(output)).rejects.toBe(
+          failure,
+        );
+      });
+
+      it('rejects an inactive writer instead of reporting admission', async () => {
+        const output = parts();
+        await recordTool(output);
+        svc['acceptingWrites'] = false;
+        await expect(
+          Promise.resolve().then(() => svc.recordToolResultAdmission(output)),
+        ).rejects.toBeInstanceOf(SessionWriterUnavailableError);
+      });
+
+      it('rejects a Managed refusal instead of reporting admission', async () => {
+        const output = parts();
+        await recordTool(output);
+        vi.spyOn(
+          svc as unknown as {
+            refusesManagedRecord(record: ChatRecord): boolean;
+          },
+          'refusesManagedRecord',
+        ).mockReturnValue(true);
+        await expect(
+          Promise.resolve().then(() => svc.recordToolResultAdmission(output)),
+        ).rejects.toThrow('Managed session');
+      });
+
+      it('waits for the receipt write before reporting admission', async () => {
+        const output = parts();
+        await recordTool(output);
+        const write = deferred();
+        vi.mocked(jsonl.writeLine).mockReturnValueOnce(write.promise);
+        let settled = false;
+        const admission = Promise.resolve(
+          svc.recordToolResultAdmission(output),
+        );
+        void admission.then(
+          () => {
+            settled = true;
+          },
+          () => {},
+        );
+        try {
+          await vi.waitFor(() => expect(writes()).toHaveLength(2));
+          expect(settled).toBe(false);
+        } finally {
+          write.resolve();
+        }
+        await expect(admission).resolves.toEqual([
+          { parts: output, decision: 'admitted' },
+        ]);
+      });
+
+      it('rejects a failed receipt and a concurrent reuse of its first decision', async () => {
+        const output = parts();
+        await recordTool(output);
+        const write = deferred();
+        vi.mocked(jsonl.writeLine).mockReturnValueOnce(write.promise);
+        const first = svc.recordToolResultAdmission(output);
+        const reuse = svc.recordToolResultAdmission(output, 'cancelled');
+        const results = Promise.allSettled([first, reuse]);
+        await vi.waitFor(() => expect(writes()).toHaveLength(2));
+        const failure = new Error('receipt write failed');
+        write.reject(failure);
+        await expect(results).resolves.toEqual([
+          { status: 'rejected', reason: failure },
+          { status: 'rejected', reason: failure },
+        ]);
+      });
+
+      it('rejects when the completion itself is still behind the topology fence', async () => {
+        const fence: NonNullable<(typeof svc)['topologyFence']> = {
+          buffered: [],
+        };
+        svc['topologyFence'] = fence;
+        const output = parts();
+        svc.recordToolResult(output);
+        try {
+          await expect(
+            svc.recordToolResultAdmission(output),
+          ).rejects.toBeInstanceOf(SessionTranscriptChangedError);
+          expect(fence.buffered).toHaveLength(1);
+          expect(writes()).toEqual([]);
+        } finally {
+          svc['releaseTopologyFence'](fence);
+        }
+        await svc.flush();
+      });
+
+      it('rejects after closing even when the completion was dropped before matching', async () => {
+        await svc.close();
+        const output = parts();
+        svc.recordToolResult(output);
+        await expect(
+          svc.recordToolResultAdmission(output),
+        ).rejects.toBeInstanceOf(SessionWriterUnavailableError);
+      });
+
+      it('rejects a topology-fenced decision without buffering a receipt', async () => {
+        const output = parts();
+        await recordTool(output);
+        const fence: NonNullable<(typeof svc)['topologyFence']> = {
+          buffered: [],
+        };
+        svc['topologyFence'] = fence;
+        try {
+          await expect(
+            svc.recordToolResultAdmission(output),
+          ).rejects.toBeInstanceOf(SessionTranscriptChangedError);
+          await svc.flush();
+          expect(fence.buffered).toEqual([]);
+          expect(writes()).toHaveLength(1);
+        } finally {
+          svc['releaseTopologyFence'](fence);
+        }
+      });
+
+      it.each([undefined, 'hook blocked'])(
+        'keeps the first decision %s when a later user round arrives during its write',
+        async (firstReason) => {
+          const output = parts();
+          const result = await recordTool(output);
+          const write = deferred();
+          vi.mocked(jsonl.writeLine).mockReturnValueOnce(write.promise);
+          const first = svc.recordToolResultAdmission(output, firstReason);
+          const reuse = svc.recordToolResultAdmission(
+            output,
+            firstReason ? undefined : 'cancelled',
+          );
+          let settled = false;
+          const admissions = Promise.all([first, reuse]);
+          void admissions.then(
+            () => {
+              settled = true;
+            },
+            () => {},
+          );
+          try {
+            await vi.waitFor(() => expect(writes()).toHaveLength(2));
+            user('next round');
+            expect(settled).toBe(false);
+          } finally {
+            write.resolve();
+          }
+          const decision = firstReason ? { withheld: firstReason } : 'admitted';
+          await expect(admissions).resolves.toEqual([
+            [{ parts: output, decision }],
+            [{ parts: output, decision }],
+          ]);
+          expect(writes()[1].systemPayload).toEqual({
+            recordUuids: [result.uuid],
+            decision,
+          });
+          expect(
+            writes().filter((r) => r.subtype === 'tool_result_admission'),
+          ).toHaveLength(1);
+        },
+      );
+
+      it('binds reordered complete packets to the actual submitted instances', async () => {
+        const allowed = [
+          fnResponse('read_file', { output: 'allowed' }, 'allow'),
+          { text: 'same companion' },
+        ];
+        const blocked = [
+          fnResponse('read_file', { output: 'blocked' }, 'block'),
+          { text: 'same companion' },
+        ];
+        await recordTool(allowed);
+        await recordTool(blocked);
+        await svc.recordToolResultAdmission(blocked, 'hook blocked');
+        const sentAllowed = structuredClone(allowed);
+        const sentBlocked = structuredClone(blocked);
+        const admissions = await svc.recordToolResultAdmission([
+          ...sentBlocked,
+          ...sentAllowed,
+        ]);
+        expect(admissions).toEqual([
+          { parts: sentAllowed, decision: 'admitted' },
+          { parts: sentBlocked, decision: { withheld: 'hook blocked' } },
+        ]);
+        expect(admissions[0].parts[0]).toBe(sentAllowed[0]);
+        expect(admissions[0].parts[1]).toBe(sentAllowed[1]);
+        expect(admissions[1].parts[0]).toBe(sentBlocked[0]);
+        expect(admissions[1].parts[1]).toBe(sentBlocked[1]);
+      });
+
+      it.each(['duplicate packet', 'missing repeated companion'] as const)(
+        'rejects %s before committing any positive receipt',
+        async (mode) => {
+          const response = fnResponse(
+            'read_file',
+            { output: 'private' },
+            'read',
+          );
+          const companion = { text: 'same companion' };
+          const packet =
+            mode === 'duplicate packet'
+              ? [response, companion]
+              : [response, companion, { ...companion }];
+          await recordTool(packet);
+          const submitted =
+            mode === 'duplicate packet'
+              ? [...structuredClone(packet), ...structuredClone(packet)]
+              : [response, companion];
+          await expect(
+            svc.recordToolResultAdmission(submitted),
+          ).rejects.toBeInstanceOf(SessionTranscriptChangedError);
+          await svc.flush();
+          expect(
+            writes().filter(
+              (record) => record.subtype === 'tool_result_admission',
+            ),
+          ).toEqual([]);
+        },
+      );
+
+      it('keeps disabled or nonmatching recording a no-op', async () => {
+        const inactive = new ChatRecordingService(mockConfig);
+        await expect(
+          Promise.resolve(inactive.recordToolResultAdmission(parts())),
+        ).resolves.toEqual([]);
+        await expect(
+          Promise.resolve(
+            svc.recordToolResultAdmission([{ text: 'user input' }]),
+          ),
+        ).resolves.toEqual([]);
+        await expect(
+          Promise.resolve(svc.recordToolResultAdmission(parts())),
+        ).resolves.toEqual([]);
+      });
+    });
+
+    it('only admits a complete result of the current round, including its attachments', async () => {
+      const answer = fnResponse('read_file', { output: 'file body' }, 'read');
+      const attachment = { text: 'attachment body' };
+      const result = await recordTool([answer, attachment]);
+      expect(result.requiresToolResultAdmission).toBe(true);
+      await expect(
+        svc.recordToolResultAdmission([
+          fnResponse('read_file', { error: 'blocked' }, 'read'),
+          attachment,
+        ]),
+      ).resolves.toEqual([]);
+      await expect(
+        svc.recordToolResultAdmission(
+          buildSyntheticToolResponseParts(
+            [{ callId: 'read', name: 'read_file' }],
+            'cancelled before admission',
+          ),
+        ),
+      ).resolves.toEqual([]);
+      await expect(
+        svc.recordToolResultAdmission([answer]),
+      ).rejects.toBeInstanceOf(SessionTranscriptChangedError);
+      await svc.flush();
+      expect(writes()).toHaveLength(1);
+      await svc.recordToolResultAdmission([answer, attachment]);
+      expect(await flushed(-1)).toMatchObject({
+        subtype: 'tool_result_admission',
+        systemPayload: { decision: 'admitted', recordUuids: [result.uuid] },
+      });
+      await expect(
+        svc.recordToolResultAdmission([answer]),
+      ).rejects.toBeInstanceOf(SessionTranscriptChangedError);
+      await expect(
+        svc.recordToolResultAdmission([answer, attachment], 'cancelled'),
+      ).resolves.toEqual([
+        { parts: [answer, attachment], decision: 'admitted' },
+      ]);
+      reply('turn finished');
+      await svc.recordToolResultAdmission([answer, attachment]);
+      await svc.flush();
+      expect(
+        writes().filter((r) => r.subtype === 'tool_result_admission'),
+      ).toHaveLength(1);
+    });
+
+    it('keeps each completion first decision when a later setup failure withholds the batch', async () => {
+      const allowed = [fnResponse('read_file', { output: 'allowed' }, 'allow')];
+      const blocked = [fnResponse('read_file', { output: 'blocked' }, 'block')];
+      const undecided = [
+        fnResponse('read_file', { output: 'pending' }, 'pending'),
+      ];
+      await recordTool(allowed);
+      await recordTool(blocked);
+      await recordTool(undecided);
+      await svc.recordToolResultAdmission(allowed);
+      await svc.recordToolResultAdmission(blocked, 'hook blocked');
+      expect(
+        await svc.recordToolResultAdmission(
+          [...allowed, ...blocked, ...undecided],
+          'cancelled',
+        ),
+      ).toEqual([
+        { parts: allowed, decision: 'admitted' },
+        { parts: blocked, decision: { withheld: 'hook blocked' } },
+        { parts: undecided, decision: { withheld: 'cancelled' } },
+      ]);
+      await svc.flush();
+      const receipts = writes().filter(
+        (record) => record.subtype === 'tool_result_admission',
+      );
+      expect(receipts).toHaveLength(3);
+      expect(receipts.map((record) => record.systemPayload)).toEqual([
+        { recordUuids: [writes()[0].uuid], decision: 'admitted' },
+        {
+          recordUuids: [writes()[1].uuid],
+          decision: { withheld: 'hook blocked' },
+        },
+        {
+          recordUuids: [writes()[2].uuid],
+          decision: { withheld: 'cancelled' },
+        },
+      ]);
+    });
+
+    it.each([false, true])(
+      'retains an admitted pending input after a setup failure (compression checkpoint %s)',
+      async (compressed) => {
+        const parts = [
+          fnResponse('read_file', { output: 'allowed pending input' }, 'read'),
+        ];
+        const content: Content = { role: 'user', parts };
+        await recordTool(parts);
+        await svc.recordToolResultAdmission(parts);
+        if (compressed) {
+          svc.recordChatCompression({
+            info: {
+              originalTokenCount: 100,
+              newTokenCount: 20,
+              compressionStatus: CompressionStatus.COMPRESSED,
+            },
+            compressedHistory: [content],
+          });
+        }
+        expect(await svc.recordToolResultAdmission(parts, 'cancelled')).toEqual(
+          [{ parts, decision: 'admitted' }],
+        );
+        expect(
+          buildApiHistoryFromConversation({ messages: await flushedAll() }),
+        ).toEqual([content]);
+        expect(
+          writes().filter(
+            (record) => record.subtype === 'tool_result_admission',
+          ),
+        ).toHaveLength(1);
+      },
+    );
+
     type ToolMeta = Parameters<ChatRecordingService['recordToolResult']>[1];
     // One call-1 response plus success metadata echoing it; the metadata
     // carries undefined `error`/`errorType` keys unless `bare`.

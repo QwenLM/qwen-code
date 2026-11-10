@@ -3424,6 +3424,7 @@ export class SessionTranscriptReader {
         position === compressionPosition ||
         ((entry?.type !== 'system' ||
           entry?.subtype === 'memory_catalog_snapshot' ||
+          entry?.subtype === 'tool_result_admission' ||
           entry?.subtype === 'goal_turn_end' ||
           entry?.subtype === 'slash_command') &&
           (compressionPosition < 0 || position > compressionPosition))

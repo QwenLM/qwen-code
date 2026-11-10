@@ -308,6 +308,8 @@ interface StopHookChain {
 }
 
 export interface SendMessageOptions {
+  /** Tool-owned parts before the host appends independent input. */
+  toolResultParts?: readonly Part[];
   onPreparedRequest?: LlmPreparedRequestCallback;
   type: SendMessageType;
   /** User-submitted text captured before prompt expansion. */
@@ -1271,6 +1273,13 @@ export class LlmClient {
    */
   replaceSynthesizedToolResponse(callId: string, realParts: Part[]): boolean {
     return this.getChat().replaceSynthesizedToolResponse(callId, realParts);
+  }
+
+  replaceSynthesizedToolResponseAsync(
+    callId: string,
+    prepare: () => Promise<Part[]>,
+  ): Promise<boolean> {
+    return this.getChat().replaceSynthesizedToolResponseAsync(callId, prepare);
   }
 
   /**
@@ -5046,6 +5055,13 @@ export class LlmClient {
         }
       }
 
+      if (
+        messageType === SendMessageType.ToolResult &&
+        options?.toolResultParts === undefined
+      ) {
+        // Normalize string companions once so ownership and the send share parts.
+        request = createUserContent(request).parts ?? [];
+      }
       let onModelRequestDispatched: (() => void) | undefined;
       const turn = new Turn(
         this.getChat(),
@@ -5065,6 +5081,10 @@ export class LlmClient {
         options?.toolCallPreparations,
         suppressedHookContext,
         workflowModeEligible ? () => onModelRequestDispatched?.() : undefined,
+        options?.toolResultParts ??
+          (messageType === SendMessageType.ToolResult
+            ? createUserContent(request).parts
+            : undefined),
       );
 
       // Assemble the outgoing request. IDE context is merged into the

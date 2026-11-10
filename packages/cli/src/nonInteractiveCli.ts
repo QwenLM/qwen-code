@@ -5,6 +5,8 @@
  */
 
 import { t } from './i18n/index.js';
+import { settleTerminalToolResultHistory } from './services/tool-result-history.js';
+
 import { isWrappedSystemReminderPart } from '@qwen-code/qwen-code-core/core/environmentContext.js';
 import { getLastApiPromptCancellation } from '@qwen-code/qwen-code-core/services/session-api-history.js';
 import type { HumanPromptInput } from '@qwen-code/qwen-code-core/core/workflow-intent.js';
@@ -3023,6 +3025,9 @@ export async function runNonInteractive(
 
       let currentPromptId = prompt_id;
       while (true) {
+        const toolResultParts = hasUnsentToolResponse
+          ? currentMessages[0]?.parts?.slice()
+          : undefined;
         // Drain pending teammate messages into the conversation.
         // sendMessageStream only reads currentMessages[0].parts,
         // so teammate text must be merged into that same parts
@@ -3094,6 +3099,7 @@ export async function runNonInteractive(
 
         const roundOptions: SendMessageOptions = {
           type: sendType,
+          ...(toolResultParts ? { toolResultParts } : {}),
           modelOverride,
           workflowModeEligible:
             isFirstTurn &&
@@ -3245,7 +3251,13 @@ export async function runNonInteractive(
               shouldFinalizeTurn = true;
               if (!activeGoalTurn) break;
               await modTurn?.complete();
-              llmClient.addHistory({ role: 'user', parts: result.parts ?? [] });
+              llmClient.addHistory(
+                await settleTerminalToolResultHistory(
+                  config.getChatRecordingService?.(),
+                  { role: 'user', parts: result.parts ?? [] },
+                  result.parts ?? [],
+                ),
+              );
               await config.getChatRecordingService?.()?.flush();
               await finishGoalTurn(activeGoalTurn);
               activeGoalTurn = undefined;
@@ -3417,10 +3429,13 @@ export async function runNonInteractive(
             }
             if (terminateTurn && activeGoalTurn) {
               await modTurn?.complete();
-              llmClient.addHistory({
-                role: 'user',
-                parts: toolResponseParts,
-              });
+              llmClient.addHistory(
+                await settleTerminalToolResultHistory(
+                  config.getChatRecordingService?.(),
+                  { role: 'user', parts: toolResponseParts },
+                  toolResponseParts,
+                ),
+              );
               await config.getChatRecordingService?.()?.flush();
               await finishGoalTurn(activeGoalTurn);
               activeGoalTurn = undefined;

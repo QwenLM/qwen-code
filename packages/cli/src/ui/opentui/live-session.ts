@@ -5,6 +5,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  hasToolResultPromptHook,
+  settleTerminalToolResultHistory,
+  UNSENT_TOOL_RESULT,
+} from '../../services/tool-result-history.js';
+
 /**
  * Live-client wiring (P1d): builds a real agent-loop event source from a
  * qwen-code `Config` and maps it onto the neutral `StreamEvent` so the OpenTUI
@@ -769,6 +775,21 @@ export async function* livePromptEvents(
   const dualOutput = options?.dualOutput;
   const promptId = options?.promptId ?? nextLivePromptId(config);
   const abort = signal ?? new AbortController().signal;
+  const retainTerminalToolResults = async (parts: Part[]) => {
+    if (!parts.length || !current() || config.getSessionId() !== sessionId) {
+      return;
+    }
+    const retained = await settleTerminalToolResultHistory(
+      config.getChatRecordingService(),
+      { role: 'user', parts },
+      parts,
+      hasToolResultPromptHook(config) ? UNSENT_TOOL_RESULT : undefined,
+    );
+    if (current() && config.getSessionId() === sessionId) {
+      await client.addHistory(retained);
+    }
+  };
+
   // Read per boundary rather than once: the vision bridge can pick a full-turn
   // model mid-turn, and the rest of the turn then stays on it (ink parity).
   const turnModel: TurnModelOverride = {
@@ -857,16 +878,22 @@ export async function* livePromptEvents(
   // Core settles this carrier at its request-local history push. Neither a
   // stream event nor a normal empty stream proves that this input was pushed.
   let pendingSteer: SteerInput | undefined;
+  let pendingToolResultParts: readonly Part[] | undefined;
   const acceptedSteerEvents: OpenTuiStreamEvent[] = [];
   let first = true;
   const waitingSeen = new Set<string>();
   for (;;) {
     if (!current() || abort.aborted) {
       pendingSteer?.restore();
+      if (abort.aborted && pendingToolResultParts) {
+        await retainTerminalToolResults([...pendingToolResultParts]);
+      }
       return;
     }
     const steerInput = pendingSteer;
     pendingSteer = undefined;
+    const toolResultParts = pendingToolResultParts;
+    pendingToolResultParts = undefined;
     const prepared: PreparedLiveRequest = {
       content: nextPrompt,
       modelOverride: turnModel.current,
@@ -923,6 +950,7 @@ export async function* livePromptEvents(
         }
       : {
           type: SendMessageType.ToolResult,
+          ...(toolResultParts ? { toolResultParts } : {}),
           ...(turnModel.current ? { modelOverride: turnModel.current } : {}),
           ...(carrier ? { steerInput: carrier } : {}),
         };
@@ -1510,9 +1538,7 @@ export async function* livePromptEvents(
     // texts stay parked for the post-turn queue drain instead of riding a
     // request that will never be sent.
     if (completed.every((call) => call.status === 'cancelled')) {
-      if (responseParts.length > 0) {
-        await client.addHistory({ role: 'user', parts: responseParts });
-      }
+      await retainTerminalToolResults(responseParts);
       options?.onToolsCancelled?.();
       return;
     }
@@ -1531,6 +1557,11 @@ export async function* livePromptEvents(
         });
       }
     }
+    if (abort.aborted) {
+      await retainTerminalToolResults(responseParts);
+      return;
+    }
+    pendingToolResultParts = responseParts.slice();
     // Sampling boundary: drained steering rides after the tool responses as
     // genuine user content (original useGeminiStream mid-turn drain).
     if (!abort.aborted) {
@@ -1554,9 +1585,7 @@ export async function* livePromptEvents(
           options?.restoreSteering?.(
             steered.restore.length > 0 ? steered.restore : texts,
           );
-          if (responseParts.length > 0) {
-            await client.addHistory({ role: 'user', parts: responseParts });
-          }
+          await retainTerminalToolResults(responseParts);
           return;
         }
         if (steered.restore.length > 0) {

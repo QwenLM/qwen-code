@@ -762,6 +762,7 @@ export class Turn {
     private readonly yieldsToolCallPreparations?: boolean,
     private readonly suppressedHookContext?: string,
     private readonly onModelRequestDispatched?: () => void,
+    private readonly toolResultParts?: readonly Part[],
   ) {
     this.goalContext = goalContext ? { ...goalContext } : undefined;
   }
@@ -782,8 +783,12 @@ export class Turn {
         this.retractDeliveredOutputOnRetry === true ||
         this.onPreparedRequest !== undefined ||
         this.onModelRequestDispatched !== undefined ||
-        this.suppressedHookContext !== undefined
+        this.suppressedHookContext !== undefined ||
+        this.toolResultParts !== undefined
           ? {
+              ...(this.toolResultParts
+                ? { toolResultParts: this.toolResultParts }
+                : {}),
               ...(this.onPreparedRequest
                 ? { onPreparedRequest: this.onPreparedRequest }
                 : {}),

@@ -483,7 +483,7 @@ const allowOnce = () => ({
         for (const [promptIndex, text] of scenario.prompts.entries()) {
           let settled = false;
           const cancelFile = scenario.cancelOnFile;
-          if (cancelFile) {
+          if (cancelFile && promptIndex === 0) {
             void (async () => {
               while (!settled && !existsSync(join(dir, cancelFile))) {
                 await new Promise((resolve) => setTimeout(resolve, 50));
@@ -975,7 +975,7 @@ const allowOnce = () => ({
     it('cancels a tool-result request whose UserPromptSubmit hook is still running', async () => {
       const scenario: Scenario = {
         name: 'cancel during a tool-result hook',
-        prompts: ['Read the readme.'],
+        prompts: ['Read the readme.', 'Next.'],
         settings: { hooks: hooks('UserPromptSubmit', 'slow-hook.mjs') },
         cancelOnFile: 'hook-waiting',
         prepare: (r) => {
@@ -1004,9 +1004,15 @@ const allowOnce = () => ({
       const started = Date.now();
       const shared = await run(scenario, true);
 
-      expect(shared.stopReasons).toEqual(['cancelled']);
+      expect(shared.stopReasons).toEqual(['cancelled', 'end_turn']);
       // The tool result never reached the model.
-      expect(shared.requests).toHaveLength(1);
+      expect(shared.requests).toHaveLength(2);
+      expect(shared.requests[1]).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ role: 'tool', tool_call_id: 'call_read' }),
+        ]),
+      );
+      expect(JSON.stringify(shared.requests[1])).not.toContain('readme body');
       expect(Date.now() - started).toBeLessThan(30_000);
     }, 120_000);
 

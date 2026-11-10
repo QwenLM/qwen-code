@@ -4,6 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { settleToolResultHistory } from '@qwen-code/qwen-code-core/services/tool-result-history.js';
+import { SessionTranscriptChangedError } from '@qwen-code/qwen-code-core/services/session-writer-lease.js';
+import {
+  hasToolResultPromptHook,
+  settleTerminalToolResultHistory,
+} from '../../services/tool-result-history.js';
+
 import { removeFileHistorySnapshots } from '@qwen-code/qwen-code-core/utils/file-history-snapshots.js';
 import { getRequestModel } from '@qwen-code/qwen-code-core/core/request-model.js';
 import { resolveWorkflowIntent } from '@qwen-code/qwen-code-core/core/workflow-intent.js';
@@ -41,7 +48,6 @@ import {
   type StructuredError,
 } from '@qwen-code/qwen-code-core/core/turn.js';
 import { toolCallArgumentsWereIncomplete } from '@qwen-code/qwen-code-core/core/incomplete-tool-call-args.js';
-import { buildSyntheticToolResponseParts } from '@qwen-code/qwen-code-core/core/turn-interruption.js';
 import { codeModeToolResultStamp } from '@qwen-code/qwen-code-core/goals/goal-tool-result-provenance.js';
 import { collectText } from '@qwen-code/qwen-code-core/services/visionBridge/image-part-utils.js';
 import {
@@ -973,6 +979,7 @@ interface ResponseInterrupt {
 /** A round of a turn on the shared agent loop; see `#runSharedRound`. */
 interface SharedRound {
   message: Content;
+  toolOutputParts: readonly Part[];
   promptId: string;
   type: SendMessageType;
   /** The send options of the round's type and of a Goal turn. */
@@ -996,7 +1003,7 @@ interface SharedRound {
   /** Names the round in the logs of its tool-call preparations. */
   label: string;
   /** Keeps a message whose request never went out. */
-  keepUnsent: (message: Content, full: boolean) => void;
+  keepUnsent: (message: Content, full: boolean) => Promise<void>;
   /** Whether a request a limit stopped is kept whole, not only its results. */
   keepFullOnStop?: boolean;
   /** Called before the request goes out. */
@@ -2745,6 +2752,7 @@ export class Session implements SessionContext {
   // batch so a transient stall can't silently lose them. See
   // `#drainMidTurnUserMessages`.
   private midTurnRecoveredMessages: DrainedMidTurnMessage[] = [];
+  private readonly midTurnUserParts = new WeakSet<Part>();
   // The turn the user asked to send queued input now for. Cleared whenever a
   // drain request goes out, since that request takes everything queued before
   // it; a request left over from an earlier turn never matches a later one.
@@ -7943,6 +7951,7 @@ export class Session implements SessionContext {
             // resolver treats that one as the turn's anchor.
             let nextMessage: Content | null = { role: 'user', parts };
             markApiHistoryPrompt(nextMessage, historyPromptId);
+            let toolOutputParts: readonly Part[] = [];
             let turnCount = 0;
             // Puts a continue's stripped user run back while no request has
             // re-pushed it. A later send's push leaves the counter advanced,
@@ -8095,6 +8104,7 @@ export class Session implements SessionContext {
                   await this.#preserveStoppedToolRun(
                     toolRun,
                     pendingSend.signal,
+                    false,
                   );
                   return {
                     stopReason: getAbortAwareEndTurnStopReason(
@@ -8110,7 +8120,9 @@ export class Session implements SessionContext {
                   onFullTurnModel,
                   rejectOnLoopDetected,
                   sharedToolBatch,
+                  false,
                 );
+                toolOutputParts = toolRun.parts;
                 nextMessage = nextAfterTools.message;
                 if (nextAfterTools.stoppedByRepeatedToolFailure) {
                   return {
@@ -8127,6 +8139,7 @@ export class Session implements SessionContext {
                   await this.#preserveStoppedToolRun(
                     toolRun,
                     pendingSend.signal,
+                    false,
                   );
                   return {
                     stopReason: rejectOnLoopDetected
@@ -8190,7 +8203,6 @@ export class Session implements SessionContext {
                       putBackUnsentContinue()
                     )
                   ) {
-                    const chat = this.#getCurrentChat();
                     // Take the turn id only on a tool-lap continuation: it is
                     // the entry that belongs to this turn without starting it.
                     // An unmarked prompt entry is either the prompt this turn
@@ -8201,7 +8213,16 @@ export class Session implements SessionContext {
                     if (isToolLapContinuation(nextMessage)) {
                       markApiHistoryPrompt(nextMessage, responseCapture.turnId);
                     }
-                    chat.addHistory(nextMessage);
+                    await this.#preserveUnsentMessageHistory(
+                      nextMessage,
+                      true,
+                      toolOutputParts,
+                      sharedModelRound &&
+                        turnCount > 1 &&
+                        hasToolResultPromptHook(this.config)
+                        ? TOOL_POST_EXECUTION_CANCELLED_MESSAGE
+                        : undefined,
+                    );
                   }
                   if (restorePostAnswerNoticesAttached) {
                     this.#clearPendingRestoreNotices();
@@ -8248,10 +8269,18 @@ export class Session implements SessionContext {
                   // re-entered turn found it: a retry's stripped attempt is put
                   // back when the prompt ends, and a continue's orphaned
                   // entries are put back here.
-                  const keepUnsent = (unsent: Content, full: boolean) => {
+                  const keepUnsent = async (unsent: Content, full: boolean) => {
                     if (restoresOriginalRetry) return;
                     if (turnCount === 1 && putBackUnsentContinue()) return;
-                    this.#preserveUnsentMessageHistory(unsent, full);
+                    await this.#preserveUnsentMessageHistory(
+                      unsent,
+                      full,
+                      toolOutputParts,
+                      roundType === SendMessageType.ToolResult &&
+                        hasToolResultPromptHook(this.config)
+                        ? TOOL_POST_EXECUTION_CANCELLED_MESSAGE
+                        : undefined,
+                    );
                     // A restore's notices now sit in history with its answer.
                     if (
                       full &&
@@ -8282,6 +8311,7 @@ export class Session implements SessionContext {
                   roundKeepTurnForInput = responseInterrupt.keepTurnForInput;
                   const roundResult = await this.#runSharedRound({
                     message,
+                    toolOutputParts,
                     promptId,
                     type: roundType,
                     options: {
@@ -8344,6 +8374,7 @@ export class Session implements SessionContext {
                     // stripped and carries the restore's notices, even when
                     // its response then fails.
                     onSettled: (pushed) => {
+                      if (pushed) toolOutputParts = [];
                       if (!pushed || turnCount !== 1) return;
                       if (restoresOriginalRetry) retryHistoryReplaced = true;
                       strippedOrphanEntries = null;
@@ -8400,6 +8431,9 @@ export class Session implements SessionContext {
                         nextMessage?.parts ?? [],
                         responseInterrupt.signal,
                         {
+                          ...(toolOutputParts.length
+                            ? { toolResultParts: toolOutputParts }
+                            : {}),
                           modelOverride: fullTurnModelOverride,
                           suppressedHookContext,
                           historyPromptId:
@@ -8444,9 +8478,10 @@ export class Session implements SessionContext {
                         );
                       }
                       if (!restoresOriginalRetry) {
-                        this.#preserveUnsentMessageHistory(
+                        await this.#preserveUnsentMessageHistory(
                           nextMessage,
                           preserveFullMessage,
+                          toolOutputParts,
                         );
                       }
                       if (
@@ -8467,6 +8502,7 @@ export class Session implements SessionContext {
                       sendResult.responseStream,
                     );
                     nextMessage = null;
+                    toolOutputParts = [];
                     channelDeliveryResponseBlock =
                       beginChannelDeliveryResponseBlock(responseCapture);
                     channelDeliveryCheckpoint =
@@ -8648,6 +8684,7 @@ export class Session implements SessionContext {
                     await this.#preserveStoppedToolRun(
                       toolRun,
                       pendingSend.signal,
+                      sharedModelRound,
                     );
                     return {
                       stopReason: getAbortAwareEndTurnStopReason(
@@ -8685,7 +8722,9 @@ export class Session implements SessionContext {
                       onFullTurnModel,
                       rejectOnLoopDetected,
                       sharedToolBatch,
+                      sharedModelRound,
                     );
+                  toolOutputParts = toolRun.parts;
                   nextMessage = nextAfterTools.message;
                   if (nextAfterTools.stoppedByRepeatedToolFailure) {
                     pauseGoalForLoopStop();
@@ -8704,6 +8743,7 @@ export class Session implements SessionContext {
                     await this.#preserveStoppedToolRun(
                       toolRun,
                       pendingSend.signal,
+                      sharedModelRound,
                     );
                     return {
                       stopReason: rejectOnLoopDetected
@@ -8791,6 +8831,19 @@ export class Session implements SessionContext {
     });
   }
 
+  async #closeWithheldToolResults(
+    message: Content,
+    toolOutputParts: readonly Part[],
+    reason: string,
+  ): Promise<Content> {
+    return settleTerminalToolResultHistory(
+      this.config.getChatRecordingService(),
+      message,
+      toolOutputParts,
+      reason,
+    );
+  }
+
   /**
    * One round of a turn on the shared agent loop: a request through
    * `LlmClient` and the continuations the client sends at its stop point,
@@ -8808,8 +8861,18 @@ export class Session implements SessionContext {
       functionCalls,
       toolRequests,
       preparationTracker,
-      keepUnsent,
     } = round;
+    const keepUnsentAfterFailure = async (unsent: Content, full: boolean) => {
+      try {
+        await round.keepUnsent(unsent, full);
+      } catch (error) {
+        if (round.toolOutputParts.length === 0) throw error;
+        debugLogger.warn(
+          'Failed to settle unsent ACP tool results after the round stopped',
+          error,
+        );
+      }
+    };
     let usageMetadata: GenerateContentResponseUsageMetadata | null = null;
     let streamStartTime = Date.now();
     const requestRouteKey = await this.#requestRouteKeyForModel(
@@ -8892,6 +8955,7 @@ export class Session implements SessionContext {
             }),
             toolCallPreparations: true,
             ...round.options,
+            toolResultParts: round.toolOutputParts,
           },
         },
         responseInterrupt.signal,
@@ -9070,7 +9134,7 @@ export class Session implements SessionContext {
           if (signal.aborted) {
             markApiHistoryPrompt(message, responseCapture.turnId);
           }
-          keepUnsent(message, signal.aborted);
+          await keepUnsentAfterFailure(message, signal.aborted);
         }
         return {
           ended: await this.#endFailedModelRound(
@@ -9112,7 +9176,7 @@ export class Session implements SessionContext {
       this.todoStopGuard.suspend();
       if (!pushed) {
         markApiHistoryPrompt(message, responseCapture.turnId);
-        keepUnsent(message, true);
+        await keepUnsentAfterFailure(message, true);
       }
       return { ended: { stopReason: 'cancelled' } };
     }
@@ -9121,31 +9185,14 @@ export class Session implements SessionContext {
       // A tool-result round the hook blocked closes its calls
       // with the block, not with the results it withheld from
       // the model, nor with the repair's "retry if needed".
-      const blockedCalls = (message.parts ?? []).flatMap(
-        ({ functionResponse }) =>
-          functionResponse?.id
-            ? [
-                {
-                  callId: functionResponse.id,
-                  name: functionResponse.name ?? '',
-                },
-              ]
-            : [],
-      );
-      // Input taken with the results, already shown as
-      // delivered, stays in history with the closed calls, as a
-      // stopped tool run keeps it.
-      if (!pushed && blockedCalls.length > 0) {
-        this.#getCurrentChat().addHistory({
-          role: 'user',
-          parts: [
-            ...buildSyntheticToolResponseParts(
-              blockedCalls,
-              USER_PROMPT_BLOCKED_TOOL_RESULT,
-            ),
-            ...(message.parts ?? []).filter((part) => !part.functionResponse),
-          ],
-        });
+      if (!pushed && message.parts?.some((part) => part.functionResponse)) {
+        this.#getCurrentChat().addHistory(
+          await this.#closeWithheldToolResults(
+            message,
+            round.toolOutputParts,
+            USER_PROMPT_BLOCKED_TOOL_RESULT,
+          ),
+        );
       }
       return { ended: { stopReason: 'end_turn' } };
     }
@@ -9157,7 +9204,7 @@ export class Session implements SessionContext {
       this.todoStopGuard.suspend();
       await showBackgroundResponse();
       if (!pushed) {
-        keepUnsent(message, round.keepFullOnStop === true);
+        await round.keepUnsent(message, round.keepFullOnStop === true);
       }
       if (roundStop === 'session_token_limit') {
         return { ended: { stopReason: 'max_tokens' } };
@@ -9243,6 +9290,7 @@ export class Session implements SessionContext {
       turn.onMessageKept?.(sent);
     };
     let nextMessage: Content | null = turn.message;
+    let toolOutputParts: readonly Part[] = [];
     let rounds = 0;
     try {
       while (nextMessage !== null) {
@@ -9255,7 +9303,14 @@ export class Session implements SessionContext {
           this.todoStopGuard.suspend();
           // The results of the tools that ran stay in history, as a
           // cancelled prompt keeps them.
-          this.#preserveUnsentMessageHistory(message, true);
+          await this.#preserveUnsentMessageHistory(
+            message,
+            true,
+            toolOutputParts,
+            !first && hasToolResultPromptHook(this.config)
+              ? TOOL_POST_EXECUTION_CANCELLED_MESSAGE
+              : undefined,
+          );
           if (first) keepMessage(false);
           return { stopReason: 'cancelled' };
         }
@@ -9268,6 +9323,7 @@ export class Session implements SessionContext {
         let requestUnsent = () => true;
         const round = await this.#runSharedRound({
           message,
+          toolOutputParts,
           promptId,
           type: first
             ? turn.type
@@ -9292,8 +9348,15 @@ export class Session implements SessionContext {
           toolRequests,
           preparationTracker,
           label: turn.label,
-          keepUnsent: (unsent, full) => {
-            this.#preserveUnsentMessageHistory(unsent, full);
+          keepUnsent: async (unsent, full) => {
+            await this.#preserveUnsentMessageHistory(
+              unsent,
+              full,
+              toolOutputParts,
+              !first && hasToolResultPromptHook(this.config)
+                ? TOOL_POST_EXECUTION_CANCELLED_MESSAGE
+                : undefined,
+            );
             if (first && full) keepMessage(false);
           },
           onOpen: (open) => {
@@ -9339,7 +9402,7 @@ export class Session implements SessionContext {
             );
         if (toolRun.stopAfterPermissionCancel || signal.aborted) {
           this.todoStopGuard.suspend();
-          await this.#preserveStoppedToolRun(toolRun, signal);
+          await this.#preserveStoppedToolRun(toolRun, signal, true);
           return {
             stopReason: getAbortAwareEndTurnStopReason(signal),
             stoppedShort: true,
@@ -9363,11 +9426,13 @@ export class Session implements SessionContext {
           undefined,
           false,
           sharedToolBatch,
+          true,
         );
+        toolOutputParts = toolRun.parts;
         nextMessage = next.message;
         if (toolRun.loopDetected) {
           this.todoStopGuard.suspend();
-          await this.#preserveStoppedToolRun(toolRun, signal);
+          await this.#preserveStoppedToolRun(toolRun, signal, true);
           return {
             stopReason: getAbortAwareEndTurnStopReason(signal),
             stoppedShort: true,
@@ -9523,7 +9588,7 @@ export class Session implements SessionContext {
           pendingSend.signal.aborted ||
           (this.pendingPrompt && this.pendingPrompt !== pendingSend)
         ) {
-          this.#preserveUnsentMessageHistory(
+          await this.#preserveUnsentMessageHistory(
             { role: 'user', parts: backgroundParts },
             true,
           );
@@ -9563,7 +9628,7 @@ export class Session implements SessionContext {
             );
             if (claim === 'queued') {
               blockGoalProposalSettlement();
-              this.#preserveUnsentMessageHistory(
+              await this.#preserveUnsentMessageHistory(
                 { role: 'user', parts: drained.parts },
                 true,
               );
@@ -9678,7 +9743,7 @@ export class Session implements SessionContext {
               );
               if (claim === 'queued') {
                 blockGoalProposalSettlement();
-                this.#preserveUnsentMessageHistory(
+                await this.#preserveUnsentMessageHistory(
                   { role: 'user', parts: drained.parts },
                   true,
                 );
@@ -9891,21 +9956,25 @@ export class Session implements SessionContext {
     } = {},
   ): Promise<StopContinuationResult> {
     let nextMessage: Content | null = { role: 'user', parts };
+    let toolOutputParts: readonly Part[] = [];
     let nextGuardContinuation = options.guardContinuation;
     const toolLoopState = createDaemonToolLoopState('off');
     let initialSend = true;
     let automaticContinuationValidated = false;
     let supersededAutomaticContinuation = false;
-    const preservePendingMessage = (message: Content) => {
+    const preservePendingMessage = async (message: Content) => {
       if (initialSend) return;
       const preservedParts = (message.parts ?? []).filter(
-        (part) => !('text' in part && isTodoStopGuardPromptText(part.text)),
+        (part) =>
+          toolOutputParts.includes(part) ||
+          !('text' in part && isTodoStopGuardPromptText(part.text)),
       );
-      this.#preserveUnsentMessageHistory(
+      await this.#preserveUnsentMessageHistory(
         preservedParts.length > 0
           ? { ...message, parts: preservedParts }
           : null,
         true,
+        toolOutputParts,
       );
     };
     // A skipped send that yields to a queued user prompt (or to an
@@ -9916,7 +9985,7 @@ export class Session implements SessionContext {
 
     while (nextMessage !== null) {
       if (this.pendingPrompt && this.pendingPrompt !== pendingSend) {
-        preservePendingMessage(nextMessage);
+        await preservePendingMessage(nextMessage);
         return {
           kind: 'terminal',
           stopReason: 'cancelled',
@@ -9926,7 +9995,7 @@ export class Session implements SessionContext {
         };
       }
       if (pendingSend.signal.aborted) {
-        preservePendingMessage(nextMessage);
+        await preservePendingMessage(nextMessage);
         this.todoStopGuard.suspend();
         return {
           kind: 'terminal',
@@ -9956,7 +10025,9 @@ export class Session implements SessionContext {
       let preservePreparedMessageOnSkippedSend =
         !guardForThisSend &&
         preparedMessage.some(
-          (part) => !('text' in part && isTodoStopGuardPromptText(part.text)),
+          (part) =>
+            toolOutputParts.includes(part) ||
+            !('text' in part && isTodoStopGuardPromptText(part.text)),
         );
       const externalParts = initialSend ? options.externalParts : undefined;
       const promptIdForSend =
@@ -9984,6 +10055,9 @@ export class Session implements SessionContext {
           nextMessage.parts ?? [],
           responseInterrupt.signal,
           {
+            ...(toolOutputParts.length
+              ? { toolResultParts: toolOutputParts }
+              : {}),
             skipCompression:
               skipCompression || (guardForThisSend?.attempt ?? 0) > 1,
             getModelOverride: options.getModelOverride,
@@ -10008,7 +10082,19 @@ export class Session implements SessionContext {
                         preservePreparedMessageOnSkippedSend = true;
                         messageForPreservation = {
                           role: 'user',
-                          parts: drained.parts,
+                          parts: initialSend
+                            ? drained.parts
+                            : [
+                                ...(nextMessage?.parts ?? []).filter(
+                                  (part) =>
+                                    toolOutputParts.includes(part) ||
+                                    !(
+                                      'text' in part &&
+                                      isTodoStopGuardPromptText(part.text)
+                                    ),
+                                ),
+                                ...drained.parts,
+                              ],
                         };
                         if (initialSend) {
                           supersededAutomaticContinuation = true;
@@ -10031,6 +10117,7 @@ export class Session implements SessionContext {
                       : [
                           ...(nextMessage?.parts ?? []).filter(
                             (part) =>
+                              toolOutputParts.includes(part) ||
                               !(
                                 'text' in part &&
                                 isTodoStopGuardPromptText(part.text)
@@ -10059,6 +10146,7 @@ export class Session implements SessionContext {
                         ...nextMessage,
                         parts: (nextMessage.parts ?? []).filter(
                           (part) =>
+                            toolOutputParts.includes(part) ||
                             !(
                               'text' in part &&
                               isTodoStopGuardPromptText(part.text)
@@ -10093,6 +10181,7 @@ export class Session implements SessionContext {
                           ...nextMessage,
                           parts: (nextMessage.parts ?? []).filter(
                             (part) =>
+                              toolOutputParts.includes(part) ||
                               !(
                                 'text' in part &&
                                 isTodoStopGuardPromptText(part.text)
@@ -10133,6 +10222,7 @@ export class Session implements SessionContext {
                           ...nextMessage,
                           parts: (nextMessage.parts ?? []).filter(
                             (part) =>
+                              toolOutputParts.includes(part) ||
                               !(
                                 'text' in part &&
                                 isTodoStopGuardPromptText(part.text)
@@ -10170,6 +10260,7 @@ export class Session implements SessionContext {
                           ...nextMessage,
                           parts: (nextMessage.parts ?? []).filter(
                             (part) =>
+                              toolOutputParts.includes(part) ||
                               !(
                                 'text' in part &&
                                 isTodoStopGuardPromptText(part.text)
@@ -10216,6 +10307,7 @@ export class Session implements SessionContext {
                     ? externalParts
                     : preparedMessage.filter(
                         (part) =>
+                          toolOutputParts.includes(part) ||
                           !(
                             'text' in part &&
                             isTodoStopGuardPromptText(part.text)
@@ -10255,14 +10347,17 @@ export class Session implements SessionContext {
             this.todoStopGuard.suspend();
           }
           const preservedParts = (messageForPreservation.parts ?? []).filter(
-            (part) => !('text' in part && isTodoStopGuardPromptText(part.text)),
+            (part) =>
+              toolOutputParts.includes(part) ||
+              !('text' in part && isTodoStopGuardPromptText(part.text)),
           );
-          this.#preserveUnsentMessageHistory(
+          await this.#preserveUnsentMessageHistory(
             preservedParts.length > 0
               ? { ...messageForPreservation, parts: preservedParts }
               : null,
             sendResult.stopReason === 'cancelled' ||
               preservePreparedMessageOnSkippedSend,
+            toolOutputParts,
           );
           return {
             kind: 'terminal',
@@ -10278,6 +10373,7 @@ export class Session implements SessionContext {
           sendResult.responseStream,
         );
         nextMessage = null;
+        toolOutputParts = [];
         channelDeliveryResponseBlock = beginChannelDeliveryResponseBlock(
           options.responseCapture,
         );
@@ -10387,7 +10483,9 @@ export class Session implements SessionContext {
       } catch (error) {
         streamFailed = true;
         const preservedParts = (messageForPreservation.parts ?? []).filter(
-          (part) => !('text' in part && isTodoStopGuardPromptText(part.text)),
+          (part) =>
+            toolOutputParts.includes(part) ||
+            !('text' in part && isTodoStopGuardPromptText(part.text)),
         );
         if (
           preservedParts.length > 0 &&
@@ -10395,9 +10493,10 @@ export class Session implements SessionContext {
             (providerSendChat.getUserContentPushCount?.() ?? 0) <=
               userContentPushCountBeforeSend)
         ) {
-          this.#preserveUnsentMessageHistory(
+          await this.#preserveUnsentMessageHistory(
             { ...messageForPreservation, parts: preservedParts },
             true,
+            toolOutputParts,
           );
         }
         const isControlledCancellation =
@@ -10499,7 +10598,11 @@ export class Session implements SessionContext {
         );
         if (toolRun.stopAfterPermissionCancel || pendingSend.signal.aborted) {
           this.todoStopGuard.suspend();
-          await this.#preserveStoppedToolRun(toolRun, pendingSend.signal);
+          await this.#preserveStoppedToolRun(
+            toolRun,
+            pendingSend.signal,
+            false,
+          );
           return {
             kind: 'terminal',
             stopReason: getAbortAwareEndTurnStopReason(pendingSend.signal),
@@ -10510,7 +10613,11 @@ export class Session implements SessionContext {
         }
         if (toolRun.loopDetected) {
           this.todoStopGuard.suspend();
-          await this.#preserveStoppedToolRun(toolRun, pendingSend.signal);
+          await this.#preserveStoppedToolRun(
+            toolRun,
+            pendingSend.signal,
+            false,
+          );
           return {
             kind: 'terminal',
             // Only the foreground chain rejects a loop-detected stop; cron
@@ -10549,6 +10656,7 @@ export class Session implements SessionContext {
           options.onFullTurnModel,
           options.rejectOnLoopDetected ?? false,
         );
+        toolOutputParts = toolRun.parts;
         nextMessage = nextAfterTools.message;
         if (nextAfterTools.stoppedByRepeatedToolFailure) {
           return {
@@ -10597,7 +10705,11 @@ export class Session implements SessionContext {
             // Guard prompt or charging another Guard attempt.
             nextGuardContinuation = undefined;
           } else {
-            this.#preserveUnsentMessageHistory(nextMessage, true);
+            await this.#preserveUnsentMessageHistory(
+              nextMessage,
+              true,
+              toolOutputParts,
+            );
             return {
               kind: 'natural_stop',
               ...(supersededAutomaticContinuation
@@ -11065,6 +11177,7 @@ export class Session implements SessionContext {
     message: Part[],
     abortSignal: AbortSignal,
     options: {
+      toolResultParts?: readonly Part[];
       skipCompression?: boolean;
       historyPromptId?: string;
       modelOverride?: string;
@@ -11256,9 +11369,13 @@ export class Session implements SessionContext {
         promptId,
         goalPermit,
         historyPromptId !== undefined ||
+          options.toolResultParts !== undefined ||
           options.onModelRequestDispatched ||
           options.suppressedHookContext
           ? {
+              ...(options.toolResultParts
+                ? { toolResultParts: options.toolResultParts }
+                : {}),
               ...(historyPromptId !== undefined
                 ? { promptId: historyPromptId }
                 : {}),
@@ -11368,39 +11485,50 @@ export class Session implements SessionContext {
     );
   }
 
-  #preserveUnsentMessageHistory(
+  async #preserveUnsentMessageHistory(
     message: Content | null,
     preserveFullMessage: boolean,
-  ): void {
+    toolOutputParts: readonly Part[] = [],
+    withheldReason?: string,
+  ): Promise<void> {
     if (!message) return;
-
-    if (preserveFullMessage) {
-      this.#getCurrentChat().addHistory(message);
-      return;
-    }
-
-    const functionResponseParts =
-      message.parts?.filter(
-        (part: Part) => 'functionResponse' in part && part.functionResponse,
-      ) ?? [];
-    const droppedParts =
-      (message.parts?.length ?? 0) - functionResponseParts.length;
-    if (droppedParts > 0) {
-      debugLogger.debug(
-        `Dropping ${droppedParts} non-functionResponse part(s) from unsent ACP message after send was skipped.`,
-      );
-    }
-    if (functionResponseParts.length > 0) {
-      this.#getCurrentChat().addHistory({
-        ...message,
-        parts: functionResponseParts,
-      });
-    }
+    const owned = toolOutputParts.filter((part) =>
+      message.parts?.includes(part),
+    );
+    if (owned.length !== toolOutputParts.length)
+      throw new SessionTranscriptChangedError();
+    const parts = preserveFullMessage
+      ? (message.parts ?? [])
+      : (message.parts ?? []).filter(
+          (part) => part.functionResponse || owned.includes(part),
+        );
+    if (!parts.length) return;
+    const preserved = { ...message, parts };
+    this.#getCurrentChat().addHistory(
+      owned.length
+        ? await settleTerminalToolResultHistory(
+            this.config.getChatRecordingService(),
+            preserved,
+            owned,
+            withheldReason,
+            preserveFullMessage
+              ? undefined
+              : () => ({
+                  ...message,
+                  parts: message.parts?.filter(
+                    (part) =>
+                      parts.includes(part) || this.midTurnUserParts.has(part),
+                  ),
+                }),
+          )
+        : preserved,
+    );
   }
 
   async #preserveStoppedToolRun(
     toolRun: RunToolResult,
     abortSignal: AbortSignal,
+    toolResultHookEligible: boolean,
   ): Promise<void> {
     // Leave host-queued input in place, but preserve messages already removed
     // by a prior timed-out drain before returning the cancellation response.
@@ -11411,17 +11539,24 @@ export class Session implements SessionContext {
           { preserveFallbackOnAbort: true },
         )
       : await this.#drainMidTurnUserMessages(abortSignal);
-    this.#preserveUnsentMessageHistory(
-      {
-        role: 'user',
-        parts: [
-          ...toolRun.parts,
-          ...(toolRun.loopDetected
-            ? [{ text: LOOP_DETECTED_CONTEXT_MESSAGE }]
-            : []),
-          ...midTurnParts,
-        ],
-      },
+    await this.#preserveUnsentMessageHistory(
+      await settleTerminalToolResultHistory(
+        this.config.getChatRecordingService(),
+        {
+          role: 'user',
+          parts: [
+            ...toolRun.parts,
+            ...(toolRun.loopDetected
+              ? [{ text: LOOP_DETECTED_CONTEXT_MESSAGE }]
+              : []),
+            ...midTurnParts,
+          ],
+        },
+        toolRun.parts,
+        toolResultHookEligible && hasToolResultPromptHook(this.config)
+          ? TOOL_POST_EXECUTION_CANCELLED_MESSAGE
+          : undefined,
+      ),
       true,
     );
     await this.messageRewriter?.waitForPendingRewrites();
@@ -11461,8 +11596,15 @@ export class Session implements SessionContext {
       return false;
     }
     this.todoStopGuard.suspend();
-    this.#preserveUnsentMessageHistory(
-      { role: 'user', parts: toolRun.parts },
+    const settle = goalTurn
+      ? settleToolResultHistory
+      : settleTerminalToolResultHistory;
+    await this.#preserveUnsentMessageHistory(
+      await settle(
+        this.config.getChatRecordingService(),
+        { role: 'user', parts: toolRun.parts },
+        toolRun.parts,
+      ),
       true,
     );
     await this.messageRewriter?.waitForPendingRewrites();
@@ -11589,6 +11731,7 @@ export class Session implements SessionContext {
     rejectOnLoopDetected = false,
     // The client adds the todo and exploration reminders to the request.
     clientToolGuards = false,
+    toolResultHookEligible = false,
   ): Promise<NextMessageAfterToolRun> {
     if (toolRun.loopDetected) {
       debugLogger.debug('Stopping ACP turn after daemon loop detection.');
@@ -11693,7 +11836,7 @@ export class Session implements SessionContext {
     ];
     if (repeatedToolFailureDecision.kind === 'stop') {
       this.todoStopGuard.suspend();
-      this.#preserveUnsentMessageHistory(
+      await this.#preserveUnsentMessageHistory(
         {
           role: 'user',
           parts: [
@@ -11702,6 +11845,10 @@ export class Session implements SessionContext {
           ],
         },
         true,
+        toolRun.parts,
+        toolResultHookEligible && hasToolResultPromptHook(this.config)
+          ? TOOL_POST_EXECUTION_CANCELLED_MESSAGE
+          : undefined,
       );
       await this.messageRewriter?.waitForPendingRewrites();
       recordDaemonLoopDetected(
@@ -12473,6 +12620,7 @@ export class Session implements SessionContext {
       } else {
         recorder?.recordMidTurnUserMessage(built, displayText);
       }
+      for (const part of built) this.midTurnUserParts.add(part);
       parts.push(...built);
     }
     return parts;
@@ -13115,11 +13263,19 @@ export class Session implements SessionContext {
                   ],
                 };
                 const toolLoopState = createDaemonToolLoopState('off');
+                let toolOutputParts: readonly Part[] = [];
 
                 while (nextMessage !== null) {
                   turnCount++;
                   if (ac.signal.aborted) {
                     this.todoStopGuard.suspend();
+                    if (toolOutputParts.length > 0) {
+                      await this.#preserveUnsentMessageHistory(
+                        nextMessage,
+                        true,
+                        toolOutputParts,
+                      );
+                    }
                     return;
                   }
 
@@ -13135,15 +13291,19 @@ export class Session implements SessionContext {
                       promptId,
                       nextMessage.parts ?? [],
                       ac.signal,
+                      toolOutputParts.length
+                        ? { toolResultParts: toolOutputParts }
+                        : {},
                     );
                   const responseStream = sendResult.responseStream;
                   const preserveFullMessage =
                     !responseStream && sendResult.stopReason === 'cancelled';
                   if (!responseStream) {
                     this.todoStopGuard.suspend();
-                    this.#preserveUnsentMessageHistory(
+                    await this.#preserveUnsentMessageHistory(
                       nextMessage,
                       preserveFullMessage,
+                      toolOutputParts,
                     );
                     if (sendResult.stopReason === 'max_tokens') {
                       this.#stopCronAfterTokenLimit();
@@ -13175,6 +13335,7 @@ export class Session implements SessionContext {
                     this.loopTickResolver?.markDelivered();
                   }
                   nextMessage = null;
+                  toolOutputParts = [];
                   const messageDisplay = this.#createMessageDisplayDispatcher(
                     ac.signal,
                   );
@@ -13313,7 +13474,11 @@ export class Session implements SessionContext {
                       ac.signal.aborted
                     ) {
                       this.todoStopGuard.suspend();
-                      await this.#preserveStoppedToolRun(toolRun, ac.signal);
+                      await this.#preserveStoppedToolRun(
+                        toolRun,
+                        ac.signal,
+                        false,
+                      );
                       return;
                     }
                     const nextAfterTools =
@@ -13323,10 +13488,15 @@ export class Session implements SessionContext {
                         promptId,
                         toolLoopState,
                       );
+                    toolOutputParts = toolRun.parts;
                     nextMessage = nextAfterTools.message;
                     if (toolRun.loopDetected) {
                       this.todoStopGuard.suspend();
-                      await this.#preserveStoppedToolRun(toolRun, ac.signal);
+                      await this.#preserveStoppedToolRun(
+                        toolRun,
+                        ac.signal,
+                        false,
+                      );
                       return;
                     }
                   }
@@ -14495,11 +14665,16 @@ export class Session implements SessionContext {
             return;
           }
           const toolLoopState = createDaemonToolLoopState('off');
+          let toolOutputParts: readonly Part[] = [];
 
           while (nextMessage !== null) {
             if (ac.signal.aborted) {
               this.todoStopGuard.suspend();
-              this.#preserveUnsentMessageHistory(nextMessage, true);
+              await this.#preserveUnsentMessageHistory(
+                nextMessage,
+                true,
+                toolOutputParts,
+              );
               await finishBackgroundNotificationTurn('cancelled', true);
               return;
             }
@@ -14517,12 +14692,16 @@ export class Session implements SessionContext {
               promptId,
               nextMessage.parts ?? [],
               ac.signal,
+              toolOutputParts.length
+                ? { toolResultParts: toolOutputParts }
+                : {},
             );
             if (!sendResult.responseStream) {
               this.todoStopGuard.suspend();
-              this.#preserveUnsentMessageHistory(
+              await this.#preserveUnsentMessageHistory(
                 nextMessage,
                 sendResult.stopReason === 'cancelled',
+                toolOutputParts,
               );
               await finishBackgroundNotificationTurn(
                 sendResult.stopReason,
@@ -14534,6 +14713,7 @@ export class Session implements SessionContext {
             const responseStream = sendResult.responseStream;
             const requestRouteKey = sendResult.requestRouteKey;
             nextMessage = null;
+            toolOutputParts = [];
             const messageDisplay = this.#createMessageDisplayDispatcher(
               ac.signal,
             );
@@ -14642,7 +14822,7 @@ export class Session implements SessionContext {
               );
               if (toolRun.stopAfterPermissionCancel || ac.signal.aborted) {
                 this.todoStopGuard.suspend();
-                await this.#preserveStoppedToolRun(toolRun, ac.signal);
+                await this.#preserveStoppedToolRun(toolRun, ac.signal, false);
                 await finishBackgroundNotificationTurn(
                   getAbortAwareEndTurnStopReason(ac.signal),
                   true,
@@ -14655,10 +14835,11 @@ export class Session implements SessionContext {
                 promptId,
                 toolLoopState,
               );
+              toolOutputParts = toolRun.parts;
               nextMessage = nextAfterTools.message;
               if (toolRun.loopDetected) {
                 this.todoStopGuard.suspend();
-                await this.#preserveStoppedToolRun(toolRun, ac.signal);
+                await this.#preserveStoppedToolRun(toolRun, ac.signal, false);
                 await finishBackgroundNotificationTurn(
                   getAbortAwareEndTurnStopReason(ac.signal),
                   true,

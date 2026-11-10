@@ -4,6 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { settleToolResultHistory } from '@qwen-code/qwen-code-core/services/tool-result-history.js';
+import {
+  hasToolResultPromptHook,
+  settleTerminalToolResultHistory,
+  UNSENT_TOOL_RESULT,
+} from '../../services/tool-result-history.js';
+
 import {
   completeRestoreToolResponse,
   type RestoreToolResponseBinding,
@@ -470,6 +477,11 @@ interface ToolResultRoundState {
   promptId: string | undefined;
   continuationOwner: ToolContinuationOwner | undefined;
   continuationWasCancelled: () => boolean;
+  isCurrentSession: () => boolean;
+  retainTerminalToolResults: (
+    parts: Part[],
+    withheldReason?: string,
+  ) => Promise<void>;
   toolGoalBinding: GoalTurnBinding | undefined;
   endToolInteraction: (
     status: 'ok' | 'error' | 'cancelled',
@@ -4335,6 +4347,7 @@ export const useLlmStream = (
         onGoalClaimDeferred?: () => void;
         onRequestStarted?: () => void;
         steerInput?: SteerInput;
+        toolResultParts?: readonly Part[];
         submittedPrompt?: string;
         displayText?: string;
         humanInput?: HumanPromptInput;
@@ -4989,6 +5002,9 @@ export const useLlmStream = (
             todoWorkChainId: metadata?.todoWorkChainId,
             modelOverride: modelOverrideRef.current,
             steerInput: metadata?.steerInput,
+            ...(metadata?.toolResultParts
+              ? { toolResultParts: metadata.toolResultParts }
+              : {}),
             ...(allowConcurrentBtwDuringResponse
               ? { isConcurrentSideQuery: true }
               : {}),
@@ -5177,7 +5193,7 @@ export const useLlmStream = (
               responseParts,
               SendMessageType.ToolResult,
               immediateDuplicateToolResponses.promptId,
-              { goalBinding },
+              { goalBinding, toolResultParts: responseParts },
             );
             if (
               goalBinding &&
@@ -6033,50 +6049,62 @@ export const useLlmStream = (
           // NEW session's transcript. Skip both; the ids fall through to
           // the drop bookkeeping below.
           if (isCurrentSession()) {
-            finalizedReplaceable.forEach((entry, index) => {
+            for (const [index, entry] of finalizedReplaceable.entries()) {
               const { request, response, status } = replaceableTools[index]!;
-              if (
-                !llmClient.replaceSynthesizedToolResponse?.(
+              if (!isCurrentSession()) {
+                abandonedSessionId = sessionId;
+                break;
+              }
+              const recorder = config.getChatRecordingService?.();
+              const replaced =
+                await llmClient.replaceSynthesizedToolResponseAsync(
                   entry.callId,
-                  entry.responseParts,
-                )
-              ) {
-                return;
+                  async () => {
+                    if (!isCurrentSession()) {
+                      throw new Error(
+                        'Session changed before late tool result admission.',
+                      );
+                    }
+                    const sharedResult = sharedResultsByCallId.get(
+                      entry.callId,
+                    );
+                    if (sharedResult) {
+                      sharedResult.record?.();
+                    } else {
+                      recorder?.recordToolResult?.(
+                        entry.responseParts,
+                        {
+                          callId: entry.callId,
+                          status,
+                          resultDisplay: response.resultDisplay,
+                          persistedOutputFiles: entry.persistedOutputFiles,
+                          artifacts: entry.artifacts,
+                          error: response.error,
+                          errorType: response.errorType,
+                          executionStatus: response.executionStatus,
+                        },
+                        goalToolResultProvenance(request, entry.responseParts),
+                      );
+                    }
+                    const settled = await settleToolResultHistory(
+                      recorder,
+                      { role: 'user', parts: entry.responseParts },
+                      entry.responseParts,
+                      hasToolResultPromptHook(config)
+                        ? UNSENT_TOOL_RESULT
+                        : undefined,
+                    );
+                    return settled.parts ?? [];
+                  },
+                );
+              if (!isCurrentSession()) {
+                abandonedSessionId = sessionId;
+                break;
               }
+              if (!replaced) continue;
               replacedCallIds.push(entry.callId);
-              // Every other completion path emits to the sidecar; without
-              // this a stream-json consumer never sees the late real result.
               dualOutput?.emitToolResult(request, response);
-              // The drop path never reaches `recordToolResult`, so without
-              // this the transcript keeps a `model[functionCall]` whose
-              // response exists nowhere on disk — the exact phantom shape
-              // reported in issue #15297. The placeholder was itself
-              // in-memory only, so the real result is the first durable
-              // answer for this callId. On `--resume` the repair pass hoists
-              // it back only while it still sits in the user run right after
-              // the call; once a model turn intervenes the scan stops there
-              // and synthesizes a fresh placeholder instead, leaving the
-              // recorded result durable but unreferenced.
-              const sharedResult = sharedResultsByCallId.get(entry.callId);
-              if (sharedResult) {
-                sharedResult.record?.();
-                return;
-              }
-              config.getChatRecordingService?.()?.recordToolResult?.(
-                entry.responseParts,
-                {
-                  callId: entry.callId,
-                  status,
-                  resultDisplay: response.resultDisplay,
-                  persistedOutputFiles: entry.persistedOutputFiles,
-                  artifacts: entry.artifacts,
-                  error: response.error,
-                  errorType: response.errorType,
-                  executionStatus: response.executionStatus,
-                },
-                goalToolResultProvenance(request, entry.responseParts),
-              );
-            });
+            }
             if (replacedCallIds.length > 0) {
               debugLogger.warn(
                 `[REPAIR] Replaced synthesized placeholder(s) with late ` +
@@ -6389,6 +6417,19 @@ export const useLlmStream = (
       }
       let promptId =
         ownerToolCall?.request.prompt_id ?? continuationOwner?.promptId;
+      const retainTerminalToolResults = async (
+        parts: Part[],
+        withheldReason?: string,
+      ) => {
+        if (!llmClient || !isCurrentSession()) return;
+        const settled = await settleTerminalToolResultHistory(
+          config.getChatRecordingService(),
+          { role: 'user', parts },
+          parts,
+          withheldReason,
+        );
+        if (isCurrentSession()) await llmClient.addHistory(settled);
+      };
       const pairGoalToolResponsesIntoHistory = async () => {
         if (!llmClient || llmTools.length === 0) return;
         const responses = await finalizeToolResponses(
@@ -6408,10 +6449,13 @@ export const useLlmStream = (
             ),
           ),
         );
-        llmClient.addHistory({
-          role: 'user',
-          parts: responses.flatMap((entry) => entry.responseParts),
-        });
+        const toolOutputParts = responses.flatMap(
+          (entry) => entry.responseParts,
+        );
+        await retainTerminalToolResults(
+          toolOutputParts,
+          hasToolResultPromptHook(config) ? UNSENT_TOOL_RESULT : undefined,
+        );
       };
       const endToolInteraction = (
         status: 'ok' | 'error' | 'cancelled',
@@ -6843,7 +6887,14 @@ export const useLlmStream = (
             .filter((entry) => !pairedCallIds.has(entry.callId))
             .flatMap((entry) => entry.responseParts);
           if (unpairedParts.length > 0)
-            llmClient.addHistory({ role: 'user', parts: unpairedParts });
+            await retainTerminalToolResults(
+              unpairedParts,
+              hasToolResultPromptHook(config) ? UNSENT_TOOL_RESULT : undefined,
+            );
+        }
+        if (!isCurrentSession()) {
+          if (toolGoalBinding) releaseGoalTurn(toolGoalBinding);
+          return;
         }
         markToolsAsSubmitted(
           llmTools.map((toolCall) => toolCall.request.callId),
@@ -6877,40 +6928,47 @@ export const useLlmStream = (
         pendingDuplicateResponses.length === 0 &&
         !sendsSharedReplayAnswers
       ) {
-        if (llmClient) {
-          // We need to manually add the function responses to the history
-          // so the model knows the tools were cancelled.
-          llmClient.addHistory({
-            role: 'user',
-            parts: responsesToSend,
-          });
-
-          // Report cancellation to arena (safety net — cancelOngoingRequest
-          config.getArenaAgentClient()?.reportCancelled();
-        }
-
-        const callIdsToMarkAsSubmitted = llmTools.map(
-          (toolCall) => toolCall.request.callId,
-        );
-        markToolsAsSubmitted(callIdsToMarkAsSubmitted);
         // The person declined every tool the turn asked for, which ends it as
         // Esc does; Esc and a Mod's `$.turn.abort` already set the cancel.
+        // Stopping queued Mod prompts does not depend on receipt persistence.
         if (!turnCancelledRef.current)
           getInteractiveModSession(config)?.stopSubmittedPrompts();
-        if (toolGoalBinding) {
-          // Every cancellation that reaches here originates in a user action:
-          // either Esc through `cancelOngoingRequest`, or a declined tool
-          // confirmation, which the dialog consumes so `turnCancelledRef`
-          // stays false. Selecting the failure arm on that ref would tell a
-          // user who declined one command that their Goal stopped because a
-          // turn failed.
-          await failClosedGoalTurn(
-            toolGoalBinding,
-            'Goal tool continuation was cancelled',
-            { userCancelled: true },
-          );
+        try {
+          if (llmClient) {
+            // We need to manually add the function responses to the history
+            // so the model knows the tools were cancelled.
+            llmClient.addHistory(
+              await settleToolResultHistory(
+                config.getChatRecordingService(),
+                { role: 'user', parts: responsesToSend },
+                responsesToSend,
+                hasToolResultPromptHook(config)
+                  ? UNSENT_TOOL_RESULT
+                  : undefined,
+              ),
+            );
+          }
+        } finally {
+          if (isCurrentSession()) {
+            if (llmClient) config.getArenaAgentClient()?.reportCancelled();
+            const callIdsToMarkAsSubmitted = llmTools.map(
+              (toolCall) => toolCall.request.callId,
+            );
+            markToolsAsSubmitted(callIdsToMarkAsSubmitted);
+            if (toolGoalBinding) {
+              // The dialog consumes a declined confirmation without setting
+              // turnCancelledRef. It still ends the Goal as a user cancellation.
+              await failClosedGoalTurn(
+                toolGoalBinding,
+                'Goal tool continuation was cancelled',
+                { userCancelled: true },
+              );
+            }
+            endToolInteraction('cancelled');
+          } else if (toolGoalBinding) {
+            releaseGoalTurn(toolGoalBinding);
+          }
         }
-        endToolInteraction('cancelled');
         return;
       }
 
@@ -6963,10 +7021,17 @@ export const useLlmStream = (
         (toolCall) => toolCall.response.terminateTurn === true,
       );
       if (terminatesTurn && toolGoalBinding) {
-        llmClient.addHistory({ role: 'user', parts: responsesToSend });
         let goalFinishFailed = false;
         try {
-          await config.getChatRecordingService()?.flush();
+          const recorder = config.getChatRecordingService();
+          const settled = await settleToolResultHistory(
+            recorder,
+            { role: 'user', parts: responsesToSend },
+            responsesToSend,
+          );
+          if (!isCurrentSession()) return;
+          await llmClient.addHistory(settled);
+          await recorder?.flush();
           const runtime = await config.getGoalRuntimeReady();
           const currentPermit = runtime.permitForTurn(toolGoalBinding.turnKey);
           if (
@@ -7019,7 +7084,11 @@ export const useLlmStream = (
         // On the shared loop a tool that ends the turn ends it outside a
         // Goal turn too, as on the other surfaces. Its results answer the
         // calls in history, as a cancelled batch's do.
-        llmClient?.addHistory({ role: 'user', parts: responsesToSend });
+        await retainTerminalToolResults(responsesToSend);
+        if (!isCurrentSession()) {
+          if (toolGoalBinding) releaseGoalTurn(toolGoalBinding);
+          return;
+        }
         endToolInteraction('ok');
         return;
       }
@@ -7124,7 +7193,14 @@ export const useLlmStream = (
       // turn.
       if (modelSwitchedFromQuotaErrorRef.current) {
         if (shared || toolGoalBinding) {
-          llmClient?.addHistory({ role: 'user', parts: responsesToSend });
+          await retainTerminalToolResults(
+            responsesToSend,
+            hasToolResultPromptHook(config) ? UNSENT_TOOL_RESULT : undefined,
+          );
+        }
+        if (!isCurrentSession()) {
+          if (toolGoalBinding) releaseGoalTurn(toolGoalBinding);
+          return;
         }
         if (toolGoalBinding) {
           await failClosedGoalTurn(
@@ -7148,7 +7224,14 @@ export const useLlmStream = (
             : launchedBackgroundAgent(toolCall.request, toolCall.response),
         ) && backgroundSlotsSpent(config);
       if (backgroundLaunchExhaustedCapacity) {
-        llmClient?.addHistory({ role: 'user', parts: responsesToSend });
+        await retainTerminalToolResults(
+          responsesToSend,
+          hasToolResultPromptHook(config) ? UNSENT_TOOL_RESULT : undefined,
+        );
+        if (!isCurrentSession()) {
+          if (toolGoalBinding) releaseGoalTurn(toolGoalBinding);
+          return;
+        }
         if (toolGoalBinding) {
           await failClosedGoalTurn(
             toolGoalBinding,
@@ -7169,6 +7252,8 @@ export const useLlmStream = (
         promptId,
         continuationOwner,
         continuationWasCancelled,
+        isCurrentSession,
+        retainTerminalToolResults,
         toolGoalBinding,
         endToolInteraction,
         releaseScheduler: shared?.releaseScheduler,
@@ -7211,6 +7296,8 @@ export const useLlmStream = (
       promptId,
       continuationOwner,
       continuationWasCancelled,
+      isCurrentSession,
+      retainTerminalToolResults,
       toolGoalBinding,
       endToolInteraction,
       releaseScheduler,
@@ -7394,11 +7481,13 @@ export const useLlmStream = (
         drainedSteer?.restore();
         settleDrainedTeammates(false);
         if (toolGoalBinding) {
-          if (llmClient) {
-            llmClient.addHistory({
-              role: 'user',
-              parts: toolResultPartsForPause,
-            });
+          await retainTerminalToolResults(
+            toolResultPartsForPause,
+            hasToolResultPromptHook(config) ? UNSENT_TOOL_RESULT : undefined,
+          );
+          if (!isCurrentSession()) {
+            releaseGoalTurn(toolGoalBinding);
+            return;
           }
           await failClosedGoalTurn(
             toolGoalBinding,
@@ -7412,11 +7501,13 @@ export const useLlmStream = (
       if (toolGoalBinding?.controller.signal.aborted) {
         drainedSteer?.restore();
         settleDrainedTeammates(false);
-        if (llmClient) {
-          llmClient.addHistory({
-            role: 'user',
-            parts: toolResultPartsForPause,
-          });
+        await retainTerminalToolResults(
+          toolResultPartsForPause,
+          hasToolResultPromptHook(config) ? UNSENT_TOOL_RESULT : undefined,
+        );
+        if (!isCurrentSession()) {
+          releaseGoalTurn(toolGoalBinding);
+          return;
         }
         await failClosedGoalTurn(
           toolGoalBinding,
@@ -7429,6 +7520,7 @@ export const useLlmStream = (
 
       releaseScheduler?.();
       await submitQuery(responsesToSend, SendMessageType.ToolResult, promptId, {
+        toolResultParts: toolResultPartsForPause,
         steerInput: submissionSettlement,
         onDelivered: () => submissionSettlement?.accept(),
         onAdmissionFailed: () => {
@@ -7456,7 +7548,6 @@ export const useLlmStream = (
     },
     [
       submitQuery,
-      llmClient,
       config,
       midTurnDrainRef,
       resolveDrainedSteerMessages,
@@ -7464,6 +7555,7 @@ export const useLlmStream = (
       failClosedGoalTurn,
       stripTrailingTextsFromLastPrompt,
       capturePushedTeammateEntry,
+      releaseGoalTurn,
     ],
   );
 

@@ -43,6 +43,7 @@ const CARRIED_SYSTEM_SUBTYPES = new Set([
   'ui_telemetry',
   'attribution_snapshot',
   'turn_attempt',
+  'tool_result_admission',
 ]);
 
 /**
