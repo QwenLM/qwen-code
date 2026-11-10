@@ -485,14 +485,20 @@ function scanExecutedSubstitutions(text: string): ScannedSubstitutions {
     }
 
     if (char === '$') {
-      const paren =
-        text[index + 1] === '('
-          ? index + 1
-          : text[index + 1] === '\\' &&
-              text[index + 2] === '\n' &&
-              text[index + 3] === '('
-            ? index + 3
-            : -1;
+      // Bash removes an unbounded run of `\\<newline>` before parsing, so a
+      // `$` followed by any number of continuations may become `$(`. Rebuilding
+      // that adjacency is not worth another round: treat it as unprovable.
+      let probe = index + 1;
+      let continued = false;
+      while (text[probe] === '\\' && text[probe + 1] === '\n') {
+        continued = true;
+        probe += 2;
+      }
+      if (continued) {
+        unprovable = true;
+        break;
+      }
+      const paren = text[index + 1] === '(' ? index + 1 : -1;
       if (paren !== -1 && text[paren + 1] !== '(') {
         const result = findCommandSubstitutionEnd(text, paren + 1);
         if (result.unprovable || result.end === -1) {

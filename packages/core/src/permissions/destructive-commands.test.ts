@@ -561,6 +561,20 @@ describe('isDestructiveCommand — git commit --amend', () => {
     // The join also reassembles a flag name and the `commit` word itself.
     expect(amendNeedsApproval('git commit --am\\\nend')).toBe(true);
     expect(amendNeedsApproval('git com\\\nmit --amend')).toBe(true);
+    // Any number of continuations after `$` is unprovable, not reconstructed.
+    expect(
+      amendNeedsApproval('git commit -m "$\\\n\\\n(git commit --$x)"'),
+    ).toBe(true);
+    expect(
+      amendNeedsApproval('git commit -m "$\\\n\\\n\\\n(git commit --$x)"'),
+    ).toBe(true);
+    expect(amendNeedsApproval('git commit -m "hello $\\\nx"')).toBe(true);
+    // A continuation with no `$` and no amend changes nothing.
+    expect(amendNeedsApproval('echo hello\\\nworld')).toBe(false);
+    // Single quotes keep `\` literal, so nothing is joined there.
+    expect(amendNeedsApproval("git commit -m '$\\\n(git commit --$x)'")).toBe(
+      false,
+    );
     // A plain continuation changes nothing.
     expect(amendNeedsApproval('git commit -m "hello\\\nworld"')).toBe(false);
     // An unquoted heredoc body expands; a continuation in it is unprovable.
