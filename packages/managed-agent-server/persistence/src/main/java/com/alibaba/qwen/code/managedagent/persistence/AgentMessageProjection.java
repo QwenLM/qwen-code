@@ -11,6 +11,7 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.MaterializationTarge
 import com.alibaba.qwen.code.managedagent.model.StoreModels.ReplayFloorTarget;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.ReplayWindow;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
@@ -99,7 +100,7 @@ final class AgentMessageProjection {
             throw new ManagedAgentException(503, "message_projection_pending",
                     "Retry after pending messages have been projected.");
         }
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
+        String scope = ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
         MessagePosition position = new MessagePosition(1, scope, backward, projection, covered,
                 backward ? covered + 1 : -1, "");
         if (org.apache.commons.lang3.StringUtils.isNotBlank(cursor)) {
@@ -510,7 +511,7 @@ final class AgentMessageProjection {
                         parts);
             }
         }
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
+        String scope = ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
         var iterator = parts.entrySet().iterator();
         while (iterator.hasNext()) {
             var entry = iterator.next();
@@ -783,7 +784,7 @@ final class AgentMessageProjection {
 
     void flushParts(
             String tenantId, String sessionId, Map<String, List<ItemPartRecord>> projectedParts) {
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
+        String scope = ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
         for (var entry : projectedParts.entrySet()) {
             String item = entry.getKey();
             byte[] bytes =
@@ -811,7 +812,7 @@ final class AgentMessageProjection {
             if (bytes.length > 64 * 1024) {
                 String digest = WorkspaceEvidenceResources.digest(bytes);
                 String id = "message:" + owner + ":" + revision + ":" + digest;
-                resource = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.resourceKey(scope, id);
+                resource = ManagedSessionStore.resourceKey(scope, id);
                 try {
                     jdbc.update(
                             "INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, state, gmt_create, last_verified_at) VALUES (?, ?, ?, ?, ?, 'managed-message-parts', 1, ?, ?, 'MYSQL_INLINE', ?, 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ")",
@@ -915,7 +916,7 @@ final class AgentMessageProjection {
                             return bytes;
                         },
                         resourceKey,
-                        com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
+                        ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
                         tenantId,
                         sessionId,
                         "managed-message-parts");

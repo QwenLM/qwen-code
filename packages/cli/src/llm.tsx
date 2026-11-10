@@ -755,14 +755,17 @@ export async function main() {
         undefined,
         undefined,
         undefined,
-        privateAcpParentCapability === undefined
-          ? {
-              workflowAncestorTrustProvider:
-                createLocalWorkflowAncestorTrustProvider(
-                  getOperatorTrustSettings(settings),
-                ),
-            }
-          : undefined,
+        {
+          lspDisabled: true,
+          ...(privateAcpParentCapability === undefined
+            ? {
+                workflowAncestorTrustProvider:
+                  createLocalWorkflowAncestorTrustProvider(
+                    getOperatorTrustSettings(settings),
+                  ),
+              }
+            : {}),
+        },
         buildEnabledSkillNamesProvider(settings),
       );
 
@@ -1355,9 +1358,16 @@ export async function main() {
       !config.getExperimentalZedIntegration() &&
       !input &&
       !hasRemoteInput;
+    const allowSubscriptionStartupFallback =
+      !config.getExperimentalZedIntegration() &&
+      argv.model === undefined &&
+      argv.authType === undefined;
     markAcpStartup('appInitializationStart');
     const initializationResult = await initializeApp(config, settings, {
       deferIdeConnection,
+      allowSubscriptionStartupFallback,
+      allowUnlistedSubscriptionModel:
+        deferIdeConnection && allowSubscriptionStartupFallback,
     });
     markAcpStartup('appInitializationEnd');
     profileCheckpoint('after_initialize_app');

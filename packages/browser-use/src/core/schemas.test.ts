@@ -70,6 +70,66 @@ describe('recursive locator plans', () => {
     expect(probe.stdout.trim()).toBe('rejected');
   }, 20_000);
 
+  // The child process carries the hard timeout: at the unfixed baseline the
+  // second parse of the shared module-level schema blocks synchronously, which
+  // a vitest timeout cannot interrupt. spawnSync kills it, so this test fails
+  // fast instead of turning the suite into a hang.
+  it('parses the same 32-level plan twice through every recursive branch', () => {
+    const probe = spawnSync(
+      process.execPath,
+      [
+        '--max-old-space-size=1024',
+        '--import',
+        'tsx',
+        '--input-type=module',
+        '-e',
+        `
+          import assert from 'node:assert/strict';
+          import { locatorStepsSchema } from ${JSON.stringify(new URL('./schemas.ts', import.meta.url).href)};
+          const plan = (levels, kind) => {
+            let steps = [{ kind: 'locator', selector: 'button' }];
+            for (let level = 1; level < levels; level++) {
+              steps = [
+                { kind: 'locator', selector: 'button' },
+                kind === 'has' || kind === 'hasNot'
+                  ? { kind: 'filter', [kind]: steps }
+                  : { kind, steps },
+              ];
+            }
+            return steps;
+          };
+          for (const kind of ['and', 'or', 'has', 'hasNot']) {
+            const payload = plan(32, kind);
+            const first = locatorStepsSchema.safeParse(payload);
+            assert.equal(first.success, true);
+            const second = locatorStepsSchema.safeParse(payload);
+            assert.equal(second.success, true);
+            assert.deepEqual(second.data, first.data);
+            assert.equal(locatorStepsSchema.safeParse(plan(33, kind)).success, false);
+          }
+          assert.equal(
+            locatorStepsSchema.safeParse([
+              { kind: 'getByText', text: { regex: 'Save' }, exact: true },
+            ]).success,
+            false,
+          );
+          assert.equal(
+            locatorStepsSchema.safeParse([
+              { kind: 'locator', selector: 'button', extra: true },
+            ]).success,
+            false,
+          );
+          console.log('stable');
+        `,
+      ],
+      { encoding: 'utf8', timeout: 10_000 },
+    );
+    expect(probe.error).toBeUndefined();
+    expect(probe.status).toBe(0);
+    expect(probe.stderr).toBe('');
+    expect(probe.stdout.trim()).toBe('stable');
+  }, 15_000);
+
   it('preserves nested combinations and strict leaf validation', () => {
     const steps = [
       { kind: 'locator', selector: 'button' },

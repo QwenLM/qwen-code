@@ -9,6 +9,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import {
   chmodSync,
   existsSync,
+  lutimesSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -17,6 +18,7 @@ import {
   rmSync,
   statSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -7887,5 +7889,348 @@ describe('review model canary routing', () => {
         '::notice title=Review model::default-model (PR #12300, canary 10%, bucket 0/10, cohort default, endpoint default.example.com)\n' +
         'default-model|default|https://default.example.com/v1|default-key',
     );
+  });
+});
+
+describe('stale agent-home reclaim guard (#16616)', () => {
+  const cleanStep = () =>
+    parse(workflow).jobs['review-pr'].steps.find(
+      (s) => s.name === 'Clean stale agent state',
+    ).run;
+
+  // The guard block ends before the stage-draft sweep; slicing keeps the
+  // executed body to the agent-home logic so the fixture needs no git tree.
+  const guardBody = () => {
+    const run = cleanStep();
+    const end = run.indexOf('rm -f /tmp/stage-*.md');
+    expect(end).toBeGreaterThan(-1);
+    return run.slice(0, end);
+  };
+
+  const runGuard = (
+    runnerTemp,
+    {
+      sudoBlocked = false,
+      sudoDeletes = false,
+      sudoChownRepairs = false,
+      chmodBlocked = false,
+      binDir,
+    } = {},
+  ) => {
+    binDir = binDir ?? join(runnerTemp, 'stub-bin');
+    mkdirSync(binDir, { recursive: true });
+    // A chmod that always fails leaves a mode-0555 copy unremovable, which is
+    // the shape the drain reports rather than deletes.
+    if (chmodBlocked) {
+      const chmodStub = join(binDir, 'chmod');
+      writeFileSync(chmodStub, '#!/bin/sh\nexit 1\n');
+      chmodSync(chmodStub, 0o755);
+    }
+    if (sudoBlocked || sudoDeletes || sudoChownRepairs) {
+      const sudoStub = join(binDir, 'sudo');
+      writeFileSync(
+        sudoStub,
+        // 'deletes' emulates the reclaim a passwordless-sudo pool member
+        // performs: make the target writable for this uid, then delete it.
+        // Keyed on the subcommand, because the ladder calls it twice — a stub
+        // that deleted on both legs would keep the primary reclaim's case
+        // green after that leg was deleted. 'repairs' emulates the fallback's
+        // shape instead — the sudo rm leg fails and the chown leg is what
+        // hands the directory back, leaving the unprivileged retry to remove
+        // it.
+        sudoDeletes
+          ? '#!/bin/sh\n[ "$2" = rm ] || exit 1\nfor last in "$@"; do :; done\nchmod -R u+rwX "$last" 2>/dev/null || true\nexec rm -rf -- "$last"\n'
+          : sudoChownRepairs
+            ? '#!/bin/sh\n[ "$2" = rm ] && exit 1\nfor last in "$@"; do :; done\nchmod -R u+rwX "$last"\n'
+            : '#!/bin/sh\nexit 1\n',
+      );
+      chmodSync(sudoStub, 0o755);
+    }
+    return spawnSync('bash', ['-c', guardBody()], {
+      env: {
+        ...process.env,
+        RUNNER_TEMP: runnerTemp,
+        ...(sudoBlocked || sudoDeletes || sudoChownRepairs || chmodBlocked
+          ? { PATH: `${binDir}:/usr/bin:/bin` }
+          : {}),
+      },
+      encoding: 'utf8',
+    });
+  };
+
+  // A same-parent rename of a mode-0555 directory needs only the parent's
+  // write bit on Linux; BSD-derived kernels also rewrite the moved
+  // directory's `..` entry and answer EACCES. The review pool is Linux-only,
+  // so the case runs where the mechanism it pins actually exists.
+  const renamesForeignDir = process.platform === 'linux';
+
+  it('reclaims a stale home and leaves a fresh runner-writable one', () => {
+    const runnerTemp = mkdtempSync(join(tmpdir(), 'qwen-home-guard-'));
+    try {
+      const stale = join(runnerTemp, 'qwen-home');
+      mkdirSync(stale);
+      writeFileSync(join(stale, 'settings.json'), '{}');
+      const out = runGuard(runnerTemp);
+      expect(out.status, out.stderr).toBe(0);
+      expect(existsSync(join(stale, 'settings.json'))).toBe(false);
+      // The fresh home must accept the settings write that killed #16610.
+      writeFileSync(join(stale, 'settings.json'), '{}');
+    } finally {
+      rmSync(runnerTemp, { recursive: true, force: true });
+    }
+  });
+
+  it('fails before checkout when an unlinkable home survives and sudo is unavailable', () => {
+    // A read-only parent makes the home unlinkable for this uid without
+    // needing a second account; with sudo stubbed out, the guard must
+    // exit 1 and name the directory instead of proceeding.
+    const runnerTemp = mkdtempSync(join(tmpdir(), 'qwen-home-guard-'));
+    const binDir = mkdtempSync(join(tmpdir(), 'qwen-home-guard-bin-'));
+    const stale = join(runnerTemp, 'qwen-home');
+    mkdirSync(stale);
+    chmodSync(runnerTemp, 0o555);
+    try {
+      const out = runGuard(runnerTemp, { sudoBlocked: true, binDir });
+      expect(out.status).toBe(1);
+      expect(out.stdout).toContain('stale qwen-home survives cleanup');
+      expect(out.stdout).toContain(stale);
+      // The read-only parent is what refuses the rename, so the success line
+      // must not appear: an ungated echo would tell the operator a leftover
+      // was preserved at a path that was never created, right above the
+      // ::error:: that aborts the job.
+      expect(out.stdout).not.toContain('moved it to');
+    } finally {
+      chmodSync(runnerTemp, 0o755);
+      rmSync(runnerTemp, { recursive: true, force: true });
+      rmSync(binDir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a fresh home the runner user cannot write AND traverse', () => {
+    // -w alone would pass a mode-0600 home; settings.json needs w+x.
+    const run = cleanStep();
+    expect(run).toContain('[ ! -w "$QWEN_HOME" ] || [ ! -x "$QWEN_HOME" ]');
+    expect(run).toContain('fresh qwen-home is not writable');
+  });
+
+  it.skipIf(!arePermissionBitsEnforced())(
+    'escalates to sudo before quarantining a home rm cannot unlink',
+    () => {
+      // Rung order is load-bearing: quarantining a home that sudo could have
+      // deleted would strand the previous run's home on every review. A
+      // mode-0555 directory is unlinkable for this uid but reclaimable by
+      // the sudo stub, so the quarantine must not fire.
+      const runnerTemp = mkdtempSync(join(tmpdir(), 'qwen-home-guard-'));
+      const binDir = mkdtempSync(join(tmpdir(), 'qwen-home-guard-bin-'));
+      const stale = join(runnerTemp, 'qwen-home');
+      mkdirSync(stale);
+      writeFileSync(join(stale, 'settings.json'), '{}');
+      chmodSync(stale, 0o555);
+      try {
+        const out = runGuard(runnerTemp, { sudoDeletes: true, binDir });
+        expect(out.status, out.stderr).toBe(0);
+        expect(out.stdout).not.toContain('moved it to');
+        expect(existsSync(join(stale, 'settings.json'))).toBe(false);
+        expect(
+          readdirSync(runnerTemp).filter((n) =>
+            n.startsWith('qwen-home.stale-'),
+          ),
+        ).toEqual([]);
+        // The fresh home must accept the settings write that killed #16610.
+        writeFileSync(join(stale, 'settings.json'), '{}');
+      } finally {
+        if (existsSync(stale)) chmodSync(stale, 0o755);
+        rmSync(runnerTemp, { recursive: true, force: true });
+        rmSync(binDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(!arePermissionBitsEnforced() || !renamesForeignDir)(
+    'quarantines a home neither rm nor sudo can delete instead of failing',
+    () => {
+      // The pool members without passwordless sudo: the job still has write
+      // access to RUNNER_TEMP, and a same-parent rename needs only that, so
+      // the review proceeds on a fresh home and the leftover is preserved
+      // (and named) under a timestamped path.
+      const runnerTemp = mkdtempSync(join(tmpdir(), 'qwen-home-guard-'));
+      const binDir = mkdtempSync(join(tmpdir(), 'qwen-home-guard-bin-'));
+      const stale = join(runnerTemp, 'qwen-home');
+      mkdirSync(stale);
+      writeFileSync(join(stale, 'settings.json'), '{"tools":{}}');
+      chmodSync(stale, 0o555);
+      try {
+        const out = runGuard(runnerTemp, { sudoBlocked: true, binDir });
+        expect(out.status, out.stderr).toBe(0);
+        expect(out.stdout).toContain('moved it to');
+        const quarantine = readdirSync(runnerTemp).find((name) =>
+          name.startsWith('qwen-home.stale-'),
+        );
+        expect(quarantine).toBeTruthy();
+        expect(existsSync(join(runnerTemp, quarantine, 'settings.json'))).toBe(
+          true,
+        );
+        writeFileSync(join(stale, 'settings.json'), '{}');
+      } finally {
+        for (const name of readdirSync(runnerTemp)) {
+          try {
+            chmodSync(join(runnerTemp, name), 0o755);
+          } catch {
+            // A quarantined home may already be gone; rm below is best-effort.
+          }
+        }
+        rmSync(runnerTemp, { recursive: true, force: true });
+        rmSync(binDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(!arePermissionBitsEnforced())(
+    'retries the unlink after the sudo chown fallback hands the home back',
+    () => {
+      // The chown leg exists for the shape where sudo rm fails but sudo can
+      // still take the directory over, leaving the unprivileged retry to
+      // remove it. Deleting that leg strands the home and hands the review
+      // to the quarantine rung it was not meant to need.
+      const runnerTemp = mkdtempSync(join(tmpdir(), 'qwen-home-guard-'));
+      const binDir = mkdtempSync(join(tmpdir(), 'qwen-home-guard-bin-'));
+      const stale = join(runnerTemp, 'qwen-home');
+      mkdirSync(stale);
+      writeFileSync(join(stale, 'settings.json'), '{}');
+      chmodSync(stale, 0o555);
+      try {
+        const out = runGuard(runnerTemp, { sudoChownRepairs: true, binDir });
+        expect(out.status, out.stderr).toBe(0);
+        expect(out.stdout).not.toContain('moved it to');
+        expect(existsSync(join(stale, 'settings.json'))).toBe(false);
+        writeFileSync(join(stale, 'settings.json'), '{}');
+      } finally {
+        if (existsSync(stale)) chmodSync(stale, 0o755);
+        rmSync(runnerTemp, { recursive: true, force: true });
+        rmSync(binDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(!arePermissionBitsEnforced() || !renamesForeignDir)(
+    'drains an aged quarantine on a later run and spares the rest',
+    () => {
+      // Production shape: a foreign 0555 home whose own mtime is old. The
+      // rung sets it aside without touching that mtime, so run one must
+      // leave the copy alone (the sweep runs before the rung), and a later
+      // run drains it only after a chmod — a hand-back restores the owner
+      // without the write bit.
+      const runnerTemp = mkdtempSync(join(tmpdir(), 'qwen-home-guard-'));
+      const binDir = mkdtempSync(join(tmpdir(), 'qwen-home-guard-bin-'));
+      const stale = join(runnerTemp, 'qwen-home');
+      const keep = join(runnerTemp, 'triage-context');
+      const fiveHoursAgo = new Date(Date.now() - 5 * 60 * 60 * 1000);
+      mkdirSync(stale);
+      writeFileSync(join(stale, 'settings.json'), '{"tools":{}}');
+      utimesSync(stale, fiveHoursAgo, fiveHoursAgo);
+      chmodSync(stale, 0o555);
+      try {
+        const first = runGuard(runnerTemp, { sudoBlocked: true, binDir });
+        expect(first.status, first.stderr).toBe(0);
+        const quarantine = readdirSync(runnerTemp).find((name) =>
+          name.startsWith('qwen-home.stale-'),
+        );
+        expect(quarantine).toBeTruthy();
+        expect(existsSync(join(runnerTemp, quarantine, 'settings.json'))).toBe(
+          true,
+        );
+
+        // An aged sibling the name filter must spare, and a quarantine a
+        // prior run made from a recently written home, which the age gate
+        // must spare.
+        const fresh = 'qwen-home.stale-20260101T000001Z-2';
+        mkdirSync(keep);
+        utimesSync(keep, fiveHoursAgo, fiveHoursAgo);
+        mkdirSync(join(runnerTemp, fresh));
+
+        const second = runGuard(runnerTemp);
+        expect(second.status, second.stderr).toBe(0);
+        expect(existsSync(join(runnerTemp, quarantine))).toBe(false);
+        expect(existsSync(keep)).toBe(true);
+        expect(existsSync(join(runnerTemp, fresh))).toBe(true);
+        // The live home survives both runs.
+        expect(existsSync(join(runnerTemp, 'qwen-home'))).toBe(true);
+      } finally {
+        for (const name of readdirSync(runnerTemp)) {
+          try {
+            chmodSync(join(runnerTemp, name), 0o755);
+          } catch {
+            // A drained copy may already be gone.
+          }
+        }
+        rmSync(runnerTemp, { recursive: true, force: true });
+        rmSync(binDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(!arePermissionBitsEnforced())(
+    'does not follow a planted symlink while repairing mode bits',
+    () => {
+      // find matches a symlink by name and reports the link's own mtime, and
+      // chmod -R follows a symlink operand — so without -type d, anyone able
+      // to write RUNNER_TEMP could point this pre-checkout step at a tree
+      // outside it.
+      const runnerTemp = mkdtempSync(join(tmpdir(), 'qwen-home-guard-'));
+      const victim = join(
+        mkdtempSync(join(tmpdir(), 'qwen-home-victim-')),
+        'd',
+      );
+      const lure = join(runnerTemp, 'qwen-home.stale-20260101T000000Z-3');
+      try {
+        mkdirSync(victim);
+        writeFileSync(join(victim, 'file'), 'x');
+        chmodSync(victim, 0o500);
+        symlinkSync(victim, lure);
+        const fiveHoursAgo = new Date(Date.now() - 5 * 60 * 60 * 1000);
+        lutimesSync(lure, fiveHoursAgo, fiveHoursAgo);
+        const out = runGuard(runnerTemp);
+        expect(out.status, out.stderr).toBe(0);
+        expect(statSync(victim).mode & 0o200).toBe(0);
+      } finally {
+        chmodSync(victim, 0o755);
+        rmSync(victim, { recursive: true, force: true });
+        rmSync(runnerTemp, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(!arePermissionBitsEnforced())(
+    'reports a quarantine the drain could not remove instead of claiming a clean sweep',
+    () => {
+      // Silence would make "drained" and "never drainable" identical in the
+      // log, while every later run re-walks the whole stranded tree.
+      const runnerTemp = mkdtempSync(join(tmpdir(), 'qwen-home-guard-'));
+      const binDir = mkdtempSync(join(tmpdir(), 'qwen-home-guard-bin-'));
+      const stranded = join(runnerTemp, 'qwen-home.stale-20260101T000000Z-4');
+      try {
+        mkdirSync(stranded);
+        writeFileSync(join(stranded, 'settings.json'), '{}');
+        const fiveHoursAgo = new Date(Date.now() - 5 * 60 * 60 * 1000);
+        utimesSync(stranded, fiveHoursAgo, fiveHoursAgo);
+        chmodSync(stranded, 0o555);
+        const out = runGuard(runnerTemp, { chmodBlocked: true, binDir });
+        expect(out.status, out.stderr).toBe(0);
+        expect(out.stdout).toContain('survived the drain');
+        expect(out.stdout).toContain('qwen-home.stale-20260101T000000Z-4');
+        expect(existsSync(stranded)).toBe(true);
+      } finally {
+        if (existsSync(stranded)) chmodSync(stranded, 0o755);
+        rmSync(runnerTemp, { recursive: true, force: true });
+        rmSync(binDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('keeps the step header honest about the fail-fast contract', () => {
+    const stepIndex = workflow.indexOf("- name: 'Clean stale agent state'");
+    const header = workflow.slice(stepIndex - 900, stepIndex);
+    expect(header).not.toContain('never fail the job');
+    expect(header).toContain('fails the job here, before checkout');
   });
 });

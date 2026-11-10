@@ -104,6 +104,7 @@ export interface UIState {
   loopDetectionConfirmationRequest: LoopDetectionConfirmationRequest | null;
   memoryFileCount: number;
   streamingState: StreamingState;
+  commandCancellationBlocked: boolean;
   initError: string | null;
   pendingLlmHistoryItems: HistoryItemWithoutId[];
   thought: ThoughtSummary | null;

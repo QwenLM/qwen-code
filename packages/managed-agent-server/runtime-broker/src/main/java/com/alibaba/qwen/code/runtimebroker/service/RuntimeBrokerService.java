@@ -28,6 +28,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRepository;
+import com.alibaba.qwen.code.runtimebroker.RuntimeToolMeasurements;
 import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
@@ -77,14 +78,17 @@ import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.i
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.mapFailure;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.mapStoreFailure;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.notFound;
+import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.prepareExecutionReference;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.referenceString;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.renewalDelayMillis;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.requireOpen;
+import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.requireSameSession;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.safeStage;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.sameReceipt;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.sshNoStartReceipt;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.unavailable;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.unwrap;
+import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.workerRefusedRelease;
 
 /** Repository-backed orchestration for the private Managed Runtime contract. */
 public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerOperations {
@@ -283,7 +287,7 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                 publicationVerifier, this.brokerOwnerId, this.dispatchLeaseDuration, this.v3ResultWindow,
                 clock, scheduler, renewalScheduler, closed);
         this.executionReconciler = new RuntimeExecutionReconciler(bindingRegistry, executionState, executionRepository,
-                provisioner, transport, publicationVerifier, this.operationLeaseDuration, clock, closed,
+                provisioner, transport, publicationVerifier, this.operationLeaseDuration, clock, scheduler, closed,
                 new ExecutionObservationCooldown(clock, scheduler));
         this.executionRecovery = new RuntimeExecutionRecovery(bindingRegistry, executionState, executionRepository,
                 sessionRepository, transport, executionReconciler, closed);
@@ -644,13 +648,6 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
         });
     }
 
-    private static boolean workerRefusedRelease(Throwable error) {
-        Throwable cause = unwrap(error);
-        return cause instanceof RuntimeBrokerException failure
-                && ("managed_runtime_owner_hold_pending".equals(failure.getCode())
-                        || "managed_runtime_release_timeout".equals(failure.getCode()));
-    }
-
     /**
      * Clears durable Workspace ownership for Sessions this drain has retired.
      * Their worker is stopped and their rows are released, so no writer can
@@ -871,11 +868,13 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
 
     public CompletionStage<RuntimeScope> capabilities(
             String harnessSessionId, RuntimeLifecycleAuthority authority) {
+        return capabilitiesContext(harnessSessionId, authority).thenApply(HarnessSessionResolver.Capabilities::scope);
+    }
+
+    @Override
+    public CompletionStage<HarnessSessionResolver.Capabilities> capabilitiesContext(String harnessSessionId, RuntimeLifecycleAuthority authority) {
         requireOpen(closed);
-        String harnessId = BrokerValues.requirePathSafe(
-                BrokerValues.requireId(harnessSessionId, "harnessSessionId"),
-                "harnessSessionId");
-        return resolveScope(harnessId, true, authority);
+        return RuntimeBrokerSupport.resolveCapabilities(sessionResolver, harnessSessionId, authority);
     }
 
     public CompletionStage<List<Map<String, Object>>> mcpDefinitions(String harnessSessionId, String runtimeSessionId) {
@@ -947,7 +946,7 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
         Map<String, Object> immutable = immutableMap(operation, "extension operation");
         ManagedExtensionProtocol.validateOperation(immutable);
         boolean recovery = ManagedExtensionProtocol.isRecovery(immutable);
-        boolean status = "extension-status".equals(immutable.get("kind"));
+        boolean status = "extension-status".equals(immutable.get("kind")) || "extension-skill-candidates".equals(immutable.get("kind"));
         if ((expectedBindingId == null) != (expectedGeneration == null) || expectedBindingId == null && !status) {
             throw invalid("runtime_control_operation_invalid", "Extension mutations require the original Runtime identity.");
         }
@@ -1509,46 +1508,8 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
             String payloadDigest, String publicationId) {
         requireOpen(closed);
         String key = BrokerValues.requireId(idempotencyKey, "idempotencyKey");
-        Map<String, Object> immutable = immutableMap(reference, "reference");
-        if (ProviderRuntimeProtocol.isReference(immutable)) {
-            ProviderRuntimeProtocol.reference(immutable, runtimeSessionId);
-        } else {
-            boolean v3 = Integer.valueOf(3).equals(immutable.get("runtimeProtocol"));
-            if (v3 && payloadDigest != null) {
-                throw invalid("runtime_reference_invalid", "Tool v3 publication modes conflict");
-            }
-            Set<String> fields = v3
-                    ? Set.of("sessionId", "promptId", "callId", "argsDigest", "runtimeProtocol", "inputDigest")
-                    : Set.of("sessionId", "promptId", "callId", "argsDigest");
-            if (!immutable.keySet().equals(fields)
-                    || !(immutable.get("argsDigest") instanceof String digest)
-                    || !digest.matches("sha256:[0-9a-f]{64}")
-                    || v3 && (!(immutable.get("inputDigest") instanceof String inputDigest)
-                        || !inputDigest.matches("[0-9a-f]{64}"))) {
-                throw invalid("runtime_reference_invalid", "Deferred execution reference is invalid");
-            }
-            Map<String, Object> deferred = new LinkedHashMap<>(immutable);
-            if (payloadDigest == null) {
-                deferred.put("dispatchMode", "deferred");
-            } else {
-                if (!payloadDigest.matches("sha256:[0-9a-f]{64}")
-                        || publicationId == null
-                        || !publicationId.matches("[a-z0-9_-]{1,128}")) {
-                    throw invalid("runtime_reference_invalid", "Payload digest or publication ID is invalid");
-                }
-                deferred.put("dispatchMode", "deferred_v3");
-                deferred.put("payloadDigest", payloadDigest);
-                deferred.put("publicationId", publicationId);
-            }
-            if (deferred.containsValue(null)) {
-                // immutableMap admits null values; keep the rejection on the
-                // stage channel as a 400 rather than a synchronous NPE.
-                return CompletableFuture.failedFuture(invalid("runtime_reference_invalid",
-                        "Deferred execution reference is invalid"));
-            }
-            immutable = Map.copyOf(deferred);
-        }
-        return createExecutionReceipt(harnessSessionId, runtimeSessionId, key, immutable, false);
+        return prepareExecutionReference(runtimeSessionId, reference, payloadDigest, publicationId)
+                .thenCompose(immutable -> createExecutionReceipt(harnessSessionId, runtimeSessionId, key, immutable, false));
     }
 
     public CompletionStage<ToolExecutionRecord> startExecution(
@@ -1571,6 +1532,9 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                     try {
                         bindingRegistry.requireReadySessionRecord(context);
                         ToolExecutionRecord record = executionState.requireExecution(context, executionId);
+                        if (RuntimeToolMeasurements.selected(record.getReference())) {
+                            RuntimeToolMeasurements.requireProfile(context.session());
+                        }
                         boolean v3 = "deferred_v3".equals(record.getReference().get("dispatchMode"));
                         if (!"deferred".equals(record.getReference().get("dispatchMode")) && !v3) {
                             throw conflict("runtime_execution_conflict", "Execution was not reserved for deferred dispatch");
@@ -1685,7 +1649,8 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                     }
                 });
         return mapStoreFailure(executionState.unknownWhenAdmissionClosed(started,
-                harnessSessionId, runtimeSessionId, executionId));
+                harnessSessionId, runtimeSessionId, executionId)
+                .thenCompose(record -> executionReconciler.measuredResult(record, 0)));
     }
 
     public CompletionStage<ToolExecutionRecord> startExecution(
@@ -1735,7 +1700,7 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                     throw conflict("runtime_idempotency_conflict",
                             "idempotency key belongs to another request");
                 }
-                return CompletableFuture.completedFuture(receipt);
+                return executionReconciler.measuredResult(receipt, 0);
             }
             return bindingRegistry.requireReadySession(harnessSessionId, runtimeSessionId)
                     .thenApply(context -> createExecution(context, key, reference, dispatch));
@@ -1752,7 +1717,7 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
             ToolExecutionRecord saved = executionState.requireOwnedExecution(harnessSessionId,
                     runtimeSessionId, executionId);
             if (saved.isTerminal()) {
-                return CompletableFuture.completedFuture(saved);
+                return executionReconciler.measuredResult(saved, 0);
             }
             if ("deferred_v3".equals(saved.getReference().get("dispatchMode"))) {
                 if (saved.getState() == ToolExecutionRecord.State.UNKNOWN
@@ -1836,7 +1801,9 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
             }
             return safeStage(() -> {
                 bindingRegistry.requireUsableLease(context);
-                return transport.acknowledge(context.lease(), context.session(), record.getReference(), savedReceipt);
+                return RuntimeToolMeasurements.selected(record.getReference())
+                        ? executionReconciler.acknowledgeMeasured(context, record, savedReceipt)
+                        : transport.acknowledge(context.lease(), context.session(), record.getReference(), savedReceipt);
             }).thenApply(status -> {
                 if (!"settled".equals(status.get("state"))) {
                     throw conflict("runtime_execution_conflict", "Runtime did not confirm the result acknowledgement");
@@ -1890,7 +1857,9 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                                         "Session receipt conflicts with publication");
                             }
                             bindingRegistry.requireUsableLease(context);
-                            return transport.acknowledgeV3(context.lease(),
+                            return RuntimeToolMeasurements.selected(original.getReference())
+                                    ? executionReconciler.acknowledgeMeasured(context, original, receipt)
+                                    : transport.acknowledgeV3(context.lease(),
                                     context.session(), original.getReference(),
                                     receipt);
                         }), "runtime_execution_ack_failed", "Tool v3 acknowledgement failed")
@@ -1905,7 +1874,9 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                             throw conflict("runtime_execution_conflict", "Session receipt conflicts with publication");
                         }
                         bindingRegistry.requireUsableLease(context);
-                        return transport.acknowledgeV3(context.lease(), context.session(),
+                        return RuntimeToolMeasurements.selected(original.getReference())
+                                ? executionReconciler.acknowledgeMeasured(context, original, saved)
+                                : transport.acknowledgeV3(context.lease(), context.session(),
                                 original.getReference(), saved);
                     }), "runtime_execution_ack_failed", "Tool v3 acknowledgement failed")
                             .whenComplete((ignored, error) -> context.endControl());
@@ -2039,10 +2010,13 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
      * here. Only the latest acquire's claim may hand the mount back, and a
      * lifecycle operation's window refuses it like the sibling release.
      * A Session with an active operation keeps its mount honestly, the
-     * same freeze the fleet promises while anything is unproven — every
-     * kind of unsettled row counts, background processes included (the
-     * drain excludes them because its sweep stops or settles them first,
-     * and this path runs no sweep). A settled execution whose capture
+     * same freeze the fleet promises while anything is unproven. An
+     * observe-only sweep first settles any background row whose exit it
+     * can prove — stopping nothing, because this handback is
+     * observe-and-hold (#13800), not a drain — and the busy check then
+     * re-reads without the exclusion, so a background row still live or
+     * unproven keeps the mount instead of being handed back over a
+     * running writer. A settled execution whose capture
      * never proved its writer stopped keeps the mount for good: the
      * operator-recovery family fences exactly that Workspace, and the
      * distinct refusal tells the caller that waiting settles nothing. The
@@ -2078,24 +2052,17 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                     throw conflict("runtime_session_conflict",
                             "Mount claim was superseded by a later acquire");
                 }
-                if (context.hasActiveControl()
-                        || executionRepository.hasActiveByRuntimeSession(
-                                context.binding().getBindingId(),
-                                context.binding().getGeneration(), runtimeId)) {
-                    throw conflict("runtime_session_busy",
-                            "Runtime Session has an active operation");
-                }
-                if (executionRepository.hasUnprovenCaptureByRuntimeSession(
-                        context.binding().getBindingId(),
-                        context.binding().getGeneration(), runtimeId)) {
-                    throw conflict("workspace_writer_unproven",
-                            "A settled execution never proved its writer stopped");
-                }
-                return safeStage(() -> transport.releaseMount(context.lease(),
-                        context.session())).toCompletableFuture();
             } finally {
                 context.unlock();
             }
+            // R17-2 / R18-1: observe the unproven background rows (stop nothing —
+            // observe-and-hold, #13800), then hand back under the claim/busy/
+            // unproven guard in releaseMountAfterSweep: a provable exit un-wedges
+            // a routine detach, a live or unproven row keeps the mount. Mount
+            // handback only — the owner id stays re-acquirable (R13-1).
+            return executionRecovery.settleUnprovenBackgroundRows(context, false)
+                    .thenCompose(ignored -> executionRecovery.releaseMountAfterSweep(
+                            context, claimId, runtimeId));
         });
     }
 
@@ -2664,10 +2631,6 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
         provisioner.close();
     }
 
-    private CompletionStage<RuntimeScope> resolveScope(String harnessSessionId) {
-        return resolveScope(harnessSessionId, null);
-    }
-
     private CompletionStage<RuntimeScope> resolveScope(
             String harnessSessionId, RuntimeLifecycleAuthority authority) {
         return resolveScope(harnessSessionId, false, authority);
@@ -2690,17 +2653,6 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
             // such as one without a storage ID, rather than fall back.
             throw new RuntimeBrokerException(400, "runtime_placement_invalid",
                     "Runtime placement is invalid", false, exception);
-        }
-    }
-
-    private static void requireSameSession(RuntimeSession actual,
-            RuntimeSession requested) {
-        if (!actual.getHarnessSessionId().equals(
-                requested.getHarnessSessionId())
-                || !actual.getTurnKind().equals(requested.getTurnKind())
-                || !actual.getScope().equals(requested.getScope())) {
-            throw conflict("runtime_session_conflict",
-                    "runtimeSessionId belongs to another Session identity");
         }
     }
 
