@@ -262,8 +262,11 @@ subscription auth routes and calls the dispose function on shutdown.
 
 No new serve capability tag. The panel probes `GET /auth/weixin` and treats
 `404` as "this daemon does not support WeChat login", exactly as
-`LocalControlQrButton` treats a `404` from `/web-shell/pairing`. This avoids
-churning `CONDITIONAL_SERVE_FEATURES`, the pinned table in
+`LocalControlQrButton` treats a `404` from `/web-shell/pairing`. A daemon that
+has already disposed these routes answers the status read with
+`enabled: false` rather than `404` — the status route has no `allowed` guard —
+so the panel reads that the same way; a login offered there could only `404`.
+This avoids churning `CONDITIONAL_SERVE_FEATURES`, the pinned table in
 `docs/developers/qwen-serve-protocol.md`, and `capability-parity.ts` for a route
 that is already behind the `channel_management` UI gate.
 

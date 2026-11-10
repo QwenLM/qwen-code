@@ -123,7 +123,7 @@ qwen channel start my-weixin    # 还要先手工编辑 ~/.qwen/settings.json
 
 ### Capability 门控
 
-不新增 serve capability tag。面板探测 `GET /auth/weixin`，把 `404` 当作「此 daemon 不支持微信登录」，与 `LocalControlQrButton` 处理 `/web-shell/pairing` 返回 `404` 的方式完全一致。这样就无需为一条已经处于 `channel_management` UI 门禁之后的路由去改动 `CONDITIONAL_SERVE_FEATURES`、`docs/developers/qwen-serve-protocol.md` 里被钉住的表格、以及 `capability-parity.ts`。
+不新增 serve capability tag。面板探测 `GET /auth/weixin`，把 `404` 当作「此 daemon 不支持微信登录」，与 `LocalControlQrButton` 处理 `/web-shell/pairing` 返回 `404` 的方式完全一致。已经 dispose 掉这些路由的 daemon 不会返回 `404`——状态路由没有 `allowed` 守卫——而是返回 `enabled: false`，面板对它的处理与 `404` 相同：在那里给出登录按钮也只会得到 `404`。这样就无需为一条已经处于 `channel_management` UI 门禁之后的路由去改动 `CONDITIONAL_SERVE_FEATURES`、`docs/developers/qwen-serve-protocol.md` 里被钉住的表格、以及 `capability-parity.ts`。
 
 ## 设计决策与理由
 

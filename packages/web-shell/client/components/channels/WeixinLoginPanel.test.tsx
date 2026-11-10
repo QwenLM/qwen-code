@@ -127,6 +127,21 @@ describe('WeixinLoginPanel', () => {
     expect(buttonByText('Log out')).toBeUndefined();
   });
 
+  it('treats a disposed login surface as unsupported', async () => {
+    // The status read has no `allowed` guard, so a daemon that disposed these
+    // routes still answers 200 — with `enabled: false`. A login button there
+    // could only 404, and `enabled` would otherwise be a field nothing reads.
+    await renderPanel({
+      status: vi.fn().mockResolvedValue({ enabled: false, configured: true }),
+    });
+
+    expect(container.textContent).toContain(
+      'This daemon does not support WeChat login',
+    );
+    expect(buttonByText('Log in again')).toBeUndefined();
+    expect(buttonByText('Log in with QR code')).toBeUndefined();
+  });
+
   it('starts a flow and renders the QR block', async () => {
     const { start } = await renderPanel();
 

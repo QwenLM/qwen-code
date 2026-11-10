@@ -91,7 +91,10 @@ export function WeixinLoginPanel({ api }: { api: WeixinLoginApi }) {
     try {
       const status = await apiRef.current.status();
       if (!mountedRef.current || generation !== accountReadRef.current) return;
-      setUnsupported(status === undefined);
+      // A daemon that has disposed these routes still answers the status read
+      // (it has no `allowed` guard) but reports `enabled: false`. Offering a
+      // login there could only 404, so it reads the same as no support at all.
+      setUnsupported(status === undefined || status.enabled === false);
       setAccount(status);
     } catch (failure) {
       if (mountedRef.current && generation === accountReadRef.current) {
@@ -181,7 +184,7 @@ export function WeixinLoginPanel({ api }: { api: WeixinLoginApi }) {
         return;
       }
       setFlow(next);
-      if (previous && previous !== next.id) {
+      if (previous) {
         void apiRef.current.cancel(previous).catch(() => undefined);
       }
     } catch (failure) {
