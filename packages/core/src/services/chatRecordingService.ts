@@ -649,20 +649,10 @@ export interface NotificationRecordPayload {
     commandLabel?: string;
     eventCount?: number;
     droppedLines?: number;
-    /**
-     * Author of an inter-agent message, when the row is one. The wire's
-     * `agent` names the recipient for such a row, so the author travels here
-     * instead of being parsed out of the text.
-     */
-    author?: {
-      agentName: string;
-      depth: number;
-      kind: 'root' | 'teammate';
-    };
-    /** Tool activity fields: what ran, which phase, and whether it failed. */
-    toolName?: string;
-    phase?: 'call' | 'result';
-    success?: boolean;
+    // Activity frames (author/toolName/phase/success) are display-only by
+    // design and never enter the queue, so the persisted payload must not
+    // declare them — they live on BackgroundNotificationQueueItem.structured
+    // alone (R2-6).
     /**
      * Members of a coalesced teammate roster burst: the structural names a
      * client retires (or admits) without parsing the row's prose. Persisted

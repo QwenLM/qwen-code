@@ -4295,10 +4295,12 @@ class QwenAgent implements Agent {
               // it has closed.
               session.flushPendingPeerNotifications?.();
             } catch (error) {
-              // The drain wait rejects on timeout (`waitForSessionDrain`) and
-              // the flush above is skipped, so a report the delivery loop still
-              // owns stays in the queue rather than being landed against a
-              // turn that has not settled. `dispose()` runs
+              // A synchronous throw here (drain-wait timeout or a flush
+              // failure) is contained so the surrounding loop keeps
+              // collecting Configs; the diagnostic is the guard's observable
+              // effect. A report the delivery loop still owns stays in the
+              // queue rather than being landed against a turn that has not
+              // settled. `dispose()` runs
               // `#landUndrainedPeerNotifications` as the last resort; if the
               // writer has already closed that write is a no-op, which is the
               // residual window a timeout accepts — closing it needs the

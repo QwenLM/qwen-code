@@ -1618,11 +1618,11 @@ describe('Session', () => {
             timestamp: i,
           });
         }
-        // The synchronous exit burst coalesces into ONE queued roster item
-        // (#15659 R1-4), so the queue holds the reports plus that item,
-        // capped at the queue maximum; only the overflow beyond it lands
-        // early.
-        await new Promise((resolve) => setTimeout(resolve, 0));
+        // The exit burst coalesces into ONE queued roster item (#15659
+        // R1-4) on the timer-bounded flush (R2-3), so the queue holds the
+        // reports plus that item, capped at the queue maximum; only the
+        // overflow beyond it lands early.
+        await new Promise((resolve) => setTimeout(resolve, 80));
         const queued = Math.min(
           reportCount + 1,
           MAX_BACKGROUND_NOTIFICATION_QUEUE,
@@ -1962,6 +1962,40 @@ describe('Session', () => {
           }
         ).rosterMembers.map((member) => member.name),
       ).toEqual(['dev-0', 'dev-1', 'dev-2', 'dev-3', 'dev-4']);
+      session.dispose();
+    });
+
+    it('coalesces joins that arrive one per macrotask, as production spawns do', async () => {
+      // R2-3: spawnTeammate emits TEAMMATE_JOINED after an awaited fs
+      // write, so production joins land in distinct event-loop turns. A
+      // microtask-only flush drains between them and coalesces nothing;
+      // the timer-bounded flush must still yield ONE automatic turn.
+      const manager = makeFakeTeamManager();
+      session.dispose();
+      vi.mocked(mockConfig.isAgentTeamEnabled).mockReturnValue(true);
+      vi.mocked(mockConfig.getTeamManager).mockReturnValue(manager as never);
+      session = new Session(
+        'test-session-id',
+        mockConfig,
+        mockClient,
+        mockSettings,
+      );
+      const sendMessageStream = vi.mocked(mockChat.sendMessageStream);
+      sendMessageStream.mockClear();
+      sendMessageStream.mockResolvedValue(createEmptyStream());
+      for (let i = 0; i < 5; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 1));
+        manager.emit('teammate_joined', {
+          agentId: `a${i}`,
+          name: `dev-${i}`,
+          timestamp: i,
+        });
+      }
+      await vi.waitFor(() =>
+        expect(sendMessageStream).toHaveBeenCalledTimes(1),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      expect(sendMessageStream).toHaveBeenCalledTimes(1);
       session.dispose();
     });
 
@@ -2307,6 +2341,55 @@ describe('Session', () => {
         },
       });
 
+      session.dispose();
+    });
+
+    it('projects a successful teammate tool result as completed', async () => {
+      // R3-1: the Web Shell maps only completed/failed/cancelled; a raw
+      // `result` phase renders like a started call and finish counters
+      // miss it. The machine-readable phase/success pair stays intact.
+      const manager = makeFakeTeamManager();
+      session.dispose();
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      vi.mocked(mockClient.sessionUpdate).mockClear();
+      vi.mocked(mockConfig.isAgentTeamEnabled).mockReturnValue(true);
+      vi.mocked(mockConfig.getTeamManager).mockReturnValue(manager as never);
+      session = new Session(
+        'test-session-id',
+        mockConfig,
+        mockClient,
+        mockSettings,
+      );
+      manager.emit('teammate_activity', {
+        agentId: 'a1',
+        name: 'researcher',
+        toolName: 'write_file',
+        phase: 'result',
+        success: true,
+        timestamp: 1,
+      });
+      const frames = () =>
+        vi
+          .mocked(mockClient.sessionUpdate)
+          .mock.calls.map(([notification]) => notification.update)
+          .filter(
+            (update) =>
+              (update._meta?.['source'] as string | undefined) ===
+              'teammate_activity',
+          );
+      await vi.waitFor(() => expect(frames()).toHaveLength(1));
+      expect(frames()[0]).toMatchObject({
+        _meta: {
+          backgroundTask: {
+            kind: 'peer',
+            status: 'completed',
+            phase: 'result',
+            success: true,
+          },
+        },
+      });
       session.dispose();
     });
 

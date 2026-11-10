@@ -5764,6 +5764,36 @@ describe('background execution ownership', () => {
     };
   }
 
+  it.each([
+    [
+      'string binding id',
+      { permissionScope: 'session', teammateBindingId: '1' },
+    ],
+    [
+      'fractional binding id',
+      { permissionScope: 'session', teammateBindingId: 1.5 },
+    ],
+    ['missing session scope', { teammateBindingId: 1 }],
+  ] as const)(
+    'cancels a teammate approval with a malformed binding (%s) before publishing',
+    async (_name, meta) => {
+      // R3-3: each fail-closed disjunct is load-bearing — a published
+      // approval that never enters teammateState.pending can never be
+      // retracted when the teammate exits.
+      const { client, entry, publish } = teammatePermissionClient(1);
+      await expect(
+        client.requestPermission({
+          sessionId: 'session',
+          _meta: { ...meta },
+          toolCall: { toolCallId: 'call-malformed', title: 'Write' },
+          options: [{ optionId: 'allow', name: 'Allow', kind: 'allow_once' }],
+        }),
+      ).resolves.toMatchObject({ outcome: { outcome: 'cancelled' } });
+      expect(publish).not.toHaveBeenCalled();
+      expect(entry.pendingPermissionIds.size).toBe(0);
+    },
+  );
+
   it('retracts a retired team approval and releases capacity for the new team', async () => {
     const { entry, mediator, publish, request, retire } =
       teammatePermissionClient(1);

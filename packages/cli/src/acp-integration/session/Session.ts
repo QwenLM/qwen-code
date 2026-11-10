@@ -13761,9 +13761,12 @@ export class Session implements SessionContext {
     // One `cleanup()` publishes an exit per surviving teammate and one
     // `team_create` a join per spawned member (up to ten each), and every
     // queued peer item drains as its own automatic leader turn. Collect the
-    // synchronous burst and enqueue a single item per kind instead; the
-    // per-teammate events still reach the wire and the approval retirement
-    // (#15659 review, R1-4).
+    // burst and enqueue a single item per kind instead; the per-teammate
+    // events still reach the wire and the approval retirement (#15659
+    // review, R1-4). Production joins arrive one per event-loop turn after
+    // each spawn's awaited persistTeamFile(), so the flush waits a short
+    // timer rather than a microtask — microtasks drain between the libuv
+    // callbacks and would coalesce nothing (R2-3).
     this.#pendingRosterChanges.push({
       type: change.type,
       name: change.name,
@@ -13771,7 +13774,7 @@ export class Session implements SessionContext {
     });
     if (!this.#rosterFlushScheduled) {
       this.#rosterFlushScheduled = true;
-      queueMicrotask(() => this.#flushRosterChanges());
+      setTimeout(() => this.#flushRosterChanges(), 50);
     }
   }
 
@@ -13824,7 +13827,9 @@ export class Session implements SessionContext {
           activity.kind === 'tool'
             ? toolFailed
               ? 'failed'
-              : (activity.phase ?? 'call')
+              : activity.phase === 'result'
+                ? 'completed'
+                : (activity.phase ?? 'call')
             : 'message',
         kind: 'peer',
         agent: {

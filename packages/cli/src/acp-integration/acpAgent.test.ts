@@ -33161,13 +33161,18 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       liveSession,
     );
 
-    // An unguarded throw would abort the session loop before this session's
-    // Config reached the writer-close loop, leaving its writer open.
+    // Promise.allSettled already contains a rejected flush; the try/catch's
+    // observable effect is the diagnostic, so pin that too (R3-2).
     await agent.beginManagedShutdown().writerShutdown;
 
     expect(innerConfig.closeSessionWriter).toHaveBeenCalledWith({
       handoff: true,
     });
+    expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'peer notification flush during managed shutdown failed: mailbox write failed',
+      ),
+    );
 
     mockConnectionState.resolve();
     await agentPromise;

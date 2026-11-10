@@ -10,19 +10,14 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-// Compile-time pin for the peer-activity fields. TypeScript does not
-// excess-property-check an object spread, so the sites that spread
-// `item.structured` into this payload lose the check the literal form keeps;
-// declaring the fields here restores it in both directions.
+// Compile-time pin for the persisted peer payload. Activity frames never
+// enter the queue, so their fields must stay OFF this payload (R2-6).
 {
   const declared: NotificationRecordPayload['backgroundTask'] = {
     taskId: 'teammate-activity-1',
     status: 'message',
     kind: 'peer',
-    author: { agentName: '/root/writer', depth: 1, kind: 'teammate' },
-    toolName: 'read_file',
-    phase: 'call',
-    success: false,
+    agent: { agentName: '/root/writer', depth: 1, kind: 'teammate' },
   };
   void declared;
   const undeclared: NotificationRecordPayload['backgroundTask'] = {
@@ -33,6 +28,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
     undeclaredActivityField: true,
   };
   void undeclared;
+  const activityOnly: NotificationRecordPayload['backgroundTask'] = {
+    taskId: 'teammate-activity-3',
+    status: 'message',
+    kind: 'peer',
+    // @ts-expect-error - activity fields are display-only, never persisted
+    toolName: 'read_file',
+  };
+  void activityOnly;
 }
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/approval-mode.js';

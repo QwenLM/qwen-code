@@ -19,5 +19,11 @@ export function defangPeerNotificationTags(text: string): string {
   // Only the opening `<` is rewritten, so the tag's own case, spacing and
   // attributes survive unchanged. The `(?![-\w])` guard keeps a longer tag that
   // merely shares the prefix (`<peer-notification-extra>`) out of the match.
-  return text.replace(/<(?=\s*\/?\s*peer-notification(?![-\w]))/gi, '&lt;');
+  // The structural task-envelope delimiters are defanged in the same pass:
+  // the cold copy wraps this body in a real `<task-notification>`, so a
+  // report could otherwise close it early and forge a sibling notification
+  // in the durable transcript (R3-4). Ordinary markup stays verbatim.
+  return text
+    .replace(/<(?=\s*\/?\s*peer-notification(?![-\w]))/gi, '&lt;')
+    .replace(/<(?=\s*\/?\s*task-notification(?![-\w]))/gi, '&lt;');
 }
