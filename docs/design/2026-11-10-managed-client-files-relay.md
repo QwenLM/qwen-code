@@ -78,8 +78,9 @@ per-request timeout ceiling `600 s`, catalog category cap `16 KiB`.
   Session and one actor.
 - Write operations on client files go through the Hosted approval path.
 - No new WebSocket infrastructure, no CDP, no change to the Hosted Harness
-  profile prohibitions, no client file content in durable events, items,
-  projections, or logs.
+  profile prohibitions. Relay state (bindings, queued requests, credentials)
+  never persists client file content; tool arguments and results follow the
+  Session's normal durable tool-result policy (decision 6).
 
 ## Non-goals
 
@@ -219,6 +220,17 @@ Per the repository's route-ownership rule:
    says so explicitly instead of implying a containment check it cannot
    perform. Server-side enforcement focuses on identity, grants, caps, and
    approval.
+6. **Tool results follow the normal durable policy (2026-11-10, approved).**
+   The hosted MCP execution path publishes tool arguments and results as
+   durable resources with the Session's tenant isolation and read grants.
+   Client-files tools use that same path. The original goal of keeping all
+   file content out of durable storage was narrowed to relay state: a
+   parallel "results never persisted" path would still leak, because the
+   model's own answer text is journaled and may quote file content, and it
+   would break recovery and replay. Approval needs no new wiring: MCP tool
+   names are never pre-approved, so `hostedApprovalAsks` and the
+   server/tool-name permission rules already govern every client-files call
+   in non-yolo modes.
 
 ## Constraints
 
@@ -297,8 +309,12 @@ Per the repository's route-ownership rule:
    fallback.
 3. Revoking the actor's grant stops request delivery within the recheck
    interval; a read-only actor cannot register.
-4. No client file content, relay token, or directory path appears in durable
-   events, items, projections, logs, or metrics.
+4. Relay state (bindings, queued requests, credentials) persists no client
+   file content, and no relay token or directory path appears in durable
+   events, items, projections, logs, or metrics. Client-files tool arguments
+   and results follow the Session's normal durable tool-result policy
+   (decision 6), under the same tenant isolation and read grants as
+   Workspace tool results.
 5. Harness restart leaves no stranded recovery state; the UI offers
    reconnect and re-registration succeeds with a fresh gesture.
 6. All new routes pass the OpenAPI contract and SurfaceRegistry gates; the
@@ -324,12 +340,21 @@ feature for users.
 
 1. Exact in-memory catalog path into `HostedWorkspaceToolTurn` for ephemeral
    servers (runtime slice must name every consumer before implementing).
+   Resolved 2026-11-10: the worker's `installSessionDefinitions` plus the
+   existing `mcp-configure` / `mcp-discover` / `mcp-invoke` controls carry an
+   ephemeral definition without new transports; the harness holds the
+   catalog and merges it beside `HostedMcpSession.tools()`.
 2. Whether hosted MCP invokes already traverse the approval path; if not,
    the minimal wiring that does not widen other MCP servers' behavior.
+   Resolved 2026-11-10: they do. MCP names are never in the pre-approved
+   lists, `hostedApprovalAsks` asks for them in every non-yolo mode, and
+   `permissionDecision` matches them by server/tool name. No new wiring.
 3. SQL queue vs. a sticky-routing alternative for multi-node deployments —
    the SQL queue is proposed; revisit only with measured evidence.
 4. Whether read tools also require approval in the default policy, or follow
-   the Session's approval mode like other read tools.
+   the Session's approval mode like other read tools. Resolved 2026-11-10:
+   they follow the Session's approval mode exactly like other MCP tools;
+   reads are not pre-approved either.
 5. File System Access permission persistence across page reloads
    (`needs-gesture` phase) — reuse the daemon's handle-store behavior
    unchanged, but confirm the Managed provider's storage partitioning.

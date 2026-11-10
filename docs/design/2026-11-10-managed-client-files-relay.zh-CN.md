@@ -67,8 +67,9 @@ catalog 单类上限 `16 KiB`。
 - 注册显式（用户手势 + 目录选择器）、可撤销（断开按钮、关标签页、撤销授权）、
   作用域为单个 Session 与单个 actor。
 - 对客户端文件的写操作走 Hosted 审批路径。
-- 不新增 WebSocket 基础设施、不引入 CDP、不改 Hosted Harness profile 禁令、
-  客户端文件内容不进持久事件、Items、投影或日志。
+- 不新增 WebSocket 基础设施、不引入 CDP、不改 Hosted Harness profile 禁令。
+  relay 状态（绑定、排队请求、凭据）绝不持久化客户端文件内容；工具参数与
+  结果遵循会话常规持久工具结果策略（决策 6）。
 
 ## 非目标
 
@@ -182,6 +183,13 @@ Hosted Harness worker — ManagedMcpRuntime
    File System Access 授权；服务端看不到授权之外的路径，也无法复验。设计
    明说这一点，而不是暗示一个做不到的包含性检查。服务端强制集中在身份、
    授权、限额与审批。
+6. **工具结果遵循常规持久策略（2026-11-10，已批准）。** hosted MCP 执行路径
+   把工具参数与结果发布为持久资源，受会话的租户隔离与读授权保护。
+   client-files 工具走同一路径。原先「所有文件内容不进持久存储」的目标收窄
+   为 relay 状态：并行的「结果绝不持久化」路径仍有漏洞——模型的回答文本本身
+   入 journal 且可能引用文件内容——并会破坏恢复与回放。审批无需新接线：
+   MCP 工具名从不预批准，`hostedApprovalAsks` 与按服务器/工具名匹配的权限
+   规则在非 yolo 模式下已治理每一次 client-files 调用。
 
 ## 约束
 
@@ -239,8 +247,10 @@ Hosted Harness worker — ManagedMcpRuntime
 2. 关标签页摘除工具，在途调用以 `client_files_offline` 失败；任何调用绝不
    以 Workspace 存储为回退。
 3. 撤销 actor 授权在复查间隔内停止请求投递；只读 actor 不能注册。
-4. 持久事件、Items、投影、日志、metrics 中不出现客户端文件内容、relay token
-   或目录路径。
+4. relay 状态（绑定、排队请求、凭据）不持久化客户端文件内容；持久事件、
+   Items、投影、日志、metrics 中不出现 relay token 或目录路径。client-files
+   工具参数与结果遵循会话常规持久工具结果策略（决策 6），与 Workspace 工具
+   结果受同样的租户隔离与读授权保护。
 5. Harness 重启不留下搁浅恢复状态；UI 提供重连，新手势重新注册成功。
 6. 所有新路由通过 OpenAPI 契约与 SurfaceRegistry 门禁；功能开关默认 OFF，
    关闭部署的行为与今天逐字节一致。
@@ -260,12 +270,18 @@ Hosted Harness worker — ManagedMcpRuntime
 ## 开放问题
 
 1. 临时 server 汇入 `HostedWorkspaceToolTurn` 的确切内存 catalog 路径
-   （runtime 切片实现前必须点名每个消费者）。
+   （runtime 切片实现前必须点名每个消费者）。2026-11-10 已解决：worker 的
+   `installSessionDefinitions` 加现有 `mcp-configure` / `mcp-discover` /
+   `mcp-invoke` 控制即可承载临时定义，无需新传输；harness 持有 catalog 并
+   与 `HostedMcpSession.tools()` 并列汇入。
 2. hosted MCP invoke 今天是否已走审批路径；若没有，不加宽其它 MCP server
-   行为的最小接线是什么。
+   行为的最小接线是什么。2026-11-10 已解决：已走。MCP 名从不预批准，
+   `hostedApprovalAsks` 在所有非 yolo 模式下询问，`permissionDecision` 按
+   服务器/工具名匹配。无需新接线。
 3. 多节点部署用 SQL 队列还是粘性路由替代——提案选 SQL 队列；只有拿到实测
    证据才重议。
 4. 默认策略下读工具是否也要求审批，还是像其它读工具一样跟随 Session 审批
-   模式。
+   模式。2026-11-10 已解决：与其它 MCP 工具完全一样跟随 Session 审批模式；
+   读工具同样不预批准。
 5. File System Access 权限跨页面刷新的持久化（`needs-gesture` 阶段）——原样
    复用 daemon 句柄存储行为，但需确认 Managed provider 的存储分区。
