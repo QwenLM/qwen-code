@@ -311,6 +311,9 @@ export function createJavaManagedAgentProvider(
       list: (sessionId, request) =>
         client.getSessionMcp(sessionId, request.signal),
     },
+    clientFiles: {
+      transport: () => client.clientFilesTransport(),
+    },
     extensions: {
       storageScope: options.productScope?.trim()
         ? storageKey(options)
