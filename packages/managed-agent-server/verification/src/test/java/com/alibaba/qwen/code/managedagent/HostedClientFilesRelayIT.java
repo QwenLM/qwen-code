@@ -18,6 +18,7 @@ import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -30,6 +31,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.reservePort;
@@ -62,14 +65,18 @@ class HostedClientFilesRelayIT {
     private ServletWebServerApplicationContext spring;
     private JdbcTemplate jdbc;
     private Process harness;
+    private com.sun.net.httpserver.HttpServer model;
+    private ExecutorService modelExecutor;
     private final List<Drain> drains = new CopyOnWriteArrayList<>();
+    private final List<String> callArgs = new CopyOnWriteArrayList<>();
+    private final List<String> modelToolMessages = new CopyOnWriteArrayList<>();
 
     @Test
     @Timeout(300)
     void registrationLoopCrossesBrowserControlPlaneAndHarnessOnMySql()
             throws Exception {
         boot();
-        String session = createSession();
+        String session = createSession("yolo");
 
         // The registration dispatch is synchronous: the Harness MCP leg
         // queues initialize/tools/list while register blocks. The stream
@@ -137,7 +144,7 @@ class HostedClientFilesRelayIT {
 
         // A browser that refuses discovery fails the registration closed:
         // the Harness cannot list tools, so Java answers 503.
-        String refused = createSession();
+        String refused = createSession("yolo");
         var refusing = startRegister(refused);
         awaitBinding(refused, 1);
         Drain offline = startDrain(refused, 1, true);
@@ -160,9 +167,113 @@ class HostedClientFilesRelayIT {
                 + " tokenDigestOnly=true");
     }
 
+    @Test
+    @Timeout(300)
+    void turnExecutesBrowserToolThroughTheRelayOnMySql() throws Exception {
+        boot();
+        String session = createSession("yolo");
+        Drain drain = registerBinding(session);
+        submitTurn(session, "CF_TOOL read the client file");
+        JsonNode transcript = awaitTranscriptContaining(session, "turn.completed");
+        // The browser's answer reached the model through the relay: the
+        // tool message content is the end-to-end proof; the transcript
+        // keeps the tool call completed and the turn settled.
+        assertThat(modelToolMessages)
+                .anySatisfy(message -> assertThat(message).contains("client file content"));
+        assertThat(transcript.toString()).contains("turn.completed");
+        assertThat(browserMethods).contains("tools/call");
+        assertThat(callArgs).anySatisfy(args -> assertThat(args).contains("a.txt"));
+        drain.stop();
+
+        // A default-mode Session must ask before the browser tool runs.
+        String approved = createSession("default");
+        Drain approvalDrain = registerBinding(approved);
+        submitTurn(approved, "CF_TOOL read the client file");
+        approveNextAction(approved);
+        JsonNode approvedTranscript = awaitTranscriptContaining(approved, "turn.completed");
+        assertThat(approvedTranscript.toString()).contains("turn.completed");
+        assertThat(modelToolMessages.stream()
+                .filter(message -> message.contains("client file content")).count())
+                .isGreaterThanOrEqualTo(2L);
+        approvalDrain.stop();
+
+        System.out.println("CLIENT_FILES_TURN_EVIDENCE yoloTurn=true approvedTurn=true"
+                + " toolCallArgs=true durableResult=true");
+    }
+
     private String scope(String session) {
         return com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore
                 .sessionScopeKey(tenant, session);
+    }
+
+    private Drain registerBinding(String session) throws Exception {
+        var registering = startRegister(session);
+        awaitBinding(session, 1);
+        Drain drain = startDrain(session, 1, false);
+        var draining = beginAsync(drain);
+        settled(registering, 200);
+        draining.get(30, java.util.concurrent.TimeUnit.SECONDS);
+        return drain;
+    }
+
+    private void submitTurn(String session, String text) throws Exception {
+        HttpResponse<String> response = http.send(
+                HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port
+                        + "/api/agent/web-shell/v1/turns/submit"))
+                        .timeout(Duration.ofSeconds(60))
+                        .header("X-Qwen-Tenant-Id", tenant)
+                        .header("X-Qwen-Actor-Id", "actor")
+                        .header("Content-Type", "application/json")
+                        .POST(HttpRequest.BodyPublishers.ofString(
+                                json.writeValueAsString(Map.of(
+                                        "requestId", UUID.randomUUID().toString(),
+                                        "idempotencyKey", "submit-" + UUID.randomUUID(),
+                                        "sessionId", session,
+                                        "input", List.of(Map.of(
+                                                "type", "text", "text", text))))))
+                        .build(),
+                HttpResponse.BodyHandlers.ofString());
+        assertThat(response.statusCode())
+                .as("turns/submit: %s", response.body())
+                .isBetween(200, 299);
+    }
+
+    private JsonNode awaitTranscriptContaining(String session, String needle) {
+        var result = new java.util.concurrent.atomic.AtomicReference<JsonNode>();
+        await().atMost(Duration.ofSeconds(120)).untilAsserted(() -> {
+            JsonNode transcript = webShellApi("/transcript/query",
+                    Map.of("sessionId", session), 200);
+            assertThat(transcript.toString()).contains(needle);
+            result.set(transcript);
+        });
+        return result.get();
+    }
+
+    private void approveNextAction(String session) throws Exception {
+        var found = new java.util.concurrent.atomic.AtomicReference<JsonNode>();
+        await().atMost(Duration.ofSeconds(60)).untilAsserted(() -> {
+            JsonNode page = webShellApi("/actions/query",
+                    Map.of("sessionId", session), 200);
+            for (JsonNode action : page.path("data")) {
+                if ("requested".equals(action.path("state").asText())) {
+                    found.set(action);
+                    return;
+                }
+            }
+            throw new AssertionError("no requested action yet: " + page);
+        });
+        JsonNode action = found.get();
+        assertThat(action.path("toolName").asText()).startsWith("mcp_");
+        webShellApi("/actions/respond", Map.of(
+                "requestId", UUID.randomUUID().toString(),
+                "sessionId", session,
+                "actionId", action.path("actionId").asText(),
+                "idempotencyKey", "approve-" + UUID.randomUUID(),
+                "response", Map.of(
+                        "kind", "permission",
+                        "inputRevision", action.path("inputRevision"),
+                        "policyRevision", action.path("policyRevision").asText(),
+                        "optionId", "allow")), 202);
     }
 
     private java.util.concurrent.CompletableFuture<HttpResponse<String>> startRegister(
@@ -227,7 +338,13 @@ class HostedClientFilesRelayIT {
         port = reservePort();
         harnessPort = reservePort();
         brokerPort = reservePort();
-        startHarness(node, cli);
+        model = com.sun.net.httpserver.HttpServer.create(
+                new InetSocketAddress("127.0.0.1", 0), 0);
+        modelExecutor = Executors.newVirtualThreadPerTaskExecutor();
+        model.setExecutor(modelExecutor);
+        model.createContext("/v1/chat/completions", this::modelReply);
+        model.start();
+        startHarness(node, cli, "http://127.0.0.1:" + model.getAddress().getPort() + "/v1");
         spring = (ServletWebServerApplicationContext) new SpringApplicationBuilder(
                 ManagedAgentServerApplication.class)
                 .run("--server.address=127.0.0.1", "--server.port=" + port,
@@ -280,15 +397,20 @@ class HostedClientFilesRelayIT {
                 + " ?, 'OPERATOR')", tenant, "actor".getBytes(StandardCharsets.UTF_8));
     }
 
-    private void startHarness(String node, Path cli) throws Exception {
+    private void startHarness(String node, Path cli, String modelUrl) throws Exception {
         Path home = Files.createDirectory(temporary.resolve("home"));
         Path config = Files.createDirectory(home.resolve(".qwen"));
-        json.writeValue(config.resolve("settings.json").toFile(),
-                Map.of("telemetry", Map.of("enabled", false)));
+        json.writeValue(config.resolve("settings.json").toFile(), Map.of(
+                "security", Map.of("auth", Map.of("selectedType", "openai")),
+                "telemetry", Map.of("enabled", false),
+                "model", Map.of("name", "cf-fixture"),
+                "modelProviders", Map.of("openai", List.of(Map.of(
+                        "id", "cf-fixture", "envKey", "OPENAI_API_KEY",
+                        "baseUrl", modelUrl)))));
         ProcessBuilder builder = new ProcessBuilder(node, cli.toString(),
                 "serve", "--profile", "hosted-harness", "--http-bridge",
                 "--hostname", "127.0.0.1", "--port", Integer.toString(harnessPort),
-                "--require-auth", "--no-web", "--safe-mode", "--bare",
+                "--require-auth", "--no-web",
                 "--workspace", temporary.resolve("decoy").toString(),
                 "--managed-runtime-broker-url", "http://127.0.0.1:" + brokerPort,
                 "--managed-runtime-broker-token", TOKEN)
@@ -300,6 +422,7 @@ class HostedClientFilesRelayIT {
         env.put("PATH", System.getenv("PATH"));
         env.putAll(Map.of("HOME", home.toString(), "QWEN_HOME", config.toString(),
                 "QWEN_RUNTIME_DIR", home.resolve("runtime").toString(),
+                "OPENAI_API_KEY", "fixture-only", "OPENAI_BASE_URL", modelUrl,
                 "QWEN_SERVER_TOKEN", TOKEN,
                 "QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST", CAPABILITY,
                 "QWEN_CODE_MODELS_DEV_REFRESH", "off"));
@@ -328,7 +451,7 @@ class HostedClientFilesRelayIT {
                 });
     }
 
-    private String createSession() throws Exception {
+    private String createSession(String approvalMode) throws Exception {
         // The real deployment path: Java admits the Session, warms the
         // Workspace and attaches the Harness, so the relay dispatch finds
         // a fully authorized execution binding.
@@ -347,7 +470,7 @@ class HostedClientFilesRelayIT {
                                         "workspace", Map.of(
                                                 "workspaceId", "workspace",
                                                 "cwdRelative", "child"),
-                                        "approvalMode", "yolo"))))
+                                        "approvalMode", approvalMode))))
                         .build(),
                 HttpResponse.BodyHandlers.ofString());
         assertThat(created.statusCode())
@@ -361,6 +484,21 @@ class HostedClientFilesRelayIT {
             int expected) throws Exception {
         HttpResponse<String> response = webShellRaw(method, route, body);
         assertThat(response.statusCode()).as("%s %s: %s", method, route,
+                response.body()).isEqualTo(expected);
+        return json.readTree(response.body());
+    }
+
+    private JsonNode webShellApi(String route, Object body, int expected)
+            throws Exception {
+        HttpResponse<String> response = http.send(HttpRequest.newBuilder(URI.create(
+                "http://127.0.0.1:" + port + "/api/agent/web-shell/v1" + route))
+                .timeout(Duration.ofSeconds(60))
+                .header("X-Qwen-Tenant-Id", tenant)
+                .header("X-Qwen-Actor-Id", "actor")
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(json.writeValueAsString(body)))
+                .build(), HttpResponse.BodyHandlers.ofString());
+        assertThat(response.statusCode()).as("POST %s: %s", route,
                 response.body()).isEqualTo(expected);
         return json.readTree(response.body());
     }
@@ -446,6 +584,9 @@ class HostedClientFilesRelayIT {
                 JsonNode payload = json.readTree(request.path("payloadJson").asText());
                 String method = payload.path("method").asText();
                 browserMethods.add(method);
+                if ("tools/call".equals(method)) {
+                    callArgs.add(payload.at("/params/arguments").toString());
+                }
                 if (!payload.has("id") || payload.path("id").isNull()) {
                     return;
                 }
@@ -496,6 +637,62 @@ class HostedClientFilesRelayIT {
         }
     }
 
+    /**
+     * The scripted model: calls the advertised mcp_* tool while the prompt
+     * marker is unanswered, then completes once the tool result arrives.
+     */
+    private void modelReply(com.sun.net.httpserver.HttpExchange exchange)
+            throws IOException {
+        try {
+            JsonNode request = json.readTree(exchange.getRequestBody());
+            boolean toolResult = false;
+            boolean marker = false;
+            for (JsonNode message : request.path("messages")) {
+                if ("tool".equals(message.path("role").asText())) {
+                    toolResult = true;
+                    modelToolMessages.add(message.path("content").toString());
+                }
+                if ("user".equals(message.path("role").asText())
+                        && message.path("content").toString().contains("CF_TOOL")) {
+                    marker = true;
+                }
+            }
+            String mcpName = null;
+            for (JsonNode tool : request.path("tools")) {
+                String name = tool.at("/function/name").asText();
+                if (name.startsWith("mcp_")) {
+                    mcpName = name;
+                }
+            }
+            boolean call = marker && !toolResult && mcpName != null;
+            var chunk = json.createObjectNode().put("id", "cf-fixture")
+                    .put("object", "chat.completion.chunk").put("created", 0)
+                    .put("model", "cf-fixture");
+            var choice = chunk.putArray("choices").addObject().put("index", 0);
+            var delta = choice.putObject("delta").put("role", "assistant");
+            if (call) {
+                delta.putArray("tool_calls").addObject().put("index", 0)
+                        .put("id", "call_cf_tool").put("type", "function")
+                        .putObject("function").put("name", mcpName)
+                        .put("arguments", json.writeValueAsString(
+                                Map.of("path", "a.txt")));
+            } else {
+                delta.put("content", "CF_DONE");
+            }
+            choice.putNull("finish_reason");
+            String first = "data: " + json.writeValueAsString(chunk) + "\n\n";
+            choice.putObject("delta");
+            choice.put("finish_reason", call ? "tool_calls" : "stop");
+            byte[] response = (first + "data: " + json.writeValueAsString(chunk)
+                    + "\n\ndata: [DONE]\n\n").getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().set("Content-Type", "text/event-stream");
+            exchange.sendResponseHeaders(200, response.length);
+            exchange.getResponseBody().write(response);
+        } finally {
+            exchange.close();
+        }
+    }
+
     @AfterEach
     void stop() {
         for (Drain drain : drains) {
@@ -506,6 +703,12 @@ class HostedClientFilesRelayIT {
                 spring.close();
             }
         } finally {
+            if (model != null) {
+                model.stop(0);
+            }
+            if (modelExecutor != null) {
+                modelExecutor.shutdownNow();
+            }
             if (harness != null) {
                 harness.destroyForcibly();
                 try {
