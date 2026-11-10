@@ -451,7 +451,19 @@ PR 4a sends each model round of the live turn through `runModelRound`. The turn 
 | the turn collects `tool_call_request` events and drops them on `retry` and `model_fallback` | `runModelRound` collects and drops them                         |
 | the calls a response made before a detected loop still run                                  | any stop reason keeps the round's calls from running, as in Ink |
 
-The parity suite runs on the renderer that `QWEN_E2E_RENDERER` selects. On OpenTUI it leaves out the scenarios of turns OpenTUI does not start, and checks that only the run with the setting on sends its rounds on the shared loop; its tool batches stay OpenTUI's until PR 4b.
+The parity suite runs on the renderer that `QWEN_E2E_RENDERER` selects. On OpenTUI it leaves out the scenarios of turns OpenTUI does not start, and checks that only the run with the setting on sends its rounds on the shared loop.
+
+PR 4b runs a shared round's calls as one batch of the shared loop, `runToolBatch`, on an executor over the turn's `InteractiveModToolScheduler`. The scheduler takes the batch as before, so the tool cards, approvals, checkpoints and the Mod tool middleware do not change. The batch then finishes the step, as it does on Ink:
+
+| OpenTUI today                                             | With the setting on                                                                                                                         |
+| --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| a call the model replays from history runs again          | the batch answers it in place, and answers alone go out as the next round; a model that replays an answered call again is stopped as a loop |
+| only a batch the Mod tool middleware touched is finalized | every batch is finalized, so results that together exceed the tool output budget are trimmed to it                                          |
+| the turn records each result while it is current          | the batch's recording, under the same check                                                                                                 |
+| no call counts toward the session's completed tool calls  | each completed call counts, except a cancelled one and those the Mod tool middleware counted                                                |
+| a tool that ends the turn does not end it                 | it ends the turn, with the results in history                                                                                               |
+
+A tool a slash command runs keeps the current path, as on Ink.
 
 ## Migration
 
@@ -566,7 +578,7 @@ A continuation's request runs under a prompt id of its own on the current loop a
 - a UserPromptSubmit hook that blocks;
 - a Stop hook that blocks once.
 
-On OpenTUI the suite leaves out the Goal, background-notification, cron and teammate scenarios, since OpenTUI does not start those turns, and expects no tool batch on the shared loop until PR 4b.
+On OpenTUI the suite leaves out the Goal, background-notification, cron and teammate scenarios, since OpenTUI does not start those turns, and checks the tool batches on the shared loop from PR 4b on. There, the replayed call is an intended difference: the scenario checks that only the run with the setting on answers it in place.
 
 The suites run in the integration job, the TUI suite on Ink; the OpenTUI interactive E2E job, on main and nightly, runs the TUI suite on OpenTUI. The nightly E2E run, and one started by hand, also runs the whole integration suite with the setting on, in a Linux leg without a sandbox; it is the scheduled job a surface's default change waits on.
 
@@ -620,8 +632,12 @@ The suites run in the integration job, the TUI suite on Ink; the OpenTUI interac
   - from PR 3b-1, the skipped siblings of a plan-mode entry no longer count toward the session's completed tool calls;
   - from PR 3b-2a, a tool that ends the turn ends it outside a Goal turn too.
 
-- With the setting on, OpenTUI differs from today in this intended way:
+- With the setting on, OpenTUI differs from today in these intended ways, as Ink does:
   - from PR 4a, the calls a response made before a detected loop no longer run, as in Ink and headless.
+  - from PR 4b, a call the model replays from history is answered in place instead of run again;
+  - from PR 4b, every tool batch is finalized, so results that together exceed the tool output budget are trimmed to it;
+  - from PR 4b, completed tool calls count toward the session's tool calls, which the automatic skill review and memory recall read;
+  - from PR 4b, a tool that ends the turn ends it, with the results in history.
 
 - Later surfaces bring their own fixes: #15324 (ACP), #15326 (OpenTUI), #14114 and #12209 (ACP).
 

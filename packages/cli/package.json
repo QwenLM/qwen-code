@@ -111,7 +111,7 @@
     "yaml": "^2.8.1",
     "yargs": "^17.7.2",
     "yauzl": "^3.4.0",
-    "zod": "^3.23.8"
+    "zod": "^4.6.6"
   },
   "devDependencies": {
     "@babel/runtime": "^7.27.6",

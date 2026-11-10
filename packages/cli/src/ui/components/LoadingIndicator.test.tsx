@@ -92,6 +92,16 @@ describe('<LoadingIndicator />', () => {
     expect(output).not.toContain('10s');
   });
 
+  it('keeps the spinner and timer without the hint when cancellation is blocked', () => {
+    const { lastFrame } = renderWithContext(
+      <LoadingIndicator {...defaultProps} showCancelHint={false} />,
+      StreamingState.Responding,
+    );
+    expect(lastFrame()).toContain('Loading...');
+    expect(lastFrame()).toContain('(5s)');
+    expect(lastFrame()).not.toContain('esc to cancel');
+  });
+
   it('should display the currentLoadingPhrase correctly', () => {
     const props = {
       currentLoadingPhrase: 'Processing data...',
