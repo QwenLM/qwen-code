@@ -136,8 +136,9 @@ Email 是唯一的例外。
   联合类型。
 - 新增 `PRIVATE_ONLY_CHANNEL_TYPES` 与 `isPrivateOnlyChannelType()`，形状与既有的
   “仅仓库”那一对保持一致。
-- **不**新增 `PLATFORM_MARKS` 条目。两个调用点都已回退到
-  `displayName[0].toUpperCase()`，结果为 `E`；显式条目会是一行空操作。
+- 新增显式 `email: 'E'` 的 `PLATFORM_MARKS` 条目。两个调用点本就回退到
+  `displayName[0].toUpperCase()`（同样为 `E`），故该条目行为中性，但使徽章显式、
+  与所有其他已接入平台一致，而不依赖回退。
 
 ### 编辑器状态
 

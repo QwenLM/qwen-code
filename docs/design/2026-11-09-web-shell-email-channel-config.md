@@ -155,9 +155,10 @@ Out of scope, with reasons:
   return union.
 - Add `PRIVATE_ONLY_CHANNEL_TYPES` and `isPrivateOnlyChannelType()`, shaped like
   the existing repository-only pair.
-- Do **not** add a `PLATFORM_MARKS` entry. Both call sites already fall back to
-  `displayName[0].toUpperCase()`, which yields `E`; an explicit entry would be a
-  no-op line.
+- Add an explicit `email: 'E'` entry to `PLATFORM_MARKS`. Both call sites fall
+  back to `displayName[0].toUpperCase()` (also `E`), so the entry is behaviour-
+  neutral, but it keeps the badge explicit and consistent with every other
+  admitted platform rather than relying on the fallback.
 
 ### Editor state
 

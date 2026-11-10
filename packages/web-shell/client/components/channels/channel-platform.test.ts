@@ -35,7 +35,7 @@ describe('Channel platform availability', () => {
         descriptor('email'),
         descriptor('telegram'),
         descriptor('weixin'),
-        descriptor('qqbot'),
+        descriptor('qq'),
         descriptor('dingtalk', false),
         descriptor('github', false),
         descriptor('gitlab', false),
@@ -66,7 +66,9 @@ describe('Channel platform availability', () => {
     expect(isSupportedChannelType('email')).toBe(true);
     expect(isSupportedChannelType('telegram')).toBe(false);
     expect(isSupportedChannelType('weixin')).toBe(false);
-    expect(isSupportedChannelType('qqbot')).toBe(false);
+    // The QQ plugin's channelType is 'qq'; 'qqbot' is only the loader name, so
+    // asserting it would guard a string no descriptor can carry.
+    expect(isSupportedChannelType('qq')).toBe(false);
     expect(isSupportedChannelType(undefined)).toBe(false);
   });
 });
@@ -89,7 +91,7 @@ describe('Private-only channel types', () => {
       'gitlab',
       'telegram',
       'weixin',
-      'qqbot',
+      'qq',
     ]) {
       expect(isPrivateOnlyChannelType(type)).toBe(false);
     }

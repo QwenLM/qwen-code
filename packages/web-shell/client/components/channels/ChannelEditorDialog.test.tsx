@@ -14,6 +14,7 @@ import type {
   DaemonChannelTypeDescriptor,
   DaemonWorkspaceCapability,
 } from '@qwen-code/sdk/daemon';
+import { plugin as emailPlugin } from '@qwen-code/channel-email';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -4205,27 +4206,17 @@ const EMAIL: DaemonChannelTypeDescriptor = {
   ],
 };
 
-// The 17 keys FIELD_LABEL_KEYS.email maps (privatePolicy is shared, not here).
-const EMAIL_LABEL_KEYS = [
-  'address',
-  'imapHost',
-  'imapUser',
-  'imapPassword',
-  'smtpHost',
-  'smtpUser',
-  'smtpPassword',
-  'folder',
-  'imapPort',
-  'smtpPort',
-  'imapSecure',
-  'smtpSecure',
-  'proactiveRecipients',
-  'pollInterval',
-  'maxMessageBytes',
-  'maxAttachmentBytes',
-  'maxTextLength',
-].map((k) => `channels.editor.field.email.${k}`);
-
+// Derive the checked field keys from the REAL plugin descriptor (not a hand
+// copy) so a newly declared Email field cannot silently escape the sweep.
+// privatePolicy uses the shared label; allowedUsers/operators are shared keys
+// that Email overrides with address-specific copy.
+const EMAIL_MAPPED_FIELDS = [
+  ...(emailPlugin.management?.fields ?? [])
+    .map((f) => f.key)
+    .filter((k) => k !== 'privatePolicy'),
+  'allowedUsers',
+  'operators',
+];
 const EMAIL_INSTANCE: DaemonChannelInstanceSnapshot = {
   name: 'agent-mail',
   config: {
@@ -4261,6 +4252,10 @@ describe('Email channel editor', () => {
     expect(labels.some((t) => t.includes('IMAP Password'))).toBe(true);
     expect(labels.some((t) => t.includes('SMTP Password'))).toBe(true);
     // The descriptor used to carry `label: key` for all seven required fields.
+    // Exact match on the star-stripped label: a raw fallback renders exactly the
+    // key, while a legitimate label like "Allowed email addresses" merely
+    // contains "address" as a substring and must not trip the guard.
+    const normalized = labels.map((t) => t.replace(/\*+$/, '').trim());
     for (const raw of [
       'address',
       'imapHost',
@@ -4270,7 +4265,7 @@ describe('Email channel editor', () => {
       'imapPassword',
       'smtpPassword',
     ]) {
-      expect(labels.some((t) => t.includes(raw))).toBe(false);
+      expect(normalized).not.toContain(raw);
     }
     expect(document.body.textContent ?? '').not.toContain(
       'Descriptor description',
@@ -4295,6 +4290,7 @@ describe('Email channel editor', () => {
     expect(labels.some((t) => t.includes('IMAP 服务器'))).toBe(true);
     expect(labels.some((t) => t.includes('IMAP 密码'))).toBe(true);
     expect(labels.some((t) => t.includes('SMTP 密码'))).toBe(true);
+    const normalized = labels.map((t) => t.replace(/\*+$/, '').trim());
     for (const raw of [
       'address',
       'imapHost',
@@ -4304,7 +4300,7 @@ describe('Email channel editor', () => {
       'imapPassword',
       'smtpPassword',
     ]) {
-      expect(labels.some((t) => t.includes(raw))).toBe(false);
+      expect(normalized).not.toContain(raw);
     }
     // getTranslator resolves messages[key] ?? EN[key] ?? key, so a zh-CN gap
     // renders the ENGLISH copy, not the descriptor. These per-locale label and
@@ -4316,8 +4312,14 @@ describe('Email channel editor', () => {
     expect(descriptionOf(fieldByLabel('IMAP 隐式 TLS'))).toContain(
       '关闭后必须使用 STARTTLS',
     );
+    expect(descriptionOf(fieldByLabel('SMTP 隐式 TLS'))).toContain(
+      '关闭后必须使用 STARTTLS',
+    );
     expect(descriptionOf(fieldByLabel('主动投递收件人'))).toContain(
       '留空则禁用主动投递邮件',
+    );
+    expect(descriptionOf(fieldByLabel('允许的邮箱地址'))).toContain(
+      '裸邮箱地址',
     );
   });
 
@@ -4328,6 +4330,11 @@ describe('Email channel editor', () => {
     // assertions above pin each language. What this adds is the both-missing
     // case across the WHOLE map, where the operator would see the raw catalog
     // key as the field's label.
+    // The fixture must carry every field the real plugin declares, so a new
+    // plugin field cannot escape the sweep by being absent from the fixture.
+    for (const key of emailPlugin.management?.fields ?? []) {
+      expect(EMAIL.fields.some((f) => f.key === key.key)).toBe(true);
+    }
     for (const [language, advancedLabel] of [
       ['en', 'Advanced settings'],
       ['zh-CN', '高级设置'],
@@ -4352,16 +4359,22 @@ describe('Email channel editor', () => {
       // is what pins each translation rather than only the both-missing case.
       const t = getTranslator(language);
       const en = getTranslator('en');
-      // Required labels render a trailing aria-hidden asterisk in their text.
-      const normalized = labels.map((text) => text.replace(/\*+$/, '').trim());
-      for (const key of EMAIL_LABEL_KEYS) {
-        const catalog = t(key);
-        expect(catalog).not.toBe(key);
-        expect(normalized).toContain(catalog);
-        // A zh-CN gap silently falls back to EN, which the checks above cannot
-        // see (rendered == catalog == EN). Every Email label is translated, so
+      // Pin the field->label ASSOCIATION, not just the set of strings: each
+      // control's label carries htmlFor ending in the field key, so transposing
+      // two catalog entries (imapUser <-> smtpUser) must go red here even though
+      // both strings still appear once in the flattened list.
+      for (const field of EMAIL_MAPPED_FIELDS) {
+        const i18nKey = `channels.editor.field.email.${field}`;
+        const catalog = t(i18nKey);
+        expect(catalog).not.toBe(i18nKey);
+        const label = document.querySelector(`label[for$="-${field}"]`);
+        expect(label).not.toBeNull();
+        // Required labels render a trailing aria-hidden asterisk.
+        const text = (label?.textContent ?? '').replace(/\*+$/, '').trim();
+        expect(text).toBe(catalog);
+        // A zh-CN gap silently falls back to EN (rendered == catalog == EN), so
         // requiring zh != en is what pins the zh catalog entry's presence.
-        if (language === 'zh-CN') expect(catalog).not.toBe(en(key));
+        if (language === 'zh-CN') expect(catalog).not.toBe(en(i18nKey));
       }
     }
   });
@@ -4395,8 +4408,20 @@ describe('Email channel editor', () => {
     );
     // Direct-message access is still editable: only the group axis is inert.
     expect(labels.some((t) => t.includes('Direct message policy'))).toBe(true);
-    expect(labels.some((t) => t.includes('Allowed user IDs'))).toBe(true);
-    expect(labels.some((t) => t.includes('Session operators'))).toBe(true);
+    // Email overrides the shared "user IDs / without pairing" copy with
+    // address-specific hints, since the adapter only accepts bare mailboxes.
+    expect(labels.some((t) => t.includes('Allowed email addresses'))).toBe(
+      true,
+    );
+    expect(labels.some((t) => t.includes('Session operator addresses'))).toBe(
+      true,
+    );
+    expect(descriptionOf(fieldByLabel('Allowed email addresses'))).toContain(
+      'bare mailbox addresses',
+    );
+    expect(
+      descriptionOf(fieldByLabel('Allowed email addresses')),
+    ).not.toContain('without pairing');
   });
 
   it('does not resurrect group controls from a stored pairing policy', async () => {

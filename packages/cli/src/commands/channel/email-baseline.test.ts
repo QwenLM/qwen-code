@@ -55,18 +55,14 @@ describe('built-in Email channel #8281', () => {
     );
     // The descriptor is public: a client without its own translation table
     // renders `label` directly, so a raw config key must never reach it.
-    for (const key of [
-      'address',
-      'imapHost',
-      'imapUser',
-      'imapPassword',
-      'smtpHost',
-      'smtpUser',
-      'smtpPassword',
-    ]) {
+    // Iterate the plugin's own required list (not a hand copy) and assert the
+    // field exists, so dropping a required field cannot pass via undefined.
+    const plugin = await getPlugin('email');
+    for (const key of plugin?.requiredConfigFields ?? []) {
       const field = entry?.fields.find((item) => item.key === key);
+      expect(field).toBeDefined();
       expect(field?.label).not.toBe(key);
-      expect(field?.label?.trim()).not.toBe('');
+      expect(field?.label?.trim()).toBeTruthy();
     }
     expect(entry?.fields.find((field) => field.key === 'imapHost')?.label).toBe(
       'IMAP Host',

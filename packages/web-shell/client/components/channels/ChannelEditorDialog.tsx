@@ -155,6 +155,10 @@ const FIELD_LABEL_KEYS: Record<string, Record<string, string>> = {
     maxMessageBytes: 'channels.editor.field.email.maxMessageBytes',
     maxAttachmentBytes: 'channels.editor.field.email.maxAttachmentBytes',
     maxTextLength: 'channels.editor.field.email.maxTextLength',
+    // The shared hints say "stable user IDs ... without pairing", but the
+    // Email adapter only accepts bare mailbox addresses and rejects pairing.
+    allowedUsers: 'channels.editor.field.email.allowedUsers',
+    operators: 'channels.editor.field.email.operators',
   },
 };
 
@@ -197,6 +201,8 @@ const SHARED_FIELD_LABEL_KEYS: Record<string, string> = {
 const FIELD_PLACEHOLDER_KEYS: Record<string, string> = {
   'github.baseUrl': 'https://ghe.example.com/api/v3',
   'github.repoFilter': 'owner/repo, owner/repo',
+  'email.allowedUsers': 'you@example.com, colleague@example.com',
+  'email.operators': 'you@example.com',
 };
 
 // Email's endpoint and TLS keys are declared by no other channel, so listing
@@ -230,6 +236,10 @@ const ADVANCED_FIELD_KEYS = new Set([
   'defaultMessageRoute',
   'multiSession',
   'instructions',
+  // Email size caps are rarely changed tuning, not credentials.
+  'maxMessageBytes',
+  'maxAttachmentBytes',
+  'maxTextLength',
 ]);
 
 /** Every repository starts fully inheriting; nothing is materialized. */

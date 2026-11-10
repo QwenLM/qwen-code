@@ -1606,6 +1606,30 @@ describe('Private-only channel access config', () => {
     expect(validateChannelEditorDraft(EMAIL, emailDraft(), [])).toEqual({});
   });
 
+  it('does not flag a required group policy the draft deliberately omits', () => {
+    // Pins the validator's private-only skip: with a blank groupPolicy value
+    // present, the required-check would otherwise report 'required' for a
+    // control the editor never renders. Without the skip this goes red.
+    const draft = emailDraft();
+    draft.values['groupPolicy'] = '';
+    expect(
+      validateChannelEditorDraft(EMAIL, draft, [])['groupPolicy'],
+    ).toBeUndefined();
+  });
+
+  it('leaves a non-record stored group entry untouched on save', () => {
+    // Pins the save-path private-only guard: without it, assignGroups() would
+    // rebuild groups and coerce a non-record entry to {}, rewriting stored
+    // data the editor does not model. Email has no invalidGroupEntry backstop.
+    const instance = emailInstance({
+      groupPolicy: 'allowlist',
+      groups: { g1: 'not-a-record' },
+    });
+    const draft = createChannelEditorDraft(EMAIL, instance);
+    const request = buildChannelUpsertRequest(EMAIL, draft, 'rev-9', instance);
+    expect(request.config['groups']).toEqual({ g1: 'not-a-record' });
+  });
+
   it('preserves a stored group policy and groups on an unrelated save', () => {
     // Skipping the field in the draft but not in the save would let
     // assignField() read an absent key as empty and delete both.
