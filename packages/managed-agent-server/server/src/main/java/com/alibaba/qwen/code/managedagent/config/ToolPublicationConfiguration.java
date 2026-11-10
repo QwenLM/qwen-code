@@ -3,7 +3,7 @@ package com.alibaba.qwen.code.managedagent.config;
 import com.alibaba.qwen.code.managedagent.artifact.ToolPublicationRetentionObserver;
 import com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObjectStore;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.persistence.SessionResourceCollectionCollector;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationAdmissionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationCollector;
@@ -29,7 +29,7 @@ import org.springframework.transaction.PlatformTransactionManager;
 public class ToolPublicationConfiguration {
     @Bean
     public ToolPublicationStore toolPublicationStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc,
-            @Qualifier("managedAgentTransactionManager") PlatformTransactionManager manager, ManagedSessionStore sessions,
+            @Qualifier("managedAgentTransactionManager") PlatformTransactionManager manager, JdbcManagedSessionStore sessions,
             ToolExecutionRepository executions, RuntimeBindingRepository bindings,
             ManagedAgentProperties properties) {
         var settings = properties.getToolPublication();
@@ -49,7 +49,7 @@ public class ToolPublicationConfiguration {
     @Bean
     public ToolPublicationDataStore toolPublicationDataStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc,
             @Qualifier("managedAgentTransactionManager") PlatformTransactionManager manager, ToolPublicationStore grants,
-            ManagedSessionStore sessions, ToolPublicationObjectStore objects,
+            JdbcManagedSessionStore sessions, ToolPublicationObjectStore objects,
             ManagedAgentProperties properties) {
         var settings = properties.getToolPublication();
         if (settings.getOperationTimeout() == null || settings.getClaimTimeout() == null
@@ -67,7 +67,7 @@ public class ToolPublicationConfiguration {
 
     @Bean
     public ToolPublicationAdmissionStore toolPublicationAdmissionStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc,
-            @Qualifier("managedAgentTransactionManager") PlatformTransactionManager manager, ManagedSessionStore sessions,
+            @Qualifier("managedAgentTransactionManager") PlatformTransactionManager manager, JdbcManagedSessionStore sessions,
             ToolPublicationDataStore data) {
         return new ToolPublicationAdmissionStore(jdbc, manager, sessions, data);
     }

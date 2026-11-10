@@ -3,9 +3,9 @@ package com.alibaba.qwen.code.runtimebroker.provisioning.kubernetes;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiRegistration;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.RuntimeWarmer;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.persistence.ResidentWorkspaces;
-import com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLease;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
@@ -108,7 +108,7 @@ class ResidentWorkspaceProvisionerTest {
                 WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1);
         try (var broker = com.alibaba.qwen.code.managedagent.config.runtime.EmbeddedBrokerFixture.create(mock(ManagedAgentStore.class), properties,
                 bindings, new InMemoryRuntimeSessionRepository(), new InMemoryToolExecutionRepository(),
-                mock(WorkspaceExecutionStore.class), null, null, jdbc,
+                mock(JdbcWorkspaceExecutionStore.class), null, null, jdbc,
                 mock(PlatformTransactionManager.class), wrapper)) {
             assertThat(broker.supportsWorkspaceClose()).isTrue();
             assertThat(RuntimeWarmer.supportsClose(broker, binding)).isTrue();

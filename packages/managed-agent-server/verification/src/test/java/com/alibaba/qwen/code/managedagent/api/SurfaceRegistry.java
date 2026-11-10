@@ -23,6 +23,12 @@ import java.util.Set;
  * exactly one rule class.
  */
 public enum SurfaceRegistry {
+    PUBLIC_MEMORY_STORE_CREATE(Method.POST, "/v1/agents/memory-stores",
+            Surface.PUBLIC, RuleClass.PERSONAL_MEMORY, EnumSet.of(Capability.MEMORY_STORE_CREATE)),
+    PUBLIC_MEMORY_STORE_LIST(Method.GET, "/v1/agents/memory-stores",
+            Surface.PUBLIC, RuleClass.PERSONAL_MEMORY, EnumSet.of(Capability.MEMORY_STORE_LIST)),
+    INTERNAL_MEMORY_QUERY(Method.POST, "/internal/managed-session-store/v1/sessions/{sessionId}/memory:query",
+            Surface.INTERNAL, RuleClass.INTERNAL_WRITER, EnumSet.of(Capability.STORE_MEMORY_QUERY)),
     PUBLIC_SESSION_ACTIVITY_STATS(Method.GET, "/v1/agents/sessions/{sessionId}/activity-stats",
             Surface.PUBLIC, RuleClass.READER_ACTOR, EnumSet.of(Capability.SESSION_ACTIVITY_STATS)),
     WEBSHELL_SESSION_ACTIVITY_STATS(Method.POST, "/api/agent/web-shell/v1/session-activity-stats/query",
@@ -207,6 +213,18 @@ public enum SurfaceRegistry {
             Surface.WEBSHELL, RuleClass.SESSION_EXTENSION_READER, EnumSet.of(Capability.EXTENSION_CONFIG_GET)),
     PUBLIC_EXTENSION_IMPORT(Method.POST, "/v1/agents/workspaces/{workspaceId}/extensions/imports",
             Surface.PUBLIC, RuleClass.WORKSPACE_EXTENSION_OPERATOR, EnumSet.of(Capability.EXTENSION_PUBLISH)),
+    PUBLIC_RUNTIME_SKILL_CANDIDATES(Method.GET, "/v1/agents/sessions/{sessionId}/extensions/skills/candidates",
+            Surface.PUBLIC, RuleClass.SESSION_EXTENSION_OPERATOR, EnumSet.of(Capability.RUNTIME_SKILL_IMPORT)),
+    PUBLIC_RUNTIME_SKILL_SNAPSHOT(Method.POST, "/v1/agents/sessions/{sessionId}/extensions/skills/snapshot",
+            Surface.PUBLIC, RuleClass.SESSION_EXTENSION_OPERATOR, EnumSet.of(Capability.RUNTIME_SKILL_IMPORT)),
+    PUBLIC_RUNTIME_SKILL_IMPORT(Method.POST, "/v1/agents/sessions/{sessionId}/extensions/skills/imports",
+            Surface.PUBLIC, RuleClass.SESSION_EXTENSION_OPERATOR, EnumSet.of(Capability.RUNTIME_SKILL_IMPORT)),
+    WEBSHELL_RUNTIME_SKILL_CANDIDATES(Method.POST, "/api/agent/web-shell/v1/session-extensions/skills/candidates/query",
+            Surface.WEBSHELL, RuleClass.SESSION_EXTENSION_OPERATOR, EnumSet.of(Capability.RUNTIME_SKILL_IMPORT)),
+    WEBSHELL_RUNTIME_SKILL_SNAPSHOT(Method.POST, "/api/agent/web-shell/v1/session-extensions/skills/snapshot",
+            Surface.WEBSHELL, RuleClass.SESSION_EXTENSION_OPERATOR, EnumSet.of(Capability.RUNTIME_SKILL_IMPORT)),
+    WEBSHELL_RUNTIME_SKILL_IMPORT(Method.POST, "/api/agent/web-shell/v1/session-extensions/skills/imports",
+            Surface.WEBSHELL, RuleClass.SESSION_EXTENSION_OPERATOR, EnumSet.of(Capability.RUNTIME_SKILL_IMPORT)),
     PUBLIC_EXTENSION_PREVIEW(Method.POST, "/v1/agents/workspaces/{workspaceId}/extensions/imports/preview",
             Surface.PUBLIC, RuleClass.WORKSPACE_EXTENSION_OPERATOR, EnumSet.of(Capability.EXTENSION_PUBLISH)),
     WEBSHELL_EXTENSION_PREVIEW(Method.POST, "/api/agent/web-shell/v1/workspace-extensions/imports/preview",
@@ -747,7 +765,9 @@ public enum SurfaceRegistry {
      * carries both {@link #TURN_SUBMIT} and {@link #TURN_CANCEL}.
      */
     public enum Capability {
-        SESSION_CONTEXT_USAGE, SESSION_MODEL_STATISTICS, SESSION_RESOURCES, SESSION_AGENT_TRACE, SESSION_ACTIVITY_STATS, SESSION_ACTIVITY,
+        MEMORY_STORE_CREATE, MEMORY_STORE_LIST, STORE_MEMORY_QUERY,
+        SESSION_CONTEXT_USAGE, SESSION_MODEL_STATISTICS, SESSION_RESOURCES, SESSION_AGENT_TRACE,
+        SESSION_ACTIVITY_STATS, SESSION_ACTIVITY,
         SESSION_WORKTREE,
         EXTERNAL_STORAGE_REGISTER,
         USER_MESSAGE_QUERY, USER_MESSAGE_COMMAND, STORE_USER_MESSAGE_CLAIM,
@@ -805,6 +825,7 @@ public enum SurfaceRegistry {
         EXTENSION_PUBLISH,
         EXTENSION_GET,
         EXTENSION_INSPECTION,
+        RUNTIME_SKILL_IMPORT,
         EXTENSION_ARCHIVE,
         EXTENSION_SETTINGS_GET,
         EXTENSION_SETTINGS_SET,
@@ -863,6 +884,8 @@ public enum SurfaceRegistry {
      * acceptance suite walks these classes to build its probe matrix.
      */
     public enum RuleClass {
+        /** Authenticated tenant actor, restricted to that actor's personal Store. */
+        PERSONAL_MEMORY,
         SESSION_WORKTREE,
         /** Trusted actor with a read grant on the persisted Workspace; operation reads also retain actor ownership. */
         SESSION_EXTENSION_READER,
