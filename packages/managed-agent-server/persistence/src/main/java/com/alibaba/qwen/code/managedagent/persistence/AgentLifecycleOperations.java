@@ -408,6 +408,7 @@ final class AgentLifecycleOperations {
                 } else if (!List.of("CLOSED", "ARCHIVED").contains(session.status())) {
                     throw AgentSessionPolicies.sessionStateConflict(session.status());
                 }
+                sessionPolicies.requireNoOpenOperation(tenantId, sessionId);
                 if (!sessionQueries.hasCompletedWorkspaceClose(tenantId, sessionId)) {
                     throw AgentSessionPolicies.workspaceExecutionUnavailable();
                 }
