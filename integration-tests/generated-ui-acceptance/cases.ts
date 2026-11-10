@@ -195,7 +195,7 @@ export async function runBillSplitter(
     checks.expect(
       'chart-updates',
       'case 1 / R1',
-      /<(svg|canvas)\b/i.test(chartAfter) && chartAfter !== chartBefore,
+      chartAfter.trim().length > 0 && chartAfter !== chartBefore,
       chartAfter
         ? 'the chart did not change with the inputs'
         : 'no #chart content',

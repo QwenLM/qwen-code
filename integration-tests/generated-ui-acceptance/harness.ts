@@ -167,6 +167,8 @@ async function startRecordingProxy(model: LiveModel): Promise<ModelBackend> {
   const upstream = model.baseUrl.replace(/\/+$/, '');
   const server: Server = createServer(
     async (request: IncomingMessage, response: ServerResponse) => {
+      const controller = new AbortController();
+      response.once('close', () => controller.abort());
       try {
         const body = await readBody(request);
         if (body.length) {
@@ -190,6 +192,7 @@ async function startRecordingProxy(model: LiveModel): Promise<ModelBackend> {
           method: request.method,
           headers,
           body: body.length ? body : undefined,
+          signal: controller.signal,
         });
         const responseHeaders: Record<string, string> = {};
         upstreamResponse.headers.forEach((value, key) => {

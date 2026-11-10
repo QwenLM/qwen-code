@@ -147,6 +147,64 @@ describe('acceptance environment setup cleanup', () => {
 });
 
 describe('live recording proxy', () => {
+  it.each(['client disconnect', 'proxy close'])(
+    'cancels upstream generation after %s',
+    async (cause) => {
+      let upstreamClosed = false;
+      let requests = 0;
+      const upstream = createServer((_request, response) => {
+        if (requests++ > 0) {
+          response.end('ok');
+          return;
+        }
+        response.on('close', () => {
+          upstreamClosed = true;
+        });
+        response.writeHead(200, { 'content-type': 'text/event-stream' });
+        response.write('data: partial\n\n');
+      });
+      await new Promise<void>((resolve) =>
+        upstream.listen(0, '127.0.0.1', resolve),
+      );
+      let env: AcceptanceEnv | undefined;
+      const controller = new AbortController();
+      try {
+        const { port } = upstream.address() as AddressInfo;
+        env = await startAcceptanceEnv({
+          mode: {
+            kind: 'live',
+            model: {
+              label: 'test',
+              baseUrl: `http://127.0.0.1:${port}`,
+              apiKey: 'test-key',
+              model: 'test',
+            },
+          },
+        });
+        const baseUrl =
+          mocks.spawnDaemon.mock.calls[0][0]?.env?.['OPENAI_BASE_URL'];
+        const response = await fetch(`${baseUrl}/chat/completions`, {
+          signal: controller.signal,
+        });
+        const first = await response.body!.getReader().read();
+        expect(new TextDecoder().decode(first.value)).toBe('data: partial\n\n');
+        if (cause === 'client disconnect') controller.abort();
+        else await env.close();
+
+        await expect.poll(() => upstreamClosed, { timeout: 2_000 }).toBe(true);
+        if (cause === 'client disconnect') {
+          const next = await fetch(`${baseUrl}/chat/completions`);
+          expect(await next.text()).toBe('ok');
+        }
+      } finally {
+        controller.abort();
+        await env?.close();
+        upstream.closeAllConnections();
+        await new Promise<void>((resolve) => upstream.close(() => resolve()));
+      }
+    },
+  );
+
   it.each([false, true])(
     'handles an upstream reset with headersSent=%s',
     async (afterHeaders) => {

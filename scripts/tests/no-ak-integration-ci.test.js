@@ -203,6 +203,7 @@ describe('no-AK integration CI wiring', () => {
       './fake-openai-server.test.ts',
       './generated-ui-acceptance/fixtures.test.ts',
       './generated-ui-acceptance/harness.test.ts',
+      './generated-ui-acceptance/live-case.test.ts',
       './test-helper.test.ts',
       './chat-transcript-contract.test.ts',
       './skill-hooks-invocation-parity.test.ts',

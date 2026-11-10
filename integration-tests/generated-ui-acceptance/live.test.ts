@@ -27,13 +27,8 @@ import {
   runChecklist,
   runComparator,
 } from './cases.js';
-import {
-  SHOW_TOOL,
-  messageText,
-  startAcceptanceEnv,
-  type AcceptanceEnv,
-  type LiveModel,
-} from './harness.js';
+import type { AcceptanceEnv, LiveModel } from './harness.js';
+import { runLiveCase } from './live-case.js';
 import {
   ACTIVITY_FORM_PROMPT,
   BILL_SPLITTER_PROMPT,
@@ -82,71 +77,6 @@ const caseNames = Object.keys(CASES).filter(
   (name) => selected.length === 0 || selected.includes(name),
 );
 
-async function runCase(
-  model: LiveModel,
-  name: string,
-  trial: number,
-): Promise<CaseResult> {
-  const env = await startAcceptanceEnv({
-    mode: { kind: 'live', model },
-    cardTimeoutMs: 15 * 60 * 1000,
-  });
-  let checks: CheckResult[] = [];
-  let error: string | undefined;
-  try {
-    checks = await CASES[name](env);
-  } catch (caught) {
-    error = String(caught instanceof Error ? caught.message : caught).split(
-      '\n',
-    )[0];
-    await env.screenshot(`${name}-failure`);
-  } finally {
-    await env.close();
-  }
-  const main = env.mainRequests();
-  const calledTool = main.some((request) =>
-    request.messages.some((message) =>
-      (message.tool_calls ?? []).some(
-        (call) => call.function?.name === SHOW_TOOL,
-      ),
-    ),
-  );
-  const last = main[main.length - 1];
-  const showIds = new Set(
-    (last?.messages ?? []).flatMap((message) =>
-      (message.tool_calls ?? [])
-        .filter((call) => call.function?.name === SHOW_TOOL)
-        .map((call) => call.id),
-    ),
-  );
-  const viewErrors = (last?.messages ?? []).filter(
-    (message) =>
-      message.role === 'tool' &&
-      showIds.has(message.tool_call_id) &&
-      messageText(message.content).includes('VIEW_ERROR'),
-  ).length;
-  if (error) {
-    checks.push({
-      id: `${name}.harness`,
-      covers: '—',
-      status: 'fail',
-      detail: error,
-    });
-  }
-  return {
-    case: name,
-    model: model.label,
-    trial,
-    calledTool,
-    viewErrors,
-    secondsToFirstCard:
-      env.firstCardMs === undefined
-        ? undefined
-        : Math.round(env.firstCardMs / 1000),
-    checks,
-  };
-}
-
 describe.runIf(enabled && models.length > 0)(
   'Generated UI acceptance, live models (#14019)',
   () => {
@@ -157,7 +87,7 @@ describe.runIf(enabled && models.length > 0)(
         for (const model of models) {
           for (const name of caseNames) {
             for (let trial = 1; trial <= trials; trial++) {
-              results.push(await runCase(model, name, trial));
+              results.push(await runLiveCase(model, name, trial, CASES[name]));
             }
           }
         }

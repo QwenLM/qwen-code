@@ -185,6 +185,9 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
       'reversed',
       'regenerated-chart-id',
       'canvas-chart',
+      'css-chart',
+      'unchanged-chart',
+      'empty-chart',
       'stale-subtotal',
       'stale-discount',
       'stale-service-rate',
@@ -236,6 +239,9 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
                 document.getElementById('total').textContent = (total / 100).toFixed(2);
                 document.getElementById('shares').innerHTML = shares.map((share, i) => '<li>Person ' + (i + 1) + ': ' + (share / 100).toFixed(2) + '</li>').join('');
                 document.getElementById('chart').innerHTML = '<svg viewBox="0 0 ' + people * 30 + ' 100"><rect width="' + people + '" height="10"></rect></svg>';
+                if (${JSON.stringify(mode)} === 'css-chart') document.getElementById('chart').innerHTML = '<div style="background:blue;height:10px;width:' + people * 10 + 'px"></div>';
+                if (${JSON.stringify(mode)} === 'unchanged-chart') document.getElementById('chart').innerHTML = '<svg><rect width="6" height="10"></rect></svg>';
+                if (${JSON.stringify(mode)} === 'empty-chart') document.getElementById('chart').innerHTML = '';
                 if (canvasChart) {
                   const context = document.getElementById('chart').getContext('2d');
                   context.clearRect(0, 0, 200, 100);
@@ -263,7 +269,7 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
                 const fault = ${JSON.stringify(mode)}.replace('stale-', '');
                 const staleInput = document.getElementById(fault)?.value;
                 const staleChart = document.getElementById('chart').innerHTML;
-                const staleChartData = document.querySelector('#chart rect').dataset.people;
+                const staleChartData = document.querySelector('#chart rect')?.dataset.people;
                 const staleChartStyle = document.getElementById('chart').getAttribute('style');
                 const stalePixels = canvasChart ? document.getElementById('chart').getContext('2d').getImageData(0, 0, 200, 100) : null;
                 for (const [id, value] of Object.entries({ subtotal: '900', people: '6', discount: '60', 'service-rate': '10' })) document.getElementById(id).value = value;
@@ -307,6 +313,13 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
           );
           expect(results.find(({ id }) => id === 'bill.reset')?.status).toBe(
             mode.startsWith('stale-') ? 'fail' : 'pass',
+          );
+          expect(
+            results.find(({ id }) => id === 'bill.chart-updates')?.status,
+          ).toBe(
+            mode === 'unchanged-chart' || mode === 'empty-chart'
+              ? 'fail'
+              : 'pass',
           );
           if (mode === 'stale-chart-root') {
             expect(

@@ -61,7 +61,7 @@ The API key only reaches the local recording proxy. It is never written to the r
 
 Neither mode is part of the required no-AK integration gate. They start a daemon and a browser per case, and the no-AK job does not install Chromium.
 
-The no-AK gate also runs `harness.test.ts`, which injects setup failures and checks resource cleanup without starting a daemon or browser. `cases.test.ts` exercises the evaluator with real Chromium DOM and controlled host data: repeated model requests in one user turn, identical duplicate submissions, ordered bill shares, both in-place and appended-card updates, and complete resets of choices and amounts. Run it separately from the full replay:
+The no-AK gate also runs `harness.test.ts` and `live-case.test.ts`, which inject setup failures, verify that later cases still run and earlier results remain in the report, and check resource cleanup and upstream cancellation without starting a daemon or browser. `cases.test.ts` exercises the evaluator with real Chromium DOM and controlled host data: repeated model requests in one user turn, identical duplicate submissions, ordered bill shares, CSS chart updates, both in-place and appended-card updates, and complete resets of choices and amounts. Run it separately from the full replay:
 
 ```sh
 QWEN_GENERATED_UI_ACCEPTANCE=1 \
