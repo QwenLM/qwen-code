@@ -93,15 +93,20 @@ GitHub channel 开启 `deliverToBoundSessions` 后，每个绑定了某 PR 的 d
    `enabled !== false`、`recurring === true`、`sessionId` 非空、且 `gate`
    指名 `verify-pr-watch-gate.mjs` 的任务。gate 先按 shell 自身的语义分词
    （`shellWords`：单引号字面、双引号 POSIX 反斜杠转义、引号外的反斜杠转义
-   与反斜杠换行续行）——空白切分会与真实 argv 不一致，例如
+   与反斜杠换行续行——续行整体消除两个字符且**不启动新词**，续行的缩进
+   不会 push 出空 argv 元素——以及词首 `#` 注释终止命令；词中 `#` 保持
+   字面）。引号外的 glob/brace 字符（`*?[]{}`）与 `$`/反引号同属无法确定：
+   shell 可能把它们展开成不同的 argv（如 `--repo acme/*`），因此 fail-open
+   而非确认「无 watch」。空白切分会与真实 argv 不一致，例如
    `--state-root '/tmp/pr 16772' 42` 是一个参数后跟 PR 号，而非名为 16772
    的 PR。分词后镜像脚本自身的 `parseArgs`：`--repo`/`--cli`/`--state-root`
-   消费后一个词，第一个非旗标位置参数是 PR 号，带
-   `--check`/`--claim`/`--release` 的 gate 是一次性探针调用（安装/收尾），
-   绝不是常驻 watch。结果为三态：`watch`（repo + PR）、`none`（确认非
-   常驻 watch——不是该脚本、一次性调用、或脚本自身会拒绝的参数，这样的
-   gate 永不触发）、`unknown`（gate 指名该脚本但 argv 无法确定：未闭合引号、
-   `$`/反引号展开、shell 操作符）。任一 `unknown` 任务使整个 workspace 的
+   消费后一个词，第一个非旗标位置参数是 PR 号（空串即 `Number('') === 0`，
+   脚本会拒绝），带 `--check`/`--claim`/`--release` 的 gate 是一次性探针
+   调用（安装/收尾），绝不是常驻 watch。结果为三态：`watch`（repo + PR）、
+   `none`（确认非常驻 watch——不是该脚本、一次性调用、或脚本自身会拒绝的
+   参数，这样的 gate 永不触发）、`unknown`（gate 指名该脚本但 argv 无法
+   确定：未闭合引号、`$`/反引号展开、glob/brace 展开、shell 操作符）。
+   任一 `unknown` 任务使整个 workspace 的
    答案为 `undefined`（fail-open）——无法确定的 gate 绝不能变成已知的
    「无 watch」，给可能正在被 watch 的 PR 盖上 `watching: false`。
 
@@ -235,8 +240,8 @@ watch 事件无需新代码：检测冻结 `resolveBoundDelivery`（已过滤）
 ## 风险
 
 - **gate 解析脆弱性。** verify-pr 的 gate 字符串由模型按 skill 契约撰写；
-  异常拼法不贡献 watch（fail-open：会话继续接收事件）。token 解析接受旗标
-  顺序变化与脚本路径带引号。
+  解析器无法确定的拼法一律 fail-open（会话继续接收事件），绝不落成确认的
+  「无 watch」。token 解析接受旗标顺序变化、脚本路径带引号、续行与尾注释。
 - **扫描成本。** 每次绑定轮询（默认 60s）每 workspace 一次 `git worktree list`
   （10s 超时）+ cron 文件读取。与 Web Shell watches 页面按需使用的机制相同。
 - **partial 快照下 `watching` 陈旧。** 保留行沿用最后已知值；永久 partial

@@ -114,6 +114,45 @@ describe('shellWords', () => {
     expect(shellWords('node a\\ b')).toEqual(['node', 'a b']);
   });
 
+  it('drops continuation characters without starting an empty word', () => {
+    // Indentation on the continued line is a word separator, not an empty
+    // argv element between --repo and its value.
+    expect(shellWords('node x.mjs --repo \\\n  acme/widgets')).toEqual([
+      'node',
+      'x.mjs',
+      '--repo',
+      'acme/widgets',
+    ]);
+    expect(shellWords('node ac\\\nme/widgets')).toEqual([
+      'node',
+      'acme/widgets',
+    ]);
+  });
+
+  it('ends argv at a word-start comment and keeps mid-word # literal', () => {
+    expect(
+      shellWords('node x.mjs 42 # omit --check for the standing watch'),
+    ).toEqual(['node', 'x.mjs', '42']);
+    expect(shellWords('node x.mjs a#b')).toEqual(['node', 'x.mjs', 'a#b']);
+    expect(shellWords("node x.mjs '#check'")).toEqual([
+      'node',
+      'x.mjs',
+      '#check',
+    ]);
+  });
+
+  it('returns undefined for unquoted glob and brace expansion characters', () => {
+    expect(shellWords('node x.mjs --repo acme/*')).toBeUndefined();
+    expect(shellWords('node x.mjs 4?')).toBeUndefined();
+    expect(shellWords('node x.mjs [ab]')).toBeUndefined();
+    expect(shellWords('node x.mjs {a,b}')).toBeUndefined();
+    expect(shellWords("node x.mjs 'acme/*'")).toEqual([
+      'node',
+      'x.mjs',
+      'acme/*',
+    ]);
+  });
+
   it('returns undefined when argv cannot be determined', () => {
     expect(shellWords("node 'unterminated")).toBeUndefined();
     expect(shellWords('node "unterminated')).toBeUndefined();
@@ -169,6 +208,46 @@ describe('parseVerifyPrWatchGate', () => {
         'node scripts/verify-pr-watch-gate.mjs \\\n42 --repo acme/widgets',
       ),
     ).toEqual({ kind: 'watch', repo: 'acme/widgets', pr: 42 });
+  });
+
+  it('reads a continued --repo value with indentation on the next line', () => {
+    // Reviewer repro: the continuation must not push an empty word that
+    // --repo then consumes, turning a live watch into a known "no watch".
+    expect(
+      parseVerifyPrWatchGate(
+        'node scripts/verify-pr-watch-gate.mjs 42 --cli /bin/echo --repo \\\n  acme/widgets',
+      ),
+    ).toEqual({ kind: 'watch', repo: 'acme/widgets', pr: 42 });
+  });
+
+  it('ignores a trailing comment, including one that names --check', () => {
+    // Reviewer repro: the shell never passes the comment to the script, so
+    // a --check inside it must not read as a one-shot probe invocation.
+    expect(
+      parseVerifyPrWatchGate(
+        'node scripts/verify-pr-watch-gate.mjs 42 --repo acme/widgets --cli /bin/echo # omit --check for the standing watch',
+      ),
+    ).toEqual({ kind: 'watch', repo: 'acme/widgets', pr: 42 });
+  });
+
+  it('mirrors the script rejecting an empty first positional', () => {
+    // Number('') is 0 — the script throws on it, so the gate never fires
+    // and detection must not skip ahead to the later 42.
+    expect(
+      parseVerifyPrWatchGate(
+        'node scripts/verify-pr-watch-gate.mjs "" 42 --repo acme/widgets',
+      ),
+    ).toEqual({ kind: 'none' });
+  });
+
+  it('returns unknown for a gate whose repo is a glob', () => {
+    // The shell could expand acme/* to the real repo — a literal read
+    // would confirm "no watch" on a gate that actually fires.
+    expect(
+      parseVerifyPrWatchGate(
+        'node scripts/verify-pr-watch-gate.mjs 42 --repo acme/*',
+      ),
+    ).toEqual({ kind: 'unknown' });
   });
 
   it('returns unknown when the gate names the script but argv is undeterminable', () => {
@@ -284,6 +363,20 @@ describe('collectActivePrWatches', () => {
     const watches = await collectActivePrWatches('/ws');
     expect(watches?.get(SESSION)).toEqual(
       new Set([prWatchKey('https://github.com/acme/widgets/pull/42', 42)]),
+    );
+  });
+
+  it('collects a watch whose gate ends in a comment naming --check', async () => {
+    // The reviewer repro end to end: a known-empty map here would stamp
+    // watching:false on the live watch and drop its events under the gate.
+    mocks.readCronTasks.mockResolvedValue([
+      cronTask({
+        gate: 'node scripts/verify-pr-watch-gate.mjs 42 --repo acme/widgets --cli /bin/echo # omit --check for the standing watch',
+      }),
+    ]);
+    const watches = await collectActivePrWatches('/ws');
+    expect(watches?.get(SESSION)).toEqual(
+      new Set(['github.com/acme/widgets#42']),
     );
   });
 

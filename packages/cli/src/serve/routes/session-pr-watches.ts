@@ -47,12 +47,15 @@ export function prWatchKey(url: string, pr: number): string | undefined {
  * Split a simple shell command into the words the shell would pass as
  * argv, honoring single quotes (literal), double quotes (backslash escapes
  * only `$`, backtick, `"`, `\`, and newline), backslash escapes and
- * backslash-newline continuations outside quotes. Returns undefined when
- * the argv CANNOT be determined: unterminated quotes, variable/command
- * expansion (`$`, backticks), or shell operators/redirections/newlines
- * outside quotes — a whitespace split would silently disagree with the
- * real argv there (e.g. `--state-root '/tmp/pr 16772' 42` is ONE argument
- * followed by the PR number, not a PR named 16772).
+ * backslash-newline continuations outside quotes (both characters vanish
+ * without starting a word), and a word-start `#` comment, which ends the
+ * command. Returns undefined when the argv CANNOT be determined:
+ * unterminated quotes, variable/command expansion (`$`, backticks),
+ * glob/brace expansion characters (`*?[]{}`), or shell
+ * operators/redirections/newlines outside quotes — a whitespace split
+ * would silently disagree with the real argv there (e.g.
+ * `--state-root '/tmp/pr 16772' 42` is ONE argument followed by the PR
+ * number, not a PR named 16772).
  */
 export function shellWords(input: string): string[] | undefined {
   const words: string[] = [];
@@ -109,13 +112,22 @@ export function shellWords(input: string): string[] | undefined {
     if (ch === '\\') {
       const next = input[i + 1];
       if (next === undefined) return undefined; // trailing backslash
+      if (next === '\n') {
+        // Line continuation: both characters vanish and the word state is
+        // unchanged — starting a word here would push an empty argv element
+        // when the continued line begins with indentation.
+        i += 2;
+        continue;
+      }
       started = true;
-      if (next !== '\n') current += next; // backslash-newline: continuation
+      current += next;
       i += 2;
       continue;
     }
     if (ch === '$' || ch === '`') return undefined; // expansion
+    if ('*?[]{}'.includes(ch)) return undefined; // glob/brace expansion
     if (';|&><()'.includes(ch) || ch === '\n') return undefined; // operator
+    if (ch === '#' && !started) return words; // comment: the rest is not argv
     if (/\s/.test(ch)) {
       push();
       i += 1;
@@ -168,7 +180,6 @@ export function parseVerifyPrWatchGate(
   let repo: string | undefined;
   for (let i = scriptIndex + 1; i < tokens.length; i++) {
     const token = tokens[i]!;
-    if (token === '') continue;
     if (token === '--check' || token === '--claim' || token === '--release') {
       return { kind: 'none' };
     }

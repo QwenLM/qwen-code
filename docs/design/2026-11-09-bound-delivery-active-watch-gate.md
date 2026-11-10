@@ -104,19 +104,27 @@ keyed `sessionId` → set of PR keys, the union of:
    `gate` that names `verify-pr-watch-gate.mjs`. The gate is first split
    into words with the SHELL's own semantics (`shellWords`: single quotes
    literal, double quotes with POSIX backslash escapes, backslash escapes
-   and backslash-newline continuations outside quotes) — a whitespace split
-   would disagree with the real argv, e.g. `--state-root '/tmp/pr 16772' 42`
-   is one argument followed by the PR number, not a PR named 16772. The
-   word parse then MIRRORS the script's own `parseArgs`:
-   `--repo`/`--cli`/`--state-root` consume the following word, the first
-   non-flag positional is the PR number, and a gate carrying
+   and backslash-newline continuations outside quotes — a continuation
+   removes both characters WITHOUT starting a word, so indentation on the
+   continued line cannot push an empty argv element — and a word-start `#`
+   comment ends the command; mid-word `#` stays literal). Unquoted
+   glob/brace characters (`*?[]{}`) are undeterminable like `$`/backticks:
+   the shell could expand them into a different argv (e.g. a globbed
+   `--repo` value), so they fail open instead of confirming "no watch". A
+   whitespace split would disagree with the real argv, e.g.
+   `--state-root '/tmp/pr 16772' 42` is one argument followed by the PR
+   number, not a PR named 16772. The word parse then MIRRORS the script's
+   own `parseArgs`: `--repo`/`--cli`/`--state-root` consume the following
+   word, the first non-flag positional is the PR number (an empty string
+   is `Number('') === 0`, which the script rejects), and a gate carrying
    `--check`/`--claim`/`--release` is a one-shot probe invocation, never a
    standing watch. The result is THREE-state: `watch` (repo + PR),
    `none` (confirmed not a standing watch — not the script, a one-shot
    invocation, or arguments the script itself would reject, so the gate
    never fires), and `unknown` (the gate names the script but its argv
    cannot be determined: unterminated quotes, `$`/backtick expansion,
-   shell operators). Any `unknown` task makes the whole workspace answer
+   glob/brace expansion, shell operators). Any `unknown` task makes the
+   whole workspace answer
    `undefined` (fail-open) — an undeterminable gate must never become a
    known "no watch" that stamps `watching: false` on a possibly-watched PR.
 
@@ -279,9 +287,10 @@ in that same skip — private retirement, cursor progress, no public reply.
 ## Risks
 
 - **Gate-parse fragility.** The verify-pr gate string is model-authored per
-  the skill contract; an unusual spelling contributes no watch (fail-open:
-  the session keeps receiving events). The token parse accepts flag order
-  variation and quoting of the script path.
+  the skill contract; a spelling the parser cannot determine fails open
+  (the session keeps receiving events), never a confirmed "no watch". The
+  token parse accepts flag order variation, quoting of the script path,
+  line continuations, and trailing comments.
 - **Scan cost.** One `git worktree list` (10 s timeout) + cron-file read per
   workspace per binding poll (default 60 s). Same machinery the Web Shell
   watches page already uses on demand.
