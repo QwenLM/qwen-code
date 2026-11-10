@@ -246,15 +246,25 @@ function VirtualizedList<T>(
     useBoxMetrics(containerRef as React.RefObject<DOMElement>);
 
   // A host that derives the viewport from the terminal (MainContent passes
-  // `Math.max(0, terminalHeight - header - tabBar)`) legitimately hands down 0
-  // for a frame. `??` keeps that 0, which collapses the root box and leaves the
-  // transcript blank until the next measurement lands. Treat a non-positive
-  // host height as "not measured yet" so the measured box height keeps the
-  // content visible.
-  const containerHeight =
-    props.containerHeight !== undefined && props.containerHeight > 0
-      ? props.containerHeight
-      : measuredContainerHeight;
+  // `Math.max(0, terminalHeight - header - tabBar)`) legitimately hands down 0.
+  // `0` is a steady state, not only a settling frame: the controls region can
+  // fill a short terminal for as long as it stays open. The component's own
+  // measurement cannot stand in for the viewport — the root box sits under
+  // auto-height ancestors, so its height is the content's, and feeding that
+  // back would make the render window cover every row and `maxScroll` collapse
+  // to 0. Hold the last height the host actually constrained to instead.
+  const lastConstrainedHeight = useRef<number | undefined>(undefined);
+  if (props.containerHeight !== undefined && props.containerHeight > 0) {
+    lastConstrainedHeight.current = props.containerHeight;
+  }
+  const hostHeight =
+    props.containerHeight === undefined
+      ? undefined
+      : props.containerHeight > 0
+        ? props.containerHeight
+        : lastConstrainedHeight.current;
+
+  const containerHeight = hostHeight ?? measuredContainerHeight;
   const containerWidth = measuredContainerWidth;
 
   const [heights, setHeights] = useState<Record<string, number>>({});
@@ -992,12 +1002,11 @@ function VirtualizedList<T>(
   // measurement so short content does not leave a gap above the composer.
   // `scrollableContainerHeight` (the scroll math) still uses the full
   // `containerHeight`, so scrolling is unaffected.
-  const hostConstrainsHeight =
-    props.containerHeight !== undefined && props.containerHeight > 0;
+  const hostConstrainsHeight = hostHeight !== undefined;
   const rootHeight = hostConstrainsHeight
     ? fullHeightMeasurementPending
-      ? containerHeight
-      : Math.min(containerHeight, totalHeight)
+      ? hostHeight
+      : Math.min(hostHeight, totalHeight)
     : '100%';
 
   return (
