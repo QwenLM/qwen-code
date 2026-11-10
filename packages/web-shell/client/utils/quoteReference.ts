@@ -40,6 +40,38 @@ export function isQuotableText(raw: string): boolean {
 /** Opening token of the quote fence; a shell must never receive it. */
 export const QUOTE_FENCE_OPEN = '<quoted-message>';
 
+// The non-greedy body stops at the first closing tag; `+` (not `*`) keeps an
+// empty fence literal text, since a chip can never serialize to one, and the
+// newline-free body keeps the match single-line, because flattenQuoteText
+// strips every newline out of a chip's fragment.
+const QUOTE_FENCE_MATCH_RE = /<quoted-message>([^\n]+?)<\/quoted-message>/g;
+
+export interface QuoteFenceMatch {
+  from: number;
+  to: number;
+  fragment: string;
+}
+
+/**
+ * Finds the complete single-line `<quoted-message>` fences in a pasted
+ * string. The composer's quote chips are the only producer of this shape,
+ * so a fence in a paste is a chip that was copied or cut from the editor
+ * and should rehydrate into a chip, not stay as raw tag text.
+ */
+export function findQuoteFenceRanges(text: string): QuoteFenceMatch[] {
+  const matches: QuoteFenceMatch[] = [];
+  QUOTE_FENCE_MATCH_RE.lastIndex = 0;
+  let match: RegExpExecArray | null;
+  while ((match = QUOTE_FENCE_MATCH_RE.exec(text)) !== null) {
+    matches.push({
+      from: match.index,
+      to: match.index + match[0].length,
+      fragment: match[1] ?? '',
+    });
+  }
+  return matches;
+}
+
 /**
  * Builds the composer insert text for a quoted fragment, e.g.
  * `<quoted-message>quoted fragment text</quoted-message>`. The semantic

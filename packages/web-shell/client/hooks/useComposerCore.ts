@@ -84,7 +84,11 @@ import {
 } from '../extensions/inputHighlight';
 import { getShadowAwareActiveElement, isEditableTarget } from '../utils/dom';
 import { cssUrlValue } from '../utils/cssUrlVar';
-import { QUOTE_FENCE_OPEN } from '../utils/quoteReference';
+import {
+  QUOTE_FENCE_OPEN,
+  buildQuoteReferenceTag,
+  findQuoteFenceRanges,
+} from '../utils/quoteReference';
 import {
   createInputAnnotationsFromComposerTags,
   getComposerTagDisplay,
@@ -4280,6 +4284,43 @@ export function useComposerCore(
           return false;
         }),
         EditorView.domEventHandlers({
+          paste(event, view) {
+            // A cut quote chip comes back as its serialized fence text;
+            // rehydrate it into a chip instead of leaving the raw tags as
+            // text. Extension handlers run before the built-in paste, so
+            // returning true keeps CodeMirror's plain insert off the fence.
+            const data = event.clipboardData;
+            if (
+              !data ||
+              view.state.readOnly ||
+              disabledRef.current ||
+              shellModeRef.current
+            )
+              return false;
+            const text = data.getData('text/plain');
+            if (!text) return false;
+            const fences = findQuoteFenceRanges(text);
+            if (fences.length === 0) return false;
+            const tags = fences.map((fence) =>
+              buildQuoteReferenceTag(fence.fragment),
+            );
+            if (tags.some((tag) => tag === null)) return false;
+            const { from, to } = view.state.selection.main;
+            view.dispatch({
+              changes: { from, to, insert: text },
+              effects: fences.map((fence, i) =>
+                addInlineTagEffect.of({
+                  from: from + fence.from,
+                  to: from + fence.to,
+                  tag: resolveComposerTagIcon(tags[i]!),
+                }),
+              ),
+              selection: { anchor: from + text.length },
+              userEvent: 'input.paste',
+              scrollIntoView: true,
+            });
+            return true;
+          },
           blur(event) {
             closeSlashMenu();
             if (

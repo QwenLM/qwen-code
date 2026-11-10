@@ -6,6 +6,7 @@ import {
 import {
   QUOTE_REFERENCE_MAX_CHARS,
   buildQuoteReferenceTag,
+  findQuoteFenceRanges,
   flattenQuoteText,
   insertQuoteIntoComposer,
   isQuotableText,
@@ -118,6 +119,58 @@ describe('insertQuoteIntoComposer', () => {
     expect(insertQuoteIntoComposer({}, 'text')).toBe(false);
     expect(insertQuoteIntoComposer({ insertQuote }, ' \u200F ')).toBe(false);
     expect(insertQuote).not.toHaveBeenCalled();
+  });
+});
+
+describe('findQuoteFenceRanges', () => {
+  const fence = '<quoted-message>fragment</quoted-message>';
+
+  it('finds a fence at the start, middle, and end of the text', () => {
+    expect(findQuoteFenceRanges(fence)).toEqual([
+      { from: 0, to: fence.length, fragment: 'fragment' },
+    ]);
+    expect(findQuoteFenceRanges(`see ${fence} and more`)).toEqual([
+      { from: 4, to: 4 + fence.length, fragment: 'fragment' },
+    ]);
+    expect(findQuoteFenceRanges(`prefix ${fence}`)).toEqual([
+      { from: 7, to: 7 + fence.length, fragment: 'fragment' },
+    ]);
+  });
+
+  it('finds multiple fences in one paste', () => {
+    const second = '<quoted-message>other</quoted-message>';
+    const text = `${fence}\nsecond: ${second}`;
+    expect(findQuoteFenceRanges(text)).toEqual([
+      { from: 0, to: fence.length, fragment: 'fragment' },
+      {
+        from: text.indexOf(second),
+        to: text.indexOf(second) + second.length,
+        fragment: 'other',
+      },
+    ]);
+  });
+
+  it('ignores unclosed fences and empty fragments', () => {
+    expect(findQuoteFenceRanges('<quoted-message>open only')).toEqual([]);
+    expect(findQuoteFenceRanges('<quoted-message></quoted-message>')).toEqual(
+      [],
+    );
+  });
+
+  it('ignores multi-line fences: a chip can never carry newlines', () => {
+    expect(
+      findQuoteFenceRanges(
+        '<quoted-message>line one\nline two</quoted-message>',
+      ),
+    ).toEqual([]);
+  });
+
+  it('stops at the first closing tag when a fragment contains one', () => {
+    const text = '<quoted-message>inner</quoted-message> tail</quoted-message>';
+    const first = '<quoted-message>inner</quoted-message>';
+    expect(findQuoteFenceRanges(text)).toEqual([
+      { from: 0, to: first.length, fragment: 'inner' },
+    ]);
   });
 });
 

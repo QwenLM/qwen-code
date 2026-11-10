@@ -3452,6 +3452,95 @@ describe('useComposerCore tags', () => {
     );
   });
 
+  describe('quote paste rehydration', () => {
+    const quoteTag = {
+      id: 'quote:paste-1',
+      kind: 'quote',
+      value: 'fragment',
+      serialized: '<quoted-message>fragment</quoted-message>',
+    };
+    const fence = quoteTag.serialized;
+
+    const pasteText = (text: string) => {
+      const event = new Event('paste', { bubbles: true, cancelable: true });
+      Object.defineProperty(event, 'clipboardData', {
+        value: {
+          files: [],
+          items: [],
+          types: ['text/plain'],
+          getData: (type: string) => (type === 'text/plain' ? text : ''),
+        },
+      });
+      act(() => container!.querySelector('.cm-content')!.dispatchEvent(event));
+    };
+
+    it('rehydrates a cut quote chip when it is pasted back', async () => {
+      await mount();
+      const view = latest!.viewRef.current!;
+      act(() => {
+        latest!.handle.insertQuote!(quoteTag);
+      });
+      expect(view.state.doc.toString()).toBe(`${fence}\n`);
+      // Cut: the clipboard receives the chip's serialized fence and the
+      // chip text leaves the document, caret at the cut point.
+      act(() => {
+        view.dispatch({
+          changes: { from: 0, to: fence.length, insert: '' },
+          selection: { anchor: 0 },
+        });
+      });
+      expect(view.state.doc.toString()).toBe('\n');
+
+      pasteText(fence);
+
+      expect(view.state.doc.toString()).toBe(`${fence}\n`);
+      const tags = getInlineComposerTags(view);
+      expect(tags).toHaveLength(1);
+      expect(tags[0]).toMatchObject({ kind: 'quote', value: 'fragment' });
+      // A re-pasted chip gets a fresh id: it is an independent chip, so the
+      // draft-persistence filters and the remove button treat it on its own.
+      expect(tags[0]?.id).not.toBe(quoteTag.id);
+    });
+
+    it('rehydrates a fence embedded in surrounding pasted text', async () => {
+      await mount();
+      const view = latest!.viewRef.current!;
+      const text = `see ${fence} and more`;
+      pasteText(text);
+      expect(view.state.doc.toString()).toBe(text);
+      const tags = getInlineComposerTags(view);
+      expect(tags).toHaveLength(1);
+      expect(tags[0]).toMatchObject({ kind: 'quote', value: 'fragment' });
+    });
+
+    it('keeps a plain paste plain', async () => {
+      await mount();
+      const view = latest!.viewRef.current!;
+      pasteText('nothing to rehydrate');
+      expect(view.state.doc.toString()).toBe('nothing to rehydrate');
+      expect(getInlineComposerTags(view)).toHaveLength(0);
+    });
+
+    it('keeps an unclosed fence as literal text', async () => {
+      await mount();
+      const view = latest!.viewRef.current!;
+      const text = 'unclosed <quoted-message>half';
+      pasteText(text);
+      expect(view.state.doc.toString()).toBe(text);
+      expect(getInlineComposerTags(view)).toHaveLength(0);
+    });
+
+    it('keeps a pasted fence literal in shell mode', async () => {
+      await mount();
+      act(() => latest!.toggleShellMode());
+      expect(latest!.shellMode).toBe(true);
+      const view = latest!.viewRef.current!;
+      pasteText(fence);
+      expect(view.state.doc.toString()).toBe(fence);
+      expect(getInlineComposerTags(view)).toHaveLength(0);
+    });
+  });
+
   describe('quote draft persistence on non-persistent hosts', () => {
     const quoteTag = {
       id: 'quote:draft-1',
