@@ -88,6 +88,10 @@ vi.mock('./Footer.js', () => ({
   Footer: () => <Text>Footer</Text>,
 }));
 
+vi.mock('./KeyboardShortcuts.js', () => ({
+  KeyboardShortcuts: () => <Text>KeyboardShortcuts</Text>,
+}));
+
 vi.mock('./QueuedMessageDisplay.js', () => ({
   QueuedMessageDisplay: ({ messageQueue }: { messageQueue: string[] }) => {
     if (messageQueue.length === 0) {
@@ -296,6 +300,37 @@ describe('Composer', () => {
       const { lastFrame } = renderComposer(uiState);
 
       expect(lastFrame()).not.toContain('Footer');
+    });
+
+    it('renders the footer rather than the shortcuts panel when a queued message mounts the slot with the input inactive', () => {
+      // showShortcuts has one writer and nothing resets it when isInputActive
+      // flips, so a panel left open would otherwise take the slot the queue
+      // just mounted and hide the count this change exists for.
+      const uiState = createMockUIState({
+        isInputActive: true,
+        isConfigInitialized: true,
+      });
+
+      const { lastFrame, rerender } = renderComposer(uiState);
+
+      const inputPrompt = vi.mocked(InputPrompt);
+      const firstProps = inputPrompt.mock.calls.at(-1)?.[0] as {
+        onToggleShortcuts?: () => void;
+      };
+      firstProps?.onToggleShortcuts?.();
+
+      rerender(
+        composerElement(
+          createMockUIState({
+            isInputActive: false,
+            isConfigInitialized: true,
+            messageQueue: ['queued'],
+          }),
+        ),
+      );
+
+      expect(lastFrame()).toContain('Footer');
+      expect(lastFrame()).not.toContain('KeyboardShortcuts');
     });
   });
 
