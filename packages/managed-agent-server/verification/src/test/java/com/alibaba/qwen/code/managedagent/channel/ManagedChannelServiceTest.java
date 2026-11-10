@@ -423,11 +423,7 @@ class ManagedChannelServiceTest {
         assertThat(segmentLedger.list(TENANT, channel, deliveryId))
                 .extracting(SegmentLedger::providerReceipt)
                 .containsExactly(null, null, null);
-        clock.addAndGet(Duration.ofMinutes(11).toMillis());
-        jdbc.update("UPDATE ma_delivery SET claimed_at=?"
-                        + " WHERE tenant_id=? AND delivery_id=?",
-                clock.get() - Duration.ofMinutes(11).toMillis(), TENANT,
-                deliveryId);
+        expire(deliveryId);
         service.reconcile();
         assertThat(segmentLedger.list(TENANT, channel, deliveryId))
                 .extracting(SegmentLedger::providerReceipt)
@@ -435,6 +431,38 @@ class ManagedChannelServiceTest {
                         "<m2@example.com>");
         assertThat(service.ledger(TENANT, channel, deliveryId)).get()
                 .extracting(row -> row.state()).isEqualTo("delivered");
+        // The delivery-level representative receipt is the last segment's,
+        // not the first: a first-wins fold would persist m0 here.
+        assertThat(service.ledger(TENANT, channel, deliveryId)).get()
+                .extracting(row -> row.providerReceipt())
+                .isEqualTo("<m2@example.com>");
+    }
+
+    @Test
+    void reconcileRebuildsSegmentRowsThatWereNeverPlanned() {
+        InboundAdmission admitted = service.submitInbound(TENANT, channel,
+                event(1, "1700:94", "please reply"));
+        String deliveryId = admitted.inputId() + ":reply";
+        plannedDelivery(admitted.sessionId(), deliveryId, admitted.routeId(),
+                "The build is green.", 3);
+        service.claimDeliveries(TENANT, channel, 16);
+        // The record carries receipts on the first two segments; the segment
+        // rows the claim created are gone, as for a delivery claimed before
+        // the segment ledger existed.
+        mirrorSegmentReceipts(admitted.sessionId(), deliveryId, 2);
+        jdbc.update("DELETE FROM ma_channel_segment WHERE tenant_id=?"
+                        + " AND channel_id=?",
+                TENANT, channel);
+        assertThat(segmentLedger.list(TENANT, channel, deliveryId)).isEmpty();
+        expire(deliveryId);
+        service.reconcile();
+        assertThat(segmentLedger.list(TENANT, channel, deliveryId))
+                .extracting(SegmentLedger::segmentId)
+                .containsExactly(deliveryId + ":0", deliveryId + ":1",
+                        deliveryId + ":2");
+        assertThat(segmentLedger.list(TENANT, channel, deliveryId))
+                .extracting(SegmentLedger::providerReceipt)
+                .containsExactly("<m0@example.com>", "<m1@example.com>", null);
     }
 
     @Test
@@ -472,11 +500,7 @@ class ManagedChannelServiceTest {
         // The reconciler still reaches the open delivery and converges the
         // missing receipt from the committed record.
         mirrorSegmentReceipts(admitted.sessionId(), deliveryId, 3);
-        clock.addAndGet(Duration.ofMinutes(11).toMillis());
-        jdbc.update("UPDATE ma_delivery SET claimed_at=?"
-                        + " WHERE tenant_id=? AND delivery_id=?",
-                clock.get() - Duration.ofMinutes(11).toMillis(), TENANT,
-                deliveryId);
+        expire(deliveryId);
         failingService.reconcile();
         assertThat(service.ledger(TENANT, channel, deliveryId)).get()
                 .extracting(row -> row.state()).isEqualTo("delivered");
@@ -496,11 +520,7 @@ class ManagedChannelServiceTest {
         service.claimDeliveries(TENANT, channel, 16);
         // The adapter died after sending: the lease settles the delivery
         // unknown without a single segment receipt.
-        clock.addAndGet(Duration.ofMinutes(11).toMillis());
-        jdbc.update("UPDATE ma_delivery SET claimed_at=?"
-                        + " WHERE tenant_id=? AND delivery_id=?",
-                clock.get() - Duration.ofMinutes(11).toMillis(), TENANT,
-                deliveryId);
+        expire(deliveryId);
         service.reconcile();
         assertThat(service.ledger(TENANT, channel, deliveryId)).get()
                 .extracting(row -> row.state()).isEqualTo("unknown");
@@ -1099,6 +1119,23 @@ class ManagedChannelServiceTest {
      * Session store writes them while the control plane's answers are lost. */
     private void mirrorSegmentReceipts(String sessionId, String deliveryId,
             int segmentCount) {
+        mirrorReceipts(sessionId, deliveryId, segmentCount,
+                ordinal -> "<m" + ordinal + "@example.com>");
+    }
+
+    /** The record body gains the committed segment receipt, as the Session
+     * store writes it with the delivered revision. */
+    private void mirrorReceiptIntoRecord(String sessionId,
+            String deliveryId) {
+        mirrorReceipts(sessionId, deliveryId, Integer.MAX_VALUE,
+                ordinal -> "<m1@example.com>");
+    }
+
+    /** Stamps the record's segments below {@code segmentCount} with the
+     * receipt id the policy derives from each ordinal, rewriting the resource
+     * body exactly as the Session store does. */
+    private void mirrorReceipts(String sessionId, String deliveryId,
+            int segmentCount, java.util.function.IntFunction<String> receiptId) {
         for (Map<String, Object> row : jdbc.query(
                 "SELECT resource_id, inline_bytes"
                         + " FROM ma_resource"
@@ -1123,50 +1160,9 @@ class ManagedChannelServiceTest {
                     continue;
                 }
                 ObjectNode receipt = mapper.createObjectNode();
-                receipt.put("providerMessageId", "<m" + ordinal + "@example.com>");
+                receipt.put("providerMessageId", receiptId.apply(ordinal));
                 receipt.put("acceptedAt", 1_750_000_000_000L);
                 ((ObjectNode) segment).set("receipt", receipt);
-            }
-            try {
-                jdbc.update("UPDATE ma_resource"
-                                + " SET inline_bytes = ?"
-                                + " WHERE tenant_id = ? AND resource_id = ?",
-                        mapper.writeValueAsString(tree)
-                                .getBytes(StandardCharsets.UTF_8),
-                        TENANT, row.get("resource_id"));
-            } catch (JsonProcessingException error) {
-                throw new IllegalStateException(error);
-            }
-        }
-    }
-
-    /** The record body gains the committed segment receipt, as the Session
-     * store writes it with the delivered revision. */
-    private void mirrorReceiptIntoRecord(String sessionId,
-            String deliveryId) {
-        for (Map<String, Object> row : jdbc.query(
-                "SELECT resource_id, inline_bytes"
-                        + " FROM ma_resource"
-                        + " WHERE tenant_id = ? AND session_id = ?"
-                        + " AND kind = ?"
-                        + " AND state = 'REFERENCED'",
-                (row, index) -> com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.read(row), TENANT, sessionId, "managed-channel_delivery")) {
-            JsonNode tree;
-            try {
-                tree = mapper.readTree(
-                        new String((byte[]) row.get("inline_bytes"),
-                                StandardCharsets.UTF_8));
-            } catch (JsonProcessingException error) {
-                throw new IllegalStateException(error);
-            }
-            if (!deliveryId.equals(tree.path("deliveryId").asText())) {
-                continue;
-            }
-            ObjectNode receipt = mapper.createObjectNode();
-            receipt.put("providerMessageId", "<m1@example.com>");
-            receipt.put("acceptedAt", 1_750_000_000_000L);
-            for (JsonNode segment : tree.path("segments")) {
-                ((ObjectNode) segment).set("receipt", receipt.deepCopy());
             }
             try {
                 jdbc.update("UPDATE ma_resource"

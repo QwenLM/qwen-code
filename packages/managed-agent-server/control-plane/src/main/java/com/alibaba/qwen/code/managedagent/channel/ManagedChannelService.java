@@ -452,20 +452,13 @@ public class ManagedChannelService {
     }
 
     /**
-     * Converges every segment receipt the committed record holds into the
-     * segment ledger: a receipt whose answer was lost still landed, and the
-     * write-once update leaves an already-stored receipt intact.
+     * Converges the committed record into the segment ledger: the plan insert
+     * carries each segment's identity and the write-once backfill lands any
+     * receipt whose answer was lost, leaving an already-stored receipt intact.
      */
     private void convergeSegments(String tenantId, String channelId,
             String deliveryId, JsonNode tree) {
         planSegments(tenantId, channelId, deliveryId, tree);
-        for (JsonNode segment : tree.path("segments")) {
-            String receipt = segmentReceipt(segment);
-            if (receipt != null) {
-                segments.receipt(tenantId, channelId, deliveryId,
-                        segment.required("ordinal").asInt(), receipt);
-            }
-        }
     }
 
     // --- public reads ---

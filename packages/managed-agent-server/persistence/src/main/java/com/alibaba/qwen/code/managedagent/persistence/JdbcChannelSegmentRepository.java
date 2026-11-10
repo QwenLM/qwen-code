@@ -44,7 +44,7 @@ public final class JdbcChannelSegmentRepository
             if (segment.ordinal() < 0) {
                 throw new IllegalArgumentException("ordinal must not be negative");
             }
-            jdbc.update("INSERT IGNORE INTO ma_channel_segment (delivery_key,"
+            int inserted = jdbc.update("INSERT IGNORE INTO ma_channel_segment (delivery_key,"
                             + " tenant_id, channel_id, segment_id, segment_ordinal,"
                             + " provider_receipt_json, gmt_create, gmt_modified)"
                             + " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -53,11 +53,11 @@ public final class JdbcChannelSegmentRepository
                     JdbcChannelDeliveryRepository.receiptJson(
                             segment.providerReceipt()),
                     now, now);
-            // INSERT IGNORE keeps an existing row untouched, so a resumed
-            // plan also backfills a receipt the row is still missing — never
-            // overwriting one it already holds.
-            if (segment.providerReceipt() != null) {
-                receiptOnce(key, segment.ordinal(), segment.providerReceipt());
+            // A row the insert just created already carries the receipt; only
+            // a pre-existing row with a null receipt needs the write-once
+            // backfill, which never overwrites a receipt it already holds.
+            if (inserted == 0 && segment.providerReceipt() != null) {
+                receiptOnce(key, segment.ordinal(), segment.providerReceipt(), now);
             }
         }
     }
@@ -78,11 +78,16 @@ public final class JdbcChannelSegmentRepository
     }
 
     private boolean receiptOnce(String key, int ordinal, String providerReceipt) {
+        return receiptOnce(key, ordinal, providerReceipt, databaseNow());
+    }
+
+    private boolean receiptOnce(String key, int ordinal, String providerReceipt,
+            long now) {
         return jdbc.update("UPDATE ma_channel_segment SET provider_receipt_json = ?,"
                         + " gmt_modified = ? WHERE delivery_key = ?"
                         + " AND segment_ordinal = ? AND provider_receipt_json IS NULL",
                 JdbcChannelDeliveryRepository.receiptJson(providerReceipt),
-                databaseNow(), key, ordinal) == 1;
+                now, key, ordinal) == 1;
     }
 
     @Override
