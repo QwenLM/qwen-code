@@ -708,6 +708,16 @@ final class JournalStoreRows {
             String recordDigest) {
     }
 
+    TransactionRow withRecordBytes(TransactionRow row, byte[] bytes) {
+        return new TransactionRow(row.workspaceId(), row.journalRevision(), row.transactionId(),
+                row.operation(), row.commandId(), row.contentDigest(), row.firstSequence(),
+                row.lastSequence(), row.eventCount(), row.eventsDigest(),
+                row.previousCommitDigest(), row.commitDigest(), row.writerGeneration(),
+                row.writerId(), row.writerTokenHash(), row.activationEpoch(),
+                row.latestCheckpointResourceId(), row.recordEncoding(), bytes, row.byteLength(),
+                row.recordDigest());
+    }
+
     record ResourceRow(String tenantId, String workspaceId,
             String sessionId, String resourceId, String kind,
             int schemaVersion, long byteLength, String digest,

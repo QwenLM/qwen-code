@@ -42,7 +42,9 @@ public class JdbcManagedSessionStore
         implements ManagedSessionStore {
     private final JournalStoreRows storeRows;
     private final JournalFencing fencing;
-    private final JournalHistoryQueries historyQueries;
+    private final JdbcTemplate jdbc;
+    private final ToolPublicationObjectStore publicationObjects;
+    private JournalHistoryQueries historyQueries;
     private final JournalLifecycleAuthorization lifecycleAuthorization;
     private final JournalResourceReads resourceReads;
     private final JournalResourceWrites resourceWrites;
@@ -94,6 +96,8 @@ public class JdbcManagedSessionStore
         var ownerReads = new org.springframework.transaction.support.TransactionTemplate(manager);
         ownerReads.setTimeout(10);
         this.storeRows = new JournalStoreRows(readerVersion, jdbc);
+        this.jdbc = jdbc;
+        this.publicationObjects = publicationObjects;
         this.fencing = new JournalFencing(storeRows, jdbc, journalEventTransport, credentials, csiBindings);
         this.historyQueries = new JournalHistoryQueries(fencing, storeRows, jdbc);
         this.lifecycleAuthorization = new JournalLifecycleAuthorization(fencing, storeRows, harnessRules, jdbc, extensionRecords, lifecycleExecution, lifecycleSessions);
@@ -101,6 +105,20 @@ public class JdbcManagedSessionStore
         this.resourceWrites = new JournalResourceWrites(fencing, storeRows, jdbc);
         this.writerLifecycle = new JournalWriterLifecycle(fencing, storeRows, readerVersion, jdbc, credentials, csiBindings, extensionRecords);
         this.commits = new JournalCommit(fencing, lifecycleAuthorization, resourceWrites, storeRows, readerVersion, jdbc, toolResults, journalEventTransport, extensionRecords, actions);
+    }
+
+    /**
+     * Optional setter injection keeps every manual construction site (maintenance launchers,
+     * fixtures) unchanged: without settings the history queries stay inline-only.
+     */
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    void setSessionResources(
+            com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings settings) {
+        if (settings == null) {
+            return;
+        }
+        JdbcJournalPacks packs = new JdbcJournalPacks(jdbc, publicationObjects, settings);
+        this.historyQueries = new JournalHistoryQueries(fencing, storeRows, jdbc, packs);
     }
 
     static final int GUARD_ACQUIRE_TIMEOUT_SECONDS = JournalFencing.GUARD_ACQUIRE_TIMEOUT_SECONDS;

@@ -217,6 +217,18 @@ public class ManagedSideQueryStore implements ManagedSideQueries {
         return new Claim(instance, boot, generation, token);
     }
 
+    private JdbcJournalPacks packs;
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    void setSessionResources(
+            com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings settings,
+            org.springframework.beans.factory.ObjectProvider<
+                    com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObjectStore> objects) {
+        if (settings != null) {
+            this.packs = new JdbcJournalPacks(jdbc, objects.getIfAvailable(), settings);
+        }
+    }
+
     @Override
     public FrozenInput frozen(String tenant, String session, String id, Claim claim) {
         Row row = checked(tenant, session, id, claim, true);
@@ -246,6 +258,15 @@ public class ManagedSideQueryStore implements ManagedSideQueries {
             }
             if (bytes + transaction.byteLength() > ManagedSessionStoreModels.MAX_TRANSACTION_BYTES && !transactions.isEmpty()) {
                 break;
+            }
+            if (transaction.recordBytes() == null) {
+                byte[] resolved = packs == null ? null : packs.resolveBytes(tenant, session,
+                        transaction.journalRevision(), transaction.recordDigest(),
+                        transaction.byteLength());
+                if (resolved == null) {
+                    throw error(409, "side_query_history_unavailable");
+                }
+                transaction = journal.withRecordBytes(transaction, resolved);
             }
             transactions.add(journal.storedTransaction(transaction));
             bytes += transaction.byteLength();
