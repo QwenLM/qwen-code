@@ -105,11 +105,13 @@ daemon PR-state watch（观测 + drain）在生产中关闭：
 - `buildBoundSessionPrompt` 传 `language: this.locale` 并选取
   `DEFAULT_BOUND_ROLE_GUIDANCE_BY_LANGUAGE[this.locale][role]`。
 - 聚合通道的批次省略提示被移到头部行（行首的方括号副本会被 sanitizer
-  剥掉），单条评论截断标记只在 composer 真正按 400 码点截断评论时重写
-  （该 bullet 的渲染内容恰好为 `MAX_AGGREGATE_COMMENT_CHARS` 码点），因此
-  评论正文里引用形态的标记文本保持原样。direct lane 的指令由 `Trigger:`
-  元数据行决定，不依据正文文本。以上重写全部只发生在绑定投递路径；公共
-  通道发布的共享聚合 summary 不受影响。
+  剥掉），单条评论截断标记只在整个 bullet 的渲染内容（含续行）恰为
+  `MAX_AGGREGATE_COMMENT_CHARS` 码点时才重写——即 composer 的真实截断处——
+  因此评论正文里引用形态的标记文本保持原样。direct lane 的指令由 `event-`
+  消息 id（唯一直通道入口）决定，不依据正文或共享的 `Trigger:` 行（每个
+  lane 都有 reason）。direct lane 的正文取自 en 文案表（逐字节一致），en
+  条目因此被真实读取。以上重写全部只发生在绑定投递路径；公共通道发布的
+  共享聚合 summary 不受影响。
 - `watchOnePr` 在检测时按 `this.locale` 渲染摘要。英文渲染逐字节不变。
 
 ### daemon drain 生产方
@@ -149,6 +151,8 @@ channel 撰写的字符串：
 | 批次省略提示                    | `[<n> earlier comment(s) omitted from this batch; list the PR comments to see them]`                                        | `[本批次省略了 <n> 条较早的评论；请列出 PR 评论查看]`                                               |
 | direct lane（review_requested） | `Return a formal review summary with verified actionable findings, or a concise no-blocker result.`                         | `请给出正式的评审总结，包含经核实的可操作发现；若没有阻塞问题，给出简洁的无阻塞结论。`              |
 | direct lane（assign）           | `Triage this issue and respond with the next action.`                                                                       | `请分诊该 issue 并给出下一步行动。`                                                                 |
+| 评论监视 lead                   | `New comment by @<author>:`                                                                                                 | `@<author> 的新评论：`                                                                              |
+| 行内评审 lead                   | `New inline review comment by @<author>:`                                                                                   | `@<author> 的新行内评审评论：`                                                                      |
 | 单条评论截断                    | `… [comment truncated: <n> more characters]`                                                                                | `… [评论已截断：省略了 <n> 个字符]`                                                                 |
 | head_change                     | `New commits pushed: head moved from <a> to <b>.`                                                                           | `有新提交推送：head 从 <a> 变为 <b>。`                                                              |
 | ci_failure                      | `CI failed on head <sha>.` + ` Failed checks: <names>` + ` (list may be incomplete: later check pages were not read)` + `.` | `head <sha> 的 CI 失败。` + `失败的检查：<names>` + `（列表可能不完整：未读取后续检查分页）` + `。` |

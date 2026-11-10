@@ -123,13 +123,16 @@ live producer of bound event prompts today.
   `DEFAULT_BOUND_ROLE_GUIDANCE_BY_LANGUAGE[this.locale][role]`.
 - The aggregate lane's batch-omission notice is lifted ONTO the header line
   (a line-start bracketed copy would be peeled by the sanitizer), and the
-  per-comment truncation marker is rewritten only where the composer actually
-  cut a comment at the 400-code-point cap (the bullet's rendered content is
-  exactly `MAX_AGGREGATE_COMMENT_CHARS` code points long), so quoted marker
-  text inside a comment body stays verbatim. The direct-lane instructions are
-  keyed by the `Trigger:` metadata line, never by body text. All of these
-  rewrites happen on the bound path only; the shared aggregate summary the
-  public lane publishes is never touched.
+  per-comment truncation marker is rewritten only where the WHOLE bullet's
+  rendered content (including continuation lines) is exactly
+  `MAX_AGGREGATE_COMMENT_CHARS` code points long — the composer's own cut —
+  so quoted marker text inside a comment body stays verbatim. The direct-lane
+  instructions are keyed by the `event-` message id (the only lane that emits
+  it), never by body text or by the shared `Trigger:` line (every lane's
+  reason). The direct lane's own text comes from the en copy table
+  (byte-identical), so en entries are genuinely read. All of these rewrites
+  happen on the bound path only; the shared aggregate summary the public lane
+  publishes is never touched.
 - `watchOnePr` renders summaries in `this.locale` at detection time. The
   English renderings stay byte-identical.
 
@@ -170,6 +173,8 @@ Channel-authored strings:
 | batch omission notice          | `[<n> earlier comment(s) omitted from this batch; list the PR comments to see them]`                                        | `[本批次省略了 <n> 条较早的评论；请列出 PR 评论查看]`                                               |
 | direct lane (review_requested) | `Return a formal review summary with verified actionable findings, or a concise no-blocker result.`                         | `请给出正式的评审总结，包含经核实的可操作发现；若没有阻塞问题，给出简洁的无阻塞结论。`              |
 | direct lane (assign)           | `Triage this issue and respond with the next action.`                                                                       | `请分诊该 issue 并给出下一步行动。`                                                                 |
+| comment-watch lead             | `New comment by @<author>:`                                                                                                 | `@<author> 的新评论：`                                                                              |
+| inline review lead             | `New inline review comment by @<author>:`                                                                                   | `@<author> 的新行内评审评论：`                                                                      |
 | per-comment truncation         | `… [comment truncated: <n> more characters]`                                                                                | `… [评论已截断：省略了 <n> 个字符]`                                                                 |
 | head_change                    | `New commits pushed: head moved from <a> to <b>.`                                                                           | `有新提交推送：head 从 <a> 变为 <b>。`                                                              |
 | ci_failure                     | `CI failed on head <sha>.` + ` Failed checks: <names>` + ` (list may be incomplete: later check pages were not read)` + `.` | `head <sha> 的 CI 失败。` + `失败的检查：<names>` + `（列表可能不完整：未读取后续检查分页）` + `。` |

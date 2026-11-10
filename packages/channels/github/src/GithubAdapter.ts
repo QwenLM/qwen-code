@@ -1315,6 +1315,8 @@ const BOUND_DELIVERY_COPY: Readonly<
       newCommentsHeader: string;
       omittedNotice(count: number): string;
       commentTruncated(count: number): string;
+      newCommentLead(author: string): string;
+      newInlineReviewCommentLead(author: string): string;
       reviewRequestedInstruction: string;
       assignInstruction: string;
       headChange(fromSha: string, toSha: string): string;
@@ -1334,6 +1336,9 @@ const BOUND_DELIVERY_COPY: Readonly<
     omittedNotice: (count) =>
       `${count} earlier comment(s) omitted from this batch; list the PR comments to see them`,
     commentTruncated: (count) => `comment truncated: ${count} more characters`,
+    newCommentLead: (author) => `New comment by @${author}:`,
+    newInlineReviewCommentLead: (author) =>
+      `New inline review comment by @${author}:`,
     reviewRequestedInstruction:
       'Return a formal review summary with verified actionable findings, or a concise no-blocker result.',
     assignInstruction: 'Triage this issue and respond with the next action.',
@@ -1358,6 +1363,8 @@ const BOUND_DELIVERY_COPY: Readonly<
     omittedNotice: (count) =>
       `本批次省略了 ${count} 条较早的评论；请列出 PR 评论查看`,
     commentTruncated: (count) => `评论已截断：省略了 ${count} 个字符`,
+    newCommentLead: (author) => `@${author} 的新评论：`,
+    newInlineReviewCommentLead: (author) => `@${author} 的新行内评审评论：`,
     reviewRequestedInstruction:
       '请给出正式的评审总结，包含经核实的可操作发现；若没有阻塞问题，给出简洁的无阻塞结论。',
     assignInstruction: '请分诊该 issue 并给出下一步行动。',
@@ -3585,8 +3592,8 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       messageId: `event-${trigger.id}`,
       text:
         reason === 'review_requested'
-          ? 'Return a formal review summary with verified actionable findings, or a concise no-blocker result.'
-          : 'Triage this issue and respond with the next action.',
+          ? BOUND_DELIVERY_COPY.en.reviewRequestedInstruction
+          : BOUND_DELIVERY_COPY.en.assignInstruction,
       isGroup: true,
       isMentioned: true,
       isReplyToBot: false,
@@ -6724,43 +6731,58 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
             return '';
           },
         );
+        const truncationPattern = new RegExp(
+          `… \\[${escapeRegExpText(
+            BOUND_DELIVERY_COPY.en.commentTruncated(0),
+          ).replace(
+            /^comment truncated: 0 /,
+            'comment truncated: (\\d+) ',
+          )}\\]\\n?$`,
+        );
         summary = summary
-          .split('\n')
-          .map((line) =>
-            line.replace(
-              new RegExp(
-                `… \\[${escapeRegExpText(
-                  BOUND_DELIVERY_COPY.en.commentTruncated(0),
-                ).replace(
-                  /^comment truncated: 0 /,
-                  'comment truncated: (\\d+) ',
-                )}\\]$`,
-              ),
-              (match, count: string) => {
-                // Genuine only at the composer's own cut: the bullet's rendered
-                // content then holds exactly MAX_AGGREGATE_COMMENT_CHARS code
-                // points. Any other length is quoted user text, left verbatim.
-                const rendered = line
-                  .slice(0, line.length - match.length)
-                  .replace(/^- @[^:]*: /, '');
-                return Array.from(rendered).length ===
-                  MAX_AGGREGATE_COMMENT_CHARS
-                  ? `… [${copy.commentTruncated(Number(count))}]`
-                  : match;
-              },
-            ),
-          )
-          .join('\n');
+          .split(/(?=^- @)/m)
+          .map((chunk) => {
+            const match = chunk.match(truncationPattern);
+            if (!match) return chunk;
+            const count = match[1]!;
+            // Genuine only at the composer's own cut: the WHOLE bullet's
+            // rendered content (including continuation lines) then holds
+            // exactly MAX_AGGREGATE_COMMENT_CHARS code points. Any other
+            // length is quoted user text, left verbatim.
+            const rendered = chunk
+              .slice(0, chunk.length - match[0].length)
+              .replace(/^- @[^:]*: /, '');
+            return Array.from(rendered).length === MAX_AGGREGATE_COMMENT_CHARS
+              ? `${rendered}… [${copy.commentTruncated(Number(count))}]`
+              : chunk;
+          })
+          .join('');
       }
       text = `${header}\n${summary}`;
     }
-    // The direct lanes are keyed by their Trigger metadata line, never by
-    // body text: a comment body that happens to match the instruction
-    // literal must not be rewritten.
-    const trigger = metadataLines
-      .find((line) => line.startsWith('Trigger: '))
-      ?.replace(/^Trigger: |\.$/g, '');
+    // The comment-watch lanes' lead lines are product prose as well.
     if (this.locale !== 'en') {
+      if (text.startsWith('New comment by @')) {
+        text = text.replace(/^New comment by @([^:]+):/, (_match, author) =>
+          copy.newCommentLead(author),
+        );
+      } else if (text.startsWith('New inline review comment by @')) {
+        text = text.replace(
+          /^New inline review comment by @([^:]+):/,
+          (_match, author) => copy.newInlineReviewCommentLead(author),
+        );
+      }
+    }
+    // Only the direct lane emits `event-` message ids. Keying on that lane
+    // (not the Trigger line, which every lane shares) keeps a comment body
+    // that matches the instruction literal verbatim.
+    if (
+      this.locale !== 'en' &&
+      envelope.messageId?.startsWith('event-') === true
+    ) {
+      const trigger = metadataLines
+        .find((line) => line.startsWith('Trigger: '))
+        ?.replace(/^Trigger: |\.$/g, '');
       if (trigger === 'review_requested') {
         text = copy.reviewRequestedInstruction;
       } else if (trigger === 'assign') {

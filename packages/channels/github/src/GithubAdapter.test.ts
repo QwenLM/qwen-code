@@ -12118,17 +12118,109 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       expect(assign).toContain('请分诊该 issue 并给出下一步行动。');
       expect(assign).not.toContain('Triage this issue');
       // A body that happens to equal the instruction literal is NOT a direct
-      // lane: the Trigger line decides, so quoted text is left verbatim.
-      const quoted = build(
-        makeEnvelope(
-          'Triage this issue and respond with the next action.',
-          'comment',
-        ),
-      );
+      // lane: only `event-` message ids are direct-lane, so a comment lane's
+      // quoted text stays verbatim even with a direct-lane Trigger line.
+      const quoted = build({
+        channelName: 'test-github',
+        senderId: 'alice',
+        senderName: 'alice',
+        chatId: 'owner/repo',
+        threadId: 'pr:42',
+        messageId: 'comment-1',
+        text: 'Triage this issue and respond with the next action.',
+        isGroup: true,
+        isMentioned: true,
+        isReplyToBot: false,
+        metadata:
+          'Type: Pull Request | Title: Test PR | URL: https://github.com/owner/repo/pull/42\nTrigger: review_requested.',
+      });
       expect(quoted).toContain(
         'Triage this issue and respond with the next action.',
       );
       expect(quoted).not.toContain('请分诊该 issue');
+    });
+
+    it('localizes the truncation marker inside a multi-line comment', async () => {
+      await initChannel(
+        { deliverToBoundSessions: true },
+        { boundSessions, locale: 'zh' },
+      );
+      // A multi-line body over 400 code points: the marker lands at the end
+      // of a continuation line, whose own length is not 400, so only a
+      // whole-bullet count recognizes the genuine cut.
+      const comments = [
+        makeComment({ id: 1, body: `Steps:\n${'x'.repeat(500)}` }),
+      ];
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification('comment')])
+        .mockResolvedValueOnce(comments);
+      await pollOnce();
+
+      const prompt = boundSessions.deliverPrompt.mock.calls[0]![1] as string;
+      expect(prompt).toMatch(/… \[评论已截断：省略了 \d+ 个字符\]/);
+      expect(prompt).not.toContain('comment truncated');
+    });
+
+    it('keeps the direct-lane instruction English when the locale is en', async () => {
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      const build = (
+        channel as unknown as {
+          buildBoundSessionPrompt: (envelope: Envelope) => string;
+        }
+      ).buildBoundSessionPrompt.bind(channel);
+      const prompt = build({
+        channelName: 'test-github',
+        senderId: 'alice',
+        senderName: 'alice',
+        chatId: 'owner/repo',
+        threadId: 'pr:42',
+        messageId: 'event-1',
+        text: 'Return a formal review summary with verified actionable findings, or a concise no-blocker result.',
+        isGroup: true,
+        isMentioned: true,
+        isReplyToBot: false,
+        metadata:
+          'Type: Pull Request | Title: Test PR | URL: https://github.com/owner/repo/pull/42\nTrigger: review_requested.',
+      });
+      expect(prompt).toContain(
+        'Return a formal review summary with verified actionable findings, or a concise no-blocker result.',
+      );
+    });
+
+    it('localizes the comment-watch lead lines on the bound path', async () => {
+      await initChannel(
+        { deliverToBoundSessions: true },
+        { boundSessions, locale: 'zh' },
+      );
+      const build = (
+        channel as unknown as {
+          buildBoundSessionPrompt: (envelope: Envelope) => string;
+        }
+      ).buildBoundSessionPrompt.bind(channel);
+      const makeEnvelope = (text: string): Envelope => ({
+        channelName: 'test-github',
+        senderId: 'alice',
+        senderName: 'alice',
+        chatId: 'owner/repo',
+        threadId: 'pr:42',
+        messageId: 'comment-1',
+        text,
+        isGroup: true,
+        isMentioned: true,
+        isReplyToBot: false,
+        metadata:
+          'Type: Pull Request | Title: Test PR | URL: https://github.com/owner/repo/pull/42\nTrigger: comment.',
+      });
+      const newCommentPrompt = build(
+        makeEnvelope('New comment by @alice:\nbody\nComment: url'),
+      );
+      expect(newCommentPrompt).toContain('@alice 的新评论：');
+      const inlinePrompt = build(
+        makeEnvelope(
+          'New inline review comment by @alice:\nfoo.ts:42\nbody\nComment: url',
+        ),
+      );
+      expect(inlinePrompt).toContain('@alice 的新行内评审评论：');
     });
 
     it('re-injects with the SAME idempotency key after a failed acceptance mark (W4)', async () => {
