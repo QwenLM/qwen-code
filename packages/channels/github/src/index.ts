@@ -172,6 +172,14 @@ export const plugin: ChannelPlugin = {
         default: 'false',
       },
       {
+        key: 'requireBoundWatch',
+        label: 'Require Active Watch For Review/Verify Sessions',
+        kind: 'boolean',
+        description:
+          'Only deliver events to review/verify bound sessions while they hold an active watch on that PR (an /autofix-pr watch or /verify-pr --watch). One-shot /review and /verify-pr sessions stay bound but receive nothing; events with no eligible session retire privately instead of a public reply. Requires Deliver To PR-Bound Sessions. Unknown watch state (detection failure) keeps delivering.',
+        default: 'false',
+      },
+      {
         key: 'prCommentWatch',
         label: 'PR Comment Watch',
         kind: 'boolean',

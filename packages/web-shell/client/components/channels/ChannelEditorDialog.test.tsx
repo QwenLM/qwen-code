@@ -115,6 +115,13 @@ const GITHUB_BOUND: DaemonChannelTypeDescriptor = {
       description: 'Descriptor description for bound sessions',
     },
     {
+      key: 'requireBoundWatch',
+      label: 'Bound watch gate (descriptor)',
+      kind: 'boolean',
+      default: 'false',
+      description: 'Descriptor description for the bound watch gate',
+    },
+    {
       key: 'prWatchEvents',
       label: 'Watch events (descriptor)',
       kind: 'string-list',
@@ -828,6 +835,11 @@ describe('ChannelEditorDialog', () => {
     expect(labels.some((t) => t.includes('Deliver To PR-Bound Sessions'))).toBe(
       true,
     );
+    expect(
+      labels.some((t) =>
+        t.includes('Require Active Watch For Review/Verify Sessions'),
+      ),
+    ).toBe(true);
     expect(labels.some((t) => t.includes('PR Watch Events'))).toBe(true);
     // No descriptor fallback may leak through for these keys.
     expect(labels.some((t) => t.includes('(descriptor)'))).toBe(false);
@@ -851,6 +863,9 @@ describe('ChannelEditorDialog', () => {
       (l) => l.textContent ?? '',
     );
     expect(labels.some((t) => t.includes('投递到 PR 绑定会话'))).toBe(true);
+    expect(labels.some((t) => t.includes('评审/验证会话须有活跃监视'))).toBe(
+      true,
+    );
     expect(labels.some((t) => t.includes('PR 状态监视事件'))).toBe(true);
     expect(labels.some((t) => t.includes('(descriptor)'))).toBe(false);
     // With the `.description` keys dropped from BOTH locale maps the
@@ -919,6 +934,123 @@ describe('ChannelEditorDialog', () => {
     expect(document.body.textContent).toContain(
       '开启上方「投递到 PR 绑定会话」后即可选择监视事件。',
     );
+    expect(document.body.textContent).toContain(
+      '开启上方「投递到 PR 绑定会话」后即可要求活跃监视。',
+    );
+  });
+
+  it('disables the watch gate switch with an inline hint until delivery is on', async () => {
+    await renderDialog({ descriptor: GITHUB_BOUND });
+
+    const gate = fieldByLabel(
+      'Require Active Watch For Review/Verify Sessions',
+    ) as HTMLButtonElement;
+    expect(gate).not.toBeNull();
+    expect(gate.getAttribute('role')).toBe('switch');
+    expect(gate.disabled).toBe(true);
+    expect(document.body.textContent).toContain(
+      'Enable "Deliver To PR-Bound Sessions" above to require an active watch.',
+    );
+    const describedBy = gate.getAttribute('aria-describedby');
+    expect(describedBy).not.toBeNull();
+    expect(document.getElementById(describedBy!)?.textContent).toContain(
+      'above to require an active watch',
+    );
+
+    await act(async () => {
+      document
+        .querySelector<HTMLButtonElement>('button[role="switch"]')!
+        .click();
+    });
+
+    expect(gate.disabled).toBe(false);
+    expect(document.body.textContent).not.toContain(
+      'above to require an active watch.',
+    );
+  });
+
+  it('names the delivery dependency when a stored watch gate lacks it', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'github-bot',
+      config: {
+        type: 'github',
+        requireBoundWatch: true,
+      },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    await renderDialog({ descriptor: GITHUB_BOUND, instance, onSave });
+
+    const gate = fieldByLabel(
+      'Require Active Watch For Review/Verify Sessions',
+    ) as HTMLButtonElement;
+    expect(gate.getAttribute('aria-checked')).toBe('true');
+    // A stored true stays clearable while the prerequisite is off.
+    expect(gate.disabled).toBe(false);
+
+    const save = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Save',
+    );
+    await act(async () => {
+      save?.click();
+    });
+
+    expect(onSave).not.toHaveBeenCalled();
+    // The gate field's own message — not the prWatchEvents one, which names a
+    // control this operator never touched.
+    expect(document.body.textContent).toContain(
+      'Enable "Deliver To PR-Bound Sessions" to require an active watch.',
+    );
+    expect(document.body.textContent).not.toContain(
+      'to save the selected watch events.',
+    );
+
+    // Unticking the gate is itself a remedy: it re-derives the shown error
+    // without another Save (a valid draft must not keep a stale alert).
+    await act(async () => {
+      gate.click();
+    });
+    expect(gate.getAttribute('aria-checked')).toBe('false');
+    // The validation error is gone; the disabled hint (which says "above to
+    // require…") legitimately remains while delivery is still off.
+    expect(document.body.textContent).not.toContain(
+      'Enable "Deliver To PR-Bound Sessions" to require an active watch.',
+    );
+  });
+
+  it('keeps the gate hint live region mounted before the hint appears', async () => {
+    // A live region that enters the DOM already filled is never announced.
+    // The region must exist (empty) while delivery is on, then carry the hint
+    // when delivery toggles off — the same node throughout.
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'github-bot',
+      config: { type: 'github', deliverToBoundSessions: true },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    await renderDialog({ descriptor: GITHUB_BOUND, instance });
+
+    const gate = fieldByLabel(
+      'Require Active Watch For Review/Verify Sessions',
+    ) as HTMLButtonElement;
+    const region = Array.from(
+      document.querySelectorAll<HTMLElement>('span[aria-live="polite"]'),
+    ).find((node) => node.id.endsWith('-requireBoundWatch-disabled-hint'));
+    expect(region).toBeDefined();
+    expect(region!.textContent).toBe('');
+
+    // Toggle delivery off (the first switch).
+    await act(async () => {
+      document
+        .querySelector<HTMLButtonElement>('button[role="switch"]')!
+        .click();
+    });
+    expect(region!.isConnected).toBe(true);
+    expect(region!.textContent).toContain('above to require an active watch');
+    expect(gate.disabled).toBe(true);
   });
 
   it('saves the selected watch events once delivery is enabled', async () => {

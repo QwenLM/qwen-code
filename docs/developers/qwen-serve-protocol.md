@@ -1309,7 +1309,11 @@ message it accepted or skipped (with the machine reason: `reason_filter`,
 before the poll window that mentions the bot, was edited after the window
 opened and is not in the channel's dedupe record; the channel does not answer
 it, and `actor` names the comment's author, who need not be the editor), a sender-gate rejection, `github_api_error`,
-`no_role_matched`),
+`no_role_matched`, `bound_watch_required` (the GitHub channel's
+`requireBoundWatch` gate excluded every bound `review`/`verify` follower of the
+PR — none holds an active watch on it — so the event retired privately instead
+of taking the public path; also used for a same-account comment watch skip and
+a plain comment whose mention waiver the gate removed)),
 a GitHub thread whose handling failed and that it will read again (`failed`
 with `github_api_error`: a GitHub error, or a local error while the channel
 cannot read or write its own state or one of the thread's tasks is unfinished),
