@@ -359,8 +359,8 @@ public class ManagedChannelService {
         deliveries.find(tenantId, channelId, resentId).ifPresent(existing -> {
             if (!existing.segmentId().equals(String.valueOf(first.get("segmentId")))
                     || existing.ordinal() != ((Number) first.get("ordinal")).intValue()) {
-                throw new IllegalStateException(
-                        "delivery id already belongs to another segment");
+                throw new ManagedAgentException(409, "channel_delivery_conflict",
+                        "The resent delivery id already belongs to another segment.");
             }
         });
         // The new chain carries only the segments proven unsent, so none of

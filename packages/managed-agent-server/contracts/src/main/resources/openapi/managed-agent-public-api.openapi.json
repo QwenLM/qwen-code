@@ -15936,12 +15936,12 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 128,
-            "description": "Stable identity of the card or reply segment this delivery carries; only segments proven unsent are sent again, and an explicit resend keeps this identity under a new deliveryId."
+            "description": "Stable identity of the delivery's first segment, the first entry of segments; only segments proven unsent are sent again, and an explicit resend keeps each carried identity under a new deliveryId. The authoritative per-segment view is segments."
           },
           "ordinal": {
             "type": "integer",
             "minimum": 0,
-            "description": "Position of the segment inside its segmentId sequence."
+            "description": "Position of the first segment (the singular segment_id) within the delivery, contiguous from 0."
           },
           "state": {
             "$ref": "#/components/schemas/ChannelDeliveryState"

@@ -694,7 +694,12 @@ class ManagedChannelServiceTest {
                 new ChannelDeliveryRepository.ChannelDelivery(TENANT, channel,
                         resentId, resentId + ":0", 5, "planned", null, 0, 0));
         assertThatThrownBy(() -> service.resend(TENANT, channel, deliveryId))
-                .isInstanceOf(IllegalStateException.class);
+                .isInstanceOf(ManagedAgentException.class)
+                .satisfies(e -> {
+                    assertThat(((ManagedAgentException) e).getStatus()).isEqualTo(409);
+                    assertThat(((ManagedAgentException) e).getCode())
+                            .isEqualTo("channel_delivery_conflict");
+                });
         // The guard must reject on the ordinal before planning: findOrCreate
         // would also reject, but only after orphan segment rows were written.
         assertThat(segmentLedger.list(TENANT, channel, resentId)).isEmpty();
@@ -717,7 +722,12 @@ class ManagedChannelServiceTest {
         segmentLedger.plan(TENANT, channel, resentId,
                 List.of(new SegmentLedger("other:0", 0, null)));
         assertThatThrownBy(() -> service.resend(TENANT, channel, deliveryId))
-                .isInstanceOf(IllegalStateException.class);
+                .isInstanceOf(ManagedAgentException.class)
+                .satisfies(e -> {
+                    assertThat(((ManagedAgentException) e).getStatus()).isEqualTo(409);
+                    assertThat(((ManagedAgentException) e).getCode())
+                            .isEqualTo("channel_delivery_conflict");
+                });
         // The refused chain planned nothing: only the original row remains.
         assertThat(segmentLedger.list(TENANT, channel, resentId))
                 .extracting(SegmentLedger::segmentId)
