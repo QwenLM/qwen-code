@@ -214,6 +214,7 @@ import {
 } from './hosted-harness-contract.js';
 import { validateHostedHarnessProfile } from './hosted-harness-profile.js';
 import { registerHostedHarnessSessionRoutes } from './hosted-harness-session.js';
+import { registerHostedSideQueryRoutes } from './hosted-side-query.js';
 import {
   registerHostedPackagePreparation,
   HOSTED_PACKAGE_PREPARATION_PREFIX,
@@ -2379,6 +2380,8 @@ export function createServeApp(
         req.path === '/health' ||
         req.path === '/capabilities' ||
         req.path === '/session' ||
+        req.path === '/side-queries' ||
+        req.path.startsWith('/side-queries/') ||
         req.path.startsWith(`${HOSTED_PACKAGE_PREPARATION_PREFIX}/`) ||
         (poolEnabled && req.path.startsWith('/internal/hosted-harness/v1/')) ||
         req.path.startsWith('/session/')
@@ -2641,6 +2644,7 @@ export function createServeApp(
       hostedHarness,
       ordinary,
     );
+    registerHostedSideQueryRoutes(app, hostedHarness, ordinary);
     app.use((req, res, next) => {
       if (req.path === '/capabilities' || req.path === '/health') next();
       else res.sendStatus(404);

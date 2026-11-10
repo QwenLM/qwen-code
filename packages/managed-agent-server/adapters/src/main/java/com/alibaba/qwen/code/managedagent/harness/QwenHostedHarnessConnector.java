@@ -855,6 +855,49 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     }
 
     @Override
+    public boolean supportsSideQueries() {
+        try {
+            return sessionStore.isEnabled() && HarnessFeature.SIDE_QUERY.in(client().capabilities().getFeatures());
+        } catch (RuntimeException unavailable) {
+            return false;
+        }
+    }
+
+    @Override
+    public SideQueryTarget prepareSideQuery() {
+        if (!supportsSideQueries()) {
+            throw new ManagedAgentException(409, "unsupported_feature", "Hosted side queries are unavailable.");
+        }
+        var selected = client();
+        return new SideQueryTarget() {
+            @Override public String instanceId() {
+                return selected.capabilities().getInstanceId() == null
+                        ? selected.capabilities().getBootId() : selected.capabilities().getInstanceId();
+            }
+            @Override public String bootId() { return selected.capabilities().getBootId(); }
+            @Override public Map<String, Object> submit(Map<String, Object> body) {
+                return selected.submitSideQuery(body);
+            }
+            @Override public Map<String, Object> status(String queryId, Map<String, Object> claim) {
+                try {
+                    return selected.readSideQuery(queryId, claim);
+                } catch (HostedHarnessGenerationException lost) {
+                    return Map.of("queryId", queryId, "state", "settled", "active", false);
+                } catch (DaemonHttpException absent) {
+                    if (absent.getStatusCode() != 404) {
+                        throw absent;
+                    }
+                    return Map.of("queryId", queryId, "state", "settled", "active", false);
+                }
+            }
+            @Override public void cancel(String queryId, Map<String, Object> claim) {
+                selected.cancelSideQuery(queryId, claim);
+            }
+            @Override public void close() { }
+        };
+    }
+
+    @Override
     public boolean supportsContextCompression() {
         return feature(HarnessFeature.CONTEXT_COMPRESSION);
     }

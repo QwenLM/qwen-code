@@ -8,6 +8,10 @@ import { JavaManagedAgentHttpError } from './java-managed-agent-client';
 import { getManagedClientId } from './managed-session-storage';
 import { webcrypto } from 'node:crypto';
 import { pendingQuestion } from './managed-question.test-fixtures';
+import {
+  sideQuery,
+  sideQueryContext,
+} from './managed-side-query.test-fixtures';
 import * as pendingStorage from './managed-pending-storage';
 import { I18nProvider } from '../../i18n';
 import type {
@@ -323,6 +327,76 @@ describe('ManagedSessionsPage', () => {
       await flush();
     });
   }
+
+  it('intercepts BTW and recap before main-task busy and queue admission', async () => {
+    const create = vi.fn().mockImplementation(async (_sessionId, request) => ({
+      ...sideQuery,
+      queryId: request.kind === 'recap' ? 'recap-1' : 'btw-1',
+      kind: request.kind,
+      trigger: request.trigger ?? 'manual',
+      question: request.question ?? null,
+    }));
+    const queue = vi.fn();
+    provider = {
+      ...provider,
+      userMessages: {
+        query: vi.fn().mockResolvedValue({ paused: false, messages: [] }),
+        command: queue,
+      },
+      sideQueries: {
+        context: vi.fn().mockResolvedValue(sideQueryContext),
+        list: vi.fn().mockResolvedValue({ items: [], nextCursor: null }),
+        create,
+        get: vi.fn(),
+        stream: vi.fn().mockImplementation(async function* () {}),
+        cancel: vi.fn(),
+      },
+    };
+    mocks.client.getSession.mockResolvedValue(
+      summary('s1', {
+        phase: 'agent_running',
+        capabilities: {
+          canSend: false,
+          canCancel: true,
+          btw: true,
+          recap: true,
+        },
+      }),
+    );
+    await render('s1');
+    await act(async () => {
+      mocks.editorProps!.onSubmit(
+        '/btw private follow-up',
+        undefined,
+        undefined,
+        mocks.commitAccepted,
+      );
+      await flush();
+    });
+    expect(create).toHaveBeenCalledWith(
+      's1',
+      { kind: 'btw', question: 'private follow-up' },
+      expect.objectContaining({ idempotencyKey: expect.any(String) }),
+    );
+    expect(queue).not.toHaveBeenCalled();
+    expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
+    await act(async () => {
+      mocks.editorProps!.onSubmit(
+        '/recap',
+        undefined,
+        undefined,
+        mocks.commitAccepted,
+      );
+      await flush();
+    });
+    expect(create).toHaveBeenLastCalledWith(
+      's1',
+      { kind: 'recap', trigger: 'manual' },
+      expect.objectContaining({ idempotencyKey: expect.any(String) }),
+    );
+    expect(mocks.commitAccepted).toHaveBeenCalledTimes(2);
+    expect(mocks.client.cancel).not.toHaveBeenCalled();
+  });
 
   it.each([false, true])(
     'opens diagnostics in a read-only Session and closes them on owner change (home: %s)',
