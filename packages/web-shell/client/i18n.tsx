@@ -4688,7 +4688,7 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'channels.loadError.title': 'Channels could not be loaded',
   'channels.empty.title': 'No supported channels configured',
   'channels.empty.description':
-    'Configure WeChat, DingTalk, WeCom, Feishu, GitHub, or GitLab to receive messages in this workspace.',
+    'Configure WeChat, DingTalk, WeCom, Feishu, GitHub, GitLab, or Email to receive messages in this workspace.',
   'channels.runtimeError': 'Channel runtime error',
   'channels.action.back': 'Back',
   'channels.action.refresh': 'Refresh',
@@ -4966,6 +4966,36 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
     'Unmergeable — MR becomes unmergeable (conflicts)',
   'channels.editor.field.gitlab.action_prompt_template.option.merge_train_removed':
     'Merge Train Removed — MR removed from merge train',
+  'channels.editor.field.email.address': 'Mailbox Address',
+  'channels.editor.field.email.imapHost': 'IMAP Host',
+  'channels.editor.field.email.imapUser': 'IMAP Username',
+  'channels.editor.field.email.imapPassword': 'IMAP Password',
+  'channels.editor.field.email.smtpHost': 'SMTP Host',
+  'channels.editor.field.email.smtpUser': 'SMTP Username',
+  'channels.editor.field.email.smtpPassword': 'SMTP Password',
+  'channels.editor.field.email.folder': 'IMAP Folder',
+  'channels.editor.field.email.imapPort': 'IMAP Port',
+  'channels.editor.field.email.smtpPort': 'SMTP Port',
+  'channels.editor.field.email.imapSecure': 'IMAP Implicit TLS',
+  'channels.editor.field.email.imapSecure.description':
+    'When disabled, STARTTLS is mandatory.',
+  'channels.editor.field.email.smtpSecure': 'SMTP Implicit TLS',
+  'channels.editor.field.email.smtpSecure.description':
+    'When disabled, STARTTLS is mandatory.',
+  'channels.editor.field.email.proactiveRecipients': 'Proactive Recipients',
+  'channels.editor.field.email.proactiveRecipients.description':
+    'Explicit bare addresses. Empty disables proactive email.',
+  'channels.editor.field.email.pollInterval': 'Poll Interval (ms)',
+  'channels.editor.field.email.maxMessageBytes': 'Message Size Limit (bytes)',
+  'channels.editor.field.email.maxAttachmentBytes':
+    'Attachment Size Limit (bytes)',
+  'channels.editor.field.email.maxTextLength': 'Text Character Limit',
+  'channels.editor.field.email.allowedUsers': 'Allowed email addresses',
+  'channels.editor.field.email.allowedUsers.description':
+    'Comma-separated bare mailbox addresses that can start private conversations.',
+  'channels.editor.field.email.operators': 'Session operator addresses',
+  'channels.editor.field.email.operators.description':
+    'Comma-separated bare mailbox addresses that may approve tool use and run /cancel, /clear or /loop in shared sessions.',
   'channels.editor.secret.environment': 'Stored in environment',
   'channels.editor.secret.stored': 'Stored securely',
   'channels.editor.secret.preserve': 'Keep',
@@ -9516,7 +9546,7 @@ const ZH: Messages = {
   'channels.loadError.title': '无法加载频道',
   'channels.empty.title': '尚未配置支持的频道',
   'channels.empty.description':
-    '配置微信、钉钉、企业微信、飞书、GitHub 或 GitLab，让当前工作区接收消息。',
+    '配置微信、钉钉、企业微信、飞书、GitHub、GitLab 或 Email，让当前工作区接收消息。',
   'channels.runtimeError': '频道运行时错误',
   'channels.action.back': '返回',
   'channels.action.refresh': '刷新',
@@ -9780,6 +9810,35 @@ const ZH: Messages = {
     '不可合并 — MR 变为不可合并（冲突）',
   'channels.editor.field.gitlab.action_prompt_template.option.merge_train_removed':
     '合并队列移除 — MR 从合并队列中移除',
+  'channels.editor.field.email.address': '邮箱地址',
+  'channels.editor.field.email.imapHost': 'IMAP 服务器',
+  'channels.editor.field.email.imapUser': 'IMAP 用户名',
+  'channels.editor.field.email.imapPassword': 'IMAP 密码',
+  'channels.editor.field.email.smtpHost': 'SMTP 服务器',
+  'channels.editor.field.email.smtpUser': 'SMTP 用户名',
+  'channels.editor.field.email.smtpPassword': 'SMTP 密码',
+  'channels.editor.field.email.folder': 'IMAP 文件夹',
+  'channels.editor.field.email.imapPort': 'IMAP 端口',
+  'channels.editor.field.email.smtpPort': 'SMTP 端口',
+  'channels.editor.field.email.imapSecure': 'IMAP 隐式 TLS',
+  'channels.editor.field.email.imapSecure.description':
+    '关闭后必须使用 STARTTLS。',
+  'channels.editor.field.email.smtpSecure': 'SMTP 隐式 TLS',
+  'channels.editor.field.email.smtpSecure.description':
+    '关闭后必须使用 STARTTLS。',
+  'channels.editor.field.email.proactiveRecipients': '主动投递收件人',
+  'channels.editor.field.email.proactiveRecipients.description':
+    '需填写精确的裸邮箱地址。留空则禁用主动投递邮件。',
+  'channels.editor.field.email.pollInterval': '轮询间隔（毫秒）',
+  'channels.editor.field.email.maxMessageBytes': '邮件大小上限（字节）',
+  'channels.editor.field.email.maxAttachmentBytes': '附件大小上限（字节）',
+  'channels.editor.field.email.maxTextLength': '文本字符数上限',
+  'channels.editor.field.email.allowedUsers': '允许的邮箱地址',
+  'channels.editor.field.email.allowedUsers.description':
+    '逗号分隔的裸邮箱地址，可发起私聊会话。',
+  'channels.editor.field.email.operators': '会话操作者邮箱地址',
+  'channels.editor.field.email.operators.description':
+    '逗号分隔的裸邮箱地址，可在共享会话中批准工具调用并运行 /cancel、/clear 或 /loop。',
   'channels.editor.secret.environment': '已保存在环境变量中',
   'channels.editor.secret.stored': '已安全保存',
   'channels.editor.secret.preserve': '保留',

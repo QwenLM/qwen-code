@@ -200,7 +200,7 @@ describe('Mod session ownership', () => {
     });
     const signal = new AbortController().signal;
     await session.initialize(signal);
-    const runModel = mocks.create.mock.calls[0].at(-1) as ModModelHost;
+    const runModel = mocks.create.mock.calls[0][12] as ModModelHost;
     const input = { model: 'sonnet', prompt: 'test request' };
     let ending: Awaited<ReturnType<ModModelHost>> | undefined;
     runtime.end.mockImplementationOnce(async () => {

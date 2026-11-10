@@ -328,6 +328,8 @@ export interface AgentTask extends TaskBase {
    * question every read site asks.
    */
   isBackgrounded: boolean;
+  /** The live run has its own working directory and survives session relocation. */
+  workspacePinned?: boolean;
   status: TaskStatus;
   result?: string;
   error?: string;

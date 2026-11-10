@@ -869,12 +869,6 @@ test('configures a WeChat channel with in-browser QR login', async ({
         manageable: true,
         fields: [
           {
-            key: 'baseUrl',
-            label: 'API Base URL',
-            kind: 'string',
-            envResolvable: true,
-          },
-          {
             key: 'groupPolicy',
             label: 'Group Policy',
             kind: 'enum',
@@ -1052,4 +1046,177 @@ test('configures a WeChat channel with in-browser QR login', async ({
   // Closing the editor drops a *live* flow, never a finished one — cancelling
   // here would delete the retained terminal view for no reason.
   expect(cancels).toBe(0);
+});
+
+test('lists a configured Email channel and hides its inert group controls @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario({
+    capabilities: {
+      features: [
+        'session_events',
+        'permission_vote',
+        'session_permission_vote',
+        'session_scope_override',
+        'session_source_metadata',
+        'channel_management',
+      ],
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/qwen-web-shell-e2e',
+          displayName: 'Main workspace',
+          primary: true,
+          trusted: true,
+        },
+      ],
+    },
+    channelTypes: [
+      {
+        type: 'email',
+        displayName: 'Email',
+        manageable: true,
+        fields: [
+          {
+            key: 'address',
+            label: 'address',
+            kind: 'string',
+            required: true,
+            envResolvable: true,
+          },
+          {
+            key: 'imapHost',
+            label: 'imapHost',
+            kind: 'string',
+            required: true,
+            envResolvable: true,
+          },
+          {
+            key: 'imapPassword',
+            label: 'imapPassword',
+            kind: 'secret',
+            required: true,
+            envResolvable: true,
+          },
+          {
+            key: 'smtpPassword',
+            label: 'smtpPassword',
+            kind: 'secret',
+            required: true,
+            envResolvable: true,
+          },
+          {
+            key: 'privatePolicy',
+            label: 'Private Policy',
+            kind: 'enum',
+            required: true,
+            default: 'allowlist',
+            options: [
+              { value: 'disabled', label: 'Disabled' },
+              { value: 'allowlist', label: 'Allowlist' },
+              { value: 'open', label: 'Open' },
+            ],
+          },
+          {
+            key: 'allowedUsers',
+            label: 'Allowed Users',
+            kind: 'string-list',
+          },
+          // Injected by the registry because the plugin does not declare it.
+          // Email builds every envelope with isGroup:false, so it is inert.
+          {
+            key: 'groupPolicy',
+            label: 'Group Policy',
+            kind: 'enum',
+            required: true,
+            default: 'disabled',
+            options: [
+              { value: 'disabled', label: 'Disabled' },
+              { value: 'pairing', label: 'Pairing' },
+              { value: 'allowlist', label: 'Allowlist' },
+              { value: 'open', label: 'Open' },
+            ],
+          },
+        ],
+      },
+    ],
+    channels: {
+      revision: '1',
+      instances: {
+        'agent-mail': {
+          name: 'agent-mail',
+          config: {
+            type: 'email',
+            address: 'agent@example.com',
+            imapHost: 'imap.example.com',
+            privatePolicy: 'allowlist',
+          },
+          secrets: {
+            imapPassword: { present: true, source: 'environment' },
+            smtpPassword: { present: true, source: 'environment' },
+          },
+          startsWithServe: false,
+          runtime: { state: 'connected' },
+        },
+      },
+    },
+  });
+  await page.addInitScript(() => {
+    window.sessionStorage.setItem('qwen-daemon-token', 'e2e-token');
+  });
+  const daemon = await installMockDaemon(page, scenario, {
+    baseURL: String(testInfo.project.use.baseURL),
+  });
+
+  await page.goto(`/session/${encodeURIComponent(scenario.sessionId)}`);
+  await expect(
+    page.locator('[data-web-shell-root]:not([data-web-shell-gate])'),
+  ).toBeVisible();
+  const connection = await daemon.sse.waitForConnection(scenario.sessionId);
+  await daemon.sendEvent(
+    replayCompleteEvent({ sessionId: connection.sessionId }),
+  );
+  await expect(page.getByText('Loading...')).toHaveCount(0);
+
+  await page.getByRole('button', { name: 'Channels', exact: true }).click();
+
+  // The instance list filtered on the same allowlist as the picker, so a
+  // running Email channel used to be absent from the page entirely.
+  await expect(
+    page.getByRole('button', { name: 'Edit agent-mail' }),
+  ).toBeVisible();
+
+  await page.getByRole('button', { name: 'Configure Email' }).click();
+  const editor = page.getByRole('dialog');
+  await expect(
+    editor.getByRole('heading', { name: 'Configure Email' }),
+  ).toBeVisible();
+  // Locate by role and accessible name, not by label text: FieldShell appends
+  // an aria-hidden "*" to every required label, so the label's text is
+  // "IMAP Host*" and an exact getByLabel matches nothing. The accessible name
+  // skips aria-hidden content, so an exact role name matches the control.
+  await expect(
+    editor.getByRole('textbox', { name: 'IMAP Host', exact: true }),
+  ).toBeVisible();
+  await expect(
+    editor.getByRole('textbox', { name: 'Mailbox Address', exact: true }),
+  ).toBeVisible();
+  await expect(
+    editor.getByRole('combobox', {
+      name: 'Direct message policy',
+      exact: true,
+    }),
+  ).toBeVisible();
+  // Substring name matchers on purpose: an exact matcher would also miss a
+  // rendered "Group policy*", letting this guard pass while the control it
+  // forbids is on screen. Cover the whole group axis, not just the policy.
+  await expect(
+    editor.getByRole('combobox', { name: /Group policy/ }),
+  ).toHaveCount(0);
+  await expect(
+    editor.getByRole('textbox', { name: /Allowed group IDs/ }),
+  ).toHaveCount(0);
+  await expect(
+    editor.getByRole('combobox', { name: /Who can talk in groups/ }),
+  ).toHaveCount(0);
 });

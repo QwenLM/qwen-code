@@ -287,11 +287,46 @@ describe('ChannelsManagerPage', () => {
 
       expect(container.textContent).toContain(
         language === 'zh-CN'
-          ? '配置微信、钉钉、企业微信、飞书、GitHub 或 GitLab'
-          : 'Configure WeChat, DingTalk, WeCom, Feishu, GitHub, or GitLab',
+          ? '配置微信、钉钉、企业微信、飞书、GitHub、GitLab 或 Email'
+          : 'Configure WeChat, DingTalk, WeCom, Feishu, GitHub, GitLab, or Email',
       );
     },
   );
+
+  it('lists a configured Email channel and offers its editor', async () => {
+    channelState.current.catalog = [
+      ...channelState.current.catalog,
+      { type: 'email', displayName: 'Email', manageable: true, fields: [] },
+    ];
+    channelState.current.channels = {
+      ...channelState.current.channels,
+      mail: channel('Agent Mailbox', 'email', 'connected'),
+    };
+    channelState.current.snapshot = {
+      revision: '1',
+      instances: channelState.current.channels,
+    };
+
+    await renderPage();
+
+    // The instance list filtered on the same allowlist as the picker, so a
+    // running Email channel was omitted from the page entirely and read as
+    // "the configuration did not take effect".
+    expect(container.textContent).toContain('Agent Mailbox');
+    expect(container.textContent).toContain('Email');
+    // Admitting Email must not admit the platforms still deliberately excluded.
+    expect(container.textContent).not.toContain('Telegram Bot');
+    expect(container.textContent).not.toContain('Telegram');
+
+    const platform = container.querySelector<HTMLButtonElement>(
+      '[data-testid="channel-platform-email"]',
+    );
+    expect(platform?.tagName).toBe('BUTTON');
+    await act(async () => {
+      platform?.click();
+    });
+    expect(document.body.textContent).toContain('Configure Email');
+  });
 
   it('starts a stopped Channel from its card', async () => {
     await renderPage();
