@@ -676,6 +676,7 @@ export interface DaemonSessionActions {
     getCurrentWorkspaceCwd?: () => string | undefined;
     sessionContext?: DaemonProductSessionContext;
     modelServiceId?: string;
+    startupConfig?: CreateSessionRequest['startupConfig'];
     approvalMode?: DaemonApprovalMode;
     sourceType?: string;
     worktree?: { slug?: string };

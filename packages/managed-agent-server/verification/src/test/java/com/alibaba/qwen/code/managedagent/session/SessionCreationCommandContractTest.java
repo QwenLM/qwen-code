@@ -60,7 +60,10 @@ class SessionCreationCommandContractTest {
         assertThat(command.extensionLifecycleProfiles()).isEqualTo(Set.of());
         assertThat(command.worktree()).isNull();
         assertThat(command.modelConfig()).isNull();
-        assertThat(SessionCreationCommand.class.getRecordComponents()).hasSize(21);
+        assertThat(command.memoryStoreId()).isNull();
+        assertThat(SessionCreationCommand.builder().memoryStoreId("memory-store").build().memoryStoreId())
+                .isEqualTo("memory-store");
+        assertThat(SessionCreationCommand.class.getRecordComponents()).hasSize(22);
     }
 
     @Test

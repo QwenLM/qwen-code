@@ -21761,87 +21761,127 @@ describe('DaemonSessionProvider', () => {
     expect(streamingState).toBe('idle');
   });
 
-  it('keeps own user messages when replay rebuilds after ring eviction', async () => {
-    const reloaded = createDeferred<void>();
-    const firstSession = createMockSession({
-      sessionId: 'session-own-user-replay',
-      lastEventId: 10,
-      events: async function* ringEvictedEvents() {
-        yield {
-          v: 1,
-          type: 'state_resync_required',
-          data: {
-            reason: 'ring_evicted',
-            lastDeliveredId: 10,
-            earliestAvailableId: 12,
-          },
-        };
-      },
-    });
-    const reloadedSession = createMockSession({
-      sessionId: 'session-own-user-replay',
-      clientId: 'client-1',
-      replaySnapshot: {
-        compactedReplay: [
-          {
-            id: 12,
-            v: 1,
-            type: 'session_update',
-            originatorClientId: 'client-1',
-            data: {
-              update: {
-                sessionUpdate: 'user_message_chunk',
-                content: { type: 'text', text: 'own replayed prompt' },
+  it.each(['ring_evicted', 'epoch_reset'])(
+    'keeps visible messages during %s recovery and rebuilds from replay',
+    async (reason) => {
+      const gap = createDeferred<void>();
+      const loadStarted = createDeferred<void>();
+      const allowLoad = createDeferred<void>();
+      const reloaded = createDeferred<void>();
+      const firstSession = createMockSession({
+        sessionId: 'session-own-user-replay',
+        lastEventId: 10,
+        replaySnapshot: {
+          compactedReplay: [
+            {
+              id: 9,
+              v: 1,
+              type: 'session_update',
+              data: {
+                update: {
+                  sessionUpdate: 'user_message_chunk',
+                  content: { type: 'text', text: 'message before recovery' },
+                },
               },
             },
-          },
-        ],
-        liveJournal: [],
-      },
-      events: async function* reloadedIdleEvents(
-        opts: { signal?: AbortSignal } = {},
-      ) {
-        reloaded.resolve();
-        await new Promise<void>((resolve) => {
-          if (opts.signal?.aborted) {
-            resolve();
-            return;
-          }
-          opts.signal?.addEventListener('abort', () => resolve(), {
-            once: true,
+          ],
+          liveJournal: [],
+        },
+        events: async function* resyncEvents() {
+          await gap.promise;
+          yield {
+            v: 1,
+            type: 'state_resync_required',
+            data: {
+              reason,
+              lastDeliveredId: 10,
+              earliestAvailableId: 12,
+            },
+          };
+        },
+      });
+      const reloadedSession = createMockSession({
+        sessionId: 'session-own-user-replay',
+        clientId: 'client-1',
+        replaySnapshot: {
+          compactedReplay: [
+            {
+              id: 12,
+              v: 1,
+              type: 'session_update',
+              originatorClientId: 'client-1',
+              data: {
+                update: {
+                  sessionUpdate: 'user_message_chunk',
+                  content: { type: 'text', text: 'own replayed prompt' },
+                },
+              },
+            },
+          ],
+          liveJournal: [],
+        },
+        events: async function* reloadedIdleEvents(
+          opts: { signal?: AbortSignal } = {},
+        ) {
+          reloaded.resolve();
+          await new Promise<void>((resolve) => {
+            if (opts.signal?.aborted) {
+              resolve();
+              return;
+            }
+            opts.signal?.addEventListener('abort', () => resolve(), {
+              once: true,
+            });
           });
-        });
-        yield* [];
-      },
-    });
-    sdkMocks.sessions.push(firstSession, reloadedSession);
+          yield* [];
+        },
+      });
+      sdkMocks.sessions.push(firstSession);
 
-    let blocks: readonly DaemonTranscriptBlock[] = [];
-    function Harness() {
-      blocks = useDaemonTranscriptBlocks();
-      return null;
-    }
+      let blocks: readonly DaemonTranscriptBlock[] = [];
+      function Harness() {
+        blocks = useDaemonTranscriptBlocks();
+        return null;
+      }
 
-    await renderWithProvider(<Harness />, {
-      autoConnect: true,
-      suppressOwnUserEcho: true,
-      reconnectDelayMs: 1,
-      maxReconnectDelayMs: 1,
-    });
-    await act(async () => {
-      await reloaded.promise;
-      await flushPromises();
-    });
+      await renderWithProvider(<Harness />, {
+        autoConnect: true,
+        suppressOwnUserEcho: true,
+        reconnectDelayMs: 1,
+        maxReconnectDelayMs: 1,
+      });
+      sdkMocks.MockDaemonSessionClient.load.mockImplementationOnce(async () => {
+        loadStarted.resolve();
+        await allowLoad.promise;
+        return reloadedSession;
+      });
+      await act(async () => {
+        gap.resolve();
+        await loadStarted.promise;
+      });
+      try {
+        expect(blocks).toEqual([
+          expect.objectContaining({
+            kind: 'user',
+            text: 'message before recovery',
+          }),
+        ]);
+      } finally {
+        allowLoad.resolve();
+      }
+      await act(async () => {
+        await reloaded.promise;
+        await flushPromises();
+      });
 
-    expect(blocks).toEqual(
-      expect.arrayContaining([
+      expect(blocks).toEqual([
         expect.objectContaining({
           kind: 'user',
           text: 'own replayed prompt',
         }),
-      ]),
-    );
-  });
+      ]);
+    },
+  );
 
   it('skips malformed replay events without dropping later replay history', async () => {
     const reloaded = createDeferred<void>();
