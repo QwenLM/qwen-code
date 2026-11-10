@@ -2475,21 +2475,45 @@ function resolveCdTargetCwd(
  * `x{a}y{b,c}` the first group is inert but the second still expands into two
  * words. Stopping at the first group would publish a phantom cwd for the whole
  * target.
+ *
+ * A group's close is found by depth, not by the first `}`: `{a{b},c}` closes
+ * the inner group first, and a quoted or escaped `}` closes nothing at all, so
+ * matching the first `}` would miss the outer group's top-level comma.
  */
 function canBraceExpand(target: string, bare: string | undefined): boolean {
   // `bare` is undefined when the caller has no per-character marking; a target
   // reached here is always shell-decoded, so assume the braces were typed bare.
+  const isBare = (index: number) => bare === undefined || bare[index] === '1';
   for (
     let opening = target.indexOf('{');
     opening !== -1;
     opening = target.indexOf('{', opening + 1)
   ) {
-    const closing = target.indexOf('}', opening + 1);
-    // No closing brace after this `{` means none after any later one either.
-    if (closing === -1) return false;
-    if (bare !== undefined && bare[opening] !== '1') continue;
-    const body = target.slice(opening + 1, closing);
-    if (body.includes(',') || body.includes('..')) return true;
+    if (!isBare(opening)) continue;
+    // Match the `}` that closes THIS group by depth: `{a{b},c}` has an inner
+    // `}` first, and a quoted or escaped `}` does not close anything, so
+    // stopping at the first `}` would miss the outer group's top-level comma.
+    let depth = 0;
+    let expands = false;
+    let closed = false;
+    for (let i = opening; i < target.length; i++) {
+      if (!isBare(i)) continue;
+      const ch = target[i];
+      if (ch === '{') {
+        depth++;
+      } else if (ch === '}') {
+        if (--depth === 0) {
+          closed = true;
+          break;
+        }
+      } else if (
+        depth === 1 &&
+        (ch === ',' || (ch === '.' && target[i + 1] === '.' && isBare(i + 1)))
+      ) {
+        expands = true;
+      }
+    }
+    if (closed && expands) return true;
   }
   return false;
 }
