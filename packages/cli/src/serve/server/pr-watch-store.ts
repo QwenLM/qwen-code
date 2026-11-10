@@ -560,6 +560,20 @@ function parseOwnerRecord(value: unknown): PrWatchOwnerRecord | null {
   };
 }
 
+/**
+ * This process owns the record: ours, local, and still the same process. The
+ * claim's `retained` branch and the shutdown release share this one predicate
+ * so a future widening of the identity discriminator cannot land on only one
+ * of them — which would let shutdown delete a record the claim refuses.
+ */
+function isOwnedByThisProcess(record: PrWatchOwnerRecord): boolean {
+  return (
+    record.pid === process.pid &&
+    isLocalIdentity(record) &&
+    isSameProcess(record.pid, record.procStart)
+  );
+}
+
 function sameOwnerRecord(
   a: PrWatchOwnerRecord,
   b: PrWatchOwnerRecord,
@@ -753,7 +767,7 @@ function attemptPrWatchClaimSync(
             };
           }
           if (existing && isSameProcess(existing.pid, existing.procStart)) {
-            if (existing.pid === process.pid) {
+            if (isOwnedByThisProcess(existing)) {
               return { kind: 'retained', record: existing };
             }
             return {
@@ -814,6 +828,45 @@ function attemptPrWatchClaimSync(
       reason: `cannot lock ${ownerPath}: ${String(error)}`,
     };
   }
+}
+
+/**
+ * Why a shutdown release did or did not remove the owner record. `absent` is
+ * the ordinary "this daemon never claimed" case and stays silent; the other
+ * refusals are worth a line, because otherwise an operator cannot tell them
+ * apart from a clean release.
+ */
+export type PrWatchReleaseOutcome =
+  | 'released'
+  | 'absent'
+  | 'foreign'
+  | 'unreadable'
+  | 'lock';
+
+/**
+ * Release the owner record only when this process is the owner. Shutdown holds
+ * no handle on the record a claim returned — the observation and the drain
+ * each claim independently — so it reads the file and verifies identity by the
+ * claim's own predicate. A daemon that never claimed, or whose record a
+ * successor already replaced, removes nothing. The re-read inside the release
+ * is still authoritative: this outer read only decides whether to try.
+ */
+export function releaseOwnedPrWatchSync(
+  watchDir: string,
+): PrWatchReleaseOutcome {
+  if (!existsSync(watchDir)) return 'absent';
+  const ownerFile = readOwnerFileGuardedSync(prWatchOwnerPath(watchDir));
+  if (ownerFile.kind === 'absent') return 'absent';
+  if (ownerFile.kind !== 'content') return 'unreadable';
+  let current: PrWatchOwnerRecord | null;
+  try {
+    current = parseOwnerRecord(JSON.parse(ownerFile.raw));
+  } catch {
+    return 'unreadable';
+  }
+  if (!current) return 'unreadable';
+  if (!isOwnedByThisProcess(current)) return 'foreign';
+  return releasePrWatchOwnershipSync(watchDir, current) ? 'released' : 'lock';
 }
 
 /** Remove the owner record only when it is still the expected one. */

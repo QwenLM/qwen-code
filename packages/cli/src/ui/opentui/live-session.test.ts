@@ -62,6 +62,7 @@ import type { OpenTuiStreamEvent } from './event-adapter.js';
 import type { DualOutputBridge } from '../../dualOutput/DualOutputBridge.js';
 import type { HandleAtCommandResult } from '../hooks/atCommandProcessor.js';
 import { ToolCallStatus, type IndividualToolCallDisplay } from '../types.js';
+import type { Part } from '@google/genai';
 
 function steering(...texts: string[]): OpenTuiSteeringSubmission[] {
   return texts.map((text) => ({ text, content: text }));
@@ -4274,4 +4275,168 @@ describe('live checkpoint producer and approval ownership', () => {
     'does not publish after async temporary write when %s',
     (invalidate) => scenario({ invalidate }),
   );
+});
+
+describe('livePromptEvents on the shared agent loop (experimental.unifiedAgentLoop)', () => {
+  const shared = (config: Config) =>
+    ({ ...config, isUnifiedAgentLoopEnabled: () => true }) as unknown as Config;
+  const call = (callId: string) => ({
+    type: 'tool_call_request',
+    value: { callId, name: 'test_tool', args: {} },
+  });
+  /** The ids of the function responses each continuation sent. */
+  const sentResponses = (send: ReturnType<typeof vi.fn>) =>
+    send.mock.calls
+      .slice(1)
+      .map((args) =>
+        (args[0] as Part[]).map((part) => part.functionResponse?.id),
+      );
+
+  it('sends the same requests and yields the same events as the current path', async () => {
+    const runs = [];
+    for (const onShared of [false, true]) {
+      const send = oneToolBatchStream({
+        callId: 't1',
+        name: 'test_tool',
+        args: {},
+      });
+      const config = createFakeConfig(send);
+      const events = await drain(
+        livePromptEvents(
+          onShared ? shared(config) : config,
+          'start',
+          undefined,
+          {
+            promptId: 'p1',
+          },
+        ),
+      );
+      runs.push({
+        events,
+        requests: send.mock.calls.map(([parts, , promptId, options]) => ({
+          parts,
+          promptId,
+          options,
+        })),
+      });
+    }
+    expect(runs[1].requests).toHaveLength(2);
+    expect(runs[1]).toEqual(runs[0]);
+  });
+
+  it.each(['retry', 'model_fallback'])(
+    'runs only the calls of the attempt a %s replaced them with',
+    async (type) => {
+      let sends = 0;
+      const send = vi.fn(function* () {
+        if (++sends > 1) return;
+        yield call('stale');
+        yield { type };
+        yield call('fresh');
+      });
+      await drain(livePromptEvents(shared(createFakeConfig(send)), 'start'));
+      expect(sentResponses(send)).toEqual([['fresh']]);
+    },
+  );
+
+  it('settles tool cards when a round detects a loop', async () => {
+    const runs = [];
+    for (const onShared of [false, true]) {
+      let sends = 0;
+      const send = vi.fn(function* () {
+        if (++sends > 1) return;
+        yield call('t1');
+        yield { type: 'loop_detected' };
+      });
+      const config = createFakeConfig(send);
+      const events = await drain(
+        livePromptEvents(onShared ? shared(config) : config, 'start'),
+      );
+      const items = events.reduce<readonly LiveHistoryItem[]>(
+        foldLiveEvent,
+        [],
+      );
+      runs.push({
+        sends: send.mock.calls.length,
+        card: items.find((item) => item.kind === 'tool' && item.id === 't1'),
+      });
+    }
+    expect(runs).toMatchObject([
+      { sends: 2, card: { done: true, success: true } },
+      { sends: 1, card: { done: true, success: false, summary: 'cancelled' } },
+    ]);
+  });
+
+  it('pairs sidecar tool uses before yielding cancelled cards', async () => {
+    const send = vi.fn(function* () {
+      yield call('t1');
+      yield call('t2');
+      yield { type: 'loop_detected' };
+    });
+    const order: string[] = [];
+    const dualOutput = {
+      emitUserMessage: vi.fn(),
+      startAssistantMessage: vi.fn(),
+      processEvent: vi.fn(),
+      finalizeAssistantMessage: () => order.push('assistant'),
+      emitToolResult: vi.fn<DualOutputBridge['emitToolResult']>((request) => {
+        order.push(`result:${request.callId}`);
+      }),
+    };
+    for await (const event of livePromptEvents(
+      shared(createFakeConfig(send)),
+      'start',
+      undefined,
+      { dualOutput: dualOutput as unknown as DualOutputBridge },
+    )) {
+      if (event.type === 'tool-end') {
+        order.push(`card:${event.id}`);
+        break;
+      }
+    }
+    expect(order).toEqual(['assistant', 'result:t1', 'result:t2', 'card:t1']);
+    expect(
+      dualOutput.emitToolResult.mock.calls.map(([request, response]) => [
+        request.callId,
+        response.callId,
+        response.executionStatus,
+      ]),
+    ).toEqual([
+      ['t1', 't1', 'not_started'],
+      ['t2', 't2', 'not_started'],
+    ]);
+    expect(send).toHaveBeenCalledOnce();
+  });
+
+  it("closes the round's stream when the turn is no longer current", async () => {
+    let current = true;
+    let closed = false;
+    const send = vi.fn(function* () {
+      try {
+        yield { type: 'content', value: 'a' };
+        current = false;
+        yield call('t1');
+        yield { type: 'content', value: 'b' };
+      } finally {
+        closed = true;
+      }
+    });
+    await drain(
+      livePromptEvents(shared(createFakeConfig(send)), 'start', undefined, {
+        isCurrentTurn: () => current,
+      }),
+    );
+    expect(closed).toBe(true);
+    expect(send).toHaveBeenCalledOnce();
+  });
+
+  it("rethrows the round's stream failure", async () => {
+    const send = vi.fn(function* () {
+      yield { type: 'content', value: 'a' };
+      throw new Error('provider failed');
+    });
+    await expect(
+      drain(livePromptEvents(shared(createFakeConfig(send)), 'start')),
+    ).rejects.toThrow('provider failed');
+  });
 });
