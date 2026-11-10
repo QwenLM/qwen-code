@@ -8,8 +8,8 @@ import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionP
 import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages.Target;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceAccess;
@@ -47,7 +47,7 @@ class ManagedExtensionPackageServiceTest {
     private JdbcTemplate jdbc;
     private DataSourceTransactionManager manager;
     private ManagedAgentProperties properties;
-    private ManagedWorkspaceRegistry workspaces;
+    private JdbcManagedWorkspaceRegistry workspaces;
     private ManagedExtensionArchiveStore archives;
     private DefaultListableBeanFactory beans;
     private ManagedExtensionPackageService service;
@@ -70,7 +70,7 @@ class ManagedExtensionPackageServiceTest {
         properties.getExtensions().setSelfServiceEnabled(true);
         properties.getExtensions().setArtifactDirectory(directory.toString());
         properties.getExtensions().setAllowedActors(List.of("operator"));
-        workspaces = mock(ManagedWorkspaceRegistry.class);
+        workspaces = mock(JdbcManagedWorkspaceRegistry.class);
         when(workspaces.accessOf(anyString(), anyString(), anyString())).thenReturn(WorkspaceAccess.NONE);
         when(workspaces.accessOf("tenant", "operator", "workspace")).thenReturn(WorkspaceAccess.OPERATOR);
         when(workspaces.accessOf("tenant", "reader", "workspace")).thenReturn(WorkspaceAccess.READER);

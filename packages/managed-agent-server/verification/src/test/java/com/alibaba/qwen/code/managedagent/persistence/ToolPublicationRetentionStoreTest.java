@@ -5,6 +5,7 @@ import com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObje
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.OperationKind;
@@ -359,7 +360,7 @@ public class ToolPublicationRetentionStoreTest {
     void publicDeleteAndPrivateRetirementCommitAtomicallyAfterWriterStops() {
         var props = new ManagedAgentProperties();
         var publicStore = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, new ObjectMapper(), java.time.Clock.systemUTC(), events -> {},
-                org.mockito.Mockito.mock(ManagedWorkspaceRegistry.class), props, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+                org.mockito.Mockito.mock(JdbcManagedWorkspaceRegistry.class), props, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         String original = session;
         session = tx.execute(status -> publicStore.insertSessionCommand(tenant, "CREATE_SESSION", "create", "digest",
                 "qwen-code", null, null, java.util.List.of(), null).sessionId());
@@ -436,10 +437,10 @@ public class ToolPublicationRetentionStoreTest {
     @Test
     void retirementSuppressesOutstandingWorkOnlyInItsOwnResultScope() {
         for (String state : java.util.List.of("LEASED", "READY")) {
-            addOperation(OperationKind.TOOL_RESULT_PROJECTION, ManagedToolResultStore.scope(tenant, session),
+            addOperation(OperationKind.TOOL_RESULT_PROJECTION, JdbcManagedToolResultStore.scope(tenant, session),
                     null, session, state, state);
         }
-        addOperation(OperationKind.TOOL_RESULT_PROJECTION, ManagedToolResultStore.scope(tenant, "other"),
+        addOperation(OperationKind.TOOL_RESULT_PROJECTION, JdbcManagedToolResultStore.scope(tenant, "other"),
                 null, "other", "other", "LEASED");
         retire();
         var leased = jdbc.queryForMap("SELECT state, claim_until, failure_code FROM ma_operation"
@@ -501,7 +502,7 @@ public class ToolPublicationRetentionStoreTest {
 
     protected void addCaptureObject(String captureScope, String publication, String captureSession,
             String slot, String resourceId, String objectKey, byte[] inline, String captureState) {
-        String resourceScope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, captureSession);
+        String resourceScope = ManagedSessionStore.sessionScopeKey(tenant, captureSession);
         jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, state, scope_key, publication_id, slot_key, capture_state, capture_object_key, inline_bytes, operation_id, gmt_create) VALUES (?, ?, ?, 'workspace-1', ?, ?, 'managed-tool-result-content', 1, ?, ?, ?, 'PUBLISHED', ?, ?, ?, ?, ?, ?, 'op', " + ManagedSchemaTime.SQL_NOW + ")",
                 ManagedSchemaKeys.key(resourceScope, resourceId), resourceScope, tenant, captureSession, resourceId,
                 inline == null ? 1 : inline.length, ToolPublicationRetentionStore.hash(slot),
@@ -518,7 +519,7 @@ public class ToolPublicationRetentionStoreTest {
                         + " tenant_id, workspace_id, session_id, publication_id, target_kind, target_key, request_digest,"
                         + " request_json, state, phase, gmt_create, gmt_modified) VALUES (?, ?, ?, ?, ?, ?, 'workspace-1', ?, ?,"
                         + " 'OUTPUT_CAPTURE', ?, ?, '{}', ?, 'TEST', ?, ?)",
-                operationKey, com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, targetSession), opScope, kind.name(), id,
+                operationKey, ManagedSessionStore.sessionScopeKey(tenant, targetSession), opScope, kind.name(), id,
                 tenant, targetSession, publication, target, "b".repeat(64), state, time, time);
         return operationKey;
     }

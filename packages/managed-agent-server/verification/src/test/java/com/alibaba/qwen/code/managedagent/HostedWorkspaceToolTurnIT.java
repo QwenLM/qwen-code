@@ -7,13 +7,14 @@ import com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObje
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationAdmissionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationDataStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationStore;
-import com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageGuard;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.session.HarnessEventProjector;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
@@ -235,12 +236,12 @@ class HostedWorkspaceToolTurnIT {
         });
         context.registerBean("unicodeGrants", ToolPublicationStore.class, () -> new ToolPublicationStore(
                 context.getBean("managedJdbcTemplate", JdbcTemplate.class), context.getBean(PlatformTransactionManager.class),
-                context.getBean(ManagedSessionStore.class), context.getBean(ToolExecutionRepository.class),
+                context.getBean(JdbcManagedSessionStore.class), context.getBean(ToolExecutionRepository.class),
                 context.getBean(RuntimeBindingRepository.class),
                 new ToolPublicationStore.Capacity(1024 * 1024, 16 * 1024 * 1024, 64 * 1024 * 1024, 4)));
         context.registerBean("unicodeData", ToolPublicationDataStore.class, () -> new ToolPublicationDataStore(
                 context.getBean("managedJdbcTemplate", JdbcTemplate.class), context.getBean(PlatformTransactionManager.class),
-                context.getBean(ToolPublicationStore.class), context.getBean(ManagedSessionStore.class),
+                context.getBean(ToolPublicationStore.class), context.getBean(JdbcManagedSessionStore.class),
                 context.getBean(ToolPublicationObjectStore.class), Duration.ofSeconds(30), Duration.ofSeconds(5),
                 new ToolPublicationDataStore.VerificationBudget(1024 * 1024, Duration.ofMinutes(25))));
         context.registerBean("unicodePublicationController", ToolPublicationController.class, () -> {
@@ -249,7 +250,7 @@ class HostedWorkspaceToolTurnIT {
             return new ToolPublicationController(context.getBean(ToolPublicationStore.class),
                     context.getBean(ToolPublicationDataStore.class),
                     new ToolPublicationAdmissionStore(context.getBean("managedJdbcTemplate", JdbcTemplate.class),
-                            context.getBean(PlatformTransactionManager.class), context.getBean(ManagedSessionStore.class),
+                            context.getBean(PlatformTransactionManager.class), context.getBean(JdbcManagedSessionStore.class),
                             context.getBean(ToolPublicationDataStore.class)), properties);
         });
     }
@@ -456,7 +457,7 @@ class HostedWorkspaceToolTurnIT {
                             () -> new EmbeddedRuntimeBroker(spring.getBean(AgentStateStore.class),
                                     spring.getBean(ManagedAgentProperties.class), spring.getBean(RuntimeBindingRepository.class),
                                     spring.getBean(RuntimeSessionRepository.class), spring.getBean(ToolExecutionRepository.class),
-                                    spring.getBean(WorkspaceExecutionStore.class))) : null;
+                                    spring.getBean(JdbcWorkspaceExecutionStore.class))) : null;
             HostedWorkspaceColdLoadProbe coldLoadProbe = new HostedWorkspaceColdLoadProbe(jdbc, tenant, sessions,
                     "http://127.0.0.1:" + spring.getWebServer().getPort(), gateServer);
             HostedOperatorRecoveryProbe operatorProbe = operatorRecovery
@@ -774,7 +775,7 @@ class HostedWorkspaceToolTurnIT {
             // Led by the indexed session scope key, as in HostedGateTestSupport:
             // the raw tenant+session form scans the lane's accumulated ma_resource rows.
             List<Map<String, Object>> stored = jdbc.queryForList("SELECT " + ManagedSchemaProjection.RESOURCE.columns() + " FROM ma_resource WHERE session_scope_key = ? AND resource_id = ? AND tenant_id = ? AND session_id = ?",
-                    com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, sessionId), resource.path("resourceId").asText(), tenant, sessionId);
+                    ManagedSessionStore.sessionScopeKey(tenant, sessionId), resource.path("resourceId").asText(), tenant, sessionId);
             if (!applied) {
                 if (resource.has("bytesBase64")) {
                     assertThat(stored).as(fault + " rolled-back resource").isEmpty();
@@ -857,7 +858,7 @@ class HostedWorkspaceToolTurnIT {
         assertThat(head.get("latest_checkpoint_resource_id")).isEqualTo(checkpointId);
         byte[] checkpoint = jdbc.queryForObject("SELECT inline_bytes FROM ma_resource"
                 + " WHERE session_scope_key = ? AND resource_id = ? AND tenant_id = ? AND session_id = ?", byte[].class,
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, sessionId), checkpointId, tenant, sessionId);
+                ManagedSessionStore.sessionScopeKey(tenant, sessionId), checkpointId, tenant, sessionId);
         String phase = mapper.readTree(checkpoint).path("continuation").path("phase").asText();
         if (fault.startsWith("result-")) {
             assertThat(phase).isEqualTo("await_runtime");

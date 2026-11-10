@@ -266,7 +266,8 @@ from N`, and bounding an engagement with `@qwen-code /takeover for N`.
 - [159. route · Takeover round budget — '<cmd> for N' bounds a window's rounds and releases the PR when the budget is spent…](#af-159)
 - [160. (top level) · Env constant commentary — Moved out of the workflow verbatim to keep the file under GitHub's start-runs gate…](#af-160)
 - [161. review-address · Prepare branch and feedback — Failed-check evidence: the agent gets check NAMES only and holds no GitHub…](#af-161)
-- [162. takeover-command, retry-command, takeover-ack — The command lane joins the persistent pool: an accepted command's visible half…](#af-162)
+- [162. review-scan · Scan for PRs with new feedback — review-pr is excluded from STALE_BASE_REDS: a review timeout is a verdict on THIS diff, not…](#af-162)
+- [163. takeover-command, retry-command, takeover-ack — The command lane joins the persistent pool: an accepted command's visible half…](#af-163)
 
 ---
 
@@ -4953,7 +4954,73 @@ reaches step stdout.
 
 <a id="af-162"></a>
 
-### 162. takeover-command, retry-command, takeover-ack — The command lane joins the persistent pool: route accepting a command in seconds is invisible while its only visible half sits in the hosted queue.
+### 162. review-scan · Scan for PRs with new feedback — review-pr is excluded from STALE_BASE_REDS: a review timeout is a verdict on THIS diff, not…
+
+[中文说明](#af-162-zh)
+
+In `review-scan` · `Scan for PRs with new feedback`.
+
+```text
+New in this change, not moved from the YAML.
+
+Observed on #16408: a maintainer's feedback comment sat unaddressed
+for 13+ hours while the loop spun a review-timeout ↔ base-update
+cycle. The mechanics: review-pr times out on a large diff (~6h per
+run) and lands FAILURE; the stale-base gate sees a red check that is
+green on MAIN_GREEN_CHECKS (the last-merged PR's review passed) and a
+branch behind main, so it merges main via update-branch and
+`continue`s — skipping feedback processing for that scan. The merge
+creates a new head, which starts a FRESH review-pr run; the #8888
+review-in-flight gate then holds every scan until that run ends, and
+when it times out the stale-base gate fires again. Two base updates
+(01:14, 07:47) both cited review-pr and neither cleared it; the
+pending comment never reached a round. The exclusion breaks the
+SUSTAINED cycle, not the first update: a mixed red set that also
+carries a genuine stale-base red (the 01:14 update cited Lint & Static
+alongside review-pr) still merges main once and re-arms the in-flight
+hold before the pending feedback can be picked up. The mixed-case
+meta-test pins that boundary.
+
+The green-on-main premise is unsound for review-pr specifically: it
+reviews THIS PR's diff, so a timeout reproduces on any base — merging
+main cannot fix it, it only restarts the clock. af-109 already calls
+green-on-main necessary-but-NOT-sufficient; this is the check where
+the insufficiency is structural, not incidental. The selector
+therefore drops review-pr by name (the same key NON_BLOCKING_CHECKS
+uses), alongside the existing Qwen Autofix exclusion.
+
+What remains unchanged: while review-pr is IN_PROGRESS the #8888 gate
+still holds the round (a push would cancel the review); a red
+review-pr still appears in feedback.md's failed-check sections once a
+round runs; and every OTHER red check keeps its stale-base behavior.
+The trade-off: a review-pr red genuinely caused by a stale base no
+longer auto-merges main — but the feedback round still lists it under
+failed checks, and the address agent can merge main itself when the
+evidence calls for it. The meta-test pins both directions: review-pr
+alone green-on-main no longer updates, and a mixed review-pr + Test
+red still updates for Test.
+```
+
+<a id="af-162-zh"></a>
+
+<details>
+<summary>中文说明（af-162 完整中文翻译，与上方英文逐段对应）</summary>
+
+[English](#af-162)
+
+本次新增，非从 YAML 移入。
+
+在 #16408 上观测到：一条维护者反馈评论 13+ 小时无人处理，循环在「评审超时 ↔ base 更新」之间打转。机制：review-pr 在大 diff 上超时（每轮约 6 小时）后落地为 FAILURE；stale-base 门禁看到一个在 MAIN_GREEN_CHECKS 上为绿（最近合入 main 的 PR 评审通过）、且分支落后 main 的红色检查，于是经 update-branch 合入 main 并 `continue`——跳过该次扫描的反馈处理。merge 产生新 head，触发一轮全新的 review-pr 运行；#8888 review-in-flight 门禁随后扣住每次扫描直到该轮结束，超时后 stale-base 门禁再次触发。两次 base 更新（01:14、07:47）都点名 review-pr，却都没能消除它；待处理评论始终没有进入任何一轮。本排除打断的是**持续**循环，而非第一次更新：若红色集合是混合的、还包含真正的 stale-base 红（01:14 那次同时点名 Lint & Static 与 review-pr），仍会合入 main 一次，并在待处理反馈被拾取前重新武装 in-flight 扣压。混合用例的 meta-test 钉住的正是这一边界。
+
+green-on-main 前提对 review-pr 特别不成立：它评审的是本 PR 自己的 diff，超时在任何 base 上都会复现——合入 main 治不了它，只会重启计时。af-109 本就称 green-on-main 是必要非充分信号；这个检查正是其不充分性属于结构性而非偶然性的情形。因此选择器按名字丢弃 review-pr（与 NON_BLOCKING_CHECKS 使用的键相同），与既有的 Qwen Autofix 排除并列。
+
+保持不变的部分：review-pr 处于 IN_PROGRESS 时，#8888 门禁仍扣住本轮（推送会取消评审）；一旦有一轮运行，红色 review-pr 仍会出现在 feedback.md 的失败检查段；其余所有红色检查保持原有 stale-base 行为。权衡：真正由 base 过期导致的 review-pr 红不再自动合入 main——但反馈轮仍会把它列在失败检查里，address agent 可在证据支持时自行合入 main。meta-test 钉住两个方向：仅 review-pr 红且 main 上绿时不再更新；review-pr + Test 混合红时仍会为 Test 更新。
+
+</details>
+
+<a id="af-163"></a>
+
+### 163. takeover-command, retry-command, takeover-ack — The command lane joins the persistent pool: route accepting a command in seconds is invisible while its only visible half sits in the hosted queue.
 
 In `takeover-command`, `retry-command` and `takeover-ack`.
 
@@ -5007,36 +5074,44 @@ path. They call gh and jq, both already used by route on
 this pool; they run no node, docker or tmux, so they get no
 'Check runner environment' capability preflight.
 
-The rule is file-wide, so it is pinned file-wide (R2-1).
-Twelve sites mint this dir: ten in the workflow and two in
-autofix-push-and-report.sh. Only the three moved jobs and the
-heartbeat's per-call wrapper cleaned up, leaving eight leaks
-behind wording that reads file-wide. Two are fixed here:
-route — up to 144 cron runs a day — and review-scan.
+The rule is file-wide, so it is pinned file-wide. Thirteen
+sites mint this dir: ten in the workflow, two in
+autofix-push-and-report.sh and one in
+autofix-status-heartbeat.sh. Seven clean up after themselves
+— route, the three moved jobs, review-scan, the workflow's
+per-call post_status wrapper and the heartbeat's per-tick
+removal. Six do not, and they are the recorded follow-up:
+issue-autofix's publish, review-address's prepare, dry-run
+report and finalize, plus the script's two sites.
 
-review-scan cannot carry a second `trap … EXIT`: bash keeps
-one handler per shell, so its removal joins the existing
-fleet/WORKDIR trap and that merged line is pinned verbatim.
-The merged trap is installed AT THE MINT, not down beside
-FLEET_FILE (R3-1): the empty-PAT guard and the WORKDIR
+route and review-scan are fixed here because they are the
+highest-volume leakers — route alone runs up to 144 times a
+day. review-scan cannot carry a second `trap … EXIT`: bash
+keeps one handler per shell, so its removal joins the
+existing fleet/WORKDIR trap and that merged line is pinned
+verbatim. The merged trap is installed AT THE MINT, not down
+beside FLEET_FILE (R3-1): the empty-PAT guard and the WORKDIR
 pre-clean both exit before that later point, and each would
 otherwise leave the dir behind — a mis-scoped secret would
 leak one per scan tick while a substring census still called
 the site clean. FLEET_FILE does not exist on those paths, so
 the merged line reads it with a `:-` default. Every step that
-gained a trap is also pinned to exactly ONE EXIT handler
-(R3-3): a second one silently replaces the first, and neither
-the census nor the lazy preamble match would notice.
+gained a trap is pinned to exactly ONE EXIT handler (R3-3):
+a second one silently replaces the first, and neither the
+census nor the lazy preamble match would notice.
 
-The remaining six are the heavy agent jobs' PAT steps
-(issue-autofix's publish, review-address's prepare, dry-run
-report and finalize) and the script's two sites. They predate
-this lane and stay a follow-up — but a RECORDED one: a census
-walks BOTH sources and requires every mint site to be either
-self-cleaning or on an explicit leak list, so a new site
-cannot join unnoticed and a fixed one cannot leave the list
-stale. Reading only the workflow was itself a false claim of
-completeness (R3-2).
+The census itself took three rounds to get right, and the
+shape it settled on is the point. It matches the mint with a
+pattern tolerant of the RUNNER_TEMP spelling — the heartbeat
+writes `${RUNNER_TEMP:-/tmp}`, which a single literal never
+matched (R3-2) — walks every source that mints rather than a
+hand-picked subset, and judges each site on its OWN region:
+a step body in the workflow, the span up to the next mint in
+a script. A file-wide predicate let one site's cleanup vouch
+for another, so fixing the first would have flipped both into
+the cleaned list and recorded a lie (R4-2). Both lists are
+asserted exactly, so a new site cannot join unnoticed and a
+fixed one cannot leave a stale entry.
 
 One bound on all of this: an EXIT trap covers bash's own
 exits, not a SIGKILLed shell. That is why the scan lane also
