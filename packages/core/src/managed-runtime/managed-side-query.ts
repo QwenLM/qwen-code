@@ -186,18 +186,46 @@ export async function prepareManagedSideQuery(
     ...privateHistory.flat(),
     question,
   ];
-  const fits = (): boolean =>
+  const fitsWith = (mainDrop: number, privateDrop: number): boolean =>
     estimateContentTokens([
       { role: 'user', parts: [{ text: systemInstruction }] },
-      ...assemble(),
+      ...main.slice(mainDrop).flat(),
+      ...privateHistory.slice(privateDrop).flat(),
+      question,
     ]) *
       2 +
       maxOutputTokens +
       1024 <=
     window;
-  while (!fits() && privateHistory.length > 0) privateHistory.shift();
-  while (!fits() && main.length > 0) main.shift();
-  if (!fits() || (recap && main.length === 0))
+  // fitsWith is monotone in each drop count, so binary-search the cut point
+  // rather than re-estimating the whole retained history per dropped turn
+  // (the shift loop was O(n^2) on the harness event loop). The estimate ceils
+  // over the whole array, so searching fitsWith keeps the retained tail exact.
+  const minDrop = (
+    length: number,
+    fitsAt: (drop: number) => boolean,
+  ): number => {
+    let lo = 0;
+    let hi = length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (fitsAt(mid)) hi = mid;
+      else lo = mid + 1;
+    }
+    return lo;
+  };
+  let privateDrop = 0;
+  let mainDrop = 0;
+  if (!fitsWith(0, 0)) {
+    privateDrop = minDrop(privateHistory.length, (drop) => fitsWith(0, drop));
+    if (!fitsWith(0, privateDrop))
+      mainDrop = minDrop(main.length, (drop) =>
+        fitsWith(drop, privateHistory.length),
+      );
+  }
+  main = main.slice(mainDrop);
+  privateHistory.splice(0, privateDrop);
+  if (!fitsWith(0, 0) || (recap && main.length === 0))
     throw new ManagedSideQueryError('context_too_large');
   const request: GenerateContentParameters = {
     model: model.model,

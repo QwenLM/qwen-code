@@ -1645,8 +1645,9 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
                         visible && "ACTIVE".equals(session.status()) && renameSupported
                                 && (session.workspace() == null || maySubmit),
                         visible && approvalExecutable && compressionSupported && compression.available(),
-                        childAgentsCapability(session, worktree), maySubmit && supportsSideQueries(session),
-                        maySubmit && supportsSideQueries(session)),
+                        childAgentsCapability(session, worktree),
+                        (session.workspace() == null || maySubmit) && supportsSideQueries(session),
+                        (session.workspace() == null || maySubmit) && supportsSideQueries(session)),
                 session.workspace() != null || session.agentDefinitionDigest() != null
                         ? approvalSelection == null ? session.approvalMode() : approvalSelection.mode() : null,
                 modelContext, modelSelection, approvalSelection == null ? null : approvalSelection.revision(),

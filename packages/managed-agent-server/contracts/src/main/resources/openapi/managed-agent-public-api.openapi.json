@@ -9318,6 +9318,9 @@
           },
           "409": {
             "$ref": "#/components/responses/Conflict"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
           }
         },
         "requestBody": {
@@ -9649,6 +9652,9 @@
           },
           "409": {
             "$ref": "#/components/responses/Conflict"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
           }
         },
         "requestBody": {

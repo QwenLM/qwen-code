@@ -26,6 +26,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 @Service
 public class ManagedSideQueryService {
     private static final Logger LOG = LoggerFactory.getLogger(ManagedSideQueryService.class);
+    private static final long RELEASE_GRACE_MILLIS = 30_000;
     private final ManagedSideQueries queries;
     private final ManagedAgentSettings settings;
     private final HarnessConnector harness;
@@ -33,7 +34,7 @@ public class ManagedSideQueryService {
     private final Map<String, Execution> executions = new ConcurrentHashMap<>();
 
     private record Execution(String tenant, String actor, String session, String query,
-            SideQueryTarget target, Claim claim, AtomicBoolean submitted) {
+            SideQueryTarget target, Claim claim, AtomicBoolean submitted, long deadlineAt) {
         Map<String, Object> wireClaim() {
             return Map.of("instanceId", claim.instanceId(), "bootId", claim.bootId(),
                     "generation", claim.generation(), "token", claim.token());
@@ -78,7 +79,8 @@ public class ManagedSideQueryService {
         try {
             target = harness.prepareSideQuery();
             Claim claim = queries.claim(tenant, session, query.queryId(), target.instanceId(), target.bootId());
-            execution = new Execution(tenant, actor, session, query.queryId(), target, claim, new AtomicBoolean());
+            execution = new Execution(tenant, actor, session, query.queryId(), target, claim, new AtomicBoolean(),
+                    query.deadlineAt());
             executions.put(query.queryId(), execution);
             Execution accepted = execution;
             executor.execute(() -> submit(accepted, query.deadlineAt()));
@@ -157,6 +159,16 @@ public class ManagedSideQueryService {
         }
         for (var execution : executions.values()) {
             if (!execution.submitted().get()) {
+                continue;
+            }
+            // Bound retention by the query's own deadline plus a grace window. A
+            // harness that dies mid-query makes the status probe throw transport
+            // noise forever, so release (idempotent close) must not depend on a
+            // successful probe or the pool Member leaks for the control plane's
+            // lifetime. SQL expiry reconciliation already interrupts the row past
+            // its deadline; this only frees the client-side target and count.
+            if (System.currentTimeMillis() > execution.deadlineAt() + RELEASE_GRACE_MILLIS) {
+                release(execution);
                 continue;
             }
             boolean terminal;

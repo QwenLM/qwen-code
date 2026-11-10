@@ -186,12 +186,9 @@ export function ManagedSideQueryPanel({
               : sideQueries.error}
           </p>
         )}
-        {pending && !active && !sideQueries.error && (
-          <p role="status">{t('preparing')}</p>
-        )}
-        {pending && !active && kind && sideQueries.error && (
+        {pending && !active && kind && (
           <div className="space-y-2" role="status">
-            <p>{t('unconfirmed')}</p>
+            <p>{sideQueries.error ? t('unconfirmed') : t('preparing')}</p>
             <Button
               variant="outline"
               disabled={!interactive}

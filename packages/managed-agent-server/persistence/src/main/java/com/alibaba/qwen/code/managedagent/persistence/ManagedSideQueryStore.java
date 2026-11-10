@@ -140,7 +140,7 @@ public class ManagedSideQueryStore implements ManagedSideQueries {
         }
         long now = now();
         String id = UUID.randomUUID().toString();
-        String lease = retention.read(tenant, session).leaseId();
+        String lease = retention.read(tenant, session).id;
         List<Pair> pairs = "btw".equals(request.kind()) ? privateHistory(tenant, actor, session) : List.of();
         jdbc.update("INSERT INTO ma_side_query (query_key,query_id,tenant_id,session_id,session_scope_key,actor_id,"
                         + "actor_scope_key,kind,trigger_kind,question,state,source_json,private_history_json,model_config_digest,"

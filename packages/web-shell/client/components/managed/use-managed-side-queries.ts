@@ -120,6 +120,7 @@ export function useManagedSideQueries(
     let actor: string | undefined;
     let context: ManagedSideQueryContext | undefined;
     let automatic = false;
+    let restored = false;
     let settingEpoch = 0;
     let awayAt: number | undefined;
     let candidate: { epoch: number; boundary: number } | undefined;
@@ -403,11 +404,36 @@ export function useManagedSideQueries(
         autoBusy = false;
       }
     };
+    // One-shot restore of the automatic preference and persisted intents. It
+    // must run as soon as the actor is first known, not only after the first
+    // refresh: a failed initial refresh leaves actor undefined, and the effect
+    // never re-runs, so a later successful refresh has to pick it up.
+    const restore = () => {
+      if (restored || !alive() || !actor) return;
+      restored = true;
+      try {
+        automatic = localStorage.getItem(preferenceKey()) === 'true';
+      } catch {
+        automatic = false;
+      }
+      for (const kind of ['btw', 'recap'] as const) {
+        const intent = readIntent(key(kind));
+        if (intent) {
+          intents.set(kind, intent);
+          void run(
+            kind,
+            'request' in intent ? intent.request.trigger !== 'automatic' : true,
+          );
+        }
+      }
+      update();
+    };
     const refresh = async () => {
       if (refreshBusy || !alive()) return;
       refreshBusy = true;
       try {
         if (!(await readContext())) return;
+        restore();
         const page = await api.list(sessionId, {
           ...requestOptions,
           limit: 50,
@@ -537,23 +563,7 @@ export function useManagedSideQueries(
     setState({ identity, queries: [], pending: [], automatic: false });
     void (async () => {
       await refresh();
-      if (!alive() || !actor) return;
-      try {
-        automatic = localStorage.getItem(preferenceKey()) === 'true';
-      } catch {
-        automatic = false;
-      }
-      for (const kind of ['btw', 'recap'] as const) {
-        const intent = readIntent(key(kind));
-        if (intent) {
-          intents.set(kind, intent);
-          void run(
-            kind,
-            'request' in intent ? intent.request.trigger !== 'automatic' : true,
-          );
-        }
-      }
-      update();
+      restore();
     })();
     const timer = setInterval(() => {
       if (!document.hidden) void refresh();
