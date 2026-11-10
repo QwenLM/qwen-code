@@ -858,17 +858,8 @@ public class ManagedAutomationService {
     }
 
     private static String deferredCode(OccurrenceRow occurrence) {
-        String error = occurrence.lastError();
-        if (error != null) {
-            int at = error.indexOf("\"code\":\"");
-            if (at >= 0) {
-                int end = error.indexOf('"', at + 8);
-                if (end > at) {
-                    return error.substring(at + 8, end);
-                }
-            }
-        }
-        return "automation_operation_unknown";
+        String code = HarnessConflictCodes.bodyCode(occurrence.lastError());
+        return code != null ? code : "automation_operation_unknown";
     }
 
     private static ManagedAgentException deferred(OccurrenceRow occurrence) {

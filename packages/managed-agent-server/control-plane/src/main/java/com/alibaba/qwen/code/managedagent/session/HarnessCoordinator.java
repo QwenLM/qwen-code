@@ -1175,8 +1175,18 @@ public class HarnessCoordinator {
         try {
             TurnRecord turn = store.findTurn(tenantId, sessionId, turnId)
                     .orElse(null);
-            if (turn == null || !"CANCELLING".equals(turn.status())
-                    || turn.harnessEventEpoch() == null) {
+            if (turn == null || !"CANCELLING".equals(turn.status())) {
+                // The Turn is absent or settled: its cancellation dedup and
+                // takeover-pace keys can never gate another send, so reclaim
+                // them here instead of letting them accumulate for the
+                // process lifetime. A transient read failure throws into the
+                // outer catch and never reaches this prune.
+                takeoverPace.remove(tenantId + '/' + sessionId + '/' + turnId);
+                String turnPrefix = key(tenantId, sessionId, turnId) + "\n";
+                cancellations.removeIf(cancelKey -> cancelKey.startsWith(turnPrefix));
+                return;
+            }
+            if (turn.harnessEventEpoch() == null) {
                 return;
             }
             SessionRecord session = store.requireSession(tenantId,

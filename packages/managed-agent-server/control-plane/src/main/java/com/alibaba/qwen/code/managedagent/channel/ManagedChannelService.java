@@ -753,16 +753,12 @@ public class ManagedChannelService {
                     "channel_operation_failed",
                     "The Hosted Harness failed the channel operation.");
         }
-        String code = "channel_operation_failed";
-        String body = http.getResponseBody();
-        if (body != null) {
-            int at = body.indexOf("\"code\":\"");
-            if (at >= 0) {
-                int end = body.indexOf('"', at + 8);
-                if (end > at) {
-                    code = body.substring(at + 8, end);
-                }
-            }
+        String code = http.getErrorCode();
+        if (code == null) {
+            code = HarnessConflictCodes.bodyCode(http.getResponseBody());
+        }
+        if (code == null) {
+            code = "channel_operation_failed";
         }
         // A 400 is a deterministic verdict, not a server failure: the
         // adapter's permanent-refusal branch can only recognize it when

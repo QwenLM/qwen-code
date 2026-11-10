@@ -98,8 +98,10 @@ public class JdbcManagedSessionSkills
                 throw conflict();
             }
             return skills;
+        } catch (ManagedAgentException error) {
+            throw error;
         } catch (Exception error) {
-            throw conflict();
+            throw conflict(error);
         }
     }
 
@@ -122,7 +124,7 @@ public class JdbcManagedSessionSkills
             }
             return command;
         } catch (java.io.IOException error) {
-            throw conflict();
+            throw conflict(error);
         }
     }
 
@@ -198,5 +200,10 @@ public class JdbcManagedSessionSkills
     private static ManagedAgentException conflict() {
         return new ManagedAgentException(409, "session_skills_conflict",
                 "The immutable Session Skills snapshot is invalid.");
+    }
+
+    private static ManagedAgentException conflict(Throwable cause) {
+        return new ManagedAgentException(409, "session_skills_conflict",
+                "The immutable Session Skills snapshot is invalid.", cause);
     }
 }
