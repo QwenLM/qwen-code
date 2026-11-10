@@ -294,27 +294,37 @@ class GlobToolInvocation extends BaseToolInvocation<
       const permissionManager = this.config.getPermissionManager?.();
       const filteredEntries: GlobPath[] = [];
       for (const entry of allFilteredEntries) {
+        signal.throwIfAborted();
         if (
           !(await isPathDeniedByReadRule(
             permissionManager,
             entry.fullpath(),
             this.config.getTargetDir(),
+            ToolNames.GLOB,
           ))
         ) {
           filteredEntries.push(entry);
         }
       }
+      const withheldFileCount =
+        allFilteredEntries.length - filteredEntries.length;
 
       if (filteredEntries.length === 0) {
         if (hitCollectionLimit) {
           return {
-            llmContent: `Results truncated after scanning ${allFilteredEntries.length} matching files; all collected entries were excluded by permission rules. Narrow the pattern or path.`,
+            llmContent: `Results truncated after scanning ${allFilteredEntries.length} matching files; ${withheldFileCount} collected file(s) were excluded by permission rules. Narrow the pattern or path.`,
             returnDisplay: `Results truncated`,
           };
         }
+        if (allFilteredEntries.length === 0) {
+          return {
+            llmContent: `No files found matching pattern "${this.params.pattern}" ${searchLocationDescription}`,
+            returnDisplay: `No files found`,
+          };
+        }
         return {
-          llmContent: `No files found matching pattern "${this.params.pattern}" ${searchLocationDescription}`,
-          returnDisplay: `No files found`,
+          llmContent: `No files found matching pattern "${this.params.pattern}" ${searchLocationDescription}. Matching files were excluded by permission rules.`,
+          returnDisplay: `No files found (permission-filtered)`,
         };
       }
 
@@ -353,11 +363,14 @@ class GlobToolInvocation extends BaseToolInvocation<
 
       // Add truncation notice if needed
       if (hitCollectionLimit) {
-        resultMessage += `\n---\n[Results truncated after scanning ${totalFileCount} matching files. Narrow the pattern or path.]`;
+        resultMessage += `\n---\n[Results truncated after collecting ${allFilteredEntries.length} matching files${withheldFileCount ? `; ${withheldFileCount} excluded by permission rules` : ''}. Narrow the pattern or path.]`;
       } else if (truncated) {
         const omittedFiles = totalFileCount - fileLimit;
         const fileTerm = omittedFiles === 1 ? 'file' : 'files';
         resultMessage += `\n---\n[${omittedFiles} ${fileTerm} truncated] ...`;
+      }
+      if (withheldFileCount > 0 && !hitCollectionLimit) {
+        resultMessage += `\n---\n[${withheldFileCount} matching file(s) excluded by permission rules.]`;
       }
 
       return {

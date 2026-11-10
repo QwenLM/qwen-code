@@ -326,10 +326,13 @@ class GrepToolInvocation extends BaseToolInvocation<
       // Ripgrep is workspace-auto-approved, but its result set must still
       // honour path-scoped Read deny/ask rules before counts and truncation.
       const permissionManager = this.config.getPermissionManager?.();
+      let withheldMatchCount = 0;
       if (permissionManager) {
+        const beforeFilterCount = allLines.length;
         const permittedLines: RipgrepMatchLine[] = [];
         const evaluatedPaths = new Map<string, boolean>();
         for (const line of allLines) {
+          signal.throwIfAborted();
           const absolutePath = toAbsoluteResultPath(
             line.filePath,
             searchPaths,
@@ -341,6 +344,7 @@ class GrepToolInvocation extends BaseToolInvocation<
               permissionManager,
               absolutePath,
               this.config.getTargetDir(),
+              ToolNames.GREP,
             );
             evaluatedPaths.set(absolutePath, denied);
           }
@@ -349,6 +353,7 @@ class GrepToolInvocation extends BaseToolInvocation<
           }
         }
         allLines = permittedLines;
+        withheldMatchCount = beforeFilterCount - allLines.length;
       }
 
       // Deduplicate lines from potentially overlapping workspace directories.
@@ -375,8 +380,14 @@ class GrepToolInvocation extends BaseToolInvocation<
             returnDisplay: 'Error: Search incomplete',
           };
         }
-        const noMatchMsg = `No matches found for pattern "${this.params.pattern}" ${searchLocationDescription}${filterDescription}.`;
-        return { llmContent: noMatchMsg, returnDisplay: `No matches found` };
+        const permissionNote = withheldMatchCount
+          ? ` Some matching results were withheld by permission rules.`
+          : '';
+        const noMatchMsg = `No matches found for pattern "${this.params.pattern}" ${searchLocationDescription}${filterDescription}.${permissionNote}`;
+        return {
+          llmContent: noMatchMsg,
+          returnDisplay: `No matches found${withheldMatchCount ? ' (permission-filtered)' : ''}`,
+        };
       }
       const matchTerm = totalMatches === 1 ? 'match' : 'matches';
 
@@ -433,6 +444,9 @@ class GrepToolInvocation extends BaseToolInvocation<
 
       // Build result
       let llmContent = header + grepOutput;
+      if (withheldMatchCount > 0) {
+        llmContent += `\n---\n[${withheldMatchCount} matching result(s) withheld by permission rules.]`;
+      }
 
       // Add truncation notice if needed
       if (truncatedByLineLimit || truncatedByCharLimit) {
@@ -447,6 +461,9 @@ class GrepToolInvocation extends BaseToolInvocation<
       // Build display message (show real count, not truncated)
       let displayMessage = `Found ${totalMatches} ${matchTerm}`;
       const displayTags: string[] = [];
+      if (withheldMatchCount > 0) {
+        displayTags.push(`${withheldMatchCount} permission-filtered`);
+      }
       if (truncatedByLineLimit || truncatedByCharLimit) {
         displayTags.push('truncated');
       }

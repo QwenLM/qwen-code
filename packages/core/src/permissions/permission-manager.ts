@@ -621,7 +621,7 @@ export class PermissionManager {
     return worst;
   }
 
-  private hasDenyOrAskRuleForTool(toolName: string): boolean {
+  hasDenyOrAskRuleForTool(toolName: string): boolean {
     return [
       ...this.sessionRules.ask,
       ...this.persistentRules.ask,

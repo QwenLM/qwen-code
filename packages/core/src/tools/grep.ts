@@ -172,16 +172,19 @@ class GrepToolInvocation extends BaseToolInvocation<
       // from being returned. Filter complete files before truncation so a
       // denied file cannot leak through the line or character limits.
       const permissionManager = this.config.getPermissionManager?.();
+      let withheldMatchCount = 0;
       if (permissionManager) {
         const deniedPaths = new Set<string>();
         const evaluatedPaths = new Map<string, boolean>();
         for (const match of rawMatches) {
+          signal.throwIfAborted();
           let denied = evaluatedPaths.get(match.absoluteFilePath);
           if (denied === undefined) {
             denied = await isPathDeniedByReadRule(
               permissionManager,
               match.absoluteFilePath,
               this.config.getTargetDir(),
+              ToolNames.GREP,
             );
             evaluatedPaths.set(match.absoluteFilePath, denied);
           }
@@ -190,9 +193,11 @@ class GrepToolInvocation extends BaseToolInvocation<
           }
         }
         if (deniedPaths.size > 0) {
+          const beforeFilterCount = rawMatches.length;
           rawMatches = rawMatches.filter(
             (match) => !deniedPaths.has(match.absoluteFilePath),
           );
+          withheldMatchCount = beforeFilterCount - rawMatches.length;
         }
       }
 
@@ -202,8 +207,14 @@ class GrepToolInvocation extends BaseToolInvocation<
 
       // Check if we have any matches
       if (rawMatches.length === 0) {
-        const noMatchMsg = `No matches found for pattern "${this.params.pattern}" ${searchLocationDescription}${filterDescription}.`;
-        return { llmContent: noMatchMsg, returnDisplay: `No matches found` };
+        const permissionNote = withheldMatchCount
+          ? ` Some matching results were withheld by permission rules.`
+          : '';
+        const noMatchMsg = `No matches found for pattern "${this.params.pattern}" ${searchLocationDescription}${filterDescription}.${permissionNote}`;
+        return {
+          llmContent: noMatchMsg,
+          returnDisplay: `No matches found${withheldMatchCount ? ' (permission-filtered)' : ''}`,
+        };
       }
 
       const charLimit = this.config.getTruncateToolOutputThreshold();
@@ -287,6 +298,9 @@ class GrepToolInvocation extends BaseToolInvocation<
 
       // Build result
       let llmContent = header + grepOutput;
+      if (withheldMatchCount > 0) {
+        llmContent += `\n---\n[${withheldMatchCount} matching result(s) withheld by permission rules.]`;
+      }
 
       // Add truncation notice if needed
       if (truncatedByLineLimit || truncatedByCharLimit) {
@@ -296,6 +310,9 @@ class GrepToolInvocation extends BaseToolInvocation<
 
       // Build display message
       let displayMessage = `Found ${totalMatches} ${matchTerm}`;
+      if (withheldMatchCount > 0) {
+        displayMessage += ` (${withheldMatchCount} permission-filtered)`;
+      }
       if (truncatedByLineLimit || truncatedByCharLimit) {
         displayMessage += ` (truncated)`;
       }

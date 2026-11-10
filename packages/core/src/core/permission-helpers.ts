@@ -115,17 +115,38 @@ export async function isPathDeniedByReadRule(
   pm: PermissionManager | null | undefined,
   filePath: string,
   targetDir: string,
+  toolName = 'read_file',
 ): Promise<boolean> {
   if (!pm) return false;
 
+  if (
+    typeof pm.hasDenyOrAskRuleForTool === 'function' &&
+    !pm.hasDenyOrAskRuleForTool(toolName)
+  ) {
+    return false;
+  }
+
   const context = buildPermissionCheckContext(
-    'read_file',
+    toolName,
     { file_path: filePath },
     targetDir,
   );
   if (!pm.hasRelevantRules(context)) return false;
   const decision = await pm.evaluate(context);
-  return decision === 'deny' || decision === 'ask';
+  if (decision === 'deny') return true;
+  if (decision !== 'ask') return false;
+
+  // A bare tool-level ask rule already gated the search invocation. Only hide
+  // a result for an ask decision that comes from a path-scoped rule.
+  const invocationContext = buildPermissionCheckContext(
+    toolName,
+    {},
+    targetDir,
+  );
+  if (pm.hasRelevantRules(invocationContext)) {
+    return (await pm.evaluate(invocationContext)) !== 'ask';
+  }
+  return true;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
