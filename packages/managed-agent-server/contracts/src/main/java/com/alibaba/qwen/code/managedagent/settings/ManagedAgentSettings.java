@@ -28,6 +28,7 @@ public interface ManagedAgentSettings {
     public List<? extends ModelOption> getModelCatalog();
     public default List<String> getModelConfigBaseUrls() { return List.of(); }
     public default boolean isMemoryEnabled() { return false; }
+    public default boolean isSideQueriesEnabled() { return false; }
     public interface ModelOption {
         public String getModelId();
         public String getLabel();

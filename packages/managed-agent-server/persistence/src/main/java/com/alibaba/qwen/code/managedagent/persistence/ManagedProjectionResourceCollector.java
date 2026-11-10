@@ -10,7 +10,9 @@ import org.springframework.transaction.support.TransactionTemplate;
 /** Reclaims released public projection bodies, including those of still-live Sessions. */
 final class ManagedProjectionResourceCollector {
     private static final int BATCH = 32;
-    private static final String KINDS = "X'6d616e616765642d6d6573736167652d7061727473'";
+    private static final String KINDS = "X'6d616e616765642d6d6573736167652d7061727473',"
+            + "X'6d616e616765642d736964652d71756572792d696e707574',"
+            + "X'6d616e616765642d736964652d71756572792d6368756e6b'";
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transactions;
 

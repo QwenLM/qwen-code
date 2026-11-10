@@ -35,7 +35,8 @@ class SessionRowLockOrderTest {
         }
         var types = new TreeSet<Class<?>>(java.util.Comparator.comparing(Class::getName));
         for (Class<?> facade : List.of(ManagedAgentStore.class, JdbcManagedSessionStore.class,
-                JdbcManagedActionStore.class, JdbcManagedUserMessageStore.class, WorkspaceRecoveryStore.class)) {
+                JdbcManagedActionStore.class, JdbcManagedUserMessageStore.class, ManagedSideQueryStore.class,
+                WorkspaceRecoveryStore.class)) {
             collect(facade, types);
         }
         var actual = new TreeSet<String>();
