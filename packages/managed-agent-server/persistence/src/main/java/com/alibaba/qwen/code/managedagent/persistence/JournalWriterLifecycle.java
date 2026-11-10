@@ -229,7 +229,7 @@ final class JournalWriterLifecycle {
                     JdbcRuntimeBindingRepository.harnessDrainKey(sessionId),
                     tenantId,
                     sessionId);
-            return new WriterGrant(1, JournalStoreRows.epochMillis(initialLeaseUntil), 0, 0, null, 0, false);
+            return new WriterGrant(1, JournalStoreRows.epochMillis(initialLeaseUntil), 0, 0, null, 0, false, supportedStorage(csiOriginal));
         }
         try {
             jdbc.update(
@@ -249,7 +249,7 @@ final class JournalWriterLifecycle {
                     createdAt.getTime(),
                     createdAt.getTime());
             return new WriterGrant(1, JournalStoreRows.epochMillis(initialLeaseUntil), 0, 0,
-                    null, 0, false);
+                    null, 0, false, supportedStorage(csiOriginal));
         } catch (DuplicateKeyException ignored) {
             // A prior acquire created the row; lock and inspect it below.
         }
@@ -289,7 +289,7 @@ final class JournalWriterLifecycle {
                     JdbcRuntimeBindingRepository.harnessDrainKey(sessionId),
                     tenantId,
                     sessionId);
-            return grant(head, leaseUntil, true);
+            return grant(head, leaseUntil, true, supportedStorage(csiOriginal));
         }
         long generation = JournalStoreRows.increment(head.writerGeneration(),
                 "writer generation");
@@ -328,7 +328,7 @@ final class JournalWriterLifecycle {
                 sessionId);
         return new WriterGrant(generation, JournalStoreRows.epochMillis(leaseUntil),
                 head.journalRevision(), head.committedSequence(),
-                head.lastCommitDigest(), head.activationEpoch(), false);
+                head.lastCommitDigest(), head.activationEpoch(), false, supportedStorage(csiOriginal));
     }
 
     WriterGrant renewWriter(String tenantId, String sessionId, String writerToken,
@@ -403,9 +403,9 @@ final class JournalWriterLifecycle {
                     activation.activationId(), activation.epoch(), activation.renewalSeq(), until);
             return new WriterGrant(head.writerGeneration(), JournalStoreRows.epochMillis(leaseUntil), head.journalRevision(),
                     head.committedSequence(), head.lastCommitDigest(), head.activationEpoch(), false,
-                    com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedStorageVersions.SUPPORTED, true, lease);
+                    supportedStorage(csiOriginal), true, lease);
         }
-        return grant(head, leaseUntil, false);
+        return grant(head, leaseUntil, false, supportedStorage(csiOriginal));
     }
 
     SealReceipt sealWriter(String tenantId, String sessionId, String writerToken,
@@ -640,10 +640,19 @@ final class JournalWriterLifecycle {
     }
 
     WriterGrant grant(JournalStoreRows.HeadRow head, Timestamp leaseUntil,
-            boolean replayed) {
+            boolean replayed, int supportedStorageVersion) {
         return new WriterGrant(head.writerGeneration(), JournalStoreRows.epochMillis(leaseUntil),
                 head.journalRevision(), head.committedSequence(),
-                head.lastCommitDigest(), head.activationEpoch(), replayed);
+                head.lastCommitDigest(), head.activationEpoch(), replayed, supportedStorageVersion);
+    }
+
+    private static int supportedStorage(com.alibaba.qwen.code.runtimebroker.persistence.JdbcCsiFilesRetirementGuard.Original original) {
+        if (original == null) {
+            return com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedStorageVersions.SUPPORTED;
+        }
+        var scope = original.request().getScope();
+        return com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile.hasActivityDiagnostics(scope) ? 4
+                : com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile.hasDiagnostics(scope) ? 3 : 1;
     }
 
     static Timestamp plusMillis(Timestamp timestamp, long millis) {

@@ -868,7 +868,7 @@ jobs:
   # The required `Test (ubuntu-latest, Node 22.x)` check is `test_ubuntu`,
   # which passes only when the build and every shard below pass.
   test:
-    name: 'Linux unit tests (shard ${{ matrix.shard }}/8)'
+    name: 'Linux unit tests (shard ${{ matrix.shard }}/2)'
     needs: ['classify_pr', 'test_build']
     # Stay running on release-sync PRs so the required Test contexts still
     # report; the per-step skip_ci guards below make them no-op (pass) there.
@@ -886,14 +886,18 @@ jobs:
     # lint/static in `lint_and_static`, unit tests here.
     if: "${{ !cancelled() && github.event_name != 'schedule' }}"
     runs-on: '${{ fromJSON(needs.classify_pr.outputs.pr_test_runner || ''["ubuntu-latest"]'') }}'
-    # Every Vitest run takes one eighth of its suite's files (`--shard`): the
+    # Every Vitest run takes one half of its suite's files (`--shard`): the
     # unsharded lane ran 45-59 minutes, almost all of it the CLI and core
-    # suites one after the other. A shard keeps the old ceiling's headroom
-    # for a contended ECS host; the test step's own cap bounds a genuine hang.
+    # suites one after the other. Two shards cut the per-job infra failure
+    # points (install, artifact download, coverage upload) to a quarter of the
+    # earlier eight-way split while the slowest leg stays bounded by single
+    # test files (Session.test.ts ~506 s, App.test.tsx ~377 s) that no shard
+    # count can split. A shard keeps the old ceiling's headroom for a
+    # contended ECS host; the test step's own cap bounds a genuine hang.
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5, 6, 7, 8]
+        shard: [1, 2]
     timeout-minutes: 60
     outputs:
       ci_profile: '${{ steps.ci_profile.outputs.ci_profile }}'
@@ -1194,14 +1198,14 @@ jobs:
           fi
           corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
 
-      # Eight shards pull this same artifact at once, so the cap has to clear
-      # the slow tail rather than the median: on main four shards finished
-      # inside a minute, three needed between 2m40s and just under five
-      # minutes, and one exceeded the old five-minute cap on two consecutive
-      # runs, which skipped the unpack and failed the required check. Fifteen
-      # minutes leaves that measured tail about three times the headroom; if
-      # main still expires, the fix is fewer concurrent fetches, not a bigger
-      # cap.
+      # Two shards now pull this same artifact at once, down from eight, so
+      # the cap has to clear the slow tail rather than the median. Under that
+      # earlier eight-way split four shards finished inside a minute, three
+      # needed between 2m40s and just under five minutes, and one exceeded the
+      # old five-minute cap on two consecutive runs, which skipped the unpack
+      # and failed the required check. Fifteen minutes leaves that measured
+      # tail about three times the headroom; cutting the concurrent fetches
+      # to two only shortens the tail further.
       - name: 'Download the built tree'
         id: 'download_tree'
         if: "${{ needs.test_build.result == 'success' && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
@@ -1329,11 +1333,14 @@ jobs:
         # processes, which reads as a timeout rather than a failure.
         #
         # The cap has to clear the slowest honest shard, not the healthy one:
-        # the same 1/8 slice measures ~7 minutes on an idle host and ~36 on a
-        # contended one, and a failing run adds its retries on top. 45 leaves
-        # room for that while still firing before this job's 60-minute cap,
-        # which this step enters around minute 10 — a step timeout keeps the
-        # diagnostic steps below alive, a job timeout does not.
+        # under the earlier eight-way split a 1/8 slice measured ~7 minutes on
+        # an idle host and ~36 on a contended one (#10490). A 1/2 slice does
+        # more file work but the slowest leg is still bounded by single test
+        # files, and cutting the shard count to two cuts the burst concurrency
+        # that produced the contended tail. 45 leaves room for retries while
+        # still firing before this job's 60-minute cap, which this step enters
+        # around minute 10 — a step timeout keeps the diagnostic steps below
+        # alive, a job timeout does not.
         timeout-minutes: 45
         env:
           NO_COLOR: true
@@ -1381,7 +1388,7 @@ jobs:
           # This shard's slice of every Vitest run. A small suite has fewer
           # files than shards, hence --passWithNoTests beside it. The
           # standalone regression is no Vitest run; the first shard runs it.
-          UNIT_TEST_SHARD: '${{ matrix.shard }}/8'
+          UNIT_TEST_SHARD: '${{ matrix.shard }}/2'
           QWEN_CI_SKIP_STANDALONE_RUNTIMES: "${{ matrix.shard != 1 && '1' || '' }}"
         run: |-
           node -e "const fs = require('node:fs'); for (const key of ['HOME', 'USERPROFILE']) { const dir = process.env[key]; if (dir) fs.mkdirSync(dir, { recursive: true }); }"
@@ -2177,7 +2184,7 @@ jobs:
   # The `web-shell E2E Smoke (ubuntu-latest, Node 22.x)` check is
   # `web_shell_e2e_smoke_result`, which passes only when every shard passes.
   web_shell_e2e_smoke:
-    name: 'web-shell E2E Smoke (shard ${{ matrix.shard }}/4)'
+    name: 'web-shell E2E Smoke (shard ${{ matrix.shard }}/2)'
     # Gate on the classifier's own profile output instead of the copy `test`
     # re-derives: it is the same value (the classifier already forces an
     # unknown one to `full`), and dropping the `test` edge lets this
@@ -2213,14 +2220,17 @@ jobs:
     # host. The smoke step pins the hosted worker count.
     runs-on: '${{ contains(fromJSON(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]''), ''self-hosted'') && fromJSON(''["self-hosted", "linux", "arm64"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     # The unsharded smoke ran 44-46 minutes, about 33 of them in the 208
-    # smoke tests at two workers; each shard runs a quarter of them.
+    # smoke tests at two workers; each shard runs half of them.
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        shard: [1, 2]
     # Slow hosted mirrors kept downloading past 23 min; reserve time for
-    # the smoke tests and artifact cleanup after installation.
-    timeout-minutes: 60
+    # the smoke tests and artifact cleanup after installation. Two shards run
+    # half the suite each (~23-24 min observed per shard) rather than a
+    # quarter, so the cap rises from 60 to 75 to keep the headroom the
+    # four-way split had for a slow install or download tail.
+    timeout-minutes: 75
     permissions:
       contents: 'read'
     steps:
@@ -2511,7 +2521,7 @@ jobs:
         # Two workers is the hosted default (half of 4 vCPUs). Unpinned, a pool
         # job would start browsers for half the host's cores while the host
         # runs its other jobs.
-        run: 'npm run test:e2e:smoke --workspace=packages/web-shell -- --shard=${{ matrix.shard }}/4 --workers=2'
+        run: 'npm run test:e2e:smoke --workspace=packages/web-shell -- --shard=${{ matrix.shard }}/2 --workers=2'
 
       - name: 'Upload web-shell Playwright artifacts'
         if: '${{ always() }}'
@@ -2950,13 +2960,13 @@ jobs:
   # so adding it is a no-op for existing PR/push runs. Reuses the exact
   # `test:integration:cli:sandbox:none` script from `release.yml`.
   integration_no_ak:
-    name: 'Integration Tests (no-AK, shard ${{ matrix.shard }}/3)'
+    name: 'Integration Tests (no-AK, shard ${{ matrix.shard }}/2)'
     # Since #16133 test_build uploads the tree this gate tests. Installing
     # with `prepare` here rebuilt and rebundled it from scratch — about ten
     # minutes, the longest single step on the required path — and the ~50
     # files then ran one at a time (one fork on the pool, below), seventeen
     # more minutes. The shards unpack the shared tree and split the files
-    # three ways; integration_no_ak_result keeps the required check name.
+    # two ways; integration_no_ak_result keeps the required check name.
     needs:
       - 'classify_pr'
       - 'test_build'
@@ -2980,7 +2990,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3]
+        shard: [1, 2]
     # Dependency installation alone can exceed 30 minutes on a contended shared
     # ECS host, before the separately bounded 20-minute integration step starts.
     # Same self-hosted scoping as lint_and_static (60/30 like its 90/45):
@@ -3264,7 +3274,7 @@ jobs:
           if [ "${{ matrix.shard }}" = 1 ]; then
             npm run typecheck:integration
           fi
-          npm run test:integration:no-ak:sandbox:none -- --shard=${{ matrix.shard }}/3
+          npm run test:integration:no-ak:sandbox:none -- --shard=${{ matrix.shard }}/2
 
       # Reclaim the run-unique HOME (constructed path, never $HOME) so it
       # does not accumulate in RUNNER_TEMP on this persistent pool.

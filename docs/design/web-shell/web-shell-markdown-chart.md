@@ -89,7 +89,7 @@ closed chart fence from the active incomplete tail fence.
 
 ## Decisions
 
-- Use the published `@datafe-open/markdown-chart*` `0.1.12` packages, which
+- Use the published `@datafe-open/markdown-chart*` `0.4.1` packages, which
   include localized labels, blockquote-aware streaming fence completion, and
   restored tooltip safety invariants.
 - Document only the canonical `markdown-chart` skill for new integrations.
