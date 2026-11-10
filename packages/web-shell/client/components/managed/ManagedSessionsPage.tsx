@@ -100,6 +100,7 @@ import type {
   ManagedAgentWorkspace,
   ManagedInputBlock,
 } from './managed-agent-provider';
+import { ManagedLocalFilesControl } from '../ManagedLocalFilesControl';
 import type { PromptImage, PromptFile } from '../../adapters/promptTypes';
 import {
   encodeManagedInput,
@@ -1410,6 +1411,14 @@ function ManagedSessionsContent({
         {diagnosticsText('title')}
       </Button>
     ) : null;
+  const localFilesButton =
+    provider.clientFiles && currentSummary ? (
+      <ManagedLocalFilesControl
+        provider={provider}
+        sessionId={currentSummary.sessionId}
+        triggerClassName="inline-flex h-8 w-8 items-center justify-center rounded-md border border-input bg-background text-muted-foreground hover:bg-accent hover:text-accent-foreground"
+      />
+    ) : null;
   function prepareHandoff() {
     if (
       !currentSummary ||
@@ -1957,6 +1966,7 @@ function ManagedSessionsContent({
                     {sessionActions(summary)}
                     {diagnosticsButton}
                     {sideQueryButtons}
+                    {localFilesButton}
                   </span>
                 }
                 workspaceName={summary.workspace?.workspaceId}
