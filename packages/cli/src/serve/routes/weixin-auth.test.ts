@@ -591,6 +591,34 @@ describe('weixin auth routes', () => {
     expect(statuses).toEqual([201, 201, 201, 201]);
   });
 
+  it('publishes the replacement QR in the served view, not just upstream', async () => {
+    // The refresh branch had only upstream counters read against it, so a view
+    // that kept the first code forever would stay green.
+    fake.statusResponses = [{ status: 'expired' }];
+    fake.qrResponses = [
+      { qrcode: 'qr-1', qrcode_img_content: 'https://scan.example/qr-1' },
+      { qrcode: 'qr-2', qrcode_img_content: 'https://scan.example/qr-2' },
+    ];
+
+    const started = await auth(request(app).post('/auth/weixin/flows')).send(
+      {},
+    );
+    const id = started.body['id'] as string;
+    expect(started.body['qrcodeUrl']).toBe('https://scan.example/qr-1');
+
+    const deadline = Date.now() + 8000;
+    let view: Record<string, unknown> = {};
+    while (Date.now() < deadline) {
+      const response = await auth(request(app).get(`/auth/weixin/flows/${id}`));
+      view = response.body as Record<string, unknown>;
+      if (view['qrcodeUrl'] === 'https://scan.example/qr-2') break;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+
+    expect(view['qrcodeUrl']).toBe('https://scan.example/qr-2');
+    expect(view['qrText']).toEqual(expect.any(String));
+  });
+
   it('ends expired after the refresh budget', async () => {
     fake.statusResponses = [{ status: 'expired' }];
     fake.qrResponses = [

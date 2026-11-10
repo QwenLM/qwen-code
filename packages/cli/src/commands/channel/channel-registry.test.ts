@@ -885,6 +885,14 @@ describe('channel registry', () => {
       default: 'disabled',
       options: [{ value: 'disabled', label: 'Disabled' }],
     });
+    // No API-root knob: `connect()` replaces the configured root with the one
+    // stored at login, and both login paths always store one, so the field
+    // would promise an override that can never reach a request.
+    expect(
+      builtinCatalog
+        .find((entry) => entry.type === 'weixin')
+        ?.fields.some((field) => field.key === 'baseUrl'),
+    ).toBe(false);
     // The registry skips the shared `instructions` injection for any channel
     // that declares its own, so pin the render invariants the editor depends on
     // for every manageable built-in: exactly one field, plus the multiline hint
