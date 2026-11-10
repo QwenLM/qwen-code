@@ -4,15 +4,20 @@
 
 ## Status
 
-Layers 1-4 implemented. The `channels/base` capability contract, the QQ management
+Layers 1-5 implemented. The `channels/base` capability contract, the QQ management
 descriptor and `qrLogin` wiring, the daemon's workspace-scoped login-session
 resource with its three routes, and the SDK types plus client methods on both
 client classes are in place. The `qrcode` dependency is added for daemon-side
 rendering.
 
-**Not implemented:** Layer 5 (Web Shell allowlist, i18n, QR panel, and the shared
-`requireMention` control). QQ is therefore still invisible in Web Shell and no
-browser scan works yet, even though the daemon can now serve one.
+The Web Shell allowlist, the bind-by-QR panel and its English/Chinese labels are in
+place, so QQ is now configurable and bindable from the editor. The panel uses the
+shipped status union; the `scanned` state an earlier draft named is not
+representable and was dropped.
+
+**Not implemented:** the shared `requireMention` control. **Not verified:** the
+panel has no committed test, has not been driven in a real browser, and no human
+has scanned a code.
 
 Verification so far is unit and type level only: 13 session-lifecycle tests, the
 channel registry and QQ adapter suites, SDK typecheck at zero errors, and build /

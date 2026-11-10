@@ -4,13 +4,15 @@
 
 ## 状态
 
-第 1–4 层已实现。`channels/base` 的能力契约、QQ 管理描述符与 `qrLogin` 接线、
+第 1–5 层已实现。`channels/base` 的能力契约、QQ 管理描述符与 `qrLogin` 接线、
 daemon 侧按 workspace 隔离的登录会话资源及其三条路由,以及 SDK 类型与两个客户端类上的
 客户端方法均已就位。已添加 `qrcode` 依赖用于 daemon 侧渲染。
 
-**尚未实现:** 第 5 层(Web Shell 白名单、i18n、扫码面板,以及共享 `requireMention`
-控件)。因此尽管 daemon 现在已能提供扫码会话,QQ 在 Web Shell 中仍不可见,浏览器扫码
-也尚不可用。
+Web Shell 白名单、扫码绑定面板及其中英文案均已就位,QQ 现在可在编辑器中配置并绑定。
+面板使用契约实际提供的状态集合;早期草稿提到的 `scanned` 状态无法表示,已删除。
+
+**尚未实现:** 共享 `requireMention` 控件。**尚未验证:** 面板无提交测试、未在真实
+浏览器中驱动过、也无人扫码。
 
 目前的验证仅到单元与类型层:13 条会话生命周期测试、channel registry 与 QQ 适配器套件、
 SDK 类型检查零错误,以及改动文件的构建 / ESLint / Prettier 全绿。**未做路由级测试、
