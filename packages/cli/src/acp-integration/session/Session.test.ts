@@ -50803,6 +50803,75 @@ describe('Session', () => {
       },
     );
 
+    it('asks instead of AUTO_EDIT auto-approving when a permissions.ask rule matches (#16795)', async () => {
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
+      mockConfig.getApprovalMode = vi
+        .fn()
+        .mockReturnValue(ApprovalMode.AUTO_EDIT);
+      mockConfig.getPermissionManager = vi.fn().mockReturnValue({
+        isToolEnabled: async () => true,
+        hasRelevantRules: () => true,
+        evaluate: async () => 'ask',
+        hasMatchingAskRule: () => true,
+        findMatchingDenyRule: () => undefined,
+      } as unknown as ReturnType<Config['getPermissionManager']>);
+      const execute = vi.fn().mockResolvedValue({
+        llmContent: 'guarded',
+        returnDisplay: 'guarded',
+      });
+      mockToolRegistry.getTool.mockReturnValue(
+        mockConfirmingTool('read_file', execute, 'info'),
+      );
+      vi.mocked(mockClient.requestPermission).mockResolvedValue({
+        outcome: { outcome: 'cancelled' },
+      });
+      vi.spyOn(core, 'logToolCall').mockImplementation(() => {});
+
+      const result = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(new AbortController().signal, 'pm-ask-auto-edit', [
+        { id: 'pm-ask-auto-edit-call', name: 'read_file', args: {} },
+      ]);
+
+      // Without the `!pmForcedAsk` term this branch silently auto-approves
+      // the `info` call even though a `permissions.ask` rule — honored by
+      // AUTO mode and every other mode except YOLO — demands confirmation.
+      expect(mockClient.requestPermission).toHaveBeenCalledOnce();
+      expect(execute).not.toHaveBeenCalled();
+      expect(result.parts[0]?.functionResponse?.response).not.toEqual({
+        output: 'guarded',
+      });
+    });
+
+    it('still AUTO_EDIT auto-approves an info call when no ask rule matches', async () => {
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
+      mockConfig.getApprovalMode = vi
+        .fn()
+        .mockReturnValue(ApprovalMode.AUTO_EDIT);
+      const execute = vi.fn().mockResolvedValue({
+        llmContent: 'read ok',
+        returnDisplay: 'read ok',
+      });
+      mockToolRegistry.getTool.mockReturnValue(
+        mockConfirmingTool('read_file', execute, 'info'),
+      );
+      vi.spyOn(core, 'logToolCall').mockImplementation(() => {});
+
+      const result = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(new AbortController().signal, 'auto-edit-info', [
+        { id: 'auto-edit-info-call', name: 'read_file', args: {} },
+      ]);
+
+      // The mode keeps its purpose: routine info dialogs in AUTO_EDIT stay
+      // auto-approved; only rule-forced asks (previous test) prompt.
+      expect(mockClient.requestPermission).not.toHaveBeenCalled();
+      expect(execute).toHaveBeenCalledOnce();
+      expect(result.parts[0]?.functionResponse?.response).toEqual({
+        output: 'read ok',
+      });
+    });
+
     it('separates approval time from actual execution lifecycle timing', async () => {
       mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
       let elapsed = 0;

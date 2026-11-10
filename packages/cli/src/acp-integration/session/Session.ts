@@ -18509,9 +18509,12 @@ export class Session implements SessionContext {
             }
 
             // AUTO_EDIT mode: auto-approve edit and info tools
-            // (same as coreToolScheduler L5 — NOT delegated to the extension)
+            // (same as coreToolScheduler L5 — NOT delegated to the extension).
+            // A `permissions.ask` rule still forces the prompt: it outranks
+            // the mode default in every other mode except YOLO.
             if (
               !requiresUserInteraction &&
+              !pmForcedAsk &&
               approvalMode === ApprovalMode.AUTO_EDIT &&
               (confirmationDetails.type === 'edit' ||
                 confirmationDetails.type === 'info')
