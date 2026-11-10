@@ -932,11 +932,14 @@ export function WorkspaceBindingCreator({
     setBusy(true);
     setError(undefined);
     setPathError(undefined);
+    // Both the creation request and a read-back-only retry (a pending attempt
+    // that already carries a sessionId) are "processing" for this screen: the
+    // latch has to wrap the whole block, not just the createSession branch.
     let creating = false;
     try {
+      creating = true;
+      setCreatingSession(true);
       if (!attempt.sessionId) {
-        creating = true;
-        setCreatingSession(true);
         const request = {
           agentId: attempt.agentId,
           ...(attempt.modelId === undefined
