@@ -1231,6 +1231,9 @@ async function resolveGhPrCreateDirectory(
     // current shell. Pre-scanning the whole tree would let a definition AFTER
     // the create (or inside a subshell) wrongly shadow an earlier cd.
     const shadowed = new Set<string>();
+    // Functions marked readonly (`readonly -f`, `declare -r -f`) cannot be
+    // removed by `unset -f`, so their shadow must survive an unset attempt.
+    const readonlyFunctions = new Set<string>();
 
     const visit = (
       node: ShellSyntaxNode,
@@ -1329,7 +1332,10 @@ async function resolveGhPrCreateDirectory(
           let current = dir;
           for (const child of node.namedChildren) {
             if (child.type.endsWith('_redirect')) continue;
-            current = visit(child, current, guaranteed);
+            // The redirection is set up before the command runs and can fail
+            // (e.g. a missing parent directory), so the command — and any
+            // `unset -f` it contains — is not guaranteed to execute.
+            current = visit(child, current, false);
           }
           return current;
         }
@@ -1341,11 +1347,34 @@ async function resolveGhPrCreateDirectory(
           if (subtreeMayChangeDirectory(node)) opaque = true;
           return dir;
         }
+        case 'declaration_command': {
+          // `readonly -f cd` / `declare -r -f cd` mark a function readonly; a
+          // later `unset -f` cannot remove it, so its shadow must survive.
+          // Marking conservatively (even if the declaration is skipped) only
+          // ever keeps a shadow, which is the safe direction.
+          const keyword = node.firstChild?.text;
+          const flags = node.namedChildren
+            .filter((c) => c.type === 'word')
+            .map((c) => c.text);
+          const marksReadonly =
+            (keyword === 'readonly' && flags.includes('-f')) ||
+            ((keyword === 'declare' || keyword === 'typeset') &&
+              flags.includes('-r') &&
+              flags.includes('-f'));
+          if (marksReadonly) {
+            for (const c of node.namedChildren) {
+              if (c.type === 'variable_name') readonlyFunctions.add(c.text);
+            }
+          }
+          return dir;
+        }
         case 'unset_command': {
           // `unset -f cd` restores the builtin, lifting the shadow — but only
-          // when the unset is GUARANTEED to execute. Behind `&&` / `||` / `&`
-          // (e.g. `false && unset -f cd`) it may be skipped, so the shadow must
-          // be kept; lifting it would treat a later no-op function call as the
+          // when the unset is GUARANTEED to execute AND provably succeeds.
+          // Behind `&&` / `||` / `&` (e.g. `false && unset -f cd`) it may be
+          // skipped; under a failed redirection it never runs; and a readonly
+          // function cannot be removed. In all of those the shadow must be
+          // kept; lifting it would treat a later no-op function call as the
           // real builtin and query a directory the create never ran in. Only
           // literal function names can be removed; an expanded name stays
           // conservative.
@@ -1356,7 +1385,11 @@ async function resolveGhPrCreateDirectory(
           if (hasFunctionFlag) {
             const targets = node.namedChildren.filter((c) => c.type !== 'word');
             if (targets.every((c) => c.type === 'variable_name')) {
-              for (const t of targets) shadowed.delete(t.text);
+              // If any target is readonly the removal is not provably
+              // successful, so keep the shadows rather than clearing them.
+              if (!targets.some((t) => readonlyFunctions.has(t.text))) {
+                for (const t of targets) shadowed.delete(t.text);
+              }
             } else {
               opaque = true;
             }

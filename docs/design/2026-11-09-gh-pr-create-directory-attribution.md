@@ -649,6 +649,34 @@ unconditional-unset control stays green; restored from a byte-level backup
 (final `shell.ts` SHA-256
 `72bbeac2f0cf7f503171225a42daf224df3b9840a4ec8ef8cb9dd1ca3199a181`).
 
+### Review round 9 (2026-11-10, re-review of `9356d4e281`)
+
+The re-review confirmed the round-8 conditional-unset fix (13 retained witnesses
+pass) and reported one remaining P2 in the same unset-success proof:
+`guaranteed` establishes execution ORDER, not that the unset SUCCEEDS. Two paths
+still cleared the shadow while the no-op function survived — a failed output
+redirection (`unset -f cd > <missing-parent>/out`, the redirect fails before
+unset runs) and a readonly function (`readonly -f cd; unset -f cd`, the builtin
+rejects removal).
+
+**Fix (require provable success, not just execution order).**
+
+- A `redirected_statement` now visits its body with `guaranteed = false`: the
+  redirection is set up before the command and can fail, so an `unset -f` under
+  it is not guaranteed to run.
+- A new `declaration_command` arm tracks functions marked readonly
+  (`readonly -f`, `declare -r -f` / `typeset -r -f`) in a `readonlyFunctions`
+  set; the `unset_command` arm keeps the shadow when any target is readonly,
+  since such a removal cannot succeed. Marking readonly is conservative (it only
+  ever keeps a shadow).
+
+Round-9 verification: **501 passed** (487 unit + 14 real-filesystem), core
+typecheck exit 0, ESLint and Prettier clean. Mutation witnesses AJ (drop the
+readonly check) and AK (forward `guaranteed` through a redirection) each red
+their named cases with the other controls green; restored from a byte-level
+backup (final `shell.ts` SHA-256
+`30e1e6dc8b945c15dd4e5642d0059749c6f1700cfdcf7a6c989e397816fd4ac9`).
+
 ## Acceptance criteria
 
 - Both incident command shapes bind the PR their worktree branch resolves to.

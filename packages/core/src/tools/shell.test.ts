@@ -1417,6 +1417,24 @@ describe('ShellTool', () => {
         },
       );
 
+      it.each([
+        'cd() { :; }; readonly -f cd; unset -f cd; cd /test/dir/nested && gh pr create --fill',
+        'cd() { :; }; declare -r -f cd; unset -f cd; cd /test/dir/nested && gh pr create --fill',
+        'cd() { :; }; unset -f cd > /missing-parent/output; cd /test/dir/nested && gh pr create --fill',
+      ])(
+        'keeps the function shadow when the unset cannot provably succeed: %s',
+        async (command) => {
+          // A readonly function cannot be unset, and a failed output
+          // redirection means the unset never runs; in both the no-op function
+          // survives, so the later cd does NOT move the shell. Keep the shadow
+          // and fall back conservatively instead of clearing it from the
+          // execution-order flag alone.
+          mockCreatedPr(77);
+          const result = await runShell(command, PR_77);
+          expectOpaqueFallback(result);
+        },
+      );
+
       it('binds from launch without a notice when only a subshell cds', async () => {
         // R3-8: a subshell's cd cannot leak to this shell, so the create
         // provably runs at launch and binds there — no false "fell back" notice.

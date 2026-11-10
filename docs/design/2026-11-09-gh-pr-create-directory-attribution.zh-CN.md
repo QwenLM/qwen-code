@@ -272,6 +272,17 @@ bot 还在其收敛姿态下记录了一份 deferred 清单（本轮不要求修
 
 第八轮验证：**498 passed**（484 单测 + 14 真实文件系统），core typecheck exit 0，ESLint 与 Prettier 干净。变异见证 AI（去 `guaranteed` 闸门）杀掉三条被跳过/后台化 unset 用例，无条件 unset 对照绿；从字节级备份还原（最终 `shell.ts` SHA-256 `72bbeac2f0cf7f503171225a42daf224df3b9840a4ec8ef8cb9dd1ca3199a181`）。
 
+### 第九轮评审（2026-11-10，复评 `9356d4e281`）
+
+复评确认第八轮条件 unset 修复（13 条保留见证通过），并报出同一 unset 成功证明里残留的一条 P2：`guaranteed` 只确立执行**顺序**，不证明 unset **成功**。两条路径仍在空操作函数存活时清除了阴影——失败的输出重定向（`unset -f cd > <缺失父目录>/out`，重定向先于 unset 失败）与 readonly 函数（`readonly -f cd; unset -f cd`，内建拒绝移除）。
+
+**修复（要求可证成功，而非仅执行顺序）。**
+
+- `redirected_statement` 现在以 `guaranteed = false` 访问其主体：重定向先于命令建立、可能失败，故其下的 `unset -f` 不保证执行。
+- 新增 `declaration_command` 分支，把被标记 readonly 的函数（`readonly -f`、`declare -r -f` / `typeset -r -f`）记入 `readonlyFunctions` 集合；`unset_command` 分支在任一目标 readonly 时保留阴影，因为这种移除不可能成功。标记 readonly 是保守的（只会保留阴影）。
+
+第九轮验证：**501 passed**（487 单测 + 14 真实文件系统），core typecheck exit 0，ESLint 与 Prettier 干净。变异见证 AJ（去 readonly 检查）、AK（重定向透传 `guaranteed`）各自杀掉点名用例、其余对照绿；从字节级备份还原（最终 `shell.ts` SHA-256 `30e1e6dc8b945c15dd4e5642d0059749c6f1700cfdcf7a6c989e397816fd4ac9`）。
+
 ## 验收标准
 
 - 两条事故命令形状都绑定到其 worktree 分支所解析出的 PR。
