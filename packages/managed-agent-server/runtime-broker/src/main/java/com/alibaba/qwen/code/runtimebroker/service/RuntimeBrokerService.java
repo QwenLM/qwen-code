@@ -2071,13 +2071,12 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
             boolean drain, RuntimeLifecycleAuthority authority) {
         return bindingRegistry.persistedSession(harnessSessionId, runtimeSessionId)
                 .thenCompose(record -> {
-                    RuntimeBindingRecord owner = bindingRepository.findById(record.getBindingId());
-                    requireLifecycleRelease(owner == null ? null : owner.getRequest(), record.getSession(), authority);
+                    RuntimeBindingRecord binding = bindingRepository.findById(record.getBindingId());
+                    requireLifecycleRelease(binding == null ? null : binding.getRequest(), record.getSession(), authority);
                     if (record.getState()
                             == RuntimeSessionRecord.State.RELEASED) {
                         return CompletableFuture.completedFuture(true);
                     }
-                    RuntimeBindingRecord binding = owner;
                     if ((record.getState() == RuntimeSessionRecord.State.ACQUIRING
                             || record.getState() == RuntimeSessionRecord.State.RELEASING)
                             && binding != null && binding.getGeneration() == record.getRuntimeGeneration()
