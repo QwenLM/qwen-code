@@ -413,9 +413,9 @@ describe('Storage – runtime path methods use getRuntimeBaseDir', () => {
 
     const storage = new Storage(longRoot);
     const projectId = path.basename(storage.getProjectDir());
-    expect(Buffer.byteLength(projectId, 'utf8')).toBeLessThanOrEqual(
-      PROJECT_DIR_NAME_MAX,
-    );
+    // Pinned to the limit exactly: a lowered readable budget still fits under
+    // NAME_MAX, so only an exact length asserts the budget itself.
+    expect(Buffer.byteLength(projectId, 'utf8')).toBe(PROJECT_DIR_NAME_MAX);
     expect(projectId).toContain(getProjectHash(longRoot).slice(0, 16));
     expect(projectId.startsWith(sanitizeCwd(longRoot).slice(0, 64))).toBe(true);
   });

@@ -424,16 +424,9 @@ export function boundProjectIdentifier(projectRoot: string): string {
     return projectId;
   }
   const hash = getProjectHash(projectRoot);
-  return `${truncateToBudget(projectId, PROJECT_DIR_READABLE_BUDGET)}-${hash.slice(0, 16)}`;
-}
-
-/** Truncate on a character boundary so the result never splits a code point. */
-function truncateToBudget(id: string, budget: number): string {
-  let end = id.length;
-  while (end > 0 && Buffer.byteLength(id.slice(0, end), 'utf8') > budget) {
-    end--;
-  }
-  return id.slice(0, end);
+  // `sanitizeCwd` emits ASCII only, so one byte per char: slicing by bytes and
+  // by code units agree here.
+  return `${projectId.slice(0, PROJECT_DIR_READABLE_BUDGET)}-${hash.slice(0, 16)}`;
 }
 
 /**

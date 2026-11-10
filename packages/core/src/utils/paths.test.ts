@@ -988,9 +988,9 @@ describe('boundProjectIdentifier', () => {
     );
 
     const bounded = boundProjectIdentifier(longRoot);
-    expect(Buffer.byteLength(bounded, 'utf8')).toBeLessThanOrEqual(
-      PROJECT_DIR_NAME_MAX,
-    );
+    // Exact length: the 17-byte `-<hash>` suffix leaves a 238-byte readable
+    // budget, and a lower budget would still satisfy a `<=` ceiling.
+    expect(Buffer.byteLength(bounded, 'utf8')).toBe(PROJECT_DIR_NAME_MAX);
     expect(bounded).toContain(getProjectHash(longRoot).slice(0, 16));
     expect(bounded.startsWith(sanitizeCwd(longRoot).slice(0, 64))).toBe(true);
   });
