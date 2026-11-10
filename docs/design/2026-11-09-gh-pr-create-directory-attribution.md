@@ -817,6 +817,52 @@ dormant case, always-skip reds the called case); each named case reds while its
 sibling controls stay green. Restored from a byte-level backup (final `shell.ts`
 SHA-256 `e22ac5278bf33d8a1dc78dff6c7ebadee0920589d5da81921281fa2d5365b39e`).
 
+### Review round 14 (2026-11-10, re-review of exact head `228dd5565d7`)
+
+The re-review confirmed all four round-13 concrete cases fixed, and raised two
+P2 boundaries adjacent to those fixes. Both are fixed in this PR:
+
+**R14-1 — lastpipe enablement is tri-state, not boolean.** Round-13's
+`guaranteed` gate over-corrected: it modeled a conditional `shopt -s lastpipe`
+as proven OFF. But `true && shopt -s lastpipe` actually enables lastpipe, so the
+final element's `readonly -f cd` runs in the parent; discarding it as child-only
+cleared the shadow and silently queried the worktree. A new `lastpipeUncertain`
+flag records an enablement that may run but is not guaranteed. While uncertain,
+a pipeline's final element is visited in current-shell context WITHOUT
+guaranteed execution — its possible parent effects (readonly / shadow) are
+preserved, but it cannot lift a shadow — and a directory-moving pipeline fails
+closed. The control-flow scan's nested-pipeline arm mirrors this. Proven-on and
+proven-off behavior is unchanged.
+
+**R14-2 — invoked names come from executable call sites only.** Round-13's
+invoked-name prepass scanned commands inside EVERY function body, so a call
+recorded in a dormant body activated another function (`unused() { helper; }`
+made `helper` count as invoked). Both consumers — the subshell create scan and
+the control-flow readonly scan — lost a worktree binding. A shared
+`invokedFunctionNames` helper now records each call under its innermost
+enclosing function and computes the transitive closure seeded ONLY by calls
+outside any function body; a call inside a dormant body is not an executable
+call site, so uncalled functions cannot activate each other's effects. A called
+wrapper still transitively invokes its callee.
+
+Round-14 verification: **524 passed** (510 unit + 14 real-filesystem), core
+typecheck exit 0, ESLint and Prettier clean. Mutation witnesses re-run on the
+final head, two arms per finding: R14-1 (disable the uncertain source; disable
+the pipeline-arm uncertain reader) each reds the uncertain case while the
+skipped / proven-on controls stay green; R14-2 (record all calls as top-level)
+reds both dormant-mutual-reference cases at both consumers while the
+transitive-wrapper and direct-call controls stay green, and (drop the closure
+expansion) reds the transitive-wrapper controls while the direct-call controls
+stay green. Restored from a byte-level backup (final `shell.ts` SHA-256
+`aaf58e6031f89cafab53f1c37e082d23576b014b86bcf67a6faaeffb7f81db02`).
+
+CI note (attributed, not a PR regression): the Web Shell smoke shard 1/2 red at
+`web-shell.files.spec.ts:823` is a runner-level mock-daemon flake — 409
+`ECONNREFUSED 127.0.0.1:4170` lines on a busy host (35m), the byte-read budget
+timeout, shard 2/2 green on a different runner, the previous head's smoke green,
+and this PR's net diff touches no web-shell file. Linux unit and no-AK
+integration checks pass.
+
 ## Acceptance criteria
 
 - Both incident command shapes bind the PR their worktree branch resolves to.

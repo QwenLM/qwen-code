@@ -1491,6 +1491,20 @@ describe('ShellTool', () => {
         await expectAttributedIn(resolved('/test/dir/nested'));
       });
 
+      it('preserves the final-element readonly when lastpipe enablement is uncertain', async () => {
+        // `true && shopt -s lastpipe` may enable lastpipe (the walker cannot
+        // evaluate the `true`), so the state is uncertain, not proven off. The
+        // final `readonly -f cd` may run in this shell; discarding it as
+        // child-only would clear the shadow and silently query the worktree.
+        // Keep the possible parent effect and fall back conservatively.
+        mockCreatedPr(77);
+        const result = await runShell(
+          'cd() { :; }; true && shopt -s lastpipe; true | readonly -f cd; unset -f cd; cd /test/dir/nested && gh pr create --fill',
+          PR_77,
+        );
+        expectOpaqueFallback(result);
+      });
+
       it('ignores readonly inside an uncalled function defined in control flow', async () => {
         // helper is never called, so `readonly -f cd` in its dormant body never
         // executes; the unset succeeds and the create runs in the worktree.
@@ -1510,6 +1524,31 @@ describe('ShellTool', () => {
         mockCreatedPr(77);
         const result = await runShell(
           'cd() { :; }; if true; then helper() { readonly -f cd; }; helper; fi; unset -f cd; cd /test/dir/nested && gh pr create --fill',
+          PR_77,
+        );
+        expectOpaqueFallback(result);
+      });
+
+      it('ignores readonly when the only call site is inside another uncalled function', async () => {
+        // Neither helper nor unused is called; the `helper` call inside unused's
+        // dormant body is not an executable call site, so it must not activate
+        // helper's readonly. The unset succeeds and the create runs in the
+        // worktree.
+        mockCreatedPr(77);
+        await runShell(
+          'cd() { :; }; if true; then helper() { readonly -f cd; }; unused() { helper; }; fi; unset -f cd; cd /test/dir/nested && gh pr create --fill',
+          PR_77,
+        );
+        await expectAttributedIn(resolved('/test/dir/nested'));
+      });
+
+      it('retains readonly when a called wrapper transitively invokes the function', async () => {
+        // Control: wrapper IS called, so the `helper` call in its body is an
+        // executable call site; helper's readonly executes and the unset is
+        // rejected. The closure must expand through called functions.
+        mockCreatedPr(77);
+        const result = await runShell(
+          'cd() { :; }; if true; then helper() { readonly -f cd; }; wrapper() { helper; }; wrapper; fi; unset -f cd; cd /test/dir/nested && gh pr create --fill',
           PR_77,
         );
         expectOpaqueFallback(result);
@@ -1626,6 +1665,34 @@ describe('ShellTool', () => {
         mockCreatedPr(77);
         const result = await runShell(
           '(helper() { cd /test/dir/nested && gh pr create --fill; }; helper); cd /test/dir/nested && gh pr create --fill',
+          PR_77,
+        );
+        expectOpaqueFallback(result);
+      });
+
+      it('ignores a subshell create when the only call site is inside another uncalled function', async () => {
+        // Neither helper nor unused is called; the `helper` call inside unused's
+        // dormant body is not an executable call site, so helper's create does
+        // not execute. The sole executed create is the outer one in the
+        // worktree, which keeps its binding with no notice.
+        mockCreatedPr(77);
+        const result = await runShell(
+          '(helper() { cd /test/dir/nested && gh pr create --fill; }; unused() { helper; }); cd /test/dir/nested && gh pr create --fill',
+          PR_77,
+        );
+        await expectAttributedIn(resolved('/test/dir/nested'));
+        expect(result.llmContent).not.toContain(
+          SHELL_PR_BINDING_DIRECTORY_NOTICE,
+        );
+      });
+
+      it('still flags a subshell create when a called wrapper transitively invokes the function', async () => {
+        // Control: wrapper IS called, so the `helper` call in its body is an
+        // executable call site; helper's create executes in the moving subshell
+        // and must surface the fallback notice.
+        mockCreatedPr(77);
+        const result = await runShell(
+          '(helper() { cd /test/dir/nested && gh pr create --fill; }; wrapper() { helper; }; wrapper); cd /test/dir/nested && gh pr create --fill',
           PR_77,
         );
         expectOpaqueFallback(result);

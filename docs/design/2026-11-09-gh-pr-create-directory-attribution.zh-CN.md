@@ -329,6 +329,18 @@ bot 还在其收敛姿态下记录了一份 deferred 清单（本轮不要求修
 
 第十三轮验证：**519 passed**（505 单测 + 14 真实文件系统），core typecheck exit 0，ESLint 与 Prettier 干净。四条发现的变异见证均在最终 head 重跑（F2 双臂——恒 descend 杀掉休眠用例、恒 skip 杀掉被调用用例）；每条 named 用例变红而其兄弟对照保持绿。从字节级备份还原（最终 `shell.ts` SHA-256 `e22ac5278bf33d8a1dc78dff6c7ebadee0920589d5da81921281fa2d5365b39e`）。
 
+### 第十四轮评审（2026-11-10，对精确 head `228dd5565d7` 的复审）
+
+复审确认第十三轮四条具体用例都已修好，另提出两条紧邻这些修复的 P2 边界。两条均在本 PR 内修复：
+
+**R14-1——lastpipe 启用是三态，不是布尔。** 第十三轮的 `guaranteed` 门过度修正：把条件式 `shopt -s lastpipe` 当成已证 OFF。但 `true && shopt -s lastpipe` 实际会启用 lastpipe，末元素的 `readonly -f cd` 跑在父 shell；把它当 child-only 丢弃会清掉 shadow、静默查询 worktree。新增 `lastpipeUncertain` 标志记录「可能执行但不被保证」的启用。不确定期间，pipeline 末元素按当前 shell 上下文走查但**不授予保证执行**——保留其可能的父 shell 效果（readonly / shadow），但不能 lift shadow——且会移动目录的 pipeline fail-closed。控制流扫描的嵌套 pipeline 臂镜像此逻辑。已证 ON 与已证 OFF 的行为不变。
+
+**R14-2——invoked 名只来自可执行调用点。** 第十三轮的 invoked 名预扫描扫了**每个**函数体内的命令，于是记录在休眠体里的调用会激活另一个函数（`unused() { helper; }` 使 `helper` 被当作 invoked）。两个消费点——subshell create 扫描与控制流 readonly 扫描——都丢了 worktree 绑定。共享 helper `invokedFunctionNames` 现在把每个调用记录在其最内层所属函数名下，并计算**仅**由「任何函数体之外的调用」播种的传递闭包；休眠体里的调用不是可执行调用点，故未调用函数不能互相激活对方的效果。被调用的 wrapper 仍传递调用其 callee。
+
+第十四轮验证：**524 passed**（510 单测 + 14 真实文件系统），core typecheck exit 0，ESLint 与 Prettier 干净。变异见证在最终 head 重跑，每条发现双臂：R14-1（关闭 uncertain 来源；关闭 pipeline 臂 uncertain 读取端）各杀掉不确定用例、跳过/已证启用对照绿；R14-2（把所有调用记为顶层）在两个消费点杀掉两条休眠互引用例、传递 wrapper 与直接调用对照绿，（去闭包展开）杀掉传递 wrapper 对照、直接调用对照绿。从字节级备份还原（最终 `shell.ts` SHA-256 `aaf58e6031f89cafab53f1c37e082d23576b014b86bcf67a6faaeffb7f81db02`）。
+
+CI 注记（已归因，非本 PR 回归）：Web Shell smoke shard 1/2 在 `web-shell.files.spec.ts:823` 的红是 runner 级 mock-daemon flake——繁忙宿主（35m）上 409 行 `ECONNREFUSED 127.0.0.1:4170`、byte-read 预算超时、shard 2/2 异机全绿、前置 head smoke 全绿、且本 PR 净 diff 不触及任何 web-shell 文件。Linux 单测与 no-AK 集成检查通过。
+
 ## 验收标准
 
 - 两条事故命令形状都绑定到其 worktree 分支所解析出的 PR。
