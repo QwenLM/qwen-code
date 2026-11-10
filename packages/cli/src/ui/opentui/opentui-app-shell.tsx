@@ -113,10 +113,26 @@ import { emitAutoModeEntryNotices } from '../hooks/useAutoAcceptIndicator.js';
 import { OpenTuiAppHost } from './opentui-host.js';
 import { executeUserShell } from './shell-mode.js';
 import { STATUS_INDICATOR_WIDTH } from './messages.js';
-import { useKeyboard, useTerminalDimensions } from '@opentui/react';
-import type { KeyEvent, BoxRenderable } from '@opentui/core';
+import {
+  useKeyboard,
+  useRenderer,
+  useTerminalDimensions,
+} from '@opentui/react';
+import {
+  MouseButton,
+  type KeyEvent,
+  type BoxRenderable,
+  type MouseEvent as OpenTuiMouseEvent,
+  type ScrollBoxRenderable,
+} from '@opentui/core';
 import { Command, matchesCommand, toOriginalKey } from './key-map.js';
 import { keyToAnsi } from '../hooks/keyToAnsi.js';
+import { JumpToBottomHint } from './jump-to-bottom-hint.js';
+import { CopyNoticeToast, type CopiedNotice } from './copy-notice.js';
+import { isRenderableWithin } from './renderable-tree.js';
+import { openTuiScrollbarOptions } from './scrollbar-visibility.js';
+import { useSelectionAutoCopy } from './selection-auto-copy.js';
+import { handleTranscriptRightClick } from './transcript-mouse.js';
 import {
   normalizeQuitSubmission,
   OpenTuiSlashGateway,
@@ -369,6 +385,22 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
   const shellControllersRef = useRef<Set<AbortController>>(new Set());
   const { width: terminalWidth, height: terminalHeight } =
     useTerminalDimensions();
+  const renderer = useRenderer();
+  const transcriptScrollRef = useRef<ScrollBoxRenderable | null>(null);
+  const showOpenTuiScrollbar =
+    settings.merged.ui?.showOpenTuiScrollbar === true;
+  const [copiedNotice, setCopiedNotice] = useState<CopiedNotice | null>(null);
+  const copiedNoticeIdRef = useRef(0);
+  const [jumpHintVisible, setJumpHintVisible] = useState(false);
+  const canShowCopiedToastRef = useRef(false);
+  const handleCopied = useCallback((text: string) => {
+    if (!canShowCopiedToastRef.current) return;
+    setCopiedNotice({ id: ++copiedNoticeIdRef.current, text });
+  }, []);
+  const expireCopied = useCallback((id: number) => {
+    setCopiedNotice((current) => (current?.id === id ? null : current));
+  }, []);
+  useSelectionAutoCopy(renderer, handleCopied);
   const modBand = useModBand(config);
   // ink renders every dialog inside a region of exactly this height, clipped,
   // with the composer swapped out (`DefaultAppLayout`'s dialog wrapper) — in
@@ -712,6 +744,77 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
     if (!shellFocused) setShellFocus(null);
   }, [shellFocused]);
 
+  /**
+   * Right-click anywhere in the shell: a transcript selection is cleared; with
+   * no selection the clipboard is pasted into the composer. The handler sits on
+   * the root and on the transcript scrollbox, so composer, footer, and status
+   * areas paste too; the scrollbox stops propagation to avoid a second paste.
+   */
+  const handleShellMouseDown = useCallback(
+    (event: OpenTuiMouseEvent) => {
+      if (event.button !== MouseButton.RIGHT) return;
+      if (
+        dialog ||
+        activeModal ||
+        activeToolCall ||
+        mcpApproval.isMcpApprovalDialogOpen ||
+        hooksApproval.isProjectHooksApprovalDialogOpen
+      ) {
+        return;
+      }
+      const selectionContainer = renderer.getSelectionContainer?.();
+      const hasSelection = Boolean(
+        selectionContainer &&
+          transcriptScrollRef.current &&
+          isRenderableWithin(selectionContainer, transcriptScrollRef.current),
+      );
+      handleTranscriptRightClick(event, {
+        hasSelection,
+        clearSelection: () => renderer.clearSelection(),
+        pasteClipboard: () => props.composerHandle?.current?.pasteClipboard?.(),
+      });
+    },
+    [
+      renderer,
+      props.composerHandle,
+      dialog,
+      activeModal,
+      activeToolCall,
+      mcpApproval.isMcpApprovalDialogOpen,
+      hooksApproval.isProjectHooksApprovalDialogOpen,
+    ],
+  );
+
+  // A modal mounted within the toast's two-second window must not leave the
+  // confirmation floating over it. Copy events that arrive while the toast
+  // cannot mount are dropped, not replayed when the slot returns.
+  canShowCopiedToastRef.current =
+    !dialog &&
+    !activeModal &&
+    !activeToolCall &&
+    !mcpApproval.isMcpApprovalDialogOpen &&
+    !hooksApproval.isProjectHooksApprovalDialogOpen &&
+    !showSuggestions;
+  useEffect(() => {
+    if (
+      dialog ||
+      activeModal ||
+      activeToolCall ||
+      mcpApproval.isMcpApprovalDialogOpen ||
+      hooksApproval.isProjectHooksApprovalDialogOpen ||
+      showSuggestions
+    ) {
+      setCopiedNotice(null);
+    }
+  }, [
+    dialog,
+    activeModal,
+    activeToolCall,
+    mcpApproval.isMcpApprovalDialogOpen,
+    hooksApproval.isProjectHooksApprovalDialogOpen,
+    showSuggestions,
+  ]);
+
   const controlsRef = useRef<BoxRenderable | null>(null);
   const [controlsHeight, setControlsHeight] = useState(0);
   const shellColumns = Math.max(1, Math.floor(terminalWidth * 0.89));
@@ -799,6 +902,33 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
       return;
     }
     const { name, shift, ctrl } = toOriginalKey(key);
+    const pageDelta =
+      !ctrl && name === 'pageup' ? -1 : !ctrl && name === 'pagedown' ? 1 : null;
+    const edge = ctrl && (name === 'home' || name === 'end') ? name : null;
+    if (
+      key.eventType !== 'release' &&
+      !dialog &&
+      !activeModal &&
+      !activeToolCall &&
+      !mcpApproval.isMcpApprovalDialogOpen &&
+      !hooksApproval.isProjectHooksApprovalDialogOpen &&
+      !shellFocused &&
+      (pageDelta !== null || edge !== null)
+    ) {
+      const box = transcriptScrollRef.current;
+      if (box) {
+        if (pageDelta !== null) {
+          box.scrollBy(pageDelta, 'viewport');
+        } else if (edge === 'home') {
+          box.scrollTo(0);
+        } else {
+          box.scrollTo(box.scrollHeight);
+        }
+      }
+      key.preventDefault();
+      key.stopPropagation();
+      return;
+    }
     if (
       key.eventType !== 'release' &&
       !streaming &&
@@ -1688,7 +1818,12 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
       recordForExitEcho
       onError={(error) => onRenderError?.(error)}
     >
-      <box flexDirection="column" height={terminalHeight} flexShrink={0}>
+      <box
+        flexDirection="column"
+        height={terminalHeight}
+        flexShrink={0}
+        onMouseDown={handleShellMouseDown}
+      >
         {/* Everything that flows lives here, and it is the alt-screen stand-in
             for ink's <Static>: the column is bounded by the terminal, so the
             region keeps only the tail of the conversation, pinned to its last
@@ -1714,6 +1849,9 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
           stickyScroll
           stickyStart="bottom"
           focusable={false}
+          scrollbarOptions={openTuiScrollbarOptions(showOpenTuiScrollbar)}
+          ref={transcriptScrollRef}
+          onMouseDown={handleShellMouseDown}
         >
           <OpenTuiBanner config={config} settings={settings} />
           {renderMain
@@ -1955,6 +2093,25 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
             />
           ) : null}
         </box>
+        {!dialog &&
+        !activeModal &&
+        !activeToolCall &&
+        !mcpApproval.isMcpApprovalDialogOpen &&
+        !hooksApproval.isProjectHooksApprovalDialogOpen &&
+        !showSuggestions ? (
+          <>
+            <CopyNoticeToast
+              notice={copiedNotice}
+              bottom={controlsHeight + (jumpHintVisible ? 1 : 0)}
+              onExpire={expireCopied}
+            />
+            <JumpToBottomHint
+              scrollRef={transcriptScrollRef}
+              bottom={controlsHeight}
+              onVisibilityChange={setJumpHintVisible}
+            />
+          </>
+        ) : null}
       </box>
     </OpenTuiErrorBoundary>
   );

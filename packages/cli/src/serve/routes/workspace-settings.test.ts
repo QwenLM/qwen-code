@@ -924,13 +924,18 @@ describe('POST /workspace/settings', () => {
     expect(persistSetting).not.toHaveBeenCalled();
   });
 
-  it.each(['ui.mouseTracking', 'ui.showScrollbar', 'ui.showToolCallArgs'])(
+  it.each([
+    'ui.mouseTracking',
+    'ui.showScrollbar',
+    'ui.showOpenTuiScrollbar',
+    'ui.showToolCallArgs',
+  ])(
     'rejects a TUI-only key (%s) that has no effect in the web shell',
     async (key) => {
-      // These keys are read only inside the ink TUI (mouseTracking also
-      // requires a TTY), so exposing them here would be dead toggles in serve
-      // mode. They are filtered out via TUI_ONLY_SETTINGS even though they
-      // declare showInDialog: true.
+      // These keys are read only inside the interactive TUI (mouseTracking
+      // also requires a TTY), so exposing them here would be dead toggles in
+      // serve mode. They are filtered out via TUI_ONLY_SETTINGS even though
+      // they declare showInDialog: true.
       const { app, persistSetting } = makeApp();
 
       const res = await request(app).post('/workspace/settings').send({

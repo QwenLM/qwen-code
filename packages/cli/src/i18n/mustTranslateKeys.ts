@@ -137,4 +137,6 @@ export const MUST_TRANSLATE_KEYS = [
   'Unset',
   'Update requires sudo. Please run:',
   'Standalone install detected. Please rerun the standalone installer to update:',
+  'Jump to bottom (ctrl+End)',
+  'Copied {{count}} chars',
 ] as const;

@@ -18,7 +18,11 @@
 
 import { useEffect, useMemo, useRef, useState, type ErrorInfo } from 'react';
 import { useRenderer } from '@opentui/react';
-import type { Renderable, ScrollBoxRenderable } from '@opentui/core';
+import {
+  MouseButton,
+  type Renderable,
+  type ScrollBoxRenderable,
+} from '@opentui/core';
 import { AgentStatus } from '@qwen-code/qwen-code-core';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import { C, SYNTAX, SYNTAX_DIM, type Palette } from './theme.js';
@@ -874,7 +878,8 @@ function ThinkingRow({
   return (
     <box
       flexDirection="column"
-      onMouseUp={() => {
+      onMouseUp={(event) => {
+        if (event.button !== MouseButton.LEFT) return;
         if (item.done) setClickedOpen((v) => !v);
       }}
     >
@@ -990,7 +995,8 @@ function ToolCard({
     <box flexDirection="column">
       <box
         flexDirection="row"
-        onMouseUp={() => {
+        onMouseUp={(event) => {
+          if (event.button !== MouseButton.LEFT) return;
           if (collapsed) setClickedOpen(true);
         }}
       >

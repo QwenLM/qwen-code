@@ -62,6 +62,7 @@ import {
   cleanupOldClipboardImages,
   readClipboardText,
 } from '../utils/clipboardUtils.js';
+import { CLIPBOARD_BUSY_MESSAGE } from '../utils/native-clipboard.js';
 import path from 'node:path';
 import { copyFile, mkdir, stat, unlink } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
@@ -543,6 +544,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     submittedPrompt: string;
   } | null>(null);
   const clipboardUnavailableShownRef = useRef(false);
+  const pasteClipboardRef = useRef<() => void>(() => {});
   const showAttachments = useCallback(
     () => setAttachments([...draftRef.current.attachments]),
     [],
@@ -1119,6 +1121,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       },
       cancelTurn,
       submitDraft,
+      pasteClipboard: () => pasteClipboardRef.current(),
       invalidateImportedInput,
       restoreSubmission: (submission) => restoreSubmission(submission, '\n'),
     };
@@ -1206,8 +1209,13 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       };
       const result = operation(notify, () => draft.valid).catch(
         (error: unknown) => {
-          if (draft.valid)
-            onNotice?.(error instanceof Error ? error.message : String(error));
+          const message =
+            error instanceof Error ? error.message : String(error);
+          // The addon's ownership race is transient; showing its raw message
+          // would read as a paste failure the user cannot act on.
+          if (draft.valid && !message.includes(CLIPBOARD_BUSY_MESSAGE)) {
+            onNotice?.(message);
+          }
           return { paths: [] };
         },
       );
@@ -1240,16 +1248,9 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
 
   const handleClipboardImage = useCallback(() => {
     queuePaste(async (notify, isCurrent) => {
+      let imageUnavailable = false;
       const reportUnavailable = () => {
-        if (clipboardUnavailableShownRef.current) return;
-        clipboardUnavailableShownRef.current = true;
-        notify(
-          t(
-            process.platform === 'linux'
-              ? 'Clipboard image paste is unavailable: no supported clipboard tool was reached. On Linux, install `wl-clipboard` (Wayland) or `xclip` (X11), or set DISPLAY/WAYLAND_DISPLAY if running headless.'
-              : 'Clipboard image paste is unavailable because the native clipboard module could not be loaded. Reinstall Qwen Code or use the npm installation method.',
-          ),
-        );
+        imageUnavailable = true;
       };
       const hasImage = await clipboardHasImage(reportUnavailable);
       if (!isCurrent()) return { paths: [] };
@@ -1263,9 +1264,29 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       }
       if (!isCurrent()) return { paths: [] };
       const text = await readClipboardText();
-      return { paths: [], ...(text ? { fallback: text } : {}) };
+      if (text) {
+        return { paths: [], fallback: text };
+      }
+      // The native text fallback above can succeed without wl-paste/xclip.
+      // Only warn about the missing image backend when there is no text to
+      // paste either.
+      if (imageUnavailable && !clipboardUnavailableShownRef.current) {
+        clipboardUnavailableShownRef.current = true;
+        notify(
+          t(
+            process.platform === 'linux'
+              ? 'Clipboard image paste is unavailable: no supported clipboard tool was reached. On Linux, install `wl-clipboard` (Wayland) or `xclip` (X11), or set DISPLAY/WAYLAND_DISPLAY if running headless.'
+              : 'Clipboard image paste is unavailable because the native clipboard module could not be loaded. Reinstall Qwen Code or use the npm installation method.',
+          ),
+        );
+      }
+      return { paths: [] };
     });
   }, [queuePaste]);
+
+  useEffect(() => {
+    pasteClipboardRef.current = handleClipboardImage;
+  }, [handleClipboardImage]);
 
   const promoteImagePaths = useCallback(
     (paths: string[], original: string) => {

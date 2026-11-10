@@ -1342,6 +1342,16 @@ const SETTINGS_SCHEMA = {
           'Show the auto-hiding scrollbar in the in-app scrollable viewport (Virtualized History). The bar appears while scrolling and fades out when idle. Disable to hide it entirely.',
         showInDialog: true,
       },
+      showOpenTuiScrollbar: {
+        type: 'boolean',
+        label: 'Show Scrollbar (OpenTUI)',
+        category: 'UI',
+        requiresRestart: true,
+        default: false,
+        description:
+          'Show the native OpenTUI transcript scrollbar. Hidden by default so the conversation can use the extra column; enable and restart to restore the auto-hiding bar.',
+        showInDialog: true,
+      },
       mouseTracking: {
         type: 'boolean',
         label: 'Mouse Tracking',
@@ -1349,7 +1359,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: true,
         default: true,
         description:
-          'Enable in-app SGR mouse tracking. While enabled, Qwen Code captures mouse events for text selection, click-to-position in text inputs, row hover, history-item toggling, and viewport scrolling. Because the terminal forwards all mouse events to the app, Qwen Code supplies its own equivalents for what the terminal can no longer do natively: a single click opens an http(s) hyperlink under the pointer (other link schemes are copied to the clipboard), and right-click over a link or a text selection opens an in-app context menu with Open Link / Copy Link Address / Copy Selection. Disable to hand the mouse fully back to the terminal (native right-click menu and link clicks); this turns off all in-app mouse interaction, and in Virtualized History the wheel no longer scrolls the transcript — use Shift+↑/↓, PgUp/PgDn, or Ctrl+Home/End instead (pair with ui.useTerminalBuffer: false to restore native terminal scrollback).',
+          'Enable in-app SGR mouse tracking. While enabled, Qwen Code captures mouse events for text selection, click-to-position in text inputs, row hover, history-item toggling, and viewport scrolling. Because the terminal forwards all mouse events to the app, Qwen Code supplies its own equivalents for what the terminal can no longer do natively: a single click opens an http(s) hyperlink under the pointer (other link schemes are copied to the clipboard). Ink right-click over a link or a text selection opens an in-app context menu with Open Link / Copy Link Address / Copy Selection. OpenTUI copies a completed selection from any region (transcript, footer, composer, dialogs), clears a transcript selection on right-click, and pastes the clipboard on right-click when there is no transcript selection. Disable to hand the mouse fully back to the terminal (native right-click menu and link clicks); this turns off all in-app mouse interaction, and in Virtualized History the wheel no longer scrolls the transcript — use Shift+↑/↓, PgUp/PgDn, or Ctrl+Home/End instead (pair with ui.useTerminalBuffer: false to restore native terminal scrollback).',
         showInDialog: true,
       },
       arrowKeysScrollTranscript: {

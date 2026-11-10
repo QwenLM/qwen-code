@@ -33,6 +33,12 @@ const { mockSpawn, mockExecSync, clipboardMockState, mockDebugLogger } =
     },
   }));
 
+// The native fallback is exercised by its own bridge tests; keep these
+// tool-availability tests from spawning a Node helper.
+vi.mock('./native-clipboard.js', () => ({
+  readTextViaNativeClipboard: vi.fn().mockResolvedValue(null),
+}));
+
 // Mock @teddyzhu/clipboard
 vi.mock('@teddyzhu/clipboard', async () => {
   if (clipboardMockState.loadDelayMs > 0) {
@@ -345,6 +351,9 @@ describe('clipboardUtils', () => {
     isWaylandSession = mod.isWaylandSession;
     readClipboardText = mod.readClipboardText;
     mod.resetLinuxClipboardTool();
+    const native = await import('./native-clipboard.js');
+    vi.mocked(native.readTextViaNativeClipboard).mockReset();
+    vi.mocked(native.readTextViaNativeClipboard).mockResolvedValue(null);
     // Set up Wayland env as default
     vi.stubEnv('WAYLAND_DISPLAY', 'wayland-0');
     vi.stubEnv('XDG_SESSION_TYPE', undefined as unknown as string);
@@ -801,7 +810,41 @@ describe('clipboardUtils', () => {
       expect(mockSpawn).not.toHaveBeenCalled();
     });
 
-    it('does not touch the tools off Linux', async () => {
+    it('normalizes the native fallback when no tool is reachable', async () => {
+      mockExecSync.mockImplementation(() => {
+        throw new Error('command not found');
+      });
+      const native = await import('./native-clipboard.js');
+      vi.mocked(native.readTextViaNativeClipboard).mockResolvedValue(
+        'line\n\n',
+      );
+
+      await expect(readClipboardText()).resolves.toBe('line');
+    });
+
+    it.each(['darwin', 'win32'] as const)(
+      'reads clipboard text through the native addon on %s',
+      async (platform) => {
+        const native = await import('./native-clipboard.js');
+        vi.mocked(native.readTextViaNativeClipboard).mockResolvedValue(
+          'from native\n',
+        );
+        Object.defineProperty(process, 'platform', {
+          value: platform,
+          configurable: true,
+          writable: true,
+        });
+
+        await expect(readClipboardText()).resolves.toBe('from native');
+        expect(native.readTextViaNativeClipboard).toHaveBeenCalledTimes(1);
+        expect(mockExecSync).not.toHaveBeenCalled();
+        expect(mockSpawn).not.toHaveBeenCalled();
+      },
+    );
+
+    it('drops whitespace-only native text', async () => {
+      const native = await import('./native-clipboard.js');
+      vi.mocked(native.readTextViaNativeClipboard).mockResolvedValue('  \n\n');
       Object.defineProperty(process, 'platform', {
         value: 'darwin',
         configurable: true,
@@ -809,7 +852,6 @@ describe('clipboardUtils', () => {
       });
 
       await expect(readClipboardText()).resolves.toBeNull();
-      expect(mockSpawn).not.toHaveBeenCalled();
     });
   });
 

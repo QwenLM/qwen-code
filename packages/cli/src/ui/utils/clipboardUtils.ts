@@ -12,6 +12,7 @@ import { randomUUID } from 'node:crypto';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import { wrapForMultiplexer } from '../../utils/osc.js';
 import { fileUriToLocalPath, isFileUri } from './file-uri.js';
+import { readTextViaNativeClipboard } from './native-clipboard.js';
 
 const debugLogger = createDebugLogger('CLIPBOARD_UTILS');
 
@@ -807,14 +808,22 @@ async function listClipboardTypes(
   return types;
 }
 
+/** Normalize addon text the same way the tool path does: LF endings and no
+ *  trailing line terminator; whitespace-only content is not a paste. */
+function normalizeNativeClipboardText(text: string | null): string | null {
+  if (!text) return null;
+  const trimmed = text.replace(/\n+$/, '');
+  return trimmed.trim() ? trimmed : null;
+}
+
 /**
- * Read text from the clipboard on Linux.
+ * Read text from the clipboard.
  *
- * The clipboard decides what is readable: only the types it actually lists are
- * requested, and the ICCCM text atoms are asked for before any other `text/*`,
- * so a selection that a browser describes as `text/uri-list` still arrives
- * rather than nothing. Other platforms return `null`, because their text path is
- * the native addon, which is not wired for reads here.
+ * On Linux the clipboard decides what is readable: only the types it actually
+ * lists are requested, and the ICCCM text atoms are asked for before any other
+ * `text/*`, so a selection that a browser describes as `text/uri-list` still
+ * arrives rather than nothing. Other platforms read through the native
+ * clipboard addon, which is also the Linux fallback when no tool is reachable.
  *
  * Line endings come back as LF regardless of what the selection carried: a
  * Windows clipboard reached through WSL2 is CRLF throughout, and so is the
@@ -825,11 +834,11 @@ async function listClipboardTypes(
  */
 export async function readClipboardText(): Promise<string | null> {
   if (process.platform !== 'linux') {
-    return null;
+    return normalizeNativeClipboardText(await readTextViaNativeClipboard());
   }
   const tool = getLinuxClipboardTool();
   if (!tool) {
-    return null;
+    return normalizeNativeClipboardText(await readTextViaNativeClipboard());
   }
 
   const offers = await listClipboardTypes(tool);
@@ -885,7 +894,7 @@ export async function readClipboardText(): Promise<string | null> {
       return converted.trim() ? converted : null;
     }
   }
-  return null;
+  return normalizeNativeClipboardText(await readTextViaNativeClipboard());
 }
 
 /**
