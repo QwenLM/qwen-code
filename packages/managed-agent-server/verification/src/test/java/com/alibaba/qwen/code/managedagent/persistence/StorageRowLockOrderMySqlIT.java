@@ -93,7 +93,7 @@ class StorageRowLockOrderMySqlIT {
         // The alias locker starts once admission has read the row for its
         // fence, and admission goes on only after the locker is waiting.
         var admissionJdbc = new PausingJdbc(database.source(), " FROM ma_storage ",
-                () -> transactions.executeWithoutResult(status -> SshWorkspaceStore.physicalKey(jdbc, TENANT, STORAGE)));
+                () -> transactions.executeWithoutResult(status -> JdbcSshWorkspaceStore.physicalKey(jdbc, TENANT, STORAGE)));
         Future<?> admission = threads.submit(() -> transactions.executeWithoutResult(status -> admit(admissionJdbc, shared)));
 
         admission.get(30, TimeUnit.SECONDS);

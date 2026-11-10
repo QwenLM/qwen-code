@@ -29,13 +29,13 @@ class SessionRowLockOrderTest {
 
     @Test
     void allEntriesHaveExactSignaturesTransactionAttributesAndScenarios() throws Exception {
-        for (var facade : List.of(ManagedAgentStore.class, ManagedSessionStore.class)) {
+        for (var facade : List.of(ManagedAgentStore.class, JdbcManagedSessionStore.class)) {
             assertThat(facade.getAnnotation(org.springframework.beans.factory.annotation.Qualifier.class).value())
                     .isEqualTo("managedAgentTransactionManager");
         }
         var types = new TreeSet<Class<?>>(java.util.Comparator.comparing(Class::getName));
-        for (Class<?> facade : List.of(ManagedAgentStore.class, ManagedSessionStore.class,
-                ManagedActionStore.class, ManagedUserMessageStore.class, WorkspaceRecoveryStore.class)) {
+        for (Class<?> facade : List.of(ManagedAgentStore.class, JdbcManagedSessionStore.class,
+                JdbcManagedActionStore.class, JdbcManagedUserMessageStore.class, WorkspaceRecoveryStore.class)) {
             collect(facade, types);
         }
         var actual = new TreeSet<String>();

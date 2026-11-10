@@ -10,6 +10,9 @@ import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationAdmission;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationTarget;
+import com.alibaba.qwen.code.managedagent.repository.ManagedActionStore;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.OperationKind;
@@ -43,12 +46,12 @@ import static com.alibaba.qwen.code.managedagent.persistence.ManagedActionJourna
 
 @Repository
 @Qualifier("managedAgentTransactionManager")
-public class ManagedActionStore
-        implements com.alibaba.qwen.code.managedagent.repository.ManagedActionStore {
+public class JdbcManagedActionStore
+        implements ManagedActionStore {
     private final JdbcTemplate jdbc;
     private final AgentStateStore sessions;
 
-    public ManagedActionStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc, AgentStateStore sessions) {
+    public JdbcManagedActionStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc, AgentStateStore sessions) {
         this.jdbc = jdbc;
         this.sessions = sessions;
     }
@@ -67,7 +70,7 @@ public class ManagedActionStore
     private static byte[] actorScopeKey(String tenantId, String actorId) {
         try {
             return actorId == null
-                    ? null : com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(tenantId, actorId);
+                    ? null : ManagedWorkspaceRegistry.actorKey(tenantId, actorId);
         } catch (IllegalArgumentException error) {
             throw new ManagedAgentException(403,
                     "actor_scope_mismatch", "Authenticated actor scope is invalid.");
@@ -100,7 +103,7 @@ public class ManagedActionStore
     private boolean workspaceOperatorAdmits(String tenantId,
             OwnerRow session, String actorId) {
         return session != null && session.workspaceId() != null
-                && new ManagedWorkspaceRegistry(jdbc)
+                && new JdbcManagedWorkspaceRegistry(jdbc)
                         .accessOf(tenantId, actorId, session.workspaceId()).canCreate();
     }
 
@@ -199,7 +202,7 @@ public class ManagedActionStore
             String id = payload.path("requestId").asText();
             String state = payload.path("state").asText();
             require(
-                    ManagedActionStore.ACTION_ID.matcher(id).matches()
+                    JdbcManagedActionStore.ACTION_ID.matcher(id).matches()
                             && List.of("permission", "question").contains(payload.path("kind").asText())
                             && "tool_call".equals(payload.path("source").asText())
                             && List.of("requested", "decided", "expired", "cancelled")
@@ -303,7 +306,7 @@ public class ManagedActionStore
                                 && body.path("inputRevision").equals(options.path("inputRevision"))
                                 && body.path("policyRevision")
                                         .equals(options.path("policyRevision"))
-                                && decided.digest().equals(com.alibaba.qwen.code.managedagent.repository.ManagedActionStore.decisionDigest(body)));
+                                && decided.digest().equals(ManagedActionStore.decisionDigest(body)));
                 receipt =
                         "decision_"
                                 + ManagedExtensionProjection.recordKey(
@@ -335,7 +338,7 @@ public class ManagedActionStore
             } else {
                 require(decision.isNull());
             }
-            String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
+            String scope = ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
             String recordKey = ManagedSchemaKeys.key(scope, "ACTION", id);
             if (previous == null) {
                 jdbc.update("INSERT INTO ma_session_record (session_scope_key, record_key, tenant_id, workspace_id, session_id, record_kind, domain, record_id, action_id, revision, action_version, state, options_json, gmt_create, first_sequence) VALUES (?, ?, ?, ?, ?, 'ACTION', 'action', ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -371,7 +374,7 @@ public class ManagedActionStore
 
     private void replaceActionReferences(String tenantId, String workspaceId, String sessionId,
             String recordKey, long revision, JsonNode optionsRef, JsonNode options, JsonNode decisionRef) {
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
+        String scope = ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
         List<JsonNode> refs = new ArrayList<>(List.of(optionsRef));
         if (options.has("inputRef")) {
             refs.add(options.get("inputRef"));
@@ -403,7 +406,7 @@ public class ManagedActionStore
     }
 
     public Optional<Action> find(String tenantId, String sessionId, String id) {
-        if (!ManagedActionStore.ACTION_ID.matcher(id).matches()) {
+        if (!JdbcManagedActionStore.ACTION_ID.matcher(id).matches()) {
             return Optional.empty();
         }
         return jdbc
@@ -416,7 +419,7 @@ public class ManagedActionStore
                                         read(r.getString("options_json")),
                                         r.getString("decision_receipt_id"),
                                         r.getString("decision_digest")),
-                        com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId), tenantId, sessionId, id)
+                        ManagedSessionStore.sessionScopeKey(tenantId, sessionId), tenantId, sessionId, id)
                 .stream()
                 .findFirst();
     }
@@ -445,7 +448,7 @@ public class ManagedActionStore
 
     public List<Action> list(
             String tenantId, String sessionId, Long before, String beforeId, int limit) {
-        List<Object> args = new ArrayList<>(List.of(com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId), tenantId, sessionId));
+        List<Object> args = new ArrayList<>(List.of(ManagedSessionStore.sessionScopeKey(tenantId, sessionId), tenantId, sessionId));
         String cursor = "";
         if (before != null) {
             cursor = " AND (gmt_create < ? OR gmt_create = ? AND action_id < ?)";
@@ -500,7 +503,7 @@ public class ManagedActionStore
                             + " 'ACTION_RESPONSE' AND actor_digest = ? AND idempotency_digest = ?"
                             + " AND idempotency_key = ?",
                         (r, row) -> r.getString(1),
-                        com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId), ManagedSchemaKeys.key(sessionId),
+                        ManagedSessionStore.sessionScopeKey(tenantId, sessionId), ManagedSchemaKeys.key(sessionId),
                         tenantId, sessionId, actorDigest, ManagedSchemaKeys.key(key), key);
         if (!replay.isEmpty()) {
             OperationRecord existing =
@@ -620,7 +623,7 @@ public class ManagedActionStore
                         && "decided".equals(action.get().state())
                         && action.get().decisionDigest() != null
                         && action.get().decisionDigest().equals(
-                                com.alibaba.qwen.code.managedagent.repository.ManagedActionStore.decisionDigest(failedResponse.body()))) {
+                                ManagedActionStore.decisionDigest(failedResponse.body()))) {
                     // The heal settles the row: same gate, same reason.
                     if (!admitted && !workspaceOperatorAdmits(tenantId,
                             ownerRow, actorId)) {
@@ -704,16 +707,16 @@ public class ManagedActionStore
         if (!"requested".equals(action.state())) {
             throw new ManagedAgentException(
                     409,
-                    com.alibaba.qwen.code.managedagent.repository.ManagedActionStore.endedCode(action.state()),
+                    ManagedActionStore.endedCode(action.state()),
                     "The Action has already ended.");
         }
         if (now >= o.path("expiresAt").asLong()) {
             throw new ManagedAgentException(
                     409, "action_expired", "The Action has expired.");
         }
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
+        String scope = ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
         String actionScope = ManagedSchemaKeys.key(scope, actionId, Long.toString(o.path("inputRevision").asLong()));
-        String decision = com.alibaba.qwen.code.managedagent.repository.ManagedActionStore.decisionDigest(body);
+        String decision = ManagedActionStore.decisionDigest(body);
         List<String[]> reserved = jdbc.query(
                         "SELECT request_digest, result_operation_key FROM ma_request_receipt WHERE"
                                 + " namespace = 'ACTION_DECISION' AND tenant_key = ? AND"
@@ -792,12 +795,12 @@ public class ManagedActionStore
             Response response = response(target.tenantId(), target.sessionId(), target.operationId());
             Action action = find(target.tenantId(), target.sessionId(), response.actionId()).orElseThrow();
             boolean matched = "decided".equals(action.state())
-                    && com.alibaba.qwen.code.managedagent.repository.ManagedActionStore.decisionDigest(response.body()).equals(action.decisionDigest());
+                    && ManagedActionStore.decisionDigest(response.body()).equals(action.decisionDigest());
             jdbc.update(
                     "UPDATE ma_operation SET state = ?, phase = 'SETTLED', admission_stage = 'HARNESS_CONFIRMED', delivery_state = 'CONFIRMED', receipt_id = ?, failure_code = ?, decision_receipt_id = ?, claim_owner = NULL, claim_until = NULL, gmt_modified = ?, completed_at = ? WHERE tenant_id = ? AND session_id = ? AND operation_id = ? AND operation_kind = 'ACTION_RESPONSE' AND delivery_state IN ('PENDING', 'LEASED')",
                     matched ? "COMPLETED" : "FAILED",
                     "rcpt_" + UUID.randomUUID().toString().replace("-", ""),
-                    matched ? null : com.alibaba.qwen.code.managedagent.repository.ManagedActionStore.endedCode(action.state()),
+                    matched ? null : ManagedActionStore.endedCode(action.state()),
                     matched ? action.decisionReceiptId() : null,
                     now, now, target.tenantId(), target.sessionId(), target.operationId());
         }

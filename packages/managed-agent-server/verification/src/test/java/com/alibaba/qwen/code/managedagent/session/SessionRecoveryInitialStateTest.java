@@ -8,10 +8,10 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.CommitTransactionRequest;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.InputBlock;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -62,7 +62,7 @@ class SessionRecoveryInitialStateTest {
     private JdbcDataSource source;
     private JdbcTemplate jdbc;
     private ManagedAgentStore store;
-    private ManagedSessionStore journals;
+    private JdbcManagedSessionStore journals;
     private ManagedAgentService sessions;
     private String sessionId;
     private long generation;
@@ -79,7 +79,7 @@ class SessionRecoveryInitialStateTest {
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
         ManagedSchema.initialize(source);
         jdbc = new ManagedSchemaJdbcTemplate(source);
-        var registry = mock(ManagedWorkspaceRegistry.class);
+        var registry = mock(JdbcManagedWorkspaceRegistry.class);
         store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, json, Clock.systemUTC(), events -> {}, registry,
                 new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         journals = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
@@ -321,7 +321,7 @@ class SessionRecoveryInitialStateTest {
         assertThat(recovery(com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(moving)).query(TENANT, "actor", sessionId).nextTurnAllowed()).isFalse();
     }
 
-    private SessionRecoveryService recovery(ManagedSessionStore nativeStore) {
+    private SessionRecoveryService recovery(JdbcManagedSessionStore nativeStore) {
         return new SessionRecoveryService(sessions, store, coordinator, harness, new com.alibaba.qwen.code.managedagent.persistence.JdbcSessionRecoveryRepository(jdbc), nativeStore);
     }
 
