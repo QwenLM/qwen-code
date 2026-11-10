@@ -3,7 +3,7 @@ package com.alibaba.qwen.code.managedagent.workspace.runtime;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
-import com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceExecutionStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
@@ -24,7 +24,7 @@ import static org.mockito.Mockito.when;
 
 class WorkspaceRuntimeResolverTest {
     private final AgentStateStore sessions = mock(AgentStateStore.class);
-    private final WorkspaceExecutionStore authority = mock(WorkspaceExecutionStore.class);
+    private final JdbcWorkspaceExecutionStore authority = mock(JdbcWorkspaceExecutionStore.class);
     private final ExternalStorageRegistry registrations = mock(ExternalStorageRegistry.class);
     private final ManagedAgentProperties properties = new ManagedAgentProperties();
     private final SessionRecord session = mock(SessionRecord.class);

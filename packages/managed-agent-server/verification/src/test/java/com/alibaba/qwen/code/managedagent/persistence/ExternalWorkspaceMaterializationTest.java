@@ -58,7 +58,7 @@ class ExternalWorkspaceMaterializationTest {
     private DataSourceTransactionManager manager;
     private ExternalStorageRegistrationStore registrations;
     private ExternalWorkspaceMaterializationStore store;
-    private ManagedWorkspaceRegistry registry;
+    private JdbcManagedWorkspaceRegistry registry;
     private ManagedAgentProperties properties;
     private ServerProperties server;
     private MockMvc mvc;
@@ -76,7 +76,7 @@ class ExternalWorkspaceMaterializationTest {
         manager = new DataSourceTransactionManager(source);
         registrations = new ExternalStorageRegistrationStore(jdbc, manager);
         store = new ExternalWorkspaceMaterializationStore(jdbc, manager);
-        registry = new ManagedWorkspaceRegistry(jdbc);
+        registry = new JdbcManagedWorkspaceRegistry(jdbc);
         properties = new ManagedAgentProperties();
         properties.getRuntimeBroker().setToken("operator-secret");
         server = new ServerProperties();
@@ -210,12 +210,12 @@ class ExternalWorkspaceMaterializationTest {
             context.registerBean(ExternalStorageRegistrationStore.class, () -> registrations);
             context.registerBean(HarnessConnector.class, () -> harness);
             context.registerBean(com.alibaba.qwen.code.managedagent.contracts.workspace.RuntimeWarmer.class, () -> warmer);
-            context.registerBean(ManagedWorkspaceRegistry.class, () -> registry);
-            context.registerBean(WorkspaceExecutionStore.class, () -> new WorkspaceExecutionStore(jdbc, manager));
+            context.registerBean(com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.class, () -> registry);
+            context.registerBean(com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.class, () -> new JdbcWorkspaceExecutionStore(jdbc, manager));
             context.registerBean(com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles.class,
                     () -> mock(com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles.class));
             context.refresh();
-            var execution = context.getBean(WorkspaceExecutionStore.class);
+            var execution = context.getBean(com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.class);
             assertThat(registry.findReadable("tenant", "owner", "workspace").canCreateSession()).isFalse();
             when(harness.supportsLifecycle(profile)).thenReturn(true);
             assertThat(registry.findReadable("tenant", "owner", "workspace").canCreateSession()).isTrue();
@@ -259,7 +259,7 @@ class ExternalWorkspaceMaterializationTest {
                                 .build()));
                 var saved = sessions.requireSession("tenant", admitted.sessionId());
                 assertThat(saved.toolProfile()).isEqualTo(profile);
-                var privateStore = new ManagedSessionStore(jdbc);
+                var privateStore = new JdbcManagedSessionStore(jdbc);
                 String writerToken = "external-approval-writer-token-0123456789";
                 var writer = transaction.execute(status -> privateStore.acquireWriter("tenant", admitted.sessionId(), writerToken,
                         new ManagedSessionStoreModels.AcquireWriterRequest("workspace", "writer", 60_000L)));
@@ -391,7 +391,7 @@ class ExternalWorkspaceMaterializationTest {
             context.registerBean(ExternalStorageRegistrationStore.class, () -> registrations);
             context.registerBean(HarnessConnector.class, () -> harness);
             context.registerBean(com.alibaba.qwen.code.managedagent.contracts.workspace.RuntimeWarmer.class, () -> warmer);
-            context.registerBean(ManagedWorkspaceRegistry.class, () -> registry);
+            context.registerBean(com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.class, () -> registry);
             context.refresh();
             store.materialize("tenant", "workspace", "Name", "owner", "key");
             assertThat(registry.findReadable("tenant", "owner", "workspace").canCreateSession()).isTrue();
@@ -447,7 +447,7 @@ class ExternalWorkspaceMaterializationTest {
             context.registerBean(ExternalStorageRegistrationStore.class, () -> registrations);
             context.registerBean(HarnessConnector.class, () -> harness);
             context.registerBean(com.alibaba.qwen.code.managedagent.contracts.workspace.RuntimeWarmer.class, () -> warmer);
-            context.registerBean(ManagedWorkspaceRegistry.class, () -> registry);
+            context.registerBean(com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.class, () -> registry);
             context.refresh();
             store.materialize("tenant", "workspace", "Name", "owner", "key");
             register("tenant", "healthy");

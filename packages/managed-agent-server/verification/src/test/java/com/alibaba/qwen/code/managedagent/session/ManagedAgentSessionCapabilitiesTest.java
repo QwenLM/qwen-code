@@ -88,7 +88,7 @@ class ManagedAgentSessionCapabilitiesTest {
     @Test
     void anUnprovableExternalRegistrationDoesNotFailTheWholeSessionPage() {
         var store = mock(AgentStateStore.class);
-        var workspaces = mock(ManagedWorkspaceRegistry.class);
+        var workspaces = mock(JdbcManagedWorkspaceRegistry.class);
         var harness = mock(HarnessConnector.class);
         var service = new ManagedAgentService(store, new RequestDigests(),
                 mock(HarnessCoordinator.class), harness, workspaces,
@@ -106,7 +106,7 @@ class ManagedAgentSessionCapabilitiesTest {
         when(workspaces.canRead("tenant", "actor", "workspace")).thenReturn(true);
         when(workspaces.findReadable(eq("tenant"), eq("actor"), anyCollection()))
                 .thenReturn(Map.of("workspace",
-                        new ManagedWorkspaceRegistry.ReadableGrant("workspace", 1, "storage", true)));
+                        new JdbcManagedWorkspaceRegistry.ReadableGrant("workspace", 1, "storage", true)));
         when(store.sessionsWithExecutionRegistryFacts(eq("tenant"), any()))
                 .thenReturn(Set.of("external", "local"));
         when(store.requireSession("tenant", "external")).thenReturn(external);

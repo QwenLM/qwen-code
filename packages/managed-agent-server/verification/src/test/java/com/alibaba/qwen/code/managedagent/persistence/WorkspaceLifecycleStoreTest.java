@@ -234,7 +234,7 @@ class WorkspaceLifecycleStoreTest {
         fixture.jdbc.update("UPDATE ma_session SET tool_profile = ?",
                 WorkspaceToolProfiles.EXTERNAL_FILES);
         var execution = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(
-                new WorkspaceExecutionStore(fixture.jdbc,
+                new JdbcWorkspaceExecutionStore(fixture.jdbc,
                         new DataSourceTransactionManager(fixture.jdbc.getDataSource())));
 
         assertThatThrownBy(() -> execution.authorizeExternal(

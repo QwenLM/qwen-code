@@ -40,7 +40,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class ExternalWorkspaceOwnershipTest {
     private ManagedSchemaJdbcTemplate jdbc;
-    private WorkspaceExecutionStore ownership;
+    private JdbcWorkspaceExecutionStore ownership;
     private JdbcRuntimeBindingRepository bindings;
     private JdbcRuntimeSessionRepository sessions;
     private JdbcToolExecutionRepository executions;
@@ -73,7 +73,7 @@ class ExternalWorkspaceOwnershipTest {
         bindings = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("owner-test", new byte[32]));
         sessions = new JdbcRuntimeSessionRepository(source);
         executions = new JdbcToolExecutionRepository(source);
-        ownership = new WorkspaceExecutionStore(jdbc, manager);
+        ownership = new JdbcWorkspaceExecutionStore(jdbc, manager);
         var scope = new RuntimeScope("tenant", "workspace", "1", "/remote/workspace",
                 WorkspaceExecutionProfile.CAPABILITY_DIGEST, "session");
         var request = new RuntimeProvisionRequest(scope, "harness", ExternalWorkspaceProvisioner.KIND, "workspace");
@@ -247,7 +247,7 @@ class ExternalWorkspaceOwnershipTest {
         var member = jdbc.queryForMap("SELECT * FROM ma_runtime_session");
         assertThat(binding.hasStoppedWriters()).isTrue();
         var manager = org.mockito.Mockito.spy(new DataSourceTransactionManager(jdbc.getDataSource()));
-        var recovery = new WorkspaceExecutionStore(jdbc, manager);
+        var recovery = new JdbcWorkspaceExecutionStore(jdbc, manager);
         org.mockito.Mockito.clearInvocations(manager);
         assertThatThrownBy(() -> recovery.releaseLost(binding))
                 .isInstanceOfSatisfying(RuntimeBrokerException.class, error -> {
@@ -270,7 +270,7 @@ class ExternalWorkspaceOwnershipTest {
         assertThat(jdbc.queryForObject("SELECT execution_storage_key FROM ma_runtime_session", String.class)).isNull();
         assertThat(jdbc.queryForMap("SELECT * FROM ma_storage_owner")).isEqualTo(owner);
         ownership.assertOriginalExternal(context, session, binding, bindings);
-        assertThat(new WorkspaceExecutionStore(jdbc, new DataSourceTransactionManager(jdbc.getDataSource())).hasHolder(binding)).isTrue();
+        assertThat(new JdbcWorkspaceExecutionStore(jdbc, new DataSourceTransactionManager(jdbc.getDataSource())).hasHolder(binding)).isTrue();
         ownership.claim(context, session, binding, bindings);
         assertThat(ownership.isHeld(context, session, binding, bindings)).isTrue();
         var competitor = sessions.findOrCreate(new RuntimeSessionRecord(new RuntimeSession("harness", "competitor", "bootstrap",
