@@ -8,15 +8,22 @@ import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import type { Worker } from 'node:worker_threads';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ModRuntime, type ModPromptQueue } from './runtime.js';
+import { ModBudget } from './dispatch.js';
 import { ModStore } from './store.js';
 import {
   MOD_MAX_BYTES,
+  MOD_TIMEOUT_MS,
   type ModLog,
+  type ModModelCompleteInput,
+  type ModModelCompleteResult,
+  type ModModelHost,
   type ModOptions,
   type ModQueuedPrompt,
   type ModSessionFacts,
+  type ModWorkerReply,
 } from './types.js';
 import type { ModToolNext } from './tool-events.js';
 
@@ -435,6 +442,7 @@ describe('ModRuntime with the real QuickJS worker', () => {
             'clock.sleep',
             'command.register',
             'command.run',
+            'model.complete',
             'session.cwd',
             'session.end',
             'session.id',
@@ -1615,6 +1623,733 @@ describe('ModRuntime with the real QuickJS worker', () => {
     );
     expect(Date.now() - started).toBeLessThan(3000);
   });
+  describe('$.model.complete', () => {
+    const usage = {
+      input_tokens: 3,
+      output_tokens: 2,
+      cache_read_input_tokens: 1,
+      cache_creation_input_tokens: 0,
+    };
+    const aborted = {
+      isAnswered: false,
+      reason: 'aborted',
+      usage: {
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+      },
+    };
+    const createModels = async (sources: string[], host?: ModModelHost) => {
+      const runtime = await ModRuntime.createGroup(
+        sources.map((source, index) => ({
+          id: `mod-${index}`,
+          name: `mod-${index}`,
+          source: { root: '/fixture', entry: '/fixture/mod.js', source },
+          options: {},
+        })),
+        '/workspace',
+        (log) => logs.push(log),
+        signal(),
+        undefined,
+        'terminal',
+        '1.2.3',
+        undefined,
+        undefined,
+        undefined,
+        false,
+        undefined,
+        host,
+      );
+      runtimes.push(runtime);
+      return runtime;
+    };
+    // A command that runs the requests its args name, one result each.
+    const asker = (requests: string) =>
+      fixture(`
+        const results = [];
+        for (const request of ${requests}) {
+          try { results.push(await $.model.complete(request)); }
+          catch (error) { results.push(String(error)); }
+        }
+        return {text: JSON.stringify(results)};`);
+    const guestSignal = `
+      const listeners = new Set();
+      const stop = {aborted: false, addEventListener: (_, f) => listeners.add(f),
+        removeEventListener: (_, f) => listeners.delete(f)};
+      const abort = () => {
+        stop.aborted = true;
+        for (const listener of listeners) listener();
+      };`;
+
+    it('runs a request on the host, its blocks joined and kept beside it', async () => {
+      const asked: ModModelCompleteInput[] = [];
+      const runtime = await createModels(
+        [
+          asker(`[{model: 'haiku', prompt: [{text: 'A', cache: true}, {text: 'B'}],
+            system: 'S', maxTokens: 10, effort: 'low', timeoutMs: 5000},
+            {model: 'm', prompt: 'p'}]`),
+        ],
+        async (input) => {
+          asked.push(input);
+          return input.prompt === 'p'
+            ? { isAnswered: false, reason: 'empty-reply', usage }
+            : { isAnswered: true, text: 'answer', usage };
+        },
+      );
+      expect(
+        JSON.parse(await runtime.runCommand('hello', '', signal())),
+      ).toEqual([
+        { isAnswered: true, text: 'answer', usage },
+        { isAnswered: false, reason: 'empty-reply', usage },
+      ]);
+      expect(asked).toEqual([
+        {
+          model: 'haiku',
+          prompt: 'AB',
+          system: 'S',
+          promptBlocks: [{ text: 'A', cache: true }, { text: 'B' }],
+          maxTokens: 10,
+          effort: 'low',
+          timeoutMs: 5000,
+        },
+        { model: 'm', prompt: 'p' },
+      ]);
+    });
+
+    it('rejects a request it will not send, and one the host refuses', async () => {
+      const host = vi.fn<ModModelHost>(async (input) => {
+        throw new Error(
+          `model ${JSON.stringify(input.model)} is not configured`,
+        );
+      });
+      const requests = `[{model: 'm'}, {model: '', prompt: 'p'},
+        {model: 'm', prompt: 'p', maxTokens: 64001},
+        {model: 'm', prompt: 'p', maxTokens: 1.5},
+        {model: 'm', prompt: 'p', effort: 'huge'},
+        {model: 'm', prompt: 'p', timeoutMs: 0},
+        {model: 'm', prompt: [{text: 'p', cache: false}]},
+        {model: 'm', prompt: 'p', tools: []},
+        {model: 'gone', prompt: 'p'}]`;
+      const runtime = await createModels([asker(requests)], host);
+      const results = JSON.parse(
+        await runtime.runCommand('hello', '', signal()),
+      );
+      expect(results.slice(0, 8)).toEqual(
+        Array(8).fill(expect.stringContaining('Mod model.complete')),
+      );
+      expect(results[2]).toContain('over the limit of 64000');
+      expect(results[8]).toContain(
+        'Mod model.complete: model "gone" is not configured',
+      );
+      expect(host).toHaveBeenCalledTimes(1);
+      const unhosted = await createModels([
+        asker(`[{model: 'm', prompt: 'p'}]`),
+      ]);
+      expect(
+        JSON.parse(await unhosted.runCommand('hello', '', signal())),
+      ).toEqual([expect.stringContaining('this host runs no model calls')]);
+    });
+
+    it('lets another plugin rewrite, answer or deny model.complete', async () => {
+      const asked: ModModelCompleteInput[] = [];
+      const runtime = await createModels(
+        [
+          `export function register(on) {
+            on('model.complete', ($, e, next) =>
+              e.prompt === 'mock'
+                ? {value: {isAnswered: true, text: 'mocked', usage: {input_tokens: 0,
+                    output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0}}}
+                : e.prompt === 'deny'
+                  ? {deny: 'no model calls here'}
+                  : next({...e, prompt: e.prompt + '!', system: null}));
+          }`,
+          asker(`[{model: 'm', prompt: 'mock'}, {model: 'm', prompt: 'deny'},
+            {model: 'm', prompt: 'x', system: 'S'}]`),
+        ],
+        async (input) => {
+          asked.push(input);
+          return { isAnswered: true, text: input.prompt, usage };
+        },
+      );
+      const results = JSON.parse(
+        await runtime.runCommand('hello', '', signal()),
+      );
+      expect(results[0]).toMatchObject({ isAnswered: true, text: 'mocked' });
+      expect(results[1]).toContain('no model calls here');
+      expect(results[2]).toEqual({ isAnswered: true, text: 'x!', usage });
+      expect(asked).toEqual([{ model: 'm', prompt: 'x!' }]);
+    });
+
+    it('cuts a discarded downstream call when model middleware returns', async () => {
+      let markStarted!: () => void;
+      const started = new Promise<void>((resolve) => {
+        markStarted = resolve;
+      });
+      let downstream: AbortSignal | undefined;
+      let cancelledBeforeWitness: boolean | undefined;
+      const host = vi.fn<ModModelHost>(async ({ prompt }, active) => {
+        if (prompt === 'discarded') {
+          downstream = active;
+          markStarted();
+          await new Promise<never>((_, reject) => {
+            active.addEventListener('abort', () => reject(active.reason), {
+              once: true,
+            });
+          });
+        }
+        if (prompt === 'ready') await started;
+        if (prompt === 'witness') cancelledBeforeWitness = downstream?.aborted;
+        return { isAnswered: true, text: prompt, usage };
+      });
+      const runtime = await createModels(
+        [
+          `export function register(on) {
+            on('model.complete', {prompt:'outer'}, async ($, e, next) => {
+              void next({...e, prompt:'discarded'}).catch(() => {});
+              await $.model.complete({model:'m', prompt:'ready'});
+              return {value:{isAnswered:true, text:'local', usage:${JSON.stringify(usage)}}};
+            });
+          }`,
+          fixture(`
+            const local = await $.model.complete({model:'m', prompt:'outer'});
+            const witness = await $.model.complete({model:'m', prompt:'witness'});
+            return {text:JSON.stringify([local.text, witness.text])};`),
+        ],
+        host,
+      );
+      expect(
+        JSON.parse(
+          await runtime.runCommand('hello', '', AbortSignal.timeout(3000)),
+        ),
+      ).toEqual(['local', 'witness']);
+      expect(cancelledBeforeWitness).toBe(true);
+    });
+
+    it("cuts the call when the caller's signal aborts", async () => {
+      const cut: boolean[] = [];
+      const runtime = await createModels(
+        [
+          fixture(`
+            const listeners = [];
+            const stop = {aborted: false, addEventListener: (type, f) => listeners.push(f),
+              removeEventListener: () => {}};
+            const running = $.model.complete({model: 'm', prompt: 'slow'}, {signal: stop});
+            await $.clock.sleep(30);
+            stop.aborted = true;
+            for (const listener of listeners) listener();
+            const before = await $.model.complete({model: 'm', prompt: 'never'}, {signal: stop});
+            return {text: JSON.stringify([await running, before])};`),
+        ],
+        (input, hostSignal) =>
+          new Promise((resolve) => {
+            hostSignal.addEventListener('abort', () => {
+              cut.push(true);
+              resolve({ isAnswered: true, text: 'late', usage });
+            });
+          }),
+      );
+      expect(
+        JSON.parse(await runtime.runCommand('hello', '', signal())),
+      ).toEqual([aborted, aborted]);
+      // One request was made and cut; the already-aborted one was never sent.
+      expect(cut).toEqual([true]);
+    });
+
+    it('skips a model call aborted in the same guest execution slice', async () => {
+      const host = vi.fn<ModModelHost>(async ({ prompt }) => ({
+        isAnswered: true,
+        text: prompt,
+        usage,
+      }));
+      const runtime = await createModels(
+        [
+          fixture(`
+            ${guestSignal}
+            const pending = $.model.complete({model:'m', prompt:'skip'}, {signal:stop});
+            const sibling = $.model.complete({model:'m', prompt:'keep'});
+            abort();
+            return {text:JSON.stringify(await Promise.all([pending, sibling]))};`),
+        ],
+        host,
+      );
+      expect(
+        JSON.parse(await runtime.runCommand('hello', '', signal())),
+      ).toEqual([aborted, { isAnswered: true, text: 'keep', usage }]);
+      expect(host.mock.calls.map(([input]) => input.prompt)).toEqual(['keep']);
+    });
+
+    it('skips a model request whose signal aborts during serialization', async () => {
+      const host = vi.fn<ModModelHost>(async () => ({
+        isAnswered: true,
+        text: 'late',
+        usage,
+      }));
+      const runtime = await createModels(
+        [
+          fixture(`
+            const listeners = new Set();
+            const stop = {
+              aborted: false,
+              addEventListener: (type, fn) => listeners.add(fn),
+              removeEventListener: (type, fn) => listeners.delete(fn),
+            };
+            const result = await $.model.complete({
+              toJSON() {
+                stop.aborted = true;
+                for (const listener of listeners) listener();
+                return {model:'m', prompt:'skip'};
+              },
+            }, {signal: stop});
+            return {text: JSON.stringify({result, listeners: listeners.size})};`),
+        ],
+        host,
+      );
+      expect(
+        JSON.parse(await runtime.runCommand('hello', '', signal())),
+      ).toEqual({ result: aborted, listeners: 0 });
+      expect(host).not.toHaveBeenCalled();
+    });
+
+    it.each(['host', 'middleware'])(
+      'settles a retained %s model call as aborted when its dispatch ends',
+      async (mode) => {
+        const cut = vi.fn();
+        const host = vi.fn<ModModelHost>(
+          (_, active) =>
+            new Promise((_, reject) => {
+              active.addEventListener('abort', () => {
+                cut();
+                reject(active.reason);
+              });
+            }),
+        );
+        const runtime = await createModels(
+          [
+            `let pending;
+            export function register(on) {
+              on('session.start', async ($, e, next) => {
+                await $.command.register({name:'hello', description:'Hello'});
+                return next(e);
+              });
+              on('command.run', async ($, e) => {
+                if (e.args === 'start') {
+                  pending = $.model.complete({model:'m', prompt:'${mode}'});
+                  void pending.catch(() => {});
+                  await $.clock.sleep(50);
+                  return {text:'started'};
+                }
+                return {text:JSON.stringify(await pending)};
+              });
+              on('model.complete', {prompt:'middleware'}, async ($, e, next) => {
+                await $.model.complete({model:'m', prompt:'inner'});
+                return next({...e, prompt:'stale'});
+              });
+            }`,
+          ],
+          host,
+        );
+        expect(
+          await runtime.runCommand('hello', 'start', AbortSignal.timeout(3000)),
+        ).toBe('started');
+        expect(
+          JSON.parse(await runtime.runCommand('hello', 'read', signal())),
+        ).toEqual(aborted);
+        expect(host.mock.calls.map(([input]) => input.prompt)).toEqual([
+          mode === 'host' ? 'host' : 'inner',
+        ]);
+        expect(cut).toHaveBeenCalledOnce();
+      },
+    );
+
+    it.each(['signal', 'timeout'])(
+      'cancels middleware and its nested model call on %s',
+      async (mode) => {
+        const cut = vi.fn();
+        const host = vi.fn<ModModelHost>(async ({ prompt }, active) => {
+          if (prompt !== 'inner')
+            return { isAnswered: true, text: prompt, usage };
+          return new Promise((_, reject) => {
+            active.addEventListener('abort', () => {
+              cut();
+              reject(active.reason);
+            });
+          });
+        });
+        const runtime = await createModels(
+          [
+            `export function register(on) {
+              on('model.complete', {prompt:'outer'}, async ($) => ({
+                value: await $.model.complete({model:'m', prompt:'inner'})
+              }));
+            }`,
+            fixture(`
+              const listeners = [];
+              const stop = {aborted: false, addEventListener: (type, f) => listeners.push(f),
+                removeEventListener: () => {}};
+              const request = {model:'m', prompt:'outer'};
+              if (e.args === 'timeout') request.timeoutMs = 200;
+              const running = $.model.complete(request, {signal: stop});
+              if (e.args === 'signal') {
+                await $.clock.sleep(50);
+                stop.aborted = true;
+                for (const listener of listeners) listener();
+              }
+              const result = await running;
+              const after = await $.model.complete({model:'m', prompt:'after'});
+              return {text: JSON.stringify([result, after])};`),
+          ],
+          host,
+        );
+        expect(
+          JSON.parse(
+            await runtime.runCommand('hello', mode, AbortSignal.timeout(3000)),
+          ),
+        ).toEqual([aborted, { isAnswered: true, text: 'after', usage }]);
+        expect(host.mock.calls.map(([input]) => input.prompt)).toEqual([
+          'inner',
+          'after',
+        ]);
+        expect(cut).toHaveBeenCalledOnce();
+      },
+    );
+
+    it.each(['synchronous', 'resumed'])(
+      'keeps a %s sibling model hook running when another call expires',
+      async (mode) => {
+        const host = vi.fn<ModModelHost>(async ({ prompt }) => ({
+          isAnswered: true,
+          text: prompt,
+          usage,
+        }));
+        const runtime = await createModels(
+          [
+            `export function register(on) {
+              on('session.start', async ($, e, next) => {
+                await $.command.register({name:'hello', description:'Hello'});
+                return next(e);
+              });
+              on('command.run', async ($) => {
+                const answers = await Promise.all([
+                  $.model.complete({model:'m', prompt:'slow', timeoutMs:50}),
+                  $.model.complete({model:'m', prompt:'raw', timeoutMs:3000}),
+                ]);
+                return {text:JSON.stringify(answers)};
+              });
+              on('model.complete', async ($, e, next) => {
+                if (e.prompt === 'slow') await $.clock.sleep(300);
+                else {
+                  ${mode === 'resumed' ? 'await Promise.resolve();' : ''}
+                  const end = Date.now() + 150;
+                  while (Date.now() < end) {}
+                }
+                return next({...e, prompt:'sanitized'});
+              });
+            }`,
+          ],
+          host,
+        );
+        expect(
+          JSON.parse(await runtime.runCommand('hello', '', signal())),
+        ).toEqual([aborted, { isAnswered: true, text: 'sanitized', usage }]);
+        expect(host.mock.calls.map(([input]) => input.prompt)).toEqual([
+          'sanitized',
+        ]);
+      },
+    );
+
+    it('recovers an expired hook without interrupting its resumed sibling', async () => {
+      const host = vi.fn<ModModelHost>(async ({ prompt }) => ({
+        isAnswered: true,
+        text: prompt,
+        usage,
+      }));
+      const runtime = await createModels(
+        [
+          `export function register(on) {
+            on('session.start', async ($, e, next) => {
+              await $.command.register({name:'hello', description:'Hello'});
+              return next(e);
+            });
+            on('command.run', async ($) => {
+              const slow = $.model.complete({model:'m', prompt:'slow'});
+              await $.clock.sleep(${MOD_TIMEOUT_MS - 400});
+              const normal = $.model.complete({model:'m', prompt:'raw'});
+              return {text:JSON.stringify(await Promise.all([slow, normal]))};
+            });
+            on('model.complete', async ($, e, next) => {
+              if (e.prompt === 'slow') {
+                await $.clock.sleep(${MOD_TIMEOUT_MS + 1000});
+                return next(e);
+              }
+              await Promise.resolve();
+              const end = Date.now() + 750;
+              while (Date.now() < end) {}
+              return next({...e, prompt:'sanitized'});
+            }).catch(($, e, next) => {
+              if (e.prompt === 'slow' && next.error.kind === 'timeout')
+                return {value:{isAnswered:true, text:'recovered', usage:${JSON.stringify(usage)}}};
+            });
+          }`,
+        ],
+        host,
+      );
+      expect(
+        JSON.parse(
+          await runtime.runCommand('hello', '', AbortSignal.timeout(16000)),
+        ),
+      ).toEqual([
+        { isAnswered: true, text: 'recovered', usage },
+        { isAnswered: true, text: 'sanitized', usage },
+      ]);
+      expect(host.mock.calls.map(([input]) => input.prompt)).toEqual([
+        'sanitized',
+      ]);
+    }, 20_000);
+
+    it('does not forward a request after middleware exhausts its deadline', async () => {
+      const host = vi.fn<ModModelHost>(async () => ({
+        isAnswered: true,
+        text: 'too late',
+        usage,
+      }));
+      const runtime = await createModels(
+        [
+          `export function register(on) {
+            on('model.complete', ($, e, next) => {
+              const end = Date.now() + 200;
+              while (Date.now() < end) {}
+              return next(e);
+            });
+          }`,
+          asker(`[{model:'m', prompt:'p', timeoutMs:50}]`),
+        ],
+        host,
+      );
+      expect(
+        JSON.parse(await runtime.runCommand('hello', '', signal())),
+      ).toEqual([aborted]);
+      expect(host).not.toHaveBeenCalled();
+    });
+
+    it.each(['queued', 'running'])(
+      'cancels a %s model call with its root dispatch',
+      async (phase) => {
+        const root = new AbortController();
+        let cutImmediately = false;
+        const host = vi.fn<ModModelHost>(async (_, active) => {
+          root.abort();
+          cutImmediately = active.aborted;
+          return { isAnswered: true, text: 'late', usage };
+        });
+        const runtime = await createModels(
+          [asker(`[{model:'m', prompt:'p'}]`)],
+          host,
+        );
+        const worker = Reflect.get(runtime, 'worker') as Worker;
+        const onQueued = vi.fn((reply: ModWorkerReply) => {
+          if (reply.type === 'model-complete') root.abort();
+        });
+        // Abort after the worker posts the request, before the host handles it.
+        if (phase === 'queued') worker.prependListener('message', onQueued);
+        try {
+          await expect(
+            runtime.runCommand('hello', '', root.signal),
+          ).rejects.toThrow('Mod dispatch cancelled');
+          if (phase === 'queued') {
+            expect(onQueued).toHaveBeenCalledWith(
+              expect.objectContaining({ type: 'model-complete' }),
+            );
+            expect(host).not.toHaveBeenCalled();
+          } else {
+            expect(host).toHaveBeenCalledOnce();
+            expect(cutImmediately).toBe(true);
+          }
+        } finally {
+          worker.removeListener('message', onQueued);
+        }
+      },
+    );
+
+    it.each(['signal', 'owner'])(
+      'skips a queued model call cancelled by its %s before host admission',
+      async (mode) => {
+        const host = vi.fn<ModModelHost>(async () => ({
+          isAnswered: true,
+          text: 'too late',
+          usage,
+        }));
+        const runtime = await createModels(
+          [
+            `let retained;${fixture(`
+              if (e.args === 'read') return {text:JSON.stringify(await retained)};
+              ${guestSignal}
+              retained = $.model.complete({model:'m', prompt:'skip'}, {signal:stop});
+              await $.clock.sleep(1);
+              if (e.args === 'owner') return {text:'started'};
+              abort();
+              return {text:JSON.stringify(await retained)};`)}`,
+          ],
+          host,
+        );
+        const worker = Reflect.get(runtime, 'worker') as Worker;
+        const [receive] = worker.listeners('message') as Array<
+          (reply: ModWorkerReply) => void
+        >;
+        const queued: ModWorkerReply[] = [];
+        let released = false;
+        // Delay handling without changing the FIFO order of worker messages.
+        const delay = (reply: ModWorkerReply) => {
+          if (reply.type !== 'model-complete' && !queued.length) {
+            receive(reply);
+            return;
+          }
+          queued.push(reply);
+          if (reply.type === 'host-cancel') {
+            released = true;
+            for (const pending of queued.splice(0)) receive(pending);
+          }
+        };
+        worker.off('message', receive);
+        worker.on('message', delay);
+        try {
+          const answer = await runtime.runCommand(
+            'hello',
+            mode,
+            AbortSignal.timeout(3000),
+          );
+          if (mode === 'owner') {
+            expect(answer).toBe('started');
+            expect(
+              JSON.parse(await runtime.runCommand('hello', 'read', signal())),
+            ).toEqual(aborted);
+          } else {
+            expect(JSON.parse(answer)).toEqual(aborted);
+          }
+          expect(released).toBe(true);
+          expect(host).not.toHaveBeenCalled();
+        } finally {
+          worker.off('message', delay);
+          worker.on('message', receive);
+        }
+      },
+    );
+
+    it('does not send a model call that expires while queued for the host', async () => {
+      const host = vi.fn<ModModelHost>(async () => ({
+        isAnswered: true,
+        text: 'too late',
+        usage,
+      }));
+      const runtime = await createModels(
+        [asker(`[{model:'m', prompt:'p', timeoutMs:200}]`)],
+        host,
+      );
+      const worker = Reflect.get(runtime, 'worker') as Worker;
+      const stall = new Int32Array(new SharedArrayBuffer(4));
+      let queued = false;
+      const delay = (reply: ModWorkerReply) => {
+        if (reply.type !== 'model-complete') return;
+        queued = true;
+        Atomics.wait(stall, 0, 0, 250);
+      };
+      worker.prependListener('message', delay);
+      try {
+        expect(
+          JSON.parse(await runtime.runCommand('hello', '', signal())),
+        ).toEqual([aborted]);
+        expect(queued).toBe(true);
+        expect(host).not.toHaveBeenCalled();
+      } finally {
+        worker.removeListener('message', delay);
+      }
+    });
+
+    it('stops the dispatch clock while the host runs the call', async () => {
+      const pause = vi.spyOn(ModBudget.prototype, 'pause');
+      try {
+        const runtime = await createModels(
+          [asker(`[{model: 'm', prompt: 'p'}]`)],
+          async () => {
+            await new Promise((resolve) => setTimeout(resolve, 100));
+            return { isAnswered: true, text: 'done', usage };
+          },
+        );
+        pause.mockClear();
+        expect(
+          JSON.parse(await runtime.runCommand('hello', '', signal())),
+        ).toEqual([{ isAnswered: true, text: 'done', usage }]);
+        expect(pause).toHaveBeenCalled();
+      } finally {
+        pause.mockRestore();
+      }
+    });
+
+    it('lends the dispatch clock to the model a permission check waits for', async () => {
+      let started = false;
+      let resolve!: (result: ModModelCompleteResult) => void;
+      const reply = new Promise<ModModelCompleteResult>((done) => {
+        resolve = done;
+      });
+      const runtime = await createModels(
+        [
+          `export function register(on) {
+            on('tool.check', async ($, e, next) => {
+              await $.model.complete({model:'m', prompt:'p'});
+              return next(e);
+            });
+          }`,
+        ],
+        () => {
+          pause.mockClear();
+          started = true;
+          return reply;
+        },
+      );
+      const pause = vi.spyOn(ModBudget.prototype, 'pause');
+      const next: ModToolNext = async (changed, active, check) => ({
+        result: await check(
+          { tool: changed.tool, input: {}, tool_use_id: changed.tool_use_id },
+          { decision: 'allow' },
+          active,
+        ),
+      });
+      const tool = runtime.runTool(
+        { tool: 'write_file', tool_use_id: 'call-1' },
+        next,
+        AbortSignal.timeout(3000),
+      );
+      try {
+        const paused = vi.waitFor(() => {
+          expect(started).toBe(true);
+          expect(pause).toHaveBeenCalled();
+        });
+        expect(await Promise.race([paused, tool])).toBeUndefined();
+      } finally {
+        resolve({ isAnswered: true, text: 'done', usage });
+        pause.mockRestore();
+      }
+      await expect(tool).resolves.toEqual({ result: { decision: 'allow' } });
+    });
+
+    it('lists model.complete as a method only where the host runs it', async () => {
+      const version = fixture(
+        'return {text: JSON.stringify((await $.session.version()).qwen.methods)};',
+      );
+      const hosted = await createModels([version], async () => ({
+        isAnswered: true,
+        text: '',
+        usage,
+      }));
+      expect(
+        JSON.parse(await hosted.runCommand('hello', '', signal())),
+      ).toContain('model.complete');
+      const unhosted = await createModels([version]);
+      expect(
+        JSON.parse(await unhosted.runCommand('hello', '', signal())),
+      ).not.toContain('model.complete');
+    });
+  });
 
   describe('$.store', () => {
     const dirs: string[] = [];
@@ -1658,6 +2393,7 @@ describe('ModRuntime with the real QuickJS worker', () => {
         undefined,
         undefined,
         false,
+        undefined,
         undefined,
         dir === undefined ? undefined : new ModStore(dir),
       );
@@ -1817,6 +2553,7 @@ describe('ModRuntime with the real QuickJS worker', () => {
         undefined,
         undefined,
         false,
+        undefined,
         undefined,
         new SlowStore(dir),
       );

@@ -98,6 +98,72 @@ export interface ModTurnUsage {
   model: string;
 }
 
+/** How hard a request asks the model to think, in Claude Code's levels. */
+export const MOD_MODEL_EFFORTS = [
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+  'max',
+] as const;
+export type ModModelEffort = (typeof MOD_MODEL_EFFORTS)[number];
+
+/** A block of `prompt` or `system`, sent as written. */
+export interface ModModelTextBlock {
+  text: string;
+  cache?: true;
+}
+
+/**
+ * What a `model.complete` hook reads as `e`, in Claude Code's
+ * `ModelCompleteInput`: the caller's blocks joined into `prompt` and
+ * `system`, and kept beside them as given.
+ */
+export interface ModModelCompleteInput {
+  model: string;
+  prompt: string;
+  /** `null` or `false`, written by a hook, sends none. */
+  system?: string | null | false;
+  promptBlocks?: ModModelTextBlock[];
+  systemBlocks?: ModModelTextBlock[];
+  maxTokens?: number;
+  effort?: ModModelEffort;
+  timeoutMs?: number;
+}
+
+/** What one model call cost, in the API's spelling. */
+export interface ModModelUsage {
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_input_tokens: number;
+  cache_creation_input_tokens: number;
+}
+
+/** What `$.model.complete` resolves to, in Claude Code's shape. */
+export type ModModelCompleteResult =
+  | { isAnswered: true; text: string; usage: ModModelUsage }
+  | {
+      isAnswered: false;
+      reason: 'api-error';
+      status: number | null;
+      error: string;
+      usage: ModModelUsage;
+    }
+  | {
+      isAnswered: false;
+      reason: 'empty-reply' | 'aborted';
+      usage: ModModelUsage;
+    };
+
+/**
+ * Runs one completion for a Mod on the host. It rejects only a request the
+ * host refuses to send; what the provider did is a result.
+ */
+export type ModModelHost = (
+  input: ModModelCompleteInput,
+  signal: AbortSignal,
+) => Promise<ModModelCompleteResult>;
+
 export interface ModTurnStart {
   text: string;
   turnId: string;
@@ -167,6 +233,8 @@ export type ModRequest =
       prompts?: boolean;
       /** Whether the host runs the prompts `$.prompt.submit` submits. */
       submits?: boolean;
+      /** Whether the host runs `$.model.complete` calls. */
+      models?: boolean;
       /** Whether the host keeps each plugin's `$.store`. */
       stores?: boolean;
     }
@@ -193,6 +261,12 @@ export type ModRequest =
   | { type: 'render'; input: ModRenderInput }
   | { type: 'turn-abort-result'; id: number; error?: string }
   | { type: 'prompt-queue-result'; id: number; refused?: string }
+  | {
+      type: 'model-result';
+      id: number;
+      result?: ModModelCompleteResult;
+      error?: string;
+    }
   | { type: 'store-result'; id: number; value?: unknown; error?: string };
 
 export type ModReply =
@@ -209,6 +283,13 @@ export type ModReply =
     }
   | { type: 'turn-abort'; id: number; turnId: string }
   | { type: 'prompt-queue'; id: number; prompt: ModQueuedPrompt }
+  | {
+      type: 'model-complete';
+      id: number;
+      input: ModModelCompleteInput;
+      deadline: number;
+      cancellation: Int32Array;
+    }
   | { type: 'store'; id: number; operation: ModStoreOperation }
   | { type: 'invalidate'; plugin: string; event: string }
   | ({ type: 'log'; plugin: string } & ModLog);
