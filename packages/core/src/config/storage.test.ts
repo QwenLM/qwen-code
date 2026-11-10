@@ -413,9 +413,9 @@ describe('Storage – runtime path methods use getRuntimeBaseDir', () => {
 
     const storage = new Storage(longRoot);
     const projectId = path.basename(storage.getProjectDir());
-    expect(Buffer.byteLength(projectId, 'utf8')).toBeLessThanOrEqual(
-      PROJECT_DIR_NAME_MAX,
-    );
+    // Pinned to the limit exactly: a lowered readable budget still fits under
+    // NAME_MAX, so only an exact length asserts the budget itself.
+    expect(Buffer.byteLength(projectId, 'utf8')).toBe(PROJECT_DIR_NAME_MAX);
     expect(projectId).toContain(getProjectHash(longRoot).slice(0, 16));
     expect(projectId.startsWith(sanitizeCwd(longRoot).slice(0, 64))).toBe(true);
   });
@@ -458,9 +458,19 @@ describe('Storage – runtime path methods use getRuntimeBaseDir', () => {
 
   it('getProjectDir gives distinct long project paths distinct directories', () => {
     const base = path.resolve('workspace');
-    const first = new Storage(path.join(base, 'a'.repeat(200), 'one'));
-    const second = new Storage(path.join(base, 'a'.repeat(200), 'two'));
-    expect(first.getProjectDir()).not.toBe(second.getProjectDir());
+    const firstRoot = path.join(base, 'a'.repeat(300), 'one');
+    const secondRoot = path.join(base, 'a'.repeat(300), 'two');
+    // Both roots must exceed the limit, or the difference between them comes
+    // from their tails and deleting the hash suffix would still pass. Compare
+    // the whole path: sanitizeCwd truncates at the limit by construction, so
+    // it can only reach it, never exceed it.
+    for (const root of [firstRoot, secondRoot])
+      expect(Buffer.byteLength(root, 'utf8')).toBeGreaterThan(
+        PROJECT_DIR_NAME_MAX + 64,
+      );
+    expect(new Storage(firstRoot).getProjectDir()).not.toBe(
+      new Storage(secondRoot).getProjectDir(),
+    );
   });
 
   it('getProjectDir is stable for the same long project path', () => {

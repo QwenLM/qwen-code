@@ -988,9 +988,9 @@ describe('boundProjectIdentifier', () => {
     );
 
     const bounded = boundProjectIdentifier(longRoot);
-    expect(Buffer.byteLength(bounded, 'utf8')).toBeLessThanOrEqual(
-      PROJECT_DIR_NAME_MAX,
-    );
+    // Exact length: the 17-byte `-<hash>` suffix leaves a 238-byte readable
+    // budget, and a lower budget would still satisfy a `<=` ceiling.
+    expect(Buffer.byteLength(bounded, 'utf8')).toBe(PROJECT_DIR_NAME_MAX);
     expect(bounded).toContain(getProjectHash(longRoot).slice(0, 16));
     expect(bounded.startsWith(sanitizeCwd(longRoot).slice(0, 64))).toBe(true);
   });
@@ -1008,8 +1008,18 @@ describe('boundProjectIdentifier', () => {
 
   it('gives distinct long project paths distinct identifiers', () => {
     const base = path.resolve('workspace');
-    expect(
-      boundProjectIdentifier(path.join(base, 'a'.repeat(200), 'one')),
-    ).not.toBe(boundProjectIdentifier(path.join(base, 'a'.repeat(200), 'two')));
+    const first = path.join(base, 'a'.repeat(300), 'one');
+    const second = path.join(base, 'a'.repeat(300), 'two');
+    // Both roots must exceed the limit, or the difference between them comes
+    // from their tails and deleting the hash suffix would still pass. Compare
+    // the whole path: sanitizeCwd truncates at the limit by construction, so
+    // it can only reach it, never exceed it.
+    for (const root of [first, second])
+      expect(Buffer.byteLength(root, 'utf8')).toBeGreaterThan(
+        PROJECT_DIR_NAME_MAX + 64,
+      );
+    expect(boundProjectIdentifier(first)).not.toBe(
+      boundProjectIdentifier(second),
+    );
   });
 });

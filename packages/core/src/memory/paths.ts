@@ -153,8 +153,8 @@ export function getAutoMemoryRoot(projectRoot: string): string {
     const projectKey = useWorkspaceRoot
       ? path.resolve(projectRoot)
       : (findGitRoot(projectRoot) ?? path.resolve(projectRoot));
-    // `projects/<key>/auto-memory` joins the key as one component, so it hits
-    // the same NAME_MAX ceiling the chats directory does. Bounding only
+    // The key is joined as one component under `projects/`, so it hits the
+    // same NAME_MAX ceiling the chats directory does. Bounding only
     // Storage.getProjectDir() would leave auto memory failing with
     // ENAMETOOLONG for exactly the long roots that fix repairs.
     result = path.join(
