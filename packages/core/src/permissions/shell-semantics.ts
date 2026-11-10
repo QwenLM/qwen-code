@@ -2584,6 +2584,7 @@ function stripHeredocBodies(command: string): StrippedHeredocs {
   const lines = command.split('\n');
   const kept: string[] = [];
   const pendingDelimiters: string[] = [];
+  let reachableOpener = false;
   const lexer = new HeredocLexer();
 
   for (const line of lines) {
@@ -2596,6 +2597,13 @@ function stripHeredocBodies(command: string): StrippedHeredocs {
 
     kept.push(line);
     pendingDelimiters.push(...lexer.scan(line));
+    // An opener seen before the uncertainty can still be affected when it is
+    // not closed yet: its body starts on a later line, and an ambiguous quote
+    // or comment from here on could move that boundary.
+    if (lexer.takeUncertaintyRaised() && pendingDelimiters.length > 0) {
+      reachableOpener = true;
+    }
+    if (lexer.hasPossibleOpener()) reachableOpener = true;
     const commentStart = lexer.takeCommentStart();
     if (commentStart !== null) {
       // bash never executes a commented tail; dropping it keeps a `>` inside
@@ -2607,7 +2615,7 @@ function stripHeredocBodies(command: string): StrippedHeredocs {
   return {
     text: kept.join('\n'),
     uncertain: lexer.hasUncertainty(),
-    possibleOpener: lexer.hasPossibleOpener(),
+    possibleOpener: reachableOpener,
   };
 }
 
@@ -2684,6 +2692,8 @@ class HeredocLexer {
   private commentStart: number | null = null;
   /** Sticky: a `#` boundary was ambiguous, so this command's own parse is. */
   private ambiguousCommentBoundary = false;
+  /** Set when the line just scanned raised the uncertainty for the first time. */
+  private uncertaintyRaised = false;
   /**
    * True when the previous line ended with an unescaped `$` and a
    * backslash-newline, so a leading `$` on this line forms `$$` (the PID)
@@ -2704,6 +2714,13 @@ class HeredocLexer {
 
   hasPossibleOpener(): boolean {
     return this.possibleOpener;
+  }
+
+  /** True when the last scanned line raised the uncertainty. */
+  takeUncertaintyRaised(): boolean {
+    const raised = this.uncertaintyRaised;
+    this.uncertaintyRaised = false;
+    return raised;
   }
 
   hasAmbiguousCommentBoundary(): boolean {
@@ -2762,7 +2779,7 @@ class HeredocLexer {
           hasEscapedQuoteInAnsiC(line, index + 2)
         ) {
           this.ansiCQuoteUntrusted = true;
-          this.uncertain = true;
+          this.raiseUncertainty();
         }
       }
       if (char === '"' || char === "'") {
@@ -2833,7 +2850,7 @@ class HeredocLexer {
           // The `#` may belong to the previous word, so the rest of the line
           // is real text: keep scanning it instead of dropping it, and let the
           // caller treat the resulting paths as unproven.
-          this.uncertain = true;
+          this.raiseUncertainty();
           this.ambiguousCommentBoundary = true;
           this.ambiguousCommentTail = true;
           continue;
@@ -2846,7 +2863,7 @@ class HeredocLexer {
         index += 2;
         continue;
       }
-      this.possibleOpener = true;
+      if (this.uncertain) this.possibleOpener = true;
       if (this.ambiguousCommentTail) {
         // Seen, but not trusted as a boundary: keep the following lines as
         // code and let the uncertainty drive the approval.
@@ -2873,6 +2890,11 @@ class HeredocLexer {
    * lexer but belongs to the previous word for bash, so treating the `#` as a
    * comment would silently discard the rest of the line.
    */
+  private raiseUncertainty(): void {
+    if (!this.uncertain) this.uncertaintyRaised = true;
+    this.uncertain = true;
+  }
+
   private commentBoundaryIsAmbiguous(
     line: string,
     index: number,

@@ -617,6 +617,18 @@ describe('shouldForceAutoModeReviewForAllow', () => {
     // The escaped space makes the `#` word data, so the redirect is real; the
     // unproven boundary must ask rather than report a clean path.
     expect(forcesReview('echo a\\ # x > evil.txt')).toBe(true);
+
+    // A heredoc that closed before the ambiguity cannot be re-opened by it.
+    for (const command of [
+      "cat <<EOF\nbody\nEOF\nprintf %s $'a\\'b'; echo hi > out.txt",
+      'cat <<EOF\nbody\nEOF\necho a\\ # harmless; echo hi > out.txt',
+    ]) {
+      expect(forcesReview(command)).toBe(false);
+    }
+    // A same-line opener is still open when the ambiguity starts.
+    expect(
+      forcesReview("cat <<EOF $'a\\'b'\nbody\nEOF\necho hi > out.txt"),
+    ).toBe(true);
   });
 
   it('does not force review for awk field references', () => {

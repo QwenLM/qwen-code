@@ -787,6 +787,28 @@ describe('extractShellOperationsAcrossCommand', () => {
       [write('/repo/out.txt')],
     ],
     [
+      // A heredoc that already closed cannot be re-opened by a later
+      // ambiguous form, so that form must not taint the command.
+      'does not taint a command whose heredoc closed before the ambiguity',
+      "cat <<EOF\nbody\nEOF\nprintf %s $'a\\'b'; echo hi > out.txt",
+      [write('/repo/out.txt')],
+    ],
+    [
+      'does not taint a command whose heredoc closed before an escaped-space hash',
+      'cat <<EOF\nbody\nEOF\necho a\\ # harmless; echo hi > out.txt',
+      [write('/repo/out.txt')],
+    ],
+    [
+      // The opener on this line is still open when the ambiguity starts, so
+      // its body boundary is unproven even though the opener came first.
+      'marks an opener still open when the ambiguity appears after it',
+      "cat <<EOF $'a\\'b'\nbody\nEOF\necho hi > out.txt",
+      [
+        { ...read("/repo/a'b"), cwdUnknown: true, pathMayDependOnCwd: true },
+        uncertainWrite('/repo/out.txt'),
+      ],
+    ],
+    [
       // R25-1 narrowing: `<<` inside arithmetic is a shift, so a later
       // ambiguous form must not mark the command.
       'keeps an arithmetic shift inert for a later escaped quote',
