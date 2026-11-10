@@ -80,6 +80,7 @@
     "docx-preview": "0.4.1",
     "echarts": "^6.0.0",
     "fzf": "^0.5.2",
+    "hast-util-from-html-isomorphic": "2.0.0",
     "katex": "0.18.2",
     "lucide-react": "^1.24.0",
     "radix-ui": "^1.6.2",

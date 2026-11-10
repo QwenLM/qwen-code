@@ -1664,6 +1664,9 @@ importers:
       fzf:
         specifier: ^0.5.2
         version: 0.5.2
+      hast-util-from-html-isomorphic:
+        specifier: 2.0.0
+        version: 2.0.0
       katex:
         specifier: 0.18.2
         version: 0.18.2

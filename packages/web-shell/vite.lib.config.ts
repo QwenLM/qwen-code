@@ -345,6 +345,7 @@ export default defineConfig(({ mode }) => ({
           'remark-cjk-friendly',
           /^remark-cjk-friendly\//,
           'remark-gfm',
+          'hast-util-from-html-isomorphic',
           'katex',
           /^katex\/(?!dist\/katex\.min\.css$)/,
           'codemirror',
