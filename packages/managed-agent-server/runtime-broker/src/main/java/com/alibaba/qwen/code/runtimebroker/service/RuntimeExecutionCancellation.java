@@ -5,6 +5,7 @@ import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
+import com.alibaba.qwen.code.runtimebroker.RuntimeToolMeasurements;
 import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
@@ -191,7 +192,10 @@ final class RuntimeExecutionCancellation {
                         }
                         bindingRegistry.requireUsableLease(context);
                         return mapFailure(safeStage(() ->
-                                publicationV3
+                                RuntimeToolMeasurements.selected(requested.getReference())
+                                        ? transport.cancelV4(context.lease(), context.session(),
+                                                requested.getReference())
+                                        : publicationV3
                                         ? transport.cancelV3(context.lease(), context.session(),
                                                 requested.getReference()).thenApply(
                                                         RuntimeBrokerSupport::projectV3Status)
