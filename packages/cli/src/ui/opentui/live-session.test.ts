@@ -63,6 +63,7 @@ import type { DualOutputBridge } from '../../dualOutput/DualOutputBridge.js';
 import type { HandleAtCommandResult } from '../hooks/atCommandProcessor.js';
 import { ToolCallStatus, type IndividualToolCallDisplay } from '../types.js';
 import type { Part } from '@google/genai';
+import { getToolCallFingerprint } from '@qwen-code/qwen-code-core/core/toolCallIdUtils.js';
 
 function steering(...texts: string[]): OpenTuiSteeringSubmission[] {
   return texts.map((text) => ({ text, content: text }));
@@ -358,6 +359,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
               __modOutput?: string;
               __restoreResult?: Record<string, unknown>;
               __rewritten?: boolean;
+              __terminate?: boolean;
             };
             return {
               nativeAttemptsObserved: a.__modOutput !== undefined,
@@ -394,6 +396,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
                   a.__modOutput !== undefined ? [] : undefined,
                 executionStatus:
                   a.__modOutput !== undefined ? 'not_started' : undefined,
+                ...(a.__terminate ? { terminateTurn: true } : {}),
               },
             };
           }),
@@ -4278,8 +4281,22 @@ describe('live checkpoint producer and approval ownership', () => {
 });
 
 describe('livePromptEvents on the shared agent loop (experimental.unifiedAgentLoop)', () => {
-  const shared = (config: Config) =>
-    ({ ...config, isUnifiedAgentLoopEnabled: () => true }) as unknown as Config;
+  /**
+   * The config with the setting on. Its client answers the calls `history`
+   * holds by provider id and fingerprint, and counts completed calls.
+   */
+  const shared = (config: Config, history = new Map<string, string>()) => {
+    const client = config.getGeminiClient() as unknown as Record<
+      string,
+      unknown
+    >;
+    client['getHistoryToolCallFingerprints'] ??= () => history;
+    client['recordCompletedToolCall'] ??= vi.fn();
+    return {
+      ...config,
+      isUnifiedAgentLoopEnabled: () => true,
+    } as unknown as Config;
+  };
   const call = (callId: string) => ({
     type: 'tool_call_request',
     value: { callId, name: 'test_tool', args: {} },
@@ -4438,5 +4455,138 @@ describe('livePromptEvents on the shared agent loop (experimental.unifiedAgentLo
     await expect(
       drain(livePromptEvents(shared(createFakeConfig(send)), 'start')),
     ).rejects.toThrow('provider failed');
+  });
+
+  // --- PR 4b: the round's calls as one shared tool batch ---
+
+  /** A stream that sends `calls` on its first request and ends after. */
+  const batchStream = (calls: Array<Record<string, unknown>>) => {
+    let sends = 0;
+    return vi.fn(function* () {
+      if (++sends > 1) return;
+      for (const value of calls) yield { type: 'tool_call_request', value };
+    });
+  };
+  const toolEnds = (events: OpenTuiStreamEvent[]) =>
+    events.flatMap((event) =>
+      event.type === 'tool-end' ? [`${event.id}:${event.summary}`] : [],
+    );
+
+  it('answers a replayed call in place and runs only the fresh one', async () => {
+    const replay = {
+      callId: 'r1',
+      providerCallId: 'p-old',
+      name: 'test_tool',
+      args: { a: 1 },
+    };
+    const send = batchStream([
+      replay,
+      { callId: 't1', name: 'test_tool', args: {} },
+    ]);
+    const config = shared(
+      createFakeConfig(send),
+      new Map([['p-old', getToolCallFingerprint('test_tool', { a: 1 })]]),
+    );
+    const events = await drain(livePromptEvents(config, 'start'));
+    expect(sentResponses(send)).toEqual([['r1', 't1']]);
+    const sent = (send.mock.calls[1] as unknown[])[0] as Part[];
+    expect(sent[0].functionResponse?.response).not.toEqual({ ok: true });
+    expect(sent[1].functionResponse?.response).toEqual({ ok: true });
+    // Only the fresh call ran, and both cards end.
+    const client = config.getGeminiClient() as unknown as {
+      recordCompletedToolCall: ReturnType<typeof vi.fn>;
+    };
+    expect(client.recordCompletedToolCall).toHaveBeenCalledOnce();
+    expect(toolEnds(events)).toEqual(['t1:ok', 'r1:error']);
+  });
+
+  it('settles the batch when the scheduler completes it, not when it returns', async () => {
+    // A call waiting for approval: `schedule` returns before it completes.
+    schedulerControl.finish = null;
+    const send = batchStream([
+      { callId: 't1', name: 'test_tool', args: { __deferred: true } },
+    ]);
+    const config = shared(createFakeConfig(send));
+    const turn = drain(livePromptEvents(config, 'start'));
+    await vi.waitFor(() => expect(schedulerControl.finish).not.toBeNull());
+    expect(send).toHaveBeenCalledOnce();
+    await schedulerControl.finish!();
+    await turn;
+    expect(sentResponses(send)).toEqual([['t1']]);
+    const client = config.getGeminiClient() as unknown as {
+      recordCompletedToolCall: ReturnType<typeof vi.fn>;
+    };
+    expect(client.recordCompletedToolCall).toHaveBeenCalledOnce();
+  });
+
+  it('ends the turn with the answers in history when every call is a replay', async () => {
+    const send = batchStream([
+      { callId: 'r1', providerCallId: 'p-old', name: 'test_tool', args: {} },
+    ]);
+    const config = shared(
+      createFakeConfig(send),
+      new Map([['p-old', getToolCallFingerprint('test_tool', {})]]),
+    );
+    const events = await drain(livePromptEvents(config, 'start'));
+    expect(send).toHaveBeenCalledOnce();
+    expect(config.getGeminiClient().addHistory).toHaveBeenCalledOnce();
+    const [history] = vi.mocked(config.getGeminiClient().addHistory).mock
+      .calls[0];
+    expect(
+      (history.parts as Part[]).map((part) => part.functionResponse?.id),
+    ).toEqual(['r1']);
+    expect(toolEnds(events)).toEqual(['r1:error']);
+  });
+
+  it('counts each completed call toward the session, not a cancelled one', async () => {
+    const send = batchStream([
+      { callId: 't1', name: 'test_tool', args: {} },
+      { callId: 't2', name: 'test_tool', args: { __cancelled: true } },
+    ]);
+    const config = shared(createFakeConfig(send));
+    await drain(livePromptEvents(config, 'start'));
+    const client = config.getGeminiClient() as unknown as {
+      recordCompletedToolCall: ReturnType<typeof vi.fn>;
+    };
+    expect(client.recordCompletedToolCall).toHaveBeenCalledOnce();
+    expect(sentResponses(send)).toEqual([['t1', 't2']]);
+  });
+
+  it('ends the turn with the results in history when a tool ends it', async () => {
+    const send = batchStream([
+      { callId: 't1', name: 'test_tool', args: { __terminate: true } },
+    ]);
+    const config = shared(createFakeConfig(send));
+    await drain(livePromptEvents(config, 'start'));
+    expect(send).toHaveBeenCalledOnce();
+    const [history] = vi.mocked(config.getGeminiClient().addHistory).mock
+      .calls[0];
+    expect(
+      (history.parts as Part[]).map((part) => part.functionResponse?.id),
+    ).toEqual(['t1']);
+  });
+
+  it('records each result once, while the turn is current', async () => {
+    for (const stillCurrent of [true, false]) {
+      let current = true;
+      const send = vi.fn(function* () {
+        if (send.mock.calls.length > 1) return;
+        yield call('t1');
+        current = stillCurrent;
+      });
+      const recordToolResult = vi.fn();
+      const config = shared(
+        createFakeConfig(send, undefined, undefined, {
+          recordMidTurnUserMessage: vi.fn(),
+          recordToolResult,
+        }),
+      );
+      await drain(
+        livePromptEvents(config, 'start', undefined, {
+          isCurrentTurn: () => current,
+        }),
+      );
+      expect(recordToolResult).toHaveBeenCalledTimes(stillCurrent ? 1 : 0);
+    }
   });
 });
