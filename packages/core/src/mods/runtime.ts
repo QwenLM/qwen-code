@@ -91,7 +91,10 @@ function workerEntry(): URL | string {
 export class ModRuntime {
   private readonly worker: Worker;
   // The $.store calls the host is answering.
-  private readonly storeCalls = new Set<Promise<void>>();
+  private readonly storeCalls = new Map<
+    number,
+    { controller: AbortController; task: Promise<void> }
+  >();
   private readonly storeReadSlots = new Semaphore(4);
   private failure?: Error;
   private pending?: (reply: ModReply) => void;
@@ -161,6 +164,7 @@ export class ModRuntime {
         for (const id of reply.ids) {
           this.tool?.operations.get(id)?.controller.abort();
           root.models.get(id)?.abort();
+          this.storeCalls.get(id)?.controller.abort();
         }
       } else if (reply.type === 'model-complete') this.answerModel(reply, root);
       else if (reply.type === 'check-result')
@@ -170,9 +174,15 @@ export class ModRuntime {
       else if (reply.type === 'prompt-queue')
         this.answerPromptQueue(reply, root.id);
       else if (reply.type === 'store') {
-        const task = this.answerStore(reply, root.id, root.storeAbort.signal);
-        this.storeCalls.add(task);
-        void task.finally(() => this.storeCalls.delete(task));
+        const remainingMs = reply.deadline - performance.now();
+        if (remainingMs <= 0) return;
+        const controller = new AbortController();
+        const signals = [root.storeAbort.signal, controller.signal];
+        if (Number.isFinite(remainingMs))
+          signals.push(AbortSignal.timeout(Math.ceil(remainingMs)));
+        const task = this.answerStore(reply, root.id, AbortSignal.any(signals));
+        this.storeCalls.set(reply.id, { controller, task });
+        void task.finally(() => this.storeCalls.delete(reply.id));
       } else if (reply.type === 'invalidate') {
         if (reply.event !== 'ui.render' || this.failure) return;
         if (this.early) this.early.add(reply.plugin);
@@ -823,7 +833,7 @@ export class ModRuntime {
         (operation) => operation.task,
       ),
       // Let a store update that acquired its lock finish before closing.
-      ...this.storeCalls,
+      ...[...this.storeCalls.values()].map(({ task }) => task),
     ]);
   }
 

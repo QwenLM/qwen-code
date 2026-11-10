@@ -290,7 +290,12 @@ export type ModReply =
       deadline: number;
       cancellation: Int32Array;
     }
-  | { type: 'store'; id: number; operation: ModStoreOperation }
+  | {
+      type: 'store';
+      id: number;
+      operation: ModStoreOperation;
+      deadline: number;
+    }
   | { type: 'invalidate'; plugin: string; event: string }
   | ({ type: 'log'; plugin: string } & ModLog);
 

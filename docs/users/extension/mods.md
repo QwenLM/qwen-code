@@ -619,10 +619,10 @@ store in place.
   time namespace. Recovery across boots requires matching machine, hostname,
   and PID namespace identities and boot IDs verified through procfs.
 - The host limits concurrent file reads for `get` and `keys` per runtime.
-  Ending a dispatch cancels queued reads and `set` or `delete` calls that are
-  waiting for a lock. An update already started under the lock may still land,
-  and the session waits for it before closing. A process exit during the update
-  leaves either the old file or the new one.
+  Ending the requesting hook or its dispatch cancels queued reads and `set` or
+  `delete` calls that are waiting for a lock. An update already started under
+  the lock may still land, and the session waits for it before closing. A
+  process exit during the update leaves either the old file or the new one.
 
 The calls are API events, so another plugin's hooks hear them with `{key}` or
 `{key, value}`. A hook may pass on another `value` for `store.set`, answer with

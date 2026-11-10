@@ -6,7 +6,7 @@
 
 import { once } from 'node:events';
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
-import { rm } from 'node:fs/promises';
+import { mkdir, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Worker } from 'node:worker_threads';
@@ -2379,6 +2379,7 @@ describe('ModRuntime with the real QuickJS worker', () => {
     const createStore = async (
       sources: string[],
       store?: string | ModStore,
+      host?: ModModelHost,
     ) => {
       const runtime = await ModRuntime.createGroup(
         sources.map((source, index) => ({
@@ -2398,7 +2399,7 @@ describe('ModRuntime with the real QuickJS worker', () => {
         undefined,
         false,
         undefined,
-        undefined,
+        host,
         typeof store === 'string' ? new ModStore(store) : store,
       );
       runtimes.push(runtime);
@@ -2654,6 +2655,98 @@ describe('ModRuntime with the real QuickJS worker', () => {
         cleanup.abort();
       }
     });
+
+    it.each(['timeout', 'signal'])(
+      'cancels a waiting store write when its model middleware ends by %s',
+      async (mode) => {
+        const dir = storeDir();
+        const lock = 'mod-1.json.lock';
+        await mkdir(join(dir, lock, 'held'), { recursive: true });
+        const store = new ModStore(dir);
+        let allowAbort = () => {};
+        const gate = new Promise<void>((resolve) => (allowAbort = resolve));
+        let finishWitness = () => {};
+        const witness = new Promise<void>(
+          (resolve) => (finishWitness = resolve),
+        );
+        const host = vi.fn<ModModelHost>(async ({ prompt }) => {
+          await (prompt === 'gate' ? gate : witness);
+          return {
+            isAnswered: true,
+            text: 'continued',
+            usage: {
+              input_tokens: 0,
+              output_tokens: 0,
+              cache_read_input_tokens: 0,
+              cache_creation_input_tokens: 0,
+            },
+          };
+        });
+        const nested =
+          mode === 'timeout'
+            ? `const expired = await $.model.complete({model: 'm', prompt: 'write', timeoutMs: 1000});`
+            : `
+            const listeners = new Set();
+            const stop = {aborted: false, addEventListener: (_, f) => listeners.add(f),
+              removeEventListener: (_, f) => listeners.delete(f)};
+            const running = $.model.complete({model: 'm', prompt: 'write'}, {signal: stop});
+            await $.model.complete({model: 'm', prompt: 'gate'});
+            stop.aborted = true;
+            for (const listener of listeners) listener();
+            const expired = await running;`;
+        const runtime = await createStore(
+          [
+            command(`
+            ${nested}
+            const live = await $.model.complete({model: 'm', prompt: expired.reason});
+            return [expired.reason, live.text];
+          `),
+            `export function register(on) {
+            on('model.complete', {prompt: 'write'}, async ($, e, next) => {
+              await $.store.set('k', 1);
+              return next(e);
+            });
+          }`,
+          ],
+          store,
+          host,
+        );
+        const ran = runtime.runCommand(
+          'go-mod-0',
+          '',
+          AbortSignal.timeout(5000),
+        );
+        void ran.catch(() => {});
+        try {
+          await vi.waitFor(async () => {
+            expect(
+              (await readdir(dir)).some((entry) =>
+                entry.startsWith(lock + '.'),
+              ),
+            ).toBe(true);
+          });
+          allowAbort();
+          await vi.waitFor(
+            () =>
+              expect(host.mock.calls.map(([input]) => input.prompt)).toEqual(
+                mode === 'signal' ? ['gate', 'aborted'] : ['aborted'],
+              ),
+            { timeout: 3000 },
+          );
+          await vi.waitFor(async () => {
+            expect(await readdir(dir)).toEqual([lock]);
+          });
+          expect(host.mock.calls.at(-1)?.[1].aborted).toBe(false);
+          await rm(join(dir, lock), { recursive: true });
+          expect(await store.get('mod-1', 'k')).toBeUndefined();
+        } finally {
+          allowAbort();
+          finishWitness();
+        }
+        expect(JSON.parse(await ran)).toEqual(['aborted', 'continued']);
+        expect(await store.get('mod-1', 'k')).toBeUndefined();
+      },
+    );
 
     it('finishes a write the session closes on before it is closed', async () => {
       const dir = storeDir();

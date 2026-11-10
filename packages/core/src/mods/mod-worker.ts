@@ -99,7 +99,11 @@ const modelSignals = new Map<string, AbortController>();
 // $.store calls the host is answering, by id.
 const storeCalls = new Map<
   number,
-  { resolve: (value: unknown) => void; reject: (error: Error) => void }
+  {
+    parent?: ModInvocation;
+    resolve: (value: unknown) => void;
+    reject: (error: Error) => void;
+  }
 >();
 let serial = 0;
 let epoch = 0;
@@ -853,6 +857,7 @@ async function hostCall(
                       plugin: plugin.name,
                       key,
                     },
+              owner,
             ),
           };
         }
@@ -976,12 +981,20 @@ async function queueArrived(
   return refused === undefined ? arrived : { drop: refused };
 }
 
-// The host owns the store's file, so a call outlives a worker cut short.
-function storeCall(operation: ModStoreOperation): Promise<unknown> {
+function storeCall(
+  operation: ModStoreOperation,
+  parent?: ModInvocation,
+): Promise<unknown> {
+  assertLive(parent);
   const id = ++serial;
   return new Promise<unknown>((resolve, reject) => {
-    storeCalls.set(id, { resolve, reject });
-    send({ type: 'store', id, operation });
+    storeCalls.set(id, { parent, resolve, reject });
+    send({
+      type: 'store',
+      id,
+      operation,
+      deadline: parent?.modelScope?.deadline ?? Infinity,
+    });
   }).finally(() => storeCalls.delete(id));
 }
 
@@ -1007,6 +1020,12 @@ function cancelAbandonedOperations(): void {
     modelOperations.delete(id);
     cancelled.push(id);
     operation.reject(new Error('Mod model call ended with its dispatch.'));
+  }
+  for (const [id, operation] of storeCalls) {
+    if (!callAbandoned(operation.parent)) continue;
+    storeCalls.delete(id);
+    cancelled.push(id);
+    operation.reject(new Error('Mod store call ended with its dispatch.'));
   }
   if (cancelled.length) send({ type: 'host-cancel', ids: cancelled });
 }
