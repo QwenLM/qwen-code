@@ -54,10 +54,10 @@ secret 类型的 signingSecret，复用现有环境变量引用及凭证编辑�
 验证 HTTPS 钉钉机器人 endpoint 和必需的 access token。每次发送使用
 `msgtype: markdown`，复用现有钉钉 `extractTitle` 工具生成 `markdown.title`，
 将传入正文保留在 `markdown.text` 中。普通文本也可作为消息正文。公共 Channel
-投递契约仍是文本字符串，不新增消息格式设置或 Markdown 转换。钉钉仅支持
-[Markdown 子集](https://open.dingtalk.com/document/orgapp/custom-bot-send-message-type)，
-官方列出的元素不包含表格；本适配器不转换表格，也不承诺完整的 GitHub 风格
-Markdown 渲染。
+投递契约仍是文本字符串，不新增消息格式设置或 Markdown 转换。钉钉文档列出了
+[Markdown 子集](https://open.dingtalk.com/document/orgapp/custom-bot-send-message-type)。
+本适配器原样保留表格及其他 Markdown 语法，具体渲染由钉钉客户端完成；不转换
+表格，也不承诺完整的 GitHub 风格 Markdown 渲染。
 
 启用签名时按钉钉文档算法生成新的毫秒时间戳和 HMAC-SHA256 签名，不缓存已签名
 URL。传输错误、无效响应、非成功 HTTP 状态及非零业务码均按 #7521 以有界、脱敏

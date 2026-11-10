@@ -73,9 +73,8 @@ signing secret stay in Channel configuration.
 ## Delivery behavior
 
 - Sends messages as Markdown, with a short title derived from the first line.
-  Ordinary text is also accepted. DingTalk supports only a Markdown subset;
-  tables are not among the officially listed elements. The adapter preserves
-  the supplied body without converting tables or other unsupported syntax.
+  Ordinary text is also accepted. The adapter preserves the supplied Markdown,
+  including table syntax; rendering is handled by the DingTalk client.
 - It does not receive messages, run inbound webhook tasks or enable Channel loops.
 - Checks both HTTP status and DingTalk's business response. Rejected signatures,
   credentials, security rules and rate limits are failures with sanitized errors.
