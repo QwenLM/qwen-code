@@ -8,6 +8,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { SessionArchiveCoordinator } from './session-archive.js';
 import type { RequestedSessionIdAdmission } from '../session-id-admission.js';
 import type { WorkspaceRuntime } from '../workspace-registry.js';
+import type { WorkspaceRuntimeProvenance } from '../managed-scratch-workspace.js';
 import { restoreSessionCore } from './session-restore.js';
 
 // These cases drive the core directly rather than through supertest. The
@@ -94,7 +95,7 @@ function fakeBridge(overrides: Record<string, unknown> = {}) {
 
 function fakeRuntime(
   bridge: ReturnType<typeof fakeBridge>,
-  provenance: 'workspace' | 'live-conversation' = 'workspace',
+  provenance: WorkspaceRuntimeProvenance = 'existing',
 ): WorkspaceRuntime {
   return {
     bridge,
@@ -237,9 +238,11 @@ describe('restoreSessionCore', () => {
         killFinished = true;
       }),
     });
-    let calls = 0;
+    // Flip on the reconcile's own sidecar read rather than on a call ordinal:
+    // the boundary being pinned is "the reconcile has run", so reordering the
+    // two predicate calls must not be able to satisfy this fixture.
     const { options, release } = coreOptions(fakeRuntime(bridge), {
-      isCancelled: () => ++calls > 1,
+      isCancelled: () => mocks.readWorktreeSessionStrict.mock.calls.length >= 2,
     });
 
     let settled = false;
