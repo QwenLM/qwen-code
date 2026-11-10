@@ -65,7 +65,7 @@ function renderSidebar(
   branding?: false | { render?: () => ReactNode },
   sessionProps?: Pick<
     ComponentProps<typeof WebShellSidebar>,
-    'sessionContent' | 'sessionHeader' | 'onNewSession'
+    'sessionContent' | 'sessionHeader' | 'onNewSession' | 'primaryNav'
   >,
 ) {
   act(() => {
@@ -172,33 +172,74 @@ describe('sidebar brand', () => {
     ).toBe(true);
   });
 
-  it('keeps the question sort control reachable when the brand row is hidden', async () => {
-    mocks.connection.capabilities = {
-      qwenCodeVersion: '1.2.3',
-      features: ['session_last_user_prompt_sort'],
-    };
-    renderSidebar(undefined, false);
+  it.each([undefined, false] as const)(
+    'groups sorting immediately before multi-select with branding=%s',
+    async (branding) => {
+      mocks.connection.capabilities = {
+        qwenCodeVersion: '1.2.3',
+        features: ['session_last_user_prompt_sort'],
+      };
+      renderSidebar(undefined, branding);
 
-    expect(container.textContent).not.toContain('Qwen Code');
-    const sort = container.querySelector<HTMLElement>(
-      'button[aria-label="Sort sessions"]',
-    );
-    expect(sort).not.toBeNull();
-    expect(
-      container.querySelector('[data-testid="manage-workspaces"]'),
-    ).toBeNull();
-    await act(async () => clickSidebarElement(sort!, true));
-    const choice = Array.from(
-      document.querySelectorAll<HTMLElement>('[role="menuitemradio"]'),
-    ).find((item) => item.textContent === 'Last question');
-    expect(choice).toBeDefined();
-    await act(async () => clickSidebarElement(choice!));
-    expect(
-      catalogOptions.mock.calls.some(
-        ([options]) => options.sortBy === 'lastUserPromptAt',
-      ),
-    ).toBe(true);
-  });
+      if (branding === false) {
+        expect(container.textContent).not.toContain('Qwen Code');
+      }
+      const sort = container.querySelector<HTMLElement>(
+        'button[aria-label="Sort sessions"]',
+      );
+      expect(sort).not.toBeNull();
+      const select = container.querySelector<HTMLElement>(
+        'button[aria-label="Select sessions"]',
+      );
+      expect(select).not.toBeNull();
+      expect(sort!.nextElementSibling).toBe(select);
+      expect(sort!.parentElement!.parentElement).toBe(
+        container.querySelector('button[aria-label="New session"]')!
+          .parentElement,
+      );
+      expect(
+        container.querySelectorAll('button[aria-label="Sort sessions"]'),
+      ).toHaveLength(1);
+      expect(
+        container.querySelector('[data-testid="manage-workspaces"]'),
+      ).toBeNull();
+      await act(async () => clickSidebarElement(sort!, true));
+      const choice = Array.from(
+        document.querySelectorAll<HTMLElement>('[role="menuitemradio"]'),
+      ).find((item) => item.textContent === 'Last question');
+      expect(choice).toBeDefined();
+      await act(async () => clickSidebarElement(choice!));
+      expect(
+        catalogOptions.mock.calls.some(
+          ([options]) => options.sortBy === 'lastUserPromptAt',
+        ),
+      ).toBe(true);
+    },
+  );
+
+  it.each([undefined, false] as const)(
+    'keeps sorting reachable without the session action row with branding=%s',
+    (branding) => {
+      mocks.connection.capabilities = {
+        qwenCodeVersion: '1.2.3',
+        features: ['session_last_user_prompt_sort'],
+      };
+      renderSidebar(undefined, branding, { primaryNav: { items: [] } });
+
+      expect(
+        container.querySelector('button[aria-label="Select sessions"]'),
+      ).toBeNull();
+      const sorts = container.querySelectorAll(
+        'button[aria-label="Sort sessions"]',
+      );
+      expect(sorts).toHaveLength(1);
+      expect(
+        sorts[0].parentElement!.querySelector(
+          'button[aria-label="Collapse all workspaces"]',
+        ),
+      ).not.toBeNull();
+    },
+  );
 
   it('renders the built-in name and inline mark when no brand is configured', () => {
     renderSidebar();

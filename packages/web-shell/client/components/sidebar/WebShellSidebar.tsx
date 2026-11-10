@@ -7845,14 +7845,6 @@ export function WebShellSidebar({
                         )}
                       </button>
                     )}
-                  {questionSortSupported &&
-                    sessionContent === undefined &&
-                    (!collapsed || mobileOpen) && (
-                      <SessionSortMenu
-                        value={sessionSort}
-                        onChange={changeSessionSort}
-                      />
-                    )}
                   {topRowSearchVisible &&
                     renderSearchToggle(styles.searchToggle)}
                 </div>
@@ -7907,23 +7899,32 @@ export function WebShellSidebar({
                   </button>
                 )}
                 {sessionContent === undefined && (!collapsed || mobileOpen) && (
-                  <button
-                    className={cx(
-                      'ml-auto size-8 shrink-0 cursor-pointer rounded-lg p-[7px] hover:bg-accent',
-                      styles.activityToggle,
+                  <div className="ml-auto flex shrink-0 items-center gap-1">
+                    {questionSortSupported && (
+                      <SessionSortMenu
+                        value={sessionSort}
+                        onChange={changeSessionSort}
+                        triggerClassName="size-8 shrink-0 cursor-pointer rounded-lg p-[7px] hover:bg-accent"
+                      />
                     )}
-                    type="button"
-                    title={t('sidebar.selectSessions')}
-                    aria-label={t('sidebar.selectSessions')}
-                    aria-pressed={selectionMode}
-                    disabled={bulkWorking}
-                    onClick={() => {
-                      if (selectionMode) exitSelection();
-                      else setSelectionMode(true);
-                    }}
-                  >
-                    <ListChecksIcon size={18} strokeWidth={1.5} />
-                  </button>
+                    <button
+                      className={cx(
+                        'size-8 shrink-0 cursor-pointer rounded-lg p-[7px] hover:bg-accent',
+                        styles.activityToggle,
+                      )}
+                      type="button"
+                      title={t('sidebar.selectSessions')}
+                      aria-label={t('sidebar.selectSessions')}
+                      aria-pressed={selectionMode}
+                      disabled={bulkWorking}
+                      onClick={() => {
+                        if (selectionMode) exitSelection();
+                        else setSelectionMode(true);
+                      }}
+                    >
+                      <ListChecksIcon size={18} strokeWidth={1.5} />
+                    </button>
+                  </div>
                 )}
               </div>
             )}
@@ -8184,7 +8185,8 @@ export function WebShellSidebar({
                     <IconChevron expanded={projectsExpanded} />
                   </button>
                   <div className={styles.projectsHeaderActions}>
-                    {searchInProjectHeader &&
+                    {((!primaryNavItems.has('newTask') && !selectionMode) ||
+                      (searchInProjectHeader && collapsed && !mobileOpen)) &&
                       !sectionView &&
                       questionSortSupported &&
                       sessionContent === undefined && (
