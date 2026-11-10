@@ -225,6 +225,7 @@ export function ChannelsManagerPage({
     stop,
     restart,
     pairing,
+    qrLogin,
   } = useChannels({
     autoLoad: supportsManagement,
     enabled: supportsManagement,
@@ -853,6 +854,7 @@ export function ChannelsManagerPage({
           }}
           onSave={saveChannel}
           onReload={reload}
+          qrLoginActions={qrLogin}
           listPairingRequests={pairing.list}
           approvePairingRequest={pairing.approve}
           listPairingApprovals={pairing.approvals}
