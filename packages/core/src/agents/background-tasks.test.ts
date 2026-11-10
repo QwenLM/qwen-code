@@ -2182,6 +2182,22 @@ describe('BackgroundTaskRegistry', () => {
       expect(onChange).toHaveBeenCalledTimes(3);
     });
 
+    it('drops an answered prompt before its result arrives', () => {
+      const onChange = vi.fn();
+      const { emitter } = track('fg-inline-4');
+      emitter.emit(
+        AgentEventType.TOOL_WAITING_APPROVAL,
+        makeWaitingEvent('fg', 'c1'),
+      );
+      registry.setApprovalChangeCallback(onChange);
+
+      registry.clearInlineApproval('fg-inline-4', 'c1');
+      registry.clearInlineApproval('fg-inline-4', 'c1');
+
+      expect(registry.get('fg-inline-4')!.inlineApprovals).toEqual([]);
+      expect(onChange).toHaveBeenCalledTimes(1);
+    });
+
     it('never records prompts on a background entry', () => {
       const { emitter } = track('bg-inline-1', true);
       emitter.emit(

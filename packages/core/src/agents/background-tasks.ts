@@ -1456,8 +1456,10 @@ export class BackgroundTaskRegistry {
    * Record a FOREGROUND agent's inline approval prompts on its entry.
    * The prompt itself stays inline in the parent session; this only keeps
    * `inlineApprovals` in step with it: a `TOOL_WAITING_APPROVAL` adds the
-   * call (re-emissions for a call already listed are ignored), and its
-   * `TOOL_RESULT` removes it. Terminal transitions clear the list too.
+   * call (re-emissions for a call already listed are ignored). The prompt's
+   * owner removes it when the user answers ({@link clearInlineApproval});
+   * the call's `TOOL_RESULT` removes it too, and terminal transitions clear
+   * the list.
    * Returns an unsubscribe function the caller MUST invoke when the agent
    * terminates.
    */
@@ -1481,22 +1483,32 @@ export class BackgroundTaskRegistry {
       ];
       this.emitApprovalChange(entry);
     };
-    const onResult = (event: AgentToolResultEvent) => {
-      const entry = this.agents.get(agentId);
-      if (!entry?.inlineApprovals?.length) return;
-      const next = entry.inlineApprovals.filter(
-        (notice) => notice.callId !== event.callId,
-      );
-      if (next.length === entry.inlineApprovals.length) return;
-      entry.inlineApprovals = next;
-      this.emitApprovalChange(entry);
-    };
+    // The prompt's owner clears the record when the user answers
+    // (clearInlineApproval); the result also clears it, for a call that
+    // settled without the inline prompt, e.g. through an IDE diff tab.
+    const onResult = (event: AgentToolResultEvent) =>
+      this.clearInlineApproval(agentId, event.callId);
     emitter.on(AgentEventType.TOOL_WAITING_APPROVAL, onWaiting);
     emitter.on(AgentEventType.TOOL_RESULT, onResult);
     return () => {
       emitter.off(AgentEventType.TOOL_WAITING_APPROVAL, onWaiting);
       emitter.off(AgentEventType.TOOL_RESULT, onResult);
     };
+  }
+
+  /**
+   * Drop a call from a foreground agent's `inlineApprovals` once its
+   * inline prompt has been answered. No-op if it is not listed.
+   */
+  clearInlineApproval(agentId: string, callId: string): void {
+    const entry = this.agents.get(agentId);
+    if (!entry?.inlineApprovals?.length) return;
+    const next = entry.inlineApprovals.filter(
+      (notice) => notice.callId !== callId,
+    );
+    if (next.length === entry.inlineApprovals.length) return;
+    entry.inlineApprovals = next;
+    this.emitApprovalChange(entry);
   }
 
   get(agentId: string): AgentTask | undefined {

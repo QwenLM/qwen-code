@@ -208,6 +208,7 @@ const baseRegistry = () => ({
   unregisterForeground: vi.fn(),
   // Foreground launches call the returned unsubscribe in their finally.
   trackInlineApprovals: vi.fn().mockReturnValue(vi.fn()),
+  clearInlineApproval: vi.fn(),
   complete: vi.fn(),
   fail: vi.fn(),
   finalizeCancelled: vi.fn(),
@@ -4902,6 +4903,54 @@ describe('AgentTool', () => {
       snapshots.length = 0;
       await capturedOnConfirm!(ToolConfirmationOutcome.ProceedOnce);
       expect(snapshots.some((s) => !s.hasPendingConfirmation)).toBe(true);
+    });
+  });
+
+  describe('inline approval record on the registry entry', () => {
+    beforeEach(() => {
+      newContextState();
+      loadFirstSubagent();
+    });
+
+    it('clears the record when the prompt is answered, not when the call ends', async () => {
+      // The call's result arrives only after it has run; a long tool would
+      // keep "needs approval" on the panel row for its whole run otherwise.
+      const registry = config.getBackgroundTaskRegistry() as unknown as {
+        register: MockFn;
+        clearInlineApproval: MockFn;
+      };
+      const mockAgent = mockHeadless('Done', statsOf(1, 100, 1, [10, 5]));
+      const invocation = invoke(fg());
+      vi.mocked(mockAgent.execute).mockImplementation(async () => {
+        invocation.eventEmitter.emit(AgentEventType.TOOL_WAITING_APPROVAL, {
+          subagentId: 'sub-1',
+          round: 1,
+          callId: 'call-slow-1',
+          name: 'run_shell_command',
+          description: 'wait 15s',
+          timestamp: Date.now(),
+          confirmationDetails: { type: 'exec', title: 'Shell' },
+          respond: vi.fn(),
+        } as unknown as AgentApprovalRequestEvent);
+      });
+      serveAgent(mockAgent);
+
+      let answered = false;
+      await invocation.execute(undefined, (output) => {
+        const display = output as AgentResultDisplay;
+        if (!answered && display.pendingConfirmation?.onConfirm) {
+          answered = true;
+          void display.pendingConfirmation.onConfirm(
+            ToolConfirmationOutcome.ProceedOnce,
+          );
+        }
+      });
+
+      expect(answered).toBe(true);
+      expect(registry.clearInlineApproval).toHaveBeenCalledExactlyOnceWith(
+        registry.register.mock.calls[0][0].agentId,
+        'call-slow-1',
+      );
     });
   });
 

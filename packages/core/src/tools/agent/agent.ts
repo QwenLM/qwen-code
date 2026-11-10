@@ -1676,6 +1676,12 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
   readonly eventEmitter: AgentEventEmitter = new AgentEventEmitter();
   private currentDisplay: AgentResultDisplay | null = null;
   private currentToolCalls: AgentResultDisplay['toolCalls'] = [];
+  /**
+   * Set while a top-level foreground run mirrors its inline prompts on its
+   * registry entry: clears the record as soon as the user answers, since
+   * the call's result arrives only once it has finished running.
+   */
+  private onInlineApprovalAnswered?: (callId: string) => void;
   private callId?: string;
   private executionBackend?: 'container';
 
@@ -1921,6 +1927,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             // Clear the inline prompt immediately
             // and optimistically mark the tool as executing for proceed outcomes.
             pendingConfirmationCallId = undefined;
+            this.onInlineApprovalAnswered?.(event.callId);
             const proceedOutcomes = new Set<ToolConfirmationOutcome>([
               ToolConfirmationOutcome.ProceedOnce,
               ToolConfirmationOutcome.ProceedAlways,
@@ -4976,6 +4983,10 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       const cleanupInlineApprovalTracking = approvalAncestorId
         ? undefined
         : registry.trackInlineApprovals(hookOpts.agentId, runtimeEventEmitter);
+      if (cleanupInlineApprovalTracking) {
+        this.onInlineApprovalAnswered = (callId) =>
+          registry.clearInlineApproval(hookOpts.agentId, callId);
+      }
 
       try {
         ({ cleanup: cleanupFgJsonl } = attachJsonlTranscriptWriter(
@@ -5209,6 +5220,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         );
         cleanupNestedApprovalBridge?.();
         cleanupInlineApprovalTracking?.();
+        this.onInlineApprovalAnswered = undefined;
         signal?.removeEventListener('abort', onParentAbort);
         cleanupOwnedMonitorNotifications();
         // Release the JSONL writer's listeners and close the fd before
