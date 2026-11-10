@@ -17,6 +17,7 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
@@ -175,7 +176,7 @@ class ManagedSessionGuardConvoyIT {
                 + " AND head_kind = 'MANAGED_SESSION'",
                 tenant, "blocked");
         var agents = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, JSON, Clock.systemUTC(), ignored -> {},
-                new ManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+                new JdbcManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         String turnSession = transactions.execute(ignored -> agents.insertSessionCommand(tenant,
                 "CREATE_SESSION", "turn-session", "digest-create", "qwen-code", null, null,
                 List.of(), null)).sessionId();
@@ -185,7 +186,7 @@ class ManagedSessionGuardConvoyIT {
             // Hold both tenant-wide guards the way a fat lifecycle transaction
             // would, on a connection the test never commits.
             ToolPublicationRetentionStore.lockTenant(jdbc, tenant);
-            WorkspaceLifecycleStore.lockPlacement(jdbc, tenant);
+            JdbcWorkspaceLifecycleStore.lockPlacement(jdbc, tenant);
             var templates = ManagedHookRecordContractTest.fixtures().get("templates");
             var data = new CommitResource("hook-data", "hook-data", 1, 2, sha256("{}"), "e30=");
             ObjectNode registration = templates.get("hook_registration").deepCopy();
@@ -381,7 +382,7 @@ class ManagedSessionGuardConvoyIT {
             }
         }
         properties.getRuntimeBroker().setWorkspaceMounts(mounts);
-        var registry = new ManagedWorkspaceRegistry(jdbc);
+        var registry = new JdbcManagedWorkspaceRegistry(jdbc);
         var store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, JSON, Clock.systemUTC(),
                 ignored -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         var service = new com.alibaba.qwen.code.managedagent.session.ManagedAgentService(store,
@@ -593,7 +594,7 @@ class ManagedSessionGuardConvoyIT {
         try (var pool = Executors.newSingleThreadExecutor()) {
             var hold = manager.getTransaction(new DefaultTransactionDefinition());
             try {
-                WorkspaceLifecycleStore.lockPlacement(jdbc, TENANT);
+                JdbcWorkspaceLifecycleStore.lockPlacement(jdbc, TENANT);
                 ToolPublicationRetentionStore.lockTenant(jdbc, TENANT);
                 var published = pool.submit(() -> transactions.execute(status ->
                         store.publishToolResult(TENANT, "inline", TOKEN, inlineToolResult())))
@@ -703,7 +704,7 @@ class ManagedSessionGuardConvoyIT {
         journal.reserve();
         var jdbc = journal.jdbc;
         String scope = ToolPublicationDataStore.scope("tenant-1", "workspace-1", "session-1");
-        String resourceScope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore
+        String resourceScope = ManagedSessionStore
                 .sessionScopeKey("tenant-1", "session-1");
         jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id,"
                 + " resource_id, kind, schema_version, byte_length, sha256, storage_kind, state, scope_key,"
@@ -788,7 +789,7 @@ class ManagedSessionGuardConvoyIT {
         // before inserting a drain row.
         var lifecycle = manager.getTransaction(new DefaultTransactionDefinition());
         try {
-            WorkspaceLifecycleStore.lockPlacement(jdbc, tenant);
+            JdbcWorkspaceLifecycleStore.lockPlacement(jdbc, tenant);
             long deadlocksBefore = MySqlLockProbe.innodbDeadlocks(jdbc);
             try (var pool = Executors.newSingleThreadExecutor()) {
                 var writer = pool.submit(() -> transactions.executeWithoutResult(ignored ->
@@ -912,7 +913,7 @@ class ManagedSessionGuardConvoyIT {
     private static final String TOKEN = "w".repeat(32);
 
     private interface PausedCall {
-        Object run(ManagedSessionStore store, ManagedSessionStoreModels.WriterGrant grant);
+        Object run(JdbcManagedSessionStore store, ManagedSessionStoreModels.WriterGrant grant);
     }
 
     private void assertNoDeadlockAgainstOrdinaryWriter(String trigger, PausedCall paused) throws Exception {
@@ -1019,7 +1020,7 @@ class ManagedSessionGuardConvoyIT {
     private static org.springframework.transaction.TransactionStatus holdBothTenantGuards(JdbcTemplate jdbc,
             DataSourceTransactionManager manager, String tenant) {
         var hold = manager.getTransaction(new DefaultTransactionDefinition());
-        WorkspaceLifecycleStore.lockPlacement(jdbc, tenant);
+        JdbcWorkspaceLifecycleStore.lockPlacement(jdbc, tenant);
         ToolPublicationRetentionStore.lockTenant(jdbc, tenant);
         return hold;
     }
