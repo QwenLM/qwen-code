@@ -12161,6 +12161,59 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       expect(prompt).not.toContain('comment truncated');
     });
 
+    it('localizes a truncation on a later bullet exactly once', async () => {
+      await initChannel(
+        { deliverToBoundSessions: true },
+        { boundSessions, locale: 'zh' },
+      );
+      // The second comment exceeds the cap too: only that bullet's marker is
+      // localized, and the truncated comment appears exactly ONCE (no
+      // duplication from re-emitting the bullet).
+      const comments = Array.from({ length: 4 }, (_, i) =>
+        makeComment({
+          id: 2000 + i,
+          body:
+            i === 1
+              ? `HEAD ${'b'.repeat(490)} TAIL`
+              : `REQ${i} ${'x'.repeat(390)}`,
+        }),
+      );
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification('comment')])
+        .mockResolvedValueOnce(comments);
+      await pollOnce();
+
+      const prompt = boundSessions.deliverPrompt.mock.calls[0]![1] as string;
+      expect(prompt).toContain('… [评论已截断：省略了 100 个字符]');
+      expect(prompt.match(/- @alice: HEAD b/g)).toHaveLength(1);
+      expect(prompt).toContain('REQ3 ');
+      expect(prompt).not.toContain('comment truncated');
+    });
+
+    it('localizes a genuine truncation whose continuation line starts with - @name:', async () => {
+      await initChannel(
+        { deliverToBoundSessions: true },
+        { boundSessions, locale: 'zh' },
+      );
+      // The truncated comment itself contains a `- @bob:` line: that line is
+      // a continuation of the comment, NOT the start of a new bullet. Only
+      // sequential bullet-start tracking still recognizes the real cut.
+      const comments = [
+        makeComment({
+          id: 1,
+          body: `Steps:\n${'x'.repeat(200)}\n- @bob: ${'y'.repeat(290)}`,
+        }),
+      ];
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification('comment')])
+        .mockResolvedValueOnce(comments);
+      await pollOnce();
+
+      const prompt = boundSessions.deliverPrompt.mock.calls[0]![1] as string;
+      expect(prompt).toMatch(/… \[评论已截断：省略了 \d+ 个字符\]/);
+      expect(prompt).not.toContain('comment truncated');
+    });
+
     it('keeps the direct-lane instruction English when the locale is en', async () => {
       await initChannel({ deliverToBoundSessions: true }, { boundSessions });
       const build = (
@@ -12212,15 +12265,22 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
           'Type: Pull Request | Title: Test PR | URL: https://github.com/owner/repo/pull/42\nTrigger: comment.',
       });
       const newCommentPrompt = build(
-        makeEnvelope('New comment by @alice:\nbody\nComment: url'),
+        makeEnvelope(
+          'New comment by @alice:\nbody\nComment: https://github.com/owner/repo/pull/42#issuecomment-1',
+        ),
       );
       expect(newCommentPrompt).toContain('@alice 的新评论：');
       const inlinePrompt = build(
         makeEnvelope(
-          'New inline review comment by @alice:\nfoo.ts:42\nbody\nComment: url',
+          'New inline review comment by @alice:\nfoo.ts:42\nbody\nComment: https://github.com/owner/repo/pull/42#discussion_r7',
         ),
       );
       expect(inlinePrompt).toContain('@alice 的新行内评审评论：');
+      // A body that merely starts with the lead literal but has NO watch
+      // Comment: URL tail must not be rewritten.
+      const quotedPrompt = build(makeEnvelope('New comment by @alice:\nbody'));
+      expect(quotedPrompt).toContain('New comment by @alice:');
+      expect(quotedPrompt).not.toContain('@alice 的新评论：');
     });
 
     it('re-injects with the SAME idempotency key after a failed acceptance mark (W4)', async () => {

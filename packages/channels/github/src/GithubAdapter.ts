@@ -6743,31 +6743,45 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         // Track bullet starts sequentially instead of splitting on `- @`:
         // a continuation line can itself start with `- @name:`, and treating
         // it as a new bullet would lose a genuine multi-line truncation.
+        // Evaluate every candidate start and rewrite ONLY the marker text —
+        // re-emitting the bullet would duplicate it.
         let bulletStart = 0;
         summary = summary.replace(
           truncationPattern,
           (match, count, offset, whole) => {
-            const start = whole.indexOf('- @', bulletStart);
+            let start = -1;
+            for (
+              let idx = whole.indexOf('- @', bulletStart);
+              idx !== -1 && idx < offset;
+              idx = whole.indexOf('- @', idx + 1)
+            ) {
+              const rendered = whole
+                .slice(idx, offset)
+                .replace(/^- @[^:]*: /, '');
+              if (Array.from(rendered).length === MAX_AGGREGATE_COMMENT_CHARS) {
+                start = idx;
+                break;
+              }
+            }
             if (start < 0) return match;
             bulletStart = offset;
-            const rendered = whole
-              .slice(start, offset)
-              .replace(/^- @[^:]*: /, '');
-            // Genuine only at the composer's own cut: the WHOLE bullet's
-            // rendered content (including any `- @name:` continuation lines)
-            // then holds exactly MAX_AGGREGATE_COMMENT_CHARS code points.
-            return Array.from(rendered).length === MAX_AGGREGATE_COMMENT_CHARS
-              ? `${whole.slice(start, offset)}… [${copy.commentTruncated(
-                  Number(count),
-                )}]`
-              : match;
+            return match.replace(
+              BOUND_DELIVERY_COPY.en.commentTruncated(Number(count)),
+              copy.commentTruncated(Number(count)),
+            );
           },
         );
       }
       text = `${header}\n${summary}`;
     }
-    // The comment-watch lanes' lead lines are product prose as well.
-    if (this.locale !== 'en') {
+    // The comment-watch lanes' lead lines are product prose as well, but only
+    // where the watch itself composed the trailing Comment: <web origin> URL —
+    // an ordinary comment that happens to start with the lead literal is not
+    // a watch event and must not be rewritten.
+    if (
+      this.locale !== 'en' &&
+      text.includes(`\nComment: ${this.webOrigin}/`) === true
+    ) {
       if (text.startsWith('New comment by @')) {
         text = text.replace(/^New comment by @([^:]+):/, (_match, author) =>
           copy.newCommentLead(author),
