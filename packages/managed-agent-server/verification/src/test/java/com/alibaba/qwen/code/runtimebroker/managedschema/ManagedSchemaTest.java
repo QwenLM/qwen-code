@@ -562,7 +562,17 @@ class ManagedSchemaTest {
                                                 && ManagedSchemaContract.TABLES.containsAll(
                                                         tables)));
         Set<String> originalTargets = new java.util.HashSet<>(ManagedSchemaContract.TABLES);
-        originalTargets.removeAll(Set.of("ma_extension_package", "ma_extension_settings", "ma_extension_operation", "ma_session_worktree"));
+        // ma_session_principal is written by the Session creation transaction itself. It is not
+        // the evolution target of any legacy entity: the 63-row inventory has no mapping for it
+        // and legacy-table-map.tsv has no row pointing to it. Like the four extension/worktree
+        // targets above, it is reachable from the target contract but from no original name.
+        originalTargets.removeAll(
+                Set.of(
+                        "ma_extension_package",
+                        "ma_extension_settings",
+                        "ma_extension_operation",
+                        "ma_session_worktree",
+                        "ma_session_principal"));
         assertEquals(
                 originalTargets,
                 inventory.values().stream()
