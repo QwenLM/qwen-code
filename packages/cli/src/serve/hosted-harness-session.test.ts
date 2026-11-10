@@ -41932,3 +41932,154 @@ describe('Hosted Harness stored definitions', () => {
     );
   });
 });
+
+describe('client files registration route', () => {
+  async function relayPeer() {
+    const peer = createServer((req, res) => {
+      if (req.method !== 'POST') {
+        res.writeHead(req.method === 'DELETE' ? 200 : 405);
+        res.end();
+        return;
+      }
+      let body = '';
+      req.on('data', (chunk) => (body += chunk));
+      req.on('end', () => {
+        const message = JSON.parse(body) as { id?: unknown; method?: string };
+        if (message.id === undefined) {
+          res.writeHead(202);
+          res.end();
+          return;
+        }
+        const result =
+          message.method === 'initialize'
+            ? {
+                protocolVersion: '2024-11-05',
+                capabilities: { tools: {} },
+                serverInfo: { name: 'relay', version: '1.0.0' },
+              }
+            : message.method === 'tools/list'
+              ? {
+                  tools: [
+                    {
+                      name: 'read_file',
+                      description: 'Read a client file',
+                      inputSchema: { type: 'object' },
+                    },
+                  ],
+                }
+              : { content: [{ type: 'text', text: 'ok' }] };
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ jsonrpc: '2.0', id: message.id, result }));
+      });
+    });
+    await new Promise<void>((resolve) => peer.listen(0, '127.0.0.1', resolve));
+    const port = (peer.address() as { port: number }).port;
+    return { peer, url: `http://127.0.0.1:${port}/mcp` };
+  }
+
+  async function sessionWithClient() {
+    const sessionId = randomUUID();
+    const server = await app(true);
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+      toolProfile: 'hosted-workspace-files/1',
+    });
+    expect(created.status).toBe(200);
+    return {
+      server,
+      sessionId,
+      clientId: created.body.clientId as string,
+    };
+  }
+
+  it('registers a relay, reports the tool count, and unregisters', async () => {
+    const { peer, url } = await relayPeer();
+    const { server, sessionId, clientId } = await sessionWithClient();
+    try {
+      const registered = await headers(
+        supertest(server).post(`/session/${sessionId}/client-files`),
+      )
+        .set('X-Qwen-Client-Id', clientId)
+        .send({
+          action: 'register',
+          serverId: 'local-files',
+          generation: 1,
+          url,
+          token: 'relay-token',
+        });
+      expect(registered.status).toBe(200);
+      expect(registered.body).toMatchObject({
+        registered: true,
+        generation: 1,
+        toolCount: 1,
+      });
+      const unregistered = await headers(
+        supertest(server).post(`/session/${sessionId}/client-files`),
+      )
+        .set('X-Qwen-Client-Id', clientId)
+        .send({ action: 'unregister' });
+      expect(unregistered.status).toBe(200);
+      expect(unregistered.body.registered).toBe(false);
+    } finally {
+      await headers(supertest(server).delete(`/session/${sessionId}`)).set(
+        'X-Qwen-Client-Id',
+        clientId,
+      );
+      await new Promise<void>((resolve) => {
+        peer.close(() => resolve());
+        peer.closeAllConnections();
+      });
+    }
+  });
+
+  it('refuses an invalid registration payload', async () => {
+    const { server, sessionId, clientId } = await sessionWithClient();
+    try {
+      const bad = await headers(
+        supertest(server).post(`/session/${sessionId}/client-files`),
+      )
+        .set('X-Qwen-Client-Id', clientId)
+        .send({
+          action: 'register',
+          serverId: 'local-files',
+          generation: 0,
+          url: 'http://127.0.0.1:1/mcp',
+          token: 't',
+        });
+      expect(bad.status).toBe(400);
+      expect(bad.body.code).toBe('invalid_client_files_registration');
+    } finally {
+      await headers(supertest(server).delete(`/session/${sessionId}`)).set(
+        'X-Qwen-Client-Id',
+        clientId,
+      );
+    }
+  });
+
+  it('refuses an unknown session and a wrong client id', async () => {
+    const { server, sessionId, clientId } = await sessionWithClient();
+    try {
+      const unknown = await headers(
+        supertest(server).post(
+          '/session/99999999-9999-4999-8999-999999999999/client-files',
+        ),
+      )
+        .set('X-Qwen-Client-Id', clientId)
+        .send({ action: 'unregister' });
+      expect(unknown.status).toBe(404);
+      const wrongClient = await headers(
+        supertest(server).post(`/session/${sessionId}/client-files`),
+      )
+        .set('X-Qwen-Client-Id', '99999999-9999-4999-8999-999999999999')
+        .send({ action: 'unregister' });
+      expect(wrongClient.status).toBe(404);
+    } finally {
+      await headers(supertest(server).delete(`/session/${sessionId}`)).set(
+        'X-Qwen-Client-Id',
+        clientId,
+      );
+    }
+  });
+});

@@ -406,6 +406,7 @@ import {
   parseHostedMcpServers,
   type HostedMcpServerPin,
 } from './hosted-mcp-session.js';
+import { HostedClientFilesSession } from './hosted-client-files-session.js';
 import {
   HostedApprovalWaiters,
   hostedApprovalDefinition,
@@ -731,6 +732,7 @@ interface HostedSession {
   // in publication mode exactly like `shell` does without capture bytes.
   backgroundLane?: HostedShellTurnOptions;
   mcp?: HostedMcpSession;
+  clientFiles?: HostedClientFilesSession;
   hooks?: HostedHookSession;
   childRuns?: HostedChildRunSession;
   monitors?: HostedMonitorSession;
@@ -4056,6 +4058,7 @@ async function executeHostedTurn(
                   memory: session.memory,
                   memoryOnly: !session.toolProfile,
                   mcp: session.mcp,
+                  clientFiles: session.clientFiles,
                   hooks: session.hooks,
                   skills: session.skills,
                   extensionConfig: session.extensionBundle
@@ -8553,6 +8556,8 @@ export function registerHostedHarnessSessionRoutes(
           await session.shell?.publisher?.close();
           await session.backgroundLane?.publisher?.close();
           await session.mcp?.closeResources({ terminal: kind === 'delete' });
+          await session.clientFiles?.close();
+          session.clientFiles = undefined;
         }
         res.json({
           protocolVersion: 2,
@@ -9260,6 +9265,62 @@ export function registerHostedHarnessSessionRoutes(
           }
         : null,
     });
+  });
+
+  app.post('/session/:id/client-files', async (req, res) => {
+    const session = identity(req, sessions);
+    if (!session) return error(res, 404, 'hosted_session_not_found');
+    if (session.active || session.blocked)
+      return error(res, 409, 'hosted_turn_active');
+    const body = object(req.body);
+    const action = body?.['action'];
+    if (action === 'unregister') {
+      await session.clientFiles?.unregister();
+      return res.json({ registered: false });
+    }
+    if (action !== 'register')
+      return error(res, 400, 'invalid_client_files_action');
+    const serverId = body?.['serverId'];
+    const generation = body?.['generation'];
+    const url = body?.['url'];
+    const token = body?.['token'];
+    if (
+      typeof serverId !== 'string' ||
+      !/^[A-Za-z0-9._:-]{1,128}$/u.test(serverId) ||
+      typeof generation !== 'number' ||
+      !Number.isSafeInteger(generation) ||
+      generation < 1 ||
+      typeof url !== 'string' ||
+      typeof token !== 'string' ||
+      token === ''
+    )
+      return error(res, 400, 'invalid_client_files_registration');
+    let parsed: URL;
+    try {
+      parsed = new URL(url);
+    } catch {
+      return error(res, 400, 'invalid_client_files_registration');
+    }
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:')
+      return error(res, 400, 'invalid_client_files_registration');
+    session.clientFiles ??= new HostedClientFilesSession();
+    try {
+      const toolCount = await session.clientFiles.register({
+        serverId,
+        generation,
+        url,
+        token,
+      });
+      return res.json({ registered: true, generation, toolCount });
+    } catch (cause) {
+      return error(
+        res,
+        503,
+        'client_files_relay_unavailable',
+        undefined,
+        cause instanceof Error ? cause.message : undefined,
+      );
+    }
   });
 
   app.post('/session/:id/hooks/operations', (req, res) => {
@@ -11616,6 +11677,7 @@ export function registerHostedHarnessSessionRoutes(
             memory: session.memory,
             memoryOnly: !session.toolProfile,
             mcp: session.mcp,
+            clientFiles: session.clientFiles,
             skills: session.skills,
             extensionConfig: session.extensionBundle
               ? {
@@ -13492,6 +13554,10 @@ export function registerHostedHarnessSessionRoutes(
         // Only a DELETE is terminal; a detach keeps the owner re-acquirable
         // across the reload (R14-1), matching the Hook close above.
         await session.mcp?.close({ terminal: req.method === 'DELETE' });
+        // The client files registration is ephemeral harness-local state; a
+        // detach loses it across the reload, so the browser re-registers.
+        await session.clientFiles?.close();
+        session.clientFiles = undefined;
         if (
           session.mcp &&
           mcpLease !== undefined &&
