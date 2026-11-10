@@ -290,7 +290,15 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
     // extension skill resolves to it (exact registry identity and
     // model-invocable commands take precedence above).
     const authoredResolution = this.resolveAuthoredName(params.skill);
-    if (authoredResolution && 'name' in authoredResolution) return null;
+    if (authoredResolution && 'name' in authoredResolution) {
+      // A silent `paths:` activation (no SkillManager change event) leaves
+      // the refreshed snapshot stale; the bare spelling must not pass while
+      // the qualified one is still gated by it (#13690).
+      if (!this.pathGateOpenFor(params.skill, authoredResolution.name)) {
+        return `Skill "${params.skill}" is gated by path-based activation (paths: frontmatter) and is not yet available. Access a file matching its paths patterns first to activate it.`;
+      }
+      return null;
+    }
     if (authoredResolution && 'gated' in authoredResolution) {
       return `Skill "${params.skill}" is gated by path-based activation (paths: frontmatter) and is not yet available. Access a file matching its paths patterns first to activate it.`;
     }
@@ -373,6 +381,25 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
     if (authored.length === 1 && inactive.length === 1)
       return { gated: inactive[0]!.name };
     return null;
+  }
+
+  /**
+   * A bare-name pass must agree with both views of `paths:` activation —
+   * the refreshed snapshot (`pendingConditionalSkillNames`) and the live
+   * registry. Either saying not-yet-active keeps the gate closed (#13690).
+   */
+  private pathGateOpenFor(skillName: string, name: string): boolean {
+    if (this.pendingConditionalSkillNames.has(name)) return false;
+    if (skillName !== name && this.pendingConditionalSkillNames.has(skillName))
+      return false;
+    const skill = (this.skillManager.getCachedSkills() ?? []).find(
+      (candidate) => candidate.name === name,
+    );
+    return (
+      !skill ||
+      skillModelInvocationBlock(this.config, this.skillManager, skill) !==
+        'inactive'
+    );
   }
 
   /**

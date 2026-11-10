@@ -707,6 +707,38 @@ describe('SkillTool', () => {
       expect(validate('gated', tool)).toMatch(/gated by path-based activation/);
     });
 
+    it('keeps the bare spelling gated when a silent activation outruns the snapshot (#13690)', async () => {
+      const gated: SkillConfig = {
+        ...mockSkills[0],
+        name: 'portable:gated',
+        authoredName: 'gated',
+        extensionName: 'portable',
+        level: 'extension',
+        paths: ['**/*.tsx'],
+      };
+      lists([gated]);
+      caches([gated]);
+      gateOnPaths();
+      const tool = await newTool();
+
+      // A matching file access activates the skill in the registry without
+      // firing a change notification, so the snapshot still lists it as
+      // paths-pending. The qualified spelling follows that stale snapshot;
+      // the bare spelling consults the live registry and used to slip
+      // through while the qualified one stayed blocked.
+      vi.mocked(mockSkillManager.isSkillActive).mockReturnValue(true);
+      expect(validate('portable:gated', tool)).toMatch(
+        /gated by path-based activation/,
+      );
+      expect(validate('gated', tool)).toMatch(/gated by path-based activation/);
+
+      // Once a notified refresh rebuilds the snapshot, both spellings open.
+      clearCollectedSkillEntriesCache(mockSkillManager);
+      const refreshed = await newTool();
+      expect(validate('portable:gated', refreshed)).toBeNull();
+      expect(validate('gated', refreshed)).toBeNull();
+    });
+
     it('dedups a bare-then-qualified invocation in one session (#13683)', async () => {
       const skill: SkillConfig = {
         ...mockSkills[0],
