@@ -458,9 +458,17 @@ describe('Storage – runtime path methods use getRuntimeBaseDir', () => {
 
   it('getProjectDir gives distinct long project paths distinct directories', () => {
     const base = path.resolve('workspace');
-    const first = new Storage(path.join(base, 'a'.repeat(200), 'one'));
-    const second = new Storage(path.join(base, 'a'.repeat(200), 'two'));
-    expect(first.getProjectDir()).not.toBe(second.getProjectDir());
+    const firstRoot = path.join(base, 'a'.repeat(200), 'one');
+    const secondRoot = path.join(base, 'a'.repeat(200), 'two');
+    // Both roots must exceed the limit, or the difference between them comes
+    // from their tails and deleting the hash suffix would still pass.
+    for (const root of [firstRoot, secondRoot])
+      expect(Buffer.byteLength(sanitizeCwd(root), 'utf8')).toBeGreaterThan(
+        PROJECT_DIR_NAME_MAX,
+      );
+    expect(new Storage(firstRoot).getProjectDir()).not.toBe(
+      new Storage(secondRoot).getProjectDir(),
+    );
   });
 
   it('getProjectDir is stable for the same long project path', () => {

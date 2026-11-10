@@ -106,9 +106,9 @@ describe('SessionService - rename and custom title', () => {
       );
     (
       (await import('../utils/paths.js')) as unknown as {
-        sanitizeCwd: (cwd: string) => string;
+        boundProjectIdentifier: (cwd: string) => string;
       }
-    ).sanitizeCwd = actualPaths.sanitizeCwd;
+    ).boundProjectIdentifier = actualPaths.boundProjectIdentifier;
     vi.mocked(path.dirname).mockImplementation((p) => {
       const parts = p.split('/');
       parts.pop();

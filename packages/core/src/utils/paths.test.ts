@@ -1008,8 +1008,16 @@ describe('boundProjectIdentifier', () => {
 
   it('gives distinct long project paths distinct identifiers', () => {
     const base = path.resolve('workspace');
-    expect(
-      boundProjectIdentifier(path.join(base, 'a'.repeat(200), 'one')),
-    ).not.toBe(boundProjectIdentifier(path.join(base, 'a'.repeat(200), 'two')));
+    const first = path.join(base, 'a'.repeat(200), 'one');
+    const second = path.join(base, 'a'.repeat(200), 'two');
+    // Both roots must exceed the limit, or the difference between them comes
+    // from their tails and deleting the hash suffix would still pass.
+    for (const root of [first, second])
+      expect(Buffer.byteLength(sanitizeCwd(root), 'utf8')).toBeGreaterThan(
+        PROJECT_DIR_NAME_MAX,
+      );
+    expect(boundProjectIdentifier(first)).not.toBe(
+      boundProjectIdentifier(second),
+    );
   });
 });

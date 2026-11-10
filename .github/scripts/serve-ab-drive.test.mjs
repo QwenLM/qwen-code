@@ -13,8 +13,9 @@ import {
   readdirSync,
   writeFileSync,
 } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
-import { join, sep } from 'node:path';
+import { basename, dirname, join, sep } from 'node:path';
 import test from 'node:test';
 
 import {
@@ -46,6 +47,30 @@ test('chatsDirFor mirrors the daemon project-dir layout', () => {
       '-srv-my-project',
       'chats',
     ),
+  );
+});
+
+test('chatsDirFor bounds an over-long workspace the way boundProjectIdentifier does', () => {
+  const home = '/home/runner/work/tmp';
+  const workspace = `/tmp/${'a'.repeat(300)}`;
+  const sanitized = workspace.replace(/[^a-zA-Z0-9]/g, '-');
+  // The premise: this workspace really does outgrow one path component, or
+  // the assertion below would hold for the unbounded identifier too.
+  assert.ok(Buffer.byteLength(sanitized, 'utf8') > 255);
+  const projectId = basename(dirname(chatsDirFor(home, workspace)));
+  assert.equal(Buffer.byteLength(projectId, 'utf8'), 255);
+  assert.equal(
+    projectId,
+    `${sanitized.slice(0, 238)}-${createHash('sha256')
+      .update(workspace)
+      .digest('hex')
+      .slice(0, 16)}`,
+  );
+  // Two long roots that share their readable prefix must stay distinct, or
+  // one project's transcripts become readable under another.
+  assert.notEqual(
+    chatsDirFor(home, `${workspace}1`),
+    chatsDirFor(home, `${workspace}2`),
   );
 });
 
