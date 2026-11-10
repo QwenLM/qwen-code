@@ -658,3 +658,363 @@ test('shows Qwen Live sessions in Tasks and excludes them from Channels @smoke',
     page.getByText('Qwen Live task fixture', { exact: true }),
   ).toBeVisible();
 });
+
+test('edits GitHub bound-session action templates on demand and toggles fullscreen @smoke', async ({
+  page,
+}, testInfo) => {
+  const workspaceCwd = '/tmp/qwen-web-shell-e2e';
+  const scenario = createWebShellDaemonScenario({
+    workspaceCwd,
+    capabilities: {
+      features: [
+        'session_events',
+        'permission_vote',
+        'session_permission_vote',
+        'session_scope_override',
+        'session_source_metadata',
+        'channel_management',
+      ],
+    },
+    channelTypes: [
+      {
+        type: 'github',
+        displayName: 'GitHub',
+        manageable: true,
+        fields: [
+          {
+            key: 'useLocalGh',
+            label: 'Use Local GitHub CLI Authentication',
+            kind: 'boolean',
+          },
+          {
+            key: 'groupPolicy',
+            label: 'Group Policy',
+            kind: 'enum',
+            required: true,
+            default: 'open',
+            options: [
+              { value: 'open', label: 'Open' },
+              { value: 'allowlist', label: 'Allowlist' },
+              { value: 'pairing', label: 'Pairing' },
+              { value: 'disabled', label: 'Disabled' },
+            ],
+          },
+          {
+            key: 'deliverToBoundSessions',
+            label: 'Deliver To PR-Bound Sessions',
+            kind: 'boolean',
+            default: 'false',
+          },
+          {
+            key: 'boundSessionActions',
+            label: 'Bound Session Actions',
+            kind: 'record',
+            options: [
+              {
+                value: 'default',
+                label: 'default',
+                description: 'Fallback for any unmatched event',
+                group: 'any',
+              },
+              {
+                value: 'watch:ci_failure',
+                label: 'watch:ci_failure',
+                description: 'CI checks turn red on a head commit',
+                group: 'any',
+              },
+              {
+                value: 'comment',
+                label: 'comment',
+                description: 'A new comment notification',
+                group: 'any',
+              },
+              {
+                value: 'review:watch:ci_failure',
+                label: 'review:watch:ci_failure',
+                description: 'CI checks turn red on a head commit',
+                group: 'review',
+              },
+              {
+                value: 'fix:comment',
+                label: 'fix:comment',
+                description: 'A new comment notification',
+                group: 'fix',
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  });
+  await page.addInitScript(() => {
+    window.sessionStorage.setItem('qwen-daemon-token', 'e2e-token');
+  });
+  const daemon = await installMockDaemon(page, scenario, {
+    baseURL: String(testInfo.project.use.baseURL),
+  });
+
+  await page.goto(`/session/${encodeURIComponent(scenario.sessionId)}`);
+  await expect(
+    page.locator('[data-web-shell-root]:not([data-web-shell-gate])'),
+  ).toBeVisible();
+  const connection = await daemon.sse.waitForConnection(scenario.sessionId);
+  await daemon.sendEvent(
+    replayCompleteEvent({ sessionId: connection.sessionId }),
+  );
+  await expect(page.getByText('Loading...')).toHaveCount(0);
+
+  await page.getByRole('button', { name: 'Channels', exact: true }).click();
+  await page.getByRole('button', { name: 'Configure GitHub' }).click();
+  const editor = page.getByRole('dialog');
+  await expect(
+    editor.getByRole('heading', { name: 'Configure GitHub' }),
+  ).toBeVisible();
+
+  // On-demand rows: a fresh draft shows the add picker, not one input per
+  // descriptor option.
+  const addPicker = editor.getByLabel('Bound Session Actions');
+  await expect(addPicker).toBeVisible();
+  await expect(editor.locator('textarea')).toHaveCount(0);
+
+  // Fullscreen toggle enlarges the dialog and back. Locate by aria-pressed:
+  // the accessible name flips between Fullscreen and Exit fullscreen.
+  const fullscreenButton = editor.locator('button[aria-pressed]');
+  await expect(fullscreenButton).toHaveAttribute('aria-label', 'Fullscreen');
+  await fullscreenButton.click();
+  await expect(fullscreenButton).toHaveAttribute('aria-pressed', 'true');
+  const viewport = page.viewportSize();
+  // The dialog size transitions over 100ms; poll the settled width.
+  await expect
+    .poll(async () => (await editor.boundingBox())?.width ?? 0)
+    .toBeGreaterThan((viewport?.width ?? 1280) - 64);
+  await fullscreenButton.click();
+  await expect(fullscreenButton).toHaveAttribute('aria-pressed', 'false');
+
+  await editor.getByLabel('Instance name').fill('gh-bot');
+  await editor
+    .getByRole('switch', { name: 'Use Local GitHub CLI Authentication' })
+    .click();
+  await editor
+    .getByRole('switch', { name: 'Deliver To PR-Bound Sessions' })
+    .click();
+
+  // Add two keys; leave one empty — the save must filter it out.
+  await addPicker.click();
+  await page.getByRole('option', { name: /review:watch:ci_failure/ }).click();
+  const template = 'Review CI failure on %repo%#%pr%\nRun /verify-pr';
+  await editor
+    .getByRole('textbox', { name: 'review:watch:ci_failure' })
+    .fill(template);
+  await addPicker.click();
+  await page.getByRole('option', { name: /fix:comment/ }).click();
+  await editor.getByRole('button', { name: 'Save' }).click();
+  await expect(
+    editor.getByRole('heading', { name: 'Configure GitHub' }),
+  ).toHaveCount(0);
+
+  const upserts = () =>
+    daemon.requests.filter(
+      (request) =>
+        request.method === 'PUT' && request.path.endsWith('/channels/gh-bot'),
+    );
+  await expect.poll(() => upserts().length).toBe(1);
+  expect(upserts()[0]?.body).toEqual(
+    expect.objectContaining({
+      config: expect.objectContaining({
+        type: 'github',
+        useLocalGh: true,
+        deliverToBoundSessions: true,
+        boundSessionActions: { 'review:watch:ci_failure': template },
+      }),
+    }),
+  );
+
+  // Reopen: the stored row round-trips; deleting it drops the key on save.
+  await page.getByRole('button', { name: 'Edit gh-bot' }).click();
+  await expect(
+    editor.getByRole('textbox', { name: 'review:watch:ci_failure' }),
+  ).toHaveValue(template);
+  await editor
+    .getByRole('button', { name: 'Remove review:watch:ci_failure' })
+    .click();
+  await expect(editor.locator('textarea')).toHaveCount(0);
+  await editor.getByRole('button', { name: 'Save' }).click();
+  await expect.poll(() => upserts().length).toBe(2);
+  const secondBody = upserts()[1]?.body as {
+    config: Record<string, unknown>;
+  };
+  expect(secondBody.config['boundSessionActions']).toBeUndefined();
+});
+
+test('lists a configured Email channel and hides its inert group controls @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario({
+    capabilities: {
+      features: [
+        'session_events',
+        'permission_vote',
+        'session_permission_vote',
+        'session_scope_override',
+        'session_source_metadata',
+        'channel_management',
+      ],
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/qwen-web-shell-e2e',
+          displayName: 'Main workspace',
+          primary: true,
+          trusted: true,
+        },
+      ],
+    },
+    channelTypes: [
+      {
+        type: 'email',
+        displayName: 'Email',
+        manageable: true,
+        fields: [
+          {
+            key: 'address',
+            label: 'address',
+            kind: 'string',
+            required: true,
+            envResolvable: true,
+          },
+          {
+            key: 'imapHost',
+            label: 'imapHost',
+            kind: 'string',
+            required: true,
+            envResolvable: true,
+          },
+          {
+            key: 'imapPassword',
+            label: 'imapPassword',
+            kind: 'secret',
+            required: true,
+            envResolvable: true,
+          },
+          {
+            key: 'smtpPassword',
+            label: 'smtpPassword',
+            kind: 'secret',
+            required: true,
+            envResolvable: true,
+          },
+          {
+            key: 'privatePolicy',
+            label: 'Private Policy',
+            kind: 'enum',
+            required: true,
+            default: 'allowlist',
+            options: [
+              { value: 'disabled', label: 'Disabled' },
+              { value: 'allowlist', label: 'Allowlist' },
+              { value: 'open', label: 'Open' },
+            ],
+          },
+          {
+            key: 'allowedUsers',
+            label: 'Allowed Users',
+            kind: 'string-list',
+          },
+          // Injected by the registry because the plugin does not declare it.
+          // Email builds every envelope with isGroup:false, so it is inert.
+          {
+            key: 'groupPolicy',
+            label: 'Group Policy',
+            kind: 'enum',
+            required: true,
+            default: 'disabled',
+            options: [
+              { value: 'disabled', label: 'Disabled' },
+              { value: 'pairing', label: 'Pairing' },
+              { value: 'allowlist', label: 'Allowlist' },
+              { value: 'open', label: 'Open' },
+            ],
+          },
+        ],
+      },
+    ],
+    channels: {
+      revision: '1',
+      instances: {
+        'agent-mail': {
+          name: 'agent-mail',
+          config: {
+            type: 'email',
+            address: 'agent@example.com',
+            imapHost: 'imap.example.com',
+            privatePolicy: 'allowlist',
+          },
+          secrets: {
+            imapPassword: { present: true, source: 'environment' },
+            smtpPassword: { present: true, source: 'environment' },
+          },
+          startsWithServe: false,
+          runtime: { state: 'connected' },
+        },
+      },
+    },
+  });
+  await page.addInitScript(() => {
+    window.sessionStorage.setItem('qwen-daemon-token', 'e2e-token');
+  });
+  const daemon = await installMockDaemon(page, scenario, {
+    baseURL: String(testInfo.project.use.baseURL),
+  });
+
+  await page.goto(`/session/${encodeURIComponent(scenario.sessionId)}`);
+  await expect(
+    page.locator('[data-web-shell-root]:not([data-web-shell-gate])'),
+  ).toBeVisible();
+  const connection = await daemon.sse.waitForConnection(scenario.sessionId);
+  await daemon.sendEvent(
+    replayCompleteEvent({ sessionId: connection.sessionId }),
+  );
+  await expect(page.getByText('Loading...')).toHaveCount(0);
+
+  await page.getByRole('button', { name: 'Channels', exact: true }).click();
+
+  // The instance list filtered on the same allowlist as the picker, so a
+  // running Email channel used to be absent from the page entirely.
+  await expect(
+    page.getByRole('button', { name: 'Edit agent-mail' }),
+  ).toBeVisible();
+
+  await page.getByRole('button', { name: 'Configure Email' }).click();
+  const editor = page.getByRole('dialog');
+  await expect(
+    editor.getByRole('heading', { name: 'Configure Email' }),
+  ).toBeVisible();
+  // Locate by role and accessible name, not by label text: FieldShell appends
+  // an aria-hidden "*" to every required label, so the label's text is
+  // "IMAP Host*" and an exact getByLabel matches nothing. The accessible name
+  // skips aria-hidden content, so an exact role name matches the control.
+  await expect(
+    editor.getByRole('textbox', { name: 'IMAP Host', exact: true }),
+  ).toBeVisible();
+  await expect(
+    editor.getByRole('textbox', { name: 'Mailbox Address', exact: true }),
+  ).toBeVisible();
+  await expect(
+    editor.getByRole('combobox', {
+      name: 'Direct message policy',
+      exact: true,
+    }),
+  ).toBeVisible();
+  // Substring name matchers on purpose: an exact matcher would also miss a
+  // rendered "Group policy*", letting this guard pass while the control it
+  // forbids is on screen. Cover the whole group axis, not just the policy.
+  await expect(
+    editor.getByRole('combobox', { name: /Group policy/ }),
+  ).toHaveCount(0);
+  await expect(
+    editor.getByRole('textbox', { name: /Allowed group IDs/ }),
+  ).toHaveCount(0);
+  await expect(
+    editor.getByRole('combobox', { name: /Who can talk in groups/ }),
+  ).toHaveCount(0);
+});

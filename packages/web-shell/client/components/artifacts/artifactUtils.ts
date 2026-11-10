@@ -288,7 +288,7 @@ export async function readWorkspaceFileAsBlob(
     maxBytes?: number;
   },
 ): Promise<Blob> {
-  const chunks: Uint8Array[] = [];
+  const chunks: Array<Uint8Array<ArrayBuffer>> = [];
   const maxBytes = options.maxBytes ?? MAX_WORKSPACE_FILE_BLOB_BYTES;
   const checkCurrent = () => {
     if (options.isCancelled?.()) {

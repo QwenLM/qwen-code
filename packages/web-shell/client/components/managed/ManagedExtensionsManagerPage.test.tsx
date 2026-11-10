@@ -65,7 +65,11 @@ function provider() {
     value: { extensions } as unknown as ManagedAgentProvider,
   };
 }
-async function render(value: ManagedAgentProvider, sessionId = 'session-a') {
+async function render(
+  value: ManagedAgentProvider,
+  sessionId = 'session-a',
+  view: 'extensions' | 'mcp' | 'skills' = 'extensions',
+) {
   await act(async () =>
     root.render(
       <I18nProvider language="en">
@@ -73,6 +77,7 @@ async function render(value: ManagedAgentProvider, sessionId = 'session-a') {
           provider={value}
           workspaceId="workspace"
           sessionId={sessionId}
+          view={view}
           onClose={vi.fn()}
         />
       </I18nProvider>,
@@ -92,6 +97,34 @@ beforeEach(() => {
   container = document.createElement('div');
   document.body.append(container);
   root = createRoot(container);
+});
+
+it('keeps the last good static skills and shows an error when refresh fails', async () => {
+  const target = provider();
+  const list = vi
+    .fn()
+    .mockResolvedValueOnce({
+      skills: [{ name: 'fixed-skill', description: 'Fixed instructions' }],
+    })
+    .mockRejectedValueOnce(new Error('request failed'));
+  target.value.skills = { list } as unknown as ManagedAgentProvider['skills'];
+  await render(target.value, 'session-a', 'skills');
+  await vi.waitFor(() =>
+    expect(container.textContent).toContain('fixed-skill'),
+  );
+  await act(async () =>
+    container
+      .querySelector<HTMLButtonElement>('button[aria-label="Refresh"]')!
+      .click(),
+  );
+  await vi.waitFor(() =>
+    expect(container.textContent).toContain(
+      'The request could not be confirmed. Refresh status or retry the original request.',
+    ),
+  );
+  expect(container.textContent).toContain('fixed-skill');
+  expect(target.extensions.list).toHaveBeenCalledTimes(2);
+  expect(target.extensions.query).toHaveBeenCalledTimes(2);
 });
 
 it('limits checkbox and saved-settings additions to 32 selected packages', async () => {
@@ -270,54 +303,60 @@ describe('Managed extension selection', () => {
   });
 });
 
-it('refreshes and unlocks a definitive stale-revision rejection for a new request', async () => {
-  const target = provider();
-  target.extensions.apply.mockRejectedValue(
-    new JavaManagedAgentHttpError(
-      409,
-      'extension_config_revision_conflict',
-      'Refresh current configuration',
-    ),
-  );
-  target.extensions.query
-    .mockResolvedValueOnce(snapshot('session-a'))
-    .mockResolvedValue({ ...snapshot('session-a'), revision: 2 });
-  await render(target.value);
-  await ready();
-  const checkbox = () =>
-    container.querySelector<HTMLInputElement>('[aria-label="Example"]')!;
-  await act(async () => checkbox().click());
-  const apply = [...container.querySelectorAll('button')].find(
-    (button) => button.textContent === 'Apply selection',
-  )!;
-  await act(async () => apply.click());
-  await vi.waitFor(() =>
-    expect(target.extensions.apply).toHaveBeenCalledTimes(1),
-  );
-  await vi.waitFor(() =>
-    expect(target.extensions.query).toHaveBeenCalledTimes(2),
-  );
-  expect(checkbox().disabled).toBe(false);
-  expect(container.textContent).not.toContain('Retry original request');
-  expect(
-    sessionStorage.getItem('managed-extension-apply:test:workspace:session-a'),
-  ).toBeNull();
-  target.extensions.apply.mockResolvedValueOnce(snapshot('session-a'));
-  await act(async () => checkbox().click());
-  await act(async () => apply.click());
-  expect(
-    target.extensions.apply.mock.calls[1]?.[1].expectedConfigRevision,
-  ).toBe(2);
-  expect(target.extensions.apply.mock.calls[1]?.[2].idempotencyKey).not.toBe(
-    target.extensions.apply.mock.calls[0]?.[2].idempotencyKey,
-  );
-});
+it.each(['extension_config_revision_conflict'])(
+  'refreshes and unlocks a definitive %s rejection for a new request',
+  async (code) => {
+    const target = provider();
+    target.extensions.apply.mockRejectedValue(
+      new JavaManagedAgentHttpError(409, code, 'Refresh current configuration'),
+    );
+    target.extensions.query
+      .mockResolvedValueOnce(snapshot('session-a'))
+      .mockResolvedValue({ ...snapshot('session-a'), revision: 2 });
+    await render(target.value);
+    await ready();
+    const checkbox = () =>
+      container.querySelector<HTMLInputElement>('[aria-label="Example"]')!;
+    await act(async () => checkbox().click());
+    const apply = [...container.querySelectorAll('button')].find(
+      (button) => button.textContent === 'Apply selection',
+    )!;
+    await act(async () => apply.click());
+    await vi.waitFor(() =>
+      expect(target.extensions.apply).toHaveBeenCalledTimes(1),
+    );
+    await vi.waitFor(() =>
+      expect(target.extensions.query).toHaveBeenCalledTimes(2),
+    );
+    expect(checkbox().disabled).toBe(false);
+    expect(container.textContent).not.toContain('Retry original request');
+    expect(
+      sessionStorage.getItem(
+        'managed-extension-apply:test:workspace:session-a',
+      ),
+    ).toBeNull();
+    target.extensions.apply.mockResolvedValueOnce(snapshot('session-a'));
+    await act(async () => checkbox().click());
+    await act(async () => apply.click());
+    expect(
+      target.extensions.apply.mock.calls[1]?.[1].expectedConfigRevision,
+    ).toBe(2);
+    expect(target.extensions.apply.mock.calls[1]?.[2].idempotencyKey).not.toBe(
+      target.extensions.apply.mock.calls[0]?.[2].idempotencyKey,
+    );
+  },
+);
 
 it.each([
   new JavaManagedAgentHttpError(
     409,
     'hosted_extension_configuration_conflict',
     'Commit conflict',
+  ),
+  new JavaManagedAgentHttpError(
+    409,
+    'extension_selection_upgrade_required',
+    'Unsupported selection protocol',
   ),
   new JavaManagedAgentHttpError(
     503,

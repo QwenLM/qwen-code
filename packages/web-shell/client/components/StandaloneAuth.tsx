@@ -11,6 +11,7 @@ import {
   confirmDaemonTarget,
   getAllowedDaemonOrigin,
   getDaemonToken,
+  isDaemonMixedContent,
   navigateToDaemon,
   persistDaemonToken,
 } from '../config/daemon';
@@ -41,6 +42,7 @@ import {
 import { Input } from './ui/input';
 import { Label } from './ui/label';
 import { Spinner } from './ui/spinner';
+import { DaemonConnectionHelp } from './DaemonConnectionHelp';
 
 // A probe must give up well before the SDK's own 30s fetch timeout
 // (DaemonClient DEFAULT_FETCH_TIMEOUT_MS) so the gate keeps retrying while the
@@ -63,6 +65,7 @@ interface AuthCopy {
   enterToken: string;
   policyBlocked: string;
   invalidAddress: string;
+  mixedContent: string;
   addressChanged: string;
   confirmTarget: string;
   remoteHint: string;
@@ -81,41 +84,46 @@ interface AuthCopy {
 
 // This gate renders before the app (and therefore before its I18nProvider), so
 // it carries its own copy table instead of calling useI18n.
+const EN_COPY: AuthCopy = {
+  pairingFailed:
+    'Pairing failed or the QR code expired. Scan a fresh QR code, or enter the daemon token.',
+  heading: 'Connect to Qwen Code',
+  connecting: 'Connecting…',
+  starting: 'Daemon is starting…',
+  unreachable: 'Cannot reach the daemon. Retrying…',
+  remoteUnreachable:
+    'Cannot reach the daemon. Retrying… The browser cannot distinguish a network, certificate, or cross-origin failure. See remote connection setup below.',
+  notReady: 'Daemon is not ready. Retrying…',
+  startFailed: 'Daemon failed to start.',
+  invalidToken:
+    'Invalid or expired token. Copy the current token from the server’s remote connection settings or startup output.',
+  enterToken:
+    'Enter the bearer token from the server’s remote connection settings or startup output.',
+  policyBlocked:
+    'The server or proxy refused the request (HTTP 403). Check its access rules, Host policy, and allowed page origins in remote connection settings.',
+  invalidAddress: 'Invalid daemon address. Enter an HTTP or HTTPS origin.',
+  mixedContent:
+    'This HTTPS page cannot connect to a remote HTTP daemon. Use an HTTPS address for the remote service.',
+  addressChanged:
+    'Connection paused. Select Connect to use the entered address.',
+  confirmTarget:
+    'This page points to a daemon this browser has not connected to before. Connect only if you trust it.',
+  remoteHint:
+    'The token is sent to the address shown above. Enter only a token issued by that daemon.',
+  switchUnavailable:
+    'Browser storage is unavailable, so the token could not be carried to that daemon.',
+  addressLabel: 'Daemon address',
+  tokenLabel: 'Bearer token (optional)',
+  connect: 'Connect',
+  local: 'Return to local workspaces',
+  remoteAddCancel: 'Cancel adding workspace',
+  connectionAddCancel: 'Cancel adding connection',
+  retry: 'Retry',
+  hint: 'This token grants full access to the daemon. Only enter it on a page you opened from the daemon terminal or its QR code.',
+};
+
 const COPY: Record<WebShellLanguage, AuthCopy> = {
-  en: {
-    pairingFailed:
-      'Pairing failed or the QR code expired. Scan a fresh QR code, or enter the daemon token.',
-    heading: 'Connect to Qwen Code',
-    connecting: 'Connecting…',
-    starting: 'Daemon is starting…',
-    unreachable: 'Cannot reach the daemon. Retrying…',
-    remoteUnreachable:
-      'Cannot reach the daemon. Retrying… Check the address, network, HTTPS certificate, and --allow-origin for this page origin.',
-    notReady: 'Daemon is not ready. Retrying…',
-    startFailed: 'Daemon failed to start.',
-    invalidToken:
-      'Invalid or expired token. Enter the token from the daemon terminal.',
-    enterToken: 'Enter the bearer token from the daemon terminal.',
-    policyBlocked:
-      'Access blocked by the daemon Origin or Host policy. Open its direct address, or check --allow-origin for cross-origin access.',
-    invalidAddress: 'Invalid daemon address. Enter an HTTP or HTTPS origin.',
-    addressChanged:
-      'Connection paused. Select Connect to use the entered address.',
-    confirmTarget:
-      'This page points to a daemon this browser has not connected to before. Connect only if you trust it.',
-    remoteHint:
-      'The token is sent to the address shown above. Enter only a token issued by that daemon.',
-    switchUnavailable:
-      'Browser storage is unavailable, so the token could not be carried to that daemon.',
-    addressLabel: 'Daemon address',
-    tokenLabel: 'Bearer token (optional)',
-    connect: 'Connect',
-    local: 'Return to local workspaces',
-    remoteAddCancel: 'Cancel adding workspace',
-    connectionAddCancel: 'Cancel adding connection',
-    retry: 'Retry',
-    hint: 'This token grants full access to the daemon. Only enter it on a page you opened from the daemon terminal or its QR code.',
-  },
+  en: EN_COPY,
   'zh-CN': {
     pairingFailed:
       '配对失败或二维码已过期。请扫描新的二维码，或输入 daemon 令牌。',
@@ -124,14 +132,17 @@ const COPY: Record<WebShellLanguage, AuthCopy> = {
     starting: '守护进程正在启动…',
     unreachable: '无法访问守护进程，正在重试…',
     remoteUnreachable:
-      '无法访问守护进程，正在重试… 请检查地址、网络、HTTPS 证书，以及 --allow-origin 是否允许当前页面来源。',
+      '无法连接守护进程，正在重试… 浏览器无法区分网络、证书或跨域失败，请查看下方的远程连接配置说明。',
     notReady: '守护进程尚未就绪，正在重试…',
     startFailed: '守护进程启动失败。',
-    invalidToken: '令牌无效或已过期，请输入守护进程终端中显示的令牌。',
-    enterToken: '请输入守护进程终端中显示的 bearer token。',
+    invalidToken:
+      '令牌无效或已过期，请从服务器远程连接设置或启动输出复制当前 token。',
+    enterToken: '请输入服务器远程连接设置或启动输出中的 bearer token。',
     policyBlocked:
-      '访问被守护进程的 Origin 或 Host 策略拦截。请直接打开守护进程地址，或检查 --allow-origin 以允许跨域访问。',
+      '服务或代理拒绝了请求（HTTP 403），请检查访问规则、Host 策略，以及远程连接设置是否允许当前页面来源。',
     invalidAddress: 'Daemon 地址无效。请输入 HTTP 或 HTTPS origin。',
+    mixedContent:
+      '当前 HTTPS 页面无法连接远端 HTTP 服务，请使用远端服务的 HTTPS 地址。',
     addressChanged: '连接已暂停。点击“连接”以使用填写的地址。',
     confirmTarget:
       '此页面指向一个本浏览器从未连接过的守护进程。仅在你信任它时再连接。',
@@ -146,6 +157,9 @@ const COPY: Record<WebShellLanguage, AuthCopy> = {
     retry: '重试',
     hint: '该令牌拥有守护进程的完整访问权限。请仅在从守护进程终端或其二维码打开的页面中输入。',
   },
+  // Not translated yet — same partial-catalog policy as the ru table in
+  // i18n.tsx (#13391): ru reuses the EN copy.
+  ru: EN_COPY,
 };
 
 /** `Retry-After` in milliseconds (delta-seconds or HTTP-date), or undefined. */
@@ -260,6 +274,12 @@ export function StandaloneAuth({
 
   const connect = useCallback(
     async (candidate: string) => {
+      if (isDaemonMixedContent(baseUrl)) {
+        setBusy(false);
+        setNeedsToken(false);
+        setStatus(copyRef.current.mixedContent);
+        return;
+      }
       const controller = new AbortController();
       controllerRef.current = controller;
       if (operatorProbeRef.current) {
@@ -475,6 +495,12 @@ export function StandaloneAuth({
                 setStatus(copy.invalidAddress);
                 return;
               }
+              if (isDaemonMixedContent(normalizedAddress)) {
+                retireProbe();
+                setBusy(false);
+                setStatus(copy.mixedContent);
+                return;
+              }
               if (changingTarget) {
                 const candidate =
                   token.trim() || getDaemonToken(normalizedAddress);
@@ -550,6 +576,17 @@ export function StandaloneAuth({
                     : copy.retry}
             </Button>
           </form>
+          {normalizedAddress &&
+            normalizedAddress !== window.location.origin && (
+              <DaemonConnectionHelp
+                language={language}
+                expanded={
+                  status === copy.remoteUnreachable ||
+                  status === copy.policyBlocked ||
+                  status === copy.mixedContent
+                }
+              />
+            )}
           {(remoteWorkspaceAddActive ||
             remoteConnectionAddActive ||
             invalidTarget ||

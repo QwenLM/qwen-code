@@ -74,6 +74,7 @@ import {
 } from '../constants/sessions';
 import { ErrorBoundary } from './ErrorBoundary';
 import { SessionDetailsTooltip } from './sidebar/SessionDetailsTooltip';
+import { isAbsolutePath } from './sidebar/WorkspaceSection';
 import { Button } from './ui/button';
 import { Badge } from './ui/badge';
 import { Checkbox } from './ui/checkbox';
@@ -314,6 +315,7 @@ function SessionOverviewPanelInner({
   includeOtherWorkspaces,
   workspaceCwd,
   manageLiveState,
+  onLiveStateWorkspaceCwdsChange,
 }: {
   onOpenSession: (
     sessionId: string,
@@ -327,6 +329,7 @@ function SessionOverviewPanelInner({
   includeOtherWorkspaces: boolean;
   workspaceCwd?: string;
   manageLiveState: boolean;
+  onLiveStateWorkspaceCwdsChange?: (cwds: readonly string[]) => void;
 }) {
   const { t } = useI18n();
   const generatedUiOwner = useContext(McpAppGeneratedUiOwnerContext);
@@ -381,28 +384,45 @@ function SessionOverviewPanelInner({
   // isWaitingForUserQuestion and coordinates full-catalog reconciles only when
   // something actually changed. Adopt it only when trusted live-state routes
   // cover every visible workspace; otherwise fall back to catalog polling.
-  const liveStateWorkspaceCwds = useMemo(() => {
-    if (!workspaceCatalogAdvertised) {
-      const legacyCwd = workspaceCwd || primaryCwd;
-      return legacyCwd ? [legacyCwd] : [];
-    }
-    const visible = workspaceCwd
+  const visibleWorkspaces = useMemo(() => {
+    if (!workspaceCatalogAdvertised) return undefined;
+    return workspaceCwd
       ? (registeredWorkspaces ?? []).filter(
           (entry) => entry.cwd === workspaceCwd,
         )
       : (registeredWorkspaces ?? []).filter(
           (entry) => entry.primary || entry.trusted,
         );
-    return visible.length > 0 &&
-      visible.every((entry) => entry.trusted && entry.kind !== 'live')
-      ? visible.map((entry) => entry.cwd)
+  }, [registeredWorkspaces, workspaceCatalogAdvertised, workspaceCwd]);
+  const liveStateWorkspaceCwds = useMemo(() => {
+    if (!visibleWorkspaces) {
+      const legacyCwd = workspaceCwd || primaryCwd;
+      return legacyCwd ? [legacyCwd] : [];
+    }
+    return visibleWorkspaces.length > 0 &&
+      visibleWorkspaces.every((entry) => entry.trusted && entry.kind !== 'live')
+      ? visibleWorkspaces.map((entry) => entry.cwd)
       : [];
-  }, [
-    primaryCwd,
-    registeredWorkspaces,
-    workspaceCatalogAdvertised,
-    workspaceCwd,
-  ]);
+  }, [visibleWorkspaces, primaryCwd, workspaceCwd]);
+  // The app-level sidebarless poller covers workspaces per entry, so report
+  // the pollable subset of the displayed set even when the panel's own
+  // all-or-nothing adoption above falls back to catalog polling (#16355).
+  const reportableLiveStateWorkspaceCwds = useMemo(() => {
+    if (!visibleWorkspaces) return liveStateWorkspaceCwds;
+    return visibleWorkspaces
+      .filter(
+        (entry) =>
+          entry.trusted && entry.kind !== 'live' && isAbsolutePath(entry.cwd),
+      )
+      .map((entry) => entry.cwd);
+  }, [visibleWorkspaces, liveStateWorkspaceCwds]);
+  useEffect(() => {
+    onLiveStateWorkspaceCwdsChange?.(reportableLiveStateWorkspaceCwds);
+  }, [onLiveStateWorkspaceCwdsChange, reportableLiveStateWorkspaceCwds]);
+  useEffect(
+    () => () => onLiveStateWorkspaceCwdsChange?.([]),
+    [onLiveStateWorkspaceCwdsChange],
+  );
   const liveStateEnabled =
     (connection.capabilities?.features?.includes(SESSION_LIVE_STATE_FEATURE) ??
       false) &&
@@ -873,6 +893,7 @@ function SessionOverviewPanelInner({
         byCwd.set(key, [...(byCwd.get(key) ?? []), card]);
       }
       const succeededIdentities = new Set<string>();
+      const deleteFailures: string[] = [];
       let firstError: Error | undefined;
       for (const [cwd, group] of byCwd) {
         const ids = group.map((card) => card.sessionId);
@@ -906,21 +927,32 @@ function SessionOverviewPanelInner({
                 : undefined;
             }
           } else {
-            const invalidateDeleted =
-              generatedUiOwner?.captureSessionDeletion(ownerCwd);
-            const result = await client.deleteSessionsData(ids);
-            invalidateDeleted?.([...result.removed, ...result.notFound]);
-            for (const id of [...result.removed, ...result.notFound]) {
-              const card = cardsById.get(id);
-              if (card) succeededIdentities.add(getSessionIdentity(card));
+            for (
+              let offset = 0;
+              offset < ids.length;
+              offset += SESSION_ARCHIVE_BATCH_SIZE
+            ) {
+              const invalidateDeleted =
+                generatedUiOwner?.captureSessionDeletion(ownerCwd);
+              const result = await client.deleteSessionsData(
+                ids.slice(offset, offset + SESSION_ARCHIVE_BATCH_SIZE),
+              );
+              invalidateDeleted?.([...result.removed, ...result.notFound]);
+              for (const id of [...result.removed, ...result.notFound]) {
+                const card = cardsById.get(id);
+                if (card) succeededIdentities.add(getSessionIdentity(card));
+              }
+              deleteFailures.push(...result.errors.map(({ error }) => error));
             }
-            firstError ??= result.errors[0]
-              ? new Error(result.errors[0].error)
-              : undefined;
           }
         } catch (error) {
-          firstError ??=
+          const requestError =
             error instanceof Error ? error : new Error(String(error));
+          if (mutation === 'delete') {
+            deleteFailures.push(requestError.message);
+          } else {
+            firstError ??= requestError;
+          }
         } finally {
           if (ownerCwd) {
             sessionCatalogController.refreshWorkspace(ownerCwd);
@@ -966,16 +998,24 @@ function SessionOverviewPanelInner({
                 id,
               );
             }
-            firstError ??= result.errors[0]
-              ? new Error(result.errors[0].message)
-              : undefined;
+            deleteFailures.push(...result.errors.map(({ message }) => message));
           }
         } catch (error) {
-          firstError ??=
+          const requestError =
             error instanceof Error ? error : new Error(String(error));
+          if (mutation === 'delete') {
+            deleteFailures.push(requestError.message);
+          } else {
+            firstError ??= requestError;
+          }
         }
       }
-      return { succeededIdentities, error: firstError };
+      return {
+        succeededIdentities,
+        error: deleteFailures.length
+          ? new Error(deleteFailures.join('; '))
+          : firstError,
+      };
     },
     [
       canArchiveCard,
@@ -1322,8 +1362,8 @@ function SessionOverviewPanelInner({
         cell: ({ row }) => {
           const card = row.original;
           return (
-            <div className="min-w-0 space-y-1 py-1">
-              <div className="flex min-w-0 items-center gap-2">
+            <div className="min-w-0 space-y-1 py-0">
+              <div className="flex min-h-7 min-w-0 items-center gap-2">
                 {card.color && (
                   <span
                     className={cx(styles.colorDot, colorDotClass(card.color))}
@@ -2162,6 +2202,7 @@ export function SessionOverviewPanel({
   includeOtherWorkspaces = true,
   workspaceCwd,
   manageLiveState = true,
+  onLiveStateWorkspaceCwdsChange,
 }: {
   onOpenSession: (
     sessionId: string,
@@ -2175,6 +2216,7 @@ export function SessionOverviewPanel({
   includeOtherWorkspaces?: boolean;
   workspaceCwd?: string;
   manageLiveState?: boolean;
+  onLiveStateWorkspaceCwdsChange?: (cwds: readonly string[]) => void;
 }) {
   const { t } = useI18n();
   return (
@@ -2195,6 +2237,7 @@ export function SessionOverviewPanel({
         includeOtherWorkspaces={includeOtherWorkspaces}
         workspaceCwd={workspaceCwd}
         manageLiveState={manageLiveState}
+        onLiveStateWorkspaceCwdsChange={onLiveStateWorkspaceCwdsChange}
       />
     </ErrorBoundary>
   );
