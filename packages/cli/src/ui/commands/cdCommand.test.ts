@@ -17,6 +17,7 @@ import {
 } from './types.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
 import type { Config } from '@qwen-code/qwen-code-core';
+import type { AgentTask } from '@qwen-code/qwen-code-core/agents/background-tasks.js';
 import {
   loadTrustedFolders,
   resetTrustedFoldersForTesting,
@@ -35,11 +36,12 @@ describe('cdCommand', () => {
   let addWorkingDirectoryChangedContext: ReturnType<typeof vi.fn>;
   let getBackgroundTasks: ReturnType<
     typeof vi.fn<
-      () => Array<{
-        isBackgrounded: boolean;
-        status: string;
-        subagentType: string;
-      }>
+      () => Array<
+        Pick<
+          AgentTask,
+          'isBackgrounded' | 'status' | 'subagentType' | 'workspacePinned'
+        >
+      >
     >
   >;
 
@@ -179,25 +181,38 @@ describe('cdCommand', () => {
     expect(relocateWorkingDirectory).not.toHaveBeenCalled();
   });
 
-  it('checks for a running background fork after path lookup and allows retry after it settles', async () => {
-    const pendingMove = cdCommand.action!(context, nextDir);
-    const fork = {
-      isBackgrounded: true,
-      status: 'running',
-      subagentType: 'fork',
-    };
-    getBackgroundTasks.mockReturnValue([fork]);
+  it.each(['fork', 'general-purpose'])(
+    'checks for a running background %s after path lookup and allows retry after it settles',
+    async (subagentType) => {
+      const pendingMove = cdCommand.action!(context, nextDir);
+      const agent = { isBackgrounded: true, subagentType };
+      getBackgroundTasks.mockReturnValue([{ ...agent, status: 'running' }]);
 
-    await expect(pendingMove).resolves.toMatchObject({
-      type: 'message',
-      messageType: 'error',
-      content: expect.stringContaining('Wait for the background fork'),
-    });
-    expect(relocateWorkingDirectory).not.toHaveBeenCalled();
+      await expect(pendingMove).resolves.toMatchObject({
+        type: 'message',
+        messageType: 'error',
+        content: expect.stringContaining('Wait for background agents'),
+      });
+      expect(relocateWorkingDirectory).not.toHaveBeenCalled();
 
+      getBackgroundTasks.mockReturnValue([{ ...agent, status: 'completed' }]);
+      await cdCommand.action!(context, nextDir);
+      const targetDir = await realpath(nextDir);
+      expect(relocateWorkingDirectory).toHaveBeenCalledExactlyOnceWith(
+        targetDir,
+        targetDir,
+      );
+    },
+  );
+
+  it('allows switching while an independent worktree agent is running', async () => {
     getBackgroundTasks.mockReturnValue([
-      { ...fork, status: 'completed' },
-      { ...fork, subagentType: 'general-purpose' },
+      {
+        isBackgrounded: true,
+        status: 'running',
+        subagentType: 'general-purpose',
+        workspacePinned: true,
+      },
     ]);
     await cdCommand.action!(context, nextDir);
     const targetDir = await realpath(nextDir);

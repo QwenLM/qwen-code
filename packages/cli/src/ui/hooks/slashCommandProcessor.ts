@@ -88,7 +88,6 @@ import {
   sanitizeTerminalText,
   stripUnsafeCharacters,
 } from '../utils/textUtils.js';
-import { useKeypress } from './useKeypress.js';
 import { isPickerOnlyModelInvocation } from '../commands/modelCommand.js';
 import { quitCommand } from '../commands/quitCommand.js';
 import { useSubscriptionCommandVisibility } from './use-subscription-command-visibility.js';
@@ -236,7 +235,6 @@ export const useSlashCommandProcessor = (
   loadHistory: UseHistoryManagerReturn['loadHistory'],
   refreshStatic: () => void,
   toggleVimEnabled: () => Promise<boolean>,
-  isProcessing: boolean,
   setIsProcessing: (isProcessing: boolean) => void,
   isIdleRef: MutableRefObject<boolean>,
   setMemoryFileCount: (count: number) => void,
@@ -433,6 +431,7 @@ export const useSlashCommandProcessor = (
   const activeCommandRef = useRef<{
     controller: AbortController;
     canCancel: boolean;
+    committing: boolean;
   } | null>(null);
   const [commandCancellationBlocked, setCommandCancellationBlocked] =
     useState(false);
@@ -441,13 +440,17 @@ export const useSlashCommandProcessor = (
     () => activeCommandRef.current?.canCancel === false,
     [],
   );
+  const isCommandCommitting = useCallback(
+    () => activeCommandRef.current?.committing === true,
+    [],
+  );
 
   const cancelSlashCommand = useCallback(() => {
-    cancelBtw();
-    if (!activeCommandRef.current?.canCancel) {
-      return;
+    const active = activeCommandRef.current;
+    if (!active?.canCancel || active.controller.signal.aborted) {
+      return false;
     }
-    activeCommandRef.current.controller.abort();
+    active.controller.abort();
     addItem(
       {
         type: MessageType.INFO,
@@ -455,18 +458,9 @@ export const useSlashCommandProcessor = (
       },
       Date.now(),
     );
-    setPendingItem(null);
     setIsProcessing(false);
-  }, [addItem, setIsProcessing, cancelBtw]);
-
-  useKeypress(
-    (key) => {
-      if (key.name === 'escape') {
-        cancelSlashCommand();
-      }
-    },
-    { isActive: isProcessing },
-  );
+    return true;
+  }, [addItem, setIsProcessing]);
 
   const pendingHistoryItems = useMemo(() => {
     const items: HistoryItemWithoutId[] = [];
@@ -921,8 +915,7 @@ export const useSlashCommandProcessor = (
         return false;
       }
 
-      // Shortcuts can dispatch directly while the composer is disabled.
-      if (isCommandCancellationBlocked() || submissionSignal?.aborted) {
+      if (isCommandCommitting() || submissionSignal?.aborted) {
         return { type: 'handled' };
       }
 
@@ -946,6 +939,17 @@ export const useSlashCommandProcessor = (
         }
       }
 
+      // A built-in quit can exit a non-cancellable action without taking
+      // ownership away from it while exit cleanup is in progress.
+      const cancellationBlocked = isCommandCancellationBlocked();
+      if (
+        cancellationBlocked &&
+        (commandToExecute?.kind !== CommandKind.BUILT_IN ||
+          commandToExecute.name !== quitCommand.name)
+      ) {
+        return { type: 'handled' };
+      }
+
       const recordedItems: HistoryItemWithoutId[] = [];
       const recordItem = (item: HistoryItemWithoutId) => {
         recordedItems.push(item);
@@ -958,12 +962,17 @@ export const useSlashCommandProcessor = (
         return addItem(item, timestamp);
       };
 
-      setIsProcessing(true);
-
       // Create a new AbortController for this command execution
       const abortController = new AbortController();
-      const activeCommand = { controller: abortController, canCancel: true };
-      activeCommandRef.current = activeCommand;
+      const activeCommand = {
+        controller: abortController,
+        canCancel: true,
+        committing: false,
+      };
+      if (!cancellationBlocked) {
+        activeCommandRef.current = activeCommand;
+        setIsProcessing(true);
+      }
       const blockCancellation = () => {
         activeCommand.canCancel = false;
         if (activeCommandRef.current === activeCommand) {
@@ -973,8 +982,11 @@ export const useSlashCommandProcessor = (
       // A shortcut can replace the active command while a typed command is
       // running. Its submission still needs to abort the original action.
       const cancelFromSubmission = () => {
-        if (activeCommand.canCancel)
-          abortController.abort(submissionSignal?.reason);
+        if (!activeCommand.canCancel) return;
+        abortController.abort(submissionSignal?.reason);
+        if (activeCommandRef.current === activeCommand) {
+          setIsProcessing(false);
+        }
       };
       let commandPendingItem: HistoryItemWithoutId | null = null;
 
@@ -1204,6 +1216,7 @@ export const useSlashCommandProcessor = (
                 ) {
                   return false;
                 }
+                activeCommand.committing = true;
                 blockCancellation();
                 return true;
               },
@@ -1771,6 +1784,7 @@ export const useSlashCommandProcessor = (
       setConfirmationRequest,
       updateItem,
       isCommandCancellationBlocked,
+      isCommandCommitting,
     ],
   );
 
@@ -1784,6 +1798,7 @@ export const useSlashCommandProcessor = (
     cancelBtw,
     cancelSlashCommand,
     isCommandCancellationBlocked,
+    isCommandCommitting,
     commandCancellationBlocked,
     commandContext,
     shellConfirmationRequest,

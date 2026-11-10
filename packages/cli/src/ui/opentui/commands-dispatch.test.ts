@@ -50,6 +50,7 @@ import {
   REWRITE_CHANGED_PASTE,
 } from '../utils/paste-placeholders.js';
 import type { OpenTuiCommandHost } from './commands-context.js';
+import * as exitLifecycle from './exit-lifecycle.js';
 import * as interactiveMods from '../../services/interactive-mod-session.js';
 import { helpCommand } from '../commands/helpCommand.js';
 import { clearCommand } from '../commands/clearCommand.js';
@@ -1635,6 +1636,7 @@ describe('result mapping (all SlashCommandActionReturn kinds)', () => {
 
     try {
       await vi.waitFor(() => expect(handleBranch).toHaveBeenCalledOnce());
+      expect(dispatcher.isCommitInProgress()).toBe(true);
       dispatcher.cancel();
       expect(host.processingFlags).toEqual([true]);
     } finally {
@@ -1642,8 +1644,33 @@ describe('result mapping (all SlashCommandActionReturn kinds)', () => {
     }
     const outcome = await handlePromise;
     expect(outcome).toEqual({ kind: 'handled' });
+    expect(dispatcher.isCommitInProgress()).toBe(false);
     expect(host.processingFlags).toEqual([true, false]);
     expect(branchNames).toEqual(['wip']);
+  });
+
+  it('refuses a pending commit and later dispatches once exit starts', async () => {
+    const exiting = vi
+      .spyOn(exitLifecycle, 'isExitInProgress')
+      .mockReturnValue(false);
+    try {
+      const host = createFakeHost();
+      const branch = vi.fn(() => {
+        exiting.mockReturnValue(true);
+        return { type: 'dialog', dialog: 'branch' } as const;
+      });
+      const handleBranch = vi.fn(async () => {});
+      host.handleBranch = handleBranch;
+      const dispatcher = new OpenTuiSlashDispatcher(host, services, [
+        stub({ name: 'branch', action: branch }),
+      ]);
+      await dispatcher.handle('/branch');
+      await dispatcher.handle('/branch');
+      expect(branch).toHaveBeenCalledOnce();
+      expect(handleBranch).not.toHaveBeenCalled();
+    } finally {
+      exiting.mockRestore();
+    }
   });
 
   it('quit and tool results surface untouched', async () => {
@@ -2211,6 +2238,7 @@ describe('cancellation, telemetry and recording', () => {
         gateway.cancel();
         await Promise.resolve();
         expect(gateway.isBusy()).toBe(true);
+        expect(gateway.isCommitInProgress()).toBe(false);
         expect(host.processingFlags.at(-1)).toBe(true);
         expect(
           host.items.some((item) => item.text === 'Command cancelled.'),

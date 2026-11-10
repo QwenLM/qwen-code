@@ -429,6 +429,8 @@ describe('AppContainer State Management', () => {
   const mockedUseModelCommand = useModelCommand as Mock;
   const mockedUseSlashCommandProcessor = useSlashCommandProcessor as Mock;
   const mockIsCommandCancellationBlocked = vi.fn(() => false);
+  const mockIsCommandCommitting = vi.fn(() => false);
+  const mockCancelSlashCommand = vi.fn(() => false);
   const mockedUseLlmStream = useLlmStream as Mock;
   const mockedUseVim = useVim as Mock;
   const mockedUseFolderTrust = useFolderTrust as Mock;
@@ -468,6 +470,8 @@ describe('AppContainer State Management', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockIsCommandCancellationBlocked.mockReturnValue(false);
+    mockIsCommandCommitting.mockReturnValue(false);
+    mockCancelSlashCommand.mockReturnValue(false);
     restoreCiEnv = clearCiEnv();
     vi.stubEnv('TERM', 'xterm-256color');
     originalStdoutIsTTY = process.stdout.isTTY;
@@ -559,6 +563,8 @@ describe('AppContainer State Management', () => {
     });
     mockedUseSlashCommandProcessor.mockReturnValue({
       isCommandCancellationBlocked: mockIsCommandCancellationBlocked,
+      isCommandCommitting: mockIsCommandCommitting,
+      cancelSlashCommand: mockCancelSlashCommand,
       handleSlashCommand: vi.fn(),
       slashCommands: [],
       pendingHistoryItems: [],
@@ -1498,7 +1504,7 @@ describe('AppContainer State Management', () => {
 
       const slashCommandActions = mockedUseSlashCommandProcessor.mock.calls.at(
         -1,
-      )?.[12] as { quit: (messages: HistoryItem[]) => void };
+      )?.[11] as { quit: (messages: HistoryItem[]) => void };
       const timerCount = vi.getTimerCount();
       expect(() => slashCommandActions.quit([])).not.toThrow();
 
@@ -2006,6 +2012,8 @@ describe('AppContainer State Management', () => {
       const addMessage = vi.fn();
       mockedUseSlashCommandProcessor.mockReturnValue({
         isCommandCancellationBlocked: mockIsCommandCancellationBlocked,
+        isCommandCommitting: mockIsCommandCommitting,
+        cancelSlashCommand: mockCancelSlashCommand,
         handleSlashCommand,
         slashCommands,
         pendingHistoryItems: [],
@@ -2544,6 +2552,8 @@ describe('AppContainer State Management', () => {
           slashRefreshStatic = refreshStatic;
           return {
             isCommandCancellationBlocked: mockIsCommandCancellationBlocked,
+            isCommandCommitting: mockIsCommandCommitting,
+            cancelSlashCommand: mockCancelSlashCommand,
             handleSlashCommand: vi.fn(),
             slashCommands: [],
             pendingHistoryItems: [],
@@ -4930,6 +4940,8 @@ describe('AppContainer State Management', () => {
 
         mockedUseSlashCommandProcessor.mockReturnValue({
           isCommandCancellationBlocked: mockIsCommandCancellationBlocked,
+          isCommandCommitting: mockIsCommandCommitting,
+          cancelSlashCommand: mockCancelSlashCommand,
           handleSlashCommand: mockHandleSlashCommand,
           slashCommands: [],
           pendingHistoryItems: [],
@@ -4971,6 +4983,8 @@ describe('AppContainer State Management', () => {
         const mockQueueMessage = vi.fn();
         mockedUseSlashCommandProcessor.mockReturnValue({
           isCommandCancellationBlocked: mockIsCommandCancellationBlocked,
+          isCommandCommitting: mockIsCommandCommitting,
+          cancelSlashCommand: mockCancelSlashCommand,
           handleSlashCommand: mockHandleSlashCommand,
           slashCommands: [],
           pendingHistoryItems: [],
@@ -5157,6 +5171,7 @@ describe('AppContainer State Management', () => {
       const cancelOngoingRequest = vi.fn();
       const handleSlashCommand = vi.fn();
       mockIsCommandCancellationBlocked.mockReturnValue(true);
+      mockIsCommandCommitting.mockReturnValue(true);
       mockedUseLlmStream.mockReturnValue({
         ...mockedUseLlmStream(),
         streamingState: StreamingState.Responding,
@@ -5184,10 +5199,44 @@ describe('AppContainer State Management', () => {
       expect(handleSlashCommand).not.toHaveBeenCalled();
 
       mockIsCommandCancellationBlocked.mockReturnValue(false);
+      mockIsCommandCommitting.mockReturnValue(false);
       act(() => getGlobalKeypress()!(ctrlC));
       expect(cancelOngoingRequest).toHaveBeenCalledOnce();
       expect(handleSlashCommand).not.toHaveBeenCalled();
     });
+
+    it.each([
+      ['c', '\u0003'],
+      ['d', '\u0004'],
+    ])(
+      'allows double Ctrl+%s to quit a non-cancellable action outside a commit',
+      (name, sequence) => {
+        const handleSlashCommand = vi.fn();
+        mockIsCommandCancellationBlocked.mockReturnValue(true);
+        mockedUseLlmStream.mockReturnValue({
+          ...mockedUseLlmStream(),
+          streamingState: StreamingState.Responding,
+        });
+        mockedUseSlashCommandProcessor.mockReturnValue({
+          ...mockedUseSlashCommandProcessor(),
+          handleSlashCommand,
+        });
+        render(
+          <AppContainer
+            config={mockConfig}
+            settings={mockSettings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />,
+        );
+
+        const key = { ...escKey, name, ctrl: true, sequence };
+        act(() => getGlobalKeypress()!(key));
+        expect(handleSlashCommand).not.toHaveBeenCalled();
+        act(() => getGlobalKeypress()!(key));
+        expect(handleSlashCommand).toHaveBeenCalledExactlyOnceWith('/quit');
+      },
+    );
 
     it('keeps the MCP shortcut from replacing a slash command awaiting consent', () => {
       const handleSlashCommand = vi.fn();
@@ -8421,6 +8470,8 @@ describe('AppContainer State Management', () => {
       const mockHandleSlashCommand = vi.fn();
       mockedUseSlashCommandProcessor.mockReturnValue({
         isCommandCancellationBlocked: mockIsCommandCancellationBlocked,
+        isCommandCommitting: mockIsCommandCommitting,
+        cancelSlashCommand: mockCancelSlashCommand,
         handleSlashCommand: mockHandleSlashCommand,
         slashCommands: [],
         pendingHistoryItems: [],
@@ -8450,6 +8501,8 @@ describe('AppContainer State Management', () => {
       const mockHandleSlashCommand = vi.fn();
       mockedUseSlashCommandProcessor.mockReturnValue({
         isCommandCancellationBlocked: mockIsCommandCancellationBlocked,
+        isCommandCommitting: mockIsCommandCommitting,
+        cancelSlashCommand: mockCancelSlashCommand,
         handleSlashCommand: mockHandleSlashCommand,
         slashCommands: [],
         pendingHistoryItems: [],
@@ -8483,6 +8536,8 @@ describe('AppContainer State Management', () => {
       const mockHandleSlashCommand = vi.fn();
       mockedUseSlashCommandProcessor.mockReturnValue({
         isCommandCancellationBlocked: mockIsCommandCancellationBlocked,
+        isCommandCommitting: mockIsCommandCommitting,
+        cancelSlashCommand: mockCancelSlashCommand,
         handleSlashCommand: mockHandleSlashCommand,
         slashCommands: [],
         pendingHistoryItems: [],
@@ -8524,6 +8579,8 @@ describe('AppContainer State Management', () => {
       const mockHandleSlashCommand = vi.fn();
       mockedUseSlashCommandProcessor.mockReturnValue({
         isCommandCancellationBlocked: mockIsCommandCancellationBlocked,
+        isCommandCommitting: mockIsCommandCommitting,
+        cancelSlashCommand: mockCancelSlashCommand,
         handleSlashCommand: mockHandleSlashCommand,
         slashCommands: [],
         pendingHistoryItems: [],
@@ -8547,6 +8604,9 @@ describe('AppContainer State Management', () => {
     it('cancels a btw request shown behind a browsed answer on Ctrl+C', () => {
       const cancelBtw = vi.fn();
       mockedUseSlashCommandProcessor.mockReturnValue({
+        isCommandCancellationBlocked: mockIsCommandCancellationBlocked,
+        isCommandCommitting: mockIsCommandCommitting,
+        cancelSlashCommand: mockCancelSlashCommand,
         handleSlashCommand: vi.fn(),
         slashCommands: [],
         pendingHistoryItems: [],
@@ -8595,6 +8655,8 @@ describe('AppContainer State Management', () => {
       const mockHandleSlashCommand = vi.fn();
       mockedUseSlashCommandProcessor.mockReturnValue({
         isCommandCancellationBlocked: mockIsCommandCancellationBlocked,
+        isCommandCommitting: mockIsCommandCommitting,
+        cancelSlashCommand: mockCancelSlashCommand,
         handleSlashCommand: mockHandleSlashCommand,
         slashCommands: [],
         pendingHistoryItems: [],
@@ -9830,7 +9892,7 @@ describe('AppContainer State Management', () => {
       renderRewindHarness();
       const actions = mockedUseSlashCommandProcessor.mock.calls.at(
         -1,
-      )?.[12] as Parameters<typeof useSlashCommandProcessor>[12];
+      )?.[11] as Parameters<typeof useSlashCommandProcessor>[11];
       act(() => actions.openRewindSelector('slash-command'));
       expect(capturedUIState.isRewindSelectorOpen).toBe(true);
     });
@@ -9871,7 +9933,7 @@ describe('AppContainer State Management', () => {
       renderRewindHarness();
       const actions = mockedUseSlashCommandProcessor.mock.calls.at(
         -1,
-      )?.[12] as Parameters<typeof useSlashCommandProcessor>[12];
+      )?.[11] as Parameters<typeof useSlashCommandProcessor>[11];
       act(() => actions.openRewindSelector('slash-command'));
       expect(capturedUIState.isRewindSelectorOpen).toBe(false);
     });
@@ -9895,7 +9957,7 @@ describe('AppContainer State Management', () => {
         );
         const actions = mockedUseSlashCommandProcessor.mock.calls.at(
           -1,
-        )?.[12] as Parameters<typeof useSlashCommandProcessor>[12];
+        )?.[11] as Parameters<typeof useSlashCommandProcessor>[11];
         act(() => actions.openRewindSelector('slash-command'));
         expect(capturedUIState.isRewindSelectorOpen).toBe(false);
         if (blockedBy === 'ide')
@@ -10399,6 +10461,8 @@ describe('AppContainer State Management', () => {
     it('consumes the latch on a model-invocable slash command (skills)', () => {
       mockedUseSlashCommandProcessor.mockReturnValue({
         isCommandCancellationBlocked: mockIsCommandCancellationBlocked,
+        isCommandCommitting: mockIsCommandCommitting,
+        cancelSlashCommand: mockCancelSlashCommand,
         handleSlashCommand: vi.fn(),
         slashCommands: [
           {

@@ -129,18 +129,14 @@ export const forkCommand: SlashCommand = {
       run_in_background: true,
     };
 
-    if (context.beginCommit?.() === false) {
-      return;
-    }
+    const signal = context.abortSignal ?? new AbortController().signal;
+    if (signal.aborted) return;
 
     let result;
     try {
-      // Hold the dispatch through asynchronous launch and registration. The
-      // background run owns its own AbortController once it starts.
-      result = await agentTool
-        .build(params)
-        .execute(new AbortController().signal);
+      result = await agentTool.build(params).execute(signal);
     } catch (error) {
+      if (signal.aborted) return;
       return {
         type: 'message',
         messageType: 'error',
@@ -149,6 +145,7 @@ export const forkCommand: SlashCommand = {
         }),
       };
     }
+    if (signal.aborted) return;
 
     // A failed launch (e.g. the background-agent concurrency cap is reached, or
     // registration throws) does NOT reject — the Agent tool returns a result
