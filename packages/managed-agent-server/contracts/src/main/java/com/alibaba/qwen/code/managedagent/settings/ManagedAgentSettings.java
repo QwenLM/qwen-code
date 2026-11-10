@@ -162,6 +162,10 @@ public interface ManagedAgentSettings {
         public String getWorkspaceCwd();
         public String getIsolationClass();
         public String getBoundSessionIsolationClass();
+        public default boolean isToolMeasurements() {
+            return false;
+        }
+
         public boolean isSessionCreateWarm();
         public List<? extends WorkspaceMount> getWorkspaceMounts();
         public String getWorkspaceCreationRoot();

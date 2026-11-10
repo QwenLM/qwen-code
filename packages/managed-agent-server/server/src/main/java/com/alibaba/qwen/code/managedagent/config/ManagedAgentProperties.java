@@ -907,6 +907,7 @@ public class ManagedAgentProperties
         private boolean localDirectoryImportEnabled;
         private String isolationClass = "session";
         private String boundSessionIsolationClass = "session";
+        private boolean toolMeasurements;
         private boolean sessionCreateWarm;
         private String stateDirectory = "";
         private boolean durableLocalProcess = true;

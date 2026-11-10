@@ -12,6 +12,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRepository;
+import com.alibaba.qwen.code.runtimebroker.RuntimeToolMeasurements;
 import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
@@ -202,7 +203,22 @@ final class RuntimeExecutionDispatcher {
             throw exception;
         }
         invocations.add(executing.getExecutionCallId());
-        CompletionStage<Map<String, Object>> invocation = grant == null
+        CompletionStage<Map<String, Object>> invocation =
+                RuntimeToolMeasurements.selected(executing.getReference())
+                        ? safeStage(() -> transport.executeV4(
+                                context.lease(), context.session(),
+                                dispatchReference(executing, context.binding().getRequest().getScope()),
+                                payload, grant == null ? null : capture(grant)))
+                                .thenCompose(answer -> {
+                                    if ("settled".equals(answer.get("state"))
+                                            && answer.get("result") instanceof Map<?, ?> raw) {
+                                        @SuppressWarnings("unchecked")
+                                        Map<String, Object> result = (Map<String, Object>) raw;
+                                        return CompletableFuture.completedFuture(result);
+                                    }
+                                    return awaitV3Result(context, executing, clock.instant().plus(v3ResultWindow));
+                                })
+                        : grant == null
                 ? safeStage(() -> payload == null
                         ? transport.execute(context.lease(), context.session(), executing.getReference())
                         : transport.execute(context.lease(), context.session(),
@@ -248,6 +264,7 @@ final class RuntimeExecutionDispatcher {
                 }).thenCompose(ignored -> {
                     if (!RuntimeProviderKinds.SSH_PROCESS.equals(context.binding().getRequest().getProvisionerKind())
                             && !WorkspaceExecutionProfile.isExternalWorkspaceRequest(context.binding().getRequest())) {
+                            && !RuntimeToolMeasurements.selected(executing.getReference())) {
                         return CompletableFuture.completedFuture(null);
                     }
                     ToolExecutionRecord settled = executionRepository.findByExecutionCallId(executing.getExecutionCallId());
@@ -291,8 +308,12 @@ final class RuntimeExecutionDispatcher {
             return;
         }
         try {
-            Map<String, Object> finished = publicationVerifier.finished(original);
-            if (finished != null) {
+            boolean measured =
+                    RuntimeToolMeasurements.selected(
+                            original.getReference());
+            Map<String, Object> finished =
+                    publicationVerifier == null ? null : publicationVerifier.finished(original);
+            if (finished != null && !measured) {
                 answer.complete(finished);
                 return;
             }
@@ -304,13 +325,23 @@ final class RuntimeExecutionDispatcher {
                     || !provisioner.isUsable(context.lease()) || !clock.instant().isBefore(deadline)) {
                 throw evidenceUnavailable();
             }
-            safeStage(() -> transport.statusV3(context.lease(), context.session(),
-                    original.getReference(), 0)).whenComplete((status, error) -> {
+            safeStage(() -> measured
+                    ? transport.statusV4(context.lease(), context.session(), original.getReference(), 0)
+                    : transport.statusV3(context.lease(), context.session(), original.getReference(), 0))
+                    .whenComplete((status, error) -> {
                         if (answer.isDone()) {
                             return;
                         }
                         if (nonRetryableToolV3(error)) {
                             answer.completeExceptionally(unwrap(error));
+                            return;
+                        }
+                        if (measured && error == null && status != null
+                                && "settled".equals(status.get("state"))
+                                && status.get("result") instanceof Map<?, ?> raw) {
+                            @SuppressWarnings("unchecked")
+                            Map<String, Object> result = (Map<String, Object>) raw;
+                            answer.complete(result);
                             return;
                         }
                         if (error == null && status != null && "settled".equals(status.get("state"))
@@ -419,6 +450,8 @@ final class RuntimeExecutionDispatcher {
             return failed(conflict("workspace_close_identity_unverified", "External drain requires settled file Tool v2 results"));
         }
         if ((!RuntimeProviderKinds.SSH_PROCESS.equals(binding.getRequest().getProvisionerKind()) && !external)
+        if ((!RuntimeProviderKinds.SSH_PROCESS.equals(binding.getRequest().getProvisionerKind())
+                        && !RuntimeToolMeasurements.selected(execution.getReference()) && !external)
                 || !execution.isSettled() || execution.getResult() == null
                 || ProviderRuntimeProtocol.isReference(execution.getReference())) {
             return CompletableFuture.completedFuture(null);
@@ -435,7 +468,9 @@ final class RuntimeExecutionDispatcher {
                 || !binding.getBindingId().equals(execution.getBindingId())
                 || binding.getGeneration() != execution.getRuntimeGeneration()
                 || !binding.getRequest().getScope().equals(session.getSession().getScope())
-                || !binding.getRequest().getIsolationKey().equals(execution.getHarnessSessionId())) {
+                || !binding.getRequest().getScope().equals(session.getSession().getScope())
+                || !com.alibaba.qwen.code.runtimebroker.HarnessOwnership.sharesRuntimeSessions(binding.getRequest())
+                        && !execution.getHarnessSessionId().equals(binding.getRequest().getIsolationKey())) {
             return failed(conflict("workspace_close_identity_unverified", "Persisted Tool ownership conflicts"));
         }
         if (noStart != null) {
@@ -454,7 +489,15 @@ final class RuntimeExecutionDispatcher {
             original = new RuntimeSession(original.getHarnessSessionId(), original.getRuntimeSessionId(),
                     original.getTurnKind(), original.getScope().withLifecycleAuthority(authority));
         }
-        return transport.acknowledgeV2(binding.getLease(), original, execution.getReference());
+        return RuntimeToolMeasurements.selected(
+                        execution.getReference())
+                ? transport.acknowledgeV4(
+                        binding.getLease(),
+                        original,
+                        execution.getReference(),
+                        execution.getResult(),
+                        null)
+                : transport.acknowledgeV2(binding.getLease(), original, execution.getReference());
     }
 
     private static boolean ownsDispatch(ToolExecutionRecord current,

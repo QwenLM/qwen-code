@@ -9,6 +9,9 @@ public final class WorkspaceExecutionProfile {
             "sha256:5fa15183dcfe582ce54c28bf25aff62801d19038a9ec649e9bfc67b06f2a389f";
     public static final String CAPABILITY_DIGEST =
             "sha256:7df3981fa14b397fe09f6ba84ed0c096c71902394da667bf47f3b315866e7f91";
+    public static final String MEASURED_PROFILE = "managed-workspace-execution/2";
+    public static final String MEASURED_CAPABILITY_DIGEST =
+            "sha256:b2ab403f278282eb8f2ca06c926be96bd3d85877714f64dc926eab535f544580";
 
     private WorkspaceExecutionProfile() {
     }
@@ -23,7 +26,8 @@ public final class WorkspaceExecutionProfile {
      * profile), which participates in Harness Session admission fencing.
      */
     public static boolean admitsCapabilityDigest(String digest) {
-        return CAPABILITY_DIGEST.equals(digest) || ManagedExtensionExecutionProfile.admits(digest);
+        return CAPABILITY_DIGEST.equals(digest)
+                || MEASURED_CAPABILITY_DIGEST.equals(digest) || ManagedExtensionExecutionProfile.admits(digest);
     }
 
     public static boolean isBoundWorkspaceScope(RuntimeScope scope) {
