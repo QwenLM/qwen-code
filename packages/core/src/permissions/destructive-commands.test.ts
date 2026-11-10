@@ -242,10 +242,8 @@ describe('isDestructiveCommand — git commit --amend', () => {
     },
   );
 
-  // `--amend` here is the value of `-m`, not an operator: it never mentioned an
-  // amend invocation, so it stays allowed on both the old and the new guard.
-  it('keeps git commit -m --amend allowed', () => {
-    expectAllowed(['git commit -m --amend'], 'commit changes');
+  it('asks conservatively when a message looks like an amend invocation', () => {
+    expectNeedsApproval('git commit -m --amend');
   });
 
   it('allows git commit (without --amend)', () => {
@@ -256,13 +254,10 @@ describe('isDestructiveCommand — git commit --amend', () => {
     'git commit -m "fix" # was: --amend',
     'git commit -a -m "x" # not --amend',
     'git commit -m x <<< --amend',
-    'git commit -m a#b',
-  ])(
-    'does not read comments or here-strings as amend arguments: %s',
-    (command) => {
-      expectAllowed([command], 'commit changes');
-    },
-  );
+    'git commit -m "note --amend"',
+  ])('asks conservatively for an amend-shaped argument: %s', (command) => {
+    expectNeedsApproval(command);
+  });
 
   it('routes a next-line amend after a comment to approval', () => {
     expectNeedsApproval("git status # it's fine\ngit commit --amend");
@@ -345,8 +340,20 @@ describe('isDestructiveCommand — git commit --amend', () => {
     'git checkout HEAD~1 && git commit --amend',
     'git switch some-branch && git commit --amend',
     '/usr/bin/git commit --amend',
+    '$(git commit --amend)',
+    '`git commit --amend`',
+    '<(git commit --amend)',
+    "x='git commit --amend'; $x",
+    'git commit --amend>/dev/null',
+    "git commit --amend\\n'-m' x",
   ])('routes the %s spelling to approval', (command) => {
     expectNeedsApproval(command);
+  });
+
+  it('keeps amend scanning linear for long model-authored commands', () => {
+    const start = performance.now();
+    expect(amendNeedsApproval('git commit '.repeat(8000))).toBe(false);
+    expect(performance.now() - start).toBeLessThan(500);
   });
 
   it.each([
@@ -354,6 +361,7 @@ describe('isDestructiveCommand — git commit --amend', () => {
     'git commit -m "a normal commit"',
     'git log --grep=amend',
     'git commit --all',
+    'git commit -m a#b',
   ])('leaves a non-amend command alone: %s', (command) => {
     expect(amendNeedsApproval(command)).toBe(false);
   });

@@ -493,6 +493,11 @@ describe('shouldForceAutoModeReviewForAllow', () => {
     ).toBe(true);
   });
 
+  it('reviews an amend even when an allow rule already matched', () => {
+    expect(forcesReview('git commit --amend --no-edit')).toBe(true);
+    expect(forcesReview('git status')).toBe(false);
+  });
+
   it('returns true for nested wrappers writing protected paths after `cd`', () => {
     // Regression guard: without `extractShellOperationsAcrossCommand` doing
     // cross-segment cd tracking AND recursive wrapper unwrapping, this payload

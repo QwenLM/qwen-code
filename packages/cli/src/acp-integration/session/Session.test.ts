@@ -42841,6 +42841,91 @@ describe('Session', () => {
       );
     });
 
+    it('keeps the amend approval human-only in ACP', async () => {
+      const command = 'git commit --amend --no-edit';
+      const onConfirm = vi.fn();
+      const invocation = {
+        params: { command },
+        getDefaultPermission: vi.fn().mockResolvedValue('ask'),
+        getConfirmationDetails: vi.fn().mockResolvedValue({
+          type: 'exec',
+          title: 'Confirm shell command',
+          command,
+          rootCommand: 'git',
+          onConfirm,
+        }),
+        getDescription: vi.fn().mockReturnValue('Amend commit'),
+        toolLocations: vi.fn().mockReturnValue([]),
+        execute: vi.fn(),
+      };
+      mockToolRegistry.getTool.mockReturnValue({
+        name: core.ToolNames.SHELL,
+        kind: core.Kind.Execute,
+        build: vi.fn().mockReturnValue(invocation),
+      });
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.AUTO);
+      mockConfig.getCwd = vi.fn().mockReturnValue('/repo');
+      mockConfig.getTargetDir = vi.fn().mockReturnValue('/repo');
+      mockConfig.getAutoModeDenialState = vi.fn().mockReturnValue({
+        consecutiveBlock: 0,
+        consecutiveUnavailable: 0,
+        totalBlock: 0,
+        totalUnavailable: 0,
+      });
+      mockConfig.setAutoModeDenialState = vi.fn();
+      mockConfig.getPermissionManager = vi.fn().mockReturnValue(null);
+      mockConfig.getAutoModeSettings = vi.fn().mockReturnValue({});
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
+      mockConfig.getLlmClient = vi.fn().mockReturnValue({
+        ...mockLlmClient,
+        getHistoryTail: () => [
+          { role: 'user', parts: [{ text: 'amend the commit' }] },
+        ],
+      });
+      mockClient.requestPermission = vi.fn().mockResolvedValue({
+        outcome: { outcome: 'selected', optionId: 'proceed_once' },
+      });
+      mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+        createStreamWithChunks([
+          {
+            type: core.StreamEventType.CHUNK,
+            value: {
+              functionCalls: [
+                {
+                  id: 'call-amend',
+                  name: core.ToolNames.SHELL,
+                  args: { command },
+                },
+              ],
+            },
+          },
+        ]),
+      );
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'amend the commit' }],
+      });
+
+      const request = vi.mocked(mockClient.requestPermission).mock.calls[0]![0];
+      expect(
+        request.options.every(
+          (option: { kind: string }) => option.kind !== 'allow_always',
+        ),
+      ).toBe(true);
+      expect(request.toolCall?.content).toContainEqual({
+        type: 'content',
+        content: {
+          type: 'text',
+          text: 'Rewriting a commit requires manual approval in AUTO mode.',
+        },
+      });
+      expect(onConfirm).toHaveBeenCalledWith(
+        core.ToolConfirmationOutcome.ProceedOnce,
+        { answers: undefined },
+      );
+    });
+
     it('never requests ACP permission for the trusted Live Appshot tool', async () => {
       const directory = path.join(os.tmpdir(), 'qwen-live-appshot');
       await fs.mkdir(directory, { recursive: true, mode: 0o700 });

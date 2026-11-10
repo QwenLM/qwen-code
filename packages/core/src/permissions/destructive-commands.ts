@@ -22,7 +22,6 @@
 import type { Content, Part } from '@google/genai';
 import { execSync } from 'node:child_process';
 
-import { splitCompoundCommand } from './rule-parser.js';
 import { shellWords } from './shell-semantics.js';
 
 /**
@@ -35,6 +34,9 @@ const DESTRUCTIVE_GIT_PATTERNS: readonly RegExp[] = Object.freeze([
   /\bgit\s+clean\s+-[a-zA-Z]*f/,
   /\bgit\s+stash\s+drop\b/,
 ]);
+
+const GIT_AMEND_MENTION =
+  /\bgit(?:\.exe)?\s+commit\s+--am(?:e(?:n(?:d)?)?)?\b/i;
 
 /**
  * IaC destroy commands that tear down infrastructure.
@@ -175,42 +177,28 @@ export function registerSessionCommit(sha: string): void {
  * exactly the bypass the guard is for.
  */
 export function amendNeedsApproval(command: string): boolean {
-  // Two readings: the raw text, and the payload of a shell wrapper
-  // (`bash -c '…'`) with its quotes stripped, so a nested mention is seen too.
-  return (
-    mentionsGitCommitAmend(command) ||
-    mentionsGitCommitAmend(stripShellQuotes(command))
-  );
+  return GIT_AMEND_MENTION.test(command) || mentionsGitCommitAmend(command);
 }
 
-/**
- * Lexical detection over words, not a regular expression (R23-1). Words are
- * split by the same tokenizer the rest of the guard family uses, so quotes,
- * ANSI-C `$'…'` and line continuations are already resolved, and git's
- * unambiguous option abbreviations are accepted.
- */
 function mentionsGitCommitAmend(command: string): boolean {
-  for (const segment of splitCompoundCommand(command)) {
-    // Quote removal makes a quoted mention one token (`echo "git commit
-    // --amend"`), so split each token again: the guard cannot prove such a
-    // mention inert either, and asking is the fail-closed direction.
-    const words = shellWords(segment).flatMap((word) =>
-      word.split(/\s+/).filter(Boolean),
-    );
-    for (let start = 0; start < words.length; start++) {
-      if (!isGitWord(words[start]!)) continue;
-      let inCommit = false;
-      for (let index = start + 1; index < words.length; index++) {
-        const word = words[index]!;
-        if (inCommit) {
-          if (isAmendFlag(word)) return true;
-        } else if (word === 'commit') {
-          inCommit = true;
-        }
-      }
+  let seenGit = false;
+  let inCommit = false;
+  for (const token of shellWords(command)) {
+    for (const word of token.split(/\s+/).filter(Boolean)) {
+      const bare = bareShellWord(word);
+      if (inCommit && isAmendFlag(bare)) return true;
+      if (isGitWord(bare)) seenGit = true;
+      else if (seenGit && bare === 'commit') inCommit = true;
     }
   }
   return false;
+}
+
+function bareShellWord(word: string): string {
+  return word
+    .replace(/[^\w.-]+$/, '')
+    .replace(/^(?:\$\(|[<(]\(|`)+/, '')
+    .replace(/^[A-Za-z_]\w*\+?=/, '');
 }
 
 function isGitWord(word: string): boolean {

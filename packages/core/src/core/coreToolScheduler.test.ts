@@ -8445,6 +8445,7 @@ describe('CoreToolScheduler request queueing', () => {
    */
   async function autoApprovePendingProtectedWrite(
     options?: {
+      command?: string;
       denialState?: TestDenialState;
       disableHooks?: boolean;
       failPermissionDeniedHook?: boolean;
@@ -8452,6 +8453,7 @@ describe('CoreToolScheduler request queueing', () => {
     signal = new AbortController().signal,
   ) {
     const cwd = '/repo';
+    const command = options?.command ?? PROTECTED_WRITE_COMMAND;
     let denialState = options?.denialState ?? blockedState(0);
     const setAutoModeDenialState = vi.fn((next: typeof denialState) => {
       denialState = next;
@@ -8499,7 +8501,7 @@ describe('CoreToolScheduler request queueing', () => {
     const request = toolRequest(
       'pending-protected-write',
       ToolNames.SHELL,
-      { command: PROTECTED_WRITE_COMMAND },
+      { command },
       'prompt-pending-protected-write',
     );
     const invocation = {
@@ -8520,8 +8522,8 @@ describe('CoreToolScheduler request queueing', () => {
         confirmationDetails: {
           type: 'exec',
           title: 'Confirm shell command',
-          command: PROTECTED_WRITE_COMMAND,
-          rootCommand: 'echo',
+          command,
+          rootCommand: command.split(' ')[0]!,
           onConfirm: vi.fn(),
         },
       },
@@ -8628,6 +8630,32 @@ describe('CoreToolScheduler request queueing', () => {
     expect(
       internals.autoModeFallbackCallIds.has('pending-protected-write'),
     ).toBe(true);
+  });
+
+  it('hides persistent approval when a pending amend requires a human', async () => {
+    const { internals, onToolCallsUpdate } =
+      await autoApprovePendingProtectedWrite({
+        command: 'git commit --amend --no-edit',
+      });
+
+    expect(internals.toolCalls[0]).toMatchObject({
+      status: 'awaiting_approval',
+      confirmationDetails: {
+        autoModeFallback: {
+          reason: 'safety_check',
+          message: 'Rewriting a commit requires manual approval in AUTO mode.',
+        },
+      },
+    });
+    expect(
+      reportedCalls(onToolCallsUpdate).some(
+        (call) =>
+          call.status === 'awaiting_approval' &&
+          'autoModeFallback' in call.confirmationDetails &&
+          call.confirmationDetails.autoModeFallback?.reason === 'safety_check',
+      ),
+    ).toBe(true);
+    expect(runSideQueryMock).not.toHaveBeenCalled();
   });
 
   it('routes an exact retry through manual approval during pending re-evaluation', async () => {

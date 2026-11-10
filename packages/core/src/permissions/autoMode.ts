@@ -324,6 +324,7 @@ export function shouldForceAutoModeReviewForAllow(
       : ctx.command;
   const cwd = ctx.cwd ?? cwdFallback;
 
+  if (amendNeedsApproval(command)) return true;
   if (hasRawProtectedRedirect(command, cwd)) return true;
   if (hasRawProtectedWriteCommand(command, cwd)) return true;
 

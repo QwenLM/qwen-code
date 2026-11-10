@@ -5,6 +5,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
+import os from 'node:os';
 import {
   extractShellOperations,
   extractShellOperationsAcrossCommand,
@@ -585,10 +586,37 @@ describe('extractShellOperations', () => {
   });
 
   // A quoted `>` is not a redirect, so `2">"&1` is not fd duplication; bash
-  // reads the unquoted `&` as "run in background", and the check keeps the
-  // literal write.
+  // reads the unquoted `&` as "run in background" and then runs `1`, so no
+  // file is written.
   it('2">"&1 is not fd duplication', () => {
-    expect(ops('printf X 2">"&1')).toContainEqual(write(`${CWD}/&1`));
+    expect(ops('printf X 2">"&1')).toEqual([]);
+  });
+
+  // A quoted or escaped `>` ends the word; an adjacent unquoted `>` is still
+  // a redirect: `echo x '>'>file` passes `>` to echo and writes `file`.
+  it.each<[command: string, file: string]>([
+    ["echo x '>'>.qwen/settings.json", '.qwen/settings.json'],
+    ['echo x \\>>out2.txt', 'out2.txt'],
+    ['echo x ">">out3.txt', 'out3.txt'],
+    ["echo x $'\\x3e'>out4.txt", 'out4.txt'],
+    ["echo x '&'>out5.txt", 'out5.txt'],
+    ['echo x "&">>out6.txt', 'out6.txt'],
+    ['echo x \\&>out7.txt', 'out7.txt'],
+    ["echo x $'\\x26'>out8.txt", 'out8.txt'],
+    ["echo x '>'&>out9.txt", 'out9.txt'],
+    ['echo x "&"&>out10.txt', 'out10.txt'],
+  ])(
+    'a quoted operator before a real redirect keeps the write: %s',
+    (command, file) => {
+      expect(ops(command)).toEqual([write(`${CWD}/${file}`)]);
+    },
+  );
+
+  // A quoted word before a descriptor operation keeps its fd semantics.
+  it('keeps fd redirects after a quoted word', () => {
+    expect(ops("echo hi '>'>&1")).toEqual([]);
+    expect(ops("echo hi '>'>&-")).toEqual([]);
+    expect(ops("echo hi '>'>&out2.txt")).toEqual([write(`${CWD}/out2.txt`)]);
   });
 
   // A quoted or escaped `-` is part of the file name: `>&"-x"` writes `-x`.
@@ -696,6 +724,49 @@ describe('extractShellOperationsAcrossCommand', () => {
     [
       'does not treat quoted heredoc-looking text as a heredoc marker',
       ["echo '<<EOF'", 'cd .qwen', "echo '{}' > settings.json"].join('\n'),
+      [write(REPO_SETTINGS)],
+    ],
+    [
+      // bash has no word-boundary requirement for `<<`: `cat<<EOF` is a heredoc.
+      'reads a glued heredoc opener the way bash does',
+      "cat<<EOF\nit's fine\nEOF\necho '{}' > .qwen/settings.json",
+      [write(REPO_SETTINGS)],
+    ],
+    [
+      'keeps a glued inert heredoc body out of the operations',
+      "cat<<'EOF'\nrm -rf /tmp/z\nEOF",
+      [],
+    ],
+    [
+      'does not read a shift inside arithmetic as a heredoc opener',
+      'echo $((8<<2))',
+      [],
+    ],
+    [
+      // Without the arithmetic guard the `2` becomes a delimiter and the next
+      // line is swallowed as its body, hiding the settings write.
+      'does not let an arithmetic shift swallow the next line as a heredoc body',
+      "echo $((8<<2))\necho '{}' > .qwen/settings.json",
+      [write(REPO_SETTINGS)],
+    ],
+    [
+      'recognizes a comment after a subshell terminator',
+      "(true)# note <<EOF\necho '{}' > .qwen/settings.json",
+      [write(REPO_SETTINGS)],
+    ],
+    [
+      'keeps multiline arithmetic from hiding a write',
+      "n=$((1\n << 3))\necho '{}' > .qwen/settings.json",
+      [write(REPO_SETTINGS)],
+    ],
+    [
+      'keeps multiline legacy arithmetic from hiding a write',
+      "n=$[1\n << 3]\necho '{}' > .qwen/settings.json",
+      [write(REPO_SETTINGS)],
+    ],
+    [
+      'does not treat a hash inside parameter expansion as a comment',
+      'echo ${x:- #c} <<EOF\ncd /tmp\nEOF\necho {} > .qwen/settings.json',
       [write(REPO_SETTINGS)],
     ],
     [
@@ -871,5 +942,168 @@ describe('ANSI-C astral escape keeps bare aligned with current', () => {
     expect(
       extractShellOperationsAcrossCommand("(cat > $'\\x41')", '/repo'),
     ).toEqual([write('/repo/A')]);
+  });
+});
+
+// Invalid UTF-8 keeps one lone surrogate per byte: two different byte paths
+// must never collapse into the same string.
+describe('ANSI-C bytes that are not valid UTF-8', () => {
+  it.each<[command: string, path: string]>([
+    [String.raw`cat $'\xff'`, '/repo/\udcff'],
+    [String.raw`cat $'\xc3'`, '/repo/\udcc3'],
+    [String.raw`cat $'\uD800'`, '/repo/\udced\udca0\udc80'],
+    [String.raw`cat $'\U00110000'`, '/repo/\udcf4\udc90\udc80\udc80'],
+  ])('keeps one character per byte: %s', (command, path) => {
+    expect(extractShellOperationsAcrossCommand(command, '/repo')).toEqual([
+      read(path),
+    ]);
+  });
+});
+
+describe('ANSI-C wrapper payloads', () => {
+  it.each([
+    [String.raw`cat $'\xc3\xa9'`, [read('/repo/é')]],
+    [String.raw`cat $'\xc3'$'\xa9'`, [read('/repo/é')]],
+    [String.raw`cat $'a\c\\tb'`, [read('/repo/a\x1ctb')]],
+    [String.raw`cat $'\c?'`, [read('/repo/\x7f')]],
+    [String.raw`cat $'\x3e'/etc/passwd`, [read('/repo/>/etc/passwd')]],
+    ['echo hi ">"/tmp/x', []],
+    ["echo hi >'>'x/../settings.json", [write('/repo/settings.json')]],
+  ] as const)(
+    'keeps decoded bytes and operators distinct: %s',
+    (command, expected) => {
+      expect(across(command)).toEqual(expected);
+    },
+  );
+
+  it.each(["cd $''", "cd ''"])(
+    'keeps an empty cd argument uncertain: %s',
+    (command) => {
+      expect(across(`${command}; cat > settings.json`)).toEqual([
+        uncertainWrite('/repo/settings.json'),
+      ]);
+    },
+  );
+  it('keeps a redirect after a continuation-split PID visible', () => {
+    expect(across("cat $\\\n$'a\\' > /etc/motd")).toContainEqual(
+      write('/etc/motd'),
+    );
+  });
+
+  // The script word is the word the shell resolves: an ANSI-C, locale or
+  // continuation-split payload carries the operations that run, so the write
+  // inside it must reach the permission scan.
+  it.each([
+    ['an ANSI-C payload', "bash -c $'cat > /etc/motd'"],
+    ['a locale payload', 'sh -c $"cat > /etc/motd"'],
+    [
+      'a continuation-split payload',
+      String.raw`sh -c $\
+'cat > /etc/motd'`,
+    ],
+    [
+      'a terminator after a continuation',
+      String.raw`sh -c $\
+'--' 'cat > /etc/motd'`,
+    ],
+    ['a brace-expanded terminator', "sh -c {--,'cat > /etc/motd'}"],
+  ])('extracts the write inside %s', (_what, command) => {
+    expect(across(command)).toEqual([write('/etc/motd')]);
+  });
+
+  it('treats a decoded operator as data, not a redirect', () => {
+    // `$'\x3e'` decodes to `>` and is a `>` argument to `cat`: the read of
+    // the file named `>` plus the real write, not a phantom write to `>`.
+    expect(sorted(across(String.raw`cat $'\x3e' > /tmp/t`))).toEqual([
+      read('/repo/>'),
+      write('/tmp/t'),
+    ]);
+  });
+});
+
+describe('quoted and decoded tilde targets', () => {
+  // bash expands `~` only when it was typed unquoted. `cat > "~/x"` and
+  // `cat > $'\x7e/x'` both decode to `~/x` and write under a literal directory
+  // named `~`, so expanding them invented a path under $HOME that no rule can
+  // match (#16075 review, R2-8).
+  it.each([
+    ['a quoted tilde', 'cat > "~/x"'],
+    ['an empty quote before the tilde', 'cat > ""~/x'],
+    ['an empty quote in the tilde prefix', 'cat > ~""/x'],
+    ['a single-quoted tilde', "cat > '~/x'"],
+    ['a backslash-escaped tilde', String.raw`cat > \~/x`],
+  ])('does not expand %s in a redirect target', (_what, command) => {
+    expect(across(command)).toEqual([write('/repo/~/x')]);
+  });
+
+  it('does not expand a decoded tilde', () => {
+    expect(across(String.raw`cat > $'\x7e/x'`)).toEqual([write('/repo/~/x')]);
+  });
+
+  it('still expands an unquoted tilde', () => {
+    const home = os.homedir().replace(/\\/g, '/');
+    expect(across('cat > ~/x')).toEqual([write(`${home}/x`)]);
+  });
+
+  it('keeps a decoded cd target uncertain', () => {
+    // `cd $'\x7e'` is the literal `~` directory and may not exist at all, so
+    // the rest of the segment runs in a cwd the analysis cannot know.
+    expect(across(String.raw`cd $'\x7e' ; cat > settings.json`)).toEqual([
+      uncertainWrite('/repo/~/settings.json'),
+    ]);
+  });
+
+  it.each([String.raw`$'\x7e'/x`, '"~"/x', String.raw`\~/x`])(
+    'keeps a literal tilde prefix uncertain: %s',
+    (target) => {
+      expect(across(`cd ${target}; cat > settings.json`)).toEqual([
+        uncertainWrite('/repo/~/x/settings.json'),
+      ]);
+    },
+  );
+
+  it('keeps an empty quote in a cd tilde prefix uncertain', () => {
+    expect(across("cd ~''; cat > settings.json")).toEqual([
+      uncertainWrite('/repo/~/settings.json'),
+    ]);
+  });
+
+  it('keeps a quoted cd target uncertain', () => {
+    expect(across('cd "~/x" ; cat > y')).toEqual([
+      uncertainWrite('/repo/~/x/y'),
+    ]);
+  });
+});
+
+// `>|` is a clobber-override redirect that writes its target exactly like `>`,
+// and `<<<` feeds a here-string to stdin, so its operand is never a file. When
+// either reading is lost the operand becomes a file path (`/repo/|`) or a
+// phantom read, and permission rules match the wrong target.
+describe('clobber-override and here-string redirects', () => {
+  it('writes the target of a separate-token clobber override', () => {
+    expect(across("echo '{}' >| x/settings.json")).toEqual([
+      write('/repo/x/settings.json'),
+    ]);
+  });
+
+  it('keeps /dev/null as the clobber-override target', () => {
+    expect(across('git >| /dev/null commit --amend')).toEqual([
+      write('/dev/null'),
+    ]);
+  });
+
+  it('writes the target of a stderr clobber override', () => {
+    expect(across('cmd 2>| out.log')).toEqual([write('/repo/out.log')]);
+  });
+
+  it('treats a here-string operand as stdin, never a file', () => {
+    expect(across('cat <<< /etc/passwd')).toEqual([]);
+    expect(across('cat <<<file')).toEqual([]);
+  });
+
+  it('still reports a write that follows a here-string', () => {
+    expect(across("cat <<< '{}' > .qwen/settings.json")).toEqual([
+      write('/repo/.qwen/settings.json'),
+    ]);
   });
 });

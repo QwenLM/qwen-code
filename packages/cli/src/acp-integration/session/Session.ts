@@ -18012,6 +18012,16 @@ export class Session implements SessionContext {
                 message: outcome.message,
               };
             }
+            if (
+              outcome.message &&
+              outcome.requiresHumanDecision === true &&
+              outcome.reason === 'safety_check'
+            ) {
+              autoModeFallback = {
+                reason: outcome.reason,
+                message: outcome.message,
+              };
+            }
 
             if (wasAutoModeManualFallback && denialState) {
               debugLogger.warn(

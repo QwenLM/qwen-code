@@ -589,7 +589,39 @@ describe('getCommandRoots', () => {
   });
 });
 
+// The `-c` script is the word the shell resolves, not its spelling: an
+// ANSI-C, locale or continuation-split payload carries the commands that run,
+// so the guard hands the resolved word to op extraction and the self-kill scan
+// instead of a quoted token neither of them would see.
+const RESOLVED_PAYLOADS: Array<[string, string]> = [
+  ['an ANSI-C payload', String.raw`sh -c $'cat > /etc/motd'`],
+  ['a locale payload', 'sh -c $"cat > /etc/motd"'],
+  ['a continuation-split locale payload', 'sh -c $\\\n"cat > /etc/motd"'],
+  [
+    'a continuation-split locale terminator',
+    'sh -c $\\\n"--" \'cat > /etc/motd\'',
+  ],
+  [
+    'a continuation-split payload',
+    String.raw`sh -c $\
+'cat > /etc/motd'`,
+  ],
+  [
+    'a terminator after a continuation',
+    String.raw`sh -c $\
+'--' 'cat > /etc/motd'`,
+  ],
+];
+
 describe('stripShellWrapper', () => {
+  it.each([
+    [String.raw`sh -c $'printf \xc3\xa9'`, 'printf é'],
+    [String.raw`sh -c $'printf \c?x'`, 'printf \x7fx'],
+    [String.raw`sh -c $'printf a\c\\tb'`, 'printf a\x1ctb'],
+    [String.raw`sh -c $'printf a\c@b'`, 'printf a'],
+  ])('decodes the payload bytes in %s', (command, expected) => {
+    expect(stripShellWrapper(command)).toBe(expected);
+  });
   it('should strip sh -c with quotes', async () => {
     expect(stripShellWrapper('sh -c "ls -l"')).toEqual('ls -l');
   });
@@ -691,9 +723,19 @@ describe('stripShellWrapper', () => {
     expect(stripShellWrapper("sh -c -- 'ls -l'")).toEqual('ls -l');
   });
 
+  // Brace expansion runs before the shell reads the words, so
+  // `{--,'ls -l'}` hands `--` and `ls -l` to `-c`.
+  it('reads the payload after a brace-expanded option terminator', async () => {
+    expect(stripShellWrapper("sh -c {--,'ls -l'}")).toEqual('ls -l');
+    expect(stripShellWrapper("sh -c {'--','ls -l'}")).toEqual('ls -l');
+  });
+
   it('does not treat a locale word as an option terminator', async () => {
+    // The locale word is the payload (bash runs a program named `x2dx2d`), so
+    // the word after it is positional argv. Like every other static payload it
+    // comes back as the resolved word, not its `$"…"` spelling.
     expect(stripShellWrapper('sh -c $"\\x2d\\x2d" \'ls -l\'')).toEqual(
-      '$"\\x2d\\x2d"',
+      '\\x2d\\x2d',
     );
   });
 
@@ -724,8 +766,23 @@ describe('stripShellWrapper', () => {
   });
 
   it('does not read a lone terminator as a payload', () => {
-    expect(stripShellWrapper('sh -c --')).toEqual('sh -c --');
+    expect(stripShellWrapper('sh -c --')).toEqual('--');
   });
+
+  // Invalid UTF-8 keeps one character per byte instead of U+FFFD.
+  it('keeps undecodable ANSI-C bytes distinct', () => {
+    expect(stripShellWrapper(String.raw`sh -c $'\xff'`)).toEqual('\udcff');
+    expect(stripShellWrapper(String.raw`sh -c $'\uD800'`)).toEqual(
+      '\udced\udca0\udc80',
+    );
+  });
+
+  it.each(RESOLVED_PAYLOADS)(
+    'unwraps %s to the resolved script',
+    (_what, command) => {
+      expect(stripShellWrapper(command)).toBe('cat > /etc/motd');
+    },
+  );
 });
 
 describe('stripTrailingBackgroundAmp', () => {
@@ -769,6 +826,17 @@ describe('detectSelfKillCommand', () => {
     ]);
   });
 
+  // R7-9: the expansion word may be the option terminator, so the word
+  // after it is a script bash runs; the self-kill gate must read it too.
+  it('detects self-kill behind an unresolvable -c payload', () => {
+    expectEach(detectSelfKillCommand, true, [
+      "sh -c $(printf -- --) 'pkill -f qwen'",
+      'sh -c `printf -- --` "pkill -f qwen"',
+      "sh -c $(printf -- --) $'pkill -f qwen'",
+      'sh -c `printf -- --` pkill\\ -f\\ qwen',
+    ]);
+  });
+
   // The option terminator can be spelled with ANSI-C escapes, octal escapes
   // or quote concatenation; each still ends option parsing, so the self-kill
   // payload after it is the command (witnessed with sh/bash). A NUL ends the
@@ -782,6 +850,7 @@ describe('detectSelfKillCommand', () => {
       "sh -c $'--\\0x' 'pkill -f qwen'",
       "sh -c $'--\\x00x' 'pkill -f qwen'",
       "sh -c $'--\\0' 'pkill -f qwen'",
+      "sh -c {--,'pkill -f qwen'}",
     ]);
   });
 
@@ -994,6 +1063,24 @@ describe('normalizeMonitorCommand', () => {
       analysisCommand: 'ls -l',
       safetyCommand: 'ls -l',
       spawnCommand: "sh -c $'--\\0x' 'ls -l'",
+      strippedTrailingAmp: false,
+    });
+  });
+
+  // The brace token expands into `--` AND the script, so keeping it in the
+  // spawn command already covers the payload; appending the payload again
+  // would run a different argv than the user wrote.
+  it('spawns a brace-expanded terminator once', () => {
+    expect(normalizeMonitorCommand("sh -c {--,'ls -l'}")).toEqual({
+      analysisCommand: 'ls -l',
+      safetyCommand: 'ls -l',
+      spawnCommand: "sh -c {--,'ls -l'}",
+      strippedTrailingAmp: false,
+    });
+    expect(normalizeMonitorCommand("sh -c {--,'ls -l'} arg")).toEqual({
+      analysisCommand: 'ls -l',
+      safetyCommand: 'ls -l arg',
+      spawnCommand: "sh -c {--,'ls -l'} arg",
       strippedTrailingAmp: false,
     });
   });
