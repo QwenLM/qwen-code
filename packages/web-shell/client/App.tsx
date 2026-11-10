@@ -26596,7 +26596,7 @@ export function App({
                     className="flex min-h-0 flex-1"
                     onKeyDown={handleArtifactPanelSurfaceKeyDown}
                   >
-                    <WebShellCustomizationProvider value={customization}>
+                    <WebShellCustomizationProvider value={appCustomization}>
                       <ArtifactPanel
                         {...artifactPanelSharedProps}
                         onOpenTerminal={
@@ -26668,7 +26668,7 @@ export function App({
                       onPointerDown={handleArtifactPanelResizeStart}
                     />
                   )}
-                  <WebShellCustomizationProvider value={customization}>
+                  <WebShellCustomizationProvider value={appCustomization}>
                     <div className={styles.artifactPanelClip}>
                       <ArtifactPanel
                         {...artifactPanelSharedProps}

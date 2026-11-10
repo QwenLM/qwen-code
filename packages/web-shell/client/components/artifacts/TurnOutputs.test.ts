@@ -46,6 +46,26 @@ describe('TurnOutputs helpers', () => {
     expect(isArtifactPreviewable(publishedDocument)).toBe(false);
   });
 
+  it('recognizes live published artifact pages without over-promising links', () => {
+    const livePage = {
+      id: 'published-live-page',
+      kind: 'html',
+      storage: 'published',
+      source: 'tool',
+      toolName: 'artifact',
+      status: 'available',
+      url: 'https://example.com/report',
+    } as DaemonSessionArtifact;
+    const externalUrl = {
+      ...livePage,
+      id: 'external-url',
+      storage: 'external_url',
+    } as DaemonSessionArtifact;
+
+    expect(isArtifactPreviewable(livePage)).toBe(true);
+    expect(isArtifactPreviewable(externalUrl, true)).toBe(false);
+  });
+
   it('caps collapsed turn outputs at three items', () => {
     const items = [1, 2, 3, 4, 5];
     expect(visibleTurnOutputs(items, false)).toEqual([1, 2, 3]);

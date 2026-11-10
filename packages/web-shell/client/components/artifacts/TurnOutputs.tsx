@@ -690,6 +690,12 @@ export function isArtifactPreviewable(
     isRenderedArtifact(artifact) &&
     (artifact.storage === 'workspace' ||
       artifact.metadata?.['artifactType'] === 'web_preview_snapshot' ||
+      (artifact.storage === 'published' &&
+        artifact.source === 'tool' &&
+        artifact.toolName?.toLowerCase() === 'artifact' &&
+        artifact.status === 'available' &&
+        Boolean(artifact.url) &&
+        (artifact.kind === 'html' || artifact.kind === 'link')) ||
       (artifact.storage === 'managed' && hostOwnsArtifactPreview))
   );
 }
