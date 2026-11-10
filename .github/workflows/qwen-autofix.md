@@ -2862,13 +2862,17 @@ In `review-scan` · `Scan for PRs with new feedback`.
 startedAt is the only staleness clock: a check blocks only if it
 started within the bound; one with no startedAt (queued, not yet
 running) is not blocking (the next scan re-checks once it starts).
+Two tiers: the general 375-minute horizon applies to every check
+except review-address*, which alone legitimately runs long and gets
+the 495-minute long horizon — 30 minutes above the 465-minute
+self-hosted job cap (af-050) so a live address round is never aged
+out mid-flight, while a hung check on a dead runner still ages out
+at the general bound instead of blocking its PR two extra hours.
 The dispatch-pending marker is exempted by context: it is this
 loop's own StatusContext busy signal (no .workflowName/.name, so
 it passes the filters above) and its dedicated TTL check above is
-the authority on it — the 495-minute horizon here would keep a
-stranded marker blocking long past its TTL. The horizon sits 30
-minutes above the 465-minute self-hosted job cap (af-050) so a live
-address round is never aged out mid-flight.
+the authority on it — either horizon here would keep a stranded
+marker blocking long past its TTL.
 ```
 
 <a id="af-102"></a>

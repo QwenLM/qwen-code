@@ -636,15 +636,22 @@ describe('qwen-autofix workflow', () => {
     expect(reviewScanJob).toContain('EFF_WM="${CREATED_WM}"');
     expect(reviewScanJob).toContain('echo "targets=[]" >> "${GITHUB_OUTPUT}"');
     expect(reviewScanJob).toContain('active checks in flight; skipping until');
-    // Staleness bound must sit above legitimate check runtimes (a review-address
-    // job runs up to its 465-minute self-hosted cap) so an active run is never
+    // Two staleness tiers: the general bound stays tight so a hung non-autofix
+    // check ages out promptly; only review-address (up to its 465-minute
+    // self-hosted job cap) gets the long bound, so an active round is never
     // aged out mid-flight.
-    expect(reviewScanJob).toContain('PENDING_STALE_MIN=495');
+    expect(reviewScanJob).toContain('PENDING_STALE_MIN=375');
+    expect(reviewScanJob).toContain('PENDING_LONG_STALE_MIN=495');
     // The staleness filter itself, including the comparison operator: a check only
-    // blocks if its start is newer than the cutoff. Asserting `> $cut` too means a
-    // flipped comparison (which would age out live checks → double-processing) is
-    // caught, not just a removed constant.
-    expect(reviewScanJob).toContain('.startedAt // $cut) > $cut');
+    // blocks if its start is newer than its row's cutoff. Asserting `> $rowcut`
+    // too means a flipped comparison (which would age out live checks →
+    // double-processing) is caught, not just a removed constant. The tier
+    // binding is pinned beside it: dropping it would silently apply one
+    // cutoff to every check again.
+    expect(reviewScanJob).toContain('.startedAt // $rowcut) > $rowcut');
+    expect(reviewScanJob).toContain(
+      'startswith("review-address")) then $cut_long else $cut end) as $rowcut',
+    );
     // Round is the max across markers so a terminal handoff marker is honored
     // regardless of its timestamp; the fallback is the window's SEED (0 unless
     // '@qwen-code /takeover from N' anchored this window at N), never a
@@ -5326,6 +5333,8 @@ describe('qwen-autofix workflow', () => {
           env: {
             ...process.env,
             PENDING_CUTOFF: '2026-08-17T02:30:00Z',
+            // 120 minutes earlier, mirroring 495 - 375 in production.
+            PENDING_LONG_CUTOFF: '2026-08-17T00:30:00Z',
             NON_BLOCKING_CHECKS: '["review-pr"]',
             DISPATCH_STATUS_CONTEXT: 'qwen-autofix/dispatch-pending',
             CHECKS_JSON: JSON.stringify(checks),
@@ -5362,20 +5371,59 @@ describe('qwen-autofix workflow', () => {
         checkRun('build', 'IN_PROGRESS', '2026-08-17T01:00:00Z'),
       ]),
     ).toBe('false');
+    // The two tiers are per-NAME, not global: a non-autofix check started
+    // BETWEEN the cutoffs (01:30 — after the long cut 00:30, before the
+    // general cut 02:30) is aged out by the general bound, so a hung runner
+    // does not block its PR for the extra two hours. A single global long
+    // cutoff would return 'true' here.
+    expect(
+      runPendingGate([
+        checkRun('build', 'IN_PROGRESS', '2026-08-17T01:30:00Z'),
+      ]),
+    ).toBe('false');
+    // The SAME start time on a review-address row still blocks: that row
+    // alone legitimately runs past the general bound (465m job cap).
+    expect(
+      runPendingGate([
+        {
+          name: 'review-address (16408, feat/x)',
+          workflowName: 'Qwen Autofix',
+          status: 'IN_PROGRESS',
+          startedAt: '2026-08-17T01:30:00Z',
+        },
+      ]),
+    ).toBe('true');
+    // ...and a review-address row older than even the long bound ages out.
+    expect(
+      runPendingGate([
+        {
+          name: 'review-address (16408, feat/x)',
+          workflowName: 'Qwen Autofix',
+          status: 'IN_PROGRESS',
+          startedAt: '2026-08-16T23:00:00Z',
+        },
+      ]),
+    ).toBe('false');
     // ...and a foreign PENDING status context still blocks (the exemption is
     // exactly the marker's own context).
     expect(
       runPendingGate([marker('PENDING', '2026-08-17T07:50:00Z', 'other-ci')]),
     ).toBe('true');
 
-    // The design record this gate cites (af-101) describes THIS horizon —
-    // derive the bound from the workflow so the pin tracks PENDING_STALE_MIN,
-    // then require the doc to agree. Naming the 345-minute job cap instead
-    // computes a 0-minute margin and invites squeezing the bound down to the
-    // cap, which ages a live review-address run out mid-flight.
+    // The design record this gate cites (af-101) describes BOTH horizons —
+    // derive each bound from the workflow so the pins track PENDING_STALE_MIN
+    // and PENDING_LONG_STALE_MIN, then require the doc to agree. Naming the
+    // job cap itself instead computes a 0-minute margin and invites squeezing
+    // the long bound down to the cap, which ages a live review-address run
+    // out mid-flight.
     const pendingStaleMin = reviewScanJob.match(/PENDING_STALE_MIN=(\d+)/)?.[1];
     expect(pendingStaleMin).toBeTruthy();
     expect(designDoc).toContain(`${pendingStaleMin}-minute horizon`);
+    const pendingLongMin = reviewScanJob.match(
+      /PENDING_LONG_STALE_MIN=(\d+)/,
+    )?.[1];
+    expect(pendingLongMin).toBeTruthy();
+    expect(designDoc).toContain(`${pendingLongMin}-minute long horizon`);
 
     // Writer/reader identity: all three status writes and both readers bind
     // the SAME context variable — a mismatch on any site leaves the marker
@@ -22632,17 +22680,23 @@ exit 1
     // says; only the hosted arm is bound by that ceiling.
     expect(jobCaps.hosted).toBeLessThanOrEqual(360);
 
-    // The pending-check staleness bound (review-scan) must sit ABOVE the
-    // LARGER job cap, or a live review-address run ages out of
+    // The LONG pending-check staleness tier (review-scan) must sit ABOVE
+    // the LARGER job cap, or a live review-address run ages out of
     // HAS_PENDING_CHECKS mid-flight and the PR is enqueued against its own
-    // still-running check.
+    // still-running check. The GENERAL tier stays tighter so a hung
+    // non-autofix check ages out promptly (af-101).
+    const pendingLongMin = Number(
+      reviewScanJob.match(/PENDING_LONG_STALE_MIN=(\d+)/)?.[1],
+    );
+    expect(Number.isFinite(pendingLongMin)).toBe(true);
+    expect(pendingLongMin).toBeGreaterThan(
+      Math.max(jobCaps.hosted, jobCaps.selfHosted),
+    );
     const pendingStaleMin = Number(
       reviewScanJob.match(/PENDING_STALE_MIN=(\d+)/)?.[1],
     );
     expect(Number.isFinite(pendingStaleMin)).toBe(true);
-    expect(pendingStaleMin).toBeGreaterThan(
-      Math.max(jobCaps.hosted, jobCaps.selfHosted),
-    );
+    expect(pendingStaleMin).toBeLessThan(pendingLongMin);
 
     // continue-on-error makes bounding the verification gates a graceful
     // degrade: a timed-out gate falls through to the report step.
