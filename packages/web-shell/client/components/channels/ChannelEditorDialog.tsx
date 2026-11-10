@@ -101,7 +101,6 @@ const FIELD_LABEL_KEYS: Record<string, Record<string, string>> = {
     clientSecret: 'channels.editor.field.dingtalk.clientSecret',
   },
   weixin: {
-    baseUrl: 'channels.editor.field.weixin.baseUrl',
     groupPolicy: 'channels.editor.field.weixin.groupPolicy',
   },
   wecom: {

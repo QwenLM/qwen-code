@@ -4089,12 +4089,6 @@ describe('ChannelEditorDialog WeChat login', () => {
     manageable: true,
     fields: [
       {
-        key: 'baseUrl',
-        label: 'API Base URL',
-        kind: 'string',
-        envResolvable: true,
-      },
-      {
         key: 'groupPolicy',
         label: 'Group Policy',
         kind: 'enum',
@@ -4226,9 +4220,8 @@ describe('ChannelEditorDialog WeChat login', () => {
     const labels = Array.from(document.querySelectorAll('label')).map(
       (label) => label.textContent ?? '',
     );
-    expect(labels.some((text) => text.includes('API 根地址'))).toBe(true);
     expect(labels.some((text) => text.includes('群聊策略'))).toBe(true);
     // Descriptor labels are English, so a missing i18n key would surface them.
-    expect(labels.some((text) => text.includes('API Base URL'))).toBe(false);
+    expect(labels.some((text) => text.includes('Group Policy'))).toBe(false);
   });
 });

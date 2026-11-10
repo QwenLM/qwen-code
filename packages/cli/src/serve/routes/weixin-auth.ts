@@ -23,6 +23,12 @@ const MAX_FLOWS = 4;
 /** How long a terminal view stays readable so a polling client can observe it. */
 const TERMINAL_RETENTION_MS = 60_000;
 
+const TERMINAL_STATUSES = new Set<DaemonWeixinLoginFlow['status']>([
+  'ready',
+  'expired',
+  'error',
+]);
+
 export interface RegisterWeixinAuthRoutesOptions {
   /**
    * Test seam only. Production wiring passes nothing and no request field can
@@ -94,7 +100,18 @@ export function registerWeixinAuthRoutes(
 
   app.get('/auth/weixin', (_req, res) => {
     noStore(res);
-    const account = loadAccount();
+    let account: ReturnType<typeof loadAccount>;
+    try {
+      account = loadAccount();
+    } catch {
+      // `loadAccount` reaches `getStateDir`, whose mkdir is outside its own
+      // try, so a read-only home throws here. The write paths already answer a
+      // stable code for that environment; a bare 500 would reach the panel as
+      // an English stack trace. Not 404 — the client reads that as "this daemon
+      // has no WeChat support".
+      res.status(502).json({ code: 'credentials_error' });
+      return;
+    }
     const status: DaemonWeixinAccountStatus = {
       enabled: !disposed,
       configured: account !== null,
@@ -109,7 +126,13 @@ export function registerWeixinAuthRoutes(
     mutate({ strict: true }),
     allowed,
     async (_req, res) => {
-      if (flows.size >= MAX_FLOWS) {
+      // Count live flows, not map entries. A terminal view is kept for
+      // TERMINAL_RETENTION_MS so a polling client can still read it, and four
+      // *finished* logins must not refuse a fifth start with nothing running.
+      const live = [...flows.values()].filter(
+        (entry) => !TERMINAL_STATUSES.has(entry.view.status),
+      ).length;
+      if (live >= MAX_FLOWS) {
         res.status(429).json({ code: 'too_many_flows' });
         return;
       }
@@ -137,7 +160,7 @@ export function registerWeixinAuthRoutes(
 
       let qrcodeId: string;
       try {
-        const qr = await startLogin(apiBaseUrl);
+        const qr = await startLogin(apiBaseUrl, { signal: controller.signal });
         // Without a scannable URL the flow has nothing to show: the operator
         // could neither scan nor open a link, and a live flow renders no
         // retry action, so it would sit dead until the deadline. Treat it like
@@ -174,6 +197,18 @@ export function registerWeixinAuthRoutes(
         onEvent: (event) => {
           if (event.type === 'scanned') {
             flow.view = { ...flow.view, status: 'scanned' };
+            return;
+          }
+          if (event.type === 'expired') {
+            // The QR is dead now, and the replacement mint can take up to its
+            // own bound — or never publish one at all. Stop advertising the
+            // dead code as scannable while that is in flight.
+            flow.view = {
+              id,
+              status: 'waiting',
+              qrText: undefined,
+              qrcodeUrl: undefined,
+            };
             return;
           }
           if (event.type === 'qrcode') {

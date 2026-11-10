@@ -45,15 +45,18 @@ const QR_MINT_TIMEOUT_MS = 30_000;
 /** Step 1: Get QR code from server. */
 export async function startLogin(
   apiBaseUrl: string,
-  options: { timeoutMs?: number } = {},
+  options: { timeoutMs?: number; signal?: AbortSignal } = {},
 ): Promise<WeixinQrCode> {
+  // Symmetric with `waitForLogin`'s timeoutMs: the caller that owns the
+  // deadline decides, and the default bounds the daemon's slot holding. The
+  // caller's signal is composed in rather than replacing the bound, so a
+  // cancel reaches this request too and a hung mint still cannot wedge a slot.
+  const bound = AbortSignal.timeout(options.timeoutMs ?? QR_MINT_TIMEOUT_MS);
   const resp = await fetch(
     `${apiBaseUrl}/ilink/bot/get_bot_qrcode?bot_type=3`,
     {
       headers: buildHeaders(),
-      // Symmetric with `waitForLogin`'s timeoutMs: the caller that owns the
-      // deadline decides, and the default bounds the daemon's slot holding.
-      signal: AbortSignal.timeout(options.timeoutMs ?? QR_MINT_TIMEOUT_MS),
+      signal: options.signal ? AbortSignal.any([options.signal, bound]) : bound,
     },
   );
   if (!resp.ok) {
@@ -148,7 +151,7 @@ export async function waitForLogin(params: {
           }
           onEvent?.({ type: 'expired' });
           {
-            const refreshed = await startLogin(apiBaseUrl);
+            const refreshed = await startLogin(apiBaseUrl, { signal });
             // A refresh that yields no scannable URL is not a replacement:
             // publishing it would overwrite a view with one that has nothing
             // to scan and no link to open. Keep the expired id instead, so the

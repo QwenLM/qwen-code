@@ -16,6 +16,7 @@ import type {
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
+const { formatDateTime } = await import('../../utils/formatDateTime');
 const { WeixinLoginPanel } = await import('./WeixinLoginPanel');
 const { I18nProvider, getTranslator } = await import('../../i18n');
 
@@ -101,9 +102,13 @@ describe('WeixinLoginPanel', () => {
 
     expect(container.textContent).toContain('Logged in');
     expect(container.textContent).toContain('User ID: wx-user-1');
+    // Formatted for the reader's locale, not the raw UTC stamp the daemon
+    // stores. The absence assertion is the load-bearing one: it reds if the
+    // formatter is dropped, and it does not depend on the runner's timezone.
     expect(container.textContent).toContain(
-      'Logged in at 2026-11-09T00:00:00.000Z',
+      `Logged in at ${formatDateTime(LOGGED_IN.savedAt!)}`,
     );
+    expect(container.textContent).not.toContain('T00:00:00.000Z');
     expect(container.textContent).toContain(
       'Channels that are already running keep the previous account',
     );
@@ -304,6 +309,139 @@ describe('WeixinLoginPanel', () => {
     expect(container.textContent).toContain('Not logged in');
     expect(container.textContent).not.toContain('wx-user-1');
     expect(buttonByText('Log in with QR code')).toBeDefined();
+  });
+
+  it('keeps Log out available when a relogin fails', async () => {
+    // The credential is still installed, so the one control that can revoke
+    // it must survive a relogin that ends in error.
+    const revoke = vi.fn().mockResolvedValue(undefined);
+    await renderPanel({
+      status: vi.fn().mockResolvedValue(LOGGED_IN),
+      poll: vi.fn().mockResolvedValue({ id: 'flow-1', status: 'error' }),
+      revoke,
+    });
+
+    await act(async () => {
+      buttonByText('Log in again')?.click();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1600);
+    });
+
+    expect(container.textContent).toContain('Logged in');
+    expect(buttonByText('Refresh QR code')).toBeDefined();
+    // Exactly one retry action in this state.
+    expect(buttonByText('Log in again')).toBeUndefined();
+    const logout = buttonByText('Log out');
+    expect(logout).toBeDefined();
+    await act(async () => {
+      logout?.click();
+    });
+    expect(revoke).toHaveBeenCalledOnce();
+  });
+
+  it('clears a poll error once the daemon reports the flow gone', async () => {
+    const poll = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('Failed to fetch'))
+      .mockResolvedValue(undefined);
+    await renderPanel({ poll });
+
+    await act(async () => {
+      buttonByText('Log in with QR code')?.click();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1600);
+    });
+    expect(container.textContent).toContain('Failed to fetch');
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1600);
+    });
+    expect(container.textContent).toContain('Not logged in');
+    expect(container.textContent).not.toContain('Failed to fetch');
+  });
+
+  it('does not keep showing Logged in when the post-logout read fails', async () => {
+    const status = vi
+      .fn()
+      .mockResolvedValueOnce(LOGGED_IN)
+      .mockRejectedValue(new Error('status unavailable'));
+    await renderPanel({ status });
+
+    await act(async () => {
+      buttonByText('Log out')?.click();
+    });
+
+    expect(container.textContent).not.toContain('Logged in');
+    expect(container.textContent).not.toContain('wx-user-1');
+    expect(container.textContent).toContain('status unavailable');
+  });
+
+  it('presents a credential write failure as permanent, not retryable', async () => {
+    await renderPanel({
+      poll: vi.fn().mockResolvedValue({
+        id: 'flow-1',
+        status: 'error',
+        errorCode: 'credentials_error',
+      }),
+    });
+
+    await act(async () => {
+      buttonByText('Log in with QR code')?.click();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1600);
+    });
+
+    expect(container.textContent).toContain('could not save the credential');
+    expect(buttonByText('Refresh QR code')).toBeUndefined();
+    expect(buttonByText('Log in with QR code')).toBeUndefined();
+  });
+
+  it('exposes the QR as a named image rather than a wall of glyphs', async () => {
+    await renderPanel();
+    await act(async () => {
+      buttonByText('Log in with QR code')?.click();
+    });
+
+    const pre = container.querySelector('pre');
+    expect(pre?.getAttribute('role')).toBe('img');
+    expect(pre?.getAttribute('aria-label')).toBe(
+      getTranslator('en')('channels.weixin.qrAlt'),
+    );
+  });
+
+  it('refuses to link an unsafe QR URL', async () => {
+    await renderPanel({
+      start: vi.fn().mockResolvedValue({
+        id: 'flow-1',
+        status: 'waiting',
+        qrcodeUrl: 'javascript:alert(1)',
+      }),
+    });
+    await act(async () => {
+      buttonByText('Log in with QR code')?.click();
+    });
+
+    expect(container.querySelector('a')).toBeNull();
+  });
+
+  it('links a safe QR URL when the encoder could not render it', async () => {
+    await renderPanel({
+      start: vi.fn().mockResolvedValue({
+        id: 'flow-1',
+        status: 'waiting',
+        qrcodeUrl: 'https://scan.example/qr-1',
+      }),
+    });
+    await act(async () => {
+      buttonByText('Log in with QR code')?.click();
+    });
+
+    expect(container.querySelector('a')?.getAttribute('href')).toBe(
+      'https://scan.example/qr-1',
+    );
   });
 
   it('surfaces a start failure without leaving the panel wedged', async () => {
@@ -568,6 +706,36 @@ describe('WeixinLoginPanel localization', () => {
       if (language === 'zh-CN') {
         expect(t('channels.weixin.loggedIn')).toBe('已登录');
         expect(t('channels.weixin.logout')).toBe('退出登录');
+      }
+    },
+  );
+
+  it.each(['en', 'zh-CN'] as const)(
+    'renders the credential-write failure in %s',
+    async (language) => {
+      await renderPanel({
+        language,
+        poll: vi.fn().mockResolvedValue({
+          id: 'flow-1',
+          status: 'error',
+          errorCode: 'credentials_error',
+        }),
+      });
+      const t = getTranslator(language);
+
+      await act(async () => {
+        buttonByText(t('channels.weixin.login'))?.click();
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1600);
+      });
+
+      expect(container.textContent).toContain(
+        t('channels.weixin.credentialsError'),
+      );
+      expect(container.textContent).not.toContain('channels.weixin.');
+      if (language === 'zh-CN') {
+        expect(t('channels.weixin.credentialsError')).toContain('无法保存凭据');
       }
     },
   );

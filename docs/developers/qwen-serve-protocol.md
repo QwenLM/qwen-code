@@ -1438,7 +1438,9 @@ variant:
 
 `GET /auth/weixin` reads local state only and returns
 `{ "enabled": boolean, "configured": boolean, "userId"?: string, "savedAt"?: string }`.
-It never calls the upstream platform.
+It never calls the upstream platform. A home directory it cannot read answers
+`502 { "code": "credentials_error" }`, the same code the write paths use — not
+`404`, which clients read as "this daemon has no WeChat support".
 
 `POST /auth/weixin/flows` requires the strict mutation gate, mints a QR upstream,
 and returns `201` with `{ "id": string, "status": "waiting", "qrText"?: string,
@@ -1447,17 +1449,25 @@ failure rather than a live flow — the operator would have nothing to scan, and
 live flow renders no retry action — so `502 { "code": "qr_unavailable" }` covers
 both an upstream error and a response carrying an id but no URL, and either way
 the slot is released. The scan loop then runs in the daemon; clients poll
-`GET /auth/weixin/flows/:id`, whose `status` advances through `waiting`,
-`scanned`, and the terminals `ready`, `expired`, or `error`, each carrying a
-stable `errorCode`: `qr_expired` (the refresh budget ran out) or `login_failed`
-(the upstream poll failed). A credential that could not be written yields
-`error` with `errorCode: credentials_error`, because the operator has to fix the
-daemon's home directory and a generic `login_failed` would hide that. `qrText`
-is a best-effort block-glyph rendering and is absent when the encoder cannot
-render the URL; `qrcodeUrl` is always present while the flow is live, so the
-operator can open it directly. At most four flows run concurrently; a further
-start returns `429 too_many_flows`. A terminal view is retained for 60 seconds
-and then dropped, after which the poll returns `404 flow_not_found`.
+`GET /auth/weixin/flows/:id`, whose `status` is `waiting`, `scanned`, or one of
+the terminals `ready`, `expired`, `error`. **`ready` carries no `errorCode`** —
+only the failure terminals do: `qr_expired` (the refresh budget ran out) or
+`login_failed` (the upstream poll failed, or the login deadline elapsed). A
+credential that could not be written yields `error` with
+`errorCode: credentials_error`, because the operator has to fix the daemon's
+home directory and a generic `login_failed` would hide that.
+
+The status is not monotonic: after `scanned` the QR can still expire, and the
+view returns to `waiting` with a replacement QR. While that replacement is
+being minted the view carries neither `qrText` nor `qrcodeUrl`, so a dead code
+is never presented as scannable. **Clients must re-render on every poll, not
+only when the status changes.** `qrText` is a best-effort block-glyph rendering
+and is absent when the encoder cannot render the URL; `qrcodeUrl` is present
+whenever a live QR is available, so the operator can open it directly. At most
+four _live_ flows run concurrently; a further start returns
+`429 too_many_flows`. A terminal view is retained for 60 seconds so a polling
+client can still read it — it does not count against that cap — and is then
+dropped, after which the poll returns `404 flow_not_found`.
 `DELETE /auth/weixin/flows/:id` aborts a flow and returns `204`; clients are
 expected to call it when they stop watching a live flow, because the daemon
 keeps polling the upstream whether or not anyone is. Daemon shutdown aborts
@@ -1469,10 +1479,11 @@ upstream API root.
 
 `POST /auth/weixin/revoke` requires the strict mutation gate, cancels every
 in-flight flow, removes the stored account, and returns `204`. If the credential
-file cannot be removed it answers `502 { "code": "credentials_error" }` instead;
-the flows are cancelled either way, so a client must not read that failure as
-"still logged in". Channels already running keep the account they read at
-connect time until they are restarted.
+file cannot be removed it answers `502 { "code": "credentials_error" }` instead.
+The flows are cancelled either way, but **the stored account may survive**: a
+502 leaves the removal outcome unknown, so re-read `GET /auth/weixin` rather
+than assuming either state. Channels already running keep the account they read
+at connect time until they are restarted.
 
 These routes are gated by the daemon's bearer authentication, not by workspace
 trust, because the credential they manage has no workspace scope. Clients that

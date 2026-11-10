@@ -38,6 +38,8 @@ class FakeIlink {
   statusHttpCode = 200;
   /** Holds the mint open, so a client can vanish while it is in flight. */
   mintDelayMs = 0;
+  /** Every gate option the route asked for, in registration order. */
+  mutateCalls: Array<{ strict?: boolean } | undefined> = [];
   private server: Server | undefined;
   private dispose: (() => void) | undefined;
   baseUrl = '';
@@ -97,15 +99,20 @@ class FakeIlink {
 }
 
 function mount(fake: FakeIlink) {
-  const mutate =
-    (_opts?: { strict?: boolean }): RequestHandler =>
-    (req, res, next) => {
+  // The options are recorded, not ignored: `strict` is the only thing keeping
+  // these routes closed on a daemon without a bearer token, and the real gate
+  // returns one shared passthrough once a token is configured, so the option
+  // is observable only here.
+  const mutate = vi.fn((opts?: { strict?: boolean }): RequestHandler => {
+    fake.mutateCalls.push(opts);
+    return (req, res, next) => {
       if (req.header('authorization') !== 'Bearer secret') {
         res.status(401).json({ code: 'token_required' });
         return;
       }
       next();
     };
+  });
   const app = express();
   app.use(express.json());
   const dispose = registerWeixinAuthRoutes(app, mutate, {
@@ -253,7 +260,11 @@ describe('weixin auth routes', () => {
       qrcodeUrl: 'https://scan.example/qr-1',
     });
     expect(typeof started.body['id']).toBe('string');
-    expect(String(started.body['qrText']).length).toBeGreaterThan(0);
+    // Type first: `String(undefined)` is the nine-character 'undefined', so a
+    // length check alone would bless the very regression this test names —
+    // an encoder that stopped producing a block QR.
+    expect(started.body['qrText']).toEqual(expect.any(String));
+    expect((started.body['qrText'] as string).length).toBeGreaterThan(0);
 
     const ready = await waitForStatus(
       app,
@@ -340,6 +351,76 @@ describe('weixin auth routes', () => {
     expect(JSON.stringify(view)).not.toContain(BOT_TOKEN);
   });
 
+  it('answers a stable code, not a 500, when the account cannot be read', async () => {
+    // `loadAccount` reaches `getStateDir`, whose mkdir sits outside its own
+    // try. The directory must be *missing* under a regular file for that mkdir
+    // to run and throw ENOTDIR — pointing the state dir at the file itself
+    // makes existsSync true and no mkdir happens. A bare 500 would reach the
+    // panel as an English stack trace, and 404 would be read as "this daemon
+    // has no WeChat support".
+    rmSync(stateDir, { recursive: true, force: true });
+    writeFileSync(stateDir, 'not a directory');
+    process.env['WEIXIN_STATE_DIR'] = join(stateDir, 'state');
+
+    const response = await auth(request(app).get('/auth/weixin'));
+
+    expect(response.status).toBe(502);
+    expect(response.body).toEqual({ code: 'credentials_error' });
+  });
+
+  it('cancels every flow even when the credential cannot be removed', async () => {
+    const started = await auth(request(app).post('/auth/weixin/flows')).send(
+      {},
+    );
+    const id = started.body['id'] as string;
+    await waitForStatus(app, id, 'waiting');
+    await waitForUpstreamPoll(fake);
+    // Same fixture the write-side case uses: a regular file where the state
+    // directory should be makes `clearAccount` throw.
+    rmSync(stateDir, { recursive: true, force: true });
+    writeFileSync(stateDir, 'not a directory');
+
+    const revoked = await auth(request(app).post('/auth/weixin/revoke'));
+
+    expect(revoked.status).toBe(502);
+    expect(revoked.body).toEqual({ code: 'credentials_error' });
+    // The handler cancels before it clears, so the flow is gone either way.
+    const gone = await auth(request(app).get(`/auth/weixin/flows/${id}`));
+    expect(gone.status).toBe(404);
+    await expectPollingStopped(fake);
+  });
+
+  it('stops advertising a dead QR while the replacement is minted', async () => {
+    // `expired` fires before the refresh mint, and a refresh with no URL
+    // publishes no replacement at all — the view must not keep presenting the
+    // dead code as scannable for the rest of the deadline.
+    fake.statusResponses = [{ status: 'expired' }];
+    fake.mintDelayMs = 400;
+    fake.qrResponses = [
+      { qrcode: 'qr-1', qrcode_img_content: 'https://scan.example/qr-1' },
+      { qrcode: 'qr-2' },
+    ];
+
+    const started = await auth(request(app).post('/auth/weixin/flows')).send(
+      {},
+    );
+    const id = started.body['id'] as string;
+    expect(started.body['qrcodeUrl']).toBe('https://scan.example/qr-1');
+
+    // Wait for the expiry to be observed upstream, then read the live view.
+    const deadline = Date.now() + 8000;
+    let view: Record<string, unknown> = {};
+    while (Date.now() < deadline) {
+      const response = await auth(request(app).get(`/auth/weixin/flows/${id}`));
+      view = response.body as Record<string, unknown>;
+      if (fake.statusCalls > 0 && view['qrcodeUrl'] === undefined) break;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    expect(fake.statusCalls).toBeGreaterThan(0);
+    expect(view['qrcodeUrl']).toBeUndefined();
+    expect(view['qrText']).toBeUndefined();
+  });
+
   it('requires the mutation gate on start, cancel and revoke', async () => {
     const start = await request(app).post('/auth/weixin/flows').send({});
     const cancel = await request(app).delete('/auth/weixin/flows/nope');
@@ -349,6 +430,16 @@ describe('weixin auth routes', () => {
       401, 401, 401,
     ]);
     expect(fake.qrCalls).toBe(0);
+    // The 401s above are produced by the stub whatever option it is given, so
+    // they cannot detect a route downgraded to bare `mutate()`. On a daemon
+    // with no bearer token, `strict` is the only thing that keeps start,
+    // cancel and revoke closed — and revoke unlinks the process-global
+    // credential every workspace shares.
+    expect(fake.mutateCalls).toEqual([
+      { strict: true },
+      { strict: true },
+      { strict: true },
+    ]);
   });
 
   it('stops polling upstream once a flow is cancelled', async () => {
@@ -409,6 +500,23 @@ describe('weixin auth routes', () => {
     expect(fifth.body).toEqual({ code: 'too_many_flows' });
     // A refused start must not spend an upstream QR request.
     expect(fake.qrCalls).toBe(4);
+  });
+
+  it('does not count finished flows against the cap', async () => {
+    // A terminal view is retained so a polling client can read it. Four
+    // finished logins must not refuse a fifth start with nothing running.
+    fake.statusResponses = [{ status: 'confirmed', bot_token: BOT_TOKEN }];
+    for (let i = 0; i < 4; i += 1) {
+      const started = await auth(request(app).post('/auth/weixin/flows')).send(
+        {},
+      );
+      expect(started.status).toBe(201);
+      await waitForStatus(app, started.body['id'] as string, 'ready');
+    }
+
+    const fifth = await auth(request(app).post('/auth/weixin/flows')).send({});
+
+    expect(fifth.status).toBe(201);
   });
 
   it('holds the cap under concurrent starts', async () => {

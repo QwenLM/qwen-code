@@ -95,17 +95,24 @@ changes to the channel package.
 
 Add `management` so the catalog marks the type manageable:
 
-- `baseUrl` — `string`, `envResolvable`, optional. Overrides the iLink API root.
 - `groupPolicy` — `enum`, required, default and only option `disabled`. The iLink
   Bot is direct-message only (`WeixinAdapter.connect` hardcodes `isGroup: false`),
   so offering the other three policies would let an operator configure a mode
   that can never fire.
 
-`envResolvableConfigFields: ['baseUrl']`. No `requiredConfigFields`: the token
-comes from `account.json`, not from channel config, so the editor must not
-render a credential input for it. The shared `privatePolicy`, `allowedUsers`,
-`sessionScope`, and `operators` fields are appended by
-`managementFieldsWithSharedControls` as for every other channel.
+**No `baseUrl` field.** `connect()` replaces the configured root with the one
+stored at login, and both login paths always store one, so an editor field for
+it would promise an override that cannot reach a request. Exposing it needs the
+adapter's precedence fixed first; until then the knob stays out rather than
+lying. Narrowing `groupPolicy` also needs the settings validator to forgive an
+unchanged stored value, exactly as its number branch already does — otherwise an
+operator who configured a wider policy in `settings.json` before this change
+could not save an unrelated edit.
+
+No `requiredConfigFields`: the token comes from `account.json`, not from channel
+config, so the editor must not render a credential input for it. The shared
+`privatePolicy`, `allowedUsers`, `sessionScope`, and `operators` fields are
+appended by `managementFieldsWithSharedControls` as for every other channel.
 
 ### 2. CLI command: keep the terminal experience
 
@@ -221,8 +228,8 @@ subscription auth routes and calls the dispose function on shutdown.
   (`listPairingRequests`, `approvePairingRequest`, …); `ChannelsManagerPage`
   constructs it from `useWorkspace()`. This keeps the dialog testable without a
   workspace provider.
-- `FIELD_LABEL_KEYS.weixin` plus EN and ZH catalog entries for `baseUrl` and
-  `groupPolicy`, each with a `.description`. The Russian catalog is intentionally
+- `FIELD_LABEL_KEYS.weixin` plus EN and ZH catalog entries for `groupPolicy`,
+  each with a `.description`. The Russian catalog is intentionally
   partial and falls back to EN, so it needs no entries.
 - Saving is not blocked on login state. Config and credential are independent,
   and an operator may legitimately pre-configure a channel; the panel states
@@ -359,11 +366,14 @@ directories.
   action they already have.
 - Should the expired-session (`errcode -14`) state eventually surface in the
   channel card? Tracked as a non-goal here; worth a follow-up issue.
-- The channel's `baseUrl` field overrides the runtime adapter's API root, but
-  QR login always mints against `DEFAULT_BASE_URL` — the login is process-global
-  and has no channel to read a root from, and `WeixinAdapter.connect` then
-  prefers the `baseUrl` stored by the login response anyway. Making the two
-  agree would mean teaching a global route to read one workspace's channel
-  configuration, so it stays as it is, but the field's description should not be
-  read as also moving the login endpoint. Worth revisiting if a private iLink
-  deployment ever needs the browser login path.
+- A private iLink deployment still cannot be reached from the browser login:
+  the mint always uses `DEFAULT_BASE_URL`, and `connect()` then prefers the root
+  stored at login over any configured one. That is why no `baseUrl` field is
+  exposed. Supporting it means fixing the adapter's precedence and giving the
+  global login route a root to mint against — worth revisiting if such a
+  deployment ever needs the browser path.
+- A flow whose client vanishes _after_ the `201` — a page reload, rather than a
+  closing dialog — is still not reaped: the id is lost, so no `DELETE` can reach
+  it, and it polls upstream until its deadline. The cap now counts only live
+  flows, and both the unmount and the pre-response disconnect are covered, but a
+  liveness sweep keyed on the last poll would close the remaining window.

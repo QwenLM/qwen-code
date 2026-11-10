@@ -274,6 +274,50 @@ describe('weixin login cancellation', () => {
     vi.useRealTimers();
   });
 
+  it('cancels the refresh mint too, not just the poll', async () => {
+    // The expired branch mints a replacement. Without the caller's signal on
+    // that request, cancel/revoke/shutdown return while it stays open for the
+    // whole mint bound.
+    vi.useFakeTimers();
+    let mintAborted = false;
+    let call = 0;
+    const fetchMock = vi
+      .fn()
+      .mockImplementation((url: string, init: { signal?: AbortSignal }) => {
+        call += 1;
+        if (String(url).includes('get_bot_qrcode')) {
+          return new Promise((_resolve, reject) => {
+            init.signal?.addEventListener('abort', () => {
+              mintAborted = true;
+              reject(
+                Object.assign(new Error('aborted'), { name: 'AbortError' }),
+              );
+            });
+          });
+        }
+        return Promise.resolve(response({ status: 'expired' }));
+      });
+    vi.stubGlobal('fetch', fetchMock);
+    const controller = new AbortController();
+
+    const pending = waitForLogin({
+      qrcodeId: 'qrcode-1',
+      apiBaseUrl: API_BASE,
+      signal: controller.signal,
+    });
+    // Let the poll report expiry and the refresh mint start.
+    await vi.advanceTimersByTimeAsync(0);
+    expect(call).toBeGreaterThanOrEqual(2);
+    controller.abort();
+    await vi.advanceTimersByTimeAsync(1100);
+
+    await expect(pending).resolves.toMatchObject({
+      connected: false,
+      reason: 'cancelled',
+    });
+    expect(mintAborted).toBe(true);
+  });
+
   it('keeps cancellation armed until the response body is consumed', async () => {
     // `fetch` resolves at the headers. If the abort listener is detached
     // there, an upstream that sends headers and then stalls is uncancellable:

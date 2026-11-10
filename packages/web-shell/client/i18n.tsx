@@ -4737,9 +4737,6 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'channels.editor.field.sessionScope.option.single': 'One shared session',
   'channels.editor.field.dingtalk.clientId': 'Client ID (AppKey)',
   'channels.editor.field.dingtalk.clientSecret': 'Client Secret (AppSecret)',
-  'channels.editor.field.weixin.baseUrl': 'API base URL',
-  'channels.editor.field.weixin.baseUrl.description':
-    'Override the iLink Bot API root. Leave empty to use https://ilinkai.weixin.qq.com',
   'channels.editor.field.weixin.groupPolicy': 'Group policy',
   'channels.editor.field.weixin.groupPolicy.description':
     'WeChat iLink Bot only supports direct messages, so groups stay disabled.',
@@ -4758,6 +4755,8 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'channels.weixin.ready': 'WeChat connected.',
   'channels.weixin.expired': 'QR code expired. Refresh to try again.',
   'channels.weixin.error': 'WeChat login failed. Try again.',
+  'channels.weixin.credentialsError':
+    'WeChat connected, but the daemon could not save the credential. Check that its home directory is writable, then try again.',
   'channels.weixin.unsupported':
     'This daemon does not support WeChat login. Update the daemon, or run "qwen channel configure-weixin" on the host.',
   'channels.weixin.restartHint':
@@ -9550,9 +9549,6 @@ const ZH: Messages = {
   'channels.editor.field.dingtalk.clientId': 'Client ID（原 AppKey）',
   'channels.editor.field.dingtalk.clientSecret':
     'Client Secret（原 AppSecret）',
-  'channels.editor.field.weixin.baseUrl': 'API 根地址',
-  'channels.editor.field.weixin.baseUrl.description':
-    '覆盖 iLink Bot API 根地址。留空则使用 https://ilinkai.weixin.qq.com',
   'channels.editor.field.weixin.groupPolicy': '群聊策略',
   'channels.editor.field.weixin.groupPolicy.description':
     '微信 iLink Bot 只支持私聊，因此群聊始终禁用。',
@@ -9571,6 +9567,8 @@ const ZH: Messages = {
   'channels.weixin.ready': '微信已连接。',
   'channels.weixin.expired': '二维码已过期，请刷新重试。',
   'channels.weixin.error': '微信登录失败，请重试。',
+  'channels.weixin.credentialsError':
+    '微信已连接，但 daemon 无法保存凭据。请确认其 home 目录可写后重试。',
   'channels.weixin.unsupported':
     '当前 daemon 不支持微信登录。请升级 daemon，或在主机上运行「qwen channel configure-weixin」。',
   'channels.weixin.restartHint':

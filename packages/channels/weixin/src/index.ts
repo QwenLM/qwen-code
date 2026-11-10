@@ -6,17 +6,12 @@ import type { ChannelPlugin } from '@qwen-code/channel-base';
 export const plugin: ChannelPlugin = {
   channelType: 'weixin',
   displayName: 'WeChat',
-  envResolvableConfigFields: ['baseUrl'],
   management: {
     fields: [
-      {
-        key: 'baseUrl',
-        label: 'API Base URL',
-        kind: 'string',
-        envResolvable: true,
-        description:
-          'Override the iLink Bot API root. Leave empty to use https://ilinkai.weixin.qq.com',
-      },
+      // No `baseUrl` here on purpose. `connect()` replaces the configured root
+      // with the one stored at login, and both login paths always store one, so
+      // an editor field for it would promise an override that can never reach a
+      // request. Exposing it needs the adapter's precedence fixed first.
       {
         // The iLink Bot only ever produces direct messages, so the other three
         // policies would configure a mode the adapter can never reach.

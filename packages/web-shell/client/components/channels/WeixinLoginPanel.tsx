@@ -10,7 +10,10 @@ import type {
   DaemonWeixinLoginFlow,
 } from '@qwen-code/sdk/daemon';
 import { useI18n } from '../../i18n';
+import { useExternalLinkOpener } from '../../hooks/useExternalLinkOpener';
 import { extractErrorDetail } from '../../utils/errorDetail';
+import { formatDateTime } from '../../utils/formatDateTime';
+import { isSafeHref } from '../messages/Markdown';
 import { Alert, AlertDescription } from '../ui/alert';
 import { Button } from '../ui/button';
 import { Spinner } from '../ui/spinner';
@@ -41,6 +44,7 @@ const STATUS_KEYS: Record<DaemonWeixinLoginFlow['status'], string> = {
 
 export function WeixinLoginPanel({ api }: { api: WeixinLoginApi }) {
   const { t } = useI18n();
+  const openExternalLink = useExternalLinkOpener();
   const [account, setAccount] = useState<DaemonWeixinAccountStatus>();
   const [unsupported, setUnsupported] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -121,6 +125,9 @@ export function WeixinLoginPanel({ api }: { api: WeixinLoginApi }) {
             // A 404 means the daemon dropped the flow (cancel, revoke, restart).
             if (!next) {
               setFlow(undefined);
+              // The alert names a flow that no longer exists; leaving it up
+              // would contradict the healthy account view underneath it.
+              setError(undefined);
               void reloadAccount();
               return;
             }
@@ -184,6 +191,10 @@ export function WeixinLoginPanel({ api }: { api: WeixinLoginApi }) {
       await apiRef.current.revoke();
       if (!mountedRef.current) return;
       setFlow(undefined);
+      // The credential is gone as of the 204. Paint that known state before
+      // re-reading, so a failed refresh cannot leave "Logged in" on screen
+      // over an account that no longer exists.
+      setAccount({ enabled: true, configured: false });
       await reloadAccount();
     } catch (failure) {
       if (mountedRef.current) setError(extractErrorDetail(failure));
@@ -209,9 +220,16 @@ export function WeixinLoginPanel({ api }: { api: WeixinLoginApi }) {
   }
 
   const showQr = flow !== undefined && !isTerminal(flow.status);
+  // A credential the daemon could not write is a permanent local fault, not a
+  // transient one: retrying it only burns flow slots. Keep it distinct from
+  // the upstream failures the generic retry copy is written for.
+  const credentialsFailure = flow?.errorCode === 'credentials_error';
   const needsRetry =
     flow !== undefined &&
+    !credentialsFailure &&
     (flow.status === 'expired' || flow.status === 'error');
+  const safeQrUrl =
+    flow?.qrcodeUrl && isSafeHref(flow.qrcodeUrl) ? flow.qrcodeUrl : undefined;
 
   return (
     <div className={styles.weixinPanel} data-testid="weixin-login-panel">
@@ -230,7 +248,9 @@ export function WeixinLoginPanel({ api }: { api: WeixinLoginApi }) {
         ) : null}
         {account?.configured && account.savedAt ? (
           <span className={styles.weixinStatusMeta}>
-            {t('channels.weixin.savedAt', { time: account.savedAt })}
+            {t('channels.weixin.savedAt', {
+              time: formatDateTime(account.savedAt),
+            })}
           </span>
         ) : null}
       </div>
@@ -245,7 +265,11 @@ export function WeixinLoginPanel({ api }: { api: WeixinLoginApi }) {
 
       {flow ? (
         <p role="status" className={styles.weixinHint}>
-          {t(STATUS_KEYS[flow.status])}
+          {t(
+            credentialsFailure
+              ? 'channels.weixin.credentialsError'
+              : STATUS_KEYS[flow.status],
+          )}
         </p>
       ) : null}
 
@@ -253,6 +277,10 @@ export function WeixinLoginPanel({ api }: { api: WeixinLoginApi }) {
         <pre
           // CJK font fallback gives block glyphs a different width than spaces.
           lang="en"
+          // A bare <pre> maps to the generic role, whose accessible name is
+          // prohibited — without role="img" the label is dropped and a screen
+          // reader reads out every block glyph instead.
+          role="img"
           aria-label={t('channels.weixin.qrAlt')}
           className="w-fit overflow-hidden rounded-lg bg-white p-3 font-mono text-[7px] leading-[7px] tracking-normal text-black select-none"
         >
@@ -260,14 +288,17 @@ export function WeixinLoginPanel({ api }: { api: WeixinLoginApi }) {
         </pre>
       ) : null}
 
-      {showQr && !flow?.qrText && flow?.qrcodeUrl ? (
+      {showQr && !flow?.qrText && safeQrUrl ? (
         // The encoder can fail on an over-capacity URL; the raw link still
-        // completes the login.
+        // completes the login. This is exactly the branch a pathological
+        // upstream value lands in, so it is gated like every other
+        // daemon-supplied URL in this client.
         <a
-          href={flow.qrcodeUrl}
+          href={safeQrUrl}
           target="_blank"
-          rel="noreferrer"
+          rel="noopener noreferrer"
           className={styles.weixinLink}
+          onClick={(click) => openExternalLink(click, safeQrUrl)}
         >
           {t('channels.weixin.openUrl')}
         </a>
@@ -278,7 +309,7 @@ export function WeixinLoginPanel({ api }: { api: WeixinLoginApi }) {
       ) : null}
 
       <div className={styles.weixinActions}>
-        {showQr ? null : needsRetry ? (
+        {showQr || credentialsFailure ? null : needsRetry ? (
           <Button
             type="button"
             size="sm"
@@ -289,27 +320,16 @@ export function WeixinLoginPanel({ api }: { api: WeixinLoginApi }) {
             {t('channels.weixin.refresh')}
           </Button>
         ) : account?.configured ? (
-          <>
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              disabled={busy}
-              onClick={() => void startLogin()}
-            >
-              {busy ? <Spinner /> : null}
-              {t('channels.weixin.relogin')}
-            </Button>
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              disabled={busy}
-              onClick={() => void logout()}
-            >
-              {t('channels.weixin.logout')}
-            </Button>
-          </>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            disabled={busy}
+            onClick={() => void startLogin()}
+          >
+            {busy ? <Spinner /> : null}
+            {t('channels.weixin.relogin')}
+          </Button>
         ) : (
           <Button
             type="button"
@@ -321,6 +341,20 @@ export function WeixinLoginPanel({ api }: { api: WeixinLoginApi }) {
             {t('channels.weixin.login')}
           </Button>
         )}
+        {/* Outside the retry ternary on purpose: a relogin that ends in
+            expiry or error must not take away the only control that can
+            revoke a credential that is still installed. */}
+        {account?.configured ? (
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            disabled={busy}
+            onClick={() => void logout()}
+          >
+            {t('channels.weixin.logout')}
+          </Button>
+        ) : null}
       </div>
     </div>
   );

@@ -64,10 +64,11 @@ qwen channel start my-weixin    # 还要先手工编辑 ~/.qwen/settings.json
 
 补上 `management`，让 catalog 把该类型标记为可管理：
 
-- `baseUrl` —— `string`、`envResolvable`、可选。覆盖 iLink API 根地址。
 - `groupPolicy` —— `enum`、必填、默认值同时也是唯一选项 `disabled`。iLink Bot 只支持私聊（`WeixinAdapter.connect` 把 `isGroup` 硬编码为 `false`），提供另外三种策略只会让操作者配出一个永远不会触发的模式。
 
-`envResolvableConfigFields: ['baseUrl']`。不设 `requiredConfigFields`：token 来自 `account.json` 而非 channel 配置，因此编辑器绝不能为它渲染凭据输入框。共享的 `privatePolicy`、`allowedUsers`、`sessionScope`、`operators` 字段由 `managementFieldsWithSharedControls` 追加，与其它 channel 一致。
+**不提供 `baseUrl` 字段。** `connect()` 会用登录时存下的根地址覆盖配置值，而两条登录路径都必然写入该值，因此在编辑器里提供这个字段等于承诺一个永远到不了请求的覆盖项。要暴露它，得先修适配器的优先级；在那之前宁可不放这个旋钮，也不让它说谎。收窄 `groupPolicy` 还需要设置校验器像它的 number 分支那样放行「未改动的历史值」，否则在本次改动之前用 `settings.json` 配过更宽策略的操作者，将无法保存任何无关的编辑。
+
+不设 `requiredConfigFields`：token 来自 `account.json` 而非 channel 配置，因此编辑器绝不能为它渲染凭据输入框。共享的 `privatePolicy`、`allowedUsers`、`sessionScope`、`operators` 字段由 `managementFieldsWithSharedControls` 追加，与其它 channel 一致。
 
 ### 2. CLI 命令：保留终端体验
 
@@ -115,7 +116,7 @@ qwen channel start my-weixin    # 还要先手工编辑 ~/.qwen/settings.json
 - 新增 `weixin-auth-api.ts` —— 基于 `createDaemonRestRequest(baseUrl, token, client)` 的薄 REST 助手，遵循 `components/local-control-api.ts`。这是浏览器调用进程全局路由的既有模式；它刻意不新增 `WorkspaceDaemonClient` 方法，因为该路由没有 workspace 段。
 - 新增 `WeixinLoginPanel.tsx` —— 展示组件加一个轮询 effect。显示账号状态；提供「扫码登录」动作，发起流程并把 `qrText` 渲染进 `<pre>`，样式沿用 `LocalControlQrButton`；为 waiting / scanned / ready / expired / error 各显示状态文案；提供发起新流程的刷新动作；以及退出登录动作。轮询循环自续期，且只以流程 id 为键、不以状态为键：在操作者扫码之前 daemon 会反复报告 `waiting`，只在状态变化时重新挂表的定时器会触发一次就冻住。它在终态与卸载时停止，并在瞬时请求失败后继续重试（下次成功时清除错误），这样一次网络抖动不会把面板卡死 —— 流程处于非终态时面板并不渲染刷新按钮。api 对象存放在 ref 中，宿主重渲染不会重启定时器。卸载时它会取消仍在活动的流程：daemon 在没有浏览器的情况下也会让该流程及其上游轮询继续跑，否则关闭编辑器就会泄漏 slot，累积四次放弃的尝试后所有真正的登录都会被回 `429`。启动请求仍在途的那个窗口也被覆盖：此时卸载清理还拿不到 id，所以由「响应到达后发现已卸载」的分支去取消它刚创建的流程，而不是把它静默丢掉。
 - `ChannelEditorDialog.tsx` —— 当 `descriptor.type === 'weixin'` 时在凭据分区顶部渲染该面板。登录 API 以可选 prop 注入，与该 dialog 里其它所有 daemon 调用一致（`listPairingRequests`、`approvePairingRequest`……）；由 `ChannelsManagerPage` 从 `useWorkspace()` 构造。这样 dialog 无需 workspace provider 即可测试。
-- `FIELD_LABEL_KEYS.weixin` 以及 `baseUrl`、`groupPolicy` 的 EN 与 ZH 词条，各带一条 `.description`。俄语目录是有意残缺的、会回落到 EN，因此无需新增词条。
+- `FIELD_LABEL_KEYS.weixin` 以及 `groupPolicy` 的 EN 与 ZH 词条，各带一条 `.description`。俄语目录是有意残缺的、会回落到 EN，因此无需新增词条。
 - 保存不以登录状态为前置条件。配置与凭据相互独立，操作者完全可能合理地预先配置一个 channel；面板会明确说明启动需要已登录的账号。
 
 ### Capability 门控
@@ -195,4 +196,5 @@ qwen channel start my-weixin    # 还要先手工编辑 ~/.qwen/settings.json
 
 - 重新登录成功后是否应自动提议重启正在运行的 `weixin` channel？本设计只告知操作者；重启是他们已经拥有的 channel 动作。
 - 会话过期（`errcode -14`）状态最终是否应出现在 channel 卡片上？此处列为非目标；值得开一个后续 issue。
-- channel 的 `baseUrl` 字段覆盖的是运行时适配器的 API 根地址，而扫码登录始终对 `DEFAULT_BASE_URL` 生成二维码 —— 登录是进程全局的，没有某个 channel 可供读取根地址；而且 `WeixinAdapter.connect` 之后会优先采用登录响应里存下的 `baseUrl`。要让两者一致，就得让一条全局路由去读某个 workspace 的 channel 配置，因此维持现状；但该字段的说明不应被理解为同时改变登录端点。若将来私有 iLink 部署需要走浏览器登录，值得重新考虑。
+- 私有 iLink 部署仍然无法走浏览器登录：生成二维码固定使用 `DEFAULT_BASE_URL`，而 `connect()` 之后又优先采用登录时存下的根地址而非配置值。这正是不提供 `baseUrl` 字段的原因。要支持它，需要修适配器的优先级，并给全局登录路由一个可用于生成的根地址 —— 若这类部署将来需要浏览器路径，值得重新考虑。
+- 在 `201` **之后**才消失的客户端（刷新页面，而不是关闭对话框）留下的流程仍未被回收：id 已丢失，`DELETE` 够不到它，它会一直轮询上游直到截止。上限现在只统计活动流程，卸载与「响应前断开」两个窗口也已覆盖，但按「最近一次轮询时间」做活性清扫才能关掉剩下的那个窗口。
