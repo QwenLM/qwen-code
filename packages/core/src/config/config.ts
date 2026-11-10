@@ -6157,12 +6157,14 @@ export class Config {
     authMethod: AuthType,
     isInitialAuth?: boolean,
     subscriptionFallbackModel?: string,
+    allowUnlistedSubscriptionModel?: boolean,
   ) {
     return this.rebuildContentGenerator(
       authMethod,
       isInitialAuth,
       true,
       subscriptionFallbackModel,
+      allowUnlistedSubscriptionModel,
     );
   }
 
@@ -6171,6 +6173,7 @@ export class Config {
     isInitialAuth: boolean | undefined,
     refreshSubscriptionModels: boolean,
     subscriptionFallbackModel?: string,
+    allowUnlistedSubscriptionModel?: boolean,
   ) {
     const hookOwner = captureHookExecutionOwner(this, null);
     if (!this.contentGenerator && authMethod === this.initialAuthType) {
@@ -6208,17 +6211,22 @@ export class Config {
       const selected = this.modelsConfig.getModel();
       if (selected && !models.includes(selected)) {
         if (
+          isInitialAuth &&
+          subscriptionFallbackModel &&
+          models.includes(subscriptionFallbackModel)
+        ) {
+          fallbackModel = subscriptionFallbackModel;
+        } else if (
           !isInitialAuth ||
-          !subscriptionFallbackModel ||
-          !models.includes(subscriptionFallbackModel)
+          !allowUnlistedSubscriptionModel ||
+          priorGeneration.authType !== authMethod
         ) {
           throw new Error(subscriptionModelUnavailable(selected));
         }
-        fallbackModel = subscriptionFallbackModel;
       }
     }
 
-    // Sync modelsConfig state for this auth refresh.
+    // The CLI's resolved subscription credentials preserve an unlisted model during sync.
     const modelId = fallbackModel ?? this.modelsConfig.getModel();
     this.modelsConfig.syncAfterAuthRefresh(authMethod, modelId);
 

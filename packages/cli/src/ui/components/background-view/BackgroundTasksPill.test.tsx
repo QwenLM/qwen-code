@@ -7,6 +7,7 @@
 import { describe, it, expect } from 'vitest';
 import type { DialogEntry } from '../../hooks/useBackgroundTaskView.js';
 import {
+  getPendingBackgroundApprovals,
   getPillLabel,
   hasLargeWorkflow,
   hasPendingApproval,
@@ -293,6 +294,48 @@ describe('hasPendingApproval', () => {
         dreamEntry({ dreamId: 'd-a' }),
       ]),
     ).toBe(false);
+  });
+});
+
+describe('getPendingBackgroundApprovals', () => {
+  it('lists agent and workflow approvals oldest first', () => {
+    const late = { ...approval('c1'), at: 30 };
+    const early = { ...workflowApproval('wfap-1'), name: 'Edit', at: 10 };
+    const middle = { ...approval('c2'), name: 'Grep', at: 20 };
+    expect(
+      getPendingBackgroundApprovals([
+        agentEntry({ agentId: 'a', pendingApprovals: [late] }),
+        workflowEntry({ pendingApprovals: [early] }),
+        agentEntry({ agentId: 'b', pendingApprovals: [middle] }),
+        shellEntry({ shellId: 'bg_a' }),
+        dreamEntry({ dreamId: 'd-a' }),
+      ]).map(({ toolName, at }) => ({ toolName, at })),
+    ).toEqual([
+      { toolName: 'Edit', at: 10 },
+      { toolName: 'Grep', at: 20 },
+      { toolName: 'Shell', at: 30 },
+    ]);
+  });
+
+  it('keeps distinct, stable keys when nested agents share a call ID', () => {
+    const own = approval('call_qwen_1');
+    const firstChild = { ...own, subagentId: 'child-a' };
+    const secondChild = { ...own, subagentId: 'child-b' };
+    const initial = getPendingBackgroundApprovals([
+      agentEntry({ pendingApprovals: [own, firstChild] }),
+    ]);
+    const updated = getPendingBackgroundApprovals([
+      agentEntry({ pendingApprovals: [own, firstChild, secondChild] }),
+    ]);
+
+    expect(new Set(updated.map(({ key }) => key)).size).toBe(3);
+    expect(updated.slice(0, 2)).toEqual(initial);
+  });
+
+  it('is empty when nothing is parked', () => {
+    expect(
+      getPendingBackgroundApprovals([agentEntry(), workflowEntry()]),
+    ).toEqual([]);
   });
 });
 
