@@ -1,0 +1,109 @@
+package com.alibaba.qwen.code.managedagent.api;
+
+import com.alibaba.qwen.code.managedagent.contracts.clientfiles.ClientFilesModels.QueuedRequest;
+import com.alibaba.qwen.code.managedagent.contracts.clientfiles.ClientFilesModels.RegisterRequest;
+import com.alibaba.qwen.code.managedagent.contracts.clientfiles.ClientFilesModels.Registration;
+import com.alibaba.qwen.code.managedagent.contracts.clientfiles.ClientFilesModels.RespondRequest;
+import com.alibaba.qwen.code.managedagent.contracts.clientfiles.ClientFilesModels.Status;
+import com.alibaba.qwen.code.managedagent.contracts.clientfiles.ClientFilesModels.StatusRequest;
+import com.alibaba.qwen.code.managedagent.contracts.clientfiles.ClientFilesModels.StreamRequest;
+import com.alibaba.qwen.code.managedagent.contracts.clientfiles.ClientFilesModels.UnregisterRequest;
+import com.alibaba.qwen.code.managedagent.model.TenantContext;
+import com.alibaba.qwen.code.managedagent.session.ClientFilesRelayService;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.http.CacheControl;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
+
+import java.io.IOException;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
+
+/**
+ * WebShell leg of the client files relay. The browser registers its directory
+ * grant here, drains JSON-RPC requests over SSE and posts responses back; the
+ * Runtime leg is the separate internal MCP endpoint.
+ */
+@RestController
+@ConditionalOnProperty(prefix = "qwen.managed-agent.client-files", name = "enabled", havingValue = "true")
+@RequestMapping("/api/agent/web-shell/v1/client-files")
+public class ClientFilesController {
+    private final ClientFilesRelayService service;
+
+    public ClientFilesController(ClientFilesRelayService service) {
+        this.service = service;
+    }
+
+    @PostMapping("/register")
+    public ResponseEntity<Registration> register(TenantContext tenant,
+            @RequestBody RegisterRequest request) {
+        return noStore(service.register(tenant.tenantId(), tenant.requireActorId(), request.sessionId()));
+    }
+
+    @PostMapping("/unregister")
+    public ResponseEntity<Status> unregister(TenantContext tenant,
+            @RequestBody UnregisterRequest request) {
+        return noStore(service.unregister(tenant.tenantId(), tenant.requireActorId(), request.sessionId()));
+    }
+
+    @PostMapping("/status")
+    public ResponseEntity<Status> status(TenantContext tenant,
+            @RequestBody StatusRequest request) {
+        return noStore(service.status(tenant.tenantId(), tenant.requireActorId(), request.sessionId()));
+    }
+
+    @PostMapping(value = "/requests/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public ResponseEntity<SseEmitter> stream(TenantContext tenant,
+            @RequestBody StreamRequest request) {
+        String actor = tenant.requireActorId();
+        String session = request.sessionId();
+        long generation = request.generation();
+        service.requests(tenant.tenantId(), actor, session, generation);
+        var emitter = new SseEmitter(300_000L);
+        var open = new AtomicBoolean(true);
+        emitter.onCompletion(() -> open.set(false));
+        emitter.onTimeout(() -> open.set(false));
+        emitter.onError(error -> open.set(false));
+        Thread.startVirtualThread(() -> {
+            Set<String> sent = new HashSet<>();
+            try {
+                while (open.get()) {
+                    List<QueuedRequest> rows = service.requests(tenant.tenantId(), actor, session, generation);
+                    for (QueuedRequest row : rows) {
+                        if (sent.add(row.requestId())) {
+                            emitter.send(SseEmitter.event().name("request").id(row.requestId())
+                                    .data(Map.of("requestId", row.requestId(), "payloadJson", row.payloadJson())));
+                        }
+                    }
+                    Thread.sleep(500);
+                }
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                emitter.complete();
+            } catch (IOException | RuntimeException ended) {
+                emitter.completeWithError(ended);
+            }
+        });
+        return noStore(emitter);
+    }
+
+    @PostMapping("/responses")
+    public ResponseEntity<Map<String, Boolean>> respond(TenantContext tenant,
+            @RequestBody RespondRequest request) {
+        service.respond(tenant.tenantId(), tenant.requireActorId(), request.sessionId(),
+                request.generation(), request.rpcRequestId(), request.responseJson(), request.errorCode());
+        return noStore(Map.of("settled", true));
+    }
+
+    private static <T> ResponseEntity<T> noStore(T body) {
+        return ResponseEntity.ok().cacheControl(CacheControl.noStore().cachePrivate()).body(body);
+    }
+}

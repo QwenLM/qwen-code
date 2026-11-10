@@ -26,6 +26,8 @@ public interface ClientFilesRelay {
 
     List<QueuedRequest> queued(String tenantId, String sessionId, long generation, int limit);
 
+    QueuedRequest request(String tenantId, String sessionId, long generation, String requestId);
+
     boolean answer(String tenantId, String sessionId, long generation, String requestId,
             String responseJson, long now);
 

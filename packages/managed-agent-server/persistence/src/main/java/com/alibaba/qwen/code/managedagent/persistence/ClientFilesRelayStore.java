@@ -110,6 +110,15 @@ public class ClientFilesRelayStore implements ClientFilesRelay {
     }
 
     @Override
+    public QueuedRequest request(String tenantId, String sessionId, long generation, String requestId) {
+        List<QueuedRequest> rows = jdbc.query("SELECT " + REQUEST_COLUMNS
+                        + " FROM ma_client_files_request WHERE session_scope_key=?"
+                        + " AND binding_generation=? AND request_id=?",
+                REQUEST_MAPPER, ManagedSchemaKeys.key(tenantId, sessionId), generation, requestId);
+        return rows.isEmpty() ? null : rows.get(0);
+    }
+
+    @Override
     public boolean answer(String tenantId, String sessionId, long generation, String requestId,
             String responseJson, long now) {
         return jdbc.update("UPDATE ma_client_files_request SET state=?,response_json=?,gmt_modified=?"

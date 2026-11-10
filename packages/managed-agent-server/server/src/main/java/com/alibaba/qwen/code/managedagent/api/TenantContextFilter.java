@@ -30,6 +30,8 @@ public class TenantContextFilter extends OncePerRequestFilter {
             "/internal/managed-channels/v1/";
     private static final String MANAGED_WORKSPACES_PREFIX =
             "/internal/managed-workspaces/v1/";
+    private static final String MANAGED_CLIENT_FILES_PREFIX =
+            "/internal/managed-client-files/v1/";
     private static final Pattern TENANT_PATTERN = Pattern.compile(
             "^[A-Za-z0-9._:-]{1,128}$");
     private final ObjectMapper objectMapper;
@@ -45,7 +47,8 @@ public class TenantContextFilter extends OncePerRequestFilter {
                 && !path.startsWith(MANAGED_SESSION_STORE_PREFIX)
                 && !path.startsWith(TOOL_PUBLICATION_PREFIX)
                 && !path.startsWith(MANAGED_CHANNELS_PREFIX)
-                && !path.startsWith(MANAGED_WORKSPACES_PREFIX);
+                && !path.startsWith(MANAGED_WORKSPACES_PREFIX)
+                && !path.startsWith(MANAGED_CLIENT_FILES_PREFIX);
     }
 
     @Override
@@ -57,6 +60,7 @@ public class TenantContextFilter extends OncePerRequestFilter {
                 || path.startsWith(TOOL_PUBLICATION_PREFIX)
                 || path.startsWith(MANAGED_CHANNELS_PREFIX)
                 || path.startsWith(MANAGED_WORKSPACES_PREFIX)
+                || path.startsWith(MANAGED_CLIENT_FILES_PREFIX)
                 || path.startsWith("/v1/agents/workspaces")
                 || path.startsWith("/api/agent/web-shell/v1/workspaces/")) {
             response.setHeader(HttpHeaders.CACHE_CONTROL, "no-store");

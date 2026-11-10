@@ -70,6 +70,23 @@ final class ManagedSessionRetirementStore {
         if (!receipts.isEmpty()) {
             return true;
         }
+        var clientFilesRequests = jdbc.queryForList("SELECT request_key FROM ma_client_files_request"
+                + " WHERE session_scope_key=? ORDER BY request_key LIMIT ? FOR UPDATE", scope, limit);
+        for (var row : clientFilesRequests) {
+            jdbc.update("DELETE FROM ma_client_files_request WHERE request_key=?", row.get("request_key"));
+        }
+        if (!clientFilesRequests.isEmpty()) {
+            return true;
+        }
+        var clientFilesBindings = jdbc.queryForList("SELECT session_scope_key FROM ma_client_files_binding"
+                + " WHERE session_scope_key=? LIMIT ? FOR UPDATE", scope, limit);
+        for (var row : clientFilesBindings) {
+            jdbc.update("DELETE FROM ma_client_files_binding WHERE session_scope_key=?",
+                    row.get("session_scope_key"));
+        }
+        if (!clientFilesBindings.isEmpty()) {
+            return true;
+        }
         var messages =
                 jdbc.queryForList(
                         "SELECT item_id FROM ma_message WHERE tenant_id = ? AND session_id = ?"

@@ -9621,6 +9621,240 @@
         ]
       }
     },
+    "/api/agent/web-shell/v1/client-files/register": {
+      "post": {
+        "tags": ["WebShell"],
+        "operationId": "registerWebShellClientFiles",
+        "description": "Registers the calling actor's client directory grant into the Session and issues the one-time relay credential for the Runtime MCP leg. Requires the deployment opt-in and current execution authority on the bound ACTIVE Workspace. Registration is ephemeral session state; no file content is persisted.",
+        "x-qwen-implementation-status": "implemented",
+        "responses": {
+          "200": {
+            "description": "The registration with its one-time relay credential.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebShellClientFilesRegistration"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebShellClientFilesRegisterRequest"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agent/web-shell/v1/client-files/unregister": {
+      "post": {
+        "tags": ["WebShell"],
+        "operationId": "unregisterWebShellClientFiles",
+        "description": "Closes the calling actor's registration (or an operator's teardown of it) and fails every queued request with the structured offline error.",
+        "x-qwen-implementation-status": "implemented",
+        "responses": {
+          "200": {
+            "description": "The closed binding summary.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebShellClientFilesStatus"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebShellClientFilesUnregisterRequest"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agent/web-shell/v1/client-files/status": {
+      "post": {
+        "tags": ["WebShell"],
+        "operationId": "queryWebShellClientFilesStatus",
+        "description": "Reads the Session's binding summary without the credential; an absent binding answers an empty 200.",
+        "x-qwen-implementation-status": "implemented",
+        "responses": {
+          "200": {
+            "description": "The binding summary, or an empty body when nothing is registered.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebShellClientFilesStatus"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebShellClientFilesStatusRequest"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agent/web-shell/v1/client-files/requests/stream": {
+      "post": {
+        "tags": ["WebShell"],
+        "operationId": "streamWebShellClientFilesRequests",
+        "description": "The browser downlink: SSE events named request carrying opaque JSON-RPC payloads for the registering actor's own active binding generation. Each poll revalidates the read grant.",
+        "x-qwen-implementation-status": "implemented",
+        "responses": {
+          "200": {
+            "description": "Queued JSON-RPC requests as SSE events.",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebShellClientFilesStreamRequest"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agent/web-shell/v1/client-files/responses": {
+      "post": {
+        "tags": ["WebShell"],
+        "operationId": "respondWebShellClientFiles",
+        "description": "The browser uplink: settles one queued JSON-RPC request with either a response payload or a structured error code, never both.",
+        "x-qwen-implementation-status": "implemented",
+        "responses": {
+          "200": {
+            "description": "The request was settled.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebShellClientFilesRespondReceipt"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebShellClientFilesRespondRequest"
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/agent/web-shell/v1/session-side-queries/create": {
       "post": {
         "tags": ["WebShell"],
@@ -22910,6 +23144,129 @@
           },
           "requestId": {
             "type": "string"
+          }
+        }
+      },
+      "WebShellClientFilesRegisterRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["sessionId"],
+        "properties": {
+          "sessionId": {
+            "type": "string"
+          }
+        }
+      },
+      "WebShellClientFilesUnregisterRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["sessionId"],
+        "properties": {
+          "sessionId": {
+            "type": "string"
+          }
+        }
+      },
+      "WebShellClientFilesStatusRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["sessionId"],
+        "properties": {
+          "sessionId": {
+            "type": "string"
+          }
+        }
+      },
+      "WebShellClientFilesStreamRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["sessionId", "generation"],
+        "properties": {
+          "sessionId": {
+            "type": "string"
+          },
+          "generation": {
+            "type": "integer",
+            "minimum": 1
+          }
+        }
+      },
+      "WebShellClientFilesRespondRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["sessionId", "generation", "rpcRequestId"],
+        "properties": {
+          "sessionId": {
+            "type": "string"
+          },
+          "generation": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "rpcRequestId": {
+            "type": "string",
+            "maxLength": 128,
+            "description": "The JSON-RPC request identity being settled; distinct from the HTTP request id echo field."
+          },
+          "responseJson": {
+            "type": "string"
+          },
+          "errorCode": {
+            "type": "string",
+            "maxLength": 128
+          }
+        }
+      },
+      "WebShellClientFilesRegistration": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["serverId", "generation", "token", "expiresAt"],
+        "properties": {
+          "serverId": {
+            "type": "string"
+          },
+          "generation": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "token": {
+            "type": "string",
+            "description": "The one-time relay credential for the Runtime MCP leg; never persisted."
+          },
+          "expiresAt": {
+            "type": "integer",
+            "description": "Binding deadline in Unix epoch milliseconds."
+          }
+        }
+      },
+      "WebShellClientFilesStatus": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["serverId", "generation", "state", "expiresAt"],
+        "properties": {
+          "serverId": {
+            "type": "string"
+          },
+          "generation": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "state": {
+            "enum": ["active", "closed"]
+          },
+          "expiresAt": {
+            "type": "integer",
+            "description": "Binding deadline in Unix epoch milliseconds."
+          }
+        }
+      },
+      "WebShellClientFilesRespondReceipt": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["settled"],
+        "properties": {
+          "settled": {
+            "type": "boolean"
           }
         }
       },

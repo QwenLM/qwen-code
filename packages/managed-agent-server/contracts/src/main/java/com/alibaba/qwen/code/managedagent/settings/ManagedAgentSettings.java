@@ -15,6 +15,7 @@ public interface ManagedAgentSettings {
     public Channels getChannels();
     public EventTransport getEventTransport();
     public SessionStore getSessionStore();
+    public ClientFiles getClientFiles();
     public ToolPublication getToolPublication();
     public Artifacts getArtifacts();
     public ManagedExtensions getManagedExtensions();
@@ -78,6 +79,13 @@ public interface ManagedAgentSettings {
         public Duration getWriterLeaseDuration();
         public String getBindingKey();
         public boolean isAllowInsecureHttp();
+    }
+    public interface ClientFiles {
+        public boolean isEnabled();
+        public int getQueueDepth();
+        public Duration getRequestTtl();
+        public Duration getBindingTtl();
+        public int getMaxPayloadBytes();
     }
     public interface ToolPublication {
         public boolean isAsyncVerificationEnabled();

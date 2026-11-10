@@ -64,6 +64,7 @@ public class ManagedAgentProperties
 
     private final Harness harness = new Harness();
     private final SessionStore sessionStore = new SessionStore();
+    private final ClientFiles clientFiles = new ClientFiles();
     private final Memory memory = new Memory();
     private final ToolPublication toolPublication = new ToolPublication();
     private final Artifacts artifacts = new Artifacts();
@@ -701,6 +702,20 @@ public class ManagedAgentProperties
         private Duration writerLeaseDuration = Duration.ofSeconds(60);
         private String bindingKey = "";
         private boolean allowInsecureHttp;
+    }
+
+    @Getter
+    @Setter
+    public static class ClientFiles
+            implements com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings
+                    .ClientFiles {
+        private boolean enabled;
+        private int queueDepth = 32;
+        @DurationUnit(ChronoUnit.SECONDS)
+        private Duration requestTtl = Duration.ofSeconds(25);
+        @DurationUnit(ChronoUnit.SECONDS)
+        private Duration bindingTtl = Duration.ofHours(8);
+        private int maxPayloadBytes = 60 * 1024;
     }
 
     @Getter

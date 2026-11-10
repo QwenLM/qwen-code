@@ -26,5 +26,22 @@ public final class ClientFilesModels {
             String state, String responseJson, String errorCode, long expiresAt,
             long createdAt, long modifiedAt) {}
 
+    /** The one-time registration answer; the token is shown once, never stored. */
+    public record Registration(String serverId, long generation, String token, long expiresAt) {}
+
+    /** Binding summary without the credential. */
+    public record Status(String serverId, long generation, String state, long expiresAt) {}
+
+    public record RegisterRequest(String sessionId) {}
+
+    public record UnregisterRequest(String sessionId) {}
+
+    public record StatusRequest(String sessionId) {}
+
+    public record StreamRequest(String sessionId, long generation) {}
+
+    public record RespondRequest(String sessionId, long generation, String rpcRequestId,
+            String responseJson, String errorCode) {}
+
     private ClientFilesModels() {}
 }
