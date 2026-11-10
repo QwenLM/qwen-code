@@ -129,7 +129,8 @@ env:
   # In-round self-review A/B: off (default) | ab (odd PRs armed) | on. → qwen-autofix.md#af-156
   SELF_REVIEW: "${{ vars.QWEN_AUTOFIX_SELF_REVIEW || 'off' }}"
   # Agent budget (ms) for an ARMED round; clamped in the address step.
-  SELF_REVIEW_TIMEOUT_MS: '${{ vars.QWEN_AUTOFIX_SELF_REVIEW_TIMEOUT_MS || 10800000 }}'
+  # 240m, same as the unarmed self-hosted default → af-125/af-156.
+  SELF_REVIEW_TIMEOUT_MS: '${{ vars.QWEN_AUTOFIX_SELF_REVIEW_TIMEOUT_MS || 14400000 }}'
   # Do not claim more issues when too many existing autofix PRs are still open.
   MAX_OPEN_AUTOFIX_PRS: '5'
 
@@ -2041,7 +2042,7 @@ jobs:
     # Keep the predicate as narrow as the job's own `if:` — concurrency is
     # evaluated BEFORE it, so without the do_review conjunct a dispatch with
     # `phase: issue` + `pr_number: N` (route emits pr_number unconditionally)
-    # would park this skipped job in that PR's shared slot behind a 345-minute
+    # would park this skipped job in that PR's shared slot behind a 465-minute
     # address round, stalling the issue phase that `needs` it.
     concurrency:
       group: "qwen-pr-head-write-${{ needs.route.outputs.do_review == 'true' && needs.route.outputs.pr_number || github.run_id }}"
@@ -2373,15 +2374,12 @@ jobs:
               "${WORKDIR}/bot-prs.json" "${WORKDIR}/takeover-prs.json")
           fi
 
-          # Pending-check staleness bound (invariant across candidate PRs, computed
-          # once): ignore a check stuck far past any legitimate runtime. The bound
-          # must sit ABOVE real check durations here — review-pr can take ~50m and
-          # a review-address JOB runs up to its 345-minute cap — so an active run
-          # keeps blocking and is never aged out mid-flight (which would enqueue
-          # the PR against a live check and double-process the feedback). 375 holds
-          # a 30-minute margin over that cap.
+          # Pending-check staleness bounds, two tiers (invariant across
+          # candidate PRs, computed once) → qwen-autofix.md#af-101
           PENDING_STALE_MIN=375
+          PENDING_LONG_STALE_MIN=495
           PENDING_CUTOFF="$(date -u -d "${PENDING_STALE_MIN} minutes ago" +%Y-%m-%dT%H:%M:%SZ)"
+          PENDING_LONG_CUTOFF="$(date -u -d "${PENDING_LONG_STALE_MIN} minutes ago" +%Y-%m-%dT%H:%M:%SZ)"
 
           # Repetition-guard cutoff for the stale-base update marker (invariant
           # across candidate PRs, computed once — same reasoning as
@@ -2604,6 +2602,7 @@ jobs:
             # running) is not blocking (the next scan re-checks once it starts).
             # Full rationale → qwen-autofix.md#af-101
             HAS_PENDING_CHECKS="$(jq -r --arg cut "${PENDING_CUTOFF}" \
+              --arg cut_long "${PENDING_LONG_CUTOFF}" \
               --argjson nonblocking "${NON_BLOCKING_CHECKS}" \
               --arg ctx "${DISPATCH_STATUS_CONTEXT}" '
               [ .[]
@@ -2611,11 +2610,12 @@ jobs:
                 | select(((.workflowName // "") != "Qwen Autofix") or (((.name // "") | startswith("review-address"))))
                 | select((.name // "") as $n | ($nonblocking | index($n)) == null)
                 | select((.context // "") != $ctx)
-                | select((.startedAt // $cut) > $cut) ]
+                | (if ((.name // "") | startswith("review-address")) then $cut_long else $cut end) as $rowcut
+                | select((.startedAt // $rowcut) > $rowcut) ]
               | length > 0
             ' <<< "${CHECKS_JSON}")"
             if [[ "${HAS_PENDING_CHECKS}" == "true" ]]; then
-              echo "⏳ #${PR}: active checks in flight; skipping until they finish (only checks stuck >${PENDING_STALE_MIN}m past their start are treated as dead and ignored)"
+              echo "⏳ #${PR}: active checks in flight; skipping until they finish (checks stuck past their staleness bound — ${PENDING_STALE_MIN}m general, ${PENDING_LONG_STALE_MIN}m review-address — are treated as dead and ignored)"
               fleet_row "${PR}" 'waiting' 'active checks in flight'
               continue
             fi
@@ -3573,7 +3573,10 @@ jobs:
     # Secret-bearing jobs are limited to live-gated trusted targets.
     # Full rationale → qwen-autofix.md#af-038, af-156
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-autofix"]'') || fromJSON(''["ubuntu-latest"]'') }}'
-    timeout-minutes: 345
+    # Runner-split job cap: 465 self-hosted / 345 hosted (af-050).
+    # `runner` is unavailable at job-level timeout-minutes → predicate
+    # repeated verbatim from runs-on; a meta-test pins the copies equal.
+    timeout-minutes: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && 465 || 345 }}'
     permissions:
       contents: 'read'
     strategy:
@@ -5123,9 +5126,8 @@ jobs:
         # Bound the agent below the job timeout so a runaway agent fails THIS
         # step (not the whole job), leaving the always() verify and report
         # Full rationale → qwen-autofix.md#af-050
-        # Per arm (af-156): 180m + 10m armed, 120m + 10m unarmed. The job
-        # bound cannot hold the armed cap AND the repair chain (skipped).
-        timeout-minutes: "${{ steps.prepare.outputs.self_review_arm == 'on' && 190 || 130 }}"
+        # Runner-split backstop: 250 self-hosted / 130 hosted (af-050/125).
+        timeout-minutes: "${{ runner.environment == 'github-hosted' && 130 || 250 }}"
         env:
           # The arm prepare resolved (af-156); the clamp reads it.
           SELF_REVIEW_ARM: "${{ steps.prepare.outputs.self_review_arm || 'off' }}"
@@ -5139,10 +5141,9 @@ jobs:
           OPENAI_MODEL: '${{ vars.QWEN_AUTOFIX_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
           NO_PROXY: '127.0.0.1,localhost,::1'
           QWEN_HOME: '${{ runner.temp }}/qwen-autofix-review-home'
-          # The primary attempt's real budget: 120m, with a 10-minute margin
-          # under the 130-minute step backstop above (180m/190m armed).
+          # Real budget; unset → runner-split default in the run body.
           # Full rationale → qwen-autofix.md#af-125
-          QWEN_TIMEOUT_MS: '${{ vars.QWEN_AUTOFIX_TIMEOUT_MS || 7200000 }}'
+          QWEN_TIMEOUT_MS: "${{ vars.QWEN_AUTOFIX_TIMEOUT_MS || '' }}"
           CONFLICT: '${{ steps.prepare.outputs.conflict }}'
           BASE: 'main'
           SETTINGS_JSON: |-
@@ -5189,16 +5190,25 @@ jobs:
           # commits again.
           # Full rationale → qwen-autofix.md#af-126
           git config core.hooksPath .husky
-          # Clamp the override to the budget ceiling: a repo variable past
-          # 7,200,000 ms (120m; 10,800,000 ms armed) would arm the timer past
-          # the 130-minute (190-minute armed) step
+          # Unset → runner-split default, resolved here so the hosted
+          # default never trips the clamp warning (af-125).
+          if [[ -z "${QWEN_TIMEOUT_MS}" ]]; then
+            if [[ "${RUNNER_ENVIRONMENT:-}" == 'github-hosted' ]]; then
+              QWEN_TIMEOUT_MS=7200000
+            else
+              QWEN_TIMEOUT_MS=14400000
+            fi
+          fi
+          # Clamp the override to the runner's ceiling.
           # Full rationale → qwen-autofix.md#af-051
           BUDGET_CAP_MS=7200000
           BUDGET_FLOOR_MS=60000
+          if [[ "${RUNNER_ENVIRONMENT:-}" != 'github-hosted' ]]; then
+            BUDGET_CAP_MS=14400000
+          fi
           if [[ "${SELF_REVIEW_ARM:-off}" == 'on' ]]; then
-            # One delta review's worth: 180m under the 190-minute step.
-            BUDGET_CAP_MS=10800000
-            QWEN_TIMEOUT_MS="${SELF_REVIEW_TIMEOUT_MS:-10800000}"
+            # Same 240m as the unarmed self-hosted default (af-156).
+            QWEN_TIMEOUT_MS="${SELF_REVIEW_TIMEOUT_MS:-14400000}"
           fi
           if [[ ! "${QWEN_TIMEOUT_MS}" =~ ^[0-9]{1,8}$ ]] ||
              (( 10#${QWEN_TIMEOUT_MS} < BUDGET_FLOOR_MS )) ||

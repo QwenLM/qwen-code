@@ -111,7 +111,7 @@ it('runs a relocated bundled worker with TypeScript and relative imports', async
     turnStart: false,
     promptSubmit: [],
     turnComplete: [],
-    render: [],
+    render: {},
   });
   expect(
     await dispatch({ type: 'command', command: 'hello', args: '' }),
