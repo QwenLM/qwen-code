@@ -1,8 +1,5 @@
 package com.alibaba.qwen.code.managedagent.api;
 
-import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
-import com.alibaba.qwen.code.managedagent.workspace.runtime.WorkspaceTerminalRelayService;
-import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.server.ServerHttpRequest;
@@ -16,12 +13,12 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * Authenticates and admits a Managed Web Terminal handshake. The servlet
- * filter chain has already established the tenant actor principal; this
- * interceptor re-checks the tenant header against it, then runs the terminal
- * admission (OPERATOR, Shell profile, opt-ins, terminal-capable READY
- * binding). A refusal answers the typed error and rejects the upgrade; the
- * relay never opens on an ambiguous state.
+ * Consumes the short-lived ticket a browser offers on the terminal WebSocket
+ * upgrade. Browsers cannot set the deployment's authentication headers on a
+ * WebSocket, so the full terminal admission runs on the authenticated
+ * ticket endpoint and is carried here by a single-use ticket offered as the
+ * bearer subprotocol. The upgrade only consumes the ticket and re-checks that
+ * it names this URL's Session and terminal; it never re-reads a principal.
  */
 public final class TerminalRelayHandshakeInterceptor implements HandshakeInterceptor {
     public static final String BINDING_ATTRIBUTE =
@@ -30,17 +27,16 @@ public final class TerminalRelayHandshakeInterceptor implements HandshakeInterce
             TerminalRelayHandshakeInterceptor.class.getName() + ".sessionId";
     public static final String TERMINAL_ATTRIBUTE =
             TerminalRelayHandshakeInterceptor.class.getName() + ".terminalId";
+    /** Keep in sync with the Web Shell's bearer subprotocol prefix. */
+    public static final String BEARER_SUBPROTOCOL_PREFIX = "qwen-bearer.";
     private static final Pattern SESSION_PATH = Pattern.compile(
             "^/api/agent/web-shell/v1/sessions/([^/]+)/terminal$");
-    private static final int MAX_TERMINAL_ID_LENGTH = 256;
-    /** The hold derives a Runtime Session id from the terminal id, so it must
-     * be path-safe, not merely bounded. */
-    private static final Pattern TERMINAL_ID = Pattern.compile("[A-Za-z0-9._-]+");
+    private static final Pattern PATH_SAFE = Pattern.compile("[A-Za-z0-9._-]{1,256}");
 
-    private final WorkspaceTerminalRelayService relay;
+    private final TerminalTicketStore tickets;
 
-    public TerminalRelayHandshakeInterceptor(WorkspaceTerminalRelayService relay) {
-        this.relay = relay;
+    public TerminalRelayHandshakeInterceptor(TerminalTicketStore tickets) {
+        this.tickets = tickets;
     }
 
     @Override
@@ -64,36 +60,37 @@ public final class TerminalRelayHandshakeInterceptor implements HandshakeInterce
         }
         String sessionId = matcher.group(1);
         String terminalId = http.getParameter("terminalId");
-        if (terminalId == null || terminalId.isEmpty()
-                || terminalId.length() > MAX_TERMINAL_ID_LENGTH
-                || !TERMINAL_ID.matcher(terminalId).matches()
-                || !TERMINAL_ID.matcher(sessionId).matches()) {
+        if (terminalId == null || !PATH_SAFE.matcher(terminalId).matches()
+                || !PATH_SAFE.matcher(sessionId).matches()) {
             response.setStatusCode(HttpStatus.BAD_REQUEST);
             return false;
         }
-        String tenantId = http.getHeader(TenantContextFilter.HEADER);
-        String actorId = null;
-        if (http.getUserPrincipal() instanceof AuthenticatedTenantActor actor) {
-            if (tenantId == null || !tenantId.equals(actor.tenantId())) {
-                response.setStatusCode(HttpStatus.FORBIDDEN);
-                return false;
+        TerminalTicketStore.Admission admission = tickets.consume(bearerTicket(http));
+        if (admission == null
+                || !admission.sessionId().equals(sessionId)
+                || !admission.terminalId().equals(terminalId)) {
+            response.setStatusCode(HttpStatus.UNAUTHORIZED);
+            return false;
+        }
+        attributes.put(BINDING_ATTRIBUTE, admission.binding());
+        attributes.put(SESSION_ATTRIBUTE, sessionId);
+        attributes.put(TERMINAL_ATTRIBUTE, terminalId);
+        return true;
+    }
+
+    /** The ticket rides the bearer subprotocol; never a URL parameter. */
+    private static String bearerTicket(HttpServletRequest http) {
+        String protocols = http.getHeader("Sec-WebSocket-Protocol");
+        if (protocols == null) {
+            return null;
+        }
+        for (String offered : protocols.split(",")) {
+            String trimmed = offered.trim();
+            if (trimmed.startsWith(BEARER_SUBPROTOCOL_PREFIX)) {
+                return trimmed.substring(BEARER_SUBPROTOCOL_PREFIX.length());
             }
-            actorId = actor.actorId();
         }
-        if (tenantId == null) {
-            response.setStatusCode(HttpStatus.BAD_REQUEST);
-            return false;
-        }
-        try {
-            RuntimeBindingRecord binding = relay.admit(tenantId, actorId, sessionId);
-            attributes.put(BINDING_ATTRIBUTE, binding);
-            attributes.put(SESSION_ATTRIBUTE, sessionId);
-            attributes.put(TERMINAL_ATTRIBUTE, terminalId);
-            return true;
-        } catch (ManagedAgentException refusal) {
-            response.setStatusCode(HttpStatus.valueOf(refusal.getStatus()));
-            return false;
-        }
+        return null;
     }
 
     @Override

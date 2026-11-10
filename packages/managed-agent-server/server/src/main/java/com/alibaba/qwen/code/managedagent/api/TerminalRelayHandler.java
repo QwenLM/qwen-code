@@ -5,6 +5,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerOperations;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLease;
 import org.springframework.web.socket.BinaryMessage;
 import org.springframework.web.socket.CloseStatus;
+import org.springframework.web.socket.SubProtocolCapable;
 import org.springframework.web.socket.TextMessage;
 import org.springframework.web.socket.WebSocketSession;
 import org.springframework.web.socket.handler.AbstractWebSocketHandler;
@@ -16,6 +17,7 @@ import java.net.http.WebSocket;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.List;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -28,7 +30,10 @@ import java.util.concurrent.atomic.AtomicReference;
  * it is never journaled, exported or retained. Closing either side closes
  * the other.
  */
-public final class TerminalRelayHandler extends AbstractWebSocketHandler {
+public final class TerminalRelayHandler extends AbstractWebSocketHandler
+        implements SubProtocolCapable {
+    /** The non-secret marker the handshake selects; never the bearer ticket. */
+    private static final String WS_SUBPROTOCOL = "qwen-ws";
     private static final String WORKER_TERMINAL_PATH =
             "/internal/managed-runtime/v3/terminal";
     private static final String RELAY_ATTRIBUTE =
@@ -45,6 +50,11 @@ public final class TerminalRelayHandler extends AbstractWebSocketHandler {
     TerminalRelayHandler(RuntimeBrokerOperations broker, HttpClient client) {
         this.broker = broker;
         this.client = client;
+    }
+
+    @Override
+    public List<String> getSubProtocols() {
+        return List.of(WS_SUBPROTOCOL);
     }
 
     @Override

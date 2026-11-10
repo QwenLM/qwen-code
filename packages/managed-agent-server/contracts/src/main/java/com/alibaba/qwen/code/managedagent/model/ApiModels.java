@@ -327,6 +327,14 @@ public final class ApiModels {
     public record WebShellSessionRequest(@NotBlank String sessionId) {
     }
 
+    public record WebShellTerminalTicketRequest(
+            @NotBlank @Pattern(regexp = "[A-Za-z0-9._-]{1,256}") String sessionId,
+            @NotBlank @Pattern(regexp = "[A-Za-z0-9._-]{1,256}") String terminalId) {
+    }
+
+    public record WebShellTerminalTicket(String ticket, long expiresInSeconds) {
+    }
+
     public record WebShellActivityQueryRequest(@NotBlank String sessionId, @NotBlank String kind,
             String cursor, Integer limit) { }
 
