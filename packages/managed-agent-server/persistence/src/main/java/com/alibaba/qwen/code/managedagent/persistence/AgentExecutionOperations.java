@@ -15,6 +15,9 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.ParkedOperation;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionMutationKind;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnRecord;
+import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceAccess;
@@ -45,7 +48,7 @@ final class AgentExecutionOperations {
     private final com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles worktreeFiles;
     private final JdbcTemplate jdbc;
     private final Clock clock;
-    private final ManagedWorkspaceRegistry workspaces;
+    private final JdbcManagedWorkspaceRegistry workspaces;
     private final boolean workspaceFilesEnabled;
 
     AgentExecutionOperations(AgentEventJournal eventJournal,
@@ -56,7 +59,7 @@ final class AgentExecutionOperations {
             com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles worktreeFiles,
             JdbcTemplate jdbc,
             Clock clock,
-            ManagedWorkspaceRegistry workspaces,
+            JdbcManagedWorkspaceRegistry workspaces,
             boolean workspaceFilesEnabled) {
         this.eventJournal = eventJournal;
         this.lifecycleOperations = lifecycleOperations;
@@ -84,15 +87,8 @@ final class AgentExecutionOperations {
             String actorId, String actorDigest, String key, String digest,
             long expectedCompactionRevision, boolean supported) {
         SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
+        WorkspaceAccess access = AgentSessionAccess.requireContextCompressionRead(session, actorId, workspaces);
         ContextBinding binding = session.workspace();
-        if (binding == null) {
-            throw new ManagedAgentException(400, "unsupported_feature",
-                    "Context compression requires a Workspace Session.");
-        }
-        WorkspaceAccess access = workspaces.accessOf(tenantId, actorId, binding.getWorkspaceId());
-        if (!access.canRead()) {
-            throw new ManagedAgentException(404, "session_not_found", "The Session was not found.");
-        }
         Optional<OperationRecord> replay = lifecycleOperations.replayOperation(tenantId, sessionId,
                 OperationKind.CONTEXT_COMPRESSION, actorDigest, key);
         if (replay.isPresent()) {
@@ -117,7 +113,7 @@ final class AgentExecutionOperations {
             throw new ManagedAgentException(409, "compaction_revision_conflict",
                     "The Session compaction revision has changed.");
         }
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
+        String scope = ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
         if (sessionPolicies.hasOpenOperation(tenantId, sessionId) || sessionPolicies.hasPendingRenameDelivery(tenantId, sessionId)
                 || sessionPolicies.hasActiveTurn(tenantId, sessionId) || sessionPolicies.hasDecidableAction(session)
                 || !jdbc.queryForList("SELECT 1 FROM ma_session_record WHERE session_scope_key = ?"
@@ -149,13 +145,13 @@ final class AgentExecutionOperations {
                 AgentStoreRows.sessionOperationKey(tenantId, sessionId, OperationKind.CONTEXT_COMPRESSION, operationId),
                 scope, scope, AgentStoreRows.sessionOperationTarget(sessionId), sessionId, storeRows.writeJson(request),
                 ManagedSchemaKeys.key(key), tenantId, sessionId, operationId, actorDigest, key, digest,
-                session.status(), com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(tenantId, actorId), now, now, now);
+                session.status(), ManagedWorkspaceRegistry.actorKey(tenantId, actorId), now, now, now);
         return new OperationAdmission(lifecycleOperations.findOperation(tenantId, sessionId, operationId).orElseThrow(), false);
     }
 
     ContextCompressionState contextCompressionState(String tenantId, String sessionId) {
         ensureCompactionProjection(tenantId, sessionId);
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
+        String scope = ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
         List<Long> revisions = jdbc.queryForList("SELECT revision FROM ma_session_record WHERE"
                 + " session_scope_key = ? AND record_key = ? AND record_kind = 'DOMAIN'", Long.class,
                 scope, ManagedExtensionProjection.recordKey(sessionId, "hosted_context_compaction", "latest"));
@@ -173,7 +169,7 @@ final class AgentExecutionOperations {
         }
         List<Object> arguments = new ArrayList<>();
         arguments.add(tenantId);
-        sessionIds.forEach(id -> arguments.add(com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, id)));
+        sessionIds.forEach(id -> arguments.add(ManagedSessionStore.sessionScopeKey(tenantId, id)));
         Map<String, ContextCompressionState> result = new HashMap<>();
         Set<String> indexed = new HashSet<>();
         sessionIds.forEach(id -> result.put(id, new ContextCompressionState(0, null)));
@@ -214,7 +210,7 @@ final class AgentExecutionOperations {
     }
 
     void ensureCompactionProjection(String tenantId, String sessionId) {
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
+        String scope = ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
         String key = ManagedExtensionProjection.recordKey(sessionId, "hosted_context_compaction", "latest");
         if (!jdbc.queryForList("SELECT 1 FROM ma_session_record WHERE session_scope_key = ? AND record_key = ?",
                 scope, key).isEmpty()) {
@@ -255,7 +251,7 @@ final class AgentExecutionOperations {
                     throw compressionStateUnavailable();
                 }
                 for (String line : new String(bytes, StandardCharsets.UTF_8).split("\n")) {
-                    var record = com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore.parse(line);
+                    var record = ManagedExtensionRecordStore.parse(line);
                     if (record == null) {
                         throw compressionStateUnavailable();
                     }
@@ -318,7 +314,7 @@ final class AgentExecutionOperations {
     Map<String, Object> contextCompressionRequest(String tenantId, String sessionId, String operationId) {
         return jdbc.queryForList("SELECT request_json FROM ma_operation WHERE scope_key = ?"
                 + " AND operation_kind = 'CONTEXT_COMPRESSION' AND operation_id = ?", String.class,
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId), operationId).stream()
+                ManagedSessionStore.sessionScopeKey(tenantId, sessionId), operationId).stream()
                 .findFirst().map(storeRows::readMap).orElse(Map.of());
     }
 
@@ -338,7 +334,7 @@ final class AgentExecutionOperations {
                 + " scope_key = ? AND operation_kind = 'CONTEXT_COMPRESSION' AND operation_id = ?"
                 + " AND state IN ('PENDING', 'RUNNING', 'RECOVERY_BLOCKED') AND available_at <= "
                 + ManagedSchemaTime.SQL_NOW + " AND (claim_owner IS NULL OR claim_until < " + ManagedSchemaTime.SQL_NOW + ")",
-                owner, duration.toMillis(), com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId), operationId);
+                owner, duration.toMillis(), ManagedSessionStore.sessionScopeKey(tenantId, sessionId), operationId);
         return changed == 1 ? lifecycleOperations.findOperation(tenantId, sessionId, operationId) : Optional.empty();
     }
 
@@ -438,7 +434,7 @@ final class AgentExecutionOperations {
                                 + " AND target_key = ? AND tenant_id = ? AND session_id = ? AND"
                                 + " operation_id = ? FOR UPDATE",
                         Boolean.class,
-                        com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
+                        ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
                         AgentStoreRows.sessionOperationTarget(sessionId),
                         tenantId,
                         sessionId,
@@ -473,8 +469,8 @@ final class AgentExecutionOperations {
         }
         if (failure == null) {
             try {
-                SessionWorktreeStore.requireReady(worktreeFiles, jdbc, tenantId, sessionId);
-                SessionWorktreeStore.requireCwd(jdbc, tenantId, sessionId, operation.targetCwdRelative());
+                JdbcSessionWorktreeStore.requireReady(worktreeFiles, jdbc, tenantId, sessionId);
+                JdbcSessionWorktreeStore.requireCwd(jdbc, tenantId, sessionId, operation.targetCwdRelative());
             } catch (ManagedAgentException error) {
                 failure = error.getCode();
             }
@@ -492,7 +488,7 @@ final class AgentExecutionOperations {
                     failure,
                     now,
                     now,
-                    com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
+                    ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
                     AgentStoreRows.sessionOperationTarget(sessionId),
                     tenantId,
                     sessionId,
@@ -504,8 +500,8 @@ final class AgentExecutionOperations {
                         + " context_revision = ?, gmt_modified = ?, version ="
                         + " version + 1 WHERE tenant_id = ? AND"
                         + " session_id = ?",
-                operation.targetCwdRelative(), result, now, tenantId,
-                sessionId);
+                operation.targetCwdRelative(), result, now, tenantId, sessionId);
+        ManagedModelDiagnosticProjection.invalidateModelContext(jdbc, tenantId, sessionId);
         jdbc.update(
                 "UPDATE ma_operation SET phase = 'COMPLETED', state = 'COMPLETED', delivery_state ="
                     + " 'CONFIRMED', receipt_id = ?, result_context_revision = ?, claim_owner ="
@@ -518,7 +514,7 @@ final class AgentExecutionOperations {
                 result,
                 now,
                 now,
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
+                ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
                 AgentStoreRows.sessionOperationTarget(sessionId),
                 tenantId,
                 sessionId,
@@ -551,7 +547,7 @@ final class AgentExecutionOperations {
                         failureCode,
                         now,
                         now,
-                        com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
+                        ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
                         AgentStoreRows.sessionOperationTarget(sessionId),
                         tenantId,
                         sessionId,
@@ -601,7 +597,7 @@ final class AgentExecutionOperations {
                         + " AND task_kind IS NOT NULL FOR UPDATE",
                 (result, row) -> new String[] {result.getString("task_kind"),
                         result.getString("task_state")},
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
+                ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
                 taskId.substring("task_".length()));
         if (task.isEmpty()) {
             throw new ManagedAgentException(404, "task_not_found",
@@ -632,8 +628,8 @@ final class AgentExecutionOperations {
                     + " gmt_modified) VALUES (?, ?, ?, 'SESSION', ?, ?, 'PENDING', ?, ?, ?, ?, ?, ?,"
                     + " ?, ?, ?, 'PENDING', 'JAVA_DURABLE', 'PENDING', ?, ?, ?, ?, ?)",
                 AgentStoreRows.sessionOperationKey(tenantId, sessionId, OperationKind.TASK_CANCEL, operationId),
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
+                ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
+                ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
                 AgentStoreRows.sessionOperationTarget(sessionId),
                 sessionId,
                 storeRows.writeJson(
@@ -766,7 +762,7 @@ final class AgentExecutionOperations {
             String sessionId, String operationId) {
         String turnId = jdbc.queryForList("SELECT target_id FROM ma_operation WHERE"
                         + " scope_key = ? AND operation_kind = 'SUBMIT_INPUT' AND operation_id = ?",
-                String.class, com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
+                String.class, ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
                 operationId).stream().findFirst().orElse(null);
         TurnRecord turn = turnId == null ? null
                 : storeRows.findTurn(tenantId, sessionId, turnId).orElse(null);
@@ -810,7 +806,7 @@ final class AgentExecutionOperations {
                 (result, row) -> new JournalEvidence(result.getString("admitted_digest"),
                         result.getLong("sealed") > 0),
                 tenantId, sessionId,
-                ManagedSessionStore.commandKeyHash(operation, commandId),
+                JdbcManagedSessionStore.commandKeyHash(operation, commandId),
                 JdbcRuntimeBindingRepository.harnessDrainKey(tenantId),
                 JdbcRuntimeBindingRepository.harnessDrainKey(sessionId), tenantId,
                 sessionId);
@@ -827,7 +823,7 @@ final class AgentExecutionOperations {
         var rows = jdbc.queryForList("SELECT target_revision, request_json FROM ma_operation"
                         + " WHERE scope_key = ? AND operation_kind = 'RENAME' AND operation_id = ?"
                         + " AND tenant_id = ? AND session_id = ? AND state = 'RECOVERY_BLOCKED'",
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(parked.tenantId(), parked.sessionId()),
+                ManagedSessionStore.sessionScopeKey(parked.tenantId(), parked.sessionId()),
                 parked.operationId(), parked.tenantId(), parked.sessionId());
         if (rows.isEmpty()) {
             return Optional.empty();
@@ -862,7 +858,7 @@ final class AgentExecutionOperations {
                         + " FROM ma_operation WHERE scope_key = ? AND operation_kind = 'RENAME'"
                         + " AND operation_id = ? AND tenant_id = ? AND session_id = ? AND state ="
                         + " 'RECOVERY_BLOCKED' AND delivery_state = 'BLOCKED' FOR UPDATE",
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId), parked.operationId(),
+                ManagedSessionStore.sessionScopeKey(tenantId, sessionId), parked.operationId(),
                 tenantId, sessionId);
         if (rows.isEmpty()) {
             return false;
@@ -884,9 +880,9 @@ final class AgentExecutionOperations {
                                     + " version = version + 1 WHERE tenant_id = ? AND session_id = ?",
                             title, now, tenantId, sessionId);
                     eventJournal.appendEvent(tenantId, sessionId, null,
-                            AgentSessionCommands.mutationEvent(SessionMutationKind.RENAME, "completed"),
+                            SessionMutationEvents.mutationEvent(SessionMutationKind.RENAME, "completed"),
                             Map.of("sessionId", sessionId, "metadata", Map.of("title", title)),
-                            false, AgentSessionCommands.mutationSource("RENAME_SESSION", key, "completed"), now);
+                            false, SessionMutationEvents.mutationSource("RENAME_SESSION", key, "completed"), now);
                 }
                 jdbc.update("UPDATE ma_request_receipt SET state = 'COMPLETED', gmt_modified = ?"
                                 + " WHERE receipt_key = ? AND namespace = 'SESSION_COMMAND'",
@@ -974,7 +970,7 @@ final class AgentExecutionOperations {
             default -> throw new IllegalArgumentException(
                     "Unknown task cancel outcome " + outcome.status());
         };
-        arguments.addAll(List.of(com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId), AgentStoreRows.sessionOperationTarget(sessionId), tenantId, sessionId, operationId, owner, claimGeneration));
+        arguments.addAll(List.of(ManagedSessionStore.sessionScopeKey(tenantId, sessionId), AgentStoreRows.sessionOperationTarget(sessionId), tenantId, sessionId, operationId, owner, claimGeneration));
         return jdbc.update(
                         update
                                 + " WHERE scope_key = ? AND operation_kind IN "

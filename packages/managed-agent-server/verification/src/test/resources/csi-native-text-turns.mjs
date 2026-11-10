@@ -16,6 +16,9 @@ export async function generateNativeTextTurns(
     pathToFileURL(`${root}/packages/core/dist/src/managed-runtime/${name}.js`)
       .href;
   const { openManagedSession } = await import(core('managed-session-assembly'));
+  const { enableManagedSessionDiagnostics } = await import(
+    core('managed-session-diagnostics')
+  );
   const { createManagedHarnessHandle } = await import(
     core('managed-harness-factory')
   );
@@ -158,7 +161,7 @@ export async function generateNativeTextTurns(
         JSON.stringify({
           engine: 'managed',
           sessionId: input.sessionKey.sessionId,
-          toolProfile: 'csi-files-retirement/1',
+          toolProfile: input.toolProfile,
         }),
       ),
     );
@@ -180,13 +183,21 @@ export async function generateNativeTextTurns(
       requireNew: true,
       create: { definitionRef, rootSnapshotRef, createdBy: 'hosted-harness' },
     });
+    if (input.diagnostics) await enableManagedSessionDiagnostics(managed);
+    if (input.activityDiagnostics) {
+      const { enableManagedExecutionDiagnostics } = await import(
+        core('managed-execution-diagnostics')
+      );
+      await enableManagedExecutionDiagnostics(managed);
+    }
     if (input.legacyTerminalShape) {
       const write = managed.sink.write.bind(managed.sink);
-      managed.sink.write = (entry) =>
+      managed.sink.write = (entry, diagnostics) =>
         write(
           entry.subtype === 'turn_result'
             ? { ...entry, daemonPromptId: entry.systemPayload.promptId }
             : entry,
+          diagnostics,
         );
     }
     const turnCount = input.extractedProducer ? 2 : 5;

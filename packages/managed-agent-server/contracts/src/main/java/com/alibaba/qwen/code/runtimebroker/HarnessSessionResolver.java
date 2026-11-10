@@ -11,6 +11,13 @@ import java.util.concurrent.CompletionStage;
  * Session identity.
  */
 public interface HarnessSessionResolver {
+    public record WorkspaceContext(String cwdRelative, String contextRevision) { }
+    public record Capabilities(RuntimeScope scope, WorkspaceContext workspaceContext) { }
+
+    public default CompletionStage<Capabilities> resolveCapabilities(String harnessSessionId, RuntimeLifecycleAuthority authority) {
+        return resolveAdmission(harnessSessionId, authority).thenApply(scope -> new Capabilities(scope, null));
+    }
+
     public CompletionStage<RuntimeScope> resolve(String harnessSessionId);
 
     /**
