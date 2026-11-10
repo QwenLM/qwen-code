@@ -53,10 +53,11 @@ public final class ManagedExtensionRecords {
     public static final int MAX_GRANT_PHASES = 16;
     public static final int MAX_PHASE_LENGTH = 64;
     /**
-     * The selected MCP snapshot retains removed tombstones. 224 is the largest
-     * total whose worst-case serialized record (128-char ids, 16-digit
-     * revisions, 64-hex digests and add/edit's duplicate pin) stays below the
-     * 64 KiB inline resource bound.
+     * The selected MCP snapshot retains removed tombstones. 224 keeps a
+     * worst-case serialized record (128-char ids, 16-digit revisions, 64-hex
+     * digests and add/edit's duplicate pin) below the 64 KiB inline resource
+     * bound, with room for the durable predecessor reference a later revision
+     * carries.
      */
     public static final int MAX_MCP_SELECTION_ENTRIES = 224;
     public static final int MAX_MONITOR_EVENTS = 10_000;

@@ -130,7 +130,7 @@ class ManagedMcpSettingsStoreTest {
         ObjectNode overfilled = settings.deepCopy();
         overfilled.withArray("servers").addObject()
                 .put("serverId", "x".repeat(128))
-                .put("serverRevision", 9_007_199_254_740_991L)
+                .put("serverRevision", 9_007_199_254_740_990L)
                 .put("definitionDigest", "a".repeat(64))
                 .put("state", "removed");
         assertThatThrownBy(() -> ManagedMcpSettings.require(overfilled))
@@ -258,14 +258,14 @@ class ManagedMcpSettingsStoreTest {
         for (int index = 0; index < live + removed; index++) {
             servers.addObject()
                     .put("serverId", serverId(index < live ? "live-" : "removed-", index))
-                    .put("serverRevision", 9_007_199_254_740_991L)
+                    .put("serverRevision", 9_007_199_254_740_990L)
                     .put("definitionDigest", "a".repeat(64))
                     .put("state", index == 0 ? "enabled" : index < live ? "disabled" : "removed");
         }
         var command = result.putObject("command").put("operationId", operation).put("actorKey", "b".repeat(64))
                 .put("action", "add").put("serverId", serverId("live-", 0)).put("expectedRevision", 0);
         command.putObject("server").put("serverId", serverId("live-", 0))
-                .put("serverRevision", 9_007_199_254_740_991L).put("definitionDigest", "a".repeat(64));
+                .put("serverRevision", 9_007_199_254_740_990L).put("definitionDigest", "a".repeat(64));
         result.putNull("previousRecordRef");
         return result;
     }
