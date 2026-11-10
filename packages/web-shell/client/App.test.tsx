@@ -53064,6 +53064,14 @@ describe('settings-derived theme and language (#11955)', () => {
         ?.classList.contains('dark'),
     ).toBe(false);
     expect(onThemeResolved).toHaveBeenCalledWith('light');
+
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+    expect(testState.latestProvidersHookOptions).toEqual({
+      autoLoad: false,
+      enabled: false,
+    });
   });
 
   it('lets an explicit language prop win over general.language', async () => {
