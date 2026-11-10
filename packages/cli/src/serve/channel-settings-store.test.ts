@@ -139,6 +139,22 @@ describe('WorkspaceChannelSettingsStore', () => {
             maximum: 10,
           },
           {
+            key: 'stricterFloor',
+            label: 'Stricter floor',
+            kind: 'number',
+            exclusiveMinimum: 0,
+            minimum: 5,
+            maximum: 10,
+          },
+          {
+            key: 'stricterExclusiveFloor',
+            label: 'Stricter exclusive floor',
+            kind: 'number',
+            exclusiveMinimum: 5,
+            minimum: 0,
+            maximum: 10,
+          },
+          {
             key: 'mode',
             label: 'Mode',
             kind: 'enum',
@@ -3449,6 +3465,85 @@ describe('WorkspaceChannelSettingsStore', () => {
 
       expect(next.channels['bounded']['boundedSeconds']).toBe(300);
       expect(next.channels['bounded']['retries']).toBe(4);
+    });
+
+    it('applies the stricter of two declared lower bounds', async () => {
+      // Both bounds may be declared, and the conjunction is what makes the
+      // stricter one win. An exclusive-wins precedence would keep both keys in
+      // use and start admitting 3 here, on the path that serves hand-edited
+      // settings files and daemon API clients.
+      const store = new WorkspaceChannelSettingsStore(workspace);
+
+      for (const value of [3, 0]) {
+        await expect(
+          store.upsert('bounded', {
+            expectedRevision: store.snapshot().revision,
+            config: { ...baseConfig, stricterFloor: value } as never,
+            secrets: {
+              clientSecret: { operation: 'replace', value: 'secret' },
+            },
+          }),
+        ).rejects.toMatchObject({ code: 'channel_settings_invalid_config' });
+      }
+
+      const next = await store.upsert('bounded', {
+        expectedRevision: store.snapshot().revision,
+        config: { ...baseConfig, stricterFloor: 5 } as never,
+        secrets: { clientSecret: { operation: 'replace', value: 'secret' } },
+      });
+      expect(next.channels['bounded']['stricterFloor']).toBe(5);
+
+      // The mirror shape: an inclusive-wins precedence would survive the case
+      // above and admit 5 here, where the exclusive bound is the stricter one.
+      await expect(
+        store.upsert('bounded', {
+          expectedRevision: store.snapshot().revision,
+          config: { ...baseConfig, stricterExclusiveFloor: 5 } as never,
+          secrets: { clientSecret: { operation: 'replace', value: 'secret' } },
+        }),
+      ).rejects.toMatchObject({ code: 'channel_settings_invalid_config' });
+
+      const mirrored = await store.upsert('bounded', {
+        expectedRevision: store.snapshot().revision,
+        config: { ...baseConfig, stricterExclusiveFloor: 6 } as never,
+        secrets: { clientSecret: { operation: 'replace', value: 'secret' } },
+      });
+      expect(mirrored.channels['bounded']['stricterExclusiveFloor']).toBe(6);
+    });
+
+    it('tolerates re-sending a stored number below a newly declared minimum', async () => {
+      // The forgiveness wraps the whole range, not just the exclusive bound and
+      // the ceiling. Without it an operator whose settings file predates the
+      // floor cannot edit that channel at all — the accept-then-fail mismatch
+      // this change removes, reintroduced on the daemon path.
+      writeWorkspaceSettings(
+        JSON.stringify({
+          channels: {
+            bounded: {
+              ...baseConfig,
+              clientSecret: '$BOT_TOKEN',
+              inclusiveFloor: -0.5,
+            },
+          },
+        }),
+      );
+      const store = new WorkspaceChannelSettingsStore(workspace);
+
+      const next = await store.upsert('bounded', {
+        expectedRevision: store.snapshot().revision,
+        config: { ...baseConfig, inclusiveFloor: -0.5, retries: 4 } as never,
+        secrets: {},
+      });
+      expect(next.channels['bounded']['inclusiveFloor']).toBe(-0.5);
+      expect(next.channels['bounded']['retries']).toBe(4);
+
+      await expect(
+        store.upsert('bounded', {
+          expectedRevision: store.snapshot().revision,
+          config: { ...baseConfig, inclusiveFloor: -0.2 } as never,
+          secrets: {},
+        }),
+      ).rejects.toMatchObject({ code: 'channel_settings_invalid_config' });
     });
   });
 });

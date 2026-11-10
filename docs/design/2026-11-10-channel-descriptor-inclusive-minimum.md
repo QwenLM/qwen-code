@@ -62,8 +62,11 @@ The adapter check **stays**. It is not redundant: configuration also arrives fro
 ## Validation plan
 
 - Daemon store: a value below an inclusive floor is refused at upsert, and the bound itself is admitted. This consumer was found by enumerating readers of the bound, not by the original report — without it, moving a field from `exclusiveMinimum: -1` to `minimum: 0` would silently drop the daemon's descriptor-level floor.
+- Daemon store: with both lower bounds declared, the stricter one decides. The conjunction is what makes that true — rewriting it as exclusive-wins precedence keeps both keys in use and starts admitting a value the inclusive clause refuses, on the path that serves hand-edited settings files and daemon API clients. Both directions are pinned: the mirror shape, where the exclusive bound is the stricter one, is the half an inclusive-wins precedence slips past.
+- Daemon store: an unchanged stored value below a newly declared floor is still forgiven, while a changed one is refused. The forgiveness wraps the whole range; hoisting the inclusive clause out of it strands an operator whose settings file predates the floor.
 - Editor state: values below an inclusive floor are refused, the bound itself and positive fractions are admitted.
 - Editor state: with both bounds declared, the stricter one decides.
+- Editor state: the unchanged-value forgiveness covers the inclusive floor too, so a stored below-floor number does not block an unrelated edit; a value the operator typed is still refused.
 - Dialog: an inclusive-only floor is worded "at least N"; a tie names the exclusive bound; a strictly-higher inclusive bound wins; a strictly-lower one loses. All four shapes are needed — the tie pins the `>` against `>=`, and the strictly-lower shape pins the comparison against being dropped altogether.
 - Range message: the pre-existing exclusive-floor strings are pinned verbatim in both locales, so folding the lower clause into one variable cannot silently respace them.
 - Descriptor: the reserve declares `minimum: 0` and no `exclusiveMinimum`.
@@ -71,7 +74,7 @@ The adapter check **stays**. It is not redundant: configuration also arrives fro
 - Registration: a non-finite `minimum`, a `minimum` on a non-number field, and a `maximum` below the inclusive floor are each refused; a single-value interval where `maximum === minimum` **registers**, which is what keeps the inclusive clause strict `<`.
 - Wire shape: the built-in descriptor allowlist admits `minimum` on number fields and still refuses it elsewhere.
 
-Every runtime fix site has a mutation witness: the daemon clause, the editor clause, the dialog's tie-break and its stricter-floor comparison, the registration guard's rejection set and its strict `<`, the zh spacing, the wire-shape allowlist, and the descriptor's own declaration. The SDK type mirror has no runtime behaviour to mutate; it is pinned by the typecheck, which is how the missing mirror was found — the unit suites strip types and stayed green without it.
+Every runtime fix site has a mutation witness: the daemon clause, the daemon's composition and its unchanged-value forgiveness, the editor clause and its own forgiveness, the dialog's tie-break and its stricter-floor comparison, the registration guard's rejection set and its strict `<`, the zh spacing, the wire-shape allowlist, and the descriptor's own declaration. The SDK type mirror has no runtime behaviour to mutate; it is pinned by the typecheck, which is how the missing mirror was found — the unit suites strip types and stayed green without it.
 
 ### Consumers found by enumeration, not by the report
 

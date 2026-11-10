@@ -949,6 +949,45 @@ describe('Channel editor state', () => {
     expect(validateChannelEditorDraft(descriptor, valid, [])).toEqual({});
   });
 
+  it('does not strand an edit over a stored value below a newly declared floor', () => {
+    // The store forgives an unchanged stored number for the whole range, so the
+    // editor has to forgive the inclusive bound too. Otherwise a channel whose
+    // settings file predates the floor cannot be edited at all.
+    const descriptor: DaemonChannelTypeDescriptor = {
+      type: 'example',
+      displayName: 'Example',
+      manageable: true,
+      fields: [
+        {
+          key: 'reserve',
+          label: 'Reserve',
+          kind: 'number',
+          minimum: 0,
+          maximum: 5000,
+        },
+      ],
+    };
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'example',
+      config: { type: 'example', reserve: -0.5 },
+      secrets: {},
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    const draft = createChannelEditorDraft(descriptor, instance);
+    draft.name = 'example';
+    expect(draft.values.reserve).toBe('-0.5');
+
+    expect(validateChannelEditorDraft(descriptor, draft, [], instance)).toEqual(
+      {},
+    );
+
+    draft.values.reserve = '-0.2';
+    expect(validateChannelEditorDraft(descriptor, draft, [], instance)).toEqual(
+      { reserve: 'outOfRange' },
+    );
+  });
+
   it('treats a whitespace-only number draft as empty instead of invalid', () => {
     const descriptor: DaemonChannelTypeDescriptor = {
       type: 'example',
