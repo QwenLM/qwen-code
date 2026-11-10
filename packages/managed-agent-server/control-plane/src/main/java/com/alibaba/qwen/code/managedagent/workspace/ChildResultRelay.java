@@ -3,7 +3,7 @@ package com.alibaba.qwen.code.managedagent.workspace;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
-import com.alibaba.qwen.code.managedagent.contracts.workspace.ChildWorktreeGit;
+import com.alibaba.qwen.code.managedagent.contracts.workspace.ChildWorktreeOperations;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessHttpFailure;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.CommandAdmission;
@@ -1301,7 +1301,7 @@ public class ChildResultRelay {
             }
         }
         if (!"merged".equals(outcome) && workspace.resultCommit() != null) {
-            receipt.put("resultRef", ChildWorktreeGit.PIN_PREFIX
+            receipt.put("resultRef", ChildWorktreeOperations.PIN_PREFIX
                     + workspace.childWorkspaceId() + "/result");
         }
         return receipt;

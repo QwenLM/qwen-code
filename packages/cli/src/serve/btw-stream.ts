@@ -103,6 +103,14 @@ class BtwStreamRequest {
             requestId: this.snapshot.requestId,
             answer,
           });
+        } else if (event.type === 'reset') {
+          answer = '';
+          bytes = 0;
+          this.update({
+            type: 'answer',
+            requestId: this.snapshot.requestId,
+            answer,
+          });
         } else if (event.type === 'done') {
           this.update({
             type: 'done',
