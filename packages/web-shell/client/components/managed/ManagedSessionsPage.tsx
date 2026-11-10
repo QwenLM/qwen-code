@@ -1,5 +1,8 @@
 import { ManagedUserMessageQueue } from './ManagedUserMessageQueue';
 import { useManagedUserMessages } from './use-managed-user-messages';
+import { useManagedSideQueries } from './use-managed-side-queries';
+import { ManagedSideQueryPanel } from './ManagedSideQueryPanel';
+import { managedSideQueryCommand } from './managed-side-query-command';
 import {
   useCallback,
   useEffect,
@@ -7,6 +10,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type ReactNode,
 } from 'react';
 import { createPortal } from 'react-dom';
 import { useI18n } from '../../i18n';
@@ -84,9 +88,12 @@ import { ManagedToolResultPanel } from './ManagedToolResultPanel';
 import { ManagedTaskPanel, taskCancelMessage } from './ManagedTaskPanel';
 import { useManagedTasks } from './use-managed-tasks';
 import { ManagedChildSessionView } from './ManagedChildSessionView';
+import { ManagedDiagnosticsPanel } from './ManagedDiagnosticsPanel';
+import { useManagedDiagnosticsText } from './managed-diagnostics-messages';
 import { useManagedTaskCancel } from './use-managed-task-cancel';
 import { TodoFullList } from '../messages/TodoView';
 import { getLatestSuccessfulTodos } from '../../utils/todos';
+import { getShadowAwareActiveElement } from '../../utils/dom';
 import type {
   ManagedAgentProvider,
   ManagedAgentSessionSummary,
@@ -203,6 +210,8 @@ export function ManagedSessionsPage({
   navigationTarget,
   archivedNavigationTarget,
   onArchivedSessionsStatusChange,
+  renderNavigation,
+  renderArchivedNavigation,
   interactive = true,
   creationSkills,
   navigationActive = interactive,
@@ -232,6 +241,9 @@ export function ManagedSessionsPage({
   onArchivedSessionsStatusChange?: (
     status: ManagedArchivedSessionsStatus,
   ) => void;
+  /** Wraps the portaled Session list so a host slot outside the shell keeps scoped CSS. */
+  renderNavigation?: (navigation: ReactNode) => ReactNode;
+  renderArchivedNavigation?: (archived: ReactNode) => ReactNode;
   interactive?: boolean;
   creationSkills?: ManagedCreationSkillsSource;
   navigationActive?: boolean;
@@ -261,6 +273,8 @@ export function ManagedSessionsPage({
         navigationTarget={navigationTarget}
         archivedNavigationTarget={archivedNavigationTarget}
         onArchivedSessionsStatusChange={onArchivedSessionsStatusChange}
+        renderNavigation={renderNavigation}
+        renderArchivedNavigation={renderArchivedNavigation}
         interactive={interactive}
         creationSkills={creationSkills}
         navigationActive={navigationActive}
@@ -330,6 +344,8 @@ function ManagedSessionsContent({
   navigationTarget,
   archivedNavigationTarget,
   onArchivedSessionsStatusChange,
+  renderNavigation,
+  renderArchivedNavigation,
   interactive,
   creationSkills,
   navigationActive,
@@ -359,12 +375,15 @@ function ManagedSessionsContent({
   onArchivedSessionsStatusChange?: (
     status: ManagedArchivedSessionsStatus,
   ) => void;
+  renderNavigation?: (navigation: ReactNode) => ReactNode;
+  renderArchivedNavigation?: (archived: ReactNode) => ReactNode;
   interactive: boolean;
   creationSkills?: ManagedCreationSkillsSource;
   navigationActive: boolean;
   navigationSearch: string;
 }) {
   const { t, language } = useI18n();
+  const diagnosticsText = useManagedDiagnosticsText();
   const recoveryText = useManagedRecoveryText();
   const home = hostSessionOnly || navigationTarget !== undefined;
   const clientId = useMemo(
@@ -430,6 +449,19 @@ function ManagedSessionsContent({
   );
   const pageRef = useRef<HTMLDivElement>(null);
   const taskTriggerRef = useRef<HTMLButtonElement>(null);
+  const diagnosticsTriggerRef = useRef<HTMLButtonElement>(null);
+  const [diagnosticsOwner, setDiagnosticsOwner] = useState<{
+    provider: ManagedAgentProvider;
+    clientId: string;
+    sessionId: string;
+  }>();
+  useEffect(
+    () => setDiagnosticsOwner(undefined),
+    [provider, clientId, sessionId],
+  );
+  useEffect(() => {
+    if (detail.signals?.session) setDiagnosticsOwner(undefined);
+  }, [detail.signals?.session]);
   const [wideTasks, setWideTasks] = useState(false);
   const [taskPanelSession, setTaskPanelSession] = useState<string>();
   const taskPanelOpen = !!sessionId && taskPanelSession === sessionId;
@@ -537,6 +569,18 @@ function ManagedSessionsContent({
     provider,
     interactive ? sessionId : undefined,
   );
+  const sideQueries = useManagedSideQueries(provider, clientId, sessionId, {
+    idle:
+      !!summary &&
+      !active &&
+      !busy &&
+      (!provider.userMessages || !!userMessages.snapshot) &&
+      !userMessages.snapshot?.messages.length,
+    interactive,
+    btw: summary?.sessionId === sessionId && summary?.capabilities.btw === true,
+    recap:
+      summary?.sessionId === sessionId && summary?.capabilities.recap === true,
+  });
   const [pendingRestoreFailed, setPendingRestoreFailed] = useState(false);
   const [outputTarget, setOutputTarget] = useState<{
     sessionId: string;
@@ -582,6 +626,10 @@ function ManagedSessionsContent({
   const focusComposer = useRef<{ sessionId: string | undefined } | undefined>(
     undefined,
   );
+  // The element a discard parked focus on. Comparing against that node — not
+  // against the page wrapper itself — keeps the latch dead for a user who
+  // clicked any other element inside that pane.
+  const discardParked = useRef<HTMLElement | null>(null);
   const composerRef = useRef<EditorHandle | null>(null);
   const composerContainerRef = useRef<HTMLDivElement | null>(null);
   const composerCommit = useRef<ComposerSubmitCommit | undefined>(undefined);
@@ -846,8 +894,22 @@ function ManagedSessionsContent({
     const composer = composerContainerRef.current?.querySelector(
       '[contenteditable="true"], textarea:not([disabled])',
     );
-    const parked = document.activeElement;
-    const ours = parked === document.body || parked === sessionsNavRef.current;
+    // document.activeElement retargets to the shadow host in portal mode; read
+    // the focused node from the page wrapper's own root instead. A shadow root
+    // with nothing focused reports null there — but so does a shadow root
+    // whose user's focus sits on a host-page element outside the root, so fall
+    // through to the document's active element to tell those states apart.
+    const parked =
+      getShadowAwareActiveElement(pageRef.current) ?? document.activeElement;
+    const unclaimed = parked === null || parked === document.body;
+    // hostSessionOnly renders no list, so the fallback below parks focus on the
+    // page wrapper; the latch accepts the node it parked on itself, so a user
+    // who merely clicked inside that pane is still recognised as having moved
+    // on.
+    const ours =
+      unclaimed ||
+      parked === sessionsNavRef.current ||
+      (discardParked.current !== null && parked === discardParked.current);
     if (composer) {
       focusComposer.current = undefined;
       if (ours) composerRef.current?.focus();
@@ -857,7 +919,8 @@ function ManagedSessionsContent({
       focusComposer.current = undefined;
       return;
     }
-    sessionsNavRef.current?.focus();
+    discardParked.current = sessionsNavRef.current ?? pageRef.current;
+    discardParked.current?.focus();
     // detail.summary is the re-arm trigger: a poll or clean pass lifts the
     // disablement by delivering a new summary without touching the record.
   }, [pending, sessionId, detail.summary, interactive]);
@@ -1037,6 +1100,56 @@ function ManagedSessionsContent({
     files?: PromptFile[],
     metadata?: ComposerSubmitMetadata,
   ) {
+    const sideCommand = managedSideQueryCommand(submittedText);
+    if (sideCommand) {
+      if (
+        !interactive ||
+        !sessionId ||
+        !provider.sideQueries ||
+        !sideQueries.context
+      ) {
+        setError(
+          language === 'zh-CN'
+            ? '此会话暂不支持 BTW/回顾。'
+            : 'BTW/recap is unavailable for this session.',
+        );
+        return;
+      }
+      if (
+        images?.length ||
+        files?.length ||
+        (sideCommand.kind === 'recap' && sideCommand.argument)
+      ) {
+        setError(
+          language === 'zh-CN'
+            ? 'BTW 仅支持文本问题，/recap 不接受参数。'
+            : 'BTW accepts text only; /recap accepts no arguments.',
+        );
+        return;
+      }
+      if (sideCommand.kind === 'btw' && !sideCommand.argument) {
+        sideQueries.show('btw');
+        commit?.();
+        return;
+      }
+      if (!sideQueries.available(sideCommand.kind)) {
+        setError(
+          language === 'zh-CN'
+            ? '此会话暂不支持 BTW/回顾生成。'
+            : 'BTW/recap generation is unavailable for this session.',
+        );
+        return;
+      }
+      if (
+        await sideQueries.create(
+          sideCommand.kind === 'btw'
+            ? { kind: 'btw', question: sideCommand.argument }
+            : { kind: 'recap', trigger: 'manual' },
+        )
+      )
+        commit?.();
+      return;
+    }
     const abort = lifetime.current;
     if (
       (hostSessionOnly && !sessionId) ||
@@ -1106,7 +1219,7 @@ function ManagedSessionsContent({
         text: submittedText,
         draftText: composerRef.current?.getText(),
         sessionId,
-        workspaceId: detail.summary?.workspace?.workspaceId,
+        workspaceId: summary?.workspace?.workspaceId,
         ...(input.some(
           (block) =>
             block.type !== 'input_text' || block.text !== submittedText,
@@ -1177,6 +1290,7 @@ function ManagedSessionsContent({
                 opts,
               );
       if (abort.signal.aborted) return;
+      sideQueries.mainInputAccepted();
       if (attempt.queued) void userMessages.refresh();
       pendingRef.current = undefined;
       setPending(undefined);
@@ -1251,6 +1365,51 @@ function ManagedSessionsContent({
   }, [summary, cancellationEnabled, busy, turnCancelBusy, requestTurnCancel]);
 
   const currentSummary = summary?.sessionId === sessionId ? summary : undefined;
+  const sideQueryButtons =
+    provider.sideQueries && sideQueries.context ? (
+      <>
+        {(currentSummary?.capabilities.btw ||
+          sideQueries.queries.some((query) => query.kind === 'btw')) && (
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => sideQueries.show('btw')}
+          >
+            BTW
+          </Button>
+        )}
+        {(currentSummary?.capabilities.recap ||
+          sideQueries.context.latestRecapContentVersion ||
+          sideQueries.queries.some((query) => query.kind === 'recap')) && (
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => sideQueries.show('recap')}
+          >
+            {language === 'zh-CN' ? '回顾' : 'Recap'}
+          </Button>
+        )}
+      </>
+    ) : null;
+  const diagnosticsButton =
+    currentSummary?.capabilities.diagnostics &&
+    !detail.signals?.session &&
+    provider.diagnostics ? (
+      <Button
+        ref={diagnosticsTriggerRef}
+        variant="outline"
+        size="sm"
+        onClick={() =>
+          setDiagnosticsOwner({
+            provider,
+            clientId,
+            sessionId: currentSummary.sessionId,
+          })
+        }
+      >
+        {diagnosticsText('title')}
+      </Button>
+    ) : null;
   function prepareHandoff() {
     if (
       !currentSummary ||
@@ -1628,6 +1787,11 @@ function ManagedSessionsContent({
   return (
     <div
       ref={pageRef}
+      tabIndex={-1}
+      // A non-interactive focus parking spot (discard/task-panel fallback):
+      // the composer's global keydown gate treats focus here like body focus
+      // so "type anywhere" keeps working after a click inside the pane.
+      data-web-shell-focus-region
       className={`flex h-full min-h-0 flex-col ${home ? '' : 'gap-3'}`}
     >
       {/* The uncertain-request row unmounts on the Discard click itself, so
@@ -1639,20 +1803,24 @@ function ManagedSessionsContent({
         home &&
         provider.lifecycle &&
         archivedNavigationTarget &&
-        createPortal(
-          <ManagedArchivedSessions
-            key={listRevision}
-            provider={provider}
-            clientId={clientId}
-            sessionId={sessionId}
-            active={navigationActive}
-            onSelectSession={openSession}
-            renderSessionActions={sessionActions}
-            onSessionsChange={setArchivedSummaries}
-            onStatusChange={onArchivedSessionsStatusChange}
-          />,
-          archivedNavigationTarget,
-        )}
+        (() => {
+          const archived = (
+            <ManagedArchivedSessions
+              key={listRevision}
+              provider={provider}
+              clientId={clientId}
+              sessionId={sessionId}
+              active={navigationActive}
+              onSelectSession={openSession}
+              renderSessionActions={sessionActions}
+              onSessionsChange={setArchivedSummaries}
+              onStatusChange={onArchivedSessionsStatusChange}
+            />
+          );
+          return renderArchivedNavigation
+            ? renderArchivedNavigation(archived)
+            : createPortal(archived, archivedNavigationTarget);
+        })()}
       {confirmation && (
         <ManagedLifecycleConfirmation
           {...confirmation}
@@ -1752,14 +1920,22 @@ function ManagedSessionsContent({
           ? null
           : home
             ? navigationTarget
-              ? createPortal(navigation, navigationTarget)
+              ? renderNavigation
+                ? renderNavigation(navigation)
+                : createPortal(navigation, navigationTarget)
               : null
             : navigation}
         <section
           className={`${shellStyles.chatPane} ${home ? '' : 'gap-3'}`}
           data-managed-home={home || undefined}
           data-managed-empty={
-            home && messages.length === 0 && !summary?.failure
+            home &&
+            messages.length === 0 &&
+            !detail.loading &&
+            // A failed restore keeps `busy` until the user discards, and the
+            // pane is still empty then (the base marker ignored `busy`).
+            (!busy || pendingRestoreFailed) &&
+            !summary?.failure
               ? true
               : undefined
           }
@@ -1779,6 +1955,8 @@ function ManagedSessionsContent({
                         : summary.title}
                     </span>
                     {sessionActions(summary)}
+                    {diagnosticsButton}
+                    {sideQueryButtons}
                   </span>
                 }
                 workspaceName={summary.workspace?.workspaceId}
@@ -1828,6 +2006,8 @@ function ManagedSessionsContent({
                   {t('sidebar.rename')}
                 </Button>
               )}
+              {diagnosticsButton}
+              {sideQueryButtons}
               {provider.tasks &&
                 (summary.capabilities.tasks === true ||
                   taskCancel.pendingTaskIds.length > 0) && (
@@ -1914,16 +2094,6 @@ function ManagedSessionsContent({
 
           {recovery.value && (
             <ManagedRecoveryPanel
-              // A terminal Session still needs the panel for diagnostics and
-              // any handoff action. Only the terminal "not active" verdict is
-              // expected state, so it should not be framed as operator work.
-              attention={
-                !(
-                  (summary?.lifecycleStatus === 'closed' ||
-                    summary?.lifecycleStatus === 'archived') &&
-                  recovery.value.reasonCode === 'session_not_active'
-                )
-              }
               recovery={recovery.value}
               busy={!interactive || recovery.busy || turnCancel.busy}
               error={recovery.error}
@@ -2095,8 +2265,9 @@ function ManagedSessionsContent({
                     // paginated, or host-mode empty) page, so prefer the
                     // workspace captured when the request was submitted.
                     pending?.workspaceId ??
-                      sessions.find((item) => item.sessionId === owner)
-                        ?.workspace?.workspaceId,
+                      lifecycleSummaries.find(
+                        (session) => session.sessionId === owner,
+                      )?.workspace?.workspaceId,
                   );
                 }}
               >
@@ -2390,7 +2561,36 @@ function ManagedSessionsContent({
                   void submit(value, commit, images, files, metadata);
                   return false;
                 }}
-                commands={skills.commands}
+                commands={[
+                  ...skills.commands,
+                  ...(sideQueries.available('btw')
+                    ? [
+                        {
+                          name: 'btw',
+                          description:
+                            language === 'zh-CN'
+                              ? '私下继续追问当前会话'
+                              : 'Ask a private follow-up',
+                          source: 'builtin-command',
+                          displayCategory: 'system' as const,
+                        },
+                      ]
+                    : []),
+                  ...(sideQueries.available('recap')
+                    ? [
+                        {
+                          name: 'recap',
+                          description:
+                            language === 'zh-CN'
+                              ? '回顾已完成的对话'
+                              : 'Recap the completed conversation',
+                          source: 'builtin-command',
+                          displayCategory: 'system' as const,
+                        },
+                      ]
+                    : []),
+                ]}
+                btwEnabled={sideQueries.available('btw')}
                 skills={skills.skills}
                 onSkillsOpenChange={
                   skills.supported ? skills.onOpenChange : undefined
@@ -2884,7 +3084,7 @@ function ManagedSessionsContent({
                 clientId,
                 root: sessionId,
                 child,
-                trigger: document.activeElement,
+                trigger: getShadowAwareActiveElement(pageRef.current),
               })
             }
             cancel={taskCancel}
@@ -2902,10 +3102,43 @@ function ManagedSessionsContent({
             restoreFocus={() => {
               if (taskTriggerRef.current?.isConnected)
                 taskTriggerRef.current.focus();
-              else sessionsNavRef.current?.focus();
+              else (sessionsNavRef.current ?? pageRef.current)?.focus();
             }}
           />
         )}
+        {provider.sideQueries && (
+          <ManagedSideQueryPanel
+            sideQueries={sideQueries}
+            interactive={interactive}
+          />
+        )}
+        {provider.diagnostics &&
+          currentSummary?.capabilities.diagnostics &&
+          !detail.signals?.session &&
+          diagnosticsOwner?.provider === provider &&
+          diagnosticsOwner.clientId === clientId &&
+          diagnosticsOwner.sessionId === sessionId && (
+            <ManagedDiagnosticsPanel
+              key={`${provider.storageKey}:${clientId}:${sessionId}`}
+              provider={provider.diagnostics}
+              sessionId={diagnosticsOwner.sessionId}
+              clientId={clientId}
+              running={isManagedSessionRunning(currentSummary.phase)}
+              revision={`${currentSummary.compactionRevision}:${currentSummary.modelSelection?.revision}:${currentSummary.workspace?.contextRevision}:${currentSummary.phase}:${currentSummary.activeTurnId}`}
+              onClose={() => setDiagnosticsOwner(undefined)}
+              restoreFocus={() => diagnosticsTriggerRef.current?.focus()}
+              onOpenChild={(child) => {
+                setDiagnosticsOwner(undefined);
+                setChildView({
+                  provider,
+                  clientId,
+                  root: diagnosticsOwner.sessionId,
+                  child,
+                  trigger: diagnosticsTriggerRef.current,
+                });
+              }}
+            />
+          )}
         {childView &&
           childView.provider === provider &&
           childView.clientId === clientId &&

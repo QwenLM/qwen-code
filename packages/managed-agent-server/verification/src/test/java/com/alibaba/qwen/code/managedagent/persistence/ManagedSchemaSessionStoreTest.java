@@ -4,6 +4,8 @@ import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -52,7 +54,7 @@ public class ManagedSchemaSessionStoreTest {
                         new ObjectMapper(),
                         clock,
                         ignored -> {},
-                        new ManagedWorkspaceRegistry(jdbc),
+                        new JdbcManagedWorkspaceRegistry(jdbc),
                         new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         tenant = "tenant-" + UUID.randomUUID();
         // This create writes the immutable ma_session_principal row: under the
@@ -80,7 +82,7 @@ public class ManagedSchemaSessionStoreTest {
     @Test
     void executionFactsReadNullableUnsignedWorkspaceGenerations() {
         assertThat(store.sessionsWithExecutionRegistryFacts(tenant, List.of(session))).isEmpty();
-        byte[] actor = com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(tenant, "actor");
+        byte[] actor = ManagedWorkspaceRegistry.actorKey(tenant, "actor");
         jdbc.update(
                 "INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation, storage_id,"
                         + " display_name, config_ref, policy_ref, state) VALUES"
@@ -200,7 +202,7 @@ public class ManagedSchemaSessionStoreTest {
                                 "SELECT COUNT(*) FROM ma_resource_ref WHERE owner_kind = 'MESSAGE'"
                                         + " AND session_scope_key = ?",
                                 Integer.class,
-                                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session)))
+                                ManagedSessionStore.sessionScopeKey(tenant, session)))
                 .isEqualTo(1);
     }
 
@@ -278,7 +280,7 @@ public class ManagedSchemaSessionStoreTest {
         event("big", "a".repeat(70_000));
         materialize();
         String original = messageBody("big");
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session);
+        String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
         jdbc.update("INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key, owner_revision, resource_key, tenant_id, session_id, gmt_create) VALUES (?, 'JOURNAL', ?, 1, ?, ?, ?, " + ManagedSchemaTime.SQL_NOW + ")",
                 scope, scope, original, tenant, session);
         event("big", "b");
@@ -297,7 +299,7 @@ public class ManagedSchemaSessionStoreTest {
         makeProjectionCandidatesDue();
         projectionCollector().runOnce();
         assertThat(resourceState(original)).isEqualTo("COLLECTED");
-        assertThat(resourceState(com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.resourceKey(scope, privateBody.resourceId()))).isEqualTo("PUBLISHED");
+        assertThat(resourceState(ManagedSessionStore.resourceKey(scope, privateBody.resourceId()))).isEqualTo("PUBLISHED");
     }
 
     private void alignProjectionClock() {
@@ -475,7 +477,7 @@ public class ManagedSchemaSessionStoreTest {
         jdbc.update(
                 "UPDATE ma_resource SET session_scope_key = ? WHERE resource_key = (SELECT"
                     + " body_resource_key FROM ma_message WHERE tenant_id = ? AND item_id = ?)",
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, "another-session"),
+                ManagedSessionStore.sessionScopeKey(tenant, "another-session"),
                 tenant,
                 "big");
         assertThatThrownBy(() -> messages())
@@ -805,7 +807,7 @@ public class ManagedSchemaSessionStoreTest {
                         new ObjectMapper(),
                         clock,
                         ignored -> {},
-                        new ManagedWorkspaceRegistry(duplicate),
+                        new JdbcManagedWorkspaceRegistry(duplicate),
                         new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         event("big", "x".repeat(70_000));
         if ("none".equals(corruption)) {
@@ -908,7 +910,7 @@ public class ManagedSchemaSessionStoreTest {
                 }
             };
             subject = new ManagedAgentStore(paused, new ObjectMapper(), clock, ignored -> {},
-                    new ManagedWorkspaceRegistry(paused), new ManagedAgentProperties(),
+                    new JdbcManagedWorkspaceRegistry(paused), new ManagedAgentProperties(),
                     new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         }
 

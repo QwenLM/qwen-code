@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
+import com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import org.springframework.jdbc.core.ConnectionCallback;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -61,7 +62,7 @@ final class WorkspaceMigrationAdmission {
 
     private static void requireOpen(JdbcTemplate jdbc, String tenant, String storage, String lock) {
         if (storage != null && owner(jdbc, tenant, storage, lock) != null) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
         requirePhysicalOpen(jdbc, tenant, storage, lock);
     }
@@ -89,7 +90,7 @@ final class WorkspaceMigrationAdmission {
         }
         var alias = aliases.getFirst();
         if (!tenant.equals(alias.get("tenant_id")) || !storage.equals(alias.get("storage_id"))) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
         if (java.util.Set.of("EXTERNAL", "EPHEMERAL").contains(alias.get("storage_kind"))) {
             requireExternalPhysicalOpen(jdbc, tenant, storage, lock);
@@ -99,9 +100,9 @@ final class WorkspaceMigrationAdmission {
             return;
         }
         var owner = "SSH_LOCAL".equals(alias.get("storage_kind"))
-                ? SshWorkspaceStore.requireOwner(jdbc, tenant, storage, alias, lock) : LocalStorageOwners.requireOwner(jdbc, alias, lock);
+                ? JdbcSshWorkspaceStore.requireOwner(jdbc, tenant, storage, alias, lock) : LocalStorageOwners.requireOwner(jdbc, alias, lock);
         if (!"READY".equals(owner.get("mount_state"))) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
     }
 

@@ -4,7 +4,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import org.springframework.jdbc.core.JdbcTemplate;
 
-import static com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore.busy;
+import static com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceExecutionStore.busy;
 
 /**
  * Resident-hold verification, split out of WorkspaceExecutionStore. The

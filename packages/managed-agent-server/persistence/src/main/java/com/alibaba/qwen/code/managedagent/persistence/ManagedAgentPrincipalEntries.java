@@ -54,6 +54,16 @@ class ManagedAgentPrincipalEntries {
         return sessionAdmissions.insertSessionCommand(tenantId, principal, operation, idempotencyKey, requestDigest, agentId, requestedRevision, title, input, payloadDigest, modelConfig);
     }
 
+    @Transactional
+    public Admission insertSessionCommand(String tenantId,
+            SessionPrincipal principal, String operation,
+            String idempotencyKey, String requestDigest, String agentId,
+            String requestedRevision, String title,
+            List<Map<String, Object>> input, String payloadDigest,
+            SessionModelConfig modelConfig, String memoryStoreId) {
+        return sessionAdmissions.insertSessionCommand(tenantId, principal, operation, idempotencyKey, requestDigest, agentId, requestedRevision, title, input, payloadDigest, modelConfig, memoryStoreId);
+    }
+
     public void requireSessionOwnership(String tenantId, String sessionId,
             SessionPrincipal principal) {
         sessionAdmissions.requireSessionOwnership(tenantId, sessionId, principal);

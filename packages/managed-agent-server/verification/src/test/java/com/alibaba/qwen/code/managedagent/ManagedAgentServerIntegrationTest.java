@@ -19,8 +19,8 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.MessagePage;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.ProjectedEvent;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionMutationKind;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.session.HarnessCoordinator;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
 import com.alibaba.qwen.code.managedagent.session.SessionEventHub;
@@ -210,8 +210,8 @@ class ManagedAgentServerIntegrationTest {
                         null, null, List.of());
         ManagedAgentProperties changed = new ManagedAgentProperties();
         changed.setAgentRevision("2");
-        ManagedWorkspaceRegistry workspaces = applicationContext.getBean(
-                ManagedWorkspaceRegistry.class);
+        JdbcManagedWorkspaceRegistry workspaces = applicationContext.getBean(
+                JdbcManagedWorkspaceRegistry.class);
         ManagedAgentService upgraded = new ManagedAgentService(
                 com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, objectMapper, Clock.systemUTC(),
                         ignored -> {}, workspaces, changed, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()),

@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
+import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.runtimebroker.BrokerValues;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
@@ -158,7 +159,7 @@ public final class ExternalWorkspaceRetirementService {
     private void lock(Request request) {
         WorkspaceMigrationAdmission.lockTenant(jdbc, request.tenantId(), 10);
         ToolPublicationRetentionStore.lockTenant(jdbc, request.tenantId(), 10);
-        WorkspaceLifecycleStore.lockPlacement(jdbc, request.tenantId(), 10);
+        JdbcWorkspaceLifecycleStore.lockPlacement(jdbc, request.tenantId(), 10);
         require(jdbc.queryForList("SELECT role FROM ma_workspace_access WHERE tenant_id = ? AND workspace_id = ?"
                 + " AND actor_id = ? FOR UPDATE", String.class, request.tenantId(), request.workspaceId(),
                 com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(
@@ -234,7 +235,7 @@ public final class ExternalWorkspaceRetirementService {
                         && (head.get("recovery_status") == null || "READY".equals(head.get("recovery_status")))
                         && (head.get("state") == null || List.of("ACTIVE", "SEALED", "DELETED").contains(head.get("state"))));
             }
-            WorkspaceLifecycleStore.requireIdleJournal(jdbc, json, request.tenantId(), session);
+            JdbcWorkspaceLifecycleStore.requireIdleJournal(jdbc, json, request.tenantId(), session);
             empty("SELECT turn_id FROM ma_turn WHERE tenant_id = ? AND session_id = ?"
                     + " AND status NOT IN ('COMPLETED','FAILED','CANCELLED') LIMIT 1 FOR UPDATE", request.tenantId(), session);
             // A decided approval is a recorded decision: any continuation it

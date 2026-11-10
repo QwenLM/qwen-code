@@ -314,7 +314,7 @@ public class ManagedTaskService {
             position = events.positions(tenantId, sessionId, taskId)
                     .expiredThrough();
         } else {
-            position = com.alibaba.qwen.code.managedagent.repository.ManagedTaskEventStore.decodeCursor(tenantId, sessionId, taskId, after);
+            position = ManagedTaskEventStore.decodeCursor(tenantId, sessionId, taskId, after);
         }
         EventPage page = events.read(tenantId, sessionId, taskId, position,
                 limit);
@@ -334,11 +334,11 @@ public class ManagedTaskService {
         }
         String nextCursor;
         if (page.events().isEmpty()) {
-            nextCursor = com.alibaba.qwen.code.managedagent.repository.ManagedTaskEventStore.encodeCursor(tenantId, sessionId, taskId,
+            nextCursor = ManagedTaskEventStore.encodeCursor(tenantId, sessionId, taskId,
                     Math.max(position, floor));
         } else {
             TaskEvent last = page.events().get(page.events().size() - 1);
-            nextCursor = com.alibaba.qwen.code.managedagent.repository.ManagedTaskEventStore.encodeCursor(tenantId, sessionId, taskId,
+            nextCursor = ManagedTaskEventStore.encodeCursor(tenantId, sessionId, taskId,
                     last.sequence());
         }
         return new ResolvedPage(page, nextCursor);
@@ -397,7 +397,7 @@ public class ManagedTaskService {
     private static String outputCursor(String tenantId, String sessionId, String taskId,
             CursorPositions positions) {
         return positions.lastSequence() == 0 ? null
-                : com.alibaba.qwen.code.managedagent.repository.ManagedTaskEventStore.encodeCursor(tenantId, sessionId, taskId,
+                : ManagedTaskEventStore.encodeCursor(tenantId, sessionId, taskId,
                         positions.lastSequence());
     }
 
@@ -405,7 +405,7 @@ public class ManagedTaskService {
             String taskId, TaskEvent event) {
         return new PublicTaskEvent(event.schemaVersion(),
                 event.projectionVersion(), taskId, sessionId, event.type(),
-                com.alibaba.qwen.code.managedagent.repository.ManagedTaskEventStore.encodeCursor(tenantId, sessionId, taskId, event.sequence()),
+                ManagedTaskEventStore.encodeCursor(tenantId, sessionId, taskId, event.sequence()),
                 event.occurredAt(), event.state(), event.runtimeState(),
                 event.text(), event.truncated(), event.artifactId());
     }
@@ -414,7 +414,7 @@ public class ManagedTaskService {
             String taskId, TaskEvent event) {
         return new WebShellTaskEvent(event.schemaVersion(),
                 event.projectionVersion(), taskId, sessionId, event.type(),
-                com.alibaba.qwen.code.managedagent.repository.ManagedTaskEventStore.encodeCursor(tenantId, sessionId, taskId, event.sequence()),
+                ManagedTaskEventStore.encodeCursor(tenantId, sessionId, taskId, event.sequence()),
                 event.occurredAt(), event.state(), event.runtimeState(),
                 event.text(), event.truncated(), event.artifactId());
     }

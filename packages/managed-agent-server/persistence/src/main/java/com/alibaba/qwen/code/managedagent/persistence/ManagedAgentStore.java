@@ -74,22 +74,22 @@ public class ManagedAgentStore extends ManagedAgentReadEntries implements AgentS
     private final AgentExecutionOperations executionOperations;
 
     public ManagedAgentStore(JdbcTemplate jdbc, ObjectMapper objectMapper, Clock clock,
-            CommittedEventPublisher eventPublisher, ManagedWorkspaceRegistry workspaces,
+            CommittedEventPublisher eventPublisher, JdbcManagedWorkspaceRegistry workspaces,
             ManagedAgentSettings properties, HarnessRules harnessRules) {
         this(jdbc, objectMapper, clock, eventPublisher, workspaces, properties, harnessRules,
-                null, new ManagedSessionSkills(jdbc, objectMapper, new RequestDigests(), null), null,
+                null, new JdbcManagedSessionSkills(jdbc, objectMapper, new RequestDigests(), null), null,
                 null, null, null, null, null);
     }
 
     public ManagedAgentStore(JdbcTemplate jdbc, ObjectMapper objectMapper,
             Clock clock, CommittedEventPublisher eventPublisher,
-            ManagedWorkspaceRegistry workspaces, ManagedAgentSettings properties, HarnessRules harnessRules,
+            JdbcManagedWorkspaceRegistry workspaces, ManagedAgentSettings properties, HarnessRules harnessRules,
             com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles worktreeFiles,
-            ManagedSessionSkills creationSkills,
+            JdbcManagedSessionSkills creationSkills,
             com.alibaba.qwen.code.managedagent.contracts.extensions.ExtensionPackages extensionPackages,
-            WorkspaceLifecycleStore lifecycle, ManagedAgentDefinitionStore definitions,
-            SessionWorktreeStore sessionWorktrees, JournalEventTransport journalEventTransport,
-            ManagedExtensionRecordStore configRecords) {
+            JdbcWorkspaceLifecycleStore lifecycle, JdbcManagedAgentDefinitionStore definitions,
+            JdbcSessionWorktreeStore sessionWorktrees, JournalEventTransport journalEventTransport,
+            JdbcManagedExtensionRecordStore configRecords) {
         this(jdbc, objectMapper, clock, eventPublisher, workspaces, properties, harnessRules,
                 worktreeFiles, creationSkills, extensionPackages, lifecycle, definitions,
                 sessionWorktrees, journalEventTransport, configRecords, null);
@@ -98,13 +98,13 @@ public class ManagedAgentStore extends ManagedAgentReadEntries implements AgentS
     @Autowired
     public ManagedAgentStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc, @Qualifier("managedAgentObjectMapper") ObjectMapper objectMapper,
             @Qualifier("managedAgentClock") Clock clock, CommittedEventPublisher eventPublisher,
-            ManagedWorkspaceRegistry workspaces, ManagedAgentSettings properties, HarnessRules harnessRules,
+            JdbcManagedWorkspaceRegistry workspaces, ManagedAgentSettings properties, HarnessRules harnessRules,
             com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles worktreeFiles,
-            ManagedSessionSkills creationSkills,
+            JdbcManagedSessionSkills creationSkills,
             com.alibaba.qwen.code.managedagent.contracts.extensions.ExtensionPackages extensionPackages,
-            @Nullable WorkspaceLifecycleStore lifecycle, @Nullable ManagedAgentDefinitionStore definitions,
-            @Nullable SessionWorktreeStore sessionWorktrees, @Nullable JournalEventTransport journalEventTransport,
-            @Lazy @Nullable ManagedExtensionRecordStore configRecords, ManagedSessionModelConfigs modelConfigs) {
+            @Nullable JdbcWorkspaceLifecycleStore lifecycle, @Nullable JdbcManagedAgentDefinitionStore definitions,
+            @Nullable JdbcSessionWorktreeStore sessionWorktrees, @Nullable JournalEventTransport journalEventTransport,
+            @Lazy @Nullable JdbcManagedExtensionRecordStore configRecords, ManagedSessionModelConfigs modelConfigs) {
         this(new ManagedStoreAssembly(jdbc, objectMapper, clock, eventPublisher, workspaces, properties, harnessRules,
                 worktreeFiles, creationSkills, extensionPackages, lifecycle, definitions,
                 sessionWorktrees, journalEventTransport, configRecords, modelConfigs));
@@ -124,12 +124,12 @@ public class ManagedAgentStore extends ManagedAgentReadEntries implements AgentS
     }
 
     @Override
-    public SessionWorktreeStore.Descriptor findSessionWorktree(String tenantId, String sessionId) {
+    public JdbcSessionWorktreeStore.Descriptor findSessionWorktree(String tenantId, String sessionId) {
         return sessionQueries.findSessionWorktree(tenantId, sessionId);
     }
 
     @Override
-    public Map<String, SessionWorktreeStore.Descriptor> findSessionWorktrees(String tenantId, List<String> sessionIds) {
+    public Map<String, JdbcSessionWorktreeStore.Descriptor> findSessionWorktrees(String tenantId, List<String> sessionIds) {
         return sessionQueries.findSessionWorktrees(tenantId, sessionIds);
     }
 
@@ -139,7 +139,7 @@ public class ManagedAgentStore extends ManagedAgentReadEntries implements AgentS
             String operation, String idempotencyKey, String requestDigest,
             String agentId, String requestedRevision, String title,
             List<Map<String, Object>> input, String payloadDigest) {
-        return sessionAdmissions.insertSessionCommand(tenantId, actorId, operation, idempotencyKey, requestDigest, agentId, requestedRevision, title, input, payloadDigest);
+        return sessionAdmissions.insertSessionCommand(tenantId, actorId, operation, idempotencyKey, requestDigest, agentId, requestedRevision, title, input, payloadDigest, null, null);
     }
 
     @Override
@@ -148,7 +148,17 @@ public class ManagedAgentStore extends ManagedAgentReadEntries implements AgentS
             String operation, String idempotencyKey, String requestDigest,
             String agentId, String requestedRevision, String title,
             List<Map<String, Object>> input, String payloadDigest, SessionModelConfig modelConfig) {
-        return sessionAdmissions.insertSessionCommand(tenantId, actorId, operation, idempotencyKey, requestDigest, agentId, requestedRevision, title, input, payloadDigest, modelConfig);
+        return sessionAdmissions.insertSessionCommand(tenantId, actorId, operation, idempotencyKey, requestDigest, agentId, requestedRevision, title, input, payloadDigest, modelConfig, null);
+    }
+
+    @Override
+    @Transactional
+    public Admission insertSessionCommand(String tenantId, String actorId,
+            String operation, String idempotencyKey, String requestDigest,
+            String agentId, String requestedRevision, String title,
+            List<Map<String, Object>> input, String payloadDigest, SessionModelConfig modelConfig, String memoryStoreId) {
+        return sessionAdmissions.insertSessionCommand(tenantId, actorId, operation, idempotencyKey,
+                requestDigest, agentId, requestedRevision, title, input, payloadDigest, modelConfig, memoryStoreId);
     }
 
     // The principal-carrying mutation entries must stay DECLARED on the
@@ -182,6 +192,17 @@ public class ManagedAgentStore extends ManagedAgentReadEntries implements AgentS
             List<Map<String, Object>> input, String payloadDigest,
             SessionModelConfig modelConfig) {
         return super.insertSessionCommand(tenantId, principal, operation, idempotencyKey, requestDigest, agentId, requestedRevision, title, input, payloadDigest, modelConfig);
+    }
+
+    @Override
+    @Transactional
+    public Admission insertSessionCommand(String tenantId,
+            SessionPrincipal principal, String operation,
+            String idempotencyKey, String requestDigest, String agentId,
+            String requestedRevision, String title,
+            List<Map<String, Object>> input, String payloadDigest,
+            SessionModelConfig modelConfig, String memoryStoreId) {
+        return super.insertSessionCommand(tenantId, principal, operation, idempotencyKey, requestDigest, agentId, requestedRevision, title, input, payloadDigest, modelConfig, memoryStoreId);
     }
 
     @Override
@@ -340,6 +361,9 @@ public class ManagedAgentStore extends ManagedAgentReadEntries implements AgentS
     public SessionRecord requireExtensionManagement(String tenantId, String actorId, String sessionId, String operationId, boolean mutation) {
         return sessionPolicies.requireExtensionManagement(tenantId, actorId, sessionId, operationId, mutation);
     }
+
+    @Override
+    public boolean canApplyExtensions(SessionRecord session) { return sessionPolicies.canApplyExtensions(session); }
 
     @Override
     @Transactional(propagation = org.springframework.transaction.annotation.Propagation.MANDATORY)

@@ -13,7 +13,7 @@ import {
 } from './managed-context-envelope.js';
 import { publisherFields } from './managed-shell-publisher.js';
 import { realpathDeepestExisting } from './managed-runtime-tool-executor.js';
-import { WORKSPACE_CAPABILITY_DIGEST } from './managed-workspace-activation.js';
+import { isWorkspaceToolCapability } from './managed-workspace-activation.js';
 
 const INVALID = 'Managed Runtime external storage admission failed.';
 const directories = new WeakMap<ManagedExternalContextBoot, string>();
@@ -143,7 +143,7 @@ export async function readManagedExternalBoot(
       (boot.isolationClass !== 'session' &&
         boot.isolationClass !== 'workspace') ||
       boot.mountRoot !== storage.mountRoot ||
-      boot.capabilityDigest !== WORKSPACE_CAPABILITY_DIGEST
+      !isWorkspaceToolCapability(boot.capabilityDigest)
     )
       throw new Error(INVALID);
     const directory = path.dirname(bootPath);

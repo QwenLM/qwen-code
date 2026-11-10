@@ -46,7 +46,7 @@ class ExternalWorkspaceRetirementServiceTest {
     private JdbcRuntimeBindingRepository bindings;
     private JdbcRuntimeSessionRepository sessions;
     private JdbcToolExecutionRepository executions;
-    private WorkspaceExecutionStore ownership;
+    private JdbcWorkspaceExecutionStore ownership;
     private ExternalWorkspaceProvisioner provider;
     private RuntimeBindingRecord original;
     private RuntimeProvisionRequest placement;
@@ -75,7 +75,7 @@ class ExternalWorkspaceRetirementServiceTest {
         bindings = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("test", new byte[32]));
         sessions = new JdbcRuntimeSessionRepository(source);
         executions = new JdbcToolExecutionRepository(source);
-        ownership = new WorkspaceExecutionStore(jdbc, manager);
+        ownership = new JdbcWorkspaceExecutionStore(jdbc, manager);
         placement = new RuntimeProvisionRequest(new RuntimeScope("tenant", "workspace", "1", "/var/lib/managed-workspace",
                 WorkspaceExecutionProfile.CAPABILITY_DIGEST, "workspace"), null, "external-workspace", "workspace");
         original = bindings.findOrCreate(placement);
@@ -92,7 +92,7 @@ class ExternalWorkspaceRetirementServiceTest {
         })
                 .when(recoveryGateway).validateExternalTerminalOriginal(any());
         service = new ExternalWorkspaceRetirementService(jdbc, manager, bindings, registration,
-                new ManagedWorkspaceRegistry(jdbc), recoveryGateway, new ObjectMapper().findAndRegisterModules());
+                new JdbcManagedWorkspaceRegistry(jdbc), recoveryGateway, new ObjectMapper().findAndRegisterModules());
         request = new ExternalWorkspaceRetirementService.Request("tenant", "owner", "workspace", 1,
                 original.getBindingId(), original.getGeneration(), original.getVersion(), UUID.randomUUID().toString());
     }

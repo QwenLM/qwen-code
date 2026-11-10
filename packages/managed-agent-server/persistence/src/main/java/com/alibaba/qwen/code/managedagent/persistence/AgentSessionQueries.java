@@ -14,6 +14,8 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnPage;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnSummary;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -55,12 +57,12 @@ final class AgentSessionQueries {
             "turn_record." + String.join(", turn_record.",
                     TURN_SUMMARY_COLUMNS.split(", "));
 
-    SessionWorktreeStore.Descriptor findSessionWorktree(String tenantId, String sessionId) {
-        return SessionWorktreeStore.descriptor(worktreeFiles, jdbc, tenantId, sessionId);
+    JdbcSessionWorktreeStore.Descriptor findSessionWorktree(String tenantId, String sessionId) {
+        return JdbcSessionWorktreeStore.descriptor(worktreeFiles, jdbc, tenantId, sessionId);
     }
 
-    Map<String, SessionWorktreeStore.Descriptor> findSessionWorktrees(String tenantId, List<String> sessionIds) {
-        return SessionWorktreeStore.descriptors(worktreeFiles, jdbc, tenantId, sessionIds);
+    Map<String, JdbcSessionWorktreeStore.Descriptor> findSessionWorktrees(String tenantId, List<String> sessionIds) {
+        return JdbcSessionWorktreeStore.descriptors(worktreeFiles, jdbc, tenantId, sessionIds);
     }
 
     String findChildWorkspaceCwd(String tenantId,
@@ -108,7 +110,7 @@ final class AgentSessionQueries {
         }
         List<Object> arguments = new ArrayList<>(sessionIds.size() + 1);
         arguments.add(tenantId);
-        sessionIds.forEach(id -> arguments.add(com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, id)));
+        sessionIds.forEach(id -> arguments.add(ManagedSessionStore.sessionScopeKey(tenantId, id)));
         return new HashSet<>(jdbc.queryForList("SELECT session_id FROM"
                         + " ma_operation WHERE tenant_id = ?"
                         + " AND scope_key IN (" + AgentStoreRows.placeholders(sessionIds.size())
@@ -119,7 +121,7 @@ final class AgentSessionQueries {
 
     // The Registry still backs the binding exactly, its state is ACTIVE and
     // the creation actor's grants survive — the passive-attachment subset
-    // WorkspaceExecutionStore.authorizePassiveAttachment gates execution on;
+    // JdbcWorkspaceExecutionStore.authorizePassiveAttachment gates execution on;
     // the frozen profile and agent checks stay the next turn's
     // acquire-time gate. Admission of every family that executes under the
     // creator's authority (later Turns and the cwd change alike) re-checks
@@ -319,6 +321,13 @@ final class AgentSessionQueries {
             // row-present Session is its owner's alone.
             ownershipClause = " OR" + legacyUnbound;
         }
+        // The owner-only privacy fence is unconditional on the completion base:
+        // a memory-bound Session lists only for the actor that owns it, whether
+        // or not the caller asked for the owner-only scope (ownerOnly stays in
+        // the signature for the explicit-scope arm below).
+        arguments.add(actorId == null ? null
+                : com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(
+                        tenantId, actorId));
         String ownerClause = "";
         if (ownerOnly) {
             ownerClause = " AND (ma_session.workspace_id IS NULL OR"
@@ -351,7 +360,7 @@ final class AgentSessionQueries {
             arguments.add(beforeSessionId);
         }
         arguments.add(limit + 1);
-        Map<String, SessionWorktreeStore.Row> worktrees = new LinkedHashMap<>();
+        Map<String, JdbcSessionWorktreeStore.Row> worktrees = new LinkedHashMap<>();
         List<SessionRecord> rows =
                 jdbc.query(
                         "SELECT " + ManagedSchemaProjection.SESSION.columns("ma_session") + ", COALESCE(es.last_sequence, 0) AS list_last_sequence,"
@@ -378,6 +387,9 @@ final class AgentSessionQueries {
                             + " AND wa.actor_id = ? AND wa.role IN ('READER', 'OPERATOR',"
                             + " 'OWNER'))"
                                 + ownershipClause + ")"
+                                + " AND (ma_session.owner_only = 0 OR"
+                                + " COALESCE(ma_session.owner_actor_key,"
+                                + " ma_session.creator_actor_key) = ?)"
                                 + ownerClause
                                 + archiveClause + titleClause + cursorClause
                                 + " ORDER BY ma_session.gmt_create DESC, ma_session.session_id DESC"
@@ -385,7 +397,7 @@ final class AgentSessionQueries {
                         (result, index) -> {
                             SessionRecord session = storeRows.sessionListMapper.mapRow(result, index);
                             if (result.getString("worktree_worktree_id") != null) {
-                                worktrees.put(session.sessionId(), SessionWorktreeStore.readRow(result, "worktree_"));
+                                worktrees.put(session.sessionId(), JdbcSessionWorktreeStore.readRow(result, "worktree_"));
                             }
                             return session;
                         },
@@ -396,7 +408,7 @@ final class AgentSessionQueries {
         }
         var selectedWorktrees = rows.stream().map(row -> worktrees.get(row.sessionId()))
                 .filter(java.util.Objects::nonNull).toList();
-        return new SessionPage(List.copyOf(rows), hasMore, SessionWorktreeStore.descriptors(worktreeFiles, jdbc, selectedWorktrees));
+        return new SessionPage(List.copyOf(rows), hasMore, JdbcSessionWorktreeStore.descriptors(worktreeFiles, jdbc, selectedWorktrees));
     }
 
     Map<String, WebShellLifecycleOperation>
@@ -490,7 +502,7 @@ final class AgentSessionQueries {
 
     Map<String, WebShellModelContext> findModelContexts(
             String tenantId, List<String> sessionIds) {
-        return ManagedExtensionRecordStore.findModelContexts(jdbc, tenantId, sessionIds);
+        return JdbcManagedExtensionRecordStore.findModelContexts(jdbc, tenantId, sessionIds);
     }
 
     List<WebShellModelOption> modelOptions() { return modelCatalog; }
@@ -550,7 +562,7 @@ final class AgentSessionQueries {
         }
         List<Object> args = new ArrayList<>();
         args.add(tenantId);
-        args.add(com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(tenantId, actorId));
+        args.add(ManagedWorkspaceRegistry.actorKey(tenantId, actorId));
         args.addAll(sessionIds);
         return new HashSet<>(jdbc.queryForList("SELECT session_id FROM ma_session WHERE tenant_id=?"
                         + " AND COALESCE(owner_actor_key, creator_actor_key)=? AND session_id IN ("
@@ -633,7 +645,7 @@ final class AgentSessionQueries {
                         + " AND session_status_before IS NOT NULL"
                         + " ORDER BY gmt_create DESC LIMIT 1",
                 (rows, row) -> rows.getString(1),
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
+                ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
                 AgentStoreRows.sessionOperationTarget(sessionId), tenantId, sessionId)
                 .stream().findFirst();
     }

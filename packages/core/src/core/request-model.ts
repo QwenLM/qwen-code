@@ -6,15 +6,17 @@
 
 import type { ContentGeneratorConfig } from './contentGenerator.js';
 import { AuthType } from '../utils/auth-type.js';
+import { retryContext } from '../utils/retryContext.js';
 
 export function getRequestModel(
   generation: Partial<ContentGeneratorConfig>,
   model = generation.model ?? '',
 ): string {
   if (
-    generation.authType !== undefined &&
-    generation.authType !== AuthType.USE_OPENAI &&
-    generation.authType !== AuthType.QWEN_OAUTH
+    retryContext.getStore()?.singleAttempt ||
+    (generation.authType !== undefined &&
+      generation.authType !== AuthType.USE_OPENAI &&
+      generation.authType !== AuthType.QWEN_OAUTH)
   )
     return model;
   const override = {

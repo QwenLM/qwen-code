@@ -6,10 +6,10 @@ import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
 import com.alibaba.qwen.code.managedagent.model.SessionPrincipal;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedUserMessageStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedUserMessageStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.repository.ManagedUserMessageStore.Command;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -217,7 +217,7 @@ class SessionPrincipalOwnershipTest {
         var f = new Fixture();
         when(f.harness.supportsUserMessageQueue()).thenReturn(true);
         var messages = com.alibaba.qwen.code.managedagent.VerificationFixtures
-                .configure(new ManagedUserMessageStore(f.jdbc,
+                .configure(new JdbcManagedUserMessageStore(f.jdbc,
                         new ObjectMapper(), new RequestDigests(),
                         new ManagedUserMessagePolicy(f.store,
                                 new RequestDigests(), f.harness,
@@ -287,12 +287,12 @@ class SessionPrincipalOwnershipTest {
     @Test
     void taskAndRecoveryEntryPointsKeepTheActorWhileRecheckingExistingWork() {
         var f = new Fixture();
-        var records = new com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecordStore(f.jdbc);
-        var events = new com.alibaba.qwen.code.managedagent.persistence.ManagedTaskEventStore(f.jdbc);
+        var records = new com.alibaba.qwen.code.managedagent.persistence.JdbcManagedExtensionRecordStore(f.jdbc);
+        var events = new com.alibaba.qwen.code.managedagent.persistence.JdbcManagedTaskEventStore(f.jdbc);
         var tasks = new ManagedTaskService(f.service, records, events);
         var recovery = new SessionRecoveryService(f.service, f.store, f.coordinator, f.harness,
                 new com.alibaba.qwen.code.managedagent.persistence.JdbcSessionRecoveryRepository(f.jdbc),
-                new com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore(f.jdbc));
+                new com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionStore(f.jdbc));
         f.tx.executeWithoutResult(status -> {
             String id = f.create(OWNER, "create");
             var foreign = SessionPrincipal.of("tenant", "user", "actor-B");
@@ -318,7 +318,7 @@ class SessionPrincipalOwnershipTest {
     void principalAwareApiOverloadsNeverDowngradeToTheActorlessUser() {
         var f = new Fixture();
         var records =
-                new com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecordStore(
+                new com.alibaba.qwen.code.managedagent.persistence.JdbcManagedExtensionRecordStore(
                         f.jdbc);
         var hook =
                 new com.alibaba.qwen.code.managedagent.catalog.ManagedHookCatalogService(
@@ -332,7 +332,7 @@ class SessionPrincipalOwnershipTest {
         var skills =
                 new com.alibaba.qwen.code.managedagent.catalog.ManagedSkillCatalogService(
                         f.service, mock(
-                                com.alibaba.qwen.code.managedagent.persistence.ManagedSessionSkills.class));
+                                com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionSkills.class));
         var extensions =
                 new com.alibaba.qwen.code.managedagent.extensions.ManagedExtensionManagementService(
                         f.store, f.service, records,
@@ -341,7 +341,7 @@ class SessionPrincipalOwnershipTest {
         var actions =
                 new com.alibaba.qwen.code.managedagent.session.ManagedActionService(
                         f.service,
-                        new com.alibaba.qwen.code.managedagent.persistence.ManagedActionStore(
+                        new com.alibaba.qwen.code.managedagent.persistence.JdbcManagedActionStore(
                                 f.jdbc, f.store),
                         records, mock(ActionResponseCoordinator.class),
                         new RequestDigests(), Clock.systemUTC(), new ObjectMapper());
@@ -603,7 +603,7 @@ class SessionPrincipalOwnershipTest {
         final TransactionTemplate tx;
         final HarnessConnector harness;
         final HarnessCoordinator coordinator;
-        final ManagedWorkspaceRegistry workspaces;
+        final JdbcManagedWorkspaceRegistry workspaces;
 
         Fixture() {
             var source = new JdbcDataSource();
@@ -611,7 +611,7 @@ class SessionPrincipalOwnershipTest {
                     + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
             ManagedSchema.initialize(source);
             jdbc = new ManagedSchemaJdbcTemplate(source);
-            workspaces = new ManagedWorkspaceRegistry(jdbc);
+            workspaces = new JdbcManagedWorkspaceRegistry(jdbc);
             store = new ManagedAgentStore(jdbc, new ObjectMapper(), Clock.systemUTC(),
                     ignored -> {}, workspaces, new ManagedAgentProperties(),
                     new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());

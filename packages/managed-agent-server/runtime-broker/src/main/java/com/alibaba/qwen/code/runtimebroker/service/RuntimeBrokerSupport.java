@@ -6,6 +6,8 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
+import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
+import com.alibaba.qwen.code.runtimebroker.RuntimeToolMeasurements;
 import com.alibaba.qwen.code.runtimebroker.StoreFailureException;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
@@ -15,6 +17,7 @@ import com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds;
 
 import java.time.Duration;
 import java.util.concurrent.TimeoutException;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -33,6 +36,65 @@ final class RuntimeBrokerSupport {
             "prepared", "executing", "cancel_requested", "settled",
             "unknown");
     static final int MAX_CAS_ATTEMPTS = 16;
+
+    static void requireSameSession(RuntimeSession actual,
+            RuntimeSession requested) {
+        if (!actual.getHarnessSessionId().equals(
+                requested.getHarnessSessionId())
+                || !actual.getTurnKind().equals(requested.getTurnKind())
+                || !actual.getScope().equals(requested.getScope())) {
+            throw conflict("runtime_session_conflict",
+                    "runtimeSessionId belongs to another Session identity");
+        }
+    }
+
+    static CompletionStage<Map<String, Object>> prepareExecutionReference(String runtimeSessionId,
+            Map<String, Object> reference, String payloadDigest, String publicationId) {
+        Map<String, Object> immutable = immutableMap(reference, "reference");
+        if (ProviderRuntimeProtocol.isReference(immutable)) {
+            ProviderRuntimeProtocol.reference(immutable, runtimeSessionId);
+        } else {
+            boolean measured = RuntimeToolMeasurements.selected(immutable);
+            boolean v3 = Integer.valueOf(3).equals(immutable.get("runtimeProtocol"));
+            if (v3 && payloadDigest != null) {
+                throw invalid("runtime_reference_invalid", "Tool v3 publication modes conflict");
+            }
+            Set<String> fields = new HashSet<>(v3
+                    ? Set.of("sessionId", "promptId", "callId", "argsDigest", "runtimeProtocol", "inputDigest")
+                    : Set.of("sessionId", "promptId", "callId", "argsDigest"));
+            if (measured) {
+                fields.add("resultProtocol");
+            }
+            if (!immutable.keySet().equals(fields)
+                    || !(immutable.get("argsDigest") instanceof String digest)
+                    || !digest.matches("sha256:[0-9a-f]{64}")
+                    || v3 && (!(immutable.get("inputDigest") instanceof String inputDigest)
+                        || !inputDigest.matches("[0-9a-f]{64}"))) {
+                throw invalid("runtime_reference_invalid", "Deferred execution reference is invalid");
+            }
+            Map<String, Object> deferred = new LinkedHashMap<>(immutable);
+            if (payloadDigest == null) {
+                deferred.put("dispatchMode", "deferred");
+            } else {
+                if (!payloadDigest.matches("sha256:[0-9a-f]{64}")
+                        || publicationId == null
+                        || !publicationId.matches("[a-z0-9_-]{1,128}")) {
+                    throw invalid("runtime_reference_invalid", "Payload digest or publication ID is invalid");
+                }
+                deferred.put("dispatchMode", "deferred_v3");
+                deferred.put("payloadDigest", payloadDigest);
+                deferred.put("publicationId", publicationId);
+            }
+            if (deferred.containsValue(null)) {
+                // immutableMap admits null values; keep the rejection on the
+                // stage channel as a 400 rather than a synchronous NPE.
+                return CompletableFuture.failedFuture(invalid("runtime_reference_invalid",
+                        "Deferred execution reference is invalid"));
+            }
+            immutable = Map.copyOf(deferred);
+        }
+        return CompletableFuture.completedFuture(immutable);
+    }
 
     static <T> CompletionStage<T> safeStage(
             Supplier<CompletionStage<T>> supplier) {
@@ -86,6 +148,13 @@ final class RuntimeBrokerSupport {
             }
             throw new CompletionException(cause);
         });
+    }
+
+    static boolean workerRefusedRelease(Throwable error) {
+        Throwable cause = unwrap(error);
+        return cause instanceof RuntimeBrokerException failure
+                && ("managed_runtime_owner_hold_pending".equals(failure.getCode())
+                        || "managed_runtime_release_timeout".equals(failure.getCode()));
     }
 
     static Throwable unwrap(Throwable error) {
@@ -189,6 +258,18 @@ final class RuntimeBrokerSupport {
         return "settled".equals(name)
                 ? Map.of("state", name, "result", response.get("result"))
                 : Map.of("state", name);
+    }
+
+    static CompletionStage<HarnessSessionResolver.Capabilities> resolveCapabilities(
+            HarnessSessionResolver sessionResolver, String harnessSessionId, RuntimeLifecycleAuthority authority) {
+        String id = BrokerValues.requirePathSafe(BrokerValues.requireId(harnessSessionId, "harnessSessionId"), "harnessSessionId");
+        return mapFailure(safeStage(() -> sessionResolver.resolveCapabilities(id, authority)),
+                "runtime_scope_resolution_failed", "Runtime scope resolution failed").thenApply(value -> {
+                    if (value == null || value.scope() == null) {
+                        throw unavailable("runtime_scope_resolution_failed", "Runtime scope resolver returned no scope");
+                    }
+                    return value;
+                });
     }
 
     static CompletionStage<RuntimeScope> resolveScope(HarnessSessionResolver sessionResolver,

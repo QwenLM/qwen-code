@@ -145,7 +145,7 @@ final class RuntimeBindingSessionRelease {
             JdbcRepositorySupport.setIdentity(clear, 2, session.getBindingId());
             clear.setLong(3, session.getRuntimeGeneration());
             JdbcRepositorySupport.setIdentity(clear, 4, session.getRuntimeSessionId());
-            com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore.releaseMembers(connection, key,
+            com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceExecutionStore.releaseMembers(connection, key,
                     clear.executeUpdate());
         }
     }

@@ -9,9 +9,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.jdbc.core.JdbcTemplate;
 
-import java.nio.charset.StandardCharsets;
 import java.time.Clock;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 
@@ -34,30 +32,19 @@ final class ManagedStoreAssembly {
 
     ManagedStoreAssembly(JdbcTemplate jdbc, ObjectMapper objectMapper,
             Clock clock, CommittedEventPublisher eventPublisher,
-            ManagedWorkspaceRegistry workspaces, ManagedAgentSettings properties, HarnessRules harnessRules,
+            JdbcManagedWorkspaceRegistry workspaces, ManagedAgentSettings properties, HarnessRules harnessRules,
             com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles worktreeFiles,
-            ManagedSessionSkills creationSkills,
+            JdbcManagedSessionSkills creationSkills,
             com.alibaba.qwen.code.managedagent.contracts.extensions.ExtensionPackages extensionPackages,
-            WorkspaceLifecycleStore lifecycle, ManagedAgentDefinitionStore definitions,
-            SessionWorktreeStore sessionWorktrees, JournalEventTransport journalEventTransport,
-            ManagedExtensionRecordStore configRecords, ManagedSessionModelConfigs modelConfigs) {
+            JdbcWorkspaceLifecycleStore lifecycle, JdbcManagedAgentDefinitionStore definitions,
+            JdbcSessionWorktreeStore sessionWorktrees, JournalEventTransport journalEventTransport,
+            JdbcManagedExtensionRecordStore configRecords, ManagedSessionModelConfigs modelConfigs) {
         String approvalMode =
                 properties.getHarness().getApprovalMode().toLowerCase(Locale.ROOT);
         String agentRevision = properties.getAgentRevision();
         List<String> definitionToolProfiles = properties.getDefinitionToolProfiles();
         List<String> definitionModels = properties.getDefinitionModels();
-        var modelIds = new HashSet<String>();
-        List<WebShellModelOption> modelCatalog = properties.getModelCatalog().stream().map(option -> {
-            String id = option.getModelId();
-            String label = option.getLabel() == null ? id : option.getLabel();
-            if (StringUtils.isBlank(id) || id.getBytes(StandardCharsets.UTF_8).length > 512
-                    || id.chars().anyMatch(Character::isISOControl) || !modelIds.add(id)
-                    || StringUtils.isBlank(label) || label.length() > 512
-                    || label.chars().anyMatch(Character::isISOControl)) {
-                throw new IllegalArgumentException("Invalid or duplicate Managed model catalog entry");
-            }
-            return new WebShellModelOption(id, label);
-        }).toList();
+        List<WebShellModelOption> modelCatalog = ManagedSessionModelConfigs.catalog(properties);
         boolean journalEventTransportEnabled = properties.getEventTransport().isEnabled();
         boolean workspaceFilesEnabled = properties.getHarness().isWorkspaceFilesEnabled();
         boolean workspaceShellEnabled = properties.getHarness().isWorkspaceShellEnabled();

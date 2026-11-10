@@ -2,6 +2,13 @@ package com.alibaba.qwen.code.runtimebroker.managedschema;
 
 /** Explicit columns for Managed SQL readers; independent of live database metadata. */
 public enum ManagedSchemaProjection {
+    SIDE_QUERY(
+            "query_key, query_id, tenant_id, session_id, session_scope_key, actor_id, actor_scope_key, "
+                    + "kind, trigger_kind, question, state, active_slot, source_json, private_history_json, "
+                    + "model_config_digest, processing_version, input_resource_id, input_digest, is_input_ready, "
+                    + "claim_instance_id, claim_boot_id, claim_generation, claim_token_hash, read_lease_id, "
+                    + "read_deadline_at, deadline_at, result_revision, answer_text, outcome, usage_json, error_code, "
+                    + "gmt_create, gmt_modified"),
     ARTIFACT(
             "artifact_id, result_id, scope_key, descriptor_json, publication_id, binding_json, "
                     + "manifest_ref_json, stream_id, creation_sequence"),
@@ -119,7 +126,7 @@ public enum ManagedSchemaProjection {
                     + "public_session_id, deleted_at, workspace_id, workspace_generation, "
                     + "workspace_storage_id, cwd_relative, context_config_ref, context_revision, "
                     + "workspace_config_ref, workspace_policy_ref, agent_revision, approval_mode, "
-                    + "tool_profile, creator_actor_key, owner_actor_key, parent_session_id, "
+                    + "tool_profile, creator_actor_key, owner_actor_key, memory_store_id, owner_only, parent_session_id, "
                     + "root_session_id, parent_child_run_id, child_depth, agent_definition_digest, "
                     + "session_kind, tenant_key, session_key, session_scope_key, title_revision, "
                     + "retirement_operation_id, retirement_generation, retired_at, is_recovery_protected, "

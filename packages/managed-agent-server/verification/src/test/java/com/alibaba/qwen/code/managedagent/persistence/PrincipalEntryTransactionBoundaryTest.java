@@ -76,7 +76,7 @@ class PrincipalEntryTransactionBoundaryTest {
         var jdbc = new ManagedSchemaJdbcTemplate(recorded);
         var store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(
                 jdbc, new ObjectMapper(), Clock.systemUTC(), events -> {},
-                new ManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties(),
+                new JdbcManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties(),
                 new SdkHarnessRules());
         var interceptor = new TransactionInterceptor(
                 new DataSourceTransactionManager(recorded),

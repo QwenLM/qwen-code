@@ -14,7 +14,10 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationTarget;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.repository.ChildResultRelayStore;
+import com.alibaba.qwen.code.managedagent.repository.ChildWorkspaceStore;
 import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore;
+import com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
 import com.alibaba.qwen.code.managedagent.workspace.ChildLifecycleAdmissions;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
@@ -104,10 +107,10 @@ public class SessionLifecycleCoordinator {
     private static final Set<String> SELF_CLEARING_DAEMON_REFUSALS =
             Set.of("hosted_lifecycle_recovery_required", "hosted_turn_active");
     private final AgentStateStore store;
-    private com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore lifecycle;
+    private WorkspaceLifecycleStore lifecycle;
 
     @org.springframework.beans.factory.annotation.Autowired(required = false)
-    public void setWorkspaceLifecycleStore(com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore lifecycle) {
+    public void setWorkspaceLifecycleStore(WorkspaceLifecycleStore lifecycle) {
         this.lifecycle = lifecycle;
     }
 
@@ -133,7 +136,7 @@ public class SessionLifecycleCoordinator {
     private final ObjectMapper objectMapper;
     private final ChildLifecycleAdmissions childCloses;
     private final ManagedAgentService sessions;
-    private final com.alibaba.qwen.code.managedagent.repository.ChildWorkspaceStore childWorkspaces;
+    private final ChildWorkspaceStore childWorkspaces;
     private final ObjectProvider<RuntimeBrokerOperations> brokerProviders;
     private final ExecutorService executor;
     private final Clock clock;
@@ -182,7 +185,7 @@ public class SessionLifecycleCoordinator {
             ObjectProvider<RuntimeBrokerOperations> brokerProviders,
             @Qualifier("managedAgentExecutor") ExecutorService executor,
             @Qualifier("managedAgentClock") Clock clock, ManagedAgentSettings properties,
-            com.alibaba.qwen.code.managedagent.repository.ChildWorkspaceStore childWorkspaces) {
+            ChildWorkspaceStore childWorkspaces) {
         this.childWorkspaces = childWorkspaces;
         this.store = store;
         this.sessionStore = sessionStore;
@@ -650,7 +653,7 @@ public class SessionLifecycleCoordinator {
         var session = store.requireSession(tenantId, sessionId);
         try {
             if (session.workspace() == null) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                throw WorkspaceExecutionStore.unavailable();
             }
             runtimeWarmer.verifyWorkspaceCwdTarget(session.workspace(),
                     operation.targetCwdRelative());
@@ -715,7 +718,7 @@ public class SessionLifecycleCoordinator {
     private boolean settle(OperationRecord operation,
             java.util.concurrent.atomic.AtomicBoolean harnessSettled) {
         if (operation.lifecycleProtocolVersion() < 0 || operation.lifecycleProtocolVersion() > 2) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.blocked("workspace_lifecycle_protocol_unavailable");
+            throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_protocol_unavailable");
         }
         boolean harnessConfirmed = false;
         var session = store.requireSession(operation.tenantId(), operation.sessionId());
@@ -729,14 +732,14 @@ public class SessionLifecycleCoordinator {
         }
         if (bound && operationIsLifecycle(operation)) {
             if (lifecycle == null || !RuntimeWarmer.supportsClose(runtimeWarmer, session.workspace())) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.blocked("workspace_close_identity_unverified");
+                throw WorkspaceLifecycleStore.blocked("workspace_close_identity_unverified");
             }
             lifecycle.requireSettledExecutions(operation);
             JsonNode effects = lifecycle.recoverEffects(operation);
             if (effects == null) {
                 if (!(com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles.EXTERNAL_FILES.equals(session.toolProfile())
                         ? harness.supportsSavedLifecycle(session.toolProfile()) : harness.supportsLifecycle(session.toolProfile()))) {
-                    throw com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.blocked("workspace_lifecycle_protocol_unavailable");
+                    throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_protocol_unavailable");
                 }
                 try {
                     effects = harness.settleLifecycle(operation);
@@ -774,7 +777,7 @@ public class SessionLifecycleCoordinator {
                 try {
                     harness.prepareLifecycleResources(operation);
                     if (com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles.SHELL.equals(profile)) {
-                        var authority = com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.authority(operation);
+                        var authority = WorkspaceLifecycleStore.authority(operation);
                         if (store.hasMcpServers(session)) {
                             runtimeWarmer.prepareWorkspaceResources(operation.tenantId(), operation.sessionId(), authority)
                                     .toCompletableFuture().join();
@@ -785,7 +788,7 @@ public class SessionLifecycleCoordinator {
                     }
                     harness.settleLifecycleResources(operation);
                     runtimeWarmer.drainWorkspaceResources(operation.tenantId(), operation.sessionId(),
-                            com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.authority(operation))
+                            WorkspaceLifecycleStore.authority(operation))
                             .toCompletableFuture().join();
                 } catch (RuntimeException unsettled) {
                     if (!(unsettled instanceof com.alibaba.qwen.code.managedagent.harness.contracts.HarnessFailure)
@@ -803,10 +806,10 @@ public class SessionLifecycleCoordinator {
                     }
                     if (com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles.MCP.equals(profile)) {
                         runtimeWarmer.recoverStoppedWorkspaceResources(operation.tenantId(), operation.sessionId(),
-                                com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.authority(operation))
+                                WorkspaceLifecycleStore.authority(operation))
                                 .toCompletableFuture().join();
                     } else {
-                        throw com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.blocked("workspace_lifecycle_resources_unsettled");
+                        throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_resources_unsettled");
                     }
                 }
             }
@@ -816,7 +819,7 @@ public class SessionLifecycleCoordinator {
             }
             harness.detachLifecycle(operation);
             if (sessionStore.hasLiveWriter(operation.tenantId(), operation.sessionId())) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.blocked("workspace_lifecycle_writer_active");
+                throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_writer_active");
             }
             runtimeWarmer.closeWorkspace(operation.tenantId(), operation.sessionId()).toCompletableFuture().join();
             return true;
@@ -886,7 +889,7 @@ public class SessionLifecycleCoordinator {
                 return true;
             }
             childWorkspaces.requestFinish(tenantId, sessionId, childRunId,
-                    com.alibaba.qwen.code.managedagent.repository.ChildWorkspaceStore.DISCARD,
+                    ChildWorkspaceStore.DISCARD,
                     clock.millis());
             return true;
         } catch (com.alibaba.qwen.code.managedagent.exception.ManagedAgentException refused) {

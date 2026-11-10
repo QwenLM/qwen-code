@@ -136,8 +136,9 @@ this recovery exception.
 | Middleware | Patterns and recursive matchers; explicit, repeatable `next(e)`; `.catch` and per-plugin failure recovery; frozen input and host identity                                               |
 | API events | `command.register`, `ui.log`, `ui.invalidate` and the session and clock methods pass through the middleware chain with host-supplied origin                                             |
 | Session    | `$.plugin`, read-only `$.session` facts, `$.clock.now` and `$.clock.sleep`, described in [Session facts and clock](#session-facts-and-clock)                                            |
-| Turns      | `turn.start`, `turn.complete` and `$.turn.abort` for the prompts a person submits and, in headless and Ink sessions, those a Mod submits, described in [Turn events](#turn-events)      |
-| Prompts    | `prompt.submit` in headless runs and the Ink and OpenTUI terminals, and `$.prompt.submit` in headless runs and the Ink terminal, described in [Submitted prompts](#submitted-prompts)   |
+| Turns      | `turn.start`, `turn.complete` and `$.turn.abort` for the prompts a person submits and those a Mod submits, described in [Turn events](#turn-events)                                     |
+| Model      | `$.model.complete` runs one completion on the session's client, described in [Model calls](#model-calls)                                                                                |
+| Prompts    | `prompt.submit` and `$.prompt.submit` in headless runs and the Ink and OpenTUI terminals, described in [Submitted prompts](#submitted-prompts)                                          |
 | Logging    | `$.ui.log` returns void and queues delivery; transcript logs use stderr in text mode or `system/ui_log` in JSON modes; debug logs stay in the debug logger; neither becomes model input |
 | Elements   | `$.ui.resolve`, `$.ui.invalidate` and the `h` and `Fragment` globals, described in [Elements](#elements)                                                                                |
 | Drawing    | `ui.render` for the band above the prompt in the Ink and OpenTUI terminals, described in [The band above the prompt](#the-band-above-the-prompt)                                        |
@@ -466,7 +467,7 @@ supports:
 }
 ```
 
-This is a headless run. In the Ink and OpenTUI terminals, `events` also lists `ui.render`, and in OpenTUI `methods` does not list `prompt.submit` yet.
+This is a headless run. In the Ink and OpenTUI terminals, `events` also lists `ui.render`.
 `claudeCode` is the Claude Code release whose event names are recognized,
 `events` lists the events hooks can receive and `methods` the `$` methods a Mod can
 call. A Mod can use it to choose a fallback, such as a command reply where a
@@ -478,9 +479,9 @@ the caller's budget. Neither does `$.prompt.submit`, whose call can outlive the
 hook that made it: the time the other Mods' `prompt.submit` hooks take while a
 hook awaits it counts as the hook's own. Catch recovery uses a one-second budget.
 Qwen additionally caps each root dispatch at 60 seconds of charged time and each
-uninterrupted guest execution slice at 10 seconds. Only tool roots exclude the
-trusted native waits described above; load and command roots retain continuous
-60-second limits. All `session.end` work shares 1.5 seconds. Native tool timeouts
+uninterrupted guest execution slice at 10 seconds. A dispatch waiting only on a
+host model request pauses its clock. Tool roots also exclude the trusted native
+waits described above. All `session.end` work shares 1.5 seconds. Native tool timeouts
 and permission decisions still apply. The scheduler's optional execution timeout
 defaults to disabled and does not impose an approval deadline; individual tools
 retain their own timeout policies.
@@ -553,6 +554,83 @@ budget, so a sleep longer than the remaining budget times the hook out. Its
 `signal` option rejects the wait at once when it aborts; pass `next.signal`,
 because the Mod environment has no `AbortController`. A sleep ends with the hook
 that started it, so a sleep the hook does not await cannot hold up the dispatch.
+
+## Model calls
+
+`$.model.complete(request, {signal})` runs one text completion on the session's
+own client, with no tools, no history and no system prompt but the request's
+`system`. Provider settings cannot replace those request fields or raise the
+output cap. `request` takes the fields Claude Code 2.1.319 declares:
+
+| Field       | Meaning                                                                                                                                                                    |
+| ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `model`     | `haiku` runs the fast model (the session's model when none is set); `sonnet` and `opus` run the session's model; any other name is a configured model id, or `authType:id` |
+| `prompt`    | the one user message: a string, or a list of `{text, cache?}` blocks sent in order                                                                                         |
+| `system`    | an optional system prompt, a string or blocks                                                                                                                              |
+| `maxTokens` | the reply's cap, default 1024; above 64000, or above a model's known output limit, the call rejects                                                                        |
+| `effort`    | `low`, `medium`, `high`, `xhigh` or `max`                                                                                                                                  |
+| `timeoutMs` | how long the whole call may take before it resolves `aborted`                                                                                                              |
+
+The call resolves to a result, never a bare string, and never rejects over what
+the provider did:
+
+- `{isAnswered: true, text, usage}` when the model answered;
+- `{isAnswered: false, reason: 'api-error', status, error, usage}` when the API
+  failed: `status` is the HTTP status or `null`, and `error` a kind such as
+  `rate_limit`, `overloaded`, `invalid_request` or `unknown`, never the error's
+  text;
+- `{isAnswered: false, reason: 'empty-reply', usage}` when the reply held no
+  text;
+- `{isAnswered: false, reason: 'aborted', usage}` when `signal` aborted,
+  `timeoutMs` elapsed or the dispatch that made the call ended.
+
+`usage` holds the four token counts in the API's spelling. Only a request Qwen
+Code will not send rejects: a wrong shape, a model that is not configured, or a
+cap over the limit.
+
+```js
+on('command.run', { command: 'summarize' }, async ($, e, next) => {
+  const r = await $.model.complete({
+    model: 'haiku',
+    prompt: `Summarize in one line:\n${e.args}`,
+    timeoutMs: 20000,
+  });
+  return { text: r.isAnswered ? r.text : `No summary (${r.reason})` };
+});
+```
+
+`model.complete` is an API event: another Mod's hook can rewrite the request,
+answer it with `{value: result}` without a request, or refuse it with `{deny}`.
+It reads the prompt as text with the caller's blocks beside it in `promptBlocks`
+and `systemBlocks`; passing `system: null` or `false` down sends no system
+prompt. The `signal` does not cross into the event.
+The caller's signal and deadline still apply while these hooks run. Cancelling
+the call also cancels model requests started by its hooks. For pending QuickJS
+promise jobs the deadline takes effect at the next hook or API boundary, with
+the VM execution budget still in effect.
+
+Qwen Code differs from Claude Code here:
+
+- Without `effort`, the client uses the provider's reasoning controls. On Gemini
+  it suppresses thought summaries and leaves thinking at the provider default.
+  With `effort`, the model uses the configured level. Qwen Code does not send
+  the named level yet.
+- `cache` marks are accepted and not sent; the cache counts in `usage` are what
+  the provider reports.
+- The call is tried once. Retry from `status` and `error` when a kind such as
+  `rate_limit` may clear.
+- The selected endpoint uses its own credentials. An OAuth model needs cached
+  credentials.
+- A reply too long for a Mod payload keeps its head and tail around a
+  truncation marker.
+
+A model call ends with its dispatch. If the host has already switched sessions,
+model calls from the old `session.end` resolve `aborted`. The hook's budget pauses
+while it awaits the call. The dispatch's 60-second budget pauses when the worker
+is waiting only on the host model request, including inside a `tool.check` hook. A session
+runs one Mod dispatch at a time, so other hooks in the session wait for it.
+Keep calls short, bound them with `timeoutMs`, and cache answers you will need
+again.
 
 ## Turn events
 
@@ -635,7 +713,7 @@ ends a turn, with [`$.prompt.submit`](#a-mods-own-prompt).
 ## Submitted prompts
 
 In headless runs and in the Ink and OpenTUI terminals, `prompt.submit` fires for
-each prompt a person submits, and in headless runs for each prompt a Mod submits
+each prompt a person submits, and for each prompt a Mod submits
 ([A Mod's own prompt](#a-mods-own-prompt)), before UserPromptSubmit hooks and before `@` references are read. A hook can rewrite the
 prompt, attach context the model reads beside it, or drop it:
 
@@ -729,9 +807,9 @@ where transcript logs do.
 
 ### A Mod's own prompt
 
-In headless runs and the Ink terminal, `$.prompt.submit({ text })` submits a
-prompt of the Mod's own. It starts a turn once the session is idle, after the
-turn that is running, and never joins a running turn:
+In headless runs and the Ink and OpenTUI terminals, `$.prompt.submit({ text })`
+submits a prompt of the Mod's own. It starts a turn once the session is idle,
+after the turn that is running, and never joins a running turn:
 
 ```javascript
 export function register(on) {
@@ -772,29 +850,36 @@ export function register(on) {
   queued and the background notifications, and waits while a Goal is running.
   A Monitor update that waits out the minimum interval between its turns does
   not hold it.
-  The transcript shows it as the line `Mod <name>: <text>`, live and when the
-  session is resumed, with `asUser` too, and it does not enter the input
-  history.
+- In the OpenTUI terminal the prompt's turn starts after the prompts and
+  commands the person queued, and waits while a dialog is open, a `!` command
+  runs, something the person sent is still being routed or run as a command,
+  and while a Goal is active. OpenTUI runs no Goal continuation turns, so an
+  active Goal holds the prompt until a turn of the person's ends the Goal or
+  the person runs `/goal pause` or `/goal clear`.
+- In both terminals the transcript shows the prompt as the line
+  `Mod <name>: <text>`, live and when the session is resumed, with `asUser`
+  too, and it does not enter the input history.
 - The Mods' prompts start at most 8 turns before the person sends a prompt
   again. Past that a call resolves to a drop, and the line
   `$.prompt.submit refused: …` appears where transcript logs do. In a headless
   run, the prompt the run was given is the person's, and in a stream-json
   session each message the client sends is, a slash command too. In the Ink
-  terminal, each prompt or slash command the person sends is.
+  and OpenTUI terminals, each prompt or command the person sends is; one
+  queued during a turn counts when it runs. In OpenTUI, text steered into a
+  running turn counts as soon as the turn takes it; in Ink it does not, and
+  the count and a stop hold until the person's next prompt runs.
 - `/clear` and `/resume` start the new session with no prompts queued and the
   count at 0. A prompt submitted while the old session ends, from a
   `session.end` hook for instance, resolves to
   `{ drop: 'the session is ending' }`.
 - A prompt still queued when the run stops early, on an interrupt, a structured
   result, a detected loop or a slash command that fails, does not run. In the
-  Ink terminal, neither does one still queued when the person stops a turn,
+  terminals, neither does one still queued when the person stops a turn,
   with Esc or by declining every tool it asks to run. Until the person sends a
   prompt again, a call then resolves to
   `{ drop: 'the person stopped a turn and has not sent a prompt since' }`, so a
   `turn.complete` hook of the stopped turn starts no turn. A turn a Mod ends
   with `$.turn.abort` keeps them.
-- In the OpenTUI terminal the method is not listed in `methods` yet, and a
-  call resolves to `{ drop: 'this host does not run prompts a Mod submits' }`.
 
 These differ from Claude Code:
 

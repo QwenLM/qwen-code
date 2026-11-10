@@ -30,16 +30,16 @@ final class ChildSessionAdmissions {
     private final AgentStoreRows storeRows;
     private final AgentEventJournal eventJournal;
     private final AgentSessionCommands sessionCommands;
-    private final ManagedExtensionRecordStore configRecords;
+    private final JdbcManagedExtensionRecordStore configRecords;
     private final ManagedSessionModelConfigs modelConfigs;
-    private final ManagedSessionSkills creationSkills;
+    private final JdbcManagedSessionSkills creationSkills;
     private final ResidentWorkspaces residentWorkspaces;
     private final boolean workspaceFilesEnabled;
 
     ChildSessionAdmissions(JdbcTemplate jdbc, Clock clock, AgentStoreRows storeRows,
             AgentEventJournal eventJournal, AgentSessionCommands sessionCommands,
-            ManagedExtensionRecordStore configRecords, ManagedSessionModelConfigs modelConfigs,
-            ManagedSessionSkills creationSkills, ResidentWorkspaces residentWorkspaces,
+            JdbcManagedExtensionRecordStore configRecords, ManagedSessionModelConfigs modelConfigs,
+            JdbcManagedSessionSkills creationSkills, ResidentWorkspaces residentWorkspaces,
             boolean workspaceFilesEnabled) {
         this.jdbc = jdbc;
         this.clock = clock;
@@ -99,7 +99,7 @@ final class ChildSessionAdmissions {
         SessionRecord parent = storeRows.requireSessionForUpdate(tenantId,
                 parentSessionId);
         if (parent.workspace() == null || residentWorkspaces.find(parent.workspace()) != null || !"ACTIVE".equals(parent.status())
-                || CsiFilesRetirementProfile.PROFILE.equals(parent.toolProfile())) {
+                || CsiFilesRetirementProfile.isProfile(parent.toolProfile())) {
             throw new ManagedAgentException(409,
                     "child_parent_unavailable",
                     "The parent Session cannot admit a child.");
@@ -194,7 +194,7 @@ final class ChildSessionAdmissions {
         // a profile that writes. Only the profile differs from the parent.
         String toolProfile = null;
         if (childCwdRelative != null
-                && ChildWorkspaceStore.SNAPSHOT.equals(requireReadyChildWorkspace(
+                && JdbcChildWorkspaceStore.SNAPSHOT.equals(requireReadyChildWorkspace(
                         tenantId, parentSessionId, lineage.parentChildRunId(),
                         parent.workspace(), childCwdRelative))) {
             toolProfile = WorkspaceToolProfiles.READ;
@@ -211,7 +211,7 @@ final class ChildSessionAdmissions {
                         + " cwd_relative, context_config_ref,"
                         + " context_revision, workspace_config_ref,"
                         + " workspace_policy_ref, tool_profile,"
-                        + " creator_actor_key, approval_mode,"
+                        + " creator_actor_key, owner_actor_key, owner_only, approval_mode,"
                         + " parent_session_id, root_session_id,"
                         + " parent_child_run_id, child_depth)"
                         + " SELECT tenant_id, ?, agent_id,"
@@ -223,7 +223,7 @@ final class ChildSessionAdmissions {
                         + ", context_config_ref, context_revision,"
                         + " workspace_config_ref, workspace_policy_ref, "
                         + (toolProfile == null ? "tool_profile" : "?")
-                        + ", creator_actor_key, approval_mode,"
+                        + ", creator_actor_key, COALESCE(owner_actor_key, creator_actor_key), owner_only, approval_mode,"
                         + " ?, ?, ?, ?"
                         + " FROM ma_session"
                         + " WHERE tenant_id = ? AND session_id = ?",
@@ -248,6 +248,7 @@ final class ChildSessionAdmissions {
         if (turnId != null) {
             sessionCommands.insertTurn(tenantId, sessionId, turnId, promptId, input,
                     payloadDigest, now);
+            SideQueryConversation.mainInputAccepted(jdbc, tenantId, sessionId);
         }
         ManagedReceipts.insertCreation(jdbc, tenantId,
                 com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(tenantId, childActorOf(parentSessionId)),
@@ -328,7 +329,7 @@ final class ChildSessionAdmissions {
             throw new ManagedAgentException(409, "child_workspace_not_ready",
                     "The child run's Workspace is not ready to bind a child Session.");
         }
-        return ChildWorkspaceStore.workspaceMode(requests.getFirst());
+        return JdbcChildWorkspaceStore.workspaceMode(requests.getFirst());
     }
 
     // H2 truncates bare BINARY casts; the suffix also prevents NUL-padding aliases.

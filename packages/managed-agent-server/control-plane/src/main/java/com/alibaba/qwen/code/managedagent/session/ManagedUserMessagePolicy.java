@@ -58,6 +58,8 @@ public class ManagedUserMessagePolicy implements UserMessagePolicy {
     // has its own, narrower rule (requireCancellerRole/Shape).
     void requireSubmitterRole(SessionRecord session,
             String actorId) {
+        ManagedWorkspaceRegistry.requireSessionVisibility(session, actorId,
+                workspaces);
         // Same split as the read grant: both arms compare the raw actor
         // (code-point bounded by the filter). The unified write authority is
         // the read authority, so this gate takes the raw-actor twin instead
@@ -201,6 +203,8 @@ public class ManagedUserMessagePolicy implements UserMessagePolicy {
     // shape gates or the creator-keyed facts the family's domain 409.
     void requireLegacyWorkspace(SessionRecord session,
             String actorId) {
+        ManagedWorkspaceRegistry.requireSessionVisibility(session, actorId,
+                workspaces);
         if (session.workspace() == null) {
             // The refusal path for a legacy Session is a gate too: the
             // unified write authority is the read authority, so no

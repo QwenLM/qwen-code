@@ -299,7 +299,7 @@ final class RuntimeBindingProvisioning {
             // exactly capacity and shutdown.
             boolean busy = failure instanceof RuntimeBrokerException brokerFailure && brokerFailure.isRetryable()
                     && (claimed.getResourceHandle() == null
-                            || RuntimeBrokerSupport.externalRetryable(request, brokerFailure)
+                            || RuntimeProvisionFailureHandler.externalRetryable(request, brokerFailure)
                             || (request.isManagedContext() && brokerFailure.getStatusCode() == 409
                                     && "workspace_csi_busy".equals(brokerFailure.getCode()))
                             || (!request.isManagedContext()

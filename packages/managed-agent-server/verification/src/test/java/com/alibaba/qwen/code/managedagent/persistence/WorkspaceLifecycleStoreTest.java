@@ -12,6 +12,8 @@ import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfi
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLease;
@@ -62,10 +64,10 @@ class WorkspaceLifecycleStoreTest {
     void lifecycleHookTransitionsRecheckNewEffectsAndKeepOriginalSettlement(boolean authority, boolean granted,
             String before, String after, boolean replacement, boolean accepted, boolean batch, boolean draining) throws Exception {
         var fixture = fixture();
-        var executionStore = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new WorkspaceExecutionStore(fixture.jdbc,
+        var executionStore = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new JdbcWorkspaceExecutionStore(fixture.jdbc,
                 new DataSourceTransactionManager(fixture.jdbc.getDataSource())));
         var store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(fixture.jdbc,
-                new ManagedExtensionRecordStore(fixture.jdbc), null, executionStore, fixture.store, null, null, null,
+                new JdbcManagedExtensionRecordStore(fixture.jdbc), null, executionStore, fixture.store, null, null, null,
                 com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy.unbound(), null);
         var journal = fixture.transactions.execute(ignored -> new ExtensionRecordJournal(store, "tenant", "workspace", fixture.session).open());
         var templates = ManagedHookRecordContractTest.fixtures().get("templates");
@@ -131,7 +133,7 @@ class WorkspaceLifecycleStoreTest {
         long revision = fixture.jdbc.queryForObject("SELECT journal_revision FROM ma_session_head", Long.class);
         int resources = fixture.jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource", Integer.class);
         Runnable commit = () -> fixture.transactions.executeWithoutResult(ignored -> store.commit("tenant", fixture.session,
-                "extension-writer-token-0123456789", commitRequest, authority ? com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.authority(operation) : null));
+                "extension-writer-token-0123456789", commitRequest, authority ? WorkspaceLifecycleStore.authority(operation) : null));
         if (accepted && !batch) {
             commit.run();
             assertThat(fixture.jdbc.queryForObject("SELECT journal_revision FROM ma_session_head", Long.class))
@@ -197,9 +199,9 @@ class WorkspaceLifecycleStoreTest {
     void lifecycleClaimRefusalRemainsANonRetryableBrokerConflict() {
         var fixture = fixture();
         var operation = fixture.admit(OperationKind.DELETE);
-        var execution = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new WorkspaceExecutionStore(fixture.jdbc, new DataSourceTransactionManager(fixture.jdbc.getDataSource())));
+        var execution = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new JdbcWorkspaceExecutionStore(fixture.jdbc, new DataSourceTransactionManager(fixture.jdbc.getDataSource())));
         var session = fixture.store.requireSession("tenant", fixture.session);
-        execution.authorizeLifecycle(session, com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.authority(operation));
+        execution.authorizeLifecycle(session, WorkspaceLifecycleStore.authority(operation));
         assertThatThrownBy(() -> execution.authorizeLifecycle(session,
                 new RuntimeLifecycleAuthority(operation.operationId(), operation.claimGeneration() + 1)))
                 .isInstanceOfSatisfying(RuntimeBrokerException.class, error -> {
@@ -208,7 +210,7 @@ class WorkspaceLifecycleStoreTest {
                     assertThat(error.isRetryable()).isFalse();
                 });
         fixture.jdbc.update("UPDATE ma_operation SET claim_until = 0");
-        assertThatThrownBy(() -> execution.authorizeLifecycle(session, com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.authority(operation)))
+        assertThatThrownBy(() -> execution.authorizeLifecycle(session, WorkspaceLifecycleStore.authority(operation)))
                 .isInstanceOfSatisfying(RuntimeBrokerException.class, error -> {
                     assertThat(error.getStatusCode()).isEqualTo(409);
                     assertThat(error.getCode()).isEqualTo("workspace_lifecycle_claim_fenced");
@@ -232,7 +234,7 @@ class WorkspaceLifecycleStoreTest {
         fixture.jdbc.update("UPDATE ma_session SET tool_profile = ?",
                 WorkspaceToolProfiles.EXTERNAL_FILES);
         var execution = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(
-                new WorkspaceExecutionStore(fixture.jdbc,
+                new JdbcWorkspaceExecutionStore(fixture.jdbc,
                         new DataSourceTransactionManager(fixture.jdbc.getDataSource())));
 
         assertThatThrownBy(() -> execution.authorizeExternal(
@@ -253,7 +255,7 @@ class WorkspaceLifecycleStoreTest {
                 (row, index) -> row.getLong(1) * 1000 + row.getLong(2) / 1000);
         fixture.jdbc.update("UPDATE ma_session_head SET claim_lease_until = ?", now - 1);
         assertThatThrownBy(() -> fixture.bindings.requireHarnessAdmission(fixture.scope(), fixture.session,
-                com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.authority(operation))).isInstanceOfSatisfying(RuntimeBrokerException.class, error -> {
+                WorkspaceLifecycleStore.authority(operation))).isInstanceOfSatisfying(RuntimeBrokerException.class, error -> {
                     assertThat(error.getStatusCode()).isEqualTo(409);
                     assertThat(error.getCode()).isEqualTo("runtime_admission_closed");
                     assertThat(error.isRetryable()).isFalse();
@@ -293,7 +295,7 @@ class WorkspaceLifecycleStoreTest {
                 Base64.getEncoder().encodeToString(bytes), HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes)),
                 List.of(resource));
         assertThatThrownBy(() -> fixture.transactions.execute(ignored -> journal.commit("tenant", fixture.session, "w".repeat(32),
-                request, "authority".equals(mode) ? com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.authority(operation) : null)))
+                request, "authority".equals(mode) ? WorkspaceLifecycleStore.authority(operation) : null)))
                 .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
                     assertThat(error.getStatus()).isEqualTo(400);
                     assertThat(error.getCode()).isEqualTo(ManagedSessionStoreModels.ERROR_INVALID_REQUEST);
@@ -359,7 +361,7 @@ class WorkspaceLifecycleStoreTest {
             fixture.jdbc.update("INSERT INTO ma_session_record (session_scope_key, record_key, tenant_id, workspace_id,"
                     + " session_id, domain, record_id, operation_hash, revision, record_resource_id, task_kind, task_state, gmt_create, first_sequence)"
                     + " VALUES (?, ?, 'tenant', 'workspace', ?, 'hook_execution', ?, ?, 1, ?, 'hook', 'settled', 1, 1)",
-                    com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey("tenant", fixture.session),
+                    ManagedSessionStore.sessionScopeKey("tenant", fixture.session),
                     ManagedExtensionProjection.recordKey(fixture.session, "hook_execution", id),
                     fixture.session, id, "a".repeat(64), ref.path("resourceId").asText());
             effects.addObject().put("event", event).set("recordRef", ref);
@@ -379,7 +381,7 @@ class WorkspaceLifecycleStoreTest {
         assertThat(fixture.jdbc.queryForObject("SELECT phase FROM ma_session_head", String.class)).isEqualTo("DRAINING");
         fixture.transactions.executeWithoutResult(ignored -> journal.sealWriter("tenant", fixture.session, "w".repeat(32),
                 new ManagedSessionStoreModels.SealWriterRequest("workspace", "original", writer.writerGeneration()),
-                com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.authority(operation)));
+                WorkspaceLifecycleStore.authority(operation)));
         fixture.transactions.executeWithoutResult(ignored -> fixture.lifecycle.verifyCompletion(operation));
     }
 
@@ -437,7 +439,7 @@ class WorkspaceLifecycleStoreTest {
         fixture.jdbc.update("INSERT INTO ma_session_record (session_scope_key, record_key, tenant_id, workspace_id,"
                 + " session_id, domain, record_id, operation_hash, revision, record_resource_id, task_kind, task_state, gmt_create, first_sequence)"
                 + " VALUES (?, ?, 'tenant', 'workspace', ?, 'hook_execution', ?, ?, 1, ?, 'hook', 'settled', 1, 1)",
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey("tenant", fixture.session),
+                ManagedSessionStore.sessionScopeKey("tenant", fixture.session),
                 ManagedExtensionProjection.recordKey(fixture.session, "hook_execution", occurrence),
                 fixture.session, occurrence, "a".repeat(64), ref.path("resourceId").asText());
         // The first close persists its effects — the fence moves to
@@ -448,7 +450,7 @@ class WorkspaceLifecycleStoreTest {
         assertThat(fixture.jdbc.queryForObject("SELECT phase FROM ma_session_head", String.class)).isEqualTo("DRAINING");
         fixture.transactions.executeWithoutResult(ignored -> journal.sealWriter("tenant", fixture.session, "w".repeat(32),
                 new ManagedSessionStoreModels.SealWriterRequest("workspace", "original", writer.writerGeneration()),
-                com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.authority(first)));
+                WorkspaceLifecycleStore.authority(first)));
         fixture.transactions.executeWithoutResult(ignored -> fixture.store.failOperation("tenant", fixture.session,
                 first.operationId(), "worker", first.claimGeneration(), "session_close_completion_unsettled"));
         assertThat(fixture.jdbc.queryForObject("SELECT operation_id FROM ma_session_head", String.class))
@@ -491,7 +493,7 @@ class WorkspaceLifecycleStoreTest {
                         definition.length, digest, Base64.getEncoder().encodeToString(definition))));
         fixture.transactions.execute(ignored -> journal.commit("tenant", fixture.session, "w".repeat(32), commit));
         var operation = fixture.admit(OperationKind.DELETE);
-        var authority = com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.authority(operation);
+        var authority = WorkspaceLifecycleStore.authority(operation);
         var cleanup = new ManagedSessionStoreModels.AuthorizeLifecycleRequest("workspace", "original", writer.writerGeneration());
         assertThatThrownBy(() -> fixture.transactions.executeWithoutResult(ignored -> journal.authorizeLifecycle(
                 "tenant", fixture.session, "w".repeat(32), cleanup, authority))).hasMessageContaining("blocked");
@@ -541,7 +543,7 @@ class WorkspaceLifecycleStoreTest {
         fixture.bindings.requireHookAdmission(fixture.scope(), fixture.session, null);
         assertThatThrownBy(() -> fixture.bindings.requireHarnessAdmission(fixture.scope(), fixture.session, null))
                 .hasMessageContaining("closed");
-        var execution = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new WorkspaceExecutionStore(fixture.jdbc, new DataSourceTransactionManager(fixture.jdbc.getDataSource())));
+        var execution = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new JdbcWorkspaceExecutionStore(fixture.jdbc, new DataSourceTransactionManager(fixture.jdbc.getDataSource())));
         execution.authorizeLegacyClose(fixture.store.requireSession("tenant", fixture.session));
         fixture.jdbc.update("UPDATE ma_workspace_access SET role = 'READER'");
         assertThatThrownBy(() -> execution.authorizeLegacyClose(fixture.store.requireSession("tenant", fixture.session)))
@@ -583,9 +585,9 @@ class WorkspaceLifecycleStoreTest {
         var request = new ManagedSessionStoreModels.AuthorizeLifecycleRequest("workspace", "original", writer.writerGeneration());
         fixture.transactions.executeWithoutResult(ignored -> journal.authorizeLifecycle("tenant", fixture.session,
                 "w".repeat(32), new ManagedSessionStoreModels.AuthorizeLifecycleRequest("workspace", "original", writer.writerGeneration(), "delete"),
-                com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.authority(operation)));
+                WorkspaceLifecycleStore.authority(operation)));
         assertThatThrownBy(() -> fixture.transactions.executeWithoutResult(ignored -> journal.authorizeLifecycle("tenant", fixture.session,
-                "w".repeat(32), request, com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.authority(operation)))).hasMessageContaining("blocked");
+                "w".repeat(32), request, WorkspaceLifecycleStore.authority(operation)))).hasMessageContaining("blocked");
         assertThat(journal.hasLiveWriter("tenant", fixture.session)).isTrue();
         assertThat(fixture.jdbc.queryForObject("SELECT phase FROM ma_session_head", String.class)).isEqualTo("LIFECYCLE_ONLY");
     }
@@ -654,18 +656,18 @@ class WorkspaceLifecycleStoreTest {
         var fixture = fixture();
         OperationRecord first = fixture.admit(OperationKind.DELETE);
         RuntimeScope scope = fixture.scope();
-        fixture.bindings.requireHarnessAdmission(scope, fixture.session, com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.authority(first));
+        fixture.bindings.requireHarnessAdmission(scope, fixture.session, WorkspaceLifecycleStore.authority(first));
         assertThatThrownBy(() -> fixture.bindings.requireHarnessAdmission(scope, fixture.session, null))
                 .hasMessageContaining("closed");
         fixture.jdbc.update("UPDATE ma_operation SET claim_until = 0");
         OperationRecord second = fixture.transactions.execute(ignored -> fixture.store.claimOperation(
                 "tenant", fixture.session, first.operationId(), "second", Duration.ofSeconds(30)).orElseThrow());
         assertThat(second.claimGeneration()).isGreaterThan(first.claimGeneration());
-        assertThatThrownBy(() -> fixture.bindings.requireHarnessAdmission(scope, fixture.session, com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.authority(first)))
+        assertThatThrownBy(() -> fixture.bindings.requireHarnessAdmission(scope, fixture.session, WorkspaceLifecycleStore.authority(first)))
                 .hasMessageContaining("closed");
         assertThatThrownBy(() -> fixture.transactions.execute(ignored -> fixture.lifecycle.recoverEffects(first)))
                 .hasMessageContaining("blocked");
-        fixture.bindings.requireHarnessAdmission(scope, fixture.session, com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.authority(second));
+        fixture.bindings.requireHarnessAdmission(scope, fixture.session, WorkspaceLifecycleStore.authority(second));
         assertThat(fixture.transactions.<com.fasterxml.jackson.databind.JsonNode>execute(ignored -> fixture.lifecycle.recoverEffects(second))).isNotNull();
         assertThat(fixture.transactions.<Boolean>execute(ignored -> fixture.store.completeOperation(
                 "tenant", fixture.session, first.operationId(), "worker", first.claimGeneration(), true))).isFalse();
@@ -792,7 +794,7 @@ class WorkspaceLifecycleStoreTest {
         final ObjectMapper json = new ObjectMapper();
         final TransactionTemplate transactions;
         final ManagedAgentStore store;
-        final WorkspaceLifecycleStore lifecycle;
+        final JdbcWorkspaceLifecycleStore lifecycle;
         final JdbcRuntimeBindingRepository bindings;
         final String session;
 
@@ -815,11 +817,11 @@ class WorkspaceLifecycleStoreTest {
             bindings = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("test", new byte[32]));
             var beans = new DefaultListableBeanFactory();
             beans.registerSingleton("bindings", bindings);
-            lifecycle = new WorkspaceLifecycleStore(jdbc, json, beans.getBeanProvider(RuntimeBindingRepository.class));
-            store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, json, Clock.systemUTC(), ignored -> {}, new ManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules(), null, lifecycle);
-            beans.registerSingleton("results", new ManagedToolResultStore(jdbc, new DataSourceTransactionManager(source), store));
+            lifecycle = new JdbcWorkspaceLifecycleStore(jdbc, json, beans.getBeanProvider(RuntimeBindingRepository.class));
+            store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, json, Clock.systemUTC(), ignored -> {}, new JdbcManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules(), null, lifecycle);
+            beans.registerSingleton("results", new JdbcManagedToolResultStore(jdbc, new DataSourceTransactionManager(source), store));
             lifecycle.setProfiles(new WorkspaceProfileLifecycleVerifier(jdbc, beans.getBeanProvider(ToolPublicationDataStore.class),
-                    beans.getBeanProvider(ManagedToolResultStore.class)));
+                    beans.getBeanProvider(JdbcManagedToolResultStore.class)));
             jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation, storage_id,"
                     + " display_name, config_ref, policy_ref, state) VALUES ('tenant', 'workspace', 1, 'storage', 'Workspace', ?, ?, 'ACTIVE')",
                     WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
@@ -869,7 +871,7 @@ class WorkspaceLifecycleStoreTest {
             byte[] bytes = body.toString().getBytes(StandardCharsets.UTF_8);
             String digest = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));
             jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, gmt_create) VALUES (?, ?, 'tenant', 'workspace', ?, ?, ?, 1, ?, ?, 'MYSQL_INLINE', ?, 'committed-hooks', 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ")",
-                    ManagedSchemaKeys.key(com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey("tenant", session), id), com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey("tenant", session), session, id, kind, bytes.length, digest, bytes);
+                    ManagedSchemaKeys.key(ManagedSessionStore.sessionScopeKey("tenant", session), id), ManagedSessionStore.sessionScopeKey("tenant", session), session, id, kind, bytes.length, digest, bytes);
             return json.createObjectNode().put("resourceId", id).put("kind", kind).put("schemaVersion", 1).put("byteLength", bytes.length).put("digest", digest);
         }
 

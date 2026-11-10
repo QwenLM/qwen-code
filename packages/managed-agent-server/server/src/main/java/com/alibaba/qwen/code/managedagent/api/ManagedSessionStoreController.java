@@ -17,9 +17,9 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.WriterGrant;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.TenantContext;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedUserMessageStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedNativeJournalSnapshots;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedUserMessageStore;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonUnwrapped;
 import jakarta.validation.Valid;
@@ -46,13 +46,13 @@ import org.springframework.web.bind.annotation.RestController;
         name = "enabled", havingValue = "true")
 @RequestMapping("/internal/managed-session-store/v1/sessions/{sessionId}")
 public class ManagedSessionStoreController {
-    private final ManagedSessionStore store;
-    private final ManagedUserMessageStore userMessages;
+    private final JdbcManagedSessionStore store;
+    private final JdbcManagedUserMessageStore userMessages;
     private final ManagedNativeJournalSnapshots snapshots;
     @org.springframework.beans.factory.annotation.Autowired
     private com.alibaba.qwen.code.managedagent.persistence.ManagedSessionModelConfigs modelConfigs;
 
-    public ManagedSessionStoreController(ManagedSessionStore store, ManagedUserMessageStore userMessages,
+    public ManagedSessionStoreController(JdbcManagedSessionStore store, JdbcManagedUserMessageStore userMessages,
             ManagedNativeJournalSnapshots snapshots) {
         this.store = store;
         this.userMessages = userMessages;
