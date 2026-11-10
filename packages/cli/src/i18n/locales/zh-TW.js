@@ -360,6 +360,8 @@ export default {
   'Open the skills panel (browse, search, toggle, pick).':
     '開啟技能面板（瀏覽、搜尋、啟停、選擇）。',
   'Move this session to a new working directory': '將此會話移動到新的工作目錄',
+  'Wait for background agents to finish or stop them in /tasks before changing directories.':
+    '請等待背景智能體完成，或在 /tasks 中停止它們後再切換目錄。',
   'Manage Skills': '管理技能',
   'Skills configuration saved.': '技能設定已儲存。',
   'Skills configuration saved, but refresh failed: {{error}}. Restart to ensure the new state is applied.':
