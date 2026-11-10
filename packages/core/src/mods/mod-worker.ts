@@ -26,12 +26,14 @@ import {
   type ModModelCompleteResult,
   type ModReply,
   type ModSessionFacts,
+  type ModStoreOperation,
   type ModWorkerRequest,
 } from './types.js';
 import { ENGINE_NODE, type ModRenderSite } from './render-tree.js';
 import {
   MOD_EVENTS,
   MOD_HOST_EVENTS,
+  MOD_STORE_EVENTS,
   MOD_METHODS,
   MOD_READS,
   ModBudget,
@@ -94,6 +96,15 @@ const modelOperations = new Map<
 // The AbortController behind each running call's `options.signal`, by the
 // caller's invocation and the token its guest gave the call.
 const modelSignals = new Map<string, AbortController>();
+// $.store calls the host is answering, by id.
+const storeCalls = new Map<
+  number,
+  {
+    parent?: ModInvocation;
+    resolve: (value: unknown) => void;
+    reject: (error: Error) => void;
+  }
+>();
 let serial = 0;
 let epoch = 0;
 let rootId = 0;
@@ -120,6 +131,8 @@ let version = 'unknown';
 let submitsPrompts = false;
 // Whether the host runs `$.model.complete` calls.
 let runsModels = false;
+// Whether the host keeps each plugin's `$.store`.
+let keepsStore = false;
 // The events this host runs: those it raises only where it draws need a site.
 let supported: readonly ModEvent[] = MOD_EVENTS;
 // A render hook that keeps failing the same way is said once per load.
@@ -738,6 +751,8 @@ async function hostCall(
   const plugin = realms[call.plugin].plugin;
   if (model && !runsModels)
     throw new Error('Mod model.complete: this host runs no model calls.');
+  const store = MOD_STORE_EVENTS.includes(method);
+  if (store && !keepsStore) throw new Error('This host keeps no Mod store.');
   // A submitted prompt raises prompt.submit as a typed one does, through
   // every hook but the caller's. What arrives beneath them last is queued once
   // they have all answered. Its hooks do not run beneath the caller's, so a
@@ -806,6 +821,11 @@ async function hostCall(
                 methods: [...MOD_METHODS, ...MOD_READS]
                   .filter((name) => name !== 'prompt.submit' || submitsPrompts)
                   .filter((name) => name !== 'model.complete' || runsModels)
+                  .filter(
+                    (name) =>
+                      keepsStore ||
+                      !MOD_STORE_EVENTS.includes(name as ModEvent),
+                  )
                   .sort(),
               },
             },
@@ -829,6 +849,23 @@ async function hostCall(
         }
         if (model && modelScope)
           return { value: await completeModel(e, modelScope, owner) };
+        if (store) {
+          const key = String(e['key']);
+          return {
+            value: await storeCall(
+              method === 'store.keys'
+                ? { method, plugin: plugin.name }
+                : method === 'store.set'
+                  ? { method, plugin: plugin.name, key, value: e['value'] }
+                  : {
+                      method: method as 'store.get' | 'store.delete',
+                      plugin: plugin.name,
+                      key,
+                    },
+              owner,
+            ),
+          };
+        }
         if (submits) {
           arrived = {
             text: e['text'],
@@ -949,6 +986,23 @@ async function queueArrived(
   return refused === undefined ? arrived : { drop: refused };
 }
 
+function storeCall(
+  operation: ModStoreOperation,
+  parent?: ModInvocation,
+): Promise<unknown> {
+  assertLive(parent);
+  const id = ++serial;
+  return new Promise<unknown>((resolve, reject) => {
+    storeCalls.set(id, { parent, resolve, reject });
+    send({
+      type: 'store',
+      id,
+      operation,
+      deadline: parent?.modelScope?.deadline ?? Infinity,
+    });
+  }).finally(() => storeCalls.delete(id));
+}
+
 function queuePrompt(prompt: ModQueuedPrompt): Promise<string | undefined> {
   const id = ++serial;
   return new Promise<string | undefined>((resolve, reject) => {
@@ -971,6 +1025,12 @@ function cancelAbandonedOperations(): void {
     modelOperations.delete(id);
     cancelled.push(id);
     operation.reject(new Error('Mod model call ended with its dispatch.'));
+  }
+  for (const [id, operation] of storeCalls) {
+    if (!callAbandoned(operation.parent)) continue;
+    storeCalls.delete(id);
+    cancelled.push(id);
+    operation.reject(new Error('Mod store call ended with its dispatch.'));
   }
   if (cancelled.length) send({ type: 'host-cancel', ids: cancelled });
 }
@@ -1103,6 +1163,13 @@ port.on('message', async (request: ModWorkerRequest) => {
     promptQueues.get(request.id)?.resolve(request.refused);
     return;
   }
+  if (request.type === 'store-result') {
+    if (!busy || request.root !== rootId) return;
+    const pending = storeCalls.get(request.id);
+    if (request.error !== undefined) pending?.reject(new Error(request.error));
+    else pending?.resolve(request.value);
+    return;
+  }
   if (request.type === 'tool-check') {
     if (request.id <= lastCheck) return;
     lastCheck = request.id;
@@ -1176,12 +1243,15 @@ port.on('message', async (request: ModWorkerRequest) => {
       sites = request.sites ?? [];
       submitsPrompts = request.submits === true;
       runsModels = request.models === true;
+      keepsStore = request.stores === true;
       supported = MOD_EVENTS.filter(
         (event) =>
           !MOD_HOST_EVENTS.includes(event) ||
           (event === 'prompt.submit'
             ? request.prompts === true
-            : sites.length > 0),
+            : MOD_STORE_EVENTS.includes(event)
+              ? keepsStore
+              : sites.length > 0),
       );
       for (const plugin of request.plugins) {
         assertLive();
@@ -1385,6 +1455,7 @@ port.on('message', async (request: ModWorkerRequest) => {
       ...modelOperations.values(),
       ...turnAborts.values(),
       ...promptQueues.values(),
+      ...storeCalls.values(),
     ]) {
       operation.reject(new Error('Mod root dispatch has ended.'));
     }
@@ -1393,6 +1464,7 @@ port.on('message', async (request: ModWorkerRequest) => {
     modelSignals.clear();
     turnAborts.clear();
     promptQueues.clear();
+    storeCalls.clear();
     starting = false;
     builtinTool = undefined;
     rootBudget = undefined;
