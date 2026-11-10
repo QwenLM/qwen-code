@@ -20,6 +20,7 @@ it.each([
   '%s MCP tools infer and validate parsed Zod arguments',
   async (_, defineTool, createServer) => {
     const observed = vi.fn();
+    const customObserved = vi.fn();
     const definition = defineTool(
       'count',
       'Parse a count',
@@ -38,7 +39,19 @@ it.each([
         };
       },
     );
-    const server = createServer({ name: 'schema-test', tools: [definition] });
+    const customDefinition = defineTool(
+      'custom',
+      'Validate a custom value',
+      { value: z.custom<string>((value) => typeof value === 'string') },
+      async (args) => {
+        customObserved(args);
+        return { content: [{ type: 'text', text: args.value }] };
+      },
+    );
+    const server = createServer({
+      name: 'schema-test',
+      tools: [definition, customDefinition],
+    });
     const client = new Client({ name: 'schema-test-client', version: '1.0.0' });
     const [clientTransport, serverTransport] =
       InMemoryTransport.createLinkedPair();
@@ -46,6 +59,9 @@ it.each([
     try {
       await server.instance.connect(serverTransport);
       await client.connect(clientTransport);
+      await expect(client.listTools()).resolves.toMatchObject({
+        tools: [{ name: 'count' }, { name: 'custom' }],
+      });
       await expect(
         client.callTool({ name: 'count', arguments: { count: '7' } }),
       ).resolves.toMatchObject({
@@ -61,6 +77,19 @@ it.each([
         }),
       ).resolves.toMatchObject({ isError: true });
       expect(observed).not.toHaveBeenCalled();
+
+      await expect(
+        client.callTool({ name: 'custom', arguments: { value: 'valid' } }),
+      ).resolves.toMatchObject({
+        content: [{ type: 'text', text: 'valid' }],
+      });
+      expect(customObserved).toHaveBeenCalledWith({ value: 'valid' });
+      customObserved.mockClear();
+
+      await expect(
+        client.callTool({ name: 'custom', arguments: { value: 7 } }),
+      ).resolves.toMatchObject({ isError: true });
+      expect(customObserved).not.toHaveBeenCalled();
     } finally {
       await client.close();
       await server.instance.close();
