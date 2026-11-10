@@ -5,10 +5,13 @@ import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.RuntimeB
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcChildWorkspaceStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceOperatorRecoveryStore;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageGuard;
+import com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
@@ -84,7 +87,7 @@ class WorkspaceRuntimeTest {
     @Autowired
     private ManagedAgentStore sessions;
     @Autowired
-    private WorkspaceExecutionStore authority;
+    private JdbcWorkspaceExecutionStore authority;
     @Autowired
     private @Qualifier("managedJdbcTemplate") JdbcTemplate jdbc;
     @Autowired
@@ -466,9 +469,9 @@ class WorkspaceRuntimeTest {
     void authorizationRefusesAnUnverifiedPhysicalMount() {
         SessionRecord session = createSession("storage", ".");
         WorkspaceStorageGuard guard = mock(WorkspaceStorageGuard.class);
-        var checked = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new WorkspaceExecutionStore(new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(dataSource),
+        var checked = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new JdbcWorkspaceExecutionStore(new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(dataSource),
                 new DataSourceTransactionManager(dataSource), guard));
-        doThrow(com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable()).when(guard).verify(session.workspace());
+        doThrow(WorkspaceExecutionStore.unavailable()).when(guard).verify(session.workspace());
         assertUnavailable(() -> checked.authorize(session));
         checked.authorizePassiveAttachment(session);
         verify(guard).verify(session.workspace());
@@ -591,7 +594,7 @@ class WorkspaceRuntimeTest {
         var binding = session.workspace();
         RuntimeSessionRecord first = holder(session, "first");
         RuntimeSessionRecord second = holder(secondSession, "second");
-        var otherClient = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new WorkspaceExecutionStore(new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(dataSource), new DataSourceTransactionManager(dataSource)));
+        var otherClient = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new JdbcWorkspaceExecutionStore(new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(dataSource), new DataSourceTransactionManager(dataSource)));
         CyclicBarrier start = new CyclicBarrier(2);
         try (var pool = Executors.newFixedThreadPool(2)) {
             var one = pool.submit(() -> contend(authority, binding, first, start));
@@ -950,7 +953,7 @@ class WorkspaceRuntimeTest {
         SessionRecord session = createSession("storage", ".");
         var fixture = transport(session);
         when(fixture.http().installContext(any(), any(), any(), any()))
-                .thenThrow(com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable());
+                .thenThrow(WorkspaceExecutionStore.unavailable());
         assertThatThrownBy(() -> fixture.transport().acquire(fixture.lease(), fixture.record().getSession()))
                 .isInstanceOfSatisfying(RuntimeBrokerException.class, error ->
                         assertThat(error.getCode()).isEqualTo("runtime_session_acquire_failed"));
@@ -1121,9 +1124,9 @@ class WorkspaceRuntimeTest {
         var runtimeSession = fixture.record().getSession();
         authority.claim(session.workspace(), fixture.record());
         WorkspaceStorageGuard guard = mock(WorkspaceStorageGuard.class);
-        var checked = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new WorkspaceExecutionStore(new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(dataSource),
+        var checked = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new JdbcWorkspaceExecutionStore(new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(dataSource),
                 new DataSourceTransactionManager(dataSource), guard));
-        doThrow(com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable()).when(guard).verify(session.workspace());
+        doThrow(WorkspaceExecutionStore.unavailable()).when(guard).verify(session.workspace());
         var transport = new WorkspaceRuntimeTransport(fixture.http(), resolver(session, temp.toRealPath()),
                 checked, fixture.bindings(), new JdbcRuntimeSessionRepository(dataSource));
         assertUnavailable(() -> transport.control(fixture.lease(), runtimeSession, mcpControl(session, "mcp-configure")));
@@ -1209,7 +1212,7 @@ class WorkspaceRuntimeTest {
         var closeProperties = new ManagedAgentProperties();
         closeProperties.getHarness().setWorkspaceFilesEnabled(true);
         var closeStore = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, new ObjectMapper(), java.time.Clock.systemUTC(), ignored -> {},
-                new com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry(jdbc), closeProperties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+                new JdbcManagedWorkspaceRegistry(jdbc), closeProperties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         new TransactionTemplate(new DataSourceTransactionManager(dataSource)).execute(status -> {
             var admittedClose = closeStore.beginWorkspaceClose(session.tenantId(), session.sessionId(), "actor", "actor", "close", "digest", true);
             return closeStore.claimOperation(session.tenantId(), session.sessionId(), admittedClose.operation().operationId(),
@@ -1382,7 +1385,7 @@ class WorkspaceRuntimeTest {
     void childWorkspaceMaintenanceAndToolTurnsExcludeEachOther() throws Exception {
         SessionRecord session = createSession("storage", ".");
         RuntimeSessionRecord turn = holder(session, UUID.randomUUID().toString());
-        var childStore = new com.alibaba.qwen.code.managedagent.persistence.ChildWorkspaceStore(jdbc,
+        var childStore = new JdbcChildWorkspaceStore(jdbc,
                 new DataSourceTransactionManager(dataSource));
         var child = childStore.admit(session.tenantId(), session.sessionId(), "run", session.workspace(), System.currentTimeMillis());
         var claimed = childStore.claim(child, "worker", System.currentTimeMillis(), 60_000);
@@ -1424,7 +1427,7 @@ class WorkspaceRuntimeTest {
                 Instant.now(), Instant.now()));
     }
 
-    private boolean contend(WorkspaceExecutionStore store, ContextBinding binding,
+    private boolean contend(JdbcWorkspaceExecutionStore store, ContextBinding binding,
             RuntimeSessionRecord holder, CyclicBarrier barrier) throws Exception {
         barrier.await(5, TimeUnit.SECONDS);
         try {

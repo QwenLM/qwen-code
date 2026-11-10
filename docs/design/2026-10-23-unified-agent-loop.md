@@ -433,6 +433,26 @@ A retry with Ctrl+Y already runs on the shared round and, from PR 3b-2b, awaits 
 
 PR 3c-2 covers the turns the TUI starts on its own: a Goal's continuations, a background task's notification, a cron fire and a teammate's report. Each is a `submitQuery` call that the TUI's idle scheduling makes with its own send type, so each already runs on the shared round and the shared batch, and from PR 3c-1 the turn sends the round its batch continues with. The scheduling around these turns stays the TUI's, as on the other surfaces. PR 3c-2 adds a scenario for each kind of turn to the Ink parity suite, with a tool batch inside the turn. They pass unchanged, so the TUI's code does not change.
 
+### OpenTUI on the shared loop (PR 4)
+
+OpenTUI's live turn, `livePromptEvents` in `live-session.ts`, already has the loop's shape: it sends a round, runs the round's calls on a new `InteractiveModToolScheduler`, and sends their results as the next round, until a round calls no tools. OpenTUI does not start turns of its own yet: it has no Goal continuation, background-notification, cron or teammate turns. It moves in these steps:
+
+| Step | Content                                                                                                               |
+| ---- | --------------------------------------------------------------------------------------------------------------------- |
+| 4a   | every model round on the loop's `runModelRound`; the turn keeps its tool step; the parity suite runs on OpenTUI too   |
+| 4b   | a round's tool calls as one shared batch over `InteractiveModToolScheduler`, with the loop's finalizing and recording |
+| 4c   | the turn on the loop, whose next round takes the steering input queued for the tool boundary; a retry                 |
+| 4d   | default on, then remove the current loop                                                                              |
+
+PR 4a sends each model round of the live turn through `runModelRound`. The turn reads the round's events one at a time, as it reads the client's stream, and maps each as before. A turn that stops reading, because a newer turn replaced it or it was cancelled, ends the round, which closes the client's stream. What moves:
+
+| OpenTUI today                                                                               | With the setting on                                             |
+| ------------------------------------------------------------------------------------------- | --------------------------------------------------------------- |
+| the turn collects `tool_call_request` events and drops them on `retry` and `model_fallback` | `runModelRound` collects and drops them                         |
+| the calls a response made before a detected loop still run                                  | any stop reason keeps the round's calls from running, as in Ink |
+
+The parity suite runs on the renderer that `QWEN_E2E_RENDERER` selects. On OpenTUI it leaves out the scenarios of turns OpenTUI does not start, and checks that only the run with the setting on sends its rounds on the shared loop; its tool batches stay OpenTUI's until PR 4b.
+
 ## Migration
 
 | PR    | Content                                                                                                                                             |
@@ -455,12 +475,15 @@ PR 3c-2 covers the turns the TUI starts on its own: a Goal's continuations, a ba
 | 3c-1  | Ink TUI: input at a tool boundary through the loop's next round; a retry                                                                            |
 | 3c-2  | Ink TUI: cron, background-notification, teammate and Goal turns                                                                                     |
 | 3d    | Ink TUI: default on, then remove its current loop                                                                                                   |
-| 4     | OpenTUI                                                                                                                                             |
+| 4a    | OpenTUI: every model round on the loop's round; the turn keeps its tool step; the parity suite on OpenTUI                                           |
+| 4b    | OpenTUI: a round's tool calls as one shared batch                                                                                                   |
+| 4c    | OpenTUI: the turn on the loop, with steering input at a tool boundary; a retry                                                                      |
+| 4d    | OpenTUI: default on, then remove its current loop                                                                                                   |
 | 5     | AgentCore on a `Turn` round (subagents, background and forked agents, workflows)                                                                    |
 | 6     | speculation                                                                                                                                         |
 | —     | Hosted Harness: separate evaluation                                                                                                                 |
 
-Each of PRs 4–6 is followed by its own default-on and removal steps.
+Each of PRs 5 and 6 is followed by its own default-on and removal steps.
 
 A surface counts as moved when it passes its parity suite with the setting on and its known differences are listed. Each surface then changes its default on its own, without waiting for the others. Its default changes when:
 
@@ -521,7 +544,7 @@ A difference fails the scenario unless it is listed with a linked issue.
 
 A continuation's request runs under a prompt id of its own on the current loop and under the turn's prompt id on the shared loop; the suite compares them as one.
 
-**Ink scenarios** (`integration-tests/interactive/ink-agent-loop-parity.test.ts`). The TUI runs in a pseudo-terminal against the fake server. The suite compares the two runs' request bodies as sent, with the system prompt, the tools offered and each message's `reasoning_content`, and their session's chat records, with usage. It also checks each run's number of requests, and, through the debug log, that only the run with the setting on sends its rounds and runs its tool batches on the shared loop, as many as the scenario has. A scenario that sends and records nothing, such as a blocked prompt, checks the notice on each run's last screen instead; the screen is not compared otherwise, since it repaints on timers:
+**TUI scenarios** (`integration-tests/interactive/tui-agent-loop-parity.test.ts`). The TUI that `QWEN_E2E_RENDERER` selects, Ink or OpenTUI, runs in a pseudo-terminal against the fake server. The suite compares the two runs' request bodies as sent, with the system prompt, the tools offered and each message's `reasoning_content`, and their session's chat records, with usage. It also checks each run's number of requests, and, through the debug log, that only the run with the setting on sends its rounds and runs its tool batches on the shared loop, as many as the scenario has. A scenario that sends and records nothing, such as a blocked prompt, checks the notice on each run's last screen instead; the screen is not compared otherwise, since it repaints on timers:
 
 - plain text, and streamed text with a thought;
 - a thought before a tool, whose second request replays the reasoning;
@@ -543,7 +566,9 @@ A continuation's request runs under a prompt id of its own on the current loop a
 - a UserPromptSubmit hook that blocks;
 - a Stop hook that blocks once.
 
-The suite runs in the integration job. The nightly E2E run, and one started by hand, also runs the whole integration suite with the setting on, in a Linux leg without a sandbox; it is the scheduled job a surface's default change waits on.
+On OpenTUI the suite leaves out the Goal, background-notification, cron and teammate scenarios, since OpenTUI does not start those turns, and expects no tool batch on the shared loop until PR 4b.
+
+The suites run in the integration job, the TUI suite on Ink; the OpenTUI interactive E2E job, on main and nightly, runs the TUI suite on OpenTUI. The nightly E2E run, and one started by hand, also runs the whole integration suite with the setting on, in a Linux leg without a sandbox; it is the scheduled job a surface's default change waits on.
 
 ## Compatibility
 
@@ -594,6 +619,9 @@ The suite runs in the integration job. The nightly E2E run, and one started by h
 - With the setting on, the Ink TUI differs from today in these intended ways, as on the other surfaces:
   - from PR 3b-1, the skipped siblings of a plan-mode entry no longer count toward the session's completed tool calls;
   - from PR 3b-2a, a tool that ends the turn ends it outside a Goal turn too.
+
+- With the setting on, OpenTUI differs from today in this intended way:
+  - from PR 4a, the calls a response made before a detected loop no longer run, as in Ink and headless.
 
 - Later surfaces bring their own fixes: #15324 (ACP), #15326 (OpenTUI), #14114 and #12209 (ACP).
 
