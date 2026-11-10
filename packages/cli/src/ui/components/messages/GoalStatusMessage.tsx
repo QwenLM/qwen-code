@@ -15,6 +15,8 @@ import {
   describeLegacyGoalCard,
   type GoalCardColor,
 } from '../../utils/goal-card-view.js';
+import { composeGoalBudgetReason } from '../../utils/goal-budget-reason.js';
+import { getCurrentLanguage, t } from '../../../i18n/index.js';
 import type { GoalStatusKind } from '../../types.js';
 
 interface LegacyGoalStatusMessageProps {
@@ -65,7 +67,9 @@ const GoalStateCard: React.FC<GoalStateMessageProps> = ({
   snapshot,
   cause,
 }) => {
-  const view = describeGoalCard(snapshot, cause);
+  const view = describeGoalCard(snapshot, cause, (g) =>
+    composeGoalBudgetReason(g, t, getCurrentLanguage()),
+  );
   if (view.state === 'hidden') {
     // A Goal is on the record but its status is one this build cannot word.
     if (snapshot.goal) throw new Error('Unexpected Goal status');
