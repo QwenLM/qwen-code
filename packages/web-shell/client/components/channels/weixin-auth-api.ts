@@ -30,6 +30,16 @@ export interface WeixinAuthTarget {
  */
 const WEIXIN_REQUEST_TIMEOUT_MS = 15_000;
 
+/**
+ * Starting a flow is not a synchronous read: the handler awaits the upstream
+ * QR mint, which the daemon bounds at 30 s (`QR_MINT_TIMEOUT_MS`). Sharing the
+ * poll budget aborted any mint taking 16–30 s in the browser, and the daemon
+ * then cancelled the flow it was about to return — a failure on a request it
+ * was designed to allow. Only the poll budget feeds the abandonment contract,
+ * so this one can be longer without moving that bound.
+ */
+const WEIXIN_START_TIMEOUT_MS = 30_000;
+
 export class WeixinAuthError extends Error {
   constructor(
     message: string,
@@ -45,6 +55,7 @@ async function send<T>(
   target: WeixinAuthTarget,
   method: 'GET' | 'POST' | 'DELETE',
   path: string,
+  timeoutMs: number = WEIXIN_REQUEST_TIMEOUT_MS,
 ): Promise<T | undefined> {
   const response = await createDaemonRestRequest(
     target.baseUrl,
@@ -55,7 +66,7 @@ async function send<T>(
     headers: new Headers(
       target.token ? { Authorization: `Bearer ${target.token}` } : undefined,
     ),
-    signal: AbortSignal.timeout(WEIXIN_REQUEST_TIMEOUT_MS),
+    signal: AbortSignal.timeout(timeoutMs),
   });
   // A daemon that predates these routes answers 404; callers render that as
   // "unsupported" rather than as a failure.
@@ -91,7 +102,12 @@ export async function getWeixinAccountStatus(
 export async function startWeixinLogin(
   target: WeixinAuthTarget,
 ): Promise<DaemonWeixinLoginFlow | undefined> {
-  return send<DaemonWeixinLoginFlow>(target, 'POST', '/auth/weixin/flows');
+  return send<DaemonWeixinLoginFlow>(
+    target,
+    'POST',
+    '/auth/weixin/flows',
+    WEIXIN_START_TIMEOUT_MS,
+  );
 }
 
 export async function getWeixinLoginFlow(

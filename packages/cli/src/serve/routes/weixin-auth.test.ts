@@ -20,7 +20,11 @@ import type { AddressInfo } from 'node:net';
 import express, { type RequestHandler } from 'express';
 import request from 'supertest';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { registerWeixinAuthRoutes, UNWATCHED_FLOW_MS } from './weixin-auth.js';
+import {
+  registerWeixinAuthRoutes,
+  TERMINAL_RETENTION_MS,
+  UNWATCHED_FLOW_MS,
+} from './weixin-auth.js';
 
 const BOT_TOKEN = 'ilink-bot-token-must-never-leak';
 
@@ -111,7 +115,10 @@ class FakeIlink {
   }
 }
 
-function mount(fake: FakeIlink, options: { unwatchedFlowMs?: number } = {}) {
+function mount(
+  fake: FakeIlink,
+  options: { unwatchedFlowMs?: number; terminalRetentionMs?: number } = {},
+) {
   // The options are recorded, not ignored: `strict` is the only thing keeping
   // these routes closed on a daemon without a bearer token, and the real gate
   // returns one shared passthrough once a token is configured, so the option
@@ -624,6 +631,16 @@ describe('weixin auth routes', () => {
     );
 
     expect(interval + requestBudget).toBeLessThan(UNWATCHED_FLOW_MS);
+    // The second half of the same rationale. Chromium throttles a page hidden
+    // for five minutes to about one timer per minute, so a backgrounded login
+    // goes ~60 s between polls plus the request budget. Pinning only the stall
+    // gap above would let the bound drop to 60 s — under the window it was
+    // sized for — with the suite still green.
+    expect(UNWATCHED_FLOW_MS).toBeGreaterThanOrEqual(75_000);
+    // The retention window the protocol doc promises. The behavioural case
+    // below drives the test seam, so it cannot notice this default being
+    // shortened — a 5 s window would break the documented contract silently.
+    expect(TERMINAL_RETENTION_MS).toBe(60_000);
   });
 
   it('keeps a terminal view readable past the abandonment bound', async () => {
@@ -644,6 +661,34 @@ describe('weixin auth routes', () => {
     const view = await auth(request(watched).get(`/auth/weixin/flows/${id}`));
     expect(view.status).toBe(200);
     expect(view.body).toMatchObject({ status: 'ready' });
+  });
+
+  it('drops a terminal view once the retention window elapses', async () => {
+    // The retention timer in `finish()` is the only thing that reaps a
+    // terminal view: the GET handler skips the watchdog for terminal statuses
+    // and nothing else cancels it. Without this case, deleting that timer —
+    // or shortening the documented 60 s window — leaves the suite green.
+    fake.statusResponses = [{ status: 'confirmed', bot_token: BOT_TOKEN }];
+    const watched = mount(fake, {
+      unwatchedFlowMs: 5_000,
+      terminalRetentionMs: 600,
+    });
+    const started = await auth(
+      request(watched).post('/auth/weixin/flows'),
+    ).send({});
+    const id = started.body['id'] as string;
+    await waitForStatus(watched, id, 'ready');
+
+    // Readable inside the window…
+    const during = await auth(request(watched).get(`/auth/weixin/flows/${id}`));
+    expect(during.status).toBe(200);
+
+    await new Promise((resolve) => setTimeout(resolve, 900));
+
+    // …and gone after it, with the same shape an unknown id gets.
+    const after = await auth(request(watched).get(`/auth/weixin/flows/${id}`));
+    expect(after.status).toBe(404);
+    expect(after.body).toEqual({ code: 'flow_not_found' });
   });
 
   it('aborts the upstream mint when the daemon shuts down mid-mint', async () => {

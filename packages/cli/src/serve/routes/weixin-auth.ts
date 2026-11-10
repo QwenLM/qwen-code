@@ -20,8 +20,13 @@ import type {
 
 /** Concurrent flows are capped; each one polls the upstream once a second. */
 const MAX_FLOWS = 4;
-/** How long a terminal view stays readable so a polling client can observe it. */
-const TERMINAL_RETENTION_MS = 60_000;
+/**
+ * How long a terminal view stays readable so a polling client can observe it.
+ * Exported for the contract case that pins it against the documented window:
+ * the behavioural test drives the seam, which would not notice this default
+ * being shortened.
+ */
+export const TERMINAL_RETENTION_MS = 60_000;
 /**
  * How long a live flow may go unpolled before it is treated as abandoned.
  *
@@ -54,6 +59,8 @@ export interface RegisterWeixinAuthRoutesOptions {
   apiBaseUrl?: string;
   /** Test seam only, for the same reason: it shortens the abandonment bound. */
   unwatchedFlowMs?: number;
+  /** Test seam only, for the same reason: it shortens the retention window. */
+  terminalRetentionMs?: number;
 }
 
 interface WeixinFlow {
@@ -100,6 +107,8 @@ export function registerWeixinAuthRoutes(
 ): () => void {
   const apiBaseUrl = options.apiBaseUrl ?? DEFAULT_BASE_URL;
   const unwatchedFlowMs = options.unwatchedFlowMs ?? UNWATCHED_FLOW_MS;
+  const terminalRetentionMs =
+    options.terminalRetentionMs ?? TERMINAL_RETENTION_MS;
   const flows = new Map<string, WeixinFlow>();
   let disposed = false;
 
@@ -224,7 +233,7 @@ export function registerWeixinAuthRoutes(
         // anyone is still reading them.
         clearTimeout(flow.watchdog);
         flow.view = view;
-        flow.timer = setTimeout(() => cancel(id), TERMINAL_RETENTION_MS);
+        flow.timer = setTimeout(() => cancel(id), terminalRetentionMs);
         flow.timer.unref();
       };
 
