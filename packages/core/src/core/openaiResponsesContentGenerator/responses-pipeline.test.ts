@@ -34,6 +34,7 @@ import type { ContentGeneratorConfig } from '../contentGenerator.js';
 import type { ResponsesApiRequest } from './types.js';
 import { preloadRuntimeFetchModule } from '../../utils/runtimeFetchOptions.js';
 import { classifyRetryError } from '../../utils/retryErrorClassification.js';
+import { retryContext } from '../../utils/retryContext.js';
 import { appendAutoMemoryContext } from '../../memory/request-context.js';
 import {
   collect,
@@ -690,6 +691,49 @@ describe('ResponsesPipeline', () => {
       { ...textRequest('hi'), config: { maxOutputTokens: 8000 } },
     ],
   ])('%s', expectBody);
+
+  it('keeps isolated Mod requests free of configured tools and server-side history', async () => {
+    const body = await retryContext.run(
+      {
+        attempt: 1,
+        retryTotalDelayMs: 0,
+        requestSetupMs: 0,
+        singleAttempt: true,
+      },
+      () =>
+        sendBody(
+          pipe({
+            extra_body: {
+              instructions: 'configured prompt',
+              prompt: { id: 'pmpt_fixture', variables: { note: 'configured' } },
+              previous_response_id: 'old-response',
+              conversation: 'old-conversation',
+              tools: [{ type: 'web_search' }],
+              tool_choice: 'required',
+              max_tokens: 111,
+              max_output_tokens: 222,
+              service_tier: 'priority',
+            },
+          }),
+          { ...textRequest('hi'), config: { maxOutputTokens: 32 } },
+        ),
+    );
+    expect(body).toMatchObject({
+      max_output_tokens: 32,
+      service_tier: 'priority',
+    });
+    for (const key of [
+      'instructions',
+      'prompt',
+      'previous_response_id',
+      'conversation',
+      'tools',
+      'tool_choice',
+      'max_tokens',
+    ]) {
+      expect(body).not.toHaveProperty(key);
+    }
+  });
 
   describe('tool_choice from toolConfig.functionCallingConfig.mode', () => {
     function requestWithTool(

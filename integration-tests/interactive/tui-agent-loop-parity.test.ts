@@ -5,7 +5,8 @@
  */
 
 /**
- * The Ink TUI runs each scripted scenario twice, with
+ * The TUI that `QWEN_E2E_RENDERER` selects, Ink or OpenTUI, runs each
+ * scripted scenario twice, with
  * `QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP` unset and set, and the two runs must
  * send the model the same requests and record the same session. The screen is
  * not compared: it repaints on timers, and what it shows comes from the same
@@ -49,14 +50,16 @@ interface Scenario {
   approvals?: Array<'allow' | 'deny'>;
   /** Presses Esc once this text is on screen. */
   cancelOn?: string;
+  /** Disconnects the first response once this text is visible. */
+  disconnectOn?: string;
   /** Submits `input` once `on` is on screen, while the turn runs. */
   queue?: { on: string; input: string };
   /** Presses Ctrl+Y this many times after the prompt, each after a turn. */
   retries?: number;
   /**
-   * The session starts turns of its own after the prompts, a Goal's
-   * continuations, a background task's notification or a cron fire: waits
-   * until it has sent all `requests`.
+   * Wait for turns started by the session after the prompts, such as Goal
+   * continuations, background notifications, cron fires and teammate reports.
+   * These scenarios run only on Ink and wait until all `requests` are sent.
    */
   laterTurns?: boolean;
   /** Environment for the TUI, over the suite's. */
@@ -334,12 +337,13 @@ const hooks = (event: string, script: string) => ({
   ],
 });
 
-const describeInk =
-  IS_CONTAINER_SANDBOX || pickE2eRenderer() !== 'ink'
-    ? describe.skip
-    : describe;
+const renderer = pickE2eRenderer();
+const describeTui = IS_CONTAINER_SANDBOX ? describe.skip : describe;
+const SUITE = `${renderer === 'ink' ? 'Ink' : 'OpenTUI'} TUI agent loop parity (experimental.unifiedAgentLoop)`;
+/** Ink runs its tool batches on the shared loop; OpenTUI does not yet. */
+const sharesToolBatches = renderer === 'ink';
 
-describeInk('Ink TUI agent loop parity (experimental.unifiedAgentLoop)', () => {
+describeTui(SUITE, () => {
   let server: FakeOpenAIServer | undefined;
   let session: InteractiveSession | undefined;
   let scratch: string | undefined;
@@ -357,7 +361,7 @@ describeInk('Ink TUI agent loop parity (experimental.unifiedAgentLoop)', () => {
     await session?.close();
     await server?.close();
     if (scratch) rmSync(scratch, { recursive: true, force: true });
-    scratch = mkdtempSync(join(tmpdir(), 'qwen-ink-agent-loop-parity-'));
+    scratch = mkdtempSync(join(tmpdir(), 'qwen-tui-agent-loop-parity-'));
     const workspace = join(scratch, 'workspace');
     const home = join(scratch, 'home');
     const runtimeDir = join(scratch, 'runtime');
@@ -386,18 +390,33 @@ describeInk('Ink TUI agent loop parity (experimental.unifiedAgentLoop)', () => {
     for (const file of ['system.json', 'defaults.json'])
       json(join(scratch, file), { $version: 4 });
 
+    const { disconnectOn } = scenario;
+    const firstChunkRead = deferred();
     let streamingIndex = 0;
-    server = await startFakeOpenAIServer(({ body }) =>
-      body['stream'] === true
-        ? scenario.reply(
-            (body['messages'] ?? []) as JsonObject[],
-            workspace,
-            streamingIndex++,
-          )
-        : (scenario.sideReply?.(body) ?? {
+    server = await startFakeOpenAIServer(async ({ body }) => {
+      if (body['stream'] !== true) {
+        return (
+          scenario.sideReply?.(body) ?? {
             content: '{"selected_memories":[]}',
-          }),
-    );
+          }
+        );
+      }
+      const index = streamingIndex++;
+      const response = await scenario.reply(
+        (body['messages'] ?? []) as JsonObject[],
+        workspace,
+        index,
+      );
+      if (index === 0 && disconnectOn) {
+        return {
+          ...response,
+          holdAfterChunks: 1,
+          holdUntil: firstChunkRead.promise,
+          disconnectAfterContentChunks: 2,
+        };
+      }
+      return response;
+    });
     session = await InteractiveSession.start({
       cwd: workspace,
       cols: 100,
@@ -456,8 +475,18 @@ describeInk('Ink TUI agent loop parity (experimental.unifiedAgentLoop)', () => {
       await session!.idle(1_000, 30_000);
     };
 
-    for (const prompt of scenario.prompts) {
+    for (const [index, prompt] of scenario.prompts.entries()) {
       await session.send(prompt);
+      if (index === 0 && disconnectOn) {
+        try {
+          await until(
+            async () => (await session!.viewport()).includes(disconnectOn),
+            'the first response chunk is visible',
+          );
+        } finally {
+          firstChunkRead.resolve();
+        }
+      }
       for (const answer of scenario.approvals ?? []) {
         // The viewport, not the whole output, which still holds the
         // previous approval.
@@ -560,8 +589,9 @@ describeInk('Ink TUI agent loop parity (experimental.unifiedAgentLoop)', () => {
     return { promise, resolve };
   };
   let leaderWaiting = deferred();
+  const retryPrefix = 'A clockwork fox ';
 
-  const scenarios: Scenario[] = [
+  const allScenarios: Scenario[] = [
     {
       name: 'plain text',
       requests: 1,
@@ -720,17 +750,16 @@ describeInk('Ink TUI agent loop parity (experimental.unifiedAgentLoop)', () => {
     },
     {
       name: 'a stream that drops and is retried',
+      sent: 'The connection dropped mid-response.',
       requests: 2,
       rounds: 1,
       batches: 0,
       prompts: ['Tell me a story.'],
+      disconnectOn: retryPrefix.trimEnd(),
       reply: (_messages, _dir, index) =>
         index === 0
-          ? {
-              contentChunks: ['Once ', 'upon'],
-              disconnectAfterContentChunks: 1,
-            }
-          : { contentChunks: ['Once ', 'upon a time.'] },
+          ? { contentChunks: [retryPrefix, ''] }
+          : { contentChunks: [retryPrefix, 'followed the moon.'] },
     },
     {
       name: 'two prompts in one session',
@@ -1040,6 +1069,12 @@ describeInk('Ink TUI agent loop parity (experimental.unifiedAgentLoop)', () => {
     },
   ];
 
+  // OpenTUI does not start turns of its own yet: no Goal continuation,
+  // background notification, cron or teammate turn.
+  const scenarios = allScenarios.filter(
+    (scenario) => renderer === 'ink' || !scenario.laterTurns,
+  );
+
   it.each(scenarios)('$name', PARITY_CASE_OPTIONS, async (scenario) => {
     const current = await run(scenario, false);
     const shared = await run(scenario, true);
@@ -1047,7 +1082,7 @@ describeInk('Ink TUI agent loop parity (experimental.unifiedAgentLoop)', () => {
     expect(current.sharedRounds).toBe(0);
     expect(shared.sharedRounds).toBe(scenario.rounds);
     expect(current.sharedBatches).toBe(0);
-    expect(shared.sharedBatches).toBe(scenario.batches);
+    expect(shared.sharedBatches).toBe(sharesToolBatches ? scenario.batches : 0);
     for (const run of [current, shared]) {
       expect(run.requests).toHaveLength(scenario.requests);
       if (scenario.sideRequests !== undefined)

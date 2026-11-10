@@ -880,9 +880,9 @@ final class AgentExecutionOperations {
                                     + " version = version + 1 WHERE tenant_id = ? AND session_id = ?",
                             title, now, tenantId, sessionId);
                     eventJournal.appendEvent(tenantId, sessionId, null,
-                            AgentSessionCommands.mutationEvent(SessionMutationKind.RENAME, "completed"),
+                            SessionMutationEvents.mutationEvent(SessionMutationKind.RENAME, "completed"),
                             Map.of("sessionId", sessionId, "metadata", Map.of("title", title)),
-                            false, AgentSessionCommands.mutationSource("RENAME_SESSION", key, "completed"), now);
+                            false, SessionMutationEvents.mutationSource("RENAME_SESSION", key, "completed"), now);
                 }
                 jdbc.update("UPDATE ma_request_receipt SET state = 'COMPLETED', gmt_modified = ?"
                                 + " WHERE receipt_key = ? AND namespace = 'SESSION_COMMAND'",
