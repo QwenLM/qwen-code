@@ -11,9 +11,12 @@ restart. The daemon already provides `POST /session/:id/continue` and core
 already classifies interrupted prompts and dangling tool calls.
 
 This change exposes those existing capabilities. Opening a conversation does
-not start work. Partial assistant text without a persisted terminal outcome
-remains outside the supported interruption classifier; this change does not
-introduce new transcript records or provider-specific prefill.
+not itself issue a model request; the shipped Web Shell mounts opt into an
+automatic continue, which fires only once per restored load and only while the
+session is idle with a resumable interrupted turn. Partial assistant text
+without a persisted terminal outcome remains outside the supported interruption
+classifier; this change does not introduce new transcript records or
+provider-specific prefill.
 
 ## Design
 
@@ -92,11 +95,14 @@ does not replay the tools itself.
 - ACP session recovery decision, context response, and focused tests.
 - Daemon SDK context/result types, HTTP/session clients, exports, and tests.
 - Web Shell session actions, recovery banner, both chat surfaces, i18n, and tests.
-- No new daemon route, core recovery algorithm, CLI flag, or automatic resume.
+- No new daemon route, core recovery algorithm, or CLI flag. The automatic
+  continue is a Web Shell provider option and is on at both shipped mounts.
 
 ## Validation and acceptance
 
-1. Opening a saved interrupted prompt makes no model request until clicked.
+1. With the automatic continue off, opening a saved interrupted prompt makes no
+   model request until clicked. With it on, opening issues at most one request,
+   for a resumable turn on an idle session.
 2. Continuing preserves the session ID and sends the original context without
    duplicating a user message; tool interruptions use synthetic error results.
 3. Clean, active, pending-question, degraded, and unsupported states cannot
