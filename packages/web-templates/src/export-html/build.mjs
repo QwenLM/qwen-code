@@ -71,7 +71,7 @@ const exportTranscriptMaxEnvelopeBytes = 32 * 1024 * 1024;
 // Keep the warning close to the measurement and the hard ceiling close above
 // it: a cap left far above the measurement is a ratchet with enough slack for
 // a whole dependency family to come back unnoticed.
-const DOCUMENT_RUNTIME_WARNING_BYTES = 1_970_000;
+const DOCUMENT_RUNTIME_WARNING_BYTES = 2_066_000;
 // Grouped deletion plus main 159f8d0266 measures 2,041,583 JS bytes
 // (CSS is separate). Per-cause loop-stop text (#14828: seven keys across two
 // locales plus their mapping) adds 5,139: 2,041,583 against 2,046,722 on main
@@ -82,7 +82,18 @@ const DOCUMENT_RUNTIME_WARNING_BYTES = 1_970_000;
 // Recovery UI and availability consumers (#14980) add 1,787, measured
 // against merged main 65051590d9, so the merged build stays below this
 // ceiling.
-const MAX_DOCUMENT_RUNTIME_BYTES = 2_053_000;
+//
+// The markdown-chart 0.1.12 -> 0.4.1 upgrade (#16021) measures 2,053,466 on
+// head de6c47d879 against 2,034,760 on its merge parent: +12,947 in
+// @datafe-open/markdown-chart, +4,251 in markdown-chart-echarts, +1,219 in the
+// transcript entry's new echartsChart.* labels, and +289 across the adapter
+// and its transitive inputs. The AG Grid graph the adapter now imports is
+// dead in document mode and stubbed out below, so it contributes no bytes
+// here. That head was last built before the 2026-11-09 Web Shell changes, so
+// the merged tree measures 2,065,087, 11,621 above the head figure. The
+// warning sits 913 above the merged measurement and the ceiling 4,913 above
+// it.
+const MAX_DOCUMENT_RUNTIME_BYTES = 2_070_000;
 
 // Modules that must not be reachable from the document entry, checked against
 // the esbuild metafile inputs after the bundle is produced.
@@ -109,6 +120,21 @@ const FORBIDDEN_DOCUMENT_INPUTS = [
       'takes (MarkdownChartRenderer always passes a loadECharts). IIFE output ' +
       'cannot code-split, so that dead dynamic import was flattened in; it is ' +
       'resolved to src/document-echarts-stub.ts by the strip plugin below.',
+  },
+  {
+    pattern:
+      /(^|\/)node_modules\/(@datafe-open\/markdown-chart-table|ag-grid-community|ag-stack)\//,
+    why:
+      'The table data view is statically imported by ' +
+      '@datafe-open/markdown-chart-react@0.4.1, but document mode never renders ' +
+      'a chart (Markdown.tsx disables the integration outside the interactive ' +
+      'shell), so neither the table renderer nor its AG Grid Community graph ' +
+      'can run there. The import is static and IIFE output cannot code-split, ' +
+      'so it was flattened into the renderer asset; `markdown-chart-table` is ' +
+      'resolved to src/document-markdown-chart-table-stub.ts by the strip ' +
+      'plugin below, and the two AG Grid packages are named here too so ' +
+      'neither can return through another path — the same shape as the ' +
+      'echarts/zrender rule.',
   },
   {
     pattern: /(^|\/)node_modules\/(mermaid|@mermaid-js|cytoscape)\//,
@@ -138,6 +164,10 @@ const FORBIDDEN_DOCUMENT_INPUTS = [
 const documentShikiStub = join(srcDir, 'document-shiki-stub.ts');
 const documentEchartsStub = join(srcDir, 'document-echarts-stub.ts');
 const documentMermaidStub = join(srcDir, 'document-mermaid-stub.ts');
+const documentMarkdownChartTableStub = join(
+  srcDir,
+  'document-markdown-chart-table-stub.ts',
+);
 const stripDocumentDeadModules = {
   name: 'strip-document-dead-modules',
   setup(build) {
@@ -150,6 +180,10 @@ const stripDocumentDeadModules = {
     build.onResolve({ filter: /^mermaid(\/|$)/ }, () => ({
       path: documentMermaidStub,
     }));
+    build.onResolve(
+      { filter: /^@datafe-open\/markdown-chart-table(\/|$)/ },
+      () => ({ path: documentMarkdownChartTableStub }),
+    );
   },
 };
 

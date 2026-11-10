@@ -118,6 +118,25 @@ export interface Envelope {
   channelName: string;
   senderId: string;
   senderName: string;
+  /**
+   * Adapter-supplied marker identifying an automated sender (e.g. a peer bot
+   * in a bot-to-bot conversation), rendered as `[tag] ` in front of the
+   * sender attribution.
+   *
+   * Carried on the envelope instead of inside `text` because ChannelBase owns
+   * the sender prefix only after message routing and prompt sanitization run:
+   * a leading `[tag]` in `text` would either stop `matchMessageRoute` from
+   * matching (the route prefix must lead the text) or lose its brackets to
+   * `unwrapStartOfLineTags`. ChannelBase renders it only where it composes
+   * that prefix; self-prefixing adapters (`alreadyPrefixed`) render it
+   * themselves.
+   *
+   * A tagged envelope's text is prose, never a command: slash-command
+   * dispatch, `!` shell execution and channel-memory intents are skipped for
+   * it, because an automated peer is not an operator and its command-shaped
+   * text is model input.
+   */
+  senderTag?: string;
   chatId: string;
   chatName?: string;
   text: string;
@@ -272,6 +291,17 @@ export interface ChannelBoundSessions {
     prompt: string,
     idempotencyKey?: string,
   ): Promise<void>;
+  /**
+   * The set of GitHub comment identifiers the session has itself posted,
+   * canonical as `ic:<id>` (conversation comment) or `rc:<id>` (inline review
+   * comment). The bound PR comment watch uses it to withhold a comment from
+   * the session that wrote it while delivering every other author's comment,
+   * including the same GitHub account used by a different session/agent.
+   * Fail-open: an unavailable lookup resolves to an empty set so delivery is
+   * never suppressed on missing evidence. Optional: absent in standalone
+   * mode, where no suppression is applied.
+   */
+  postedCommentIds?(sessionId: string): Promise<ReadonlySet<string>>;
 }
 
 export interface ObservedChannelIdentity {

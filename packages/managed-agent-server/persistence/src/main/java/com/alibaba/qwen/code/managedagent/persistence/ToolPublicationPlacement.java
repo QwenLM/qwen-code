@@ -62,8 +62,8 @@ final class ToolPublicationPlacement {
             ToolPublicationRetentionStore.lockSessionRoot(jdbc, tenant, session);
             return false;
         }
-        ManagedSessionStore.lockBounded(() -> WorkspaceLifecycleStore.lockPlacement(jdbc, tenant,
-                ManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
+        JdbcManagedSessionStore.lockBounded(() -> JdbcWorkspaceLifecycleStore.lockPlacement(jdbc, tenant,
+                JdbcManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
         return true;
     }
 

@@ -71,7 +71,9 @@ public class LocalProcessRuntimeProvisionerTest {
     @Test
     void refusesPrivateProfileBeforeSpawningOrAdopting(
             @org.junit.jupiter.api.io.TempDir Path directory) throws Exception {
-        assertPrivateProfileRefused(directory, null);
+        for (String digest : List.of(CsiFilesRetirementProfile.CAPABILITY_DIGEST, CsiFilesRetirementProfile.DIAGNOSTICS_DIGEST)) {
+            assertPrivateProfileRefused(directory, null, digest);
+        }
     }
 
     @org.junit.jupiter.api.condition.DisabledOnOs(org.junit.jupiter.api.condition.OS.WINDOWS)
@@ -79,11 +81,13 @@ public class LocalProcessRuntimeProvisionerTest {
     public void refusesPrivateProfileBeforeDurableRegistration(
             @org.junit.jupiter.api.io.TempDir Path directory) throws Exception {
         Path root = directory.toRealPath();
-        assertPrivateProfileRefused(root,
-                new LocalRuntimeStore(root.resolve("state"), DurableLocalProcessRuntimeProvisionerTest.HOST));
+        var store = new LocalRuntimeStore(root.resolve("state"), DurableLocalProcessRuntimeProvisionerTest.HOST);
+        for (String digest : List.of(CsiFilesRetirementProfile.CAPABILITY_DIGEST, CsiFilesRetirementProfile.DIAGNOSTICS_DIGEST)) {
+            assertPrivateProfileRefused(root, store, digest);
+        }
     }
 
-    private static void assertPrivateProfileRefused(Path directory, LocalRuntimeStore store) throws Exception {
+    private static void assertPrivateProfileRefused(Path directory, LocalRuntimeStore store, String digest) throws Exception {
         Path marker = directory.resolve("spawned");
         Path script = directory.resolve("worker.mjs");
         Files.writeString(script, "import {writeFileSync} from 'node:fs';"
@@ -101,7 +105,7 @@ public class LocalProcessRuntimeProvisionerTest {
                 }, store)) {
             for (String isolation : List.of("session", "workspace")) {
                 RuntimeScope scope = new RuntimeScope("tenant", "workspace", "1", directory.toString(),
-                        CsiFilesRetirementProfile.CAPABILITY_DIGEST, isolation);
+                        digest, isolation);
                 RuntimeProvisionRequest request = new RuntimeProvisionRequest(scope,
                         "session".equals(isolation) ? java.util.UUID.randomUUID().toString() : null,
                         "kubernetes-workspace", "storage");
