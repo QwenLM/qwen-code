@@ -530,6 +530,7 @@ public class ManagedExtensionPackageService implements ExtensionPackages {
 
     public Operation saveSettings(String tenant, String actor, String workspace, String extensionId,
             String idempotencyKey, SettingsCommand command) {
+        requireAccess(tenant, actor, workspace, true);
         authorizeExtension(tenant, actor, workspace, extensionId);
         ManagedAgentService.validateIdempotencyKey(idempotencyKey);
         requireId(extensionId);

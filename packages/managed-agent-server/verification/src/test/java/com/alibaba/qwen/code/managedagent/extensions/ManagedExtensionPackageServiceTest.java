@@ -42,7 +42,9 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class ManagedExtensionPackageServiceTest {
@@ -259,6 +261,24 @@ class ManagedExtensionPackageServiceTest {
                 input, bytes.length)).isInstanceOfSatisfying(ManagedAgentException.class,
                         error -> assertThat(error.getStatus()).isEqualTo(403));
         assertThat(input.available()).isEqualTo(bytes.length);
+    }
+
+    @Test
+    void requiresWritePermissionBeforeLookingUpSettingsOrConsultingSource() throws Exception {
+        var provider = sourceProvider();
+        var imported = service.importSource("tenant", "operator", "workspace", "source",
+                new SourceImport(new ManagedExtensionSource.Reference("business", "skill", "skill_1", "1"), manifest.target()));
+        clearInvocations(provider);
+        var command = new SettingsCommand(0, Map.of());
+        for (String extensionId : List.of(imported.pin().extensionId(), "ext_11111111-1111-4111-8111-111111111111")) {
+            assertThatThrownBy(() -> service.saveSettings("tenant", "reader", "workspace", extensionId, "settings", command))
+                    .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
+                        assertThat(error.getStatus()).isEqualTo(403);
+                        assertThat(error.getCode()).isEqualTo("extension_management_forbidden");
+                    });
+        }
+        verifyNoInteractions(provider);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_extension_settings", Integer.class)).isZero();
     }
 
     @Test
