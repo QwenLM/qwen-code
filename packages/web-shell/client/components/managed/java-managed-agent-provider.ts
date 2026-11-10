@@ -320,6 +320,17 @@ export function createJavaManagedAgentProvider(
           source,
           request.signal,
         ),
+      runtimeSkillCandidates: (sessionId, request) =>
+        client.getRuntimeSkillCandidates(sessionId, request.signal),
+      runtimeSkillSnapshot: (sessionId, input, request) =>
+        client.snapshotRuntimeSkill(sessionId, input, request.signal),
+      importRuntimeSkill: (sessionId, input, request) =>
+        client.importRuntimeSkill(
+          sessionId,
+          input,
+          request.idempotencyKey,
+          request.signal,
+        ),
       lookupPackageOperation: (workspaceId, kind, key, request) =>
         client.lookupExtensionPackageOperation(
           workspaceId,

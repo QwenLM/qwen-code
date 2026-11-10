@@ -314,8 +314,8 @@ public class ToolPublicationAsyncVerificationTest {
                 .withBean("managedJdbcTemplate", org.springframework.jdbc.core.JdbcTemplate.class, () -> fixture.jdbc)
                 .withBean("managedAgentTransactionManager", PlatformTransactionManager.class, () -> fixture.manager)
                 .withBean(WriterCredentialPolicy.class, WriterCredentialPolicy::unbound)
-                .withBean(ManagedSessionStore.class, () -> com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(
-                        fixture.jdbc, new ManagedExtensionRecordStore(fixture.jdbc), null, null, null, bucket, null, null,
+                .withBean(JdbcManagedSessionStore.class, () -> com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(
+                        fixture.jdbc, new JdbcManagedExtensionRecordStore(fixture.jdbc), null, null, null, bucket, null, null,
                         WriterCredentialPolicy.unbound(), fixture.bindings))
                 .withBean(HarnessRules.class, SdkHarnessRules::new)
                 .withBean(StorageReadPolicy.class, ManagedSessionReaderVersion::new)

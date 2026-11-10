@@ -65,7 +65,7 @@
 
 1. 原样执行现有的包含性判定逻辑。
 2. 对判定为过期、且文件在表中的条目，取该文件在 `candidate.sha`（基线侧）与 `headSha`（分支侧）两处的文本。
-3. 抽取它的范围清单。对 `eslint.config.js` 是第一个 `ignores: [...]` 块，得到条目列表与 **remainder**——移除了整个该块之后的文件。对 `.prettierignore`，每个非空、且不在第零列以 `#` 开头的行都是模式，没有 remainder。但 `.prettierignore` **不是** prettier 的全部范围：prettier 3 也读 `.gitignore`（3.6.1 实测，加 `apps/host/` 让受检文件数从 2 降到 1），而且它在**任意深度**发现这两类文件——lane 按最近带忽略文件的祖先分组，仓库共跟踪 29 个这样的文件。因此收窄改为读取两侧的递归 tree，按路径与 blob SHA 比对**整个忽略文件集合**：除根 `.prettierignore` 外全部必须相同，blob SHA 无需取内容即可判定。不并入子集判定，因为真实 `.gitignore` 带十二条 `!` 重新纳入，语义比对会拒绝一切输入、使收窄从第一天起就是死代码。tree 被截断即为不完整答案，一律不收窄。
+3. 抽取它的范围清单。对 `eslint.config.js` 是第一个 `ignores: [...]` 块，得到条目列表与 **remainder**——移除了整个该块之后的文件。对 `.prettierignore`，每个非空、且不在第零列以 `#` 开头的行都是模式，没有 remainder。但 `.prettierignore` **不是** prettier 的全部范围：prettier 3 也读 `.gitignore`（3.6.1 实测，加 `apps/host/` 让受检文件数从 2 降到 1），而且它在**任意深度**发现这两类文件——lane 按最近带忽略文件的祖先分组，仓库共跟踪 29 个这样的文件。因此收窄改为读取两侧的递归 tree，按路径与 blob SHA 比对**整个忽略文件集合**：除根 `.prettierignore` 外全部必须相同，blob SHA 无需取内容即可判定。不并入子集判定，因为真实 `.gitignore` 带十二条 `!` 重新纳入，语义比对会拒绝一切输入、使收窄从第一天起就是死代码。tree 被截断即为不完整答案：抛出异常，从而保留判定并由 catch 注解原因，而不是静默关闭收窄。
 
    **基线侧在 `baseRef`（基线 tip）读取，而不是门禁提交。** `.gitignore` 没有自己的门禁判定，若按「最近触碰 `.prettierignore` 的提交」读取，其后基线上对它的任何改动都会被隐藏，且没有其他判定能抓到。只剥**尾随**空白——对 prettier 实测，`foo.js` 与 ` foo.js` 忽略的是不同文件，两端都 trim 会把不同模式归并，可能认证一个范围比基线更窄的分支；同理 `  # foo` 仍是模式。
 
@@ -183,7 +183,8 @@ tree \ base_ignores  ⊆  tree \ branch_ignores
 - `.prettierignore` 上同样三条结论成立：基线新增放行、基线移除仍过期、负向行阻止收窄。
 - raw media type 与 `main()` 的 `fetchText` 接线各自被钉住：改回 JSON media type 或删掉接线会让点名用例变红，而不是在 fail-closed 的 catch 后面静默失效。
 - 取文本失败或抽取失败保留原过期结论，并发出点名该文件与原因的 `::warning::` 注解；抽取失败因此改为抛出而非返回 false，才能进入负责记录的 catch。
-- prettier 收窄在基线 tip 读取 tree、覆盖嵌套忽略文件，并在 tree 截断或任一侧增删忽略文件时拒绝收窄。
+- prettier 收窄在基线 tip 读取 tree、覆盖嵌套忽略文件，并在 tree 截断或任一侧增删忽略文件时拒绝收窄；截断与抽取失败一样会发出注解。
+- 含斜杠的基线 ref 在 tree 路径中经过 URI 编码。
 - 注释中嵌入的 U+2028、U+2029 或单独 CR 无法藏匿条目。
 - `.gitignore` 的任何差异都阻止 prettier 收窄。
 - 真实 `.prettierignore` 中出现负向或转义模式会打红漂移守卫，避免收窄静默地永久失效。

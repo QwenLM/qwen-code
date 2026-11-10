@@ -2,7 +2,7 @@ package com.alibaba.qwen.code.managedagent.maintenance;
 
 import com.alibaba.qwen.code.maintenance.WorkspaceRecoveryApplication;
 import com.alibaba.qwen.code.managedagent.config.runtime.RuntimeProviderRegistry;
-import com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceOperatorRecoveryStore;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
 import com.alibaba.qwen.code.managedagent.workspace.runtime.WorkspaceRuntimeProvisioner;
@@ -64,7 +64,7 @@ public final class WorkspaceRecoveryCommand {
             var executions = new JdbcToolExecutionRepository(dataSource);
             var manager = new JdbcTransactionManager(dataSource);
             var jdbc = new JdbcTemplate(dataSource);
-            var ownership = new WorkspaceExecutionStore(jdbc, manager);
+            var ownership = new JdbcWorkspaceExecutionStore(jdbc, manager);
             var operator = new WorkspaceOperatorRecoveryStore(jdbc, manager,
                     bindings, context.getBean(ObjectMapper.class));
             Path stateDirectory = Path.of(options.getStateDirectory()).toAbsolutePath().normalize();
