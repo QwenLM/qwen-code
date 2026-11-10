@@ -183,10 +183,19 @@ keeps minting notification entries that are never read again; without the
 refresh those dead entries would evict the quiet PRs that are read every poll.
 
 A moved cursor still mints new keys, so the map stays bounded and evicts
-least-recently-used first. Bodies above a fixed size are declined, sized
-against the entry cap so the retention bound stays in the same order as a
-smaller cache of larger bodies; a declined URL simply stays unconditional,
-which is the pre-change behavior. The cache is cleared on disconnect so a
+least-recently-used first. Bodies above a fixed size are declined; a declined
+URL simply stays unconditional, which is the pre-change behavior. A response
+carrying no validator at all is likewise passed through and never occupies a
+slot — there is nothing to revalidate against.
+
+The entry and per-body caps only bound their product loosely, so retention is
+**also bounded directly by a total byte budget**. Eviction runs until both the
+entry count and the byte total are within their limits. Real responses sit one
+to two orders of magnitude below the per-body cap, so the byte budget binds
+only the pathological case and never evicts a working set. The running total
+is maintained by the cache's only two writers, so it cannot drift from the map.
+
+The cache is cleared on disconnect — map and byte total together — so a
 reconnect never serves a body cached under a previous credential.
 
 ## Files affected

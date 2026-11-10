@@ -118,6 +118,7 @@ vi.mock('@qwen-code/channel-base', async (importOriginal) => {
 
 import {
   CONDITIONAL_CACHE_MAX_ENTRIES,
+  CONDITIONAL_CACHE_MAX_TOTAL_BYTES,
   GithubChannel,
   MAX_PR_WATCH_LIMIT,
   validateBoundSessionConfig,
@@ -19702,6 +19703,64 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
 
         await transport(prUrl, { method: 'GET' });
         expect(calls.at(-1)!.ifNoneMatch).toBe('"v1"');
+      });
+
+      it('leaves a 200 without an ETag unconditional', async () => {
+        await initChannel(watchConfig, { boundSessions });
+        // No validator means nothing to revalidate against: the response must
+        // pass through untouched and must not occupy a cache slot.
+        const calls = installTransport(() => ({
+          status: 200,
+          body: makePrMeta({}),
+        }));
+        const transport = adapterFetch();
+
+        const first = await transport(prUrl, { method: 'GET' });
+        const second = await transport(prUrl, { method: 'GET' });
+
+        expect(calls).toHaveLength(2);
+        expect(calls.map((call) => call.ifNoneMatch)).toEqual([null, null]);
+        expect(second.status).toBe(200);
+        expect(await second.json()).toEqual(await first.json());
+        expect(
+          (channel as unknown as { conditionalCacheBytes: number })
+            .conditionalCacheBytes,
+        ).toBe(0);
+      });
+
+      it('evicts on total bytes even while under the entry cap', async () => {
+        await initChannel(watchConfig, { boundSessions });
+        // One shared string keeps the fixture cheap while the accounting still
+        // sums per entry: enough maximum-size bodies to cross the byte budget
+        // without approaching the entry cap.
+        const filler = 'x'.repeat(256 * 1024 - 64);
+        const needed =
+          Math.ceil(CONDITIONAL_CACHE_MAX_TOTAL_BYTES / (256 * 1024)) + 1;
+        expect(needed).toBeLessThan(CONDITIONAL_CACHE_MAX_ENTRIES);
+        const calls = installTransport(() => ({
+          status: 200,
+          body: { title: filler },
+          headers: { etag: '"v1"' },
+        }));
+        const transport = adapterFetch();
+        const pull = (n: number) =>
+          `https://api.github.com/repos/owner/repo/pulls/${n}`;
+
+        for (let n = 1; n <= needed; n++) {
+          await transport(pull(n), { method: 'GET' });
+        }
+
+        // The oldest was evicted by bytes, not by count.
+        await transport(pull(1), { method: 'GET' });
+        expect(calls.at(-1)!.ifNoneMatch).toBeNull();
+        // Control: the newest survived, and the running total stayed in step
+        // with the map rather than drifting negative or over-counting.
+        await transport(pull(needed), { method: 'GET' });
+        expect(calls.at(-1)!.ifNoneMatch).toBe('"v1"');
+        expect(
+          (channel as unknown as { conditionalCacheBytes: number })
+            .conditionalCacheBytes,
+        ).toBeLessThanOrEqual(CONDITIONAL_CACHE_MAX_TOTAL_BYTES);
       });
 
       it('declines to cache an oversized body', async () => {

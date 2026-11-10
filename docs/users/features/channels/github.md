@@ -382,8 +382,10 @@ full cost. It is sized to cover the largest watch fan-out — twice
 `prWatchLimit`'s ceiling of 500 — because a cache smaller than one sweep would
 not degrade gently: every miss would evict the entry the sweep is about to
 read, and the saving would be zero at exactly the high PR counts that need it.
-Bodies over 256 KiB are not cached, and an evicted or oversized URL simply
-stays unconditional. Periodic CI re-checks are unaffected — GitHub does not
+Bodies over 256 KiB are not cached, total retention is capped at 64 MiB, and a
+response with no `ETag` at all is passed through without taking a slot; an
+evicted, oversized or validator-less URL simply stays unconditional. Periodic
+CI re-checks are unaffected — GitHub does not
 advance a PR's `updated_at` on check activity, so a `304` is not evidence that
 CI is unchanged, and those timers keep firing on their own schedule.
 

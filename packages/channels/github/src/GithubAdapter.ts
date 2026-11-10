@@ -1326,10 +1326,20 @@ export const CONDITIONAL_CACHE_MAX_ENTRIES = MAX_PR_WATCH_LIMIT * 2;
  */
 const CONDITIONAL_CACHE_MAX_BODY_BYTES = 256 * 1024;
 
+/**
+ * Total retained body bytes. The entry and per-body caps only bound the
+ * product loosely — a thousand maximum-size bodies would be a quarter of a
+ * gigabyte — so the cache is also bounded directly. Real responses are one to
+ * two orders of magnitude below the per-body cap, so this binds only the
+ * pathological case and never evicts a working set.
+ */
+export const CONDITIONAL_CACHE_MAX_TOTAL_BYTES = 64 * 1024 * 1024;
+
 interface ConditionalCacheEntry {
   etag: string;
   body: string;
   link: string | undefined;
+  bytes: number;
 }
 
 /**
@@ -1670,6 +1680,8 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
    * serves a body cached under a previous credential.
    */
   private readonly conditionalCache = new Map<string, ConditionalCacheEntry>();
+  /** Running total of cached body bytes, maintained by the two helpers below. */
+  private conditionalCacheBytes = 0;
   /**
    * Floor (ms) from the notifications endpoint's `X-Poll-Interval`. GitHub
    * asks polling clients not to poll faster than this; pollInterval raises
@@ -2058,6 +2070,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   disconnect(): void {
     this.stopPollLoop();
     this.conditionalCache.clear();
+    this.conditionalCacheBytes = 0;
     this.notificationsPollFloorMs = 0;
     // Retire the runner generation: an idle runner wakes and exits, and a
     // runner mid-turn exits after that turn. The durable task stays
@@ -5323,8 +5336,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       // Refresh recency on a hit, not just on a write: a moved `since` cursor
       // keeps minting dead notification entries, and without this they would
       // evict the quiet PRs that are being read every poll.
-      this.conditionalCache.delete(url);
-      this.conditionalCache.set(url, cached);
+      this.storeCached(url, cached);
       return new Response(cached.body, { status: 200, headers: merged });
     }
 
@@ -5332,25 +5344,45 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       const etag = response.headers.get('etag');
       if (etag !== null) {
         const body = await response.clone().text();
-        if (Buffer.byteLength(body) <= CONDITIONAL_CACHE_MAX_BODY_BYTES) {
-          // Re-insert so Map iteration order is oldest-written-first.
-          this.conditionalCache.delete(url);
-          this.conditionalCache.set(url, {
+        const bytes = Buffer.byteLength(body);
+        if (bytes <= CONDITIONAL_CACHE_MAX_BODY_BYTES) {
+          this.storeCached(url, {
             etag,
             body,
             link: response.headers.get('link') ?? undefined,
+            bytes,
           });
           for (const oldest of this.conditionalCache.keys()) {
-            if (this.conditionalCache.size <= CONDITIONAL_CACHE_MAX_ENTRIES) {
+            if (
+              this.conditionalCache.size <= CONDITIONAL_CACHE_MAX_ENTRIES &&
+              this.conditionalCacheBytes <= CONDITIONAL_CACHE_MAX_TOTAL_BYTES
+            ) {
               break;
             }
-            this.conditionalCache.delete(oldest);
+            this.dropCached(oldest);
           }
         }
       }
     }
     return response;
   };
+
+  /**
+   * The only two writers of the cache, so the byte total cannot drift from
+   * the map. Re-inserting moves the key to the most-recently-used end.
+   */
+  private dropCached(url: string): void {
+    const entry = this.conditionalCache.get(url);
+    if (entry === undefined) return;
+    this.conditionalCacheBytes -= entry.bytes;
+    this.conditionalCache.delete(url);
+  }
+
+  private storeCached(url: string, entry: ConditionalCacheEntry): void {
+    this.dropCached(url);
+    this.conditionalCache.set(url, entry);
+    this.conditionalCacheBytes += entry.bytes;
+  }
 
   /**
    * Record the REST budget from a successful response's headers. Called by
