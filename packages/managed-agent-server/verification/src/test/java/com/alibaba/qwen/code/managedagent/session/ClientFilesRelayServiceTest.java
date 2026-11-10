@@ -150,8 +150,8 @@ class ClientFilesRelayServiceTest {
     @Test
     void mcpRoundTripsThroughTheBrowserQueue() throws Exception {
         Registration registration = service.register(tenant, ACTOR, session);
-        CompletableFuture<String> call = CompletableFuture.supplyAsync(() ->
-                service.mcp(tenant, session, registration.token(), request("7")));
+        CompletableFuture<String> call =
+                service.mcp(tenant, session, registration.token(), request("7"));
         List<QueuedRequest> drained = awaitQueue(registration.generation(), 1);
         assertThat(drained.get(0).requestId()).isEqualTo("7");
         service.respond(tenant, ACTOR, session, registration.generation(), "7",
@@ -160,30 +160,31 @@ class ClientFilesRelayServiceTest {
     }
 
     @Test
-    void mcpExpiresToTheStructuredOfflineError() {
+    void mcpExpiresToTheStructuredOfflineError() throws Exception {
         Registration registration = service.register(tenant, ACTOR, session);
-        String answer = service.mcp(tenant, session, registration.token(), request("9"));
+        String answer = service.mcp(tenant, session, registration.token(), request("9"))
+                .get(5, TimeUnit.SECONDS);
         assertThat(answer).contains("client_files_offline").contains("\"id\":\"9\"");
     }
 
     @Test
     void mcpRetryOfAnAnsweredIdReplaysTheAnswer() throws Exception {
         Registration registration = service.register(tenant, ACTOR, session);
-        CompletableFuture<String> call = CompletableFuture.supplyAsync(() ->
-                service.mcp(tenant, session, registration.token(), request("3")));
+        CompletableFuture<String> call =
+                service.mcp(tenant, session, registration.token(), request("3"));
         awaitQueue(registration.generation(), 1);
         service.respond(tenant, ACTOR, session, registration.generation(), "3",
                 "{\"jsonrpc\":\"2.0\",\"id\":\"3\",\"result\":{\"v\":1}}", null);
         String first = call.get(5, TimeUnit.SECONDS);
-        assertThat(service.mcp(tenant, session, registration.token(), request("3")))
-                .isEqualTo(first);
+        assertThat(service.mcp(tenant, session, registration.token(), request("3"))
+                .get(5, TimeUnit.SECONDS)).isEqualTo(first);
     }
 
     @Test
     void mcpSessionResolvesTheTenantFromTheBinding() throws Exception {
         Registration registration = service.register(tenant, ACTOR, session);
-        CompletableFuture<String> call = CompletableFuture.supplyAsync(() ->
-                service.mcpSession(session, registration.token(), request("5")));
+        CompletableFuture<String> call =
+                service.mcpSession(session, registration.token(), request("5"));
         List<QueuedRequest> drained = awaitQueue(registration.generation(), 1);
         assertThat(drained.get(0).requestId()).isEqualTo("5");
         service.respond(tenant, ACTOR, session, registration.generation(), "5",
@@ -194,10 +195,11 @@ class ClientFilesRelayServiceTest {
     }
 
     @Test
-    void mcpNotificationIsFireAndForget() {
+    void mcpNotificationIsFireAndForget() throws Exception {
         Registration registration = service.register(tenant, ACTOR, session);
         assertThat(service.mcp(tenant, session, registration.token(),
-                "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}")).isNull();
+                "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}")
+                .get(5, TimeUnit.SECONDS)).isNull();
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_client_files_request", Integer.class)).isEqualTo(1);
     }
 
@@ -249,7 +251,8 @@ class ClientFilesRelayServiceTest {
     }
 
     private void mcpInBackground(String token, String body) {
-        CompletableFuture.runAsync(() -> service.mcp(tenant, session, token, body));
+        // mcp registers a waiter and returns immediately; no thread needed.
+        service.mcp(tenant, session, token, body);
     }
 
     private List<QueuedRequest> awaitQueue(long generation, int expected) throws InterruptedException {

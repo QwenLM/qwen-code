@@ -11,6 +11,9 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.context.request.async.DeferredResult;
+
+import java.util.concurrent.CompletableFuture;
 
 /**
  * Runtime-facing Streamable HTTP MCP endpoint of the client files relay.
@@ -31,16 +34,30 @@ public class ClientFilesMcpController {
 
     @PostMapping(value = "/mcp", consumes = MediaType.APPLICATION_JSON_VALUE,
             produces = MediaType.APPLICATION_JSON_VALUE)
-    public ResponseEntity<String> mcp(@PathVariable String sessionId,
+    public DeferredResult<ResponseEntity<String>> mcp(@PathVariable String sessionId,
             @RequestHeader(value = "Authorization", required = false) String authorization,
             @RequestBody String body) {
         String token = authorization != null && authorization.startsWith(BEARER)
                 ? authorization.substring(BEARER.length()).trim() : null;
-        String response = service.mcpSession(sessionId, token, body);
-        if (response == null) {
-            return ResponseEntity.accepted().cacheControl(CacheControl.noStore()).build();
-        }
-        return ResponseEntity.ok().cacheControl(CacheControl.noStore())
-                .contentType(MediaType.APPLICATION_JSON).body(response);
+        // The wait runs on the service's shared poller, not a servlet thread;
+        // validation refusals still throw synchronously into the exception
+        // handler. The timeout is a safety net — the request TTL settles the
+        // future first.
+        CompletableFuture<String> pending = service.mcpSession(sessionId, token, body);
+        DeferredResult<ResponseEntity<String>> result = new DeferredResult<>(300_000L);
+        pending.whenComplete((response, failure) -> {
+            if (failure != null) {
+                result.setErrorResult(failure);
+            } else if (response == null) {
+                result.setResult(ResponseEntity.accepted().cacheControl(CacheControl.noStore()).build());
+            } else {
+                result.setResult(ResponseEntity.ok().cacheControl(CacheControl.noStore())
+                        .contentType(MediaType.APPLICATION_JSON).body(response));
+            }
+        });
+        result.onTimeout(() -> result.setErrorResult(ResponseEntity.status(503)
+                .cacheControl(CacheControl.noStore()).contentType(MediaType.APPLICATION_JSON)
+                .body("{\"error\":{\"code\":\"client_files_relay_unavailable\"}}")));
+        return result;
     }
 }

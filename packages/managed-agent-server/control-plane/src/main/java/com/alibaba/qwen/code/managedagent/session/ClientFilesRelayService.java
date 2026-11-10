@@ -14,6 +14,7 @@ import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import jakarta.annotation.PreDestroy;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -29,6 +30,12 @@ import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Ephemeral client filesystem registrations. The browser keeps its directory
@@ -51,6 +58,20 @@ public class ClientFilesRelayService {
     private final HarnessConnector harness;
     private final ObjectMapper json;
 
+    /**
+     * Pending MCP waiters, settled by one shared poller instead of one
+     * blocking servlet thread per in-flight request. A response POST also
+     * completes its waiters directly (fast path).
+     */
+    private final ConcurrentHashMap<WaiterKey, CopyOnWriteArrayList<Waiter>> waiters =
+            new ConcurrentHashMap<>();
+    private final ScheduledExecutorService waiterPoller =
+            Executors.newSingleThreadScheduledExecutor(runnable -> {
+                Thread thread = new Thread(runnable, "client-files-waiter-poller");
+                thread.setDaemon(true);
+                return thread;
+            });
+
     public ClientFilesRelayService(ClientFilesRelay relay, ManagedAgentService agentService,
             ManagedWorkspaceRegistry workspaces, ManagedAgentSettings settings,
             HarnessConnector harness,
@@ -61,6 +82,26 @@ public class ClientFilesRelayService {
         this.settings = settings;
         this.harness = harness;
         this.json = json;
+        waiterPoller.scheduleWithFixedDelay(this::settleWaiters,
+                POLL_INTERVAL_MILLIS, POLL_INTERVAL_MILLIS, TimeUnit.MILLISECONDS);
+    }
+
+    @PreDestroy
+    void shutdown() {
+        waiterPoller.shutdownNow();
+    }
+
+    private record WaiterKey(String tenant, String session, long generation, String requestId) { }
+
+    private static final class Waiter {
+        private final long deadline;
+        private final JsonNode id;
+        private final CompletableFuture<String> future = new CompletableFuture<>();
+
+        private Waiter(long deadline, JsonNode id) {
+            this.deadline = deadline;
+            this.id = id;
+        }
     }
 
     public Registration register(String tenant, String actor, String session) {
@@ -165,13 +206,18 @@ public class ClientFilesRelayService {
         if (!settled) {
             throw error(404, "client_files_request_not_found");
         }
+        // Fast path: settle the waiters now instead of at the next poll tick.
+        // A null answer means failure; each waiter keeps its original id node
+        // so a numeric JSON-RPC id is not coerced to a string.
+        completeWaiters(tenant, session, binding.generation(), requestId,
+                answer ? responseJson : null);
     }
 
     /**
      * The internal MCP leg carries no tenant context: the binding is resolved
      * by Session and the relay credential is the only admission.
      */
-    public String mcpSession(String session, String token, String body) {
+    public CompletableFuture<String> mcpSession(String session, String token, String body) {
         requireEnabled();
         requireSessionId(session);
         Binding binding = relay.findBySession(session);
@@ -182,11 +228,13 @@ public class ClientFilesRelayService {
     }
 
     /**
-     * The Runtime-facing MCP leg. Returns the browser's JSON-RPC response, a
-     * structured offline error once the request expires, or {@code null} for
-     * a notification (the controller answers 202).
+     * The Runtime-facing MCP leg. The future completes with the browser's
+     * JSON-RPC response, a structured offline error once the request expires,
+     * or {@code null} for a notification (the controller answers 202).
+     * Validation refusals throw synchronously; the wait itself never blocks
+     * the calling (servlet) thread.
      */
-    public String mcp(String tenant, String session, String token, String body) {
+    public CompletableFuture<String> mcp(String tenant, String session, String token, String body) {
         requireEnabled();
         requireSessionId(session);
         Binding binding = relay.find(tenant, session);
@@ -201,7 +249,7 @@ public class ClientFilesRelayService {
         JsonNode id = request.get("id");
         if (id == null || id.isNull()) {
             enqueue(binding, "n-" + UUID.randomUUID(), body, now);
-            return null;
+            return CompletableFuture.completedFuture(null);
         }
         String requestId = id.asText();
         if (requestId.isBlank() || requestId.length() > 128) {
@@ -211,28 +259,62 @@ public class ClientFilesRelayService {
             enqueue(binding, requestId, body, now);
         } catch (org.springframework.dao.DuplicateKeyException retried) {
             // A retried JSON-RPC id attaches to the existing queue row; the
-            // poll below returns its answer (or its settled failure).
+            // waiter shares its answer (or its settled failure).
         }
         long deadline = now + settings.getClientFiles().getRequestTtl().toMillis();
-        while (System.currentTimeMillis() < deadline) {
-            QueuedRequest row = relay.request(tenant, session, binding.generation(), requestId);
-            if (row == null) {
-                break;
+        Waiter waiter = new Waiter(deadline, id);
+        waiters.computeIfAbsent(
+                new WaiterKey(tenant, session, binding.generation(), requestId),
+                key -> new CopyOnWriteArrayList<>()).add(waiter);
+        return waiter.future;
+    }
+
+    /**
+     * One shared poller settles every pending waiter: answered rows complete
+     * with the response, settled/missing rows and expired deadlines complete
+     * with the structured offline error.
+     */
+    void settleWaiters() {
+        long now = System.currentTimeMillis();
+        waiters.forEach((key, list) -> {
+            for (Waiter waiter : list) {
+                String answer;
+                if (now >= waiter.deadline) {
+                    answer = offlineError(waiter.id);
+                } else {
+                    QueuedRequest row;
+                    try {
+                        row = relay.request(key.tenant(), key.session(), key.generation(),
+                                key.requestId());
+                    } catch (RuntimeException unavailable) {
+                        // Transient store failure: retry next tick; the
+                        // deadline still bounds the wait.
+                        continue;
+                    }
+                    if (row != null && ClientFilesModels.REQUEST_QUEUED.equals(row.state())) {
+                        continue;
+                    }
+                    answer = row != null && ClientFilesModels.REQUEST_ANSWERED.equals(row.state())
+                            ? row.responseJson() : offlineError(waiter.id);
+                }
+                list.remove(waiter);
+                waiter.future.complete(answer);
             }
-            if (ClientFilesModels.REQUEST_ANSWERED.equals(row.state())) {
-                return row.responseJson();
+            if (list.isEmpty()) {
+                waiters.remove(key, list);
             }
-            if (!ClientFilesModels.REQUEST_QUEUED.equals(row.state())) {
-                break;
-            }
-            try {
-                Thread.sleep(POLL_INTERVAL_MILLIS);
-            } catch (InterruptedException interrupted) {
-                Thread.currentThread().interrupt();
-                break;
+        });
+    }
+
+    private void completeWaiters(String tenant, String session, long generation,
+            String requestId, String responseJson) {
+        List<Waiter> list = waiters.remove(new WaiterKey(tenant, session, generation, requestId));
+        if (list != null) {
+            for (Waiter waiter : list) {
+                waiter.future.complete(responseJson != null
+                        ? responseJson : offlineError(waiter.id));
             }
         }
-        return offlineError(id);
     }
 
     @Scheduled(fixedDelay = 30_000)
