@@ -227,6 +227,14 @@ export interface PrBindingEntry {
    * Absent means untyped; the adapter groups untyped followers separately.
    */
   role?: PrBindingRole;
+  /**
+   * Whether the session holds an active watch on THIS PR (an `/autofix-pr`
+   * watch or a `/verify-pr --watch` standing trigger), derived by the daemon
+   * at scan time. Absent means unknown — watch detection failed or the
+   * daemon predates the field — and consumers must treat unknown as
+   * eligible: the watch gate is a noise filter, not a security boundary.
+   */
+  watching?: boolean;
 }
 
 /**
@@ -670,8 +678,40 @@ export type ChannelConfigFieldDescriptor =
   | ChannelConfigNumberFieldDescriptor
   | ChannelConfigObjectFieldDescriptor;
 
+/**
+ * Handlers an adapter drives during an interactive QR login. The daemon owns
+ * the session lifecycle and the transport; the adapter owns the protocol.
+ */
+export interface ChannelQrLoginHandlers {
+  /** A fresh QR payload URL is ready to render. Never carries a secret. */
+  onQrCode(url: string): void;
+  /** The current QR expired; a replacement is being requested. */
+  onExpired(): void;
+  /**
+   * Login succeeded. Values are keyed by management field key so the daemon can
+   * persist them through the shared config/secret path without knowing which
+   * platform produced them.
+   */
+  onSuccess(values: Readonly<Record<string, string>>): void;
+  onFailure(error: Error): void;
+}
+
+export interface ChannelQrLoginDescriptor {
+  /**
+   * Begin the login handshake. Returns a dispose function that must stop all
+   * upstream polling. Aborting `signal` has the same effect.
+   */
+  start(handlers: ChannelQrLoginHandlers, signal: AbortSignal): () => void;
+}
+
 export interface ChannelManagementDescriptor {
   fields: readonly ChannelConfigFieldDescriptor[];
+
+  /**
+   * Opt in to browser-rendered QR login. Adapters without it can only be
+   * configured by supplying credentials directly.
+   */
+  qrLogin?: ChannelQrLoginDescriptor;
 
   /**
    * Cross-field validation applied to the resolved config during managed

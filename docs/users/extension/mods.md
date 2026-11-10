@@ -126,27 +126,28 @@ this recovery exception.
 
 ## Supported subset
 
-| Surface    | Behavior                                                                                                                                                                                |
-| ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Packaging  | One `.ts`, `.tsx`, `.jsx`, `.js`, `.mjs`, `.cjs`, `.mts` or `.cts` ESM entry; relative static imports and re-exports inside the installed plugin; JSX in `.tsx` and `.jsx` files        |
-| Entry      | `register(on, options)`; async registration is awaited; typed non-secret options are copied and deeply frozen                                                                           |
-| Lifecycle  | All modules register before the initial `session.start` chain; `session.end` on exit and conversation replacement; clear/resume do not reload modules                                   |
-| Commands   | Register during `session.start` using name, description and optional argumentHint; intercept registered Mod commands across plugins; return `{text}` or `{}`                            |
-| Tools      | In headless and local terminal model turns, intercept existing main-session tools with `tool.call`; inspect and restrict native permission decisions with `tool.check`                  |
-| Middleware | Patterns and recursive matchers; explicit, repeatable `next(e)`; `.catch` and per-plugin failure recovery; frozen input and host identity                                               |
-| API events | `command.register`, `ui.log`, `ui.invalidate` and the session and clock methods pass through the middleware chain with host-supplied origin                                             |
-| Session    | `$.plugin`, read-only `$.session` facts, `$.clock.now` and `$.clock.sleep`, described in [Session facts and clock](#session-facts-and-clock)                                            |
-| Turns      | `turn.start`, `turn.complete` and `$.turn.abort` for the prompts a person submits and those a Mod submits, described in [Turn events](#turn-events)                                     |
-| Model      | `$.model.complete` runs one completion on the session's client, described in [Model calls](#model-calls)                                                                                |
-| Prompts    | `prompt.submit` and `$.prompt.submit` in headless runs and the Ink and OpenTUI terminals, described in [Submitted prompts](#submitted-prompts)                                          |
-| Logging    | `$.ui.log` returns void and queues delivery; transcript logs use stderr in text mode or `system/ui_log` in JSON modes; debug logs stay in the debug logger; neither becomes model input |
-| Elements   | `$.ui.resolve`, `$.ui.invalidate` and the `h` and `Fragment` globals, described in [Elements](#elements)                                                                                |
-| Drawing    | `ui.render` for the band above the prompt in the Ink and OpenTUI terminals, described in [The band above the prompt](#the-band-above-the-prompt)                                        |
-| Isolation  | Separate QuickJS environment per plugin inside a session worker; no Node, filesystem or network APIs; memory, stack, source/output and execution limits                                 |
+| Surface    | Behavior                                                                                                                                                                                                               |
+| ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Packaging  | One `.ts`, `.tsx`, `.jsx`, `.js`, `.mjs`, `.cjs`, `.mts` or `.cts` ESM entry; relative static imports and re-exports inside the installed plugin; JSX in `.tsx` and `.jsx` files                                       |
+| Entry      | `register(on, options)`; async registration is awaited; typed non-secret options are copied and deeply frozen                                                                                                          |
+| Lifecycle  | All modules register before the initial `session.start` chain; `session.end` on exit and conversation replacement; clear/resume do not reload modules                                                                  |
+| Commands   | Register during `session.start` using name, description and optional argumentHint; intercept registered Mod commands across plugins; return `{text}` or `{}`                                                           |
+| Tools      | In headless and local terminal model turns, intercept existing main-session tools with `tool.call`; inspect and restrict native permission decisions with `tool.check`                                                 |
+| Middleware | Patterns and recursive matchers; explicit, repeatable `next(e)`; `.catch` and per-plugin failure recovery; frozen input and host identity                                                                              |
+| API events | `command.register`, `ui.log`, `ui.invalidate` and the session and clock methods pass through the middleware chain with host-supplied origin                                                                            |
+| Session    | `$.plugin`, read-only `$.session` facts, `$.clock.now` and `$.clock.sleep`, described in [Session facts and clock](#session-facts-and-clock)                                                                           |
+| Store      | `$.store` keeps each plugin's JSON values between sessions, described in [The store](#the-store)                                                                                                                       |
+| Turns      | `turn.start`, `turn.complete` and `$.turn.abort` for the prompts a person submits and those a Mod submits, described in [Turn events](#turn-events)                                                                    |
+| Model      | `$.model.complete` runs one completion on the session's client, described in [Model calls](#model-calls)                                                                                                               |
+| Prompts    | `prompt.submit` and `$.prompt.submit` in headless runs and the Ink and OpenTUI terminals, described in [Submitted prompts](#submitted-prompts)                                                                         |
+| Logging    | `$.ui.log` returns void and queues delivery; transcript logs use stderr in text mode or `system/ui_log` in JSON modes; debug logs stay in the debug logger; neither becomes model input                                |
+| Elements   | `$.ui.resolve`, `$.ui.invalidate` and the `h` and `Fragment` globals, described in [Elements](#elements)                                                                                                               |
+| Drawing    | `ui.render` for the band above the prompt in the Ink and OpenTUI terminals, and for reply rows in the Ink terminal, described in [The band above the prompt](#the-band-above-the-prompt) and [Reply rows](#reply-rows) |
+| Isolation  | Separate QuickJS environment per plugin inside a session worker; no Node, filesystem or network APIs; memory, stack, source/output and execution limits                                                                |
 
 This is a supported subset, not full compatibility with existing Claude Mods.
 Runtime package imports, built-in command interception, tool registration and active `$.tool` APIs, context,
-`$.session.messages` and `repo`, state/store, `$.clock.after` and `every`, `ui.render` sites other than the band above the prompt, streaming events and hot reload are not implemented.
+`$.session.messages` and `repo`, `$.state`, `$.clock.after` and `every`, `ui.render` sites other than the band above the prompt and reply rows, streaming events and hot reload are not implemented.
 Commands cannot return `context`, `exitCode` or engine references yet. Hooks for
 other Claude Code events load without running, as described in
 [Middleware and recovery](#middleware-and-recovery).
@@ -436,6 +437,10 @@ supports:
       "session.turns",
       "session.usage",
       "session.version",
+      "store.delete",
+      "store.get",
+      "store.keys",
+      "store.set",
       "tool.call",
       "tool.check",
       "turn.abort",
@@ -458,6 +463,10 @@ supports:
       "session.turns",
       "session.usage",
       "session.version",
+      "store.delete",
+      "store.get",
+      "store.keys",
+      "store.set",
       "turn.abort",
       "ui.invalidate",
       "ui.log",
@@ -554,6 +563,70 @@ budget, so a sleep longer than the remaining budget times the hook out. Its
 `signal` option rejects the wait at once when it aborts; pass `next.signal`,
 because the Mod environment has no `AbortController`. A sleep ends with the hook
 that started it, so a sleep the hook does not await cannot hold up the dispatch.
+
+## The store
+
+`$.store` keeps a plugin's own values between sessions, in every host that runs
+Mods:
+
+```javascript
+export function register(on) {
+  on('session.start', async ($, e, next) => {
+    const runs = Number((await $.store.get('runs')) ?? 0) + 1;
+    await $.store.set('runs', runs);
+    $.ui.log(`session ${runs} with this Mod`);
+    return next(e);
+  });
+}
+```
+
+| Method                    | Resolves to                                              |
+| ------------------------- | -------------------------------------------------------- |
+| `$.store.get(key)`        | the value under `key`, or `undefined` when it is not set |
+| `$.store.set(key, value)` | `undefined`, once the value is written                   |
+| `$.store.delete(key)`     | `undefined`, once the key is gone                        |
+| `$.store.keys()`          | every key set, in the order each was first set           |
+
+A value is JSON data, read back as `JSON.parse(JSON.stringify(value))`: a
+`Date` becomes its ISO string, an `undefined` field is dropped and a `Map` or
+`Set` becomes `{}`. `set` rejects `undefined`, a function and a value with a
+cycle. Keys are strings; `"10"` and `__proto__` are keys like any other.
+
+Each plugin has one JSON file under `~/.qwen/mods/store/` (or
+`$QWEN_HOME/mods/store/`), shared by all its sessions. The filename uses the
+lowercase plugin name for names of up to 128 characters and a stable hash for
+longer names.
+Concurrent writes to different keys preserve both updates. Each writer takes
+the store lock and re-reads the file before updating it. A read followed by a
+write can race with another session updating the same key. A value another
+session wrote shows up at the next `get`. Uninstalling the plugin leaves its
+store in place.
+
+- A plugin's store holds at most 4 MiB of JSON. A `set` that would take it
+  over rejects, and the store keeps what it had. One value is also bound by the
+  256 KiB limit on what a Mod passes to Qwen Code.
+- A new key must keep the serialized key list within the Mod reply budget of
+  256 KiB, including the reply envelope. Deleting an existing key can shrink
+  a list that already exceeds the budget.
+- A store path must point to a readable regular file. Calls reject symlinks,
+  named pipes, and invalid store data and leave the entry in place.
+- A paused process still holds its write lock. Acquiring the lock across
+  processes times out after eight seconds. A later writer can recover a lock
+  from a verified dead process. On Linux, within the same boot and PID
+  namespace, an absent PID or a zombie confirmed through a verified local
+  procfs view allows recovery, including for older lock formats. Detecting a
+  reused PID requires verified procfs PID views on both sides and a matching
+  time namespace. Recovery across boots requires matching machine, hostname,
+  and PID namespace identities and boot IDs verified through procfs.
+- The host limits concurrent file reads for `get` and `keys` per runtime.
+  Ending the requesting hook or its dispatch cancels queued reads and `set` or
+  `delete` calls that are waiting for a lock. An update already started under
+  the lock may still land, and the session waits for it before closing. A
+  process exit during the update leaves either the old file or the new one.
+
+The calls are API events, so another plugin's hooks hear them with `{key}` or
+`{key, value}`. A hook may pass on another `value` for `store.set`, answer with
+`{value}`, or `{deny}` the call. The key is pinned.
 
 ## Model calls
 
@@ -1018,6 +1091,65 @@ These differ from Claude Code:
   off at the right edge without a mark. Its borders have one stroke per axis,
   so the `arrow` border draws its top arrow on the bottom edge and its left
   arrow on the right edge.
+
+## Reply rows
+
+The Ink terminal raises `ui.render` for the `AssistantMessage` site once for
+each complete block of a reply in the main transcript, so a hook can change how
+the reply reads. A hook receives:
+
+```js
+{
+  surface: 'terminal',
+  component: 'AssistantMessage',
+  requestId: '42', // the transcript item's id
+  props: {
+    text: 'The worker runs one dispatch at a time.', // the block's markdown
+    isFirstOfReply: true, // the block that opens the reply
+  },
+}
+```
+
+To change what the row shows, pass rewritten props down:
+
+```js
+on('ui.render', { component: 'AssistantMessage' }, ($, e, next) =>
+  next({ ...e, props: { ...e.props, text: e.props.text.toUpperCase() } }),
+);
+```
+
+Only the drawing changes: the stored message, what the model reads, `/copy`
+and exports keep the original text. `isFirstOfReply` and the envelope are
+pinned. A rewritten `text` holds at most 100,000 characters and no control characters
+other than tabs and line breaks; otherwise the hook fails like a thrown error. A hook that answers a
+tree of its own instead of the engine node leaves the row as it was, and the
+debug log says so once.
+
+A row is raised when its block is complete, never while it streams. It shows
+its own text until its hooks answer, so a hook may await `$.model.complete`;
+answers are kept, and a row that scrolls back into view does not ask again. A
+row asked again with `$.ui.invalidate('ui.render')` shows its previous answer
+until the new one arrives; `/clear`, `/resume` and `/branch` forget every
+answer when switching sessions. The Mod sees rows from the new transcript once
+it is committed.
+Rows render one at a time, so while a row's hook waits, other Mod hooks wait for
+that row only. A render that takes more than 30 seconds is cancelled, including
+time spent waiting for a model call. A long reply is split into several blocks
+while it streams, and each block is its own row.
+
+In a rewritten row, a Mermaid or LaTeX block with one exact source match in the
+original row shows the original block's `/copy mermaid N` or `/copy latex N`
+hint. New, changed, or ambiguous blocks omit the hint.
+
+Reply rows are drawn only with the virtualized history (`ui.useTerminalBuffer`,
+on by default in interactive terminals). With history in the terminal
+scrollback, a printed row cannot change, so the site is not offered and its
+hooks are skipped. OpenTUI, subagent views and headless runs do not raise it
+yet. A row whose text is too large for a Mod payload is not raised.
+
+The host raises a site only when some hook may hear it: a hook that names a
+`component` in its matcher hears only the sites it names, and `ui.invalidate`
+re-runs only the sites the calling Mod may hear.
 
 ## TypeScript, JSX and relative imports
 
