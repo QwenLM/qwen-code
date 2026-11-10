@@ -190,19 +190,19 @@ refusal. Sessions on `hosted-workspace-files/1` are out of scope.
 
 ### Contract and capability advertisement
 
-- A new `SurfaceRegistry.Capability` (proposed `SESSION_TERMINAL`) on the
-  WEBSHELL surface, with the route template recorded in the committed twin.
-- The OpenAPI contract (`managed-agent-public-api.openapi.json`) documents the
-  upgrade route, its admission and its typed refusals; WebShell types are
-  regenerated with
-  `npm run generate:managed-agent-api --workspace=packages/web-shell`.
+The terminal is a WebSocket upgrade, not a REST handler, so it does not take a
+`SurfaceRegistry` route label (the D6 gate enumerates
+`RequestMappingHandlerMapping` handlers) nor an OpenAPI path. Instead:
+
+- The parity row flips to `managed` with `docs:` evidence pointing at this
+  design; `capability-parity.test.ts` resolves the file.
 - `ManagedAgentSessionSummary.capabilities` gains a `terminal?: boolean`
   field, computed server-side from the same admission chain, so the UI entry
-  appears only for Sessions that can actually attach.
-- The parity row flips to `managed` with `surface:SESSION_TERMINAL` evidence;
-  `capability-parity.test.ts` checks it against the twin.
-- `ManagedAgentApiContractTest` and `SurfaceRegistryGateTest` run with the
-  change.
+  appears only for Sessions that can actually attach. This is the only
+  generated-type change; WebShell types are regenerated with
+  `npm run generate:managed-agent-api --workspace=packages/web-shell`.
+- The upgrade route, its admission and its typed refusals are documented here
+  rather than in the OpenAPI contract.
 
 ### Web Shell UI
 
@@ -226,17 +226,17 @@ instead of a silent reconnect loop.
 
 ## Affected components
 
-| Component                             | Change                                                                                                       |
-| ------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
-| `packages/core` `WebTerminalRegistry` | Session-tagged ownership if not already expressible; no semantic change to bounds, replay or reclaim         |
-| `packages/cli` managed runtime worker | Terminal upgrade route, route-gate entry, bearer/lease auth, capability digest bump                          |
-| `packages/cli` unified launcher proxy | WebSocket upgrade forwarding for the terminal route                                                          |
-| `packages/cli` `capability-parity.ts` | `web_terminal` row flips to `managed` with surface evidence                                                  |
-| Java WebShell surface                 | First WebSocket endpoint: handshake authorization, binding resolution, byte relay, lifecycle-triggered close |
-| Java hold admission                   | Owner-side hold execution admission/settlement on the H3 pattern; drain ordering in close/delete             |
-| Contracts                             | OpenAPI route, SurfaceRegistry twin, generated WebShell types, `capabilities.terminal`                       |
-| Web Shell client                      | Managed connection factory for `TerminalPanel`, entry gating, terminal-lost notice                           |
-| Verification                          | Focused worker/Java/frontend tests, contract gates, real-process E2E and fault cases                         |
+| Component                             | Change                                                                                                                            |
+| ------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `packages/core` `WebTerminalRegistry` | Session-tagged ownership if not already expressible; no semantic change to bounds, replay or reclaim                              |
+| `packages/cli` managed runtime worker | Terminal upgrade route, route-gate entry, bearer/lease auth, capability digest bump                                               |
+| `packages/cli` unified launcher proxy | WebSocket upgrade forwarding for the terminal route                                                                               |
+| `packages/cli` `capability-parity.ts` | `web_terminal` row flips to `managed` with `docs:` evidence                                                                       |
+| Java WebShell surface                 | First WebSocket endpoint: handshake authorization, binding resolution, byte relay, lifecycle-triggered close                      |
+| Java hold admission                   | Owner-side hold execution admission/settlement on the H3 pattern; drain ordering in close/delete                                  |
+| Contracts                             | `capabilities.terminal` on the session summary + regenerated WebShell types (no OpenAPI/SurfaceRegistry entry for the WS upgrade) |
+| Web Shell client                      | Managed connection factory for `TerminalPanel`, entry gating, terminal-lost notice                                                |
+| Verification                          | Focused worker/Java/frontend tests, contract gates, real-process E2E and fault cases                                              |
 
 ## Constraints
 
@@ -292,8 +292,10 @@ Acceptance is binary:
    keep the hold and block retirement.
 5. Worker replacement never replays a terminal; the client receives an
    explicit terminal-lost notice.
-6. `ManagedAgentApiContractTest`, `SurfaceRegistryGateTest` and the parity
-   test pass on the committed twin; generated types match the contract.
+6. The parity test passes with the `web_terminal` row citing this design, and
+   the regenerated WebShell types carry `capabilities.terminal`; the existing
+   `ManagedAgentApiContractTest`/`SurfaceRegistryGateTest` stay green (the WS
+   upgrade adds no REST surface).
 
 ## Rollout
 

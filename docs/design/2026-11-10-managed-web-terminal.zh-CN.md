@@ -159,18 +159,18 @@ Session 不在范围内。
 
 ### 契约与能力声明
 
-- 新增 `SurfaceRegistry.Capability`（建议 `SESSION_TERMINAL`），位于
-  WEBSHELL surface，路由模板登记进 committed twin。
-- OpenAPI 契约（`managed-agent-public-api.openapi.json`）记录该 upgrade
-  路由、其准入与类型化拒绝；WebShell 类型用
-  `npm run generate:managed-agent-api --workspace=packages/web-shell`
-  重新生成。
+终端是 WebSocket upgrade，不是 REST handler，因此不占用 `SurfaceRegistry`
+路由标签（D6 gate 枚举的是 `RequestMappingHandlerMapping` handler），也不占
+OpenAPI path。取而代之：
+
+- parity 矩阵该行翻为 `managed`，evidence 用 `docs:` 指向本设计文档；
+  `capability-parity.test.ts` 校验该文件存在。
 - `ManagedAgentSessionSummary.capabilities` 新增 `terminal?: boolean`
   字段，由服务端按同一准入链计算，使 UI 入口只对真正能 attach 的 Session
-  出现。
-- parity 矩阵该行翻为 `managed`，evidence 为 `surface:SESSION_TERMINAL`；
-  `capability-parity.test.ts` 对照 twin 校验。
-- 随本变更运行 `ManagedAgentApiContractTest` 与 `SurfaceRegistryGateTest`。
+  出现。这是唯一的生成类型变更；WebShell 类型用
+  `npm run generate:managed-agent-api --workspace=packages/web-shell`
+  重新生成。
+- upgrade 路由、其准入与类型化拒绝记录在本设计文档，而非 OpenAPI 契约。
 
 ### Web Shell UI
 
@@ -192,17 +192,17 @@ Managed 会话复用 `TerminalPanel` 与现有帧编解码；只有连接工厂�
 
 ## 受影响组件
 
-| 组件                                  | 变更                                                                              |
-| ------------------------------------- | --------------------------------------------------------------------------------- |
-| `packages/core` `WebTerminalRegistry` | 如现有接口无法表达，则补充 Session 标记的归属；边界、重放与回收语义不变           |
-| `packages/cli` managed runtime worker | 终端 upgrade 路由、route-gate 条目、bearer/lease 鉴权、capability digest 升级     |
-| `packages/cli` 统一启动器代理         | 终端路由的 WebSocket upgrade 转发                                                 |
-| `packages/cli` `capability-parity.ts` | `web_terminal` 行翻为 `managed` 并给 surface evidence                             |
-| Java WebShell surface                 | 首个 WebSocket 端点：握手鉴权、binding 解析、字节中继、生命周期触发关闭           |
-| Java hold 准入                        | 按 H3 模式的 owner 侧 hold execution 准入/结算；close/delete 的 drain 顺序        |
-| 契约                                  | OpenAPI 路由、SurfaceRegistry twin、生成的 WebShell 类型、`capabilities.terminal` |
-| Web Shell 客户端                      | `TerminalPanel` 的 Managed 连接工厂、入口门控、terminal-lost 通知                 |
-| 验证                                  | worker/Java/前端聚焦测试、契约门禁、真实进程 E2E 与故障用例                       |
+| 组件                                  | 变更                                                                                                             |
+| ------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `packages/core` `WebTerminalRegistry` | 如现有接口无法表达，则补充 Session 标记的归属；边界、重放与回收语义不变                                          |
+| `packages/cli` managed runtime worker | 终端 upgrade 路由、route-gate 条目、bearer/lease 鉴权、capability digest 升级                                    |
+| `packages/cli` 统一启动器代理         | 终端路由的 WebSocket upgrade 转发                                                                                |
+| `packages/cli` `capability-parity.ts` | `web_terminal` 行翻为 `managed` 并给 `docs:` evidence                                                            |
+| Java WebShell surface                 | 首个 WebSocket 端点：握手鉴权、binding 解析、字节中继、生命周期触发关闭                                          |
+| Java hold 准入                        | 按 H3 模式的 owner 侧 hold execution 准入/结算；close/delete 的 drain 顺序                                       |
+| 契约                                  | session summary 的 `capabilities.terminal` + 重新生成的 WebShell 类型（WS upgrade 不进 OpenAPI/SurfaceRegistry） |
+| Web Shell 客户端                      | `TerminalPanel` 的 Managed 连接工厂、入口门控、terminal-lost 通知                                                |
+| 验证                                  | worker/Java/前端聚焦测试、契约门禁、真实进程 E2E 与故障用例                                                      |
 
 ## 约束
 
@@ -248,8 +248,9 @@ lost-Runtime 语义。故障用例（attach 期间杀 worker、hold 准入期间
 4. close/delete 以证明的退出证据 drain 终端；未证明的 stop 保持 hold 并
    阻塞退役。
 5. worker 替换绝不重放终端；客户端收到显式 terminal-lost 通知。
-6. `ManagedAgentApiContractTest`、`SurfaceRegistryGateTest` 与 parity
-   测试在 committed twin 上通过；生成的类型与契约一致。
+6. parity 测试通过且 `web_terminal` 行引用本设计文档；重新生成的 WebShell
+   类型带 `capabilities.terminal`；既有 `ManagedAgentApiContractTest`/
+   `SurfaceRegistryGateTest` 保持绿（WS upgrade 不新增 REST surface）。
 
 ## 发布
 

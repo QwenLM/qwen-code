@@ -575,7 +575,12 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
   voice_transcribe: NO_MANAGED_EQUIVALENT('no Managed voice route'),
   realtime_voice: NO_MANAGED_EQUIVALENT('no Managed voice route'),
   realtime_voice_web: NO_MANAGED_EQUIVALENT('no Managed voice route'),
-  web_terminal: NO_MANAGED_EQUIVALENT('no Managed web terminal'),
+  // The Managed terminal is a WebSocket upgrade, not a REST handler, so it
+  // is evidenced by its design rather than a SurfaceRegistry route label.
+  web_terminal: {
+    standing: 'managed',
+    evidence: 'docs:docs/design/2026-11-10-managed-web-terminal.md',
+  },
 };
 
 export interface CapabilityParityMatrix {
