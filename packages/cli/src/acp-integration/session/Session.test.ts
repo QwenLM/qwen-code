@@ -50853,6 +50853,19 @@ describe('Session', () => {
         mockConfig.getApprovalMode = vi
           .fn()
           .mockReturnValue(ApprovalMode.AUTO_EDIT);
+        // A real session always has a PermissionManager installed; with the
+        // base mock's `null` the L4 rule evaluation never runs, so the
+        // control could not fail on over-blocking permission-flow
+        // regressions. Rules exist but none applies ('default') and no
+        // `permissions.ask` rule matches — the guarded branch must still
+        // auto-approve.
+        mockConfig.getPermissionManager = vi.fn().mockReturnValue({
+          isToolEnabled: async () => true,
+          hasRelevantRules: () => true,
+          evaluate: async () => 'default',
+          hasMatchingAskRule: () => false,
+          findMatchingDenyRule: () => undefined,
+        } as unknown as ReturnType<Config['getPermissionManager']>);
         const execute = vi.fn().mockResolvedValue({
           llmContent: 'read ok',
           returnDisplay: 'read ok',
