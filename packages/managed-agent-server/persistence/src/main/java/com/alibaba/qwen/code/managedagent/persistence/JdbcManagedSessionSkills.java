@@ -47,6 +47,8 @@ public class JdbcManagedSessionSkills
         }
         try {
             return AgentDefinitionExtensions.sessionSkills(json.readValue(resource.bytes(), new TypeReference<List<Map<String, Object>>>() { }));
+        } catch (ManagedAgentException error) {
+            throw inConflictVocabulary(error);
         } catch (java.io.IOException error) {
             throw conflict(error);
         }
@@ -99,14 +101,7 @@ public class JdbcManagedSessionSkills
             }
             return skills;
         } catch (ManagedAgentException error) {
-            // Keep a corrupt stored snapshot inside this class's conflict
-            // vocabulary: sessionSkills raises the admission code
-            // agent_definition_unsupported, which would blame the caller's
-            // definition for a fault in the server's own committed row.
-            if ("session_skills_conflict".equals(error.getCode())) {
-                throw error;
-            }
-            throw conflict(error);
+            throw inConflictVocabulary(error);
         } catch (Exception error) {
             throw conflict(error);
         }
@@ -130,6 +125,8 @@ public class JdbcManagedSessionSkills
                 throw conflict();
             }
             return command;
+        } catch (ManagedAgentException error) {
+            throw inConflictVocabulary(error);
         } catch (java.io.IOException error) {
             throw conflict(error);
         }
@@ -212,5 +209,14 @@ public class JdbcManagedSessionSkills
     private static ManagedAgentException conflict(Throwable cause) {
         return new ManagedAgentException(409, "session_skills_conflict",
                 "The immutable Session Skills snapshot is invalid.", cause);
+    }
+
+    // Keep a corrupt stored snapshot inside this class's conflict vocabulary:
+    // sessionSkills raises the admission code agent_definition_unsupported,
+    // which would blame the caller's definition for a fault in the server's own
+    // committed row. The caller-supplied definition path keeps that admission
+    // code; only readers of stored bytes normalize through here.
+    private static ManagedAgentException inConflictVocabulary(ManagedAgentException error) {
+        return "session_skills_conflict".equals(error.getCode()) ? error : conflict(error);
     }
 }

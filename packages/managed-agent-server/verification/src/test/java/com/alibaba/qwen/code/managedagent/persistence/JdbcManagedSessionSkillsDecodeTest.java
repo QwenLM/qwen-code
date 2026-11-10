@@ -42,4 +42,18 @@ class JdbcManagedSessionSkillsDecodeTest {
                 .isEqualTo("session_skills_conflict");
         assertThat(error.getCause()).isNull();
     }
+
+    @Test
+    void chainsTheJsonCauseThroughTheGenericArm() {
+        // Truncated JSON fails readValue before any conflict() throw, so it
+        // exits through the generic catch; the chained parse cause is the
+        // diagnostic value that arm adds.
+        Throwable error = catchThrowable(
+                () -> JdbcManagedSessionSkills.decode("{\"version\":1,", json, digests));
+        assertThat(error).isInstanceOf(ManagedAgentException.class);
+        assertThat(((ManagedAgentException) error).getCode())
+                .isEqualTo("session_skills_conflict");
+        assertThat(error.getCause())
+                .isInstanceOf(com.fasterxml.jackson.core.JsonProcessingException.class);
+    }
 }
