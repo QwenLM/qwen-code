@@ -415,8 +415,54 @@ class ManagedChannelServiceTest {
                 .extracting(PublicChannelDeliverySegment::providerReceipt)
                 .containsExactly("<m0@example.com>", "<m1@example.com>",
                         "<m2@example.com>");
+        assertThat(viewed.segments())
+                .extracting(PublicChannelDeliverySegment::ordinal)
+                .containsExactly(0, 1, 2);
+        // The singular fields name the first segment of the array.
+        assertThat(viewed.segmentId())
+                .isEqualTo(viewed.segments().getFirst().segmentId());
+        assertThat(viewed.ordinal())
+                .isEqualTo(viewed.segments().getFirst().ordinal());
         assertThat(service.listDeliveries(TENANT, ACTOR, channel, null, 10)
                 .data().getFirst().segments()).hasSize(3);
+    }
+
+    @Test
+    void listDeliveriesScopesSegmentsToEachDelivery() {
+        InboundAdmission first = service.submitInbound(TENANT, channel,
+                event(1, "1700:95", "first"));
+        InboundAdmission second = service.submitInbound(TENANT, channel,
+                event(1, "1700:96", "second"));
+        String firstId = first.inputId() + ":reply";
+        String secondId = second.inputId() + ":reply";
+        plannedDelivery(first.sessionId(), firstId, first.routeId(), "one", 2);
+        plannedDelivery(second.sessionId(), secondId, second.routeId(), "two", 3);
+        service.claimDeliveries(TENANT, channel, 16);
+        service.receipt(TENANT, channel, firstId,
+                new ReceiptRequest("accepted", 0, "<f0@example.com>", null));
+        service.receipt(TENANT, channel, secondId,
+                new ReceiptRequest("accepted", 0, "<s0@example.com>", null));
+
+        List<PublicChannelDelivery> page = service.listDeliveries(TENANT,
+                ACTOR, channel, null, 10).data();
+        assertThat(page).hasSize(2);
+        PublicChannelDelivery firstView = page.stream()
+                .filter(d -> d.id().equals(firstId)).findFirst().orElseThrow();
+        PublicChannelDelivery secondView = page.stream()
+                .filter(d -> d.id().equals(secondId)).findFirst().orElseThrow();
+        assertThat(firstView.segments())
+                .extracting(PublicChannelDeliverySegment::segmentId)
+                .containsExactly(firstId + ":0", firstId + ":1");
+        assertThat(firstView.segments())
+                .extracting(PublicChannelDeliverySegment::providerReceipt)
+                .containsExactly("<f0@example.com>", null);
+        assertThat(secondView.segments())
+                .extracting(PublicChannelDeliverySegment::segmentId)
+                .containsExactly(secondId + ":0", secondId + ":1",
+                        secondId + ":2");
+        assertThat(secondView.segments())
+                .extracting(PublicChannelDeliverySegment::providerReceipt)
+                .containsExactly("<s0@example.com>", null, null);
     }
 
     @Test
@@ -548,6 +594,87 @@ class ManagedChannelServiceTest {
         assertThat(segmentLedger.list(TENANT, channel, resent.deliveryId()))
                 .extracting(SegmentLedger::providerReceipt)
                 .containsExactly(null, null, null);
+    }
+
+    @Test
+    void aResendAgainstAConflictingStoredChainLeavesNoOrphanSegments() {
+        InboundAdmission admitted = service.submitInbound(TENANT, channel,
+                event(1, "1700:97", "please reply"));
+        String deliveryId = admitted.inputId() + ":reply";
+        plannedDelivery(admitted.sessionId(), deliveryId, admitted.routeId(),
+                "The build is green.", 2);
+        service.claimDeliveries(TENANT, channel, 16);
+        // The Harness mints deliveryId + ":r1"; pre-create that id naming a
+        // different first segment, as an already-issued conflicting chain.
+        String resentId = deliveryId + ":r1";
+        new JdbcChannelDeliveryRepository(jdbc).findOrCreate(
+                new ChannelDeliveryRepository.ChannelDelivery(TENANT, channel,
+                        resentId, "other:0", 0, "planned", null, 0, 0));
+        segmentLedger.plan(TENANT, channel, resentId,
+                List.of(new SegmentLedger("other:0", 0, null)));
+        assertThatThrownBy(() -> service.resend(TENANT, channel, deliveryId))
+                .isInstanceOf(IllegalStateException.class);
+        // The refused chain planned nothing: only the original row remains.
+        assertThat(segmentLedger.list(TENANT, channel, resentId))
+                .extracting(SegmentLedger::segmentId)
+                .containsExactly("other:0");
+    }
+
+    @Test
+    void deliveryRowsAreCreatedOnlyAfterTheirSegmentsArePlanned() {
+        InboundAdmission admitted = service.submitInbound(TENANT, channel,
+                event(1, "1700:98", "please reply"));
+        String deliveryId = admitted.inputId() + ":reply";
+        plannedDelivery(admitted.sessionId(), deliveryId, admitted.routeId(),
+                "The build is green.", 2);
+        ChannelDeliveryRepository delegate = new JdbcChannelDeliveryRepository(jdbc);
+        ChannelDeliveryRepository observing = new ChannelDeliveryRepository() {
+            @Override
+            public ChannelDelivery findOrCreate(ChannelDelivery candidate) {
+                assertThat(segmentLedger.list(TENANT, channel,
+                        candidate.deliveryId()))
+                        .as("segments planned before the delivery row is visible")
+                        .isNotEmpty();
+                return delegate.findOrCreate(candidate);
+            }
+
+            @Override
+            public java.util.Optional<ChannelDelivery> find(String tenantId,
+                    String channelId, String deliveryId) {
+                return delegate.find(tenantId, channelId, deliveryId);
+            }
+
+            @Override
+            public ChannelDelivery transition(String tenantId, String channelId,
+                    String deliveryId, String expectedState, String state,
+                    String providerReceipt) {
+                return delegate.transition(tenantId, channelId, deliveryId,
+                        expectedState, state, providerReceipt);
+            }
+
+            @Override
+            public ChannelDelivery transition(String tenantId, String channelId,
+                    String deliveryId, String expectedState, String state,
+                    String providerReceipt, long claimGeneration) {
+                return delegate.transition(tenantId, channelId, deliveryId,
+                        expectedState, state, providerReceipt, claimGeneration);
+            }
+
+            @Override
+            public DeliveryPage listByChannel(String tenantId, String channelId,
+                    DeliveryCursor before, int limit) {
+                return delegate.listByChannel(tenantId, channelId, before, limit);
+            }
+        };
+        ManagedChannelService observingService = new ManagedChannelService(
+                instances, new JdbcChannelRouteRepository(jdbc), observing,
+                segmentLedger, sessions, workspaces, harness, mapper,
+                Duration.ofMinutes(10), clock::get);
+        observingService.claimDeliveries(TENANT, channel, 16);
+        expire(deliveryId);
+        observingService.reconcile();
+        ResendResponse resent = observingService.resend(TENANT, channel, deliveryId);
+        assertThat(resent.deliveryId()).isEqualTo(deliveryId + ":r1");
     }
 
     @Test

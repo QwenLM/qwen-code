@@ -333,6 +333,17 @@ public class ManagedChannelService {
         Map<?, ?> delivery = (Map<?, ?>) result.get("delivery");
         String resentId = String.valueOf(delivery.get("deliveryId"));
         List<?> resentSegments = (List<?>) delivery.get("segments");
+        Map<?, ?> first = (Map<?, ?>) resentSegments.getFirst();
+        // Reject a resent id that already names a different first segment
+        // before planning, so a refused resend leaves no orphan segment rows
+        // under the existing delivery's key.
+        deliveries.find(tenantId, channelId, resentId).ifPresent(existing -> {
+            if (!existing.segmentId().equals(String.valueOf(first.get("segmentId")))
+                    || existing.ordinal() != ((Number) first.get("ordinal")).intValue()) {
+                throw new IllegalStateException(
+                        "delivery id already belongs to another segment");
+            }
+        });
         // The new chain carries only the segments proven unsent, so none of
         // them holds a receipt yet. Plan them before the delivery row is
         // visible, so a public read never sees an empty segments array.
@@ -343,7 +354,6 @@ public class ManagedChannelService {
                     ((Number) segment.get("ordinal")).intValue(), null));
         }
         segments.plan(tenantId, channelId, resentId, plan);
-        Map<?, ?> first = (Map<?, ?>) resentSegments.getFirst();
         ChannelDelivery row = deliveries.findOrCreate(new ChannelDelivery(
                 tenantId, channelId, resentId,
                 String.valueOf(first.get("segmentId")),
