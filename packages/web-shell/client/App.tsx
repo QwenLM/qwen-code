@@ -26480,7 +26480,8 @@ export function App({
                             refreshSignal={connection.tokenCount}
                             running={
                               streamingState !== 'idle' ||
-                              sessionHasActivePrompt
+                              sessionHasActivePrompt ||
+                              sessionActiveWorkState === 'active'
                             }
                             onOpen={openComposerUsagePanel}
                           />

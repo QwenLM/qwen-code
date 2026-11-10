@@ -164,3 +164,106 @@ test('composer usage reading stays hidden and silent when stats fail @smoke', as
   await expect(page.locator('[data-web-shell-composer-usage]')).toHaveCount(0);
   await expect(page.getByText(/Load stats failed/)).toHaveCount(0);
 });
+
+test('composer usage follows background work and refreshes when it settles @smoke', async ({
+  page,
+}, testInfo) => {
+  await page.clock.install({ time: new Date('2026-11-10T00:00:00Z') });
+  await page.clock.pauseAt(new Date('2026-11-10T01:00:00Z'));
+  const scenario = createWebShellDaemonScenario({
+    capabilities: {
+      features: [
+        'session_events',
+        'session_source_metadata',
+        'workspace_session_live_state',
+      ],
+      sessionLiveStatePollIntervalMs: 1_000,
+    },
+    events: [
+      userTextEvent('Continue investigating in the background.', { id: 1 }),
+      assistantTextEvent('The background agent is still working.', { id: 2 }),
+      turnCompleteEvent('usage-background', { id: 3 }),
+    ],
+  });
+  let backgroundRunning = true;
+  scenario.sessions[0] = {
+    ...scenario.sessions[0],
+    hasActivePrompt: false,
+    hasRunningBackgroundTasks: true,
+    activeWorkState: 'active',
+  };
+  const daemon = await installMockDaemon(page, scenario, {
+    baseURL: String(testInfo.project.use.baseURL),
+  });
+  await page.route(
+    /\/workspaces\/.*\/sessions\/live-state(?:\?.*)?$/,
+    (route) =>
+      route.fulfill({
+        json: {
+          v: 1,
+          catalogVersion: scenario.sessionCatalogVersion,
+          sessions: [
+            {
+              sessionId: scenario.sessionId,
+              clientCount: 1,
+              hasActivePrompt: false,
+              hasRunningBackgroundTasks: backgroundRunning,
+              activeWorkState: backgroundRunning ? 'active' : 'idle',
+              isWaitingForPermission: false,
+              isWaitingForUserQuestion: false,
+            },
+          ],
+        },
+      }),
+  );
+  let stats = statsFor(scenario.sessionId, scenario.workspaceCwd, 4_080_000);
+  let reads = 0;
+  await page.route('**/session/*/stats', (route) => {
+    reads++;
+    return route.fulfill({ json: stats });
+  });
+  await page.goto(`/session/${encodeURIComponent(scenario.sessionId)}`);
+  const connection = await daemon.sse.waitForConnection(scenario.sessionId);
+  await daemon.sendEvent(
+    replayCompleteEvent({ sessionId: connection.sessionId, replayedCount: 3 }),
+  );
+  const bar = page.locator('[data-web-shell-composer-usage]');
+  const backgroundMarker = page.locator(
+    '[data-web-shell-session-background-running]',
+  );
+  await expect(backgroundMarker).toBeVisible();
+  await expect(bar).toContainText('4.2M tok');
+  await page.clock.runFor(1_000);
+
+  stats = statsFor(scenario.sessionId, scenario.workspaceCwd, 8_000_000);
+  const beforeChildUsage = reads;
+  await daemon.sendEvent({
+    v: 1,
+    type: 'session_update',
+    data: {
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: '' },
+        _meta: {
+          parentToolCallId: 'background-agent',
+          usage: { inputTokens: 52_000, outputTokens: 900 },
+        },
+      },
+    },
+  });
+  await page.clock.runFor(1_000);
+  expect(reads).toBe(beforeChildUsage);
+  await expect(bar).toContainText('4.2M tok');
+  await page.clock.runFor(5_000);
+  await expect(bar).toContainText('8.12M tok');
+
+  stats = statsFor(scenario.sessionId, scenario.workspaceCwd, 9_000_000);
+  backgroundRunning = false;
+  await page.clock.runFor(1_000);
+  await expect(backgroundMarker).toHaveCount(0);
+  await page.clock.runFor(1_000);
+  await expect(bar).toContainText('9.12M tok');
+  const settledReads = reads;
+  await page.clock.runFor(6_000);
+  expect(reads).toBe(settledReads);
+});

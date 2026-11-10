@@ -76,7 +76,7 @@ export function ComposerUsageStats({
   sessionIdRef.current = sessionId;
   const loadStatsRef = useRef(loadStats);
   loadStatsRef.current = loadStats;
-  const inFlightRef = useRef(false);
+  const inFlightRef = useRef<symbol | undefined>(undefined);
   const pendingRef = useRef(false);
   const lastStartRef = useRef(0);
   const timerRef = useRef<number | undefined>(undefined);
@@ -101,18 +101,25 @@ export function ComposerUsageStats({
       }
       return;
     }
-    inFlightRef.current = true;
+    const request = Symbol();
+    inFlightRef.current = request;
     lastStartRef.current = Date.now();
     Promise.resolve()
       .then(() => load(id))
       .then((snapshot) => {
-        if (sessionIdRef.current !== id || snapshot.sessionId !== id) return;
+        if (
+          inFlightRef.current !== request ||
+          sessionIdRef.current !== id ||
+          snapshot.sessionId !== id
+        )
+          return;
         setStatus(snapshot);
       })
       // A background reading keeps its last value; the panel reports errors.
       .catch(() => undefined)
       .finally(() => {
-        inFlightRef.current = false;
+        if (inFlightRef.current !== request) return;
+        inFlightRef.current = undefined;
         if (pendingRef.current) {
           pendingRef.current = false;
           refresh();
@@ -125,6 +132,14 @@ export function ComposerUsageStats({
   useEffect(() => {
     setStatus(null);
     lastStartRef.current = 0;
+    return () => {
+      inFlightRef.current = undefined;
+      pendingRef.current = false;
+      if (timerRef.current !== undefined) {
+        window.clearTimeout(timerRef.current);
+        timerRef.current = undefined;
+      }
+    };
   }, [sessionId]);
 
   useEffect(() => {
@@ -141,15 +156,6 @@ export function ComposerUsageStats({
     document.addEventListener('visibilitychange', refresh);
     return () => document.removeEventListener('visibilitychange', refresh);
   }, [refresh]);
-
-  useEffect(
-    () => () => {
-      if (timerRef.current !== undefined) {
-        window.clearTimeout(timerRef.current);
-      }
-    },
-    [],
-  );
 
   if (!status || status.sessionId !== sessionId) return null;
   const totals = summarizeSessionUsage(status);

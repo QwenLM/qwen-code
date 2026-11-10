@@ -105,6 +105,14 @@ async function flush() {
   });
 }
 
+function deferredStats() {
+  let resolve!: (value: DaemonSessionStatsStatus) => void;
+  const promise = new Promise<DaemonSessionStatsStatus>((finish) => {
+    resolve = finish;
+  });
+  return { promise, resolve };
+}
+
 function render(
   props: Partial<Parameters<typeof ComposerUsageStats>[0]> = {},
   language: 'en' | 'zh-CN' = 'en',
@@ -318,6 +326,65 @@ describe('ComposerUsageStats', () => {
     resolveSecond(stats({ sessionId: 's-2', promptCount: 7 }));
     await flush();
     expect(container.textContent).toContain('7 turns');
+  });
+
+  it('reads a new session without waiting for the previous request', async () => {
+    vi.useFakeTimers();
+    const first = deferredStats();
+    const second = deferredStats();
+    const loadStats = vi
+      .fn<(id: string) => Promise<DaemonSessionStatsStatus>>()
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(second.promise)
+      .mockResolvedValue(stats({ sessionId: 's-2', promptCount: 8 }));
+    const { container, update } = render({ loadStats });
+    await flush();
+    update({ sessionId: 's-2' });
+    await flush();
+    expect(loadStats).toHaveBeenCalledTimes(2);
+    expect(loadStats).toHaveBeenLastCalledWith('s-2');
+
+    update({ sessionId: 's-2', refreshSignal: 1 });
+    first.resolve(stats({ promptCount: 99 }));
+    await flush();
+    expect(container.innerHTML).toBe('');
+    await act(async () => {
+      vi.advanceTimersByTime(1_000);
+    });
+    await flush();
+    expect(loadStats).toHaveBeenCalledTimes(2);
+
+    second.resolve(stats({ sessionId: 's-2', promptCount: 7 }));
+    await flush();
+    expect(loadStats).toHaveBeenCalledTimes(3);
+    expect(loadStats).toHaveBeenLastCalledWith('s-2');
+    expect(container.textContent).toContain('8 turns');
+  });
+
+  it('ignores an old request after switching away and back', async () => {
+    const first = deferredStats();
+    const latest = deferredStats();
+    const loadStats = vi
+      .fn<(id: string) => Promise<DaemonSessionStatsStatus>>()
+      .mockReturnValueOnce(first.promise)
+      .mockResolvedValueOnce(stats({ sessionId: 's-2' }))
+      .mockReturnValueOnce(latest.promise);
+    const { container, update } = render({ loadStats });
+    await flush();
+    update({ sessionId: 's-2' });
+    await flush();
+    update({ sessionId: 's-1' });
+    await flush();
+    expect(loadStats).toHaveBeenCalledTimes(3);
+
+    latest.resolve(stats({ promptCount: 7 }));
+    await flush();
+    expect(container.textContent).toContain('7 turns');
+    first.resolve(stats({ promptCount: 99 }));
+    await flush();
+    expect(container.textContent).toContain('7 turns');
+    expect(container.textContent).not.toContain('99 turns');
+    expect(loadStats).toHaveBeenCalledTimes(3);
   });
 
   it('reads nothing while the page is hidden and catches up when shown', async () => {
