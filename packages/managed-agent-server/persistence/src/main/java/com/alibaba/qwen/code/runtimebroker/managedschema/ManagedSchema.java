@@ -43,6 +43,24 @@ public final class ManagedSchema {
         }
     }
 
+    /**
+     * True when the catalog already holds Managed namespace tables. The Flyway
+     * strategy and the preflight use it to tell "this chain has applied its
+     * baseline" apart from "the catalog's history belongs to the host".
+     */
+    public static boolean hasManagedTables(Connection connection) throws SQLException {
+        return !ManagedSchemaCatalog.tables(connection).isEmpty();
+    }
+
+    /** Data-source form of {@link #hasManagedTables(Connection)}. */
+    public static boolean hasManagedTables(DataSource source) {
+        try (Connection connection = source.getConnection()) {
+            return hasManagedTables(connection);
+        } catch (SQLException exception) {
+            return false;
+        }
+    }
+
     public static void validate(DataSource source) {
         Objects.requireNonNull(source, "source");
         try (Connection connection = source.getConnection()) {

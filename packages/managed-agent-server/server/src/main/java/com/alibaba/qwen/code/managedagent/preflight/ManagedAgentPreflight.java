@@ -1647,15 +1647,48 @@ public final class ManagedAgentPreflight {
 
     /** The database row for a reachable database: its schema, held to the server's validation. */
     static Check schemaCheck(Connection connection, String expected) {
-        return schemaCheck(schemaVersion(connection), expected,
-                () -> ManagedSchema.validate(connection));
+        String schema = schemaVersion(connection);
+        if (schema == null && hasManagedTables(connection)) {
+            // Shared catalog: the baseline was applied directly, so the host's
+            // flyway_schema_history says nothing about this chain. The exact
+            // schema validation is the authority.
+            try {
+                ManagedSchema.validate(connection);
+                return new Check("database", Status.PASS,
+                        "schema=" + (expected == null ? "baseline" : expected)
+                                + "; performance_schema grant ok",
+                        null);
+            } catch (SQLException | RuntimeException error) {
+                return new Check("database", Status.FAIL,
+                        "schema does not match this distribution: "
+                                + rootMessage(error),
+                        "start this distribution on a new, empty database, or"
+                                + " keep the release that created this one");
+            }
+        }
+        return schemaCheck(schema, expected, () -> ManagedSchema.validate(connection));
+    }
+
+    private static boolean hasManagedTables(Connection connection) {
+        try {
+            return ManagedSchema.hasManagedTables(connection);
+        } catch (SQLException error) {
+            return false;
+        }
     }
 
     private static String schemaVersion(Connection connection) {
         try (Statement statement = connection.createStatement();
                 ResultSet result = statement.executeQuery(
-                        "SELECT version FROM flyway_schema_history "
-                                + "ORDER BY installed_rank DESC LIMIT 1")) {
+                        // Only rows this chain wrote describe its schema. An
+                        // embedding application's own history keeps its versions
+                        // (a v12 application row must not read as a v12 Managed
+                        // database), so key on the Managed chain's rows: the
+                        // Flyway baseline marker and the managed-schema scripts.
+                        "SELECT version FROM flyway_schema_history WHERE"
+                                + " description = '<< Flyway Baseline >>'"
+                                + " OR script LIKE '%managed_schema%'"
+                                + " ORDER BY installed_rank DESC LIMIT 1")) {
             return result.next() ? result.getString(1) : null;
         } catch (SQLException error) {
             return null;

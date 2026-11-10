@@ -38,6 +38,57 @@ class ManagedAgentPreflightTest {
     private static final String DIGEST = "sha256:" + "a".repeat(64);
 
     @Test
+    void passesAPreflightWhenTheHostsHistoryIsAhead() throws Exception {
+        // A shared catalog keeps the host's history at a higher version; the
+        // preflight must anchor to the Managed chain, not to the global maximum.
+        JdbcDataSource source = sharedCatalog("app-history-12", "12");
+        try (Connection connection = source.getConnection()) {
+            var check = ManagedAgentPreflight.schemaCheck(connection, "1");
+            assertEquals(ManagedAgentPreflight.Status.PASS, check.status(), check.detail());
+        }
+    }
+
+    @Test
+    void anchorsTheSchemaVersionToTheManagedChainOnly() throws Exception {
+        for (String[] arm : new String[][] {
+                {"app-history-12", "12"}, {"app-history-1", "1"}, {"no-history", null}}) {
+            JdbcDataSource source = sharedCatalog(arm[0], arm[1]);
+            try (Connection connection = source.getConnection()) {
+                var check = ManagedAgentPreflight.schemaCheck(connection, "1");
+                assertEquals(ManagedAgentPreflight.Status.PASS, check.status(),
+                        arm[0] + " -> " + check.detail());
+                assertTrue(check.detail().startsWith("schema=1;")
+                                || check.detail().startsWith("schema=not migrated yet;"),
+                        arm[0] + " -> " + check.detail());
+            }
+        }
+    }
+
+    private static JdbcDataSource sharedCatalog(String name, String version) throws Exception {
+        JdbcDataSource source = new JdbcDataSource();
+        source.setURL("jdbc:h2:mem:preflight-" + name + "-" + UUID.randomUUID()
+                + ";MODE=MySQL;DB_CLOSE_DELAY=-1");
+        try (Connection connection = source.getConnection();
+                var statement = connection.createStatement()) {
+            statement.execute("CREATE TABLE da_business (witness INT)");
+            if (version != null) {
+                statement.execute(
+                        "CREATE TABLE flyway_schema_history (installed_rank INT PRIMARY KEY,"
+                                + " version VARCHAR(50), description VARCHAR(200),"
+                                + " type VARCHAR(20), script VARCHAR(1000), checksum INT,"
+                                + " installed_by VARCHAR(100), installed_on TIMESTAMP"
+                                + " DEFAULT CURRENT_TIMESTAMP, execution_time INT, success BOOLEAN)");
+                statement.execute("INSERT INTO flyway_schema_history (installed_rank, version,"
+                        + " description, type, script, checksum, installed_by, execution_time,"
+                        + " success) VALUES (1, '" + version + "', 'host', 'SQL', 'host.sql',"
+                        + " 0, 'host', 1, TRUE)");
+            }
+        }
+        ManagedSchema.initialize(source);
+        return source;
+    }
+
+    @Test
     void treatsOnlyLoopbackSpellingsAsLoopback() {
         assertTrue(ManagedAgentPreflight.isLoopback("127.0.0.1"));
         assertTrue(ManagedAgentPreflight.isLoopback("::1"));
