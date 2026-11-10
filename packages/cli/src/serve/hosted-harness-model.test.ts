@@ -190,6 +190,132 @@ function nativeInput(event: HookEventName): HookInput {
 describe('Hosted Harness model boundary', () => {
   beforeEach(() => vi.clearAllMocks());
 
+  it('recalls personal memory from original user input and injects it as request data', async () => {
+    const model = config([{ type: LlmEventType.Finished }]);
+    const hooks = hostedHooks([HookEventName.UserPromptSubmit]);
+    hooks.fire.mockImplementation(async (event) =>
+      event === HookEventName.UserPromptSubmit
+        ? {
+            hookSpecificOutput: {
+              hookEventName: event,
+              updatedPrompt: 'rewritten prompt',
+            },
+          }
+        : undefined,
+    );
+    const recall = vi
+      .fn()
+      .mockResolvedValue(
+        '<untrusted_external_context>known preference</untrusted_external_context>',
+      );
+    await runHostedHarnessTextTurn({
+      ...input,
+      memory: { recall },
+      recallUserInput: true,
+      hooks: hooks.session,
+      workspaceContext: { read: () => 'workspace instructions' },
+    });
+    expect(recall).toHaveBeenCalledExactlyOnceWith(
+      input.promptId,
+      'hello',
+      input.signal,
+    );
+    expect(model.requests[0][0].text).toContain('rewritten prompt');
+    expect(model.requests[0][0].text).toContain('<untrusted_external_context>');
+    expect(model.setUserMemory).toHaveBeenCalledWith('workspace instructions');
+    expect(model.setUserMemory.mock.calls.flat().join(' ')).not.toContain(
+      'known preference',
+    );
+  });
+
+  it('does not recall personal memory without a new accepted user input', async () => {
+    config([{ type: LlmEventType.Finished }]);
+    const recall = vi.fn();
+    await runHostedHarnessTextTurn({
+      ...input,
+      memory: { recall },
+      recallUserInput: false,
+    });
+    expect(recall).not.toHaveBeenCalled();
+  });
+
+  it.each(['tool-results', 'model'] as const)(
+    'does not recall accepted input again when resuming %s',
+    async (kind) => {
+      const model = config([{ type: LlmEventType.Finished }]);
+      const recall = vi.fn().mockResolvedValue('unexpected recall');
+      const responses: Part[] = [
+        {
+          functionResponse: {
+            id: 'saved-call',
+            name: 'context_search',
+            response: { status: 'ok', items: [] },
+          },
+        },
+      ];
+      const prepared = {
+        request: { model: 'saved-model', config: {}, contents: [] },
+      } as unknown as LlmPreparedRequest;
+      const replay =
+        kind === 'model'
+          ? vi
+              .spyOn(Turn.prototype, 'run')
+              .mockImplementation(async function* () {
+                yield {
+                  type: LlmEventType.Finished,
+                  value: { reason: undefined, usageMetadata: undefined },
+                };
+              })
+          : undefined;
+      try {
+        await runHostedHarnessTextTurn({
+          ...input,
+          memory: { recall },
+          recallUserInput: true,
+          ...(kind === 'model'
+            ? { resumeModel: { round: 0, prepared } as HostedModelRequest }
+            : { resumeFromToolResults: responses }),
+        });
+        expect(recall).not.toHaveBeenCalled();
+        if (replay) expect(replay).toHaveBeenCalled();
+        else expect(model.requests[0]).toEqual(responses);
+      } finally {
+        replay?.mockRestore();
+      }
+    },
+  );
+
+  it('recalls personal memory for each queued input using its accepted identity and original text', async () => {
+    config([{ type: LlmEventType.Finished }]);
+    const recall = vi.fn(
+      async (_id: string, text: string) => `memory for ${text}`,
+    );
+    const claim = vi
+      .fn()
+      .mockResolvedValueOnce([
+        {
+          id: 'umsg_next:2',
+          text: 'new preference',
+          parts: [{ text: 'new preference' }],
+        },
+      ])
+      .mockResolvedValue([]);
+    const commit = vi.fn();
+    await runHostedHarnessTextTurn({
+      ...input,
+      memory: { recall },
+      recallUserInput: true,
+      userMessages: { claim, commit, commitAssistant: vi.fn() },
+    });
+    expect(recall.mock.calls.map(([id, text]) => [id, text])).toEqual([
+      [input.promptId, 'hello'],
+      ['umsg_next:2', 'new preference'],
+    ]);
+    expect(commit).toHaveBeenCalledWith('umsg_next:2', [
+      { text: 'new preference\nmemory for new preference' },
+    ]);
+  });
+
   it.each([false, true])(
     'borrows diagnostics-only preparation while preserving durable capture (%s)',
     async (durable) => {
