@@ -722,11 +722,7 @@ export interface ServeAppDeps {
   ) => Promise<void | import('../config/settings.js').LoadedSettings>;
   persistSettings?: (
     workspace: string,
-    writes: Array<{
-      scope: import('../config/settings.js').SettingScope;
-      key: string;
-      value: unknown;
-    }>,
+    writes: import('./workspace-service/types.js').WorkspaceSettingsWrites,
     assertGenerationOpen?: () => void,
   ) => Promise<void>;
   updateModelContextWindow?: import('./routes/workspace-models.js').WorkspaceModelsRouteDeps['updateModelContextWindow'];
@@ -3595,8 +3591,10 @@ export function createServeApp(
 
   registerWorkspaceSubscriptionRoutes(app, {
     workspaceRegistry,
+    qwenCodeVersion: deps.qwenCodeVersion,
     mutate,
     persistSettings: deps.persistSettings,
+    syncModelProvidersRuntime,
     sendBridgeError,
   });
   const stopSubscriptionAuth = registerSubscriptionAuthRoutes(

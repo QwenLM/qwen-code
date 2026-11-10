@@ -25481,6 +25481,67 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
         expect(deliveredTo).not.toContain('author-A');
       });
 
+      it.each([
+        // The silent shapes matter most: a string is iterable and null is
+        // defaulted away, so neither throws at the delivery loop — they just
+        // exclude nobody and hand the comment back to its author.
+        ['a bare string', 'author-A'],
+        ['null', null],
+        ['a number', 42],
+        ['an object', { author: 'author-A' }],
+        ['an array with a non-string member', ['author-A', 7]],
+      ])(
+        'rejects a task record whose authorExclude is %s',
+        async (_name, authorExclude) => {
+          await initChannel(commentWatchConfig, { boundSessions });
+          boundSessions.deliverPrompt = vi.fn().mockResolvedValue(undefined);
+          writeInboundTasks([
+            makeInboundTaskRecord({
+              id: 'corrupt-author-exclude',
+              state: 'accepted',
+              issueNumber: 42,
+              delivery: { kind: 'bound-session', sessionId: 'winner-B' },
+              privateOnly: true,
+              authorExclude: authorExclude as unknown as string[],
+            }),
+          ]);
+          const recovery = channel as unknown as {
+            recoverInboundTasks: () => Promise<void>;
+            inboundPersistenceBlocked: boolean;
+          };
+          await expect(recovery.recoverInboundTasks()).rejects.toThrow(
+            'invalid GitHub inbound task state',
+          );
+          expect(recovery.inboundPersistenceBlocked).toBe(true);
+          expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+        },
+      );
+
+      it('names the offending record when the task store is rejected', async () => {
+        // One bad record blocks every healthy task in the file, so the
+        // rejection has to locate it for whoever repairs the store by hand.
+        await initChannel(commentWatchConfig, { boundSessions });
+        boundSessions.deliverPrompt = vi.fn().mockResolvedValue(undefined);
+        writeInboundTasks([
+          makeInboundTaskRecord({ id: 'healthy-task' }),
+          makeInboundTaskRecord({
+            id: 'corrupt-author-exclude',
+            state: 'accepted',
+            issueNumber: 42,
+            delivery: { kind: 'bound-session', sessionId: 'winner-B' },
+            privateOnly: true,
+            authorExclude: 42 as unknown as string[],
+          }),
+        ]);
+        const recovery = channel as unknown as {
+          recoverInboundTasks: () => Promise<void>;
+        };
+        await expect(recovery.recoverInboundTasks()).rejects.toThrow(
+          'invalid GitHub inbound task state at record 1 (corrupt-author-exclude)',
+        );
+        expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+      });
+
       it('does not reselect the author during LEGACY-mode task recovery (F3)', async () => {
         // Same exclusion contract without boundSessionActions: legacy mode
         // re-resolves the single winner, so once the author becomes the newest
