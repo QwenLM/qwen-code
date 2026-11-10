@@ -1953,6 +1953,41 @@ describe('WorkspaceBindingCreator', () => {
     expect(container.textContent).toContain('source unavailable');
   });
 
+  it('blocks the creation composer while the prepare phase is in flight', async () => {
+    // R8-1: `createOrRead` early-returns while `busy`, so the editor must not
+    // accept a prompt during the prepare window (here held at the skills
+    // load). Otherwise the keystrokes are dropped silently and cleared once
+    // the session is created.
+    const { createSession, getSessionOptions } = approvalSelection();
+    getSessionOptions.mockResolvedValue({
+      approvalMode: 'default',
+      availableApprovalModes: ['default'],
+      skillsSupported: true,
+    });
+    let finish!: (skills: never[]) => void;
+    creationSkills = {
+      workspaceCwd: '/hold',
+      list: vi.fn().mockResolvedValue([]),
+      load: vi.fn(
+        () =>
+          new Promise<never[]>((resolve) => {
+            finish = resolve;
+          }),
+      ),
+    };
+    await render();
+    await act(async () => {
+      editorMocks.props!.onSubmit!('hello');
+      await flush();
+    });
+    expect(editorMocks.props!.disabled).toBe(true);
+    await act(async () => {
+      finish([]);
+      await flush();
+    });
+    expect(createSession).toHaveBeenCalledOnce();
+  });
+
   it('freezes selected policy on lost response and restores the exact mode after refresh', async () => {
     const { createSession } = approvalSelection();
     createSession.mockRejectedValueOnce(new Error('lost response'));

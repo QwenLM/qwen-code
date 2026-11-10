@@ -752,6 +752,10 @@ export function WorkspaceBindingCreator({
     busy || loading || optionsLoading || fileReferences.busy;
   const composerBlocked =
     !interactive ||
+    // The prepare window and the creation request itself both set `busy`, and
+    // `createOrRead` early-returns on it: without this the composer accepts a
+    // prompt it will silently drop (and clear once the session is created).
+    busy ||
     workspaceSelectionBlocked ||
     workspaceCreating ||
     Boolean(pending) ||
