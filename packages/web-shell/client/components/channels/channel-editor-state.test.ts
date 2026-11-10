@@ -881,6 +881,113 @@ describe('Channel editor state', () => {
     expect(validateChannelEditorDraft(descriptor, valid, [])).toEqual({});
   });
 
+  it('rejects values below an inclusive minimum but admits the bound itself', () => {
+    // The gap this closes: a field whose real floor is 0 could only say
+    // exclusiveMinimum: -1, which admits (-1, 0). The editor accepted -0.5 and
+    // the adapter refused it at save, so the operator learned the constraint
+    // only after pressing Save.
+    const descriptor: DaemonChannelTypeDescriptor = {
+      type: 'example',
+      displayName: 'Example',
+      manageable: true,
+      fields: [
+        {
+          key: 'reserve',
+          label: 'Reserve',
+          kind: 'number',
+          minimum: 0,
+          maximum: 5000,
+        },
+      ],
+    };
+
+    for (const value of ['-0.5', '-1', '-0.0001']) {
+      const draft = createChannelEditorDraft(descriptor);
+      draft.name = 'example';
+      draft.values.reserve = value;
+      expect(validateChannelEditorDraft(descriptor, draft, [])).toEqual({
+        reserve: 'outOfRange',
+      });
+    }
+
+    // 0 is the point of the inclusive bound — it disables the gate.
+    for (const value of ['0', '200', '200.5', '5000']) {
+      const draft = createChannelEditorDraft(descriptor);
+      draft.name = 'example';
+      draft.values.reserve = value;
+      expect(validateChannelEditorDraft(descriptor, draft, [])).toEqual({});
+    }
+  });
+
+  it('applies the stricter floor when both lower bounds are declared', () => {
+    const descriptor: DaemonChannelTypeDescriptor = {
+      type: 'example',
+      displayName: 'Example',
+      manageable: true,
+      fields: [
+        {
+          key: 'reserve',
+          label: 'Reserve',
+          kind: 'number',
+          exclusiveMinimum: 0,
+          minimum: -1,
+        },
+      ],
+    };
+
+    // exclusiveMinimum: 0 is stricter than minimum: -1, so 0 stays refused.
+    const draft = createChannelEditorDraft(descriptor);
+    draft.name = 'example';
+    draft.values.reserve = '0';
+    expect(validateChannelEditorDraft(descriptor, draft, [])).toEqual({
+      reserve: 'outOfRange',
+    });
+
+    const valid = createChannelEditorDraft(descriptor);
+    valid.name = 'example';
+    valid.values.reserve = '1';
+    expect(validateChannelEditorDraft(descriptor, valid, [])).toEqual({});
+  });
+
+  it('does not strand an edit over a stored value below a newly declared floor', () => {
+    // The store forgives an unchanged stored number for the whole range, so the
+    // editor has to forgive the inclusive bound too. Otherwise a channel whose
+    // settings file predates the floor cannot be edited at all.
+    const descriptor: DaemonChannelTypeDescriptor = {
+      type: 'example',
+      displayName: 'Example',
+      manageable: true,
+      fields: [
+        {
+          key: 'reserve',
+          label: 'Reserve',
+          kind: 'number',
+          minimum: 0,
+          maximum: 5000,
+        },
+      ],
+    };
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'example',
+      config: { type: 'example', reserve: -0.5 },
+      secrets: {},
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    const draft = createChannelEditorDraft(descriptor, instance);
+    draft.name = 'example';
+    expect(draft.values.reserve).toBe('-0.5');
+
+    expect(validateChannelEditorDraft(descriptor, draft, [], instance)).toEqual(
+      {},
+    );
+
+    draft.values.reserve = '-0.2';
+    expect(validateChannelEditorDraft(descriptor, draft, [], instance)).toEqual(
+      { reserve: 'outOfRange' },
+    );
+  });
+
   it('treats a whitespace-only number draft as empty instead of invalid', () => {
     const descriptor: DaemonChannelTypeDescriptor = {
       type: 'example',
@@ -1030,6 +1137,51 @@ describe('GitHub watch events require bound delivery', () => {
     expect(
       validateChannelEditorDraft(BOUND, draftWithEvents('typo_event'), []),
     ).toEqual({ prWatchEvents: 'invalidOption' });
+  });
+});
+
+describe('GitHub requireBoundWatch requires bound delivery', () => {
+  const BOUND: DaemonChannelTypeDescriptor = {
+    ...GITHUB,
+    fields: [
+      ...GITHUB.fields,
+      {
+        key: 'deliverToBoundSessions',
+        label: 'Deliver To PR-Bound Sessions',
+        kind: 'boolean',
+      },
+      {
+        key: 'requireBoundWatch',
+        label: 'Require Active Watch For Review/Verify Sessions',
+        kind: 'boolean',
+      },
+    ],
+  };
+
+  function draftWithGate(on: boolean): ChannelEditorDraft {
+    const draft = createChannelEditorDraft(BOUND);
+    draft.name = 'my-bot';
+    draft.values.useLocalGh = true;
+    draft.values.requireBoundWatch = on;
+    return draft;
+  }
+
+  it('refuses the gate while bound delivery is off', () => {
+    expect(validateChannelEditorDraft(BOUND, draftWithGate(true), [])).toEqual({
+      requireBoundWatch: 'requiresBoundDeliveryForWatchGate',
+    });
+  });
+
+  it('allows the gate once bound delivery is on', () => {
+    const draft = draftWithGate(true);
+    draft.values.deliverToBoundSessions = true;
+    expect(validateChannelEditorDraft(BOUND, draft, [])).toEqual({});
+  });
+
+  it('leaves the gate off alone with delivery off', () => {
+    expect(validateChannelEditorDraft(BOUND, draftWithGate(false), [])).toEqual(
+      {},
+    );
   });
 });
 

@@ -6,10 +6,10 @@ Status: proposed (2026-11-09), partially landed (#16732 and this increment). Thi
 
 ## Problem
 
-The drain is complete but unreachable. `runPrWatchDrainTick` takes its restore, admission, registry and self-push access as injected dependencies, and nothing in production populates them: `getPrWatchDeps` and `getPrDrainDeps` have no production caller, `defaultPrWatchDir()` and `releasePrWatchOwnershipSync()` are referenced only by tests. Three consequences follow, and each is a defect the moment PR B flips the switch:
+The drain is complete but unreachable. `runPrWatchDrainTick` takes its restore, admission, registry and self-push access as injected dependencies, and nothing in production populates them: `getPrWatchDeps` and `getPrDrainDeps` have no production caller, `defaultPrWatchDir()` and `releasePrWatchOwnershipSync()` are referenced only by tests. Three consequences follow once PR B flips the switch — two of correctness, one of latency:
 
 - A dormant recipient can never be woken. The real restore lived in `restoreSessionHandler`, a route closure inside `registerSessionRoutes`, reachable only over HTTP; §1 moved its reusable core into `server/session-restore.ts`. The channel reaches it through the SDK (`commands/channel/daemon-worker.ts:1057-1063`), which the daemon cannot use for its own in-process delivery.
-- `wakeDormant: false` strands entries forever. The drain holds them for the session's next live turn, but no hook drains on resume, so nothing consumes them.
+- `wakeDormant: false` delays delivery by up to one refresh interval. It does **not** strand entries: the drain runs after the observation on every tick, re-reads each watch file's `pending` list, and only takes the dormant branch when `isSessionLive` is false — so once the session is live, the next tick delivers. What is missing is immediacy: nothing drains at the moment of resume, so a transition can wait a full interval (5 minutes by default) for a session the user is already looking at.
 - Shutdown overlaps a successor. Nothing stops the watch or releases the owner record, so a successor daemon can claim while the predecessor's restores and admissions are still in flight (master §2).
 
 Two further gaps are load-bearing for correctness rather than reachability: the observation discards the bindings scan's `partial` flag (its own comment says enablement MUST thread it before any negative decision), and the slim listing never writes `state` to a watch file nor supplies `listedKeys`, so a closed PR the listing returns stays in the view rotation forever.
@@ -29,7 +29,7 @@ Two further gaps are load-bearing for correctness rather than reachability: the 
 
 - Extract the restore core into a function the route and the drain both call in-process, with the route's HTTP behaviour byte-compatible.
 - Give the drain a real `wakeSession` that mints and releases a client registration, classifying outcomes as the channel does.
-- Drain on resume so `wakeDormant: false` entries are consumed on the session's next live turn.
+- Drain at the moment of resume, so a `wakeDormant: false` entry is delivered as soon as the session is live instead of at the next refresh tick.
 - Stop the watch and release the owner record on shutdown, after in-flight work settles.
 - Populate both deps seams: watch directory and lock registry, allowed hosts, admission, restore, self-push ledger, and the scan's `partial`.
 - Write the slim listing's `state` to watch files and supply `listedKeys`.
@@ -64,7 +64,9 @@ Five boundaries are decided explicitly:
 
 ### 2. Resume-drain hook (not yet landed)
 
-The shared restore takes an optional `onRestored` callback, invoked after the session is live and the generation assertion passes, before the function returns. The route passes nothing (behaviour unchanged); the drain's `wakeSession` provisioning passes a hook that schedules a drain for that session's bound PRs.
+This is a **latency optimization, not a correctness fix**. Delivery already happens without it: the drain runs every tick, re-reads `pending`, and delivers to a recipient once `isSessionLive` is true. The hook removes the wait between a user's resume and the next tick.
+
+The shared restore takes an optional `onRestored` callback, invoked after the session is live and the generation assertion passes. **The caller that matters is the route, not the drain.** A hook supplied only by the drain's own `wakeSession` provisioning would fire on the `wakeDormant: true` path — the drain restoring a session itself — and never on a user's resume, so it would not deliver the case this section exists for. Wiring it therefore needs a route-to-drain seam: an injected `onSessionRestored`-style dependency on the session routes, populated from the same late-bound getter as the drain deps, which schedules a drain for that session's bound PRs. Until that seam exists the callback has no caller, so it lands together with the seam or not at all.
 
 The hook **must not be awaited inside the restore**. `PathMutexRegistry.runExclusive` is not re-entrant, and the drain's own `restoreAndAdmit` re-acquires the same per-PR lock after its wake. Awaiting a drain from inside a restore that a drain dispatched would invert the await direction and can deadlock. The hook therefore fires the drain without waiting (`void`, with its own failure logging), exactly as the drain already fires restores. It also runs after the core's `finally` has released the reservation and the worktree lock — §1 moved both releases inside the core, so the hook must sit after that `finally`, not before it — so a drain that re-enters the same session's restore cannot collide with the pending reservation count.
 
@@ -157,7 +159,7 @@ The rows for `session-restore.ts`, `routes/session.ts`, `worktree-ownership-op.t
 1. With the switch off, production behaviour and API volume are unchanged; no new seam is read.
 2. The route's HTTP behaviour is byte-compatible: every existing load/resume test passes with its assertions, title and count unchanged.
 3. With the switch on (tests), a dormant recipient is restored through the shared core, delivered to, and its registration released once the prompt settles.
-4. `wakeDormant: false` entries are consumed on the session's next resume.
+4. A `wakeDormant: false` entry is delivered on the resume itself rather than at the next refresh tick. (Delivery on the next tick already holds without this slice; the criterion is the latency, not the delivery.)
 5. Shutdown stops the watch, waits for in-flight work, and only then releases the owner record.
 6. A closed PR the slim listing returns is not viewed again; the listing's `state` reaches the watch file.
 7. Views go only to allowed hosts; a binding on any other host causes no `gh` call.
