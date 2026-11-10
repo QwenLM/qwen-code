@@ -93,12 +93,13 @@ class ManagedStoreDecompositionTest {
         assertEntries(ManagedAgentStore.class, """
                 findSessionWorktree/2:- findSessionWorktrees/2:- insertSessionCommand/10::REQUIRED:DEFAULT:false
                 insertSessionCommand/11::REQUIRED:DEFAULT:false
+                insertSessionCommand/12::REQUIRED:DEFAULT:false
                 insertWorkspaceSessionCommand/1::REQUIRED:DEFAULT:false insertInternalTeamLeadSessionCommand/6::REQUIRED:DEFAULT:false findWorkspaceCreateReplay/4:-
                 replayWorkspaceSessionCommand/4::REQUIRED:DEFAULT:false insertCsiSessionCommand/7:- requireCsiRequest/2:-
                 insertChildSessionCommand/8::REQUIRED:DEFAULT:false insertChildSessionCommand/9::REQUIRED:DEFAULT:false findChildWorkspaceCwd/3:-
                 insertPublicChildSessionCommand/9::REQUIRED:DEFAULT:false replayChildSessionCommand/4::REQUIRED:DEFAULT:false findChildLineage/2:-
                 workspaceSessionOptions/2::REQUIRED:DEFAULT:false supportsPlanMode/1:- hasMcpServers/1:-
-                requireMcpManagement/4::REQUIRED:DEFAULT:false requireMcpSettingsCommit/3::MANDATORY:DEFAULT:false requireExtensionManagement/5::REQUIRED:DEFAULT:false
+                requireMcpManagement/4::REQUIRED:DEFAULT:false requireMcpSettingsCommit/3::MANDATORY:DEFAULT:false requireExtensionManagement/5::REQUIRED:DEFAULT:false canApplyExtensions/1:-
                 requireConfigurationCommit/4::MANDATORY:DEFAULT:false insertTurnCommand/7::REQUIRED:DEFAULT:false insertTurnCommand/8::REQUIRED:DEFAULT:false
                 insertCancelCommand/6::REQUIRED:DEFAULT:false insertCancelCommand/7::REQUIRED:DEFAULT:false beginSessionRename/5::REQUIRED:DEFAULT:false
                 beginSessionRename/6::REQUIRED:DEFAULT:false completeSessionRename/6::REQUIRED:DEFAULT:false completeSessionRename/3::REQUIRED:DEFAULT:false
@@ -148,7 +149,7 @@ class ManagedStoreDecompositionTest {
                 authorizeLifecycle/5::REQUIRED:DEFAULT:false skipContended/2:- lockBounded/1:-
                 lockBoundedResult/1:- namedRootDeadlock/1:- authorizeOrdinary/4::REQUIRED:DEFAULT:false
                 approvalSelection/4::REQUIRED:DEFAULT:false usesDataSource/1:- lockSnapshotWriter/4:-
-                lockPublicationWriter/6:- lockPublicationWriter/8:- acquireWriter/4::REQUIRED:DEFAULT:false acquireWriter/5::REQUIRED:DEFAULT:false
+                lockPublicationWriter/6:- lockPublicationWriter/8:- acquireWriter/4::NOT_SUPPORTED:DEFAULT:false acquireWriter/5::NOT_SUPPORTED:DEFAULT:false
                 renewWriter/4::REQUIRED:DEFAULT:false renewWriter/5::REQUIRED:DEFAULT:false sealWriter/4::REQUIRED:DEFAULT:false
                 sealWriter/5::REQUIRED:DEFAULT:false quiesceOwnership/4::REQUIRED:DEFAULT:false releaseOwnership/4::REQUIRED:DEFAULT:false
                 blockRecovery/4::REQUIRED:DEFAULT:false commit/4::REQUIRED:DEFAULT:false commit/5::REQUIRED:DEFAULT:false

@@ -16018,6 +16018,9 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
             totalTtftMs: 500,
             totalGenerationDurationMs: 400,
             totalThroughputOutputTokens: 40,
+            totalTimedGenerationDurationMs: 400,
+            totalOutputSpeedTokens: 40,
+            totalOutputSpeedDurationMs: 900,
             last: {
               model: 'model-a',
               ttftMs: 200,
@@ -16049,6 +16052,9 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         totalTtftMs: 500,
         totalGenerationDurationMs: 400,
         totalThroughputOutputTokens: 40,
+        totalTimedGenerationDurationMs: 400,
+        totalOutputSpeedTokens: 40,
+        totalOutputSpeedDurationMs: 900,
       });
       expect(stats.models['model-b']).not.toHaveProperty('generation');
     } finally {
@@ -30430,6 +30436,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
   let capturedAgentFactory:
     | ((conn: { closed: Promise<void> }) => {
         initialize: (args: Record<string, unknown>) => Promise<unknown>;
+        newSession: (args: Record<string, unknown>) => Promise<unknown>;
         loadSession: (args: Record<string, unknown>) => Promise<unknown>;
         unstable_resumeSession: (
           args: Record<string, unknown>,
@@ -31120,6 +31127,160 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         } else {
           await expect(restore).rejects.toThrow('session_changed');
           expect(innerConfig.switchModel).not.toHaveBeenCalled();
+        }
+        expect(setValue).not.toHaveBeenCalled();
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
+
+  it.each(['newSession', 'loadSession', 'unstable_resumeSession'] as const)(
+    'passes the saved subscription fallback for %s without a recorded route',
+    async (method) => {
+      const config = bindRestoreMocks({
+        sessionExists: method !== 'newSession',
+      });
+      config
+        .getModelsConfig()
+        .getCurrentAuthType.mockReturnValue(AuthType.QWEN_SUBSCRIPTION);
+      config.getModel.mockReturnValue('legacy-api-model');
+      const setValue = vi.fn();
+      vi.mocked(loadSettings).mockReturnValue({
+        ...makeRestoreSettings(),
+        isTrusted: true,
+        workspaceSettingsActive: true,
+        user: {
+          settings: {
+            security: { auth: { selectedType: AuthType.QWEN_SUBSCRIPTION } },
+            model: { name: 'qwen3.8-max' },
+          },
+        },
+        workspace: {
+          settings: { model: { name: 'legacy-api-model', baseUrl: '' } },
+        },
+        system: { settings: {} },
+        setValue,
+      } as unknown as LoadedSettings);
+      const { agent, agentPromise } = await spawnAgent();
+
+      try {
+        await agent[method]({
+          cwd: '/tmp',
+          mcpServers: [],
+          sessionId: 'persisted-1',
+        });
+        expect(config.refreshAuth).toHaveBeenCalledExactlyOnceWith(
+          AuthType.QWEN_SUBSCRIPTION,
+          true,
+          'qwen3.8-max',
+        );
+        expect(setValue).not.toHaveBeenCalled();
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
+
+  it.each(
+    (['loadSession', 'unstable_resumeSession'] as const).flatMap((method) =>
+      (['removed', 'missing-key', 'healthy'] as const).map((route) => ({
+        method,
+        route,
+      })),
+    ),
+  )(
+    '$method restores a $route historical API route with a shadowed subscription default',
+    async ({ method, route }) => {
+      const config = bindRestoreMocks({
+        sessionExists: true,
+        resumedConversation: {
+          messages: [
+            {
+              uuid: 'route-1',
+              type: 'system',
+              subtype: 'session_model',
+              systemPayload: {
+                modelId: 'recorded-api-model',
+                authType: AuthType.USE_OPENAI,
+              },
+            },
+          ],
+        },
+      });
+      let authType = AuthType.QWEN_SUBSCRIPTION;
+      let model = 'legacy-api-model';
+      config.getAuthType.mockImplementation(() => authType);
+      config
+        .getModelsConfig()
+        .getCurrentAuthType.mockImplementation(() => authType);
+      config.getModel.mockImplementation(() => model);
+      config.switchModel.mockImplementation(async (nextAuth, nextModel) => {
+        if (route === 'removed' && nextModel === 'recorded-api-model') {
+          throw new Error('Model not found');
+        }
+        if (
+          nextAuth === AuthType.QWEN_SUBSCRIPTION &&
+          nextModel !== 'qwen3.8-max'
+        ) {
+          throw new Error('Unavailable subscription model');
+        }
+        authType = nextAuth;
+        model = nextModel;
+      });
+      config.refreshAuth.mockImplementation(async (...args: unknown[]) => {
+        if (authType === AuthType.USE_OPENAI && route === 'missing-key') {
+          throw new Error('Missing API key');
+        }
+        if (
+          authType === AuthType.QWEN_SUBSCRIPTION &&
+          model !== 'qwen3.8-max'
+        ) {
+          if (args[2] !== 'qwen3.8-max') throw new Error('Run /model');
+          model = 'qwen3.8-max';
+        }
+      });
+      const refreshSubscriptionModels = vi
+        .fn()
+        .mockResolvedValue({ models: ['qwen3.8-max'] });
+      Object.assign(config, { refreshSubscriptionModels });
+      const setValue = vi.fn();
+      vi.mocked(loadSettings).mockReturnValue({
+        ...makeRestoreSettings(),
+        isTrusted: true,
+        workspaceSettingsActive: true,
+        user: {
+          settings: {
+            security: { auth: { selectedType: AuthType.QWEN_SUBSCRIPTION } },
+            model: { name: 'qwen3.8-max' },
+          },
+        },
+        workspace: {
+          settings: { model: { name: 'legacy-api-model', baseUrl: '' } },
+        },
+        system: { settings: {} },
+        setValue,
+      } as unknown as LoadedSettings);
+      const { agent, agentPromise } = await spawnAgent();
+      try {
+        await agent[method]({
+          cwd: '/tmp',
+          mcpServers: [],
+          sessionId: 'persisted-1',
+        });
+        expect(model).toBe(
+          route === 'healthy' ? 'recorded-api-model' : 'qwen3.8-max',
+        );
+        expect(authType).toBe(
+          route === 'healthy'
+            ? AuthType.USE_OPENAI
+            : AuthType.QWEN_SUBSCRIPTION,
+        );
+        if (route === 'healthy') {
+          expect(refreshSubscriptionModels).not.toHaveBeenCalled();
+          expect(config.switchModel).toHaveBeenCalledTimes(1);
         }
         expect(setValue).not.toHaveBeenCalled();
       } finally {

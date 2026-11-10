@@ -13,6 +13,9 @@ import {
 import { logToolResultSize } from '../telemetry/loggers.js';
 import { ToolResultSizeEvent } from '../telemetry/types.js';
 import { createHash } from 'node:crypto';
+import { AuthType } from '../utils/auth-type.js';
+import { QwenSubscriptionSession } from '../qwen/subscription-session.js';
+import { SUBSCRIPTION_SIGN_IN_REQUIRED_MESSAGE } from '../qwen/subscription-errors.js';
 
 // DISCLAIMER: This is a copied version of https://github.com/googleapis/js-genai/blob/main/src/chats.ts with the intention of working around a key bug
 // where function responses are not treated as "valid" responses: https://b.corp.google.com/issues/420354090
@@ -3410,6 +3413,14 @@ export class LlmChat {
     if (exactRoute) {
       model = exactRoute.model;
     }
+    if (
+      !exactRoute &&
+      this.config.getCurrentAuthType?.() === AuthType.QWEN_SUBSCRIPTION &&
+      !this.config.getContentGeneratorConfig() &&
+      !new QwenSubscriptionSession().isSignedIn()
+    ) {
+      throw new Error(SUBSCRIPTION_SIGN_IN_REQUIRED_MESSAGE);
+    }
     // Both arms are one call: for a non-exact send `exactRoute` is
     // undefined, and `resolvedModelIdentity`'s second parameter defaults to
     // `getContentGeneratorConfig()` — including when passed an explicit
@@ -6028,8 +6039,9 @@ export class LlmChat {
         };
         const overBudget =
           onPreparedRequest.maxSnapshotBytes !== undefined &&
-          Buffer.byteLength(JSON.stringify(prepared)) >
-            onPreparedRequest.maxSnapshotBytes;
+          (onPreparedRequest.maxSnapshotBytes <= 0 ||
+            Buffer.byteLength(JSON.stringify(prepared)) >
+              onPreparedRequest.maxSnapshotBytes);
         await onPreparedRequest(
           overBudget ? prepared : structuredClone(prepared),
           continuationInFlight ||

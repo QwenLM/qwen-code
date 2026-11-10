@@ -116,6 +116,7 @@ export function createJavaManagedAgentProvider(
     request: {
       agentId: string;
       modelId?: string;
+      memoryStoreId?: string;
       workspaceId: string;
       cwdRelative: string;
       text?: string;
@@ -140,6 +141,9 @@ export function createJavaManagedAgentProvider(
           ? {}
           : { worktree: request.worktree }),
         ...(request.modelId === undefined ? {} : { modelId: request.modelId }),
+        ...(request.memoryStoreId === undefined
+          ? {}
+          : { memoryStoreId: request.memoryStoreId }),
         ...(request.skills?.length ? { skills: request.skills } : {}),
         ...(request.extensionPins === undefined
           ? {}
@@ -298,6 +302,40 @@ export function createJavaManagedAgentProvider(
           request.idempotencyKey,
           request.signal,
         ),
+      importPackage: (workspaceId, extensionId, metadata, source, request) =>
+        client.importExtensionPackage(
+          workspaceId,
+          extensionId,
+          metadata,
+          source,
+          request.idempotencyKey,
+          request.signal,
+        ),
+      inspect: (workspaceId, pin, request) =>
+        client.inspectExtensionPackage(workspaceId, pin, request.signal),
+      previewPackage: (workspaceId, metadata, source, request) =>
+        client.previewExtensionPackage(
+          workspaceId,
+          metadata,
+          source,
+          request.signal,
+        ),
+      lookupPackageOperation: (workspaceId, kind, key, request) =>
+        client.lookupExtensionPackageOperation(
+          workspaceId,
+          kind,
+          key,
+          request.signal,
+        ),
+      lookupApplyOperation: async (sessionId, key, request) =>
+        requireExtensionSnapshot(
+          await client.lookupExtensionApplyOperation(
+            sessionId,
+            key,
+            request.signal,
+          ),
+          sessionId,
+        ),
       settings: (workspaceId, extensionId, request) =>
         client.getExtensionSettings(workspaceId, extensionId, request.signal),
       saveSettings: (workspaceId, extensionId, revision, values, request) =>
@@ -399,6 +437,38 @@ export function createJavaManagedAgentProvider(
       },
     },
     diagnostics: {
+      async getActivityStatistics(sessionId, request) {
+        return requireDiagnosticSnapshot(
+          await client.getActivityStatistics(sessionId, request.signal),
+          sessionId,
+        );
+      },
+      async listActivity(sessionId, request) {
+        return requireDiagnosticSnapshot(
+          await client.listActivity(
+            {
+              sessionId,
+              kind: request.kind,
+              cursor: request.cursor,
+              limit: request.limit,
+            },
+            request.signal,
+          ),
+          sessionId,
+        );
+      },
+      async getContextUsage(sessionId, request) {
+        return requireDiagnosticSnapshot(
+          await client.getDiagnosticContextUsage(sessionId, request.signal),
+          sessionId,
+        );
+      },
+      async getStatistics(sessionId, request) {
+        return requireDiagnosticSnapshot(
+          await client.getDiagnosticStatistics(sessionId, request.signal),
+          sessionId,
+        );
+      },
       async getResources(sessionId, request) {
         return requireDiagnosticSnapshot(
           await client.getDiagnosticResources(sessionId, request.signal),
@@ -817,6 +887,7 @@ export function createJavaManagedAgentProvider(
               {
                 agentId,
                 modelId,
+                memoryStoreId,
                 workspaceId,
                 cwdRelative,
                 approvalMode,
@@ -831,6 +902,7 @@ export function createJavaManagedAgentProvider(
                 {
                   agentId,
                   modelId,
+                  memoryStoreId,
                   workspaceId,
                   cwdRelative,
                   approvalMode,
@@ -922,6 +994,9 @@ export function createJavaManagedAgentProvider(
           idempotencyKey: command.idempotencyKey,
           agentId,
           title: titleFor(request.text),
+          ...(request.memoryStoreId === undefined
+            ? {}
+            : { memoryStoreId: request.memoryStoreId }),
           input: request.input ?? [{ type: 'input_text', text: request.text }],
           metadata: { clientId: command.clientId },
         },

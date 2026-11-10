@@ -68,6 +68,24 @@ describe('createAndAttachSessionForPrompt', () => {
     expect(actions.setModel).toHaveBeenCalledWith('qwen3');
   });
 
+  it('sends the authenticated draft model with the create request', async () => {
+    const actions = createActions({
+      createSession: vi.fn(async () => ({
+        ...sessionResult,
+        modelApplied: true,
+      })),
+    });
+    const startupConfig = { modelServiceId: 'qwen3.8-max(qwen-subscription)' };
+    await prepareSession({
+      sessionActions: actions,
+      startupConfig,
+    });
+    expect(actions.createSession).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ startupConfig }),
+    );
+    expect(actions.setModel).not.toHaveBeenCalled();
+  });
+
   it('enables Plan with the selected execution permission after attach', async () => {
     const order: string[] = [];
     const actions = createActions({
@@ -772,6 +790,26 @@ describe('createAndAttachSessionForPrompt', () => {
       expect(onSessionCreated).toHaveBeenCalledWith('session-1', client);
       expect(actions.releaseSession).not.toHaveBeenCalled();
       expect(actions.clearSession).not.toHaveBeenCalled();
+    });
+
+    it('keeps the authenticated draft model when the created session is detached', async () => {
+      const client = { ...createDetachedClient(), modelApplied: true };
+      const actions = createUnboundActions(client);
+      const startupConfig = {
+        modelServiceId: 'qwen3.8-max(qwen-subscription)',
+      };
+
+      await prepareSession({
+        sessionActions: actions,
+        startupConfig,
+        getCurrentSessionId: () => 'session-2',
+      });
+
+      expect(actions.createSession).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({ startupConfig }),
+      );
+      expect(actions.attachSession).not.toHaveBeenCalled();
+      expect(client.setModel).not.toHaveBeenCalled();
     });
 
     it('applies Plan and reasoning through the created client', async () => {

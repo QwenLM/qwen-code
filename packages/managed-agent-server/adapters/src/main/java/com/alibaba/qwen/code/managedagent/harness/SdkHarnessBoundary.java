@@ -88,6 +88,11 @@ public final class SdkHarnessBoundary implements HarnessConnector {
     }
 
     @Override
+    public boolean supportsPersonalMemory() {
+        return call(delegate::supportsPersonalMemory);
+    }
+
+    @Override
     public boolean supportsUserMessageQueue() {
         return call(delegate::supportsUserMessageQueue);
     }
@@ -156,6 +161,24 @@ public final class SdkHarnessBoundary implements HarnessConnector {
     @Override
     public boolean supportsSessionExtensions() {
         return call(delegate::supportsSessionExtensions);
+    }
+
+    @Override
+    public boolean supportsPackagePreparation() { return call(delegate::supportsPackagePreparation); }
+
+    @Override
+    public PreparedPackage preparePackage(Map<String, Object> metadata, java.io.InputStream source) {
+        return call(() -> delegate.preparePackage(metadata, source));
+    }
+
+    @Override
+    public Map<String, Object> inspectPackage(Map<String, Object> metadata, java.io.InputStream source) {
+        return call(() -> delegate.inspectPackage(metadata, source));
+    }
+
+    @Override
+    public Map<String, Object> previewPackage(Map<String, Object> metadata, java.io.InputStream source) {
+        return call(() -> delegate.previewPackage(metadata, source));
     }
 
     @Override
