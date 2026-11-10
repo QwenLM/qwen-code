@@ -10,6 +10,7 @@ import {
   mkdtempSync,
   realpathSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -27,6 +28,7 @@ import {
   vi,
 } from 'vitest';
 import {
+  GitWorktreeService,
   SessionService,
   WORKTREE_SESSION_FILE,
   createWorktreeSessionMarkerExclusive,
@@ -426,6 +428,35 @@ describe('POST /session/:id/worktree-reset', () => {
     expect(newSidecar?.supersededBy).toBeUndefined();
     await expectMarkerOwner(fixture, newId);
     expect(archiveMocks.deleteDaemonSessionIfOrphan).not.toHaveBeenCalled();
+  });
+
+  it('transfers a checkout recorded with a `..` over a missing directory', async () => {
+    // JS `fs.realpathSync` folds the `..` before walking; `.native` and
+    // `fs.promises.realpath` would fail on the missing `nowhere` (POSIX), so
+    // the reset would refuse (409) a checkout the restore attests and the
+    // cleanup keys by its realpath.
+    const fixture = makeFixture();
+    const oldId = randomUUID();
+    fixture.writeTranscript(oldId);
+    await fixture.writeSidecar(oldId, {
+      worktreePath: [
+        fixture.workspaceDir,
+        'nowhere',
+        '..',
+        '.qwen',
+        'worktrees',
+        fixture.slug,
+      ].join(path.sep),
+    });
+    await fixture.createMarker(oldId);
+
+    const res = await request(fixture.app)
+      .post(`/session/${oldId}/worktree-reset`)
+      .send({});
+
+    expect(res.status).toBe(200);
+    expect(res.body.worktree.path).toBe(fixture.realTarget);
+    await expectMarkerOwner(fixture, res.body.sessionId);
   });
 
   it('rejects with 409 when the session has no worktree sidecar', async () => {
@@ -1593,5 +1624,382 @@ describe('POST /session/:id/load worktree classifications', () => {
       branch: fixture.worktreeBranch,
     });
     expect(fixture.fake.killSession).not.toHaveBeenCalled();
+  });
+
+  // The restore keys the ownership lock by its read before the bridge
+  // restore and checks that later reads name the checkout it locked; the
+  // cases below make the reads disagree, or the checkout's path change
+  // between them.
+  type SidecarRead = Awaited<ReturnType<typeof readWorktreeSessionStrict>>;
+  const LOCK_NOT_HELD =
+    'Worktree ownership lock does not cover the restored checkout';
+
+  function overrideFirstSidecarRead(
+    sidecarPath: string,
+    first: (read: SidecarRead) => SidecarRead,
+  ): void {
+    const realRead = coreMocks.real.readWorktreeSessionStrict;
+    let overridden = false;
+    coreMocks.readWorktreeSessionStrict.mockImplementation(
+      async (...args: Parameters<typeof realRead>) => {
+        const read = await realRead(...args);
+        if (overridden || args[0] !== sidecarPath) return read;
+        overridden = true;
+        return first(read);
+      },
+    );
+  }
+
+  function withWorktreePath(read: SidecarRead, worktreePath: string) {
+    return read.state === 'valid'
+      ? { ...read, session: { ...read.session, worktreePath } }
+      : read;
+  }
+
+  // A second spelling of the fixture workspace, through a symlink, so a
+  // recorded path under it is not canonical.
+  function linkedWorkspace(fixture: Fixture): string {
+    const link = path.join(tmpRoot, randomUUID());
+    symlinkSync(
+      fixture.workspaceDir,
+      link,
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+    return link;
+  }
+
+  it.each([
+    { earlier: 'missing', first: (): SidecarRead => ({ state: 'missing' }) },
+    {
+      earlier: 'invalid',
+      first: (): SidecarRead => ({
+        state: 'invalid',
+        reason: 'sidecar identity changed during read',
+      }),
+    },
+    {
+      earlier: 'legacy',
+      first: (read: SidecarRead): SidecarRead =>
+        read.state === 'valid'
+          ? { ...read, session: { ...read.session, workspaceCwd: undefined } }
+          : read,
+    },
+  ])(
+    'refuses to attest a sidecar its earlier read found $earlier, which took no lock',
+    async ({ first }) => {
+      const fixture = makeFixture();
+      const sessionId = randomUUID();
+      await fixture.writeSidecar(sessionId);
+      await fixture.createMarker(sessionId);
+      overrideFirstSidecarRead(
+        fixture.sessionService.getWorktreeSessionPath(sessionId),
+        first,
+      );
+
+      const res = await request(fixture.app)
+        .post(`/session/${sessionId}/load`)
+        .send({});
+
+      expect(res.status).toBe(500);
+      expect(res.body.error).toBe(LOCK_NOT_HELD);
+      expect(res.body.code).toBeUndefined();
+      expect(fixture.fake.loadSession).toHaveBeenCalledTimes(1);
+      expect(fixture.fake.changeSessionCwd).not.toHaveBeenCalled();
+      expect(fixture.fake.setSessionWorktree).not.toHaveBeenCalled();
+      expect(fixture.fake.killSession).toHaveBeenCalledWith(sessionId, {
+        requireZeroAttaches: true,
+      });
+    },
+  );
+
+  it('detaches an already-live session instead of closing it', async () => {
+    const fixture = makeFixture();
+    const sessionId = randomUUID();
+    await fixture.writeSidecar(sessionId);
+    await fixture.createMarker(sessionId);
+    const sidecarPath =
+      fixture.sessionService.getWorktreeSessionPath(sessionId);
+    const clientId = randomUUID();
+    fixture.fake.loadSession.mockImplementationOnce(
+      async (req: { sessionId: string; workspaceCwd: string }) => ({
+        sessionId: req.sessionId,
+        workspaceCwd: req.workspaceCwd,
+        currentCwd: req.workspaceCwd,
+        attached: true,
+        clientId,
+        hasActivePrompt: false,
+      }),
+    );
+    overrideFirstSidecarRead(sidecarPath, () => ({ state: 'missing' }));
+
+    const res = await request(fixture.app)
+      .post(`/session/${sessionId}/load`)
+      .send({});
+
+    expect(res.status).toBe(500);
+    expect(res.body.error).toBe(LOCK_NOT_HELD);
+    expect(res.body.code).toBeUndefined();
+    expect(fixture.fake.detachClient).toHaveBeenCalledWith(sessionId, clientId);
+    expect(fixture.fake.killSession).not.toHaveBeenCalled();
+    expect(fixture.fake.setSessionWorktree).not.toHaveBeenCalled();
+    // The refusal leaves the persisted sidecar in place.
+    expect(existsSync(sidecarPath)).toBe(true);
+  });
+
+  it('refuses to attest a checkout other than the one it locked', async () => {
+    const fixture = makeFixture();
+    const sessionId = randomUUID();
+    await fixture.writeSidecar(sessionId);
+    await fixture.createMarker(sessionId);
+    const otherCheckout = path.join(
+      fixture.workspaceDir,
+      '.qwen',
+      'worktrees',
+      'other',
+    );
+    mkdirSync(otherCheckout, { recursive: true });
+    // Source-less, so no Channel re-read under the lock: the first check is
+    // the one after the bridge restore.
+    vi.spyOn(
+      SessionService.prototype,
+      'readCreationMetadata',
+    ).mockResolvedValue({});
+    overrideFirstSidecarRead(
+      fixture.sessionService.getWorktreeSessionPath(sessionId),
+      (read) => withWorktreePath(read, otherCheckout),
+    );
+
+    const res = await request(fixture.app)
+      .post(`/session/${sessionId}/load`)
+      .send({});
+
+    expect(res.status).toBe(500);
+    expect(res.body.error).toBe(LOCK_NOT_HELD);
+    expect(res.body.code).toBeUndefined();
+    expect(fixture.fake.changeSessionCwd).not.toHaveBeenCalled();
+    expect(fixture.fake.setSessionWorktree).not.toHaveBeenCalled();
+    expect(fixture.fake.killSession).toHaveBeenCalledWith(sessionId, {
+      requireZeroAttaches: true,
+    });
+  });
+
+  it('refuses a Channel redirect read from a checkout it did not lock', async () => {
+    const fixture = makeFixture();
+    const sessionId = randomUUID();
+    await fixture.writeSidecar(sessionId, { supersededBy: randomUUID() });
+    const otherCheckout = path.join(
+      fixture.workspaceDir,
+      '.qwen',
+      'worktrees',
+      'other',
+    );
+    mkdirSync(otherCheckout, { recursive: true });
+    overrideFirstSidecarRead(
+      fixture.sessionService.getWorktreeSessionPath(sessionId),
+      (read) => withWorktreePath(read, otherCheckout),
+    );
+
+    const res = await request(fixture.app)
+      .post(`/session/${sessionId}/load`)
+      .send({});
+
+    expect(res.status).toBe(500);
+    expect(res.body.error).toBe(LOCK_NOT_HELD);
+    expect(res.body.code).toBeUndefined();
+    expect(res.body.replacementSessionId).toBeUndefined();
+    expect(fixture.fake.loadSession).not.toHaveBeenCalled();
+  });
+
+  it('refuses a checkout that appeared after the lock was keyed by its raw path', async () => {
+    const fixture = makeFixture();
+    const sessionId = randomUUID();
+    const recordedPath = path.join(
+      linkedWorkspace(fixture),
+      '.qwen',
+      'worktrees',
+      fixture.slug,
+    );
+    await fixture.writeSidecar(sessionId, { worktreePath: recordedPath });
+    // Missing while the lock key is derived (so the key is the raw,
+    // non-canonical path), and back by the time the checkout is validated.
+    rmSync(fixture.worktreeDir, { recursive: true, force: true });
+    vi.spyOn(
+      GitWorktreeService.prototype,
+      'getRepoTopLevel',
+    ).mockImplementation(async () => {
+      if (!existsSync(fixture.worktreeDir)) {
+        mkdirSync(fixture.worktreeDir, { recursive: true });
+        await fixture.createMarker(sessionId);
+      }
+      return null;
+    });
+
+    const res = await request(fixture.app)
+      .post(`/session/${sessionId}/load`)
+      .send({});
+
+    expect(res.status).toBe(500);
+    expect(res.body.error).toBe(LOCK_NOT_HELD);
+    expect(res.body.code).toBeUndefined();
+    expect(fixture.fake.setSessionWorktree).not.toHaveBeenCalled();
+    expect(fixture.fake.killSession).toHaveBeenCalledWith(sessionId, {
+      requireZeroAttaches: true,
+    });
+  });
+
+  it('keeps a sidecar that is legacy under the lock on the lock-free legacy path', async () => {
+    const fixture = makeFixture();
+    const sessionId = randomUUID();
+    await fixture.writeSidecar(sessionId, { workspaceCwd: undefined });
+    const sidecarPath =
+      fixture.sessionService.getWorktreeSessionPath(sessionId);
+    const otherCheckout = path.join(
+      fixture.workspaceDir,
+      '.qwen',
+      'worktrees',
+      'other',
+    );
+    mkdirSync(otherCheckout, { recursive: true });
+    // The earlier read sees a sidecar that records its workspace (so the
+    // restore locks the other checkout); every later read is legacy, which
+    // needs no lock.
+    overrideFirstSidecarRead(sidecarPath, (read) =>
+      read.state === 'valid'
+        ? {
+            ...read,
+            session: {
+              ...read.session,
+              workspaceCwd: fixture.workspaceDir,
+              worktreePath: otherCheckout,
+            },
+          }
+        : read,
+    );
+
+    const res = await request(fixture.app)
+      .post(`/session/${sessionId}/load`)
+      .send({});
+
+    expect(res.status).toBe(200);
+    // Three reads of this sidecar: before the bridge restore, the Channel
+    // re-read (which only a restore holding the lock makes), and after it.
+    expect(
+      coreMocks.readWorktreeSessionStrict.mock.calls.filter(
+        ([readPath]) => readPath === sidecarPath,
+      ),
+    ).toHaveLength(3);
+    expect(res.body.worktree.path).toBe(fixture.realTarget);
+    expect(res.body.worktreeState).toBeUndefined();
+    expect(fixture.fake.killSession).not.toHaveBeenCalled();
+  });
+
+  it('attests a checkout recorded through a symlinked path', async () => {
+    const fixture = makeFixture();
+    const sessionId = randomUUID();
+    await fixture.writeSidecar(sessionId, {
+      worktreePath: path.join(
+        linkedWorkspace(fixture),
+        '.qwen',
+        'worktrees',
+        fixture.slug,
+      ),
+    });
+    await fixture.createMarker(sessionId);
+
+    const res = await request(fixture.app)
+      .post(`/session/${sessionId}/load`)
+      .send({});
+
+    expect(res.status).toBe(200);
+    expect(res.body.worktreeState).toBe('persisted-v1');
+    expect(res.body.worktree.path).toBe(fixture.realTarget);
+    expect(fixture.fake.killSession).not.toHaveBeenCalled();
+  });
+
+  it('attests a checkout recorded with a `..` over a missing directory', async () => {
+    // The restore compares the lock key with the `realTarget` it resolves
+    // itself; both must fold the `..` the way JS `fs.realpathSync` does.
+    const fixture = makeFixture();
+    const sessionId = randomUUID();
+    await fixture.writeSidecar(sessionId, {
+      worktreePath: [
+        fixture.workspaceDir,
+        'nowhere',
+        '..',
+        '.qwen',
+        'worktrees',
+        fixture.slug,
+      ].join(path.sep),
+    });
+    await fixture.createMarker(sessionId);
+
+    const res = await request(fixture.app)
+      .post(`/session/${sessionId}/load`)
+      .send({});
+
+    expect(res.status).toBe(200);
+    expect(res.body.worktreeState).toBe('persisted-v1');
+    expect(res.body.worktree.path).toBe(fixture.realTarget);
+    expect(fixture.fake.killSession).not.toHaveBeenCalled();
+  });
+
+  it('does not redirect to a replacement an in-flight reset may still roll back', async () => {
+    const fixture = makeFixture();
+    const oldId = randomUUID();
+    fixture.writeTranscript(oldId);
+    await fixture.writeSidecar(oldId);
+    await fixture.createMarker(oldId);
+    const oldSidecarPath = fixture.sessionService.getWorktreeSessionPath(oldId);
+
+    // Park the transfer at the marker flip, holding the ownership lock, with
+    // the supersede link on disk; the flip then fails and rolls it back.
+    let reachedFlip!: () => void;
+    const atFlip = new Promise<void>((resolve) => {
+      reachedFlip = resolve;
+    });
+    let releaseFlip!: () => void;
+    const flipGate = new Promise<void>((resolve) => {
+      releaseFlip = resolve;
+    });
+    coreMocks.transferWorktreeSessionMarkerOwner.mockImplementationOnce(
+      async () => {
+        reachedFlip();
+        await flipGate;
+        throw new Error('Worktree marker owner does not match the expectation');
+      },
+    );
+
+    const resetInFlight = request(fixture.app)
+      .post(`/session/${oldId}/worktree-reset`)
+      .send({})
+      .then((response) => response);
+    try {
+      await atFlip;
+
+      // The load's read before the bridge restore catches the sidecar mid
+      // rewrite, so the load takes no lock and runs while the reset is parked.
+      overrideFirstSidecarRead(oldSidecarPath, () => ({
+        state: 'invalid',
+        reason: 'sidecar identity changed during read',
+      }));
+      const loadResponse = await request(fixture.app)
+        .post(`/session/${oldId}/load`)
+        .send({});
+
+      expect(loadResponse.status).toBe(500);
+      expect(loadResponse.body.error).toBe(LOCK_NOT_HELD);
+      expect(loadResponse.body.code).toBeUndefined();
+      expect(loadResponse.body.replacementSessionId).toBeUndefined();
+      expect(fixture.fake.killSession).toHaveBeenCalledWith(oldId, {
+        requireZeroAttaches: true,
+      });
+    } finally {
+      releaseFlip();
+    }
+    const resetResponse = await resetInFlight;
+    expect(resetResponse.status).toBe(409);
+    expect(resetResponse.body.code).toBe('worktree_reset_invalid_state');
+    const oldSidecar = await expectSidecar(fixture, oldId);
+    expect(oldSidecar?.supersededBy).toBeUndefined();
   });
 });

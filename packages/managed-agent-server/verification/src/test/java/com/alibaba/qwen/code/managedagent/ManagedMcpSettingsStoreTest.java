@@ -3,8 +3,9 @@ package com.alibaba.qwen.code.managedagent;
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedExtensionRecordStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedMcpSettings;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -38,7 +39,7 @@ import static org.mockito.Mockito.when;
         "qwen.managed-agent.harness.enabled=false"
 })
 class ManagedMcpSettingsStoreTest {
-    @Autowired private ManagedSessionStore store;
+    @Autowired private JdbcManagedSessionStore store;
     @Autowired private AgentStateStore sessions;
     @Qualifier("managedJdbcTemplate")
     @Autowired private JdbcTemplate jdbc;
@@ -63,6 +64,10 @@ class ManagedMcpSettingsStoreTest {
         journal.committed(disable);
         assertThat(ManagedMcpSettings.find(new JdbcTemplate(jdbc.getDataSource()), "tenant", id)).isEqualTo(json.readTree(disabled.toString()));
         assertThat(ManagedMcpSettings.find(jdbc, "other-tenant", id)).isNull();
+        var diagnostics = new JdbcManagedExtensionRecordStore(jdbc, sessions);
+        JsonNode configRef = diagnostics.diagnosticConfigRef("tenant", id).orElseThrow();
+        assertThat(diagnostics.readRecordResource("tenant", id, configRef)).isEqualTo(json.readTree(disabled.toString()));
+        assertThat(diagnostics.diagnosticConfigRef("other-tenant", id)).isEmpty();
         SessionRecord session = mock(SessionRecord.class);
         when(session.tenantId()).thenReturn("tenant");
         when(session.sessionId()).thenReturn(id);
@@ -83,6 +88,30 @@ class ManagedMcpSettingsStoreTest {
         jdbc.update("UPDATE ma_resource SET inline_bytes=? WHERE tenant_id=? AND session_id=? AND resource_id=?",
                 new byte[] {1}, "tenant", id, ExtensionRecordJournal.resourceId(ExtensionRecordJournal.bytes(disabled)));
         assertThatThrownBy(() -> ManagedMcpSettings.find(jdbc, "tenant", id)).isInstanceOf(RuntimeException.class);
+    }
+
+    @Test
+    void legacySettingsRevisionsReplaceTheirProjectionRowInsteadOfAccumulating() throws Exception {
+        String id = UUID.randomUUID().toString();
+        var journal = publicJournal(id);
+        byte[] session = id.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        ObjectNode first = settings(1, "enabled", null);
+        var request = journal.requestOrdinary(first.path("operationId").asText(), "config_install", first,
+                event -> {}, records -> records, 0);
+        journal.commit(request);
+        journal.committed(request);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource_ref WHERE owner_kind='SESSION_RECORD' AND session_id=?",
+                Integer.class, session)).isEqualTo(1);
+        ObjectNode second = settings(2, "disabled", first);
+        var disable = journal.requestOrdinary(second.path("operationId").asText(), "config_install", second,
+                event -> {}, records -> records, 0);
+        journal.commit(disable);
+        journal.committed(disable);
+        // R2-5: the legacy path needs no closure, so it replaces the superseded
+        // projection row — two revisions still leave exactly one row rather than
+        // accumulating one per revision for the Session's whole life.
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource_ref WHERE owner_kind='SESSION_RECORD' AND session_id=?",
+                Integer.class, session)).isEqualTo(1);
     }
 
     @Test

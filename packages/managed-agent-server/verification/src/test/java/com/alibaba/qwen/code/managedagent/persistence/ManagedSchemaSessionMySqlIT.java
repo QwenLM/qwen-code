@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import org.junit.jupiter.api.AfterEach;
@@ -93,7 +94,7 @@ public class ManagedSchemaSessionMySqlIT extends ManagedSchemaSessionStoreTest {
     }
 
     private void seedHistory(String tenant, String session, int first, int last) {
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session);
+        String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
         List<Object[]> operations = new ArrayList<>();
         List<Object[]> resources = new ArrayList<>();
         byte[] bytes = "history".getBytes(StandardCharsets.UTF_8);

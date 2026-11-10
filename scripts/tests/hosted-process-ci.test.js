@@ -145,6 +145,18 @@ const failoverArms = [
     ],
   ],
   [
+    'Run rewritten-command Hook recovery E2E',
+    'test:e2e:managed-harness-restart-approval-command-rewrite',
+    [
+      '--continuation-failover',
+      '--harness-only',
+      '--g3-verify',
+      'allow',
+      '--g3-fault',
+      'command-rewrite',
+    ],
+  ],
+  [
     'Run after-earlier-tools crash E2E',
     'test:e2e:managed-harness-restart-approval-after-earlier-tools',
     [
@@ -658,6 +670,37 @@ describe('Hosted real-process gates', () => {
     expect(delegate.run).toContain('/sys/fs/cgroup/fg8/smoke/cgroup.procs');
   });
 
+  it('delegates and enters the rewritten-command arm cgroup before its real stack starts', () => {
+    const job = java.jobs['hosted-failover-e2e'];
+    const delegate = job.steps.find(
+      (step) =>
+        step.name ===
+        'Delegate a cgroup v2 root for rewritten-command recovery',
+    );
+    const arm = job.steps.find(
+      (step) => step.name === 'Run rewritten-command Hook recovery E2E',
+    );
+    expect(delegate, 'the rewritten-command cgroup delegation').toBeDefined();
+    expect(arm, 'the rewritten-command arm').toBeDefined();
+    expect(job.steps.indexOf(delegate)).toBeLessThan(job.steps.indexOf(arm));
+    expect(delegate.if).toBe(arm.if);
+    expect(arm.env.QWEN_E2E_EXTENSION_CGROUP_ROOT).toBe(
+      '/sys/fs/cgroup/a3-command-rewrite',
+    );
+    expect(delegate.run).toContain(
+      'mkdir -p /sys/fs/cgroup/a3-command-rewrite',
+    );
+    expect(delegate.run).toContain(
+      'test -f /sys/fs/cgroup/a3-command-rewrite/cgroup.kill',
+    );
+    expect(delegate.run).toContain(
+      '/sys/fs/cgroup/a3-command-rewrite/smoke/cgroup.procs',
+    );
+    expect(arm.run).toContain(
+      'echo $$ | sudo tee /sys/fs/cgroup/a3-command-rewrite/cgroup.procs',
+    );
+  });
+
   it('sweeps every Hook cgroup subtree a Hosted IT allocates', () => {
     const owners = hostedTestClasses().filter(({ file }) =>
       read(file).includes('QWEN_MANAGED_HOOK_CGROUP_ROOT'),
@@ -680,9 +723,9 @@ describe('Hosted real-process gates', () => {
     // and now that path too can fill all four ceilings, so a slow setup
     // must still leave the O4 gates time to run.
     ['hosted-harness-mysql', 295, 328, 33],
-    // Twenty-seven failover arms at 10 each; the allowance is ~13 minutes of
-    // setup plus 2.
-    ['hosted-failover-e2e', 270, 285, 15],
+    // Twenty-eight failover arms at 10 each plus the capped rewritten-command
+    // cgroup delegation at 10; the allowance is ~13 minutes of setup plus 2.
+    ['hosted-failover-e2e', 290, 305, 15],
   ])(
     'keeps the %s job ceiling above its summed step ceilings',
     (name, steps, ceiling, allowance) => {

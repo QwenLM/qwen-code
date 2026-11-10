@@ -520,8 +520,8 @@ type RunQwenServeOptions = Omit<ServeOptions, 'token' | 'workspace'> & {
   workspace?: string | string[];
   requireWebShell?: boolean;
 };
-type WorkspaceSettingsWrite =
-  import('./workspace-service/types.js').WorkspaceSettingsWrite;
+type WorkspaceSettingsWrites =
+  import('./workspace-service/types.js').WorkspaceSettingsWrites;
 type PersistDisabledSkillsBatchResult =
   import('./workspace-service/types.js').PersistDisabledSkillsBatchResult;
 type PersistUserSkillsActivationResult =
@@ -4911,8 +4911,25 @@ async function runQwenServeImpl(
   // The refresh module loads via dynamic import (see start site) because it
   // pulls the SessionService chain, which must stay out of the pre-listen
   // static closure; the generation guards dispose-vs-async-start races.
-  let sessionPrRefreshTimer: { dispose(): void } | undefined;
+  let sessionPrRefreshTimer:
+    | { dispose(): void; stopWatch(): Promise<void> }
+    | undefined;
   let sessionPrRefreshGeneration = 0;
+  // Kept separately from the timer handle: the event-loop-monitor cleanup
+  // disposes and clears that handle before the lifecycle close runs its drains,
+  // but the watch still has to stop in order (timer, in-flight work, owner
+  // record). The disposed handle's closure stays valid, and disposing twice is
+  // a no-op, so the drain can call it afterwards.
+  //
+  // A buildRuntime re-entry takes the other path — the monitor cleanup disposes
+  // the timer without an ordered stop, so the owner record is left behind. That
+  // is safe, not a hole in the ordering: the claim returns `retained` for a
+  // record whose pid is this process and whose process token verifies, so the
+  // restarted timer re-adopts it and no second process can overlap.
+  let stopPrWatchOnShutdown: (() => Promise<void>) | undefined;
+  serveAppLifecycle.addAppDrain(async () => {
+    await stopPrWatchOnShutdown?.();
+  });
   let runtimeStartupError: string | undefined;
   let runtimeStarting: Promise<void> | undefined;
   let markRuntimeReady!: () => void;
@@ -6301,12 +6318,16 @@ async function runQwenServeImpl(
       });
     const persistSettingsFn = (
       workspace: string,
-      writes: WorkspaceSettingsWrite[],
+      requestedWrites: WorkspaceSettingsWrites,
       assertGenerationOpen?: () => void,
     ): Promise<void> =>
       withSettingsLock(workspace, async () => {
         assertGenerationOpen?.();
         const fresh = loadSettingsForPersistence(workspace);
+        const writes =
+          typeof requestedWrites === 'function'
+            ? requestedWrites(fresh)
+            : requestedWrites;
         const writesByScope = new Map<
           import('../config/settings.js').SettingScope,
           number
@@ -7620,6 +7641,8 @@ async function runQwenServeImpl(
                 }
               ).sessionArchiveCoordinator,
           });
+          const handle = sessionPrRefreshTimer;
+          stopPrWatchOnShutdown = handle ? () => handle.stopWatch() : undefined;
         })
         .catch((error) => {
           // Degrade to "no PR-state sweep" instead of leaking an unhandled

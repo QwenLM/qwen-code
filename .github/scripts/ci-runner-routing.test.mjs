@@ -94,6 +94,10 @@ function evalRunsOn(expression, { ecsDisabled, eventName, sameRepo, assoc }) {
       String(sameRepo),
     ],
     [
+      /github\.event\.pull_request\.head\.repo\.full_name != github\.repository/,
+      String(!sameRepo),
+    ],
+    [
       /contains\(fromJSON\('\["OWNER","MEMBER","COLLABORATOR"\]'\), github\.event\.pull_request\.author_association\)/,
       String(TRUSTED.includes(assoc)),
     ],
@@ -797,6 +801,279 @@ describe('ci.yml lint HOME isolation', () => {
   });
 });
 
+describe('credential-free jobs on the disposable pool', () => {
+  // The label's single source of truth is the pool config the classifier
+  // contract test already reads: a rename on either side must red this
+  // suite, not leave the capture requesting a label no runner advertises.
+  const EPHEMERAL = JSON.parse(
+    readFileSync(
+      join(
+        workflowsDir,
+        '..',
+        '..',
+        'scripts',
+        'ci',
+        'ephemeral-runner',
+        'config.example.json',
+      ),
+      'utf8',
+    ),
+  ).labels;
+
+  it('ci.yml test_ubuntu: the checkout-free gate follows the shards fleet', () => {
+    // A REQUIRED context must not sit behind a manually sized pool: pinned
+    // to ecs-qwen-ephemeral it queued 110 minutes with an empty runner_name
+    // (job 128729488158) while its sibling jobs were served in ~3. It now
+    // reads the classifier's ubuntu_runner, so it lands wherever the
+    // shards ran and the kill-switch keeps working through the classifier
+    // — including on fork runs, where repository variables arrive empty.
+    const job = ciDoc.jobs.test_ubuntu;
+    assert.equal(
+      String(job['runs-on']),
+      '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || \'["ubuntu-latest"]\') }}',
+    );
+    for (const eventName of ['pull_request', 'push', 'merge_group']) {
+      for (const sameRepo of [true, false]) {
+        for (const assoc of ASSOCIATIONS) {
+          assert.deepEqual(
+            JSON.parse(
+              runPickRunner({ eventName, sameRepo, assoc, ecsDisabled: true }),
+            ),
+            JSON.parse(HOSTED),
+            `kill-switch must revert the gate on ${eventName} sameRepo=${sameRepo} assoc='${assoc}'`,
+          );
+        }
+      }
+    }
+    // The gate must never queue on the disposable pool, and it must sit
+    // with the shards: hosted for untrusted forks, persistent fleet for
+    // trusted events.
+    assert.deepEqual(
+      JSON.parse(
+        runPickRunner({
+          eventName: 'pull_request',
+          sameRepo: false,
+          assoc: 'NONE',
+          ecsDisabled: false,
+        }),
+      ),
+      JSON.parse(HOSTED),
+    );
+    assert.deepEqual(
+      JSON.parse(
+        runPickRunner({
+          eventName: 'push',
+          sameRepo: true,
+          assoc: 'OWNER',
+          ecsDisabled: false,
+        }),
+      ),
+      JSON.parse(ECS),
+    );
+    assert.ok(
+      !job.steps.some((s) =>
+        String(s.uses || '').startsWith('actions/checkout'),
+      ),
+      'the gate must stay checkout-free wherever it is routed',
+    );
+  });
+
+  it('web-shell-visuals.yml capture: untrusted renders ride the disposable pool', () => {
+    // The capture builds and renders untrusted PR code with a read-only
+    // token and no secrets — the disposable pool's exact security model.
+    // The pool exists for untrusted fork PRs only: same-repo PRs stay on
+    // the hosted lane, where this job ran before the migration.
+    const doc = parse(
+      readFileSync(join(workflowsDir, 'web-shell-visuals.yml'), 'utf8'),
+    );
+    const runsOn = String(doc.jobs.capture['runs-on']);
+    assert.match(runsOn, /github\.repository == 'QwenLM\/qwen-code'/);
+    assert.match(
+      runsOn,
+      /github\.event\.pull_request\.head\.repo\.full_name != github\.repository/,
+      'capture must keep the fork clause: only fork PRs route to the disposable pool',
+    );
+    for (const assoc of ASSOCIATIONS) {
+      // Fork PR: the disposable pool, whoever authored it.
+      assert.deepEqual(
+        evalRunsOn(runsOn, {
+          ecsDisabled: false,
+          eventName: 'pull_request',
+          sameRepo: false,
+          assoc,
+        }),
+        EPHEMERAL,
+        `capture fork assoc='${assoc}'`,
+      );
+      // Same-repo PR: stays hosted — the disposable pool must never serve
+      // trusted runs, and the kill-switch question never arises there.
+      for (const ecsDisabled of [false, true]) {
+        assert.deepEqual(
+          evalRunsOn(runsOn, {
+            ecsDisabled,
+            eventName: 'pull_request',
+            sameRepo: true,
+            assoc,
+          }),
+          JSON.parse(HOSTED),
+          `capture same-repo assoc='${assoc}' ecsDisabled=${ecsDisabled}`,
+        );
+      }
+      // Kill-switch reverts fork runs to hosted too.
+      assert.deepEqual(
+        evalRunsOn(runsOn, {
+          ecsDisabled: true,
+          eventName: 'pull_request',
+          sameRepo: false,
+          assoc,
+        }),
+        JSON.parse(HOSTED),
+        `kill-switch must revert fork capture to hosted assoc='${assoc}'`,
+      );
+    }
+    // Only the event-scoped read-only GITHUB_TOKEN may reach the disposable
+    // pool through this workflow; any other secret reference breaks the
+    // pool's no-long-lived-secrets boundary. Walk every parsed ${{ … }}
+    // expression instead of regexing raw text: `toJSON(secrets)` and
+    // bracket forms must fail too, while the header's prose ("NO
+    // secrets") stays invisible. One rule: an expression may mention the
+    // secrets context only as exactly `secrets.GITHUB_TOKEN`.
+    const expressions = [];
+    const walk = (node) => {
+      if (typeof node === 'string') {
+        for (const m of node.matchAll(/\$\{\{([\s\S]*?)\}\}/g)) {
+          expressions.push(m[1]);
+        }
+      } else if (Array.isArray(node)) {
+        node.forEach(walk);
+      } else if (node && typeof node === 'object') {
+        Object.values(node).forEach(walk);
+      }
+    };
+    walk(doc);
+    const assertNoForeignSecrets = (exprs) => {
+      for (const expr of exprs) {
+        if (!/\bsecrets\b/.test(expr)) continue;
+        const stripped = expr.replaceAll('secrets.GITHUB_TOKEN', '');
+        assert.ok(
+          !/\bsecrets\b/.test(stripped),
+          `expression reaches beyond the read-only event token: ${expr}`,
+        );
+      }
+    };
+    assertNoForeignSecrets(expressions);
+    // Sensitivity fixtures: the forms the old raw-text regexes missed.
+    for (const bad of [
+      "${{ secrets['MODEL_KEY'] }}",
+      '${{ secrets["MODEL_KEY"] }}',
+      '${{ toJSON(secrets) }}',
+    ]) {
+      assert.throws(
+        () => assertNoForeignSecrets([bad.slice(3, -3)]),
+        /read-only event token/,
+        `guard must reject ${bad}`,
+      );
+    }
+    assertNoForeignSecrets([' secrets.GITHUB_TOKEN ']);
+    assert.equal(doc.permissions.contents, 'read');
+    // A job-level permissions block REPLACES the workflow-level one, so
+    // workflow-level 'read' alone does not bound the capture's token.
+    for (const [id, job] of Object.entries(doc.jobs)) {
+      for (const scope of Object.values(job.permissions ?? {})) {
+        assert.ok(
+          scope === 'read' || scope === 'none',
+          `job ${id} must not widen its token beyond read/none`,
+        );
+      }
+    }
+    // The pool half of the nodejs.org split (the tui-parity shape): the
+    // hosted setup-node download and pnpm cache stay hosted-only, the pool
+    // reuses the image's Node behind the preflight, and the disk floor
+    // fails fast before two full installs on a shared host.
+    const steps = doc.jobs.capture.steps;
+    const hostedOnly = steps.filter(
+      (s) =>
+        String(s.uses || '').startsWith('actions/setup-node') ||
+        s.uses === './.github/actions/pnpm-store-cache',
+    );
+    assert.equal(hostedOnly.length, 2);
+    for (const s of hostedOnly) {
+      assert.equal(s.if, "${{ runner.environment == 'github-hosted' }}");
+    }
+    const preflight = steps.find(
+      (s) => s.uses === './.github/actions/self-hosted-node',
+    );
+    assert.equal(preflight?.if, "${{ runner.environment == 'self-hosted' }}");
+    const diskFloor = steps.find((s) =>
+      String(s.run || '').includes('check-disk-floor.sh'),
+    );
+    assert.equal(diskFloor?.if, "${{ runner.environment == 'self-hosted' }}");
+    // The shared 2 GiB default passed a slot with 14.6 GB free / 89% used
+    // and pnpm died on ENOSPC minutes later (run 42478651795). This lane
+    // carries its own floor AND a percent ceiling that refuses that shape;
+    // deleting either override must red this pin.
+    assert.equal(diskFloor?.env?.DISK_FLOOR_MIN_FREE_KB, '8388608');
+    assert.ok(
+      Number(diskFloor?.env?.DISK_FLOOR_MAX_USED_PCT) < 89,
+      'the ceiling must refuse the measured 89%-used failure slot',
+    );
+    // The fork pool pays two cold installs (measured: 22m18s install,
+    // Chromium still downloading at 36m48s), so the hosted 45-minute cap
+    // cancels the job before any render. The ceiling is routed like
+    // runs-on — runner.environment is not available in timeout-minutes —
+    // keyed off the same fork term: pool (fork, not disabled) 90, else 45.
+    assert.equal(
+      String(doc.jobs.capture['timeout-minutes']),
+      "${{ (github.event.pull_request.head.repo.full_name != github.repository && vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true') && 90 || 45 }}",
+    );
+    // Unpinned workers size Chromium from the HOST's cores inside a 4-CPU
+    // container: the first pooled run lost its runner to CPU/memory
+    // starvation mid-render (run 42494910412). Both render passes must
+    // carry the smoke lane's --workers=2.
+    const renders = steps.filter((s) =>
+      String(s.run || '').includes('test:e2e:visuals'),
+    );
+    assert.equal(renders.length, 2);
+    for (const s of renders) {
+      assert.match(String(s.run), /--workers=2/);
+    }
+    // The slim image needs the DejaVu baseline and ffmpeg at runtime; the
+    // install must stay best-effort so its own failure degrades the
+    // preview instead of sinking it. Pin the WHOLE package list: the
+    // warning prose also says "ffmpeg", and re-adding fonts-dejavu-mono
+    // (no bookworm build) fails the entire apt transaction — a mutation
+    // that survived every earlier revision of this suite.
+    const fonts = steps.find((s) =>
+      String(s.run || '').includes('fonts-dejavu-core'),
+    );
+    assert.equal(fonts?.if, "${{ runner.environment == 'self-hosted' }}");
+    assert.match(
+      String(fonts.run),
+      /apt-get install -y --no-install-recommends fonts-dejavu-core ffmpeg; then/,
+    );
+    assert.ok(
+      !String(fonts.run).includes('fonts-dejavu-mono'),
+      'fonts-dejavu-mono has no bookworm build and sinks the transaction',
+    );
+    // Bounded apt calls: a blackholed mirror must land in the warning
+    // branch, not hang until the job cap (Acquire::* + lock timeout, the
+    // pooled-apt convention). And verify the baseline after installing —
+    // a half-applied transaction otherwise renders drifted shots green.
+    assert.match(String(fonts.run), /Acquire::http::Timeout/);
+    assert.match(String(fonts.run), /DPkg::Lock::Timeout/);
+    assert.match(String(fonts.run), /fc-match[^\n]*sans-serif/);
+    assert.match(String(fonts.run), /fc-match[^\n]*monospace/);
+    // The step carries no continue-on-error: what keeps a failed install from
+    // sinking the job is the shell guard, and the warning has to sit in that
+    // guard's failure branch (`else` today, `||` would do). Asserting only
+    // /::warning:: would pin the prose, not the degradation path.
+    assert.match(
+      String(fonts.run),
+      /(?:else\s*\n\s*|\|\|\s*)echo "::warning::/,
+    );
+  });
+});
+
 describe('ci.yml web_shell_e2e_smoke runner routing', () => {
   const expression = String(ciDoc.jobs.web_shell_e2e_smoke['runs-on'])
     .replace(/^\$\{\{\s*/, '')
@@ -1452,11 +1729,14 @@ describe('trusted-PR lanes moved off the hosted queue (#13245)', () => {
     );
     assert.match(remove.if, /always\(\)/);
     const run = (name) => build.steps.find((s) => s.name === name).run;
-    assert.match(run('Build Java components'), /-Dmaven\.repo\.local=/);
+    const buildJava = run('Build Java components');
+    assert.match(buildJava, /-Dmaven\.repo\.local=/);
+    assert.match(buildJava, /find "\$\{repo\}" -depth -type d/);
     assert.match(
-      run('Build Java components'),
-      /rm -rf -- "\$\{repo\}\/com\/alibaba\/qwencode-sdk" "\$\{repo\}\/com\/alibaba\/"qwen-managed-agent-\*/,
+      buildJava,
+      /-path '\*\/com\/alibaba\/qwencode-sdk' -o -path '\*\/com\/alibaba\/qwen-managed-agent-\*'/,
     );
+    assert.match(buildJava, /-exec rm -rf \{\} \+/);
     assert.match(
       run('Assemble reference distribution'),
       /rm -rf -- "\$\{RUNNER_TEMP\}\/managed-agent-reference"\n\s*node scripts\/package-managed-agent-reference\.mjs/,
@@ -1644,9 +1924,11 @@ describe('control-plane jobs moved off the hosted queue', () => {
           job.steps[heal].if,
           "${{ runner.environment == 'self-hosted' }}",
         );
-        // Cone mode rejects a file entry the reused index holds as a file.
+        // Cone mode rejects a file entry the reused index holds as a file,
+        // and a reused workspace can inherit non-cone mode from another
+        // job, so the pattern must cover the owner map under either mode.
         for (const step of checkouts) {
-          assert.equal(step.with['sparse-checkout'], '.github/scripts');
+          assert.equal(step.with['sparse-checkout'], '.github');
           assert.equal(step.with['sparse-checkout-cone-mode'], undefined);
         }
       });
@@ -1757,4 +2039,44 @@ describe('credential-free release fanout routing (#15465)', () => {
       }
     });
   }
+});
+
+// The patrol holds CI_BOT_PAT and runs a sandboxed agent, so its routing is
+// evaluated here rather than left to substring pins: `== 'true'` contains
+// every term a `includes("!= 'true'")` style assertion looks for, and an
+// inverted kill switch would send every round to the pool it just disabled.
+describe('CI failure patrol routing (#16462)', () => {
+  const doc = parse(
+    readFileSync(join(workflowsDir, 'qwen-ci-flaky-rerun.yml'), 'utf8'),
+  );
+  const events = Object.keys(doc.on);
+  it('reaches the pool only for this repository with the switch off', () => {
+    assert.deepEqual(events.sort(), ['schedule', 'workflow_dispatch']);
+    for (const jobName of ['classify', 'act']) {
+      const expression = doc.jobs[jobName]['runs-on'];
+      for (const eventName of events) {
+        assert.deepEqual(
+          evalRunsOn(expression, { eventName, ecsDisabled: false }),
+          JSON.parse(ECS),
+          `${jobName} on ${eventName} with the fleet enabled`,
+        );
+        assert.deepEqual(
+          evalRunsOn(expression, { eventName, ecsDisabled: true }),
+          JSON.parse(HOSTED),
+          `${jobName} on ${eventName} with the fleet disabled`,
+        );
+        assert.deepEqual(
+          evalRunsOn(
+            expression.replace(
+              "github.repository == 'QwenLM/qwen-code'",
+              'false',
+            ),
+            { eventName, ecsDisabled: false },
+          ),
+          JSON.parse(HOSTED),
+          `${jobName} on ${eventName} in a fork`,
+        );
+      }
+    }
+  });
 });
