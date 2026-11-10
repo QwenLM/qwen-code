@@ -2294,95 +2294,234 @@ interface HeredocMarker {
   readonly stripTabs: boolean;
 }
 
-/**
- * Finds the first real `<<[-]WORD` marker on a line, or null. A `<<` inside
- * single quotes, a quoted string without a substitution, a comment, a
- * herestring (`<<<`) or an arithmetic region (`$((a << b))`) is not a
- * marker; inside `$(…)` and backticks the line is parsed again, so a `<<`
- * there is one.
- */
-function findHeredocMarker(line: string): HeredocMarker | null {
+interface HeredocScanState {
+  single: boolean;
+  double: boolean;
+  backtick: boolean;
+  ansiC: boolean;
+  substitution: number;
+  readonly quoteStack: Array<[boolean, boolean]>;
+  readonly backtickQuoteStack: Array<[boolean, boolean]>;
+}
+
+function createHeredocScanState(): HeredocScanState {
+  return {
+    single: false,
+    double: false,
+    backtick: false,
+    ansiC: false,
+    substitution: 0,
+    quoteStack: [],
+    backtickQuoteStack: [],
+  };
+}
+
+function skipParenthesizedArithmetic(line: string, start: number): number {
+  let depth = 0;
+  let cursor = line[start] === '$' ? start + 1 : start;
+  while (cursor < line.length) {
+    const inner = line[cursor]!;
+    if (inner === '\\') {
+      cursor += 2;
+      continue;
+    }
+    if (inner === '(') depth++;
+    else if (inner === ')') {
+      depth--;
+      if (depth === 0) break;
+    }
+    cursor++;
+  }
+  return cursor;
+}
+
+function skipLegacyArithmetic(line: string, start: number): number {
+  let cursor = start + 2;
+  while (cursor < line.length) {
+    if (line[cursor] === '\\') {
+      cursor += 2;
+      continue;
+    }
+    if (line[cursor] === ']') break;
+    cursor++;
+  }
+  return cursor;
+}
+
+function parseHeredocDelimiter(
+  line: string,
+  start: number,
+): {
+  readonly delimiter: string;
+  readonly quoted: boolean;
+  readonly nextIndex: number;
+} | null {
+  let delimiter = '';
+  let quoted = false;
   let single = false;
   let double = false;
-  let backtick = false;
-  let substitution = 0;
-  const quoteStack: Array<[boolean, boolean]> = [];
+  let cursor = start;
+  while (cursor < line.length) {
+    const character = line[cursor]!;
+    if (!single && !double) {
+      if (' \t\r;&|<>()'.includes(character)) break;
+      if (character === '\\') {
+        quoted = true;
+        cursor++;
+        if (cursor >= line.length) return null;
+        delimiter += line[cursor]!;
+        cursor++;
+        continue;
+      }
+      if (character === "'") {
+        quoted = true;
+        single = true;
+        cursor++;
+        continue;
+      }
+      if (character === '"') {
+        quoted = true;
+        double = true;
+        cursor++;
+        continue;
+      }
+      delimiter += character;
+      cursor++;
+      continue;
+    }
+    if (single) {
+      if (character === "'") single = false;
+      else delimiter += character;
+      cursor++;
+      continue;
+    }
+    if (character === '"') {
+      double = false;
+      cursor++;
+      continue;
+    }
+    if (
+      character === '\\' &&
+      ['$', '`', '"', '\\'].includes(line[cursor + 1] ?? '')
+    ) {
+      delimiter += line[cursor + 1]!;
+      cursor += 2;
+      continue;
+    }
+    delimiter += character;
+    cursor++;
+  }
+  if (single || double || delimiter === '') return null;
+  return { delimiter, quoted, nextIndex: cursor };
+}
+
+/**
+ * Finds the first real `<<[-]WORD` marker on a line, or null. The scanner
+ * carries shell quote state across lines and skips arithmetic, herestrings,
+ * comments and quoted text. Command substitutions and backticks get their own
+ * quote scope, so a heredoc inside one is still a marker only when it is not
+ * quoted there.
+ */
+function findHeredocMarker(
+  line: string,
+  state: HeredocScanState,
+): HeredocMarker | null {
   // Whether a `#` here would open a comment: only at a word boundary.
   let wordStart = true;
+  let found: HeredocMarker | null = null;
   for (let index = 0; index < line.length; index++) {
     const character = line[index]!;
     const next = line[index + 1];
-    if (!single && character === '\\' && index + 1 < line.length) {
+    if (state.ansiC) {
+      if (character === '\\' && index + 1 < line.length) index++;
+      else if (character === "'") state.ansiC = false;
+      wordStart = false;
+      continue;
+    }
+    if (!state.single && character === '\\' && index + 1 < line.length) {
       index++;
       wordStart = false;
       continue;
     }
-    if (!single && character === '`') {
-      backtick = !backtick;
+    if (!state.single && !state.double && character === '$' && next === "'") {
+      state.ansiC = true;
+      index++;
       wordStart = false;
       continue;
     }
-    if (!single && !backtick && character === '$' && next === '(') {
+    if (!state.single && character === '`') {
+      if (state.backtick) {
+        const enclosing = state.backtickQuoteStack.pop();
+        state.single = enclosing?.[0] ?? false;
+        state.double = enclosing?.[1] ?? false;
+        state.backtick = false;
+      } else {
+        state.backtickQuoteStack.push([state.single, state.double]);
+        state.single = false;
+        state.double = false;
+        state.backtick = true;
+      }
+      wordStart = false;
+      continue;
+    }
+    if (!state.single && !state.double && character === '$' && next === '[') {
+      index = skipLegacyArithmetic(line, index);
+      wordStart = false;
+      continue;
+    }
+    if (!state.single && !state.double && character === '(' && next === '(') {
+      index = skipParenthesizedArithmetic(line, index);
+      wordStart = false;
+      continue;
+    }
+    if (!state.single && character === '$' && next === '(') {
       if (line[index + 2] === '(') {
-        // `$((…))` arithmetic: a `<<` inside is a shift, never a marker. Skip
-        // the balanced region; a substitution nested inside it that carries
-        // its own heredoc is pathological enough to leave visible instead.
-        let depth = 0;
-        let cursor = index + 1;
-        while (cursor < line.length) {
-          const inner = line[cursor]!;
-          if (inner === '\\') {
-            cursor += 2;
-            continue;
-          }
-          if (inner === '(') depth++;
-          else if (inner === ')') {
-            depth--;
-            if (depth === 0) break;
-          }
-          cursor++;
-        }
-        index = cursor;
+        index = skipParenthesizedArithmetic(line, index);
         wordStart = false;
         continue;
       }
-      quoteStack.push([single, double]);
-      single = false;
-      double = false;
-      substitution++;
+      state.quoteStack.push([state.single, state.double]);
+      state.single = false;
+      state.double = false;
+      state.substitution++;
       index++;
       wordStart = true;
       continue;
     }
     if (
-      !backtick &&
-      substitution > 0 &&
+      state.substitution > 0 &&
       character === ')' &&
-      !single &&
-      !double
+      !state.single &&
+      !state.double
     ) {
-      const enclosing = quoteStack.pop();
-      single = enclosing?.[0] ?? false;
-      double = enclosing?.[1] ?? false;
-      substitution--;
+      const enclosing = state.quoteStack.pop();
+      state.single = enclosing?.[0] ?? false;
+      state.double = enclosing?.[1] ?? false;
+      state.substitution--;
       wordStart = false;
       continue;
     }
-    if (!backtick && character === "'" && !double) {
-      single = !single;
+    if (character === "'" && !state.double) {
+      state.single = !state.single;
       wordStart = false;
       continue;
     }
-    if (!backtick && character === '"' && !single) {
-      double = !double;
+    if (character === '"' && !state.single) {
+      state.double = !state.double;
       wordStart = false;
       continue;
     }
-    if (!single && !double && !backtick && character === '#' && wordStart) {
-      // The rest of the line is a comment; no marker can follow.
-      return null;
+    if (
+      !state.single &&
+      !state.double &&
+      !state.backtick &&
+      character === '#' &&
+      wordStart
+    ) {
+      // The rest of the line is a comment; no later marker can start.
+      return found;
     }
-    if (character === '<' && next === '<' && !single && !double) {
+    if (character === '<' && next === '<' && !state.single && !state.double) {
       // `<<<` is a herestring: the word after it is data, not a delimiter.
       if (line[index + 2] === '<') {
         index += 2;
@@ -2396,26 +2535,23 @@ function findHeredocMarker(line: string): HeredocMarker | null {
         cursor++;
       }
       while (line[cursor] === ' ' || line[cursor] === '\t') cursor++;
-      const quoteChar = line[cursor];
-      if (quoteChar === "'" || quoteChar === '"') {
-        const close = line.indexOf(quoteChar, cursor + 1);
-        // An unterminated quote makes bash reject the line, so nothing here
-        // executes; leave the text visible rather than guess a delimiter.
-        if (close === -1) return null;
-        const delimiter = line.slice(cursor + 1, close);
-        if (delimiter === '') return null;
-        return { delimiter, quoted: true, stripTabs };
-      }
-      const name = /^[A-Za-z0-9_./~-]+/.exec(line.slice(cursor));
-      if (!name) {
+      const parsed = parseHeredocDelimiter(line, cursor);
+      if (!parsed) {
         index++;
         wordStart = false;
         continue;
       }
-      return { delimiter: name[0], quoted: false, stripTabs };
+      found ??= {
+        delimiter: parsed.delimiter,
+        quoted: parsed.quoted,
+        stripTabs,
+      };
+      index = parsed.nextIndex - 1;
+      wordStart = false;
+      continue;
     }
     wordStart =
-      !single && !double && !backtick
+      !state.single && !state.double && !state.backtick
         ? character === ' ' ||
           character === '\t' ||
           character === ';' ||
@@ -2425,7 +2561,7 @@ function findHeredocMarker(line: string): HeredocMarker | null {
           character === ')'
         : false;
   }
-  return null;
+  return found;
 }
 
 // bash joins a live backslash-newline pair in an unquoted body before
@@ -2557,10 +2693,11 @@ function expansionCanExecute(text: string): boolean {
 function stripHeredocBodies(command: string): HeredocStrip {
   const lines = command.split('\n');
   const out: string[] = [];
+  const scanState = createHeredocScanState();
   for (let index = 0; index < lines.length; index++) {
     const line = lines[index]!;
     out.push(line);
-    const marker = findHeredocMarker(line);
+    const marker = findHeredocMarker(line, scanState);
     if (!marker) continue;
     const bodyLines: string[] = [];
     // Consume the body up to the delimiter line, dropping it from the
