@@ -357,6 +357,18 @@ CI 注记（已归因，非本 PR 回归）：Web Shell smoke shard 1/2 在 `web
 
 第十五轮验证：**532 passed**（518 单测 + 14 真实文件系统），core typecheck exit 0，ESLint 与 Prettier 干净。变异见证在最终 head 重跑：R1-1 双臂（去 ANSI-C 解码杀 `$'cd'`、`c"d"` 绿；去 fail-closed 杀 undecodable 用例）、R3-8 三臂（各站点回退只杀各自用例）、R4-1（去守卫杀展开目标）、`shopt -u`（去 disable 分支杀 disable 用例）；兄弟对照全程绿。从字节级备份还原（最终 `shell.ts` SHA-256 `2f46ca30198098a1fa333a244b70075961b9456cfbe33cf0f4aab055da482116`）。
 
+### 第十六轮评审（2026-11-10，对精确 head `3eb57d7450c` 的复审）
+
+复审确认第十四/十五轮修复绑定正确，另提三条紧邻其的 P2 边界。三条均在本 PR 内修复：
+
+**R16-1——child-only-cd 豁免弄丢了既有回退 notice。** `if true; then (cd WT && gh pr create); fi` 的 create 跑在嵌套于控制流体的移动 subshell 内。第十五轮的 this-shell 扫描跳过该 subshell，`found` 未置、`opaque` 为 false，失败绑定变静默（第十五轮前的代码会发 notice）。新增 `subtreeHasCreateInMovingChild`：检测「既可能移动目录又含实际 create」的 child 上下文，default 臂对其保持 `opaque`。create 在 child 之外的 child-only cd 仍豁免。此举保留 notice，不新增控制流绑定支持。
+
+**R16-2——反斜杠转义的程序名 word 漏过。** `c\d`（一个字面反斜杠）即 `cd` builtin，但 tree-sitter 报为 `word`，`literalShellValue` 原样返回其文本，绕开目录变更与 undecodable 名两个守卫。`literalShellValue` 现在把未加引号的 `\X` 转义规范化为字面 X；尾部无后续字符的反斜杠不可解码、fail-closed。
+
+**R16-3——条件禁用使 lastpipe 仍 proven-on。** 保证启用后 `true && shopt -u lastpipe` 因非保证被忽略，走查仍给管道 unset 父 shell 执行。`shopt -u lastpipe` 现在使任何 proven-on 状态失效：保证则证 off，条件则转 uncertain——与「可能启用保留不确定性」对称。
+
+第十六轮验证：**537 passed**（523 单测 + 14 真实文件系统），core typecheck exit 0，ESLint 与 Prettier 干净。变异见证在最终 head 重跑：R16-1（去移动-child-create 检查杀嵌套用例、create-外对照绿）、R16-2（去反斜杠解码杀 `c\d`/`\cd`、`$'cd'`/`c"d"` 绿）、R16-3（回退仅保证禁用杀条件用例、保证禁用与已证启用对照绿）。从字节级备份还原（最终 `shell.ts` SHA-256 `7e4bc24ad809057f97f85e8b967ecdff42c3a2565b30cebdde6e594b7ac4f6f8`）。
+
 ## 验收标准
 
 - 两条事故命令形状都绑定到其 worktree 分支所解析出的 PR。

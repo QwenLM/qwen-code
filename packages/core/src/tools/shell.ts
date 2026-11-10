@@ -1161,7 +1161,25 @@ function literalShellValue(
   node: ShellSyntaxNode | undefined,
 ): string | undefined {
   if (!node) return undefined;
-  if (node.type === 'word') return node.text;
+  if (node.type === 'word') {
+    const text = node.text;
+    if (!text.includes('\\')) return text;
+    // An unquoted backslash escapes the next character (`c\d` is the cd
+    // builtin). Normalize `\X` to literal X; a trailing backslash with no
+    // following character is not a decodable escape, so leave it unprovable
+    // rather than letting the raw word fall through as a proven non-mover.
+    let decoded = '';
+    for (let i = 0; i < text.length; i++) {
+      if (text[i] === '\\') {
+        i++;
+        if (i >= text.length) return undefined;
+        decoded += text[i];
+      } else {
+        decoded += text[i];
+      }
+    }
+    return decoded;
+  }
   if (node.type === 'raw_string') return node.text.slice(1, -1);
   if (node.type === 'ansi_c_string') {
     // `$'…'` ANSI-C quoting: without a backslash escape the content is literal;
@@ -1257,6 +1275,31 @@ function subtreeMayChangeDirectoryInThisShell(node: ShellSyntaxNode): boolean {
       current.type === 'process_substitution'
     ) {
       continue;
+    }
+    stack.push(...current.namedChildren);
+  }
+  return false;
+}
+
+/**
+ * Whether a subtree contains a child context (subshell / command substitution /
+ * process substitution) that both may change directory AND contains the actual
+ * create. Such a create runs in the child's changed directory, which this walk
+ * does not attribute, so it must keep the visible fallback signal. A child-only
+ * cd with the create OUTSIDE it is exempt (it provably did not move this shell).
+ */
+function subtreeHasCreateInMovingChild(node: ShellSyntaxNode): boolean {
+  const stack: ShellSyntaxNode[] = [node];
+  while (stack.length > 0) {
+    const current = stack.pop()!;
+    if (
+      (current.type === 'subshell' ||
+        current.type === 'command_substitution' ||
+        current.type === 'process_substitution') &&
+      subtreeRunsGhPrCreate(current) &&
+      subtreeMayChangeDirectory(current)
+    ) {
+      return true;
     }
     stack.push(...current.namedChildren);
   }
@@ -1652,10 +1695,11 @@ async function resolveGhPrCreateDirectory(
           // `||` / `&` it may or may not run (`true && …` enables it, `false &&
           // …` does not), so the state is UNCERTAIN — not proven off. Modeling
           // it as off would discard the final element's possible parent effects
-          // and silently query a directory the create never ran in. A
-          // guaranteed `shopt -u lastpipe` proves it off again; leaving the flag
-          // set would grant a later final element current-shell semantics it no
-          // longer has.
+          // and silently query a directory the create never ran in. A `shopt -u
+          // lastpipe` invalidates any proven-on state: guaranteed it proves
+          // lastpipe off, conditional it may disable, so the state becomes
+          // uncertain. Leaving the flag set would grant a later final element
+          // current-shell semantics it no longer has.
           if (
             program === 'shopt' &&
             node.namedChildren.some(
@@ -1674,9 +1718,9 @@ async function resolveGhPrCreateDirectory(
               } else {
                 lastpipeUncertain = true;
               }
-            } else if (disables && guaranteed) {
+            } else if (disables) {
               lastpipeEnabled = false;
-              lastpipeUncertain = false;
+              lastpipeUncertain = !guaranteed;
             }
           }
           if (candidateRunsCreate) {
@@ -1879,6 +1923,10 @@ async function resolveGhPrCreateDirectory(
             }
           }
           if (subtreeMayChangeDirectoryInThisShell(node)) opaque = true;
+          // A create inside a moving child nested in this body still runs in a
+          // directory the walk does not attribute; keep the fallback signal the
+          // child-only-cd exemption above must not remove.
+          if (subtreeHasCreateInMovingChild(node)) opaque = true;
           return dir;
         }
       }

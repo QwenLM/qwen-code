@@ -920,6 +920,43 @@ and `shopt -u` (drop the disable branch reds the disable case); sibling controls
 stay green throughout. Restored from a byte-level backup (final `shell.ts`
 SHA-256 `2f46ca30198098a1fa333a244b70075961b9456cfbe33cf0f4aab055da482116`).
 
+### Review round 16 (2026-11-10, re-review of exact head `3eb57d7450c`)
+
+The re-review confirmed the round-14/15 fixes bind correctly and raised three P2
+boundaries adjacent to them. All three are fixed in this PR:
+
+**R16-1 — the child-only-cd exemption dropped an existing fallback notice.**
+`if true; then (cd WT && gh pr create); fi` runs the create inside a moving
+subshell nested in the control-flow body. The round-15 this-shell scan skips that
+subshell, so `found` stayed unset and `opaque` false and the failed binding became
+silent (the pre-round-15 code emitted the notice). A new
+`subtreeHasCreateInMovingChild` detects a child context that both may change
+directory AND contains the actual create, and the default arm keeps `opaque` for
+it. A child-only cd with the create OUTSIDE it stays exempt. This retains the
+notice; it does not add control-flow binding support.
+
+**R16-2 — backslash-escaped command-name words fell through.** `c\d` (one literal
+backslash) is the `cd` builtin, but tree-sitter reports a `word` whose raw text
+`literalShellValue` returned unchanged, bypassing both the directory-changing and
+undecodable-name guards. `literalShellValue` now normalizes unquoted `\X` escapes
+to literal X; a trailing backslash with no following character is undecodable and
+fails closed.
+
+**R16-3 — a conditional disable left lastpipe proven-on.** After a guaranteed
+enable, `true && shopt -u lastpipe` was ignored (not guaranteed), so the walker
+still granted the piped unset parent execution. A `shopt -u lastpipe` now
+invalidates any proven-on state: guaranteed proves it off, conditional makes it
+uncertain — mirroring how a possible enablement preserves uncertainty.
+
+Round-16 verification: **537 passed** (523 unit + 14 real-filesystem), core
+typecheck exit 0, ESLint and Prettier clean. Mutation witnesses re-run on the
+final head: R16-1 (drop the moving-child-create check reds the nested case while
+the create-outside control stays green), R16-2 (drop backslash decode reds `c\d`
+and `\cd` while `$'cd'` / `c"d"` stay green), R16-3 (revert to guaranteed-only
+disable reds the conditional case while the guaranteed-disable and proven-on
+controls stay green). Restored from a byte-level backup (final `shell.ts` SHA-256
+`7e4bc24ad809057f97f85e8b967ecdff42c3a2565b30cebdde6e594b7ac4f6f8`).
+
 ## Acceptance criteria
 
 - Both incident command shapes bind the PR their worktree branch resolves to.

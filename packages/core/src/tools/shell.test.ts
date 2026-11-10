@@ -1340,12 +1340,12 @@ describe('ShellTool', () => {
         await expectAttributedIn(resolved('/test/dir/nested'));
       });
 
-      it.each(["$'cd'", 'c"d"'])(
+      it.each(["$'cd'", 'c"d"', 'c\\d', '\\cd'])(
         'decodes every word encoding of the cd builtin: %s',
         async (prog) => {
-          // ANSI-C quoting and concatenation are the same cd builtin; an
-          // undecoded name fell through and silently attributed the create to
-          // launch with no binding and no notice.
+          // ANSI-C quoting, concatenation and unquoted backslash escapes are
+          // all the same cd builtin; an undecoded name fell through and
+          // silently attributed the create to launch with no binding/notice.
           mockCreatedPr(77);
           const result = await runShell(
             `${prog} /test/dir/nested && gh pr create --fill`,
@@ -1551,6 +1551,19 @@ describe('ShellTool', () => {
         expectOpaqueFallback(result);
       });
 
+      it('invalidates proven-on lastpipe on a conditional shopt -u', async () => {
+        // After a guaranteed enable, `true && shopt -u lastpipe` may disable
+        // lastpipe, so the proven-on state must become uncertain. Ignoring the
+        // conditional disable would grant the piped unset parent execution,
+        // lift the shadow and silently query the worktree.
+        mockCreatedPr(77);
+        const result = await runShell(
+          'cd() { :; }; shopt -s lastpipe; true && shopt -u lastpipe; true | unset -f cd; cd /test/dir/nested && gh pr create --fill',
+          PR_77,
+        );
+        expectOpaqueFallback(result);
+      });
+
       it('ignores readonly inside an uncalled function defined in control flow', async () => {
         // helper is never called, so `readonly -f cd` in its dormant body never
         // executes; the unset succeeds and the create runs in the worktree.
@@ -1726,6 +1739,32 @@ describe('ShellTool', () => {
         mockCreatedPr(77);
         const result = await runShell(
           '(cd /test/dir/nested); gh pr create --fill',
+          PR_77,
+        );
+        await expectAttributedIn('/test/dir');
+        expect(result.llmContent).not.toContain(
+          SHELL_PR_BINDING_DIRECTORY_NOTICE,
+        );
+      });
+
+      it('keeps the fallback notice for a create in a subshell nested in control flow', async () => {
+        // The create runs inside a moving subshell nested in the if body, in a
+        // directory the walk does not attribute. The child-only-cd exemption
+        // must not remove the existing visible fallback signal.
+        mockCreatedPr(77);
+        const result = await runShell(
+          'if true; then (cd /test/dir/nested && gh pr create --fill); fi',
+          PR_77,
+        );
+        expectOpaqueFallback(result);
+      });
+
+      it('does not flag a nested subshell cd when the create is outside it', async () => {
+        // Control: the nested subshell only cds; the create is outside it and
+        // provably runs at launch, so no spurious fallback notice.
+        mockCreatedPr(77);
+        const result = await runShell(
+          'if true; then (cd /test/dir/nested); fi; gh pr create --fill',
           PR_77,
         );
         await expectAttributedIn('/test/dir');
