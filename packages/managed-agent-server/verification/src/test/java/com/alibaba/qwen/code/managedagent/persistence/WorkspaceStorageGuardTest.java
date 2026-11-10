@@ -329,12 +329,12 @@ class WorkspaceStorageGuardTest {
         var session = new SessionRecord("tenant", sessionId, "qwen-code", null,
                 null, "ACTIVE", null, null, 0, 0, 0, 1, 1, null, 1,
                 binding, "default", "hosted-workspace-files/1");
-        var execution = spy(com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new WorkspaceExecutionStore(jdbc, manager, guard)));
+        var execution = spy(com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new JdbcWorkspaceExecutionStore(jdbc, manager, guard)));
         doNothing().when(execution).authorizeActionResponse(session);
         doNothing().when(execution).authorizePassiveAttachment(session);
         var sessions = mock(AgentStateStore.class);
         when(sessions.requireSession("tenant", sessionId)).thenReturn(session);
-        var actions = mock(ManagedActionStore.class);
+        var actions = mock(JdbcManagedActionStore.class);
         when(actions.approvalMode("tenant", sessionId)).thenReturn("default");
         properties.getHarness().setToken("test-token");
         properties.getHarness().setCapabilityDigest("sha256:" + "a".repeat(64));
@@ -380,7 +380,7 @@ class WorkspaceStorageGuardTest {
         guard.register("tenant", "storage", UUID.randomUUID().toString());
         // The action-response authority is derived from the real grant rows,
         // not injected.
-        var execution = spy(com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new WorkspaceExecutionStore(jdbc, manager, guard)));
+        var execution = spy(com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new JdbcWorkspaceExecutionStore(jdbc, manager, guard)));
         var bound = new ContextBinding("tenant", "workspace", 1, "storage", "child",
                 WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1);
         String sessionId = UUID.randomUUID().toString();
@@ -405,7 +405,7 @@ class WorkspaceStorageGuardTest {
                 bound, "default", "hosted-workspace-files/1");
         var sessions = mock(AgentStateStore.class);
         when(sessions.requireSession("tenant", sessionId)).thenReturn(session);
-        var actions = mock(ManagedActionStore.class);
+        var actions = mock(JdbcManagedActionStore.class);
         when(actions.approvalMode("tenant", sessionId)).thenReturn("default");
         properties.getHarness().setToken("test-token");
         properties.getHarness().setCapabilityDigest("sha256:" + "a".repeat(64));

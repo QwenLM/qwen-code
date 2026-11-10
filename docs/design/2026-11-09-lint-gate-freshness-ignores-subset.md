@@ -113,13 +113,25 @@ A file absent from the table keeps whole-file containment.
    would merge distinct patterns and could certify a branch whose scope is
    narrower than the base's; `  # foo` likewise stays a pattern.
 
-   `.prettierignore` is not prettier's whole scope: prettier 3 reads `.gitignore`
-   too. Measured on 3.6.1, adding `apps/host/` to `.gitignore` drops the
-   checked-file count from 2 to 1 with `.prettierignore` untouched. That file is
-   therefore fetched as well and required to be **byte-identical**; it is not
-   folded into the subset test, because the real `.gitignore` carries a dozen
-   `!` re-inclusions that would make a semantic comparison reject every input
-   and leave the narrowing dead from day one.
+   `.prettierignore` is not prettier's whole scope. Prettier 3 reads `.gitignore`
+   too — measured on 3.6.1, adding `apps/host/` there drops the checked-file
+   count from 2 to 1 — and it discovers both kinds at **every depth**, because
+   the lane groups by the nearest ancestor carrying an ignore file. The
+   repository tracks 29 such files.
+
+   So rather than guess which files matter, the narrowing reads both recursive
+   trees and compares the whole ignore-file set by path and blob SHA. Every one
+   of them except the root `.prettierignore` must be identical; blob SHAs answer
+   that without fetching content. They are not folded into the subset test: the
+   real `.gitignore` carries a dozen `!` re-inclusions, so a semantic comparison
+   would reject every input and leave the narrowing dead from day one. A
+   truncated tree is a partial answer: it throws, so the verdict is kept and the
+   catch annotates why, rather than silently disabling the narrowing.
+
+   **The base side is read at `baseRef`, the base tip — not at the gate commit.**
+   `.gitignore` owns no gate verdict, so reading it at the newest commit touching
+   `.prettierignore` would hide any later base-side change to it, and no other
+   verdict would catch that change.
 
 4. Refuse to narrow if either side has a re-including pattern (see below).
 5. Drop the entry when the branch's pattern set is a subset of the base's and,
@@ -246,8 +258,9 @@ able to weaken the gate.
 
 ### Raw media type for the content fetch
 
-The content fetches request `Accept: application/vnd.github.raw` — two for the
-eslint path, four for prettier's two scope files. The
+The content fetches request `Accept: application/vnd.github.raw`. The eslint
+path makes two; the prettier path makes two recursive-tree calls plus two
+root-ignore reads. The
 contents API returns an empty `content` field for files above 1 MB in its JSON
 representation; a raw body avoids silently disabling the narrowing as a file
 grows.
@@ -319,7 +332,13 @@ Post-implementation:
   flipping the media type or deleting the wiring reddens a named case rather
   than silently disabling the refinement behind the fail-closed catch.
 - A fetch failure or an extraction failure leaves the stale verdict intact and
-  emits a `::warning::` annotation naming the file and the cause.
+  emits a `::warning::` annotation naming the file and the cause. Extraction
+  failure therefore throws rather than returning false, so it reaches the catch
+  that logs.
+- The prettier narrowing reads the base tree at the base tip, covers nested
+  ignore files, and refuses to narrow on a truncated tree or on any ignore file
+  added or removed on either side. Truncation annotates, like extraction failure.
+- A base ref containing a slash is URI-encoded in the tree path.
 - A comment-embedded U+2028, U+2029 or lone CR cannot hide an entry.
 - Any `.gitignore` difference blocks the prettier narrowing.
 - A negated or escaped pattern in the real `.prettierignore` reddens a drift

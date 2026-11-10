@@ -328,80 +328,80 @@ public class HarnessPoolConnector implements HarnessConnector {
         return !closed;
     }
 
-    private boolean feature(String name) {
-        return contract != null && contract.features().contains(name);
+    private boolean feature(HarnessFeature feature) {
+        return contract != null && feature.in(contract.features());
     }
 
     @Override
     public boolean supportsApprovalSelection() {
-        return feature("approval-selection/1");
+        return feature(HarnessFeature.APPROVAL_SELECTION);
     }
 
     @Override
     public boolean supportsLiveApprovalSelection() {
-        return feature("live-approval-selection/1") && supportsApprovalSelection();
+        return feature(HarnessFeature.LIVE_APPROVAL_SELECTION);
     }
 
     @Override
     public boolean supportsAutoApproval() {
-        return feature("auto-approval/1") && supportsApprovalSelection();
+        return feature(HarnessFeature.AUTO_APPROVAL);
     }
 
     @Override
     public boolean supportsPermissionRules() {
-        return feature("permission-rules/1") && supportsApprovalSelection();
+        return feature(HarnessFeature.PERMISSION_RULES);
     }
 
     @Override
     public boolean supportsAgentDefinitionApprovalSelection() {
-        return feature("agent-definition-approval-selection/1") && supportsApprovalSelection();
+        return feature(HarnessFeature.AGENT_DEFINITION_APPROVAL_SELECTION);
     }
 
     @Override
     public boolean supportsModelSelection() {
-        return feature("model-selection/1");
+        return feature(HarnessFeature.MODEL_SELECTION);
     }
 
     @Override
     public boolean supportsModelConfiguration() {
-        return feature("session-model-config/1");
+        return feature(HarnessFeature.MODEL_CONFIGURATION);
     }
 
     @Override
     public boolean supportsPersonalMemory() {
-        return feature("session-memory/1");
+        return feature(HarnessFeature.PERSONAL_MEMORY);
     }
 
     @Override
-    public boolean supportsUserMessageQueue() { return feature("user-message-queue/1"); }
+    public boolean supportsUserMessageQueue() { return feature(HarnessFeature.USER_MESSAGE_QUEUE); }
 
     @Override
     public boolean supportsContextCompression() {
-        return feature("context-compression/1");
+        return feature(HarnessFeature.CONTEXT_COMPRESSION);
     }
 
     @Override
     public boolean supportsPlanMode() {
-        return feature("plan-mode/1");
+        return feature(HarnessFeature.PLAN_MODE);
     }
 
     @Override
     public boolean supportsInputAttachments() {
-        return feature("input-attachments/1");
+        return feature(HarnessFeature.INPUT_ATTACHMENTS);
     }
 
     @Override
     public boolean supportsSessionSkills() {
-        return feature("session-skills/2");
+        return feature(HarnessFeature.SESSION_SKILLS);
     }
 
     @Override
     public boolean supportsSessionExtensions() {
-        return feature("session-extension-packages/1");
+        return feature(HarnessFeature.SESSION_EXTENSIONS);
     }
 
     @Override
-    public boolean supportsPackagePreparation() { return feature("managed-package-preparation/1"); }
+    public boolean supportsPackagePreparation() { return feature(HarnessFeature.PACKAGE_PREPARATION); }
 
     private Member packagePreparationMember() {
         List<Member> candidates = accepting;
@@ -428,6 +428,32 @@ public class HarnessPoolConnector implements HarnessConnector {
     @Override
     public Map<String, Object> previewPackage(Map<String, Object> metadata, java.io.InputStream source) {
         return packagePreparationMember().connector.previewPackage(metadata, source);
+    }
+
+    @Override
+    public boolean supportsRuntimeSkillImport() { return feature(HarnessFeature.RUNTIME_SKILL_IMPORT); }
+
+    private <T> T existingRuntimeSkillOwner(String tenant, String session, Function<QwenHostedHarnessConnector, T> action) {
+        Selected selected = select(tenant, session, false);
+        if (selected == null) {
+            throw new ManagedAgentException(409, "managed_extension_owner_unavailable", "The original Runtime owner is unavailable.");
+        }
+        return call(selected, action);
+    }
+
+    @Override
+    public Map<String, Object> runtimeSkillCandidates(String tenant, String session) {
+        return existingRuntimeSkillOwner(tenant, session, leaf -> leaf.runtimeSkillCandidates(tenant, session));
+    }
+
+    @Override
+    public Map<String, Object> runtimeSkillSnapshot(String tenant, String session, Map<String, Object> request) {
+        return existingRuntimeSkillOwner(tenant, session, leaf -> leaf.runtimeSkillSnapshot(tenant, session, request));
+    }
+
+    @Override
+    public Map<String, Object> runtimeSkillArchive(String tenant, String session, Map<String, Object> request) {
+        return existingRuntimeSkillOwner(tenant, session, leaf -> leaf.runtimeSkillArchive(tenant, session, request));
     }
 
     @Override

@@ -3,7 +3,7 @@ package com.alibaba.qwen.code.managedagent;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.config.ToolPublicationConfiguration;
 import com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObjectStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationDataStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationStore;
 import org.junit.jupiter.api.Test;
@@ -99,6 +99,6 @@ class ToolPublicationConfigurationTest {
     private ToolPublicationDataStore data(ManagedAgentProperties properties) {
         return new ToolPublicationConfiguration().toolPublicationDataStore(mock(JdbcTemplate.class),
                 mock(PlatformTransactionManager.class), mock(ToolPublicationStore.class),
-                mock(ManagedSessionStore.class), mock(ToolPublicationObjectStore.class), properties);
+                mock(JdbcManagedSessionStore.class), mock(ToolPublicationObjectStore.class), properties);
     }
 }
