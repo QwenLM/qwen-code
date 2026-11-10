@@ -58,8 +58,8 @@ inputs, and a single required aggregate check. Each is a follow-up.
 flowchart LR
     C[Classify PR] --> B[test_build<br/>restore base build, build once<br/>+ bundle closure / core subpath checks]
     C --> L[Lint & Static]
-    B --> U[unit shards 1..4]
-    B --> I[no-AK integration shards 1..3]
+    B --> U[unit shards 1..2]
+    B --> I[no-AK integration shards 1..2]
     B --> W[web-shell smoke shards 1..2]
     U --> T{{Test ubuntu}}
     I --> R{{Integration Tests no-AK, No Sandbox}}
@@ -87,8 +87,8 @@ host.
 
 - `integration_no_ak` needs `test_build`, installs with
   `QWEN_SKIP_PREPARE=1`, downloads and unpacks `unit-test-tree` the same way
-  the unit shards do, and runs as three shards
-  (`--shard=N/3`; `typecheck:integration` on shard 1). A new
+  the unit shards do, and runs as two shards
+  (`--shard=N/2`; `typecheck:integration` on shard 1). A new
   `integration_no_ak_result` job carries the required name
   `Integration Tests (no-AK, No Sandbox)` and passes only when the build and
   every shard pass.
@@ -127,7 +127,7 @@ host.
 | Run the bundle checks in `test_build`, not in a new job       | A new job would duplicate the ~150-line pre-checkout prelude, which cannot be a local composite action because it runs before checkout |
 | Drop the arch from the cache key instead of relabelling hosts | The mixed pool is intentional; the one native output is cheap to recopy                                                                |
 | Restore by base commit, not merge-base                        | `pull_request.base.sha` is in the event payload and its `main` push saved exactly that key; merge-base needs history or an API call    |
-| Three integration shards                                      | ~17 minutes of serial files become about 6 per shard; the unit lane was since re-sharded 8→4, so it no longer matches this             |
+| Two integration shards                                        | ~17 minutes of serial files become about 8–9 per shard; the unit lane was since re-sharded 8→2, so it no longer matches this           |
 
 ## Risks
 
@@ -163,6 +163,7 @@ host.
 - The no-AK integration gate and the web-shell smoke no longer run a build.
 - `Lint & Static` no longer builds or bundles.
 - After `main` has saved `v2` entries, the required-path median drops below 15
-  minutes over 20 runs. Superseded by the later shard reduction (unit 8→4,
-  smoke 4→2) for lane reliability: the two-shard smoke lane is now the longest
-  pole at ~25–30 minutes, so the critical-path target yields to reliability.
+  minutes over 20 runs. Superseded by the later shard reduction (unit 8→2,
+  smoke 4→2, integration 3→2) for lane reliability: the two-shard smoke lane is
+  the longest pole at ~26 minutes observed, so the critical-path target yields
+  to reliability.

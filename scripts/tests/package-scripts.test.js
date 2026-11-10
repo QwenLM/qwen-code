@@ -1235,7 +1235,7 @@ describe('package scripts', () => {
     // exactly one shard. The lane script's own test injects the variable into
     // its stub env, so it proves the script obeys it and nothing else proves
     // CI sets it: flipping this to a constant, inverting it, or dropping it
-    // while resolving a conflict runs the regression on three wrong shards or
+    // while resolving a conflict runs the regression on one wrong shard or
     // nowhere, and the only CI coverage of that suite goes with it.
     expect(step).toContain(
       "QWEN_CI_SKIP_STANDALONE_RUNTIMES: \"${{ matrix.shard != 1 && '1' || '' }}\"",

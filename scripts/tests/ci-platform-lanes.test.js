@@ -309,18 +309,18 @@ const runnerOn = (job, runner) => {
 it('gives the shared Linux test lane one ceiling on both pools', () => {
   // The unsharded suite outgrew 60 minutes on hosted runners: on 2026-10-17,
   // 17 of the 30 hosted runs that ended on their own were cancelled at 60.
-  // Each shard runs a quarter of it, beside one build of the tree.
+  // Each shard runs half of it, beside one build of the tree.
   for (const runner of [ECS_RUNNER, HOSTED_RUNNER, '']) {
     expect(timeoutMinutesOn('test_build', runner)).toBe(45);
     expect(timeoutMinutesOn('test', runner)).toBe(60);
   }
   expect(ci.jobs.test.strategy['fail-fast']).toBe(false);
-  expect(ci.jobs.test.strategy.matrix.shard).toEqual([1, 2, 3, 4]);
+  expect(ci.jobs.test.strategy.matrix.shard).toEqual([1, 2]);
 });
 
 it('skips every build-consuming shard step when test_build failed', () => {
   // `!cancelled()` is true when a needed job fails, so without this term a
-  // failed build still starts all four shards: each pays a full install and
+  // failed build still starts both shards: each pays a full install and
   // then dies at the missing artifact, and every shard reports artifact
   // plumbing as its failing step instead of the build that broke. The steps
   // are gated, not the job or the matrix: `test_ubuntu` compares
@@ -431,13 +431,13 @@ it('pins the build-to-shard artifact handoff on both ends', () => {
   expect(archive).not.toContain('git ls-files');
 
   // Four coupled literals tie the producer to the consumers. Renaming any one
-  // fails all four shards at unpack after a full build, on the required
+  // fails both shards at unpack after a full build, on the required
   // check, so the name has to be pinned in one place.
   const name = built.get('Upload the built tree').with.name;
   expect(name).toBeTruthy();
   expect(shard.get('Download the built tree').with.name).toBe(name);
   expect(shard.get('Retry downloading the built tree').with.name).toBe(name);
-  // Both attempts have to outlast the slow tail, not the median: four shards
+  // Both attempts have to outlast the slow tail, not the median: two shards
   // fetch this same artifact at once, the slowest completed one on main took
   // just under five minutes, and one exceeded the old five-minute cap on two
   // runs in a row, skipping the unpack entirely.

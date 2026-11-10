@@ -4884,7 +4884,7 @@ New in this change, not moved from the YAML.
 
 The address agent receives check NAMES only ("Failed checks" and
 "Still-red checks" render name + conclusion) and holds no GitHub
-credentials, so "Linux unit tests (shard 3/4)" cannot tell it which
+credentials, so "Linux unit tests (shard 2/2)" cannot tell it which
 step or assertion went red. For a locally reproducible lane that is
 survivable — the agent maps the name to the repository's own command
 and reruns it — but a shard name, a "Test" check that failed on a

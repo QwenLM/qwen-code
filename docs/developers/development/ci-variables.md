@@ -84,9 +84,9 @@ workspaces' suites and `npm run test:scripts:unit` at half the cap, at least 1,
 so at its peak the step runs the cap plus that half. On GitHub-hosted runners
 the side lane's Vitest runs use 2 workers.
 
-The step runs in four shards (`Linux unit tests (shard N/4)`), each passing
-`--shard=N/4` to every one of those Vitest runs. The shards apply the cap on
-their own too, so the pool sees up to four such steps at once. They install
+The step runs in two shards (`Linux unit tests (shard N/2)`), each passing
+`--shard=N/2` to every one of those Vitest runs. The shards apply the cap on
+their own too, so the pool sees up to two such steps at once. They install
 without the `prepare` build and unpack the tree `test_build` built once.
 `Test (ubuntu-latest, Node 22.x)` passes only when the build and every shard
 pass.
@@ -103,7 +103,7 @@ the only architecture-specific output, the bundle's opentui native library,
 is recopied for the host after every restore and unpack
 (`ci-build-cache.mjs host-assets`).
 
-The unit-test shards, the three `Integration Tests (no-AK, shard N/3)` shards
+The unit-test shards, the two `Integration Tests (no-AK, shard N/2)` shards
 and the two web-shell smoke shards all unpack that one tree. `test_build`
 also runs the checks that read it, the serve fast-path bundle closure, the
 core subpath exports and the settings-schema freshness check, which
