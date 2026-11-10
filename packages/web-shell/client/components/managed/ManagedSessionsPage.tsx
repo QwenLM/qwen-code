@@ -1,5 +1,8 @@
 import { ManagedUserMessageQueue } from './ManagedUserMessageQueue';
 import { useManagedUserMessages } from './use-managed-user-messages';
+import { useManagedSideQueries } from './use-managed-side-queries';
+import { ManagedSideQueryPanel } from './ManagedSideQueryPanel';
+import { managedSideQueryCommand } from './managed-side-query-command';
 import {
   useCallback,
   useEffect,
@@ -584,6 +587,18 @@ function ManagedSessionsContent({
     provider,
     interactive ? sessionId : undefined,
   );
+  const sideQueries = useManagedSideQueries(provider, clientId, sessionId, {
+    idle:
+      !!summary &&
+      !active &&
+      !busy &&
+      (!provider.userMessages || !!userMessages.snapshot) &&
+      !userMessages.snapshot?.messages.length,
+    interactive,
+    btw: summary?.sessionId === sessionId && summary?.capabilities.btw === true,
+    recap:
+      summary?.sessionId === sessionId && summary?.capabilities.recap === true,
+  });
   const [pendingRestoreFailed, setPendingRestoreFailed] = useState(false);
   const [outputTarget, setOutputTarget] = useState<{
     sessionId: string;
@@ -1111,6 +1126,56 @@ function ManagedSessionsContent({
     files?: PromptFile[],
     metadata?: ComposerSubmitMetadata,
   ) {
+    const sideCommand = managedSideQueryCommand(submittedText);
+    if (sideCommand) {
+      if (
+        !interactive ||
+        !sessionId ||
+        !provider.sideQueries ||
+        !sideQueries.context
+      ) {
+        setError(
+          language === 'zh-CN'
+            ? '此会话暂不支持 BTW/回顾。'
+            : 'BTW/recap is unavailable for this session.',
+        );
+        return;
+      }
+      if (
+        images?.length ||
+        files?.length ||
+        (sideCommand.kind === 'recap' && sideCommand.argument)
+      ) {
+        setError(
+          language === 'zh-CN'
+            ? 'BTW 仅支持文本问题，/recap 不接受参数。'
+            : 'BTW accepts text only; /recap accepts no arguments.',
+        );
+        return;
+      }
+      if (sideCommand.kind === 'btw' && !sideCommand.argument) {
+        sideQueries.show('btw');
+        commit?.();
+        return;
+      }
+      if (!sideQueries.available(sideCommand.kind)) {
+        setError(
+          language === 'zh-CN'
+            ? '此会话暂不支持 BTW/回顾生成。'
+            : 'BTW/recap generation is unavailable for this session.',
+        );
+        return;
+      }
+      if (
+        await sideQueries.create(
+          sideCommand.kind === 'btw'
+            ? { kind: 'btw', question: sideCommand.argument }
+            : { kind: 'recap', trigger: 'manual' },
+        )
+      )
+        commit?.();
+      return;
+    }
     const abort = lifetime.current;
     if (
       (hostSessionOnly && !sessionId) ||
@@ -1252,6 +1317,7 @@ function ManagedSessionsContent({
                 opts,
               );
       if (abort.signal.aborted) return;
+      sideQueries.mainInputAccepted();
       if (attempt.queued) void userMessages.refresh();
       pendingRef.current = undefined;
       setPending(undefined);
@@ -1326,6 +1392,32 @@ function ManagedSessionsContent({
   }, [summary, cancellationEnabled, busy, turnCancelBusy, requestTurnCancel]);
 
   const currentSummary = summary?.sessionId === sessionId ? summary : undefined;
+  const sideQueryButtons =
+    provider.sideQueries && sideQueries.context ? (
+      <>
+        {(currentSummary?.capabilities.btw ||
+          sideQueries.queries.some((query) => query.kind === 'btw')) && (
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => sideQueries.show('btw')}
+          >
+            BTW
+          </Button>
+        )}
+        {(currentSummary?.capabilities.recap ||
+          sideQueries.context.latestRecapContentVersion ||
+          sideQueries.queries.some((query) => query.kind === 'recap')) && (
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => sideQueries.show('recap')}
+          >
+            {language === 'zh-CN' ? '回顾' : 'Recap'}
+          </Button>
+        )}
+      </>
+    ) : null;
   const diagnosticsButton =
     currentSummary?.capabilities.diagnostics &&
     !detail.signals?.session &&
@@ -1912,6 +2004,7 @@ function ManagedSessionsContent({
                     )}
                     {sessionActions(summary)}
                     {diagnosticsButton}
+                    {sideQueryButtons}
                   </span>
                 }
                 hideWorkspaceIcon={!showManagedSessionHeader}
@@ -1965,6 +2058,7 @@ function ManagedSessionsContent({
                 </Button>
               )}
               {diagnosticsButton}
+              {sideQueryButtons}
               {provider.tasks &&
                 (summary.capabilities.tasks === true ||
                   taskCancel.pendingTaskIds.length > 0) && (
@@ -2541,7 +2635,36 @@ function ManagedSessionsContent({
                   void submit(value, commit, images, files, metadata);
                   return false;
                 }}
-                commands={skills.commands}
+                commands={[
+                  ...skills.commands,
+                  ...(sideQueries.available('btw')
+                    ? [
+                        {
+                          name: 'btw',
+                          description:
+                            language === 'zh-CN'
+                              ? '私下继续追问当前会话'
+                              : 'Ask a private follow-up',
+                          source: 'builtin-command',
+                          displayCategory: 'system' as const,
+                        },
+                      ]
+                    : []),
+                  ...(sideQueries.available('recap')
+                    ? [
+                        {
+                          name: 'recap',
+                          description:
+                            language === 'zh-CN'
+                              ? '回顾已完成的对话'
+                              : 'Recap the completed conversation',
+                          source: 'builtin-command',
+                          displayCategory: 'system' as const,
+                        },
+                      ]
+                    : []),
+                ]}
+                btwEnabled={sideQueries.available('btw')}
                 skills={skills.skills}
                 onSkillsOpenChange={
                   skills.supported ? skills.onOpenChange : undefined
@@ -3079,6 +3202,12 @@ function ManagedSessionsContent({
                 taskTriggerRef.current.focus();
               else (sessionsNavRef.current ?? pageRef.current)?.focus();
             }}
+          />
+        )}
+        {provider.sideQueries && (
+          <ManagedSideQueryPanel
+            sideQueries={sideQueries}
+            interactive={interactive}
           />
         )}
         {provider.diagnostics &&
