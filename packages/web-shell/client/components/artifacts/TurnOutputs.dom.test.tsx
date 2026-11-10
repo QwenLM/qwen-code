@@ -1062,6 +1062,71 @@ describe('TurnOutputs artifact downloads', () => {
     act(() => root.unmount());
   });
 
+  it('uses the host artifact-preview opt-in for managed rendered artifacts', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const managedImage = {
+      id: 'managed-image-artifact',
+      kind: 'image',
+      storage: 'managed',
+      status: 'available',
+      title: 'Managed diagram',
+      mimeType: 'image/png',
+    } as DaemonSessionArtifact;
+    const render = (hostOwnsArtifactPreview?: boolean) =>
+      act(() => {
+        root.render(
+          <I18nProvider language="en">
+            <WebShellCustomizationProvider
+              value={
+                hostOwnsArtifactPreview === undefined
+                  ? {}
+                  : { hostOwnsArtifactPreview }
+              }
+            >
+              <TurnOutputs
+                turnId="turn-managed-image"
+                workspaceCwd="/primary"
+                changes={[]}
+                artifacts={[managedImage]}
+                scheduledTasks={[]}
+                onReviewChanges={() => {}}
+                onOpenArtifact={() => {}}
+                onOpenScheduledTask={() => {}}
+              />
+            </WebShellCustomizationProvider>
+          </I18nProvider>,
+        );
+      });
+
+    render();
+    expect(
+      Array.from(container.querySelectorAll('button')).find(
+        (button) => button.textContent?.trim() === 'Open',
+      ),
+    ).toBeDefined();
+    expect(
+      Array.from(container.querySelectorAll('button')).find(
+        (button) => button.textContent?.trim() === 'Preview',
+      ),
+    ).toBeUndefined();
+
+    render(true);
+    expect(
+      Array.from(container.querySelectorAll('button')).find(
+        (button) => button.textContent?.trim() === 'Preview',
+      ),
+    ).toBeDefined();
+    expect(
+      Array.from(container.querySelectorAll('button')).find(
+        (button) => button.textContent?.trim() === 'Open',
+      ),
+    ).toBeUndefined();
+
+    act(() => root.unmount());
+  });
+
   it('marks only changed workspace artifacts as modified since recorded', () => {
     const container = document.createElement('div');
     document.body.appendChild(container);
