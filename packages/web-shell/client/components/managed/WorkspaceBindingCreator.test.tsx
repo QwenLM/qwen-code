@@ -2058,6 +2058,74 @@ describe('WorkspaceBindingCreator', () => {
     });
   });
 
+  it('reports a read-back-only retry as processing and running', async () => {
+    // R9-1: a persisted pending that already carries a session id resumes with
+    // a read-back only, so the latch must cover that path too -- there is no
+    // createSession call to attach it to.
+    const createSession = directCreation();
+    sessionStorage.setItem(
+      `qwen-managed-workspace-create:${provider.storageKey}`,
+      JSON.stringify({
+        agentId: 'agent-a',
+        workspaceId: 'ws-a',
+        cwdRelative: '.',
+        input: [{ type: 'input_text', text: 'Frozen prompt' }],
+        clientId: 'client-a',
+        idempotencyKey: 'frozen-key',
+        sessionId: 'session-a',
+      }),
+    );
+    let releaseRead!: (value: {
+      sessionId: string;
+      agentId: string;
+      workspace: { workspaceId: string; cwdRelative: string };
+    }) => void;
+    getSession.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          releaseRead = resolve;
+        }),
+    );
+    await render(
+      true,
+      false,
+      undefined,
+      {
+        alignManagedChatWithHost: true,
+        renderComposerFooter: (props) => (
+          <span data-testid="footer-running">{String(props.isRunning)}</span>
+        ),
+      },
+      {
+        composerPlaceholders: {
+          idle: 'Idle hint',
+          processing: 'Processing hint',
+        },
+      },
+    );
+
+    await click('Retry reading session');
+    expect(createSession).not.toHaveBeenCalled();
+    expect(getSession).toHaveBeenCalledTimes(1);
+    expect(editorMocks.props!.placeholderText).toBe('Processing hint');
+    expect(
+      document.querySelector('[data-testid="footer-running"]')?.textContent,
+    ).toBe('true');
+
+    await act(async () => {
+      releaseRead({
+        sessionId: 'session-a',
+        agentId: 'agent-a',
+        workspace: { workspaceId: 'ws-a', cwdRelative: '.' },
+      });
+      await flush();
+    });
+    expect(editorMocks.props!.placeholderText).toBe('Idle hint');
+    expect(
+      document.querySelector('[data-testid="footer-running"]')?.textContent,
+    ).toBe('false');
+  });
+
   it('does not report workspace creation as a running prompt', async () => {
     // R9-1 the other direction: adding a workspace is not a creation request,
     // and this screen has no queue, so it must not draw the processing state.
