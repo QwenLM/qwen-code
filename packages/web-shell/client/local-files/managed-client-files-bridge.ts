@@ -59,7 +59,6 @@ const REQUEST_EVENT = 'request';
 export class ManagedClientFilesBridge {
   private readonly options: ManagedClientFilesOptions;
   private abort?: AbortController;
-  private generation = 0;
   private running = false;
   private state: ManagedClientFilesState = { phase: 'idle' };
   private readonly listeners = new Set<
@@ -101,39 +100,104 @@ export class ManagedClientFilesBridge {
     this.setState({ phase: 'connecting' });
     const abort = new AbortController();
     this.abort = abort;
+    let registerFailed = false;
     try {
-      const registered = await this.options.fetch(this.url('register'), {
-        method: 'POST',
-        headers: this.headers(true),
-        body: JSON.stringify({ sessionId: this.options.sessionId }),
-        signal: abort.signal,
-      });
-      if (!registered.ok) {
-        throw new Error(`register failed with HTTP ${registered.status}`);
-      }
-      const body = (await registered.json()) as {
-        generation?: number;
-        toolCount?: number;
-      };
-      this.generation = body.generation ?? 0;
+      // register blocks on the Harness discovery that this drain must
+      // answer, and the stream route requires the binding that register
+      // creates: fire register, wait for the binding, drain, then await
+      // register. Awaiting register first would deadlock the loop.
+      const registering = this.options
+        .fetch(this.url('register'), {
+          method: 'POST',
+          headers: this.headers(true),
+          body: JSON.stringify({ sessionId: this.options.sessionId }),
+          signal: abort.signal,
+        })
+        .then(async (response) => {
+          if (!response.ok) {
+            throw new Error(`register failed with HTTP ${response.status}`);
+          }
+          return (await response.json()) as {
+            generation?: number;
+            toolCount?: number;
+          };
+        });
+      // The binding poll may settle before anyone awaits registering.
+      registering.catch(() => {});
+      const generation = await this.waitForBinding(abort.signal, registering);
       this.running = true;
+      const draining = this.drain(abort.signal, generation);
+      let registered: { generation?: number; toolCount?: number };
+      try {
+        registered = await registering;
+      } catch (cause) {
+        registerFailed = true;
+        abort.abort();
+        await draining.catch(() => {});
+        throw cause;
+      }
       this.setState({
         phase: 'connected',
-        generation: this.generation,
-        toolCount: body.toolCount ?? 0,
+        generation,
+        toolCount: registered.toolCount ?? 0,
       });
-      await this.drain(abort.signal);
+      await draining;
     } catch (cause) {
-      if (abort.signal.aborted) {
+      this.running = false;
+      if (abort.signal.aborted && !registerFailed) {
         this.setState({ phase: 'stopped' });
         return;
       }
-      this.running = false;
       this.setState({
         phase: 'failed',
         code: 'client_files_bridge_failed',
         message: cause instanceof Error ? cause.message : String(cause),
       });
+    }
+  }
+
+  /**
+   * Polls status until the binding register created is active. The stream
+   * route refuses an unknown binding, so the drain cannot start earlier.
+   */
+  private async waitForBinding(
+    signal: AbortSignal,
+    registering: Promise<unknown>,
+  ): Promise<number> {
+    const settled = registering.then(
+      () => true,
+      () => false,
+    );
+    for (;;) {
+      signal.throwIfAborted();
+      const status = await this.options.fetch(this.url('status'), {
+        method: 'POST',
+        headers: this.headers(true),
+        body: JSON.stringify({ sessionId: this.options.sessionId }),
+        signal,
+      });
+      let state: string | undefined;
+      if (status.ok) {
+        // An absent binding answers 200 with an empty body.
+        const body = (await status.json().catch(() => ({}))) as {
+          state?: string;
+          generation?: number;
+        };
+        state = body.state;
+        if (state === 'active' && typeof body.generation === 'number') {
+          return body.generation;
+        }
+      }
+      const ok = await Promise.race([
+        settled,
+        new Promise<undefined>((resolve) =>
+          setTimeout(() => resolve(undefined), 250),
+        ),
+      ]);
+      if (ok === false) await registering;
+      if (ok === true && state === 'closed') {
+        throw new Error('client files binding closed during registration');
+      }
     }
   }
 
@@ -154,13 +218,13 @@ export class ManagedClientFilesBridge {
     this.setState({ phase: 'stopped' });
   }
 
-  private async drain(signal: AbortSignal): Promise<void> {
+  private async drain(signal: AbortSignal, generation: number): Promise<void> {
     const response = await this.options.fetch(this.url('requests/stream'), {
       method: 'POST',
       headers: this.headers(true),
       body: JSON.stringify({
         sessionId: this.options.sessionId,
-        generation: this.generation,
+        generation,
       }),
       signal,
     });
@@ -180,7 +244,7 @@ export class ManagedClientFilesBridge {
           const frame = buffer.slice(0, boundary);
           buffer = buffer.slice(boundary + 2);
           const data = sseData(frame);
-          if (data !== undefined) await this.answer(data, signal);
+          if (data !== undefined) await this.answer(data, signal, generation);
         }
       }
     } finally {
@@ -197,7 +261,11 @@ export class ManagedClientFilesBridge {
     }
   }
 
-  private async answer(data: string, signal: AbortSignal): Promise<void> {
+  private async answer(
+    data: string,
+    signal: AbortSignal,
+    generation: number,
+  ): Promise<void> {
     let payload: { requestId?: string; payloadJson?: string };
     try {
       payload = JSON.parse(data) as {
@@ -226,7 +294,7 @@ export class ManagedClientFilesBridge {
       headers: this.headers(true),
       body: JSON.stringify({
         sessionId: this.options.sessionId,
-        generation: this.generation,
+        generation,
         rpcRequestId: payload.requestId,
         ...(response !== undefined
           ? { responseJson: JSON.stringify(response) }

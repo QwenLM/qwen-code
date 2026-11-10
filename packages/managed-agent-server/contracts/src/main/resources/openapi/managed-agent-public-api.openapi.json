@@ -23226,7 +23226,13 @@
       "WebShellClientFilesRegistration": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["serverId", "generation", "token", "expiresAt"],
+        "required": [
+          "serverId",
+          "generation",
+          "token",
+          "expiresAt",
+          "toolCount"
+        ],
         "properties": {
           "serverId": {
             "type": "string"
@@ -23242,6 +23248,11 @@
           "expiresAt": {
             "type": "integer",
             "description": "Binding deadline in Unix epoch milliseconds."
+          },
+          "toolCount": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Number of browser tools the Harness discovered during registration."
           }
         }
       },

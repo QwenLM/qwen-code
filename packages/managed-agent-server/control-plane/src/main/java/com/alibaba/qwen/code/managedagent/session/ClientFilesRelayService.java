@@ -15,6 +15,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.apache.commons.codec.digest.DigestUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
@@ -38,6 +40,7 @@ import java.util.UUID;
 @Service
 public class ClientFilesRelayService {
     public static final String SERVER_ID = "local-files";
+    private static final Logger LOG = LoggerFactory.getLogger(ClientFilesRelayService.class);
     private static final SecureRandom RANDOM = new SecureRandom();
     private static final long POLL_INTERVAL_MILLIS = 100;
 
@@ -76,17 +79,22 @@ public class ClientFilesRelayService {
         if (previous != null && previous.active() && previous.generation() != binding.generation()) {
             relay.failQueued(tenant, session, previous.generation(), ClientFilesModels.ERROR_OFFLINE, now);
         }
+        int toolCount;
         try {
-            harness.clientFilesOperation(tenant, session, Map.of(
+            Map<String, Object> registered = harness.clientFilesOperation(tenant, session, Map.of(
                     "action", "register",
                     "serverId", binding.serverId(),
                     "generation", binding.generation(),
                     "url", relayEndpoint(relayUrl, session),
                     "token", token));
+            toolCount = registered.get("toolCount") instanceof Number count
+                    ? count.intValue() : 0;
         } catch (RuntimeException cause) {
+            LOG.warn("Client files registration dispatch failed for session {}", session, cause);
             throw error(503, "client_files_relay_unavailable");
         }
-        return new Registration(binding.serverId(), binding.generation(), token, binding.expiresAt());
+        return new Registration(binding.serverId(), binding.generation(), token, binding.expiresAt(),
+                toolCount);
     }
 
     public Status unregister(String tenant, String actor, String session) {
@@ -160,6 +168,20 @@ public class ClientFilesRelayService {
     }
 
     /**
+     * The internal MCP leg carries no tenant context: the binding is resolved
+     * by Session and the relay credential is the only admission.
+     */
+    public String mcpSession(String session, String token, String body) {
+        requireEnabled();
+        requireSessionId(session);
+        Binding binding = relay.findBySession(session);
+        if (binding == null) {
+            throw error(403, "client_files_credential_invalid");
+        }
+        return mcp(binding.tenantId(), session, token, body);
+    }
+
+    /**
      * The Runtime-facing MCP leg. Returns the browser's JSON-RPC response, a
      * structured offline error once the request expires, or {@code null} for
      * a notification (the controller answers 202).
@@ -185,7 +207,12 @@ public class ClientFilesRelayService {
         if (requestId.isBlank() || requestId.length() > 128) {
             throw error(400, "client_files_invalid");
         }
-        enqueue(binding, requestId, body, now);
+        try {
+            enqueue(binding, requestId, body, now);
+        } catch (org.springframework.dao.DuplicateKeyException retried) {
+            // A retried JSON-RPC id attaches to the existing queue row; the
+            // poll below returns its answer (or its settled failure).
+        }
         long deadline = now + settings.getClientFiles().getRequestTtl().toMillis();
         while (System.currentTimeMillis() < deadline) {
             QueuedRequest row = relay.request(tenant, session, binding.generation(), requestId);

@@ -3892,6 +3892,8 @@ export interface components {
             token: string;
             /** @description Binding deadline in Unix epoch milliseconds. */
             expiresAt: number;
+            /** @description Number of browser tools the Harness discovered during registration. */
+            toolCount: number;
         };
         WebShellClientFilesStatus: {
             serverId: string;

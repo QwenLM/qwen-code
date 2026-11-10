@@ -175,7 +175,7 @@ describe('HostedClientFilesSession', () => {
     expect(declarations).toHaveLength(1);
     expect(declarations[0].name).toMatch(/^mcp_[0-9a-f]{32}$/);
     expect(declarations[0].description).toContain('read_file');
-    expect(files.resolve(declarations[0].name)?.name).toBe('read_file');
+    expect(files.resolve(declarations[0]!.name!)?.name).toBe('read_file');
     expect(files.catalogs()[0].serverId).toBe('local-files');
   });
 
@@ -191,7 +191,7 @@ describe('HostedClientFilesSession', () => {
       url,
       token: 't',
     });
-    const tool = files.resolve(files.tools()[0].name)!;
+    const tool = files.resolve(files.tools()[0]!.name!)!;
     const result = (await files.invoke(tool, { path: 'a.txt' })) as {
       content: Array<{ text: string }>;
     };
@@ -210,7 +210,7 @@ describe('HostedClientFilesSession', () => {
       url,
       token: 't',
     });
-    const tool = files.resolve(files.tools()[0].name)!;
+    const tool = files.resolve(files.tools()[0]!.name!)!;
     await expect(files.invoke(tool, {})).rejects.toThrow(/byte cap/);
   });
 
@@ -228,7 +228,7 @@ describe('HostedClientFilesSession', () => {
       url,
       token: 't',
     });
-    const tool = files.resolve(files.tools()[0].name)!;
+    const tool = files.resolve(files.tools()[0]!.name!)!;
     await expect(files.invoke(tool, {})).rejects.toThrow(
       /client_files_offline/,
     );
@@ -246,7 +246,7 @@ describe('HostedClientFilesSession', () => {
       url,
       token: 't',
     });
-    const tool = files.resolve(files.tools()[0].name)!;
+    const tool = files.resolve(files.tools()[0]!.name!)!;
     await expect(files.invoke(tool, {})).rejects.toThrow();
   });
 
@@ -300,7 +300,7 @@ describe('HostedClientFilesSession', () => {
     });
     expect(files.generation).toBe(2);
     expect(files.tools()[0].name).not.toBe(before);
-    expect(files.resolve(files.tools()[0].name)?.name).toBe('write_file');
+    expect(files.resolve(files.tools()[0]!.name!)?.name).toBe('write_file');
   });
 
   it('a refused initialize leaves no active client', async () => {

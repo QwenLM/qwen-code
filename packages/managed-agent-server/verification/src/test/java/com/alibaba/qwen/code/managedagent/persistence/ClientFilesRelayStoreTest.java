@@ -52,6 +52,14 @@ class ClientFilesRelayStoreTest {
     }
 
     @Test
+    void findBySessionResolvesTheBindingWithoutTheTenant() {
+        Binding binding = tx(() -> store.register(tenant, session, actor, "local-files",
+                "a".repeat(64), 9_000L, 1_000L));
+        assertThat(tx(() -> store.findBySession(session))).isEqualTo(binding);
+        assertThat(tx(() -> store.findBySession("missing"))).isNull();
+    }
+
+    @Test
     void reRegisterAdvancesTheGenerationAndKeepsCreationTime() {
         tx(() -> store.register(tenant, session, actor, "local-files", "a".repeat(64), 9_000L, 1_000L));
         Binding second = tx(() -> store.register(tenant, session, "actor-2", "local-files", "b".repeat(64), 19_000L, 2_000L));

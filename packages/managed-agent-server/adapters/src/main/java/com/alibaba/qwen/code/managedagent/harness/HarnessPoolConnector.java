@@ -465,6 +465,21 @@ public class HarnessPoolConnector implements HarnessConnector {
     @Override
     public boolean supportsRuntimeSkillImport() { return feature(HarnessFeature.RUNTIME_SKILL_IMPORT); }
 
+    @Override
+    public boolean supportsClientFiles() {
+        return accepting.stream().anyMatch(member -> member.connector.supportsClientFiles());
+    }
+
+    @Override
+    public Map<String, Object> clientFilesOperation(String tenantId, String sessionId, Map<String, Object> body) {
+        Selected selected = select(tenantId, sessionId, false);
+        if (selected == null) {
+            throw new ManagedAgentException(503, "client_files_relay_unavailable",
+                    "No Hosted Harness accepts the Session.");
+        }
+        return call(selected, connector -> connector.clientFilesOperation(tenantId, sessionId, body));
+    }
+
     private <T> T existingRuntimeSkillOwner(String tenant, String session, Function<QwenHostedHarnessConnector, T> action) {
         Selected selected = select(tenant, session, false);
         if (selected == null) {

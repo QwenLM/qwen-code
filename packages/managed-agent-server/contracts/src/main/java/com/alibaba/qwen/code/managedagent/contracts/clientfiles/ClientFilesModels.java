@@ -27,7 +27,8 @@ public final class ClientFilesModels {
             long createdAt, long modifiedAt) {}
 
     /** The one-time registration answer; the token is shown once, never stored. */
-    public record Registration(String serverId, long generation, String token, long expiresAt) {}
+    public record Registration(String serverId, long generation, String token, long expiresAt,
+            int toolCount) {}
 
     /** Binding summary without the credential. */
     public record Status(String serverId, long generation, String state, long expiresAt) {}

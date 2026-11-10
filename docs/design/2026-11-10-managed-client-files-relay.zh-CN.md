@@ -150,6 +150,13 @@ Hosted Harness worker — ManagedMcpRuntime
 粘性路由或消息中间件。队列深度、payload 大小、TTL 为部署配置，取保守默认；
 溢出失败该请求，绝不让 Turn 无限阻塞。
 
+注册是同步 dispatch：`register` 先创建绑定，随后阻塞等待 Harness 经队列完成
+`initialize`/`tools/list`。因此浏览器必须并发执行注册与消费——发起
+`register`，轮询 `status` 至绑定 active，打开 SSE 下行，再 await
+`register`。先 await `register` 再消费会死锁；stream 路由也拒绝未知绑定，
+且 SSE 响应头只在首个事件时提交（空队列永不提交响应头）。已由三进程联合
+IT（切片 4）实证。
+
 ### 路由所有权分类
 
 按仓库的路由所有权规则：

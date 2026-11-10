@@ -342,7 +342,11 @@ public class SurfaceAdmissionAcceptanceTest {
     }
 
     public static Stream<SurfaceRegistry> everyRoute() {
-        return Stream.of(SurfaceRegistry.values());
+        // The client-files MCP leg carries no tenant context by design: the
+        // relay credential is its only admission (probed in the rule-class
+        // matrix), so a cross-tenant principal is not a meaningful probe.
+        return Stream.of(SurfaceRegistry.values())
+                .filter(entry -> entry != SurfaceRegistry.INTERNAL_CLIENT_FILES_MCP);
     }
 
     public static Stream<SurfaceRegistry> refusalProbedRoutes() {

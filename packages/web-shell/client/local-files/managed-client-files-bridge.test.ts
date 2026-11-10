@@ -25,22 +25,35 @@ function startPeer(): Promise<Peer> {
     resolveFirst = resolve;
   });
   let streamRes: import('node:http').ServerResponse | undefined;
+  // Like the real control plane: register creates the binding, then blocks
+  // on the Harness discovery that the browser drain must answer.
+  let binding: { generation: number; state: string } | undefined;
+  let resolveRegister: (() => void) | undefined;
+  const registerDone = new Promise<void>((resolve) => {
+    resolveRegister = resolve;
+  });
   const server = createServer((req, res) => {
     let body = '';
     req.on('data', (chunk) => (body += chunk));
-    req.on('end', () => {
+    req.on('end', async () => {
       const parsed = body ? (JSON.parse(body) as Record<string, unknown>) : {};
       const path = req.url ?? '';
       if (path.endsWith('/client-files/register')) {
         registered.push(parsed);
+        binding = { generation: 1, state: 'active' };
+        await registerDone;
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(
-          JSON.stringify({ registered: true, generation: 1, toolCount: 1 }),
-        );
+        res.end(JSON.stringify({ generation: 1, toolCount: 1 }));
+        return;
+      }
+      if (path.endsWith('/client-files/status')) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(binding ? JSON.stringify(binding) : '');
         return;
       }
       if (path.endsWith('/client-files/unregister')) {
         unregistered.push(parsed);
+        if (binding) binding.state = 'closed';
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ registered: false }));
         return;
@@ -57,6 +70,7 @@ function startPeer(): Promise<Peer> {
       if (path.endsWith('/client-files/responses')) {
         responses.push(parsed);
         resolveFirst(parsed);
+        resolveRegister?.();
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ settled: true }));
         return;
@@ -151,7 +165,9 @@ describe('ManagedClientFilesBridge', () => {
       result: { tools: [] },
     });
     expect(handled[0].method).toBe('tools/list');
-    expect(b.getState()).toMatchObject({ phase: 'connected', generation: 1 });
+    await vi.waitFor(() =>
+      expect(b.getState()).toMatchObject({ phase: 'connected', generation: 1 }),
+    );
   });
 
   it('reports a notification as offline without a response payload', async () => {

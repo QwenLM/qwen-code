@@ -1,8 +1,8 @@
 package com.alibaba.qwen.code.managedagent.api;
 
-import com.alibaba.qwen.code.managedagent.model.TenantContext;
 import com.alibaba.qwen.code.managedagent.session.ClientFilesRelayService;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.http.CacheControl;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -31,15 +31,16 @@ public class ClientFilesMcpController {
 
     @PostMapping(value = "/mcp", consumes = MediaType.APPLICATION_JSON_VALUE,
             produces = MediaType.APPLICATION_JSON_VALUE)
-    public ResponseEntity<String> mcp(TenantContext tenant, @PathVariable String sessionId,
+    public ResponseEntity<String> mcp(@PathVariable String sessionId,
             @RequestHeader(value = "Authorization", required = false) String authorization,
             @RequestBody String body) {
         String token = authorization != null && authorization.startsWith(BEARER)
                 ? authorization.substring(BEARER.length()).trim() : null;
-        String response = service.mcp(tenant.tenantId(), sessionId, token, body);
+        String response = service.mcpSession(sessionId, token, body);
         if (response == null) {
-            return ResponseEntity.accepted().build();
+            return ResponseEntity.accepted().cacheControl(CacheControl.noStore()).build();
         }
-        return ResponseEntity.ok().contentType(MediaType.APPLICATION_JSON).body(response);
+        return ResponseEntity.ok().cacheControl(CacheControl.noStore())
+                .contentType(MediaType.APPLICATION_JSON).body(response);
     }
 }

@@ -43,12 +43,16 @@ public class TenantContextFilter extends OncePerRequestFilter {
     @Override
     protected boolean shouldNotFilter(HttpServletRequest request) {
         String path = PublicSurface.pathWithinApplication(request);
+        // The client-files MCP leg carries no tenant context: the binding is
+        // resolved by Session and the relay credential is the only admission.
+        if (path.startsWith(MANAGED_CLIENT_FILES_PREFIX)) {
+            return true;
+        }
         return !PublicSurface.covers(path)
                 && !path.startsWith(MANAGED_SESSION_STORE_PREFIX)
                 && !path.startsWith(TOOL_PUBLICATION_PREFIX)
                 && !path.startsWith(MANAGED_CHANNELS_PREFIX)
-                && !path.startsWith(MANAGED_WORKSPACES_PREFIX)
-                && !path.startsWith(MANAGED_CLIENT_FILES_PREFIX);
+                && !path.startsWith(MANAGED_WORKSPACES_PREFIX);
     }
 
     @Override
@@ -60,7 +64,6 @@ public class TenantContextFilter extends OncePerRequestFilter {
                 || path.startsWith(TOOL_PUBLICATION_PREFIX)
                 || path.startsWith(MANAGED_CHANNELS_PREFIX)
                 || path.startsWith(MANAGED_WORKSPACES_PREFIX)
-                || path.startsWith(MANAGED_CLIENT_FILES_PREFIX)
                 || path.startsWith("/v1/agents/workspaces")
                 || path.startsWith("/api/agent/web-shell/v1/workspaces/")) {
             response.setHeader(HttpHeaders.CACHE_CONTROL, "no-store");

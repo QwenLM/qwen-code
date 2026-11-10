@@ -42,24 +42,53 @@ const peerFetch = ((url: string, init?: RequestInit) =>
   nodeFetch(url, init)) as unknown as ManagedFetch;
 
 function startPeer(): Promise<{ server: Server; baseUrl: string }> {
+  // Like the real control plane: register blocks on the discovery the
+  // browser drain answers; the stream pushes tools/list on open.
+  let binding: { generation: number; state: string } | undefined;
+  let resolveRegister: (() => void) | undefined;
+  const registerDone = new Promise<void>((resolve) => {
+    resolveRegister = resolve;
+  });
   const server = createServer((req, res) => {
     let body = '';
     req.on('data', (chunk) => (body += chunk));
-    req.on('end', () => {
+    req.on('end', async () => {
       const path = req.url ?? '';
       if (path.endsWith('/client-files/register')) {
+        binding = { generation: 1, state: 'active' };
+        await registerDone;
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(
-          JSON.stringify({ registered: true, generation: 1, toolCount: 2 }),
-        );
+        res.end(JSON.stringify({ generation: 1, toolCount: 2 }));
+        return;
+      }
+      if (path.endsWith('/client-files/status')) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(binding ? JSON.stringify(binding) : '');
         return;
       }
       if (path.endsWith('/client-files/requests/stream')) {
         res.writeHead(200, { 'Content-Type': 'text/event-stream' });
         res.write(': open\n\n');
+        res.write(
+          `event: request\ndata: ${JSON.stringify({
+            requestId: 'd1',
+            payloadJson: JSON.stringify({
+              jsonrpc: '2.0',
+              id: 'd1',
+              method: 'tools/list',
+            }),
+          })}\n\n`,
+        );
+        return;
+      }
+      if (path.endsWith('/client-files/responses')) {
+        resolveRegister?.();
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ settled: true }));
         return;
       }
       if (path.endsWith('/client-files/unregister')) {
+        if (binding) binding.state = 'closed';
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ registered: false }));
         return;

@@ -71,6 +71,14 @@ public class ClientFilesRelayStore implements ClientFilesRelay {
     }
 
     @Override
+    public Binding findBySession(String sessionId) {
+        List<Binding> rows = jdbc.query("SELECT " + BINDING_COLUMNS
+                + " FROM ma_client_files_binding WHERE session_id=?", BINDING_MAPPER,
+                ManagedSchemaKeys.identity(sessionId));
+        return rows.isEmpty() ? null : rows.get(0);
+    }
+
+    @Override
     public boolean close(String tenantId, String sessionId, long expectedGeneration, long now) {
         return jdbc.update("UPDATE ma_client_files_binding SET state=?,gmt_modified=?"
                         + " WHERE session_scope_key=? AND generation=? AND state=?",
@@ -82,10 +90,13 @@ public class ClientFilesRelayStore implements ClientFilesRelay {
     public void enqueue(String tenantId, String sessionId, long generation, String requestId,
             String payloadJson, long expiresAt, long now) {
         String scope = ManagedSchemaKeys.key(tenantId, sessionId);
+        // The key includes the generation: a re-registered Harness restarts
+        // its JSON-RPC ids, which must not attach to the old generation's
+        // rows (the poll reads by generation).
         jdbc.update("INSERT INTO ma_client_files_request (request_key,session_scope_key,"
                         + "tenant_id,session_id,binding_generation,request_id,payload_json,state,"
                         + "expires_at,gmt_create,gmt_modified) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                ManagedSchemaKeys.key(scope, requestId), scope,
+                ManagedSchemaKeys.key(scope, generation + ":" + requestId), scope,
                 ManagedSchemaKeys.identity(tenantId), ManagedSchemaKeys.identity(sessionId),
                 generation, requestId, payloadJson, ClientFilesModels.REQUEST_QUEUED,
                 expiresAt, now, now);

@@ -76,6 +76,7 @@ class ClientFilesRelayServiceTest {
         assertThat(registration.serverId()).isEqualTo("local-files");
         assertThat(registration.generation()).isEqualTo(1L);
         assertThat(registration.token()).isNotBlank();
+        assertThat(registration.toolCount()).isEqualTo(1);
         assertThat(jdbc.queryForObject("SELECT token_hash FROM ma_client_files_binding", String.class))
                 .isEqualTo(DigestUtils.sha256Hex(registration.token()));
         assertThat(service.status(tenant, ACTOR, session).state()).isEqualTo("active");
@@ -163,6 +164,33 @@ class ClientFilesRelayServiceTest {
         Registration registration = service.register(tenant, ACTOR, session);
         String answer = service.mcp(tenant, session, registration.token(), request("9"));
         assertThat(answer).contains("client_files_offline").contains("\"id\":\"9\"");
+    }
+
+    @Test
+    void mcpRetryOfAnAnsweredIdReplaysTheAnswer() throws Exception {
+        Registration registration = service.register(tenant, ACTOR, session);
+        CompletableFuture<String> call = CompletableFuture.supplyAsync(() ->
+                service.mcp(tenant, session, registration.token(), request("3")));
+        awaitQueue(registration.generation(), 1);
+        service.respond(tenant, ACTOR, session, registration.generation(), "3",
+                "{\"jsonrpc\":\"2.0\",\"id\":\"3\",\"result\":{\"v\":1}}", null);
+        String first = call.get(5, TimeUnit.SECONDS);
+        assertThat(service.mcp(tenant, session, registration.token(), request("3")))
+                .isEqualTo(first);
+    }
+
+    @Test
+    void mcpSessionResolvesTheTenantFromTheBinding() throws Exception {
+        Registration registration = service.register(tenant, ACTOR, session);
+        CompletableFuture<String> call = CompletableFuture.supplyAsync(() ->
+                service.mcpSession(session, registration.token(), request("5")));
+        List<QueuedRequest> drained = awaitQueue(registration.generation(), 1);
+        assertThat(drained.get(0).requestId()).isEqualTo("5");
+        service.respond(tenant, ACTOR, session, registration.generation(), "5",
+                "{\"jsonrpc\":\"2.0\",\"id\":\"5\",\"result\":{\"ok\":true}}", null);
+        assertThat(call.get(5, TimeUnit.SECONDS)).contains("\"ok\":true");
+        assertThatThrownBy(() -> service.mcpSession("missing", registration.token(), request("6")))
+                .hasFieldOrPropertyWithValue("code", "client_files_credential_invalid");
     }
 
     @Test

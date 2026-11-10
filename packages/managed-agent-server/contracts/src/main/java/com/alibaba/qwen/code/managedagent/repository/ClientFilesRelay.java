@@ -17,6 +17,9 @@ public interface ClientFilesRelay {
 
     Binding find(String tenantId, String sessionId);
 
+    /** The internal MCP leg knows only the Session; the credential fences it. */
+    Binding findBySession(String sessionId);
+
     boolean close(String tenantId, String sessionId, long expectedGeneration, long now);
 
     void enqueue(String tenantId, String sessionId, long generation, String requestId,

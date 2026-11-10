@@ -139,6 +139,17 @@ public final class SdkHarnessBoundary implements HarnessConnector {
     }
 
     @Override
+    public boolean supportsClientFiles() {
+        return call(delegate::supportsClientFiles);
+    }
+
+    @Override
+    public Map<String, Object> clientFilesOperation(String tenantId, String sessionId,
+            Map<String, Object> body) {
+        return call(() -> delegate.clientFilesOperation(tenantId, sessionId, body));
+    }
+
+    @Override
     public boolean supportsMcpManagement() {
         return call(delegate::supportsMcpManagement);
     }

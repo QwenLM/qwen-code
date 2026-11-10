@@ -178,6 +178,15 @@ broker. Queue depth, payload size, and TTL are deployment configuration with
 conservative defaults; overflow fails the request, never blocks the Turn
 indefinitely.
 
+Registration is a synchronous dispatch: `register` creates the binding,
+then blocks while the Harness runs `initialize`/`tools/list` through the
+queue. The browser therefore runs registration and draining concurrently —
+fire `register`, poll `status` until the binding is active, open the SSE
+downlink, then await `register`. Awaiting `register` before draining
+deadlocks the loop; the stream route also refuses an unknown binding, and
+SSE response headers only commit on the first event (an empty queue never
+commits them). Confirmed by the three-process joint IT (slice 4).
+
 ### Route ownership classification
 
 Per the repository's route-ownership rule:
