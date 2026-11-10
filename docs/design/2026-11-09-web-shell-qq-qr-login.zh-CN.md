@@ -65,6 +65,10 @@ QQ Bot 适配器已经存在且可用,但完全无法从 Web Shell 配置,而它
 `email` 声明了 `management` 但不在白名单里。适配器是逐个接入管理面的;先例是提交
 `41f0e3ca5d0`("add Web Shell management support for GitHub and GitLab",#8310)。
 
+以上计数是 2026-11-09 的快照。main 此后已把 `email` 加入白名单,本改动再加入 `qq`,
+因此白名单现为九项,且九项都声明了 `management`。回归范围因此写成
+「`SUPPORTED_CHANNEL_TYPES` 中的其余每个类型」,而不是一个随每次合并漂移的数字。
+
 ### 今天的扫码路径只能在终端进行
 
 `QQChannel.fetchToken()` 按顺序解析凭据:配置值、已持久化的凭据文件、交互式扫码登录
@@ -214,8 +218,10 @@ instructions 字段由 `managementFieldsWithSharedControls()` 自动追加,不�
 Device flow 是 daemon 全局的,因为 OAuth 凭据是进程级的。而 QQ 登录的终点是写入
 某一个 workspace 的渠道配置,且 `ChannelManagementService` 本就按 runtime 划分、
 各自持有 settings store。把 registry 挂在那里,隔离性由构造保证,可直接复用既有的
-信任门禁与 live-conversation 门禁,并让 `WeakMap` 随 runtime 一起回收会话。
-新路由的所有权类:**legacy-primary + persisted-workspace**,与其兄弟渠道路由一致。
+信任门禁与 live-conversation 门禁,并把会话生命周期绑定到所属 service 而非进程。
+要让 `WeakMap` 真正回收该 service,还需要释放它的清扫定时器:已挂上的 interval 是
+GC 根,会一直持有 registry,因此 `dispose()` 必须先有生产调用方,回收才会发生
+(后续工作)。新路由的所有权类:**legacy-primary + persisted-workspace**,与其兄弟渠道路由一致。
 
 **D2 —— 轮询 JSON 快照;不新增 SSE 子资源。** 渠道管理已经采用这种方式。
 登录会话生命周期很短,既有的「mutation 后重新加载」hook 足以覆盖。若确实需要推送
@@ -271,7 +277,7 @@ registry 上做过 A/B 实测。因此 QQ 与兄弟适配器一样声明 `defaul
 
 `groups['*'].requireMention` 同时在共享群组区获得一个编辑器控件,使 `keyword` 与
 `all` 可以完全从 UI 配置,而不需要手工编辑。由于该区被所有适配器共用,此改动需要
-对七个已可管理的渠道类型做一轮回归,且该控件在未被使用时必须原样保留既有群组配置。
+对 `SUPPORTED_CHANNEL_TYPES` 中的其余每个类型做一轮回归,且该控件在未被使用时必须原样保留既有群组配置。
 
 **D8 —— 保留终端兜底,但受管启动不得走到它。** CLI 扫码路径不变。
 一个没有可解析凭据的受管 QQ 渠道必须以清晰报错失败,而不是让 worker 阻塞在
@@ -299,7 +305,7 @@ URL 或 task id,因此未来的适配器可以复用该传输层。
 - **真实扫码无法自动化。** 没有 harness 能把手机对准屏幕。自动化覆盖必须用
   fake 驱动连接器回调;真实绑定需要一次人工验证。这是两类不同的证据,必须分开报告。
 - **共享编辑器的影响面。** D7 在共享群组区新增控件,影响所有渠道类型而不只是 QQ。
-  D6 已撤回,本次不改布尔初始化。七个已可管理的适配器需要一轮群组配置往返回归。
+  D6 已撤回,本次不改布尔初始化。`SUPPORTED_CHANNEL_TYPES` 中的其余每个类型都需要一轮群组配置往返回归。
 - **静默分叉陷阱。** D6 与 D7 是本功能可能「看起来能用、实际行为错误」的两条路径。
   两者都需要专门的回归测试,而不只是 happy path 覆盖。
 
@@ -317,7 +323,7 @@ registry 对新能力的校验,含畸形与 null 的 `qrLogin` 取值;登录会�
 两个陷阱各配显式回归:保存新建 QQ 渠道不得写入 `allowMention: false`;
 在缺少所需群组设置时选择 `groupAllPolicy: keyword` 必须在编辑器中被拒绝,而不是被保存。
 
-由于共享群组区发生变化,七个已可管理的适配器各配一条往返回归:在编辑器中打开、
+由于共享群组区发生变化,`SUPPORTED_CHANNEL_TYPES` 中的其余每个类型各配一条往返回归:在编辑器中打开、
 不做任何修改直接保存,断言结果配置除预期的规范化之外保持不变。该回归必须覆盖布尔
 字段与任何既有的 `groups` 条目,包括并非由新控件写入的 `requireMention` 值。
 
@@ -336,7 +342,7 @@ registry 对新能力的校验,含畸形与 null 的 `qrLogin` 取值;登录会�
    会被拒绝,并给出可操作的编辑器报错。
 9. `groups['*'].requireMention` 可从编辑器配置,且 `keyword` 或 `all` 能够端到端
    配齐,无需手工编辑 `settings.json`。
-10. 对七个已可管理的适配器,布尔字段与群组配置经编辑器往返后保持不变。
+10. 对 `SUPPORTED_CHANNEL_TYPES` 中的其余每个类型,布尔字段与群组配置经编辑器往返后保持不变。
 11. CLI 终端扫码路径仍然照常工作。
 12. 每个新文案在中英文下都能渲染。
 

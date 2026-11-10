@@ -79,6 +79,11 @@ and `email` declares `management` but is absent from the allowlist. Adapters are
 onboarded to the management surface one at a time; the precedent is commit
 `41f0e3ca5d0` ("add Web Shell management support for GitHub and GitLab", #8310).
 
+The counts above are the 2026-11-09 snapshot. Main has since added `email` to the
+allowlist, and this change adds `qq`, so it now holds nine entries — all nine
+declare `management`. Regression scope is therefore written as "every other type
+in `SUPPORTED_CHANNEL_TYPES`" rather than a number that drifts with each merge.
+
 ### Today's QR path is terminal-only
 
 `QQChannel.fetchToken()` resolves credentials in order: config values, then the
@@ -250,9 +255,13 @@ Device flow is daemon-global because OAuth credentials are process-global. A QQ
 login instead completes by writing into one workspace's channel config, and
 `ChannelManagementService` is already per-runtime with its own settings store.
 Attaching the registry there gives workspace isolation by construction, reuses
-the existing trust and live-conversation gates, and lets the `WeakMap` reclaim
-sessions with the runtime. Ownership class for the new routes:
-**legacy-primary + persisted-workspace**, matching their sibling channel routes.
+the existing trust and live-conversation gates, and scopes session lifetime to
+the owning service instead of the process. Reclaiming that service through the
+`WeakMap` additionally requires disposing its sweeper: the scheduled interval is
+a GC root that retains the registry, so `dispose()` needs a production caller
+before the reclaim actually happens (follow-up work). Ownership class for the
+new routes: **legacy-primary + persisted-workspace**, matching their sibling
+channel routes.
 
 **D2 — Poll a JSON snapshot; do not add an SSE sub-resource.** Channel
 management already works this way. A login session is short-lived and the
@@ -325,7 +334,7 @@ implemented validation and its tests follow the current upstream behavior.
 `groups['*'].requireMention` also gets an editor control in the shared group
 section, so `keyword` and `all` can be configured entirely from the UI instead of
 requiring a hand edit. Because that section is shared by every adapter, the
-change needs a regression pass across the seven already-manageable channel types,
+change needs a regression pass across every other type in `SUPPORTED_CHANNEL_TYPES`,
 and the control must leave existing group configuration untouched when unused.
 
 **D8 — The terminal fallback stays, but managed start must not reach it.** The CLI
@@ -362,8 +371,9 @@ reuse the transport.
   reported separately.
 - **Shared-editor blast radius.** D7 adds a control to the shared group
   section, which affects every channel type rather than QQ alone. D6 was
-  withdrawn, so no boolean-initialization change ships. The seven already-manageable adapters need a regression pass
-  covering boolean fields and group configuration round-trips.
+  withdrawn, so no boolean-initialization change ships. Every other type in
+  `SUPPORTED_CHANNEL_TYPES` needs a regression pass covering boolean fields and
+  group configuration round-trips.
 - **Silent-divergence traps.** D6 and D7 are the two ways this feature could
   appear to work while behaving incorrectly. Both need dedicated regression
   tests, not just happy-path coverage.
@@ -387,11 +397,11 @@ The two traps get explicit regressions: saving a new QQ channel must not write
 `allowMention: false`, and selecting `groupAllPolicy: keyword` without the
 required group settings must be rejected in the editor rather than saved.
 
-Because the shared group section changes, the seven already-manageable adapters get a
-round-trip regression: open each in the editor, save without edits, and assert
-the resulting config is unchanged apart from intended normalization. This must
-cover boolean fields and any existing `groups` entries, including
-`requireMention` values the new control did not author.
+Because the shared group section changes, every other type in
+`SUPPORTED_CHANNEL_TYPES` gets a round-trip regression: open each in the editor,
+save without edits, and assert the resulting config is unchanged apart from
+intended normalization. This must cover boolean fields and any existing `groups`
+entries, including `requireMention` values the new control did not author.
 
 ## Acceptance Criteria
 
@@ -410,7 +420,7 @@ cover boolean fields and any existing `groups` entries, including
    settings is rejected with an actionable editor error.
 9. `groups['*'].requireMention` is configurable from the editor, and `keyword` or
    `all` can be configured end to end without hand-editing `settings.json`.
-10. For the seven already-manageable adapters, boolean fields and group
+10. For every other type in `SUPPORTED_CHANNEL_TYPES`, boolean fields and group
     configuration round-trip unchanged through the editor.
 11. The CLI terminal-scan path still works unchanged.
 12. Every new label renders in both English and Chinese.
