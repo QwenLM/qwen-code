@@ -53,7 +53,9 @@ Managed Session 今天无法运行这条路径：
   pending 唤醒。工具的 `getDefaultPermission()` 返回 `'ask'`，
   `toAutoClassifierInput()` 把续跑 prompt 转交 AUTO 分类器，因为调度
   未来模型输入是有副作用的。prompt schema 把 `prompt` 上限设为 10000
-  字符。
+  字符。本地 `cron_list` 把唤醒与 cron 任务一同列出（`@wakeup`），
+  `CronScheduler.delete` fall-through 到 `cancelWakeup`——Managed 工具面
+  保留的正是这个并集形状。
 - **Hosted wake 机制**（`packages/cli/src/serve/hosted-wake-intake.ts`、
   `hosted-monitor-wake.ts`、`hosted-harness-session.ts`）。一个 input 以
   `input.accepted` 加权限机制生成的 `wake.requested` 在同一事务中提交
@@ -111,9 +113,15 @@ Managed Session 今天无法运行这条路径：
    发布一个安排时的 `managed-admission` 资源，记录请求与 clamp 后的
    延迟、reason、分类器裁决。然后在同一 journal 事务中提交 source 为
    `loop` 的 `input.accepted` 与权限机制生成的 `wake.requested`。input
-   与 turn id 为 `loop:<wakeupId>`，每次安排使用新的 `wakeupId`。不产生
-   `schedule` 或 `automation_run` 记录、不产生控制面行、不涉及
-   scanner：journal 是唯一事实，与 monitor 通知完全一致。
+   与 turn id 为 `loop:<wakeupId>`，每次安排使用新的 `wakeupId`。
+   autonomous 与 `loop.md` sentinel（`<<autonomous-loop-dynamic>>`、
+   `<<loop.md-dynamic>>`）逐字存入 envelope，在触发时而非安排时展开：
+   funnel 在 pump 选取 input 时展开它们，对应本地的触发时展开，从
+   Session 已验证的 Workspace 目录读取 `.qwen/loop.md`，受与其他 Hosted
+   文件工具相同的读取边界约束——因此任务文件的变更在下一次触发时被
+   拾取，重启或压缩后重新提供完整指令。不产生 `schedule` 或
+   `automation_run` 记录、不产生控制面行、不涉及 scanner：journal 是
+   唯一事实，与 monitor 通知完全一致。
 2. **`notBefore` 是 `input.accepted` 新增的可选 payload 字段**
    （`timeOrNull`），loop 唤醒是它的第一个生产者。语义：`notBefore`
    在未来的 input 不得在该时刻之前启动 turn；`deadline` 保留其现有
@@ -150,7 +158,8 @@ Managed Session 今天无法运行这条路径：
    （`now + clampedDelay`）超过锚点加 24 h 的安排被拒绝，且未触发的
    替换在同一判定中丢弃，因此被拒绝的重新安排不留下任何未触发的
    pending 唤醒——本地的先丢弃后检查规则，由事务使其原子化；firing
-   input 绝不被丢弃。
+   input 绝不被丢弃。turn-result 固定的 `turn:<turnId>` 事件 id 是提前
+   settle 不合法的第二条理由：它会与运行中 turn 自己的 settle 冲突。
 5. **触发是普通文本 turn；续跑是模型的事。** 现有 `runTurn` 路径在该
    input 的 `turnId` 下投递 envelope 文本；`turn.settled` 消费该
    input。loop 仅在该 turn 安排了另一个唤醒时才继续。loop turn 内部的
@@ -162,27 +171,33 @@ Managed Session 今天无法运行这条路径：
    一个未触发唤醒 pending，且其 turn 消费它，故至多触发一次。链预算在安排时
    检查，因此预算内安排的唤醒可能在 24 h 标记之后触发——本地契约的
    读法相同。
-7. **取消是仅走 journal 的消费。** `loop_cancel` 把 pending input 的
-   `turnId` 以 stop reason `loop_cancelled` settle 为 `cancelled`，
-   受与 close 路径相同的 `wakeHasPriorAttempt` 守卫：turn 已启动的唤醒
-   归恢复机制所有，取消被拒绝。应答是幂等的——不 pending 的 id 应答
-   「未取消」，对应 `cancelWakeup` 的布尔值。`/loop clear` 取消那一个
-   未触发的 pending 唤醒。close 路径把 `loop` 加入其无模型 settle 的 source 集，
-   关闭中的 Session 绝不会把唤醒遗留为下次打开时的
+7. **取消是仅走 journal 的消费，由 `cron_delete` 路由。** 传给
+   `cron_delete` 的 `loop:<wakeupId>` id 把 pending input 的 `turnId` 以
+   stop reason `loop_cancelled` settle 为 `cancelled`，受与 close 路径
+   相同的 `wakeHasPriorAttempt` 守卫：turn 已启动的唤醒归恢复机制所有，
+   取消被拒绝。应答是幂等的——不 pending 的 id 应答「未取消」，对应
+   `cancelWakeup` 的布尔值。`/loop clear` 走 skill 现有的
+   `cron_list` + `cron_delete` 路由，取消那一个未触发的 pending 唤醒。
+   close 路径把 `loop` 加入其无模型 settle 的 source 集，关闭中的
+   Session 绝不会把唤醒遗留为下次打开时的
    `hosted_turn_recovery_required`。
-8. **工具面是新 profile 修订版上的 loop 三件套。** `loop_wakeup`、
-   `loop_list`、`loop_cancel` 由可写 profile 的新修订版声明，沿用添加
-   `todo_write` 的 `files/3` 先例。profile 修订版是持久化词汇，因此每个
-   切片各自发布自己的修订版：
+8. **工具面是 `loop_wakeup` 加共享的 cron list/cancel。** `loop_wakeup`
+   由可写 profile 的新修订版声明，沿用添加 `todo_write` 的 `files/3`
+   先例。profile 修订版是持久化词汇，因此每个切片各自发布自己的修订版：
    [固定间隔姊妹设计](2026-11-10-managed-loop-schedule.zh-CN.md)为其
-   cron 三件套钉住下一批修订版号，本切片的 loop 三件套取其后的一批
-   （版号在落地时按落地顺序分配）。read profile 永不声明它们。
-   `loop_list` 从 journal 读取未触发的 pending loop input
-   （id、触发时刻、prompt）；它就是全部列表，因为决策 4 把它约束为一。
+   cron 三件套钉住下一批修订版号，本切片取其后的一批（版号在落地时按
+   落地顺序分配）；无论哪个切片先落地都由它声明
+   `cron_list`/`cron_delete`，本切片把它们扩展到并集——`cron_list`
+   加上未触发的 pending loop input（id、触发时刻、prompt），
+   `cron_delete` 把 `loop:<wakeupId>` 路由到决策 7 的取消。不存在
+   `loop_list` 或 `loop_cancel`：本地工具本就覆盖两类，skill 的
+   `allowedTools` 保持不变。read profile 永不声明 `loop_wakeup`。
    部署开关 `qwen.managed-agent.loop.enabled`（环境变量
    `QWEN_MANAGED_AGENT_LOOP_ENABLED`）在验收证据落地前默认 false，
-   对应 automation 的 opt-in 历史；开关关闭时 profile 不声明 loop
-   工具，funnel 拒绝一切操作。
+   对应 automation 的 opt-in 历史。开关只门控安排：关闭时
+   `loop_wakeup` 被拒绝，但已安排的唤醒存活——pump 投递 journal input
+   不看工具是否声明——且 `cron_list`/`cron_delete` 仍能列出并取消它，
+   关闭功能绝不遗留它已安排的东西。
 9. **安排时分类器审查取代交互对话框。** 本地工具返回 `'ask'`，让 AUTO
    分类器审查续跑 prompt；Hosted Session 没有交互审批，因此 funnel 在
    安排时把同样的分类器输入（`delaySeconds`、`prompt`、`reason`）经
@@ -197,15 +212,15 @@ Managed Session 今天无法运行这条路径：
 
 ## 流水线，逐步
 
-| 步骤 | 位置                    | 提交                                                                                                                                                                                                         |
-| ---- | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| 1    | `loop_wakeup`（funnel） | 分类器审查；发布 `managed-input` + `managed-admission`；一个事务：被替换 input 的 `cancelled` settle（如有）+ `input.accepted`（`loop`、`notBefore`）+ `wake.requested`；应答 id、触发时刻、clamp、被替换 id |
-| 2    | wake pump               | 无提交；`next()` 跳过未到期 input，在最早 `notBefore` 安排一个定时器                                                                                                                                         |
-| 3    | wake pump `runTurn`     | 在该 input 的 `turnId` 下的普通文本 turn；`turn.settled` 消费该 input                                                                                                                                        |
-| 4    | 被触发的 turn           | 另一个 `loop_wakeup`（回到步骤 1）或没有——loop 结束                                                                                                                                                          |
-| 5    | `loop_cancel`           | pending input 的 `cancelled` settle（`loop_cancelled`），无先前尝试；幂等                                                                                                                                    |
-| 6    | close 路径              | 对 pending loop input 的无模型 `cancelled` settle（`session_closing`）                                                                                                                                       |
-| 7    | 重启后的加载            | 无提交；重新推导 pending 集，过期唤醒立即到期                                                                                                                                                                |
+| 步骤 | 位置                     | 提交                                                                                                                                                                                                         |
+| ---- | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 1    | `loop_wakeup`（funnel）  | 分类器审查；发布 `managed-input` + `managed-admission`；一个事务：被替换 input 的 `cancelled` settle（如有）+ `input.accepted`（`loop`、`notBefore`）+ `wake.requested`；应答 id、触发时刻、clamp、被替换 id |
+| 2    | wake pump                | 无提交；`next()` 跳过未到期 input，在最早 `notBefore` 安排一个定时器                                                                                                                                         |
+| 3    | wake pump `runTurn`      | 在该 input 的 `turnId` 下的普通文本 turn；`turn.settled` 消费该 input                                                                                                                                        |
+| 4    | 被触发的 turn            | 另一个 `loop_wakeup`（回到步骤 1）或没有——loop 结束                                                                                                                                                          |
+| 5    | `cron_delete`（loop id） | pending input 的 `cancelled` settle（`loop_cancelled`），无先前尝试；幂等                                                                                                                                    |
+| 6    | close 路径               | 对 pending loop input 的无模型 `cancelled` settle（`session_closing`）                                                                                                                                       |
+| 7    | 重启后的加载             | 无提交；重新推导 pending 集，过期唤醒立即到期                                                                                                                                                                |
 
 ## 契约触点
 
@@ -226,10 +241,14 @@ Managed Session 今天无法运行这条路径：
   接纳 `loop`；pump 的选取尊重 `notBefore`；close 路径的 settle source
   集增加 `loop`。
 - 新的 `hosted-loop-session.ts` funnel（`HostedAutomationSession` 的
-  形状）：arm、list、cancel，与 journal 串行化。
+  形状）：arm、触发时 sentinel 展开、由 `cron_delete` 路由的取消，与
+  journal 串行化。
 - `packages/cli/src/serve/hosted-workspace-profiles.ts` 与 Hosted 工具
-  turn：新 profile 修订版与三件套的声明。
-- `packages/cli/src/serve/capability-parity.ts`：loop 三件套与开关的
+  turn：新 profile 修订版与 `loop_wakeup` 的声明，加上与姊妹切片共享的
+  `cron_list`/`cron_delete` 并集扩展。
+- managed loop skill 变体（与姊妹切片共享）：`allowedTools` 不变；
+  skill 资产是两份设计共同的契约触点。
+- `packages/cli/src/serve/capability-parity.ts`：loop 工具面与开关的
   条目；过期的 `scheduled_task_gate` 条目另行修正（managed automation
   gate 已于 2026-10-22 落地）。
 - 部署 settings schema：`qwen.managed-agent.loop.enabled`。
@@ -254,12 +273,17 @@ Managed Session 今天无法运行这条路径：
   启动的唤醒走恢复，绝不二次触发。
 - loop turn 内部崩溃：善后将其 settle 为 `failed`/`outcome_unknown`；
   不自动重新安排唤醒。
-- 取消：幂等；turn 有先前尝试后被拒绝；`/loop clear` 消费那一个
-  未触发的 pending 唤醒。
+- sentinel：`loop.md` sentinel 在触发时从当前文件展开，安排与触发之间
+  的变更被拾取；重启或压缩后重新提供完整指令；autonomous sentinel
+  无需文件即展开。
+- 取消：`loop:<wakeupId>` id 经 `cron_delete` 路由；幂等；turn 有先前
+  尝试后被拒绝；`/loop clear` 消费那一个未触发的 pending 唤醒。开关
+  关闭时，已安排的唤醒仍触发且仍可列出/取消，新安排被拒绝。
 - close：pending loop input 以无模型方式 settle；下次打开不被卡死。
 - 分类器：deny 规则拒绝安排；admission 资源记录裁决。
 - 变异检查：逐个禁用各决策的守卫都会使某个测试失败（延迟跳过、替换
-  settle、先丢弃后检查、链锚点、取消与替换的先前尝试守卫、开关）。
+  settle、先丢弃后检查、链锚点、取消与替换的先前尝试守卫、触发时展开、
+  开关关闭时的取消路径、开关）。
 
 ## 验收标准
 
@@ -271,6 +295,8 @@ Managed Session 今天无法运行这条路径：
 - 任何 loop 操作都不创建 `schedule` 记录、`automation_run` 记录或控制面
   scanner 行。
 - 3600 s 唤醒只花一个定时器，而非轮询节奏。
+- 已安排的唤醒在部署开关关闭后存活，且仍可经 `cron_delete` 取消。
+- `loop.md` sentinel 触发时读取当前文件。
 - clamp、默认值、链上限、替换与取消应答与
   `CronScheduler.scheduleWakeup` 的契约一致。
 - 两个宿主一致地重放扩展后的 fixtures。
@@ -284,12 +310,10 @@ Managed Session 今天无法运行这条路径：
    采用可从 journal 推导的重置规则——例如，一次安排发现没有存活的
    loop（既无未触发 pending input，也无 firing loop turn）时开启新链
    ——并在实现前钉住该规则。
-2. **profile 修订版号。** loop 三件套按落地顺序取
+2. **profile 修订版号。** `loop_wakeup` 的修订版按落地顺序取
    [固定间隔姊妹设计](2026-11-10-managed-loop-schedule.zh-CN.md)的
-   cron 三件套之后的一批修订版；切片落地时与控制面的 profile 准入核对
+   cron 三件套修订版之后的一批；切片落地时与控制面的 profile 准入核对
    确认分配的版号。
-3. **固定间隔切片之后 `loop_list` 的范围。** 本设计仅列出唤醒；同一
-   工具日后是否列出 H6 definition 由那个切片决定。
-4. **开关默认值时间线。** 验收证据落地前为 false，之后像
+3. **开关默认值时间线。** 验收证据落地前为 false，之后像
    `qwen.managed-agent.automation.enabled` 一样默认 true；与部署负责人
    确认启用顺序。

@@ -60,7 +60,10 @@ The facts below are from this repository at `488845a4a81`.
   tool's `getDefaultPermission()` returns `'ask'` and
   `toAutoClassifierInput()` forwards the continuation prompt to the AUTO
   classifier, because scheduling future model input is side-effectful.
-  The prompt schema caps `prompt` at 10000 characters.
+  The prompt schema caps `prompt` at 10000 characters. Locally
+  `cron_list` lists wakeups alongside cron jobs (`@wakeup`) and
+  `CronScheduler.delete` falls through to `cancelWakeup` — the union
+  shape the Managed surface preserves.
 - **Hosted wake machinery** (`packages/cli/src/serve/hosted-wake-intake.ts`,
   `hosted-monitor-wake.ts`, `hosted-harness-session.ts`). An input commits
   as `input.accepted` plus an authority-generated `wake.requested` in one
@@ -127,9 +130,17 @@ The facts below are from this repository at `488845a4a81`.
    classifier verdict. It then commits, in one journal transaction, an
    `input.accepted` with source `loop` and the authority-generated
    `wake.requested`. The input and turn id are `loop:<wakeupId>` with a
-   fresh `wakeupId` per arm. No `schedule` or `automation_run` record, no
-   control-plane row, and no scanner involvement: the journal is the only
-   fact, exactly as for a monitor notification.
+   fresh `wakeupId` per arm. The autonomous and `loop.md` sentinels
+   (`<<autonomous-loop-dynamic>>`, `<<loop.md-dynamic>>`) ride in the
+   envelope verbatim and are expanded at fire time, not at arm time: the
+   funnel expands them when the pump picks the input, mirroring the
+   local fire-time expansion, reading `.qwen/loop.md` from the Session's
+   verified Workspace directory under the same read boundary as the
+   other Hosted file tools — so a changed task file is picked up on the
+   next fire, and a restart or compaction re-provides the full guidance.
+   No `schedule` or `automation_run` record, no control-plane row, and no
+   scanner involvement: the journal is the only fact, exactly as for a
+   monitor notification.
 2. **`notBefore` is a new optional `input.accepted` payload field**
    (`timeOrNull`), and the loop wakeup is its first producer. Semantics:
    an input whose `notBefore` is in the future must not start a turn
@@ -174,7 +185,9 @@ The facts below are from this repository at `488845a4a81`.
    24 h is refused, and the unfired replacement is dropped in the same
    decision, so a rejected re-arm leaves no unfired wakeup pending — the
    local drop-before-check rule, made atomic by the transaction; a firing
-   input is never dropped.
+   input is never dropped. The turn-result's fixed `turn:<turnId>` event
+   id is a second reason an early settle is unlawful: it would collide
+   with the running turn's own settle.
 5. **Firing is an ordinary text turn; continuation is the model's job.**
    The existing `runTurn` path delivers the envelope text under the
    input's `turnId`; `turn.settled` consumes the input. The loop continues
@@ -189,32 +202,40 @@ The facts below are from this repository at `488845a4a81`.
    pending, and it fires at most once because its turn consumes it. The chain
    budget is checked at arm time, so a wakeup armed within budget may
    fire past the 24 h mark — the local contract reads the same way.
-7. **Cancel is a journal-only consume.** `loop_cancel` settles the pending
+7. **Cancel is a journal-only consume, routed by `cron_delete`.** A
+   `loop:<wakeupId>` id passed to `cron_delete` settles the pending
    input's `turnId` `cancelled` with stop reason `loop_cancelled`, under
    the same `wakeHasPriorAttempt` guard as the close path: a wakeup whose
    turn already started belongs to recovery and the cancel is refused.
    The answer is idempotent — an id that is not pending answers "not
-   cancelled", mirroring `cancelWakeup`'s boolean. `/loop clear` cancels
+   cancelled", mirroring `cancelWakeup`'s boolean. `/loop clear` rides
+   the skill's existing `cron_list` + `cron_delete` routing and cancels
    the single unfired pending wakeup. The close path adds `loop` to its
    model-free settle sources, so a closing Session never strands a
    wakeup as `hosted_turn_recovery_required` at its next open.
-8. **The tool surface is a loop trio on new profile revisions.**
-   `loop_wakeup`, `loop_list`, `loop_cancel` are declared by new revisions
-   of the write-capable profiles, following the `files/3` precedent that
-   added `todo_write`. A profile revision is a persisted vocabulary, so
-   each slice ships its own: the
+8. **The tool surface is `loop_wakeup` plus the shared cron
+   list/cancel.** `loop_wakeup` is declared by new revisions of the
+   write-capable profiles, following the `files/3` precedent that added
+   `todo_write`. A profile revision is a persisted vocabulary, so each
+   slice ships its own: the
    [fixed-interval sibling](2026-11-10-managed-loop-schedule.md) pins the
-   next revisions for its cron trio, and this slice's loop trio takes the
-   revisions after them (numbering assigned at landing, in landing
-   order). The read profile never declares them. `loop_list` reads the
-   unfired pending loop input (id, fire time, prompt) from the journal;
-   it is the whole list, because decision 4 bounds it to one. A
-   deployment gate,
+   next revisions for its cron trio, and this slice takes the revisions
+   after them (numbering assigned at landing, in landing order);
+   whichever slice lands first declares `cron_list`/`cron_delete`, and
+   this slice extends them to the union — `cron_list` adds the pending
+   unfired loop input (id, fire time, prompt), `cron_delete` routes
+   `loop:<wakeupId>` to the cancel of decision 7. There is no `loop_list`
+   or `loop_cancel`: the local tools already cover both kinds, and the
+   skill's `allowedTools` stay unchanged. The read profile never
+   declares `loop_wakeup`. A deployment gate,
    `qwen.managed-agent.loop.enabled` (environment
    `QWEN_MANAGED_AGENT_LOOP_ENABLED`), defaults to false until the
-   acceptance evidence lands, mirroring the automation opt-in history;
-   with the gate off the profiles declare no loop tools and the funnel
-   refuses every operation.
+   acceptance evidence lands, mirroring the automation opt-in history.
+   The gate gates arming only: with it off, `loop_wakeup` is refused,
+   but an already-armed wakeup survives — the pump delivers journal
+   inputs regardless of tool declarations — and `cron_list`/`cron_delete`
+   still list and cancel it, so turning the feature off never strands
+   what it already scheduled.
 9. **Arm-time classifier review replaces the interactive dialog.** The
    local tool returns `'ask'` so the AUTO classifier vets the continuation
    prompt; a Hosted Session has no interactive approval, so the funnel
@@ -239,7 +260,7 @@ The facts below are from this repository at `488845a4a81`.
 | 2    | wake pump                  | no commit; `next()` skips the not-yet-due input, one timer armed at the earliest `notBefore`                                                                                                                                             |
 | 3    | wake pump `runTurn`        | an ordinary text turn under the input's `turnId`; `turn.settled` consumes the input                                                                                                                                                      |
 | 4    | the fired turn             | another `loop_wakeup` (back to step 1) or none — the loop ends                                                                                                                                                                           |
-| 5    | `loop_cancel`              | the pending input's `cancelled` settle (`loop_cancelled`), no prior attempt; idempotent                                                                                                                                                  |
+| 5    | `cron_delete` (loop id)    | the pending input's `cancelled` settle (`loop_cancelled`), no prior attempt; idempotent                                                                                                                                                  |
 | 6    | close path                 | model-free `cancelled` settle (`session_closing`) for the pending loop input                                                                                                                                                             |
 | 7    | load after a restart       | no commit; the pending set is re-derived, an overdue wakeup is due immediately                                                                                                                                                           |
 
@@ -263,12 +284,19 @@ The facts below are from this repository at `488845a4a81`.
   admits `loop`; the pump's pick honors `notBefore`; the close path's
   settle sources gain `loop`.
 - A new `hosted-loop-session.ts` funnel (the `HostedAutomationSession`
-  shape): arm, list, cancel, serialized with the journal.
+  shape): arm, the fire-time sentinel expansion, and the cancel routed
+  from `cron_delete`, serialized with the journal.
 - `packages/cli/src/serve/hosted-workspace-profiles.ts` and the Hosted
-  tool turn: the new profile revisions and the trio's declarations.
+  tool turn: the new profile revisions and `loop_wakeup`'s declaration,
+  plus the union extension of `cron_list`/`cron_delete` shared with the
+  sibling slice.
+- The managed loop skill variant (shared with the sibling slice):
+  `allowedTools` unchanged; the skill asset is a touchpoint of both
+  designs.
 - `packages/cli/src/serve/capability-parity.ts`: entries for the loop
-  trio and the gate; the stale `scheduled_task_gate` entry is corrected
-  separately (the managed automation gate shipped on 2026-10-22).
+  surface and the gate; the stale `scheduled_task_gate` entry is
+  corrected separately (the managed automation gate shipped on
+  2026-10-22).
 - The deployment settings schema: `qwen.managed-agent.loop.enabled`.
 
 ## Validation plan
@@ -296,8 +324,15 @@ The facts below are from this repository at `488845a4a81`.
   recovery, never a second fire.
 - Crash inside the loop turn: the aftermath settles it
   `failed`/`outcome_unknown`; no wakeup is re-armed automatically.
-- Cancel: idempotent; refused once the turn has a prior attempt;
-  `/loop clear` consumes the single unfired pending wakeup.
+- Sentinels: a `loop.md` sentinel expands at fire time from the current
+  file, so a change between arm and fire is picked up; after a restart
+  or compaction the full guidance is re-provided; the autonomous
+  sentinel expands without a file.
+- Cancel: a `loop:<wakeupId>` id routes through `cron_delete`;
+  idempotent; refused once the turn has a prior attempt; `/loop clear`
+  consumes the single unfired pending wakeup. With the gate off, an
+  armed wakeup still fires and stays listable/cancellable, while a new
+  arm is refused.
 - Close: the pending loop input settles model-free; the next open is not
   wedged.
 - Classifier: a deny rule refuses the arm; the admission resource
@@ -305,7 +340,7 @@ The facts below are from this repository at `488845a4a81`.
 - Mutation checks: each decision's guard disabled in turn fails a test
   (the deferral skip, the replacement settle, the drop-before-check, the
   chain anchor, the prior-attempt guards on cancel and replacement, the
-  gate).
+  fire-time expansion, the gate-off cancel path, the gate).
 
 ## Acceptance criteria
 
@@ -318,6 +353,9 @@ The facts below are from this repository at `488845a4a81`.
 - No loop operation creates a `schedule` record, an `automation_run`
   record, or a control-plane scanner row.
 - A 3600 s wakeup costs one timer, not a poll cadence.
+- An armed wakeup survives the deployment gate going off and stays
+  cancellable through `cron_delete`.
+- A `loop.md` sentinel fire reads the current file.
 - The clamp, default, chain cap, replacement, and cancel answers match
   `CronScheduler.scheduleWakeup`'s contract.
 - Both hosts replay the extended fixtures identically.
@@ -332,13 +370,10 @@ The facts below are from this repository at `488845a4a81`.
    reading, or adopt a journal-derivable reset — for example, an arm that
    finds no live loop (no unfired pending input and no firing loop turn)
    starts a new chain — and name the rule before implementation.
-2. **Profile revision numbers.** The loop trio takes the revisions after
-   the [fixed-interval sibling](2026-11-10-managed-loop-schedule.md)'s
-   cron trio, in landing order; confirm the assigned numbers against the
-   control plane's profile admission when the slice lands.
-3. **`loop_list` scope after the fixed-interval slice.** This design
-   lists wakeups only; whether the same tool later lists H6 definitions
-   is that slice's decision.
-4. **Gate default timeline.** False until the acceptance evidence lands,
+2. **Profile revision numbers.** The `loop_wakeup` revisions follow the
+   [fixed-interval sibling](2026-11-10-managed-loop-schedule.md)'s cron
+   trio revisions, in landing order; confirm the assigned numbers
+   against the control plane's profile admission when the slice lands.
+3. **Gate default timeline.** False until the acceptance evidence lands,
    then true by default like `qwen.managed-agent.automation.enabled`;
    confirm the enablement order with the deployment owners.

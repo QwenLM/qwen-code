@@ -121,19 +121,31 @@ The facts below are from this repository at `488845a4a81`.
    profiles with Managed descriptions, the way `write_file`/`edit` carry
    profile-specific text today. The skill's `allowedTools` and its
    interval-to-cron conversion then ride unchanged; only the durable and
-   expiry wording in the managed skill variant differs.
+   expiry wording in the managed skill variant differs. The union
+   list/cancel surface (decision 6) keeps the `list`/`clear` subcommands
+   working without a whitelist change.
 2. **Mutations go through the control plane, never the funnel alone.** A
    new internal route family under the store prefix —
    `automations:create`, `automations:list`, `automations:retire` on
    `/internal/managed-session-store/v1/sessions/{sessionId}` —
    authenticates with the writer binding exactly as `memory:query` does,
    derives the actor from the bound Session's creator, and delegates to
-   `ManagedAutomationService`. The delegation inherits the creator check,
-   the deployment gate, the mode gate, the capacity check, the command
-   ledger, and the mirror write. A direct funnel call is refused as a
-   creation path: a journal-only definition has no mirror row, so the
-   scanner would never fire it — the route, not the funnel, is what makes
-   a definition discoverable.
+   `ManagedAutomationService`. The delegation is Session-scoped, not
+   actor-scoped: `create`'s target is the bound Session; `list` filters
+   to the bound Session before pagination — the service's actor-scoped
+   `list` reads every definition the creator can read across the
+   Workspace, which would let one Session's writer see another's;
+   `retire` verifies the target definition belongs to the bound Session
+   before it executes or answers a replay. The creator actor alone does
+   not provide this isolation: the same user may create several
+   Sessions. The delegation inherits the creator check, the mode gate,
+   the capacity check, the command ledger, and the mirror write. The
+   deployment gate gates creation only: `list` and `retire` stay
+   available with the gate off, so a disabled feature never strands what
+   it already scheduled. A direct funnel call is refused as a creation
+   path: a journal-only definition has no mirror row, so the scanner
+   would never fire it — the route, not the funnel, is what makes a
+   definition discoverable.
 3. **The Idempotency-Key derives from the tool execution's identity.**
    Each mutation uses a key derived from its `executionCallId` and verb
    (for example `loop:<executionCallId>:create`, within the key's 1–128
@@ -152,10 +164,12 @@ The facts below are from this repository at `488845a4a81`.
    resolved at admission as every definition's is. The prompt obeys
    `maxPromptBytes` and the wrapped-input bound; the cron obeys
    `maxCronBytes` and the H6a grammar. An optional `gate` passes through
-   to the definition, validated by the shared `gateCommandError`; the
-   arm-time classifier review (the sibling design's decision 9
-   pattern) covers its unattended approval, as the managed gate design
-   already specifies for definition authors.
+   to the definition, validated by the shared `gateCommandError`.
+   Arm-time classifier review is a new requirement for model-created
+   definitions, not something the managed gate design already specifies
+   — that design's author-approval path has no classifier. The
+   classifier input covers both the continuation prompt and the gate
+   command, following the sibling design's decision 9 pattern.
 5. **No auto-expiry in this slice.** The legacy 7-day expiry has no
    definition field; a tool-created definition persists until retired,
    exactly like one created through the public API. The budget is the
@@ -163,14 +177,21 @@ The facts below are from this repository at `488845a4a81`.
    that makes a quiet watch cheap. The parity gap is recorded as an open
    question, not hidden: the managed skill variant tells the user the
    schedule runs until cancelled.
-6. **List reads the scanner's truth; delete is retire.** `cron_list`
-   answers from the control plane ledger — the same rows the scanner
-   reads, paged as the public list is — and `create` mirrors before it
-   answers, so a list after a create is consistent. `cron_delete` retires: the relay commits the
-   terminal journal revision and the mirror retires with it; retiring a
-   retired definition answers the replay, and a Session that is not
-   ACTIVE takes the inherited local-retire fallback. Wakeup cancellation
-   belongs to the sibling slice's `loop_cancel`, not to this tool.
+6. **List and delete cover both arms, as locally.** `cron_list` answers
+   the union: the bound Session's definitions from the control plane
+   ledger — the same rows the scanner reads, paged as the public list is
+   — plus the pending unfired loop input from the journal, once the
+   wakeup slice has landed. `create` mirrors before it answers, so a
+   list after a create is consistent. `cron_delete` routes by id: a
+   definition id retires (the relay commits the terminal journal
+   revision and the mirror retires with it; retiring a retired
+   definition answers the replay, and a Session that is not ACTIVE takes
+   the inherited local-retire fallback); a `loop:<wakeupId>` id cancels
+   the wakeup through the sibling slice's journal-only consume, under
+   its prior-attempt guard. This is the local shape — `cron_list`
+   already lists wakeups (`@wakeup`) and `CronScheduler.delete` already
+   falls through to `cancelWakeup` — so the skill's `list`/`clear`
+   subcommands ride unchanged.
 7. **Firing rides the existing pipeline unchanged.** A due slot becomes
    an `automation_run`, its input and wake commit in one transaction,
    the wake pump runs the turn, and the turn settles the run — overlap
@@ -178,16 +199,25 @@ The facts below are from this repository at `488845a4a81`.
    apply as they do for a public-API definition. The skill's immediate
    first run is the current turn; no mechanism is added for it.
 8. **The tool surface ships on the next profile revisions.**
-   `hosted-workspace-files/4`, `hosted-workspace-shell/2`, and
+   `hosted-workspace-files/4`, `hosted-workspace-shell/3`, and
    `hosted-workspace-team-lead/2` declare the cron trio, following the
    `files/3` precedent; the numbering assumes this slice lands first,
-   and the two families swap if the sibling lands first. Admission
-   requires `qwen.managed-agent.automation.enabled`. The read profile
-   never declares them. The sibling slice's loop trio takes the
-   revisions after these, in landing order. The managed loop skill variant ships
-   as a skill asset through the existing Session Skills publication; its
-   visibility is gated with the tools, mirroring the local
-   `BundledSkillLoader` rule that hides `cron_` skills when cron is off.
+   and the two families swap if the sibling lands first. `shell/2` is
+   deliberately skipped: it is a retired identifier, withdrawn by the
+   [2026-10-23 Shell profile design](2026-10-23-managed-shell-profile.md)
+   and pinned dead by regression tests, and re-minting it would invert
+   them. Admission requires `qwen.managed-agent.automation.enabled` for
+   `cron_create`; `cron_list` and `cron_delete` stay declared and usable
+   with the gate off (decision 2). The read profile never declares them.
+   The sibling slice adds `loop_wakeup` on the revisions after these and
+   extends `cron_list`/`cron_delete` to the union of decision 6 — tool
+   names are the persisted vocabulary, behavior may grow; whichever
+   slice lands first declares `cron_list`/`cron_delete`. The managed
+   loop skill variant ships as a skill asset through the existing
+   Session Skills publication with the same `allowedTools` as the
+   bundled skill; its visibility is gated with the tools, mirroring the
+   local `BundledSkillLoader` rule that hides `cron_` skills when cron
+   is off.
 9. **Failure semantics split retryable from terminal.** A transport
    fault or a 503 leaves the tool execution pending; the re-drive derives
    the same key and meets the claim or the replay. The
@@ -219,12 +249,17 @@ The facts below are from this repository at `488845a4a81`.
   for the three verbs, with `SurfaceRegistry` entries, the OpenAPI
   internal surface, `ManagedAgentApiContractTest`,
   `SurfaceRegistryGateTest`, and the `managed-surface.txt` fixture.
-- `ManagedAutomationService`: no semantic change; the controller derives
-  the creator actor and delegates.
+- `ManagedAutomationService`: the controller derives the creator actor
+  and delegates; the service gains Session-scoped list/retire (or the
+  controller enforces the scope around the actor-scoped calls) and
+  permits list/retire with the deployment gate off — creation stays
+  gated.
 - `packages/cli/src/serve/hosted-workspace-profiles.ts` and the Hosted
-  tool turn: the new profile revisions and the cron trio's declarations
-  and execution wiring, calling the internal routes over the existing
-  store channel (`baseUrl` + writer binding).
+  tool turn: the new profile revisions (skipping the retired `shell/2`)
+  and the cron trio's declarations and execution wiring, calling the
+  internal routes over the existing store channel (`baseUrl` + writer
+  binding); the unknown-profile fixtures that list `files/4` flip in the
+  same change.
 - The managed loop skill variant as a skill asset in the Session Skills
   publication.
 - `packages/cli/src/serve/capability-parity.ts`: entries for the cron
@@ -235,7 +270,10 @@ The facts below are from this repository at `488845a4a81`.
 
 - Internal-route admission: the writer binding is required; a foreign
   Session or tenant is refused; the actor is the bound Session's
-  creator; the deployment gate off refuses every verb.
+  creator; the deployment gate off refuses create but not list/retire.
+- Session isolation: same tenant, same creator, two Sessions — one
+  Session's writer neither lists nor retires the other's definitions,
+  and create's target is always the bound Session.
 - Replay: a re-driven execution with the same `executionCallId` answers
   the same `scheduleId` with the replay mark; a different body under one
   key answers the conflict.
@@ -248,13 +286,20 @@ The facts below are from this repository at `488845a4a81`.
   definition and the fire.
 - List-after-create consistency; delete idempotency; the not-ACTIVE
   Session's local-retire fallback.
+- Union surface (with the wakeup slice landed): `cron_list` returns the
+  definitions plus the pending unfired wakeup; `cron_delete` routes a
+  `loop:<wakeupId>` id to cancel and a definition id to retire.
+- Profile admission: the retired `hosted-workspace-shell/2` stays
+  refused; the unknown-profile fixtures that list `files/4` flip in the
+  same change that admits it.
 - Failure split: a 503 re-drives with the same key; a pre-commit refusal
   releases the key; a lost answer replays.
 - Skill E2E: `/loop 5m …` creates the definition and runs the prompt
   immediately; `/loop list` shows it; `/loop clear` retires it.
 - Mutation checks: each decision's guard disabled in turn fails a test
   (the mirror write, the derived key, the one-shot refusal, the durable
-  refusal, the creator derivation, the gate).
+  refusal, the creator derivation, the Session scoping, the gate-off
+  list/retire, the gate).
 
 ## Acceptance criteria
 
@@ -264,7 +309,10 @@ The facts below are from this repository at `488845a4a81`.
 - A re-driven tool execution never creates a second definition.
 - A definition committed only into the journal never fires: the internal
   route, not the funnel, is the creation path.
-- `/loop list` and `/loop clear` work against tool-created definitions.
+- `/loop list` and `/loop clear` work against tool-created definitions
+  and, with the wakeup slice landed, the pending wakeup.
+- One Session's writer cannot list or retire another Session's
+  definitions, even under the same creator.
 - No new journal event kind or payload field; no second scheduler.
 
 ## Open questions
