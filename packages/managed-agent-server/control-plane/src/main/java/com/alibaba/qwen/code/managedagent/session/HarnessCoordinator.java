@@ -448,15 +448,6 @@ public class HarnessCoordinator {
             renewal.cancel(false);
             if (!terminal) {
                 store.releaseTurnLease(tenantId, sessionId, turnId, owner);
-            } else {
-                // The Turn reached a terminal state and its renewal was just
-                // cancelled, so no further cancellation send can run for it.
-                // Reclaim its dedup and takeover-pace keys here, where the
-                // claim actually finishes; a settled Turn never re-enters the
-                // cancel path, so pruning there would never run.
-                takeoverPace.remove(tenantId + '/' + sessionId + '/' + turnId);
-                String turnPrefix = key(tenantId, sessionId, turnId) + "\n";
-                cancellations.removeIf(cancelKey -> cancelKey.startsWith(turnPrefix));
             }
         }
     }
