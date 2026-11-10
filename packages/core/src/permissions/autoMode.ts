@@ -825,6 +825,8 @@ export interface EvaluateAutoModeInput {
   pmForcedAsk: boolean;
   /** Raw tool params (forwarded to the classifier). */
   toolParams: Record<string, unknown>;
+  /** Scheduler id of the call; see `PendingAction.callId`. */
+  callId?: string;
   /** Main session message history. */
   messages: readonly Content[];
   /** Session-scoped host-confirmed answers aligned to the same history read. */
@@ -946,6 +948,7 @@ export async function evaluateAutoMode(
   const result: ClassifierResult = await classifyAction({
     toolName: input.ctx.toolName,
     toolParams: input.toolParams,
+    callId: input.callId,
     messages: input.messages,
     trustedUserAnswers: input.trustedUserAnswers,
     config: input.config,

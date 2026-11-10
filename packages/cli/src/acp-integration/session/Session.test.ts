@@ -46906,6 +46906,10 @@ describe('Session', () => {
                 expect(
                   classify.mock.calls.map(([input]) => input.toolParams),
                 ).toEqual([{ path: '/tmp/a.txt' }, { path: '/tmp/c.txt' }]);
+                // Lets the transcript skip this call's own history entry.
+                expect(
+                  classify.mock.calls.map(([input]) => input.callId),
+                ).toEqual(['call-r', 'call-r']);
                 expect(mockClient.requestPermission).not.toHaveBeenCalled();
                 expect(core.firePermissionRequestHook).toHaveBeenCalledOnce();
                 expect(core.firePreToolUseHook).toHaveBeenCalledOnce();

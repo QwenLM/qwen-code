@@ -28,6 +28,7 @@ import {
   shouldRunAutoModeForCall,
 } from './autoMode.js';
 import { clearSessionCommits } from './destructive-commands.js';
+import { classifyAction } from './classifier.js';
 import { ApprovalMode } from '../config/config.js';
 import { ToolNames } from '../tools/tool-names.js';
 import type { Config } from '../config/config.js';
@@ -881,6 +882,20 @@ describe('evaluateAutoMode — fast-path gating', () => {
       onFile(ToolNames.EDIT, `${cwd}/.qwen/settings.json`),
     );
     expect(decision.via).toBe('classifier');
+  });
+
+  it('hands the pending call id to the classifier', async () => {
+    const command = 'git branch -D tmp/spike';
+
+    const decision = await evaluate(
+      { toolName: ToolNames.SHELL, command },
+      { toolParams: { command }, callId: 'call-1' },
+    );
+
+    expect(decision.via).toBe('classifier');
+    expect(vi.mocked(classifyAction)).toHaveBeenLastCalledWith(
+      expect.objectContaining({ callId: 'call-1' }),
+    );
   });
 });
 

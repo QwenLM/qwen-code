@@ -143,6 +143,31 @@ describe('classifyAction — stage 1 escalates to stage 2', () => {
     expect(JSON.stringify(stage1.contents)).toContain('No');
   });
 
+  it('keeps the pending call out of the prior actions it sends', async () => {
+    runSideQueryMock.mockResolvedValueOnce({ shouldBlock: false });
+
+    await classifyAction(
+      makeInput({
+        toolParams: { command: 'git branch -D tmp/spike' },
+        callId: 'call-1',
+        messages: [
+          content(
+            'model',
+            fnCall(
+              'run_shell_command',
+              { command: 'git branch -D tmp/spike' },
+              'call-1',
+            ),
+          ),
+        ],
+      }),
+    );
+
+    const sent = JSON.stringify(sideQueryOptions(0).contents);
+    expect(sent).not.toContain('Prior action');
+    expect(sent).toContain('git branch -D tmp/spike');
+  });
+
   it('returns stage 2 verdict (block + reason) when stage 2 confirms block', async () => {
     runSideQueryMock
       .mockResolvedValueOnce({ shouldBlock: true })

@@ -72,7 +72,7 @@ import {
   getOptInToolNotFoundMessage,
   isToolCallConcurrencySafe,
 } from './coreToolScheduler.js';
-import type { CallableTool, Part, PartListUnion } from '@google/genai';
+import type { CallableTool, Content, Part, PartListUnion } from '@google/genai';
 import {
   MockModifiableTool,
   MockTool,
@@ -130,7 +130,12 @@ import {
   todoWorkChainContext,
 } from '../utils/promptIdContext.js';
 import type { ToolResultBoundaryObservation } from '../tools/tool-result-boundary-diagnostics.js';
-import { fnResponse } from '../test-utils/model-fixtures.js';
+import {
+  content,
+  fnCall,
+  fnResponse,
+  userText,
+} from '../test-utils/model-fixtures.js';
 
 /** MockTool that self-identifies as an omni media-policy tool, so a
  * `fixed_policy` execution origin passes the scheduler's origin/descriptor
@@ -5779,6 +5784,30 @@ describe('CoreToolScheduler', () => {
     expect(execute).toHaveBeenCalledOnce();
   });
 
+  it('does not show the AUTO classifier the pending call as a prior action', async () => {
+    runSideQueryMock.mockResolvedValueOnce({ shouldBlock: false });
+    const request = shellRequest(
+      'auto-pending-echo',
+      'git branch -D tmp/spike',
+    );
+    // History is read after the model turn issuing the call was recorded.
+    const history = [
+      userText('delete the tmp/spike branch'),
+      content('model', fnCall(request.name, request.args, request.callId)),
+    ];
+
+    await scheduleAndSettle(
+      autoScheduler(askingTool(), {
+        getLlmClient: () => ({ getHistoryTail: () => history }),
+      }),
+      request,
+    );
+
+    const sent = JSON.stringify(runSideQueryMock.mock.calls[0][1].contents);
+    expect(sent).toContain('Pending tool call to classify');
+    expect(sent).not.toContain('Prior action');
+  });
+
   it.each(Object.entries(ToolNamesMigration))(
     'sends canonical hook tool names for legacy %s calls',
     async (legacyName, canonicalName) => {
@@ -8394,6 +8423,7 @@ describe('CoreToolScheduler request queueing', () => {
       denialState?: TestDenialState;
       disableHooks?: boolean;
       failPermissionDeniedHook?: boolean;
+      history?: Content[];
     },
     signal = new AbortController().signal,
   ) {
@@ -8429,7 +8459,7 @@ describe('CoreToolScheduler request queueing', () => {
       getPermissionManager: () => permissionManager,
       getAutoModeDenialState: () => denialState,
       setAutoModeDenialState,
-      getLlmClient: () => ({ getHistoryTail: () => [] }),
+      getLlmClient: () => ({ getHistoryTail: () => options?.history ?? [] }),
       getToolRegistry: () => toolRegistry,
       getAutoModeSettings: () => ({}),
       getModel: () => 'test-model',
@@ -8503,6 +8533,28 @@ describe('CoreToolScheduler request queueing', () => {
     expect(runSideQueryMock).toHaveBeenCalled();
     expect(setAutoModeDenialState).toHaveBeenCalledWith(blockedState(0));
     expect(lastBatch(onToolCallsUpdate)[0]?.status).toBe('scheduled');
+  });
+
+  it('does not show the classifier a pending L4 allow as a prior action', async () => {
+    runSideQueryMock.mockResolvedValueOnce({ shouldBlock: false });
+
+    await autoApprovePendingProtectedWrite({
+      history: [
+        userText('reset my settings'),
+        content(
+          'model',
+          fnCall(
+            ToolNames.SHELL,
+            { command: PROTECTED_WRITE_COMMAND },
+            'pending-protected-write',
+          ),
+        ),
+      ],
+    });
+
+    const sent = JSON.stringify(runSideQueryMock.mock.calls[0][1].contents);
+    expect(sent).toContain('Pending tool call to classify');
+    expect(sent).not.toContain('Prior action');
   });
 
   it('fires PermissionDenied hooks for pending AUTO classifier blocks', async () => {

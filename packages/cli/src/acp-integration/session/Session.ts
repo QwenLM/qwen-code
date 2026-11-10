@@ -17918,6 +17918,7 @@ export class Session implements SessionContext {
               ctx,
               pmForcedAsk: forcedAsk,
               toolParams: params,
+              callId,
               messages,
               trustedUserAnswers,
               config: this.config,
