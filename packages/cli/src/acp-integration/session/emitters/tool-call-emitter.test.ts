@@ -428,10 +428,7 @@ describe('ToolCallEmitter', () => {
     });
 
     it('surfaces a discarded TodoWrite preparation as a failed card', async () => {
-      await emitter.emitPreparationDiscarded(
-        'call-todo',
-        ToolNames.TODO_WRITE,
-      );
+      await emitter.emitPreparationDiscarded('call-todo', ToolNames.TODO_WRITE);
 
       expect(sendUpdateSpy).toHaveBeenCalledTimes(1);
       expect(sendUpdateSpy).toHaveBeenCalledWith(
