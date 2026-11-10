@@ -172,6 +172,7 @@ describe('TUI product evidence', () => {
     ['packages/core/src/core/coreToolScheduler.ts', lanes.slice(0, -1)],
     ['packages/core/src/core/client.ts', lanes.slice(0, -1)],
     ['packages/cli/src/ui/opentui/live-turn.ts', lanes.slice(0, -1)],
+    ['packages/cli/src/ui/opentui/shared-model-round.ts', lanes.slice(0, -1)],
     ['packages/cli/src/ui/opentui/opentui-runtime.ts', lanes],
     ['pnpm-lock.yaml', lanes],
     ['packages/cli/package.json', lanes],

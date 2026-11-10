@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent.persistence;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedActivityDiagnostics;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.StoredResource;
+import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedToolMeasurements;
 import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore;
 import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore.ActivityPage;
 import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
@@ -69,7 +70,7 @@ final class ManagedActivityDiagnosticProjection {
         String kind = event.path("kind").asText();
         JsonNode payload = event.path("payload");
         JsonNode ref = payload.get("diagnosticsRef");
-        if (ref == null && !"tool.receipt".equals(kind)) {
+        if (ref == null && !List.of("tool.receipt", "tool.measured").contains(kind)) {
             return;
         }
         ObjectNode summary = (ObjectNode) state.find(ManagedActivityDiagnostics.STATS, "latest");
@@ -161,6 +162,60 @@ final class ManagedActivityDiagnosticProjection {
             for (JsonNode reason : evidence.path("coverageReasons")) {
                 ManagedActivityDiagnostics.gap(summary, reason.asText());
             }
+        } else if ("tool.measured".equals(kind)) {
+            com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionRecords.closed(payload,
+                    java.util.Set.of("executionCallId", "toolOutcomeRef", "measurementsRef"), "tool measurement carrier");
+            require(summary != null, "Measured execution is outside activity coverage.");
+            String execution = payload.path("executionCallId").asText();
+            JsonNode link = state.find(ManagedActivityDiagnostics.LINKS, execution);
+            require(link != null && link.path("observations").size() == 1, "Measured execution has no invocation binding.");
+            JsonNode binding = link.path("observations").get(0);
+            JsonNode before = state.find(ManagedActivityDiagnostics.TOOLS, binding.path("invocationId").asText());
+            require(before != null, "Measured invocation is outside activity coverage.");
+            StoredResource measured = resources.apply(payload.path("measurementsRef").path("resourceId").asText());
+            requireReference(measured, payload.path("measurementsRef"));
+            require(ManagedToolMeasurements.KIND.equals(measured.kind()) && measured.schemaVersion() == 1
+                    && measured.byteLength() <= ManagedToolMeasurements.MAX_BYTES, "Invalid measurement reference.");
+            JsonNode evidence = readBody(measured);
+            ManagedToolMeasurements.requireEvidence(evidence);
+            require(execution.equals(evidence.path("executionCallId").asText())
+                    && binding.path("invocationId").equals(evidence.path("invocationId")), "Measurement invocation binding conflicts.");
+            JsonNode outcomeBody = toolOutcome(payload.path("toolOutcomeRef"), resources);
+            if (outcomeBody == null) {
+                require(payload.path("toolOutcomeRef").equals(link.path("_receiptOutcomeRef")),
+                        "Measured capture has no matching committed receipt.");
+            } else if (outcomeBody.has("executionCallId")) {
+                require(outcomeBody.path("executionCallId").asText().equals(execution), "Measured outcome belongs to another execution.");
+            } else if (outcomeBody.path("identity").has("executionCallId")) {
+                require(outcomeBody.path("identity").path("executionCallId").asText().equals(execution), "Measured capture belongs to another execution.");
+            } else {
+                require(outcomeBody.path("history").path("parts").isArray()
+                        && outcomeBody.path("history").path("parts").size() == 1
+                        && before.path("functionCallId").equals(outcomeBody.path("history").path("parts").get(0).path("functionResponse").path("id")),
+                        "Measured outcome has no original invocation.");
+            }
+            JsonNode packet = evidence.path("measurements");
+            JsonNode file = packet.path("file");
+            if (file.isObject()) {
+                require("builtin".equals(before.path("toolKind").asText()) && before.path("file").isObject()
+                        && before.path("file").path("operation").equals(file.path("operation")), "File measurement is not a native file invocation.");
+            }
+            ObjectNode after = before.deepCopy();
+            if (before.has("_measurementEvidenceDigest")) {
+                require(before.path("_measurementEvidenceDigest").asText().equals(measured.digest()), "Frozen measurement evidence changed.");
+            } else {
+                after.put("_measurementEvidenceDigest", measured.digest());
+                after.put("_measurementOutcomeKnown", !packet.isNull() && !"unknown".equals(packet.path("executionOutcome").asText()));
+                after.set("measurements", ManagedToolMeasurements.publicMeasurements(evidence, sequence));
+                if (!packet.isNull() && !"unknown".equals(packet.path("executionOutcome").asText())) {
+                    after.set("execution", packet.path("executionOutcome"));
+                }
+            }
+            if (!summary.has("measurementStartSequence")) {
+                summary.put("measurementStartSequence", Long.toString(sequence));
+            }
+            ManagedActivityDiagnostics.contribute(summary, before, after);
+            state.invocation(after, sequence, at);
         } else if (summary != null) {
             JsonNode link = state.find(ManagedActivityDiagnostics.LINKS, payload.path("executionCallId").asText());
             if (link == null) {
@@ -169,19 +224,16 @@ final class ManagedActivityDiagnosticProjection {
                 JsonNode fact = link.path("observations").get(0);
                 JsonNode before = state.find(ManagedActivityDiagnostics.TOOLS, fact.path("invocationId").asText());
                 if (before != null) {
-                    StoredResource outcome = resources.apply(payload.path("toolOutcomeRef").path("resourceId").asText());
-                    requireReference(outcome, payload.path("toolOutcomeRef"));
-                    if ("managed-tool-outcome".equals(outcome.kind()) && outcome.bytes() == null
-                            && outcome.byteLength() > MAX_INLINE_RESOURCE_BYTES) {
-                        // Publication already verified the external object; do not fetch it under the Session fence.
+                    JsonNode outcomeRef = payload.path("toolOutcomeRef");
+                    JsonNode result = toolOutcome(outcomeRef, resources);
+                    require(!link.has("_receiptOutcomeRef") || outcomeRef.equals(link.path("_receiptOutcomeRef")),
+                            "Diagnostic receipt outcome changed.");
+                    if (result == null) {
+                        ObjectNode bound = link.deepCopy();
+                        bound.set("_receiptOutcomeRef", outcomeRef);
+                        state.put(ManagedActivityDiagnostics.LINKS, payload.path("executionCallId").asText(), bound, sequence, at);
                         ManagedActivityDiagnostics.gap(summary, "receipt_outcome_not_inline");
                     } else {
-                        JsonNode result = com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof.toolOutcomeBody(
-                                payload.path("toolOutcomeRef"), referenced -> {
-                                    StoredResource part = resources.apply(referenced.path("resourceId").asText());
-                                    requireReference(part, referenced);
-                                    return part.bytes();
-                                });
                         JsonNode execution = result.path("envelope").has("executionStatus") ? result.path("envelope")
                                 : result.has("executionStatus") ? result : result.path("functionResponse").path("response");
                         ObjectNode observation = fact.deepCopy();
@@ -208,6 +260,24 @@ final class ManagedActivityDiagnosticProjection {
             summary.put("lastEvidenceSequence", Long.toString(sequence));
             state.put(ManagedActivityDiagnostics.STATS, "latest", summary, sequence, at);
         }
+    }
+
+    private static JsonNode toolOutcome(JsonNode ref, Function<String, StoredResource> resources) {
+        StoredResource resource = resources.apply(ref.path("resourceId").asText());
+        requireReference(resource, ref);
+        require(resource.schemaVersion() == 1
+                && List.of("managed-tool-outcome", "managed-tool-outcome-chunks").contains(resource.kind()),
+                "Invalid diagnostic outcome resource.");
+        if ("managed-tool-outcome".equals(resource.kind()) && resource.bytes() == null
+                && resource.byteLength() > MAX_INLINE_RESOURCE_BYTES) {
+            // Publication already verified the external object; do not fetch it under the Session fence.
+            return null;
+        }
+        return com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof.toolOutcomeBody(ref, referenced -> {
+            StoredResource part = resources.apply(referenced.path("resourceId").asText());
+            requireReference(part, referenced);
+            return part.bytes();
+        });
     }
 
     private static JsonNode message(JsonNode ref, Function<String, StoredResource> resources) {

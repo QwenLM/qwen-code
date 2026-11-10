@@ -156,7 +156,7 @@ from N`, and bounding an engagement with `@qwen-code /takeover for N`.
 - [48. review-address · Prepare branch and feedback — Which trusted humans have exhausted their per-window regular feedback budget (see…](#af-048)
 - [49. review-address · Prepare branch and feedback — Time-budget exhaustions SINCE THE LAST SUCCESSFUL ROUND mean the standard…](#af-049)
 - [50. review-address · Triage and address — Bound the agent below the job timeout so a runaway agent fails THIS step (not the whole…](#af-050)
-- [51. review-address · Triage and address — Clamp the override to the budget ceiling: a repo variable past 7,200,000 ms (120m) would…](#af-051)
+- [51. review-address · Triage and address — Clamp the override to the runner's budget ceiling: a repo variable past 14,400,000 ms (240m)…](#af-051)
 - [52. review-address · Push and report — Resolve the review threads whose findings the agent actually IMPLEMENTED, so a human…](#af-052)
 - [53. review-address · Push and report — gh's stderr goes to a fresh mktemp regular file, never a named WORKDIR path: WORKDIR is…](#af-053)
 - [54. review-address · Push and report — gh emits one node per line across every page; slurp them into the flat array both blocks…](#af-054)
@@ -228,8 +228,8 @@ from N`, and bounding an engagement with `@qwen-code /takeover for N`.
 - [121. review-address · Prepare branch and feedback — Growth audit: a budget breach engages Critical-only AND makes the round a…](#af-121)
 - [122. review-address · Prepare branch and feedback — Conflict-handoff idempotence: a conflict verdict parks the PR at a genuinely…](#af-122)
 - [123. review-address · Prepare branch and feedback — Growth audit (a size signal triggers a JUDGMENT, never a stop): the window is…](#af-123)
-- [124. review-address · Post autofix status comment — The agent below runs for up to 130 minutes and the verification gate adds more,…](#af-124)
-- [125. review-address · Triage and address — The primary attempt's real budget: 120m, with a 10-minute margin under the…](#af-125)
+- [124. review-address · Post autofix status comment — The agent below runs for up to 250 minutes (self-hosted) and the verification gate adds…](#af-124)
+- [125. review-address · Triage and address — The primary attempt's real budget is runner-split: 240m self-hosted / 120m hosted, each with a…](#af-125)
 - [126. review-address · Triage and address — Prepare severed hooks for its PAT-bearing git ops; THIS step holds no PAT, so…](#af-126)
 - [127. review-address · Repair deterministic rejection — Which side is corrupt is NOT known here — jq -s fails if EITHER input is…](#af-127)
 - [128. review-address · Finalize verification — The verdict travels WITH the attempt whose outcome is selected: a repair pass…](#af-128)
@@ -1412,10 +1412,14 @@ Why 20: 37 PRs carried the label on 2026-08-08, so 5 slots served
 at a larger scale. The ecs-qwen fleet is 84 runners, so 20 concurrent
 legs occupy under a quarter of it, and the executed legs sampled that
 day finished in 3-28 minutes.
-The 345-minute job cap puts the worst case at 5.75 runner-hours per
-slot (115 across the fleet at 20) and holds the per-PR head-write
-concurrency group for the same window. Different PRs never share that
-group, so raising this does not add push contention.
+The runner-split job cap (af-050) puts the worst case at
+7.75 runner-hours per self-hosted slot (155 across the fleet at 20)
+and 5.75 runner-hours per hosted slot (115 across the fleet at 20).
+The 465-minute job cap applies on the self-hosted pool, the
+345-minute job cap on the github-hosted fallback. Each holds the
+per-PR head-write concurrency group for the same window. Different
+PRs never share that group, so raising this does not add push
+contention.
 RAISE BOTH TOGETHER: this must stay strictly below
 MAX_TARGETS_PER_SCAN, or the scan cannot emit enough legs to fill the
 matrix and the extra slots sit idle. A test pins that for the
@@ -1660,20 +1664,44 @@ for this cap. Worst-case budget:
   worst case             330  => job timeout 345, and the job runs
                                  on ubuntu-latest, whose own ceiling
                                  is 360.
+
+Runner-split (2026-11-10): the self-hosted pool carries a 240m agent
+budget (both arms) under a 250-minute step backstop; github-hosted
+keeps the 120m/130m shape above because its 360-minute job ceiling
+cannot hold the self-hosted worst-case chain. The job timeout is an
+expression — the runs-on self-hosted predicate repeated VERBATIM
+(`runner` is not an allowed context in job-level timeout-minutes),
+465 when it holds, 345 otherwise; a meta-test pins the two copies
+equal so they cannot drift.
+
+  setup                    7
+  Triage and address     250  (240 budget + 10 margin)
+  Verification gate       60
+  Repair                  70
+  Repair verification     60
+  report                   3
+  -------------------------------
+  worst case (self-hosted) 450  => job timeout 465
 ```
 
 <a id="af-051"></a>
 
-### 51. review-address · Triage and address — Clamp the override to the budget ceiling: a repo variable past 7,200,000 ms (120m) would…
+### 51. review-address · Triage and address — Clamp the override to the runner's budget ceiling: a repo variable past 14,400,000 ms (240m)…
 
 In `review-address` · `Triage and address`.
 
 ```text
-Clamp the override to the budget ceiling: a repo variable past
-7,200,000 ms (120m) would arm the timer past the 130-minute step
-backstop, the cap would fire first, and the round would be
-misreported as a crash. Malformed values fall back to the same
-ceiling (run-agent.mjs's own || handles the empty/NaN case).
+Clamp the override to the runner's budget ceiling: a repo variable
+past 14,400,000 ms (240m) on the self-hosted pool — or 7,200,000 ms
+(120m) on github-hosted — would arm the timer past the 250-minute
+(130-minute hosted) step backstop, the cap would fire first, and the
+round would be misreported as a crash. The ceiling is runner-split
+because the hosted 360-minute job ceiling cannot hold the self-hosted
+worst-case chain (af-050). An UNSET variable resolves to the runner's
+default BEFORE the clamp (240m self-hosted / 120m hosted), so the
+default never trips the warning; an explicit variable still clamps.
+Malformed values fall back to the same ceiling (run-agent.mjs's own
+|| handles the empty/NaN case).
 The {1,8} width bound keeps 10# inside int64: a 19+ digit value
 wraps negative in (( )) and slips past the comparison unclamped.
 10# forces base-10: a zero-padded value is octal in (( )) and would
@@ -1885,7 +1913,8 @@ In `review-address` · `Push and report`.
 Salvage a race-lost push instead of discarding the run. The
 per-PR head-write concurrency group serialises THIS repo's
 workflows, but it cannot stop the PR author (or anything on the
-fork side) pushing during the agent's ~120-minute window. The
+fork side) pushing during the agent's window — up to 240 minutes
+on the self-hosted pool, 120 on github-hosted (af-125). The
 stated budget widened it from ~50m, so a race-lost push is that
 much likelier and the retry loop below stays bounded at 3 merges.
 Observed twice in one day (#7983, #7985): a one-shot push died
@@ -2835,11 +2864,17 @@ In `review-scan` · `Scan for PRs with new feedback`.
 startedAt is the only staleness clock: a check blocks only if it
 started within the bound; one with no startedAt (queued, not yet
 running) is not blocking (the next scan re-checks once it starts).
+Two tiers: the general 375-minute horizon applies to every check
+except review-address*, which alone legitimately runs long and gets
+the 495-minute long horizon — 30 minutes above the 465-minute
+self-hosted job cap (af-050) so a live address round is never aged
+out mid-flight, while a hung check on a dead runner still ages out
+at the general bound instead of blocking its PR two extra hours.
 The dispatch-pending marker is exempted by context: it is this
 loop's own StatusContext busy signal (no .workflowName/.name, so
 it passes the filters above) and its dedicated TTL check above is
-the authority on it — the 375-minute horizon here would keep a
-stranded marker blocking long past its TTL.
+the authority on it — either horizon here would keep a stranded
+marker blocking long past its TTL.
 ```
 
 <a id="af-102"></a>
@@ -3162,7 +3197,8 @@ In `review-address` · `Prepare branch and feedback`.
 The instant THIS round's net was measured. Stamped into the
 growth-now marker so the census filters on measurement
 time, not the marker comment's created_at — the report posts the
-marker only after the agent's ~120-minute run, so a round in
+marker only after the agent's run (up to 240 minutes self-hosted,
+120 hosted; af-125), so a round in
 flight when a concurrent base update lands would otherwise pass a
 created_at filter while carrying pre-update sums (#9114 R2-6).
 Emitted ONLY when a measurement happened: an unmeasured attempt
@@ -3333,12 +3369,13 @@ bring new evidence to repeat it.
 
 <a id="af-124"></a>
 
-### 124. review-address · Post autofix status comment — The agent below runs for up to 130 minutes and the verification gate adds more,…
+### 124. review-address · Post autofix status comment — The agent below runs for up to 250 minutes (self-hosted) and the verification gate adds…
 
 In `review-address` · `Post autofix status comment`.
 
 ```text
-The agent below runs for up to 130 minutes and the verification gate adds
+The agent below runs for up to 250 minutes on the self-hosted pool
+(130 on github-hosted) and the verification gate adds
 more, but nothing reaches the PR thread until "Push and report" at the
 very end: a maintainer who just engaged takeover sees silence and cannot
 tell a working round from a stuck one. The agent's output already
@@ -3352,21 +3389,28 @@ fails warns and continues — it must never cost the round.
 
 <a id="af-125"></a>
 
-### 125. review-address · Triage and address — The primary attempt's real budget: 120m, with a 10-minute margin under the…
+### 125. review-address · Triage and address — The primary attempt's real budget is runner-split: 240m self-hosted / 120m hosted, each with a…
 
 In `review-address` · `Triage and address`.
 
 ```text
-The primary attempt's real budget: 120m, with a 10-minute margin
-under the 130-minute step backstop above. The margin covers the
+The primary attempt's real budget is runner-split: 240m with a
+10-minute margin under the 250-minute step backstop on the
+self-hosted pool, 120m under the 130-minute backstop on
+github-hosted (whose 360-minute job ceiling cannot hold the
+self-hosted worst-case chain, af-050). The margin covers the
 internal kill path (SIGTERM, 10s grace, SIGKILL, marker write);
 if the step cap fires first, `agent-timeout` is never written and
 the report step misclassifies the round as a crash.
-QWEN_AUTOFIX_TIMEOUT_MS can only LOWER the fallback without a code
-change: the run block clamps it to the 7,200,000 ms ceiling
-(BUDGET_CAP_MS, the fallback itself), so raising the budget still
-requires editing this default, BUDGET_CAP_MS, and the step backstop,
-while a misconfigured variable degrades to a warning, not a misreport.
+An unset QWEN_AUTOFIX_TIMEOUT_MS resolves to the runner's default
+in the run body — not in the env fallback, so the hosted default
+never trips the clamp warning. An explicit variable can only LOWER
+that default without a code change: the run block clamps it to
+BUDGET_CAP_MS, the runner's ceiling (14,400,000 ms self-hosted /
+7,200,000 ms hosted), so raising the budget still requires editing
+the default, BUDGET_CAP_MS, the step backstop and the job cap
+together, while a misconfigured variable degrades to a warning,
+not a misreport.
 ```
 
 <a id="af-126"></a>
@@ -3836,8 +3880,8 @@ In `review-address` · `Post autofix status comment`.
 
 ```text
 Round heartbeat: the announcement freezes at "working" for
-the whole round — up to the 130-minute agent step plus gate
-and repair — so on the PR page a healthy long round and a
+the whole round — up to the 250-minute self-hosted agent step plus
+gate and repair — so on the PR page a healthy long round and a
 dead one look identical (observed on #9739: ~1.5h of
 silence). A detached loop started here re-PATCHes the SAME
 comment every 10 min with elapsed time and last agent
@@ -3986,17 +4030,25 @@ holds the bot PAT in /proc/<pid>/environ until the cap,
 and any same-UID process on that host — including another
 PR's round running its gate's host-side build/tests —
 reads it directly; the pool's ptrace scope does not gate
-this read, as witnessed above. The cap therefore sits just
-past the 330-minute job envelope — only a crash orphan
-ever reaches it, so the cap IS the bound on its token
-window. A cross-run kill keyed on a WORKDIR pid would
+this read, as witnessed above. The cap is 340 minutes
+(20400s) — ~83 past setup + the 250-minute self-hosted
+address step, kept inside the [19800, 21600] magnitude
+guard, which is what actually bounds the orphan's PAT
+window; the gate kills the loop, so the job envelope is not
+the bound. Only a crash orphan ever reaches the cap, so the
+cap IS the bound on its token window. Raising the address
+step cap past ~330 minutes requires raising
+HB_MAX_AGE_SECONDS and widening the guard in the same
+change. A cross-run kill keyed on a WORKDIR pid would
 reopen the untrusted-kill-target hole, so reclamation
 stays host-local). Reading the file to self-identify is
 safe (the loop never kills anything); the
 killers never read it, which is what keeps the
 untrusted-target hole closed — no cross-run kill. The other
-bounds: a heartbeat-stop marker, or the age cap just past
-the 330-minute job envelope; each tick's gh call is
+bounds: a heartbeat-stop marker, or the 340-minute age cap
+(sized past setup + the 250-minute self-hosted address step
+and kept inside the magnitude guard; the gate kills the
+loop — see above); each tick's gh call is
 additionally wrapped in a 60s timeout so a black-holed
 connection cannot stall the loop past the cap. Killers that
 run in-round touch the stop marker BEFORE killing so a
@@ -4399,16 +4451,19 @@ splits on PR parity — and reaches the skill as three Invocation lines:
 `Self-review: on|off`, `Self-review CLI: node <workspace>/dist/cli.js`
 (the host's qwen wrapper is not on PATH inside the sandbox), and
 `Round deadline (UTC)`. An armed round's agent budget is
-SELF_REVIEW_TIMEOUT_MS (180m default) under a per-arm step cap
-(`timeout-minutes` = 190 armed, 130 unarmed), the unarmed 120m/130m
-margin rule unchanged. The 345-minute job bound cannot hold the armed
-cap AND the 70+60 same-run repair chain, and a GitHub-hosted job is cut
-at 360 whatever the bound says — so the arm is resolved once in prepare
+SELF_REVIEW_TIMEOUT_MS (240m default, the same as the unarmed
+self-hosted default) under the runner-split step cap
+(`timeout-minutes` = 250 self-hosted, 130 hosted), the 10-minute
+margin rule unchanged on both runners. A GitHub-hosted job is cut
+at 360 whatever the bound says and cannot hold a 240m budget's
+worst-case chain at all — so the arm is resolved once in prepare
 (never on a github-hosted runner: the hosted fallback runs the control
-shape), and an armed round skips the same-run repair (its `if:` excludes
-the arm; the repair fired on 7/79 = 9% of acted rounds in the sample), a
-deterministic rejection staying retryable for the next round as it was
-before the repair existed. The A/B must read gate rejections per arm
+shape at 120m/130m), and an armed round skips the same-run repair (its
+`if:` excludes the arm; the repair fired on 7/79 = 9% of acted rounds in
+the sample) — a policy kept from the 180m era even though the 465m
+self-hosted bound would now fit the chain, a deterministic rejection
+staying retryable for the next round as it was before the repair
+existed. The A/B must read gate rejections per arm
 beside the round counts, since the treatment arm pays a full cycle where
 the control arm pays a 60-minute repair. The skill runs the review
 command inside the session's own sandbox with QWEN_REVIEW_SANDBOX=off:
@@ -4886,7 +4941,7 @@ New in this change, not moved from the YAML.
 
 The address agent receives check NAMES only ("Failed checks" and
 "Still-red checks" render name + conclusion) and holds no GitHub
-credentials, so "Linux unit tests (shard 3/8)" cannot tell it which
+credentials, so "Linux unit tests (shard 2/2)" cannot tell it which
 step or assertion went red. For a locally reproducible lane that is
 survivable — the agent maps the name to the repository's own command
 and reruns it — but a shard name, a "Test" check that failed on a

@@ -1295,12 +1295,13 @@ describe('Hosted real-process gates', () => {
   // adds 28s (2x its measured 13.8s), so it becomes 10664s. The pool fixture
   // provisionally reserves 180s (its 120s method ceiling plus 60s for
   // process/context cleanup), so it becomes 10844s until CI measures it. The
-  // largest
-  // ceiling (600s) plus
+  // side-query process fixture provisionally reserves 120s (its 60s method
+  // ceiling plus 60s for process/context cleanup), so it becomes 10964s until
+  // CI measures it. The largest ceiling (600s) plus
   // that healthy sum still fits the fork. A larger ceiling lets failsafe
   // kill the fork mid-run, and the classes left unrun never report, failing
   // the gate undiagnosably (#13780).
-  const hostedForkHealthySeconds = 10844;
+  const hostedForkHealthySeconds = 10964;
   const hostedForkSeconds = () =>
     Number(
       read('packages/managed-agent-server/verification/pom.xml')
@@ -1386,6 +1387,7 @@ describe('Hosted real-process gates', () => {
       'HostedPublicWorkspaceIT',
       'HostedSessionRelayFaultGatesIT',
       'HostedShellLifecycleRecoveryIT',
+      'HostedSideQueryProcessIT',
       'HostedTeamLeadMySqlIT',
       'HostedTeamMemberCommandMySqlIT',
       'HostedWorkflowFaultGatesIT',
