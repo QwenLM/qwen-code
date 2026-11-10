@@ -119,7 +119,7 @@ public enum ManagedSchemaProjection {
                     + "public_session_id, deleted_at, workspace_id, workspace_generation, "
                     + "workspace_storage_id, cwd_relative, context_config_ref, context_revision, "
                     + "workspace_config_ref, workspace_policy_ref, agent_revision, approval_mode, "
-                    + "tool_profile, creator_actor_key, owner_actor_key, parent_session_id, "
+                    + "tool_profile, creator_actor_key, owner_actor_key, memory_store_id, owner_only, parent_session_id, "
                     + "root_session_id, parent_child_run_id, child_depth, agent_definition_digest, "
                     + "session_kind, tenant_key, session_key, session_scope_key, title_revision, "
                     + "retirement_operation_id, retirement_generation, retired_at, is_recovery_protected, "

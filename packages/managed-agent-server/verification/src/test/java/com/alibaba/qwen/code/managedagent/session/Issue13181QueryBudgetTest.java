@@ -8,12 +8,13 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationDataStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationVerifier;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcToolExecutionRepository;
@@ -464,7 +465,7 @@ class Issue13181QueryBudgetTest {
                 bound, boundIds.get(3));
         String closeSession = boundIds.get(5);
         String closeId = "op_" + UUID.randomUUID();
-        String closeScope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(bound, closeSession);
+        String closeScope = ManagedSessionStore.sessionScopeKey(bound, closeSession);
         fixture.jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, session_scope_key, target_kind,"
                 + " target_key, request_json, phase, tenant_id, session_id, operation_id, operation_kind, actor_digest,"
                 + " idempotency_key, request_digest, state, admission_stage, delivery_state, session_status_before,"
@@ -951,7 +952,7 @@ class Issue13181QueryBudgetTest {
                 .isEqualTo("env-b");
     }
 
-    private record PublicationFixture(ManagedSessionStore sessions,
+    private record PublicationFixture(JdbcManagedSessionStore sessions,
             JdbcRuntimeBindingRepository bindings,
             JdbcToolExecutionRepository executions, ToolPublicationStore store) {
     }
@@ -1072,7 +1073,7 @@ class Issue13181QueryBudgetTest {
     void publicationAuthorizationReadsTheActivationFromTheJournalHead() {
         Fixture fixture = new Fixture();
         PublicationFixture publication = publicationFixture(fixture);
-        ManagedSessionStore sessions = publication.sessions();
+        JdbcManagedSessionStore sessions = publication.sessions();
         ToolPublicationStore store = publication.store();
         JdbcToolExecutionRepository executions = publication.executions();
         long activationRevision = fixture.jdbc.queryForObject(
@@ -1552,8 +1553,8 @@ class Issue13181QueryBudgetTest {
             jdbc = new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(dataSource);
             manager = new DataSourceTransactionManager(dataSource);
             tx = new TransactionTemplate(manager);
-            ManagedWorkspaceRegistry registry =
-                    new ManagedWorkspaceRegistry(jdbc);
+            JdbcManagedWorkspaceRegistry registry =
+                    new JdbcManagedWorkspaceRegistry(jdbc);
             ManagedAgentProperties properties = new ManagedAgentProperties();
             properties.getHarness().setWorkspaceFilesEnabled(workspaceFilesEnabled);
             if (modelSelection) {

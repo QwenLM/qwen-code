@@ -19,7 +19,7 @@ import {
 } from './acpModelUtils.js';
 
 describe('acpModelUtils', () => {
-  it('prioritizes authorized Qwen models without changing routes or input order', () => {
+  it('keeps subscription models in gateway order without changing routes or input', () => {
     const models = [
       {
         id: 'runtime',
@@ -30,8 +30,13 @@ describe('acpModelUtils', () => {
       },
       { id: 'api-first', label: 'API first', authType: AuthType.USE_ANTHROPIC },
       {
-        id: 'future-first',
-        label: 'Future first',
+        id: 'coder-model',
+        label: 'Legacy OAuth',
+        authType: AuthType.QWEN_OAUTH,
+      },
+      {
+        id: 'qwen4',
+        label: 'Qwen4',
         authType: AuthType.QWEN_SUBSCRIPTION,
       },
       {
@@ -45,19 +50,14 @@ describe('acpModelUtils', () => {
         label: 'Future second',
         authType: AuthType.QWEN_SUBSCRIPTION,
       },
-      {
-        id: 'coder-model',
-        label: 'Legacy OAuth',
-        authType: AuthType.QWEN_OAUTH,
-      },
       { id: 'qwen3.8-max', label: 'API Max', authType: AuthType.USE_OPENAI },
     ];
     const original = [...models];
     const options = buildAcpModelOptions(models);
     expect(options.map(({ model }) => model.label)).toEqual([
-      'Max',
+      'Qwen4',
       'Flash',
-      'Future first',
+      'Max',
       'Future second',
       'Legacy OAuth',
       'Runtime',

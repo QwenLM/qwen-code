@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.managedagent.PublicationJournalFixture;
 import com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObjectStore;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -68,7 +69,7 @@ public class ManagedSchemaPublicationStoreTest {
                 Long.class)).isEqualTo(2);
         byte[] manifest = fixture.jdbc.queryForObject("SELECT r.inline_bytes FROM ma_output_capture c JOIN ma_resource r"
                 + " ON r.resource_key = c.seal_manifest_resource_key WHERE c.publication_id = ?", byte[].class, "pub-1");
-        assertThat(ManagedToolResultStore.parse(new String(manifest, StandardCharsets.UTF_8)).path("seals")).hasSize(2);
+        assertThat(JdbcManagedToolResultStore.parse(new String(manifest, StandardCharsets.UTF_8)).path("seals")).hasSize(2);
         ObjectMapper json = new ObjectMapper();
         var terminal = json.createObjectNode().put("executionStatus", "error");
         terminal.putArray("responseParts").add("capture unavailable");
@@ -84,7 +85,7 @@ public class ManagedSchemaPublicationStoreTest {
         outcome.set("history", history);
         JsonNode admission = data.prepareAdmission(key, "pub-1", "writer-1", 1, WRITER_TOKEN, outcome);
         String resourceId = admission.path("resourceId").asText();
-        String resourceKey = ManagedSchemaKeys.key(com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey("tenant-1", "session-1"), resourceId);
+        String resourceKey = ManagedSchemaKeys.key(ManagedSessionStore.sessionScopeKey("tenant-1", "session-1"), resourceId);
         assertThat(fixture.jdbc.queryForObject("SELECT state FROM ma_resource WHERE resource_key = ?",
                 String.class, resourceKey)).isEqualTo("PUBLISHED");
         var payload = json.createObjectNode().put("executionCallId", "execution-1")
