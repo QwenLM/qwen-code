@@ -3136,12 +3136,16 @@ jobs:
               # (CHECKS_JSON, MAIN_GREEN_CHECKS) — free, and far more selective
               # than the compare round-trip.
               # Full rationale → qwen-autofix.md#af-110
+              # review-pr is excluded: its red is a verdict on THIS diff (a
+              # timeout reproduces on any base), so merging main only restarts
+              # the review and starves pending feedback. → qwen-autofix.md#af-162
               STALE_BASE_REDS="$(jq -c -n \
                 --argjson checks "${CHECKS_JSON}" --argjson green "${MAIN_GREEN_CHECKS}" '
                 [ $checks[]
                   | select((.conclusion // .state // "") | IN("FAILURE", "FAILED", "ERROR", "TIMED_OUT", "ACTION_REQUIRED"))
                   | select((.workflowName // "") != "Qwen Autofix")
                   | (.name // .workflowName // "")
+                  | select(. != "review-pr")
                   | select(. != "" and (. as $n | $green | index($n))) ]')" || STALE_BASE_REDS='[]'
               if [[ "${STALE_BASE_REDS}" != '[]' ]]; then
                 # --jq '.status': the compare document is ~60KB; only the

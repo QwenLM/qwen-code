@@ -20,6 +20,57 @@ import java.util.concurrent.CompletionStage;
  * completion only with {@code true}.
  */
 public interface RuntimeTransport {
+    public default CompletionStage<Map<String, Object>> executeV4(
+            RuntimeLease lease,
+            RuntimeSession session,
+            Map<String, Object> reference,
+            Map<String, Object> payload,
+            Map<String, Object> capture) {
+        return CompletableFuture.failedFuture(
+                new RuntimeBrokerException(
+                        501,
+                        "runtime_tool_v4_unsupported",
+                        "Runtime measurements are unavailable.",
+                        false));
+    }
+
+    public default CompletionStage<Map<String, Object>> statusV4(
+            RuntimeLease lease,
+            RuntimeSession session,
+            Map<String, Object> reference,
+            long afterSequence) {
+        return CompletableFuture.failedFuture(
+                new RuntimeBrokerException(
+                        501,
+                        "runtime_tool_v4_unsupported",
+                        "Runtime measurements are unavailable.",
+                        false));
+    }
+
+    public default CompletionStage<Map<String, Object>> cancelV4(
+            RuntimeLease lease, RuntimeSession session, Map<String, Object> reference) {
+        return CompletableFuture.failedFuture(
+                new RuntimeBrokerException(
+                        501,
+                        "runtime_tool_v4_unsupported",
+                        "Runtime measurements are unavailable.",
+                        false));
+    }
+
+    public default CompletionStage<Void> acknowledgeV4(
+            RuntimeLease lease,
+            RuntimeSession session,
+            Map<String, Object> reference,
+            Map<String, Object> result,
+            Map<String, Object> receipt) {
+        return CompletableFuture.failedFuture(
+                new RuntimeBrokerException(
+                        501,
+                        "runtime_tool_v4_unsupported",
+                        "Runtime measurements are unavailable.",
+                        false));
+    }
+
     public default CompletionStage<Map<String, Object>> extensionControl(RuntimeBindingRecord runtime,
             String harnessSessionId, Map<String, Object> operation) {
         return CompletableFuture.failedFuture(new RuntimeBrokerException(501,

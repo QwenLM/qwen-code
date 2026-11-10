@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObjectStore;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
@@ -116,7 +117,7 @@ public final class ToolPublicationCollector {
 
     private static JsonNode progress(java.util.Map<String, Object> row) {
         return row.get("result_json") == null ? JSON.createObjectNode()
-                : ManagedToolResultStore.parse((String) row.get("result_json"));
+                : JdbcManagedToolResultStore.parse((String) row.get("result_json"));
     }
 
     private void ensureOperations() {
@@ -149,7 +150,7 @@ public final class ToolPublicationCollector {
                         jdbc.update(
                                 "INSERT IGNORE INTO ma_operation (operation_key, session_scope_key, scope_key, operation_kind, operation_id, publication_id, tenant_id, workspace_id, session_id, target_kind, target_key, request_digest, request_json, phase, state, gmt_create, gmt_modified) VALUES (?, ?, ?, 'CAPTURE_GC', ?, ?, ?, ?, ?, 'OUTPUT_CAPTURE', ?, ?, ?, 'COLLECTING', 'PENDING', ?, ?)",
                                 operationKey(scope, publication),
-                                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(
+                                ManagedSessionStore.sessionScopeKey(
                                         (String) capture.get("tenant_id"),
                                         (String) capture.get("session_id")),
                                 scope,

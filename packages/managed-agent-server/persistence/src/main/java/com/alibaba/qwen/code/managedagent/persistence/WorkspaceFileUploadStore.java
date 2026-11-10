@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.managedagent.contracts.workspace.LocalWorkspaceFile
 import com.alibaba.qwen.code.managedagent.contracts.workspace.SshWorkspaceFiles;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.SshWorkspaceFiles.FileTarget;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
 import com.alibaba.qwen.code.runtimebroker.BrokerValues;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
@@ -47,7 +48,7 @@ public class WorkspaceFileUploadStore {
     private static final String KIND = "WORKSPACE_UPLOAD";
     private static final int LIMIT = LocalWorkspaceFiles.MAX_UPLOAD_BYTES;
     private final WorkspaceFileStore files;
-    private final ManagedWorkspaceRegistry registry;
+    private final JdbcManagedWorkspaceRegistry registry;
     private final WorkspaceStorageGuard guard;
     private final SshWorkspaceFiles ssh;
     private final ManagedAgentSettings properties;
@@ -58,7 +59,7 @@ public class WorkspaceFileUploadStore {
     private final Semaphore slots = new Semaphore(4);
     private final Set<String> running = ConcurrentHashMap.newKeySet();
 
-    public WorkspaceFileUploadStore(WorkspaceFileStore files, ManagedWorkspaceRegistry registry,
+    public WorkspaceFileUploadStore(WorkspaceFileStore files, JdbcManagedWorkspaceRegistry registry,
             WorkspaceStorageGuard guard, SshWorkspaceFiles ssh, ManagedAgentSettings properties,
             @Qualifier("managedJdbcTemplate") JdbcTemplate jdbc, @Qualifier("managedAgentTransactionManager") PlatformTransactionManager manager, @Qualifier("managedAgentObjectMapper") ObjectMapper mapper,
             @Qualifier("managedAgentExecutor") Executor executor) {
@@ -299,7 +300,7 @@ public class WorkspaceFileUploadStore {
                     ManagedSchemaKeys.key(scope.binding().getStorageId()),
                     scope.binding().getStorageId().getBytes(StandardCharsets.UTF_8),
                     JdbcRuntimeBindingRepository.storageAliasKey(tenant, scope.binding().getStorageId()), physical,
-                    com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(tenant, actor), digest, encode(target));
+                    ManagedWorkspaceRegistry.actorKey(tenant, actor), digest, encode(target));
             if (jdbc.update("UPDATE ma_storage_owner SET member_count = member_count + 1 WHERE storage_key = ?"
                     + " AND mount_state = 'READY' AND mount_revision = ?",
                     physical, scope.mountRevision()) != 1) {
