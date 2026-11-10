@@ -37,6 +37,9 @@ public class ManagedSessionActivityService {
             for (String field : List.of("tools", "files", "fileOperations", "skills", "skillLoads", "extensionCommands", "toolBuckets", "skillBuckets", "otherTools", "otherSkills")) {
                 value.set(field, statistics.path(field).deepCopy());
             }
+            if (statistics.has("measurementStartSequence")) {
+                value.set("measurementStartSequence", statistics.get("measurementStartSequence"));
+            }
             for (String field : List.of("toolBuckets", "skillBuckets")) {
                 for (JsonNode bucket : value.path(field)) {
                     if (bucket.path("resource").isObject()) {
@@ -78,6 +81,7 @@ public class ManagedSessionActivityService {
         var items = result.putArray("items");
         for (JsonNode saved : page.items()) {
             ObjectNode item = saved.deepCopy();
+            item.remove(List.of("_measurementEvidenceDigest", "_measurementOutcomeKnown"));
             if (!saved.path("taskId").isNull()) {
                 records.findTask(tenant, session, saved.path("taskId").asText()).ifPresent(task -> {
                     item.put("taskState", task.projection().state());

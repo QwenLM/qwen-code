@@ -72,6 +72,7 @@ import type { ManagedShellPublisherRegistry } from './managed-shell-publisher.js
 import { ManagedRuntimeLedger } from './managed-runtime-ledger.js';
 import { registerManagedRuntimeToolRoutes } from './managed-runtime-tool-routes.js';
 import { registerManagedRuntimeToolV3Routes } from './managed-runtime-tool-v3-routes.js';
+import { registerManagedRuntimeToolV4Routes } from './managed-runtime-tool-v4-routes.js';
 import {
   MANAGED_RUNTIME_PROVIDER_ROUTE,
   ManagedRuntimeProviderProtocolError,
@@ -80,7 +81,7 @@ import { registerManagedRuntimeProviderRoute } from './managed-runtime-provider-
 import {
   WorkspaceActivations,
   WORKSPACE_ACTIVATION_ROUTE,
-  WORKSPACE_CAPABILITY_DIGEST,
+  isWorkspaceToolCapability,
   WORKSPACE_CONTEXT_CONFIG_REF,
   RESIDENT_WORKSPACE_CAPABILITY_DIGEST,
 } from './managed-workspace-activation.js';
@@ -385,7 +386,7 @@ export function registerManagedContextRoutes(
   if (resident && boot.isolationClass !== 'workspace')
     throw new Error('Resident Workspace requires Workspace isolation.');
   const requiresActivation =
-    boot.capabilityDigest === WORKSPACE_CAPABILITY_DIGEST ||
+    isWorkspaceToolCapability(boot.capabilityDigest) ||
     resident ||
     extensionConfiguration !== undefined;
   const admissionOpen = (): boolean => executor.isAdmissionOpen;
@@ -1098,6 +1099,7 @@ export function registerManagedContextRoutes(
 
   activations.register(app, boot, installations, executor);
   registerManagedRuntimeToolRoutes(app, boot, executor);
+  registerManagedRuntimeToolV4Routes(app, boot, executor);
   if (publisher) {
     registerManagedRuntimeToolV3Routes(app, boot, executor);
   }
