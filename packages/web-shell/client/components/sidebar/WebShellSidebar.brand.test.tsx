@@ -259,6 +259,22 @@ describe('sidebar brand', () => {
     },
   );
 
+  it('omits the local sort control when the host provides session content', () => {
+    mocks.connection.capabilities = {
+      qwenCodeVersion: '1.2.3',
+      features: ['session_last_user_prompt_sort'],
+    };
+    renderSidebar(undefined, undefined, {
+      sessionContent: (
+        <nav aria-label="Managed sessions">Managed history navigation</nav>
+      ),
+    });
+
+    expect(
+      container.querySelector('button[aria-label="Sort sessions"]'),
+    ).toBeNull();
+  });
+
   it('keeps sorting reachable in the collapsed session popover', async () => {
     mocks.connection.capabilities = {
       qwenCodeVersion: '1.2.3',
