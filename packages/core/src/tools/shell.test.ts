@@ -1340,6 +1340,36 @@ describe('ShellTool', () => {
         await expectAttributedIn(resolved('/test/dir/nested'));
       });
 
+      it.each(["$'cd'", 'c"d"'])(
+        'decodes every word encoding of the cd builtin: %s',
+        async (prog) => {
+          // ANSI-C quoting and concatenation are the same cd builtin; an
+          // undecoded name fell through and silently attributed the create to
+          // launch with no binding and no notice.
+          mockCreatedPr(77);
+          const result = await runShell(
+            `${prog} /test/dir/nested && gh pr create --fill`,
+            PR_77,
+          );
+          await expectAttributedIn(resolved('/test/dir/nested'));
+          expect(result.llmContent).not.toContain(
+            SHELL_PR_BINDING_DIRECTORY_NOTICE,
+          );
+        },
+      );
+
+      it('fails closed for an undecodable program name', async () => {
+        // An expanded program name could be any builtin, including a directory
+        // changer; the walk must not silently attribute the create to the
+        // current directory.
+        mockCreatedPr(77);
+        const result = await runShell(
+          '"$CMD" /test/dir/nested && gh pr create --fill',
+          PR_77,
+        );
+        expectOpaqueFallback(result);
+      });
+
       it.each(['/usr/bin/cd', './cd', 'bin/cd', '"/usr/bin/cd"'])(
         'fails closed for an external path-qualified cd: %s',
         async (prog) => {
@@ -1425,6 +1455,9 @@ describe('ShellTool', () => {
         'cd() { :; }; typeset -fr cd; unset -f cd; cd /test/dir/nested && gh pr create --fill',
         'cd() { :; }; if true; then readonly -f cd; fi; unset -f cd; cd /test/dir/nested && gh pr create --fill',
         'cd() { :; }; unset -f cd > /missing-parent/output; cd /test/dir/nested && gh pr create --fill',
+        // An expanded readonly target cannot be decoded, so the readonly state
+        // is unestablished and the shadow must survive the unset attempt.
+        'NAME=cd; cd() { :; }; readonly -f "$NAME"; unset -f cd; cd /test/dir/nested && gh pr create --fill',
       ])(
         'keeps the function shadow when the unset cannot provably succeed: %s',
         async (command) => {
@@ -1500,6 +1533,19 @@ describe('ShellTool', () => {
         mockCreatedPr(77);
         const result = await runShell(
           'cd() { :; }; true && shopt -s lastpipe; true | readonly -f cd; unset -f cd; cd /test/dir/nested && gh pr create --fill',
+          PR_77,
+        );
+        expectOpaqueFallback(result);
+      });
+
+      it('clears lastpipe on a guaranteed shopt -u', async () => {
+        // `shopt -u lastpipe` proves lastpipe off again; the piped unset then
+        // runs in a child and the no-op cd survives. An add-only flag would
+        // grant the final element current-shell semantics, lift the shadow and
+        // silently query the worktree.
+        mockCreatedPr(77);
+        const result = await runShell(
+          'cd() { :; }; shopt -s lastpipe; shopt -u lastpipe; true | unset -f cd; cd /test/dir/nested && gh pr create --fill',
           PR_77,
         );
         expectOpaqueFallback(result);
@@ -1602,6 +1648,50 @@ describe('ShellTool', () => {
           PR_77,
         );
         await expectAttributedIn(resolved('/test/dir/nested'));
+      });
+
+      it('does not fall back for a child-only cd in a bare assignment substitution', async () => {
+        // The bare-assignment twin of the export case: `X=$(cd … && pwd)` runs
+        // the cd in a child and cannot move this shell, so the later literal cd
+        // determines the create directory. Counting the child cd dropped the
+        // binding the export spelling keeps.
+        mockCreatedPr(77);
+        const result = await runShell(
+          'X=$(cd /tmp && pwd) && cd /test/dir/nested && gh pr create --fill',
+          PR_77,
+        );
+        await expectAttributedIn(resolved('/test/dir/nested'));
+        expect(result.llmContent).not.toContain(
+          SHELL_PR_BINDING_DIRECTORY_NOTICE,
+        );
+      });
+
+      it('does not fall back for a subshell cd on the right of ||', async () => {
+        // The right branch is a subshell; its cd cannot move this shell, so the
+        // create provably runs at launch with no spurious fallback notice.
+        mockCreatedPr(77);
+        const result = await runShell(
+          'test -d /nope || (cd /test/dir/elsewhere && make); gh pr create --fill',
+          PR_77,
+        );
+        await expectAttributedIn('/test/dir');
+        expect(result.llmContent).not.toContain(
+          SHELL_PR_BINDING_DIRECTORY_NOTICE,
+        );
+      });
+
+      it('does not fall back for a non-final lastpipe element cd', async () => {
+        // Under lastpipe only the final element runs in this shell; element 0's
+        // cd is a child, so the create provably runs at launch with no notice.
+        mockCreatedPr(77);
+        const result = await runShell(
+          'shopt -s lastpipe; cd /test/dir/nested | cat; gh pr create --fill',
+          PR_77,
+        );
+        await expectAttributedIn('/test/dir');
+        expect(result.llmContent).not.toContain(
+          SHELL_PR_BINDING_DIRECTORY_NOTICE,
+        );
       });
 
       it('binds from launch without a notice when only a subshell cds', async () => {

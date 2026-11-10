@@ -973,25 +973,26 @@ const DIRECTORY_CHANGING_COMMANDS = new Set([
   '.',
 ]);
 
-/** The program a command node invokes, with one layer of quotes stripped. */
-function commandNodeProgramName(node: ShellSyntaxNode): string {
-  let name = node.childForFieldName('name')?.text ?? '';
-  // A quoted builtin such as `"cd"` is still cd in Bash; strip one layer of
-  // matching surrounding quotes so the directory-changing check recognises it
-  // instead of dropping the move and attributing to the launch directory.
-  if (
-    name.length >= 2 &&
-    ((name.startsWith('"') && name.endsWith('"')) ||
-      (name.startsWith("'") && name.endsWith("'")))
-  ) {
-    name = name.slice(1, -1);
-  }
-  return name;
+/**
+ * The literal program a command node invokes, or undefined when the name cannot
+ * be statically decoded. Every word encoding Bash accepts for the same builtin
+ * (`"cd"`, `'cd'`, `$'cd'`, `c"d"`) must decode to the literal; an undecodable
+ * name (an expansion or an escape we cannot evaluate) is unprovable, and the
+ * caller fails closed instead of silently dropping the move.
+ */
+function commandNodeProgramName(node: ShellSyntaxNode): string | undefined {
+  const nameNode = node.childForFieldName('name');
+  if (!nameNode) return undefined;
+  // The `name` field is a command_name wrapper around the value node
+  // (word / string / raw_string / ansi_c_string / concatenation).
+  const valueNode = nameNode.namedChildren[0] ?? nameNode;
+  return literalShellValue(valueNode);
 }
 
 /** The program a command node invokes, basename'd like the textual walks. */
-function commandNodeProgram(node: ShellSyntaxNode): string {
-  return programBasename(commandNodeProgramName(node));
+function commandNodeProgram(node: ShellSyntaxNode): string | undefined {
+  const name = commandNodeProgramName(node);
+  return name === undefined ? undefined : programBasename(name);
 }
 
 /**
@@ -1004,6 +1005,7 @@ function commandIsBuiltinDirectoryChanger(node: ShellSyntaxNode): boolean {
   if (node.type !== 'command') return false;
   const name = commandNodeProgramName(node);
   return (
+    name !== undefined &&
     !/[/\\]/.test(name) &&
     DIRECTORY_CHANGING_COMMANDS.has(programBasename(name))
   );
@@ -1066,12 +1068,14 @@ function invokedFunctionNames(node: ShellSyntaxNode): Set<string> {
     }
     if (n.type === 'command') {
       const program = commandNodeProgram(n);
-      let calls = callsBy.get(enclosing);
-      if (!calls) {
-        calls = new Set();
-        callsBy.set(enclosing, calls);
+      if (program !== undefined) {
+        let calls = callsBy.get(enclosing);
+        if (!calls) {
+          calls = new Set();
+          callsBy.set(enclosing, calls);
+        }
+        calls.add(program);
       }
-      calls.add(program);
     }
     for (const c of n.namedChildren) stack.push({ n: c, enclosing });
   }
@@ -1159,6 +1163,12 @@ function literalShellValue(
   if (!node) return undefined;
   if (node.type === 'word') return node.text;
   if (node.type === 'raw_string') return node.text.slice(1, -1);
+  if (node.type === 'ansi_c_string') {
+    // `$'…'` ANSI-C quoting: without a backslash escape the content is literal;
+    // with escapes it cannot be statically decoded, so leave it unprovable.
+    const inner = node.text.slice(2, -1);
+    return inner.includes('\\') ? undefined : inner;
+  }
   if (node.type === 'string') {
     if (node.namedChildren.some((c) => c.type !== 'string_content')) {
       return undefined;
@@ -1222,6 +1232,31 @@ function subtreeMayChangeDirectory(node: ShellSyntaxNode): boolean {
       commandCreatesWorktree(current)
     ) {
       return true;
+    }
+    stack.push(...current.namedChildren);
+  }
+  return false;
+}
+
+/**
+ * Whether a subtree may move THIS shell's directory. A `cd` inside a subshell /
+ * command substitution / process substitution runs in a child and cannot move
+ * this shell, so it is not counted; a worktree created even in a child still
+ * lands on disk before spawn and is counted. Used where counting a child-only
+ * cd would raise a spurious fallback on a run that provably did not move.
+ */
+function subtreeMayChangeDirectoryInThisShell(node: ShellSyntaxNode): boolean {
+  if (subtreeCreatesWorktree(node)) return true;
+  const stack: ShellSyntaxNode[] = [node];
+  while (stack.length > 0) {
+    const current = stack.pop()!;
+    if (commandIsBuiltinDirectoryChanger(current)) return true;
+    if (
+      current.type === 'subshell' ||
+      current.type === 'command_substitution' ||
+      current.type === 'process_substitution'
+    ) {
+      continue;
     }
     stack.push(...current.namedChildren);
   }
@@ -1403,7 +1438,7 @@ async function resolveGhPrCreateDirectory(
             if (separator === '||') {
               if (
                 path.resolve(current) !== path.resolve(dir) ||
-                subtreeMayChangeDirectory(child)
+                subtreeMayChangeDirectoryInThisShell(child)
               ) {
                 opaque = true;
                 return current;
@@ -1471,9 +1506,13 @@ async function resolveGhPrCreateDirectory(
             lastpipeEnabled = savedLastpipe;
             lastpipeUncertain = savedLastpipeUncertain;
           }
+          // Only the FINAL element may run in this shell under lastpipe; a cd
+          // in a preceding element is a child and cannot move us.
+          const lastElement = elements[elements.length - 1];
           if (
             (lastpipeEnabled || lastpipeUncertain) &&
-            subtreeMayChangeDirectory(node)
+            lastElement &&
+            subtreeMayChangeDirectoryInThisShell(lastElement)
           ) {
             opaque = true;
           }
@@ -1551,7 +1590,16 @@ async function resolveGhPrCreateDirectory(
           return dir;
         }
         case 'command': {
-          const program = commandNodeProgram(node);
+          const programName = commandNodeProgramName(node);
+          // An undecodable program name (an expansion or an escape we cannot
+          // evaluate) could be any builtin, including a directory changer.
+          // Falling through would silently attribute the create to the current
+          // directory; fail closed instead.
+          if (programName === undefined) {
+            opaque = true;
+            return dir;
+          }
+          const program = programBasename(programName);
           // A same-named function shadows the builtin, so `cd()` / `pushd()` /
           // `gh()` moving or creating nothing here is mis-attributed if we
           // trust the name alone. No later command of that name is provable.
@@ -1604,20 +1652,31 @@ async function resolveGhPrCreateDirectory(
           // `||` / `&` it may or may not run (`true && …` enables it, `false &&
           // …` does not), so the state is UNCERTAIN — not proven off. Modeling
           // it as off would discard the final element's possible parent effects
-          // and silently query a directory the create never ran in.
+          // and silently query a directory the create never ran in. A
+          // guaranteed `shopt -u lastpipe` proves it off again; leaving the flag
+          // set would grant a later final element current-shell semantics it no
+          // longer has.
           if (
             program === 'shopt' &&
-            node.namedChildren.some(
-              (c) => c.type === 'word' && c.text === '-s',
-            ) &&
             node.namedChildren.some(
               (c) => c.type === 'word' && c.text === 'lastpipe',
             )
           ) {
-            if (guaranteed) {
-              lastpipeEnabled = true;
-            } else {
-              lastpipeUncertain = true;
+            const enables = node.namedChildren.some(
+              (c) => c.type === 'word' && c.text === '-s',
+            );
+            const disables = node.namedChildren.some(
+              (c) => c.type === 'word' && c.text === '-u',
+            );
+            if (enables) {
+              if (guaranteed) {
+                lastpipeEnabled = true;
+              } else {
+                lastpipeUncertain = true;
+              }
+            } else if (disables && guaranteed) {
+              lastpipeEnabled = false;
+              lastpipeUncertain = false;
             }
           }
           if (candidateRunsCreate) {
@@ -1684,7 +1743,7 @@ async function resolveGhPrCreateDirectory(
           // so the directory is unprovable rather than the builtin's target.
           if (
             DIRECTORY_CHANGING_COMMANDS.has(program) &&
-            /[/\\]/.test(commandNodeProgramName(node))
+            /[/\\]/.test(programName)
           ) {
             opaque = true;
             return dir;
@@ -1819,7 +1878,7 @@ async function resolveGhPrCreateDirectory(
               stack.push({ n: c, child: nowChild });
             }
           }
-          if (subtreeMayChangeDirectory(node)) opaque = true;
+          if (subtreeMayChangeDirectoryInThisShell(node)) opaque = true;
           return dir;
         }
       }

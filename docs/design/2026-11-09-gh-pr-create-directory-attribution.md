@@ -863,6 +863,63 @@ timeout, shard 2/2 green on a different runner, the previous head's smoke green,
 and this PR's net diff touches no web-shell file. Linux unit and no-AK
 integration checks pass.
 
+### Review round 15 (2026-11-10, `/review` on exact head `22eaf8c0b80`)
+
+A `/review` pass raised one Critical and three Suggestions. Per the agreed scope
+this round fixes the concrete reproducible items and records the rest honestly.
+
+**R1-1 (Critical) — undecodable program name silently attributed launch.**
+`commandNodeProgramName` stripped only one layer of matching quotes, so other
+Bash word encodings of a builtin (`$'cd'` ANSI-C, `c"d"` concatenation) never
+matched `DIRECTORY_CHANGING_COMMANDS`; the command arm fell through and the
+create collapsed to `{kind:'launch'}` with no binding and no notice. The name is
+now decoded through `literalShellValue` (extended for `ansi_c_string` without
+escapes), unwrapping the `command_name` node, and an undecodable name (expansion
+or unevaluable escape) fails closed to `opaque` instead of dropping the move.
+Path-qualified spellings keep external-executable semantics. The add-only
+lastpipe flag sibling is also closed: a guaranteed `shopt -u lastpipe` now clears
+the enabled/uncertain flags.
+
+**R3-8 (Suggestion) — child-context cd counted as a move in three arms.** A new
+`subtreeMayChangeDirectoryInThisShell` ignores `cd` inside subshell / command
+substitution / process substitution (it cannot move this shell) while still
+counting a worktree created anywhere. It replaces the whole-subtree scan in the
+`||` right-branch guard, the lastpipe pipeline check (now scanning only the final
+element), and the control-flow / bare-assignment default arm — removing spurious
+fallback notices and restoring the bare-assignment binding its `export` twin
+keeps. The function-definition and moving-subshell checks keep the conservative
+whole-subtree scan.
+
+**R4-1 (Suggestion) — `readonlyUncertain` had no test.** Added an expanded-target
+case (`readonly -f "$NAME"`) to the readonly `it.each`; it reds when the
+`!readonlyUncertain` guard is deleted, while the decodable-target controls
+(including `readonly -f 'cd'`) stay green.
+
+**R4-2 (Suggestion) — evaluated, recorded as a limitation.** A host-less
+`--repo` / `GH_REPO` is canonicalised against the derived checkout's host, not
+gh's effective host (`GH_HOST` / authenticated default). The safe fix needs gh's
+effective host, which the static resolver does not have; the fail-closed
+alternative would break the pinned host-less same-repo case (`--repo O/R`). The
+witness requires a multi-host gh install the harness cannot stage, so this is
+recorded rather than changed.
+
+**Remaining R1-1 class members — recorded as limitations.** The reviewer notes
+the hand-modelled walk is an unbounded class. Verified still open and deferred
+this round (each needs a deeper change that risks new holes): a user-defined
+`unset()` function bypasses the shadow guard; `command git worktree add …`
+bypasses the pre-spawn worktree guard; `command cd` inside a compound body is
+judged immobile by the subtree scans; and a create inside a control-flow body
+(`cd WT && if true; then gh pr create; fi`) is not detected by the default arm.
+
+Round-15 verification: **532 passed** (518 unit + 14 real-filesystem), core
+typecheck exit 0, ESLint and Prettier clean. Mutation witnesses re-run on the
+final head: R1-1 two arms (drop ANSI-C decode reds `$'cd'` while `c"d"` stays
+green; drop fail-closed reds the undecodable case), R3-8 three arms (each site's
+reversion reds only its own case), R4-1 (drop the guard reds the expanded target),
+and `shopt -u` (drop the disable branch reds the disable case); sibling controls
+stay green throughout. Restored from a byte-level backup (final `shell.ts`
+SHA-256 `2f46ca30198098a1fa333a244b70075961b9456cfbe33cf0f4aab055da482116`).
+
 ## Acceptance criteria
 
 - Both incident command shapes bind the PR their worktree branch resolves to.

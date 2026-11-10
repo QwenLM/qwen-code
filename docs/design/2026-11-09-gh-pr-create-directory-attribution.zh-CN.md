@@ -341,6 +341,22 @@ bot 还在其收敛姿态下记录了一份 deferred 清单（本轮不要求修
 
 CI 注记（已归因，非本 PR 回归）：Web Shell smoke shard 1/2 在 `web-shell.files.spec.ts:823` 的红是 runner 级 mock-daemon flake——繁忙宿主（35m）上 409 行 `ECONNREFUSED 127.0.0.1:4170`、byte-read 预算超时、shard 2/2 异机全绿、前置 head smoke 全绿、且本 PR 净 diff 不触及任何 web-shell 文件。Linux 单测与 no-AK 集成检查通过。
 
+### 第十五轮评审（2026-11-10，对精确 head `22eaf8c0b80` 的 `/review`）
+
+一次 `/review` 提出一条 Critical 与三条 Suggestion。按约定范围，本轮修具体可复现项，其余如实记录。
+
+**R1-1（Critical）——未解码程序名静默归因 launch。** `commandNodeProgramName` 只剥一层配对引号，builtin 的其它 Bash 词编码（`$'cd'` ANSI-C、`c"d"` 拼接）匹配不上 `DIRECTORY_CHANGING_COMMANDS`，command 臂落到 `return dir`，create 折叠成 `{kind:'launch'}`，无绑定无 notice。现在经 `literalShellValue`（扩展无转义 `ansi_c_string`）解码、解包 `command_name` 节点；解不出的名字（展开或不可求值转义）fail-closed 到 `opaque` 而非丢弃移动。路径前缀拼写保持外部可执行语义。add-only lastpipe 标志兄弟洞一并闭合：保证执行的 `shopt -u lastpipe` 现在清除 enabled/uncertain 标志。
+
+**R3-8（Suggestion）——三个臂把 child-context cd 当移动。** 新增 `subtreeMayChangeDirectoryInThisShell`：忽略 subshell / 命令替换 / 进程替换里的 `cd`（动不了本 shell），但仍计任何位置创建的 worktree。它替换 `||` 右分支守卫、lastpipe pipeline 检查（现只扫末元素）、控制流/裸赋值 default 臂的整子树扫描——去掉假回退 notice，并找回裸赋值丢失的、其 `export` 孪生能拿到的绑定。函数定义与移动 subshell 检查保留保守的整子树扫描。
+
+**R4-1（Suggestion）——`readonlyUncertain` 无测试。** 在 readonly `it.each` 补展开目标用例（`readonly -f "$NAME"`）；删 `!readonlyUncertain` 守卫时它变红，可解码目标对照（含 `readonly -f 'cd'`）保持绿。
+
+**R4-2（Suggestion）——已评估，记录为局限。** host-less `--repo` / `GH_REPO` 按派生 checkout 的 host 规范化，而非 gh 实际生效 host（`GH_HOST` / 认证默认）。安全修复需 gh 生效 host，静态解析器拿不到；fail-closed 替代会破坏已钉住的 host-less 同仓用例（`--repo O/R`）。witness 需多 host gh 装置、夹具无法搭建，故记录而不改。
+
+**R1-1 类的其余成员——记录为局限。** 评审指出手工建模走查是无界类。下列核实仍开放、本轮延后（各需更深改动、易开新洞）：用户定义 `unset()` 函数绕开 shadow 守卫；`command git worktree add …` 绕开 pre-spawn worktree 守卫；复合体内的 `command cd` 被子树扫描判为不动；控制流体内的 create（`cd WT && if true; then gh pr create; fi`）不被 default 臂检测。
+
+第十五轮验证：**532 passed**（518 单测 + 14 真实文件系统），core typecheck exit 0，ESLint 与 Prettier 干净。变异见证在最终 head 重跑：R1-1 双臂（去 ANSI-C 解码杀 `$'cd'`、`c"d"` 绿；去 fail-closed 杀 undecodable 用例）、R3-8 三臂（各站点回退只杀各自用例）、R4-1（去守卫杀展开目标）、`shopt -u`（去 disable 分支杀 disable 用例）；兄弟对照全程绿。从字节级备份还原（最终 `shell.ts` SHA-256 `2f46ca30198098a1fa333a244b70075961b9456cfbe33cf0f4aab055da482116`）。
+
 ## 验收标准
 
 - 两条事故命令形状都绑定到其 worktree 分支所解析出的 PR。
