@@ -1437,6 +1437,18 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'echartsChart.showData': 'Show data',
   'echartsChart.chart': 'Chart',
   'echartsChart.data': 'Data',
+  'echartsChart.nodes': 'Nodes',
+  'echartsChart.links': 'Links',
+  'echartsChart.name': 'Name',
+  'echartsChart.category': 'Category',
+  'echartsChart.id': 'ID',
+  'echartsChart.source': 'Source',
+  'echartsChart.target': 'Target',
+  'echartsChart.value': 'Value',
+  'echartsChart.depth': 'Depth',
+  'echartsChart.path': 'Path',
+  'echartsChart.idPath': 'ID path',
+  'echartsChart.subtreeTotal': 'Subtree total (derived)',
   'markdownTable.blank': '(blank)',
   'markdownTable.column': (v) => `Column ${v?.index ?? ''}`,
   'markdownTable.rows': (v) => {
@@ -4676,7 +4688,7 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'channels.loadError.title': 'Channels could not be loaded',
   'channels.empty.title': 'No supported channels configured',
   'channels.empty.description':
-    'Configure DingTalk, WeCom, Feishu, GitHub, or GitLab to receive messages in this workspace.',
+    'Configure DingTalk, WeCom, Feishu, GitHub, GitLab, or Email to receive messages in this workspace.',
   'channels.runtimeError': 'Channel runtime error',
   'channels.action.back': 'Back',
   'channels.action.refresh': 'Refresh',
@@ -4760,7 +4772,7 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
     'GitHub Enterprise API root (e.g. https://ghe.example.com/api/v3). Leave empty for github.com',
   'channels.editor.field.github.pollInterval': 'Poll Interval (ms)',
   'channels.editor.field.github.pollInterval.description':
-    'How often to check GitHub for new notifications. Leave empty for 60000 (one minute).',
+    "How often to check GitHub for new notifications. Leave empty for 60000 (one minute). A steady-state poll is raised to the endpoint's X-Poll-Interval when that is larger, which paces the PR watch too, so a smaller value will not make detection faster; at the default the header is also 60s.",
   'channels.editor.field.github.repositorySettings': 'Per-repository settings',
   'channels.editor.field.github.repositorySettings.description':
     'Each allowlisted repository inherits the channel-wide settings below until you override it here.',
@@ -4863,13 +4875,13 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
     'state_change — the PR is merged or closed',
   'channels.editor.field.github.prWatchLimit': 'PR Watch Limit',
   'channels.editor.field.github.prWatchLimit.description':
-    'Maximum open bound PRs watched per poll. Open PRs keep the full budget; merged/closed bindings drain in an additional slice (20% of the limit, at least one) outside it, so they never crowd out open PRs. Each watched PR costs about one API request per poll — at the 60s default, a 5000/hour token budget admits ~80 watched PRs (~69 open while a terminal backlog drains at the 1.2x fan-out); over budget, every watch pass aborts on rate limits. Raise the poll interval when raising this. Requires Deliver To PR-Bound Sessions and PR Watch Events. Leave empty for the default (30).',
+    'Maximum open bound PRs watched per poll. Open PRs keep the full budget; merged/closed bindings drain in an additional slice (20% of the limit, at least one) outside it, so they never crowd out open PRs. Each watched PR still issues about one API request per poll, but an unchanged PR answers 304 and costs no primary rate limit, so the state watch is near-free while PRs are quiet. What still counts is the default-on comment watch (~60 requests/hour per PR at the 60s default) and the periodic CI re-checks, which put a 5000/hour budget at roughly 70-75 bound PRs. The ceiling moved from the state watch to the comment watch — it did not disappear, so do not read "near-free" as "unlimited". Over budget, every watch pass aborts on rate limits. Raise the poll interval when raising this. Requires Deliver To PR-Bound Sessions; the per-PR API request also needs PR Watch Events — without them the cap only bounds the comment watch. Leave empty for the default (30).',
   'channels.editor.field.github.prWatchLimit.disabledHint':
     'Enable "Deliver To PR-Bound Sessions" above to set the watch limit.',
   'channels.editor.field.github.prWatchBudgetReserve':
     'PR Watch Budget Reserve',
   'channels.editor.field.github.prWatchBudgetReserve.description':
-    'REST requests held back for the interactive notification lane. When the last known remaining budget is at or below this, the PR state watch is skipped for that poll — and stopped mid-pass if a pass spends down to it — so a human mention is not starved by background polling; detection resumes once the budget recovers or its window resets. The default (200) is ~4% of a 5000/hour token budget. Set 0 to disable the gate. Requires Deliver To PR-Bound Sessions and PR Watch Events. Leave empty for the default.',
+    'REST requests held back for the interactive notification lane. When the last known remaining budget is at or below this, the PR state watch is skipped for that poll — and stopped mid-pass if a pass spends down to it — so a human mention is not starved by background polling; detection resumes once the budget recovers or its window resets. The default (200) is ~4% of a 5000/hour token budget. Set 0 to disable the gate. Requires Deliver To PR-Bound Sessions; the gate covers the comment watch too, so PR Watch Events are not required. Leave empty for the default.',
   'channels.editor.field.github.boundSessionActions': 'Bound Session Actions',
   'channels.editor.field.github.boundSessionActions.description':
     'Optional. Instruction templates delivered to PR-bound sessions. Pick an event key below; a role prefix (review:, verify:, fix:) targets that binding role only. Requires Deliver To PR-Bound Sessions. Each role with a matching key gets its own delivery; roles without one skip the event. Variables: %repo%, %pr%, %url%, %title%, %event%, %sender%, %role%; %% for a literal %. Leave empty for the default generic prompt.',
@@ -4925,6 +4937,36 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
     'Unmergeable — MR becomes unmergeable (conflicts)',
   'channels.editor.field.gitlab.action_prompt_template.option.merge_train_removed':
     'Merge Train Removed — MR removed from merge train',
+  'channels.editor.field.email.address': 'Mailbox Address',
+  'channels.editor.field.email.imapHost': 'IMAP Host',
+  'channels.editor.field.email.imapUser': 'IMAP Username',
+  'channels.editor.field.email.imapPassword': 'IMAP Password',
+  'channels.editor.field.email.smtpHost': 'SMTP Host',
+  'channels.editor.field.email.smtpUser': 'SMTP Username',
+  'channels.editor.field.email.smtpPassword': 'SMTP Password',
+  'channels.editor.field.email.folder': 'IMAP Folder',
+  'channels.editor.field.email.imapPort': 'IMAP Port',
+  'channels.editor.field.email.smtpPort': 'SMTP Port',
+  'channels.editor.field.email.imapSecure': 'IMAP Implicit TLS',
+  'channels.editor.field.email.imapSecure.description':
+    'When disabled, STARTTLS is mandatory.',
+  'channels.editor.field.email.smtpSecure': 'SMTP Implicit TLS',
+  'channels.editor.field.email.smtpSecure.description':
+    'When disabled, STARTTLS is mandatory.',
+  'channels.editor.field.email.proactiveRecipients': 'Proactive Recipients',
+  'channels.editor.field.email.proactiveRecipients.description':
+    'Explicit bare addresses. Empty disables proactive email.',
+  'channels.editor.field.email.pollInterval': 'Poll Interval (ms)',
+  'channels.editor.field.email.maxMessageBytes': 'Message Size Limit (bytes)',
+  'channels.editor.field.email.maxAttachmentBytes':
+    'Attachment Size Limit (bytes)',
+  'channels.editor.field.email.maxTextLength': 'Text Character Limit',
+  'channels.editor.field.email.allowedUsers': 'Allowed email addresses',
+  'channels.editor.field.email.allowedUsers.description':
+    'Comma-separated bare mailbox addresses that can start private conversations.',
+  'channels.editor.field.email.operators': 'Session operator addresses',
+  'channels.editor.field.email.operators.description':
+    'Comma-separated bare mailbox addresses that may approve tool use and run /cancel, /clear or /loop in shared sessions.',
   'channels.editor.secret.environment': 'Stored in environment',
   'channels.editor.secret.stored': 'Stored securely',
   'channels.editor.secret.preserve': 'Keep',
@@ -6487,6 +6529,18 @@ const ZH: Messages = {
   'echartsChart.showData': '显示数据',
   'echartsChart.chart': '图表',
   'echartsChart.data': '数据',
+  'echartsChart.nodes': '节点',
+  'echartsChart.links': '连线',
+  'echartsChart.name': '名称',
+  'echartsChart.category': '分类',
+  'echartsChart.id': 'ID',
+  'echartsChart.source': '起点',
+  'echartsChart.target': '终点',
+  'echartsChart.value': '数值',
+  'echartsChart.depth': '深度',
+  'echartsChart.path': '路径',
+  'echartsChart.idPath': 'ID 路径',
+  'echartsChart.subtreeTotal': '子树合计（派生）',
   'markdownTable.blank': '(空白)',
   'markdownTable.column': (v) => `第 ${v?.index ?? ''} 列`,
   'markdownTable.rows': (v) => `共${v?.count ?? 0}行`,
@@ -9463,7 +9517,7 @@ const ZH: Messages = {
   'channels.loadError.title': '无法加载频道',
   'channels.empty.title': '尚未配置支持的频道',
   'channels.empty.description':
-    '配置钉钉、企业微信、飞书、GitHub 或 GitLab，让当前工作区接收消息。',
+    '配置钉钉、企业微信、飞书、GitHub、GitLab 或 Email，让当前工作区接收消息。',
   'channels.runtimeError': '频道运行时错误',
   'channels.action.back': '返回',
   'channels.action.refresh': '刷新',
@@ -9543,7 +9597,7 @@ const ZH: Messages = {
     'GitHub Enterprise API 根地址（如 https://ghe.example.com/api/v3），github.com 留空',
   'channels.editor.field.github.pollInterval': '轮询间隔（毫秒）',
   'channels.editor.field.github.pollInterval.description':
-    '多久向 GitHub 查一次新通知。留空为 60000（一分钟）。',
+    '多久向 GitHub 查一次新通知。留空为 60000（一分钟）。稳态轮询会被抬到端点的 X-Poll-Interval（当它更大时），这也会同时压住 PR 监视的节奏，因此调小本值并不会让检测更快；默认值下该头也是 60 秒。',
   'channels.editor.field.github.repositorySettings': '按仓库设置',
   'channels.editor.field.github.repositorySettings.description':
     '每个已允许的仓库都继承下面的渠道级设置，直到你在这里覆盖它。',
@@ -9640,12 +9694,12 @@ const ZH: Messages = {
     'state_change — PR 被合并或关闭',
   'channels.editor.field.github.prWatchLimit': 'PR 监视上限',
   'channels.editor.field.github.prWatchLimit.description':
-    '每轮轮询最多监视的 open 绑定 PR 数。open PR 独占全部预算；已合并/关闭的绑定在预算之外的一块额外名额（上限的 20%，至少一个）中排出，因此绝不会挤占 open PR。每个被监视的 PR 每轮约消耗一次 API 请求——按默认 60 秒间隔，5000 次/小时的 token 预算约容纳 80 个被监视 PR（终态积压按 1.2 倍扇出排出时约 69 个 open）；超出预算会让每轮监视都因限流中止。提高本值时请同时提高轮询间隔。需开启"投递到 PR 绑定会话"并配置监视事件。留空则使用默认值（30）。',
+    '每轮轮询最多监视的 open 绑定 PR 数。open PR 独占全部预算；已合并/关闭的绑定在预算之外的一块额外名额（上限的 20%，至少一个）中排出，因此绝不会挤占 open PR。每个被监视的 PR 每轮仍约发出一次 API 请求，但未变化的 PR 会得到 304、不计入主速率限制，因此 PR 安静时状态监视近乎免费。仍然计费的是默认开启的评论监视（按默认 60 秒间隔约每小时 60 次/PR）与周期性 CI 复查，两者使 5000 次/小时的预算大约落在 70–75 个绑定 PR。上限是从状态监视转移到了评论监视，并没有消失，因此不要把「近乎免费」读成「没有上限」。超出预算会让每轮监视都因限流中止。提高本值时请同时提高轮询间隔。需开启"投递到 PR 绑定会话"；每个 PR 的 API 请求还需要配置监视事件——不配置时本上限只约束评论监视。留空则使用默认值（30）。',
   'channels.editor.field.github.prWatchLimit.disabledHint':
     '开启上方「投递到 PR 绑定会话」后即可设置监视上限。',
   'channels.editor.field.github.prWatchBudgetReserve': 'PR 监视预算预留',
   'channels.editor.field.github.prWatchBudgetReserve.description':
-    '为交互式通知车道留回的 REST 请求数。当上次已知剩余预算处于或低于此值时，本轮跳过 PR 状态监视（若某轮 pass 花到该值则中途停止），以免后台轮询饿死人工 mention；预算回升或其窗口重置后检测恢复。默认值（200）约为 5000 次/小时 token 预算的 4%。设为 0 可禁用该门。需开启"投递到 PR 绑定会话"并配置监视事件。留空则使用默认值。',
+    '为交互式通知车道留回的 REST 请求数。当上次已知剩余预算处于或低于此值时，本轮跳过 PR 状态监视（若某轮 pass 花到该值则中途停止），以免后台轮询饿死人工 mention；预算回升或其窗口重置后检测恢复。默认值（200）约为 5000 次/小时 token 预算的 4%。设为 0 可禁用该门。需开启"投递到 PR 绑定会话"；该门同样覆盖评论监视，因此不需要配置监视事件。留空则使用默认值。',
   'channels.editor.field.github.boundSessionActions': '绑定会话动作模板',
   'channels.editor.field.github.boundSessionActions.description':
     '可选。投递给 PR 绑定会话的 operator 指令模板。在下方选择事件键；加角色前缀（review:、verify:、fix:）可只定向该绑定角色。需开启"投递到 PR 绑定会话"。有匹配键的角色各自投递，没有匹配键的角色跳过该事件。变量：%repo%、%pr%、%url%、%title%、%event%、%sender%、%role%；%% 表示字面 %。留空则使用默认通用 prompt。',
@@ -9698,6 +9752,35 @@ const ZH: Messages = {
     '不可合并 — MR 变为不可合并（冲突）',
   'channels.editor.field.gitlab.action_prompt_template.option.merge_train_removed':
     '合并队列移除 — MR 从合并队列中移除',
+  'channels.editor.field.email.address': '邮箱地址',
+  'channels.editor.field.email.imapHost': 'IMAP 服务器',
+  'channels.editor.field.email.imapUser': 'IMAP 用户名',
+  'channels.editor.field.email.imapPassword': 'IMAP 密码',
+  'channels.editor.field.email.smtpHost': 'SMTP 服务器',
+  'channels.editor.field.email.smtpUser': 'SMTP 用户名',
+  'channels.editor.field.email.smtpPassword': 'SMTP 密码',
+  'channels.editor.field.email.folder': 'IMAP 文件夹',
+  'channels.editor.field.email.imapPort': 'IMAP 端口',
+  'channels.editor.field.email.smtpPort': 'SMTP 端口',
+  'channels.editor.field.email.imapSecure': 'IMAP 隐式 TLS',
+  'channels.editor.field.email.imapSecure.description':
+    '关闭后必须使用 STARTTLS。',
+  'channels.editor.field.email.smtpSecure': 'SMTP 隐式 TLS',
+  'channels.editor.field.email.smtpSecure.description':
+    '关闭后必须使用 STARTTLS。',
+  'channels.editor.field.email.proactiveRecipients': '主动投递收件人',
+  'channels.editor.field.email.proactiveRecipients.description':
+    '需填写精确的裸邮箱地址。留空则禁用主动投递邮件。',
+  'channels.editor.field.email.pollInterval': '轮询间隔（毫秒）',
+  'channels.editor.field.email.maxMessageBytes': '邮件大小上限（字节）',
+  'channels.editor.field.email.maxAttachmentBytes': '附件大小上限（字节）',
+  'channels.editor.field.email.maxTextLength': '文本字符数上限',
+  'channels.editor.field.email.allowedUsers': '允许的邮箱地址',
+  'channels.editor.field.email.allowedUsers.description':
+    '逗号分隔的裸邮箱地址，可发起私聊会话。',
+  'channels.editor.field.email.operators': '会话操作者邮箱地址',
+  'channels.editor.field.email.operators.description':
+    '逗号分隔的裸邮箱地址，可在共享会话中批准工具调用并运行 /cancel、/clear 或 /loop。',
   'channels.editor.secret.environment': '已保存在环境变量中',
   'channels.editor.secret.stored': '已安全保存',
   'channels.editor.secret.preserve': '保留',

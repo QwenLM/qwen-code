@@ -221,6 +221,13 @@ final class WorkspaceCsiApplicationInventory {
                     + "session_id:VARBINARY,slot:BIGINT,trigger_kind:VARCHAR,outcome:VARCHAR,reason:VARCHAR,"
                     + "definition_revision:BIGINT,fence:BIGINT,attempts:INT,next_retry_at:BIGINT,last_error:VARCHAR,"
                     + "gmt_create:BIGINT,gmt_modified:BIGINT"),
+            declaration("ma_side_query", "query_key",
+                    "query_key:CHAR,query_id:VARBINARY,tenant_id:VARBINARY,session_id:VARBINARY,session_scope_key:CHAR,"
+                    + "actor_id:VARBINARY,actor_scope_key:CHAR,kind:VARCHAR,trigger_kind:VARCHAR,question:VARCHAR,state:VARCHAR,"
+                    + "active_slot:CHAR,source_json:LONGTEXT,private_history_json:LONGTEXT,model_config_digest:VARCHAR,processing_version:VARCHAR,"
+                    + "input_resource_id:VARBINARY,input_digest:CHAR,is_input_ready:TINYINT,claim_instance_id:VARBINARY,claim_boot_id:VARBINARY,"
+                    + "claim_generation:BIGINT,claim_token_hash:CHAR,read_lease_id:VARBINARY,read_deadline_at:BIGINT,deadline_at:BIGINT,"
+                    + "result_revision:BIGINT,answer_text:LONGTEXT,outcome:VARCHAR,usage_json:LONGTEXT,error_code:VARCHAR,gmt_create:BIGINT,gmt_modified:BIGINT"),
             declaration("ma_session", "tenant_id,session_id",
                     "tenant_id:VARBINARY,session_id:VARBINARY,agent_id:VARBINARY,title:VARCHAR,status:VARCHAR,"
                     + "harness_boot_id:VARBINARY,harness_event_epoch:VARBINARY,harness_last_event_id:BIGINT,"
@@ -2019,7 +2026,7 @@ final class WorkspaceCsiApplicationInventory {
                 case "ma_session" -> query(table, "tenant_id=T&session_id=sessions", "runtime_request_key=requests",
                         "tenant_id=T&parent_session_id=sessions", "tenant_id=T&root_session_id=sessions");
                 case "ma_session_head" -> query(table, "tenant_key=BT&harness_key=BS", "tenant_id=T&session_id=sessions");
-                case "ma_public_event", "ma_turn", "ma_session_record", "ma_user_message",
+                case "ma_public_event", "ma_turn", "ma_session_record", "ma_side_query", "ma_user_message",
                         "ma_user_message_command", "ma_user_message_queue" ->
                         query(table, "tenant_id=T&session_id=sessions");
                 case "ma_event_stream" -> query(table, "tenant_id=T&session_id=sessions", "artifact_refs_resource_key=resourceKeys");
