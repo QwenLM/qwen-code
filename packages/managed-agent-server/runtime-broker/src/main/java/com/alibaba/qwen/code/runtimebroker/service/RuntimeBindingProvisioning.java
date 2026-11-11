@@ -405,16 +405,6 @@ final class RuntimeBindingProvisioning {
                     RuntimeBindingRecord currentClaim = renewal.stopAndGet();
                     try {
                         if (error != null) {
-                            if (request.isManagedContext()
-                                    && RuntimeBrokerSupport.retryableExternalWorkspaceProvision(request, cause)) {
-                                // A retryable external-workspace failure keeps the
-                                // binding recoverable instead of blocking it.
-                                if (cause instanceof RuntimeBrokerException brokerFailure) {
-                                    throw new CompletionException(brokerFailure);
-                                }
-                                throw unavailable("runtime_provision_failed",
-                                        "Runtime provisioning failed", cause);
-                            }
                             throw provisionFailureHandler.failure(claimed, currentClaim, cause, localCapacityRefused.get());
                         }
                         if (currentClaim == null) {

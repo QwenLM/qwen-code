@@ -11,7 +11,6 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeToolMeasurements;
 import com.alibaba.qwen.code.runtimebroker.StoreFailureException;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
-import com.alibaba.qwen.code.runtimebroker.protocol.ExternalRuntimeKinds;
 import com.alibaba.qwen.code.runtimebroker.protocol.ProviderRuntimeProtocol;
 import com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds;
 
@@ -376,20 +375,11 @@ final class RuntimeBrokerSupport {
         if (cause instanceof RuntimeBrokerException failure) {
             return failure.isRetryable()
                     && ("runtime_external_provider_failed".equals(failure.getCode())
-                            || failure.getStatusCode() == 503 && (externalRetryable(request, failure)
+                            || failure.getStatusCode() == 503 && (RuntimeProvisionFailureHandler.externalRetryable(request, failure)
                                     || "runtime_broker_provision_timeout".equals(failure.getCode())
                                     || "managed_runtime_unavailable".equals(failure.getCode())));
         }
         return cause instanceof java.io.IOException || cause instanceof TimeoutException;
-    }
-
-    static boolean externalRetryable(
-            com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest request,
-            RuntimeBrokerException failure) {
-        return ExternalRuntimeKinds.isExternal(request.getProvisionerKind())
-                && failure.getStatusCode() == 503
-                && ("runtime_external_capacity".equals(failure.getCode())
-                        || "runtime_external_unavailable".equals(failure.getCode()));
     }
 
     /**

@@ -87,7 +87,6 @@ import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.s
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.sshNoStartReceipt;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.unavailable;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.unwrap;
-import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.workerRefusedRelease;
 
 /** Repository-backed orchestration for the private Managed Runtime contract. */
 public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerOperations {
@@ -661,84 +660,6 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                 }).exceptionally(error -> {
                     throw bindingProvisioning.mapStepTimeout(error);
                 });
-    }
-
-    /**
-     * Releases the drained Sessions, and escalates a worker that refuses to
-     * release to the durable stop this drain arm already owns. Only the close
-     * cascade reaches this path: a routine release never stops a worker.
-     */
-    private CompletionStage<Void> releaseDrainedSessions(RuntimeBindingRecord binding,
-            BindingRenewal renewal, RuntimeLifecycleAuthority authority) {
-        return drainSessions(binding, renewal, authority, null).exceptionallyCompose(error -> {
-            if (!workerRefusedRelease(error) || !provisioner.supportsDrainedStop(binding)) {
-                return CompletableFuture.<Void>failedFuture(error);
-            }
-            return safeStage(() -> provisioner.stopDrained(binding))
-                    .thenAccept(receipt -> renewal.persistDrainReceipt(receipt, authority))
-                    .thenCompose(ignored -> drainSessions(binding, renewal, authority, null));
-        });
-    }
-
-    /**
-     * Clears durable Workspace ownership for Sessions this drain has retired.
-     * Their worker is stopped and their rows are released, so no writer can
-     * still hold the storage. Runs before the binding is marked RELEASED, so a
-     * crash retries it; the exact-match clear cannot touch a newer holder.
-     */
-    private CompletionStage<Void> releaseRetiredHolders(RuntimeBindingRecord binding, BindingRenewal renewal) {
-        var current = renewal.current.get();
-        // Only a persisted receipt can prove the worker stopped. On the plain
-        // close path every holder was cleared by the acknowledged release, so
-        // there is nothing to scan and nothing to clear.
-        if (!binding.getRequest().isManagedContext() || binding.getLease() == null
-                || current == null || current.getDrainReceipt() == null) {
-            return CompletableFuture.completedFuture(null);
-        }
-        return releaseRetiredHolders(binding, (String) null);
-    }
-
-    private CompletionStage<Void> releaseRetiredHolders(RuntimeBindingRecord binding, String cursor) {
-        var batch = sessionRepository.findByBinding(binding.getBindingId(), binding.getGeneration(), cursor, 100);
-        CompletionStage<Void> work = CompletableFuture.completedFuture(null);
-        for (var record : batch) {
-            if (record.isActive()) {
-                continue;
-            }
-            work = work.thenCompose(ignored -> safeStage(() ->
-                    transport.releaseRetired(binding.getLease(), record.getSession())))
-                    .thenAccept(retired -> {
-                        if (!Boolean.TRUE.equals(retired)) {
-                            throw unavailable("runtime_session_release_failed",
-                                    "Retired Session still owns Workspace storage");
-                        }
-                    });
-        }
-        return work.thenCompose(ignored -> batch.size() < 100
-                ? CompletableFuture.completedFuture(null)
-                : releaseRetiredHolders(binding, batch.getLast().getRuntimeSessionId()));
-    }
-
-    private CompletionStage<Void> drainSessions(RuntimeBindingRecord binding, BindingRenewal renewal,
-            RuntimeLifecycleAuthority authority, String cursor) {
-        var batch = sessionRepository.findByBinding(binding.getBindingId(), binding.getGeneration(), cursor, 100);
-        CompletionStage<Void> work = CompletableFuture.completedFuture(null);
-        for (var record : batch) {
-            if (!record.isActive()) {
-                continue;
-            }
-            work = work.thenCompose(ignored -> {
-                if (authority != null) {
-                    if (!renewal.releaseStoppedSession(record, authority)) {
-                        return failed(conflict("workspace_close_identity_unverified", "Original stop receipt is missing"));
-                    }
-                    return CompletableFuture.completedFuture(null);
-                }
-                return releaseSavedSession(binding, record, renewal);
-            });
-        }
-        return work.thenCompose(ignored -> batch.size() < 100 ? CompletableFuture.completedFuture(null)
-                : drainSessions(binding, renewal, authority, batch.getLast().getRuntimeSessionId()));
     }
 
     CompletionStage<Void> releaseSavedSession(RuntimeBindingRecord binding, RuntimeSessionRecord record,

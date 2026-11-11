@@ -564,6 +564,13 @@ class ExternalWorkspaceMaterializationTest {
         jdbc.update("UPDATE ma_storage SET registration_json = ?", registration.replace("\"tenantWorkspaceId\":\"workspace\"",
                 "\"tenantWorkspaceId\":\"other\""));
         conflict(() -> store.materialize("tenant", "workspace", "Name", "owner", "key"), "external_workspace_conflict");
+        // R23-1: a field-type drift the strict shared decoder refuses must not
+        // be scalar-coerced into a committed ACTIVE Workspace here.
+        for (String drifted : List.of("\"registrationRevision\":\"1\"", "\"registrationRevision\":1.0")) {
+            jdbc.update("UPDATE ma_storage SET registration_json = ?",
+                    registration.replace("\"registrationRevision\":1", drifted));
+            conflict(() -> store.materialize("tenant", "workspace", "Name", "owner", "key"), "external_workspace_conflict");
+        }
         jdbc.update("UPDATE ma_storage SET registration_json = ?", registration);
         // An unreadable stored registration is a permanent ownership refusal
         // (409), not a malformed-request 400 from the decode exception.
