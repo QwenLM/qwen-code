@@ -82,6 +82,7 @@ import { isVisibleComposerModel } from '../utils/composerModels';
 import { shouldBlockComposerSubmit } from '../utils/composerInputState';
 import { base64ToBlob } from '../utils/base64';
 import { QuoteToComposerContext } from './messages/quoteToComposerContext';
+import { registerAskInSideTaskInsert } from '../utils/askInSideTaskDelivery';
 import { insertQuoteIntoComposer } from '../utils/quoteReference';
 import { isDefinitelyRejectedPromptAdmission } from '../utils/promptAdmission';
 import {
@@ -609,6 +610,14 @@ export function ChatPane({
   const handleQuoteSelection = useCallback((text: string) => {
     insertQuoteIntoComposer(editorRef.current, text);
   }, []);
+  // "Ask in side task" handoff: the side-task pane requests its quote once
+  // the child settles empty, this surface registers once the composer is
+  // mounted — the per-session registry settles the pair in either order.
+  useEffect(() => {
+    const sessionId = connection.sessionId;
+    if (!sessionId) return;
+    registerAskInSideTaskInsert(sessionId, handleQuoteSelection);
+  }, [connection.sessionId, handleQuoteSelection]);
   const transcriptViewportRef = useRef<MessageListHandle>(null);
   const {
     followupState,

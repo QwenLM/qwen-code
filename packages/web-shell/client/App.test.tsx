@@ -957,6 +957,10 @@ const {
         | ((text: string) => void)
         | null
         | undefined,
+      latestAskInSideTask: undefined as
+        | ((text: string) => void)
+        | null
+        | undefined,
       capturedHostOwnsArtifactPreview: undefined as boolean | undefined,
       latestMessageListProps: null as {
         onTurnOutputOpen?: (request: TurnOutputOpenRequest) => void;
@@ -1614,6 +1618,9 @@ vi.mock('./components/TranscriptViewport', async () => {
   const { QuoteToComposerContext } = await import(
     './components/messages/quoteToComposerContext'
   );
+  const { AskInSideTaskContext } = await import(
+    './components/messages/askInSideTaskContext'
+  );
   const { useWebShellCustomization } = await import('./customization');
   function InteractionBlockerProbe() {
     const registerInteractionBlocker = useInteractionBlocker();
@@ -1666,6 +1673,7 @@ vi.mock('./components/TranscriptViewport', async () => {
       testState.latestQuoteToComposer = React.useContext(
         QuoteToComposerContext,
       );
+      testState.latestAskInSideTask = React.useContext(AskInSideTaskContext);
       testState.backgroundDetails = useSubagentDetails()?.onOpenBackground;
       testState.openTurnCalls = useOpenTurnCalls();
       // The main transcript mounts inside mainChatCustomization, so this reads
@@ -12853,6 +12861,7 @@ beforeEach(() => {
   testState.latestStatusBarOnSelectModel = null;
   testState.latestMessageListProps = null;
   testState.latestQuoteToComposer = undefined;
+  testState.latestAskInSideTask = undefined;
   testState.backgroundDetails = undefined;
   testState.openTurnCalls = undefined;
   testState.capturedHostOwnsArtifactPreview = undefined;
@@ -35920,6 +35929,46 @@ describe('App session callbacks', () => {
       expect(mockWorkspace.client.createSideTaskSession).toHaveBeenCalledOnce();
     },
   );
+
+  it('asks a new side task seeded with the selection as a composer quote', async () => {
+    mockConnection.capabilities.features = ['session_side_task'];
+    mockWorkspace.client.createSideTaskSession.mockResolvedValueOnce({
+      sessionId: 'ask-side-task-1',
+      clientId: 'ask-side-client',
+    });
+    renderApp();
+    await flush();
+    expect(testState.latestAskInSideTask).toBeTypeOf('function');
+
+    act(() => testState.latestAskInSideTask!('quoted\ntext'));
+    await flush();
+
+    expect(
+      mockWorkspace.client.createSideTaskSession,
+    ).toHaveBeenCalledExactlyOnceWith(
+      'session-1',
+      { name: 'Side task' },
+      'client-1',
+    );
+    expect(testState.latestArtifactPanelProps?.tabs).toEqual([
+      expect.objectContaining({
+        kind: 'side_task',
+        sessionId: 'ask-side-task-1',
+        parentSessionId: 'session-1',
+        nameFromFirstPrompt: true,
+        initialQuote: 'quoted\ntext',
+      }),
+    ]);
+    // The quote only seeds the composer; the user writes and sends the prompt.
+    expect(mockSessionActions.btwSessionStream).not.toHaveBeenCalled();
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it('exposes no ask-in-side-task action while side tasks are unavailable', async () => {
+    renderApp();
+    await flush();
+    expect(testState.latestAskInSideTask).toBeNull();
+  });
 
   it('refuses a host-disabled model setup side task before provisioning', async () => {
     mockConnection.capabilities.features = ['session_side_task'];

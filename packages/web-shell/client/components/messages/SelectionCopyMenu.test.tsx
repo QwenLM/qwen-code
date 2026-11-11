@@ -6,6 +6,7 @@ import { SelectionCopyMenu } from './SelectionCopyMenu';
 import { SelectionCopyMenu as TranscriptSelectionCopyMenu } from './SelectionCopyMenu.transcript-stub';
 import { I18nProvider } from '../../i18n';
 import { WebShellPortalRootContext } from '../../portalRoot';
+import { AskInSideTaskContext } from './askInSideTaskContext';
 import { QuoteToComposerContext } from './quoteToComposerContext';
 
 let root: Root;
@@ -24,6 +25,7 @@ function mount(
   content = 'reply',
   language: 'en' | 'zh-CN' = 'en',
   onQuote?: (text: string) => void,
+  onAsk?: (text: string) => void,
 ) {
   if (!container) container = document.createElement('div');
   if (!portal) portal = document.createElement('div');
@@ -35,15 +37,17 @@ function mount(
         <I18nProvider language={language}>
           <WebShellPortalRootContext.Provider value={portal}>
             <QuoteToComposerContext.Provider value={onQuote ?? null}>
-              <SelectionCopyMenu
-                className="reply-body"
-                content={value}
-                enabled={enabled}
-              >
-                <p>
-                  Before <strong>bold text</strong> after
-                </p>
-              </SelectionCopyMenu>
+              <AskInSideTaskContext.Provider value={onAsk ?? null}>
+                <SelectionCopyMenu
+                  className="reply-body"
+                  content={value}
+                  enabled={enabled}
+                >
+                  <p>
+                    Before <strong>bold text</strong> after
+                  </p>
+                </SelectionCopyMenu>
+              </AskInSideTaskContext.Provider>
             </QuoteToComposerContext.Provider>
           </WebShellPortalRootContext.Provider>
         </I18nProvider>,
@@ -524,4 +528,58 @@ describe('SelectionCopyMenu', () => {
     expect(onQuote).toHaveBeenCalledWith('bold');
     expect(portal.querySelector('[data-slot="popover-content"]')).toBeNull();
   });
+  it('hides the ask-in-side-task button when the app provides no ask action', async () => {
+    mount(true, 'reply', 'en', vi.fn());
+    await choose();
+    const texts = [...portal.querySelectorAll('button')].map(
+      (item) => item.textContent,
+    );
+    expect(texts).toContain('Quote to composer');
+    expect(texts).not.toContain('Ask in side task');
+  });
+  it('shows the ask-in-side-task button when the app provides an ask action', async () => {
+    mount(true, 'reply', 'en', vi.fn(), vi.fn());
+    await choose();
+    const button = [...portal.querySelectorAll('button')].find(
+      (item) => item.textContent === 'Ask in side task',
+    )!;
+    expect(button).toBeDefined();
+    expect(button.disabled).toBe(false);
+  });
+  it('sends the selected text to the ask action and closes the menu', async () => {
+    const onAsk = vi.fn();
+    mount(true, 'reply', 'en', vi.fn(), onAsk);
+    await choose();
+    const button = [...portal.querySelectorAll('button')].find(
+      (item) => item.textContent === 'Ask in side task',
+    )!;
+    expect(button).toBeDefined();
+    await act(async () => button.click());
+    expect(onAsk).toHaveBeenCalledTimes(1);
+    expect(onAsk).toHaveBeenCalledWith('bold');
+    expect(portal.querySelector('[data-slot="popover-content"]')).toBeNull();
+  });
+  it.each(['', ' '])(
+    'disables the ask button for an image-only selection (prefix=%j)',
+    async (prefix) => {
+      mount(true, 'reply', 'en', vi.fn(), vi.fn());
+      const paragraph = container.querySelector('p')!;
+      paragraph.innerHTML = `${prefix}<img src="https://example.com/image.png" alt="">`;
+      for (const type of ['pointerdown', 'pointerup']) {
+        if (type === 'pointerup') {
+          const range = document.createRange();
+          range.selectNodeContents(paragraph);
+          window.getSelection()!.addRange(range);
+        }
+        const event = new MouseEvent(type, { bubbles: true, button: 0 });
+        Object.defineProperty(event, 'pointerType', { value: 'mouse' });
+        await act(async () => paragraph.dispatchEvent(event));
+      }
+      const ask = [...portal.querySelectorAll('button')].find(
+        (item) => item.textContent === 'Ask in side task',
+      )!;
+      expect(ask).toBeDefined();
+      expect(ask.disabled).toBe(true);
+    },
+  );
 });

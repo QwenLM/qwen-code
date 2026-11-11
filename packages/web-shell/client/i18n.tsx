@@ -1189,6 +1189,7 @@ const EN: Messages = {
   'assistant.copyMarkdown': 'Copy Markdown',
   'assistant.copyMarkdownSource': 'Copy Markdown source',
   'assistant.quoteToComposer': 'Quote to composer',
+  'assistant.askInSideTask': 'Ask in side task',
   'composer.quote.shellMode': 'Leave shell mode to quote into the composer',
   'composer.quote.blocksShellMode':
     'Remove the quote from the draft to use shell mode',
@@ -6266,6 +6267,7 @@ const ZH: Messages = {
   'assistant.copyMarkdown': '复制 Markdown',
   'assistant.copyMarkdownSource': '复制 Markdown 源文',
   'assistant.quoteToComposer': '引用到输入框',
+  'assistant.askInSideTask': '问这个侧边任务',
   'composer.quote.shellMode': '请先退出 Shell 模式再引用到输入框',
   'composer.quote.blocksShellMode': '请先移除草稿中的引用再使用 Shell 模式',
   'assistant.dissatisfied': '不满意',

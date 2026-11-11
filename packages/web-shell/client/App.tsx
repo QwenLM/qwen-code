@@ -208,6 +208,7 @@ import {
   ChatEditor,
   type ComposerToolbarAction,
 } from './components/ChatEditor';
+import { AskInSideTaskContext } from './components/messages/askInSideTaskContext';
 import { QuoteToComposerContext } from './components/messages/quoteToComposerContext';
 import { insertQuoteIntoComposer } from './utils/quoteReference';
 import { getWorkflowModeMessages } from './components/workflow-mode-messages';
@@ -5869,6 +5870,7 @@ export function App({
       initialPrompt?: string,
       detailsRequestId?: string,
       existingChildSessionId?: string,
+      initialQuote?: string,
     ) => {
       const parentSessionId = connection.sessionId;
       if (!parentSessionId || !sideTasksAvailable) return false;
@@ -5932,6 +5934,11 @@ export function App({
               ...(initialPrompt?.trim()
                 ? { initialPrompt: initialPrompt.trim() }
                 : {}),
+              // New children only: the pane seeds this into the composer as
+              // a quote chip (never sent) once the child settles empty.
+              ...(initialQuote?.trim()
+                ? { initialQuote: initialQuote.trim() }
+                : {}),
             }),
       };
       setArtifactPanelTabs((tabs) => {
@@ -5955,6 +5962,14 @@ export function App({
     if (createSideTask()) return;
     pushToast('error', t('sideTask.createFailed'));
   }, [createSideTask, pushToast, t]);
+  // Selection-menu entry: the quote lands in the new side task's composer as
+  // a chip; the user writes the prompt (no auto-send).
+  const askInSideTaskFromSelection = useCallback(
+    (text: string) => {
+      createSideTask(undefined, undefined, undefined, text);
+    },
+    [createSideTask],
+  );
   const openWebPreviewTab = useCallback(() => {
     const id = `web-preview:${crypto.randomUUID()}`;
     setArtifactPanelTabs((tabs) => [
@@ -23230,6 +23245,9 @@ export function App({
       {/* prettier-ignore */}
       <BrandProvider value={resolvedBrand}>
       <I18nProvider language={selectedLanguage}>
+        <AskInSideTaskContext.Provider
+          value={sideTasksAvailable ? askInSideTaskFromSelection : null}
+        >
         <McpAppMessagesContext.Provider value={mcpAppMessages.context}>
         <McpAppModelContextContext.Provider value={mcpAppModelContext}>
         <McpAppHostContext.Provider value={workspace.baseUrl}>
@@ -26769,6 +26787,7 @@ export function App({
         </McpAppHostContext.Provider>
         </McpAppModelContextContext.Provider>
         </McpAppMessagesContext.Provider>
+        </AskInSideTaskContext.Provider>
       </I18nProvider>
       </BrandProvider>
     </ThemeProvider>

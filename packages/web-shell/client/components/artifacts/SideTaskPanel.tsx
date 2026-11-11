@@ -27,6 +27,7 @@ import type {
 import { ChatPane } from '../ChatPane';
 import { Button } from '../ui/button';
 import { Spinner } from '../ui/spinner';
+import { requestAskInSideTaskQuote } from '../../utils/askInSideTaskDelivery';
 import { useSessionCatalogController } from '../../session-catalog/session-catalog-hooks';
 
 interface SideTaskPanelProps {
@@ -37,6 +38,11 @@ interface SideTaskPanelProps {
   title: string;
   shouldNameFromFirstPrompt?: boolean;
   initialPrompt?: string;
+  /**
+   * Quote placed into the new child's composer as a chip once it settles
+   * empty. Never sent: the user writes the prompt.
+   */
+  initialQuote?: string;
   createSession: (
     tabId: string,
     parentSessionId: string,
@@ -73,6 +79,7 @@ export function SideTaskPanel({
   title,
   shouldNameFromFirstPrompt,
   initialPrompt,
+  initialQuote,
   createSession,
   onCreated,
   onTitleChange,
@@ -116,6 +123,7 @@ export function SideTaskPanel({
         title={title}
         shouldNameFromFirstPrompt={shouldNameFromFirstPrompt}
         initialPrompt={initialPrompt}
+        initialQuote={initialQuote}
         workspaceCwd={workspaceCwd}
         onTitleChange={onTitleChange}
         onRightPanelOpen={onRightPanelOpen}
@@ -224,6 +232,7 @@ function SideTaskSession({
   title,
   shouldNameFromFirstPrompt,
   initialPrompt,
+  initialQuote,
   workspaceCwd,
   onTitleChange,
   onRightPanelOpen,
@@ -408,6 +417,23 @@ function SideTaskSession({
     t,
     tabId,
   ]);
+  // The ask-in-side-task quote is requested exactly once, when the child has
+  // settled empty: the composer chip is only meaningful in a fresh session.
+  // The delivery registry keeps a per-session delivered marker, so a pane
+  // remount (tab switch) cannot seed a second chip.
+  const askQuoteRequestedRef = useRef(false);
+  useEffect(() => {
+    const quote = initialQuote?.trim();
+    if (
+      !quote ||
+      !restoredEmptySession ||
+      !connection.sessionId ||
+      askQuoteRequestedRef.current
+    )
+      return;
+    askQuoteRequestedRef.current = true;
+    requestAskInSideTaskQuote(connection.sessionId, quote);
+  }, [connection.sessionId, initialQuote, restoredEmptySession]);
 
   if (!connection.sessionId) {
     return (

@@ -340,6 +340,7 @@ export type ArtifactPanelTab =
       workspaceCwd?: string;
       nameFromFirstPrompt?: boolean;
       initialPrompt?: string;
+      initialQuote?: string;
     }
   | {
       id: string;
@@ -1677,6 +1678,7 @@ export function ArtifactPanel({
             title={activeTab.title}
             shouldNameFromFirstPrompt={activeTab.nameFromFirstPrompt}
             initialPrompt={activeTab.initialPrompt}
+            initialQuote={activeTab.initialQuote}
             createSession={
               onCreateSideTaskSession ?? rejectMissingSideTaskCreate
             }
