@@ -23,7 +23,6 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.RuntimePublicationGrant;
 import com.alibaba.qwen.code.runtimebroker.RuntimePublicationVerifier;
 import com.alibaba.qwen.code.runtimebroker.RuntimeRecoveryEvidence;
-import com.alibaba.qwen.code.runtimebroker.RuntimeResourceHandle;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
@@ -48,7 +47,6 @@ import org.apache.commons.codec.digest.DigestUtils;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Duration;
-import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -60,16 +58,12 @@ import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicReference;
-import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Supplier;
 
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBindingRegistry.sameLease;
-import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.MAX_CAS_ATTEMPTS;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.conflict;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.failed;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.immutableMap;
@@ -79,10 +73,8 @@ import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.i
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.isPublicationV3;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.mapFailure;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.mapStoreFailure;
-import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.notFound;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.prepareExecutionReference;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.referenceString;
-import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.renewalDelayMillis;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.requireOpen;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.requireSameSession;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.safeStage;
@@ -132,6 +124,7 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
     private final RuntimeExecutionReconciler executionReconciler;
     private final RuntimeExecutionRecovery executionRecovery;
     private final RuntimeExecutionCancellation executionCancellation;
+    private final RuntimeSessionRelease sessionRelease;
     private final RuntimeHoldInventory holdInventory;
 
     /**
@@ -281,7 +274,7 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                 sessionRepository, sessionResolver, this.brokerOwnerId, this.operationLeaseDuration, clock);
         this.bindingProvisioning = new RuntimeBindingProvisioning(bindingRegistry, bindingRepository,
                 sessionRepository, executionRepository, provisioner, transport, this.brokerOwnerId,
-                this.operationLeaseDuration, clock, scheduler, closed, BindingRenewal::new);
+                this.operationLeaseDuration, clock, scheduler, closed, this::newBindingRenewal);
         this.executionState = new RuntimeExecutionState(bindingRepository, sessionRepository, executionRepository,
                 this.brokerOwnerId, this.dispatchLeaseDuration, clock);
         this.executionDispatcher = new RuntimeExecutionDispatcher(bindingRegistry, executionState,
@@ -295,6 +288,14 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                 sessionRepository, transport, executionReconciler, closed);
         this.executionCancellation = new RuntimeExecutionCancellation(bindingRegistry, executionState, executionRepository,
                 transport, executionDispatcher, scheduler, this.operationLeaseDuration, closed);
+        this.sessionRelease = new RuntimeSessionRelease(bindingRepository, sessionRepository, executionRepository,
+                provisioner, transport, bindingRegistry, executionRecovery);
+    }
+
+    private BindingRenewal newBindingRenewal(RuntimeBindingRecord claimed) {
+        return new BindingRenewal(claimed, bindingRepository, executionRepository,
+                bindingRegistry, sessionRelease, brokerOwnerId, operationLeaseDuration,
+                clock, closed, renewalScheduler);
     }
 
     public boolean supportsDrainedStop() {
@@ -583,7 +584,7 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
             bindingRegistry.releaseOperationQuietly(claimed.getBindingId(), claimed.getOperationGeneration());
             return failed(unavailable("runtime_close_claim_pending", "Drain claim changed"));
         }
-        var renewal = new BindingRenewal(draining);
+        var renewal = newBindingRenewal(draining);
         renewal.start();
         CompletionStage<Void> result = safeStage(() -> {
             CompletionStage<Void> stopped = CompletableFuture.completedFuture(null);
@@ -605,7 +606,7 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                             || executionRepository.hasActiveByBinding(draining.getBindingId(), draining.getGeneration())) {
                         throw conflict("workspace_close_execution_unsettled", "Original resources are unsettled");
                     }
-                    var receipt = renewal.current.get().getDrainReceipt();
+                    var receipt = renewal.currentRecord().getDrainReceipt();
                     return receipt == null ? stopAcknowledgedRuntime(draining)
                             : CompletableFuture.completedFuture(receipt);
                 }).thenCompose(receipt -> releaseRetiredHolders(draining, renewal)
@@ -657,7 +658,7 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
      * crash retries it; the exact-match clear cannot touch a newer holder.
      */
     private CompletionStage<Void> releaseRetiredHolders(RuntimeBindingRecord binding, BindingRenewal renewal) {
-        var current = renewal.current.get();
+        var current = renewal.currentRecord();
         // Only a persisted receipt can prove the worker stopped. On the plain
         // close path every holder was cleared by the acknowledged release, so
         // there is nothing to scan and nothing to clear.
@@ -847,7 +848,7 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
             // The close cascade's release is the drain arm: a live hold row
             // gets its stop here, where the caller's fence can wait for the
             // proof, never on a turn's routine release.
-            return releaseSession(original, true).thenAccept(released -> {
+            return sessionRelease.releaseSession(original, true).thenAccept(released -> {
                 if (!Boolean.TRUE.equals(released)) {
                     throw unavailable("runtime_session_release_failed", "Original Session has not released");
                 }
@@ -1980,7 +1981,7 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                         "Runtime Session belongs to another Harness Session");
             }
             requireLifecycleRelease(context.binding().getRequest(), context.session(), authority);
-            return releaseSession(context, drain);
+            return sessionRelease.releaseSession(context, drain);
         });
     }
 
@@ -2113,7 +2114,7 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                                             clock.instant()));
                         }
                         if (releasing != null) {
-                            finishSessionRelease(releasing);
+                            sessionRelease.finishSessionRelease(releasing);
                             return CompletableFuture.completedFuture(true);
                         }
                     }
@@ -2249,153 +2250,6 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
         return executionRecovery.stopBackgroundProcess(tenantId, harnessSessionId, executionCallId);
     }
 
-    private CompletionStage<Boolean> releaseSession(
-            SessionContext context, boolean drain) {
-        RuntimeSessionRecord persisted = sessionRepository.findById(context.session().getScope(),
-                context.session().getRuntimeSessionId());
-        if (persisted != null && persisted.getState() == RuntimeSessionRecord.State.RELEASED) {
-            bindingRegistry.removeSession(context.session().getRuntimeSessionId());
-            return CompletableFuture.completedFuture(true);
-        }
-        RuntimeBindingRecord parent = bindingRepository.findById(context.binding().getBindingId());
-        if (parent == null || parent.getGeneration() != context.binding().getGeneration()
-                || parent.getState() != RuntimeBindingRecord.State.READY
-                        && parent.getState() != RuntimeBindingRecord.State.DRAINING) {
-            return failed(unavailable("runtime_reconciliation_required",
-                    "Runtime release requires recovery of the original generation"));
-        }
-        if (!provisioner.isUsable(context.lease())) {
-            if (parent.isDrainRequested()) {
-                return failed(conflict("workspace_close_identity_unverified", "Original worker cannot release its Session"));
-            }
-            return releaseUnusableSession(context);
-        }
-        CompletableFuture<Boolean> attempt = new CompletableFuture<>();
-        context.lock();
-        try {
-            if (context.releaseAttempt() != null) {
-                return context.releaseAttempt();
-            }
-            context.releaseAttempt(attempt);
-        } finally {
-            context.unlock();
-        }
-        CompletionStage<Boolean> run = executionRecovery.settleUnprovenBackgroundRows(context, drain)
-                .thenCompose(ignored -> releaseSessionAfterSweep(context, drain));
-        run.whenComplete((result, error) -> {
-            if (error != null) {
-                context.releaseAttempt(null);
-                attempt.completeExceptionally(unwrap(error));
-            } else {
-                // A negative answer keeps the join but frees the latch, so
-                // the next caller gets a fresh attempt, not this one.
-                if (!Boolean.TRUE.equals(result)) {
-                    context.releaseAttempt(null);
-                }
-                attempt.complete(result);
-            }
-        });
-        return attempt;
-    }
-
-    private CompletionStage<Boolean> releaseSessionAfterSweep(
-            SessionContext context, boolean drain) {
-        boolean backgroundBusy;
-        context.lock();
-        try {
-            if (context.release() != null) {
-                return context.release();
-            }
-            if (context.hasActiveControl()
-                    || executionRepository.hasActiveByRuntimeSession(
-                            context.binding().getBindingId(), context.binding().getGeneration(),
-                            context.session().getRuntimeSessionId(),
-                            new HashSet<>(context.backgroundProcesses()))) {
-                throw conflict("runtime_session_busy",
-                        "Runtime Session has an active operation");
-            }
-            backgroundBusy = executionRepository.hasActiveByRuntimeSession(
-                    context.binding().getBindingId(), context.binding().getGeneration(),
-                    context.session().getRuntimeSessionId());
-        } finally {
-            context.unlock();
-        }
-        if (!backgroundBusy) {
-            return completeSessionRelease(context);
-        }
-        if (!drain) {
-            // Routine release: the sweep stopped nothing, so a live hold is
-            // the designed state, not a wedge — the run holds its Runtime
-            // until it is proven gone, and the answer names the hold so the
-            // Harness never mistakes it for the unproven busy below.
-            return failed(conflict("runtime_session_held",
-                    "Runtime Session is held by a live background run"));
-        }
-        // The drain sweep issued each row's stop and settled every end it
-        // could prove; what it could not prove keeps its hold — busy is the
-        // accurate answer here, never a speculative teardown.
-        return failed(conflict("runtime_session_busy",
-                "Runtime Session has an active background process"));
-    }
-
-    private CompletionStage<Boolean> completeSessionRelease(
-            SessionContext context) {
-        CompletableFuture<Boolean> result;
-        RuntimeSessionRecord releasing;
-        context.lock();
-        try {
-            if (context.release() != null) {
-                return context.release();
-            }
-            // Active executions are rejected inside the transition's own
-            // transaction by beginSessionRelease; only the process-local
-            // control check stays here.
-            if (context.hasActiveControl()) {
-                throw conflict("runtime_session_busy",
-                        "Runtime Session has an active operation");
-            }
-            releasing = transitionSessionToReleasing(context);
-            if (releasing.getState()
-                    == RuntimeSessionRecord.State.RELEASED) {
-                bindingRegistry.removeSession(context.session().getRuntimeSessionId());
-                return CompletableFuture.completedFuture(true);
-            }
-            result = new CompletableFuture<>();
-            context.release(result);
-        } finally {
-            context.unlock();
-        }
-        mapFailure(safeStage(() -> transport.release(context.lease(),
-                context.session())), "runtime_session_release_failed",
-                "Runtime Session release failed")
-                .whenComplete((released, error) -> {
-                    if (error != null) {
-                        context.release(null);
-                        result.completeExceptionally(unwrap(error));
-                    } else if (!Boolean.TRUE.equals(released)) {
-                        context.release(null);
-                        result.complete(false);
-                    } else {
-                        try {
-                            finishSessionRelease(releasing);
-                            bindingRegistry.removeSession(context.session()
-                                    .getRuntimeSessionId());
-                            result.complete(true);
-                        } catch (RuntimeException exception) {
-                            context.release(null);
-                            result.completeExceptionally(exception);
-                        }
-                    }
-                });
-        return result;
-    }
-
-    private CompletionStage<Boolean> releaseUnusableSession(SessionContext context) {
-        bindingRegistry.invalidateBinding(context.binding());
-        return failed(unavailable("runtime_reconciliation_required",
-                "Runtime release requires durable proof that old writers stopped"));
-    }
-
     private CompletionStage<RuntimeSessionRecord> acquireSession(
             RuntimeSession session, String mountClaimId) {
         String runtimeSessionId = session.getRuntimeSessionId();
@@ -2510,103 +2364,6 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                 ? bindingRepository.requireSessionAdmission(sessionRepository, record) : record;
     }
 
-    private RuntimeSessionRecord transitionSessionToReleasing(
-            SessionContext context) {
-        RuntimeSessionRecord current = sessionRepository.findById(
-                context.session().getScope(),
-                context.session().getRuntimeSessionId());
-        if (current == null) {
-            throw notFound("runtime_session_not_found",
-                    "Runtime Session was not found");
-        }
-        if (CsiFilesRetirementProfile.isProfile(current.getSession().getScope())) {
-            throw CsiFilesRetirementProfile.releaseUnavailable();
-        }
-        for (int attempt = 0; attempt < MAX_CAS_ATTEMPTS; attempt++) {
-            if (current.getState()
-                    == RuntimeSessionRecord.State.RELEASING) {
-                // A row already persisted as RELEASING can predate the
-                // guarded transition: an older peer's check-then-act let an
-                // admission in and its worker release then failed. Admission
-                // needs READY under the row lock, so nothing new can join
-                // now, but completing this release would free a worker that
-                // is still running a tool, so the retry is only idempotent
-                // once nothing active is left.
-                if (executionRepository.hasActiveByRuntimeSession(
-                        current.getBindingId(),
-                        current.getRuntimeGeneration(),
-                        current.getRuntimeSessionId())) {
-                    throw conflict("runtime_session_busy",
-                            "Runtime Session has an active operation");
-                }
-                return current;
-            }
-            if (current.getState()
-                    == RuntimeSessionRecord.State.RELEASED) {
-                return current;
-            }
-            if (current.getState() != RuntimeSessionRecord.State.READY
-                    && current.getState() != RuntimeSessionRecord.State.ACQUIRING) {
-                throw conflict("runtime_session_not_ready",
-                        "Runtime Session is not ready for release");
-            }
-            // The transition and the no-active-execution check commit in one
-            // transaction under the Session row lock that admission also
-            // takes, so a concurrent Broker process cannot admit into the
-            // gap between the check and the CAS.
-            RuntimeSessionRecord updated =
-                    bindingRepository.beginSessionRelease(sessionRepository,
-                            executionRepository, current);
-            if (updated != null) {
-                return updated;
-            }
-            current = sessionRepository.findById(
-                    context.session().getScope(),
-                    context.session().getRuntimeSessionId());
-            if (current == null) {
-                throw conflict("runtime_session_state_conflict",
-                        "Runtime Session changed while releasing");
-            }
-        }
-        throw conflict("runtime_session_state_conflict",
-                "Runtime Session changed while releasing");
-    }
-
-    private void finishSessionRelease(RuntimeSessionRecord releasing) {
-        finishSessionRelease(releasing, null);
-    }
-
-    private void finishSessionRelease(RuntimeSessionRecord releasing, RuntimeBindingRecord stopped) {
-        RuntimeSessionRecord current = releasing;
-        for (int attempt = 0; attempt < MAX_CAS_ATTEMPTS; attempt++) {
-            if (current.getState() == RuntimeSessionRecord.State.RELEASED) {
-                return;
-            }
-            RuntimeSessionRecord updated = stopped == null
-                    ? bindingRepository.completeSessionRelease(sessionRepository, current)
-                    : bindingRepository.completeStoppedSessionRelease(sessionRepository, executionRepository, current, stopped);
-            if (updated != null
-                    || current.getState()
-                            == RuntimeSessionRecord.State.RELEASED) {
-                return;
-            }
-            current = sessionRepository.findById(
-                    releasing.getSession().getScope(),
-                    releasing.getRuntimeSessionId());
-            if (current != null && current.getState()
-                    == RuntimeSessionRecord.State.RELEASED) {
-                return;
-            }
-            if (current == null || current.getState()
-                            != RuntimeSessionRecord.State.RELEASING) {
-                throw conflict("runtime_session_state_conflict",
-                        "Runtime Session changed after release");
-            }
-        }
-        throw conflict("runtime_session_state_conflict",
-                "Runtime Session changed after release");
-    }
-
     @Override
     public void close() {
         if (!closed.compareAndSet(false, true)) {
@@ -2693,192 +2450,4 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
         return executor;
     }
 
-    final class BindingRenewal implements AutoCloseable {
-        // A monitor here would pin a virtual-thread carrier whenever a
-        // guarded repository call blocks on the database (JDK 21);
-        // the lock parks without pinning instead.
-        private final ReentrantLock monitor = new ReentrantLock();
-        private final AtomicReference<RuntimeBindingRecord> current;
-        private final AtomicBoolean valid = new AtomicBoolean(true);
-        private final AtomicBoolean stopped = new AtomicBoolean();
-        private ScheduledFuture<?> task;
-
-        BindingRenewal(RuntimeBindingRecord claimed) {
-            current = new AtomicReference<>(claimed);
-        }
-
-        void start() {
-            monitor.lock();
-            try {
-                long delay = renewalDelayMillis(operationLeaseDuration);
-                task = renewalScheduler.scheduleWithFixedDelay(this::renew,
-                        delay, delay, TimeUnit.MILLISECONDS);
-            } finally {
-                monitor.unlock();
-            }
-        }
-
-        RuntimeBindingRecord stopAndGet() {
-            monitor.lock();
-            try {
-                closeLocked();
-                return !closed.get() && valid.get() ? current.get() : null;
-            } finally {
-                monitor.unlock();
-            }
-        }
-
-        void persistDrainReceipt(RuntimeDrainReceipt receipt) {
-            persistDrainReceipt(receipt, null);
-        }
-
-        void persistDrainReceipt(RuntimeDrainReceipt receipt, RuntimeLifecycleAuthority authority) {
-            monitor.lock();
-            try {
-                var expected = requireDrainClaim(authority != null);
-                if (receipt == null || !receipt.matches(expected)) {
-                    throw conflict("workspace_close_identity_unverified", "Original stop receipt differs");
-                }
-                var replacement = expected.withDrainReceipt(receipt);
-                if (authority != null) {
-                    replacement = replacement.withLifecycleAuthority(authority)
-                            .withState(RuntimeBindingRecord.State.DRAINING, expected.getLease(), clock.instant());
-                }
-                var updated = bindingRepository.compareAndSet(expected, replacement);
-                if (updated == null) {
-                    valid.set(false);
-                    closeLocked();
-                    throw unavailable("runtime_close_claim_pending", "Original stop receipt was fenced");
-                }
-                current.set(updated);
-            } finally {
-                monitor.unlock();
-            }
-        }
-
-        boolean releaseStoppedSession(RuntimeSessionRecord record) {
-            return releaseStoppedSession(record, null);
-        }
-
-        boolean releaseStoppedSession(RuntimeSessionRecord record, RuntimeLifecycleAuthority authority) {
-            monitor.lock();
-            try {
-                var binding = requireDrainClaim();
-                var receipt = binding.getDrainReceipt();
-                if (receipt == null) {
-                    return false;
-                }
-                if (!receipt.matches(binding) || !binding.getBindingId().equals(record.getBindingId())
-                        || binding.getGeneration() != record.getRuntimeGeneration()) {
-                    throw conflict("workspace_close_identity_unverified", "Stopped Session identity differs");
-                }
-                if (executionRepository.hasActiveByBinding(binding.getBindingId(), binding.getGeneration())) {
-                    throw conflict("workspace_close_execution_unsettled", "Original resources are unsettled");
-                }
-                var authorized = authority == null ? binding : binding.withLifecycleAuthority(authority);
-                finishSessionRelease(transitionSessionToReleasing(
-                        new SessionContext(record.getSession(), authorized, binding.getLease())), authorized);
-                bindingRegistry.removeSession(record.getRuntimeSessionId());
-                return true;
-            } finally {
-                monitor.unlock();
-            }
-        }
-
-        private RuntimeBindingRecord requireDrainClaim() {
-            return requireDrainClaim(false);
-        }
-
-        private RuntimeBindingRecord requireDrainClaim(boolean stoppedRecovery) {
-            var binding = current.get();
-            if (closed.get() || stopped.get() || !valid.get()
-                    || !brokerOwnerId.equals(binding.getOperationOwner())
-                    || !binding.isDrainRequested() || !(binding.getState() == RuntimeBindingRecord.State.DRAINING
-                            || stoppedRecovery && binding.getState() == RuntimeBindingRecord.State.LOST)
-                    || binding.getOperationLeaseUntil() == null
-                    || !binding.getOperationLeaseUntil().isAfter(clock.instant())) {
-                throw unavailable("runtime_close_claim_pending", "Original drain claim expired");
-            }
-            return binding;
-        }
-
-        boolean persistResourceHandle(
-                RuntimeResourceHandle handle) {
-            monitor.lock();
-            try {
-                if (closed.get() || !valid.get()) {
-                    return false;
-                }
-                RuntimeBindingRecord expected = current.get();
-                RuntimeBindingRecord updated = bindingRepository.compareAndSet(
-                        expected, expected.withResourceHandle(handle,
-                                clock.instant()));
-                if (updated == null) {
-                    valid.set(false);
-                    closeLocked();
-                    return false;
-                }
-                current.set(updated);
-                return true;
-            } finally {
-                monitor.unlock();
-            }
-        }
-
-        private void renew() {
-            monitor.lock();
-            try {
-                // stopped is per-instance: cancel(false) cannot retract a
-                // tick already waiting on this monitor, so once close() ran
-                // the tick must return here rather than renew a claim its
-                // owner has started renewing inline. The window is staged
-                // and pinned for the provision-path shape, where
-                // persistResourceHandle can hold this monitor while a tick
-                // queues behind it
-                // (DurableRuntimeRecoveryTest.stoppedFlagRetractsATickQueuedBehindClose);
-                // the LOST-branch shape has no third monitor holder, so
-                // there it remains a timing-only guarantee.
-                if (stopped.get() || closed.get()) {
-                    closeLocked();
-                    return;
-                }
-                RuntimeBindingRecord expected = current.get();
-                try {
-                    RuntimeBindingRecord renewed =
-                            bindingRepository.renewOperation(
-                                    expected.getBindingId(), brokerOwnerId,
-                                    expected.getOperationGeneration(),
-                                    operationLeaseDuration);
-                    if (renewed == null) {
-                        valid.set(false);
-                        closeLocked();
-                    } else {
-                        current.set(renewed);
-                    }
-                } catch (RuntimeException exception) {
-                    valid.set(false);
-                    closeLocked();
-                }
-            } finally {
-                monitor.unlock();
-            }
-        }
-
-        @Override
-        public void close() {
-            monitor.lock();
-            try {
-                closeLocked();
-            } finally {
-                monitor.unlock();
-            }
-        }
-
-        private void closeLocked() {
-            stopped.set(true);
-            if (task != null) {
-                task.cancel(false);
-            }
-        }
-    }
 }
