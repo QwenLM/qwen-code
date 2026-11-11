@@ -83,7 +83,7 @@ public class JdbcSessionResourceObjects {
         }
         Map<String, Object> row = rows.getFirst();
         byte[] bytes;
-        try (InputStream stream = store().open(text(row.get("object_key")), () -> { })) {
+        try (InputStream stream = store().open(text(row.get("object_key")), () -> {})) {
             bytes = stream.readAllBytes();
         } catch (java.io.IOException error) {
             throw new IllegalStateException("Session resource read failed", error);
@@ -172,7 +172,7 @@ public class JdbcSessionResourceObjects {
         }
         String objectKey = text(row.get("object_key"));
         byte[] bytes;
-        try (InputStream stream = store().open(objectKey, () -> { })) {
+        try (InputStream stream = store().open(objectKey, () -> {})) {
             bytes = stream.readAllBytes();
         } catch (java.io.IOException error) {
             throw new IllegalStateException("Session resource read failed", error);

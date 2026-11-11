@@ -90,7 +90,7 @@ final class JournalResourceReads {
 
     private byte[] readSessionObject(JournalStoreRows.ResourceRow resource) {
         byte[] bytes;
-        try (java.io.InputStream stream = publicationObjects.open(resource.objectKey(), () -> { })) {
+        try (java.io.InputStream stream = publicationObjects.open(resource.objectKey(), () -> {})) {
             bytes = stream.readAllBytes();
         } catch (java.io.IOException error) {
             throw new IllegalStateException("Session resource read failed", error);

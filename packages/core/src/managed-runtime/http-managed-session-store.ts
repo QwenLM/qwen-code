@@ -2505,7 +2505,7 @@ class ManagedSessionStoreHttpClient {
       `&writerId=${encodeURIComponent(this.writerId)}` +
       `&writerGeneration=${grant.writerGeneration}`;
     const allocatePath = '/resources:allocate';
-    await this.withRetry(false, 'POST', allocatePath, async (timeoutMs) => {
+    await this.withRetry(true, 'POST', allocatePath, async (timeoutMs) => {
       await this.request(
         allocatePath,
         'POST',
@@ -2523,7 +2523,7 @@ class ManagedSessionStoreHttpClient {
       );
     });
     const uploadPath = `/resources/${encodeURIComponent(ref.resourceId)}:upload?${query}`;
-    await this.withRetry(false, 'POST', uploadPath, async (timeoutMs) => {
+    await this.withRetry(true, 'POST', uploadPath, async (timeoutMs) => {
       await this.request(
         uploadPath,
         'POST',
@@ -2532,7 +2532,7 @@ class ManagedSessionStoreHttpClient {
       );
     });
     const finalizePath = `/resources/${encodeURIComponent(ref.resourceId)}:finalize?${query}`;
-    await this.withRetry(false, 'POST', finalizePath, async (timeoutMs) => {
+    await this.withRetry(true, 'POST', finalizePath, async (timeoutMs) => {
       await this.request(finalizePath, 'POST', undefined, timeoutMs);
     });
   }

@@ -773,7 +773,7 @@ public class ManagedAgentProperties
         private boolean deletionEnabled;
         private long packTargetBytes = 16L * 1024 * 1024;
         private int packMaxTransactions = 4096;
-        @DurationUnit(ChronoUnit.HOURS)
+        @DurationUnit(ChronoUnit.SECONDS)
         private Duration deletionGrace = Duration.ofHours(72);
     }
 

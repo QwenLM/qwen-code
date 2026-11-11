@@ -354,8 +354,19 @@ public class ManagedSessionStoreController {
         store.authorizeOrdinary(tenant.tenantId(), sessionId, writerToken,
                 new ManagedSessionStoreModels.AuthorizeLifecycleRequest(workspaceId, writerId,
                         writerGeneration));
-        resourceObjects.upload(tenant.tenantId(), sessionId, resourceId,
-                java.util.Base64.getDecoder().decode(body.get("bytesBase64")));
+        String encoded = body == null ? null : body.get("bytesBase64");
+        if (encoded == null || encoded.isBlank()) {
+            throw new com.alibaba.qwen.code.managedagent.exception.ManagedAgentException(400,
+                    "invalid_request", "bytesBase64 is required.");
+        }
+        byte[] bytes;
+        try {
+            bytes = java.util.Base64.getDecoder().decode(encoded);
+        } catch (IllegalArgumentException error) {
+            throw new com.alibaba.qwen.code.managedagent.exception.ManagedAgentException(400,
+                    "invalid_request", "bytesBase64 is not valid base64.");
+        }
+        resourceObjects.upload(tenant.tenantId(), sessionId, resourceId, bytes);
         return ResponseEntity.ok(java.util.Map.of("resourceId", resourceId));
     }
 

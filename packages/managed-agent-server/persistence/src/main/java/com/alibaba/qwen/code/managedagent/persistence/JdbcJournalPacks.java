@@ -133,7 +133,7 @@ public class JdbcJournalPacks {
                 packId, scope, tenant, workspace, session, from, through, "", objectKey,
                 objectBytes.length, JournalStoreRows.sha256(objectBytes), now, now);
         store().putIfAbsent(objectKey, objectBytes);
-        byte[] readBack = readFully(store().open(objectKey, () -> { }));
+        byte[] readBack = readFully(store().open(objectKey, () -> {}));
         if (!JournalStoreRows.sha256(readBack).equals(JournalStoreRows.sha256(objectBytes))) {
             throw JournalStoreRows.conflict("managed_journal_pack_corrupt",
                     "The published pack object does not match its digest.");
@@ -199,7 +199,7 @@ public class JdbcJournalPacks {
         ToolPublicationObjectStore store = store();
         long size = ((Number) pack.get("byte_length")).longValue();
         byte[] trailer = readFully(store.openRange(text(pack.get("object_key")), size - 12, 12,
-                () -> { }));
+                () -> {}));
         if (trailer[8] != MAGIC[0] || trailer[9] != MAGIC[1] || trailer[10] != MAGIC[2]
                 || trailer[11] != MAGIC[3]) {
             throw JournalStoreRows.conflict("managed_journal_pack_corrupt",
@@ -207,10 +207,10 @@ public class JdbcJournalPacks {
         }
         long indexLength = ByteBuffer.wrap(trailer, 0, 8).getLong();
         byte[] indexBytes = readFully(store.openRange(text(pack.get("object_key")),
-                size - 12 - indexLength, indexLength, () -> { }));
+                size - 12 - indexLength, indexLength, () -> {}));
         long[] entry = findEntry(new String(indexBytes, StandardCharsets.UTF_8), revision);
         byte[] chunk = readFully(store.openRange(text(pack.get("object_key")), entry[0],
-                entry[1], () -> { }));
+                entry[1], () -> {}));
         byte[] bytes = gunzip(chunk);
         if (bytes.length != byteLength || !JournalStoreRows.sha256(bytes).equals(digest)) {
             throw JournalStoreRows.conflict("managed_journal_pack_corrupt",
