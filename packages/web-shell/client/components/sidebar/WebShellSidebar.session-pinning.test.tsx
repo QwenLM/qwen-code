@@ -291,6 +291,68 @@ describe('WebShellSidebar session pinning (issue #9465)', () => {
     expect(workspaceActions.updateSessionOrganization).not.toHaveBeenCalled();
   });
 
+  describe('renaming a pinned session from the Activity view', () => {
+    async function openActivityWithPinnedSession(): Promise<HTMLElement> {
+      const session = makeSession('pinned-one', {
+        displayName: 'Pinned one',
+        isPinned: true,
+        pinnedAt: '2026-01-02T00:00:00.000Z',
+        hasActivePrompt: true,
+        updatedAt: new Date().toISOString(),
+      });
+      active.sessions = [session];
+      active.data = active.sessions;
+      pinned.sessions = [session];
+      pinned.data = pinned.sessions;
+      connection.sessionId = 'pinned-one';
+      useSessionCatalogQueries.mockReturnValue([
+        { loading: false, stale: false, page: { sessions: [session] } },
+      ]);
+      renderSidebar();
+      await flushSidebar();
+      await act(async () => {
+        click(
+          container.querySelector<HTMLButtonElement>(
+            'button[aria-label="View activity"]',
+          )!,
+        );
+      });
+      await flushSidebar();
+      const title = Array.from(
+        container.querySelectorAll('[data-web-shell-session-title]'),
+      ).find((node) => node.textContent === 'Pinned one');
+      expect(title).not.toBeUndefined();
+      return title!.closest<HTMLElement>('[role="button"]')!;
+    }
+
+    it('mounts a single editor when the inline Rename button is clicked', async () => {
+      const row = await openActivityWithPinnedSession();
+      await act(async () => {
+        click(
+          row.querySelector<HTMLButtonElement>('button[aria-label="Rename"]')!,
+        );
+      });
+      await flushSidebar();
+      expect(
+        container.querySelectorAll('input[aria-label^="Rename"]').length,
+      ).toBe(1);
+    });
+
+    it('mounts a single editor on F2', async () => {
+      const row = await openActivityWithPinnedSession();
+      await act(async () => {
+        row.dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'F2', bubbles: true }),
+        );
+        await Promise.resolve();
+      });
+      await flushSidebar();
+      expect(
+        container.querySelectorAll('input[aria-label^="Rename"]').length,
+      ).toBe(1);
+    });
+  });
+
   it('orders the pinned section by pin time, not last activity', async () => {
     // The daemon returns the pinned page sorted by activity (updatedAt
     // descending): "recent" was active most recently but was pinned AFTER

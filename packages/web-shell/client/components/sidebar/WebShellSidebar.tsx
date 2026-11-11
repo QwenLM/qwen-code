@@ -4991,15 +4991,25 @@ export function WebShellSidebar({
       ? t('sidebar.groupCreate')
       : t('sidebar.groupRename');
 
-  // The Pinned section is not rendered in Live or Channels; a host check
-  // that ignored that would let an off-screen Pinned row disable the reveal
-  // guard for a row that is actually truncated.
+  // The Pinned section is not rendered in Live or Channels, nor while the
+  // Activity view or `sessionContent` replaces the default session list; a
+  // host check that ignored that would let an unmounted Pinned row disable
+  // the only editor that is actually on screen.
   const pinnedSectionVisible = useMemo(
     () =>
+      sessionContent === undefined &&
+      !(activityOpen && activityEnabled) &&
       !liveView &&
       selectedSessionSource !== 'channel' &&
       pinnedSessions.length > 0,
-    [liveView, pinnedSessions, selectedSessionSource],
+    [
+      activityEnabled,
+      activityOpen,
+      liveView,
+      pinnedSessions,
+      selectedSessionSource,
+      sessionContent,
+    ],
   );
   // When the Pinned section hosts the editor, the row is already mounted
   // there and every other copy of it stays read-only; expanding a catalog
