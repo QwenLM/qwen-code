@@ -75,6 +75,8 @@ import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.f
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.immutableMap;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.invalid;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.isDetachedCapture;
+import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.isProtocolV3;
+import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.isPublicationV3;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.mapFailure;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.mapStoreFailure;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.notFound;
@@ -738,11 +740,7 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                     if (observation == null || observation.getOutcome() != RuntimeObservation.Outcome.READY) {
                         return safeStage(() -> provisioner.stopDrained(binding));
                     }
-                    RuntimeLease lease = binding.getLease();
-                    if (!binding.getResourceHandle().equals(observation.getHandle())
-                            || !lease.getRuntimeInstanceId().equals(observation.getRuntimeInstanceId())
-                            || !lease.getLeaseId().equals(observation.getLeaseId()) || lease.getEpoch() != observation.getEpoch()
-                            || !lease.getEndpoint().equals(observation.getEndpoint())) {
+                    if (!observation.matchesRuntime(binding.getResourceHandle(), binding.getLease())) {
                         return RuntimeBrokerSupport.<RuntimeDrainReceipt>failed(conflict("workspace_close_identity_unverified",
                                 "Original SSH worker identity changed"));
                     }
@@ -800,11 +798,7 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                             });
                         }
                         if (observation == null || observation.getOutcome() != RuntimeObservation.Outcome.READY
-                                || !binding.getResourceHandle().equals(observation.getHandle())
-                                || !binding.getLease().getRuntimeInstanceId().equals(observation.getRuntimeInstanceId())
-                                || !binding.getLease().getLeaseId().equals(observation.getLeaseId())
-                                || binding.getLease().getEpoch() != observation.getEpoch()
-                                || !binding.getLease().getEndpoint().equals(observation.getEndpoint())) {
+                                || !observation.matchesRuntime(binding.getResourceHandle(), binding.getLease())) {
                             throw conflict("workspace_close_identity_unverified", "Original worker cannot be observed");
                         }
                         var adopted = CompletableFuture.completedFuture(
@@ -1032,11 +1026,7 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                 original.getResourceHandle(), original.getLease())).thenCompose(observation -> {
                     RuntimeLease lease = original.getLease();
                     if (observation == null || observation.getOutcome() != RuntimeObservation.Outcome.READY
-                            || !original.getResourceHandle().equals(observation.getHandle())
-                            || !lease.getRuntimeInstanceId().equals(observation.getRuntimeInstanceId())
-                            || !lease.getLeaseId().equals(observation.getLeaseId())
-                            || lease.getEpoch() != observation.getEpoch()
-                            || !lease.getEndpoint().equals(observation.getEndpoint())) {
+                            || !observation.matchesRuntime(original.getResourceHandle(), lease)) {
                         throw conflict("managed_extension_owner_unavailable", "The original extension Runtime cannot be observed.");
                     }
                     return safeStage(() -> transport.attest(lease, original.getRequest(), original.getProvisionSeed()))
@@ -1535,7 +1525,7 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                         if (RuntimeToolMeasurements.selected(record.getReference())) {
                             RuntimeToolMeasurements.requireProfile(context.session());
                         }
-                        boolean v3 = "deferred_v3".equals(record.getReference().get("dispatchMode"));
+                        boolean v3 = isPublicationV3(record.getReference());
                         if (!"deferred".equals(record.getReference().get("dispatchMode")) && !v3) {
                             throw conflict("runtime_execution_conflict", "Execution was not reserved for deferred dispatch");
                         }
@@ -1569,7 +1559,7 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                                 || !(payload.get("toolName") instanceof String toolName) || toolName.isEmpty()
                                 || !(payload.get("input") instanceof Map)
                                 || !BrokerValues.isWellFormedJson(payload)
-                                || Integer.valueOf(3).equals(record.getReference().get("runtimeProtocol"))
+                                || isProtocolV3(record.getReference())
                                     && !"run_shell_command".equals(toolName) && !"monitor".equals(toolName)) {
                             throw invalid("runtime_payload_invalid", "Tool payload is invalid");
                         }
@@ -1719,7 +1709,7 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
             if (saved.isTerminal()) {
                 return executionReconciler.measuredResult(saved, 0);
             }
-            if ("deferred_v3".equals(saved.getReference().get("dispatchMode"))) {
+            if (isPublicationV3(saved.getReference())) {
                 if (saved.getState() == ToolExecutionRecord.State.UNKNOWN
                         && publicationVerifier != null) {
                     Map<String, Object> durable = publicationVerifier.finished(saved);
@@ -1787,7 +1777,7 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                 bindingRegistry.requireReadySessionRecord(context);
                 record = executionState.requireExecution(context, executionCallId);
                 if (!record.isSettled()
-                        || !Integer.valueOf(3).equals(record.getReference().get("runtimeProtocol"))
+                        || !isProtocolV3(record.getReference())
                         || !record.getExecutionCallId().equals(savedReceipt.get("executionCallId"))) {
                     throw conflict("runtime_execution_conflict", "Only the original settled Tool v3 result can be acknowledged");
                 }
@@ -1821,7 +1811,7 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
         return mapStoreFailure(safeStage(() -> bindingRegistry.requireReadySession(harnessSessionId, runtimeSessionId)
                 .thenCompose(context -> {
                     ToolExecutionRecord execution = executionState.requireExecution(context, id);
-                    if (!"deferred_v3".equals(execution.getReference().get("dispatchMode"))) {
+                    if (!isPublicationV3(execution.getReference())) {
                         return acknowledgeLocalExecution(harnessSessionId, runtimeSessionId, id, receipt);
                     }
                     context.lock();
@@ -2158,7 +2148,7 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                     referenceString(safeReference, "promptId"),
                     referenceString(safeReference, "callId"),
                     referenceString(safeReference,
-                            "deferred_v3".equals(safeReference.get("dispatchMode"))
+                            isPublicationV3(safeReference)
                                     ? "payloadDigest" : "argsDigest"),
                     safeReference);
             // The JSON writer and the JDBC codec write an unpaired surrogate

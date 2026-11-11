@@ -34,6 +34,21 @@ final class RuntimeBrokerSupport {
             "unknown");
     static final int MAX_CAS_ATTEMPTS = 16;
 
+    /** Tool v3 publication dispatch: a payload digest and publication grant. */
+    static boolean isPublicationV3(Map<String, Object> reference) {
+        return "deferred_v3".equals(reference.get("dispatchMode"));
+    }
+
+    /** Tool v3 provider protocol: an input digest in the reference itself. */
+    static boolean isProtocolV3(Map<String, Object> reference) {
+        return Integer.valueOf(3).equals(reference.get("runtimeProtocol"));
+    }
+
+    /** Either v3 encoding; a reference carries at most one of the two. */
+    static boolean isV3Family(Map<String, Object> reference) {
+        return isProtocolV3(reference) || isPublicationV3(reference);
+    }
+
     static void requireSameSession(RuntimeSession actual,
             RuntimeSession requested) {
         if (!actual.getHarnessSessionId().equals(
@@ -52,7 +67,7 @@ final class RuntimeBrokerSupport {
             ProviderRuntimeProtocol.reference(immutable, runtimeSessionId);
         } else {
             boolean measured = RuntimeToolMeasurements.selected(immutable);
-            boolean v3 = Integer.valueOf(3).equals(immutable.get("runtimeProtocol"));
+            boolean v3 = isProtocolV3(immutable);
             if (v3 && payloadDigest != null) {
                 throw invalid("runtime_reference_invalid", "Tool v3 publication modes conflict");
             }
@@ -336,8 +351,7 @@ final class RuntimeBrokerSupport {
                 || !execution.isSettled() || !"not_started".equals(execution.getExecutionStatus())
                 || execution.getResult() == null || !execution.getResult().containsKey("capture")
                 || execution.getResult().get("capture") != null
-                || !(Integer.valueOf(3).equals(execution.getReference().get("runtimeProtocol"))
-                        || "deferred_v3".equals(execution.getReference().get("dispatchMode")))
+                || !isV3Family(execution.getReference())
                 || ProviderRuntimeProtocol.isReference(execution.getReference())) {
             return null;
         }
