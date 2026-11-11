@@ -744,6 +744,7 @@ interface DropdownItem extends ToolbarDropdownItem {
   icon?: ReactNode;
   disabled?: boolean;
   tooltip?: string;
+  danger?: boolean;
 }
 
 function CheckIcon() {
@@ -908,7 +909,7 @@ function ToolbarPopover({
               item.id === activeId && !item.disabled
                 ? styles.dropdownItemActive
                 : ''
-            }`}
+            } ${item.danger ? styles.dropdownItemDanger : ''}`}
             title={item.disabled ? undefined : item.label}
             aria-disabled={item.disabled || undefined}
             data-disabled={item.disabled ? '' : undefined}
@@ -2231,6 +2232,7 @@ export const ChatEditor = memo(
           label: getModeListLabel(id, t),
           description: t(`mode.desc.${id}`),
           icon: <ModeIcon mode={id} />,
+          danger: id === 'yolo',
         })),
       [availableModes, t],
     );

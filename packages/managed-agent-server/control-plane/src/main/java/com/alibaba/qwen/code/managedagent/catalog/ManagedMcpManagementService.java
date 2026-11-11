@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.catalog;
 
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
+import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionRecords;
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionPolicyStore;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessFailure;
@@ -130,11 +131,13 @@ public class ManagedMcpManagementService {
         if (!body.isObject() || body.size() != (body.has("operation") ? 6 : 5)
                 || !body.path("sessionId").isTextual() || !body.path("supported").isBoolean()
                 || !counter(body.path("revision"), 0) || !body.path("servers").isArray()
-                || body.path("servers").size() > 32 || !body.path("availableServers").isArray()) {
+                || body.path("servers").size() > ManagedExtensionRecords.MAX_MCP_SELECTION_ENTRIES
+                || !body.path("availableServers").isArray()) {
             throw new HarnessFailure("Invalid MCP management snapshot");
         }
         for (String field : List.of("servers", "availableServers")) {
             boolean published = "availableServers".equals(field);
+            int selected = 0;
             for (JsonNode server : body.get(field)) {
                 if (!server.isObject() || server.size() != 4 || !server.path("serverId").isTextual()
                         || !server.path("serverId").asText().matches("[A-Za-z0-9._:-]{1,128}")
@@ -144,6 +147,12 @@ public class ManagedMcpManagementService {
                                 : Set.of("enabled", "disabled", "removed").contains(server.path("state").asText()))) {
                     throw new HarnessFailure("Invalid MCP management server");
                 }
+                if (!published && !"removed".equals(server.path("state").asText())) {
+                    selected++;
+                }
+            }
+            if (!published && selected > 32) {
+                throw new HarnessFailure("MCP management selection capacity exceeded");
             }
         }
         if (body.has("operation")) {
