@@ -279,6 +279,63 @@ class TerminalRelayRealScenarioTest {
         }
     }
 
+    @Test
+    void browserLegAcceptsAWholePasteBeyondTheTomcatDefault() throws Exception {
+        Tomcat tomcat = new Tomcat();
+        tomcat.setPort(0);
+        tomcat.getConnector();
+        File docBase = java.nio.file.Files.createTempDirectory("mwt-paste").toFile();
+        Context ctx = tomcat.addWebapp("", docBase.getAbsolutePath());
+        ctx.addServletContainerInitializer(new org.apache.tomcat.websocket.server.WsSci(), null);
+        ctx.addApplicationListener(EndpointRegistrar.class.getName());
+        tomcat.start();
+        int port = tomcat.getConnector().getLocalPort();
+        try {
+            // Apply the terminal container configuration (the fix under test);
+            // Tomcat's 8 KiB default would close a larger frame with 1009.
+            com.alibaba.qwen.code.managedagent.config.TerminalWebSocketConfig config =
+                    new com.alibaba.qwen.code.managedagent.config.TerminalWebSocketConfig(
+                            mock(RuntimeBrokerService.class), Clock.systemUTC());
+            org.springframework.web.socket.server.standard.ServletServerContainerFactoryBean container =
+                    config.terminalWebSocketContainer();
+            container.setServletContext(ctx.getServletContext());
+            container.afterPropertiesSet();
+
+            byte[] paste = new byte[32 * 1024];
+            new java.util.Random(7).nextBytes(paste);
+            java.io.ByteArrayOutputStream received = new java.io.ByteArrayOutputStream();
+            CountDownLatch echoed = new CountDownLatch(1);
+            java.net.http.WebSocket client = HttpClient.newHttpClient()
+                    .newWebSocketBuilder()
+                    .buildAsync(URI.create("ws://127.0.0.1:" + port
+                                    + "/internal/managed-runtime/v3/terminal"),
+                            new java.net.http.WebSocket.Listener() {
+                                @Override
+                                public CompletionStage<?> onBinary(
+                                        java.net.http.WebSocket webSocket,
+                                        ByteBuffer data, boolean last) {
+                                    byte[] chunk = new byte[data.remaining()];
+                                    data.get(chunk);
+                                    received.writeBytes(chunk);
+                                    if (last) {
+                                        echoed.countDown();
+                                    }
+                                    webSocket.request(1);
+                                    return null;
+                                }
+                            })
+                    .get(10, TimeUnit.SECONDS);
+            client.sendBinary(ByteBuffer.wrap(paste), true);
+            assertThat(echoed.await(10, TimeUnit.SECONDS))
+                    .as("a 32 KiB paste is echoed, not closed 1009").isTrue();
+            assertThat(received.toByteArray()).isEqualTo(paste);
+            client.sendClose(java.net.http.WebSocket.NORMAL_CLOSURE, "");
+        } finally {
+            tomcat.stop();
+            tomcat.destroy();
+        }
+    }
+
     private static RuntimeBindingRecord brokerBinding(RuntimeBrokerService broker) {
         // Admit the hold once to materialize a READY binding the relay can use,
         // then read it back; the relay re-admits idempotently on attach.

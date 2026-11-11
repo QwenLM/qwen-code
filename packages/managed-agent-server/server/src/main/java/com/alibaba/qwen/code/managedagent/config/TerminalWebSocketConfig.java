@@ -14,6 +14,7 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.web.socket.config.annotation.EnableWebSocket;
 import org.springframework.web.socket.config.annotation.WebSocketConfigurer;
 import org.springframework.web.socket.config.annotation.WebSocketHandlerRegistry;
+import org.springframework.web.socket.server.standard.ServletServerContainerFactoryBean;
 
 import java.time.Clock;
 
@@ -48,6 +49,23 @@ public class TerminalWebSocketConfig implements WebSocketConfigurer {
             ManagedAgentService sessions, RuntimeBrokerService broker,
             ManagedAgentSettings settings) {
         return new WorkspaceTerminalRelayService(sessions, broker, settings);
+    }
+
+    /**
+     * The browser leg must accept a whole paste as one message. Tomcat's
+     * default 8 KiB buffer would close a larger frame with 1009 before the
+     * relay ever sees it. Raise the container ceiling to the relay's own
+     * pending-byte bound (8 MiB); a larger buffer would only move the
+     * rejection into the relay's send() accounting.
+     */
+    @Bean
+    public ServletServerContainerFactoryBean terminalWebSocketContainer() {
+        ServletServerContainerFactoryBean container =
+                new ServletServerContainerFactoryBean();
+        int maxMessageBytes = 8 * 1024 * 1024;
+        container.setMaxBinaryMessageBufferSize(maxMessageBytes);
+        container.setMaxTextMessageBufferSize(maxMessageBytes);
+        return container;
     }
 
     @Override
