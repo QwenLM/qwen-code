@@ -337,6 +337,50 @@ describe('isAutoModeProtectedWritePath', () => {
     );
   });
 
+  it('does not re-resolve the default global dir for each path once warm', () => {
+    // Auto mode checks every path in a shell command. With no QWEN_HOME the
+    // prefix cache key must come from the inputs the dirs derive from, not from
+    // resolving the dirs, which stats ~/.qwen on every call.
+    const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+    restoringQwenHome(() =>
+      inTmpDir('qwen-prefix-cache-key-', (home) => {
+        delete process.env['QWEN_HOME'];
+        vi.stubEnv('HOME', home);
+        vi.stubEnv('USERPROFILE', home);
+        vi.stubEnv('XDG_CONFIG_HOME', undefined);
+        Object.defineProperty(process, 'platform', { value: 'linux' });
+        const legacyDir = path.join(home, '.qwen');
+        const globalDir = vi.spyOn(Storage, 'getGlobalQwenDir');
+        const existsSync = vi.spyOn(fs, 'existsSync');
+        try {
+          fs.mkdirSync(legacyDir);
+          const settingsPath = path.join(legacyDir, 'settings.json');
+          // Warms the cache for this home.
+          expect(isAutoModeProtectedWritePath(settingsPath)).toBe(true);
+          globalDir.mockClear();
+          existsSync.mockClear();
+
+          for (let i = 0; i < 40; i++) {
+            expect(isAutoModeProtectedWritePath(settingsPath)).toBe(true);
+            expect(
+              isAutoModeProtectedWritePath(path.join(home, `file-${i}.txt`)),
+            ).toBe(false);
+          }
+
+          expect(globalDir).not.toHaveBeenCalled();
+          expect(
+            existsSync.mock.calls.filter(([arg]) => arg === legacyDir),
+          ).toHaveLength(0);
+        } finally {
+          globalDir.mockRestore();
+          existsSync.mockRestore();
+          Object.defineProperty(process, 'platform', platform);
+          vi.unstubAllEnvs();
+        }
+      }),
+    );
+  });
+
   it('matches real paths under a symlinked custom QWEN_HOME', () => {
     restoringQwenHome(() =>
       inTmpDir('qwen-home-', (tmpRoot) => {
