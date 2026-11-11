@@ -380,7 +380,7 @@ describe('user intent', () => {
     expect(section).not.toContain('{{USER_INTENT}}');
   });
 
-  it('leaves a placeholder a user hint quotes as text, for every section', () => {
+  it('leaves a placeholder a user hint quotes as text', () => {
     // Replacing one placeholder at a time rescans text already spliced in, so
     // a hint quoting a placeholder that is filled later captured its value.
     const prompt = promptFor({ hints: { allow: ['{{ENVIRONMENT}}'] } });

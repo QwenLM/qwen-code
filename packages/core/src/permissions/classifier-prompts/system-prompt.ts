@@ -178,6 +178,9 @@ whether the action should be ALLOWED or BLOCKED.
   return.
 `;
 
+/** A `{{NAME}}` slot in {@link PROMPT_TEMPLATE}. */
+const PLACEHOLDER = /\{\{([A-Z_]+)\}\}/g;
+
 /**
  * Compose the base classifier system prompt.
  *
@@ -188,9 +191,6 @@ whether the action should be ALLOWED or BLOCKED.
  *
  * Stage-specific suffix (see classifier orchestrator) is appended separately.
  */
-/** A `{{NAME}}` slot in {@link PROMPT_TEMPLATE}. */
-const PLACEHOLDER = /\{\{([A-Z_]+)\}\}/g;
-
 export function buildClassifierSystemPrompt(config: Config): string {
   const settings = config.getAutoModeSettings();
   const hints = settings.hints ?? {};
