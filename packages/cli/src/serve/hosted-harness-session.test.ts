@@ -2050,6 +2050,8 @@ describe('Hosted Harness no-tool session', () => {
       { toolProfile: 'hosted-workspace-files/1', custom: false },
       { toolProfile: 'hosted-workspace-files/1', custom: true },
       { toolProfile: 'hosted-workspace-shell/1', custom: true },
+      { toolProfile: 'hosted-workspace-shell/3', custom: true },
+      { toolProfile: 'hosted-workspace-shell/3', custom: false },
       { toolProfile: 'hosted-workspace-files/3', custom: true },
       { toolProfile: 'hosted-workspace-files/3', custom: false },
     ].flatMap((profile) =>
@@ -9043,6 +9045,46 @@ describe('Hosted Harness no-tool session', () => {
     await cleanup(supertest(server).post(`/session/${SESSION_ID}/detach`))
       .send({ authority })
       .expect(204);
+  });
+
+  it('admits a shell/3 Session with public children and approval selection', async () => {
+    mockBrokerBroker();
+    const server = await app(true);
+    const created = await headers(supertest(server).post('/session'))
+      .send({
+        sessionId: SESSION_ID,
+        sessionScope: 'thread',
+        managedSessionStore: store(),
+        toolProfile: 'hosted-workspace-shell/3',
+        approvalMode: 'default',
+        publicChildAgentsVersion: 1,
+      })
+      .expect(200);
+    const authorize = (request: supertest.Test) =>
+      headers(request).set('X-Qwen-Client-Id', created.body.clientId);
+    // A load with the same public-child profile must reattach, not refuse the
+    // profile the control plane admitted.
+    const attached = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    )
+      .send({
+        managedSessionStore: store(),
+        toolProfile: 'hosted-workspace-shell/3',
+        publicChildAgentsVersion: 1,
+        passiveManagedRuntimeRecovery: true,
+      })
+      .expect(200);
+    expect(attached.body.clientId).toBe(created.body.clientId);
+    // A prompt carrying approval selection is admitted on shell/3.
+    const prompt = [{ type: 'text', text: 'plan this' }];
+    await authorize(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+      .send({
+        prompt,
+        promptId: PROMPT_ID,
+        payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+        approvalSelection: { mode: 'yolo', revision: 1 },
+      })
+      .expect(202);
   });
 
   it('delivers a due loop wakeup through the wake pump as an ordinary turn', async () => {

@@ -56,6 +56,21 @@ export function isHostedWorkspaceShellProfile(profile: unknown): boolean {
   );
 }
 
+/**
+ * The public Shell revisions, mirroring the control plane's
+ * WorkspaceToolProfiles.isPublicShell: shell/1 and shell/3, but not the
+ * internal team-lead profile. Routes that admit a public Shell use this so a
+ * new revision is admitted in one place; the retired shell/2 stays refused.
+ */
+export function isHostedWorkspacePublicShellProfile(
+  profile: unknown,
+): profile is string {
+  return (
+    profile === HOSTED_WORKSPACE_SHELL_PROFILE ||
+    profile === HOSTED_WORKSPACE_SHELL_PROFILE_V3
+  );
+}
+
 /** Public Shell admission sets suppressChildAgents. Private Shell lanes omit it. */
 export function hostedShellLaneAttachesChildAgents(
   shellLane: boolean,

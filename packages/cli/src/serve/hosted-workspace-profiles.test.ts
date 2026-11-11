@@ -14,6 +14,7 @@ import {
   HOSTED_WORKSPACE_TEAM_LEAD_PROFILE,
   isHostedWorkspaceGlobProfile,
   isHostedWorkspaceProfile,
+  isHostedWorkspacePublicShellProfile,
   isHostedWorkspaceShellProfile,
   isHostedWorkspaceSearchProfile,
 } from './hosted-workspace-profiles.js';
@@ -71,4 +72,26 @@ it('admits the loop wakeup Shell revision shell/3', () => {
   expect(isHostedWorkspaceGlobProfile(HOSTED_WORKSPACE_SHELL_PROFILE_V3)).toBe(
     true,
   );
+});
+
+// The public-Shell predicate mirrors the control plane's isPublicShell: both
+// public Shell revisions, but not the internal team-lead profile that
+// isHostedWorkspaceShellProfile also admits.
+it('isHostedWorkspacePublicShellProfile admits both public Shell revisions only', () => {
+  expect(
+    isHostedWorkspacePublicShellProfile(HOSTED_WORKSPACE_SHELL_PROFILE),
+  ).toBe(true);
+  expect(
+    isHostedWorkspacePublicShellProfile(HOSTED_WORKSPACE_SHELL_PROFILE_V3),
+  ).toBe(true);
+  expect(
+    isHostedWorkspacePublicShellProfile(HOSTED_WORKSPACE_TEAM_LEAD_PROFILE),
+  ).toBe(false);
+  expect(isHostedWorkspacePublicShellProfile('hosted-workspace-shell/2')).toBe(
+    false,
+  );
+  expect(
+    isHostedWorkspacePublicShellProfile(HOSTED_WORKSPACE_FILE_PROFILE),
+  ).toBe(false);
+  expect(isHostedWorkspacePublicShellProfile(undefined)).toBe(false);
 });

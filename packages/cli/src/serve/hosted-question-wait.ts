@@ -55,6 +55,7 @@ export function questionWaitDefinitionAdmitted(
       'hosted-workspace-files/2',
       'hosted-workspace-files/3',
       'hosted-workspace-shell/1',
+      'hosted-workspace-shell/3',
     ].includes(String(definition['toolProfile'] ?? 'hosted-workspace-files/1'))
   )
     return false;

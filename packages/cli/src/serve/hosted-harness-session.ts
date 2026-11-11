@@ -386,7 +386,9 @@ import { SessionTranscriptChangedError } from '@qwen-code/qwen-code-core/service
 import {
   hostedShellLaneAttachesChildAgents,
   isHostedWorkspaceReadProfile,
+  isHostedWorkspacePublicShellProfile,
   HOSTED_WORKSPACE_FILE_PROFILE_V3,
+  HOSTED_WORKSPACE_SHELL_PROFILE_V3,
 } from './hosted-workspace-profiles.js';
 import {
   HOSTED_AGENT_CALL_NOT_ADMITTED_TEXT,
@@ -862,6 +864,7 @@ async function hostedApprovalForTurn(
     [
       'hosted-workspace-files/1',
       'hosted-workspace-shell/1',
+      'hosted-workspace-shell/3',
       'hosted-workspace-files/3',
     ].includes(session.toolProfile ?? '');
   const admission = await readHostedTurnApprovalSelection(
@@ -5015,10 +5018,13 @@ export function registerHostedHarnessSessionRoutes(
     }
     const extensionChildProfile =
       contract.features?.includes('session-extension-packages/1') === true &&
-      contract.lifecycleV2Profiles?.includes('hosted-workspace-shell/1');
+      (contract.lifecycleV2Profiles?.includes('hosted-workspace-shell/1') ||
+        contract.lifecycleV2Profiles?.includes(
+          HOSTED_WORKSPACE_SHELL_PROFILE_V3,
+        ));
     if (
       publicChildAgentsVersion === 1 &&
-      (toolProfile !== 'hosted-workspace-shell/1' ||
+      (!isHostedWorkspacePublicShellProfile(toolProfile) ||
         body?.['foregroundOnly'] === true ||
         (!extensionChildProfile &&
           (body?.['mcpServers'] !== undefined ||
@@ -5087,7 +5093,7 @@ export function registerHostedHarnessSessionRoutes(
         mcpServers = parseHostedMcpServers(body?.['mcpServers']);
       else if (body?.['mcpServers'] !== undefined) {
         if (
-          toolProfile !== 'hosted-workspace-shell/1' ||
+          !isHostedWorkspacePublicShellProfile(toolProfile) ||
           !contract.lifecycleV2Profiles?.includes(toolProfile)
         )
           throw new Error('MCP requires a supported Workspace profile.');
@@ -5273,9 +5279,11 @@ export function registerHostedHarnessSessionRoutes(
         return error(res, 409, 'hosted_session_store_mismatch');
       const definition = resident.definition;
       if (
-        !['hosted-workspace-shell/1', HOSTED_MCP_PROFILE].includes(
-          toolProfile as string,
-        ) ||
+        ![
+          'hosted-workspace-shell/1',
+          HOSTED_WORKSPACE_SHELL_PROFILE_V3,
+          HOSTED_MCP_PROFILE,
+        ].includes(toolProfile as string) ||
         resident.foregroundOnly ||
         (resident.childDepth ?? 0) !== 0 ||
         definition?.['toolProfile'] !== toolProfile ||
@@ -6312,7 +6320,7 @@ export function registerHostedHarnessSessionRoutes(
         !create &&
         lifecycle &&
         (toolProfile === HOSTED_MCP_PROFILE ||
-          (toolProfile === 'hosted-workspace-shell/1' &&
+          (isHostedWorkspacePublicShellProfile(toolProfile) &&
             definition?.['mcpServers'] !== undefined)) &&
         mcpServers === undefined
       ) {
@@ -6497,9 +6505,11 @@ export function registerHostedHarnessSessionRoutes(
       if (
         mcpSettings.length &&
         (foregroundOnly ||
-          !['hosted-workspace-shell/1', HOSTED_MCP_PROFILE].includes(
-            toolProfile ?? '',
-          ) ||
+          ![
+            'hosted-workspace-shell/1',
+            HOSTED_WORKSPACE_SHELL_PROFILE_V3,
+            HOSTED_MCP_PROFILE,
+          ].includes(toolProfile ?? '') ||
           (session.childDepth ?? 0) !== 0)
       )
         throw new Error(
@@ -8791,11 +8801,13 @@ export function registerHostedHarnessSessionRoutes(
               ? [
                   'hosted-workspace-files/1',
                   'hosted-workspace-shell/1',
+                  'hosted-workspace-shell/3',
                   'hosted-workspace-files/3',
                 ]
               : [
                   'hosted-workspace-files/1',
                   'hosted-workspace-shell/1',
+                  'hosted-workspace-shell/3',
                   'hosted-workspace-files/2',
                   'hosted-workspace-files/3',
                 ]
@@ -8810,9 +8822,11 @@ export function registerHostedHarnessSessionRoutes(
         throw new Error('Approval selection is unavailable for this Session.');
       if (
         approvalSelection?.planMode &&
-        (!['hosted-workspace-files/1', 'hosted-workspace-shell/1'].includes(
-          session.toolProfile ?? '',
-        ) ||
+        (![
+          'hosted-workspace-files/1',
+          'hosted-workspace-shell/1',
+          'hosted-workspace-shell/3',
+        ].includes(session.toolProfile ?? '') ||
           (session.childDepth ?? 0) !== 0 ||
           session.mcp ||
           session.hooks)
@@ -9527,9 +9541,11 @@ export function registerHostedHarnessSessionRoutes(
       !brokerOptions ||
       session.foregroundOnly ||
       (session.childDepth ?? 0) !== 0 ||
-      !['hosted-workspace-shell/1', HOSTED_MCP_PROFILE].includes(
-        session.toolProfile ?? '',
-      ) ||
+      ![
+        'hosted-workspace-shell/1',
+        HOSTED_WORKSPACE_SHELL_PROFILE_V3,
+        HOSTED_MCP_PROFILE,
+      ].includes(session.toolProfile ?? '') ||
       !contract.lifecycleV2Profiles?.some(
         (profile) => profile === session.toolProfile,
       )
@@ -9554,9 +9570,11 @@ export function registerHostedHarnessSessionRoutes(
       session.foregroundOnly ||
       ((session.childDepth ?? 0) !== 0 &&
         !(childBootstrap && session.publicChildExtensionAgent)) ||
-      !['hosted-workspace-shell/1', HOSTED_MCP_PROFILE].includes(
-        session.toolProfile ?? '',
-      ) ||
+      ![
+        'hosted-workspace-shell/1',
+        HOSTED_WORKSPACE_SHELL_PROFILE_V3,
+        HOSTED_MCP_PROFILE,
+      ].includes(session.toolProfile ?? '') ||
       !contract.lifecycleV2Profiles?.includes(session.toolProfile!)
     )
       throw new Error('Hosted extension management is unavailable.');
@@ -9739,9 +9757,11 @@ export function registerHostedHarnessSessionRoutes(
       !brokerOptions ||
       session.foregroundOnly ||
       (session.childDepth ?? 0) !== 0 ||
-      !['hosted-workspace-shell/1', HOSTED_MCP_PROFILE].includes(
-        session.toolProfile ?? '',
-      ) ||
+      ![
+        'hosted-workspace-shell/1',
+        HOSTED_WORKSPACE_SHELL_PROFILE_V3,
+        HOSTED_MCP_PROFILE,
+      ].includes(session.toolProfile ?? '') ||
       !contract.lifecycleV2Profiles?.includes(session.toolProfile!)
     )
       throw new Error('hosted_skill_import_unsupported');
@@ -13432,7 +13452,7 @@ export function registerHostedHarnessSessionRoutes(
       return error(res, 409, 'session_context_busy');
     if (
       session.mcp &&
-      session.toolProfile === 'hosted-workspace-shell/1' &&
+      isHostedWorkspacePublicShellProfile(session.toolProfile) &&
       session.lifecycleProtocolVersion !== 2
     )
       return error(res, 409, 'hosted_lifecycle_required');
