@@ -766,8 +766,17 @@ public final class ApiModels {
             @JsonProperty("segment_id") String segmentId,
             int ordinal, String state,
             @JsonProperty("provider_receipt") String providerReceipt,
+            List<PublicChannelDeliverySegment> segments,
             @JsonProperty("created_at") long createdAt,
             @JsonProperty("updated_at") long updatedAt) {
+    }
+
+    /** H5: one segment of a channel delivery with its write-once receipt. */
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record PublicChannelDeliverySegment(
+            @JsonProperty("segment_id") String segmentId,
+            int ordinal,
+            @JsonProperty("provider_receipt") String providerReceipt) {
     }
 
     /** H6b: one occurrence decision of an automation, with its run's state. */

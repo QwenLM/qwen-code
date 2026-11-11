@@ -2,7 +2,7 @@
 
 [English](2026-11-07-ephemeral-container-runners.md) | [简体中文](2026-11-07-ephemeral-container-runners.zh-CN.md)
 
-Date: 2026-11-07. Status: runner lifecycle implemented; ten fixed slots are
+Date: 2026-11-07. Status: runner lifecycle implemented; thirty fixed slots are
 deployed on hz4. Direct external-PR routing still needs default-branch
 deployment and real CI acceptance.
 
@@ -56,7 +56,7 @@ Each container
 ```
 
 The manager keeps a configured number of slots, at most one container per slot.
-The Hangzhou trial ran ten slots at once; the hz4 deployment now maintains ten slots. It takes no webhook, schedules no PR
+The Hangzhou trial ran ten slots at once; the hz4 deployment now maintains thirty slots. It takes no webhook, schedules no PR
 itself, and introduces neither Kubernetes nor a database. GitHub assigns work by
 runner label. Each ECS runs its own manager against its local Docker socket,
 with a unique `poolId` and a per-host `slots` count. Hosts share the scheduling
@@ -106,10 +106,35 @@ comes online → run one job → runner exits → export logs → delete the con
 and network → clean up the leftover registration → create the next one.
 
 JIT provides single-job registration semantics under the normal protocol; the
-host manager is responsible for actually destroying the container. The design
-must not rely on a malicious job exiting on its own, finishing a final cleanup
-step, or keeping the runner intact. A watchdog outside the container enforces a
-maximum lifetime, and a manager restart reconciles old resources first.
+host manager is responsible for actually destroying the container after it
+exits. `ttlSeconds` marks the age at which health checks begin, not a hard
+lifetime: healthy idle runners remain available and late-assigned jobs are not
+interrupted by container age. Every five minutes after that threshold, the
+manager checks the recorded GitHub runner ID, name and online status. Missing,
+offline, invalid or unavailable registration information raises `WATCHDOG ALERT`
+without destroying the container. GitHub workflow job timeouts bound normal
+execution (45–90 minutes for the routed jobs).
+
+A `docker wait` transport error also does not prove that the container exited;
+the manager checks Docker state and retries the observation. The wait client
+has no age timeout and is cancelled when monitoring ends. A runner that is
+actually hung and cannot honor cancellation requires operator inspection and
+targeted recovery. This is an explicit availability tradeoff: container age or
+an offline control-plane record cannot safely identify a finished job, and
+malicious jobs are not guaranteed to exit cooperatively. Resource limits remain
+in force. Manager restart recovery still reconciles old resources first.
+A stop with a drain window configured is automatic: replenishment stops, and a
+slot whose container has shown no job worker for two consecutive polls retires
+its registration with a DELETE before the container is removed. The accepted
+deletion is the point at which GitHub can no longer assign work to that runner,
+which is what closes the gap between the last idle probe and `docker rm -f`. A
+refused retirement — busy, rate limited, or otherwise unconfirmed — keeps the
+container draining and restarts the idle window; only the drain deadline forces
+the shutdown. Assigned jobs finish on their own; the deadline, not the idle
+test, is what bounds a job that outlives the window. GitHub treats JIT
+registration labels as read-only, so removing the scheduling label is not an
+available drain mechanism; retiring the registration is.
+Record the actual installed commit and manager checksum when deploying.
 
 If deleting a container fails, that slot stops; if GitHub registration cleanup
 fails, the failure is recorded and retried instead of endlessly requesting new
@@ -178,7 +203,7 @@ For untrusted fork PRs, `pr_test_runner` directly selects
 Real external PR run 42382582937, attempt 2, received empty repository variables
 even though the repository settings were populated. Direct routing removes that
 dependency. It requires no configuration relay or manual smoke workflow. The
-ten registered runners use the formal labels to validate actual CI. The
+thirty registered runners use the formal labels to validate actual CI. The
 manager accepts up to 64 slots per host; keep capacity conservative until
 success rate, duration and resource use are stable. Capacity changes are
 manual configuration changes, not queue-driven scaling.
