@@ -65,9 +65,9 @@ export function prepareQoderResponsesBody(
 
   // The gateway's auto/router upstream has emitted malformed parallel
   // tool-call ids for the full tool set; sequential calls avoid that shape.
-  if (Array.isArray(prepared.tools) && prepared.tools.length > 0) {
-    prepared.parallel_tool_calls = false;
-  }
+  // if (Array.isArray(prepared.tools) && prepared.tools.length > 0) {
+  //   prepared.parallel_tool_calls = false;
+  // }
 
   if (prepared.truncation === 'auto') {
     delete prepared['truncation'];

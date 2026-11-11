@@ -229,7 +229,6 @@ describe('QoderClient', () => {
       model: 'auto',
       stream: true,
       store: false,
-      parallel_tool_calls: false,
       metadata: {
         session_type: 'qcode',
         task_id: 'agent_summary',
@@ -240,6 +239,7 @@ describe('QoderClient', () => {
         model_key: 'qmodel_38max',
       },
     });
+    expect(sent).not.toHaveProperty('parallel_tool_calls');
     expect(sent).not.toHaveProperty('temperature');
     expect(sent).not.toHaveProperty('task_id');
     expect(sent).not.toHaveProperty('source_session_id');
