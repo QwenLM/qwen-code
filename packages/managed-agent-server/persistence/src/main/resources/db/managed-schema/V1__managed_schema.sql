@@ -263,7 +263,6 @@ CREATE TABLE ma_session_journal_tx (
     record_digest CHAR(64) NOT NULL COMMENT 'Digest of the stored transaction bytes.',
     activation_lease_until BIGINT UNSIGNED COMMENT 'Latest activation lease expiry in Unix epoch milliseconds.',
     activation_renewal_seq BIGINT UNSIGNED COMMENT 'Monotonic activation lease renewal sequence.',
-    -- WorkspaceCsiApplicationImage.ACTIVATION_OPERATIONS mirrors this CASE, so keep the two in sync.
     is_activation_record TINYINT UNSIGNED GENERATED ALWAYS AS (CASE operation WHEN 'installActivation' THEN 1 WHEN 'renewActivation' THEN 1 ELSE 0 END)
         COMMENT 'Generated flag marking the transaction that carries an activation lease.',
     gmt_create BIGINT UNSIGNED NOT NULL COMMENT 'Record creation time in Unix epoch milliseconds.',

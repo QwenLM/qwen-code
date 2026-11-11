@@ -585,7 +585,7 @@ class ManagedSchemaTest {
     }
 
     // Every shipped receipt namespace must satisfy the length CHECK, including the
-    // RESOURCE_ALLOCATE namespace read back by WorkspaceCsiApplicationInventory.valueOf.
+    // RESOURCE_ALLOCATE namespace used by session resource allocation.
     @Test
     void theCurrentReceiptNamespaceCheckAdmitsEveryShippedNamespace() throws Exception {
         DataSource migrated = source();

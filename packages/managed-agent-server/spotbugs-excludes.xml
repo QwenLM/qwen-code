@@ -19,4 +19,14 @@
     <Method name="replay"/>
     <Bug pattern="NP_NULL_PARAM_DEREF"/>
   </Match>
+  <!--
+    False positive: require(raw != null, ...) is a fail-closed null assertion
+    (throws ManagedAgentException) before raw.length is dereferenced. SpotBugs
+    cannot see through the helper; the null path is unreachable at the dereference.
+  -->
+  <Match>
+    <Class name="com.alibaba.qwen.code.managedagent.persistence.ManagedActivityDiagnosticProjection"/>
+    <Method name="rebuildBatch"/>
+    <Bug pattern="NP_NULL_ON_SOME_PATH"/>
+  </Match>
 </FindBugsFilter>
