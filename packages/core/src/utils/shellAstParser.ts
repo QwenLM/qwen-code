@@ -1063,8 +1063,29 @@ function evaluateCommandSafety(commandNode: SyntaxNode): ShellCommandSafety {
   );
 }
 
-/** The parts of a `heredoc_redirect` node that are the heredoc itself. */
-const HEREDOC_OWN_PART = /^heredoc_(?:start|body|end)$/;
+/** Redirection operators that close a descriptor and take no target word. */
+const CLOSE_DESCRIPTOR_OPERATORS = new Set(['<&-', '>&-']);
+
+/**
+ * The children of a `heredoc_redirect` node that are the heredoc itself or
+ * carry nothing to run: its descriptor, delimiter, body and a trailing comment.
+ */
+const HEREDOC_OWN_PART =
+  /^(?:heredoc_(?:start|body|end)|file_descriptor|comment)$/;
+
+/**
+ * A heredoc body is expanded unless its delimiter is quoted. tree-sitter shows
+ * `$(...)` in the body as a node, which `evaluateSubstitutions` judges, but a
+ * backtick substitution stays plain text inside `heredoc_body`. A backtick in
+ * a body that bash will expand is therefore a command no rule has read.
+ */
+function evaluateHeredocBody(heredoc: SyntaxNode): ShellCommandSafety {
+  const part = (type: string) =>
+    heredoc.namedChildren.find((child) => child.type === type);
+  const delimiterIsQuoted = /['"\\]/.test(part('heredoc_start')?.text ?? '');
+  const body = part('heredoc_body')?.text ?? '';
+  return !delimiterIsQuoted && body.includes('`') ? 'unknown' : 'read-only';
+}
 
 /**
  * Judges what shares a heredoc's first line. tree-sitter files all of it
@@ -1077,6 +1098,7 @@ const HEREDOC_OWN_PART = /^heredoc_(?:start|body|end)$/;
  */
 function evaluateHeredocLine(heredoc: SyntaxNode): ShellCommandSafety {
   return mergeSafety(
+    evaluateHeredocBody(heredoc),
     evaluateRedirectionSafety(heredoc),
     ...heredoc.namedChildren
       .filter(
@@ -1097,18 +1119,20 @@ function evaluateRedirectionSafety(node: SyntaxNode): ShellCommandSafety {
       result = mergeSafety(result, evaluateHeredocLine(redirect));
     }
     if (redirect.type !== 'file_redirect') continue;
-    // bash takes one word as a redirection's target. tree-sitter attaches the
-    // words after it to the redirection as well, so they never reach the
-    // command's arguments: `git branch < /dev/null -D main` reads as
-    // `git branch`. No rule has seen those words, so the command is not known
-    // to be read-only (#16856).
-    if (redirect.childrenForFieldName('destination').length > 1) {
-      result = mergeSafety(result, 'unknown');
-    }
     const operator = redirect.children.find(
       (child) => child.type !== 'file_descriptor',
     );
     if (!operator) return 'unknown';
+    // bash gives a redirection one word as its target, and none to `<&-` and
+    // `>&-`, which only close a descriptor. tree-sitter attaches the words
+    // after it to the redirection as well, so they never reach the command's
+    // arguments: `git branch < /dev/null -D main` reads as `git branch`. No
+    // rule has seen those words, so the command is not known to be read-only
+    // (#16856).
+    const ownWords = CLOSE_DESCRIPTOR_OPERATORS.has(operator.type) ? 0 : 1;
+    if (redirect.childrenForFieldName('destination').length > ownWords) {
+      result = mergeSafety(result, 'unknown');
+    }
     if (WRITE_REDIRECT_OPERATORS.has(operator.type)) return 'write';
     if (operator.type === '>&') {
       const destination = redirect.childForFieldName('destination');

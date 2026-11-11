@@ -1134,6 +1134,12 @@ describe('words after a redirection in the middle of a command', () => {
     'git branch <&0 -D main',
     'git branch < a < b -D main',
     'git branch < /dev/null -D main | cat',
+    // `>&-` and `<&-` close a descriptor and take no word at all.
+    'find . >&- -delete',
+    'find . <&- -delete',
+    'find . 2>&- -delete',
+    'git branch 3<&- -D main',
+    'find . >&- -delete | cat',
   ])('does not classify %j as read-only', async (command) => {
     expect(await classifyShellCommandSafety(command)).toBe('unknown');
     expect(await isShellCommandReadOnlyAST(command)).toBe(false);
@@ -1146,6 +1152,11 @@ describe('words after a redirection in the middle of a command', () => {
     'cat < a.txt < b.txt',
     'cat < "my file.txt"',
     'git log --oneline <&0',
+    'git status >&-',
+    'git status 2>&-',
+    'git status <&-',
+    // A here-string keeps the words after it as the command's arguments.
+    'git status <<< x',
   ])('keeps %j read-only: one word per redirection', async (command) => {
     expect(await classifyShellCommandSafety(command)).toBe('read-only');
   });
@@ -1155,6 +1166,7 @@ describe('words after a redirection in the middle of a command', () => {
     'git branch > out.txt -D main',
     'git branch 2>/dev/null -D main',
     '< /dev/null git push origin main',
+    'git branch <<< x -D main',
   ])('keeps %j a write', async (command) => {
     expect(await classifyShellCommandSafety(command)).toBe('write');
   });
@@ -1165,6 +1177,11 @@ describe('words after a redirection in the middle of a command', () => {
     'git branch <<EOF -D main\nx\nEOF',
     'find . <<EOF -delete\nx\nEOF',
     'cat <<EOF | sh\nrm x\nEOF',
+    'cat <<EOF | grep < /dev/null hi\nhi\nEOF',
+    // An unquoted delimiter leaves the body open to expansion, and the parser
+    // shows a backtick substitution in it as plain text.
+    'cat <<EOF\n`id -u`\nEOF',
+    'cat <<-EOF\n\t`id -u`\n\tEOF',
   ])('does not classify %j as read-only', async (command) => {
     expect(await classifyShellCommandSafety(command)).toBe('unknown');
   });
@@ -1185,6 +1202,13 @@ describe('words after a redirection in the middle of a command', () => {
     'cat <<EOF | grep hi\nhi\nEOF',
     'cat <<EOF | grep hi | wc -l\nhi\nEOF',
     'git status <<EOF 2>&1\nhi\nEOF',
+    'cat << EOF\nhi\nEOF',
+    'cat 3<<EOF\nhi\nEOF',
+    'cat <<EOF # note\nhi\nEOF',
+    // A quoted delimiter turns expansion off, so the backtick is text.
+    "cat <<'EOF'\n`id -u`\nEOF",
+    'cat <<"EOF"\n`id -u`\nEOF',
+    'cat <<\\EOF\n`id -u`\nEOF',
   ])('keeps %j read-only', async (command) => {
     expect(await classifyShellCommandSafety(command)).toBe('read-only');
   });
