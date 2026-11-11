@@ -1995,12 +1995,9 @@ export class HostedHookSession {
   }
 
   async close(opts: { terminal?: boolean } = {}): Promise<void> {
-    // A detach keeps the Session reloadable; only a delete is terminal. The
-    // deterministic config-scoped owner must survive a detach re-acquirable
-    // (R13-1): a terminal release would persist a RELEASED tombstone under the
-    // very id the next load recomputes, wedging every later acquire. The rule
-    // lives on the owner, not the call site (R14-1): every non-delete close
-    // defaults to non-terminal, and only DELETE opts into the terminal release.
+    // A detach keeps the deterministic owner re-acquirable (R13-1).
+    // Public close/delete opt into terminal release after lifecycle effects;
+    // applying it to a detach would fence every later same-revision load.
     const terminal = opts.terminal ?? false;
     await this.drain();
     // The close is the drain arm. A Hook-configured Shell turn shares this
