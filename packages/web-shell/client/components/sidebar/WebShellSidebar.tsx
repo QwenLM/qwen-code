@@ -180,6 +180,7 @@ import {
 import {
   SESSION_LIST_PAGE_SIZE,
   SESSION_ORGANIZATION_FEATURE,
+  SIDEBAR_SESSION_EXPAND_STEP,
   SIDEBAR_SESSION_PREVIEW_LIMIT,
   WEB_SHELL_SESSION_SOURCE_TYPE,
 } from '../../constants/sessions';
@@ -1951,7 +1952,9 @@ export function WebShellSidebar({
   const [projectExpanded, setProjectExpanded] = useState(() =>
     readPrimaryExpanded(),
   );
-  const [showAllProjectSessions, setShowAllProjectSessions] = useState(false);
+  const [projectSessionVisibleCount, setProjectSessionVisibleCount] = useState(
+    SIDEBAR_SESSION_PREVIEW_LIMIT,
+  );
   const [workspaceExpansionRequest, setWorkspaceExpansionRequest] = useState<{
     scope: string;
     expanded: boolean;
@@ -2017,8 +2020,8 @@ export function WebShellSidebar({
 
   useEffect(() => {
     // The five-row preview is scoped per source and per primary workspace;
-    // reset the one-shot show-all when either changes, not only on collapse.
-    setShowAllProjectSessions(false);
+    // reset the expanded count when either changes, not only on collapse.
+    setProjectSessionVisibleCount(SIDEBAR_SESSION_PREVIEW_LIMIT);
   }, [projectExpanded, primaryWorkspaceExpansionId, selectedSessionSource]);
 
   const previousPrimaryExpansionRef = useRef({
@@ -2535,7 +2538,7 @@ export function WebShellSidebar({
       ),
     );
     setProjectExpanded(expanded);
-    setShowAllProjectSessions(false);
+    setProjectSessionVisibleCount(SIDEBAR_SESSION_PREVIEW_LIMIT);
     writeWorkspaceExpanded(primaryWorkspaceExpansionId, expanded);
     if (registeredPrimaryWorkspace) {
       writeWorkspaceExpanded(registeredPrimaryWorkspace.id, expanded);
@@ -6288,24 +6291,43 @@ export function WebShellSidebar({
   const body = useMemo(() => {
     // Rename only has to reveal the edited row. Expanding the whole catalog —
     // or even the whole section — mounted hundreds of rows exactly when the
-    // rename editor opened, which is what made typing lag.
+    // rename editor opened, which is what made typing lag. The shared index
+    // test below is measured in whichever sequence the caller slices: group
+    // sections pass the raw catalog against the fixed preview bound (their own
+    // expansion count lives inside SessionGroupSection), while the flat list
+    // passes rendered tree rows against its live visible count.
+    const editingIndexBeyond = (index: number, bound: number): boolean =>
+      !pinnedSectionHostsEditing &&
+      editingSessionIdentity !== null &&
+      index >= bound;
     const editingSessionBeyondPreview = (
       items: readonly DaemonSessionSummary[],
     ): boolean =>
-      !pinnedSectionHostsEditing &&
-      editingSessionIdentity !== null &&
-      items.findIndex(
-        (session) => getIdentityForSession(session) === editingSessionIdentity,
-      ) >= SIDEBAR_SESSION_PREVIEW_LIMIT;
+      editingIndexBeyond(
+        items.findIndex(
+          (session) =>
+            getIdentityForSession(session) === editingSessionIdentity,
+        ),
+        SIDEBAR_SESSION_PREVIEW_LIMIT,
+      );
     const renderFlatSessions = () => {
-      const showAll =
-        showAllProjectSessions ||
-        Boolean(searchQuery.trim()) ||
-        editingSessionBeyondPreview(filteredSessions);
       const treeRows = sessionTree.buildRows(filteredSessions);
-      const displayedRows = showAll
-        ? treeRows
-        : treeRows.slice(0, SIDEBAR_SESSION_PREVIEW_LIMIT);
+      // Measure the edited row in the rendered tree-row sequence (the one
+      // actually sliced), not the raw catalog: collapsed parents hide their
+      // children, so a raw-array index diverges from the rendered row count.
+      const editingRowBeyondBound = editingIndexBeyond(
+        treeRows.findIndex(
+          (row) =>
+            getIdentityForSession(row.session) === editingSessionIdentity,
+        ),
+        projectSessionVisibleCount,
+      );
+      const unlimited = Boolean(searchQuery.trim()) || editingRowBeyondBound;
+      const previewLimited =
+        !unlimited && treeRows.length > projectSessionVisibleCount;
+      const displayedRows = previewLimited
+        ? treeRows.slice(0, projectSessionVisibleCount)
+        : treeRows;
       return (
         <>
           {displayedRows.map((row) => (
@@ -6315,13 +6337,22 @@ export function WebShellSidebar({
               })}
             </Fragment>
           ))}
-          {!showAll && treeRows.length > SIDEBAR_SESSION_PREVIEW_LIMIT && (
+          {previewLimited && (
             <button
               type="button"
               className={styles.showAllSessions}
-              onClick={() => setShowAllProjectSessions(true)}
+              onClick={() =>
+                setProjectSessionVisibleCount(
+                  (count) => count + SIDEBAR_SESSION_EXPAND_STEP,
+                )
+              }
             >
-              {t('sidebar.showAllSessions')}
+              {t('sidebar.showMoreSessions', {
+                count: Math.min(
+                  SIDEBAR_SESSION_EXPAND_STEP,
+                  treeRows.length - projectSessionVisibleCount,
+                ),
+              })}
             </button>
           )}
         </>
@@ -6466,7 +6497,7 @@ export function WebShellSidebar({
     selectedSessionSource,
     sessionSections,
     sessionsPage,
-    showAllProjectSessions,
+    projectSessionVisibleCount,
     t,
     toggleSessionSection,
   ]);
@@ -6733,6 +6764,10 @@ export function WebShellSidebar({
     standaloneSessionsVisible,
     t,
   ]);
+  const sessionActionControlsVisible =
+    !sectionView && sessionContent === undefined && (!collapsed || mobileOpen);
+  const sessionActionButtonClassName =
+    'size-8 shrink-0 cursor-pointer rounded-lg p-[7px] hover:bg-accent';
   const searchEnabled = !liveView && !hideProjectHeader;
   // The activity panel replaces the session list, so a query typed there
   // filters rows the panel never shows.
@@ -7836,14 +7871,6 @@ export function WebShellSidebar({
                         )}
                       </button>
                     )}
-                  {questionSortSupported &&
-                    sessionContent === undefined &&
-                    (!collapsed || mobileOpen) && (
-                      <SessionSortMenu
-                        value={sessionSort}
-                        onChange={changeSessionSort}
-                      />
-                    )}
                   {topRowSearchVisible &&
                     renderSearchToggle(styles.searchToggle)}
                 </div>
@@ -7856,7 +7883,9 @@ export function WebShellSidebar({
             </>
           )}
           {!sectionView &&
-            (selectionMode || primaryNavItems.has('newTask')) && (
+            (selectionMode ||
+              primaryNavItems.has('newTask') ||
+              (questionSortSupported && sessionActionControlsVisible)) && (
               <div
                 className={cx(
                   styles.newTaskNav,
@@ -7880,7 +7909,7 @@ export function WebShellSidebar({
                       <XIcon size={18} />
                     </button>
                   </div>
-                ) : (
+                ) : primaryNavItems.has('newTask') ? (
                   <button
                     className={styles.newChatButton}
                     type="button"
@@ -7896,25 +7925,36 @@ export function WebShellSidebar({
                       <span>{t('sidebar.newTask')}</span>
                     )}
                   </button>
-                )}
-                {sessionContent === undefined && (!collapsed || mobileOpen) && (
-                  <button
-                    className={cx(
-                      'ml-auto size-8 shrink-0 cursor-pointer rounded-lg p-[7px] hover:bg-accent',
-                      styles.activityToggle,
+                ) : null}
+                {sessionActionControlsVisible && (
+                  <div className="ml-auto flex shrink-0 items-center gap-1">
+                    {questionSortSupported && (
+                      <SessionSortMenu
+                        value={sessionSort}
+                        onChange={changeSessionSort}
+                        triggerClassName={sessionActionButtonClassName}
+                      />
                     )}
-                    type="button"
-                    title={t('sidebar.selectSessions')}
-                    aria-label={t('sidebar.selectSessions')}
-                    aria-pressed={selectionMode}
-                    disabled={bulkWorking}
-                    onClick={() => {
-                      if (selectionMode) exitSelection();
-                      else setSelectionMode(true);
-                    }}
-                  >
-                    <ListChecksIcon size={18} strokeWidth={1.5} />
-                  </button>
+                    {(selectionMode || primaryNavItems.has('newTask')) && (
+                      <button
+                        className={cx(
+                          sessionActionButtonClassName,
+                          styles.activityToggle,
+                        )}
+                        type="button"
+                        title={t('sidebar.selectSessions')}
+                        aria-label={t('sidebar.selectSessions')}
+                        aria-pressed={selectionMode}
+                        disabled={bulkWorking}
+                        onClick={() => {
+                          if (selectionMode) exitSelection();
+                          else setSelectionMode(true);
+                        }}
+                      >
+                        <ListChecksIcon size={18} strokeWidth={1.5} />
+                      </button>
+                    )}
+                  </div>
                 )}
               </div>
             )}
@@ -8176,6 +8216,7 @@ export function WebShellSidebar({
                   </button>
                   <div className={styles.projectsHeaderActions}>
                     {searchInProjectHeader &&
+                      !sessionActionControlsVisible &&
                       !sectionView &&
                       questionSortSupported &&
                       sessionContent === undefined && (

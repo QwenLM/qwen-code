@@ -21,16 +21,14 @@ class ToolPublicationConfigurationTest {
     void disabledPublicationHasNoImplicitVerificationBudget() {
         var settings = new ManagedAgentProperties().getToolPublication();
         assertThat(settings.isEnabled()).isFalse();
-        assertThat(settings.isAsyncVerificationEnabled()).isFalse();
         assertThat(settings.getVerificationConcurrency()).isEqualTo(2);
         assertThat(settings.getVerificationBytesPerSecond()).isNull();
         assertThat(settings.getMaxVerificationTimeout()).isNull();
     }
 
     @Test
-    void asyncAdmissionRequiresASeparateBoundedPool() {
+    void verificationRequiresASeparateBoundedPool() {
         var properties = new ManagedAgentProperties();
-        properties.getToolPublication().setAsyncVerificationEnabled(true);
         properties.getToolPublication().setVerificationConcurrency(0);
         assertThatThrownBy(() -> new ToolPublicationConfiguration().toolPublicationVerifier(
                 mock(ToolPublicationDataStore.class), properties)).hasMessageContaining("Invalid verification concurrency");

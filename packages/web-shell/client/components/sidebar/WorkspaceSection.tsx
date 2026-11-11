@@ -37,6 +37,7 @@ import { useI18n } from '../../i18n';
 import { formatDateTime } from '../../utils/formatDateTime';
 import {
   SESSION_LIST_PAGE_SIZE,
+  SIDEBAR_SESSION_EXPAND_STEP,
   SIDEBAR_SESSION_PREVIEW_LIMIT,
 } from '../../constants/sessions';
 import {
@@ -347,7 +348,9 @@ export function WorkspaceSection({
   );
   const [actionsVisible, setActionsVisible] = useState(false);
   const [detailsOpen, setDetailsOpen] = useState(false);
-  const [showAllSessions, setShowAllSessions] = useState(false);
+  const [visibleSessionCount, setVisibleSessionCount] = useState(
+    SIDEBAR_SESSION_PREVIEW_LIMIT,
+  );
   const [gitStatus, setGitStatus] = useState<DaemonWorkspaceGitStatus>();
   const fulfilledPendingSessions = useRef(new Set<string>());
   const channelCatalogLoadRequestId = useRef(0);
@@ -370,14 +373,14 @@ export function WorkspaceSection({
   useEffect(() => {
     if (!expansionRequest || controlledExpanded !== undefined) return;
     setInternalExpanded(expansionRequest.expanded);
-    setShowAllSessions(false);
+    setVisibleSessionCount(SIDEBAR_SESSION_PREVIEW_LIMIT);
     writeWorkspaceExpanded(storageId, expansionRequest.expanded);
   }, [expansionRequest, controlledExpanded, storageId]);
 
   useEffect(() => {
-    // The five-row preview is scoped per source; reset the one-shot
-    // show-all when the section collapses or the source changes.
-    setShowAllSessions(false);
+    // The five-row preview is scoped per source; reset the expanded count
+    // when the section collapses or the source changes.
+    setVisibleSessionCount(SIDEBAR_SESSION_PREVIEW_LIMIT);
   }, [expanded, sourceType]);
 
   // The render site keys this component by workspace id, so an id change
@@ -858,13 +861,20 @@ export function WorkspaceSection({
     sessions,
   ]);
   // Same rule the sidebar applies to its own catalog: an open rename keeps
-  // its row mounted when a refresh reorders other sessions ahead of it.
+  // its row mounted when a refresh reorders other sessions ahead of it. The
+  // shared index test is measured in whichever sequence the caller slices:
+  // group sections pass the raw catalog against the fixed preview bound (their
+  // expansion count lives inside SessionGroupSection), while the flat list
+  // passes rendered tree rows against its live visible count below.
+  const editingIndexBeyond = (index: number, bound: number): boolean =>
+    editingSessionId !== undefined && index >= bound;
   const revealsEditingSession = (
     items: readonly DaemonSessionSummary[],
   ): boolean =>
-    editingSessionId !== undefined &&
-    items.findIndex((session) => session.sessionId === editingSessionId) >=
-      SIDEBAR_SESSION_PREVIEW_LIMIT;
+    editingIndexBeyond(
+      items.findIndex((session) => session.sessionId === editingSessionId),
+      SIDEBAR_SESSION_PREVIEW_LIMIT,
+    );
 
   const sessionTree = useSessionTree(storageId, searchedSessions, searchActive);
   const buildSessionTreeRows = (
@@ -928,13 +938,22 @@ export function WorkspaceSection({
         expanded: false,
       }))
     : sessionTree.buildRows(visibleSessions);
+  // Measure the edited row in the rendered tree-row sequence (the one actually
+  // sliced), not the raw catalog: collapsed parents hide their children, so a
+  // raw-array index diverges from the rendered row count.
+  const editingRowBeyondBound = editingIndexBeyond(
+    directTreeRows.findIndex(
+      (row) => row.session.sessionId === editingSessionId,
+    ),
+    visibleSessionCount,
+  );
   const directSessions =
     searchActive ||
-    showAllSessions ||
     !limitSessions ||
-    revealsEditingSession(visibleSessions)
+    editingRowBeyondBound ||
+    directTreeRows.length <= visibleSessionCount
       ? directTreeRows
-      : directTreeRows.slice(0, SIDEBAR_SESSION_PREVIEW_LIMIT);
+      : directTreeRows.slice(0, visibleSessionCount);
 
   const groupedSessions = useMemo(() => {
     // The grouped branch has no trust gate of its own; untrusted secondary
@@ -1309,15 +1328,23 @@ export function WorkspaceSection({
                 })}
                 {limitSessions &&
                   !searchActive &&
-                  !showAllSessions &&
-                  !revealsEditingSession(visibleSessions) &&
-                  directTreeRows.length > SIDEBAR_SESSION_PREVIEW_LIMIT && (
+                  !editingRowBeyondBound &&
+                  directTreeRows.length > visibleSessionCount && (
                     <button
                       type="button"
                       className={sidebarStyles.showAllSessions}
-                      onClick={() => setShowAllSessions(true)}
+                      onClick={() =>
+                        setVisibleSessionCount(
+                          (count) => count + SIDEBAR_SESSION_EXPAND_STEP,
+                        )
+                      }
                     >
-                      {t('sidebar.showAllSessions')}
+                      {t('sidebar.showMoreSessions', {
+                        count: Math.min(
+                          SIDEBAR_SESSION_EXPAND_STEP,
+                          directTreeRows.length - visibleSessionCount,
+                        ),
+                      })}
                     </button>
                   )}
               </>

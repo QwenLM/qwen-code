@@ -931,6 +931,22 @@ describe('credential-free jobs on the disposable pool', () => {
         `kill-switch must revert fork capture to hosted assoc='${assoc}'`,
       );
     }
+    // The pool image bakes Chromium and its system libraries, and it keeps the
+    // tree root-owned so a job cannot rewrite a browser. A job's own
+    // `playwright install` cannot even verify there: playwright writes a lock
+    // and a `.links` entry into the registry before it checks what is present.
+    // The pool image is what sets PLAYWRIGHT_BROWSERS_PATH, so the install step
+    // must skip on it.
+    const install = doc.jobs.capture.steps.find(
+      (step) => step.name === 'Install Playwright Chromium',
+    );
+    assert.ok(install, 'the capture job must keep its browser install step');
+    assert.ok(
+      String(install.run).includes(
+        'if [ -n "${PLAYWRIGHT_BROWSERS_PATH:-}" ]; then',
+      ),
+      'the browser install must skip on the pool image',
+    );
     // Only the event-scoped read-only GITHUB_TOKEN may reach the disposable
     // pool through this workflow; any other secret reference breaks the
     // pool's no-long-lived-secrets boundary. Walk every parsed ${{ … }}

@@ -65,7 +65,8 @@ export type ChannelEditorValidationCode =
   | 'number'
   | 'outOfRange'
   | 'policy'
-  | 'requiresBoundDelivery';
+  | 'requiresBoundDelivery'
+  | 'requiresBoundDeliveryForWatchGate';
 
 export type ChannelEditorValidationErrors = Record<
   string,
@@ -89,15 +90,26 @@ export const PRIVATE_ONLY_FIELD_KEYS = new Set([
 export const GROUP_ONLY_FIELD_KEYS = new Set(['groupPolicy']);
 
 const REPOSITORY_FULL_NAME_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+// GitLab project paths nest subgroups (group/subgroup/project); GitHub
+// repositories are exactly owner/repo. The runtime matches arbitrary group
+// keys, so this shape is a usability guard keyed on the channel, not a
+// security boundary.
+const GITLAB_PROJECT_PATH_RE = /^[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)+$/;
+
+function repositoryIdPattern(type: unknown): RegExp {
+  return type === 'gitlab' ? GITLAB_PROJECT_PATH_RE : REPOSITORY_FULL_NAME_RE;
+}
 
 /**
  * Canonical repository IDs the allowlist currently names, in typing order.
- * Entries that are not `owner/repo` are left out: the save path rejects them,
- * and a row for a half-typed repository would only flicker.
+ * Entries that do not match the channel's repository shape are left out: the
+ * save path rejects them, and a row for a half-typed repository would only
+ * flicker.
  */
-export function repositoryAllowlistIds(value: string): string[] {
+export function repositoryAllowlistIds(value: string, type: unknown): string[] {
+  const pattern = repositoryIdPattern(type);
   return [...new Set(toList(value.toLowerCase()))].filter((id) =>
-    REPOSITORY_FULL_NAME_RE.test(id),
+    pattern.test(id),
   );
 }
 
@@ -570,6 +582,7 @@ export function validateChannelEditorDraft(
         !unchanged &&
         ((field.exclusiveMinimum !== undefined &&
           parsed <= field.exclusiveMinimum) ||
+          (field.minimum !== undefined && parsed < field.minimum) ||
           (field.maximum !== undefined && parsed > field.maximum))
       ) {
         errors[field.key] = 'outOfRange';
@@ -603,6 +616,14 @@ export function validateChannelEditorDraft(
       draft.values['deliverToBoundSessions'] !== true
     ) {
       errors['prWatchEvents'] = 'requiresBoundDelivery';
+    }
+    if (
+      draft.values['requireBoundWatch'] === true &&
+      draft.values['deliverToBoundSessions'] !== true
+    ) {
+      // Its own code: the shared requiresBoundDelivery message names "the
+      // selected watch events", a control this field's operator never touched.
+      errors['requireBoundWatch'] = 'requiresBoundDeliveryForWatchGate';
     }
     // Mirror validateRepoFilterConfig: an active mode needs a non-empty list
     // of owner/repo entries. While the mode is off the list is ignored (and
@@ -641,9 +662,26 @@ export function validateChannelEditorDraft(
     isRepositoryOnlyChannelType(descriptor.type) &&
     String(draft.values['groupPolicy'] ?? '') === 'allowlist'
   ) {
+    const pattern = repositoryIdPattern(descriptor.type);
+    // A stored entry the runtime already tolerates must not block an unrelated
+    // edit (same convention as the number-field branch above). This applies
+    // only to GitLab, the newly admitted platform whose pre-existing allowlist
+    // was never validated against the shape; GitHub keeps its strict check so
+    // its behavior is unchanged. The draft lower-cases repository ids, so
+    // compare against the stored keys case-insensitively.
+    const storedGroups = instance?.config['groups'];
+    const storedIds = new Set(
+      (isRecord(storedGroups) ? Object.keys(storedGroups) : [])
+        .filter((id) => id !== '*')
+        .map((id) => id.toLowerCase()),
+    );
     if (
       splitList(draft.allowedGroupIds).some(
-        (groupId) => !REPOSITORY_FULL_NAME_RE.test(groupId),
+        (groupId) =>
+          !pattern.test(groupId) &&
+          !(
+            descriptor.type === 'gitlab' && storedIds.has(groupId.toLowerCase())
+          ),
       )
     ) {
       errors['allowedGroupIds'] = 'invalidRepoId';
@@ -921,6 +959,7 @@ function assignGroupSenders(
 function removeGroupAllowlistMembership(
   config: Record<string, unknown>,
   instance: DaemonChannelInstanceSnapshot | undefined,
+  type: unknown,
   overrides?: Record<string, ChannelGroupOverrideDraft>,
   allowedGroupIds = '',
 ): void {
@@ -939,7 +978,7 @@ function removeGroupAllowlistMembership(
     const storedIds = new Set(
       [...entries.keys()].map((id) => id.toLowerCase()),
     );
-    for (const groupId of repositoryAllowlistIds(allowedGroupIds)) {
+    for (const groupId of repositoryAllowlistIds(allowedGroupIds, type)) {
       if (!storedIds.has(groupId)) entries.set(groupId, {});
     }
   }
@@ -1035,13 +1074,16 @@ export function buildChannelUpsertRequest(
     assignField(config, field, draft.values[field.key]);
   }
   if (
-    repositoryOnly &&
+    descriptor.type === 'github' &&
     isRepoFilterActive(config['repoFilterMode']) &&
     Array.isArray(config['repoFilter'])
   ) {
     // Same canonicalization the validator applied, so pasted URLs reach the
     // daemon as owner/repo. Gated on the active mode: a parked list stays
-    // exactly as stored on an unrelated save.
+    // exactly as stored on an unrelated save. Gated on GitHub (not the wider
+    // repository-only set) to match the validator: another repository-only
+    // channel may carry a preserved repoFilter it does not manage, and
+    // rewriting it here would make the daemon reject every save.
     const normalized = normalizeRepositoryFilterInput(
       config['repoFilter']
         .filter((entry): entry is string => typeof entry === 'string')
@@ -1079,6 +1121,7 @@ export function buildChannelUpsertRequest(
       removeGroupAllowlistMembership(
         config,
         instance,
+        descriptor.type,
         repositoryOnly ? draft.groupOverrides : undefined,
         draft.allowedGroupIds,
       );

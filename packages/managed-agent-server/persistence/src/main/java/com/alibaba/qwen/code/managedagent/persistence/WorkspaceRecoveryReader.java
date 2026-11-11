@@ -46,6 +46,11 @@ final class WorkspaceRecoveryReader {
         check(text(head, "workspaceId").equals(row.get("workspace_id"))
                 && "identity".equals(row.get("record_encoding")), "transaction_scope_conflict");
         byte[] bytes = (byte[]) row.get("record_bytes");
+        if (bytes == null) {
+            bytes = new JdbcJournalPacks(jdbc, objects, null).resolveBytes(text(head, "tenantId"),
+                    text(head, "sessionId"), revision, (String) row.get("record_digest"),
+                    ((Number) row.get("byte_length")).longValue());
+        }
         check(bytes != null && bytes.length <= ManagedSessionStoreModels.MAX_TRANSACTION_BYTES
                 && bytes.length == ((Number) row.get("byte_length")).longValue()
                 && hash(bytes).equals(row.get("record_digest")), "transaction_corrupt");
@@ -58,6 +63,20 @@ final class WorkspaceRecoveryReader {
                 (String) row.get("latest_checkpoint_resource_id"), "identity", Base64.getEncoder().encodeToString(bytes),
                 bytes.length, (String) row.get("record_digest"));
         return JSON.valueToTree(value);
+    }
+
+    private byte[] readExternalObject(Map<String, Object> row) {
+        String key = row.get("object_key") instanceof byte[] b
+                ? new String(b, StandardCharsets.UTF_8) : (String) row.get("object_key");
+        byte[] bytes;
+        try (InputStream stream = objects.open(key, () -> {})) {
+            bytes = stream.readAllBytes();
+        } catch (IOException error) {
+            throw new IllegalStateException("Session resource read failed", error);
+        }
+        check(bytes.length == ((Number) row.get("byte_length")).longValue()
+                && hash(bytes).equals(row.get("sha256")), "resource_corrupt");
+        return bytes;
     }
 
     JsonNode resource(JsonNode source, JsonNode ref) {
@@ -118,6 +137,12 @@ final class WorkspaceRecoveryReader {
                     check(collected != null && collected > 0, "resource_corrupt");
                     throw com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceRecoveryProtocol.failure("resource_collected");
                 }
+            } else if ("OSS_OBJECT".equals(row.get("storage_kind"))) {
+                check(("PUBLISHED".equals(row.get("state")) || "REFERENCED".equals(row.get("state")))
+                        && row.get("inline_bytes") == null && row.get("object_key") != null
+                        && row.get("object_version_id") == null && row.get("encryption_key_id") == null,
+                        "resource_layout_unsupported");
+                bytes = readExternalObject(row);
             } else {
                 check("TOOL_PUBLICATION".equals(row.get("storage_kind")) && "REFERENCED".equals(row.get("state"))
                         && row.get("inline_bytes") == null && row.get("object_version_id") == null

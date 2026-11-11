@@ -49,6 +49,7 @@ class ManagedSchemaTimeContractTest {
             "ma_channel_instance=gmt_create,gmt_modified",
             "ma_channel_binding=gmt_create",
             "ma_delivery=claimed_at,claim_until,available_at,gmt_create,gmt_modified",
+            "ma_channel_segment=gmt_create,gmt_modified",
             "ma_schedule=armed_at,watermark_slot,lease_until,gate_last_at,gmt_create,gmt_modified",
             "ma_schedule_occurrence=slot,next_retry_at,gmt_create,gmt_modified");
 
@@ -76,7 +77,7 @@ class ManagedSchemaTimeContractTest {
                 });
             }
         }
-        assertEquals(79, count);
+        assertEquals(81, count);
         assertAll(checks);
     }
 

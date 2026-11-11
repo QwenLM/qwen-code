@@ -27,6 +27,7 @@ import type {
 import type { ACPToolCall } from './adapters/types';
 import type { WelcomeHeaderProps } from './components/WelcomeHeader';
 import type { WebShellTheme } from './themeContext';
+import type { ComposerPlaceholderState } from './utils/composerInputState';
 
 export type MarkdownContentSource = 'assistant' | 'thinking';
 
@@ -722,6 +723,30 @@ export interface WebShellCustomization {
   /** Host-specific label for the Ask User Question free-text choice. */
   askUserFreeTextLabel?: string;
   renderToolHeaderExtra?: ToolHeaderExtraRenderer;
+  /**
+   * 与普通会话对齐 Managed 对话区文案与能力提示口径。默认 false 保持独立版行为。
+   *
+   * 宿主已有自己的外壳与能力表达：控件不可用即灰掉，不额外解释。
+   * 置 true 后 Managed 会：
+   * - placeholder 改用与普通会话相同的解析口径
+   *   （`composerPlaceholders?.[state] ?? t(getComposerPlaceholderKey(state))`，
+   *   进行中的会话同样按 processing 态对齐，而不是停在 managed 队列提示）
+   * - 不再渲染「模型已固定 / 审批模式已固定 / 请新建任务后发送」这类解释文案
+   *   （能力仍由后端 capabilities 决定并静默禁用，不放宽任何限制）
+   */
+  alignManagedChatWithHost?: boolean;
+  /**
+   * Show the managed session header (title / workspace / phase badge). Defaults to true.
+   * 宿主外壳已展示会话身份（如宿主侧栏）时置 false，避免对话区重复一遍。
+   */
+  showManagedSessionHeader?: boolean;
+  /**
+   * Host welcome slots. Managed surfaces (the managed session empty state and
+   * the workspace-binding creation screen) invoke the same renderers but can
+   * only supply a workspace-relative `cwd`, no daemon `version`, and no
+   * `hideTips` flag — renderers that branch on those fields must tolerate the
+   * managed shape (see `WelcomeHeaderProps`).
+   */
   renderWelcomeHeader?: WelcomeHeaderRenderer;
   renderWelcomeFooter?: WelcomeFooterRenderer;
   parseUserMessageContent?: UserMessageContentParser;
@@ -738,6 +763,14 @@ export interface WebShellCustomization {
   renderComposerTagTooltip?: ComposerTagRenderer;
   onComposerTagClick?: ComposerTagClickHandler;
   renderAssistantTurnFooter?: AssistantTurnFooterRenderer;
+  /**
+   * Main-composer copy by semantic state, mirrored for the managed composer
+   * when `alignManagedChatWithHost` is on. Omitted or blank entries retain the
+   * localized default for that state.
+   */
+  composerPlaceholders?: Readonly<
+    Partial<Record<ComposerPlaceholderState, string>>
+  >;
   /**
    * Satisfied / not-satisfied marks on each completed assistant turn. Omit the
    * object to leave Web Shell's answer footer unchanged.

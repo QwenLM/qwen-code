@@ -77,13 +77,30 @@ final class JournalResourceReads {
                         storeRows.databaseNow(), scopeKey, resourceId);
             }
             byte[] bytes = "TOOL_PUBLICATION".equals(resource.storageKind())
-                    ? readPublicationObject(resource, lease, updateVerification) : resource.bytes();
+                    ? readPublicationObject(resource, lease, updateVerification)
+                    : "OSS_OBJECT".equals(resource.storageKind())
+                            ? readSessionObject(resource) : resource.bytes();
             var result = new StoredResource(resource.resourceId(), resource.kind(),
                     resource.schemaVersion(), resource.byteLength(),
                     resource.digest(), bytes);
             lease.check();
             return result;
         }
+    }
+
+    private byte[] readSessionObject(JournalStoreRows.ResourceRow resource) {
+        byte[] bytes;
+        try (java.io.InputStream stream = publicationObjects.open(resource.objectKey(), () -> {})) {
+            bytes = stream.readAllBytes();
+        } catch (java.io.IOException error) {
+            throw new IllegalStateException("Session resource read failed", error);
+        }
+        if (bytes.length != resource.byteLength()
+                || !JournalStoreRows.sha256(bytes).equals(resource.digest())) {
+            throw JournalStoreRows.conflict(ManagedSessionStoreModels.ERROR_RESOURCE_MISSING,
+                    "The external resource object is missing or corrupt.");
+        }
+        return bytes;
     }
 
     StoredResource readOwnerResource(
