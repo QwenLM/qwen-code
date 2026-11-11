@@ -195,7 +195,7 @@ export class HostedLoopSession {
   }): Promise<LoopWakeupArm> {
     if (!isHostedLoopArmingEnabled()) {
       throw new LoopWakeupError(
-        'Loop wakeups are disabled on this deployment (qwen.managed-agent.loop.enabled).',
+        'Loop wakeups are disabled on this deployment (set QWEN_MANAGED_AGENT_LOOP_ENABLED=true in the Harness environment).',
       );
     }
     const prompt = params.prompt.trim();

@@ -250,9 +250,11 @@ The facts below are from this repository at `488845a4a81`.
    or `loop_cancel`: the local tools already cover both kinds, and the
    skill's `allowedTools` stay unchanged. The read profile never
    declares `loop_wakeup`. A deployment gate,
-   `qwen.managed-agent.loop.enabled` (environment
-   `QWEN_MANAGED_AGENT_LOOP_ENABLED`), defaults to false until the
+   `qwen.managed-agent.loop.enabled`, defaults to false until the
    acceptance evidence lands, mirroring the automation opt-in history.
+   It is a process-scoped Harness contract, not a control-plane settings
+   key: the deployment enables it by setting
+   `QWEN_MANAGED_AGENT_LOOP_ENABLED=true` in the Harness environment.
    The gate gates arming only: with it off, `loop_wakeup` is refused,
    but an already-armed wakeup survives — the pump delivers journal
    inputs regardless of tool declarations — and `cron_list`/`cron_delete`
@@ -327,7 +329,8 @@ The facts below are from this repository at `488845a4a81`.
   surface and the gate; the stale `scheduled_task_gate` entry is
   corrected separately (the managed automation gate shipped on
   2026-10-22).
-- The deployment settings schema: `qwen.managed-agent.loop.enabled`.
+- The deployment gate (a process-scoped Harness environment contract, not
+  a control-plane settings key): `QWEN_MANAGED_AGENT_LOOP_ENABLED`.
 
 ## Validation plan
 

@@ -206,9 +206,10 @@ Managed Session 今天无法运行这条路径：
    `cron_delete` 把 `loop:<wakeupId>` 路由到决策 7 的取消。不存在
    `loop_list` 或 `loop_cancel`：本地工具本就覆盖两类，skill 的
    `allowedTools` 保持不变。read profile 永不声明 `loop_wakeup`。
-   部署开关 `qwen.managed-agent.loop.enabled`（环境变量
-   `QWEN_MANAGED_AGENT_LOOP_ENABLED`）在验收证据落地前默认 false，
-   对应 automation 的 opt-in 历史。开关只门控安排：关闭时
+   部署开关 `qwen.managed-agent.loop.enabled` 在验收证据落地前默认 false，
+   对应 automation 的 opt-in 历史。它是进程级 Harness 契约，而非控制面
+   settings 键：部署通过在 Harness 环境设置
+   `QWEN_MANAGED_AGENT_LOOP_ENABLED=true` 启用。开关只门控安排：关闭时
    `loop_wakeup` 被拒绝，但已安排的唤醒存活——pump 投递 journal input
    不看工具是否声明——且 `cron_list`/`cron_delete` 仍能列出并取消它。
    由于该取消是模型调用的工具，运维还有一条非模型路径：控制面的内部
@@ -270,7 +271,8 @@ Managed Session 今天无法运行这条路径：
 - `packages/cli/src/serve/capability-parity.ts`：loop 工具面与开关的
   条目；过期的 `scheduled_task_gate` 条目另行修正（managed automation
   gate 已于 2026-10-22 落地）。
-- 部署 settings schema：`qwen.managed-agent.loop.enabled`。
+- 部署开关（进程级 Harness 环境契约，非控制面 settings 键）：
+  `QWEN_MANAGED_AGENT_LOOP_ENABLED`。
 
 ## 验证计划
 
