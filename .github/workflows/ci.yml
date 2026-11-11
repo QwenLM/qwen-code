@@ -1327,15 +1327,12 @@ jobs:
           '
 
       # The disk floor above admits on bytes and inodes; this admits on CPU
-      # contention, as a backstop against a host no shard has survived rather
-      # than a predictor of the RPC flake — measured green and red bands
-      # overlap, and the calibration is in the script. It runs immediately
-      # before the suites: the tmux/zip and linter provisioning steps above it
-      # are apt and network installs whose duration rises with the same
-      # contention, so a reading taken before them can be minutes stale by the
-      # time the suites start — the staleness that rules out an install-time
-      # reading. Both of those steps are continue-on-error, so refusing here
-      # costs only their install time.
+      # contention: a backstop for a host no shard survived, not a predictor of
+      # the RPC flake (the bands overlap; calibration in the script). It runs
+      # immediately before the suites because the tmux/zip and linter
+      # provisioning above are apt/network installs that slow down with the
+      # same contention, so an earlier reading is minutes stale by then. Both
+      # are continue-on-error, so refusing here costs only their install time.
       - name: 'Host load gate (self-hosted)'
         if: "${{ needs.test_build.result == 'success' && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' && runner.os == 'Linux' }}"
         timeout-minutes: 3
@@ -1377,10 +1374,8 @@ jobs:
           # the lane script reads the report and re-runs only that shape. '0'
           # disables it without a PR.
           QWEN_CI_RPC_RETRY: "${{ vars.QWEN_CI_RPC_RETRY || '1' }}"
-          # The step's own cap above. The lane script skips an RPC re-run once
-          # the elapsed time leaves less than a second pass, so a retry that
-          # cannot finish stops replacing the first attempt's report with a
-          # truncated one.
+          # The step's own cap: the lane skips an RPC re-run once less than a
+          # first pass remains, so a doomed retry cannot truncate the report.
           UNIT_LANE_BUDGET_SECONDS: '2700'
           # Coverage is collected only on the post-merge main run: nothing
           # read the pull-request reports, and v8 instrumentation cost about
