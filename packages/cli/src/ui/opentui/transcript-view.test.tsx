@@ -118,6 +118,9 @@ vi.mock('@opentui/react/jsx-dev-runtime', () => mocks.buildJsxRuntime());
 vi.mock('@opentui/react', () => ({ useRenderer: () => mocks.renderer }));
 
 import { OpenTuiTranscriptView } from './transcript-view.js';
+import * as modRowHooks from '../hooks/use-mod-row.js';
+import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
+import type { ModAssistantMessageProps } from '@qwen-code/qwen-code-core/mods/render-tree.js';
 import { C } from './theme.js';
 import {
   foldLiveEvent,
@@ -952,6 +955,61 @@ describe('OpenTuiTranscriptView', () => {
 
     const plain = render(<OpenTuiTranscriptView items={items} />);
     expect(plain.container.textContent).not.toMatch(/\[\d{2}:\d{2}:\d{2}\]/);
+  });
+
+  it('draws the text the Mods rewrote for a complete reply block in the main transcript', () => {
+    const modRow = vi
+      .spyOn(modRowHooks, 'useModRow')
+      .mockImplementation((_config, _sessionId, input) =>
+        input
+          ? {
+              ...(input.props as ModAssistantMessageProps),
+              text: 'REWRITTEN_BODY',
+            }
+          : undefined,
+      );
+    try {
+      const config = {} as Config;
+      const item = (streaming: boolean): LiveAssistantItem => ({
+        kind: 'assistant',
+        id: 'a1',
+        text: 'ANSWER_BODY',
+        streaming,
+      });
+      const content = (container: HTMLElement) =>
+        container.querySelector('markdown')?.getAttribute('content');
+
+      const done = render(
+        <OpenTuiTranscriptView
+          items={[item(false)]}
+          modRows={{ config, sessionId: 'session-1' }}
+        />,
+      );
+      expect(content(done.container)).toContain('REWRITTEN_BODY');
+      expect(modRow).toHaveBeenLastCalledWith(config, 'session-1', {
+        surface: 'terminal',
+        component: 'AssistantMessage',
+        requestId: 'a1',
+        props: { text: 'ANSWER_BODY', isFirstOfReply: true },
+      });
+      done.unmount();
+
+      // A streaming block and a view without Mod rows are not offered.
+      const live = render(
+        <OpenTuiTranscriptView
+          items={[item(true)]}
+          modRows={{ config, sessionId: 'session-1' }}
+        />,
+      );
+      expect(content(live.container)).toContain('ANSWER_BODY');
+      expect(modRow).toHaveBeenLastCalledWith(config, 'session-1', undefined);
+      live.unmount();
+      const preview = render(<OpenTuiTranscriptView items={[item(false)]} />);
+      expect(content(preview.container)).toContain('ANSWER_BODY');
+      expect(modRow).toHaveBeenLastCalledWith(undefined, undefined, undefined);
+    } finally {
+      modRow.mockRestore();
+    }
   });
 
   it('remounts the assistant row when the stamp setting flips (#170)', () => {

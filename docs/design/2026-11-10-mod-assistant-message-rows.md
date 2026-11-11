@@ -2,7 +2,7 @@
 
 [English](2026-11-10-mod-assistant-message-rows.md) | [简体中文](2026-11-10-mod-assistant-message-rows.zh-CN.md)
 
-Status: proposed. This adds the `AssistantMessage` render site to the Ink terminal, tracked in #13749. The OpenTUI terminal follows in its own change.
+Status: implemented in the Ink terminal (#16794) and the OpenTUI terminal. This adds the `AssistantMessage` render site, tracked in #13749.
 
 ## Problem and current behavior
 
@@ -14,14 +14,14 @@ A Mod can draw only the band above the prompt. It cannot change how the model's 
 
 Goals:
 
-- A `ui.render` site for each block of an assistant reply in the Ink transcript, whose hooks can rewrite the text the row shows.
+- A `ui.render` site for each block of an assistant reply in the Ink and OpenTUI transcripts, whose hooks can rewrite the text the row shows.
 - The stored message, what the model reads, `/copy` and exports keep the original text.
 - A Mod that awaits a model call inside the hook works without stalling the session's other Mod hooks behind every row.
 
 Non-goals:
 
 - Trees drawn in place of a row. A row draws its own message, with the text its hooks passed down.
-- The OpenTUI terminal, thinking rows and ACP hosts (later stages).
+- Thinking rows and ACP hosts (later stages).
 - Rows in the terminal scrollback (non-virtualized Ink), which cannot be drawn again once printed.
 
 ## Compatibility contract
@@ -59,9 +59,17 @@ A session runs one Mod dispatch at a time. The next row is queued after the prev
 
 A row whose input is larger than half a Mod payload is not raised, rather than handing the hooks a cut text.
 
+### OpenTUI
+
+OpenTUI keeps one assistant item per block: a reply's text is folded into one item while it streams and on a resume replay, where Ink's `gemini_content` items join the `gemini` item before them. Each complete item is one row, its `requestId` is the item's id, and `isFirstOfReply` is always true.
+
+The OpenTUI transcript is a retained view that mounts only the items near the viewport, so a mounted row is a shown row, as in Ink's virtualized viewport, and any mounted row draws again when its text changes. It does so in both screen modes, so OpenTUI always offers the site. A row's height is measured on each frame, so a rewrite that changes it moves the rows below. The session preview and the quit screen reuse the transcript view and do not offer rows.
+
 ### Session changes
 
 Rows belong to the session of the displayed transcript. When `/clear`, `/resume` or `/branch` adopts another session, the host discards the old row cache and accepts rows from the new transcript once it is committed. The branch can render replies inherited from the parent once they are part of the branch transcript. If a switch is abandoned, visible rows in the original session can render again.
+
+The two steps of a switch run in either order. Ink's `/resume` and `/branch` adopt the session for the Mods before they replace the transcript; OpenTUI's replace the transcript first, and `/clear` adopts first in both. A row whose transcript belongs to a session the Mods have not adopted yet is not raised. When the Mods adopt a session they tell every shown row, and the rows of the new transcript ask again then.
 
 ### Copy hints
 
@@ -76,9 +84,9 @@ Core runtime tests with the real QuickJS worker:
 - A hook that awaits `$.model.complete`, answered by another Mod, rewrites the row.
 - A dispatch abandoned while its hook awaits a model call settles, cancels the host call, and the next dispatch runs.
 
-CLI tests cover serialization, skipping a row hidden while it waits, remounts, invalidation, the render deadline, session ownership and source-copy hints. The Ink PTY test exercises `/clear` and checks which session receives each row.
+CLI tests cover serialization, skipping a row hidden while it waits, remounts, invalidation, the render deadline, session ownership and source-copy hints. The PTY test runs in both terminals. It exercises `/branch`, checking that the inherited rows are drawn again for the branch's session, and `/clear`, checking which session receives each row.
 
-Acceptance: in the Ink terminal with the virtualized viewport, a Mod that rewrites each reply block shows the rewritten text once the block is complete, and the original before; `/copy` still copies the original.
+Acceptance: in the Ink terminal with the virtualized viewport and in the OpenTUI terminal, a Mod that rewrites each reply block shows the rewritten text once the block is complete, and the original before; `/copy` still copies the original.
 
 ## Risks and open questions
 
