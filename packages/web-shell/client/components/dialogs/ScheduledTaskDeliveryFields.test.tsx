@@ -116,6 +116,20 @@ describe('ScheduledTaskDeliveryFields configured destinations', () => {
     });
   }
 
+  async function editTargetId(value: string) {
+    const input = container.querySelector<HTMLInputElement>(
+      '#scheduled-task-delivery-id',
+    )!;
+    act(() => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!.call(input, value);
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await render(onChange.mock.lastCall![0]);
+  }
+
   it('selects the declared target without requiring or fabricating contacts', async () => {
     await render(null);
     expect(onChange).not.toHaveBeenCalled();
@@ -143,10 +157,146 @@ describe('ScheduledTaskDeliveryFields configured destinations', () => {
   it('round-trips a saved configured target without updating it', async () => {
     await render(configuredDelivery);
     expect(onChange).not.toHaveBeenCalled();
-    expect(container.textContent).toContain('webhook-bot');
+    expect(
+      container.querySelector<HTMLSelectElement>(
+        '#scheduled-task-delivery-channel',
+      )?.value,
+    ).toBe('webhook-bot');
     expect(container.textContent).not.toContain('webhook-bot · Chat · default');
     selectChannel('');
     expect(onChange).toHaveBeenLastCalledWith(null);
+  });
+
+  it.each(['toString', 'valueOf', 'hasOwnProperty', 'isPrototypeOf'])(
+    'preserves the saved %s channel while discovery is pending or it is missing',
+    async (channelName) => {
+      const saved: DaemonChannelDelivery = {
+        kind: 'channel',
+        target: { channelName, type: 'chat', id: 'saved-id' },
+      };
+      for (const loading of [true, false]) {
+        useChannels.mockReturnValue({
+          data: loading ? undefined : { catalog, snapshot: { instances: {} } },
+          catalog,
+          channels: {},
+          loading,
+          error: undefined,
+        });
+        await render(saved);
+        expect(
+          container.querySelector<HTMLSelectElement>(
+            '#scheduled-task-delivery-channel',
+          )?.value,
+        ).toBe(channelName);
+        expect(
+          container.querySelector<HTMLInputElement>(
+            '#scheduled-task-delivery-id',
+          )?.value,
+        ).toBe('saved-id');
+        expect(container.textContent).toContain(
+          loading ? 'Loading Channels' : 'This Channel is unavailable',
+        );
+        expect(onChange).not.toHaveBeenCalled();
+      }
+    },
+  );
+
+  it.each(['repair', 'reselect'])(
+    'keeps the manual editor mounted until explicit %s',
+    async (action) => {
+      await render({
+        ...configuredDelivery,
+        target: { ...configuredDelivery.target, id: 'old' },
+      });
+      const input = container.querySelector<HTMLInputElement>(
+        '#scheduled-task-delivery-id',
+      )!;
+      input.focus();
+      await editTargetId('default');
+      expect(container.querySelector('#scheduled-task-delivery-id')).toBe(
+        input,
+      );
+      expect(document.activeElement).toBe(input);
+      await editTargetId('default-2');
+      expect(input.value).toBe('default-2');
+      expect(onChange).toHaveBeenLastCalledWith({
+        ...configuredDelivery,
+        target: { ...configuredDelivery.target, id: 'default-2' },
+      });
+      if (action === 'repair') {
+        const repair = Array.from(container.querySelectorAll('button')).find(
+          (element) => element.textContent === 'Use configured destination',
+        )!;
+        act(() => repair.click());
+      } else {
+        selectChannel('app-bot');
+        await render(onChange.mock.lastCall![0]);
+        selectChannel('webhook-bot');
+      }
+      await render(onChange.mock.lastCall![0]);
+      expect(onChange).toHaveBeenLastCalledWith(configuredDelivery);
+      expect(container.querySelector('#scheduled-task-delivery-id')).toBeNull();
+    },
+  );
+
+  it('requires the configured target type as well as its ID to match', async () => {
+    await render({
+      ...configuredDelivery,
+      target: { ...configuredDelivery.target, type: 'user' },
+    });
+    expect(
+      container.querySelector<HTMLSelectElement>(
+        '#scheduled-task-delivery-type',
+      )?.value,
+    ).toBe('user');
+    expect(
+      container.querySelector<HTMLInputElement>('#scheduled-task-delivery-id')
+        ?.value,
+    ).toBe('default');
+    expect(container.textContent).toContain('webhook-bot · User · default');
+    const repair = Array.from(container.querySelectorAll('button')).find(
+      (element) => element.textContent === 'Use configured destination',
+    )!;
+    expect(repair).toBeDefined();
+    act(() => repair.click());
+    expect(onChange).toHaveBeenLastCalledWith(configuredDelivery);
+  });
+
+  it('does not claim a saved destination is unobserved before discovery finishes', async () => {
+    const saved: DaemonChannelDelivery = {
+      kind: 'channel',
+      target: { channelName: 'app-bot', type: 'chat', id: 'group' },
+    };
+    for (const loading of [false, true]) {
+      useChannels.mockReturnValue({
+        data: undefined,
+        catalog: [],
+        channels: {},
+        loading,
+        error: undefined,
+      });
+      await render(saved);
+      expect(container.textContent).not.toContain(
+        'This destination is not in the recent suggestions',
+      );
+      expect(actions.listChannelObservedContacts).not.toHaveBeenCalled();
+    }
+    expect(container.textContent).toContain('Loading Channels');
+    useChannels.mockReturnValue({
+      data: undefined,
+      catalog: [],
+      channels: {},
+      loading: false,
+      error: new Error('Channel discovery unavailable'),
+    });
+    await render(saved);
+    expect(actions.listChannelObservedContacts).toHaveBeenCalledWith(
+      'secondary',
+    );
+    expect(container.textContent).toContain(
+      'This destination is not in the recent suggestions',
+    );
+    expect(onChange).not.toHaveBeenCalled();
   });
 
   it('waits for the catalog before discovering contacts for a saved target', async () => {

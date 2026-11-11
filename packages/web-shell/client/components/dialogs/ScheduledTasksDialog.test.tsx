@@ -2990,6 +2990,10 @@ describe('ScheduledTasksDialog Channel delivery', () => {
     click(document.querySelector('[aria-label="Edit"]'));
     await flush();
     expect(targetInput().value).toBe(' unsupported-id ');
+    expect(document.body.textContent).toContain(
+      'This saved destination differs from the Channel’s configured destination.',
+    );
+    expect(findButton('Use configured destination')).toBeDefined();
     input(
       document.querySelector<HTMLInputElement>('input[maxlength="200"]')!,
       'Renamed webhook task',

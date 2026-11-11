@@ -316,6 +316,46 @@ describe('ChannelsManagerPage', () => {
     );
   });
 
+  it.each(['stopped', 'starting', 'partial', 'error'] as const)(
+    'does not claim outbound readiness while %s',
+    async (state) => {
+      channelState.current.catalog.push(webhookType);
+      channelState.current.channels = {
+        webhook: channel('webhook', 'dingtalk-webhook', state),
+      };
+      await renderPage();
+      expect(container.textContent).toContain(
+        'Not ready to send notifications.',
+      );
+      expect(container.textContent).not.toContain(
+        'Sends notifications to the configured destination.',
+      );
+      expect(container.textContent).not.toContain('Ready to send');
+    },
+  );
+
+  it('opens the application bot editor from the DingTalk method chooser', async () => {
+    channelState.current.catalog.push(webhookType);
+    await renderPage();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="channel-platform-dingtalk"]',
+        )!
+        .click();
+    });
+    const appMethod = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent?.includes('Application bot'),
+    )!;
+    expect(appMethod).toBeDefined();
+    await act(async () => appMethod.click());
+    expect(inputByLabel('Client ID (AppKey)')).not.toBeNull();
+    expect(inputByLabel('Webhook URL')).toBeNull();
+    expect(document.querySelector('[role="dialog"]')?.textContent).toContain(
+      'Access control',
+    );
+  });
+
   it('shows only the three enabled platforms and configured instances', async () => {
     await renderPage();
 

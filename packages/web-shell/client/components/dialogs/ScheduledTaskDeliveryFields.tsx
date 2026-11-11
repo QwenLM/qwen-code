@@ -65,9 +65,11 @@ export function ScheduledTaskDeliveryFields({
   const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
   const [contactsLoading, setContactsLoading] = useState(false);
   const [contactsError, setContactsError] = useState(false);
+  const [editingTarget, setEditingTarget] = useState(false);
   const target = delivery?.target;
   const hasTarget = delivery !== null;
   const getConfiguredTarget = (channelName: string) => {
+    if (!Object.hasOwn(channels.channels, channelName)) return undefined;
     const type = channels.channels[channelName]?.config.type;
     return channels.catalog.find((entry) => entry.type === type)
       ?.defaultDeliveryTarget;
@@ -170,6 +172,7 @@ export function ScheduledTaskDeliveryFields({
           value={target?.channelName ?? ''}
           disabled={disabled || !available}
           onChange={(event) => {
+            setEditingTarget(false);
             const channelName = event.target.value;
             const destination = getConfiguredTarget(channelName);
             onChange(
@@ -267,12 +270,13 @@ export function ScheduledTaskDeliveryFields({
                     variant="outline"
                     size="sm"
                     disabled={disabled || !available || unavailableTarget}
-                    onClick={() =>
+                    onClick={() => {
+                      setEditingTarget(false);
                       updateTarget({
                         type: configuredTarget.type,
                         id: configuredTarget.id,
-                      })
-                    }
+                      });
+                    }}
                   >
                     {t('scheduledTasks.delivery.useConfiguredDestination')}
                   </Button>
@@ -317,6 +321,7 @@ export function ScheduledTaskDeliveryFields({
               </select>
               {canDiscover &&
                 observedContactsAvailable &&
+                canSuggestContacts &&
                 !contactsLoading &&
                 !contactsError &&
                 target.id &&
@@ -339,7 +344,7 @@ export function ScheduledTaskDeliveryFields({
               </FieldDescription>
             </Field>
           )}
-          {!usesConfiguredTarget && (
+          {(!usesConfiguredTarget || editingTarget) && (
             <>
               <Field>
                 <FieldLabel
@@ -353,12 +358,13 @@ export function ScheduledTaskDeliveryFields({
                   className={styles.select}
                   value={target.type}
                   disabled={disabled || !available || unavailableTarget}
-                  onChange={(event) =>
+                  onChange={(event) => {
+                    setEditingTarget(true);
                     updateTarget({
                       type: event.target.value === 'user' ? 'user' : 'chat',
                       id: '',
-                    })
-                  }
+                    });
+                  }}
                 >
                   <option value="user">
                     {t('scheduledTasks.delivery.user')}
@@ -384,7 +390,10 @@ export function ScheduledTaskDeliveryFields({
                       ? 'scheduled-task-delivery-id-whitespace'
                       : undefined
                   }
-                  onChange={(event) => updateTarget({ id: event.target.value })}
+                  onChange={(event) => {
+                    setEditingTarget(true);
+                    updateTarget({ id: event.target.value });
+                  }}
                 />
                 {hasSurroundingWhitespace && (
                   <>

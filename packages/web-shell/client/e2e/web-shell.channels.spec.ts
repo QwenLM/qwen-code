@@ -1224,8 +1224,10 @@ test('lists a configured Email channel and hides its inert group controls @smoke
 test('configures and starts a DingTalk webhook method in the selected workspace', async ({
   page,
 }, testInfo) => {
+  const primaryWorkspaceCwd = '/tmp/qwen-web-shell-e2e';
   const workspaceCwd = '/tmp/qwen-outbound-webhook-secondary';
   const scenario = createWebShellDaemonScenario({
+    channels: { revision: '7', instances: {} },
     capabilities: {
       features: [
         'session_events',
@@ -1236,7 +1238,7 @@ test('configures and starts a DingTalk webhook method in the selected workspace'
       workspaces: [
         {
           id: 'primary',
-          cwd: '/tmp/qwen-web-shell-e2e',
+          cwd: primaryWorkspaceCwd,
           displayName: 'Main workspace',
           primary: true,
           trusted: true,
@@ -1291,6 +1293,20 @@ test('configures and starts a DingTalk webhook method in the selected workspace'
   await page.addInitScript(() => {
     window.sessionStorage.setItem('qwen-daemon-token', 'e2e-token');
   });
+  let primarySnapshotRequests = 0;
+  await page.route(
+    (url) =>
+      url.pathname ===
+      `/workspaces/${encodeURIComponent(primaryWorkspaceCwd)}/channels`,
+    async (route) => {
+      if (route.request().method() !== 'GET') {
+        await route.fallback();
+        return;
+      }
+      primarySnapshotRequests += 1;
+      await route.fulfill({ json: { revision: '1', instances: {} } });
+    },
+  );
   await page.route(
     /\/workspaces\/[^/]+\/channels\/notices\/start$/,
     async (route) => {
@@ -1314,6 +1330,7 @@ test('configures and starts a DingTalk webhook method in the selected workspace'
   await expect(page.getByText('Loading...')).toHaveCount(0);
   await page.getByRole('button', { name: 'Channels', exact: true }).click();
   await expect(page.getByTestId('channel-platform-dingtalk')).toBeVisible();
+  await expect.poll(() => primarySnapshotRequests).toBeGreaterThan(0);
   await expect(
     page.getByTestId('channel-platform-dingtalk-webhook'),
   ).toHaveCount(0);
@@ -1363,7 +1380,7 @@ test('configures and starts a DingTalk webhook method in the selected workspace'
     `/workspaces/${encodeURIComponent(workspaceCwd)}/channels/notices`,
   );
   expect(upsert?.body).toEqual({
-    expectedRevision: '1',
+    expectedRevision: '7',
     config: { type: 'dingtalk-webhook' },
     secrets: {
       webhookUrl: { operation: 'replace', value: '$DINGTALK_WEBHOOK_URL' },
@@ -1381,7 +1398,8 @@ test('configures and starts a DingTalk webhook method in the selected workspace'
   expect(
     daemon.requests.filter(
       (request) =>
-        request.method === 'POST' && /\/(sessions|prompt)$/.test(request.path),
+        request.method === 'POST' &&
+        /\/session$|\/standalone\/sessions$|\/prompt$/.test(request.path),
     ),
   ).toHaveLength(0);
   await page.screenshot({

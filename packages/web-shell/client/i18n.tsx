@@ -4676,6 +4676,8 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'channels.status.readyToSend': 'Ready to send',
   'channels.statusDescription.readyToSend':
     'Ready locally. Remote credentials are checked when sending.',
+  'channels.statusDescription.notReadyToSend':
+    'Not ready to send notifications.',
   'channels.statusDescription.outbound':
     'Sends notifications to the configured destination.',
   'channels.platform.configureNamed': (v) =>
@@ -9589,6 +9591,7 @@ const ZH: Messages = {
   'channels.status.readyToSend': '可发送',
   'channels.statusDescription.readyToSend':
     '本地已就绪，远程凭证会在发送时验证。',
+  'channels.statusDescription.notReadyToSend': '尚未就绪，暂时无法发送通知。',
   'channels.statusDescription.outbound': '向配置的目标发送通知。',
   'channels.platform.configureNamed': (v) => `配置${v?.platform ?? '频道'}`,
   'channels.status.stopped': '已停止',

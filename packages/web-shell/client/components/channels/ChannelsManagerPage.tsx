@@ -690,7 +690,7 @@ export function ChannelsManagerPage({
                                 descriptor?.outboundOnly
                                   ? channel.runtime.state === 'connected'
                                     ? 'channels.statusDescription.readyToSend'
-                                    : 'channels.statusDescription.outbound'
+                                    : 'channels.statusDescription.notReadyToSend'
                                   : STATUS_DESCRIPTION_KEYS[
                                       channel.runtime.state
                                     ],

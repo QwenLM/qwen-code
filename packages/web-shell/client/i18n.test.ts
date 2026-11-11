@@ -110,7 +110,28 @@ const SCHEDULED_TASK_DELIVERY_KEYS = [
   'user',
   'chat',
   'cardPrefix',
+  'configuredGroupHint',
+  'configuredHint',
+  'useConfiguredDestination',
+  'differentConfiguredDestination',
 ].map((suffix) => `scheduledTasks.delivery.${suffix}`);
+
+const OUTBOUND_CHANNEL_KEYS = [
+  'method.title',
+  'method.description',
+  'method.applicationBot',
+  'method.applicationBot.description',
+  'method.webhook',
+  'method.webhook.description',
+  'status.readyToSend',
+  'statusDescription.readyToSend',
+  'statusDescription.notReadyToSend',
+  'statusDescription.outbound',
+  'editor.field.dingtalkWebhook.webhookUrl',
+  'editor.field.dingtalkWebhook.webhookUrl.description',
+  'editor.field.dingtalkWebhook.signingSecret',
+  'editor.field.dingtalkWebhook.signingSecret.description',
+].map((suffix) => `channels.${suffix}`);
 
 describe('web-shell i18n catalog', () => {
   it('localizes the scheduled-task workspace host-lock hint', () => {
@@ -133,6 +154,16 @@ describe('web-shell i18n catalog', () => {
     expect(zh('scheduledTasks.delivery.perRun')).toContain(
       '每次新会话不支持频道投递',
     );
+  });
+
+  it('keeps the outbound Channel translations in both locales', () => {
+    const en = getTranslator('en');
+    const zh = getTranslator('zh-CN');
+    for (const key of OUTBOUND_CHANNEL_KEYS) {
+      expect(en(key)).not.toBe(key);
+      expect(zh(key)).not.toBe(key);
+      expect(zh(key)).not.toBe(en(key));
+    }
   });
 
   it('keeps the channel range message spacing in both locales', () => {
