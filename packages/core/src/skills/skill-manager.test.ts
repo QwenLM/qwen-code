@@ -1208,6 +1208,37 @@ describe('SkillManager', () => {
   });
 
   describe('discovery completeness', () => {
+    it('distinguishes invalid manifests from unreadable sources without weakening completeness', async () => {
+      mockReaddir(bareDirent('broken'));
+      vi.mocked(fs.access).mockResolvedValue(undefined);
+      vi.mocked(fs.readFile).mockResolvedValue('---\nname: broken\n---\n');
+      await manager.refreshCache();
+      expect(manager.hasDiscoveryErrors()).toBe(true);
+      expect(manager.hasDiscoveryReadErrors()).toBe(false);
+
+      vi.mocked(fs.readFile).mockRejectedValue(fsError('unreadable', 'EACCES'));
+      await manager.refreshCache();
+      expect(manager.hasDiscoveryReadErrors()).toBe(true);
+
+      vi.mocked(fs.readFile).mockResolvedValue(validMarkdown);
+      await manager.refreshCache();
+      expect(manager.hasDiscoveryErrors()).toBe(false);
+      expect(manager.hasDiscoveryReadErrors()).toBe(false);
+    });
+
+    it('keeps a source failure visible alongside a malformed manifest', async () => {
+      mockReaddir(bareDirent('broken'), bareDirent('unreadable'));
+      vi.mocked(fs.access).mockImplementation(async (file) => {
+        if (path.basename(path.dirname(String(file))) === 'unreadable')
+          throw fsError('unreadable', 'EACCES');
+      });
+      vi.mocked(fs.readFile).mockResolvedValue('---\nname: broken\n---\n');
+      await manager.refreshCache();
+      expect(manager.getParseErrors().size).toBeGreaterThan(0);
+      expect(manager.hasDiscoveryErrors()).toBe(true);
+      expect(manager.hasDiscoveryReadErrors()).toBe(true);
+    });
+
     function createReadGate() {
       let resolve!: (value: []) => void;
       const promise = new Promise<[]>((release) => {

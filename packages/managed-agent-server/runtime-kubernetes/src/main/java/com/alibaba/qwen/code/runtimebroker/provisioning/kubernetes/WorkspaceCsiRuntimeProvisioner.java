@@ -1,8 +1,11 @@
 package com.alibaba.qwen.code.runtimebroker.provisioning.kubernetes;
 
 import com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiRegistration;
+import com.alibaba.qwen.code.managedagent.contracts.runtime.Receipt;
 import com.alibaba.qwen.code.managedagent.contracts.runtime.WorkerArtifact;
 import com.alibaba.qwen.code.managedagent.repository.WorkspaceCsiReservations;
+import com.alibaba.qwen.code.runtimebroker.CsiOwnershipRevision;
+import com.alibaba.qwen.code.runtimebroker.ResidentWorkspaceProfile;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
@@ -14,6 +17,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.RuntimeResourceHandle;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
+import com.alibaba.qwen.code.runtimebroker.StoreFailureException;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity;
 import com.alibaba.qwen.code.runtimebroker.adapter.HttpRuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.spi.KubernetesRuntimeClient;
@@ -27,6 +31,7 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -71,7 +76,8 @@ public final class WorkspaceCsiRuntimeProvisioner implements RuntimeProvisioner 
     private final Duration timeout;
     private final RuntimeTransport transport;
     private final Map<String, Object> authority;
-    private final ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
+    private final ExecutorService executor = Executors.newThreadPerTaskExecutor(
+            Thread.ofVirtual().name("runtime-workspace-csi-", 0).factory());
     private final ThreadLocal<Long> deadline = new ThreadLocal<>();
     private final Map<RuntimeProvisionSeed, RuntimeBindingRecord> claims = new ConcurrentHashMap<>();
     private final Map<RuntimeProvisionSeed, Placement> placements = new ConcurrentHashMap<>();
@@ -188,6 +194,7 @@ public final class WorkspaceCsiRuntimeProvisioner implements RuntimeProvisioner 
             var pod = create("pods", pod(request, seed));
             checkObject(pod, pod(request, seed), null);
             String podUid = uid(pod);
+            long pause = 200;
             while (true) {
                 admitted(request, seed, original);
                 pod = get("pods", name(seed));
@@ -225,11 +232,12 @@ public final class WorkspaceCsiRuntimeProvisioner implements RuntimeProvisioner 
                     return handle;
                 }
                 try {
-                    Thread.sleep(100);
+                    Thread.sleep(pause);
                 } catch (InterruptedException interrupted) {
                     Thread.currentThread().interrupt();
                     throw timeout();
                 }
+                pause = Math.min(pause * 2, 2_000);
             }
         });
     }
@@ -255,7 +263,7 @@ public final class WorkspaceCsiRuntimeProvisioner implements RuntimeProvisioner 
             } catch (RuntimeException error) {
                 forgetPlacement(request, seed, handle);
                 return error instanceof RuntimeBrokerException failure && failure.isRetryable()
-                        || error instanceof com.alibaba.qwen.code.runtimebroker.StoreFailureException
+                        || error instanceof StoreFailureException
                         ? RuntimeObservation.unknown(handle) : RuntimeObservation.conflict(handle);
             }
         });
@@ -316,9 +324,9 @@ public final class WorkspaceCsiRuntimeProvisioner implements RuntimeProvisioner 
                         RuntimeBindingRecord.State.RECOVERY_BLOCKED).contains(original.getState())
                 && (fresh && original.getResourceHandle() == null || handle.equals(original.getResourceHandle())));
         var expectedStorage = storageTuple(reserved);
-        require(com.alibaba.qwen.code.runtimebroker.ResidentWorkspaceProfile.selects(request.getScope())
-                ? com.alibaba.qwen.code.runtimebroker.CsiOwnershipRevision.residentReserved(reserved.revision())
-                : com.alibaba.qwen.code.runtimebroker.CsiOwnershipRevision.reserved(reserved.revision()));
+        require(ResidentWorkspaceProfile.selects(request.getScope())
+                ? CsiOwnershipRevision.residentReserved(reserved.revision())
+                : CsiOwnershipRevision.reserved(reserved.revision()));
         require(same(expectedStorage, value.get("storage")));
         checkObservation(request, seed, handle);
         var receipt = attest(request, seed, placement, WorkspaceCsiRuntimeIdentity.boot(request, seed, handle));
@@ -433,7 +441,7 @@ public final class WorkspaceCsiRuntimeProvisioner implements RuntimeProvisioner 
                 && ((Number) current.get("restartCount")).doubleValue() == 0
                 && !map(current.get("state")).containsKey("terminated"));
         return "Running".equals(status.get("phase")) && Boolean.TRUE.equals(current.get("ready"))
-                && map(current.get("state")).keySet().equals(java.util.Set.of("running")) ? current : null;
+                && map(current.get("state")).keySet().equals(Set.of("running")) ? current : null;
     }
 
     private Map<String, Object> secret(RuntimeProvisionSeed seed, Map<String, Object> boot) {
@@ -456,7 +464,7 @@ public final class WorkspaceCsiRuntimeProvisioner implements RuntimeProvisioner 
             var sources = new ArrayList<Map<String, Object>>();
             for (int index = 0; index < artifacts.size(); index++) {
                 sources.add(Map.of("configMap", Map.of("name", artifacts.get(index).configMapName(),
-                        "items", List.of(Map.of("key", "chunk", "path", String.format(java.util.Locale.ROOT, "%03d", index))))));
+                        "items", List.of(Map.of("key", "chunk", "path", String.format(Locale.ROOT, "%03d", index))))));
             }
             volumes.add(Map.of("name", "worker", "projected", Map.of("defaultMode", 292, "sources", sources)));
         }
@@ -495,7 +503,7 @@ public final class WorkspaceCsiRuntimeProvisioner implements RuntimeProvisioner 
                     "metadata", Map.of("name", artifact.configMapName(), "namespace", registration.namespace())), artifact.uid());
             require(object.get("data") == null || map(object.get("data")).isEmpty());
             var data = map(object.get("binaryData"));
-            require(data.keySet().equals(java.util.Set.of("chunk")));
+            require(data.keySet().equals(Set.of("chunk")));
             byte[] chunk = Base64.getDecoder().decode(text(data, "chunk", 1024 * 1024));
             require(chunk.length > 0 && artifact.sha256().equals(rawDigest(chunk)));
         }
@@ -525,7 +533,7 @@ public final class WorkspaceCsiRuntimeProvisioner implements RuntimeProvisioner 
         return result;
     }
 
-    private Map<String, Object> protection(com.alibaba.qwen.code.managedagent.contracts.runtime.Receipt receipt) {
+    private Map<String, Object> protection(Receipt receipt) {
         require(registration.physicalKey().equals(receipt.physicalKey()) && registration.revision() == receipt.registrationRevision());
         var pin = receipt.protection();
         return Map.of("namespaceUid", pin.namespaceUid(), "policyName", pin.policyName(), "policyUid", pin.policyUid(),

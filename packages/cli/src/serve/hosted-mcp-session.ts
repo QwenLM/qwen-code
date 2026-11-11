@@ -24,6 +24,7 @@ import {
   type ManagedMcpOperationView,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-mcp-protocol.js';
 import {
+  fencedMountHandback,
   HostedWorkspaceBroker,
   HostedWorkspaceBrokerRejection,
   type HostedWorkspaceBrokerOptions,
@@ -163,6 +164,45 @@ export class HostedMcpSession {
           hookOwner ??
           `mcp-${digest([session.authority.sessionHeader.sessionKey, previous])}`,
       );
+  }
+
+  /**
+   * A non-terminal discard (the extension-drain drop and the owner-moved swap)
+   * releases the instance but leaves its rows 'drained' under the old owner:
+   * releasing them at discard time could strand an apply that later fails and
+   * leaves the durable active naming the previous revision (R14-1). Once a newer
+   * bundle is durably active, though, those superseded rows would make the
+   * reload's constructor see owners.size>1 over non-released rows and throw
+   * (R15-3). At cold load, advance every drained row whose owner is NOT the
+   * active bundle's owner to released. The active owner's own drained rows are
+   * left untouched for the reload to re-initialize (R15-1), so a failed apply
+   * (old owner still active) is never stranded.
+   */
+  static async releaseSupersededDrained(
+    session: ManagedSession,
+    activeOwnerId: string,
+  ): Promise<void> {
+    for (const entry of session.authority.extensionRecordsInDomain(
+      'mcp_configuration',
+    )) {
+      const configuration = parseMcpConfiguration(entry.record);
+      if (
+        configuration.releaseState !== 'drained' ||
+        configuration.runtimeSessionId === activeOwnerId
+      )
+        continue;
+      const released = { ...configuration, releaseState: 'released' as const };
+      await session.authority.commitExtensionRecord(
+        {
+          operation: 'commitMcpRecord',
+          commandId: `${configuration.configurationId}:${entry.revision + 1}`,
+          sessionKey: session.authority.sessionHeader.sessionKey,
+          contentDigest: digest(released),
+        },
+        { domain: 'mcp_configuration', record: released },
+        { class: 'trusted_entry' },
+      );
+    }
   }
 
   get servers(): readonly HostedMcpServerPin[] {
@@ -565,6 +605,34 @@ export class HostedMcpSession {
     signal?.throwIfAborted();
     let configuration: McpConfiguration;
     let operation: ManagedMcpOperationView;
+    if (
+      previous?.releaseState === 'drained' ||
+      previous?.releaseState === 'released'
+    ) {
+      // A non-terminal close leaves the row 'drained', a resting state nothing
+      // else consumes; the journal's one legal exit is 'released' and nothing
+      // admits released->active (R15-1). So start a FRESH row under the SAME
+      // runtimeSessionId rather than reopening: advance a drained predecessor to
+      // released first, then reinstall. A 'released' predecessor is a prior
+      // cycle's advance — the extension path resolves the deterministic id back
+      // to it on the NEXT reload, so it must also reinstall fresh instead of
+      // aborting (R16 fix-induced), exactly as initialize() neutralises a
+      // released previous. The fresh active row keeps the owner id the reload
+      // derives; only marking every row released with nothing active left would
+      // strand the deterministic owner.
+      if (previous.releaseState === 'drained')
+        await this.commitConfiguration({
+          ...previous,
+          releaseState: 'released',
+        });
+      // Past every existing row for this server so the fresh row supersedes them
+      // all (a prior cycle may have left a higher-revision random row behind).
+      configRevision =
+        this.configurations()
+          .filter((entry) => entry.serverId === pin.serverId)
+          .reduce((max, entry) => Math.max(max, entry.configRevision), 0) + 1;
+      previous = undefined;
+    }
     if (previous) {
       if (previous.releaseState !== 'active')
         throw new HostedMcpRecoveryRequiredError();
@@ -706,6 +774,22 @@ export class HostedMcpSession {
       configuration,
       catalog,
     });
+    // A non-terminal close drains EVERY row of the session, but only the latest
+    // per server is reinstalled, so superseded siblings would linger 'drained'
+    // and hold recoveryBlocked (and block mountHandback) forever (R16-1). Now
+    // that the replacing active row under this owner is committed, advance the
+    // remaining same-owner drained rows to released — they are already drained,
+    // so no mcp-release dispatch is owed. Superseded rows under OTHER owners are
+    // the discard-leak case, handled at cold load (releaseSupersededDrained).
+    for (const entry of this.configurations()) {
+      if (
+        entry.serverId === pin.serverId &&
+        entry.runtimeSessionId === this.broker.runtimeSessionId &&
+        entry.releaseState === 'drained' &&
+        entry.configurationId !== configuration.configurationId
+      )
+        await this.commitConfiguration({ ...entry, releaseState: 'released' });
+    }
   }
 
   getCatalogs(): readonly ManagedMcpCatalog[] {
@@ -993,9 +1077,9 @@ export class HostedMcpSession {
     );
   }
 
-  async close(): Promise<void> {
+  async close(opts: { terminal?: boolean } = {}): Promise<void> {
     await this.reconcileEffects();
-    await this.closeResources();
+    await this.closeResources(opts);
   }
 
   async reconcileEffects(): Promise<void> {
@@ -1051,7 +1135,16 @@ export class HostedMcpSession {
     }
   }
 
-  async closeResources(): Promise<void> {
+  async closeResources(opts: { terminal?: boolean } = {}): Promise<void> {
+    // The default is non-terminal (R14-1), for a v1 detach or an extension
+    // discard, which a reload may follow; the branch below says why. A delete
+    // and a lifecycle close pass terminal, and the RELEASED tombstone it
+    // leaves meets no later acquire of this owner, or of a Hook owner sharing
+    // its broker: the release runs in settle_resources, the last phase; a
+    // reload of a closing Session carries its lifecycle authority, which sets
+    // mcpClosing; and a retried close finds the rows released, while the
+    // Broker answers a release of a released owner too.
+    const terminal = opts.terminal ?? false;
     if (
       this.hasPendingOperations() ||
       this.configurations().some(
@@ -1092,6 +1185,29 @@ export class HostedMcpSession {
       await this.acquireOwner();
     }
     await this.drainConfigurations(configurations);
+    if (!terminal) {
+      // A detach hands the mount back but keeps the owner re-acquirable
+      // (R14-1): a terminal release would persist a RELEASED tombstone under
+      // the id the next load recomputes, wedging every later acquire. The
+      // drained configurations stay short of `released` on purpose — the
+      // reload derives this owner's id from the configurations that are not
+      // `released`, so marking them released would recompute a different id
+      // and strand the deterministic owner. The handback sweeps nothing, so
+      // live or unproven work refuses it; name that as recovery-required the
+      // way the pending-operation check above does (R14-2).
+      const claim = this.broker.mountClaim();
+      if (claim !== undefined) {
+        try {
+          await this.broker.releaseMount(claim);
+        } catch (cause) {
+          if (!fencedMountHandback(cause)) throw cause;
+          throw new HostedMcpRecoveryRequiredError();
+        }
+      }
+      this.acquired = false;
+      this.ownerReady = false;
+      return;
+    }
     await this.broker.release();
     await this.markReleased(configurations);
   }

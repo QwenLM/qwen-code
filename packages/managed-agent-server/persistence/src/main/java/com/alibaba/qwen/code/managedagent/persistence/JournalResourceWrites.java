@@ -7,6 +7,7 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.PublishToolResultRequest;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.StoredResource;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.ToolResultResourceRef;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.JdbcTemplate;
 
@@ -71,7 +72,7 @@ final class JournalResourceWrites {
     ToolResultResourceRef publishAgentResource(String tenantId, String workspaceId, String sessionId,
             String kind, byte[] bytes, String resourceId) {
         String digest = JournalStoreRows.sha256(bytes);
-        String scopeKey = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
+        String scopeKey = ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
         Timestamp now = storeRows.databaseNow();
         JournalStoreRows.ResourceRow existing = storeRows.findResource(scopeKey, resourceId);
         if (existing == null) {
@@ -81,7 +82,7 @@ final class JournalResourceWrites {
                         + " byte_length, sha256, storage_kind, inline_bytes, publish_command_id,"
                         + " state, gmt_create, last_verified_at) VALUES (?, ?, ?, ?, ?, ?,"
                         + " ?, 1, ?, ?, 'MYSQL_INLINE', ?, ?, 'PUBLISHED', ?, ?)",
-                    com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.resourceKey(scopeKey, resourceId),
+                    ManagedSessionStore.resourceKey(scopeKey, resourceId),
                     scopeKey,
                     tenantId,
                     workspaceId,
@@ -144,7 +145,7 @@ final class JournalResourceWrites {
             csiOriginal.requireContinuation();
         }
         if (authority == null && csiOriginal == null) {
-            fencing.requireSessionStorageOpenForAdmission(tenantId, request.workspaceId(), sessionId);
+            fencing.requireSessionStorageOpenForRead(tenantId, request.workspaceId(), sessionId);
         } else {
             fencing.requireSessionStorageOpen(tenantId, request.workspaceId(), sessionId);
         }
@@ -158,7 +159,7 @@ final class JournalResourceWrites {
         Timestamp now = storeRows.databaseNow();
         fencing.requireWriter(head, request.writerId(), request.writerGeneration(), writerToken, now, true);
         fencing.requireInstalledCsiWriter(csiOriginal);
-        String scopeKey = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
+        String scopeKey = ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
         JournalStoreRows.ResourceRow existing = storeRows.findResource(scopeKey, request.resourceId(), false);
         if (existing != null) {
             existing = storeRows.findResource(scopeKey, request.resourceId());
@@ -173,7 +174,7 @@ final class JournalResourceWrites {
                             + " byte_length, sha256, storage_kind, inline_bytes, publish_command_id,"
                             + " state, gmt_create, last_verified_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?,"
                             + " ?, 'MYSQL_INLINE', ?, ?, 'PUBLISHED', ?, ?)",
-                        com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.resourceKey(scopeKey, request.resourceId()),
+                        ManagedSessionStore.resourceKey(scopeKey, request.resourceId()),
                         scopeKey,
                         tenantId,
                         request.workspaceId(),
@@ -265,7 +266,7 @@ final class JournalResourceWrites {
                     scopeKey,
                     scopeKey,
                     revision,
-                    com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.resourceKey(scopeKey, resource.resourceId()),
+                    ManagedSessionStore.resourceKey(scopeKey, resource.resourceId()),
                     tenantId,
                     request.workspaceId(),
                     sessionId,
@@ -292,7 +293,7 @@ final class JournalResourceWrites {
                             + " last_verified_at) VALUES (?, ?, ?, ?, ?, ?,"
                             + " ?, ?, ?, ?, 'MYSQL_INLINE', ?, ?,"
                             + " 'REFERENCED', ?, ?)",
-                    com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.resourceKey(scopeKey, resource.resourceId()), scopeKey, tenantId, request.workspaceId(), sessionId,
+                    ManagedSessionStore.resourceKey(scopeKey, resource.resourceId()), scopeKey, tenantId, request.workspaceId(), sessionId,
                     resource.resourceId(), resource.kind(),
                     resource.schemaVersion(), resource.byteLength(),
                     resource.digest(), input.bytes(), request.commandId(),

@@ -170,6 +170,11 @@ export interface DaemonCapabilitiesLimits {
   sessionRestoreTimeoutMs?: number;
   /** Present when `workspace_file_upload` is advertised. */
   maxWorkspaceFileUploadBytes?: number;
+  /** Only raw Skill archives and zip-file sources; legacy limits are unchanged. */
+  maxSkillArchiveBytes?: number;
+  maxSkillArchiveExpandedBytes?: number;
+  maxSkillArchiveEntries?: number;
+  maxSkillArchiveManifestBytes?: number;
 }
 
 export interface DaemonWorkspaceCapability {
@@ -325,6 +330,11 @@ export type DaemonGitOperation =
   | 'cherry-pick'
   | 'revert'
   | 'bisect';
+
+export interface DaemonWorkspaceGitIgnoredPaths {
+  v: 1;
+  ignoredPaths: string[];
+}
 
 /**
  * Current Git metadata returned from a workspace Git status route.
@@ -909,6 +919,12 @@ export interface DaemonStatusReportSession {
   pendingPermissionCount: number;
   hasActivePrompt: boolean;
   lastEventId: number;
+  eventRingCount?: number;
+  eventRingBytes?: number;
+  eventRingEarliestEventId?: number;
+  eventRingEvictedEvents?: number;
+  eventRingEvictedBytes?: number;
+  availableCommandsSnapshotBytes?: number;
   lastSeenAt?: number;
   currentModelId?: string;
   currentApprovalMode?: string;
@@ -1052,6 +1068,7 @@ export interface DaemonStatusReport {
     maxPendingPromptsPerSession: number | null;
     listenerMaxConnections: number | null;
     eventRingSize: number;
+    eventRingMaxBytes?: number;
     promptDeadlineMs: number | null;
     writerIdleTimeoutMs: number | null;
     channelIdleTimeoutMs: number;
@@ -1604,7 +1621,14 @@ export interface DaemonRestoredSession extends DaemonSession {
    */
   eventEpoch?: string;
   /**
-   * True when the compaction engine failed at least once for this session
+   * Publish-time summary/unverified-seed boundary captured with a full load
+   * snapshot in eventEpoch. A suffix starting after it excludes those sources,
+   * not other partial/truncated/degraded content. Zero precedes the first event;
+   * absence is not zero. Omitted for summary reads and persisted-page refreshes.
+   */
+  replayProjectionWatermark?: number;
+  /**
+   * True when publication retention or compaction failed for this session
    * (load only): `compactedReplay`/`liveJournal` may lag behind live
    * events. Clients should prefer the full transcript (see
    * `fullTranscriptAvailable`) over the degraded snapshot.
@@ -1724,6 +1748,9 @@ export interface DaemonSessionSummary {
   workspaceCwd: string;
   createdAt?: string;
   updatedAt?: string;
+  /** Recorded ISO time of the latest real user input on the active main branch.
+   * Absent when unavailable; never substitute createdAt or updatedAt. */
+  lastUserPromptAt?: string;
   displayName?: string;
   titleSource?: 'manual' | 'auto';
   /** Id of the session that spawned this one (via `create_sub_session`), or
@@ -1919,6 +1946,8 @@ export type DaemonSessionGroupFilter =
   | (string & {});
 
 export interface DaemonSessionListPageOptions {
+  /** Descending order; question sort requires session_last_user_prompt_sort. Unknown times sort last. */
+  sortBy?: 'updatedAt' | 'lastUserPromptAt';
   pageSize?: number;
   cursor?: string;
   archiveState?: DaemonSessionArchiveState;
@@ -1936,6 +1965,14 @@ export interface DaemonSessionListPageOptions {
   sourceType?: string;
   /** Restrict the page to this source identifier. Requires `sourceType`. */
   sourceId?: string;
+  /**
+   * List the sessions currently live in the workspace bridge instead of
+   * persisted history, so closed rows cannot crowd live sessions out of the
+   * first page. Served over native REST; the ACP transport does not carry it.
+   * Cannot be combined with `view`, archived `archiveState`,
+   * `parentSessionId`, `sourceType`, or `sourceId`.
+   */
+  liveOnly?: boolean;
 }
 
 export interface DaemonSessionListPage {
@@ -1955,8 +1992,8 @@ export interface DaemonSessionCatalogWorkspace {
 export interface DaemonSessionCatalogRequest {
   /** 1–20 entries; `all` excludes internal workspaces. */
   workspaces: 'all' | DaemonSessionCatalogWorkspace[];
-  /** Shared filters; pageSize is 1–100, default 20. */
-  options?: Omit<DaemonSessionListPageOptions, 'cursor'>;
+  /** Shared filters; pageSize is 1–100, default 20. `liveOnly` is not shared. */
+  options?: Omit<DaemonSessionListPageOptions, 'cursor' | 'liveOnly'>;
   includeGroups?: boolean;
 }
 
@@ -3238,6 +3275,7 @@ export type DaemonContinueSessionResult =
       interruption: 'none' | 'interrupted_prompt' | 'interrupted_turn';
     };
 
+/** Local category estimates are independent of the reported totalTokens. */
 export interface DaemonContextCategoryBreakdown {
   systemPrompt: number;
   builtinTools: number;
@@ -3249,13 +3287,14 @@ export interface DaemonContextCategoryBreakdown {
   /** Startup prelude outside the skill listing. Absent from older daemons. */
   startupContext?: number;
   /**
-   * Conversation tokens after the startup prelude. When `totalTokens` is 0
+   * Independent conversation estimate after the startup prelude, never derived
+   * from or capped by totalTokens. When `totalTokens` is 0
    * (no provider count yet: after a model switch, `/restore` or a resume) this
    * is a local estimate of the history rather than 0, so the rows include the
    * conversation. Older daemons report 0 there.
    */
   messages: number;
-  /** Provider total not accounted for by any category. Absent from older daemons. */
+  /** @deprecated Legacy residual; accepted from old daemons but no longer emitted or displayed. */
   unattributed?: number;
   /** Cached prefix tokens; an annotation that overlaps categories. Absent from older daemons. */
   cachedTokens?: number;
@@ -3788,11 +3827,28 @@ export interface DaemonSessionStatsModelMetrics {
     totalTtftMs: number;
     /**
      * Time from the first to the last visible output, summed over requests
-     * whose window is at least 100 ms; shorter bursts cannot measure a rate.
+     * whose window is at least 100 ms. With `totalThroughputOutputTokens` it
+     * gives the generation-window rate that clients before
+     * `totalOutputSpeedDurationMs` show.
      */
     totalGenerationDurationMs: number;
     /** Output tokens of the requests in `totalGenerationDurationMs`. */
     totalThroughputOutputTokens: number;
+    /**
+     * Time from the first to the last visible output, summed over every timed
+     * request like `totalTtftMs`. Absent from older daemons.
+     */
+    totalTimedGenerationDurationMs?: number;
+    /**
+     * Output tokens, reasoning counted once, of the timed requests that
+     * reported any. Absent from older daemons.
+     */
+    totalOutputSpeedTokens?: number;
+    /**
+     * TTFT plus generation time of the requests in `totalOutputSpeedTokens`:
+     * output speed divides the tokens by it. Absent from older daemons.
+     */
+    totalOutputSpeedDurationMs?: number;
   };
   /**
    * Most recent timed, non-internal responses (oldest first, at most 200).
@@ -3803,8 +3859,14 @@ export interface DaemonSessionStatsModelMetrics {
     /** Event time, epoch ms. */
     at: number;
     ttftMs: number;
-    /** Generation window; below 100 ms it measures no output rate. */
+    /**
+     * From the first to the last visible output. Output speed divides
+     * `outputTokens` by `ttftMs + generationMs`; for a daemon without
+     * `generation.totalOutputSpeedDurationMs`, by `generationMs` when it is at
+     * least 100 ms.
+     */
     generationMs: number;
+    /** Reasoning counted once; older daemons sent the provider's count. */
     outputTokens: number;
     /** Subagent that issued the request; absent for the main conversation. */
     source?: string;
@@ -4073,6 +4135,19 @@ export type DaemonSkillToggleActivation =
   | 'reconciling'
   | 'partial';
 
+export type DaemonUserSkillActivation =
+  | { state: 'enabled' }
+  | { state: 'disabled'; mode?: 'hard' | 'default' };
+
+export interface DaemonUserSkillsActivationResult {
+  scope: 'user';
+  state: 'enabled' | 'disabled';
+  mode?: 'hard' | 'default';
+  /** Queue disposition for this write, not effective Skill availability. */
+  propagation: 'queued' | 'deferred' | 'not_required';
+  results: Array<{ skillName: string; changed: boolean }>;
+}
+
 export interface DaemonSkillToggleMutationSkill {
   name: string;
   enabled: boolean;
@@ -4146,12 +4221,61 @@ export interface DaemonSkillInstallRequest {
   source: DaemonSkillInstallSource;
 }
 
+export type DaemonSkillConfigInstallRequest =
+  | DaemonSkillInstallRequest
+  | {
+      name: string;
+      scope: DaemonSkillScope;
+      attemptId?: string;
+      source: { type: 'zip-file'; path: string; sha256?: string };
+    };
+
+export interface DaemonSkillInstallOptions {
+  signal?: AbortSignal;
+  /** Native sources default to 130 seconds; 0 disables only the client timeout. */
+  timeoutMs?: number;
+}
+
+export interface DaemonSkillArchiveInstallRequest
+  extends Omit<DaemonWorkspaceFileUploadRequest, 'path'> {
+  name: string;
+  attemptId?: string;
+}
+
+export interface DaemonSkillArchiveInstallResult
+  extends DaemonSkillMutationResult {
+  attemptId: string;
+  archiveSha256: string;
+}
+
+export interface DaemonSkillInstallAttempt {
+  attemptId: string;
+  scope: DaemonSkillScope;
+  skillName: string;
+  workspaceId: string;
+  generationId?: number;
+  state: 'running' | 'committed' | 'not_committed' | 'recovery_required';
+  phase:
+    | 'receiving'
+    | 'copying'
+    | 'waiting'
+    | 'extracting'
+    | 'publishing'
+    | 'cleanup';
+  archiveSha256?: string;
+  result?: DaemonSkillMutationResult;
+  error?: { code: string; message: string; retainedPaths?: string[] };
+}
+
 export interface DaemonSkillMutationResult {
   skillName: string;
   scope: DaemonSkillScope;
   installedPath?: string;
   deleted?: boolean;
   activation?: DaemonSkillToggleActivation;
+  attemptId?: string;
+  archiveSha256?: string;
+  activationWarning?: string;
 }
 
 export interface DaemonSettingDescriptor {
@@ -4898,10 +5022,23 @@ export type DaemonChannelConfigFieldKind =
   | 'record'
   | 'object';
 
+/**
+ * One selectable value of a config field. `description` explains the value
+ * in management UIs; `group` buckets related values under one picker
+ * section. Both are optional display metadata — validators only ever read
+ * `value`.
+ */
+interface DaemonChannelConfigFieldOption {
+  value: string;
+  label: string;
+  description?: string;
+  group?: string;
+}
+
 interface DaemonChannelConfigFieldDescriptorBase {
   key: string;
   label: string;
-  options?: ReadonlyArray<{ value: string; label: string }>;
+  options?: readonly DaemonChannelConfigFieldOption[];
   default?: string;
   description?: string;
 }
@@ -4931,7 +5068,7 @@ export interface DaemonChannelConfigEnumFieldDescriptor
   required?: boolean;
   envResolvable?: never;
   multiline?: never;
-  options: ReadonlyArray<{ value: string; label: string }>;
+  options: readonly DaemonChannelConfigFieldOption[];
   properties?: never;
 }
 
@@ -4941,7 +5078,15 @@ export interface DaemonChannelConfigNumberFieldDescriptor
   required?: boolean;
   envResolvable?: never;
   multiline?: never;
+  /** Exclusive lower bound: the value must be strictly greater than this. */
   exclusiveMinimum?: number;
+  /**
+   * Inclusive lower bound: the value may equal this. Needed because a field
+   * whose real floor is 0 cannot express it with `exclusiveMinimum` — writing
+   * -1 to admit 0 also admits (-1, 0), which the editor then accepts and the
+   * adapter rejects at save. When both are declared the stricter one wins.
+   */
+  minimum?: number;
   /** Inclusive upper bound. A poll interval above Node's 32-bit timer range is
    * clamped to 1ms, so an unbounded interval field can persist a hot loop. */
   maximum?: number;
@@ -4993,10 +5138,43 @@ export interface DaemonChannelTypeDescriptor {
   type: string;
   displayName: string;
   manageable: boolean;
+  /**
+   * Whether the adapter offers browser-rendered QR login. Absent on daemons
+   * that predate the capability.
+   */
+  supportsQrLogin?: boolean;
   fields: readonly DaemonChannelConfigFieldDescriptor[];
 }
 
 export type DaemonChannelTypeCatalog = DaemonChannelTypeDescriptor[];
+
+export type DaemonChannelQrLoginStatus =
+  | 'pending'
+  | 'succeeded'
+  | 'failed'
+  | 'expired'
+  | 'cancelled';
+
+/**
+ * A browser-rendered QR login session. Carries no credential values: the daemon
+ * persists them itself and the client only learns that binding succeeded.
+ */
+export interface DaemonChannelQrLoginView {
+  loginId: string;
+  channelType: string;
+  channelName: string;
+  status: DaemonChannelQrLoginStatus;
+  expiresAt: number;
+  /** Rendered QR image; only the initiating client receives it. */
+  qrCodeDataUrl?: string;
+  error?: string;
+}
+
+export interface DaemonChannelQrLoginStartResult
+  extends DaemonChannelQrLoginView {
+  /** True when an existing pending login for the same channel was reattached. */
+  attached: boolean;
+}
 
 export interface DaemonChannelRuntimeState {
   state: 'stopped' | 'starting' | 'connected' | 'partial' | 'error';
@@ -5039,6 +5217,13 @@ export interface DaemonChannelEvent {
   number?: number;
   actor?: string;
   sessionId?: string;
+  /**
+   * Workspace owning `sessionId`, when the Channel knew it at write time.
+   * Bound-session delivery can target a session in another workspace;
+   * clients need this to open it. Absent on older records, where the
+   * journal's own workspace is the fallback.
+   */
+  sessionWorkspaceCwd?: string;
   messageId?: string;
   durationMs?: number;
   error?: string;
@@ -5053,6 +5238,26 @@ export interface DaemonChannelEventsSnapshot {
    * than the tail window the route reads.
    */
   truncated: boolean;
+  /**
+   * Non-secret link metadata (platform type, API base URL, and the resolved
+   * GitHub web origin) for the channels named in `events`, resolved from the
+   * merged system + user + workspace settings and filtered to channels owned
+   * by the queried workspace. Present only when at least one channel
+   * resolves; absent on older daemons. Lets a client link journal rows of
+   * channels configured outside the workspace's own settings scope.
+   */
+  channelLinkMeta?: Record<string, DaemonChannelLinkMeta>;
+}
+
+export interface DaemonChannelLinkMeta {
+  type?: string;
+  baseUrl?: string;
+  /**
+   * The resolved GitHub web origin (e.g. `https://github.com` or a GHE web
+   * host). Clients should concatenate it directly; `baseUrl` remains for
+   * daemons that predate this field.
+   */
+  webOrigin?: string;
 }
 
 export interface DaemonChannelEventsQuery {
@@ -5573,6 +5778,7 @@ export type DaemonHookEventName =
   | 'TodoCreated'
   | 'TodoCompleted'
   | 'InstructionsLoaded'
+  | 'FileChanged'
   | (string & {});
 
 export type DaemonHookMatcherKind =
@@ -5665,6 +5871,8 @@ export interface DaemonHookEntry {
   matcher?: string;
   sequential?: boolean;
   enabled: boolean;
+  /** Why a disabled hook is off (e.g. 'untrusted'); absent when enabled. */
+  disabledReason?: string;
   hookId?: string;
   skillRoot?: string;
 }
@@ -5676,6 +5884,16 @@ export interface DaemonWorkspaceHooksStatus {
   disabled: boolean;
   hooks: DaemonHookEntry[];
   events: Record<string, DaemonHookEventMeta>;
+  /** Project hooks await the user's approval; see the hooks approve control. */
+  pendingApproval?: boolean;
+  /** Sanitized display lines of the withheld hooks, for the approval prompt. */
+  pendingApprovalHooks?: string[];
+  /**
+   * The hash of the block the prompt renders. Echo it back to
+   * `approveWorkspaceHooks` so the decision binds to the exact block the
+   * user reviewed; a block that changed since the render stays pending.
+   */
+  pendingApprovalHash?: string;
   errors?: DaemonStatusCell[];
 }
 
@@ -6022,4 +6240,72 @@ export interface DaemonMcpAppToolResult {
   isError?: boolean;
   structuredContent?: unknown;
   [key: string]: unknown;
+}
+
+export interface DaemonSubscriptionConfig {
+  enabled: boolean;
+  signedIn?: boolean;
+  plansUrl?: string;
+}
+
+export interface DaemonSubscriptionUserInfo {
+  sub: string;
+  name: string;
+  email: string;
+  member_type: string;
+}
+
+export interface DaemonSubscriptionFlow {
+  id: string;
+  status: 'waiting' | 'ready' | 'error' | 'cancelled';
+  authorizationUrl?: string;
+  userInfo?: DaemonSubscriptionUserInfo;
+  errorCode?: string;
+  errorStage?:
+    | 'device'
+    | 'exchange'
+    | 'credentials'
+    | 'userinfo'
+    | 'refresh'
+    | 'revoke'
+    | 'cleanup';
+  errorStatus?: number;
+  retryAfterMs?: number;
+}
+
+export interface DaemonSubscriptionActivation {
+  authType: 'qwen-subscription';
+  modelId: string;
+  runtimeSync: DaemonModelProviderRuntimeSyncResult;
+}
+
+/**
+ * WeChat login state. The credential is process-global (one account.json in
+ * the daemon's home), so these views are served outside any workspace scope.
+ * Neither carries the bot token: it is consumed by the daemon when it saves
+ * the account and is never returned to a client.
+ */
+export interface DaemonWeixinAccountStatus {
+  /** False once the daemon has disposed these routes; login is unavailable. */
+  enabled: boolean;
+  configured: boolean;
+  userId?: string;
+  savedAt?: string;
+}
+
+export interface DaemonWeixinLoginFlow {
+  id: string;
+  /** Not monotonic: `scanned` can return to `waiting` with a replacement QR. */
+  status: 'waiting' | 'scanned' | 'ready' | 'expired' | 'error';
+  /** Block-glyph QR rendering, absent when the encoder could not render it. */
+  qrText?: string;
+  /**
+   * The URL the operator scans. A live status does not guarantee one: while
+   * the daemon mints a replacement after an expiry the view has neither this
+   * nor qrText, and terminal views have neither. Derive the scan prompt from
+   * these two fields, never from `status`.
+   */
+  qrcodeUrl?: string;
+  /** Set on the failure terminals only; `ready` carries none. */
+  errorCode?: string;
 }

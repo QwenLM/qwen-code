@@ -1,10 +1,13 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
+import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionRecords;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.RestoreHead;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.StoredResource;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.StoredTransaction;
+import com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
@@ -131,9 +134,13 @@ final class JournalStoreRows {
     }
 
     ActivationLeaseRow activationLeaseRow(HeadRow head) {
+        // Every activation renewal reads this row, three times a minute per
+        // resident Session. Renewals update the activation row in place, so
+        // without idx_ma_session_journal_tx_activation the lookup walked back
+        // over every transaction the activation had committed.
         var rows = jdbc.query("SELECT journal_revision, record_bytes, record_digest, activation_lease_until,"
                         + " activation_renewal_seq FROM ma_session_journal_tx WHERE tenant_id = ? AND session_id = ?"
-                        + " AND activation_epoch = ? AND operation IN ('installActivation', 'renewActivation')"
+                        + " AND activation_epoch = ? AND is_activation_record = TRUE"
                         + " ORDER BY journal_revision DESC LIMIT 1", (result, index) -> {
                             try {
                                 byte[] raw = result.getBytes("record_bytes");
@@ -291,7 +298,7 @@ final class JournalStoreRows {
                         "SELECT " + ManagedSchemaProjection.RESOURCE.columns() + " FROM ma_resource WHERE resource_key = ? AND session_scope_key = ?"
                         + " AND resource_id = ?" + (lock ? " FOR UPDATE" : ""),
                         resourceMapper,
-                        com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.resourceKey(scopeKey, resourceId),
+                        ManagedSessionStore.resourceKey(scopeKey, resourceId),
                         scopeKey,
                         resourceId);
         return rows.isEmpty() ? null : rows.get(0);
@@ -696,5 +703,26 @@ final class JournalStoreRows {
             int schemaVersion, long byteLength, String digest,
             String storageKind, byte[] bytes, String objectKey,
             String objectVersionId, String encryptionKeyId, String state, String captureState, String deletionOperation) {
+    }
+
+    /**
+     * Converts the last activation.changed payload of a committed transaction, so the head row can
+     * answer authorization reads without rescanning the journal. The payload was already parsed by
+     * the extension record pass of this commit.
+     */
+    static ActivationChange activationChange(JsonNode payload) {
+        if (payload == null) {
+            return null;
+        }
+        return new ActivationChange(
+                ToolPublicationContract.text(payload, "activationId"),
+                ToolPublicationContract.text(payload, "phase"),
+                payload.path("epoch").asLong(),
+                ManagedExtensionRecords.millisLenient(
+                        payload.path("expiresAt")));
+    }
+
+    record ActivationChange(String id, String phase, long epoch,
+            Long expiresAt) {
     }
 }

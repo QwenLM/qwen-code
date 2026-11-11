@@ -51,6 +51,11 @@ import {
   STATIC_EXTRA_HEIGHT,
 } from '../utils/layoutUtils.js';
 import { STATUS_INDICATOR_WIDTH } from './messages.js';
+import { AuthType } from '@qwen-code/qwen-code-core/utils/auth-type.js';
+import {
+  logoutCommand,
+  upgradeCommand,
+} from '../commands/subscription-commands.js';
 import {
   CONTEXT_FILES_ANNOUNCEMENT_PREFIX,
   hasSlashCommandPathSeparator,
@@ -58,6 +63,8 @@ import {
 import {
   ApprovalMode,
   ToolConfirmationOutcome,
+  getRuntimeContentGenerator,
+  runWithRuntimeContentGenerator,
 } from '@qwen-code/qwen-code-core';
 import type { Config } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
@@ -68,6 +75,7 @@ import { createOpenTuiCommandContext } from './commands-context.js';
 import type { OpenTuiAppHost } from './opentui-host.js';
 import type { StatusLineState } from '../hooks/useStatusLine.js';
 import { StreamingState } from '../types.js';
+import * as interactiveMods from '../../services/interactive-mod-session.js';
 import type { HistoryItem } from '../types.js';
 import type { LiveHistoryItem } from './live-session-model.js';
 import {
@@ -119,6 +127,11 @@ const mocks = vi.hoisted(() => {
     /** The gated-server queue the shell's approval hook reports. */
     mcpQueue: [] as Array<Record<string, unknown>>,
     handleMcpApprovalSelect: vi.fn(),
+    hooksApprovalProps: null as Record<string, unknown> | null,
+    /** Hook lines the project hooks approval hook reports as pending. */
+    pendingHookLines: null as string[] | null,
+    handleProjectHooksApprovalSelect: vi.fn(),
+    hooksAddInfo: null as ((text: string) => void) | null,
     bannerProps: null as Record<string, unknown> | null,
     footerProps: null as Record<string, unknown> | null,
     statusLineState: null as StatusLineState | null,
@@ -201,6 +214,13 @@ vi.mock('@opentui/react', () => ({
 }));
 vi.mock('@opentui/react/jsx-runtime', () => mocks.buildJsxRuntime());
 vi.mock('@opentui/react/jsx-dev-runtime', () => mocks.buildJsxRuntime());
+const isSubscriptionSignedIn = vi.hoisted(() => vi.fn(() => false));
+vi.mock('@qwen-code/qwen-code-core/qwen/subscription-session.js', () => ({
+  QwenSubscriptionSession: class {
+    isSignedIn = isSubscriptionSignedIn;
+    onChange = () => () => {};
+  },
+}));
 vi.mock('@opentui/core', () => ({
   SyntaxStyle: { fromStyles: () => ({}) },
   MouseButton: { LEFT: 0 },
@@ -360,6 +380,10 @@ vi.mock('./dialogs-confirm.js', () => ({
     mocks.state.mcpApprovalProps = props;
     return 'mcp-approval';
   },
+  OpenTuiProjectHooksApprovalDialog: (props: Record<string, unknown>) => {
+    mocks.state.hooksApprovalProps = props;
+    return 'hooks-approval';
+  },
 }));
 vi.mock('../hooks/useMcpApproval.js', () => ({
   useMcpApproval: () => ({
@@ -369,6 +393,23 @@ vi.mock('../hooks/useMcpApproval.js', () => ({
     mcpApprovalRemaining: Math.max(0, mocks.state.mcpQueue.length - 1),
     handleMcpApprovalSelect: mocks.state.handleMcpApprovalSelect,
   }),
+}));
+vi.mock('../hooks/use-project-hooks-approval.js', () => ({
+  useProjectHooksApproval: (
+    _config: unknown,
+    _settings: unknown,
+    addInfo?: (text: string) => void,
+  ) => {
+    mocks.state.hooksAddInfo = addInfo ?? null;
+    return {
+      isProjectHooksApprovalDialogOpen: mocks.state.pendingHookLines !== null,
+      pendingProjectHooks: mocks.state.pendingHookLines
+        ? { hooks: {}, lines: mocks.state.pendingHookLines }
+        : undefined,
+      handleProjectHooksApprovalSelect:
+        mocks.state.handleProjectHooksApprovalSelect,
+    };
+  },
 }));
 vi.mock('./exit-lifecycle.js', () => ({
   isExitInProgress: () => mocks.state.exitInProgress,
@@ -403,6 +444,8 @@ vi.mock('../hooks/useStatusLine.js', () => ({
 
 const extensionManager = { setRequestConsent: vi.fn() };
 const CONFIG = {
+  getResumedSessionData: () => undefined,
+  getAuthType: () => 'openai',
   getExtensionManager: () => extensionManager,
   getSessionId: () => 'test-session',
   getContextFilePaths: () => [],
@@ -410,6 +453,7 @@ const CONFIG = {
   getTargetDir: () => '/repo',
   getModel: () => 'session-model',
   onModelChange: () => () => {},
+  setSubscriptionPlan: () => {},
 } as unknown as Config;
 const SETTINGS = { merged: {} } as unknown as LoadedSettings;
 const getSessionStats = () => ({}) as unknown as SessionStatsState;
@@ -460,6 +504,7 @@ async function submit(
 
 describe('OpenTuiApp shell wiring', () => {
   beforeEach(() => {
+    isSubscriptionSignedIn.mockReturnValue(false);
     mocks.state.handleResult = { kind: 'handled' };
     mocks.state.handleResults.length = 0;
     mocks.state.loadCommandsOverride = null;
@@ -481,6 +526,10 @@ describe('OpenTuiApp shell wiring', () => {
     mocks.state.mcpApprovalProps = null;
     mocks.state.mcpQueue.length = 0;
     mocks.state.handleMcpApprovalSelect.mockClear();
+    mocks.state.hooksApprovalProps = null;
+    mocks.state.pendingHookLines = null;
+    mocks.state.hooksAddInfo = null;
+    mocks.state.handleProjectHooksApprovalSelect.mockClear();
     mocks.state.bannerProps = null;
     mocks.state.footerProps = null;
     mocks.state.loadingProps = null;
@@ -494,6 +543,63 @@ describe('OpenTuiApp shell wiring', () => {
 
   afterEach(() => {
     mocks.state.executeUserShell.mockImplementation(() => Promise.resolve());
+  });
+
+  it('keeps subscription commands working without the composer hint row', async () => {
+    isSubscriptionSignedIn.mockReturnValue(true);
+    renderApp({
+      config: { ...CONFIG, getAuthType: () => 'qwen-subscription' } as Config,
+    });
+    await settle();
+    expect(mocks.state.inputProps?.['placeholder']).toBe(
+      '  Type your request, or /usage',
+    );
+    expect(document.body.textContent).not.toContain('Try:');
+    expect(document.body.textContent).not.toContain(
+      '/usage  /status  /upgrade  /logout',
+    );
+    expect(screen.getByText('footer')).toBeTruthy();
+    await submit('/usage');
+    expect(mocks.state.handledTexts).toEqual(['/usage']);
+  });
+
+  it('keeps hints absent after login and a response', async () => {
+    const config = {
+      ...CONFIG,
+      getAuthType: () => 'qwen-subscription',
+    } as Config;
+    const props = {
+      config,
+      settings: SETTINGS,
+      logger: null,
+      commands: [] as readonly SlashCommand[],
+      getSessionStats,
+    };
+    const ui = render(
+      <OpenTuiApp {...props} initialDialog={{ dialog: 'auth' }} />,
+    );
+    await settle();
+    act(() => {
+      isSubscriptionSignedIn.mockReturnValue(true);
+      (mocks.state.host as OpenTuiAppHost).addItem(
+        {
+          type: 'info',
+          text: 'new login',
+          presentation: 'subscription-success',
+        },
+        Date.now(),
+      );
+      (mocks.state.dialogProps?.['onClose'] as () => void)();
+    });
+    await settle();
+    expect(document.body.textContent).not.toContain('Try:');
+    ui.rerender(<OpenTuiApp {...props} streaming />);
+    await settle();
+    ui.rerender(<OpenTuiApp {...props} streaming={false} />);
+    await settle();
+    expect(document.body.textContent).not.toContain('Try:');
+    expect(screen.getByText('footer')).toBeTruthy();
+    ui.unmount();
   });
 
   it.each(['control', 'retry', 'image'] as const)(
@@ -1008,6 +1114,60 @@ describe('OpenTuiApp shell wiring', () => {
     view.unmount();
   });
 
+  it('keeps a focused foreground shell behind the project hooks approval', async () => {
+    const owner = { callId: 'shell', pid: 4300, turn: 1 };
+    const control = {
+      foregroundShell: owner,
+      promoteShellToBackground: vi.fn(() => true),
+      writeShellInput: vi.fn(() => true),
+      resizeShell: vi.fn(() => true),
+      scrollShell: vi.fn(() => true),
+    };
+    const props = {
+      config: {
+        ...CONFIG,
+        getShellExecutionConfig: () => ({}),
+        setShellExecutionConfig: vi.fn(),
+      } as unknown as Config,
+      settings: SETTINGS,
+      logger: null,
+      commands: [],
+      getSessionStats,
+      foregroundShellControl: control,
+    };
+    const view = render(<OpenTuiApp {...props} />);
+    await settle();
+    const key = (name: string, sequence: string, ctrl = false) => ({
+      name,
+      sequence,
+      ctrl,
+      preventDefault: vi.fn(),
+      stopPropagation: vi.fn(),
+    });
+    act(() =>
+      (mocks.state.inputProps!['onShellKey'] as (key: unknown) => boolean)(
+        key('f', '\x06', true),
+      ),
+    );
+    expect(mocks.state.inputProps?.['focus']).toBe(false);
+    mocks.state.pendingHookLines = ['SessionStart  ./setup.sh'];
+    const before = mocks.state.keyboardHandlers.length;
+    view.rerender(<OpenTuiApp {...props} />);
+    expect(screen.getByText('hooks-approval')).toBeTruthy();
+    const handlers = mocks.state.keyboardHandlers.slice(before);
+    for (const k of [
+      key('a', 'a'),
+      key('f', '\x06', true),
+      key('a', 'a'),
+      key('b', '\x02', true),
+    ]) {
+      for (const handler of handlers) act(() => handler(k));
+    }
+    expect(control.writeShellInput).not.toHaveBeenCalled();
+    expect(control.promoteShellToBackground).not.toHaveBeenCalled();
+    view.unmount();
+  });
+
   it('routes composer cancellation to the running command without interrupting the model', async () => {
     const onInterrupt = vi.fn();
     renderApp({ onInterrupt });
@@ -1081,14 +1241,17 @@ describe('OpenTuiApp shell wiring', () => {
 
   it('keeps the session model across a scoped override and adopts model-change events', async () => {
     let model = 'session-model';
-    let notify: (model: string) => void = () => {};
+    const listeners = new Set<(model: string) => void>();
     const unsubscribe = vi.fn();
     const config = {
       ...CONFIG,
       getModel: () => model,
-      onModelChange: (listener: typeof notify) => {
-        notify = listener;
-        return unsubscribe;
+      onModelChange: (listener: (model: string) => void) => {
+        listeners.add(listener);
+        return () => {
+          listeners.delete(listener);
+          unsubscribe();
+        };
       },
     } as unknown as Config;
     const props = {
@@ -1103,10 +1266,46 @@ describe('OpenTuiApp shell wiring', () => {
     model = 'fast-subagent';
     view.rerender(<OpenTuiApp {...props} streaming />);
     expect(mocks.state.statusLineState?.currentModel).toBe('session-model');
-    act(() => notify('selected-model'));
+    act(() => listeners.forEach((listener) => listener('selected-model')));
     expect(mocks.state.statusLineState?.currentModel).toBe('selected-model');
     view.unmount();
-    expect(unsubscribe).toHaveBeenCalledOnce();
+    expect(unsubscribe).toHaveBeenCalledTimes(2);
+    expect(listeners.size).toBe(0);
+  });
+
+  it('updates subscription entries in help as the connection changes', async () => {
+    isSubscriptionSignedIn.mockReturnValue(true);
+    let authType = AuthType.QWEN_SUBSCRIPTION;
+    const listeners = new Set<(model: string) => void>();
+    const config = {
+      ...CONFIG,
+      getAuthType: () => authType,
+      onModelChange: (listener: (model: string) => void) => {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      },
+    } as unknown as Config;
+    renderApp({
+      config,
+      commands: [logoutCommand, upgradeCommand],
+      initialDialog: { dialog: 'help' },
+    });
+    await settle();
+    const entries = () =>
+      mocks.state.dialogProps?.['commands'] as readonly SlashCommand[];
+    expect(entries()).toEqual([logoutCommand, upgradeCommand]);
+
+    act(() => {
+      authType = AuthType.USE_OPENAI;
+      listeners.forEach((listener) => listener('same-model'));
+    });
+    expect(entries()).toEqual([]);
+
+    act(() => {
+      authType = AuthType.QWEN_SUBSCRIPTION;
+      listeners.forEach((listener) => listener('same-model'));
+    });
+    expect(entries()).toEqual([logoutCommand, upgradeCommand]);
   });
 
   it('projects active worktree details and confirmation state into the status command input', async () => {
@@ -1812,6 +2011,64 @@ describe('OpenTuiApp shell wiring', () => {
         });
         expect(signals[0].aborted).toBe(true);
         expect(onInterrupt).not.toHaveBeenCalled();
+      } finally {
+        await act(async () => {
+          release();
+          await done;
+        });
+        await settle();
+      }
+    },
+  );
+
+  it.each([
+    { name: 'c', ctrl: true, sequence: '\x03' },
+    { name: 'escape', ctrl: false, sequence: '\x1b' },
+  ])(
+    'leaves the local shell running on $name while the project hooks approval is open',
+    async (key) => {
+      let release!: () => void;
+      const done = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const signals: AbortSignal[] = [];
+      mocks.state.executeUserShell.mockImplementation(((
+        _config: unknown,
+        _command: string,
+        _emit: unknown,
+        signal: AbortSignal,
+      ) => {
+        signals.push(signal);
+        return done;
+      }) as unknown as () => Promise<void>);
+      mocks.state.handleResult = false as unknown as OpenTuiDispatchOutcome;
+      const props: AppProps = {
+        config: CONFIG,
+        settings: SETTINGS,
+        logger: null,
+        commands: [],
+        getSessionStats,
+        streaming: false,
+        onTranscriptEvent: vi.fn(),
+      };
+      const view = render(<OpenTuiApp {...props} />);
+      await settle();
+      await act(async () => {
+        (mocks.state.inputProps?.['onToggleShellMode'] as () => void)();
+      });
+      try {
+        await submit('sleep 10');
+        expect(signals).toHaveLength(1);
+        mocks.state.pendingHookLines = ['SessionStart  ./setup.sh'];
+        view.rerender(<OpenTuiApp {...props} />);
+        await act(async () => {
+          mocks.state.keyboardHandlers.at(-1)!({
+            ...key,
+            eventType: 'press',
+            preventDefault: vi.fn(),
+          });
+        });
+        expect(signals[0].aborted).toBe(false);
       } finally {
         await act(async () => {
           release();
@@ -2982,6 +3239,68 @@ describe('OpenTuiApp shell wiring', () => {
     expect(mocks.state.handleMcpApprovalSelect).toHaveBeenCalledWith('approve');
   });
 
+  it('shows the project hooks approval below MCP, above a parked tool call, without the footer', async () => {
+    mocks.state.pendingHookLines = ['SessionStart  ./setup.sh'];
+    mocks.state.mcpQueue.push({ name: 'acceptance-server' });
+    renderApp({
+      waitingToolCalls: [
+        {
+          callId: 'call-1',
+          name: 'run_shell_command',
+          confirmationDetails: { type: 'info', title: 'ok?' },
+        } as never,
+      ],
+      onToolCallSettled: vi.fn(),
+    });
+    await settle();
+    expect(screen.getByText('mcp-approval')).toBeTruthy();
+    expect(screen.queryByText('hooks-approval')).toBeNull();
+  });
+
+  it('routes the project hooks choice to the approval hook', async () => {
+    mocks.state.pendingHookLines = ['SessionStart  ./setup.sh'];
+    renderApp({
+      waitingToolCalls: [
+        {
+          callId: 'call-1',
+          name: 'run_shell_command',
+          confirmationDetails: { type: 'info', title: 'ok?' },
+        } as never,
+      ],
+      onToolCallSettled: vi.fn(),
+    });
+    await settle();
+    expect(screen.getByText('hooks-approval')).toBeTruthy();
+    expect(screen.queryByText('tool-confirm')).toBeNull();
+    expect(screen.queryByText('footer')).toBeNull();
+    expect(mocks.state.hooksApprovalProps?.['lines']).toEqual([
+      'SessionStart  ./setup.sh',
+    ]);
+    const onSelect = mocks.state.hooksApprovalProps?.['onSelect'] as
+      | ((choice: string) => void)
+      | undefined;
+    if (typeof onSelect !== 'function') {
+      throw new Error('hooks approval dialog was not given onSelect');
+    }
+    onSelect('approve');
+    expect(mocks.state.handleProjectHooksApprovalSelect).toHaveBeenCalledWith(
+      'approve',
+    );
+  });
+
+  it('writes the hooks approval note to the transcript', async () => {
+    const onTranscriptEvent = vi.fn();
+    renderApp({ onTranscriptEvent });
+    await settle();
+    await act(async () => {
+      mocks.state.hooksAddInfo?.('Project hooks were not loaded.');
+    });
+    expect(onTranscriptEvent).toHaveBeenCalledWith({
+      type: 'info',
+      text: 'Project hooks were not loaded.',
+    });
+  });
+
   it('passes streaming state and interrupt through to the composer', async () => {
     const onInterrupt = vi.fn();
     renderApp({ streaming: true, onInterrupt });
@@ -3736,6 +4055,342 @@ describe('OpenTuiApp shell wiring', () => {
     expect(mocks.state.handledTexts).toEqual(['/compress']);
   });
 
+  describe("a Mod's own prompts", () => {
+    afterEach(() => {
+      vi.mocked(interactiveMods.getInteractiveModSession).mockRestore?.();
+    });
+    function installMods(waiting: number) {
+      const listeners = new Set<() => void>();
+      const mods = {
+        waiting,
+        notePersonPrompt: vi.fn(),
+        subscribePrompts: (listener: () => void) => {
+          listeners.add(listener);
+          return () => listeners.delete(listener);
+        },
+        get hasSubmittedPrompts() {
+          return mods.waiting > 0;
+        },
+      };
+      vi.spyOn(interactiveMods, 'getInteractiveModSession').mockReturnValue(
+        mods as unknown as ReturnType<
+          typeof interactiveMods.getInteractiveModSession
+        >,
+      );
+      const queue = async (count = 1) => {
+        mods.waiting += count;
+        await act(async () => {
+          for (const listener of listeners) listener();
+          await Promise.resolve();
+        });
+      };
+      return { mods, queue };
+    }
+    const runner = (mods: { waiting: number }) =>
+      vi.fn(() => {
+        if (mods.waiting === 0) return false;
+        mods.waiting -= 1;
+        return true;
+      });
+
+    it('runs one once idle, and the next when it is queued', async () => {
+      const { mods, queue } = installMods(0);
+      const onRunModPrompt = runner(mods);
+      const props = {
+        config: CONFIG,
+        settings: SETTINGS,
+        logger: null,
+        commands: [] as readonly SlashCommand[],
+        getSessionStats,
+        onRunModPrompt,
+        streaming: true,
+      };
+      const view = render(<OpenTuiApp {...props} />);
+      await settle();
+      await queue();
+      expect(onRunModPrompt).not.toHaveBeenCalled();
+
+      await act(async () => {
+        view.rerender(<OpenTuiApp {...props} streaming={false} />);
+        await Promise.resolve();
+      });
+      expect(onRunModPrompt).toHaveBeenCalledTimes(1);
+
+      await queue();
+      expect(onRunModPrompt).toHaveBeenCalledTimes(2);
+      expect(mods.waiting).toBe(0);
+      expect(mods.notePersonPrompt).not.toHaveBeenCalled();
+    });
+
+    // #7156: a subagent's progress update, made inside its agent frame, can
+    // batch into the commit that runs the drain, and the Mod's turn would
+    // then resolve the subagent's model.
+    it("starts the Mod's turn outside a subagent's frame", async () => {
+      const { mods, queue } = installMods(0);
+      let runtimeView: unknown = 'unset';
+      const onRunModPrompt = vi.fn(() => {
+        runtimeView = getRuntimeContentGenerator();
+        mods.waiting -= 1;
+        return true;
+      });
+      renderApp({ onRunModPrompt });
+      await settle();
+      const subagentView = {
+        contentGenerator: {},
+        contentGeneratorConfig: { model: 'small-default' },
+      } as never;
+      await runWithRuntimeContentGenerator(subagentView, () => queue());
+
+      expect(onRunModPrompt).toHaveBeenCalledTimes(1);
+      expect(runtimeView).toBeUndefined();
+    });
+
+    it('waits while a Goal owns the turns, and runs once it lets go', async () => {
+      const { mods, queue } = installMods(0);
+      const onRunModPrompt = runner(mods);
+      const goalListeners = new Set<() => void>();
+      let goalStatus: 'active' | 'complete' = 'active';
+      const goalRuntime = {
+        getSnapshot: () => ({
+          v: 2,
+          goal: { status: goalStatus },
+          activity: 'idle',
+        }),
+        subscribe: (listener: () => void) => {
+          goalListeners.add(listener);
+          return () => goalListeners.delete(listener);
+        },
+      };
+      renderApp({
+        config: {
+          ...CONFIG,
+          getGoalRuntime: () => goalRuntime,
+        } as unknown as Config,
+        onRunModPrompt,
+      });
+      await settle();
+      await queue();
+      // Core would run it as the person's Goal turn.
+      expect(onRunModPrompt).not.toHaveBeenCalled();
+
+      goalStatus = 'complete';
+      await act(async () => {
+        for (const listener of goalListeners) listener();
+        await Promise.resolve();
+      });
+      expect(onRunModPrompt).toHaveBeenCalledTimes(1);
+      expect(mods.waiting).toBe(0);
+    });
+
+    it("waits for the person's command still being routed, which resets the count", async () => {
+      const { mods, queue } = installMods(0);
+      const onRunModPrompt = runner(mods);
+      renderApp({ onRunModPrompt });
+      await settle();
+      mocks.state.holdHandleOn = '/slow';
+      await submit('/slow');
+      expect(mods.notePersonPrompt).toHaveBeenCalledTimes(1);
+      await queue();
+      expect(onRunModPrompt).not.toHaveBeenCalled();
+      // Input refused while it runs is no prompt of the person's.
+      await submit('/other');
+      await submit('look', ['/tmp/a.png']);
+      expect(mods.notePersonPrompt).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        mocks.state.releaseHandle?.();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(mocks.state.handledTexts).toEqual(['/slow']);
+      expect(onRunModPrompt).toHaveBeenCalledTimes(1);
+    });
+
+    it("leaves a plain prompt's count to its turn", async () => {
+      const { mods } = installMods(0);
+      mocks.state.handleResult = false as unknown as OpenTuiDispatchOutcome;
+      const onSubmitPrompt = vi.fn(() => true);
+      renderApp({ onSubmitPrompt });
+      await settle();
+      await submit('hello');
+      expect(onSubmitPrompt).toHaveBeenCalledTimes(1);
+      // The live turn counts it when it starts, as ink's submitQuery does.
+      expect(mods.notePersonPrompt).not.toHaveBeenCalled();
+    });
+
+    it('waits for a command whose defer verdict is still out when the turn ends', async () => {
+      const { mods } = installMods(1);
+      const order: string[] = [];
+      const onRunModPrompt = vi.fn(() => {
+        order.push('mod');
+        mods.waiting = 0;
+        return true;
+      });
+      const gate: { release: (defer: boolean) => void } = {
+        release: () => {
+          throw new Error('the mid-turn gate never asked for a verdict');
+        },
+      };
+      mocks.state.deferGate = () =>
+        new Promise<boolean>((resolve) => {
+          gate.release = resolve;
+        });
+      mocks.state.onHandle = (text) => order.push(text);
+      const props = {
+        config: CONFIG,
+        settings: SETTINGS,
+        logger: null,
+        commands: [] as readonly SlashCommand[],
+        getSessionStats,
+        onRunModPrompt,
+        streaming: true,
+      };
+      const view = render(<OpenTuiApp {...props} />);
+      await settle();
+      await submit('/compress');
+      await act(async () => {
+        view.rerender(<OpenTuiApp {...props} streaming={false} />);
+        await Promise.resolve();
+      });
+      // The person's command has not been queued or run yet; the Mod's
+      // prompt must not take the idle moment from it.
+      expect(order).toEqual([]);
+
+      await act(async () => {
+        gate.release(true);
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(order).toEqual(['/compress', 'mod']);
+    });
+
+    it("runs after the person's commands held back by the turn", async () => {
+      const { mods } = installMods(1);
+      const order: string[] = [];
+      const onRunModPrompt = vi.fn(() => {
+        order.push('mod');
+        mods.waiting = 0;
+        return true;
+      });
+      mocks.state.deferDuringStreaming = true;
+      mocks.state.onHandle = (text) => order.push(text);
+      const props = {
+        config: CONFIG,
+        settings: SETTINGS,
+        logger: null,
+        commands: [] as readonly SlashCommand[],
+        getSessionStats,
+        onRunModPrompt,
+        streaming: true,
+      };
+      const view = render(<OpenTuiApp {...props} />);
+      await settle();
+      await submit('/compress');
+      expect(order).toEqual([]);
+
+      await act(async () => {
+        view.rerender(<OpenTuiApp {...props} streaming={false} />);
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(order).toEqual(['/compress', 'mod']);
+    });
+
+    it('waits while a dialog is open, and runs once it closes', async () => {
+      const { mods, queue } = installMods(0);
+      const onRunModPrompt = runner(mods);
+      renderApp({ onRunModPrompt, initialDialog: { dialog: 'help' } });
+      await settle();
+      await queue();
+      expect(onRunModPrompt).not.toHaveBeenCalled();
+
+      await act(async () => {
+        (mocks.state.dialogProps?.['onClose'] as () => void)();
+        await Promise.resolve();
+      });
+      expect(onRunModPrompt).toHaveBeenCalledTimes(1);
+    });
+
+    it("counts the person's `!` command and waits while it runs", async () => {
+      const { mods, queue } = installMods(0);
+      const onRunModPrompt = runner(mods);
+      let release!: () => void;
+      const shellDone = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      mocks.state.executeUserShell.mockReturnValue(shellDone);
+      mocks.state.handleResult = false as unknown as OpenTuiDispatchOutcome;
+      renderApp({ onRunModPrompt, onTranscriptEvent: vi.fn() });
+      await settle();
+      await act(async () => {
+        (mocks.state.inputProps?.['onToggleShellMode'] as () => void)();
+      });
+      await submit('sleep 1');
+      expect(mocks.state.executeUserShell).toHaveBeenCalledOnce();
+      expect(mods.notePersonPrompt).toHaveBeenCalledTimes(1);
+      await queue();
+      expect(onRunModPrompt).not.toHaveBeenCalled();
+
+      await act(async () => {
+        release();
+        await shellDone;
+      });
+      await settle();
+      expect(onRunModPrompt).toHaveBeenCalledTimes(1);
+    });
+
+    it("counts the person's `!` command the turn held back when it runs", async () => {
+      const { mods } = installMods(0);
+      const props = {
+        config: CONFIG,
+        settings: SETTINGS,
+        logger: null,
+        commands: [] as readonly SlashCommand[],
+        getSessionStats,
+        streaming: true,
+        onTranscriptEvent: vi.fn(),
+      };
+      const view = render(<OpenTuiApp {...props} />);
+      await settle();
+      await act(async () => {
+        (mocks.state.inputProps?.['onToggleShellMode'] as () => void)();
+      });
+      await submit('ls');
+      expect(mocks.state.executeUserShell).not.toHaveBeenCalled();
+      expect(mods.notePersonPrompt).not.toHaveBeenCalled();
+
+      await act(async () => {
+        view.rerender(<OpenTuiApp {...props} streaming={false} />);
+        await Promise.resolve();
+      });
+      expect(mocks.state.executeUserShell).toHaveBeenCalledOnce();
+      expect(mods.notePersonPrompt).toHaveBeenCalledTimes(1);
+    });
+
+    it("waits for the person's submission while the command stack loads", async () => {
+      const { mods, queue } = installMods(0);
+      const onRunModPrompt = runner(mods);
+      let load!: () => void;
+      const loaded = new Promise<readonly unknown[]>((resolve) => {
+        load = () => resolve([]);
+      });
+      mocks.state.loadCommandsOverride = () => loaded;
+      mocks.state.handleResult = false as unknown as OpenTuiDispatchOutcome;
+      const onSubmitPrompt = vi.fn(() => true);
+      renderApp({ commands: undefined, onRunModPrompt, onSubmitPrompt });
+      await settle();
+      // The dispatch waits for the command stack before the gateway is busy.
+      await submit('hello');
+      await queue();
+      expect(onSubmitPrompt).not.toHaveBeenCalled();
+      expect(onRunModPrompt).not.toHaveBeenCalled();
+
+      await act(async () => {
+        load();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(onSubmitPrompt).toHaveBeenCalledTimes(1);
+      expect(onRunModPrompt).toHaveBeenCalledTimes(1);
+    });
+  });
+
   it('replays held commands in submission order, pausing behind a submit_prompt', async () => {
     const onSubmitPrompt = vi.fn(() => true);
     mocks.state.deferDuringStreaming = true;
@@ -3999,6 +4654,10 @@ describe('OpenTuiApp approval-mode cycling (F-2)', () => {
     mocks.state.mcpApprovalProps = null;
     mocks.state.mcpQueue.length = 0;
     mocks.state.handleMcpApprovalSelect.mockClear();
+    mocks.state.hooksApprovalProps = null;
+    mocks.state.pendingHookLines = null;
+    mocks.state.hooksAddInfo = null;
+    mocks.state.handleProjectHooksApprovalSelect.mockClear();
   });
 
   function fakeConfig(
@@ -4261,6 +4920,10 @@ describe('OpenTuiApp transcript scroll region', () => {
     mocks.state.mcpApprovalProps = null;
     mocks.state.mcpQueue.length = 0;
     mocks.state.handleMcpApprovalSelect.mockClear();
+    mocks.state.hooksApprovalProps = null;
+    mocks.state.pendingHookLines = null;
+    mocks.state.hooksAddInfo = null;
+    mocks.state.handleProjectHooksApprovalSelect.mockClear();
   });
 
   const layoutOf = (

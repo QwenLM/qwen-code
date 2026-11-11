@@ -605,6 +605,8 @@ export const SESSION_INITIALIZATION_DEADLINE_META_KEY =
   'qwen.daemon.sessionInitializationDeadlineMs';
 export const SESSION_INITIALIZATION_TIMEOUT_ERROR_KIND =
   'session_initialization_timeout';
+export const SESSION_STARTUP_SUBSCRIPTION_MODEL_META_KEY =
+  'qwen.session.startupSubscriptionModel';
 export const SESSION_MODEL_PERSIST_DEFAULT_META_KEY =
   'qwen.session.modelPersistDefault';
 
@@ -878,7 +880,15 @@ export interface BridgeRestoredSession extends BridgeSession {
    */
   eventEpoch?: string;
   /**
-   * True when the compaction engine failed at some point, so
+   * Publish-time summary/unverified-seed boundary in eventEpoch, captured
+   * with a full in-memory load snapshot. A suffix starting after this ID
+   * excludes those sources, but may still be partial, truncated or degraded.
+   * Zero places the boundary before the first event; absence is not zero.
+   * Omitted for summary reads and persisted-page refreshes.
+   */
+  replayProjectionWatermark?: number;
+  /**
+   * True when publication retention or compaction failed at some point, so
    * `compactedReplay`/`liveJournal` may silently miss events. Clients
    * should prefer the full transcript over this replay.
    */
@@ -1217,6 +1227,9 @@ export interface BridgeSessionSummary {
   workspaceCwd: string;
   createdAt: string;
   updatedAt?: string;
+  /** Recorded ISO time of the latest real user input on the active main branch.
+   * Absent when unavailable; never substitute createdAt or updatedAt. */
+  lastUserPromptAt?: string;
   displayName?: string;
   titleSource?: 'manual' | 'auto';
   /** Id of the session that spawned this one (via `create_sub_session`), or
@@ -1268,15 +1281,6 @@ export interface BridgeSessionSummary {
    * session can produce several PRs (stacked or follow-up work).
    */
   prs?: SessionPrInfo[];
-  /**
-   * True when the session's PR sidecar EXISTS but could not be read (I/O
-   * error, invalid JSON, failed shape check): `prs` is then unknown, not
-   * empty. Absent sidecars (never bound / last binding removed) leave both
-   * fields unset — that is an authoritative "no bindings". Consumers that
-   * project bindings into authoritative snapshots must treat this flag as
-   * a degraded read, not an unbind.
-   */
-  prsReadFailed?: true;
 }
 
 /** Original event-bus cursor captured when a prompt id was first admitted. */
@@ -1318,6 +1322,12 @@ export interface SessionPrInfo {
   url: string;
   /** Snapshot of the PR's state at last bind/refresh; optional. */
   state?: 'open' | 'merged' | 'closed';
+  /**
+   * The job this session does for the PR (role-aware bound delivery);
+   * assigned by the command-position backfill or the metadata route.
+   * Absent means untyped.
+   */
+  role?: 'review' | 'verify' | 'fix';
   /** Issues the PR closes, snapshotted by the daemon refresh; optional. */
   issues?: SessionPrIssueInfo[];
 }
@@ -1779,6 +1789,7 @@ export interface BridgeDaemonStatusLimits {
   maxSessions: number | null;
   maxPendingPromptsPerSession: number | null;
   eventRingSize: number;
+  eventRingMaxBytes: number;
   compactedReplayMaxBytes: number;
   /**
    * Per-session BASELINE journal caps. A session's effective caps can be
@@ -1816,6 +1827,12 @@ export interface BridgeDaemonSessionDiagnostic {
   backgroundTurn?: BackgroundNotificationTurn;
   hasRunningBackgroundTasks?: boolean;
   lastEventId: number;
+  eventRingCount: number;
+  eventRingBytes: number;
+  eventRingEarliestEventId?: number;
+  eventRingEvictedEvents: number;
+  eventRingEvictedBytes: number;
+  availableCommandsSnapshotBytes: number;
   lastSeenAt?: number;
   currentModelId?: string;
   currentApprovalMode?: string;
@@ -1874,6 +1891,11 @@ export type BridgeGenerationStreamEvent =
       requestId: string;
       seq: number;
       text: string;
+    }
+  | {
+      /** A retry restarted the answer; text from earlier deltas is void. */
+      type: 'reset';
+      requestId: string;
     }
   | {
       type: 'done';
@@ -2816,6 +2838,8 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
   setUserLanguage(params: {
     language: string;
     syncOutputLanguage: boolean;
+    /** Reload workspace settings too after a workspace-owned UI language write. */
+    scope?: 'workspace';
   }): Promise<{
     language: string;
     sessions: number;

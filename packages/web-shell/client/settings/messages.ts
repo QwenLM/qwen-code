@@ -74,6 +74,7 @@ export const SETTINGS_MESSAGES_EN: Record<string, SettingsMessage> = {
   'settings.localControl.qr': 'Local Control QR code',
   'settings.localControl.enable': 'Turn on Local Control',
   'settings.localControl.disable': 'Disconnect phone access',
+  'settings.localControl.explicitPick': 'Named at daemon start',
   'settings.localControl.encrypted': 'Encrypted',
   'settings.localControl.unencrypted':
     'Unencrypted — trusted networks only; re-enable after network changes',
@@ -169,6 +170,7 @@ export const SETTINGS_MESSAGES_ZH: Record<string, SettingsMessage> = {
   'settings.localControl.qr': '本地控制二维码',
   'settings.localControl.enable': '开启本地控制',
   'settings.localControl.disable': '断开手机访问',
+  'settings.localControl.explicitPick': '守护进程启动时指定',
   'settings.localControl.encrypted': '已加密',
   'settings.localControl.unencrypted':
     '未加密，仅限受信任网络；网络变化后请重新启用',
@@ -388,6 +390,9 @@ export const SETTINGS_MESSAGES_ZH: Record<string, SettingsMessage> = {
   'settings.label.tools.workflowsEnabled': '动态 Workflow',
   'settings.description.tools.workflowsEnabled':
     '启用 Workflow 工具：模型可以编写并运行一个编排多个子代理并行工作的脚本。默认关闭；一次运行可能派发大量子代理并相应消耗 token。QWEN_CODE_ENABLE_WORKFLOWS=1 和 QWEN_CODE_DISABLE_WORKFLOWS=1 环境变量会覆盖此设置（禁用时优先）。与 Session Workflow 的计划并审阅视图无关；要阻止“workflow”关键词引导对话走向，见“禁用 Workflow 关键词触发”。',
+  'settings.label.tools.lspEnabled': 'LSP 代码智能',
+  'settings.description.tools.lspEnabled':
+    '实验性。无需 `--experimental-lsp` 参数即可启用 LSP 代码智能服务：跳转定义、查找引用、悬浮提示、符号、诊断与代码操作。默认关闭。服务器来自工作区 `.lsp.json` 或已启用的扩展，并以你的权限运行；工作区声明的服务器要求文件夹被显式信任——启用 `security.folderTrust.enabled` 且该文件夹已受信任，或由 IDE 报告该工作区受信任——否则会被跳过。配置了 `tools.executionSandbox` 时会在启动时拒绝；`--safe-mode`、`QWEN_CODE_SAFE_MODE=1` 与 `--bare` 可在不启用 LSP 的情况下启动。QWEN_CODE_ENABLE_LSP=1 / QWEN_CODE_DISABLE_LSP=1 会覆盖该设置（禁用优先）；项目 `.env` 或 `settings.env` 无法设置它们。',
   'settings.label.tools.workflowSizeGuideline': '动态 Workflow 规模',
   'settings.description.tools.workflowSizeGuideline':
     '模型编写的动态 workflow 的建议规模指引：“small”目标少于 5 个 agent，“medium”（默认）少于 15 个，“large”少于 50 个，“unrestricted”不下发指引。这是建议而非强制限制。它同时决定运行中的 workflow 被标记为大型的 agent 数量（可用 QWEN_CODE_WORKFLOW_SIZE_WARNING_AGENTS 覆盖该阈值）。修改从下一条消息起生效。',
@@ -433,7 +438,7 @@ export const SETTINGS_MESSAGES_ZH: Record<string, SettingsMessage> = {
     '启用持久化的工作区 Agent 在共享任务线程上协作（实验性）。与 Agent Team 相互独立：两个开关互不隐含。启用只表示允许协作；把 Agent 开放给外部调用方、信任某个连接、注册 host 仍各自需要显式配置。也可通过 QWEN_CODE_ENABLE_AGENT_COLLABORATION=1 环境变量启用。',
   'settings.label.experimental.unifiedAgentLoop': '统一 Agent Loop',
   'settings.description.experimental.unifiedAgentLoop':
-    '让 headless 会话（`-p` 与 stream-json）和 ACP 会话（Zed、VS Code、Web Shell、channel）运行在共享的 agent loop 上（实验性）。Ink TUI 的模型请求也经由它发送，而 Ink TUI 的工具执行、OpenTUI 和子代理暂时保留各自现有的 loop。也可通过 QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP=1 环境变量启用。',
+    '让 headless 会话（`-p` 与 stream-json）和 ACP 会话（Zed、VS Code、Web Shell、channel）运行在共享的 agent loop 上（实验性）。Ink TUI 和 OpenTUI 的轮次也运行在它上面，而子代理暂时保留现有的 loop。也可通过 QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP=1 环境变量启用。',
   'settings.label.experimental.artifact': '启用 Artifacts',
   'settings.description.experimental.artifact':
     '启用 artifact 工具，默认开启。在交互式非 SDK 会话中，模型可以把自包含 HTML 页面发布为交互式 Artifact 并在浏览器中打开；非 SDK 的 daemon 会话可使用仅记录元数据的 record_artifact 工具。设为 false 或用 QWEN_CODE_DISABLE_ARTIFACT=1 可同时禁用两者。',

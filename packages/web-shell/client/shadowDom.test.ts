@@ -109,6 +109,41 @@ describe('installWebShellShadowStyles', () => {
       expect(replaceSync).toHaveBeenCalledWith(packageStyle.textContent);
       expect(sheets).toHaveLength(1);
       releaseFirst();
+      releaseFirst();
+      expect(sheets).toHaveLength(1);
+      releaseSecond();
+      expect(sheets).toHaveLength(0);
+    } finally {
+      packageStyle.remove();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('keeps a sibling shell styled when one release is called twice', () => {
+    vi.stubGlobal(
+      'CSSStyleSheet',
+      class {
+        replaceSync() {}
+      },
+    );
+    const packageStyle = document.createElement('style');
+    packageStyle.dataset.qwenWebShell = 'component';
+    packageStyle.textContent = '[data-web-shell-root] { color: teal; }';
+    document.head.appendChild(packageStyle);
+    const host = document.createElement('div');
+    const shadow = host.attachShadow({ mode: 'open' });
+    let sheets: CSSStyleSheet[] = [];
+    Object.defineProperty(shadow, 'adoptedStyleSheets', {
+      get: () => sheets,
+      set: (next: CSSStyleSheet[]) => {
+        sheets = next;
+      },
+    });
+    try {
+      const releaseFirst = installWebShellShadowStyles(shadow);
+      const releaseSecond = installWebShellShadowStyles(shadow);
+      releaseFirst();
+      releaseFirst();
       expect(sheets).toHaveLength(1);
       releaseSecond();
       expect(sheets).toHaveLength(0);

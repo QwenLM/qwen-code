@@ -1242,6 +1242,7 @@ describe('runChannelDaemonWorker', () => {
       create: expect.any(Function),
       createForTarget: expect.any(Function),
       listForTarget: expect.any(Function),
+      listForChat: expect.any(Function),
       disable: expect.any(Function),
       validateCron: expect.any(Function),
       nextFireTime: expect.any(Function),
@@ -4591,6 +4592,133 @@ describe('createBoundSessionsAccessor', () => {
     });
   }
 
+  it('postedCommentIds queries the route with the cached cwd and parses ids', async () => {
+    const requestRest = vi
+      .fn()
+      .mockResolvedValueOnce(bindingsResponse())
+      .mockResolvedValueOnce(jsonResponse(200, { ids: ['ic:555', 'rc:777'] }));
+    const accessor = createBoundSessionsAccessor(makeClient(requestRest));
+    await accessor.listPrBindings();
+
+    const ids = await accessor.postedCommentIds!('session-1');
+
+    expect([...ids].sort()).toEqual(['ic:555', 'rc:777']);
+    expect(requestRest).toHaveBeenLastCalledWith(
+      '/sessions/session-1/posted-comments?workspaceCwd=%2Fws%2Fa',
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+  });
+
+  it('postedCommentIds fail-open: a session absent from the snapshot yields an empty set', async () => {
+    const requestRest = vi.fn().mockResolvedValue(bindingsResponse());
+    const accessor = createBoundSessionsAccessor(makeClient(requestRest));
+
+    const ids = await accessor.postedCommentIds!('unknown-session');
+
+    expect(ids.size).toBe(0);
+    // The cold miss refreshes the bindings, but a session the snapshot does
+    // not list is never queried for posted comments.
+    expect(requestRest).toHaveBeenCalledWith(
+      '/sessions/pr-bindings',
+      expect.anything(),
+    );
+    expect(requestRest).not.toHaveBeenCalledWith(
+      expect.stringContaining('/posted-comments'),
+      expect.anything(),
+    );
+  });
+
+  it('postedCommentIds refreshes bindings on a cold cwd miss (evicted author still attributed)', async () => {
+    // The cwd hint cache is FIFO-capped; an author evicted from it must still
+    // be attributed, else it receives its own comments. A cold miss re-reads
+    // the fresh snapshot like the delivery path does.
+    const requestRest = vi
+      .fn()
+      .mockResolvedValueOnce(bindingsResponse())
+      .mockResolvedValueOnce(jsonResponse(200, { ids: ['ic:555'] }));
+    const accessor = createBoundSessionsAccessor(makeClient(requestRest));
+
+    // No prior listPrBindings: the cwd cache is cold, as after FIFO eviction.
+    const ids = await accessor.postedCommentIds!('session-1');
+
+    expect([...ids]).toEqual(['ic:555']);
+    expect(requestRest).toHaveBeenLastCalledWith(
+      '/sessions/session-1/posted-comments?workspaceCwd=%2Fws%2Fa',
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+  });
+
+  it('postedCommentIds fail-open: a non-200 answer yields an empty set and names the cause', async () => {
+    const requestRest = vi
+      .fn()
+      .mockResolvedValueOnce(bindingsResponse())
+      .mockResolvedValueOnce(jsonResponse(500, {}));
+    const accessor = createBoundSessionsAccessor(makeClient(requestRest));
+    await accessor.listPrBindings();
+
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    try {
+      const ids = await accessor.postedCommentIds!('session-1');
+      expect(ids.size).toBe(0);
+      const lines = stderr.mock.calls
+        .map((call) => String(call[0]))
+        .filter((line) => line.includes('authorship lookup failed'));
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toContain('HTTP 500');
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
+  it('postedCommentIds: a 200 empty set is not a failure and logs nothing', async () => {
+    const requestRest = vi
+      .fn()
+      .mockResolvedValueOnce(bindingsResponse())
+      .mockResolvedValueOnce(jsonResponse(200, { ids: [] }));
+    const accessor = createBoundSessionsAccessor(makeClient(requestRest));
+    await accessor.listPrBindings();
+
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    try {
+      const ids = await accessor.postedCommentIds!('session-1');
+      expect(ids.size).toBe(0);
+    } finally {
+      stderr.mockRestore();
+    }
+    const lines = stderr.mock.calls
+      .map((call) => String(call[0]))
+      .filter((line) => line.includes('authorship lookup failed'));
+    expect(lines).toHaveLength(0);
+  });
+
+  it('postedCommentIds: consecutive failures log once, then reset on success', async () => {
+    const requestRest = vi
+      .fn()
+      .mockResolvedValueOnce(bindingsResponse())
+      .mockResolvedValueOnce(jsonResponse(500, {}))
+      .mockResolvedValueOnce(jsonResponse(500, {}))
+      .mockResolvedValueOnce(jsonResponse(200, { ids: [] }))
+      .mockResolvedValueOnce(jsonResponse(500, {}));
+    const accessor = createBoundSessionsAccessor(makeClient(requestRest));
+    await accessor.listPrBindings();
+
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    try {
+      await accessor.postedCommentIds!('session-1');
+      await accessor.postedCommentIds!('session-1');
+      await accessor.postedCommentIds!('session-1'); // success resets the streak
+      await accessor.postedCommentIds!('session-1'); // first failure again
+      const lines = stderr.mock.calls
+        .map((call) => String(call[0]))
+        .filter((line) => line.includes('authorship lookup failed'));
+      // Two failure streaks (fail,fail then fail), each logged on its first
+      // occurrence only; the second failure of the first streak is throttled.
+      expect(lines).toHaveLength(2);
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
   it('lists and validates PR bindings', async () => {
     const requestRest = vi.fn().mockResolvedValue(
       jsonResponse(200, {
@@ -4666,6 +4794,86 @@ describe('createBoundSessionsAccessor', () => {
     expect(snapshot.bindings).toHaveLength(1);
   });
 
+  it('projects binding roles and degrades an unknown role to partial', async () => {
+    const requestRest = vi.fn().mockResolvedValue(
+      jsonResponse(200, {
+        bindings: [
+          {
+            sessionId: 'session-1',
+            workspaceCwd: '/ws/a',
+            prs: [
+              {
+                number: 1,
+                url: 'https://github.com/o/r/pull/1',
+                role: 'review',
+              },
+              {
+                number: 2,
+                url: 'https://github.com/o/r/pull/2',
+                role: 'triage',
+              },
+            ],
+          },
+        ],
+      }),
+    );
+    const accessor = createBoundSessionsAccessor(makeClient(requestRest));
+
+    const snapshot = await accessor.listPrBindings();
+
+    // The unknown role must not silently untype the entry: the dropped
+    // entry degrades the whole answer so the adapter retains known bindings.
+    expect(snapshot.partial).toBe(true);
+    expect(snapshot.bindings[0]!.prs).toEqual([
+      { number: 1, url: 'https://github.com/o/r/pull/1', role: 'review' },
+    ]);
+  });
+
+  it('projects watching booleans and drops non-boolean values field-only', async () => {
+    const requestRest = vi.fn().mockResolvedValue(
+      jsonResponse(200, {
+        bindings: [
+          {
+            sessionId: 'session-1',
+            workspaceCwd: '/ws/a',
+            prs: [
+              {
+                number: 1,
+                url: 'https://github.com/o/r/pull/1',
+                watching: true,
+              },
+              {
+                number: 2,
+                url: 'https://github.com/o/r/pull/2',
+                watching: false,
+              },
+              {
+                number: 3,
+                url: 'https://github.com/o/r/pull/3',
+                watching: 'yes',
+              },
+              { number: 4, url: 'https://github.com/o/r/pull/4' },
+            ],
+          },
+        ],
+      }),
+    );
+    const accessor = createBoundSessionsAccessor(makeClient(requestRest));
+
+    const snapshot = await accessor.listPrBindings();
+
+    // A malformed watching is unknown, not an absence: the FIELD drops,
+    // the entry stays, and the answer is not degraded — unknown remains
+    // eligible under the gate (fail-open).
+    expect(snapshot.partial).toBe(false);
+    expect(snapshot.bindings[0]!.prs).toEqual([
+      { number: 1, url: 'https://github.com/o/r/pull/1', watching: true },
+      { number: 2, url: 'https://github.com/o/r/pull/2', watching: false },
+      { number: 3, url: 'https://github.com/o/r/pull/3' },
+      { number: 4, url: 'https://github.com/o/r/pull/4' },
+    ]);
+  });
+
   it('flags a partially malformed PR projection as partial (R4-B2)', async () => {
     const requestRest = vi.fn().mockResolvedValue(
       jsonResponse(200, {
@@ -4694,6 +4902,41 @@ describe('createBoundSessionsAccessor', () => {
     expect(snapshot.bindings[0]!.prs).toEqual([
       { number: 1, url: 'https://github.com/o/r/pull/1' },
     ]);
+  });
+
+  it('logs one throttled line when the worker itself downgrades an answer to partial', async () => {
+    const requestRest = vi.fn().mockImplementation(async () =>
+      jsonResponse(200, {
+        bindings: [
+          {
+            sessionId: 'session-1',
+            workspaceCwd: '/ws/a',
+            prs: [
+              { number: 1, url: 'https://github.com/o/r/pull/1' },
+              { number: 'two', url: 'https://github.com/o/r/pull/2' },
+            ],
+          },
+          { workspaceCwd: '/ws/a', prs: [] },
+        ],
+        partial: false,
+      }),
+    );
+    const accessor = createBoundSessionsAccessor(makeClient(requestRest));
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    try {
+      await accessor.listPrBindings();
+      await accessor.listPrBindings();
+      const lines = stderr.mock.calls
+        .map((call) => String(call[0]))
+        .filter((line) => line.includes('downgraded to partial by the worker'));
+      // The daemon answered complete; the only cause is worker-side shape
+      // rejection, so it must be named — once, not on every poll.
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toContain('2 binding row(s) or PR entries');
+      expect(lines[0]).toContain('same version');
+    } finally {
+      stderr.mockRestore();
+    }
   });
 
   it('flags a dropped session row as partial (R5-C3)', async () => {

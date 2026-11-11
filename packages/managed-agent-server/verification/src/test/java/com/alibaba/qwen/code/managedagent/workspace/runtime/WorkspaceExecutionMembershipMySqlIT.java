@@ -4,20 +4,24 @@ import com.alibaba.qwen.code.managedagent.MySqlLockProbe;
 import com.alibaba.qwen.code.managedagent.VerificationFixtures;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.RuntimeBroker.WorkspaceMount;
+import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.StorageIdentityReader;
+import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules;
-import com.alibaba.qwen.code.managedagent.persistence.ChildWorkspaceStore;
 import com.alibaba.qwen.code.managedagent.persistence.IsolatedManagedSchemaMySqlTestDatabase;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcChildWorkspaceStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
-import com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceOperatorRecoveryStore;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageGuard;
 import com.alibaba.qwen.code.managedagent.workspace.runtime.WorkspaceRecoveryContract.Fixture;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeRequestKeys;
+import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
+import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
@@ -43,7 +47,6 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
@@ -59,7 +62,7 @@ class WorkspaceExecutionMembershipMySqlIT {
     private DataSource source;
     private ManagedSchemaJdbcTemplate jdbc;
     private ManagedAgentStore store;
-    private WorkspaceExecutionStore authority;
+    private JdbcWorkspaceExecutionStore authority;
     private String schema;
     @TempDir
     private Path temp;
@@ -71,7 +74,7 @@ class WorkspaceExecutionMembershipMySqlIT {
         ManagedSchema.initialize(source);
         jdbc = new ManagedSchemaJdbcTemplate(source);
         store = VerificationFixtures.managedAgentStore(jdbc, new ObjectMapper(), Clock.systemUTC(), ignored -> {},
-                new ManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties(), new SdkHarnessRules());
+                new JdbcManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties(), new SdkHarnessRules());
         authority = authority(new DataSourceTransactionManager(source));
         schema = jdbc.queryForObject("SELECT DATABASE()", String.class);
     }
@@ -97,7 +100,7 @@ class WorkspaceExecutionMembershipMySqlIT {
                     checkMembers(fixture);
                     authority.claim(fixture.session.workspace(), runtime.session());
                     checkMembers(fixture);
-                    assertThat(authority.beginRewind(fixture.session.workspace(), runtime.session())).isTrue();
+                    authority.beginRewind(fixture.session.workspace(), runtime.session());
                     checkMembers(fixture);
                     authority.endRewind(fixture.session.workspace(), runtime.session());
                     checkMembers(fixture);
@@ -211,7 +214,7 @@ class WorkspaceExecutionMembershipMySqlIT {
         guard.register(tenant, "storage", UUID.randomUUID().toString());
         var fixture = new Fixture(source, jdbc, store, tenant, "workspace", "storage");
         var runtime = fixture.runtime("physical");
-        var children = new ChildWorkspaceStore(jdbc, new DataSourceTransactionManager(source));
+        var children = new JdbcChildWorkspaceStore(jdbc, new DataSourceTransactionManager(source));
         var child = children.claim(children.admit(tenant, fixture.session.sessionId(), UUID.randomUUID().toString(),
                 fixture.session.workspace(), System.currentTimeMillis()), "maintenance", System.currentTimeMillis(), 60_000);
         java.util.concurrent.Callable<String> physical = () -> {
@@ -237,6 +240,8 @@ class WorkspaceExecutionMembershipMySqlIT {
             }
         }
         checkMembers(fixture);
+        authority.beginRewind(fixture.session.workspace(), runtime.session());
+        assertThatThrownBy(physical::call).isInstanceOf(RuntimeBrokerException.class);
         authority.release(fixture.session.workspace(), runtime.session());
         checkMembers(fixture);
         assertThat(physical.call()).isNotBlank();
@@ -244,10 +249,10 @@ class WorkspaceExecutionMembershipMySqlIT {
     }
 
     @Test
-    void exclusiveRewindRefusesACompetingMemberUntilItEnds() throws Exception {
+    void pendingRewindAllowsANeighborAfterItsShortAdmissionTransaction() throws Exception {
         var fixture = new Fixture(source, jdbc, store);
         var owner = fixture.runtime("owner");
-        var neighbor = fixture.runtime("neighbor");
+        var neighbor = fixture.runtime("neighbor", neighbor(fixture));
         authority.claim(fixture.session.workspace(), owner.session());
         checkMembers(fixture);
         var pause = new CommitPause(1);
@@ -259,24 +264,109 @@ class WorkspaceExecutionMembershipMySqlIT {
                 var claim = pool.submit(() -> authority.claim(fixture.session.workspace(), neighbor.session()));
                 MySqlLockProbe.awaitLockWaits(jdbc, schema, 1, "claim waiting for rewind");
                 pause.resume.countDown();
-                assertThat(rewind.get(5, TimeUnit.SECONDS)).isTrue();
-                assertRefused(claim);
+                rewind.get(5, TimeUnit.SECONDS);
+                claim.get(5, TimeUnit.SECONDS);
             } finally {
                 pause.resume.countDown();
             }
         }
         checkMembers(fixture);
-        authority.endRewind(fixture.session.workspace(), owner.session());
+        authority.assertHeld(fixture.session.workspace(), neighbor.session());
+        assertThat(authority.hasPendingRewind(owner.session())).isTrue();
+        authority.beginRewind(fixture.session.workspace(), neighbor.session());
         checkMembers(fixture);
-        authority.claim(fixture.session.workspace(), neighbor.session());
+        authority.endRewind(fixture.session.workspace(), owner.session());
+        assertThat(authority.hasPendingRewind(owner.session())).isFalse();
+        assertThat(authority.hasPendingRewind(neighbor.session())).isTrue();
         checkMembers(fixture);
         authority.release(fixture.session.workspace(), owner.session());
+        assertThat(authority.hasPendingRewind(neighbor.session())).isTrue();
         authority.release(fixture.session.workspace(), neighbor.session());
         checkMembers(fixture);
     }
 
-    private WorkspaceExecutionStore authority(DataSourceTransactionManager manager) {
-        return VerificationFixtures.configure(new WorkspaceExecutionStore(jdbc, manager));
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void rewindAdmissionAndMountHandbackHaveOneAtomicWinner(boolean rewindFirst) throws Exception {
+        var fixture = new Fixture(source, jdbc, store);
+        var runtime = fixture.runtime("rewind-handback");
+        authority.claim(fixture.session.workspace(), runtime.session());
+        var pause = new CommitPause(1);
+        var paused = authority(pause);
+        try (var pool = Executors.newFixedThreadPool(2)) {
+            try {
+                var first = pool.submit(() -> {
+                    if (rewindFirst) {
+                        paused.beginRewind(fixture.session.workspace(), runtime.session());
+                    } else {
+                        paused.releaseMount(fixture.session.workspace(), runtime.session());
+                    }
+                });
+                assertThat(pause.reached.await(5, TimeUnit.SECONDS)).isTrue();
+                var second = pool.submit(() -> {
+                    if (rewindFirst) {
+                        authority.releaseMount(fixture.session.workspace(), runtime.session());
+                    } else {
+                        authority.beginRewind(fixture.session.workspace(), runtime.session());
+                    }
+                });
+                MySqlLockProbe.awaitLockWaits(jdbc, schema, 1, "rewind and handback arbitration");
+                pause.resume.countDown();
+                first.get(5, TimeUnit.SECONDS);
+                assertThatThrownBy(() -> second.get(5, TimeUnit.SECONDS))
+                        .hasCauseInstanceOf(RuntimeBrokerException.class)
+                        .satisfies(error -> assertThat(((RuntimeBrokerException) error.getCause()).getCode())
+                                .isEqualTo(rewindFirst ? "workspace_writer_unproven" : "workspace_unavailable"));
+            } finally {
+                pause.resume.countDown();
+            }
+        }
+        assertThat(authority.hasPendingRewind(runtime.session())).isEqualTo(rewindFirst);
+        assertThat(authority.isHeld(fixture.session.workspace(), runtime.session())).isEqualTo(rewindFirst);
+        checkMembers(fixture);
+        authority.release(fixture.session.workspace(), runtime.session());
+        checkMembers(fixture);
+    }
+
+    @Test
+    void lostRecoveryClearsAllItsPendingMembersAndPreservesANeighbor() throws Exception {
+        var fixture = new Fixture(source, jdbc, store);
+        var original = fixture.runtime("original");
+        var acquiring = fixture.bindings.admitSession(fixture.sessions, new RuntimeSessionRecord(
+                new RuntimeSession(fixture.session.sessionId(), "second-original", "bootstrap", original.session().getSession().getScope()),
+                original.binding().getBindingId(), original.binding().getGeneration(), RuntimeSessionRecord.State.ACQUIRING,
+                0, Instant.now()));
+        var second = fixture.sessions.compareAndSet(acquiring, acquiring.withState(RuntimeSessionRecord.State.READY, Instant.now()));
+        var neighbor = fixture.runtime("neighbor", neighbor(fixture));
+        for (var member : List.of(original.session(), second, neighbor.session())) {
+            authority.claim(fixture.session.workspace(), member);
+            authority.beginRewind(fixture.session.workspace(), member);
+        }
+        checkMembers(fixture);
+        var lost = fixture.lose(original.binding());
+        var recovered = fixture.bindings.recoverLost(fixture.sessions, fixture.executions, lost);
+        authority.releaseLost(recovered);
+        for (var member : List.of(original.session(), second)) {
+            assertThat(authority.hasPendingRewind(member)).isFalse();
+            assertThat(authority.isHeld(fixture.session.workspace(), member)).isFalse();
+        }
+        assertThat(authority.hasPendingRewind(neighbor.session())).isTrue();
+        assertThat(authority.isHeld(fixture.session.workspace(), neighbor.session())).isTrue();
+        checkMembers(fixture);
+        authority.release(fixture.session.workspace(), neighbor.session());
+        checkMembers(fixture);
+    }
+
+    private String neighbor(Fixture fixture) {
+        return new org.springframework.transaction.support.TransactionTemplate(new DataSourceTransactionManager(source))
+                .execute(status -> store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                        .tenantId(fixture.tenant).actorId("actor").idempotencyKey(UUID.randomUUID().toString())
+                        .requestDigest("sha256:" + "b".repeat(64)).agentId("qwen-code")
+                        .selection(new WorkspaceSelection("workspace", ".")).build()).sessionId());
+    }
+
+    private JdbcWorkspaceExecutionStore authority(DataSourceTransactionManager manager) {
+        return VerificationFixtures.configure(new JdbcWorkspaceExecutionStore(jdbc, manager));
     }
 
     private Connection lock(String sql, String value) throws Exception {
@@ -299,18 +389,11 @@ class WorkspaceExecutionMembershipMySqlIT {
     private void checkMembers(Fixture fixture) {
         String key = jdbc.queryForObject("SELECT physical_key FROM ma_storage WHERE alias_key = ?", String.class,
                 JdbcRuntimeBindingRepository.storageAliasKey(fixture.tenant, fixture.session.workspace().getStorageId()));
-        var owner = jdbc.queryForMap("SELECT member_count, exclusive_member_key FROM ma_storage_owner WHERE storage_key = ?", key);
-        var members = jdbc.query("SELECT binding_id, runtime_generation, runtime_session_id, is_execution_exclusive"
-                + " FROM ma_runtime_session WHERE execution_storage_key = ?", (row, index) -> row.getBoolean("is_execution_exclusive")
-                        ? WorkspaceExecutionStore.exclusiveMemberKey(row.getString("binding_id"), row.getLong("runtime_generation"),
-                                row.getString("runtime_session_id")) : null, key);
-        assertThat(((Number) owner.get("member_count")).longValue()).isEqualTo(members.size());
-        var exclusive = members.stream().filter(Objects::nonNull).toList();
-        assertThat(exclusive).hasSizeLessThanOrEqualTo(1);
-        assertThat(owner.get("exclusive_member_key")).isEqualTo(exclusive.isEmpty() ? null : exclusive.getFirst());
-        if (!exclusive.isEmpty()) {
-            assertThat(members).hasSize(1);
-        }
+        long members = jdbc.queryForObject("SELECT COUNT(*) FROM ma_runtime_session WHERE execution_storage_key = ?", Long.class, key);
+        assertThat(jdbc.queryForObject("SELECT member_count FROM ma_storage_owner WHERE storage_key = ?", Long.class, key))
+                .isEqualTo(members);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_runtime_session WHERE execution_storage_key IS NULL"
+                + " AND is_rewind_pending = TRUE", Long.class)).isZero();
     }
 
     private static void assertRefused(Future<?> result) {

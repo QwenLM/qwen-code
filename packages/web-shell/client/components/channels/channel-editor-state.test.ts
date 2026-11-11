@@ -12,12 +12,18 @@ import type {
 import {
   buildChannelUpsertRequest,
   createChannelEditorDraft,
+  GITHUB_RESERVED_URL_PATHS,
   invalidRepositoryGroupEntries,
+  isRepoFilterActive,
+  normalizeRepositoryFilterInput,
   repositoryAllowlistIds,
   retainedRepositorySettings,
   validateChannelEditorDraft,
 } from './channel-editor-state';
-import type { ChannelGroupOverrideDraft } from './channel-editor-state';
+import type {
+  ChannelEditorDraft,
+  ChannelGroupOverrideDraft,
+} from './channel-editor-state';
 
 const DINGTALK: DaemonChannelTypeDescriptor = {
   type: 'dingtalk',
@@ -875,6 +881,113 @@ describe('Channel editor state', () => {
     expect(validateChannelEditorDraft(descriptor, valid, [])).toEqual({});
   });
 
+  it('rejects values below an inclusive minimum but admits the bound itself', () => {
+    // The gap this closes: a field whose real floor is 0 could only say
+    // exclusiveMinimum: -1, which admits (-1, 0). The editor accepted -0.5 and
+    // the adapter refused it at save, so the operator learned the constraint
+    // only after pressing Save.
+    const descriptor: DaemonChannelTypeDescriptor = {
+      type: 'example',
+      displayName: 'Example',
+      manageable: true,
+      fields: [
+        {
+          key: 'reserve',
+          label: 'Reserve',
+          kind: 'number',
+          minimum: 0,
+          maximum: 5000,
+        },
+      ],
+    };
+
+    for (const value of ['-0.5', '-1', '-0.0001']) {
+      const draft = createChannelEditorDraft(descriptor);
+      draft.name = 'example';
+      draft.values.reserve = value;
+      expect(validateChannelEditorDraft(descriptor, draft, [])).toEqual({
+        reserve: 'outOfRange',
+      });
+    }
+
+    // 0 is the point of the inclusive bound — it disables the gate.
+    for (const value of ['0', '200', '200.5', '5000']) {
+      const draft = createChannelEditorDraft(descriptor);
+      draft.name = 'example';
+      draft.values.reserve = value;
+      expect(validateChannelEditorDraft(descriptor, draft, [])).toEqual({});
+    }
+  });
+
+  it('applies the stricter floor when both lower bounds are declared', () => {
+    const descriptor: DaemonChannelTypeDescriptor = {
+      type: 'example',
+      displayName: 'Example',
+      manageable: true,
+      fields: [
+        {
+          key: 'reserve',
+          label: 'Reserve',
+          kind: 'number',
+          exclusiveMinimum: 0,
+          minimum: -1,
+        },
+      ],
+    };
+
+    // exclusiveMinimum: 0 is stricter than minimum: -1, so 0 stays refused.
+    const draft = createChannelEditorDraft(descriptor);
+    draft.name = 'example';
+    draft.values.reserve = '0';
+    expect(validateChannelEditorDraft(descriptor, draft, [])).toEqual({
+      reserve: 'outOfRange',
+    });
+
+    const valid = createChannelEditorDraft(descriptor);
+    valid.name = 'example';
+    valid.values.reserve = '1';
+    expect(validateChannelEditorDraft(descriptor, valid, [])).toEqual({});
+  });
+
+  it('does not strand an edit over a stored value below a newly declared floor', () => {
+    // The store forgives an unchanged stored number for the whole range, so the
+    // editor has to forgive the inclusive bound too. Otherwise a channel whose
+    // settings file predates the floor cannot be edited at all.
+    const descriptor: DaemonChannelTypeDescriptor = {
+      type: 'example',
+      displayName: 'Example',
+      manageable: true,
+      fields: [
+        {
+          key: 'reserve',
+          label: 'Reserve',
+          kind: 'number',
+          minimum: 0,
+          maximum: 5000,
+        },
+      ],
+    };
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'example',
+      config: { type: 'example', reserve: -0.5 },
+      secrets: {},
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    const draft = createChannelEditorDraft(descriptor, instance);
+    draft.name = 'example';
+    expect(draft.values.reserve).toBe('-0.5');
+
+    expect(validateChannelEditorDraft(descriptor, draft, [], instance)).toEqual(
+      {},
+    );
+
+    draft.values.reserve = '-0.2';
+    expect(validateChannelEditorDraft(descriptor, draft, [], instance)).toEqual(
+      { reserve: 'outOfRange' },
+    );
+  });
+
   it('treats a whitespace-only number draft as empty instead of invalid', () => {
     const descriptor: DaemonChannelTypeDescriptor = {
       type: 'example',
@@ -971,6 +1084,106 @@ const GITHUB: DaemonChannelTypeDescriptor = {
     },
   ],
 };
+
+describe('GitHub watch events require bound delivery', () => {
+  const BOUND: DaemonChannelTypeDescriptor = {
+    ...GITHUB,
+    fields: [
+      ...GITHUB.fields,
+      {
+        key: 'deliverToBoundSessions',
+        label: 'Deliver To PR-Bound Sessions',
+        kind: 'boolean',
+      },
+      {
+        key: 'prWatchEvents',
+        label: 'PR Watch Events',
+        kind: 'string-list',
+        options: [
+          { value: 'ci_failure', label: 'ci_failure' },
+          { value: 'merge_conflict', label: 'merge_conflict' },
+        ],
+      },
+    ],
+  };
+
+  function draftWithEvents(events: string): ChannelEditorDraft {
+    const draft = createChannelEditorDraft(BOUND);
+    draft.name = 'my-bot';
+    draft.values.useLocalGh = true;
+    draft.values.prWatchEvents = events;
+    return draft;
+  }
+
+  it('refuses a watch selection while bound delivery is off', () => {
+    expect(
+      validateChannelEditorDraft(BOUND, draftWithEvents('ci_failure'), []),
+    ).toEqual({ prWatchEvents: 'requiresBoundDelivery' });
+  });
+
+  it('allows the selection once bound delivery is on', () => {
+    const draft = draftWithEvents('ci_failure');
+    draft.values.deliverToBoundSessions = true;
+    expect(validateChannelEditorDraft(BOUND, draft, [])).toEqual({});
+  });
+
+  it('leaves an empty selection alone with delivery off', () => {
+    expect(validateChannelEditorDraft(BOUND, draftWithEvents(''), [])).toEqual(
+      {},
+    );
+  });
+
+  it('reports invalidOption before the delivery dependency', () => {
+    expect(
+      validateChannelEditorDraft(BOUND, draftWithEvents('typo_event'), []),
+    ).toEqual({ prWatchEvents: 'invalidOption' });
+  });
+});
+
+describe('GitHub requireBoundWatch requires bound delivery', () => {
+  const BOUND: DaemonChannelTypeDescriptor = {
+    ...GITHUB,
+    fields: [
+      ...GITHUB.fields,
+      {
+        key: 'deliverToBoundSessions',
+        label: 'Deliver To PR-Bound Sessions',
+        kind: 'boolean',
+      },
+      {
+        key: 'requireBoundWatch',
+        label: 'Require Active Watch For Review/Verify Sessions',
+        kind: 'boolean',
+      },
+    ],
+  };
+
+  function draftWithGate(on: boolean): ChannelEditorDraft {
+    const draft = createChannelEditorDraft(BOUND);
+    draft.name = 'my-bot';
+    draft.values.useLocalGh = true;
+    draft.values.requireBoundWatch = on;
+    return draft;
+  }
+
+  it('refuses the gate while bound delivery is off', () => {
+    expect(validateChannelEditorDraft(BOUND, draftWithGate(true), [])).toEqual({
+      requireBoundWatch: 'requiresBoundDeliveryForWatchGate',
+    });
+  });
+
+  it('allows the gate once bound delivery is on', () => {
+    const draft = draftWithGate(true);
+    draft.values.deliverToBoundSessions = true;
+    expect(validateChannelEditorDraft(BOUND, draft, [])).toEqual({});
+  });
+
+  it('leaves the gate off alone with delivery off', () => {
+    expect(validateChannelEditorDraft(BOUND, draftWithGate(false), [])).toEqual(
+      {},
+    );
+  });
+});
 
 describe('Descriptor-driven privatePolicy', () => {
   it('defaults enum fields to the first option for new channels', () => {
@@ -1412,6 +1625,237 @@ describe('Repository-only channel access config', () => {
         secrets: { token: { operation: 'clear' } },
       }),
     );
+  });
+});
+
+/**
+ * Email's descriptor as the daemon ships it. The plugin declares its own
+ * `privatePolicy` without `pairing`, so the registry injects `groupPolicy` and
+ * the other shared access fields but no private policy. The parity suite drives
+ * the real plugin; this fixture keeps the projection cases readable.
+ */
+const EMAIL: DaemonChannelTypeDescriptor = {
+  type: 'email',
+  displayName: 'Email',
+  manageable: true,
+  fields: [
+    {
+      key: 'address',
+      label: 'Mailbox Address',
+      kind: 'string',
+      required: true,
+    },
+    {
+      key: 'imapHost',
+      label: 'IMAP Host',
+      kind: 'string',
+      required: true,
+    },
+    {
+      key: 'imapPassword',
+      label: 'IMAP Password',
+      kind: 'secret',
+      required: true,
+    },
+    {
+      key: 'smtpPassword',
+      label: 'SMTP Password',
+      kind: 'secret',
+      required: true,
+    },
+    {
+      key: 'proactiveRecipients',
+      label: 'Proactive Recipients',
+      kind: 'string-list',
+    },
+    {
+      key: 'privatePolicy',
+      label: 'Private Policy',
+      kind: 'enum',
+      required: true,
+      default: 'allowlist',
+      options: [
+        { value: 'disabled', label: 'Disabled' },
+        { value: 'allowlist', label: 'Allowlist' },
+        { value: 'open', label: 'Open' },
+      ],
+    },
+    {
+      key: 'groupPolicy',
+      label: 'Group Policy',
+      kind: 'enum',
+      required: true,
+      default: 'disabled',
+      options: [
+        { value: 'disabled', label: 'Disabled' },
+        { value: 'pairing', label: 'Pairing' },
+        { value: 'allowlist', label: 'Allowlist' },
+        { value: 'open', label: 'Open' },
+      ],
+    },
+    {
+      key: 'allowedUsers',
+      label: 'Allowed Users',
+      kind: 'string-list',
+    },
+    {
+      key: 'operators',
+      label: 'Session Operators',
+      kind: 'string-list',
+    },
+  ],
+};
+
+describe('Private-only channel access config', () => {
+  function emailDraft(): ChannelEditorDraft {
+    const draft = createChannelEditorDraft(EMAIL);
+    draft.name = 'agent-mail';
+    draft.values.address = 'agent@example.com';
+    draft.values.imapHost = 'imap.example.com';
+    draft.secrets.imapPassword = { operation: 'replace', value: 'imap-secret' };
+    draft.secrets.smtpPassword = { operation: 'replace', value: 'smtp-secret' };
+    return draft;
+  }
+
+  function emailInstance(
+    config: Record<string, unknown>,
+  ): DaemonChannelInstanceSnapshot {
+    return {
+      name: 'agent-mail',
+      config: {
+        type: 'email',
+        address: 'agent@example.com',
+        imapHost: 'imap.example.com',
+        privatePolicy: 'allowlist',
+        ...config,
+      },
+      secrets: {
+        imapPassword: { present: true, source: 'environment' },
+        smtpPassword: { present: true, source: 'environment' },
+      },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+  }
+
+  it('does not persist the injected group policy', () => {
+    const request = buildChannelUpsertRequest(EMAIL, emailDraft(), 'rev-1');
+    expect(request.config).not.toHaveProperty('groupPolicy');
+    expect(request.config).not.toHaveProperty('groups');
+    expect(request.config['privatePolicy']).toBe('allowlist');
+  });
+
+  it('takes the plugin private policy, never the shared pairing default', () => {
+    const draft = createChannelEditorDraft(EMAIL);
+    expect(draft.values['privatePolicy']).toBe('allowlist');
+    // '' selects the descriptor-declared enum instead of the four-card radio
+    // group, which is the only place `pairing` is offered.
+    expect(draft.privatePolicy).toBe('');
+    expect(draft.values).not.toHaveProperty('groupPolicy');
+  });
+
+  it('does not ask for the group policy it never renders', () => {
+    expect(validateChannelEditorDraft(EMAIL, emailDraft(), [])).toEqual({});
+  });
+
+  it('does not flag a required group policy the draft deliberately omits', () => {
+    // Pins the validator's private-only skip: with a blank groupPolicy value
+    // present, the required-check would otherwise report 'required' for a
+    // control the editor never renders. Without the skip this goes red.
+    const draft = emailDraft();
+    draft.values['groupPolicy'] = '';
+    expect(
+      validateChannelEditorDraft(EMAIL, draft, [])['groupPolicy'],
+    ).toBeUndefined();
+  });
+
+  it('leaves a non-record stored group entry untouched on save', () => {
+    // Pins the save-path private-only guard: without it, assignGroups() would
+    // rebuild groups and coerce a non-record entry to {}, rewriting stored
+    // data the editor does not model. Email has no invalidGroupEntry backstop.
+    const instance = emailInstance({
+      groupPolicy: 'allowlist',
+      groups: { g1: 'not-a-record' },
+    });
+    const draft = createChannelEditorDraft(EMAIL, instance);
+    const request = buildChannelUpsertRequest(EMAIL, draft, 'rev-9', instance);
+    expect(request.config['groups']).toEqual({ g1: 'not-a-record' });
+  });
+
+  it('preserves a stored group policy and groups on an unrelated save', () => {
+    // Skipping the field in the draft but not in the save would let
+    // assignField() read an absent key as empty and delete both.
+    const instance = emailInstance({
+      groupPolicy: 'allowlist',
+      groups: { 'legacy-group': { senders: 'open' } },
+    });
+    const draft = createChannelEditorDraft(EMAIL, instance);
+    draft.values.address = 'renamed@example.com';
+
+    const request = buildChannelUpsertRequest(EMAIL, draft, 'rev-2', instance);
+    expect(request.config['groupPolicy']).toBe('allowlist');
+    expect(request.config['groups']).toEqual({
+      'legacy-group': { senders: 'open' },
+    });
+    expect(request.config['address']).toBe('renamed@example.com');
+  });
+
+  it('preserves a stored pairing group policy without validating against it', () => {
+    const instance = emailInstance({
+      groupPolicy: 'pairing',
+      groups: { '*': { senders: 'allowlist', allowedUsers: ['alice'] } },
+    });
+    const draft = createChannelEditorDraft(EMAIL, instance);
+
+    expect(validateChannelEditorDraft(EMAIL, draft, [], instance)).toEqual({});
+    const request = buildChannelUpsertRequest(EMAIL, draft, 'rev-3', instance);
+    expect(request.config['groupPolicy']).toBe('pairing');
+    expect(request.config['groups']).toEqual({
+      '*': { senders: 'allowlist', allowedUsers: ['alice'] },
+    });
+  });
+
+  it('keeps both password secrets preserved on an existing channel', () => {
+    const instance = emailInstance({});
+    const draft = createChannelEditorDraft(EMAIL, instance);
+
+    expect(
+      buildChannelUpsertRequest(EMAIL, draft, 'rev-4', instance).secrets,
+    ).toEqual({
+      imapPassword: { operation: 'preserve' },
+      smtpPassword: { operation: 'preserve' },
+    });
+  });
+
+  it('round-trips proactive recipients through the comma-separated input', () => {
+    const draft = emailDraft();
+    draft.values.proactiveRecipients = 'a@x.com, b@x.com';
+
+    const request = buildChannelUpsertRequest(EMAIL, draft, 'rev-5');
+    expect(request.config['proactiveRecipients']).toEqual([
+      'a@x.com',
+      'b@x.com',
+    ]);
+
+    const reopened = createChannelEditorDraft(
+      EMAIL,
+      emailInstance({ proactiveRecipients: ['a@x.com', 'b@x.com'] }),
+    );
+    expect(reopened.values['proactiveRecipients']).toBe('a@x.com, b@x.com');
+  });
+
+  it('still writes the group policy for a group-capable sibling', () => {
+    const draft = createChannelEditorDraft(DINGTALK_WITH_ACCESS);
+    draft.name = 'release-bot';
+    draft.values.clientId = 'id';
+    draft.secrets.clientSecret = { operation: 'replace', value: 'secret' };
+
+    const request = buildChannelUpsertRequest(
+      DINGTALK_WITH_ACCESS,
+      draft,
+      'rev-6',
+    );
+    expect(request.config['groupPolicy']).toBe('disabled');
   });
 });
 
@@ -2893,5 +3337,388 @@ describe('GitHub poll interval', () => {
     expect(
       validateChannelEditorDraft(GITHUB_POLLING, draft, [], instance),
     ).toEqual({ pollInterval: 'outOfRange' });
+  });
+});
+
+describe('GitHub repository event filter', () => {
+  const REPO_FILTER: DaemonChannelTypeDescriptor = {
+    ...GITHUB,
+    fields: [
+      ...GITHUB.fields,
+      {
+        key: 'baseUrl',
+        label: 'Base URL',
+        kind: 'string',
+        envResolvable: true,
+      },
+      {
+        key: 'repoFilterMode',
+        label: 'Repository Filter',
+        kind: 'enum',
+        default: 'off',
+        options: [
+          { value: 'off', label: 'off' },
+          { value: 'allowlist', label: 'allowlist' },
+          { value: 'blocklist', label: 'blocklist' },
+        ],
+      },
+      {
+        key: 'repoFilter',
+        label: 'Filtered Repositories',
+        kind: 'string-list',
+      },
+    ],
+  };
+
+  function filterDraft(
+    mode: string,
+    list: string,
+    instance?: DaemonChannelInstanceSnapshot,
+  ): ChannelEditorDraft {
+    const draft = createChannelEditorDraft(REPO_FILTER, instance);
+    draft.name = 'my-bot';
+    draft.values.useLocalGh = true;
+    draft.values.repoFilterMode = mode;
+    draft.values.repoFilter = list;
+    return draft;
+  }
+
+  describe('normalizeRepositoryFilterInput', () => {
+    it('shortens pasted GitHub web URLs to owner/repo', () => {
+      expect(
+        normalizeRepositoryFilterInput(
+          'https://github.com/Octo/Repo, https://github.com/Octo/Repo/pull/123, octo/repo',
+        ),
+      ).toBe('octo/repo');
+    });
+
+    it('shortens URLs on the GHES host derived from baseUrl', () => {
+      expect(
+        normalizeRepositoryFilterInput(
+          'https://ghe.example.com/octo/repo.git/',
+          'https://ghe.example.com/api/v3',
+        ),
+      ).toBe('octo/repo');
+      // Without the channel's baseUrl, the same host is not shortenable.
+      expect(
+        normalizeRepositoryFilterInput(
+          'https://ghe.example.com/octo/repo.git/',
+        ),
+      ).toBe('https://ghe.example.com/octo/repo.git/');
+    });
+
+    it('does not shorten URLs on hosts other than the channel GitHub host', () => {
+      // The structural half of the guard: the first two path segments of an
+      // arbitrary host are not a repository. Each of these once shortened to
+      // a plausible owner/repo that both validators accepted.
+      const foreign = [
+        'https://api.github.com/repos/octo/repo',
+        'https://api.github.com/repos/QwenLM/qwen-code/issues/42',
+        'https://gist.github.com/octocat/6cad1f0e5d3b2a9c',
+        'https://gitlab.com/group/project',
+      ];
+      for (const url of foreign) {
+        expect(normalizeRepositoryFilterInput(url)).toBe(url.toLowerCase());
+        expect(
+          validateChannelEditorDraft(
+            REPO_FILTER,
+            filterDraft('allowlist', url),
+            [],
+          ),
+        ).toEqual({ repoFilter: 'invalidRepoId' });
+      }
+    });
+
+    it('shortens URLs carrying a query or fragment', () => {
+      expect(
+        normalizeRepositoryFilterInput(
+          'https://github.com/Octo/Repo?tab=readme-ov-file, https://github.com/Octo/Repo#readme',
+        ),
+      ).toBe('octo/repo');
+    });
+
+    it('rejects REST-shaped URLs on the channel own API host', () => {
+      // The host gate must not re-admit the channel's own API host: with
+      // baseUrl set, a REST URL (the shape `gh api` prints) must pass through
+      // for validation to reject, not shorten to `repos/octo` or `api/v3`.
+      const cases = [
+        ['https://api.github.com/repos/octo/repo', 'https://api.github.com'],
+        [
+          'https://ghe.example.com/api/v3/repos/octo/repo',
+          'https://ghe.example.com/api/v3',
+        ],
+      ];
+      for (const [url, baseUrl] of cases) {
+        expect(normalizeRepositoryFilterInput(url!, baseUrl)).toBe(
+          url!.toLowerCase(),
+        );
+        const draft = filterDraft('allowlist', url!);
+        draft.values.baseUrl = baseUrl!;
+        expect(validateChannelEditorDraft(REPO_FILTER, draft, [])).toEqual({
+          repoFilter: 'invalidRepoId',
+        });
+      }
+    });
+
+    it('strips trailing sentence punctuation from a pasted URL', () => {
+      expect(
+        normalizeRepositoryFilterInput(
+          'https://github.com/octo/repo., https://github.com/octo/repo)',
+        ),
+      ).toBe('octo/repo');
+      expect(
+        validateChannelEditorDraft(
+          REPO_FILTER,
+          filterDraft('blocklist', 'https://github.com/octo/repo.'),
+          [],
+        ),
+      ).toEqual({});
+    });
+
+    it('binds the GHES host through both the validator and the save path', () => {
+      // Dropping either baseUrl argument must fail here: the validator would
+      // reject the paste while the save path still shortens it (or vice
+      // versa) — the editor/daemon divergence the shared normalizer prevents.
+      const instance: DaemonChannelInstanceSnapshot = {
+        name: 'my-bot',
+        config: {
+          type: 'github',
+          useLocalGh: true,
+          baseUrl: 'https://ghe.example.com/api/v3',
+        },
+        secrets: {},
+        startsWithServe: false,
+        runtime: { state: 'stopped' },
+      };
+      const draft = filterDraft(
+        'blocklist',
+        'https://ghe.example.com/octo/repo',
+        instance,
+      );
+      expect(
+        validateChannelEditorDraft(REPO_FILTER, draft, [], instance),
+      ).toEqual({});
+      const request = buildChannelUpsertRequest(
+        REPO_FILTER,
+        draft,
+        'rev-1',
+        instance,
+      );
+      expect(request.config['repoFilter']).toEqual(['octo/repo']);
+    });
+
+    it('does not shorten non-repository GitHub URLs', () => {
+      // Regression pins for the measured verify-round shapes: each of these
+      // once shortened to a plausible-but-nonexistent owner/repo that both
+      // validators accepted — fatal under an allowlist. The capitalized
+      // variant pins the guard's own lowercasing of the path root.
+      const hostile = [
+        'https://github.com/orgs/community',
+        'https://github.com/Orgs/community',
+        'https://github.com/settings/profile',
+        'https://github.com/apps/renovate',
+        'https://github.com/features/copilot',
+        'https://github.com/trending/typescript',
+        'https://github.com/pricing/enterprise',
+        'https://github.com/advisories/GHSA-xxxx-xxxx-xxxx',
+        'https://github.com/copilot/c/abc123',
+      ];
+      for (const url of hostile) {
+        expect(normalizeRepositoryFilterInput(url)).toBe(url.toLowerCase());
+        expect(
+          validateChannelEditorDraft(
+            REPO_FILTER,
+            filterDraft('allowlist', url),
+            [],
+          ),
+        ).toEqual({ repoFilter: 'invalidRepoId' });
+      }
+    });
+
+    it('pins the whole reserved-area set, not a sample of it', () => {
+      // A snapshot over every member: removing any root from the set fails
+      // here, which the it.each enumeration alone cannot witness (it would
+      // simply run one case fewer).
+      expect([...GITHUB_RESERVED_URL_PATHS].sort()).toEqual(
+        [
+          'about',
+          'account',
+          'accounts',
+          'advisories',
+          'apps',
+          'codespaces',
+          'collections',
+          'contact',
+          'copilot',
+          'customer-stories',
+          'discussions',
+          'enterprise',
+          'enterprises',
+          'events',
+          'explore',
+          'features',
+          'followers',
+          'following',
+          'issues',
+          'join',
+          'login',
+          'logout',
+          'marketplace',
+          'mobile',
+          'new',
+          'notifications',
+          'orgs',
+          'organizations',
+          'password_reset',
+          'premium-support',
+          'pricing',
+          'pulls',
+          'readme',
+          'search',
+          'security',
+          'sessions',
+          'settings',
+          'signup',
+          'site',
+          'sponsors',
+          'stars',
+          'team',
+          'topics',
+          'trending',
+          'users',
+          'watching',
+        ].sort(),
+      );
+    });
+
+    it.each([...GITHUB_RESERVED_URL_PATHS])(
+      'rejects every reserved GitHub area root: %s',
+      (root) => {
+        // Enumerates the whole guard set so a newly added root is covered the
+        // moment it lands, instead of waiting for a hand-picked fixture.
+        const url = `https://github.com/${root}/some-page`;
+        expect(normalizeRepositoryFilterInput(url)).toBe(url);
+        expect(
+          validateChannelEditorDraft(
+            REPO_FILTER,
+            filterDraft('blocklist', url),
+            [],
+          ),
+        ).toEqual({ repoFilter: 'invalidRepoId' });
+      },
+    );
+
+    it('lowercases and deduplicates plain entries', () => {
+      expect(
+        normalizeRepositoryFilterInput('Owner/Repo, owner/repo, other/repo'),
+      ).toBe('owner/repo, other/repo');
+    });
+
+    it('passes non-URL entries through for validation to name', () => {
+      expect(normalizeRepositoryFilterInput('not-a-repo, a/b')).toBe(
+        'not-a-repo, a/b',
+      );
+      expect(normalizeRepositoryFilterInput('  ')).toBe('');
+    });
+  });
+
+  it('isRepoFilterActive only accepts the two list modes', () => {
+    expect(isRepoFilterActive('allowlist')).toBe(true);
+    expect(isRepoFilterActive('blocklist')).toBe(true);
+    expect(isRepoFilterActive('off')).toBe(false);
+    expect(isRepoFilterActive(undefined)).toBe(false);
+  });
+
+  it('seeds Off for a new draft and for an instance without the keys', () => {
+    expect(createChannelEditorDraft(REPO_FILTER).values.repoFilterMode).toBe(
+      'off',
+    );
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'my-bot',
+      config: { type: 'github', useLocalGh: true },
+      secrets: {},
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    expect(
+      createChannelEditorDraft(REPO_FILTER, instance).values.repoFilterMode,
+    ).toBe('off');
+  });
+
+  it('requires a non-empty list while a mode is active', () => {
+    expect(
+      validateChannelEditorDraft(REPO_FILTER, filterDraft('allowlist', ''), []),
+    ).toEqual({ repoFilter: 'repoFilterRequired' });
+    expect(
+      validateChannelEditorDraft(
+        REPO_FILTER,
+        filterDraft('blocklist', '  '),
+        [],
+      ),
+    ).toEqual({ repoFilter: 'repoFilterRequired' });
+  });
+
+  it('rejects entries that are not owner/repo after normalization', () => {
+    expect(
+      validateChannelEditorDraft(
+        REPO_FILTER,
+        filterDraft('blocklist', 'not-a-repo'),
+        [],
+      ),
+    ).toEqual({ repoFilter: 'invalidRepoId' });
+  });
+
+  it('accepts pasted URLs and ignores the list while off', () => {
+    expect(
+      validateChannelEditorDraft(
+        REPO_FILTER,
+        filterDraft('allowlist', 'https://github.com/Octo/Repo/pull/1'),
+        [],
+      ),
+    ).toEqual({});
+    expect(
+      validateChannelEditorDraft(
+        REPO_FILTER,
+        filterDraft('off', 'not-a-repo'),
+        [],
+      ),
+    ).toEqual({});
+  });
+
+  it('normalizes the list in the save payload while a mode is active', () => {
+    const request = buildChannelUpsertRequest(
+      REPO_FILTER,
+      filterDraft(
+        'blocklist',
+        'https://github.com/Octo/Repo/pull/9, Other/Repo',
+      ),
+      'rev-1',
+    );
+    expect(request.config['repoFilterMode']).toBe('blocklist');
+    expect(request.config['repoFilter']).toEqual(['octo/repo', 'other/repo']);
+  });
+
+  it('keeps a parked list exactly as stored while the mode is off', () => {
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'my-bot',
+      config: {
+        type: 'github',
+        useLocalGh: true,
+        repoFilterMode: 'off',
+        repoFilter: ['Owner/Parked'],
+      },
+      secrets: {},
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    const draft = createChannelEditorDraft(REPO_FILTER, instance);
+    draft.name = 'my-bot';
+    const request = buildChannelUpsertRequest(
+      REPO_FILTER,
+      draft,
+      'rev-1',
+      instance,
+    );
+    expect(request.config['repoFilter']).toEqual(['Owner/Parked']);
   });
 });

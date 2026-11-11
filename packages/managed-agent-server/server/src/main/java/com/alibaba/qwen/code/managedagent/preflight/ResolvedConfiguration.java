@@ -6,23 +6,17 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.boot.ApplicationContextFactory;
-import org.springframework.boot.DefaultBootstrapContext;
-import org.springframework.boot.SpringApplication;
 import org.springframework.boot.WebApplicationType;
-import org.springframework.boot.context.event.ApplicationEnvironmentPreparedEvent;
 import org.springframework.boot.context.properties.bind.Bindable;
 import org.springframework.boot.context.properties.bind.Binder;
 import org.springframework.boot.context.properties.source.ConfigurationProperty;
 import org.springframework.boot.context.properties.source.ConfigurationPropertyName;
 import org.springframework.boot.context.properties.source.ConfigurationPropertySource;
 import org.springframework.boot.context.properties.source.ConfigurationPropertySources;
-import org.springframework.boot.convert.ApplicationConversionService;
-import org.springframework.boot.env.EnvironmentPostProcessorApplicationListener;
 import org.springframework.boot.logging.LoggingSystem;
 import org.springframework.boot.web.server.Ssl;
 import org.springframework.core.env.ConfigurableEnvironment;
 import org.springframework.core.env.PropertySource;
-import org.springframework.core.env.SimpleCommandLinePropertySource;
 
 import java.net.Inet6Address;
 import java.net.InetAddress;
@@ -36,12 +30,10 @@ import java.util.regex.Pattern;
  * Prints the settings the upgrade command must agree with the server on, as
  * the server resolves them.
  *
- * <p>It prepares the environment the way {@link SpringApplication} does
- * before it creates a context: the arguments, the process environment, every
- * environment post-processor on the class path (configuration files, imports,
- * profiles, {@code SPRING_APPLICATION_JSON}) and relaxed binding. It starts no
- * context, logs nothing and opens no connection. Run it with the server unit's
- * account, working directory, environment and arguments.
+ * <p>It reads the environment {@link ServerEnvironment} prepares, as the
+ * server's {@code --check} does. It starts no context, logs nothing and opens
+ * no connection. Run it with the server unit's account, working directory,
+ * environment and arguments.
  */
 public final class ResolvedConfiguration {
     /** Precedes the JSON line, so other output cannot be mistaken for it. */
@@ -86,20 +78,7 @@ public final class ResolvedConfiguration {
 
     static Map<String, String> resolve(String[] args,
             ConfigurableEnvironment environment) {
-        SpringApplication application = new SpringApplication();
-        application.setWebApplicationType(WebApplicationType.SERVLET);
-        environment.setConversionService(new ApplicationConversionService());
-        if (args.length > 0) {
-            environment.getPropertySources().addFirst(
-                    new SimpleCommandLinePropertySource(args));
-        }
-        ConfigurationPropertySources.attach(environment);
-        new EnvironmentPostProcessorApplicationListener().onApplicationEvent(
-                new ApplicationEnvironmentPreparedEvent(
-                        new DefaultBootstrapContext(), application, args,
-                        environment));
-        ConfigurationPropertySources.attach(environment);
-
+        ServerEnvironment.prepare(args, environment);
         ManagedAgentProperties properties = Binder.get(environment)
                 .bind("qwen.managed-agent",
                         Bindable.of(ManagedAgentProperties.class))
@@ -119,8 +98,16 @@ public final class ResolvedConfiguration {
         resolved.put("authMode", "auto".equals(mode) ? "open" : mode);
         resolved.put("trustedActorHeader",
                 StringUtils.trimToEmpty(properties.getTrustedActorHeader()));
+        // As the server parses it, untrimmed, so a refusal shows any padding,
+        // with the preflight's verdict on it: the upgrade command refuses a
+        // Harness URL the preflight would fail before it restarts the Harness,
+        // without a rule of its own, and judges none the server never reads.
+        // Pooled, the preflight does not read it, but each member's connector
+        // does.
         resolved.put("harnessBaseUrl",
-                StringUtils.trimToEmpty(properties.getHarness().getBaseUrl()));
+                StringUtils.defaultString(properties.getHarness().getBaseUrl()));
+        resolved.put("harnessOrigin",
+                ManagedAgentPreflight.harnessUrlVerdict(properties.getHarness()));
         Binder binder = Binder.get(environment);
         int port = binder.bind("server.port", Integer.class)
                 .orElse(DEFAULT_SERVER_PORT);

@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.managedagent.PublicationJournalFixture;
 import com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObjectStore;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -26,6 +27,7 @@ import java.util.UUID;
 
 import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.PUBLICATION_TOKEN;
 import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.WRITER_TOKEN;
+import static com.alibaba.qwen.code.managedagent.persistence.PublicationVerification.verified;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -52,30 +54,30 @@ public class ManagedSchemaPublicationStoreTest {
         byte[] output = "hello".getBytes(StandardCharsets.UTF_8);
         String digest = ToolPublicationContract.sha256(output);
         assertThat(data.publishSegment(key, "pub-1", PUBLICATION_TOKEN, "upload", "stdout", 0,
-                output, digest, true).path("state").asText()).isEqualTo("PENDING");
+                output, digest).path("state").asText()).isEqualTo("PENDING");
         assertThat(data.verifyNextOperation()).isTrue();
         assertThat(data.operationStatus(key, "pub-1", PUBLICATION_TOKEN, "upload").path("state").asText())
                 .isEqualTo("SUCCEEDED");
         assertThatThrownBy(() -> data.prefix(key, "pub-1", PUBLICATION_TOKEN, "upload", "stdout"))
                 .hasMessageContaining("conflict");
-        data.seal(key, "pub-1", PUBLICATION_TOKEN, "seal-out", "stdout", 1, output.length, digest);
-        data.seal(key, "pub-1", PUBLICATION_TOKEN, "seal-err", "stderr", 0, 0,
+        verified(data).seal(key, "pub-1", PUBLICATION_TOKEN, "seal-out", "stdout", 1, output.length, digest);
+        verified(data).seal(key, "pub-1", PUBLICATION_TOKEN, "seal-err", "stderr", 0, 0,
                 ToolPublicationContract.sha256(new byte[0]));
-        assertThat(data.prefix(key, "pub-1", PUBLICATION_TOKEN, "prefix", "stdout").path("sealed").asBoolean()).isTrue();
+        assertThat(verified(data).prefix(key, "pub-1", PUBLICATION_TOKEN, "prefix", "stdout").path("sealed").asBoolean()).isTrue();
         assertThatThrownBy(() -> data.publishSegment(key, "pub-1", PUBLICATION_TOKEN, "late", "stdout", 1,
                 output, digest)).hasMessageContaining("sealed");
         assertThat(fixture.jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource WHERE kind = X'6d616e616765642d746f6f6c2d7365616c2d6d616e6966657374'",
                 Long.class)).isEqualTo(2);
         byte[] manifest = fixture.jdbc.queryForObject("SELECT r.inline_bytes FROM ma_output_capture c JOIN ma_resource r"
                 + " ON r.resource_key = c.seal_manifest_resource_key WHERE c.publication_id = ?", byte[].class, "pub-1");
-        assertThat(ManagedToolResultStore.parse(new String(manifest, StandardCharsets.UTF_8)).path("seals")).hasSize(2);
+        assertThat(JdbcManagedToolResultStore.parse(new String(manifest, StandardCharsets.UTF_8)).path("seals")).hasSize(2);
         ObjectMapper json = new ObjectMapper();
         var terminal = json.createObjectNode().put("executionStatus", "error");
         terminal.putArray("responseParts").add("capture unavailable");
         terminal.set("capture", json.createObjectNode().put("captureStatus", "unavailable")
                 .put("captureReason", "storage_failed").put("previewTruncated", false)
                 .put("deliveryStatus", "pending").putNull("manifest"));
-        data.finish(key, "pub-1", PUBLICATION_TOKEN, "finish", terminal.toString().getBytes(StandardCharsets.UTF_8));
+        verified(data).finish(key, "pub-1", PUBLICATION_TOKEN, "finish", terminal.toString().getBytes(StandardCharsets.UTF_8));
         var outcome = json.createObjectNode().put("schemaVersion", 1).put("decision", "blocked").putNull("manifestRef");
         outcome.set("envelope", terminal);
         var history = json.createObjectNode().put("messageId", "11111111-1111-4111-8111-111111111111")
@@ -84,7 +86,7 @@ public class ManagedSchemaPublicationStoreTest {
         outcome.set("history", history);
         JsonNode admission = data.prepareAdmission(key, "pub-1", "writer-1", 1, WRITER_TOKEN, outcome);
         String resourceId = admission.path("resourceId").asText();
-        String resourceKey = ManagedSchemaKeys.key(com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey("tenant-1", "session-1"), resourceId);
+        String resourceKey = ManagedSchemaKeys.key(ManagedSessionStore.sessionScopeKey("tenant-1", "session-1"), resourceId);
         assertThat(fixture.jdbc.queryForObject("SELECT state FROM ma_resource WHERE resource_key = ?",
                 String.class, resourceKey)).isEqualTo("PUBLISHED");
         var payload = json.createObjectNode().put("executionCallId", "execution-1")

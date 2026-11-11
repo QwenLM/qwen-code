@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.managedagent.contracts.workspace.LocalWorkspaceFile
 import com.alibaba.qwen.code.managedagent.contracts.workspace.SshWorkspaceFiles;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.SshWorkspaceFiles.FileTarget;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
 import com.alibaba.qwen.code.runtimebroker.BrokerValues;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
@@ -47,7 +48,7 @@ public class WorkspaceFileUploadStore {
     private static final String KIND = "WORKSPACE_UPLOAD";
     private static final int LIMIT = LocalWorkspaceFiles.MAX_UPLOAD_BYTES;
     private final WorkspaceFileStore files;
-    private final ManagedWorkspaceRegistry registry;
+    private final JdbcManagedWorkspaceRegistry registry;
     private final WorkspaceStorageGuard guard;
     private final SshWorkspaceFiles ssh;
     private final ManagedAgentSettings properties;
@@ -58,7 +59,7 @@ public class WorkspaceFileUploadStore {
     private final Semaphore slots = new Semaphore(4);
     private final Set<String> running = ConcurrentHashMap.newKeySet();
 
-    public WorkspaceFileUploadStore(WorkspaceFileStore files, ManagedWorkspaceRegistry registry,
+    public WorkspaceFileUploadStore(WorkspaceFileStore files, JdbcManagedWorkspaceRegistry registry,
             WorkspaceStorageGuard guard, SshWorkspaceFiles ssh, ManagedAgentSettings properties,
             @Qualifier("managedJdbcTemplate") JdbcTemplate jdbc, @Qualifier("managedAgentTransactionManager") PlatformTransactionManager manager, @Qualifier("managedAgentObjectMapper") ObjectMapper mapper,
             @Qualifier("managedAgentExecutor") Executor executor) {
@@ -107,7 +108,7 @@ public class WorkspaceFileUploadStore {
         try {
             Operation saved = find(tenant, uploadId, false);
             if (saved == null) {
-                WorkspaceFileStore.Scope scope = files.scope(tenant, actor, locator);
+                WorkspaceFileStore.Scope scope = files.readScope(tenant, actor, locator);
                 if (!revision.equals(scope.revision())) {
                     throw changed();
                 }
@@ -262,14 +263,13 @@ public class WorkspaceFileUploadStore {
             WorkspaceMigrationAdmission.requireOpen(jdbc, tenant, scope.binding().getStorageId());
             String physical = jdbc.queryForObject("SELECT physical_key FROM ma_storage WHERE alias_key = ? FOR UPDATE", String.class,
                     JdbcRuntimeBindingRepository.storageAliasKey(tenant, scope.binding().getStorageId()));
-            var owners = jdbc.queryForList("SELECT holder_key, maintenance_id, mount_state, mount_revision, exclusive_member_key FROM ma_storage_owner WHERE storage_key = ? FOR UPDATE", physical);
+            var owners = jdbc.queryForList("SELECT mount_state, mount_revision FROM ma_storage_owner WHERE storage_key = ? FOR UPDATE", physical);
             if (owners.size() != 1 || !"READY".equals(owners.getFirst().get("mount_state"))
                     || !(owners.getFirst().get("mount_revision") instanceof Number mount)
                     || !Long.valueOf(mount.longValue()).equals(scope.mountRevision())) {
                 throw changed();
             }
-            if (owners.getFirst().get("holder_key") != null || owners.getFirst().get("maintenance_id") != null
-                    || owners.getFirst().get("exclusive_member_key") != null) {
+            if (!StorageOwnerMembership.membersAllowed(jdbc, physical)) {
                 throw busy();
             }
             Map<String, Object> request = null;
@@ -300,10 +300,10 @@ public class WorkspaceFileUploadStore {
                     ManagedSchemaKeys.key(scope.binding().getStorageId()),
                     scope.binding().getStorageId().getBytes(StandardCharsets.UTF_8),
                     JdbcRuntimeBindingRepository.storageAliasKey(tenant, scope.binding().getStorageId()), physical,
-                    com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(tenant, actor), digest, encode(target));
+                    ManagedWorkspaceRegistry.actorKey(tenant, actor), digest, encode(target));
             if (jdbc.update("UPDATE ma_storage_owner SET member_count = member_count + 1 WHERE storage_key = ?"
-                    + " AND mount_state = 'READY' AND mount_revision = ? AND holder_key IS NULL AND maintenance_id IS NULL"
-                    + " AND exclusive_member_key IS NULL", physical, scope.mountRevision()) != 1) {
+                    + " AND mount_state = 'READY' AND mount_revision = ?",
+                    physical, scope.mountRevision()) != 1) {
                 throw busy();
             }
             return new Operation(key, digest, target, null, true);
@@ -368,9 +368,9 @@ public class WorkspaceFileUploadStore {
             if (current.result() != null) {
                 return current.result();
             }
-            if (jdbc.update("UPDATE ma_storage_owner SET member_count = member_count - 1 WHERE storage_key = ?"
-                    + " AND member_count > 0 AND holder_key IS NULL AND maintenance_id IS NULL"
-                    + " AND exclusive_member_key IS NULL", target.physical()) != 1) {
+            if (!StorageOwnerMembership.membersAllowed(jdbc, target.physical())
+                    || jdbc.update("UPDATE ma_storage_owner SET member_count = member_count - 1 WHERE storage_key = ?"
+                    + " AND member_count > 0", target.physical()) != 1) {
                 throw pending();
             }
             if (jdbc.update("UPDATE ma_operation SET state = ?, phase = ?, result_json = ?, completed_at = "

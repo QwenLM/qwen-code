@@ -5,6 +5,7 @@ import com.alibaba.qwen.code.managedagent.persistence.WorkspaceCsiApplicationInv
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceCsiApplicationInventory.Row;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceCsiApplicationInventory.Snapshot;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceCsiApplicationInventory.Table;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcCsiApplicationRetirement.Stage;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -23,6 +24,14 @@ import static com.alibaba.qwen.code.managedagent.contracts.persistence.Workspace
 
 /** Exact declared stage deltas over the once-saved SETTLING image. */
 final class WorkspaceCsiApplicationImage {
+    /**
+     * The operations that the CASE generating ma_session_journal_tx.is_activation_record in
+     * V1__managed_schema.sql marks, so the row a cut adds carries what the database stores. A cut
+     * always commits a releaseActivation, so marking that name on only one side fails every cut,
+     * while a drift on any other name stays latent; ActivationRecordFlagTest keeps the two equal.
+     */
+    static final Set<String> ACTIVATION_OPERATIONS = Set.of("installActivation", "renewActivation");
+
     private WorkspaceCsiApplicationImage() {
     }
 
@@ -91,10 +100,10 @@ final class WorkspaceCsiApplicationImage {
             byte[] resourceBytes = WorkspaceCsiApplicationJson.base64(resource.path("bytesBase64"), 16 * 1024);
             Map<String, byte[]> values = empty(baseline, "ma_resource");
             scope(values, head);
-            put(values, "session_scope_key", com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(head.text("tenant_id"), head.text("session_id")));
+            put(values, "session_scope_key", ManagedSessionStore.sessionScopeKey(head.text("tenant_id"), head.text("session_id")));
             put(values, "resource_id", text(resource, "resourceId"));
-            String resourceScope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(head.text("tenant_id"), head.text("session_id"));
-            String resourceKey = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.resourceKey(resourceScope, text(resource, "resourceId"));
+            String resourceScope = ManagedSessionStore.sessionScopeKey(head.text("tenant_id"), head.text("session_id"));
+            String resourceKey = ManagedSessionStore.resourceKey(resourceScope, text(resource, "resourceId"));
             put(values, "resource_key", resourceKey);
             put(values, "kind", text(resource, "kind"));
             put(values, "schema_version", resource.path("schemaVersion").intValue());
@@ -113,7 +122,7 @@ final class WorkspaceCsiApplicationImage {
             put(values, "owner_key", resourceScope);
             put(values, "owner_revision", revision);
             put(values, "resource_key", resourceKey);
-            put(values, "session_scope_key", com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(head.text("tenant_id"), head.text("session_id")));
+            put(values, "session_scope_key", ManagedSessionStore.sessionScopeKey(head.text("tenant_id"), head.text("session_id")));
             put(values, "journal_revision", revision);
             put(values, "resource_id", text(resource, "resourceId"));
             put(values, "gmt_create", writtenAtMillis);
@@ -135,6 +144,8 @@ final class WorkspaceCsiApplicationImage {
                 put(values, entry.getKey(), request.path(entry.getValue()).longValue());
             }
             put(values, "writer_token_hash", text(envelope, "writerTokenSha256"));
+            // The database generates this column; the expected row must carry the same value.
+            put(values, "is_activation_record", activationRecord(text(request, "operation")));
             put(values, "record_encoding", "identity");
             byte[] records = WorkspaceCsiApplicationJson.base64(request.path("recordBytesBase64"), 128 * 1024);
             values.put("record_bytes", records);
@@ -171,6 +182,16 @@ final class WorkspaceCsiApplicationImage {
             tables.add(new Table(table.name(), table.columns(), table.primaryKey(), rows));
         }
         return WorkspaceCsiApplicationInventory.expectedImage(tables);
+    }
+
+    /**
+     * The generated flag for an operation name, as the CASE in V1__managed_schema.sql computes it.
+     * A cut's journal row is always exactly a releaseActivation (CsiNativeActivationProof), which
+     * avoids the one place the two differ under the table's utf8mb4_bin collation: MySQL and
+     * MariaDB compare it with PAD SPACE, ignoring trailing spaces.
+     */
+    static boolean activationRecord(String operation) {
+        return operation != null && ACTIVATION_OPERATIONS.contains(operation);
     }
 
     static void verify(Snapshot current, Snapshot expected) {

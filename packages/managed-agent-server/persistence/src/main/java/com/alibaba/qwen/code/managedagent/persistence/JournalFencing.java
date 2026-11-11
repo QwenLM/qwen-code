@@ -4,6 +4,8 @@ import com.alibaba.qwen.code.managedagent.contracts.event.JournalEventTransport;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcCsiActivationAdmission;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcCsiFilesRetirementGuard;
@@ -66,12 +68,12 @@ final class JournalFencing {
         if (authority == null) {
             return;
         }
-        lockBounded(() -> WorkspaceLifecycleStore.lockPlacement(jdbc, tenantId,
+        lockBounded(() -> JdbcWorkspaceLifecycleStore.lockPlacement(jdbc, tenantId,
                 GUARD_ACQUIRE_TIMEOUT_SECONDS));
         lockBounded(() -> ToolPublicationRetentionStore.lockTenant(jdbc, tenantId,
                 GUARD_ACQUIRE_TIMEOUT_SECONDS));
         ToolPublicationRetentionStore.lockSessionRoot(jdbc, tenantId, sessionId);
-        WorkspaceLifecycleStore.requireClaim(jdbc, tenantId, sessionId, authority, true);
+        JdbcWorkspaceLifecycleStore.requireClaim(jdbc, tenantId, sessionId, authority, true);
     }
 
     static ManagedAgentException guardContended() {
@@ -150,7 +152,7 @@ final class JournalFencing {
         // these per-turn paths it stays bounded with the shared named-failure
         // mapping, so a held row answers tenant_guard_contended instead of
         // out-waiting the caller (#13800).
-        lockBounded(() -> WorkspaceLifecycleStore.lockPlacement(jdbc, tenantId,
+        lockBounded(() -> JdbcWorkspaceLifecycleStore.lockPlacement(jdbc, tenantId,
                 GUARD_ACQUIRE_TIMEOUT_SECONDS));
     }
 
@@ -164,8 +166,8 @@ final class JournalFencing {
                 WorkspaceMigrationAdmission.sessionStorage(jdbc, tenantId, sessionId, workspaceId));
     }
 
-    void requireSessionStorageOpenForAdmission(String tenantId, String workspaceId, String sessionId) {
-        WorkspaceMigrationAdmission.requirePhysicalOpenForAdmission(jdbc, tenantId,
+    void requireSessionStorageOpenForRead(String tenantId, String workspaceId, String sessionId) {
+        WorkspaceMigrationAdmission.requirePhysicalOpenForRead(jdbc, tenantId,
                 WorkspaceMigrationAdmission.sessionStorage(jdbc, tenantId, sessionId, workspaceId));
     }
 
@@ -202,8 +204,8 @@ final class JournalFencing {
     void requireNoLifecycleClaim(String tenantId, String sessionId) {
         if (!jdbc.queryForList("SELECT operation_id FROM ma_operation WHERE scope_key = ?"
                 + " AND operation_kind IN ('CLOSE', 'ARCHIVE', 'DELETE') AND tenant_id = ? AND session_id = ?"
-                + " AND lifecycle_protocol_version = 2", com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId), tenantId, sessionId).isEmpty()) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.blocked("workspace_lifecycle_claim_fenced");
+                + " AND lifecycle_protocol_version = 2", ManagedSessionStore.sessionScopeKey(tenantId, sessionId), tenantId, sessionId).isEmpty()) {
+            throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_claim_fenced");
         }
     }
 
@@ -246,9 +248,9 @@ final class JournalFencing {
         credentials.require(tenantId, workspaceId, sessionId, writerToken);
     }
 
-    HarnessPlacementStore.Placement requirePlacement(String tenant, String workspace,
+    JdbcHarnessPlacementStore.Placement requirePlacement(String tenant, String workspace,
             String session, String token, String writer, boolean newWork) {
-        return HarnessPlacementStore.requireCurrent(jdbc, credentials, tenant, workspace, session, token, writer, newWork);
+        return JdbcHarnessPlacementStore.requireCurrent(jdbc, credentials, tenant, workspace, session, token, writer, newWork);
     }
 
     static ManagedAgentException nativeReadConflict() {
@@ -386,7 +388,7 @@ final class JournalFencing {
         // deadlock. Either side may be rolled back: this side's waits are
         // named by lockBounded, the other side's root wait by
         // namedRootDeadlock (#13800 R1-1).
-        lockBounded(() -> WorkspaceLifecycleStore.lockPlacement(jdbc, tenantId,
+        lockBounded(() -> JdbcWorkspaceLifecycleStore.lockPlacement(jdbc, tenantId,
                 GUARD_ACQUIRE_TIMEOUT_SECONDS));
         lockBounded(() -> ToolPublicationRetentionStore.lockTenant(jdbc, tenantId,
                 GUARD_ACQUIRE_TIMEOUT_SECONDS));

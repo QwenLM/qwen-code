@@ -12,15 +12,22 @@ import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 import {
   buildRuntimeEnvironment,
   getHomeEnvFallbackVars,
+  findEnvFiles,
   hasLoadedEnvironmentValues,
   isFileSourcedEnvKey,
   loadEnvironment,
   preResolveHomeEnvOverrides,
+  readProjectEnvFiles,
   reloadEnvironment,
   resetEnvironmentTrackingForTesting,
   resetHomeEnvBootstrapForTesting,
   SETTINGS_DIRECTORY_NAME,
 } from './environment.js';
+import {
+  hashProjectHooks,
+  LoadedHookApprovals,
+  type ProjectHooksApproval,
+} from './hook-approvals.js';
 import {
   ENV_ACP_REPEATED_TOOL_FAILURE_GUARD,
   PRIVATE_RELAUNCH_ENV_PROVENANCE,
@@ -118,6 +125,8 @@ const TRACKED_ENV = [
   'QWEN_CODE_PENDING_COMPILE_CACHE',
   'QWEN_CODE_TRUSTED_FOLDERS_PATH',
   'QWEN_RUNTIME_DIR',
+  'QWEN_CONVERSATIONS_DIR',
+  'qwen_conversations_dir',
   'QWEN_SERVE_MAX_WORKSPACES',
   'QWEN_SERVER_TOKEN',
   'qwen_server_token',
@@ -771,6 +780,99 @@ describe('daemon registration capacity environment', () => {
       );
     },
   );
+});
+
+describe('Conversations root environment', () => {
+  beforeEach(() => {
+    resetHomeEnvBootstrapForTesting();
+    resetEnvironmentTrackingForTesting();
+  });
+
+  afterEach(() => {
+    resetHomeEnvBootstrapForTesting();
+    resetEnvironmentTrackingForTesting();
+  });
+
+  it.each(['.env', '.qwen/.env'])(
+    'rejects root selection from project %s and settings.env',
+    (file) => {
+      const workspace = makeWorkspace();
+      const envPath = path.join(workspace, file);
+      fs.mkdirSync(path.dirname(envPath), { recursive: true });
+      fs.writeFileSync(
+        envPath,
+        'QWEN_CONVERSATIONS_DIR=/project/root\nqwen_conversations_dir=/project/lowercase\nRUNTIME_DOTENV=loaded\n',
+      );
+      const settings = testSettings({
+        env: {
+          QWEN_CONVERSATIONS_DIR: '/settings/root',
+          qwen_conversations_dir: '/settings/lowercase',
+          RUNTIME_SETTINGS: 'loaded',
+        },
+      });
+      loadEnvironment(settings, workspace);
+      expect(process.env['QWEN_CONVERSATIONS_DIR']).toBeUndefined();
+      expect(process.env['qwen_conversations_dir']).toBeUndefined();
+      expect(process.env['RUNTIME_DOTENV']).toBe('loaded');
+      expect(process.env['RUNTIME_SETTINGS']).toBe('loaded');
+      const snapshot = buildRuntimeEnvironment(settings, workspace, {});
+      expect(snapshot.effectiveEnv['QWEN_CONVERSATIONS_DIR']).toBeUndefined();
+      expect(snapshot.effectiveEnv['qwen_conversations_dir']).toBeUndefined();
+    },
+  );
+
+  it.each(['', '/persistent/Qwen Conversations '])(
+    'preserves a user .env root %j despite a project .env',
+    (root) => {
+      const workspace = makeWorkspace();
+      const qwenHome = path.join(os.homedir(), '.qwen');
+      fs.mkdirSync(qwenHome, { recursive: true });
+      fs.writeFileSync(
+        path.join(qwenHome, '.env'),
+        `QWEN_CONVERSATIONS_DIR=${JSON.stringify(root)}\n`,
+      );
+      fs.writeFileSync(
+        path.join(workspace, '.env'),
+        'QWEN_CONVERSATIONS_DIR=/project/root\nRUNTIME_DOTENV=loaded\n',
+      );
+      preResolveHomeEnvOverrides();
+      expect(process.env['QWEN_CONVERSATIONS_DIR']).toBe(root);
+      loadEnvironment(testSettings({}), workspace);
+      expect(process.env['QWEN_CONVERSATIONS_DIR']).toBe(root);
+      expect(process.env['RUNTIME_DOTENV']).toBe('loaded');
+    },
+  );
+
+  it('does not replace an explicit empty launch value with user .env', () => {
+    const workspace = makeWorkspace();
+    process.env['QWEN_CONVERSATIONS_DIR'] = '';
+    fs.writeFileSync(
+      path.join(os.homedir(), '.env'),
+      'QWEN_CONVERSATIONS_DIR=/home/root\n',
+    );
+    preResolveHomeEnvOverrides();
+    loadEnvironment(testSettings({}), workspace);
+    expect(process.env['QWEN_CONVERSATIONS_DIR']).toBe('');
+  });
+
+  it('keeps the initial root when user .env is reloaded', () => {
+    const workspace = makeWorkspace();
+    const envPath = path.join(os.homedir(), '.env');
+    fs.writeFileSync(envPath, 'QWEN_CONVERSATIONS_DIR=/initial/root\n');
+    loadEnvironment(testSettings({}), workspace);
+    expect(process.env['QWEN_CONVERSATIONS_DIR']).toBe('/initial/root');
+    fs.writeFileSync(envPath, 'QWEN_CONVERSATIONS_DIR=/changed/root\n');
+    const settings = testSettings({
+      env: { QWEN_CONVERSATIONS_DIR: '/settings/root' },
+    });
+    reloadEnvironment(settings, workspace);
+    expect(process.env['QWEN_CONVERSATIONS_DIR']).toBe('/initial/root');
+    expect(
+      buildRuntimeEnvironment(settings, workspace, {
+        QWEN_CONVERSATIONS_DIR: '/initial/root',
+      }).effectiveEnv['QWEN_CONVERSATIONS_DIR'],
+    ).toBe('/initial/root');
+  });
 });
 
 describe('buildRuntimeEnvironment', () => {
@@ -2365,4 +2467,151 @@ describe('home .env with the global dir in the XDG config directory', () => {
       }
     },
   );
+});
+
+describe('project hook approval env files stay inside the workspace', () => {
+  // #16313: the docker sandbox mounts only the workspace, so an ancestor .env
+  // the host hashed is absent in the container. Hashing it made the two sides
+  // disagree and silently withheld approved project hooks in the container.
+  function trustFolder(workspace: string, folder: string): void {
+    const trustedFoldersPath = path.join(workspace, 'trustedFolders.json');
+    fs.writeFileSync(
+      trustedFoldersPath,
+      JSON.stringify({ [folder]: TrustLevel.TRUST_FOLDER }),
+    );
+    process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'] = trustedFoldersPath;
+    resetTrustedFoldersForTesting();
+  }
+
+  it('keeps an approved record approved when the ancestor .env is absent', async () => {
+    const parent = makeWorkspace();
+    const root = path.join(parent, 'workspace');
+    fs.mkdirSync(root);
+    const ancestorEnv = path.join(parent, '.env');
+    fs.writeFileSync(ancestorEnv, 'ANCESTOR_ONLY=host\n');
+    const previousTrustedFoldersPath =
+      process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'];
+    trustFolder(parent, root);
+
+    try {
+      const settings = testSettings({
+        security: { folderTrust: { enabled: true } },
+      });
+      const hooks = {
+        Stop: [{ hooks: [{ type: 'command', command: 'true' }] }],
+      };
+      const approval = (): ProjectHooksApproval => ({
+        root,
+        hooks,
+        resolved: hooks,
+        env: { files: readProjectEnvFiles(settings, root), settings: null },
+      });
+
+      // The host sees the ancestor .env, and approves the hooks with it hashed.
+      const hostApproval = approval();
+      // Positive control: discovery still walks above the workspace for the
+      // runtime env — only the approval hash input is narrowed.
+      expect(findEnvFiles(settings, root)).toContain(ancestorEnv);
+
+      const approvalsPath = path.join(parent, 'hookApprovals.json');
+      fs.writeFileSync(approvalsPath, '{}');
+      const loaded = new LoadedHookApprovals(
+        { path: approvalsPath, config: {} },
+        [],
+      );
+      await loaded.setState(hostApproval, 'approved');
+
+      // Container view: the mount point stops at the workspace, so the
+      // ancestor .env the host read does not exist there.
+      fs.rmSync(ancestorEnv);
+      const containerApproval = approval();
+      expect(containerApproval.env.files).not.toHaveProperty(ancestorEnv);
+      expect(containerApproval.env.files).toEqual(hostApproval.env.files);
+      expect(loaded.getState(containerApproval)).toBe('approved');
+    } finally {
+      if (previousTrustedFoldersPath === undefined) {
+        delete process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'];
+      } else {
+        process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'] =
+          previousTrustedFoldersPath;
+      }
+      resetTrustedFoldersForTesting();
+    }
+  });
+
+  it('still hashes a .env inside the root and settings.env', () => {
+    const root = makeWorkspace();
+    const previousTrustedFoldersPath =
+      process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'];
+    trustFolder(root, root);
+
+    try {
+      const settings = testSettings({
+        security: { folderTrust: { enabled: true } },
+      });
+      const hooks = { Stop: [] };
+      const hashOf = (
+        files: Record<string, unknown>,
+        settingsEnv: unknown,
+      ): string =>
+        hashProjectHooks({ hooks, env: { files, settings: settingsEnv } });
+
+      const before = hashOf(readProjectEnvFiles(settings, root), null);
+      fs.writeFileSync(path.join(root, '.env'), 'INSIDE_ROOT=1\n');
+      const after = hashOf(readProjectEnvFiles(settings, root), null);
+
+      expect(Object.keys(readProjectEnvFiles(settings, root))).toContain(
+        path.join(root, '.env'),
+      );
+      expect(after).not.toBe(before);
+      expect(hashOf({}, { INSIDE_ROOT: '1' })).not.toBe(hashOf({}, null));
+    } finally {
+      if (previousTrustedFoldersPath === undefined) {
+        delete process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'];
+      } else {
+        process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'] =
+          previousTrustedFoldersPath;
+      }
+      resetTrustedFoldersForTesting();
+    }
+  });
+
+  it('does not hash a .env symlinked outside the workspace', () => {
+    const parent = makeWorkspace();
+    const root = path.join(parent, 'workspace');
+    fs.mkdirSync(root);
+    const outsideEnv = path.join(parent, 'secrets.env');
+    fs.writeFileSync(outsideEnv, 'OUTSIDE_SECRET=1\n');
+    const workspaceEnv = path.join(root, '.env');
+    fs.symlinkSync(outsideEnv, workspaceEnv);
+    const previousTrustedFoldersPath =
+      process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'];
+    trustFolder(parent, root);
+
+    try {
+      const settings = testSettings({
+        security: { folderTrust: { enabled: true } },
+      });
+      // Discovery follows the link, so the runtime env still sees the file.
+      expect(findEnvFiles(settings, root)).toContain(workspaceEnv);
+
+      // The approval hash input must not: the link target is outside the
+      // workspace, so the container mount cannot supply it.
+      const hostFiles = readProjectEnvFiles(settings, root);
+      expect(hostFiles).not.toHaveProperty(workspaceEnv);
+
+      // Container view: the target is gone and the link dangles; the hash
+      // input has to stay identical to what the host recorded.
+      fs.rmSync(outsideEnv);
+      expect(readProjectEnvFiles(settings, root)).toEqual(hostFiles);
+    } finally {
+      if (previousTrustedFoldersPath === undefined) {
+        delete process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'];
+      } else {
+        process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'] =
+          previousTrustedFoldersPath;
+      }
+      resetTrustedFoldersForTesting();
+    }
+  });
 });

@@ -10,13 +10,15 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiRegi
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.maintenance.WorkspaceCsiSessionMain;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedToolResultStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceLifecycleStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationAdmissionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationDataStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationRetentionStore;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceCsiReservationStore;
-import com.alibaba.qwen.code.managedagent.persistence.WorkspaceLifecycleStore;
+import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLease;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
@@ -34,6 +36,7 @@ import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DelegatingDataSource;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.DefaultTransactionDefinition;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import javax.sql.DataSource;
@@ -66,11 +69,74 @@ import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.COMMI
 import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.PUBLICATION_TOKEN;
 import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.WRITER_TOKEN;
 import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.digest;
+import static com.alibaba.qwen.code.managedagent.persistence.PublicationVerification.verified;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class ToolPublicationLockOrderMySqlIT {
     private static final ObjectMapper JSON = new ObjectMapper();
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void projectionCompletionSkipsTheTenantGuardAndRefusesPrivateSessions(boolean privateSession) throws Exception {
+        String url = System.getProperty("mysql.url");
+        if (url == null || !url.matches("jdbc:mysql://[^/]+/[^?]+(?:\\?.*)?")) {
+            throw new IllegalArgumentException("A MySQL test database URL is required");
+        }
+        String user = System.getProperty("mysql.user");
+        String password = System.getProperty("mysql.password", "");
+        var admin = new JdbcTemplate(new DriverManagerDataSource(url, user, password));
+        String schema = "projection_guard_" + UUID.randomUUID().toString().replace("-", "");
+        admin.execute("CREATE DATABASE " + schema);
+        try {
+            var source = new DriverManagerDataSource(
+                    url.replaceFirst("/[^/?]+(?=\\?|$)", "/" + schema), user, password);
+            var fixture = ToolPublicationStoreTest.apiFixture(source);
+            var jdbc = fixture.jdbc();
+            var artifacts = fixture.results().listArtifacts("tenant-1", "session-1", null, null, null, 100).artifacts();
+            var descriptor = JSON.readTree(jdbc.queryForObject(
+                    "SELECT result_json FROM ma_operation WHERE operation_kind = 'TOOL_RESULT_PROJECTION'", String.class));
+            var projection = new JdbcManagedToolResultStore.Projection(descriptor, "pub-1",
+                    artifacts.getFirst().binding(), artifacts.getFirst().manifestRef(), artifacts, fixture.policy().version());
+            ToolPublicationStoreTest.releaseArtifacts(jdbc, fixture.manager());
+            jdbc.update("DELETE FROM ma_public_event WHERE event_type = 'item.tool_result.updated'");
+            jdbc.update("UPDATE ma_operation SET state = 'PENDING', available_at = 0"
+                    + " WHERE operation_kind = 'TOOL_RESULT_PROJECTION'");
+            var claim = fixture.results().claim().orElseThrow();
+            if (privateSession) {
+                jdbc.update("UPDATE ma_session SET runtime_request_key = 'projection-private'");
+            }
+            jdbc.update("INSERT INTO ma_tenant_guard (tenant_key, tenant_id, guard_domain)"
+                            + " VALUES (?, ?, 'output_publication') ON DUPLICATE KEY UPDATE tenant_key = tenant_key",
+                    com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key("tenant-1"), "tenant-1");
+            var pool = Executors.newSingleThreadExecutor();
+            var hold = fixture.manager().getTransaction(new DefaultTransactionDefinition());
+            try {
+                assertThat(jdbc.queryForObject("SELECT tenant_id FROM ma_tenant_guard"
+                                + " WHERE guard_domain = 'output_publication' AND tenant_key = ? FOR UPDATE",
+                        String.class, com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key("tenant-1")))
+                        .isEqualTo("tenant-1");
+                long before = System.nanoTime();
+                assertThat(pool.submit(() -> fixture.results().complete(claim, projection, fixture.policy().version()))
+                        .get(15, TimeUnit.SECONDS)).isEqualTo(!privateSession);
+                assertThat((System.nanoTime() - before) / 1_000_000).isLessThan(15_000);
+            } finally {
+                fixture.manager().rollback(hold);
+                pool.shutdownNow();
+                assertThat(pool.awaitTermination(10, TimeUnit.SECONDS)).isTrue();
+            }
+            assertThat(jdbc.queryForObject("SELECT state FROM ma_operation"
+                            + " WHERE operation_kind = 'TOOL_RESULT_PROJECTION'", String.class))
+                    .isEqualTo(privateSession ? "LEASED" : "READY");
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_public_event"
+                            + " WHERE event_type = 'item.tool_result.updated'", Integer.class))
+                    .isEqualTo(privateSession ? 0 : 1);
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_artifact", Integer.class))
+                    .isEqualTo(privateSession ? 0 : artifacts.size());
+        } finally {
+            admin.execute("DROP DATABASE " + schema);
+        }
+    }
 
     @ParameterizedTest
     @ValueSource(strings = {"reserve", "renew"})
@@ -115,13 +181,15 @@ class ToolPublicationLockOrderMySqlIT {
     }
 
     /**
-     * A placement owner pauses after the tenant placement guard. Each publication path must wait for
-     * placement before it retains the publication tenant row, or the owner's retention request closes a
-     * placement/retention cycle. Standalone admission and renew are the shapes the HTTP controller uses.
+     * A placement owner pauses after the tenant placement guard. An ordinary publication path takes the
+     * Session root instead and never requests placement, so it completes while the owner holds it; a
+     * placement request after its root would close a cycle with every owner that locks this root behind
+     * placement (design 2026-11-04-managed-publication-placement). Standalone admission and renew are the
+     * shapes the HTTP controller uses.
      */
     @ParameterizedTest
     @ValueSource(strings = {"receipt", "admission-and-receipt", "admission", "renew", "ambient-renew"})
-    void publicationTakesPlacementBeforeRetention(String operation) throws Exception {
+    void ordinaryPublicationDoesNotWaitForAPlacementOwner(String operation) throws Exception {
         String url = System.getProperty("mysql.url");
         if (url == null || !url.matches("jdbc:mysql://[^/]+/[^?]+(?:\\?.*)?")) {
             throw new IllegalArgumentException("A MySQL test database URL is required");
@@ -170,7 +238,7 @@ class ToolPublicationLockOrderMySqlIT {
             envelope.set("capture", JSON.createObjectNode().put("captureStatus", "unavailable")
                     .put("captureReason", "storage_failed").put("previewTruncated", false)
                     .put("deliveryStatus", "pending").putNull("manifest"));
-            data.finish(key, "pub-1", PUBLICATION_TOKEN, "finish", envelope.toString().getBytes(StandardCharsets.UTF_8));
+            verified(data).finish(key, "pub-1", PUBLICATION_TOKEN, "finish", envelope.toString().getBytes(StandardCharsets.UTF_8));
             var outcome = JSON.createObjectNode().put("schemaVersion", 1).put("decision", "blocked").putNull("manifestRef");
             outcome.set("envelope", envelope);
             var history = JSON.createObjectNode().put("messageId", "11111111-1111-4111-8111-111111111111")
@@ -266,7 +334,7 @@ class ToolPublicationLockOrderMySqlIT {
             jdbc.update(
                     "INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
                         + " VALUES ('tenant', 'workspace', ?, 'OPERATOR')",
-                    com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey("tenant", "actor"));
+                    ManagedWorkspaceRegistry.actorKey("tenant", "actor"));
             var properties = new ManagedAgentProperties();
             properties.setAgentRevision("reviewed-agent/1");
             // A full pinned original: the seal below walks the whole CSI
@@ -276,7 +344,7 @@ class ToolPublicationLockOrderMySqlIT {
             var bindings = new JdbcRuntimeBindingRepository(source,
                     new AesGcmSecretProtector("test", new byte[32]));
             var managed = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, JSON, Clock.systemUTC(), ignored -> {},
-                    new ManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+                    new JdbcManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
             var transaction = new TransactionTemplate(manager);
             var request = transaction.execute(status ->
                     requireCsiRequest(managed, registration, sessionId));
@@ -354,12 +422,14 @@ class ToolPublicationLockOrderMySqlIT {
 
     /**
      * On an ordinary Session every lane that holds the tenant CAS row
-     * reaches the Session root only after it: a publication renew takes
-     * placement → CAS → root, and the retention lane takes CAS → root.
-     * Taking the root first on the retention side (an earlier answer to
-     * #13800 R1-1) closes a cycle with every such lane on every Session,
-     * not only on pinned ones: the paused retention owner would hold the
-     * root while the renew holds CAS. Here both complete with no deadlock.
+     * reaches the Session root only after it, and the ordinary apply lane
+     * (reserve, renew) no longer takes the CAS row at all: a renew takes
+     * placement → root → head, including the read lease it takes for its
+     * evidence, and the retention lane takes CAS → root. Taking the CAS row
+     * after the root on either side (an earlier answer to #13800 R1-1, or a
+     * read lease that relocks the CAS row) closes a cycle. Here the renew
+     * completes while the retention owner holds the CAS row, and neither
+     * side deadlocks.
      */
     @Test
     void ordinaryPublicationBesideARetentionOwnerDoesNotDeadlock() throws Exception {
@@ -391,13 +461,13 @@ class ToolPublicationLockOrderMySqlIT {
                         .as("Retention owner holds its first row").isTrue();
                 var subject = subjects.submit(() -> journal.store.apply(journal.request("renew"),
                         WRITER_TOKEN, PUBLICATION_TOKEN));
-                MySqlLockProbe.awaitLockWaits(admin, schema, 1, "the publication renew");
-                source.releaseOwner.countDown();
-                owner.get(30, TimeUnit.SECONDS);
                 JsonNode renewed = subject.get(30, TimeUnit.SECONDS);
                 assertThat(renewed.path("state").asText()).isEqualTo(reserved.path("state").asText());
+                assertThat(owner.isDone()).as("The retention owner still holds the CAS row").isFalse();
+                source.releaseOwner.countDown();
+                owner.get(30, TimeUnit.SECONDS);
                 assertThat(MySqlLockProbe.innodbDeadlocks(admin) - deadlocksBefore)
-                        .as("Retention and publication agree on CAS before root").isZero();
+                        .as("The renew never takes the CAS row after the root").isZero();
             } finally {
                 source.releaseOwner.countDown();
                 source.enabled = false;
@@ -480,9 +550,7 @@ class ToolPublicationLockOrderMySqlIT {
     }
 
     /** Runs the subject while a placement holder holds the tenant guard by name, then releases it.
-     *  Ordinary authorization no longer acquires tenant-wide rows after #13800, so the
-     *  placement owner is the placement acquisition itself — the contention point is the
-     *  row, not the API. */
+     *  The subject must complete while the row is held, without requesting placement. */
     private static JsonNode contend(OwnerPauseDataSource source, JdbcTemplate admin, String schema,
             PublicationJournalFixture journal, Callable<JsonNode> subject) throws Exception {
         var transaction = new TransactionTemplate(journal.manager);
@@ -491,27 +559,20 @@ class ToolPublicationLockOrderMySqlIT {
         try {
             source.enabled = true;
             var owner = owners.submit(() -> transaction.executeWithoutResult(status ->
-                    WorkspaceLifecycleStore.lockPlacement(journal.jdbc, "tenant-1")));
+                    JdbcWorkspaceLifecycleStore.lockPlacement(journal.jdbc, "tenant-1")));
             assertThat(source.ownerPlacement.await(10, TimeUnit.SECONDS)).isTrue();
             var result = subjects.submit(subject);
-            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
-            int waiting;
-            while ((waiting = MySqlLockProbe.lockWaits(admin, schema)) == 0 && !result.isDone()) {
-                assertThat(System.nanoTime()).isLessThan(deadline);
-                // InnoDB refreshes its transaction table only after 100 ms without a read.
-                Thread.sleep(200);
+            JsonNode value;
+            try {
+                value = result.get(10, TimeUnit.SECONDS);
+            } catch (java.util.concurrent.TimeoutException waiting) {
+                throw new AssertionError("Ordinary publication waited for the placement owner; "
+                        + MySqlLockProbe.describeLockWaits(admin, schema), waiting);
             }
-            if (waiting == 0 && result.isDone()) {
-                result.get(30, TimeUnit.SECONDS);
-            }
-            assertThat(waiting).as("Publication waits for the placement owner").isPositive();
-            assertThat(source.subjectPlacementLocks.get())
-                    .as(() -> "Placement precedes retention in the contending transaction; "
-                            + MySqlLockProbe.describeLockWaits(admin, schema))
-                    .containsExactly("placement");
+            assertThat(source.subjectPlacementLocks.get()).as("An ordinary lane never requests placement").isNull();
             source.releaseOwner.countDown();
             owner.get(30, TimeUnit.SECONDS);
-            return result.get(30, TimeUnit.SECONDS);
+            return value;
         } finally {
             source.releaseOwner.countDown();
             source.enabled = false;

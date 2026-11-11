@@ -177,7 +177,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; the Session's recorded owner or any caller holding OPERATOR on the bound Workspace may respond; a Shell Session's Actions may be answered only by its recorded owner (an unbound Session with no recorded creator and no recorded create command answers to any caller in its tenant, matching its read ACL; a bound Session without an owner record answers through the create-command actor recorded for it, or through the Workspace role arm). Responses are durable operations, reconciled against the original journal decision. */
+        /** @description Serves Hosted permission and structured question Actions. Question answers preserve the original question and option IDs, allow one to four answers, and are bounded to 32 KiB of canonical UTF-8 JSON. vote_recorded remains planned. Reads follow Session authorization; the Session's recorded owner or any caller holding OPERATOR on the bound Workspace may respond; a Shell Session's Actions may be answered only by its recorded owner (an unbound Session with no recorded creator and no recorded create command answers to any caller in its tenant, matching its read ACL; a bound Session without an owner record answers through the create-command actor recorded for it, or through the Workspace role arm). Responses are durable operations, reconciled against the original journal decision. */
         post: operations["queryWebShellActions"];
         delete?: never;
         options?: never;
@@ -194,7 +194,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; the Session's recorded owner or any caller holding OPERATOR on the bound Workspace may respond; a Shell Session's Actions may be answered only by its recorded owner (an unbound Session with no recorded creator and no recorded create command answers to any caller in its tenant, matching its read ACL; a bound Session without an owner record answers through the create-command actor recorded for it, or through the Workspace role arm). Responses are durable operations, reconciled against the original journal decision. */
+        /** @description Serves Hosted permission and structured question Actions. Question answers preserve the original question and option IDs, allow one to four answers, and are bounded to 32 KiB of canonical UTF-8 JSON. vote_recorded remains planned. Reads follow Session authorization; the Session's recorded owner or any caller holding OPERATOR on the bound Workspace may respond; a Shell Session's Actions may be answered only by its recorded owner (an unbound Session with no recorded creator and no recorded create command answers to any caller in its tenant, matching its read ACL; a bound Session without an owner record answers through the create-command actor recorded for it, or through the Workspace role arm). Responses are durable operations, reconciled against the original journal decision. */
         post: operations["getWebShellAction"];
         delete?: never;
         options?: never;
@@ -211,7 +211,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; the Session's recorded owner or any caller holding OPERATOR on the bound Workspace may respond; a Shell Session's Actions may be answered only by its recorded owner (an unbound Session with no recorded creator and no recorded create command answers to any caller in its tenant, matching its read ACL; a bound Session without an owner record answers through the create-command actor recorded for it, or through the Workspace role arm). Responses are durable operations, reconciled against the original journal decision. */
+        /** @description Serves Hosted permission and structured question Actions. Question answers preserve the original question and option IDs, allow one to four answers, and are bounded to 32 KiB of canonical UTF-8 JSON. vote_recorded remains planned. Reads follow Session authorization; the Session's recorded owner or any caller holding OPERATOR on the bound Workspace may respond; a Shell Session's Actions may be answered only by its recorded owner (an unbound Session with no recorded creator and no recorded create command answers to any caller in its tenant, matching its read ACL; a bound Session without an owner record answers through the create-command actor recorded for it, or through the Workspace role arm). Responses are durable operations, reconciled against the original journal decision. */
         post: operations["respondWebShellAction"];
         delete?: never;
         options?: never;
@@ -1147,6 +1147,346 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/agent/web-shell/v1/session-context-usage/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description The last durably committed main-model request. Category counts are estimates; provider totals and freshness are independent. Passive persisted Session read; never starts a Runtime, Harness or MCP discovery. Requires an authenticated actor and current Session read access. */
+        post: operations["querySessionDiagnosticContextUsage"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/session-stats/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Durable model statistics owned by this Session, including Hook and compression calls. Child Session totals are separate. Coverage gaps are retained. Passive persisted Session read; never starts a Runtime, Harness or MCP discovery. Requires an authenticated actor and current Session read access. */
+        post: operations["querySessionDiagnosticModelStatistics"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/session-resources/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Persisted Skills and MCP selection and bounded discovery history. This does not probe live connectivity; partial history remains explicit. Passive persisted Session read; never starts a Runtime, Harness or MCP discovery. Requires an authenticated actor and current Session read access. */
+        post: operations["querySessionDiagnosticResources"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/session-agent-trace/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Direct child-agent invocations, filtered before pagination. A child link is returned only after verifying the relationship and child read access. Passive persisted Session read; never starts a Runtime, Harness or MCP discovery. Requires an authenticated actor and current Session read access. */
+        post: operations["querySessionDiagnosticAgentTrace"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/session-activity-stats/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Persisted execution diagnostics since the recorded collection start. Self scope; no Runtime acquisition or discovery. Requires an authenticated actor and current Session/Workspace read access. */
+        post: operations["querySessionActivityStatistics"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/session-activity/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Persisted execution diagnostics since the recorded collection start. Self scope; no Runtime acquisition or discovery. Requires an authenticated actor and current Session/Workspace read access. */
+        post: operations["querySessionActivity"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/workspace-extensions/imports": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Requires Workspace operator and deployment publishing permission before consuming bounded input. Prepares without a Session, publishes immutable bytes and does not activate content. Retry the same input/version/target and key, or query the actor-scoped operation. */
+        post: operations["importWebShellExtensionPackage"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/workspace-extensions/inspection/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Requires publishing permission. Inspects exact published canonical bytes without hydrating settings, starting a Runtime or executing components. Literal credential fields are redacted; redaction markers must not be republished. */
+        post: operations["inspectWebShellExtensionPackage"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/workspace-extensions/operations/lookup": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Read-only actor-scoped lookup by the original idempotency key. Does not resubmit or acquire Runtime ownership. */
+        post: operations["lookupWebShellExtensionOperation"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/session-extensions/operations/lookup": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Read-only actor-scoped lookup by the original idempotency key. Does not resubmit or acquire Runtime ownership. */
+        post: operations["lookupWebShellSessionExtensionOperation"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/workspace-extensions/imports/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Requires publishing permission. Previews validated normalized input without publishing a catalog revision or activating a Session. Retain exact input bytes, target, compiler version and source digest for the later explicit import. */
+        post: operations["previewWebShellExtensionImport"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/session-extensions/skills/candidates/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Requires an authorized Workspace operator and enabled Runtime Skill import. Uses the exact original READY Runtime owner; discovery and snapshot preparation never provision a Runtime or apply configuration. Published imports require a separate explicit Session apply. */
+        post: operations["webShellRuntimeSkillCandidates"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/session-extensions/skills/snapshot": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Requires an authorized Workspace operator and enabled Runtime Skill import. Uses the exact original READY Runtime owner; discovery and snapshot preparation never provision a Runtime or apply configuration. Published imports require a separate explicit Session apply. */
+        post: operations["webShellRuntimeSkillSnapshot"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/session-extensions/skills/imports": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Requires an authorized Workspace operator and enabled Runtime Skill import. Uses the exact original READY Runtime owner; discovery and snapshot preparation never provision a Runtime or apply configuration. Published imports require a separate explicit Session apply. */
+        post: operations["webShellRuntimeSkillImports"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/session-side-queries/create": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Actor-private durable side query. Generation requires deployment opt-in, explicit Session model_config, execution authority and side-query/1. Reads revalidate visibility and query ownership. */
+        post: operations["createWebShellSessionSideQuery"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/session-side-queries/list": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Actor-private durable side query. Generation requires deployment opt-in, explicit Session model_config, execution authority and side-query/1. Reads revalidate visibility and query ownership. */
+        post: operations["listWebShellSessionSideQuery"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/session-side-queries/context": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Actor-private durable side query. Generation requires deployment opt-in, explicit Session model_config, execution authority and side-query/1. Reads revalidate visibility and query ownership. */
+        post: operations["contextWebShellSessionSideQuery"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/session-side-queries/get": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Actor-private durable side query. Generation requires deployment opt-in, explicit Session model_config, execution authority and side-query/1. Reads revalidate visibility and query ownership. */
+        post: operations["getWebShellSessionSideQuery"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/session-side-queries/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Actor-private durable side query. Generation requires deployment opt-in, explicit Session model_config, execution authority and side-query/1. Reads revalidate visibility and query ownership. */
+        post: operations["cancelWebShellSessionSideQuery"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/session-side-queries/stream": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Actor-private durable side query. Generation requires deployment opt-in, explicit Session model_config, execution authority and side-query/1. Reads revalidate visibility and query ownership. */
+        post: operations["streamWebShellSessionSideQuery"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -1301,6 +1641,8 @@ export interface components {
             worktree?: {
                 baseRef?: string;
             };
+            /** @description Optional immutable binding to the authenticated user's personal MemoryStore. Omission disables long-term memory. Bound Sessions require owner access as well as existing Workspace grants; creation idempotency includes this field. */
+            memoryStoreId?: string;
         };
         WebShellSubmitRequest: {
             /** @description Trace correlation only. */
@@ -1464,6 +1806,15 @@ export interface components {
              * @default false
              */
             childAgents?: boolean;
+            /**
+             * @description Passive persisted context, model statistics, resource inventory and direct child invocation queries are available. Each response declares its observation coverage independently of Runtime readiness or fresh Turn admission.
+             * @default false
+             */
+            diagnostics?: boolean;
+            /** @default false */
+            btw?: boolean;
+            /** @default false */
+            recap?: boolean;
         };
         WebShellSessionPage: {
             data: components["schemas"]["WebShellSession"][];
@@ -1667,7 +2018,7 @@ export interface components {
             questionId: string;
             optionIds?: string[];
             text?: string;
-        } | unknown | unknown;
+        } & (unknown | unknown);
         WebShellActionQuestion: {
             id: string;
             prompt: string;
@@ -1714,6 +2065,9 @@ export interface components {
             /** Format: int64 */
             expiresAt: number;
             decisionReceiptId?: string;
+            turnId?: string;
+            functionCallId: string;
+            toolName: string;
             questions: components["schemas"]["WebShellActionQuestion"][];
         } & unknown;
         /** @description At most one requested Hosted approval per Turn. allow and deny are stable option IDs. A requested native-tool Action may carry a bounded input preview when the producer supplies an input reference. Version 1 Actions and unavailable inputs omit it. Public timestamps are milliseconds, as recorded by the Harness. Decision receipts are opaque product IDs. */
@@ -1781,7 +2135,7 @@ export interface components {
             /** @default 20 */
             limit?: number;
             /**
-             * @description Include pending permission Actions of this public root Session and its direct children; each Action retains its actual owning sessionId.
+             * @description Include pending Actions of this public root Session and its direct children; each Action retains its actual owning sessionId.
              * @default false
              */
             includeChildren?: boolean;
@@ -2376,6 +2730,7 @@ export interface components {
             revision: number;
             supported: boolean;
             availableServers: components["schemas"]["ManagedMcpPublishedServer"][];
+            /** @description The selected MCP server snapshot, including retained removed entries. Only non-removed entries count toward the 32-server live capacity, and the retained snapshot is capped at 96 total entries. */
             servers: components["schemas"]["ManagedMcpManagementServer"][];
             operation?: components["schemas"]["ManagedMcpManagementOperation"];
         };
@@ -2547,6 +2902,10 @@ export interface components {
         ManagedExtensionPackageCatalog: {
             supported: boolean;
             extensions: components["schemas"]["ManagedExtensionPackage"][];
+            selfService?: {
+                supported: boolean;
+                canPublish: boolean;
+            };
         };
         ManagedExtensionPackageSettings: {
             /** Format: int64 */
@@ -2613,6 +2972,11 @@ export interface components {
             extensions: components["schemas"]["ManagedExtensionPackagePin"][];
             requestedExtensions: components["schemas"]["ManagedExtensionPackagePin"][];
             operation?: components["schemas"]["ManagedExtensionApplyOperation"];
+            selfService?: {
+                supported: boolean;
+                canApply: boolean;
+                runtimeSkillImportSupported?: boolean;
+            };
         };
         WebShellExtensionSessionQuery: {
             sessionId: string;
@@ -2697,6 +3061,719 @@ export interface components {
             workspaceId: string;
             worktreeId: string;
             idempotencyKey: string;
+        };
+        ManagedModelStatisticsBucket: {
+            requests: {
+                total: number;
+                success: number;
+                error: number;
+                cancelled: number;
+                interrupted: number;
+            };
+            tokens: {
+                prompt: number;
+                candidates: number;
+                total: number;
+                cached: number;
+                thoughts: number;
+            };
+            usageKnown: {
+                prompt: number;
+                candidates: number;
+                total: number;
+                cached: number;
+                thoughts: number;
+            };
+            latencyMs: number;
+            timing: {
+                ttftCount: number;
+                totalTtftMs: number;
+                generationCount: number;
+                totalGenerationMs: number;
+                throughputOutputTokens: number;
+            };
+            failures: {
+                http: number;
+                transport: number;
+                timeout: number;
+                other: number;
+            };
+            backoffRetries: number;
+        };
+        ManagedModelStatisticsSnapshot: {
+            /** @constant */
+            version: 1;
+            snapshotRevision: number;
+            observedAt: number;
+            coverage: {
+                gaps: string[];
+            };
+            totals: components["schemas"]["ManagedModelStatisticsBucket"];
+            sources: {
+                main: components["schemas"]["ManagedModelStatisticsBucket"];
+                hook: components["schemas"]["ManagedModelStatisticsBucket"];
+                compression: components["schemas"]["ManagedModelStatisticsBucket"];
+            };
+            models: {
+                key: string;
+                name: string | null;
+                nameTruncated: boolean;
+                metrics: components["schemas"]["ManagedModelStatisticsBucket"];
+            }[];
+            overflow: components["schemas"]["ManagedModelStatisticsBucket"];
+            recent: {
+                executionId: string;
+                /** @enum {string} */
+                source: "main" | "hook" | "compression";
+                modelKey: string;
+                at: number;
+                /** @enum {string} */
+                outcome: "success" | "error" | "cancelled" | "interrupted";
+                durationMs: number;
+                ttftMs: number | null;
+                generationMs: number | null;
+                outputTokens: number | null;
+                failureKind: ("http" | "transport" | "timeout" | "other") | null;
+                statusCode: number | null;
+                backoffRetryOrdinal: number;
+            }[];
+            modelBreakdownOmitted: boolean;
+            samplesTruncated: boolean;
+        };
+        ManagedContextUsageSnapshot: {
+            /** @constant */
+            version: 1;
+            attemptId: string;
+            turnId: string;
+            model: string;
+            observedAt: number;
+            inputTokens: number | null;
+            cachedTokens: number | null;
+            contextWindowSize: number | null;
+            breakdown: {
+                systemPrompt: number;
+                builtinTools: number;
+                mcpTools: number;
+                instructionFiles: number;
+                memoryFiles: number;
+                skills: number;
+                startupContext: number;
+                messages: number;
+            };
+            thresholds: {
+                warn: number;
+                auto: number;
+                hard: number;
+            } | null;
+            details: {
+                /** @enum {string} */
+                category: "systemPrompt" | "builtinTools" | "mcpTools" | "instructionFiles" | "memoryFiles" | "skills" | "startupContext" | "messages";
+                name: string;
+                tokens: number;
+            }[];
+            attributionComplete: boolean;
+            detailsTruncated: boolean;
+        };
+        ManagedDiagnosticContextUsage: {
+            /** @constant */
+            schemaVersion: 1;
+            sessionId: string;
+            readRevision: string | null;
+            /** @enum {string} */
+            availability: "available" | "partial" | "not_recorded" | "unsupported";
+            coverageReasons: string[];
+            sourceSequence: string | null;
+            stale: boolean;
+            staleReasons: string[];
+            /** @constant */
+            estimated: true;
+            context: components["schemas"]["ManagedContextUsageSnapshot"] | null;
+        };
+        ManagedDiagnosticStats: {
+            /** @constant */
+            schemaVersion: 1;
+            sessionId: string;
+            readRevision: string | null;
+            /** @enum {string} */
+            availability: "available" | "partial" | "not_recorded" | "unsupported";
+            coverageReasons: string[];
+            sourceSequence: string | null;
+            statistics: components["schemas"]["ManagedModelStatisticsSnapshot"] | null;
+        };
+        ManagedDiagnosticSkill: {
+            name: string;
+            description: string;
+            /** @enum {string} */
+            kind: "skill" | "command";
+            /** @enum {string} */
+            origin: "base" | "extension";
+            extensionId: string | null;
+            modelInvocable: boolean;
+            userInvocable: boolean;
+        };
+        ManagedDiagnosticMcpServer: {
+            serverId: string;
+            serverRevision: number;
+            /** @enum {string} */
+            origin: "base" | "extension" | "independent";
+            extensionId: string | null;
+            /** @enum {string} */
+            selectionState: "enabled" | "disabled" | "removed" | "unknown";
+            /** @constant */
+            liveState: "unknown";
+            catalogRevision: number | null;
+            catalogServerRevision: number | null;
+            attemptRevision: number | null;
+            attemptServerRevision: number | null;
+            /** @description Last persisted configuration attempt state, distinct from physical execution evidence. */
+            lastAttemptState: string | null;
+            lastExecutionState: string | null;
+            releaseState: string | null;
+            historical: boolean;
+            discovery: {
+                /** @enum {string} */
+                tools: "complete" | "partial" | "failed" | "stale" | "unknown";
+                /** @enum {string} */
+                resources: "complete" | "partial" | "failed" | "stale" | "unknown";
+                /** @enum {string} */
+                prompts: "complete" | "partial" | "failed" | "stale" | "unknown";
+            };
+            tools: {
+                name: string;
+                description?: string;
+                uri?: string;
+                mimeType?: string;
+            }[];
+            resources: {
+                name: string;
+                description?: string;
+                uri?: string;
+                mimeType?: string;
+            }[];
+            prompts: {
+                name: string;
+                description?: string;
+                uri?: string;
+                mimeType?: string;
+            }[];
+        };
+        ManagedDiagnosticResources: {
+            /** @constant */
+            schemaVersion: 1;
+            sessionId: string;
+            readRevision: string | null;
+            /** @enum {string} */
+            availability: "available" | "partial" | "not_recorded" | "unsupported";
+            coverageReasons: string[];
+            /** @enum {string} */
+            configCoverage: "complete" | "partial";
+            /** @enum {string} */
+            historyCoverage: "complete" | "partial";
+            activeConfigRevision: number | null;
+            activeOperationPhase: string | null;
+            outputTruncated: boolean;
+            skills: components["schemas"]["ManagedDiagnosticSkill"][];
+            servers: components["schemas"]["ManagedDiagnosticMcpServer"][];
+        };
+        ManagedDiagnosticAgentInvocation: {
+            taskId: string;
+            parentSessionId: string;
+            childSessionId: string | null;
+            description: string | null;
+            state: string;
+            runtimeState: string | null;
+            createdAt: number;
+            startedAt: number | null;
+            settledAt: number | null;
+            predecessorTaskId?: string | null;
+        };
+        ManagedDiagnosticAgentTrace: {
+            /** @constant */
+            schemaVersion: 1;
+            sessionId: string;
+            readRevision: string | null;
+            /** @enum {string} */
+            availability: "available" | "partial" | "not_recorded" | "unsupported";
+            coverageReasons: string[];
+            /** @constant */
+            scope: "direct-invocations";
+            items: components["schemas"]["ManagedDiagnosticAgentInvocation"][];
+            nextCursor: string | null;
+            hasMore: boolean;
+        };
+        WebShellDiagnosticTraceRequest: {
+            /** Format: uuid */
+            sessionId: string;
+            cursor?: string | null;
+            limit?: number | null;
+        };
+        ManagedActivityMetrics: {
+            requested: number;
+            admission: {
+                allowed: number;
+                denied: number;
+                invalid: number;
+                unknown: number;
+            };
+            execution: {
+                not_started: number;
+                running: number;
+                success: number;
+                error: number;
+                cancelled: number;
+                unknown: number;
+            };
+            delivery: {
+                pending: number;
+                complete: number;
+                partial: number;
+                unavailable: number;
+                unknown: number;
+            };
+            measurements?: components["schemas"]["ManagedActivityMeasurementTotals"];
+        };
+        ManagedActivityFile: {
+            /** @enum {string} */
+            operation: "read" | "write" | "edit";
+            path: string | null;
+            cwdRelative: string | null;
+        };
+        ManagedActivitySkill: {
+            /** @enum {string} */
+            resourceKind: "skill" | "extension_command";
+            name: string;
+            pin: string;
+            /** @enum {string} */
+            origin: "user" | "model" | "unknown";
+            /** @enum {string} */
+            delivery: "complete" | "partial" | "unknown";
+        };
+        ManagedActivityInvocation: {
+            invocationId: string;
+            assistantMessageId: string;
+            ordinal: number;
+            toolName: string;
+            functionCallId: string | null;
+            providerCallId: string | null;
+            executionCallId: string | null;
+            taskId: string | null;
+            /** @enum {string} */
+            toolKind: "builtin" | "mcp" | "hosted" | "unknown";
+            serverId: string | null;
+            /** @enum {string} */
+            admission: "allowed" | "denied" | "invalid" | "unknown";
+            /** @enum {string} */
+            execution: "not_started" | "running" | "success" | "error" | "cancelled" | "unknown";
+            /** @enum {string} */
+            delivery: "pending" | "complete" | "partial" | "unavailable" | "unknown";
+            /** @enum {string} */
+            capture: "complete" | "partial" | "unavailable" | "unknown";
+            file: components["schemas"]["ManagedActivityFile"] | null;
+            skill: components["schemas"]["ManagedActivitySkill"] | null;
+            requestSequence: string;
+            requestedAt: number;
+            conflictingEvidence?: boolean;
+            taskState?: string;
+            taskRuntimeState?: string | null;
+            measurements?: components["schemas"]["ManagedActivityMeasurement"];
+        };
+        ManagedActivityStatistics: {
+            tools: components["schemas"]["ManagedActivityMetrics"];
+            files: components["schemas"]["ManagedActivityMetrics"];
+            skills: components["schemas"]["ManagedActivityMetrics"];
+            otherTools: components["schemas"]["ManagedActivityMetrics"];
+            otherSkills: components["schemas"]["ManagedActivityMetrics"];
+            toolBuckets: {
+                key: string;
+                name: string;
+                metrics: components["schemas"]["ManagedActivityMetrics"];
+                resource?: {
+                    /** @enum {string} */
+                    resourceKind: "skill" | "extension_command";
+                    name: string;
+                    pin: string;
+                };
+            }[];
+            skillBuckets: {
+                key: string;
+                name: string;
+                metrics: components["schemas"]["ManagedActivityMetrics"];
+                resource?: {
+                    /** @enum {string} */
+                    resourceKind: "skill" | "extension_command";
+                    name: string;
+                    pin: string;
+                };
+            }[];
+            skillLoads: components["schemas"]["ManagedActivityMetrics"];
+            extensionCommands: components["schemas"]["ManagedActivityMetrics"];
+            fileOperations: {
+                read: components["schemas"]["ManagedActivityMetrics"];
+                write: components["schemas"]["ManagedActivityMetrics"];
+                edit: components["schemas"]["ManagedActivityMetrics"];
+            };
+            measurementStartSequence?: string;
+        };
+        ManagedDiagnosticActivityStats: {
+            /** @constant */
+            schemaVersion: 1;
+            sessionId: string;
+            /** @constant */
+            scope: "self";
+            readRevision: string | null;
+            coverageStartSequence: string | null;
+            coveredThroughSequence: string | null;
+            startedAt: number | null;
+            /** @enum {string} */
+            availability: "available" | "partial" | "not_recorded" | "unsupported";
+            coverageReasons: string[];
+            statistics: components["schemas"]["ManagedActivityStatistics"] | null;
+        };
+        ManagedActivityToolsPage: {
+            /** @constant */
+            schemaVersion: 1;
+            sessionId: string;
+            /** @constant */
+            scope: "self";
+            readRevision: string | null;
+            coverageStartSequence: string | null;
+            coveredThroughSequence: string | null;
+            startedAt: number | null;
+            /** @enum {string} */
+            availability: "available" | "partial" | "not_recorded" | "unsupported";
+            coverageReasons: string[];
+            /** @constant */
+            kind: "tools";
+            items: components["schemas"]["ManagedActivityInvocation"][];
+            hasMore: boolean;
+            nextCursor: string | null;
+        };
+        ManagedActivityFilesPage: {
+            /** @constant */
+            schemaVersion: 1;
+            sessionId: string;
+            /** @constant */
+            scope: "self";
+            readRevision: string | null;
+            coverageStartSequence: string | null;
+            coveredThroughSequence: string | null;
+            startedAt: number | null;
+            /** @enum {string} */
+            availability: "available" | "partial" | "not_recorded" | "unsupported";
+            coverageReasons: string[];
+            /** @constant */
+            kind: "files";
+            items: {
+                invocationId: string;
+                assistantMessageId: string;
+                ordinal: number;
+                toolName: string;
+                functionCallId: string | null;
+                providerCallId: string | null;
+                executionCallId: string | null;
+                taskId: string | null;
+                /** @enum {string} */
+                toolKind: "builtin" | "mcp" | "hosted" | "unknown";
+                serverId: string | null;
+                /** @enum {string} */
+                admission: "allowed" | "denied" | "invalid" | "unknown";
+                /** @enum {string} */
+                execution: "not_started" | "running" | "success" | "error" | "cancelled" | "unknown";
+                /** @enum {string} */
+                delivery: "pending" | "complete" | "partial" | "unavailable" | "unknown";
+                /** @enum {string} */
+                capture: "complete" | "partial" | "unavailable" | "unknown";
+                file: components["schemas"]["ManagedActivityFile"];
+                skill: components["schemas"]["ManagedActivitySkill"] | null;
+                requestSequence: string;
+                requestedAt: number;
+                conflictingEvidence?: boolean;
+                taskState?: string;
+                taskRuntimeState?: string | null;
+                measurements?: components["schemas"]["ManagedActivityMeasurement"];
+            }[];
+            hasMore: boolean;
+            nextCursor: string | null;
+        };
+        ManagedActivitySkillsPage: {
+            /** @constant */
+            schemaVersion: 1;
+            sessionId: string;
+            /** @constant */
+            scope: "self";
+            readRevision: string | null;
+            coverageStartSequence: string | null;
+            coveredThroughSequence: string | null;
+            startedAt: number | null;
+            /** @enum {string} */
+            availability: "available" | "partial" | "not_recorded" | "unsupported";
+            coverageReasons: string[];
+            /** @constant */
+            kind: "skills";
+            items: {
+                invocationId: string;
+                assistantMessageId: string;
+                ordinal: number;
+                toolName: string;
+                functionCallId: string | null;
+                providerCallId: string | null;
+                executionCallId: string | null;
+                taskId: string | null;
+                /** @enum {string} */
+                toolKind: "builtin" | "mcp" | "hosted" | "unknown";
+                serverId: string | null;
+                /** @enum {string} */
+                admission: "allowed" | "denied" | "invalid" | "unknown";
+                /** @enum {string} */
+                execution: "not_started" | "running" | "success" | "error" | "cancelled" | "unknown";
+                /** @enum {string} */
+                delivery: "pending" | "complete" | "partial" | "unavailable" | "unknown";
+                /** @enum {string} */
+                capture: "complete" | "partial" | "unavailable" | "unknown";
+                file: components["schemas"]["ManagedActivityFile"] | null;
+                skill: components["schemas"]["ManagedActivitySkill"];
+                requestSequence: string;
+                requestedAt: number;
+                conflictingEvidence?: boolean;
+                taskState?: string;
+                taskRuntimeState?: string | null;
+                measurements?: components["schemas"]["ManagedActivityMeasurement"];
+            }[];
+            hasMore: boolean;
+            nextCursor: string | null;
+        };
+        WebShellActivityQueryRequest: {
+            /** Format: uuid */
+            sessionId: string;
+            /** @enum {string} */
+            kind: "tools" | "files" | "skills";
+            cursor?: string;
+            /** @default 50 */
+            limit?: number;
+        };
+        ManagedDiagnosticActivityPage: components["schemas"]["ManagedActivityToolsPage"] | components["schemas"]["ManagedActivityFilesPage"] | components["schemas"]["ManagedActivitySkillsPage"];
+        ManagedExtensionImportMetadata: {
+            /** @enum {string} */
+            sourceKind: "skill" | "extension" | "mcp";
+            target: {
+                /** @enum {string} */
+                platform: "linux" | "darwin";
+                /** @enum {string} */
+                arch: "x64" | "arm64" | "any";
+            };
+            sourceDigest: string;
+            /** @enum {integer} */
+            compilerVersion: 1;
+            packageName?: string;
+        };
+        ManagedExtensionPackageInspection: {
+            manifest: components["schemas"]["ManagedExtensionPackageManifest"];
+            fileCount: number;
+            files: string[];
+            truncated: boolean;
+            skills: {
+                name: string;
+                description: string;
+            }[];
+            mcpServers: {
+                name: string;
+                recipe: {
+                    [key: string]: unknown;
+                };
+                redacted: boolean;
+            }[];
+            settings: {
+                name: string;
+                envVar: string;
+                sensitive?: boolean;
+            }[];
+        };
+        WebShellExtensionOperationLookup: {
+            workspaceId: string;
+            /** @enum {string} */
+            kind: "publish" | "settings";
+            idempotencyKey: string;
+        };
+        WebShellExtensionApplyLookup: {
+            sessionId: string;
+            idempotencyKey: string;
+        };
+        ManagedRuntimeSkillOwner: {
+            bindingId: string;
+            generation: string;
+        };
+        ManagedRuntimeSkillCandidate: {
+            name: string;
+            description: string;
+            path: string;
+            digest: string;
+            shadowed: boolean;
+            compatible: boolean;
+            error?: string;
+        };
+        ManagedRuntimeSkillCandidates: {
+            /** Format: uuid */
+            sessionId: string;
+            owner: components["schemas"]["ManagedRuntimeSkillOwner"];
+            candidates: components["schemas"]["ManagedRuntimeSkillCandidate"][];
+        };
+        ManagedRuntimeSkillSnapshot: {
+            /** Format: uuid */
+            sessionId: string;
+            owner: components["schemas"]["ManagedRuntimeSkillOwner"];
+            /** Format: uuid */
+            operationId: string;
+            /** Format: uuid */
+            preparationId: string;
+            sourceDigest: string;
+            byteLength: number;
+            target: {
+                /** @enum {string} */
+                platform: "linux" | "darwin";
+                /** @enum {string} */
+                arch: "x64" | "arm64" | "any";
+            };
+            inspection: components["schemas"]["ManagedExtensionPackageInspection"];
+        };
+        WebShellRuntimeSkillQuery: {
+            /** Format: uuid */
+            sessionId: string;
+        };
+        WebShellRuntimeSkillSnapshotRequest: {
+            /** Format: uuid */
+            sessionId: string;
+            owner: components["schemas"]["ManagedRuntimeSkillOwner"];
+            path: string;
+            digest: string;
+            target: {
+                /** @enum {string} */
+                platform: "linux" | "darwin";
+                /** @enum {string} */
+                arch: "x64" | "arm64" | "any";
+            };
+        };
+        WebShellRuntimeSkillImportRequest: {
+            /** Format: uuid */
+            sessionId: string;
+            idempotencyKey: string;
+            owner: components["schemas"]["ManagedRuntimeSkillOwner"];
+            /** Format: uuid */
+            operationId: string;
+            /** Format: uuid */
+            preparationId: string;
+            sourceDigest: string;
+            byteLength: number;
+            target: {
+                /** @enum {string} */
+                platform: "linux" | "darwin";
+                /** @enum {string} */
+                arch: "x64" | "arm64" | "any";
+            };
+            extensionId?: string;
+        };
+        ManagedActivityMeasurement: {
+            sourceSequence: string;
+            /** @enum {string} */
+            availability: "available" | "partial" | "unsupported";
+            executionDurationMs: string | null;
+            file: {
+                /** @enum {string} */
+                operation: "read" | "write" | "edit";
+                /** @enum {string} */
+                status: "measured" | "unchanged" | "unmeasured";
+                modelLinesAdded: string | null;
+                modelLinesRemoved: string | null;
+                appliedLinesAdded: string | null;
+                appliedLinesRemoved: string | null;
+            } | null;
+        };
+        ManagedActivityMeasurementTotals: {
+            /** @enum {string} */
+            availability: "available" | "partial" | "not_recorded" | "unsupported";
+            recorded: string;
+            unsupported: string;
+            executionDurationMs: string;
+            executionDurationSamples: string;
+            fileSamples: string;
+            modelDiffSamples: string;
+            appliedDiffSamples: string;
+            modelLinesAdded: string;
+            modelLinesRemoved: string;
+            appliedLinesAdded: string;
+            appliedLinesRemoved: string;
+            partial: string;
+        };
+        WebShellSideQueryPrefix: {
+            journalRevision: number;
+            committedSequence: number;
+            lastCommitDigest: string | null;
+            completedTurnSequence: number;
+            contentVersion: string;
+            completedUserTurnCount: number;
+            mainInputBoundary: number;
+        };
+        WebShellSideQuery: {
+            /** Format: uuid */
+            queryId: string;
+            /** Format: uuid */
+            sessionId: string;
+            /** @enum {unknown} */
+            kind: "btw" | "recap";
+            /** @enum {unknown} */
+            trigger: "manual" | "automatic";
+            question: string | null;
+            /** @enum {unknown} */
+            status: "preparing" | "running" | "completed" | "failed" | "cancelled" | "interrupted";
+            outcome: string | null;
+            source: components["schemas"]["WebShellSideQueryPrefix"];
+            resultRevision: number;
+            text: string | null;
+            usage: {
+                [key: string]: unknown;
+            } | null;
+            errorCode: string | null;
+            createdAt: number;
+            updatedAt: number;
+            deadlineAt: number;
+        };
+        WebShellSideQueryContext: {
+            actorScopeKey: string;
+            contentVersion: string | null;
+            completedUserTurnCount: number;
+            mainInputBoundary: number;
+            automaticEligible: boolean;
+            generationAvailable: boolean;
+            unavailableReason: string | null;
+            latestRecapContentVersion: string | null;
+            latestRecapUserTurnCount: number | null;
+        };
+        WebShellSideQueryPage: {
+            items: components["schemas"]["WebShellSideQuery"][];
+            nextCursor: string | null;
+        };
+        WebShellSideQueryCreateRequest: {
+            sessionId: string;
+            /** @enum {unknown} */
+            kind: "btw" | "recap";
+            /** @enum {unknown} */
+            trigger?: "manual" | "automatic";
+            question?: string;
+            expectedContentVersion?: string;
+            expectedMainInputBoundary?: number;
+            idempotencyKey: string;
+            requestId?: string;
+        };
+        WebShellSideQueryGetRequest: {
+            sessionId: string;
+            queryId: string;
+            afterRevision?: number;
+            requestId?: string;
+        };
+        WebShellSideQueryListRequest: {
+            sessionId: string;
+            cursor?: string;
+            limit?: number;
+            requestId?: string;
         };
     };
     responses: {
@@ -5077,6 +6154,648 @@ export interface operations {
             409: components["responses"]["MessageProjectionChanged"];
             413: components["responses"]["MessagePageTooLarge"];
             503: components["responses"]["MessageProjectionPending"];
+        };
+    };
+    querySessionDiagnosticContextUsage: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellSessionRequest"];
+            };
+        };
+        responses: {
+            /** @description The last durably committed main-model request. Category counts are estimates; provider totals and freshness are independent. */
+            200: {
+                headers: {
+                    /** @description private, no-store */
+                    "Cache-Control"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManagedDiagnosticContextUsage"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    querySessionDiagnosticModelStatistics: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellSessionRequest"];
+            };
+        };
+        responses: {
+            /** @description Durable model statistics owned by this Session, including Hook and compression calls. Child Session totals are separate. Coverage gaps are retained. */
+            200: {
+                headers: {
+                    /** @description private, no-store */
+                    "Cache-Control"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManagedDiagnosticStats"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    querySessionDiagnosticResources: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellSessionRequest"];
+            };
+        };
+        responses: {
+            /** @description Persisted Skills and MCP selection and bounded discovery history. This does not probe live connectivity; partial history remains explicit. */
+            200: {
+                headers: {
+                    /** @description private, no-store */
+                    "Cache-Control"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManagedDiagnosticResources"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    querySessionDiagnosticAgentTrace: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellDiagnosticTraceRequest"];
+            };
+        };
+        responses: {
+            /** @description Direct child-agent invocations, filtered before pagination. A child link is returned only after verifying the relationship and child read access. */
+            200: {
+                headers: {
+                    /** @description private, no-store */
+                    "Cache-Control"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManagedDiagnosticAgentTrace"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    querySessionActivityStatistics: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellSessionRequest"];
+            };
+        };
+        responses: {
+            /** @description Bounded Session execution diagnostics with explicit coverage. */
+            200: {
+                headers: {
+                    /** @description private, no-store */
+                    "Cache-Control"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManagedDiagnosticActivityStats"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    querySessionActivity: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellActivityQueryRequest"];
+            };
+        };
+        responses: {
+            /** @description Bounded Session execution diagnostics with explicit coverage. */
+            200: {
+                headers: {
+                    /** @description private, no-store */
+                    "Cache-Control"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManagedDiagnosticActivityPage"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    importWebShellExtensionPackage: {
+        parameters: {
+            query: {
+                /** @description URL-encoded JSON ManagedExtensionImportMetadata, at most16KiB. Raw input digest is verified by the Hosted compiler. */
+                metadata: string;
+                extensionId?: string;
+                workspaceId: string;
+            };
+            header: {
+                "Idempotency-Key": components["parameters"]["IdempotencyKey"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/octet-stream": string;
+            };
+        };
+        responses: {
+            /** @description Verified result. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManagedExtensionPackageOperation"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
+            /** @description Package imports require unencoded application/octet-stream bytes. */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    inspectWebShellExtensionPackage: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellExtensionPackageQuery"];
+            };
+        };
+        responses: {
+            /** @description Verified result. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManagedExtensionPackageInspection"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
+            /** @description Inspection queries require application/json. */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    lookupWebShellExtensionOperation: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellExtensionOperationLookup"];
+            };
+        };
+        responses: {
+            /** @description Verified result. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManagedExtensionPackageOperation"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
+        };
+    };
+    lookupWebShellSessionExtensionOperation: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellExtensionApplyLookup"];
+            };
+        };
+        responses: {
+            /** @description Verified result. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManagedExtensionManagementSnapshot"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
+        };
+    };
+    previewWebShellExtensionImport: {
+        parameters: {
+            query: {
+                /** @description URL-encoded JSON ManagedExtensionImportMetadata, at most16KiB. Raw input digest is verified by the Hosted compiler. */
+                metadata: string;
+                workspaceId: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/octet-stream": string;
+            };
+        };
+        responses: {
+            /** @description Verified result. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManagedExtensionPackageInspection"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
+            /** @description Package imports require unencoded application/octet-stream bytes. */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    webShellRuntimeSkillCandidates: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellRuntimeSkillQuery"];
+            };
+        };
+        responses: {
+            /** @description Verified owner-scoped result. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManagedRuntimeSkillCandidates"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
+        };
+    };
+    webShellRuntimeSkillSnapshot: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellRuntimeSkillSnapshotRequest"];
+            };
+        };
+        responses: {
+            /** @description Verified owner-scoped result. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManagedRuntimeSkillSnapshot"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
+        };
+    };
+    webShellRuntimeSkillImports: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellRuntimeSkillImportRequest"];
+            };
+        };
+        responses: {
+            /** @description Verified owner-scoped result. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManagedExtensionPackageOperation"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
+        };
+    };
+    createWebShellSessionSideQuery: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellSideQueryCreateRequest"];
+            };
+        };
+        responses: {
+            /** @description Current actor-private state. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellSideQuery"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    listWebShellSessionSideQuery: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellSideQueryListRequest"];
+            };
+        };
+        responses: {
+            /** @description Current actor-private state. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellSideQueryPage"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    contextWebShellSessionSideQuery: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellSessionRequest"];
+            };
+        };
+        responses: {
+            /** @description Current actor-private state. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellSideQueryContext"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    getWebShellSessionSideQuery: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellSideQueryGetRequest"];
+            };
+        };
+        responses: {
+            /** @description Current actor-private state. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellSideQuery"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    cancelWebShellSessionSideQuery: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellSideQueryGetRequest"];
+            };
+        };
+        responses: {
+            /** @description Current actor-private state. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellSideQuery"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    streamWebShellSessionSideQuery: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellSideQueryGetRequest"];
+            };
+        };
+        responses: {
+            /** @description Private full-state snapshots; an immediate SQL snapshot precedes one-second polling. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/event-stream": string;
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
         };
     };
 }

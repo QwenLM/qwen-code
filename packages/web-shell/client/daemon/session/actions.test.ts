@@ -99,6 +99,20 @@ describe('Generated UI action invalidation', () => {
       expect(onGeneratedUiInvalidated).not.toHaveBeenCalled();
     },
   );
+
+  it('releases through the workspace client when no session is connected', async () => {
+    const closeSession = vi.fn().mockResolvedValue(undefined);
+    const onGeneratedUiInvalidated = vi.fn();
+    const h = createActionsHarness({
+      getClient: () => ({ closeSession }) as unknown as DaemonClient,
+      onGeneratedUiInvalidated,
+    });
+
+    await h.actions.releaseSession('background');
+
+    expect(closeSession).toHaveBeenCalledWith('background');
+    expect(onGeneratedUiInvalidated).not.toHaveBeenCalled();
+  });
 });
 
 describe('context usage counter reconciliation', () => {
@@ -247,6 +261,64 @@ describe('context usage counter reconciliation', () => {
       expect(h.getConnection().tokenCount).toBe(change === 'usage' ? 70 : 60);
       expect(h.getConnection().contextWindow).toBe(
         change === 'context-window' ? 32_000 : 100,
+      );
+    },
+  );
+});
+
+describe('local prompt timing before the authoritative echo', () => {
+  it.each(['completed', 'cancelled'] as const)(
+    'clears its local clock after an admitted turn is %s',
+    async (outcome) => {
+      const session = createMockSession('session-a');
+      const h = createActionsHarness({ session });
+      const result = h.actions.sendPrompt('new question', {
+        optimisticUserMessage: false,
+      });
+      await vi.waitFor(() =>
+        expect(h.activePromptsRef.current.get('session-a')?.resolve).toBeTypeOf(
+          'function',
+        ),
+      );
+      expect(h.getConnection().localPrompt?.sessionId).toBe('session-a');
+      const active = h.activePromptsRef.current.get('session-a')!;
+      if (outcome === 'completed') active.resolve?.({ stopReason: 'end_turn' });
+      else active.controller.abort();
+      await result;
+      expect(h.getConnection().localPrompt).toBeUndefined();
+      expect(h.store.appendLocalUserMessage).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([false, true])(
+    'clears only its own clock after rejection (newer owner: %s)',
+    async (newerOwner) => {
+      const session = createMockSession('session-a');
+      const admission = createDeferred<{ promptId: string }>();
+      session.submitPrompt.mockReturnValueOnce(admission.promise);
+      const h = createActionsHarness({ session });
+      const before = Date.now();
+      const result = h.actions.sendPrompt('new question', {
+        optimisticUserMessage: false,
+      });
+      const rejected = result.catch((error: unknown) => error);
+      await vi.waitFor(() =>
+        expect(session.submitPrompt).toHaveBeenCalledOnce(),
+      );
+      const local = h.getConnection().localPrompt;
+      expect(local?.sessionId).toBe('session-a');
+      expect(local?.startedAt).toBeGreaterThanOrEqual(before);
+      expect(h.store.appendLocalUserMessage).not.toHaveBeenCalled();
+      const replacement = {
+        sessionId: 'session-b',
+        startedAt: Date.now() + 1000,
+      };
+      if (newerOwner)
+        h.replaceConnection({ ...h.getConnection(), localPrompt: replacement });
+      admission.reject(new DaemonHttpError(413, {}, 'Rejected'));
+      await rejected;
+      expect(h.getConnection().localPrompt).toEqual(
+        newerOwner ? replacement : undefined,
       );
     },
   );
@@ -1673,6 +1745,53 @@ describe('createDaemonSessionActions', () => {
     },
   );
 
+  it('only reports a missing context session for non-silent callers', async () => {
+    const addNotice = vi.fn();
+    const { actions } = createActionsHarness({ addNotice });
+
+    await expect(actions.getContext({ silent: true })).rejects.toThrow(
+      'Daemon session is not connected',
+    );
+    expect(addNotice).not.toHaveBeenCalled();
+
+    await expect(actions.getContext()).rejects.toThrow(
+      'Daemon session is not connected',
+    );
+    expect(addNotice).toHaveBeenCalledWith(
+      expect.objectContaining({
+        message: 'Load context failed: Daemon session is not connected',
+      }),
+    );
+  });
+
+  it('only reports an in-flight context disconnect for non-silent callers', async () => {
+    const addNotice = vi.fn();
+    const session = createMockSession('session-a');
+    session.context.mockRejectedValue(new DaemonTransportClosedError());
+    const { actions, getConnection } = createActionsHarness({
+      addNotice,
+      session,
+      connection: {
+        status: 'connected',
+        sessionId: 'session-a',
+        workflowModeStatus: 'ready',
+      },
+    });
+
+    await expect(actions.getContext({ silent: true })).rejects.toThrow(
+      'Transport connection closed',
+    );
+    expect(addNotice).not.toHaveBeenCalled();
+    expect(getConnection().workflowModeStatus).toBe('unknown');
+
+    await expect(actions.getContext()).rejects.toThrow(
+      'Transport connection closed',
+    );
+    expect(addNotice).toHaveBeenCalledWith(
+      expect.objectContaining({ operation: 'load_context' }),
+    );
+  });
+
   it('does not report a context usage error while the session is disconnected', async () => {
     const addNotice = vi.fn();
     const { actions } = createActionsHarness({ addNotice });
@@ -2218,6 +2337,43 @@ describe('createDaemonSessionActions', () => {
       },
       errorStatus: 503,
     });
+  });
+
+  it('marks a workspace session-limit create failure with its daemon code', async () => {
+    const addNotice = vi.fn();
+    const createDetachedSession = vi.fn(async () => {
+      throw new DaemonHttpError(
+        503,
+        {
+          error: 'Session limit reached (64)',
+          code: 'session_limit_exceeded',
+          limit: 64,
+          scope: 'workspace',
+        },
+        'Session limit reached (64)',
+      );
+    });
+    const { actions } = createActionsHarness({
+      connection: {
+        status: 'connected',
+        sessionContext: { kind: 'workspace', cwd: '/workspace' },
+        workspaceCwd: '/workspace',
+      },
+      addNotice,
+      createDetachedSession,
+    });
+
+    await expect(actions.createSession()).rejects.toBeInstanceOf(
+      DaemonHttpError,
+    );
+
+    expect(createDetachedSession).toHaveBeenCalledOnce();
+    expect(addNotice).toHaveBeenCalledWith(
+      expect.objectContaining({
+        operation: 'create_session',
+        code: 'session_limit_exceeded',
+      }),
+    );
   });
 
   it('publishes standalone recovery after a workspace predecessor is cleared', async () => {
@@ -2812,7 +2968,10 @@ describe('createDaemonSessionActions', () => {
       expect(submitPrompt).not.toHaveBeenCalled();
       await vi.advanceTimersByTimeAsync(4_999);
       await pending;
-      expect(onSessionCreated).toHaveBeenCalledExactlyOnceWith('session-b');
+      expect(onSessionCreated).toHaveBeenCalledExactlyOnceWith(
+        'session-b',
+        undefined,
+      );
       expect(attachSession).toHaveBeenCalledOnce();
       expect(submitPrompt).toHaveBeenCalledOnce();
       expect(vi.getTimerCount()).toBe(0);
@@ -3056,13 +3215,14 @@ describe('createDaemonSessionActions', () => {
     },
   );
 
-  it('stops first-prompt preparation before callbacks after workspace navigation', async () => {
+  it('continues first-prompt preparation detached after workspace navigation', async () => {
     const nextSession = createMockSession('session-b');
     const deferred = createDeferred<DaemonSessionClient>();
     let selectedWorkspaceCwd = '/workspace';
-    const { actions, getConnection, replaceConnection } = createActionsHarness({
-      createDetachedSession: vi.fn(() => deferred.promise),
-    });
+    const { actions, sessionRef, getConnection, replaceConnection } =
+      createActionsHarness({
+        createDetachedSession: vi.fn(() => deferred.promise),
+      });
     const attachSession = vi.spyOn(actions, 'attachSession');
     const clearSession = vi.spyOn(actions, 'clearSession');
     const onSessionCreated = vi.fn();
@@ -3084,13 +3244,258 @@ describe('createDaemonSessionActions', () => {
     replaceConnection(navigatedConnection);
     deferred.resolve(nextSession as unknown as DaemonSessionClient);
 
-    await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
-    expect(nextSession.detach).toHaveBeenCalledOnce();
-    expect(onSessionCreated).not.toHaveBeenCalled();
-    expect(onSessionAllocated).not.toHaveBeenCalled();
+    // The submitted prompt keeps its session: preparation resolves with the
+    // unbound client for admission-only dispatch instead of aborting, and
+    // the navigation target is never replaced.
+    await expect(pending).resolves.toMatchObject({
+      detachedSession: nextSession,
+    });
+    expect(nextSession.detach).not.toHaveBeenCalled();
+    expect(onSessionAllocated).toHaveBeenCalledWith('session-b');
+    expect(onSessionCreated).toHaveBeenCalledWith('session-b', nextSession);
     expect(attachSession).not.toHaveBeenCalled();
     expect(clearSession).not.toHaveBeenCalled();
+    expect(sessionRef.current).toBeUndefined();
     expect(getConnection()).toBe(navigatedConnection);
+  });
+
+  it('returns the created client unbound when a prompt create survives navigation', async () => {
+    const nextSession = createMockSession('session-b');
+    const deferred = createDeferred<DaemonSessionClient>();
+    const { actions, sessionRef, getConnection, replaceConnection } =
+      createActionsHarness({
+        connection: { status: 'connected' },
+        createDetachedSession: vi.fn(() => deferred.promise),
+      });
+    const navigationOutcome = { bound: true };
+    const outcome = actions.createSession({
+      keepOnNavigation: true,
+      navigationOutcome,
+    });
+    const navigatedConnection: DaemonConnectionState = {
+      status: 'connected',
+      sessionId: 'session-c',
+      sessionContext: { kind: 'workspace', cwd: '/other-workspace' },
+    };
+    replaceConnection(navigatedConnection);
+    deferred.resolve(nextSession as unknown as DaemonSessionClient);
+
+    await expect(outcome).resolves.toBe(nextSession);
+    expect(navigationOutcome.bound).toBe(false);
+    expect(nextSession.detach).not.toHaveBeenCalled();
+    expect(sessionRef.current).toBeUndefined();
+    expect(getConnection()).toBe(navigatedConnection);
+  });
+
+  it.each([
+    'superseded create resolves last',
+    'superseded create resolves first',
+  ])(
+    'keeps concurrent draft creates bound to their own draft (%s)',
+    async (order) => {
+      const sessionA = createMockSession('session-a');
+      const sessionB = createMockSession('session-b');
+      const deferredA = createDeferred<DaemonSessionClient>();
+      const deferredB = createDeferred<DaemonSessionClient>();
+      const manualSessionClearRef = { current: false };
+      const { actions, getConnection } = createActionsHarness({
+        connection: {
+          status: 'connected',
+          sessionContext: { kind: 'workspace', cwd: '/workspace' },
+        },
+        createDetachedSession: vi
+          .fn()
+          .mockReturnValueOnce(deferredA.promise)
+          .mockReturnValueOnce(deferredB.promise),
+        manualSessionClearRef,
+      });
+      let currentVersion = 1;
+      const outcomeA = { bound: true };
+      const pendingA = actions.createSession({
+        workspaceCwd: '/workspace',
+        getCurrentWorkspaceCwd: () => '/workspace',
+        keepOnNavigation: true,
+        navigationOutcome: outcomeA,
+        sourceVersion: 1,
+        getCurrentSourceVersion: () => currentVersion,
+      });
+      // The user opens a new draft in the same workspace and submits: the
+      // view is session-less again, and the second create resets the shared
+      // navigation marker.
+      currentVersion = 2;
+      manualSessionClearRef.current = true;
+      const outcomeB = { bound: true };
+      const pendingB = actions.createSession({
+        workspaceCwd: '/workspace',
+        getCurrentWorkspaceCwd: () => '/workspace',
+        keepOnNavigation: true,
+        navigationOutcome: outcomeB,
+        sourceVersion: 2,
+        getCurrentSourceVersion: () => currentVersion,
+      });
+      expect(manualSessionClearRef.current).toBe(false);
+
+      if (order === 'superseded create resolves last') {
+        // B binds the current draft first; A must not hijack it afterwards.
+        deferredB.resolve(sessionB as unknown as DaemonSessionClient);
+        await pendingB;
+        expect(outcomeB.bound).toBe(true);
+        expect(getConnection().sessionId).toBe('session-b');
+        deferredA.resolve(sessionA as unknown as DaemonSessionClient);
+        await pendingA;
+      } else {
+        // A resolves while B is still pending: without the generation
+        // check, A sees the same session-less view and binds over draft B.
+        deferredA.resolve(sessionA as unknown as DaemonSessionClient);
+        await pendingA;
+        expect(getConnection().sessionId).toBeUndefined();
+        deferredB.resolve(sessionB as unknown as DaemonSessionClient);
+        await pendingB;
+      }
+      expect(outcomeA.bound).toBe(false);
+      expect(sessionA.detach).not.toHaveBeenCalled();
+      expect(outcomeB.bound).toBe(true);
+      expect(getConnection().sessionId).toBe('session-b');
+    },
+  );
+
+  it('dispatches a detached prompt admission-only and detaches the client', async () => {
+    const session = createMockSession('session-b');
+    const { actions, store, setPromptStatus, getConnection } =
+      createActionsHarness({
+        connection: { status: 'connected', sessionId: 'session-c' },
+      });
+    const onAdmitted = vi.fn();
+
+    const result = await actions.sendDetachedPrompt(
+      session as unknown as DaemonSessionClient,
+      'background prompt',
+      { submittedPrompt: 'background prompt', onAdmitted },
+    );
+
+    expect(result).toEqual({ promptId: 'prompt-1' });
+    expect(session.submitPrompt).toHaveBeenCalledOnce();
+    const request = session.submitPrompt.mock.calls[0]?.[0] as {
+      prompt: Array<{ type: string; text: string }>;
+      _meta?: Record<string, unknown>;
+    };
+    expect(request.prompt[0]).toMatchObject({
+      type: 'text',
+      text: 'background prompt',
+    });
+    expect(request._meta).toEqual({
+      'qwen.submittedPrompt': 'background prompt',
+    });
+    expect(onAdmitted).toHaveBeenCalledWith({ promptId: 'prompt-1' });
+    expect(session.detach).toHaveBeenCalledOnce();
+    expect(store.appendLocalUserMessage).not.toHaveBeenCalled();
+    expect(setPromptStatus).not.toHaveBeenCalled();
+    expect(getConnection().sessionId).toBe('session-c');
+  });
+
+  it('detaches the client when detached admission fails', async () => {
+    const session = createMockSession('session-b');
+    session.submitPrompt.mockRejectedValue(new Error('admission failed'));
+    const { actions, store } = createActionsHarness();
+
+    await expect(
+      actions.sendDetachedPrompt(
+        session as unknown as DaemonSessionClient,
+        'background prompt',
+      ),
+    ).rejects.toThrow('admission failed');
+
+    expect(session.detach).toHaveBeenCalledOnce();
+    expect(store.appendLocalUserMessage).not.toHaveBeenCalled();
+  });
+
+  it('admits concurrent detached dispatches sharing one client', async () => {
+    // Two draft submissions dedupe onto one creation; both prompts own the
+    // same detached client. The daemon FIFO-queues the second admission.
+    const session = createMockSession('session-b');
+    const { actions, store } = createActionsHarness();
+
+    const [first, second] = await Promise.all([
+      actions.sendDetachedPrompt(
+        session as unknown as DaemonSessionClient,
+        'prompt one',
+      ),
+      actions.sendDetachedPrompt(
+        session as unknown as DaemonSessionClient,
+        'prompt two',
+      ),
+    ]);
+
+    expect(first).toEqual({ promptId: 'prompt-1' });
+    expect(second).toEqual({ promptId: 'prompt-1' });
+    expect(session.submitPrompt).toHaveBeenCalledTimes(2);
+    expect(session.detach).toHaveBeenCalledTimes(2);
+    expect(store.appendLocalUserMessage).not.toHaveBeenCalled();
+  });
+
+  it('classifies slash attachments through the detached client when commands are unloaded', async () => {
+    const session = createMockSession('session-b');
+    session.supportedCommands.mockResolvedValue(
+      supportedCommandsStatus('session-b', 'custom'),
+    );
+    const { actions, store, getConnection } = createActionsHarness({
+      connection: {
+        status: 'connected',
+        workspaceCwd: '/workspace',
+        capabilities: {
+          features: ['session_attachments'],
+        } as DaemonCapabilities,
+      },
+    });
+
+    const result = await actions.sendDetachedPrompt(
+      session as unknown as DaemonSessionClient,
+      '/custom',
+      { images: [{ data: 'aGVsbG8=', mimeType: 'image/png' }] },
+    );
+
+    expect(result).toEqual({ promptId: 'prompt-1' });
+    expect(session.supportedCommands).toHaveBeenCalledOnce();
+    expect(session.uploadAttachment).toHaveBeenCalledOnce();
+    expect(session.submitPrompt).toHaveBeenCalledOnce();
+    // The detached client's command snapshot never publishes to the
+    // connection the user navigated to.
+    expect(getConnection().commands).toBeUndefined();
+    expect(store.appendLocalUserMessage).not.toHaveBeenCalled();
+  });
+
+  it('classifies detached slash attachments against the created session catalog, not the current connection', async () => {
+    const session = createMockSession('session-b');
+    session.supportedCommands.mockResolvedValue(
+      supportedCommandsStatus('session-b', 'deploy'),
+    );
+    const { actions, getConnection } = createActionsHarness({
+      connection: {
+        status: 'connected',
+        sessionId: 'session-c',
+        workspaceCwd: '/workspace',
+        // The session the user navigated to has a built-in namesake; the
+        // created session's own 'deploy' is a custom command that keeps
+        // attachments.
+        commands: [commandInfo('deploy', 'builtin-command')],
+        capabilities: {
+          features: ['session_attachments'],
+        } as DaemonCapabilities,
+      },
+    });
+
+    const result = await actions.sendDetachedPrompt(
+      session as unknown as DaemonSessionClient,
+      '/deploy now',
+      { images: [{ data: 'aGVsbG8=', mimeType: 'image/png' }] },
+    );
+
+    expect(result).toEqual({ promptId: 'prompt-1' });
+    expect(session.supportedCommands).toHaveBeenCalledOnce();
+    expect(session.uploadAttachment).toHaveBeenCalledOnce();
+    expect(getConnection().commands).toEqual([
+      commandInfo('deploy', 'builtin-command'),
+    ]);
   });
 
   it('does not restore a detached session after the session was cleared', async () => {
@@ -3554,6 +3959,98 @@ describe('createDaemonSessionActions', () => {
       kind: 'workspace',
       cwd: '/workspace/secondary',
     });
+  });
+
+  it('reloads a standalone session with the standalone context when the connection context is missing', () => {
+    const standalone = createMockSession('standalone-a');
+    Object.assign(standalone, {
+      session: {
+        sessionId: 'standalone-a',
+        workspaceCwd: '/private/standalone-a',
+        sourceType: 'standalone',
+        context: { kind: 'standalone' },
+        projectlessOutputDirectory: '/output/standalone-a',
+        workingDirectory: { state: 'ready' },
+      },
+    });
+    const controller = new AbortController();
+    const { actions, pendingSessionLoadRef, sessionRef, store } =
+      createActionsHarness({
+        connection: { status: 'connected', sessionId: 'standalone-a' },
+        session: standalone,
+      });
+
+    void actions.reloadSession(controller.signal).catch(() => undefined);
+
+    expect(pendingSessionLoadRef.current?.sessionContext).toEqual({
+      kind: 'standalone',
+    });
+    expect(store.reset).not.toHaveBeenCalled();
+    expect(sessionRef.current).toBe(standalone);
+    expect(standalone.detach).not.toHaveBeenCalled();
+    clearTimeout(pendingSessionLoadRef.current?.timeout);
+    pendingSessionLoadRef.current?.reject(
+      new DOMException('Test cleanup', 'AbortError'),
+    );
+    pendingSessionLoadRef.current = undefined;
+  });
+
+  it('keeps the workspace reload context for a workspace session', () => {
+    const workspace = createMockSession('session-a');
+    workspace.workspaceCwd = '/work/a';
+    Object.assign(workspace, {
+      session: {
+        sessionId: 'session-a',
+        workspaceCwd: '/work/a',
+        sourceType: 'default',
+      },
+    });
+    const controller = new AbortController();
+    const { actions, pendingSessionLoadRef } = createActionsHarness({
+      connection: { status: 'connected', sessionId: 'session-a' },
+      session: workspace,
+    });
+
+    void actions.reloadSession(controller.signal).catch(() => undefined);
+
+    expect(pendingSessionLoadRef.current?.sessionContext).toEqual({
+      kind: 'workspace',
+      cwd: '/work/a',
+    });
+    clearTimeout(pendingSessionLoadRef.current?.timeout);
+    pendingSessionLoadRef.current?.reject(
+      new DOMException('Test cleanup', 'AbortError'),
+    );
+    pendingSessionLoadRef.current = undefined;
+  });
+
+  it('falls back to the standalone context for a contextless load of the current standalone session', () => {
+    const standalone = createMockSession('standalone-a');
+    Object.assign(standalone, {
+      session: {
+        sessionId: 'standalone-a',
+        workspaceCwd: '/private/standalone-a',
+        sourceType: 'standalone',
+        context: { kind: 'standalone' },
+        projectlessOutputDirectory: '/output/standalone-a',
+        workingDirectory: { state: 'ready' },
+      },
+    });
+    const { actions, pendingSessionLoadRef } = createActionsHarness({
+      connection: { status: 'connected', sessionId: 'standalone-a' },
+      session: standalone,
+    });
+
+    void actions.loadSession('standalone-a').catch(() => undefined);
+
+    expect(pendingSessionLoadRef.current?.sessionContext).toEqual({
+      kind: 'standalone',
+    });
+    clearTimeout(pendingSessionLoadRef.current?.timeout);
+    pendingSessionLoadRef.current?.reject(
+      new DOMException('Test cleanup', 'AbortError'),
+    );
+    pendingSessionLoadRef.current = undefined;
   });
 
   it('uses the default standalone context after a failed connection', () => {
@@ -7722,6 +8219,131 @@ function createTimedCreateClient({
 }
 
 describe('model catalog refresh', () => {
+  it.each([false, true])(
+    'preserves an unlisted subscription selection after logout (live: %s)',
+    async (live) => {
+      const session = createMockSession('hidden-subscription');
+      const workspace = session.client.workspaceByCwd();
+      session.client.workspaceByCwd.mockReturnValue(workspace);
+      const modelId = 'qwen3.8-max(qwen-subscription)';
+      workspace.workspaceProviders.mockResolvedValue({
+        v: 1,
+        initialized: true,
+        workspaceCwd: '/workspace',
+        current: { authType: 'qwen-subscription', modelId },
+        providers: [],
+      });
+      const context = contextStatus('hidden-subscription');
+      context.state.models = { currentModelId: modelId, availableModels: [] };
+      session.context.mockResolvedValue(context);
+      const h = createActionsHarness({
+        ...(live ? { session } : {}),
+        getClient: () => session.client as unknown as DaemonClient,
+        connection: {
+          status: 'connected',
+          ...(live ? { sessionId: 'hidden-subscription' } : {}),
+          workspaceCwd: '/workspace',
+          currentModel: modelId,
+          contextWindow: 128000,
+          models: [{ id: modelId, authType: 'qwen-subscription' }],
+        },
+      });
+      await expect(
+        h.actions.refreshModels(undefined, { reloadProviders: false }),
+      ).resolves.toBeUndefined();
+      expect(h.getConnection().currentModel).toBe(modelId);
+      expect(h.getConnection().contextWindow).toBe(128000);
+      expect(h.getConnection().models).toEqual([]);
+      expect(session.setModel).not.toHaveBeenCalled();
+      expect(workspace.reloadModelProviders).not.toHaveBeenCalled();
+    },
+  );
+
+  it('reads a recovered live model without reloading providers', async () => {
+    const h = setup();
+    h.replaceConnection({
+      ...h.getConnection(),
+      context: {
+        ...h.context,
+        state: { _meta: { authType: 'qwen-subscription' } },
+      },
+    });
+    h.context.state._meta = { authType: 'openai' };
+    h.context.state.models = {
+      currentModelId: 'bailian',
+      availableModels: [
+        { modelId: 'bailian', name: 'Bailian', _meta: { contextLimit: 8192 } },
+      ],
+    };
+    await h.actions.refreshModels(undefined, { reloadProviders: false });
+    expect(h.workspace.reloadModelProviders).not.toHaveBeenCalled();
+    expect(h.getConnection().currentModel).toBe('bailian');
+    expect(h.getConnection().contextWindow).toBe(8192);
+    expect(h.getConnection().context?.state._meta?.['authType']).toBe('openai');
+  });
+
+  it('does not overwrite a model notification received during readback', async () => {
+    const h = setup();
+    const gate = createDeferred<DaemonSessionContextStatus>();
+    h.session.context.mockImplementation(() => gate.promise);
+    const refresh = h.actions.refreshModels(undefined, {
+      reloadProviders: false,
+    });
+    await vi.waitFor(() => expect(h.session.context).toHaveBeenCalled());
+    h.replaceConnection({
+      ...h.getConnection(),
+      currentModel: 'newer-model',
+      models: [{ id: 'newer-model' }],
+    });
+    gate.resolve(h.context);
+    await refresh;
+    expect(h.getConnection().currentModel).toBe('newer-model');
+    expect(h.getConnection().models).toEqual([{ id: 'newer-model' }]);
+    expect(h.workspace.reloadModelProviders).not.toHaveBeenCalled();
+  });
+
+  it('preserves a non-subscription live model when the workspace signs out', async () => {
+    const session = createMockSession('other-provider');
+    const workspace = session.client.workspaceByCwd();
+    session.client.workspaceByCwd.mockReturnValue(workspace);
+    workspace.workspaceProviders.mockResolvedValue({
+      v: 1,
+      initialized: true,
+      workspaceCwd: '/workspace',
+      providers: [],
+      current: { modelId: 'coder-model' },
+    });
+    const context = contextStatus('other-provider');
+    context.state.models = {
+      currentModelId: 'manual-bailian',
+      availableModels: [
+        {
+          modelId: 'manual-bailian',
+          name: 'Bailian',
+          _meta: { authType: 'openai' },
+        },
+      ],
+    };
+    session.context.mockResolvedValue(context);
+    const h = createActionsHarness({
+      session,
+      connection: {
+        status: 'connected',
+        sessionId: 'other-provider',
+        workspaceCwd: '/workspace',
+        currentModel: 'manual-bailian',
+        providers: {
+          current: { authType: 'qwen-subscription', modelId: 'qwen3.8-max' },
+        },
+        models: [{ id: 'manual-bailian', authType: 'openai', isRuntime: true }],
+      },
+    });
+    await h.actions.refreshModels();
+    expect(h.getConnection().currentModel).toBe('manual-bailian');
+    await h.actions.refreshModels(undefined, { reloadProviders: false });
+    expect(h.getConnection().currentModel).toBe('manual-bailian');
+  });
+
   function setup() {
     const session = createMockSession('session-a');
     const workspace = session.client.workspaceByCwd();
@@ -7747,6 +8369,76 @@ describe('model catalog refresh', () => {
     });
     return { ...h, session, workspace, context };
   }
+
+  it.each([false, true])(
+    'clears a signed-out subscription selection without another provider (live session: %s)',
+    async (live) => {
+      const session = createMockSession('unused');
+      const workspace = session.client.workspaceByCwd();
+      workspace.reloadModelProviders.mockResolvedValue({
+        status: live ? 'applied' : 'deferred',
+      });
+      workspace.workspaceProviders.mockResolvedValue({
+        v: 1,
+        initialized: true,
+        workspaceCwd: '/workspace',
+        providers: [],
+        current: { modelId: 'coder-model' },
+      });
+      session.client.workspaceByCwd.mockReturnValue(workspace);
+      const context = contextStatus('unused');
+      delete context.state.models;
+      session.context.mockResolvedValue(context);
+      const h = createActionsHarness({
+        ...(live ? { session } : {}),
+        getClient: () => session.client as unknown as DaemonClient,
+        connection: {
+          status: 'connected',
+          ...(live ? { sessionId: 'unused' } : {}),
+          workspaceCwd: '/workspace',
+          currentModel: 'old',
+          providers: {
+            current: { authType: 'qwen-subscription', modelId: 'old' },
+          },
+          models: [{ id: 'old', label: 'Qwen', authType: 'qwen-subscription' }],
+        },
+      });
+      await expect(
+        h.actions.refreshModels(undefined, { reloadProviders: false }),
+      ).resolves.toBeUndefined();
+      expect(h.getConnection().currentModel).toBeUndefined();
+      expect(h.getConnection().models).toEqual([]);
+      expect(h.getConnection().sessionId).toBe(live ? 'unused' : undefined);
+      expect(workspace.reloadModelProviders).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['openai', 'qwen-subscription'] as const)(
+    'keeps a removed subscription selection and publishes the new catalog for reselection (workspace: %s)',
+    async (authType) => {
+      const h = setup();
+      const providers = workspaceProvidersStatus('high');
+      providers.current = { authType, modelId: 'old-model' };
+      h.workspace.workspaceProviders.mockResolvedValue(providers);
+      h.replaceConnection({
+        ...h.getConnection(),
+        models: [
+          { id: 'old-model', label: 'Old', authType: 'qwen-subscription' },
+        ],
+      });
+      h.context.state.models!.availableModels = [
+        { modelId: 'new-model', name: 'New' },
+      ];
+      await expect(h.actions.refreshModels()).rejects.toThrow(
+        'Run /model to choose another model',
+      );
+      expect(h.getConnection().currentModel).toBe('old-model');
+      expect(h.getConnection().models?.map((model) => model.id)).toEqual([
+        'new-model',
+      ]);
+      expect(h.session.setModel).not.toHaveBeenCalled();
+    },
+  );
 
   it.each([false, true])(
     'refreshes with an absent or void callback (callback=%s)',
