@@ -1848,6 +1848,69 @@ describe('package scripts', () => {
         });
         expect(scriptsStuck.rc).toBe('1');
         expect(scriptsStuck.stdout).toContain('Every test passed');
+        // The lever is a count, like VITEST_RETRY next to it: two re-runs when
+        // set to 2, and a configuration error (not a silent fall-through) for
+        // anything that is neither a count nor `off`.
+        const scriptsTwo = run('rpc-retry-scripts-two', {
+          report: rpcReport('@qwen-code/qwen-code-scripts'),
+          reportMatch: 'test:scripts:unit',
+          reportOnce: false,
+          rpcRetry: '2',
+        });
+        expect(
+          scriptsTwo.calls.filter((call) => call.includes('test:scripts:unit'))
+            .length,
+        ).toBe(3);
+        const retryInvalid = run('rpc-retry-invalid', {
+          report: rpcReport('@qwen-code/web-shell'),
+          rpcRetry: 'false',
+        });
+        expect(retryInvalid.rc).not.toBe('0');
+        expect(retryInvalid.stdout).toContain(
+          'QWEN_CI_RPC_RETRY must be a non-negative integer',
+        );
+
+        // The scripts lane is the side lane's last work, so its re-run must
+        // consult the same budget the workspace lane does.
+        const scriptsBudget = run('rpc-retry-scripts-budget', {
+          report: rpcReport('@qwen-code/qwen-code-scripts'),
+          reportMatch: 'test:scripts:unit',
+          budget: '1',
+        });
+        expect(scriptsBudget.rc).toBe('1');
+        expect(scriptsBudget.stdout).toContain('Skipping the RPC re-run');
+        expect(
+          scriptsBudget.calls.filter((call) =>
+            call.includes('test:scripts:unit'),
+          ).length,
+        ).toBe(1);
+
+        // An armed budget whose threshold is comfortably above the stub's wall
+        // time still permits the re-run; with `1` the threshold degenerates to
+        // zero and this branch is never observed.
+        const budgetAllows = run('rpc-retry-budget-armed', {
+          report: rpcReport('@qwen-code/web-shell'),
+          budget: '4',
+        });
+        expect(budgetAllows.rc, budgetAllows.stdout).toBe('0');
+        expect(budgetAllows.stdout).toContain('Every test passed');
+        expect(
+          budgetAllows.calls.filter((call) =>
+            call.includes('--workspace=@qwen-code/web-shell'),
+          ).length,
+        ).toBe(2);
+
+        // A printed near-miss of the section header must not open a
+        // pseudo-section: the opener matches Vitest's ruler-shaped line, not
+        // any line containing the words.
+        const printedHeader = run('rpc-retry-printed-header', {
+          report:
+            rpcReport('@qwen-code/web-shell') +
+            '\nUnhandled Errors: a test printed this\nError: [vitest-worker]: Timeout calling "printed"',
+        });
+        expect(printedHeader.rc, printedHeader.stdout).toBe('0');
+        expect(printedHeader.stdout).toContain('Every test passed');
+
         const scriptsOff = run('rpc-retry-scripts-off', {
           report: rpcReport('@qwen-code/qwen-code-scripts'),
           reportMatch: 'test:scripts:unit',

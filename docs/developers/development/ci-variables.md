@@ -74,8 +74,11 @@ the ones `scripts/tests/release-workflow.test.js` pins there: the run must have
 reached a passing tally, it must not have been killed by a signal, and Vitest's
 own count of unhandled errors must equal how many carried the transport message
 exactly. A count, not the crash header — the header is producer-chosen, so any
-pattern over headers is incomplete. Both figures are sums over the whole report,
-so one attempt's green tally cannot cover a later attempt's crash.
+pattern over headers is incomplete. The `Errors` figure is a sum over the whole report, while the transport
+figure counts only inside Vitest's `Unhandled Errors` sections — a test's
+console output is echoed at column 0 too, so a printed copy must not move
+it. One attempt's green tally therefore cannot cover a later attempt's
+crash.
 
 The Linux lanes deliberately keep unhandled errors fatal
 (`scripts/tests/unit-vitest-configs.test.ts`, #10438), so this does not ignore

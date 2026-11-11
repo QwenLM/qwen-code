@@ -46,8 +46,21 @@ set -uo pipefail
 # Set to 0 or off to disable, for an operator who wants the first failure to
 # stand. `off` is what the other levers in this test step use (VITEST_RETRY,
 # HOST_LOAD_MAX_RATIO), so both tokens are accepted and `0` keeps working.
+# A non-negative integer is how many re-runs one suite gets; `off` (and `0`)
+# disable it. Anything else is a configuration error rather than a silent
+# fall-through to "enabled": an operator writing `false` must not have the
+# failure they meant to keep laundered into a re-run.
 RPC_RETRY="${QWEN_CI_RPC_RETRY:-1}"
-case "$RPC_RETRY" in 0 | off) RPC_RETRY=0 ;; esac
+case "$RPC_RETRY" in
+  off | 0) RPC_RETRY=0 ;;
+  '' | *[!0-9]*)
+    echo "::error::QWEN_CI_RPC_RETRY must be a non-negative integer or 'off', got '${RPC_RETRY}'"
+    exit 1
+    ;;
+  *) RPC_RETRY=$((10#${RPC_RETRY})) ;;
+esac
+# The step's own start, so the budget below covers both retry paths.
+SCRIPT_START=$SECONDS
 
 # The main lane's workspaces, the CLI suite and core.
 main_workspaces=('@qwen-code/qwen-code' '@qwen-code/qwen-code-core')
@@ -101,6 +114,14 @@ fi
 unset SIDE_LANE_LOG
 
 # Half a Vitest worker cap, at least 1; 2 where the cap is unset or not a count.
+# True when less than half the step's budget is left. A retry costs about what
+# the first attempt cost, so issuing one here would be killed by the step
+# timeout and replace the first attempt's report with a truncated run.
+retry_budget_exhausted() {
+  [ "${UNIT_LANE_BUDGET_SECONDS:-0}" -gt 0 ] &&
+    [ $((SECONDS - SCRIPT_START)) -ge $((UNIT_LANE_BUDGET_SECONDS / 2)) ]
+}
+
 half_cap() {
   case "$1" in
     '' | *[!0-9]*) echo 2 ;;
@@ -127,12 +148,23 @@ run_suite() {
   }
   "$@" 2>&1 | tee "$log"
   rc="${PIPESTATUS[0]}"
-  if [ "$rc" -ne 0 ] && [ "$RPC_RETRY" != '0' ] &&
+  if [ "$rc" -ne 0 ] && [ "$RPC_RETRY" -gt 0 ] &&
     rpc_only_failure_text "$rc" < "$log"; then
-    echo "::warning::Every test passed but Vitest reported the worker RPC timeout as an unhandled error; re-running this suite once."
-    rm -f "$log"
-    "$@"
-    return $?
+    if retry_budget_exhausted; then
+      echo "::warning::Skipping the RPC re-run: ${SECONDS} s of the ${UNIT_LANE_BUDGET_SECONDS} s step budget used; the first failure stands."
+      rm -f "$log"
+      return "$rc"
+    fi
+    local attempt
+    for ((attempt = 1; attempt <= RPC_RETRY; attempt++)); do
+      echo "::warning::Every test passed but Vitest reported the worker RPC timeout as an unhandled error; re-running this suite (attempt ${attempt} of ${RPC_RETRY})."
+      rm -f "$log"
+      "$@"
+      rc=$?
+      [ "$rc" -eq 0 ] && return 0
+      retry_budget_exhausted && return "$rc"
+    done
+    return "$rc"
   fi
   rm -f "$log"
   return "$rc"
@@ -222,24 +254,25 @@ run_lane_suites() {
     rm -f "$log"
     return "$rc"
   fi
-  # A retry costs about what the first attempt cost. When the step has less
-  # than that left it would be killed by the step timeout, leaving a truncated
-  # run instead of the first attempt's report; keep the first failure.
-  if [ "${UNIT_LANE_BUDGET_SECONDS:-0}" -gt 0 ] &&
-    [ $((SECONDS - started)) -ge $((UNIT_LANE_BUDGET_SECONDS / 2)) ]; then
+  if retry_budget_exhausted; then
     echo "::warning::Skipping the RPC re-run: ${SECONDS} s of the ${UNIT_LANE_BUDGET_SECONDS} s step budget used, too little left for another pass."
     rm -f "$log"
     return "$rc"
   fi
   rm -f "$log"
   echo "::warning::Every test passed but Vitest reported the worker RPC timeout as an unhandled error; re-running the affected workspace suites once."
-  local status=0 attempt
-  for name in "${retryable[@]}"; do
-    npm run test:ci "--workspace=${name}" -- "${suite_args[@]}"
-    attempt=$?
-    if [ "$attempt" -ne 0 ] && [ "$status" -eq 0 ]; then
-      status="$attempt"
-    fi
+  local status=0 attempt pass round
+  for ((round = 1; round <= RPC_RETRY; round++)); do
+    status=0
+    for name in "${retryable[@]}"; do
+      npm run test:ci "--workspace=${name}" -- "${suite_args[@]}"
+      attempt=$?
+      if [ "$attempt" -ne 0 ] && [ "$status" -eq 0 ]; then
+        status="$attempt"
+      fi
+    done
+    [ "$status" -eq 0 ] && break
+    retry_budget_exhausted && break
   done
   # A workspace whose failure was not the transport was not re-run; its
   # failure is the lane's verdict even when every retry passed.
@@ -292,7 +325,7 @@ rpc_only_failure_text() {
   # retry for an unrelated unhandled error, or deny the retry a real transport
   # report had earned.
   timeouts="$(awk '
-    /Unhandled Errors/ { inside = 1; next }
+    /^[^[:alnum:]]*Unhandled Errors[^[:alnum:]]*$/ { inside = 1; next }
     inside && /^[[:space:]]*(Test Files|Tests|Errors)[[:space:]]/ { inside = 0 }
     inside && /\[vitest-worker\]: Timeout calling/ { count++ }
     END { print count + 0 }

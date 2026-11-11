@@ -300,8 +300,16 @@ describe('check-host-load', () => {
     assert.equal(result.status, 1, result.stdout);
     assert.equal(samples(result.stdout).length, 8, result.stdout);
     assert.match(result.stdout, /after 8 samples/);
-    assert.doesNotMatch(result.stdout, /value too great for base/);
-    assert.doesNotMatch(result.stdout, /load5: unbound variable/);
+    // bash writes both of these to stderr, so a stdout-only assertion can
+    // never fail on the mutation it was written to catch.
+    assert.doesNotMatch(
+      result.stdout + result.stderr,
+      /value too great for base/,
+    );
+    assert.doesNotMatch(
+      result.stdout + result.stderr,
+      /load5: unbound variable/,
+    );
   });
 
   it('keeps a custom ceiling and observes the exact boundary', () => {
