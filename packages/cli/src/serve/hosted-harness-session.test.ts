@@ -25972,6 +25972,129 @@ describe('Hosted Harness tool approvals', () => {
   });
 
   it.each([
+    { arm: 'detach', terminal: false },
+    { arm: 'delete', terminal: true },
+    { arm: 'detach, row already released', terminal: false, releasedRow: true },
+  ])(
+    'exempts a durable MCP owner with no live object on $arm',
+    async ({ terminal, releasedRow = false }) => {
+      // R8-2: the mcp-<digest> family needs the same durable source the
+      // config-scoped family got in R5-1. A plain Session builds neither live
+      // object, so nothing here is nulled by the test; the restore seeds the
+      // owner from the Broker's hold rows and the durable configuration row
+      // is what must keep it exempt.
+      const released: string[] = [];
+      const runtime = {
+        bindingId: 'binding',
+        generation: '1',
+        workspaceGeneration: '1',
+      };
+      vi.mocked(HostedWorkspaceBroker.prototype.warm).mockImplementation(
+        async function (this: HostedWorkspaceBroker) {
+          this.runtime = runtime;
+        },
+      );
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'release').mockImplementation(
+        async function (this: HostedWorkspaceBroker) {
+          released.push(this.runtimeSessionId);
+        },
+      );
+      const durableMcpOwner = `mcp-${'e'.repeat(64)}`;
+      const definition = {
+        managedSessionStore: store(),
+        toolProfile: 'hosted-workspace-shell/1',
+        publicChildAgentsVersion: 1,
+      };
+      const server = await app(true);
+      const created = await headers(supertest(server).post('/session'))
+        .send({ ...definition, sessionId: SESSION_ID, sessionScope: 'thread' })
+        .expect(200);
+      await headers(supertest(server).post(`/session/${SESSION_ID}/detach`))
+        .set('X-Qwen-Client-Id', created.body.clientId as string)
+        .expect(204);
+      vi.spyOn(
+        HostedWorkspaceBroker.prototype,
+        'activeHoldRuntimeSessionIds',
+      ).mockResolvedValue([durableMcpOwner]);
+      const reloaded = await app(true);
+      const loaded = await headers(
+        supertest(reloaded).post(`/session/${SESSION_ID}/load`),
+      ).send(definition);
+      expect(loaded.status).toBe(200);
+      const resident = (
+        wakeDeps.last as {
+          session: {
+            hooks?: unknown;
+            mcp?: unknown;
+            heldRuntimeTurns: Set<string>;
+            managed: {
+              authority: {
+                extensionRecordsInDomain: (
+                  domain: string,
+                ) => ReadonlyArray<{ record: unknown }>;
+              };
+            };
+          };
+        }
+      ).session;
+      expect(resident.hooks).toBeUndefined();
+      expect(resident.mcp).toBeUndefined();
+      expect(resident.heldRuntimeTurns.has(durableMcpOwner)).toBe(true);
+      const authority = resident.managed.authority;
+      const recordsInDomain =
+        authority.extensionRecordsInDomain.bind(authority);
+      // A non-released configuration row naming that owner — the same row the
+      // MCP constructor picks its owner from on the next load. The real parser
+      // validates it, so a wrong shape fails here rather than passing vacuously.
+      const configurationRecord = {
+        configurationId: '11111111-1111-4111-8111-111111111111',
+        runtimeSessionId: durableMcpOwner,
+        serverId: 'sample',
+        serverRevision: 1,
+        configRevision: 1,
+        catalogRevision: null,
+        connectionGeneration: null,
+        catalogRef: null,
+        releaseState: releasedRow ? 'released' : 'active',
+        run: {
+          state: releasedRow ? 'cancelled' : 'admitted',
+          execution: releasedRow ? 'not_started_proven' : 'intent',
+          effectId: '11111111-1111-4111-8111-111111111111',
+          executionCallId: null,
+          dispatchId: null,
+          deliveryId: null,
+          delivery: null,
+          definition: {
+            definitionId: 'sample',
+            definitionRevision: 1,
+            definitionDigest: 'b'.repeat(64),
+          },
+          reason: null,
+          runtime: null,
+        },
+      };
+      vi.spyOn(authority, 'extensionRecordsInDomain').mockImplementation(
+        (domain: string) =>
+          domain === 'mcp_configuration'
+            ? [{ record: configurationRecord }]
+            : recordsInDomain(domain),
+      );
+      released.length = 0;
+      const settled = terminal
+        ? await headers(
+            supertest(reloaded).delete(`/session/${SESSION_ID}`),
+          ).set('X-Qwen-Client-Id', loaded.body.clientId as string)
+        : await headers(
+            supertest(reloaded).post(`/session/${SESSION_ID}/detach`),
+          ).set('X-Qwen-Client-Id', loaded.body.clientId as string);
+      expect(settled.status).toBe(204);
+      // A detach must leave a live owner re-acquirable; only a delete may
+      // tombstone it. A row already RELEASED is one no successor recomputes,
+      // so it is not exempt and the detach drains it like any other hold.
+      expect(released.includes(durableMcpOwner)).toBe(terminal || releasedRow);
+    },
+  );
+  it.each([
     { arm: 'v2 delete', terminal: true, protocol: 2 },
     { arm: 'v2 close', terminal: false, protocol: 2 },
     { arm: 'legacy delete', terminal: true, protocol: 1 },
@@ -25988,9 +26111,27 @@ describe('Hosted Harness tool approvals', () => {
       protocol: 1,
       refused: true,
     },
+    {
+      arm: 'legacy delete, Broker restarted',
+      terminal: true,
+      protocol: 1,
+      reconciling: true,
+    },
+    {
+      arm: 'v2 delete, Broker restarted',
+      terminal: true,
+      protocol: 2,
+      reconciling: true,
+    },
   ])(
     'releases the orphaned config-scoped owners a hook-free apply left behind ($arm)',
-    async ({ terminal, protocol, retained = false, refused = false }) => {
+    async ({
+      terminal,
+      protocol,
+      retained = false,
+      refused = false,
+      reconciling = false,
+    }) => {
       // R7-1, driven end to end: no session field is assigned by this test.
       // Installing hooks, firing one, then applying a revision whose bundle
       // carries no Hook catalog is enough for the real drain to nil the Hook
@@ -26024,6 +26165,13 @@ describe('Hosted Harness tool approvals', () => {
       let refuseOrphan = refused;
       vi.spyOn(HostedWorkspaceBroker.prototype, 'release').mockImplementation(
         async function (this: HostedWorkspaceBroker) {
+          // A restarted Broker answers this on every attempt — the state it
+          // answers from never changes, so rethrowing wedges the delete.
+          if (reconciling && this.runtimeSessionId === orphanId)
+            throw new HostedWorkspaceBrokerRejection(
+              503,
+              'runtime_reconciliation_required',
+            );
           if (refuseOrphan && this.runtimeSessionId === orphanId) {
             refuseOrphan = false;
             throw new HostedWorkspaceBrokerRejection(
@@ -26166,6 +26314,15 @@ describe('Hosted Harness tool approvals', () => {
               hooks?: unknown;
               mcp?: unknown;
               extensions?: { configRevisions: readonly number[] };
+              shell?: {
+                monitorLoops?: Map<
+                  string,
+                  {
+                    prepareLifecycle: () => void;
+                    stop: (settle?: string) => Promise<void>;
+                  }
+                >;
+              };
             };
           }
         ).session;
@@ -26183,6 +26340,12 @@ describe('Hosted Harness tool approvals', () => {
       expect(residentOf().hooks === undefined).toBe(!retained);
       expect(residentOf().mcp).toBeUndefined();
       expect(residentOf().extensions?.configRevisions).toEqual([1, 2]);
+      const stop = vi.fn(async () => {});
+      const loopHost = residentOf();
+      loopHost.shell ??= {};
+      loopHost.shell.monitorLoops = new Map([
+        ['watch', { prepareLifecycle: () => {}, stop }],
+      ]);
       released.length = 0;
       const settled =
         protocol === 2
@@ -26219,7 +26382,17 @@ describe('Hosted Harness tool approvals', () => {
         expect(released.includes(ownerFor(1))).toBe(true);
         return;
       }
+      // The 503 is absorbed exactly as both held-Runtime drains absorb it,
+      // so the Session still retires instead of looping on an answer that
+      // cannot change (R8-1).
       expect(settled.status).toBe(protocol === 2 ? 200 : 204);
+      // Absorbing the 503 is only half the sibling discipline: the stop it
+      // could not prove must settle runtime_lost, not stop_requested.
+      if (terminal && !refused)
+        expect(stop).toHaveBeenCalledWith(
+          reconciling ? 'runtime_lost' : 'stop_requested',
+        );
+      if (reconciling) return;
       // A delete discharges the owner nobody else can reach; a detach must
       // leave it re-acquirable, or the next load's acquire is refused (R13-1).
       // Exactly once: with a live Hooks session its own close already swept

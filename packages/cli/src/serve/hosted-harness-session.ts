@@ -696,12 +696,14 @@ export function reloadStableOwnerIds(session: {
   hooks?: { broker: { runtimeSessionId: string } };
   mcp?: { broker: { runtimeSessionId: string } };
   configScopedOwnerIds?: readonly string[];
+  durableMcpOwnerIds?: readonly string[];
 }): Set<string> {
   return new Set(
     [
       session.hooks?.broker.runtimeSessionId,
       session.mcp?.broker.runtimeSessionId,
       ...(session.configScopedOwnerIds ?? []),
+      ...(session.durableMcpOwnerIds ?? []),
     ].filter(
       (id): id is string =>
         id !== undefined &&
@@ -729,6 +731,17 @@ function sessionReloadStableOwnerIds(session: HostedSession): Set<string> {
           revision,
         ),
     ),
+    // The mcp-<digest> family needs the same durable source, or an apply that
+    // drops both the MCP servers and the Hook catalog leaves an owner the
+    // restore still seeds but this set no longer knows — and a detach would
+    // tombstone it (R8-2). These are the very rows the MCP constructor picks
+    // its owner from, so the ids are byte-identical to the ones a reload
+    // acquires; a released row is one no successor recomputes.
+    durableMcpOwnerIds: session.managed.authority
+      .extensionRecordsInDomain('mcp_configuration')
+      .map((entry) => parseMcpConfiguration(entry.record))
+      .filter((entry) => entry.releaseState !== 'released')
+      .map((entry) => entry.runtimeSessionId),
   });
 }
 
@@ -8608,7 +8621,9 @@ export function registerHostedHarnessSessionRoutes(
           // Only a delete is terminal; a close keeps the deterministic owner
           // re-acquirable across the reload (R14-1).
           await session.hooks?.close({ terminal: kind === 'delete' });
-          if (kind === 'delete') await releaseOrphanedConfigOwners(session);
+          if (kind === 'delete')
+            heldDrainUnproven =
+              (await releaseOrphanedConfigOwners(session)) || heldDrainUnproven;
           heldDrainUnproven =
             (await releaseLeaseNow(session, kind === 'delete')) ||
             heldDrainUnproven;
@@ -10517,8 +10532,9 @@ export function registerHostedHarnessSessionRoutes(
   // them, and a live MCP broker owns its own id until its own close.
   const releaseOrphanedConfigOwners = async (
     session: HostedSession,
-  ): Promise<void> => {
-    if (!brokerOptions || session.hooks) return;
+  ): Promise<boolean> => {
+    if (!brokerOptions || session.hooks) return false;
+    let unproven = false;
     const sessionKey = session.managed.authority.sessionHeader.sessionKey;
     for (const revision of session.extensions?.configRevisions ?? []) {
       const id = hostedConfigScopedOwnerId(sessionKey, revision);
@@ -10528,17 +10544,36 @@ export function registerHostedHarnessSessionRoutes(
           drain: true,
         });
       } catch (cause) {
-        // The owner may never have been acquired, or the Broker may have
-        // forgotten it. Both mean nothing remains to stop — the tolerance
-        // the sibling owner release carries (R17-1).
+        // Exactly what both held-Runtime drains tolerate (R25-1/R17-1): a 404
+        // means nothing remains to stop, and a Broker restarted beside the
+        // Harness holds no resident Session and answers 503 — the Workspace
+        // cascade owns that Runtime. Rethrowing the 503 wedged the Session
+        // undeletable, because the state it answers from never changes.
+        // A hold fence is deliberately NOT absorbed: `HostedHookSession.close`
+        // names a remaining fence rather than answering 204, for the same
+        // reason — a delete that succeeded here would drop the only state
+        // that can retry the release.
         if (
           !(cause instanceof HostedWorkspaceBrokerRejection) ||
-          cause.status !== 404 ||
-          cause.code !== 'runtime_session_not_found'
+          !(
+            (cause.status === 404 &&
+              cause.code === 'runtime_session_not_found') ||
+            (cause.status === 503 &&
+              cause.code === 'runtime_reconciliation_required')
+          )
         )
           throw cause;
+        // Tolerating the 503 is only half of what the drains do: the stop it
+        // could not prove must not settle as stop_requested (R8-1).
+        if (cause.status === 503) {
+          unproven = true;
+          writeStderrLineSafe(
+            `qwen serve: Hosted Harness delete could not prove config-scoped owner ${id} stopped: the Broker requires reconciliation, the Workspace cascade owns it.`,
+          );
+        }
       }
     }
+    return unproven;
   };
 
   /**
@@ -13607,7 +13642,9 @@ export function registerHostedHarnessSessionRoutes(
         // The held-Runtime drain above ran first so a turn's background run no
         // longer fences the non-terminal mount handback (R14-2).
         await session.hooks?.close({ terminal: req.method === 'DELETE' });
-        if (req.method === 'DELETE') await releaseOrphanedConfigOwners(session);
+        if (req.method === 'DELETE')
+          heldDrainUnproven =
+            (await releaseOrphanedConfigOwners(session)) || heldDrainUnproven;
         // Deferred until the close is known terminal: a Hook fence refusal
         // above keeps the Session attached and retryable, and its wake pump
         // with it. wakeBusy() holds mcpClosing for the whole drain, so no
