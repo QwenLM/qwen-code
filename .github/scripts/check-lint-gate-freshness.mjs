@@ -251,6 +251,15 @@ export function ignoreLines(text) {
  * change. `LINTER_INVOCATION` below refuses any entry that runs a linter, and
  * the test suite requires every plumbing name to exist in the workflow so a
  * renamed step cannot leave a stale entry silently excluding nothing.
+ *
+ * One entry is safe only because of a step that is NOT here, and the coupling
+ * is not re-derivable from this list: `Checkout` carries `fetch-depth: 1`, while
+ * `scripts/lint-scope.js` needs `git merge-base baseSha HEAD` to compute the
+ * incremental scope. The depth guarantee lives in `Fetch incremental lint
+ * history`, which fetches the base at depth 100 and deepens until the merge
+ * base resolves — and that step is deliberately absent below, so it stays in
+ * the slice. Adding it to this list would let a base-side change to the depth
+ * guarantee silently narrow what lint covers.
  */
 export const CI_PLUMBING_STEPS = new Set([
   'Create isolated HOME',
@@ -443,9 +452,8 @@ async function narrowsToUnchangedLintSlice({
   repo,
   baseRef,
   file,
-  comparison,
+  mergeBase,
 }) {
-  const mergeBase = comparison?.merge_base_commit?.sha;
   if (!mergeBase) throw new Error('the compare carried no merge base commit');
   const [baseText, branchText] = await Promise.all(
     [baseRef, mergeBase].map((ref) =>
@@ -616,16 +624,18 @@ export async function findStaleGateFiles({
     }),
   );
   const candidates = latest.filter((entry) => entry !== null);
-  // Kept beside the verdicts rather than on them: the verdict shape is what the
-  // report renders and the tests assert, and only the narrowings need the fork
-  // point. Passing it along means none of them pays a second compare.
-  const comparisons = new Map();
+  // Only the fork-point SHA is retained, not the compare response: one of those
+  // was measured at ~4 MB, and holding all nine through the narrowing phase
+  // would keep them alive for a single field. Kept beside the verdicts rather
+  // than on them, because the verdict shape is what the report renders and the
+  // tests assert. Passing it along means no narrowing pays a second compare.
+  const mergeBases = new Map();
   const verdicts = await Promise.all(
     candidates.map(async (candidate) => {
       const comparison = await fetchJson(
         `/repos/${repo}/compare/${candidate.sha}...${headSha}`,
       );
-      comparisons.set(candidate.file, comparison);
+      mergeBases.set(candidate.file, comparison.merge_base_commit?.sha);
       return {
         ...candidate,
         contained:
@@ -647,7 +657,7 @@ export async function findStaleGateFiles({
           baseSha: verdict.sha,
           baseRef,
           headSha,
-          comparison: comparisons.get(verdict.file),
+          mergeBase: mergeBases.get(verdict.file),
         });
         return ignorable ? null : verdict;
       } catch (error) {

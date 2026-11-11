@@ -1062,6 +1062,17 @@ test('every lint job step is classified, and no plumbing name is stale', () => {
   }
 });
 
+test('the depth guarantee that makes excluding Checkout safe stays in the slice', () => {
+  // The step that owns the incremental-lint depth guarantee must stay OUT of
+  // the plumbing list. `Checkout` is only safe to exclude because this step
+  // fetches the base deep enough for lint-scope's merge-base; excluding it too
+  // would let a base-side depth change silently narrow what lint covers.
+  assert.ok(
+    !CI_PLUMBING_STEPS.has('Fetch incremental lint history'),
+    "'Fetch incremental lint history' owns the depth guarantee that makes excluding 'Checkout' safe — it must stay in the slice",
+  );
+});
+
 test('a base-side runner-routing edit does not stale the branch', async () => {
   // Mutation witness: removing ci.yml from NARROWINGS leaves this stale. This
   // is the measured shape — 6 of 13 recent ci.yml commits were plumbing churn

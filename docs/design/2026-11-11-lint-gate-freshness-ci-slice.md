@@ -243,7 +243,7 @@ over-rejects, which is the safe direction.
   they do not belong to the `Lint & Static` lane, so a branch's green on that lane
   never depended on them.
 - **Accepted residual risk:** `Checkout` and `Verify checkout includes expected
-  head commit` stay outside the slice. A base-side `ref:` or `fetch-depth:` edit,
+head commit` stay outside the slice. A base-side `ref:` or `fetch-depth:` edit,
   or an edit to that verification step's body, is invisible here. A wrong tree
   still reddens the lane at the verification step; going silent takes two
   coordinated edits.
@@ -258,15 +258,24 @@ over-rejects, which is the safe direction.
   kept step references a local action, the reference is in the slice but the
   action's implementation is not, so a base-side change to that implementation is
   invisible to this check — a gap that predates this PR, left to a follow-up.
+- **Accepted residual over-rejection:** everything above `jobs:` is kept
+  wholesale, so a base-side `on:` or `concurrency:` edit still stales every
+  in-flight PR even though it cannot change what lint checks. Narrowing that
+  prelude to `env` alone would remove those reds too, but the prelude also carries
+  `permissions` and `defaults.run.shell`, which do change how every step behaves.
+  Left in the safe direction deliberately.
 
 ## Validation plan
 
-1. `node --test .github/scripts/check-lint-gate-freshness.test.mjs` — 61 cases,
-   including the 14 added here.
-2. Mutation witnesses: each of six deliberate defects must redden the suite —
+1. `node --test .github/scripts/check-lint-gate-freshness.test.mjs` — 62 cases,
+   including the 16 added here. CI corroborates this on Linux through
+   `Run .github/scripts helper tests`, which collects the suite from
+   `HELPER_TESTS_DEP_FREE`.
+2. Mutation witnesses: each of eight deliberate defects must redden the suite —
    dropping `ci.yml` from `NARROWINGS`, returning the whole file as the slice,
    keeping headers only, comparing the head instead of the merge base, absorbing
-   an unnamed step, and treating a missing merge base as fresh.
+   an unnamed step, treating a missing merge base as fresh, trusting the plumbing
+   label without the linter check, and dropping the job `env` from the slice.
 3. Slice completeness against the real workflow: every `scripts/lint.js` lane
    flag must survive in the slice.
 4. Live API, ten historical base tips with a fork point one commit behind each,
@@ -277,7 +286,7 @@ over-rejects, which is the safe direction.
 
 ## Acceptance criteria
 
-- The suite passes, and all six mutations redden it.
+- The suite passes, and all eight mutations redden it.
 - Six of the thirteen most recent `ci.yml` commits no longer ask for a rebase;
   the other seven still do.
 - #16939's red is preserved.
