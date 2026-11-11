@@ -1073,8 +1073,12 @@ describe('WorkflowRunner', () => {
   it.each([
     [true, true, false, true],
     [true, false, false, false],
-    [true, true, true, false],
+    // An ACP session (Web Shell, IDE clients) reports non-interactive, and
+    // still resumes in the background: it delivers completion too.
+    [true, false, true, true],
+    [true, true, true, true],
     [false, true, false, false],
+    [false, false, true, false],
   ])(
     'records resumeInBackground for background=%s interactive=%s zed=%s',
     async (background, interactive, zed, expected) => {

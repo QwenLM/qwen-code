@@ -156,6 +156,38 @@ export type WorkflowRunSettlement =
   | { ok: true; outcome: WorkflowRunOutcome }
   | { ok: false; message: string; details?: WorkflowExecutionError };
 
+/**
+ * Whether this host can take a model-requested background run: one that
+ * returns before it settles and reports back through the conversation.
+ * The interactive TUI and ACP sessions (Web Shell, IDE clients) each feed
+ * the run's completion into the session's notification queue; a headless
+ * run has nothing to deliver it to, so it stays in the foreground.
+ *
+ * An ACP session also needs its workflow controls, which it turns off in
+ * bare mode and in an untrusted folder (the same conditions as the ACP
+ * agent's `canUseWorkflowControls`): without them a client could neither
+ * see nor stop a background run.
+ */
+export function hostSupportsBackgroundWorkflows(
+  config: Pick<
+    Config,
+    | 'isInteractive'
+    | 'getExperimentalZedIntegration'
+    | 'getBareMode'
+    | 'getFolderTrustFeature'
+    | 'getFolderTrust'
+  >,
+): boolean {
+  if (config.getExperimentalZedIntegration?.() === true) {
+    return (
+      config.getBareMode?.() !== true &&
+      (config.getFolderTrustFeature?.() !== true ||
+        config.getFolderTrust?.() === true)
+    );
+  }
+  return config.isInteractive?.() === true;
+}
+
 export class WorkflowRunHandle {
   readonly completion: Promise<WorkflowRunSettlement>;
   /**
@@ -574,9 +606,7 @@ export class WorkflowRunner {
         isBackgrounded: runInBackground,
         notifyOnCompletion: options.notifyOnCompletion,
         resumeInBackground:
-          runInBackground &&
-          config.isInteractive?.() === true &&
-          config.getExperimentalZedIntegration?.() !== true,
+          runInBackground && hostSupportsBackgroundWorkflows(config),
       };
       // A resume's checkpoint is not best-effort. `retry` from history
       // refuses a run whose checkpoint is still on disk, reading it as a
