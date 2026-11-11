@@ -859,6 +859,25 @@ describe('Qwen Subscription model resolution', () => {
     expect(result.sources['apiKey'].kind).toBe('computed');
   });
 
+  it('carries the output-validation retry knobs through the subscription allowlist', () => {
+    const result = resolve({
+      authType: AuthType.QWEN_SUBSCRIPTION,
+      settings: {
+        generationConfig: {
+          timeout: 12345,
+          maxOutputValidationRetries: 2,
+          outputValidationRetryDisabled: true,
+        },
+      },
+    });
+    // The two new knobs must survive the hand-maintained subscription allowlist
+    // exactly as they do on every other auth path; dropping them would leave a
+    // subscription user's `outputValidationRetryDisabled: true` read as false.
+    expect(result.config.maxOutputValidationRetries).toBe(2);
+    expect(result.config.outputValidationRetryDisabled).toBe(true);
+    expect(result.config.timeout).toBe(12345);
+  });
+
   it.each([{ baseUrl: 'https://another-gateway.example/v1' }])(
     'rejects an explicit CLI route override %o',
     (cli) => {

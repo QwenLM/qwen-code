@@ -2632,7 +2632,7 @@ describe('LlmChat', async () => {
         // Dies at the socket before its first chunk: replayable.
         'still accepts a quiet completion when the armed attempt is transport-replayed (#9026)',
         'prompt-id-tool-result-armed-transport-replay',
-        5,
+        6,
         () => streamThenThrow([], socketReset()),
         120_000,
         7,
@@ -2642,7 +2642,7 @@ describe('LlmChat', async () => {
         // the transient budget already spent (rearm keyed to that bucket).
         'still accepts a quiet completion when the armed attempt leaks protocol tags (#9026)',
         'prompt-id-tool-result-armed-tag-leak',
-        5,
+        6,
         () => streamThenThrow([], tagLeak()),
         120_000,
         7,
@@ -2652,7 +2652,7 @@ describe('LlmChat', async () => {
         // rescheduled attempt is still the final one.
         'still accepts a quiet completion when the armed attempt hits a rate limit (#9026)',
         'prompt-id-tool-result-armed-rate-limit',
-        5,
+        6,
         () =>
           streamThenThrow(
             [],
@@ -2668,7 +2668,7 @@ describe('LlmChat', async () => {
         // retry slot; the budget is shared, so the last attempt is armed.
         'arms the quiet completion when a mixed error type exhausts the budget (#9026)',
         'prompt-id-tool-result-mixed-final-error',
-        4,
+        5,
         () => streamOf({} as GenerateContentResponse),
         120_000,
         6,
