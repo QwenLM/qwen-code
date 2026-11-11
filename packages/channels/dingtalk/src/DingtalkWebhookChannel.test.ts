@@ -379,26 +379,53 @@ describe('DingTalk webhook lifecycle', () => {
   });
 
   it.each([true, false])(
-    'does not abort a settled request on disconnect (success=%s)',
+    'only cancels and drains the pending request after another settles (success=%s)',
     async (success) => {
       const { channel } = make();
       fetchMock.mockResolvedValueOnce(
         Response.json({ errcode: success ? 0 : 310000 }),
       );
+      let release!: () => void;
+      fetchMock.mockImplementationOnce(
+        () =>
+          new Promise<Response>((_resolve, reject) => {
+            release = () => reject(new Error(WEBHOOK_URL));
+          }),
+      );
       await channel.connect();
-      const result = channel.sendMessage('default', 'text');
-      if (success) {
-        await result;
-      } else {
-        await expect(result).rejects.toThrow('code 310000');
-      }
-      expect(fetchMock).toHaveBeenCalledOnce();
-      const signal = fetchMock.mock.calls[0]![1]?.signal;
-      expect(signal?.aborted).toBe(false);
+      const first = channel.sendMessage('default', 'first');
+      const second = expect(
+        channel.sendMessage('default', 'second'),
+      ).rejects.toThrow('cancelled');
+      try {
+        if (success) {
+          await first;
+        } else {
+          await expect(first).rejects.toThrow('code 310000');
+        }
+        expect(fetchMock).toHaveBeenCalledTimes(2);
+        const firstSignal = fetchMock.mock.calls[0]![1]?.signal;
+        const secondSignal = fetchMock.mock.calls[1]![1]?.signal;
+        expect(firstSignal?.aborted).toBe(false);
+        expect(secondSignal?.aborted).toBe(false);
 
-      channel.disconnect();
-      await channel.waitForDisconnect();
-      expect(signal?.aborted).toBe(false);
+        channel.disconnect();
+        let drained = false;
+        const drain = channel.waitForDisconnect().then(() => {
+          drained = true;
+        });
+        expect(firstSignal?.aborted).toBe(false);
+        expect(secondSignal?.aborted).toBe(true);
+        await new Promise(setImmediate);
+        expect(drained).toBe(false);
+        release();
+        await second;
+        await drain;
+        expect(drained).toBe(true);
+      } finally {
+        release();
+        await Promise.allSettled([first, second]);
+      }
     },
   );
 
