@@ -406,6 +406,12 @@ export function ManagedTerminalPanel({
     >
       <DialogContent
         className="flex h-[85vh] max-w-5xl flex-col sm:max-w-5xl"
+        // Escape belongs to the terminal application (e.g. leaving Vim insert
+        // mode); Radix would otherwise dismiss the dialog and release the PTY.
+        // Close stays available through the explicit dialog close control.
+        onEscapeKeyDown={(event) => {
+          event.preventDefault();
+        }}
         onCloseAutoFocus={(event) => {
           event.preventDefault();
           restoreFocus();

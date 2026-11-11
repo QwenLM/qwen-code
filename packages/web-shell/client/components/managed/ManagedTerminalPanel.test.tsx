@@ -231,4 +231,28 @@ describe('ManagedTerminalPanel', () => {
     expect(ws.close).toHaveBeenCalled();
     expect(terminalMock.dispose).toHaveBeenCalled();
   });
+
+  it('keeps the dialog open when Escape reaches the terminal', async () => {
+    const ticketFn = vi
+      .fn()
+      .mockResolvedValue({ ticket: 'ticket-one', expiresInSeconds: 30 });
+    await render(ticketFn);
+    const ws = FakeWebSocket.instances[0]!;
+    ws.open();
+    // Escape belongs to the terminal application (e.g. leaving Vim insert
+    // mode); it must be prevented so Radix does not dismiss the dialog and
+    // release the PTY out from under the running shell.
+    const escape = new KeyboardEvent('keydown', {
+      key: 'Escape',
+      bubbles: true,
+      cancelable: true,
+    });
+    await act(async () => {
+      document.dispatchEvent(escape);
+    });
+    await flush();
+    expect(escape.defaultPrevented).toBe(true);
+    expect(onClose).not.toHaveBeenCalled();
+    expect(ws.send).not.toHaveBeenCalledWith('\x00{"type":"release"}');
+  });
 });
