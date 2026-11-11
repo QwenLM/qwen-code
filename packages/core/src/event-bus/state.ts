@@ -78,6 +78,10 @@ export function createRunStateStore<
 /**
  * The round an event belongs to, or undefined for a late event from an
  * abandoned round. Handlers use this to drop work that no longer applies.
+ *
+ * Round 0 is a legitimate round (the first one), so the result is falsy only
+ * when it is undefined. Consumers must test `=== undefined`, not `!round`,
+ * or they will drop the first round.
  */
 export function currentRound(
   state: RunState | undefined,

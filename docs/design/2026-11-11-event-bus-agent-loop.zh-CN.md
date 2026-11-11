@@ -3,7 +3,7 @@
 [English](2026-11-11-event-bus-agent-loop.md) | [简体中文](2026-11-11-event-bus-agent-loop.zh-CN.md)
 
 - **状态**：提议中。实现从 PR 1（总线原语）开始；不改变任何 surface 的默认行为。
-- **日期**：2026-11-11，基于 `origin/main` `19f73eb7ec0a`。
+- **日期**：2026-11-11，基于 `origin/main` `da270e434957`。
 - **关联**：
   - [Unified agent loop](2026-10-23-unified-agent-loop.zh-CN.md) —— 本设计对其做内部架构升级的已批准设计；跟踪 issue #15327，#15343 批准，headless 已在 #15369 合入，ACP 模型轮在 #15509 评审中；
   - 被移植架构的来源：`v1.0.0-preview` 分支 `587e3429cabf`，`packages/core/src/event-bus/`（19 个文件，6,237 行）；
@@ -11,7 +11,7 @@
 
 ## 问题
 
-共享 agent 循环（`packages/core/src/core/agent-loop.ts`，620 行）是一个过程式 `for` 循环：`runModelRound` → `runToolBatch` → 续跑，所有 surface 决策都表达为 `AgentLoopHost` 上的可选回调。作为统一循环收敛的第一步这是对的：它让七个副本迁到同一实现的同时，每个 surface 适配器照常工作。
+共享 agent 循环（`packages/core/src/core/agent-loop.ts`，660 行）是一个过程式 `for` 循环：`runModelRound` → `runToolBatch` → 续跑，所有 surface 决策都表达为 `AgentLoopHost` 上的可选回调。作为统一循环收敛的第一步这是对的：它让七个副本迁到同一实现的同时，每个 surface 适配器照常工作。
 
 `v1.0.0-preview` 分支把同样的循环重新表达为事件驱动状态机，其形态具备过程式循环没有的性质：
 
@@ -34,7 +34,7 @@
 | 工具批       | `core/agent-loop.ts:351` `runToolBatch`                                                                                                            | 去重/replay → `host.selectCalls`/`beforeToolLaunch` → 执行器 → `finalizeToolResponses`                     |
 | 执行器接缝   | `core/agent-loop.ts:162` `AgentLoopToolExecutor`                                                                                                   | 可替换；默认包一个 `CoreToolScheduler`（`:613`）                                                           |
 | Surface 接缝 | `core/agent-loop.ts:110` `AgentLoopHost`                                                                                                           | 可选回调，不是订阅                                                                                         |
-| 模型事件     | `core/turn.ts:78` `LlmEventType`（22 种），`Turn`（`:752`）                                                                                        | 已是规范化事件流                                                                                           |
+| 模型事件     | `core/turn.ts:78` `LlmEventType`（21 种），`Turn`（`:752`）                                                                                        | 已是规范化事件流                                                                                           |
 | 现有总线     | `confirmation-bus/message-bus.ts:15` `MessageBus`；`agents/runtime/agent-events.ts:296` `AgentEventEmitter`；`packages/acp-bridge/src/eventBus.ts` | hooks 请求/响应；subagent 作用域事件；带 replay 的传输层 fan-out —— 都不是循环控制总线                     |
 
 各 surface：headless 跑 `runAgentLoop`（已合入，#15369）；ACP 用 `runModelRound` 加自己的工具步（#15509 评审中）；Ink TUI（`use-llm-stream.ts`）、OpenTUI、AgentCore、speculation 与 Hosted Harness 仍跑各自的循环，由 unified-agent-loop 迁移计划管辖。
@@ -146,7 +146,7 @@ preview 按 `queryId` 路由、用 UUID `roundId` 标记轮次。main 的循环�
 - `AgentEventEmitter`：词汇与生命周期都限于 subagent 运行时。
 - acp-bridge `eventBus`：带 replay 环与字节预算的传输层 fan-out；它位于循环之上，不在循环之内。
 
-没有任何一个提供 query 路由 + 串行异步投递 + 失败事件，而这些正是被移植的性质。新模块约 450 行原语；handler 是对 `agent-loop.ts` 已有逻辑的重新表达，不是新行为。
+没有任何一个提供 query 路由 + 串行异步投递 + 失败事件，而这些正是被移植的性质。新模块约 280 行原语；handler 是对 `agent-loop.ts` 已有逻辑的重新表达，不是新行为。
 
 ## 迁移（PR 切片）
 

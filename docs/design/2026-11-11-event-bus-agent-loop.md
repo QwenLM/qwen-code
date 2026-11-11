@@ -3,7 +3,7 @@
 [English](2026-11-11-event-bus-agent-loop.md) | [简体中文](2026-11-11-event-bus-agent-loop.zh-CN.md)
 
 - **Status**: proposed. Implementation starts with PR 1 (bus primitives); no surface default changes.
-- **Date**: 2026-11-11, against `origin/main` `19f73eb7ec0a`.
+- **Date**: 2026-11-11, against `origin/main` `da270e434957`.
 - **Related**:
   - [Unified agent loop](2026-10-23-unified-agent-loop.md) — the accepted design this one re-architects internally; tracking issue #15327, accepted in #15343, headless merged in #15369, ACP model round in review in #15509;
   - source of the ported architecture: the `v1.0.0-preview` branch at `587e3429cabf`, `packages/core/src/event-bus/` (19 files, 6,237 lines);
@@ -11,7 +11,7 @@
 
 ## Problem
 
-The shared agent loop (`packages/core/src/core/agent-loop.ts`, 620 lines) is a procedural `for` loop: `runModelRound` → `runToolBatch` → continuation, with every surface decision expressed as an optional callback on `AgentLoopHost`. This was the right first step for the unified-loop convergence: it keeps every surface adapter working while the seven copies move onto one implementation.
+The shared agent loop (`packages/core/src/core/agent-loop.ts`, 660 lines) is a procedural `for` loop: `runModelRound` → `runToolBatch` → continuation, with every surface decision expressed as an optional callback on `AgentLoopHost`. This was the right first step for the unified-loop convergence: it keeps every surface adapter working while the seven copies move onto one implementation.
 
 The `v1.0.0-preview` branch re-expressed the same cycle as an event-driven state machine, and its shape has properties the procedural loop lacks:
 
@@ -34,7 +34,7 @@ We want these properties in main's shared loop without disturbing the convergenc
 | Tool batch     | `core/agent-loop.ts:351` `runToolBatch`                                                                                                            | duplicates/replays → `host.selectCalls`/`beforeToolLaunch` → executor → `finalizeToolResponses`                                   |
 | Executor seam  | `core/agent-loop.ts:162` `AgentLoopToolExecutor`                                                                                                   | replaceable; default wraps one `CoreToolScheduler` (`:613`)                                                                       |
 | Surface seam   | `core/agent-loop.ts:110` `AgentLoopHost`                                                                                                           | optional callbacks, not subscriptions                                                                                             |
-| Model events   | `core/turn.ts:78` `LlmEventType` (22 kinds), `Turn` (`:752`)                                                                                       | already a normalized event stream                                                                                                 |
+| Model events   | `core/turn.ts:78` `LlmEventType` (21 kinds), `Turn` (`:752`)                                                                                       | already a normalized event stream                                                                                                 |
 | Existing buses | `confirmation-bus/message-bus.ts:15` `MessageBus`; `agents/runtime/agent-events.ts:296` `AgentEventEmitter`; `packages/acp-bridge/src/eventBus.ts` | hooks request/response; subagent-scoped events; transport fan-out with replay — none is a loop control bus                        |
 
 Surfaces: headless runs `runAgentLoop` (merged, #15369); ACP uses `runModelRound` with its own tool step (#15509 in review); Ink TUI (`use-llm-stream.ts`), OpenTUI, AgentCore, speculation and the Hosted Harness still run their own loops, governed by the unified-agent-loop migration plan.
@@ -146,7 +146,7 @@ The adapter owns the run's `AbortController` wiring exactly as today (`signal`, 
 - `AgentEventEmitter`: vocabulary and lifetime scoped to the subagent runtime.
 - acp-bridge `eventBus`: transport fan-out with replay rings and byte budgets; it sits above the loop, not inside it.
 
-None provides query routing + serial async delivery + failure events, which are the properties being ported. The new module is ~450 lines of primitives; the handlers are a re-expression of logic that already exists in `agent-loop.ts`, not new behavior.
+None provides query routing + serial async delivery + failure events, which are the properties being ported. The new module is ~280 lines of primitives; the handlers are a re-expression of logic that already exists in `agent-loop.ts`, not new behavior.
 
 ## Migration (PR slices)
 
