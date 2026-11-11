@@ -57,7 +57,8 @@ secret 类型的 signingSecret，复用现有环境变量引用及凭证编辑�
 
 验证 HTTPS 钉钉机器人 endpoint 和必需的 access token。每次发送使用
 `msgtype: markdown`，复用现有钉钉 `extractTitle` 工具生成 `markdown.title`，
-将传入正文保留在 `markdown.text` 中。普通文本也可作为消息正文。公共 Channel
+将传入正文保留在 `markdown.text` 中。标题保留原有 20 个 UTF-16 代码单元上限，
+不会在边界拆开代理对。普通文本也可作为消息正文。公共 Channel
 投递契约仍是文本字符串，不新增消息格式设置或 Markdown 转换。钉钉文档列出了
 [Markdown 子集](https://open.dingtalk.com/document/orgapp/custom-bot-send-message-type)。
 本适配器原样保留表格及其他 Markdown 语法，具体渲染由钉钉客户端完成；不转换
@@ -66,6 +67,10 @@ secret 类型的 signingSecret，复用现有环境变量引用及凭证编辑�
 启用签名时按钉钉文档算法生成新的毫秒时间戳和 HMAC-SHA256 签名，不缓存已签名
 URL。传输错误、无效响应、非成功 HTTP 状态及非零业务码均按 #7521 以有界、脱敏
 原因拒绝。错误不得暴露凭证 URL、签名、密钥或消息正文，不进行隐式重试。
+
+通过单次请求独立的 Undici dispatcher 和 fetch 使用已解析的工作区代理，并保留
+既有 `NO_PROXY` 绕过语义，不修改进程全局 dispatcher。请求成功、失败或取消时
+均释放该请求的 dispatcher，关闭等待包含这一步清理。
 
 HTTP 408、425、429 和 5xx 按包内共享的钉钉策略分类为 transient。业务响应按
 官方[自定义机器人错误码表](https://open.dingtalk.com/document/development/custom-robots-send-group-messages)，

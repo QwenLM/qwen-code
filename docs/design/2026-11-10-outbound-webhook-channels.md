@@ -69,7 +69,9 @@ bot configuration remains unchanged.
 
 Validate the HTTPS DingTalk robot endpoint and required access token. Each send
 uses `msgtype: markdown`, derives `markdown.title` with the existing DingTalk
-`extractTitle` helper and preserves the supplied body in `markdown.text`. Plain
+`extractTitle` helper and preserves the supplied body in `markdown.text`. The
+title keeps the existing 20 UTF-16 code-unit limit without splitting a surrogate
+pair across the boundary. Plain
 text is also valid message content. The public Channel delivery contract remains
 a text string; no message-format setting or Markdown conversion is introduced.
 DingTalk documents a [Markdown subset](https://open.dingtalk.com/document/orgapp/custom-bot-send-message-type).
@@ -83,6 +85,11 @@ signed URL. Transport errors, invalid responses, non-success HTTP status and
 nonzero business error codes reject with a bounded, sanitized reason in line
 with #7521. Never expose the credential URL, signature, secret or message body
 through an error. There is no implicit retry.
+
+Honor the resolved workspace proxy with a request-scoped Undici dispatcher and
+fetch implementation, retaining the existing `NO_PROXY` bypass semantics. Do not
+change the process-wide dispatcher. Release the request's dispatcher on success,
+failure or cancellation before its shutdown drain completes.
 
 HTTP 408, 425, 429 and 5xx responses are classified as transient using the
 package's shared DingTalk policy. For business responses, the official

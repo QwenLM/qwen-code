@@ -159,6 +159,7 @@ export class DingtalkWebhookChannel extends ChannelBase {
       REQUEST_TIMEOUT_MS,
     );
     timeout.unref();
+    let dispatcher: import('undici').Dispatcher | undefined;
     try {
       const url = new URL(connection.webhookUrl);
       if (connection.signingSecret) {
@@ -169,16 +170,27 @@ export class DingtalkWebhookChannel extends ChannelBase {
         url.searchParams.set('timestamp', timestamp);
         url.searchParams.set('sign', sign);
       }
-      const response = await fetch(url, {
+      const request = {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           msgtype: 'markdown',
           markdown: { title: extractTitle(text), text },
         }),
-        redirect: 'error',
+        redirect: 'error' as const,
         signal: controller.signal,
-      });
+      };
+      let response: Response | import('undici').Response;
+      if (this.proxy) {
+        const { default: undici } = await import('undici');
+        dispatcher = new undici.EnvHttpProxyAgent({
+          httpProxy: this.proxy,
+          httpsProxy: this.proxy,
+        });
+        response = await undici.fetch(url, { ...request, dispatcher });
+      } else {
+        response = await fetch(url, request);
+      }
       if (!response.ok) {
         await response.body?.cancel().catch(() => {});
         throw new ChannelProactiveDeliveryError(
@@ -255,6 +267,7 @@ export class DingtalkWebhookChannel extends ChannelBase {
       );
     } finally {
       clearTimeout(timeout);
+      await dispatcher?.destroy().catch(() => {});
     }
   }
 

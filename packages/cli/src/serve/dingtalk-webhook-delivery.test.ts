@@ -38,6 +38,14 @@ it('delivers authorized prompt and scheduled results to the configured webhook t
   const qwenHome = path.join(root, 'home');
   fs.mkdirSync(workspace);
   fs.mkdirSync(qwenHome);
+  for (const key of [
+    'HTTP_PROXY',
+    'http_proxy',
+    'HTTPS_PROXY',
+    'https_proxy',
+  ]) {
+    vi.stubEnv(key, undefined);
+  }
   vi.stubEnv('QWEN_HOME', qwenHome);
   vi.stubEnv('QWEN_CODE_SYSTEM_SETTINGS_PATH', path.join(root, 'system.json'));
   vi.stubEnv(

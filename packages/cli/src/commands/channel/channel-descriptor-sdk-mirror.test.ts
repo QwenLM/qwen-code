@@ -142,6 +142,7 @@ describe('channel descriptor SDK mirror', () => {
             'type',
             'displayName',
             'manageable',
+            'supportsQrLogin',
             'fields',
             'outboundOnly',
             'defaultDeliveryTarget',

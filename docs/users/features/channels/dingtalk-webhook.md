@@ -97,6 +97,7 @@ signing secret stay in Channel configuration.
 - Checks both HTTP status and DingTalk's business response. Rejected signatures,
   credentials, security rules and rate limits are failures with sanitized errors.
 - Does not automatically retry. A timeout can leave remote acceptance unknown.
+- Uses the workspace proxy configuration, including `NO_PROXY` bypasses.
 - Cancels in-flight sending when the Channel stops. Reload uses the updated
   saved configuration.
 - Keeps the shared delivery size protection, which marks truncated results.
