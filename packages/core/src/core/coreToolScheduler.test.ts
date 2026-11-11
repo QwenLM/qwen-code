@@ -8552,7 +8552,11 @@ describe('CoreToolScheduler request queueing', () => {
       ],
     });
 
-    const sent = JSON.stringify(runSideQueryMock.mock.calls[0][1].contents);
+    // The mock is not reset in this describe, so the first recorded call
+    // belongs to an earlier test. Read the request this test sent.
+    const sent = JSON.stringify(
+      runSideQueryMock.mock.calls.at(-1)![1].contents,
+    );
     expect(sent).toContain('Pending tool call to classify');
     expect(sent).not.toContain('Prior action');
   });
