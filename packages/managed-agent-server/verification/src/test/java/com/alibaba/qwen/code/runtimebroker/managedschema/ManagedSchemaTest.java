@@ -14,7 +14,6 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 
-import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -22,112 +21,6 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ManagedSchemaTest {
-    /**
-     * Contract tables that no entity in the 63-entity predecessor inventory maps to. The inventory
-     * records an upgrade path, so a table listed here is new surface introduced after that
-     * baseline rather than the destination of a legacy table; every other table in {@link
-     * ManagedSchemaContract#TABLES} must stay reachable from the inventory.
-     */
-    private static final Set<String> CONTRACT_TABLES_WITHOUT_PREDECESSOR =
-            Set.of(
-                    // Fresh extension domains: the predecessor schema had no extension store, and
-                    // its only extension-adjacent entity
-                    // (qwen_managed_session_extension_record) maps to ma_session_record.
-                    "ma_extension_package",
-                    "ma_extension_settings",
-                    "ma_extension_operation",
-                    // Session worktrees are a fresh domain; no legacy entity models a worktree.
-                    "ma_session_worktree",
-                    // Resident ownership row: written by the Session creation transaction, not
-                    // evolved from a legacy entity (introduced with session principal ownership).
-                    "ma_session_principal");
-
-    @Test
-    void sharedCatalogValidationIsExplicitAndPreservesBusinessRows() throws Exception {
-        DataSource source = initialized();
-        try (var connection = source.getConnection(); var statement = connection.createStatement()) {
-            statement.execute("CREATE TABLE da_business (witness INT NOT NULL)");
-            statement.execute("INSERT INTO da_business VALUES (42)");
-            statement.execute("CREATE VIEW business_view AS SELECT witness FROM da_business");
-        }
-        assertThrows(IllegalStateException.class, () -> ManagedSchema.validate(source));
-        assertThrows(IllegalStateException.class, () -> ManagedSchema.initialize(source));
-        ManagedSchema.validateSharedCatalog(source);
-        try (var connection = source.getConnection()) {
-            Map<String, String> before = ManagedSchemaCatalog.tables(connection);
-            ManagedSchema.validateSharedCatalog(connection);
-            assertEquals(before, ManagedSchemaCatalog.tables(connection));
-            assertEquals(ManagedSchemaContract.TABLES.size() + 2, before.size());
-            try (var statement = connection.createStatement();
-                    var row = statement.executeQuery("SELECT witness FROM business_view")) {
-                assertTrue(row.next());
-                assertEquals(42, row.getInt(1));
-            }
-        }
-    }
-
-    @Test
-    void sharedCatalogValidationRejectsMissingUnknownLegacyAndViewBackedManagedTables() throws Exception {
-        for (String declaration : Set.of("DROP TABLE ma_tenant_guard",
-                "CREATE TABLE ma_unpublished (witness INT)",
-                "CREATE VIEW ma_unpublished AS SELECT 1 AS witness",
-                // Legacy Managed generations, from the repository's own inventory
-                // (R6-1): they must stay visible to the exact-set comparison
-                // instead of being filtered out by a prefix test.
-                "CREATE TABLE qwen_runtime_binding (witness INT)",
-                "CREATE VIEW managed_workspace_registry AS SELECT 1 AS witness",
-                "DROP TABLE ma_tenant_guard; CREATE VIEW ma_tenant_guard AS SELECT 1 AS witness")) {
-            DataSource source = initialized();
-            try (var connection = source.getConnection(); var statement = connection.createStatement()) {
-                statement.execute("CREATE TABLE da_business (witness INT)");
-                for (String command : declaration.split(";")) {
-                    statement.execute(command);
-                }
-            }
-            assertThrows(IllegalStateException.class, () -> ManagedSchema.validateSharedCatalog(source));
-        }
-    }
-
-    @Test
-    void sharedCatalogValidationAcceptsBusinessTablesInTheManagedNamespace() throws Exception {
-        // The opposite direction of R6-1: `managed_agent_` is not a reserved
-        // prefix, so an unrelated business table there must not fail the gate.
-        DataSource source = initialized();
-        try (var connection = source.getConnection(); var statement = connection.createStatement()) {
-            statement.execute("CREATE TABLE managed_agent_settings (witness INT)");
-        }
-        assertDoesNotThrow(() -> ManagedSchema.validateSharedCatalog(source));
-    }
-
-    @Test
-    void sharedCatalogValidationRetainsDatabaseConstraintChecks() throws Exception {
-        for (String declaration : Set.of(
-                "ALTER TABLE ma_session DROP CONSTRAINT ck_ma_session_resource_gc",
-                "ALTER TABLE ma_event_stream DROP CONSTRAINT fk_ma_stream_session")) {
-            DataSource source = initialized();
-            try (var connection = source.getConnection(); var statement = connection.createStatement()) {
-                statement.execute("CREATE TABLE da_business (witness INT)");
-                statement.execute(declaration);
-            }
-            assertThrows(IllegalStateException.class, () -> ManagedSchema.validateSharedCatalog(source));
-        }
-    }
-
-    @Test
-    void sharedCatalogValidationDoesNotInitializeEmptyOrBusinessOnlyCatalogs() throws Exception {
-        for (boolean businessTable : new boolean[] {false, true}) {
-            DataSource source = source();
-            try (var connection = source.getConnection(); var statement = connection.createStatement()) {
-                if (businessTable) {
-                    statement.execute("CREATE TABLE da_business (witness INT)");
-                }
-                Map<String, String> before = ManagedSchemaCatalog.tables(connection);
-                assertThrows(SQLException.class, () -> ManagedSchema.validateSharedCatalog(connection));
-                assertEquals(before, ManagedSchemaCatalog.tables(connection));
-            }
-        }
-    }
-
     @Test
     void preservesSessionAndTurnModelsAcrossRestart() throws Exception {
         DataSource source = source();
@@ -174,6 +67,42 @@ class ManagedSchemaTest {
             assertEquals(
                     ManagedSchemaContract.TABLES, ManagedSchemaCatalog.tables(connection).keySet());
             assertEquals(ManagedSchemaContract.TABLES.size(), ManagedSchemaCatalog.tables(connection).size());
+        }
+    }
+
+    @Test
+    void sharesAnApplicationCatalogWithoutChangingBusinessTablesOrViews() throws Exception {
+        DataSource source = source();
+        try (var connection = source.getConnection(); var statement = connection.createStatement()) {
+            statement.execute("CREATE TABLE da_business (witness INT NOT NULL)");
+            statement.execute("INSERT INTO da_business VALUES (42)");
+            statement.execute("CREATE VIEW business_view AS SELECT witness FROM da_business");
+        }
+        ManagedSchema.initialize(source);
+        ManagedSchema.validate(source);
+        ManagedSchema.initialize(source);
+        try (var connection = source.getConnection(); var statement = connection.createStatement();
+                var row = statement.executeQuery("SELECT witness FROM business_view")) {
+            assertTrue(row.next());
+            assertEquals(42, row.getInt(1));
+            assertEquals(ManagedSchemaContract.TABLES, ManagedSchemaCatalog.tables(connection).keySet());
+        }
+    }
+
+    @Test
+    void stillRejectsUnknownManagedTablesAndManagedViewsInSharedCatalogs() throws Exception {
+        for (String declaration : Set.of("CREATE TABLE ma_unpublished (witness INT)",
+                "CREATE VIEW ma_unpublished AS SELECT 1 AS witness",
+                "CREATE TABLE qwen_runtime_binding (witness INT)",
+                "CREATE VIEW managed_workspace_registry AS SELECT 1 AS witness",
+                "DROP TABLE ma_tenant_guard")) {
+            DataSource source = initialized();
+            try (var connection = source.getConnection(); var statement = connection.createStatement()) {
+                statement.execute("CREATE TABLE da_business (witness INT)");
+                statement.execute(declaration);
+            }
+            assertThrows(IllegalStateException.class, () -> ManagedSchema.validate(source));
+            assertThrows(IllegalStateException.class, () -> ManagedSchema.initialize(source));
         }
     }
 
@@ -255,7 +184,8 @@ class ManagedSchemaTest {
 
     @Test
     void rejectsForeignLegacyAndPartialSchemasBeforeCreatingAnything() throws Exception {
-        for (String table : Set.of("managed_agent_session", "business_data", "ma_session")) {
+        for (String table : Set.of("managed_agent_session", "ma_unpublished", "ma_session",
+                "qwen_runtime_binding", "managed_workspace_registry")) {
             DataSource source = source();
             try (var connection = source.getConnection();
                     var statement = connection.createStatement()) {
@@ -291,6 +221,20 @@ class ManagedSchemaTest {
                 assertEquals(42, row.getInt(1));
             }
         }
+    }
+
+    @Test
+    void refusesAViewBackedFlywayHistory() throws Exception {
+        // On a complete catalog a history *view* must still be refused: discovery
+        // keeps `flyway_schema_history` in its filter for exactly this check, and a
+        // mutated filter that drops the name lets the view pass as a valid catalog.
+        DataSource source = initialized();
+        try (var connection = source.getConnection();
+                var statement = connection.createStatement()) {
+            statement.execute("CREATE VIEW flyway_schema_history AS SELECT 1 AS installed_rank");
+        }
+        assertThrows(IllegalStateException.class, () -> ManagedSchema.validate(source));
+        assertThrows(IllegalStateException.class, () -> ManagedSchema.initialize(source));
     }
 
     @Test
@@ -633,7 +577,17 @@ class ManagedSchemaTest {
                                                 && ManagedSchemaContract.TABLES.containsAll(
                                                         tables)));
         Set<String> originalTargets = new java.util.HashSet<>(ManagedSchemaContract.TABLES);
-        originalTargets.removeAll(CONTRACT_TABLES_WITHOUT_PREDECESSOR);
+        // ma_session_principal is written by the Session creation transaction itself. It is not
+        // the evolution target of any legacy entity: the 63-row inventory has no mapping for it
+        // and legacy-table-map.tsv has no row pointing to it. Like the four extension/worktree
+        // targets above, it is reachable from the target contract but from no original name.
+        originalTargets.removeAll(
+                Set.of(
+                        "ma_extension_package",
+                        "ma_extension_settings",
+                        "ma_extension_operation",
+                        "ma_session_worktree",
+                        "ma_session_principal"));
         assertEquals(
                 originalTargets,
                 inventory.values().stream()

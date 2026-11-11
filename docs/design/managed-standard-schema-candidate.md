@@ -1,30 +1,47 @@
-# Explicit shared-catalog schema validation
+# Shared-catalog Managed schema handling
 
 [English](managed-standard-schema-candidate.md) | [简体中文](managed-standard-schema-candidate.zh-CN.md)
 
-## Goal
+## Discovery
 
-Allow an embedding application to validate existing Managed Agent tables in a catalog that also contains unrelated business tables or views. This is an explicit library API; it does not change default startup behavior.
+`ManagedSchema.initialize` and `ManagedSchema.validate` discover only the Managed namespace.
+Objects whose names are Managed stay visible to the exact expected-table comparison:
 
-## Behavior
+- every `ma_*` object;
+- the fourteen legacy `managed_agent_*` names;
+- the forty-nine explicit legacy names (`managed_*` and `qwen_*` generations), kept as a private
+  catalog-discovery detail rather than a public contract;
+- `flyway_schema_history`, handled separately as before.
 
-`ManagedSchema.validateSharedCatalog(DataSource)` and its `Connection` overload validate only the Managed namespace. All `ma_*` and legacy `managed_agent_*` objects remain visible to the exact expected-table comparison, so missing, unknown, legacy or view-backed Managed tables are rejected.
+Unrelated business tables, views and their data are not part of the comparison and are left
+intact. Because the kept names are compared exactly against the thirty-nine target tables,
+missing, unknown, legacy and view-backed Managed tables are rejected, as is a catalog whose only
+Managed-related object is a `flyway_schema_history` table. Rejection happens before any DDL: no
+table is created, migrated or repaired.
 
-After selecting the namespace, validation reuses the existing column, generated-expression, primary/unique/index, CHECK, foreign-key and database-engine checks. Unrelated business objects and their data are left intact. The existing Flyway history-table handling and application-catalog checks remain in force.
+The sixty-three original inventory names map onto the target contract as thirty-nine targets
+minus the five targets (`ma_extension_package`, `ma_extension_settings`, `ma_extension_operation`,
+`ma_session_worktree`, `ma_session_principal`) that no original name evolves into.
 
-The DataSource overload closes the connection it acquires; the Connection overload leaves the caller's connection open. Validation creates, migrates and repairs nothing. An empty or business-only catalog is rejected.
+The `managed_agent_*` prefix is what keeps those fourteen names in the comparison instead of
+dropping them. Tolerating them the way R6-1 once did is rejected: those names were tolerated on a
+validate-only API, discovery is now shared with `initialize`, and tolerating them would let a
+legacy Managed catalog be silently re-created on top of its own tables.
 
-## Scope
+## `initialize` on a business-only catalog
 
-The V1 SQL baseline, database constraints, physical keys, column names, locking, Session identity and HTTP authorization are unchanged. `initialize`, default `validate`, `schemaVersion` and CSI maintenance retain strict catalog validation. There is no shared-catalog initializer or configuration switch.
+`initialize` used to create the target tables only in a dedicated catalog with no Managed objects.
+It now also initializes a catalog that holds unrelated business tables but no Managed tables: the
+thirty-nine target tables and their indexes are created next to the business tables. This is a
+relaxation of the previous behavior and its consequence is explicit — running `initialize` against
+a shared application database adds Managed tables and indexes to that database.
 
-The PR retains its existing #16023 snapshot base. It does not copy the schema-conventions changes from #16143 or claim completion of a CHECK-to-Java migration.
+A catalog that already holds exactly the target tables still validates in place and `initialize`
+on it stays a no-op. A catalog that holds Managed objects it cannot validate is still refused.
 
-## Acceptance
+## No standalone shared-catalog validation API
 
-- Existing Managed tables plus unrelated business tables and views pass only the explicit shared validation; default validation and initialization still refuse that mixed catalog.
-- Both overloads preserve business data and catalog objects.
-- Missing/unknown Managed tables, legacy objects, Managed views and constraint drift are rejected by the same validators as dedicated catalogs.
-- Empty and business-only catalogs remain unchanged after refusal.
+The `ManagedSchema.validateSharedCatalog` API no longer exists. Discovery and validation are one
+path through `initialize` and `validate`; there is no separate shared-catalog initializer.
 
-Focused regression cases are included in `ManagedSchemaTest`. Local tests, builds and typechecks are not run for this scope reduction; runtime acceptance remains pending. Earlier validation reports belong to older revisions.
+Focused regression cases live in `ManagedSchemaTest`.

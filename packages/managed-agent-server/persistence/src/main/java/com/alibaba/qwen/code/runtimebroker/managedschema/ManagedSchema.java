@@ -29,7 +29,9 @@ public final class ManagedSchema {
                 return;
             }
             if (ManagedSchemaCatalog.hasHistory(connection)) {
-                throw new SQLException("A history-only catalog is not a fresh Managed database");
+                throw new SQLException(
+                        "A catalog that already holds a Flyway history table is not a"
+                                + " fresh Managed database");
             }
             execute(connection, ddl);
             ManagedSchemaCatalog.validate(connection, ddl);
@@ -50,19 +52,6 @@ public final class ManagedSchema {
 
     public static void validate(Connection connection) throws SQLException {
         ManagedSchemaCatalog.validate(Objects.requireNonNull(connection, "connection"), ddl());
-    }
-
-    public static void validateSharedCatalog(DataSource source) {
-        Objects.requireNonNull(source, "source");
-        try (Connection connection = source.getConnection()) {
-            validateSharedCatalog(connection);
-        } catch (SQLException exception) {
-            throw new IllegalStateException("Managed shared-catalog schema validation failed", exception);
-        }
-    }
-
-    public static void validateSharedCatalog(Connection connection) throws SQLException {
-        ManagedSchemaCatalog.validateSharedCatalog(Objects.requireNonNull(connection, "connection"), ddl());
     }
 
     public static String ddl() {

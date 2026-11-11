@@ -1,30 +1,41 @@
-# 显式共享库结构校验
+# 共享库中的 Managed 表结构处理
 
 [English](managed-standard-schema-candidate.md) | [简体中文](managed-standard-schema-candidate.zh-CN.md)
 
-## 目标
+## 发现规则
 
-允许嵌入式应用校验已有 Managed Agent 表，即使同一 catalog 中还存在无关业务表或视图。这是显式库 API，不改变默认启动行为。
+`ManagedSchema.initialize` 与 `ManagedSchema.validate` 只发现 Managed 命名空间。以下对象保持可见，
+并参与与预期表集合的精确比对：
 
-## 行为
+- 所有 `ma_*` 对象；
+- 十四个旧版 `managed_agent_*` 名字；
+- 四十九个显式旧版名字（`managed_*` 与 `qwen_*` 两代），它们是私有的 catalog 发现细节，不是公开契约；
+- `flyway_schema_history`，沿用原有单独处理。
 
-`ManagedSchema.validateSharedCatalog(DataSource)` 及其 `Connection` 重载只校验 Managed 命名空间。所有 `ma_*` 及旧版 `managed_agent_*` 对象均保留在预期表集合的精确比对中，因此缺失、未知、旧版或由视图替代的 Managed 表都会被拒绝。
+无关业务表、视图及其数据不参与比对，保持原样。由于保留下来的名字要与三十九个目标表精确比对，
+Managed 表缺失、未知、属于旧版或由视图替代都会被拒绝；与 Managed 相关的唯一对象是
+`flyway_schema_history` 表的库同样被拒绝。拒绝发生在执行任何 DDL 之前：不建表、不迁移、不修复。
 
-选出命名空间后，复用现有的列、生成表达式、主键/唯一键/索引、CHECK、外键和数据库引擎校验。无关业务对象及数据保持原样。现有 Flyway 历史表处理和应用 catalog 检查继续生效。
+六十三个原始 inventory 名字与目标契约的对齐关系是：三十九个目标表，减去五个没有任何原始名字演进到的
+目标（`ma_extension_package`、`ma_extension_settings`、`ma_extension_operation`、
+`ma_session_worktree`、`ma_session_principal`）。
 
-DataSource 重载关闭自行获取的连接；Connection 重载保持调用者连接打开。校验不创建、迁移或修复任何对象，空库和只有业务表的库均被拒绝。
+`managed_agent_*` 前缀的作用是让那十四个名字留在比对里，而不是被丢弃。不复活 R6-1 式的容忍：当年这些
+名字是在只校验的 API 上被容忍的，而现在发现逻辑与 `initialize` 共用，容忍会变成在旧 Managed 库上静默
+重建自身的表。
 
-## 范围
+## `initialize` 在纯业务库上的放宽
 
-V1 SQL 基线、数据库约束、物理主键、列名、锁机制、Session 身份和 HTTP 授权均不改变。`initialize`、默认 `validate`、`schemaVersion` 和 CSI 维护继续严格校验整个 catalog。不提供共享库初始化入口或配置开关。
+`initialize` 过去只在没有任何 Managed 对象的专用库上建目标表。现在它也会初始化「有无关业务表、但没有
+任何 Managed 表」的库：三十九个目标表及其索引会建在业务表旁边。这是相对旧行为的放宽，后果写明——对共享的
+应用库执行 `initialize`，会给该库加上 Managed 表与索引。
 
-PR 保留现有的 #16023 快照基线，不复制 #16143 的表结构规范化改动，也不宣称完成 CHECK 向 Java 的迁移。
+已经恰好包含目标表的库仍然原地通过校验，`initialize` 仍是幂等空操作。已经装有无法校验的 Managed 对象的
+库仍然被拒绝。
 
-## 验收
+## 不再有独立的共享库校验 API
 
-- 完整 Managed 表加无关业务表与视图，只能通过显式共享校验；默认校验和初始化仍拒绝混合 catalog。
-- 两个重载均保留业务数据和 catalog 对象。
-- 缺失/未知 Managed 表、旧版对象、Managed 视图及约束漂移，均由独立库使用的同一套校验器拒绝。
-- 空库和只有业务表的库在被拒绝后保持原样。
+`ManagedSchema.validateSharedCatalog` API 已不存在。发现与校验合并为 `initialize` 与 `validate` 一条
+路径，不提供独立的共享库初始化入口。
 
-`ManagedSchemaTest` 包含聚焦回归案例。本次范围收敛不跑本地测试、构建或 typecheck，运行验收仍待完成。此前验证报告只适用于旧版本。
+聚焦回归在 `ManagedSchemaTest`。
