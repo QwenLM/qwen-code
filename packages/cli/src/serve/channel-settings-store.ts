@@ -380,6 +380,7 @@ function assertDescriptorValue(
       Number.isFinite(value) &&
       (((field.exclusiveMinimum === undefined ||
         value > field.exclusiveMinimum) &&
+        (field.minimum === undefined || value >= field.minimum) &&
         (field.maximum === undefined || value <= field.maximum)) ||
         // A newly declared bound must not strand an unrelated edit: the editor
         // re-sends the stored number verbatim, and the runtime already tolerates
@@ -388,7 +389,12 @@ function assertDescriptorValue(
         isDeepStrictEqual(previous, value))) ||
     (field.kind === 'enum' &&
       typeof value === 'string' &&
-      field.options?.some((option) => option.value === value) === true) ||
+      (field.options?.some((option) => option.value === value) === true ||
+        // Same forgiveness as the number branch above: a channel that narrows
+        // its own option list must not strand an unrelated edit. The editor
+        // re-sends the stored value verbatim and the runtime already tolerates
+        // it. Only the option set is forgiven — a non-string still fails.
+        isDeepStrictEqual(previous, value))) ||
     (field.kind === 'string-list' &&
       Array.isArray(value) &&
       value.every((item) => typeof item === 'string')) ||

@@ -115,6 +115,13 @@ const GITHUB_BOUND: DaemonChannelTypeDescriptor = {
       description: 'Descriptor description for bound sessions',
     },
     {
+      key: 'requireBoundWatch',
+      label: 'Bound watch gate (descriptor)',
+      kind: 'boolean',
+      default: 'false',
+      description: 'Descriptor description for the bound watch gate',
+    },
+    {
       key: 'prWatchEvents',
       label: 'Watch events (descriptor)',
       kind: 'string-list',
@@ -882,6 +889,11 @@ describe('ChannelEditorDialog', () => {
     expect(labels.some((t) => t.includes('Deliver To PR-Bound Sessions'))).toBe(
       true,
     );
+    expect(
+      labels.some((t) =>
+        t.includes('Require Active Watch For Review/Verify Sessions'),
+      ),
+    ).toBe(true);
     expect(labels.some((t) => t.includes('PR Watch Events'))).toBe(true);
     // No descriptor fallback may leak through for these keys.
     expect(labels.some((t) => t.includes('(descriptor)'))).toBe(false);
@@ -905,6 +917,9 @@ describe('ChannelEditorDialog', () => {
       (l) => l.textContent ?? '',
     );
     expect(labels.some((t) => t.includes('投递到 PR 绑定会话'))).toBe(true);
+    expect(labels.some((t) => t.includes('评审/验证会话须有活跃监视'))).toBe(
+      true,
+    );
     expect(labels.some((t) => t.includes('PR 状态监视事件'))).toBe(true);
     expect(labels.some((t) => t.includes('(descriptor)'))).toBe(false);
     // With the `.description` keys dropped from BOTH locale maps the
@@ -973,6 +988,123 @@ describe('ChannelEditorDialog', () => {
     expect(document.body.textContent).toContain(
       '开启上方「投递到 PR 绑定会话」后即可选择监视事件。',
     );
+    expect(document.body.textContent).toContain(
+      '开启上方「投递到 PR 绑定会话」后即可要求活跃监视。',
+    );
+  });
+
+  it('disables the watch gate switch with an inline hint until delivery is on', async () => {
+    await renderDialog({ descriptor: GITHUB_BOUND });
+
+    const gate = fieldByLabel(
+      'Require Active Watch For Review/Verify Sessions',
+    ) as HTMLButtonElement;
+    expect(gate).not.toBeNull();
+    expect(gate.getAttribute('role')).toBe('switch');
+    expect(gate.disabled).toBe(true);
+    expect(document.body.textContent).toContain(
+      'Enable "Deliver To PR-Bound Sessions" above to require an active watch.',
+    );
+    const describedBy = gate.getAttribute('aria-describedby');
+    expect(describedBy).not.toBeNull();
+    expect(document.getElementById(describedBy!)?.textContent).toContain(
+      'above to require an active watch',
+    );
+
+    await act(async () => {
+      document
+        .querySelector<HTMLButtonElement>('button[role="switch"]')!
+        .click();
+    });
+
+    expect(gate.disabled).toBe(false);
+    expect(document.body.textContent).not.toContain(
+      'above to require an active watch.',
+    );
+  });
+
+  it('names the delivery dependency when a stored watch gate lacks it', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'github-bot',
+      config: {
+        type: 'github',
+        requireBoundWatch: true,
+      },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    await renderDialog({ descriptor: GITHUB_BOUND, instance, onSave });
+
+    const gate = fieldByLabel(
+      'Require Active Watch For Review/Verify Sessions',
+    ) as HTMLButtonElement;
+    expect(gate.getAttribute('aria-checked')).toBe('true');
+    // A stored true stays clearable while the prerequisite is off.
+    expect(gate.disabled).toBe(false);
+
+    const save = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Save',
+    );
+    await act(async () => {
+      save?.click();
+    });
+
+    expect(onSave).not.toHaveBeenCalled();
+    // The gate field's own message — not the prWatchEvents one, which names a
+    // control this operator never touched.
+    expect(document.body.textContent).toContain(
+      'Enable "Deliver To PR-Bound Sessions" to require an active watch.',
+    );
+    expect(document.body.textContent).not.toContain(
+      'to save the selected watch events.',
+    );
+
+    // Unticking the gate is itself a remedy: it re-derives the shown error
+    // without another Save (a valid draft must not keep a stale alert).
+    await act(async () => {
+      gate.click();
+    });
+    expect(gate.getAttribute('aria-checked')).toBe('false');
+    // The validation error is gone; the disabled hint (which says "above to
+    // require…") legitimately remains while delivery is still off.
+    expect(document.body.textContent).not.toContain(
+      'Enable "Deliver To PR-Bound Sessions" to require an active watch.',
+    );
+  });
+
+  it('keeps the gate hint live region mounted before the hint appears', async () => {
+    // A live region that enters the DOM already filled is never announced.
+    // The region must exist (empty) while delivery is on, then carry the hint
+    // when delivery toggles off — the same node throughout.
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'github-bot',
+      config: { type: 'github', deliverToBoundSessions: true },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    await renderDialog({ descriptor: GITHUB_BOUND, instance });
+
+    const gate = fieldByLabel(
+      'Require Active Watch For Review/Verify Sessions',
+    ) as HTMLButtonElement;
+    const region = Array.from(
+      document.querySelectorAll<HTMLElement>('span[aria-live="polite"]'),
+    ).find((node) => node.id.endsWith('-requireBoundWatch-disabled-hint'));
+    expect(region).toBeDefined();
+    expect(region!.textContent).toBe('');
+
+    // Toggle delivery off (the first switch).
+    await act(async () => {
+      document
+        .querySelector<HTMLButtonElement>('button[role="switch"]')!
+        .click();
+    });
+    expect(region!.isConnected).toBe(true);
+    expect(region!.textContent).toContain('above to require an active watch');
+    expect(gate.disabled).toBe(true);
   });
 
   it('saves the selected watch events once delivery is enabled', async () => {
@@ -3818,6 +3950,125 @@ describe('GitHub per-repository settings', () => {
       'Enter a number greater than 0 and at most 86400000.',
     );
   });
+
+  it('words an inclusive floor as "at least", not "greater than"', async () => {
+    // Naming the exclusive bound here would tell the operator "greater than
+    // -1" — a floor the validator does not enforce, and one that reads as if
+    // -0.5 were legal.
+    const inclusive: DaemonChannelTypeDescriptor = {
+      type: 'example',
+      displayName: 'Example',
+      manageable: true,
+      fields: [
+        {
+          key: 'reserve',
+          label: 'Reserve',
+          kind: 'number',
+          minimum: 0,
+          maximum: 5000,
+        },
+      ],
+    };
+    await renderDialog({ descriptor: inclusive });
+    await act(async () => {
+      setInputValue(inputByLabel('Reserve')!, '-0.5');
+    });
+    await save();
+
+    expect(document.body.textContent).toContain(
+      'Enter a number at least 0 and at most 5000.',
+    );
+    expect(document.body.textContent).not.toContain('greater than');
+  });
+
+  it('names the exclusive floor on a tie, because equality is rejected', async () => {
+    // Both bounds at 5: the validator rejects 5, so "at least 5" would name a
+    // floor it does not enforce — the very defect this change removes.
+    const tie: DaemonChannelTypeDescriptor = {
+      type: 'example',
+      displayName: 'Example',
+      manageable: true,
+      fields: [
+        {
+          key: 'reserve',
+          label: 'Reserve',
+          kind: 'number',
+          exclusiveMinimum: 5,
+          minimum: 5,
+          maximum: 10,
+        },
+      ],
+    };
+    await renderDialog({ descriptor: tie });
+    await act(async () => {
+      setInputValue(inputByLabel('Reserve')!, '5');
+    });
+    await save();
+
+    expect(document.body.textContent).toContain(
+      'Enter a number greater than 5 and at most 10.',
+    );
+    expect(document.body.textContent).not.toContain('at least');
+  });
+
+  it('names the exclusive floor when it is stricter than the inclusive one', async () => {
+    // Dropping the comparison entirely would always name the inclusive bound,
+    // and here that is the weaker one: the validator rejects 5, so "at least
+    // 2" would advertise a value the save refuses.
+    const weakerInclusive: DaemonChannelTypeDescriptor = {
+      type: 'example',
+      displayName: 'Example',
+      manageable: true,
+      fields: [
+        {
+          key: 'reserve',
+          label: 'Reserve',
+          kind: 'number',
+          exclusiveMinimum: 5,
+          minimum: 2,
+          maximum: 10,
+        },
+      ],
+    };
+    await renderDialog({ descriptor: weakerInclusive });
+    await act(async () => {
+      setInputValue(inputByLabel('Reserve')!, '3');
+    });
+    await save();
+
+    expect(document.body.textContent).toContain(
+      'Enter a number greater than 5 and at most 10.',
+    );
+    expect(document.body.textContent).not.toContain('at least');
+  });
+
+  it('names the inclusive floor when it is strictly above the exclusive one', async () => {
+    const both: DaemonChannelTypeDescriptor = {
+      type: 'example',
+      displayName: 'Example',
+      manageable: true,
+      fields: [
+        {
+          key: 'reserve',
+          label: 'Reserve',
+          kind: 'number',
+          exclusiveMinimum: 0,
+          minimum: 2,
+          maximum: 10,
+        },
+      ],
+    };
+    await renderDialog({ descriptor: both });
+    await act(async () => {
+      setInputValue(inputByLabel('Reserve')!, '1');
+    });
+    await save();
+
+    expect(document.body.textContent).toContain(
+      'Enter a number at least 2 and at most 10.',
+    );
+    expect(document.body.textContent).not.toContain('greater than');
+  });
 });
 
 describe('Channel editor progressive disclosure', () => {
@@ -4451,6 +4702,191 @@ describe('GitHub repository event filter', () => {
   });
 });
 
+describe('ChannelEditorDialog WeChat login', () => {
+  // Mirrors the weixin plugin's management fields plus the shared controls the
+  // registry appends. Hand-built because @qwen-code/channel-weixin is not a
+  // web-shell devDependency; channel-editor-parity.test.ts owns the drift check
+  // for the platform it can import.
+  const WEIXIN: DaemonChannelTypeDescriptor = {
+    type: 'weixin',
+    displayName: 'WeChat',
+    manageable: true,
+    fields: [
+      {
+        key: 'groupPolicy',
+        label: 'Group Policy',
+        kind: 'enum',
+        required: true,
+        default: 'disabled',
+        options: [{ value: 'disabled', label: 'Disabled' }],
+      },
+      {
+        key: 'privatePolicy',
+        label: 'Private Policy',
+        kind: 'enum',
+        required: true,
+        default: 'pairing',
+        options: [
+          { value: 'disabled', label: 'Disabled' },
+          { value: 'pairing', label: 'Pairing' },
+          { value: 'allowlist', label: 'Allowlist' },
+          { value: 'open', label: 'Open' },
+        ],
+      },
+      { key: 'allowedUsers', label: 'Allowed Users', kind: 'string-list' },
+    ],
+  };
+
+  function loginApi() {
+    return {
+      status: vi.fn().mockResolvedValue({ enabled: true, configured: false }),
+      start: vi.fn(),
+      poll: vi.fn(),
+      cancel: vi.fn(),
+      revoke: vi.fn(),
+    };
+  }
+
+  async function saveDialog() {
+    const save = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Save',
+    );
+    await act(async () => {
+      save?.click();
+    });
+  }
+
+  it('renders the login panel for a WeChat channel', async () => {
+    const api = loginApi();
+    await renderDialog({ descriptor: WEIXIN, weixinLogin: api });
+
+    expect(api.status).toHaveBeenCalled();
+    expect(
+      document.querySelector('[data-testid="weixin-login-panel"]'),
+    ).not.toBeNull();
+    expect(document.body.textContent).toContain('Not logged in');
+  });
+
+  it('does not render the panel for other platforms', async () => {
+    const api = loginApi();
+    await renderDialog({ descriptor: DINGTALK, weixinLogin: api });
+
+    expect(api.status).not.toHaveBeenCalled();
+    expect(
+      document.querySelector('[data-testid="weixin-login-panel"]'),
+    ).toBeNull();
+  });
+
+  it('renders exactly one credentials heading for WeChat', async () => {
+    // The panel brings its own "Credentials" section. The field loop must not
+    // add a second one: groupPolicy/privatePolicy/allowedUsers are shared
+    // access fields and baseUrl is a connection field, so the loop's
+    // credentials section has no fields and does not render.
+    await renderDialog({ descriptor: WEIXIN, weixinLogin: loginApi() });
+
+    const headings = Array.from(document.querySelectorAll('h3')).filter(
+      (heading) => heading.textContent?.trim() === 'Credentials',
+    );
+    expect(headings).toHaveLength(1);
+  });
+
+  it('omits the panel when the host supplies no login API', async () => {
+    await renderDialog({ descriptor: WEIXIN });
+
+    expect(
+      document.querySelector('[data-testid="weixin-login-panel"]'),
+    ).toBeNull();
+  });
+
+  it('renders no credential input, because the token comes from QR login', async () => {
+    await renderDialog({ descriptor: WEIXIN, weixinLogin: loginApi() });
+
+    expect(document.querySelector('input[type="password"]')).toBeNull();
+    const labels = Array.from(document.querySelectorAll('label')).map(
+      (label) => label.textContent ?? '',
+    );
+    expect(labels.some((text) => /token|secret/i.test(text))).toBe(false);
+  });
+
+  it('saves a WeChat channel while logged out', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    await renderDialog({
+      descriptor: WEIXIN,
+      weixinLogin: loginApi(),
+      onSave,
+    });
+
+    await act(async () => {
+      setInputValue(inputByLabel('Instance name')!, 'my-weixin');
+    });
+    await saveDialog();
+
+    expect(onSave).toHaveBeenCalledTimes(1);
+    const [name, request] = onSave.mock.calls[0] as [
+      string,
+      { config: Record<string, unknown> },
+    ];
+    expect(name).toBe('my-weixin');
+    expect(request.config['type']).toBe('weixin');
+    // Login state must not gate configuration: the credential is independent.
+    expect(request.config['groupPolicy']).toBe('disabled');
+  });
+
+  it('localizes the WeChat field labels in zh-CN', async () => {
+    await renderDialog({
+      descriptor: WEIXIN,
+      weixinLogin: loginApi(),
+      language: 'zh-CN',
+    });
+
+    expect(document.body.textContent).toContain('未登录');
+    expect(document.body.textContent).toContain('扫码登录');
+    const labels = Array.from(document.querySelectorAll('label')).map(
+      (label) => label.textContent ?? '',
+    );
+    expect(labels.some((text) => text.includes('群聊策略'))).toBe(true);
+    // Descriptor labels are English, so a missing i18n key would surface them.
+    expect(labels.some((text) => text.includes('Group Policy'))).toBe(false);
+  });
+
+  it.each(['en', 'zh-CN'] as const)(
+    'tells the operator the allowlist is optional and wants a platform id in %s',
+    async (language) => {
+      // The shared copy says "stable user IDs", which reads as a WeChat handle
+      // and yields a silently inert entry. The platform override must say the
+      // field can stay empty, name the pairing block, and show the id shape.
+      await renderDialog({
+        descriptor: WEIXIN,
+        weixinLogin: loginApi(),
+        language,
+      });
+
+      const text = document.body.textContent ?? '';
+      if (language === 'zh-CN') {
+        expect(text).toContain('预先放行的用户（可留空）');
+        expect(text).toContain('建议留空');
+        expect(text).toContain('待处理的配对请求');
+        expect(text).toContain('填微信号或昵称不会生效');
+      } else {
+        expect(text).toContain('Pre-approved users (optional)');
+        expect(text).toContain('Leave empty');
+        expect(text).toContain('Pending requests');
+        expect(text).toContain('A WeChat name or handle does not match');
+      }
+      // Both locales show the id shape, and neither falls back to the shared
+      // wording that caused the confusion.
+      expect(text).toContain('oAbCd…@im.wechat');
+      expect(text).not.toContain('Comma-separated stable user IDs');
+      expect(text).not.toContain('用英文逗号分隔稳定用户 ID');
+
+      const input = inputByLabel(
+        language === 'zh-CN' ? '预先放行的用户' : 'Pre-approved users',
+      );
+      expect(input?.getAttribute('placeholder')).toBe('oAbCd…@im.wechat');
+    },
+  );
+});
+
 /**
  * Email's access shape as the daemon ships it: the plugin declares
  * `privatePolicy` without `pairing`, and the registry injects `groupPolicy`
@@ -4923,5 +5359,74 @@ describe('Email channel editor', () => {
 
     const labels = labelTexts();
     expect(labels.some((t) => t.includes('Group policy'))).toBe(true);
+  });
+});
+
+describe('QR bind inside the editor', () => {
+  it('closes the editor on a successful bind so the stale draft cannot unbind it', async () => {
+    // The draft is seeded from the pre-bind instance. Leaving the editor open
+    // would let the next Save submit the old empty credentials, which the
+    // upsert maps to a secret clear — silently undoing the bind.
+    const qqDescriptor: DaemonChannelTypeDescriptor = {
+      type: 'qq',
+      displayName: 'QQ',
+      manageable: true,
+      supportsQrLogin: true,
+      fields: [
+        { key: 'appID', label: 'App ID', kind: 'string' },
+        { key: 'appSecret', label: 'App Secret', kind: 'secret' },
+      ],
+    };
+    const instance = {
+      name: 'qq-bot',
+      config: { type: 'qq' },
+      secrets: { appSecret: { present: false } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' as const },
+    };
+    const pending = {
+      loginId: 'login-1',
+      channelType: 'qq',
+      channelName: 'qq-bot',
+      status: 'pending' as const,
+      expiresAt: 9_999_999,
+      qrCodeDataUrl: 'data:image/png;base64,AAAA',
+    };
+    const onOpenChange = vi.fn();
+    const onReload = vi.fn().mockResolvedValue(undefined);
+    const qrLoginActions = {
+      start: vi.fn().mockResolvedValue({ ...pending, attached: false }),
+      state: vi.fn().mockResolvedValue({
+        ...pending,
+        status: 'succeeded' as const,
+        qrCodeDataUrl: undefined,
+      }),
+      cancel: vi.fn(),
+    };
+    vi.useFakeTimers();
+    try {
+      await renderDialog({
+        descriptor: qqDescriptor,
+        instance: instance as never,
+        qrLoginActions,
+        onOpenChange,
+        onReload,
+      });
+      const scan = [...document.querySelectorAll('button')].find((b) =>
+        b.textContent?.includes('Scan to bind'),
+      );
+      expect(scan).toBeDefined();
+      await act(async () => {
+        scan!.click();
+      });
+      expect(onOpenChange).not.toHaveBeenCalled();
+      await act(async () => {
+        vi.advanceTimersByTime(2_000);
+      });
+      expect(onReload).toHaveBeenCalled();
+      expect(onOpenChange).toHaveBeenCalledWith(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

@@ -82,14 +82,14 @@ public final class CsiNativeActivationProof {
             long predecessorSequence, String predecessorLastRecordUuid, String predecessorCommitDigest,
             long terminalSequence, String lastRecordUuid) {
         public TerminalProof {
-            predecessorActivation = snapshot(predecessorActivation, Activation.class);
+            predecessorActivation = copyActivation(predecessorActivation);
             predecessorPrefix = snapshot(predecessorPrefix, Prefix.class);
             boundaryRef = boundaryRef.deepCopy();
         }
 
         @Override
         public Activation predecessorActivation() {
-            return snapshot(predecessorActivation, Activation.class);
+            return copyActivation(predecessorActivation);
         }
 
         @Override
@@ -100,6 +100,16 @@ public final class CsiNativeActivationProof {
         @Override
         public JsonNode boundaryRef() {
             return boundaryRef.deepCopy();
+        }
+
+        // Activation is a flat record, so a field-wise copy with a deep-copied
+        // installRef gives the same fresh, deeply-immutable instance as a JSON
+        // round trip without serializing the whole proof on every read.
+        private static Activation copyActivation(Activation value) {
+            return value == null ? null : new Activation(value.activationId(), value.workerId(),
+                    value.installRef() == null ? null : value.installRef().deepCopy(),
+                    value.leaseDurationMs(), value.expiresAt(), value.renewalSequence(),
+                    value.epoch(), value.writerGeneration());
         }
 
         private static <T> T snapshot(T value, Class<T> type) {

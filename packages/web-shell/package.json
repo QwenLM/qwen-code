@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/web-shell",
-  "version": "0.27.1",
+  "version": "0.27.2",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/QwenLM/qwen-code.git",
@@ -38,7 +38,8 @@
   ],
   "scripts": {
     "dev": "vite",
-    "build": "vite build && vite build --config vite.lib.config.ts && vite build --config vite.lib.config.ts --mode transcript && tsc -p tsconfig.lib.json && npm run generate:notices",
+    "build": "cross-env NODE_OPTIONS=\"--max-old-space-size=4096\" npm run build:steps",
+    "build:steps": "vite build && vite build --config vite.lib.config.ts && vite build --config vite.lib.config.ts --mode transcript && tsc -p tsconfig.lib.json && npm run generate:notices",
     "build:managed-host": "vite build --config vite.lib.config.ts --mode managed-host",
     "lint": "cd ../.. && eslint packages/web-shell --ext .ts,.tsx",
     "lint:fix": "cd ../.. && eslint packages/web-shell --ext .ts,.tsx --fix",
@@ -126,6 +127,7 @@
     "@types/turndown": "^5.0.6",
     "@vitejs/plugin-react": "^4.2.0",
     "browserify": "17.0.1",
+    "cross-env": "^7.0.3",
     "exceljs": "4.4.0",
     "jsdom": "^26.1.0",
     "jszip": "3.10.2",

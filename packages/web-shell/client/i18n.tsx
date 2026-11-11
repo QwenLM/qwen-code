@@ -2623,6 +2623,7 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'sidebar.collapse': 'Collapse',
   'sidebar.expand': 'Expand',
   'sidebar.showAllSessions': 'Show all',
+  'sidebar.showMoreSessions': (v) => `Show ${v?.['count'] ?? 0} more`,
   'sidebar.subSessions': (v) => plural(v?.['count'], 'sub-session'),
   'sidebar.collapseProject': 'Collapse workspace',
   'sidebar.expandProject': 'Expand workspace',
@@ -4084,8 +4085,6 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'trajectory.overview.lane.subagents': 'Subagent requests',
   'status.contextUsed': (v) => `${v?.pct ?? '0.0'}% context used`,
   'status.disconnected': 'Disconnected',
-  'status.modeHint': '(shift + tab or click to switch)',
-  'status.shortcuts': '? for shortcuts',
   'stream.cancel': 'esc to cancel',
   'stream.cancelArmed': 'Press Esc again to stop',
   'stream.tokens': (v) => `${v?.count ?? 0} tokens`,
@@ -4395,10 +4394,6 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'tasks.action.confirmHint': 'This will end the blocking turn.',
   'tasks.pill.agent': (v) => `${v?.count ?? 0} local agent`,
   'tasks.pill.agents': (v) => `${v?.count ?? 0} local agents`,
-  'tasks.pill.agentPaused': (v) => `${v?.count ?? 0} local agent paused`,
-  'tasks.pill.agentsPaused': (v) => `${v?.count ?? 0} local agents paused`,
-  'tasks.pill.done': (v) => `${v?.count ?? 0} task done`,
-  'tasks.pill.doneMany': (v) => `${v?.count ?? 0} tasks done`,
   'tasks.pill.monitor': (v) => `${v?.count ?? 0} monitor`,
   'tasks.pill.monitors': (v) => `${v?.count ?? 0} monitors`,
   'tasks.pill.shell': (v) => `${v?.count ?? 0} shell`,
@@ -4688,7 +4683,7 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'channels.loadError.title': 'Channels could not be loaded',
   'channels.empty.title': 'No supported channels configured',
   'channels.empty.description':
-    'Configure DingTalk, WeCom, Feishu, GitHub, GitLab, or Email to receive messages in this workspace.',
+    'Configure WeChat, DingTalk, WeCom, Feishu, GitHub, GitLab, or Email to receive messages in this workspace.',
   'channels.runtimeError': 'Channel runtime error',
   'channels.action.back': 'Back',
   'channels.action.refresh': 'Refresh',
@@ -4747,8 +4742,54 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'channels.editor.field.sessionScope.option.chat_thread':
     'Per chat and thread',
   'channels.editor.field.sessionScope.option.single': 'One shared session',
+  'channels.qrLogin.title': 'Bind by QR code',
+  'channels.qrLogin.description':
+    'Scan with the QQ mobile app to bind a bot. The secret stays on this machine.',
+  'channels.qrLogin.start': 'Scan to bind',
+  'channels.qrLogin.refresh': 'New code',
+  'channels.qrLogin.waiting': 'Preparing the QR code…',
+  'channels.qrLogin.scanHint': 'Open QQ on your phone and scan this code.',
+  'channels.qrLogin.imageAlt': 'QQ bot binding QR code',
+  'channels.qrLogin.bound':
+    'Bot bound. The channel now uses the new credentials.',
+  'channels.qrLogin.failed': 'Binding failed',
+  'channels.qrLogin.expired': 'The code expired. Request a new one.',
+  'channels.qrLogin.cancelled': 'Binding cancelled.',
+  'channels.qrLogin.error': 'Could not complete the QR binding.',
   'channels.editor.field.dingtalk.clientId': 'Client ID (AppKey)',
   'channels.editor.field.dingtalk.clientSecret': 'Client Secret (AppSecret)',
+  'channels.editor.field.weixin.groupPolicy': 'Group policy',
+  'channels.editor.field.weixin.groupPolicy.description':
+    'WeChat iLink Bot only supports direct messages, so groups stay disabled.',
+  'channels.editor.field.weixin.groupPolicy.option.disabled': 'Disabled',
+  'channels.editor.field.weixin.allowedUsers': 'Pre-approved users (optional)',
+  'channels.editor.field.weixin.allowedUsers.description':
+    'Leave empty and approve people under "Pending requests" below instead — an approval is remembered. Fill this only to pre-approve someone whose platform user ID you already have (looks like oAbCd…@im.wechat). A WeChat name or handle does not match here and is silently ignored.',
+  'channels.weixin.title': 'WeChat account',
+  'channels.weixin.description':
+    'Log in by scanning a QR code with WeChat. This account is shared by every WeChat channel on this daemon.',
+  'channels.weixin.loggedIn': 'Logged in',
+  'channels.weixin.loggedOut': 'Not logged in',
+  'channels.weixin.login': 'Log in with QR code',
+  'channels.weixin.relogin': 'Log in again',
+  'channels.weixin.logout': 'Log out',
+  'channels.weixin.refresh': 'Refresh QR code',
+  'channels.weixin.waiting': 'Scan the QR code with WeChat.',
+  'channels.weixin.preparing': 'Preparing a new QR code…',
+  'channels.weixin.scanned': 'Scanned. Confirm on your phone.',
+  'channels.weixin.ready': 'WeChat connected.',
+  'channels.weixin.expired': 'QR code expired. Refresh to try again.',
+  'channels.weixin.error': 'WeChat login failed. Try again.',
+  'channels.weixin.credentialsError':
+    'WeChat connected, but the daemon could not save the credential. Check that its home directory is writable, then try again.',
+  'channels.weixin.unsupported':
+    'This daemon does not support WeChat login. Update the daemon, or run "qwen channel configure-weixin" on the host.',
+  'channels.weixin.restartHint':
+    'Channels that are already running keep the previous account until they are restarted.',
+  'channels.weixin.userId': (v) => `User ID: ${v?.id ?? ''}`,
+  'channels.weixin.savedAt': (v) => `Logged in at ${v?.time ?? ''}`,
+  'channels.weixin.qrAlt': 'WeChat login QR code',
+  'channels.weixin.openUrl': 'Open the login URL',
   'channels.editor.field.wecom.botId': 'Bot ID',
   'channels.editor.field.wecom.secret': 'Bot Secret',
   'channels.editor.field.wecom.wsUrl': 'WebSocket URL',
@@ -4865,6 +4906,12 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
     'Deliver To PR-Bound Sessions',
   'channels.editor.field.github.deliverToBoundSessions.description':
     'Deliver events for PRs bound to a live session into that session as a prompt, instead of a channel-owned session. Requires a daemon-managed channel.',
+  'channels.editor.field.github.requireBoundWatch':
+    'Require Active Watch For Review/Verify Sessions',
+  'channels.editor.field.github.requireBoundWatch.description':
+    'Only deliver events to review/verify bound sessions while they hold an active watch on that PR (an /autofix-pr watch or /verify-pr --watch). One-shot /review and /verify-pr sessions stay bound but receive nothing; events with no eligible session retire privately instead of a public reply. Requires Deliver To PR-Bound Sessions. Unknown watch state (detection failure) keeps delivering.',
+  'channels.editor.field.github.requireBoundWatch.disabledHint':
+    'Enable "Deliver To PR-Bound Sessions" above to require an active watch.',
   'channels.editor.field.github.prCommentWatch': 'PR Comment Watch',
   'channels.editor.field.github.prCommentWatch.description':
     'Poll same-account conversation and inline review comments on bound PRs and deliver each new one to every bound session that did not post it. Enabled by default; turn off to disable. Requires Deliver To PR-Bound Sessions.',
@@ -5134,15 +5181,24 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
     "Remove values that aren't in the allowed list.",
   'channels.editor.validation.requiresBoundDelivery':
     'Enable "Deliver To PR-Bound Sessions" to save the selected watch events.',
+  'channels.editor.validation.requiresBoundDeliveryForWatchGate':
+    'Enable "Deliver To PR-Bound Sessions" to require an active watch.',
   'channels.editor.validation.repoFilterRequired':
     'List at least one repository, or set Repository Filter to Off.',
   'channels.editor.validation.number': 'Enter a valid number.',
-  'channels.editor.validation.outOfRange': (v) =>
-    v?.min !== undefined && v?.max !== undefined
-      ? `Enter a number greater than ${v.min} and at most ${v.max}.`
-      : v?.max !== undefined
-        ? `Enter a number at most ${v.max}.`
-        : `Enter a number greater than ${v?.min ?? 0}.`,
+  'channels.editor.validation.outOfRange': (v) => {
+    const lower =
+      v?.minInclusive !== undefined
+        ? `at least ${v.minInclusive}`
+        : v?.min !== undefined
+          ? `greater than ${v.min}`
+          : undefined;
+    if (lower !== undefined && v?.max !== undefined) {
+      return `Enter a number ${lower} and at most ${v.max}.`;
+    }
+    if (v?.max !== undefined) return `Enter a number at most ${v.max}.`;
+    return `Enter a number ${lower ?? 'greater than 0'}.`;
+  },
   'channels.editor.validation.policy': 'Choose an access policy.',
   'channels.editor.saveError': 'Changes were not saved',
   'channels.editor.reloadLatest': 'Reload latest',
@@ -7631,6 +7687,7 @@ const ZH: Messages = {
   'sidebar.collapse': '收起',
   'sidebar.expand': '展开',
   'sidebar.showAllSessions': '展开显示',
+  'sidebar.showMoreSessions': (v) => `再显示 ${v?.['count'] ?? 0} 个`,
   'sidebar.subSessions': (v) => `${v?.['count'] ?? 0} 个子会话`,
   'sidebar.collapseProject': '收起工作区',
   'sidebar.expandProject': '展开工作区',
@@ -8969,8 +9026,6 @@ const ZH: Messages = {
   'trajectory.overview.lane.subagents': '子代理请求',
   'status.contextUsed': (v) => `上下文已用 ${v?.pct ?? '0.0'}%`,
   'status.disconnected': '断开连接',
-  'status.modeHint': '(shift + tab 或点击切换)',
-  'status.shortcuts': '? 查看快捷键',
   'stream.cancel': 'esc 取消',
   'stream.cancelArmed': '再按一次 Esc 停止',
   'waitingGame.title': 'Juust Relax',
@@ -9254,10 +9309,6 @@ const ZH: Messages = {
   'tasks.action.confirmHint': '这会终结当前阻塞轮次。',
   'tasks.pill.agent': (v) => `${v?.count ?? 0} 个本地智能体`,
   'tasks.pill.agents': (v) => `${v?.count ?? 0} 个本地智能体`,
-  'tasks.pill.agentPaused': (v) => `${v?.count ?? 0} 个本地智能体已暂停`,
-  'tasks.pill.agentsPaused': (v) => `${v?.count ?? 0} 个本地智能体已暂停`,
-  'tasks.pill.done': (v) => `${v?.count ?? 0} 个任务完成`,
-  'tasks.pill.doneMany': (v) => `${v?.count ?? 0} 个任务完成`,
   'tasks.pill.monitor': (v) => `${v?.count ?? 0} 个监控`,
   'tasks.pill.monitors': (v) => `${v?.count ?? 0} 个监控`,
   'tasks.pill.shell': (v) => `${v?.count ?? 0} 个 shell`,
@@ -9529,7 +9580,7 @@ const ZH: Messages = {
   'channels.loadError.title': '无法加载频道',
   'channels.empty.title': '尚未配置支持的频道',
   'channels.empty.description':
-    '配置钉钉、企业微信、飞书、GitHub、GitLab 或 Email，让当前工作区接收消息。',
+    '配置微信、钉钉、企业微信、飞书、GitHub、GitLab 或 Email，让当前工作区接收消息。',
   'channels.runtimeError': '频道运行时错误',
   'channels.action.back': '返回',
   'channels.action.refresh': '刷新',
@@ -9584,9 +9635,54 @@ const ZH: Messages = {
   'channels.editor.field.sessionScope.option.thread': '按话题',
   'channels.editor.field.sessionScope.option.chat_thread': '按对话和话题',
   'channels.editor.field.sessionScope.option.single': '整个频道共享',
+  'channels.qrLogin.title': '扫码绑定',
+  'channels.qrLogin.description':
+    '用手机 QQ 扫码绑定机器人。密钥只保留在本机。',
+  'channels.qrLogin.start': '扫码绑定',
+  'channels.qrLogin.refresh': '换一张码',
+  'channels.qrLogin.waiting': '正在生成二维码…',
+  'channels.qrLogin.scanHint': '在手机上打开 QQ 扫描此二维码。',
+  'channels.qrLogin.imageAlt': 'QQ 机器人绑定二维码',
+  'channels.qrLogin.bound': '已绑定机器人,渠道将使用新凭据。',
+  'channels.qrLogin.failed': '绑定失败',
+  'channels.qrLogin.expired': '二维码已过期,请重新获取。',
+  'channels.qrLogin.cancelled': '已取消绑定。',
+  'channels.qrLogin.error': '无法完成扫码绑定。',
   'channels.editor.field.dingtalk.clientId': 'Client ID（原 AppKey）',
   'channels.editor.field.dingtalk.clientSecret':
     'Client Secret（原 AppSecret）',
+  'channels.editor.field.weixin.groupPolicy': '群聊策略',
+  'channels.editor.field.weixin.groupPolicy.description':
+    '微信 iLink Bot 只支持私聊，因此群聊始终禁用。',
+  'channels.editor.field.weixin.groupPolicy.option.disabled': '禁用',
+  'channels.editor.field.weixin.allowedUsers': '预先放行的用户（可留空）',
+  'channels.editor.field.weixin.allowedUsers.description':
+    '建议留空，改在下方「待处理的配对请求」里批准用户——批准一次就会记住。只有在你已经拿到对方的平台用户 ID（形如 oAbCd…@im.wechat）时才填这里。填微信号或昵称不会生效，且不会有任何报错。',
+  'channels.weixin.title': '微信账号',
+  'channels.weixin.description':
+    '使用微信扫码登录。该账号由此 daemon 上的所有微信 channel 共享。',
+  'channels.weixin.loggedIn': '已登录',
+  'channels.weixin.loggedOut': '未登录',
+  'channels.weixin.login': '扫码登录',
+  'channels.weixin.relogin': '重新登录',
+  'channels.weixin.logout': '退出登录',
+  'channels.weixin.refresh': '刷新二维码',
+  'channels.weixin.waiting': '请用微信扫描二维码。',
+  'channels.weixin.preparing': '正在生成新的二维码…',
+  'channels.weixin.scanned': '已扫描，请在手机上确认。',
+  'channels.weixin.ready': '微信已连接。',
+  'channels.weixin.expired': '二维码已过期，请刷新重试。',
+  'channels.weixin.error': '微信登录失败，请重试。',
+  'channels.weixin.credentialsError':
+    '微信已连接，但 daemon 无法保存凭据。请确认其 home 目录可写后重试。',
+  'channels.weixin.unsupported':
+    '当前 daemon 不支持微信登录。请升级 daemon，或在主机上运行「qwen channel configure-weixin」。',
+  'channels.weixin.restartHint':
+    '已在运行的 channel 仍使用旧账号，需重启后才会切换到新账号。',
+  'channels.weixin.userId': (v) => `用户 ID：${v?.id ?? ''}`,
+  'channels.weixin.savedAt': (v) => `登录时间：${v?.time ?? ''}`,
+  'channels.weixin.qrAlt': '微信登录二维码',
+  'channels.weixin.openUrl': '打开登录链接',
   'channels.editor.field.wecom.botId': 'Bot ID',
   'channels.editor.field.wecom.secret': 'Bot Secret',
   'channels.editor.field.wecom.wsUrl': 'WebSocket URL',
@@ -9699,6 +9795,11 @@ const ZH: Messages = {
   'channels.editor.field.github.deliverToBoundSessions': '投递到 PR 绑定会话',
   'channels.editor.field.github.deliverToBoundSessions.description':
     '将已绑定到活跃会话的 PR 事件以 prompt 形式投递进该会话，而不是频道自有会话。需要 daemon 托管的频道。',
+  'channels.editor.field.github.requireBoundWatch': '评审/验证会话须有活跃监视',
+  'channels.editor.field.github.requireBoundWatch.description':
+    '仅当 review/verify 绑定会话对该 PR 持有活跃监视（/autofix-pr 监视或 /verify-pr --watch）时才投递事件。一次性的 /review 与 /verify-pr 会话保持绑定但不接收任何事件；没有合格会话的事件私下退役，不做公开回复。需开启「投递到 PR 绑定会话」。监视状态未知（检测失败）时照常投递。',
+  'channels.editor.field.github.requireBoundWatch.disabledHint':
+    '开启上方「投递到 PR 绑定会话」后即可要求活跃监视。',
   'channels.editor.field.github.prWatchEvents': 'PR 状态监视事件',
   'channels.editor.field.github.prWatchEvents.description':
     '可选。为绑定 PR 监视的状态转换（需开启"投递到 PR 绑定会话"）。留空则禁用。',
@@ -9950,15 +10051,24 @@ const ZH: Messages = {
   'channels.editor.validation.invalidOption': '请移除不在允许列表中的值。',
   'channels.editor.validation.requiresBoundDelivery':
     '需开启「投递到 PR 绑定会话」才能保存所选的监视事件。',
+  'channels.editor.validation.requiresBoundDeliveryForWatchGate':
+    '需开启「投递到 PR 绑定会话」才能要求活跃监视。',
   'channels.editor.validation.repoFilterRequired':
     '请至少列出一个仓库，或把「按仓库过滤」设为关闭。',
   'channels.editor.validation.number': '请输入有效数字。',
-  'channels.editor.validation.outOfRange': (v) =>
-    v?.min !== undefined && v?.max !== undefined
-      ? `请输入大于 ${v.min} 且不超过 ${v.max} 的数字。`
-      : v?.max !== undefined
-        ? `请输入不超过 ${v.max} 的数字。`
-        : `请输入大于 ${v?.min ?? 0} 的数字。`,
+  'channels.editor.validation.outOfRange': (v) => {
+    const lower =
+      v?.minInclusive !== undefined
+        ? `不小于 ${v.minInclusive}`
+        : v?.min !== undefined
+          ? `大于 ${v.min}`
+          : undefined;
+    if (lower !== undefined && v?.max !== undefined) {
+      return `请输入${lower} 且不超过 ${v.max} 的数字。`;
+    }
+    if (v?.max !== undefined) return `请输入不超过 ${v.max} 的数字。`;
+    return `请输入${lower ?? '大于 0'} 的数字。`;
+  },
   'channels.editor.validation.policy': '请选择准入策略。',
   'channels.editor.saveError': '未能保存更改',
   'channels.editor.reloadLatest': '加载最新配置',
