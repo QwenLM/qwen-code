@@ -634,7 +634,9 @@ class WorkspaceProfileLifecycleTest {
                     .putObject("subject").put("type", "turn").put("turnId", "queued-monitor");
             records += activation + "\n";
         }
-        f.jdbc.update("UPDATE ma_session_journal_tx SET record_bytes = ?", records.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        byte[] rewritten = records.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        f.jdbc.update("UPDATE ma_session_journal_tx SET record_bytes = ?, byte_length = ?, record_digest = ?",
+                rewritten, rewritten.length, ToolPublicationContract.sha256(rewritten));
         if (activated) {
             assertThatThrownBy(() -> admit(f, WorkspaceToolProfiles.SHELL, OperationKind.CLOSE))
                     .isInstanceOfSatisfying(ManagedAgentException.class, error -> assertThat(error.getCode()).isEqualTo("turn_active"));

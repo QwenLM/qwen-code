@@ -16,6 +16,8 @@ public interface ManagedAgentSettings {
     public EventTransport getEventTransport();
     public SessionStore getSessionStore();
     public ToolPublication getToolPublication();
+    /** Null means session-resource OSS externalization and journal compaction are disabled. */
+    public default SessionResources getSessionResources() { return null; }
     public Artifacts getArtifacts();
     public ManagedExtensions getManagedExtensions();
     public Extensions getExtensions();
@@ -97,6 +99,15 @@ public interface ManagedAgentSettings {
         public Duration getClaimTimeout();
         public Long getVerificationBytesPerSecond();
         public Duration getMaxVerificationTimeout();
+    }
+    public interface SessionResources {
+        public boolean isEnabled();
+        public String getOssKeyPrefix();
+        public boolean isPackJobEnabled();
+        public boolean isDeletionEnabled();
+        public long getPackTargetBytes();
+        public int getPackMaxTransactions();
+        public Duration getDeletionGrace();
     }
     public interface ManagedExtensions {
         public boolean isEnabled();
