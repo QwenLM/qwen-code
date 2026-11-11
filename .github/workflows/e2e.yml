@@ -875,6 +875,7 @@ jobs:
 
       - name: 'Install Playwright Chromium and WebKit'
         run: |-
+          [ -z "${PLAYWRIGHT_BROWSERS_PATH:-}" ] || { echo 'browsers baked into the image, skipping install'; exit 0; }
           node node_modules/playwright/cli.js install --with-deps chromium webkit
           nested_cli='node_modules/@playwright/test/node_modules/playwright/cli.js'
           if [ -f "${nested_cli}" ]; then

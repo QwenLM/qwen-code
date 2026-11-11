@@ -1175,6 +1175,15 @@ describe('no-AK integration CI wiring', () => {
         "nested_cli='node_modules/@playwright/test/node_modules/playwright/cli.js'",
       );
       expect(step).toContain('node "${nested_cli}" install chromium webkit');
+      // The disposable pool image bakes Chromium and its system libraries and
+      // is what sets PLAYWRIGHT_BROWSERS_PATH; its root-owned tree cannot even
+      // be verified by a job's own install (playwright writes a lock and a
+      // `.links` entry before it checks what is present), so every install
+      // site skips on that env instead of failing.
+      expect(step).toContain('if [ -n "${PLAYWRIGHT_BROWSERS_PATH:-}" ]; then');
+      expect(step).toContain(
+        "echo 'browsers baked into the image, skipping install'",
+      );
     }
   });
 
@@ -1196,6 +1205,12 @@ describe('no-AK integration CI wiring', () => {
       "nested_cli='node_modules/@playwright/test/node_modules/playwright/cli.js'",
     );
     expect(install).toContain('node "${nested_cli}" install chromium webkit');
+    // One line rather than the if/else shape the ci.yml sites use: this job
+    // runs on a hosted runner, and the file's size ratchet has ~124 bytes of
+    // headroom at this commit.
+    expect(install).toContain(
+      '[ -z "${PLAYWRIGHT_BROWSERS_PATH:-}" ] || { echo \'browsers baked into the image, skipping install\'; exit 0; }',
+    );
   });
 });
 

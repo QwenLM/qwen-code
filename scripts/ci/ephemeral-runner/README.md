@@ -42,15 +42,30 @@ still verified against its pinned digest when served from a mirror.
 
 ## Browsers in the image
 
-The image bakes Chromium, its system libraries and ffmpeg, so a job's own
-`playwright install` only verifies what is already there and needs no browser
-egress. A disposable container has no cache to reuse: without this, every visuals
-job paid a fresh download, and on 2026-11-11 the upstream CDN served the browser
-at about 61 KB/s from the hz4/hz5 hosts — a 110 MB headless shell was still at 70%
-after six minutes when two jobs were cancelled. The same object came from
-`cdn.npmmirror.com` at 8.9 MB/s on the same host, which is why
-`PLAYWRIGHT_DOWNLOAD_HOST` defaults there. Set it to the upstream CDN, or to an
-internal mirror, on a host that reaches one faster.
+The image bakes Chromium, its system libraries and ffmpeg. The lanes that
+install browsers (`ci.yml`, `e2e.yml`, `web-shell-visuals.yml`) skip their own
+install when `PLAYWRIGHT_BROWSERS_PATH` is set, and only this image sets it for
+them, so a job on it needs no browser egress and no apt round trip for the
+libraries. That holds for Chromium only: the image does not bake WebKit, and the
+lanes that install `chromium webkit` (hosted `ubuntu-latest` and the persistent
+ARM64 machines) still download both. A disposable container has no cache to
+reuse: without this, every visuals job paid a fresh download, and on 2026-11-11
+the upstream CDN served the browser at about 61 KB/s from the hz4/hz5 hosts — a
+110 MB headless shell was still at 70% after six minutes when two jobs were
+cancelled. The same object came from `cdn.npmmirror.com` at 8.9 MB/s on the same
+host, which is why `PLAYWRIGHT_DOWNLOAD_HOST` defaults there. Set it to the
+upstream CDN, or to an internal mirror, on a host that reaches one faster.
+
+The mirror is incomplete: its `builds/cft/` starts at 148.0.7778.96, so it
+carries 1.61.1's and 1.62.1's Chromium but not 1.58.2's 145.0.7632.6 (nor
+1.58.2's non-CFT `builds/chromium/1208/`). The install loop therefore falls back
+per version to Playwright's own CDN list, and logs which version it retried, so
+the default host cannot fail the build on a version it does not mirror.
+
+Size is the price. From the archives' Content-Length, the three versions are
+about 0.92 GB of downloads, roughly 2.0-2.3 GB extracted, plus 2.2-2.5 GB for
+the apt packages (Chromium's system libraries and ffmpeg) — estimates, not a
+measured image delta; weigh them against the host's disk floor.
 
 Every playwright the repository resolves picks its own browser revision, and the
 tree currently carries three: 1.61.1 at the root and in Web Shell, 1.62.1 under

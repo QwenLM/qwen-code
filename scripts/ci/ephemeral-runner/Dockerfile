@@ -12,6 +12,15 @@ ARG PIP_INDEX_URL=https://pypi.org/simple
 # cancelled on 2026-11-11. The npmmirror binary mirror served the same object
 # at 8.9 MB/s from the same host. Overridable for a host that can reach the
 # upstream CDN faster, or that mirrors it internally.
+#
+# The mirror is incomplete: its `builds/cft/` starts at 148.0.7778.96, so it
+# holds 1.61.1's 149.0.7827.55 and 1.62.1's 151.0.7922.34 but 404s 1.58.2's
+# 145.0.7632.6 (and 1.58.2's non-CFT `builds/chromium/1208/`). The install loop
+# therefore falls back to playwright's own CDN list per version, rather than
+# pinning a version-to-host map that a dependency bump would silently outrun.
+# A failed fallback exits the build explicitly: inside the `&&` chain below a
+# loop body is exempt from `set -e`, so without the `exit` the loop could
+# finish clean after a version failed.
 ARG PLAYWRIGHT_DOWNLOAD_HOST=https://cdn.npmmirror.com/binaries/playwright
 
 # fonts-dejavu-core supplies the DejaVu faces: verify-capture resolves bold
@@ -32,11 +41,11 @@ ENV PATH="/opt/ci-tools/bin:${PATH}"
 
 # Chromium and its system libraries, baked in so no job downloads them. A
 # disposable container has no cache to reuse, so every visuals job paid a
-# browser fetch at the CDN speed above. A job's own `playwright install` then
-# finds the browser present and only verifies it, so the job needs no browser
-# egress. The system libraries still go through `install-deps` in the job: this
-# image grants the runner user sudo, but not root, so `--with-deps` there would
-# fail on apt. Baking the libraries here removes that apt round trip too.
+# browser fetch at the CDN speed above. The install steps in ci.yml, e2e.yml
+# and web-shell-visuals.yml skip themselves when PLAYWRIGHT_BROWSERS_PATH is
+# set (below), so a job on this image needs no browser egress and no apt round
+# trip: this image grants the runner user sudo but not root, so `--with-deps`
+# in a job would fail on apt anyway. Baking the libraries here removes both.
 #
 # EVERY playwright in the tree resolves its own browser revision, and this tree
 # carries three: 1.61.1 at the root and in web-shell, 1.62.1 under browser-use,
@@ -59,17 +68,24 @@ ENV PATH="/opt/ci-tools/bin:${PATH}"
 # browser CDN is not.
 #
 # The tree stays root-owned and world-readable: jobs run as `node` and must not
-# be able to rewrite a browser the next job trusts. PLAYWRIGHT_BROWSERS_PATH is
-# what makes a job's own install resolve here instead of ~/.cache, so it has to
-# be an ENV, not a build-arg.
+# be able to rewrite a browser the next job trusts. A job's own
+# `playwright install` cannot run here regardless: it writes a lock and a
+# `.links` entry into the registry before it checks what is present, and this
+# tree is not writable. PLAYWRIGHT_BROWSERS_PATH is what a job's playwright
+# resolves its browser from and what those install steps key their skip on, so
+# it has to be an ENV, not a build-arg.
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
 ARG PLAYWRIGHT_VERSIONS="1.58.2 1.61.1 1.62.1"
 RUN set -eu \
     && mkdir -p /opt/ci-playwright \
     && printf '%s\n' ${PLAYWRIGHT_VERSIONS} > /opt/ci-playwright/versions \
     && while read -r version; do \
-         PLAYWRIGHT_DOWNLOAD_HOST="${PLAYWRIGHT_DOWNLOAD_HOST}" \
-           npx --yes "playwright@${version}" install --with-deps chromium; \
+         if ! PLAYWRIGHT_DOWNLOAD_HOST="${PLAYWRIGHT_DOWNLOAD_HOST}" \
+              npx --yes "playwright@${version}" install --with-deps chromium; then \
+           echo "PLAYWRIGHT_DOWNLOAD_HOST does not serve ${version}; retrying on the upstream CDN"; \
+           PLAYWRIGHT_DOWNLOAD_HOST= \
+             npx --yes "playwright@${version}" install --with-deps chromium || exit 1; \
+         fi; \
        done < /opt/ci-playwright/versions \
     && chmod -R a+rX /opt/ms-playwright \
     && rm -rf /root/.npm

@@ -2486,12 +2486,18 @@ jobs:
       - name: 'Install Playwright Chromium and WebKit (hosted)'
         if: "${{ runner.environment == 'github-hosted' }}"
         timeout-minutes: 30
+        # A github-hosted runner never runs the pool image, so this guard is
+        # inert here; it keeps every browser-install site one shape.
         run: |-
-          printf '%s\n' 'Acquire::http::Timeout "30";' 'Acquire::https::Timeout "30";' 'Acquire::Retries "2";' | sudo tee /etc/apt/apt.conf.d/99-qwen-ci-timeouts > /dev/null
-          node node_modules/playwright/cli.js install --with-deps chromium webkit
-          nested_cli='node_modules/@playwright/test/node_modules/playwright/cli.js'
-          if [ -f "${nested_cli}" ]; then
-            node "${nested_cli}" install chromium webkit
+          if [ -n "${PLAYWRIGHT_BROWSERS_PATH:-}" ]; then
+            echo 'browsers baked into the image, skipping install'
+          else
+            printf '%s\n' 'Acquire::http::Timeout "30";' 'Acquire::https::Timeout "30";' 'Acquire::Retries "2";' | sudo tee /etc/apt/apt.conf.d/99-qwen-ci-timeouts > /dev/null
+            node node_modules/playwright/cli.js install --with-deps chromium webkit
+            nested_cli='node_modules/@playwright/test/node_modules/playwright/cli.js'
+            if [ -f "${nested_cli}" ]; then
+              node "${nested_cli}" install chromium webkit
+            fi
           fi
 
       - name: 'Install Playwright Chromium and WebKit (self-hosted)'
@@ -2502,18 +2508,27 @@ jobs:
         # validation reports them missing, so each host installs them once and
         # later jobs skip apt. sudo -n fails fast instead of prompting, and the
         # lock timeout waits out another job's apt run on the same host.
+        #
+        # The disposable pool image bakes Chromium and its system libraries and
+        # sets PLAYWRIGHT_BROWSERS_PATH, but it does not bake WebKit. This job
+        # routes to the hosted lane or the persistent ARM64 fleet, never to that
+        # image, so the guard cannot drop WebKit here.
         timeout-minutes: 30
         run: |-
-          install_log="${RUNNER_TEMP}/playwright-install.log"
-          node node_modules/playwright/cli.js install chromium webkit 2>&1 | tee "${install_log}"
-          nested_cli='node_modules/@playwright/test/node_modules/playwright/cli.js'
-          if [ -f "${nested_cli}" ]; then
-            node "${nested_cli}" install chromium webkit 2>&1 | tee -a "${install_log}"
-          fi
-          if grep -q 'Host system is missing dependencies' "${install_log}"; then
-            apt_config="${RUNNER_TEMP}/apt-playwright.conf"
-            printf '%s\n' 'DPkg::Lock::Timeout "300";' 'Acquire::http::Timeout "30";' 'Acquire::https::Timeout "30";' 'Acquire::Retries "2";' > "${apt_config}"
-            sudo -n env APT_CONFIG="${apt_config}" "$(command -v node)" node_modules/playwright/cli.js install-deps chromium webkit
+          if [ -n "${PLAYWRIGHT_BROWSERS_PATH:-}" ]; then
+            echo 'browsers baked into the image, skipping install'
+          else
+            install_log="${RUNNER_TEMP}/playwright-install.log"
+            node node_modules/playwright/cli.js install chromium webkit 2>&1 | tee "${install_log}"
+            nested_cli='node_modules/@playwright/test/node_modules/playwright/cli.js'
+            if [ -f "${nested_cli}" ]; then
+              node "${nested_cli}" install chromium webkit 2>&1 | tee -a "${install_log}"
+            fi
+            if grep -q 'Host system is missing dependencies' "${install_log}"; then
+              apt_config="${RUNNER_TEMP}/apt-playwright.conf"
+              printf '%s\n' 'DPkg::Lock::Timeout "300";' 'Acquire::http::Timeout "30";' 'Acquire::https::Timeout "30";' 'Acquire::Retries "2";' > "${apt_config}"
+              sudo -n env APT_CONFIG="${apt_config}" "$(command -v node)" node_modules/playwright/cli.js install-deps chromium webkit
+            fi
           fi
 
       - name: 'Choose web-shell Playwright port'
