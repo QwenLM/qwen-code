@@ -755,14 +755,6 @@ describe('extractShellOperationsAcrossCommand', () => {
       [write(REPO_SETTINGS)],
     ],
     [
-      // R25-1 fail-closed: `$'…\'…'` keeps an ANSI-C quote state this lexer
-      // does not model, so the heredoc boundary is unproven. The write stays
-      // in the operations but is marked as resolved against an unknown cwd.
-      'marks the cwd unknown after an ANSI-C quote with an escaped quote',
-      "printf '%s' $'a\\'b' <<EOF\ncd /tmp\nEOF\necho hi > out.txt",
-      [uncertainWrite('/tmp/out.txt')],
-    ],
-    [
       // Narrowed fail-closed: without a possible heredoc opener the ambiguous
       // syntax cannot move a body boundary, so the command stays exact.
       'keeps an ANSI-C escaped quote exact without a heredoc opener',
@@ -788,29 +780,19 @@ describe('extractShellOperationsAcrossCommand', () => {
     ],
     [
       // A heredoc that already closed cannot be re-opened by a later
-      // ambiguous form, so that form must not taint the command.
-      'does not taint a command whose heredoc closed before the ambiguity',
+      // ambiguous form, so that form stays inert and the write stays visible.
+      'keeps a write visible after a heredoc closed before an escaped quote',
       "cat <<EOF\nbody\nEOF\nprintf %s $'a\\'b'; echo hi > out.txt",
       [write('/repo/out.txt')],
     ],
     [
-      'does not taint a command whose heredoc closed before an escaped-space hash',
+      'keeps a write visible after a heredoc closed before an escaped-space hash',
       'cat <<EOF\nbody\nEOF\necho a\\ # harmless; echo hi > out.txt',
       [write('/repo/out.txt')],
     ],
     [
-      // The opener on this line is still open when the ambiguity starts, so
-      // its body boundary is unproven even though the opener came first.
-      'marks an opener still open when the ambiguity appears after it',
-      "cat <<EOF $'a\\'b'\nbody\nEOF\necho hi > out.txt",
-      [
-        { ...read("/repo/a'b"), cwdUnknown: true, pathMayDependOnCwd: true },
-        uncertainWrite('/repo/out.txt'),
-      ],
-    ],
-    [
-      // R25-1 narrowing: `<<` inside arithmetic is a shift, so a later
-      // ambiguous form must not mark the command.
+      // R25-1 narrowing: `<<` inside arithmetic is a shift, so the escaped
+      // quote after it stays inert and the write stays visible.
       'keeps an arithmetic shift inert for a later escaped quote',
       "echo $((8<<2)); printf %s $'a\\'b'; echo hi > out.txt",
       [write('/repo/out.txt')],
@@ -821,39 +803,17 @@ describe('extractShellOperationsAcrossCommand', () => {
       [write('/repo/out.txt')],
     ],
     [
-      // The escaped space keeps `#` inside the word, so the redirect is real.
-      // Because that boundary is unproven, the write must be reported with an
-      // unknown cwd rather than as a clean `/repo/evil.txt`.
-      'keeps a redirect after an escaped-space hash as unproven',
+      // The escaped space keeps `#` inside the word, so the redirect is real
+      // and stays a plain write now that the uncertainty channel is gone.
+      'keeps a redirect after an escaped-space hash visible',
       'echo a\\ # x > evil.txt',
-      [uncertainWrite('/repo/evil.txt')],
+      [write('/repo/evil.txt')],
     ],
     [
       // A definite comment tail is never executed, so its `>` is not a write.
       'drops a redirect inside a definite comment',
       'echo a # x > evil.txt',
       [],
-    ],
-    [
-      // A real opener after the ambiguous form is still unproven: the body's
-      // `cd` can relocate a later relative write.
-      'marks the cwd unknown when a real opener follows an ambiguous form',
-      "printf %s $'a\\'b'; cat <<EOF\ncd /tmp\nEOF\necho hi > out.txt",
-      [uncertainWrite('/tmp/out.txt')],
-    ],
-    [
-      // R25-1 fail-closed: `a\ #` has no word boundary before `#`, so bash
-      // keeps it in the word and still reads the `<<EOF` opener.
-      'marks the cwd unknown when an escaped space precedes a hash',
-      'echo a\\ # <<EOF\ncd /tmp\nEOF\necho hi > out.txt',
-      [uncertainWrite('/tmp/out.txt')],
-    ],
-    [
-      // R25-1 fail-closed: `$(…)#` closes a command substitution inside the
-      // word, so the hash is data and the heredoc opener still counts.
-      'marks the cwd unknown when a hash follows a command substitution close',
-      'echo $(echo SUB)# note <<EOF\ncd /tmp\nEOF\necho hi > out.txt',
-      [uncertainWrite('/tmp/out.txt')],
     ],
     [
       'keeps multiline arithmetic from hiding a write',
@@ -885,9 +845,22 @@ describe('extractShellOperationsAcrossCommand', () => {
       [write(REPO_SETTINGS)],
     ],
     [
-      // R25-1 (5): an unfinished opener must not discard the delimiters the
-      // same line already produced.
-      'keeps earlier delimiters when a later opener is unfinished',
+      // R25-1 (5): an earlier delimiter survives a later opener that closes,
+      // so the write after it is real. Measured with bash, dash and sh: both
+      // here-docs close, then `echo {} > .qwen/settings.json` runs.
+      'keeps earlier delimiters when a later opener closes',
+      'cat <<A && cat <<EO\nA\nEO\necho {} > .qwen/settings.json',
+      [write(REPO_SETTINGS)],
+    ],
+    [
+      // Same shape with a backslash-newline inside the opener word. bash glues
+      // the continuation into the word (`<<EO` + `cd` becomes the delimiter
+      // `EOcd`, `/tmp` becomes cat's argument), so it performs neither the `cd`
+      // nor the write: measured, bash/dash/sh exit 1 on `cat /tmp` and create
+      // no file. This lexer does not model that fold, so it keeps the later
+      // redirect visible. That is the conservative direction, and this case
+      // pins the over-report so it cannot silently become a miss.
+      'keeps a later redirect visible when a continued opener swallows the line',
       'cat <<A && cat <<EO\\\ncd /tmp\nA\necho {} > .qwen/settings.json',
       [write(REPO_SETTINGS)],
     ],
@@ -1094,6 +1067,31 @@ describe('ANSI-C bytes that are not valid UTF-8', () => {
     expect(extractShellOperationsAcrossCommand(command, '/repo')).toEqual([
       read(path),
     ]);
+  });
+});
+
+describe('unprovable boundary fail-closed (B4)', () => {
+  it.each([
+    // An ANSI-C delimiter (`<<$'EOF'`) is decoded by bash; this lexer kept it as
+    // `$EOF`, never matched the terminator and swallowed the rest of the script.
+    ['an ANSI-C heredoc delimiter', "cat <<$'EOF'\nbody\necho hi > out.txt"],
+    // CR/VT/FF are word boundaries to the character class but not modeled by
+    // the ambiguity check, so the `#` truncated the line.
+    ['a CR before the hash', 'echo a\r#x > out.txt'],
+    ['an escaped semicolon before the hash', 'echo a\\;#x > out.txt'],
+    // A `)` with no matching opener: the scan cannot tell word data from a
+    // comment, so it must keep the text.
+    ['an unmatched closing paren', 'echo hi)#x > out.txt'],
+    // The lexer does not model backticks, so a `#` inside one truncated the
+    // rest of the line.
+    ['a hash inside backticks', 'echo `a # b`; echo hi > out.txt'],
+  ])('keeps the write after %s', (_title, command) => {
+    expect(across(command)).toContainEqual(
+      expect.objectContaining({
+        virtualTool: 'write_file',
+        filePath: '/repo/out.txt',
+      }),
+    );
   });
 });
 

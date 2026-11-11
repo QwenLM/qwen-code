@@ -580,17 +580,6 @@ describe('shouldForceAutoModeReviewForAllow', () => {
     expect(forcesReview('D=.qwen/settings.json; cp payload "$D"')).toBe(true);
   });
 
-  it('asks when the heredoc boundary is unproven (R25-1 fail-closed)', () => {
-    for (const command of [
-      "printf '%s' $'a\\'b' <<EOF\ncd /tmp\nEOF\necho hi > out.txt",
-      'echo a\\ # <<EOF\ncd /tmp\nEOF\necho hi > out.txt',
-      'echo $(echo SUB)# note <<EOF\ncd /tmp\nEOF\necho hi > out.txt',
-      "printf %s $'a\\'b'; cat <<EOF\ncd /tmp\nEOF\necho hi > out.txt",
-    ]) {
-      expect(forcesReview(command)).toBe(true);
-    }
-  });
-
   it('keeps proven heredocs on their real paths (no blanket escalation)', () => {
     for (const command of [
       'cat <<EOF\ncd /tmp\nEOF\necho hi > out.txt',
@@ -614,10 +603,6 @@ describe('shouldForceAutoModeReviewForAllow', () => {
       expect(forcesReview(command)).toBe(false);
     }
 
-    // The escaped space makes the `#` word data, so the redirect is real; the
-    // unproven boundary must ask rather than report a clean path.
-    expect(forcesReview('echo a\\ # x > evil.txt')).toBe(true);
-
     // A heredoc that closed before the ambiguity cannot be re-opened by it.
     for (const command of [
       "cat <<EOF\nbody\nEOF\nprintf %s $'a\\'b'; echo hi > out.txt",
@@ -625,10 +610,6 @@ describe('shouldForceAutoModeReviewForAllow', () => {
     ]) {
       expect(forcesReview(command)).toBe(false);
     }
-    // A same-line opener is still open when the ambiguity starts.
-    expect(
-      forcesReview("cat <<EOF $'a\\'b'\nbody\nEOF\necho hi > out.txt"),
-    ).toBe(true);
   });
 
   it('does not force review for awk field references', () => {

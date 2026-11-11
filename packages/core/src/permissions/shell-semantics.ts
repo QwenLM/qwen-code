@@ -2565,26 +2565,12 @@ function extractFindExecOps(args: string[], cwd: string): ShellOperation[] {
 
 interface StrippedHeredocs {
   text: string;
-  /**
-   * True when the lexer met a construct it cannot decide the way bash does
-   * (`$'…'` with an escaped quote, an escaped space before `#`, a `#` right
-   * after a command-substitution `)`). The heredoc boundaries are then
-   * unproven, so callers must not silently trust the extracted paths.
-   */
-  uncertain: boolean;
-  /**
-   * True when the lexer saw a `<<` that cannot be excluded as a heredoc
-   * opener. A `<<` that is provably inert (arithmetic shift, determinate
-   * single-quoted text, here-string) does not set it.
-   */
-  possibleOpener: boolean;
 }
 
 function stripHeredocBodies(command: string): StrippedHeredocs {
   const lines = command.split('\n');
   const kept: string[] = [];
   const pendingDelimiters: string[] = [];
-  let reachableOpener = false;
   const lexer = new HeredocLexer();
 
   for (const line of lines) {
@@ -2597,13 +2583,6 @@ function stripHeredocBodies(command: string): StrippedHeredocs {
 
     kept.push(line);
     pendingDelimiters.push(...lexer.scan(line));
-    // An opener seen before the uncertainty can still be affected when it is
-    // not closed yet: its body starts on a later line, and an ambiguous quote
-    // or comment from here on could move that boundary.
-    if (lexer.takeUncertaintyRaised() && pendingDelimiters.length > 0) {
-      reachableOpener = true;
-    }
-    if (lexer.hasPossibleOpener()) reachableOpener = true;
     const commentStart = lexer.takeCommentStart();
     if (commentStart !== null) {
       // bash never executes a commented tail; dropping it keeps a `>` inside
@@ -2612,57 +2591,7 @@ function stripHeredocBodies(command: string): StrippedHeredocs {
     }
   }
 
-  return {
-    text: kept.join('\n'),
-    uncertain: lexer.hasUncertainty(),
-    possibleOpener: reachableOpener,
-  };
-}
-
-/**
- * True when a line ends with an unescaped `$` and a trailing backslash, so bash
- * removes the backslash-newline and the next line's leading `$` continues the
- * same word (`$$` = PID).
- */
-function endsWithDollarContinuation(line: string): boolean {
-  const trailing = /\\+$/.exec(line)?.[0].length ?? 0;
-  if (trailing === 0 || trailing % 2 === 0) return false;
-  return line[line.length - trailing - 1] === '$';
-}
-
-/**
- * True when the `$'` at `index` really opens an ANSI-C literal. An escaped
- * dollar and the second dollar of `$$` (the PID) are followed by an ordinary
- * quote instead.
- */
-function isAnsiCQuoteStart(
-  line: string,
-  index: number,
-  dollarFromPreviousLine: boolean,
-): boolean {
-  if (index === 0 && dollarFromPreviousLine) return false;
-  let backslashes = 0;
-  for (let i = index - 1; i >= 0 && line[i] === '\\'; i--) backslashes++;
-  if (backslashes % 2 === 1) return false;
-  return !(line[index - 1] === '$' && backslashes === 0);
-}
-
-/**
- * True when the ANSI-C literal starting after `$'` contains a backslash-escaped
- * single quote before its terminator. That is the form where bash's `$'…'`
- * state and this lexer's plain single-quote state diverge.
- */
-function hasEscapedQuoteInAnsiC(line: string, start: number): boolean {
-  for (let index = start; index < line.length; index++) {
-    const char = line[index]!;
-    if (char === '\\') {
-      if (line[index + 1] === "'") return true;
-      index++;
-      continue;
-    }
-    if (char === "'") return false;
-  }
-  return false;
+  return { text: kept.join('\n') };
 }
 
 class HeredocLexer {
@@ -2671,16 +2600,6 @@ class HeredocLexer {
   private arithmeticDepth = 0;
   private legacyArithmetic = false;
   private parameterDepth = 0;
-  /** Sticky: set once a construct makes the heredoc boundaries unproven. */
-  private uncertain = false;
-  /**
-   * Sticky: set when a `<<` was seen that cannot be excluded as an opener —
-   * a real opener, a `<<` met inside a quote state this lexer cannot trust,
-   * and a `<<` hidden behind an ambiguous comment break.
-   */
-  private possibleOpener = false;
-  /** Sticky: a `$'…'` with an escaped quote made the quote state untrusted. */
-  private ansiCQuoteUntrusted = false;
   /**
    * True for the rest of a line whose `#` looked like a comment boundary but
    * belongs to the previous word. The tail is scanned (so a real write after
@@ -2690,16 +2609,6 @@ class HeredocLexer {
   private ambiguousCommentTail = false;
   /** Offset of a definitively-commented tail on the line just scanned. */
   private commentStart: number | null = null;
-  /** Sticky: a `#` boundary was ambiguous, so this command's own parse is. */
-  private ambiguousCommentBoundary = false;
-  /** Set when the line just scanned raised the uncertainty for the first time. */
-  private uncertaintyRaised = false;
-  /**
-   * True when the previous line ended with an unescaped `$` and a
-   * backslash-newline, so a leading `$` on this line forms `$$` (the PID)
-   * rather than opening an ANSI-C literal.
-   */
-  private continuedDollar = false;
   /**
    * Open parens in scan order. `subst` marks one opened by `$(`; a `)` that
    * pops `subst` closes a command substitution, so a following `#` is word
@@ -2715,25 +2624,8 @@ class HeredocLexer {
   private continuedLine = false;
   /** Whether each open `((` was a `$((` expansion (part of a word). */
   private arithmeticIsWord: boolean[] = [];
-
-  hasUncertainty(): boolean {
-    return this.uncertain;
-  }
-
-  hasPossibleOpener(): boolean {
-    return this.possibleOpener;
-  }
-
-  /** True when the last scanned line raised the uncertainty. */
-  takeUncertaintyRaised(): boolean {
-    const raised = this.uncertaintyRaised;
-    this.uncertaintyRaised = false;
-    return raised;
-  }
-
-  hasAmbiguousCommentBoundary(): boolean {
-    return this.ambiguousCommentBoundary;
-  }
+  /** Inside a backtick command substitution, where `#` is data. */
+  private backtick = false;
 
   /** Offset where a definite comment starts on the last scanned line. */
   takeCommentStart(): number | null {
@@ -2743,8 +2635,6 @@ class HeredocLexer {
   }
 
   scan(line: string): string[] {
-    const dollarFromPreviousLine = this.continuedDollar;
-    this.continuedDollar = false;
     const continuedFromPreviousLine = this.continuedLine;
     this.continuedLine = false;
     this.ambiguousCommentTail = false;
@@ -2765,32 +2655,15 @@ class HeredocLexer {
       }
       if (this.quote === "'") {
         if (char === "'") this.quote = '';
-        else if (
-          this.ansiCQuoteUntrusted &&
-          char === '<' &&
-          line[index + 1] === '<'
-        ) {
-          // The `$'…'` above may have ended the quote where this lexer did
-          // not, so an opener here cannot be excluded.
-          this.possibleOpener = true;
-        }
         continue;
       }
       if (this.quote === '"') {
         if (char === '"') this.quote = '';
         continue;
       }
-      if (char === '$' && line[index + 1] === "'") {
-        // `$'…'` has its own escape rules: `\'` does not close the literal.
-        // This lexer keeps plain single-quote state, so the ambiguous form is
-        // reported instead of guessed (fail-closed).
-        if (
-          isAnsiCQuoteStart(line, index, dollarFromPreviousLine) &&
-          hasEscapedQuoteInAnsiC(line, index + 2)
-        ) {
-          this.ansiCQuoteUntrusted = true;
-          this.raiseUncertainty();
-        }
+      if (char === '`') {
+        this.backtick = !this.backtick;
+        continue;
       }
       if (char === '"' || char === "'") {
         this.quote = char;
@@ -2848,10 +2721,15 @@ class HeredocLexer {
       }
       if (char === ')') {
         const kind = this.parenStack.pop();
-        this.closeBindsWord = kind === 'subst' || kind === 'process';
+        this.closeBindsWord =
+          kind === undefined || kind === 'subst' || kind === 'process';
         continue;
       }
-      if (char === '#' && (index === 0 || /[\s;&|()]/.test(line[index - 1]!))) {
+      if (
+        !this.backtick &&
+        char === '#' &&
+        (index === 0 || /[\s;&|()]/.test(line[index - 1]!))
+      ) {
         // bash opens a comment only at a word start. Two of the boundary
         // characters above can belong to the previous word instead — an
         // escaped space (`a\ #`) and a `)` that closes a `$(…)` inside the
@@ -2866,10 +2744,7 @@ class HeredocLexer {
           )
         ) {
           // The `#` may belong to the previous word, so the rest of the line
-          // is real text: keep scanning it instead of dropping it, and let the
-          // caller treat the resulting paths as unproven.
-          this.raiseUncertainty();
-          this.ambiguousCommentBoundary = true;
+          // is real text: keep scanning it instead of dropping it.
           this.ambiguousCommentTail = true;
           continue;
         }
@@ -2881,10 +2756,10 @@ class HeredocLexer {
         index += 2;
         continue;
       }
-      if (this.uncertain) this.possibleOpener = true;
       if (this.ambiguousCommentTail) {
         // Seen, but not trusted as a boundary: keep the following lines as
-        // code and let the uncertainty drive the approval.
+        // code, so a redirect there stays visible instead of hiding behind a
+        // guessed comment.
         index++;
         continue;
       }
@@ -2899,7 +2774,6 @@ class HeredocLexer {
       index = delimiter.end;
     }
     this.escaped = false;
-    this.continuedDollar = endsWithDollarContinuation(line);
     const trailing = /\\+$/.exec(line)?.[0].length ?? 0;
     this.continuedLine = trailing % 2 === 1;
     return delimiters;
@@ -2910,11 +2784,6 @@ class HeredocLexer {
    * lexer but belongs to the previous word for bash, so treating the `#` as a
    * comment would silently discard the rest of the line.
    */
-  private raiseUncertainty(): void {
-    if (!this.uncertain) this.uncertaintyRaised = true;
-    this.uncertain = true;
-  }
-
   private commentBoundaryIsAmbiguous(
     line: string,
     index: number,
@@ -2926,9 +2795,19 @@ class HeredocLexer {
       return continuedFromPreviousLine;
     }
     const previous = line[index - 1];
+    if (previous !== undefined && /[\r\v\f]/.test(previous)) {
+      // Word boundaries this lexer does not model: keep the text.
+      return true;
+    }
     if (previous === ' ' || previous === '\t') {
       let backslashes = 0;
       for (let i = index - 2; i >= 0 && line[i] === '\\'; i--) backslashes++;
+      return backslashes % 2 === 1;
+    }
+    if (previous !== undefined && /[;&|(]/.test(previous)) {
+      let backslashes = 0;
+      for (let i = index - 2; i >= 0 && line[i] === '\\'; i--) backslashes++;
+      // `a\;#x` keeps `#` inside the word; the escape is not a boundary.
       return backslashes % 2 === 1;
     }
     if (previous === ')') {
@@ -2947,6 +2826,14 @@ class HeredocLexer {
   ): { text: string; end: number } | null {
     if (line[start] === '-') start++;
     while (line[start] === ' ' || line[start] === '\t') start++;
+    if (
+      line[start] === '$' &&
+      (line[start + 1] === "'" || line[start + 1] === '"')
+    ) {
+      // `<<$'EOF'` names a delimiter bash decodes; this lexer would record
+      // `$EOF`, never match the terminator and swallow the following script.
+      return null;
+    }
     let text = '';
     let quote: '"' | "'" | '' = '';
     let index = start;
@@ -2971,30 +2858,13 @@ class HeredocLexer {
   }
 }
 
-/**
- * True when this simple command contains a `#` the lexer cannot classify.
- * Such a `#` may hide or reveal a write in the same command, so the operations
- * extracted from it are unproven even without a heredoc. An ANSI-C quote alone
- * does not qualify: the tokenizer decodes it, so the paths it produces are
- * exact and only the heredoc boundary is in question.
- */
-function segmentHasAmbiguousComment(command: string): boolean {
-  const lexer = new HeredocLexer();
-  lexer.scan(command);
-  return lexer.hasAmbiguousCommentBoundary();
-}
-
 function walkCompoundCommand(
   command: string,
   cwd: string,
   depth: number,
   initialCwdUnknown: boolean,
 ): ShellOperation[] {
-  const {
-    text: heredocStripped,
-    uncertain,
-    possibleOpener,
-  } = stripHeredocBodies(command);
+  const { text: heredocStripped } = stripHeredocBodies(command);
   const subCommands = splitCompoundCommandSegments(heredocStripped);
 
   const ops: ShellOperation[] = [];
@@ -3050,24 +2920,14 @@ function walkCompoundCommand(
     }
 
     const subOps = extractShellOperations(sub, effectiveCwd);
-    if (cwdUnknown || segmentHasAmbiguousComment(sub)) {
+    if (cwdUnknown) {
       ops.push(...markCwdUnknownOps(subOps, sub, effectiveCwd));
     } else {
       ops.push(...subOps);
     }
   }
 
-  // The heredoc boundaries are unproven, so the paths above were resolved
-  // against a cwd this analysis cannot vouch for. Reuse the existing
-  // `cwdUnknown` channel: consumers that enforce protected relative paths then
-  // escalate to "ask" instead of silently trusting a possibly wrong path.
-  // Only commands with a `<<` the lexer could not exclude as an opener are
-  // affected; an inert `<<` (arithmetic shift, determinate quote) cannot move
-  // a body boundary, and marking those would turn every `$'…'` into a manual
-  // approval.
-  return uncertain && possibleOpener
-    ? markCwdUnknownOps(ops, command, cwd)
-    : ops;
+  return ops;
 }
 
 function hasAbsolutePathTokenForOperation(

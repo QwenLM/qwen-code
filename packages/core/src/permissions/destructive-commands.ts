@@ -447,7 +447,9 @@ function scanExecutedSubstitutions(text: string): ScannedSubstitutions {
       continue;
     }
 
-    if (char === '#' && isCommentStart(text, index)) {
+    // A `#` inside a quoted string is data, not a comment boundary; the
+    // comment test alone only knows the previous raw character.
+    if (!double && char === '#' && isCommentStart(text, index)) {
       const end = text.indexOf('\n', index);
       const stop = end === -1 ? text.length : end;
       edits.push({ start: index, end: stop, replacement: '' });
@@ -660,7 +662,7 @@ function findCommandSubstitutionEnd(
       double = true;
       continue;
     }
-    if (char === '#' && isCommentStart(text, index)) {
+    if (!double && char === '#' && isCommentStart(text, index)) {
       return { end: -1, unprovable: true };
     }
     if (char === '<' && text[index + 1] === '<') {

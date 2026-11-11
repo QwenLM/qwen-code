@@ -282,7 +282,24 @@ describe('isDestructiveCommand — git commit --amend', () => {
     "for echo in 'git commit --amend'; do $echo; done",
     "$(echo 'git commit --amend')",
     "./cat 'git commit --amend'",
+    // Every row above spells `git commit --am…` in the raw text, so the
+    // backstop regex alone would satisfy this block. These two do not: the
+    // `commit` word is split by quotes, so only the substitution body (or the
+    // wrapper's inner command) plus quote removal can see the amend. Removing
+    // either scanner path makes exactly these rows fail.
+    "$(git com''mit --amend)",
+    "bash -c 'git com''mit --amend'",
   ])('routes executed-output shapes to approval: %s', (command) => {
+    expectNeedsApproval(command);
+  });
+
+  it('routes a function that hands its argument to `sh -c` to approval', () => {
+    // `${1}` is bash's positional reference spelled so vitest's `$name` title
+    // interpolation cannot rewrite it. Written as `$1` the reported case name
+    // read `sh -c "undefined"` while the command really carried `$1`, so the
+    // name stopped describing what ran. The fixture is asserted as written.
+    const command = `cat() { sh -c "\${1}"; }\ncat 'git commit --amend'`;
+    expect(command).toContain(`sh -c "\${1}"`);
     expectNeedsApproval(command);
   });
 
@@ -292,7 +309,6 @@ describe('isDestructiveCommand — git commit --amend', () => {
     `echo 'git commit --amend' 2>&1 | sh`,
     `{ printf '%s\n' 'git commit --amend'; } | sh`,
     `cat <<'EOF' 2>&1 | sh\ngit commit --amend\nEOF`,
-    `cat() { sh -c "$1"; }\ncat 'git commit --amend'`,
     `echo 'git commit --amend' > /tmp/x.sh && bash /tmp/x.sh`,
     `printf -v x 'git commit --amend'; sh -c "$x"`,
     `./cat <<'EOF'\ngit commit --amend\nEOF`,
@@ -374,14 +390,24 @@ describe('isDestructiveCommand — git commit --amend', () => {
     // cannot see the subcommand and only the `$`-alongside-git+commit rule
     // keeps this from falling through to L5.3.
     'git ${x}commit --amend',
-    "git commit --amend\\n'-m' x",
+    // A backslash-newline is removed before bash parses, so the two physical
+    // lines are one word: this really runs `git commit --amend`, while the raw
+    // text never spells `git commit`, so only the lexical scan can see it.
+    // The previous entry here was `git commit --amend -m x`, which asserted a
+    // different thing while claiming to cover this one.
+    'git com\\\nmit --amend',
   ])('routes the %s spelling to approval', (command) => {
     expectNeedsApproval(command);
   });
 
   it('keeps amend scanning linear for long model-authored commands', () => {
+    // `git commit ` repeated is answered by the backstop regex and never
+    // reaches the scanner, so it cannot witness this bound. Repeat shapes that
+    // do traverse both scanner layers: 2000 substitution bodies and 2000
+    // stripped heredocs.
+    const command = 'git commit -m "$(true)"\ncat <<EOF\nx\nEOF\n'.repeat(2000);
     const start = performance.now();
-    expect(amendNeedsApproval('git commit '.repeat(8000))).toBe(false);
+    expect(amendNeedsApproval(command)).toBe(false);
     expect(performance.now() - start).toBeLessThan(500);
   });
 
@@ -465,6 +491,18 @@ describe('isDestructiveCommand — git commit --amend', () => {
     // A harmless substitution stays a value.
     expect(amendNeedsApproval('git commit -m "$(cat msg)"')).toBe(false);
     expect(amendNeedsApproval('git commit -m "note $(echo hi)"')).toBe(false);
+  });
+
+  it('does not mistake a hash inside quotes for a comment', () => {
+    // R26-1: the substitution scanner decided "comment" from the previous raw
+    // character, so a quoted `#` truncated the line and hid the amend after it.
+    for (const command of [
+      'git commit -m "fix #42" && git commit -a --amend',
+      'echo "step #1"; git commit -a --amend',
+      'git commit --author="a #b"; git commit --amend',
+    ]) {
+      expect(amendNeedsApproval(command)).toBe(true);
+    }
   });
 
   it('reads substitutions from the raw text, not from a dequoted word', () => {
