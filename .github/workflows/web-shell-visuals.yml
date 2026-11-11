@@ -9,8 +9,9 @@ name: 'Web-shell Visuals'
 #
 # Security model: this workflow BUILDS AND RENDERS untrusted PR code, so it runs
 # on the `pull_request` trigger (fork PRs get a read-only token and NO secrets),
-# on a disposable runner for fork PRs (the ecs-qwen-ephemeral pool) and on the
-# hosted lane for same-repo PRs, with `contents: read` and no secrets of its own.
+# on the disposable ecs-qwen-ephemeral pool for every PR, with `contents: read`
+# and no secrets of its own. The repository kill-switch keeps a hosted fallback
+# for contexts where repository variables are available.
 # It produces only image/video bytes as an artifact. The privileged step
 # that needs a write token — pushing the images and commenting on the PR — lives
 # in the separate workflow_run workflow that never checks out PR code.
@@ -54,19 +55,18 @@ defaults:
 
 jobs:
   capture:
-    name: 'Capture web-shell visuals (ubuntu-latest, Node 22.x)'
+    name: 'Capture web-shell visuals (Node 22.x)'
     if: "${{ github.repository == 'QwenLM/qwen-code' }}"
-    # The disposable pool exists for untrusted fork PRs only (design doc:
-    # "Trusted and same-repository PR routes stay unchanged"). Same-repo PRs
-    # stay on the hosted lane, where this job ran before. Fork runs receive
-    # empty repository variables, so the kill-switch cannot reach them; the
-    # fork-path escape is changing this selector on main.
-    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && github.event.pull_request.head.repo.full_name != github.repository) && fromJSON(''["self-hosted", "ecs-qwen-ephemeral"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    # The capture executes PR code without long-lived credentials, matching the
+    # disposable pool's trust boundary for both fork and same-repository PRs.
+    # Fork runs receive empty repository variables, so the kill-switch cannot
+    # reach them; the fork-path escape is changing this selector on main.
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "ecs-qwen-ephemeral"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     # Cold-store pool runs measured 22m+ installs before any render, so the
-    # fork pool arm gets 90 and same-repo/hosted keeps 45. runner.environment
-    # is not available here; key off the same fork term runs-on reads.
+    # pool arm gets 90 and the hosted fallback keeps 45. runner.environment is
+    # not available here; key off the same kill-switch term runs-on reads.
     # Rationale and measurements: docs/design/2026-11-07-ephemeral-container-runners.md.
-    timeout-minutes: "${{ (github.event.pull_request.head.repo.full_name != github.repository && vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true') && 90 || 45 }}"
+    timeout-minutes: "${{ vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true' && 90 || 45 }}"
     steps:
       - name: 'Checkout PR head'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3

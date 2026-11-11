@@ -216,9 +216,8 @@ that the new image has not verified, and leaves the routing image relationship
 of the existing classifier job and the other workflows unchanged.
 
 Update 2026-11-08: the credential-free Web-shell Visuals capture job
-moves onto this pool **for untrusted fork PRs only** — same-repo PRs stay
-on the hosted lane, where the job ran before (the original rule above,
-"trusted and same-repository PR routes stay unchanged", still governs).
+initially moved onto this pool **for untrusted fork PRs only**. At that stage,
+same-repo PRs stayed on the hosted lane under the original rule above.
 The main CI `Test (ubuntu-latest, Node 22.x)` aggregate gate was tried
 here and moved back off (below).
 The capture job matches the pool's security
@@ -239,8 +238,8 @@ the same archive; the best-effort step degrades only its own extra
 font/ffmpeg install failure to fallback fonts and .webm-only recordings
 instead of failing the preview, with bounded apt calls and a post-install
 font check. The first complete pooled render still needs acceptance for
-font metrics and end-to-end duration. Same-repo PRs never leave the hosted lane, so there is
-nothing to revert. Fork-triggered runs receive empty repository variables
+font metrics and end-to-end duration. At that stage, same-repo PRs never left
+the hosted lane. Fork-triggered runs receive empty repository variables
 (see the fork section above), so the kill-switch cannot reach them; the
 real fork-path escape is changing the selector on `main`, not the switch.
 The E2E OpenTUI leg deliberately stays hosted: it injects long-lived model
@@ -256,6 +255,20 @@ kill-switch cannot reach fork runs. It now follows the classifier's
 `ubuntu_runner` exactly like the sibling aggregates: persistent fleet for
 trusted events, hosted for untrusted forks, kill-switch honored through
 the classifier on every path.
+
+Update 2026-11-11: GitHub-hosted concurrency became the bottleneck while the
+disposable hz4/hz5 pool had available capacity. Web-shell Visuals capture now
+uses `ecs-qwen-ephemeral` for every PR, and the credential-free Managed Host
+Build uses it for PR events as well. Both jobs execute PR code with a read-only
+token and no long-lived secrets. Managed Host push and manual runs remain
+GitHub-hosted; the privileged Visuals publisher also remains GitHub-hosted
+because it receives OSS credentials and `CI_BOT_PAT`. The Managed Host lane
+reuses the image's Node, applies the same 8 GiB / 85% disk gate and gives pool
+runs a 90-minute ceiling while retaining the hosted 20-minute ceiling. Where
+repository variables are available, `MAINTAINER_ECS_RUNNER_DISABLED=true`
+returns these PR jobs to GitHub-hosted runners. Fork runs still cannot observe
+that variable, so their escape path remains a workflow selector change on
+`main` followed by a fresh event.
 
 The pool label is `ecs-qwen-ephemeral`; the initial deployment registered ten
 ARM64 runners, and the 2026-11-08 live query showed 22 online slot
