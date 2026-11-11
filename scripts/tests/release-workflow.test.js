@@ -2584,6 +2584,22 @@ describe('release workflow', () => {
     );
   });
 
+  it('keeps the Docker retry budget below the integration_docker job timeout', () => {
+    const budget = Number(
+      /^DOCKER_TEST_STEP_BUDGET_SECONDS=(\d+)$/m.exec(
+        dockerIntegrationScript,
+      )?.[1],
+    );
+    expect(Number.isInteger(budget)).toBe(true);
+    expect(budget).toBeGreaterThan(0);
+    // The step starts several minutes into the job — 7m50s and 5m54s on the
+    // two measured release runs — so the budget must keep that margin below
+    // the job's timeout-minutes.
+    expect(budget).toBeLessThanOrEqual(
+      releaseYaml.jobs.integration_docker['timeout-minutes'] * 60 - 600,
+    );
+  });
+
   const dockerIntegrationScriptAbsolutePath = join(
     process.cwd(),
     '.github/scripts/run-release-docker-integration.sh',
@@ -2614,6 +2630,8 @@ describe('release workflow', () => {
     suiteFailures = 0,
     failSuite = 'cli',
     suiteSeconds = 0,
+    preLoopSeconds = 0,
+    postGateFailAt = 2,
     dockerPsFails = false,
     aptDefaultRate,
     aptAliyunRate,
@@ -2690,6 +2708,9 @@ exit 0`,
     stub(
       'npm',
       `printf 'npm %s flags=%s\\n' "$*" "\${BUILD_SANDBOX_FLAGS:-}" >> "$CALLS_LOG"
+offset=0
+if [ -f "$CALLS_LOG.clock" ]; then offset=$(cat "$CALLS_LOG.clock"); fi
+printf '%s' "$(( offset + \${BUILD_SECONDS:-0} ))" > "$CALLS_LOG.clock"
 if [ "$BUILD_FAILS" = '1' ] && [ "$1" = 'run' ] && [ "$2" = 'build:sandbox' ]; then
   exit 1
 fi`,
@@ -2741,7 +2762,7 @@ esac`,
           'count=$((count + 1))\n' +
           'printf \'%s\' "$count" > "$count_file"\n' +
           'printf \'disk-floor %s floor=%s inodes=%s\\n\' "$*" "${DISK_FLOOR_MIN_FREE_KB:-unset}" "${DISK_FLOOR_MIN_FREE_INODES:-unset}" >> "$CALLS_LOG"\n' +
-          'if [ "$count" -gt 1 ] && [ -n "${POST_GATE_EXIT:-}" ]; then\n' +
+          'if [ "$count" -ge "${POST_GATE_FAIL_AT:-2}" ] && [ -n "${POST_GATE_EXIT:-}" ]; then\n' +
           '  exit "$POST_GATE_EXIT"\n' +
           'fi\n' +
           'exit "${GATE_EXIT:-0}"\n',
@@ -2769,6 +2790,8 @@ esac`,
         FAIL_SUITE: failSuite,
         STUB_DATE_START: '1000000',
         STUB_SUITE_SECONDS: String(suiteSeconds),
+        BUILD_SECONDS: String(preLoopSeconds),
+        POST_GATE_FAIL_AT: String(postGateFailAt),
         DOCKER_PS_FAILS: dockerPsFails ? '1' : '0',
         CURL_DEFAULT_RATE: String(aptDefaultRate ?? 10000),
         CURL_ALIYUN_RATE: String(aptAliyunRate ?? 5000000),
@@ -2985,13 +3008,17 @@ esac`,
   );
 
   it.skipIf(process.platform === 'win32')(
-    'retries the motivating 38-minute cli failure',
+    'keeps the lane red when the motivating 38-minute cli failure repeats',
     () => {
+      // The nightly incident was deterministic — the sandbox $HOME crash —
+      // so the retry reproduces its two red attempts instead of absorbing
+      // them into a green lane.
       const { result, calls } = runDockerIntegrationScript({
-        suiteFailures: 1,
+        suiteFailures: 2,
         suiteSeconds: 2317,
       });
-      expect(result.status, result.stderr).toBe(0);
+      expect(result.status).not.toBe(0);
+      expect(result.stdout).toContain('failed again after a retry');
       expect(
         calls
           .trim()
@@ -3000,19 +3027,68 @@ esac`,
             (line) => line.startsWith('npx vitest') && line.endsWith(' cli'),
           ),
       ).toHaveLength(2);
+      expect(calls).not.toContain(
+        'npx vitest run --root ./integration-tests interactive',
+      );
     },
   );
 
   it.skipIf(process.platform === 'win32')(
-    'refuses a retry that plus the remaining suite would overrun the job',
+    'refuses a retry the pre-suite work and the remaining suite no longer fit',
     () => {
-      // 2 * 3001s for cli plus the ~21-minute interactive reserve is past
-      // the step's 6600s share of the 120-minute job.
+      // 2000s of pre-suite work — the build, prunes, and lock waits all
+      // charge the step — plus 2 * 3001s for cli and the ~21-minute
+      // interactive reserve is past the step's 6600s share of the job.
       const { result, calls } = runDockerIntegrationScript({
+        runnerEnvironment: 'self-hosted',
         suiteFailures: 1,
         suiteSeconds: 3001,
+        preLoopSeconds: 2000,
+        dockerPostFloorKb: '3145728',
       });
       expect(result.status).not.toBe(0);
+      expect(result.stdout).toContain(
+        'failed after 3001s (5001s of the 6600s step budget already spent, 1260s reserved for the remaining suite)',
+      );
+      expect(result.stdout).toContain(
+        'would overrun the 120-minute job timeout',
+      );
+      expect(result.stdout).not.toContain('retrying once');
+      const lines = calls.trim().split('\n');
+      // Only the EXIT trap reclaims; the refused retry must not announce
+      // itself, reclaim containers, or sample the floor a third time.
+      expect(
+        lines.filter((line) => line.startsWith('docker ps -aq')),
+      ).toHaveLength(1);
+      expect(
+        lines.filter((line) => line.startsWith('disk-floor')),
+      ).toHaveLength(2);
+      expect(
+        lines.filter(
+          (line) => line.startsWith('npx vitest') && line.endsWith(' cli'),
+        ),
+      ).toHaveLength(1);
+      expect(calls).not.toContain(
+        'npx vitest run --root ./integration-tests interactive',
+      );
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses an interactive retry when the step has no room left for it',
+    () => {
+      // cli's 2400s plus the interactive attempt's 2400s already fill 4800s
+      // of the 6600s step budget, so the retry would overrun the job even
+      // though no later suite needs a reserve.
+      const { result, calls } = runDockerIntegrationScript({
+        suiteFailures: 1,
+        failSuite: 'interactive',
+        suiteSeconds: 2400,
+      });
+      expect(result.status).not.toBe(0);
+      expect(result.stdout).toContain(
+        'failed after 2400s (4800s of the 6600s step budget already spent)',
+      );
       expect(result.stdout).toContain(
         'would overrun the 120-minute job timeout',
       );
@@ -3021,12 +3097,10 @@ esac`,
           .trim()
           .split('\n')
           .filter(
-            (line) => line.startsWith('npx vitest') && line.endsWith(' cli'),
+            (line) =>
+              line.startsWith('npx vitest') && line.endsWith(' interactive'),
           ),
       ).toHaveLength(1);
-      expect(calls).not.toContain(
-        'npx vitest run --root ./integration-tests interactive',
-      );
     },
   );
 
@@ -3053,12 +3127,49 @@ esac`,
             : -1,
         )
         .filter((index) => index >= 0);
+      const reclaims = lines
+        .map((line, index) =>
+          line.startsWith('docker ps -aq') &&
+          index > cliRuns[0] &&
+          index < cliRuns[1]
+            ? index
+            : -1,
+        )
+        .filter((index) => index >= 0);
       // The pre-build sample charges the build floor; the pre-vitest and
-      // pre-retry samples charge the POST knob.
+      // pre-retry samples charge the POST knob. The retry reclaims first and
+      // gates the filesystem the reclaimed attempt left behind.
+      expect(reclaims).toHaveLength(1);
       expect(postGates).toHaveLength(2);
       expect(postGates[0]).toBeLessThan(cliRuns[0]);
-      expect(postGates[1]).toBeGreaterThan(cliRuns[0]);
+      expect(postGates[1]).toBeGreaterThan(reclaims[0]);
       expect(postGates[1]).toBeLessThan(cliRuns[1]);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'stops before a retry when the pre-retry disk floor trips',
+    () => {
+      // The reclaim leaves container-layer residue the cleanup cannot
+      // remove, so a retry may not start below the floor the first attempt
+      // was admitted on.
+      const { result, calls } = runDockerIntegrationScript({
+        runnerEnvironment: 'self-hosted',
+        suiteFailures: 1,
+        postGateExit: '1',
+        postGateFailAt: 3,
+        dockerPostFloorKb: '3145728',
+      });
+      expect(result.status).not.toBe(0);
+      expect(result.stdout).toContain('failed at the pre-retry checkpoint');
+      expect(
+        calls
+          .trim()
+          .split('\n')
+          .filter(
+            (line) => line.startsWith('npx vitest') && line.endsWith(' cli'),
+          ),
+      ).toHaveLength(1);
     },
   );
 
@@ -3174,6 +3285,7 @@ esac`,
       // actually reads, so the operator is not sent to the job-start gate's
       // variables.
       expect(result.stdout).toContain('docker data root floor gate failed');
+      expect(result.stdout).toContain('failed at the pre-build checkpoint');
       expect(result.stdout).toContain('DISK_FLOOR_DOCKER_MIN_FREE_KB');
     },
   );
@@ -3266,6 +3378,7 @@ esac`,
         postGateExit: '1',
       });
       expect(result.status).not.toBe(0);
+      expect(result.stdout).toContain('failed at the pre-vitest checkpoint');
       expect(calls).toContain('npm run build:sandbox');
       expect(calls).toContain('flock --unlock 7');
       expect(calls).not.toContain('npx vitest');
