@@ -89,6 +89,9 @@ Change only `createBackup` and `safeCopyFile` in
      before the source vanished).
    - `chmod(temporaryPath, srcStats.mode)` — permissions applied **before**
      publication.
+   - `open(temporaryPath, 'r+')` + `handle.sync()` + `handle.close()` — flush
+     the copied bytes before publication (issue #16896 triage note 1); a sync
+     failure routes through the same cleanup path.
    - `renameWithRetry(temporaryPath, backupPath, 3, 50)` — atomic publication
      on the same directory/filesystem, reusing the shared helper from
      `utils/atomicFileWrite.ts` (see below).
@@ -139,6 +142,23 @@ non-retryable failure contract above is preserved. Whole-function reuse of
 `atomicWriteFile` is not appropriate: it takes `string | Buffer` content and
 has no `'src-missing'` sentinel, no destination-directory `mkdir` retry, and
 no `COPYFILE_EXCL` source copy.
+
+### Flush before publication (fsync)
+
+`rename` is atomic in the metadata sense, but without flushing the copied
+bytes a host crash (power loss, kernel panic) on filesystems that can commit
+rename metadata ahead of data blocks (XFS, ext4 `data=writeback`, btrfs)
+could still expose a zero-filled or short backup — the same silent
+wrong-restore one crash layer down. Issue #16896's triage note 1 therefore
+asks the port to match `atomicWriteFile`'s durability contract (`flush`
+defaults to true there) rather than transcribe preview's no-fsync sequence.
+The capture fsyncs the temporary file after `chmod` and before the
+publication rename, inside the existing `try` so a sync failure still cleans
+up and rethrows. The flush stays at this call site: `renameWithRetry` has no
+flush parameter and is shared by every other atomic publisher. The directory
+entry itself is not separately fsynced (matching `atomicWriteFile`; the
+retained-storage CSI backend additionally syncs its directory handle) —
+journaling filesystems commit the rename through the journal.
 
 ### Orphaned temporary files
 
@@ -206,14 +226,15 @@ changed by this pilot.
 - **Cleanup failure** (e.g. permission flip on the backup directory): logged
   and swallowed; the original capture error still propagates, so failure
   reporting is unaffected. The orphan is swept later.
-- **Power-loss durability is out of scope**: the temporary file is not
-  `fsync`ed before publication, matching the preview reference. A power loss
-  (as opposed to a process crash or I/O error) within the filesystem
-  writeback window could still expose a stale or zero-length backup on some
-  filesystems. The pre-fix code had the same exposure; this change closes the
-  much larger process-crash window. Adding `fsync` (as `atomicWriteFile` and
-  the mod store do) is a candidate follow-up hardening, weighed against the
-  per-backup latency it adds.
+- **Per-capture fsync latency**: publication now flushes the temporary file
+  (one `fsync` per captured backup), the price of the host-crash durability
+  contract; captures happen once per edited file per turn, not per read.
+- **Directory-entry durability**: the file data is fsynced, the rename's
+  directory entry is not separately synced (matching `atomicWriteFile`);
+  journaling filesystems commit it through the journal. A filesystem that
+  neither journals nor ordering-guarantees the entry could still lose the
+  name (not the content) on power loss — the backup then reads as missing and
+  surfaces via the existing `failed` semantics, never as truncated content.
 
 ## Validation plan
 
@@ -234,8 +255,15 @@ changed by this pilot.
    (the issue's silent wrong-restore scenario).
 4. **Concurrent captures (success)**: two simultaneous `trackEdit` calls for
    the same file both succeed, publish exactly one complete backup, and leave
-   no temporary files (pins the unique-suffix adaptation).
+   no temporary files. A gated variant holds both copies inside a `copyFile`
+   spy until both have started, then asserts the two destinations are
+   distinct and neither is the final path — pinning the unique-suffix
+   adaptation deterministically rather than by I/O timing.
 5. **Permissions**: the published backup carries the source file's mode.
+   POSIX-only (`it.runIf(process.platform !== 'win32')`): Windows synthesizes
+   `st_mode` from file attributes, so permission assertions are meaningless
+   there — guarded like the forked-session mode sibling in
+   `sessionService.test.ts`.
 6. **Source-vanished race**: `copyFile` fails with ENOENT after the source is
    deleted → a `null` backup is recorded, nothing published. Includes the
    mid-copy variant where the copy created a partial temporary file before
@@ -243,29 +271,35 @@ changed by this pilot.
 7. **Rename retry semantics**: a single transient `EPERM` rename is retried
    and the complete backup is published; a persistent `EPERM` exhausts the
    retries and surfaces as a failed capture with nothing published.
-8. **Existing suite**: `fileHistoryService.test.ts` and the retained-storage
+8. **Flush ordering**: spies on `open` / the returned handle's `sync` /
+   `rename` record the call order over one successful capture; the temporary
+   file (and only it) is synced before the publication rename.
+9. **Existing suite**: `fileHistoryService.test.ts` and the retained-storage
    suite stay green (the `safeCopyFile` mode parameter defaults to today's
    behavior).
-9. `npm run build && npm run bundle && npm run typecheck`, focused vitest
-   runs, and an interactive E2E sanity pass (capture + rewind via tmux) per
-   the test plan in `.qwen/e2e-tests/`. E2E is interactive-only: file
-   checkpointing defaults to `!sdkMode && interactive`, so headless runs do
-   not capture snapshots on either binary (existing gating).
+10. `npm run build && npm run bundle && npm run typecheck`, focused vitest
+    runs, and an interactive E2E sanity pass (capture + rewind via tmux) per
+    the test plan in `.qwen/e2e-tests/`. E2E is interactive-only: file
+    checkpointing defaults to `!sdkMode && interactive`, so headless runs do
+    not capture snapshots on either binary (existing gating).
 
 ## Validation results (2026-11-11)
 
 - Reproduction: four failure-injection probes failed on the base commit,
   including the end-to-end silent wrong-restore (rewind reported
   `filesFailed: []` while writing truncated bytes).
-- The permanent suite `file-history-atomic-backup.test.ts` (15 tests) passes
+- The permanent suite `file-history-atomic-backup.test.ts` (17 tests) passes
   with the fix. Mutation arms, re-run against the final suite: reverting
-  `createBackup` to the direct copy fails 11/15 (the 4 survivors are the
+  `createBackup` to the direct copy fails 13/17 (the 4 survivors are the
   behavior-preservation tests — transient-EPERM retry, concurrent success,
   permissions, and the source-vanished-before-copy shape — which pass on both
   implementations by design); a retries=0 mutation reddens the transient-
   EPERM test; removing the source-vanished temporary cleanup reddens the
-  mid-copy cleanup test.
-- Focused regression: 508 core tests across 8 file-history-related files and
+  mid-copy cleanup test; removing the fsync block reddens the flush-ordering
+  test (`expected ['rename'] to deeply equal ['sync', 'rename']`); a shared
+  `${backupPath}.tmp` suffix reddens the gated distinct-destination test on
+  every run (3/3).
+- Focused regression: 510 core tests across 8 file-history-related files and
   81 cli tests across 2 consumer files passed; build, bundle, and typecheck
   passed.
 - Interactive E2E (tmux, `node dist/cli.js` vs global qwen 0.27.2 baseline):
@@ -279,15 +313,23 @@ changed by this pilot.
   regression tests (transient `EPERM` retried; persistent `EPERM` exhausts
   into the failed contract).
 - Post-PR multi-round audit (undirected + adversarial, real probes):
-  corrected the direct-copy mutation count to the re-measured 11/15; closed
+  corrected the direct-copy mutation count to the re-measured value; closed
   the source-vanished mid-copy orphan edge with a best-effort cleanup and a
   pinning test; probed a directory-occupied final path (EISDIR → honest
   failed entry, nothing published), a read-only backup directory (EACCES
-  propagates, nothing published), and a directory source (nothing published);
-  recorded the power-loss durability limitation above. The two red CI jobs
-  were classified as infrastructure: shard 2/2 ran 29/29 test files green and
-  failed only in the post-test temporary-HOME `rm` cleanup step; the
-  No-Sandbox job is the aggregate gate propagating that result.
+  propagates, nothing published), and a directory source (nothing published).
+  The two red CI jobs were classified as infrastructure: shard 2/2 ran 29/29
+  test files green and failed only in the post-test temporary-HOME `rm`
+  cleanup step; the No-Sandbox job is the aggregate gate propagating that
+  result.
+- PR review round 2 (3 threads, all accepted and fixed): the permission test
+  is now POSIX-guarded like its `sessionService.test.ts` sibling (Windows
+  synthesizes `st_mode`, so the assertion could never pass there); the
+  publication fsyncs the temporary file per issue #16896 triage note 1, with
+  a flush-ordering test; and a gated concurrent-capture test pins the unique
+  temporary suffix deterministically (the prior bare-`Promise.all` test
+  caught a shared-suffix mutation 3/3 on this machine, but only by I/O
+  timing). Each fix carries its own mutation arm above.
 
 ## Acceptance criteria
 

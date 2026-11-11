@@ -259,14 +259,82 @@ describe('atomic backup publication', () => {
     ).toBe('original-content');
   });
 
-  it('publishes the backup with the source file permissions', async () => {
+  // Windows synthesizes st_mode from file attributes and chmod only toggles
+  // the read-only bit, so permission assertions are meaningless there;
+  // guarded like sessionService.test.ts's forked-session mode sibling.
+  it.runIf(process.platform !== 'win32')(
+    'publishes the backup with the source file permissions',
+    async () => {
+      const file = await primeTracked('original-content');
+      await fs.chmod(file, 0o744);
+      await service.trackEdit(file);
+
+      const entry = service.getSnapshots()[0].trackedFileBackups['a.txt']!;
+      const backupStats = await fs.stat(join(backupDir, entry.backupFileName!));
+      expect(backupStats.mode & 0o777).toBe(0o744);
+    },
+  );
+
+  it('fsyncs the temporary file before the publication rename', async () => {
     const file = await primeTracked('original-content');
-    await fs.chmod(file, 0o744);
+    const order: string[] = [];
+    const openedPaths: string[] = [];
+    const realOpen = fs.open;
+    const realRename = fs.rename;
+    vi.spyOn(fs, 'open').mockImplementation(async (path, flags, mode) => {
+      openedPaths.push(String(path));
+      const handle = await realOpen(path, flags, mode);
+      const boundSync = handle.sync.bind(handle);
+      handle.sync = async () => {
+        order.push('sync');
+        return boundSync();
+      };
+      return handle;
+    });
+    vi.spyOn(fs, 'rename').mockImplementation(async (src, dst) => {
+      order.push('rename');
+      return realRename(src, dst);
+    });
     await service.trackEdit(file);
 
+    expect(order).toEqual(['sync', 'rename']);
+    expect(openedPaths).toHaveLength(1);
+    expect(openedPaths[0]!.endsWith('.tmp')).toBe(true);
     const entry = service.getSnapshots()[0].trackedFileBackups['a.txt']!;
-    const backupStats = await fs.stat(join(backupDir, entry.backupFileName!));
-    expect(backupStats.mode & 0o777).toBe(0o744);
+    expect(entry.failed).toBeUndefined();
+    expect(await fs.readdir(backupDir)).toEqual([entry.backupFileName]);
+  });
+
+  it('concurrent captures copy into distinct temporary files', async () => {
+    const file = await primeTracked('original-content');
+    const realCopyFile = fs.copyFile;
+    const destinations: string[] = [];
+    let count = 0;
+    let releaseBoth!: () => void;
+    const bothStarted = new Promise<void>((r) => (releaseBoth = r));
+    const spy = vi
+      .spyOn(fs, 'copyFile')
+      .mockImplementation(async (src, dst, mode) => {
+        destinations.push(dst as string);
+        count += 1;
+        if (count === 2) releaseBoth();
+        // Hold both copies until both have started, so a shared temporary
+        // name fails on every run instead of on an unlucky interleaving.
+        await bothStarted;
+        await realCopyFile(src, dst, mode);
+      });
+    await Promise.all([service.trackEdit(file), service.trackEdit(file)]);
+    spy.mockRestore();
+
+    expect(destinations).toHaveLength(2);
+    expect(destinations[0]).not.toBe(destinations[1]);
+    const entry = service.getSnapshots()[0].trackedFileBackups['a.txt']!;
+    const finalPath = join(backupDir, entry.backupFileName!);
+    expect(destinations[0]).not.toBe(finalPath);
+    expect(destinations[1]).not.toBe(finalPath);
+    expect(entry.failed).toBeUndefined();
+    expect(await fs.readdir(backupDir)).toEqual([entry.backupFileName]);
+    expect(await fs.readFile(finalPath, 'utf8')).toBe('original-content');
   });
 
   it('records a null backup when the source vanishes before the copy', async () => {

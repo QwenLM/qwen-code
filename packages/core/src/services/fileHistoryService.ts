@@ -331,6 +331,16 @@ async function createBackup(
       return { backupFileName: null, version, backupTime: new Date() };
     }
     await chmod(temporaryPath, srcStats.mode);
+    // Flush the copied bytes before publication: rename is atomic in the
+    // metadata sense, but without fsync a host crash could still expose a
+    // zero-filled backup (atomicWriteFile's flush contract, issue #16896
+    // triage note 1). A sync failure routes through the cleanup below.
+    const handle = await open(temporaryPath, 'r+');
+    try {
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
     // Same publication step as atomicWriteFile / mods store: transient
     // EPERM/EACCES (Windows concurrent access, AV scans) retry with backoff;
     // any other error rethrows into the caller's failed-entry semantics.
