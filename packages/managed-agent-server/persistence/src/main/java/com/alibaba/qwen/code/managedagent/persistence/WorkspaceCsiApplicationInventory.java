@@ -86,6 +86,14 @@ final class WorkspaceCsiApplicationInventory {
             declaration("ma_channel_segment", "delivery_key,segment_id",
                     "delivery_key:CHAR,tenant_id:VARBINARY,channel_id:VARBINARY,segment_id:VARBINARY,"
                     + "segment_ordinal:BIGINT,provider_receipt_json:LONGTEXT,gmt_create:BIGINT,gmt_modified:BIGINT"),
+            declaration("ma_client_files_binding", "session_scope_key",
+                    "session_scope_key:CHAR,tenant_id:VARBINARY,session_id:VARBINARY,actor_id:VARBINARY,"
+                    + "generation:BIGINT,state:VARCHAR,server_id:VARCHAR,token_hash:CHAR,expires_at:BIGINT,"
+                    + "gmt_create:BIGINT,gmt_modified:BIGINT"),
+            declaration("ma_client_files_request", "request_key",
+                    "request_key:CHAR,session_scope_key:CHAR,tenant_id:VARBINARY,session_id:VARBINARY,"
+                    + "binding_generation:BIGINT,request_id:VARCHAR,payload_json:LONGTEXT,state:VARCHAR,"
+                    + "response_json:LONGTEXT,error_code:VARCHAR,expires_at:BIGINT,gmt_create:BIGINT,gmt_modified:BIGINT"),
             declaration("ma_delivery", "delivery_key",
                     "delivery_key:CHAR,delivery_kind:VARCHAR,tenant_id:VARBINARY,channel_id:VARBINARY,"
                     + "delivery_id:VARBINARY,source_session_id:VARBINARY,target_session_id:VARBINARY,source_scope_key:CHAR,"
@@ -2055,6 +2063,8 @@ final class WorkspaceCsiApplicationInventory {
                 case "ma_session_journal_tx" -> query(table, "tenant_id=T&session_id=sessions");
                 case "ma_resource" -> query(table, "session_scope_key=J", "tenant_id=T&session_id=sessions");
                 case "ma_resource_ref" -> query(table, "session_scope_key=J", "tenant_id=T&session_id=sessions", "resource_key=resourceKeys");
+                case "ma_client_files_binding", "ma_client_files_request" ->
+                        query(table, "session_scope_key=J", "tenant_id=T&session_id=sessions");
                 case "ma_read_lease" -> query(table, "tenant_key=RT&session_key=RS", "lease_id=reads");
                 case "ma_schedule", "ma_schedule_occurrence" -> query(table, "tenant_id=T&session_id=sessions", "schedule_id=schedules");
                 case "ma_channel_binding" -> query(table, "tenant_id=T&session_id=sessions");

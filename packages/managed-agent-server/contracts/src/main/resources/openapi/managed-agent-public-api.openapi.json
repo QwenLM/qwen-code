@@ -23282,6 +23282,7 @@
           },
           "expiresAt": {
             "type": "integer",
+            "format": "int64",
             "description": "Binding deadline in Unix epoch milliseconds."
           },
           "toolCount": {
@@ -23308,6 +23309,7 @@
           },
           "expiresAt": {
             "type": "integer",
+            "format": "int64",
             "description": "Binding deadline in Unix epoch milliseconds."
           }
         }

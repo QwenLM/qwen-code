@@ -20,6 +20,10 @@
       "en": "The trusted channel adapter surface on the internal listener and the lease on outbound delivery claims.",
       "zh": "内部监听端口上的受信渠道适配器接口，以及出站投递认领的租约。"
     },
+    "qwen.managed-agent.client-files": {
+      "en": "Registering a Managed Web Shell user's client directory into a Session through the control-plane MCP relay: the feature switch and relay endpoint, the binding and request lifetimes, and the queue depth and payload caps.",
+      "zh": "通过控制面 MCP relay 把 Managed Web Shell 用户的客户端目录注册进 Session：功能开关与 relay 端点、绑定与请求的生命周期，以及队列深度与 payload 上限。"
+    },
     "qwen.managed-agent.dispatch": {
       "en": "Leases, retry backoff and retry budgets for the work the control plane hands to the Hosted Harness, such as Turns, Session lifecycle operations and Action responses.",
       "zh": "控制面交给 Hosted Harness 执行的工作（如 Turn、Session 生命周期操作和 Action 应答）所用的租约、重试退避与重试预算。"

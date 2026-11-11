@@ -1494,6 +1494,7 @@ CREATE TABLE ma_client_files_binding (
 ) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT='Ephemeral client filesystem registrations, no file content persisted.';
 
 CREATE INDEX idx_ma_client_files_binding_expiry ON ma_client_files_binding (state, expires_at);
+CREATE INDEX idx_ma_client_files_binding_session ON ma_client_files_binding (session_id);
 
 CREATE TABLE ma_client_files_request (
     request_key CHAR(64) NOT NULL COMMENT 'Hashed Session and JSON-RPC request identity.',

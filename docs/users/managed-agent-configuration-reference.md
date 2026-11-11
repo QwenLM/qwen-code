@@ -99,6 +99,19 @@ The trusted channel adapter surface on the internal listener and the lease on ou
 | `enabled` | `QWEN_MANAGED_AGENT_CHANNELS_ENABLED` | boolean | `false` | Whether the trusted channel adapter routes under `/internal/managed-channels/` (register, disconnect, inbound events, delivery claims, receipts and resends) are served. They authenticate by the tenant header alone, so startup refuses it unless `qwen.managed-agent.internal-server.port` sets a separate internal listener. |
 | `scan-delay` | — | duration | `30s` | How long the channel reconcile pass waits between runs; each run settles up to 50 outbound delivery claims older than `qwen.managed-agent.channels.claim-lease` as unknown. Accepts a duration such as `30s`; a plain number is milliseconds. |
 
+## `qwen.managed-agent.client-files`
+
+Registering a Managed Web Shell user's client directory into a Session through the control-plane MCP relay: the feature switch and relay endpoint, the binding and request lifetimes, and the queue depth and payload caps.
+
+| Property | Variable | Type | Default | Description |
+| --- | --- | --- | --- | --- |
+| `binding-ttl` | — | duration | `8h` | How long one client filesystem registration stays valid before the browser must register again with a fresh directory grant. The relay credential expires with the binding. Accepts a duration such as `8h`; a plain number is seconds. |
+| `enabled` | — | boolean | `false` | Whether a Managed Web Shell user may register a client directory into a Session and let the agent use its file tools through the control-plane relay. Off by default; while off, every client-files route refuses registration and no relay state is created. Client file content never enters the session journal or public events. |
+| `max-payload-bytes` | — | integer | — | The largest JSON-RPC request or response body, in bytes, the relay forwards between the Runtime and the browser; a larger payload is refused with a structured error. Aligns with the worker MCP result cap by default (60 KiB). |
+| `queue-depth` | — | integer | `32` | The maximum number of unanswered JSON-RPC requests one Session registration may queue for the browser; a further request is refused with a structured error instead of blocking the Turn. Aligns with the worker MCP in-flight cap by default (32). |
+| `relay-url` | — | string | *(empty)* | The base URL of this control plane's internal listener as reachable from the Hosted Harness, used to build the relay MCP endpoint the Harness connects back to (`<relay-url>/internal/managed-client-files/v1/sessions/<id>/mcp`). Required while `qwen.managed-agent.client-files.enabled` is true; registration is refused when it is blank. Must be an http(s) URL without credentials, query or fragment. |
+| `request-ttl` | — | duration | `25s` | How long one queued JSON-RPC request waits for the browser before it expires and the Runtime receives a structured offline error. Accepts a duration such as `25s`; a plain number is seconds. |
+
 ## `qwen.managed-agent.dispatch`
 
 Leases, retry backoff and retry budgets for the work the control plane hands to the Hosted Harness, such as Turns, Session lifecycle operations and Action responses.

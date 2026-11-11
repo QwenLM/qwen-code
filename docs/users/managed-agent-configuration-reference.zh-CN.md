@@ -99,6 +99,19 @@ Managed Agent 服务端的顶层设置：内置 agent 的修订号、存储的 A
 | `enabled` | `QWEN_MANAGED_AGENT_CHANNELS_ENABLED` | 布尔 | `false` | 是否提供 `/internal/managed-channels/` 下的受信渠道适配器路由（注册、断开、入站事件、投递认领、回执与重发）。这些路由仅凭租户请求头鉴权，因此未通过 `qwen.managed-agent.internal-server.port` 配置独立的内部监听端口时，启动时拒绝。 |
 | `scan-delay` | — | 时长 | `30s` | 渠道对账任务两次运行之间的间隔；每次运行把认领时间超过 `qwen.managed-agent.channels.claim-lease` 的出站投递认领结算为未知，每次最多 50 条。接受 `30s` 这类时长；不带单位的数字按毫秒计。 |
 
+## `qwen.managed-agent.client-files`
+
+通过控制面 MCP relay 把 Managed Web Shell 用户的客户端目录注册进 Session：功能开关与 relay 端点、绑定与请求的生命周期，以及队列深度与 payload 上限。
+
+| 属性 | 环境变量 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- | --- |
+| `binding-ttl` | — | 时长 | `8h` | 单次客户端文件系统注册的有效时长，到期后浏览器须以新的目录授权重新注册；relay 凭据随绑定一同过期。接受 `8h` 这类时长；不带单位的数字按秒计。 |
+| `enabled` | — | 布尔 | `false` | 是否允许 Managed Web Shell 用户把客户端目录注册进 Session，让 agent 经控制面 relay 使用其文件工具。默认关闭；关闭时所有 client-files 路由拒绝注册，不创建任何 relay 状态。客户端文件内容绝不进入会话 journal 或公共事件。 |
+| `max-payload-bytes` | — | 整数 | — | relay 在 Runtime 与浏览器之间转发的单条 JSON-RPC 请求或响应体的最大字节数；更大的 payload 以结构化错误拒绝。默认与 worker MCP 结果上限对齐（60 KiB）。 |
+| `queue-depth` | — | 整数 | `32` | 单个 Session 注册可为浏览器排队等待应答的 JSON-RPC 请求上限；超出的请求以结构化错误拒绝，而不是阻塞 Turn。默认与 worker MCP 在途上限对齐（32）。 |
+| `relay-url` | — | 字符串 | *（空）* | 从 Hosted Harness 可达的本控制面内部监听器基地址，用于构造 Harness 回连的 relay MCP 端点（`<relay-url>/internal/managed-client-files/v1/sessions/<id>/mcp`）。`qwen.managed-agent.client-files.enabled` 为 true 时必填；为空时拒绝注册。必须是不带凭据、查询串或片段的 http(s) URL。 |
+| `request-ttl` | — | 时长 | `25s` | 单条排队 JSON-RPC 请求等待浏览器应答的时长，到期后过期并向 Runtime 返回结构化离线错误。接受 `25s` 这类时长；不带单位的数字按秒计。 |
+
 ## `qwen.managed-agent.dispatch`
 
 控制面交给 Hosted Harness 执行的工作（如 Turn、Session 生命周期操作和 Action 应答）所用的租约、重试退避与重试预算。
