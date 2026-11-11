@@ -941,12 +941,15 @@ describe('livePromptEvents', () => {
       'terminal tool.call',
     );
     expect(sendMessageStream).not.toHaveBeenCalled();
-    // OpenTUI offers the band above the prompt, raises prompt.submit and
-    // runs the prompts the Mods submit.
-    expect(initializeMods).toHaveBeenCalledExactlyOnceWith(['AbovePrompt'], {
-      prompts: true,
-      runsPrompts: true,
-    });
+    // OpenTUI offers the band and reply rows, raises prompt.submit and runs
+    // the prompts the Mods submit.
+    expect(initializeMods).toHaveBeenCalledExactlyOnceWith(
+      ['AbovePrompt', 'AssistantMessage'],
+      {
+        prompts: true,
+        runsPrompts: true,
+      },
+    );
   });
 
   it('waits for the shared initialization before the first send', async () => {
