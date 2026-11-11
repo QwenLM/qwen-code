@@ -48,6 +48,7 @@ import java.util.Map;
 import java.util.UUID;
 
 import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.COMMIT_MARKER;
+import static com.alibaba.qwen.code.managedagent.persistence.PublicationVerification.verified;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -55,7 +56,6 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
-import static com.alibaba.qwen.code.managedagent.persistence.PublicationVerification.verified;
 
 class ToolPublicationAcknowledgementTest {
     private static final ObjectMapper JSON = new ObjectMapper();
