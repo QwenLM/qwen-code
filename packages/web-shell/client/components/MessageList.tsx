@@ -2864,7 +2864,7 @@ const SessionTimeline = memo(function SessionTimeline({
     <div className={styles.sessionTimelineLayer} aria-hidden="false">
       <nav
         ref={panelRef}
-        className={`${styles.sessionTimelinePanel} ${styles.sessionTimelineNav}`}
+        className={styles.sessionTimelinePanel}
         aria-label={t('timeline.sessionTimeline')}
         data-testid="session-timeline"
         onMouseLeave={hideTooltip}

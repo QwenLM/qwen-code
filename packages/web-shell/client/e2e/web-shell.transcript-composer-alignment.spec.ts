@@ -24,34 +24,21 @@ async function expectSameEdges(message: Locator, composer: Locator) {
     .toBeLessThanOrEqual(1);
 }
 
-async function expectTimelineCentered(
+async function expectTimelineVerticallyCentered(
   rail: Locator,
   viewport: Locator,
-  message: Locator,
 ) {
   const railViewport = rail.locator(':scope > div').first();
-  const tick = rail.locator('button').first().locator(':scope > span').first();
   const action = rail.locator(':scope > button[title]');
   await expect(action).toBeVisible();
   await expect
     .poll(async () => {
-      const [viewportBox, messageBox, railViewportBox, tickBox, actionBox] =
-        await Promise.all([
-          viewport.boundingBox(),
-          message.boundingBox(),
-          railViewport.boundingBox(),
-          tick.boundingBox(),
-          action.boundingBox(),
-        ]);
-      if (
-        !viewportBox ||
-        !messageBox ||
-        !railViewportBox ||
-        !tickBox ||
-        !actionBox
-      )
-        return Infinity;
-      const gutterCenter = (viewportBox.x + messageBox.x) / 2;
+      const [viewportBox, railViewportBox, actionBox] = await Promise.all([
+        viewport.boundingBox(),
+        railViewport.boundingBox(),
+        action.boundingBox(),
+      ]);
+      if (!viewportBox || !railViewportBox || !actionBox) return Infinity;
       const contentCenter =
         (Math.min(railViewportBox.y, actionBox.y) +
           Math.max(
@@ -59,11 +46,7 @@ async function expectTimelineCentered(
             actionBox.y + actionBox.height,
           )) /
         2;
-      return Math.max(
-        Math.abs(tickBox.x + tickBox.width / 2 - gutterCenter),
-        Math.abs(actionBox.x + actionBox.width / 2 - gutterCenter),
-        Math.abs(contentCenter - viewportBox.y - viewportBox.height / 2),
-      );
+      return Math.abs(contentCenter - viewportBox.y - viewportBox.height / 2);
     })
     .toBeLessThanOrEqual(1);
 }
@@ -152,7 +135,7 @@ for (const navigation of [true, false]) {
       .toHaveCSS('border-bottom-width', '1px');
     await messageList.hover();
     await page.mouse.wheel(0, -400);
-    await expectTimelineCentered(rail, viewport, message);
+    await expectTimelineVerticallyCentered(rail, viewport);
     const scrollToBottom = page.getByRole('button', {
       name: /Scroll to bottom|回到底部/,
     });
@@ -181,7 +164,7 @@ for (const navigation of [true, false]) {
       const viewportBox = await viewport.boundingBox();
       if (viewportBox && viewportBox.width >= 1128) {
         await expect(rail).toBeVisible();
-        await expectTimelineCentered(rail, viewport, message);
+        await expectTimelineVerticallyCentered(rail, viewport);
         const railBox = await rail.boundingBox();
         const messageBox = await message.boundingBox();
         expect(railBox!.x + railBox!.width).toBeLessThanOrEqual(messageBox!.x);
@@ -191,7 +174,7 @@ for (const navigation of [true, false]) {
     }
     for (const height of [900, 640, 480]) {
       await page.setViewportSize({ width: 1600, height });
-      await expectTimelineCentered(rail, viewport, message);
+      await expectTimelineVerticallyCentered(rail, viewport);
     }
     {
       await page.setViewportSize({ width: 1600, height: 900 });
@@ -224,15 +207,6 @@ for (const navigation of [true, false]) {
             await expect
               .poll(async () => (await tick.boundingBox())?.width ?? 0)
               .toBeGreaterThan(27);
-            await expect
-              .poll(async () => {
-                const tickBox = await tick.boundingBox();
-                const messageBox = await message.boundingBox();
-                return tickBox && messageBox
-                  ? messageBox.x - tickBox.x - tickBox.width
-                  : -Infinity;
-              })
-              .toBeGreaterThanOrEqual(16);
             await page.mouse.move(500, 10);
           }
         }
