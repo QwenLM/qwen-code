@@ -4800,6 +4800,10 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'channels.editor.field.github.allowedRepos.description':
     'Comma-separated repository full names, for example owner/repo.',
   'channels.editor.field.github.allowedRepos.placeholder': 'owner/repo',
+  'channels.editor.field.gitlab.allowedRepos': 'Allowed projects',
+  'channels.editor.field.gitlab.allowedRepos.description':
+    'Comma-separated project paths, for example group/subgroup/project.',
+  'channels.editor.field.gitlab.allowedRepos.placeholder': 'group/project',
   'channels.editor.field.github.useLocalGh':
     'Use local GitHub CLI authentication',
   'channels.editor.field.github.useLocalGh.description':
@@ -4833,6 +4837,10 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
     'GitHub logins allowed to start tasks in this repository. Empty means nobody.',
   'channels.editor.field.github.repositorySpeakers.inherited':
     'GitHub logins allowed in this repository. Leave empty to use the channel-wide list.',
+  'channels.editor.field.gitlab.repositorySpeakers.description':
+    'GitLab usernames allowed to start tasks in this project. Empty means nobody.',
+  'channels.editor.field.gitlab.repositorySpeakers.inherited':
+    'GitLab usernames allowed in this project. Leave empty to use the channel-wide list.',
   'channels.editor.field.github.retainedRepositorySettings.title':
     'Repository settings still apply',
   'channels.editor.field.github.retainedRepositorySettings.description': (v) =>
@@ -5157,8 +5165,12 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
     'Enter a group ID other than __proto__, constructor, or prototype.',
   'channels.editor.validation.invalidRepoId':
     'Enter each repository as owner/repo.',
+  'channels.editor.validation.invalidProjectPath':
+    'Enter each project as a path, for example group/subgroup/project.',
   'channels.editor.validation.conflictingRepoAliases':
     'This channel lists one repository twice with different settings, spelled differently (for example Owner/repo and owner/repo). Remove one of the entries from settings.json before saving.',
+  'channels.editor.validation.conflictingProjectAliases':
+    'This channel lists one project twice with different settings, spelled differently (for example Group/Project and group/project). Remove one of the entries from settings.json before saving.',
   'channels.editor.validation.invalidGroupEntry': (v) =>
     `This channel stores a group entry that is not an object: ${v?.repositories ?? ''}. The daemon refuses every save while it is there, and the form has no row for it. Fix or remove that entry in settings.json, then reload the channel.`,
   'channels.editor.validation.invalidOption':
@@ -9678,6 +9690,10 @@ const ZH: Messages = {
   'channels.editor.field.github.allowedRepos.description':
     '逗号分隔的仓库全名，例如 owner/repo。',
   'channels.editor.field.github.allowedRepos.placeholder': 'owner/repo',
+  'channels.editor.field.gitlab.allowedRepos': '允许的项目',
+  'channels.editor.field.gitlab.allowedRepos.description':
+    '逗号分隔的项目路径，例如 group/subgroup/project。',
+  'channels.editor.field.gitlab.allowedRepos.placeholder': 'group/project',
   'channels.editor.field.github.useLocalGh': '使用本地 GitHub CLI 认证',
   'channels.editor.field.github.useLocalGh.description':
     '未配置令牌时，显式复用 daemon 主机上账户级的 gh 登录',
@@ -9709,6 +9725,10 @@ const ZH: Messages = {
     '可以在该仓库发起任务的 GitHub 登录名。留空表示没有人。',
   'channels.editor.field.github.repositorySpeakers.inherited':
     '可以在该仓库发言的 GitHub 登录名。留空则使用渠道级列表。',
+  'channels.editor.field.gitlab.repositorySpeakers.description':
+    '可以在该项目发起任务的 GitLab 用户名。留空表示没有人。',
+  'channels.editor.field.gitlab.repositorySpeakers.inherited':
+    '可以在该项目发言的 GitLab 用户名。留空则使用渠道级列表。',
   'channels.editor.field.github.retainedRepositorySettings.title':
     '按仓库设置仍然生效',
   'channels.editor.field.github.retainedRepositorySettings.description': (v) =>
@@ -10013,8 +10033,12 @@ const ZH: Messages = {
   'channels.editor.validation.invalidGroupId':
     '群聊 ID 不能是 __proto__、constructor 或 prototype。',
   'channels.editor.validation.invalidRepoId': '仓库需写成 owner/repo 形式。',
+  'channels.editor.validation.invalidProjectPath':
+    '项目需写成路径形式，例如 group/subgroup/project。',
   'channels.editor.validation.conflictingRepoAliases':
     '该渠道把同一个仓库以不同大小写写了两次且设置不同（例如 Owner/repo 与 owner/repo）。请先在 settings.json 里删掉其中一条再保存。',
+  'channels.editor.validation.conflictingProjectAliases':
+    '该渠道把同一个项目以不同大小写写了两次且设置不同（例如 Group/Project 与 group/project）。请先在 settings.json 里删掉其中一条再保存。',
   'channels.editor.validation.invalidGroupEntry': (v) =>
     `该渠道把以下群组条目存成了非对象：${v?.repositories ?? ''}。只要它还在，daemon 就会拒绝每次保存，而表单里没有对应的行。请在 settings.json 里修正或删除该条目，然后重新加载渠道。`,
   'channels.editor.validation.invalidOption': '请移除不在允许列表中的值。',
