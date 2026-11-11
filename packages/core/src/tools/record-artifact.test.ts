@@ -568,6 +568,29 @@ describe('RecordArtifactTool', () => {
     expectText(result, ['skipped directory']);
   });
 
+  it('records a single file under a skipped dot directory', async () => {
+    const ws = await workspace();
+    await ws.write('.qwen/tmp/ask-details.html', '<html>ok</html>');
+
+    const result = await ws.record('Ask details', '.qwen/tmp/ask-details.html');
+
+    expectAll(result, [
+      {
+        title: 'ask-details.html',
+        description: 'Ask details',
+        storage: 'workspace',
+        workspacePath: '.qwen/tmp/ask-details.html',
+        sizeBytes: '<html>ok</html>'.length,
+        metadata: { derivedFromTitle: true },
+      },
+    ]);
+    expectText(result, [
+      'Recorded artifact "ask-details.html".',
+      'status: available',
+      'workspacePath: .qwen/tmp/ask-details.html',
+    ]);
+  });
+
   it('skips expansion children whose names are not trim-stable', async () => {
     const ws = await workspace();
     await ws.write('notes/keep.txt', 'ok');

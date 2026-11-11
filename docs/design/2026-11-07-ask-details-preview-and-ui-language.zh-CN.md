@@ -16,8 +16,10 @@
 ### 现状
 
 细节子会话写一个自包含 HTML 文件并回复其路径。该文件在子会话转录里以产物卡片
-（`components/artifacts/TurnOutputs.tsx` 的 `ArtifactCard`）呈现。卡片的 `Open`
-动作派发 `{kind:'artifact'}` tab 请求；`App.tsx` 的 `handleTurnOutputOpen` 把
+（`components/artifacts/TurnOutputs.tsx` 的 `ArtifactCard`）呈现，因为提示词中
+显式的 `record_artifact` 步骤登记了它——`write_file` 的自动登记会跳过 `.qwen/` 等
+点目录，没有该步骤就不会有卡片。卡片的 `Open` 动作派发 `{kind:'artifact'}` tab
+请求；`App.tsx` 的 `handleTurnOutputOpen` 把
 workspace HTML 产物路由到 `artifact` tab，由 `ArtifactPanel.tsx` 经
 `ArtifactDetail` → `WorkspaceFilePreview`（`previewKind:'html'`）→
 `HtmlArtifactPreview` → `RenderedHtmlPreview`（沙箱 `srcdoc` iframe）渲染。正常

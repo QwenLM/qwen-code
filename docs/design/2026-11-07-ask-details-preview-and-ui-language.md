@@ -21,8 +21,10 @@ task (#16458, squash `61aef512e7`). Two friction points surfaced in real use:
 
 The details child writes a self-contained HTML file and replies with its path.
 The file surfaces in the child transcript as an artifact card
-(`ArtifactCard` in `components/artifacts/TurnOutputs.tsx`). The card's `Open`
-action dispatches a `{kind:'artifact'}` tab request; `App.tsx`
+(`ArtifactCard` in `components/artifacts/TurnOutputs.tsx`) because the prompt's
+explicit `record_artifact` step registers it — `write_file`'s auto-record skips
+dot directories such as `.qwen/`, so without that step no card would render.
+The card's `Open` action dispatches a `{kind:'artifact'}` tab request; `App.tsx`
 `handleTurnOutputOpen` routes a workspace HTML artifact to an `artifact` tab,
 which `ArtifactPanel.tsx` renders through `ArtifactDetail` →
 `WorkspaceFilePreview` (`previewKind:'html'`) → `HtmlArtifactPreview` →
