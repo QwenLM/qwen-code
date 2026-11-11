@@ -342,27 +342,40 @@ describe('check-host-load', () => {
     assert.equal(below.status, 0, below.stdout);
   });
 
-  it('emits a breach the infrastructure classifier recognises', () => {
+  it('emits a breach the infrastructure classifiers recognise', () => {
     // A refusal is the one failure whose whole purpose is "re-run me", and
-    // qwen-autofix only re-runs a check whose annotation matches
-    // INFRA_FAILURE_SIGNATURES. Keep the two in lockstep.
+    // two workflows classify a check-run annotation as infrastructure:
+    // qwen-autofix re-runs it, main-ci-failure-issue suppresses the failure
+    // record. Both match on INFRA_FAILURE_SIGNATURES, and the issue workflow
+    // promises the two strings stay equal, so read both here: a token added
+    // to one and not the other is a silent coverage hole.
     const result = runGate({
       loadavg: '145.00 140.00 130.00 1/900 1\n',
       env: { HOST_LOAD_MAX_WAIT_TRIES: '1' },
     });
     assert.equal(result.status, 1, result.stdout);
-    const workflow = readFileSync(
-      fileURLToPath(new URL('../workflows/qwen-autofix.yml', import.meta.url)),
-      'utf8',
-    );
-    const signatures = /INFRA_FAILURE_SIGNATURES: '([^']*)'/.exec(
-      workflow,
-    )?.[1];
-    assert.ok(signatures, 'INFRA_FAILURE_SIGNATURES not found');
+    const readSignatures = (name) => {
+      const workflow = readFileSync(
+        fileURLToPath(new URL(`../workflows/${name}`, import.meta.url)),
+        'utf8',
+      );
+      const signatures = /INFRA_FAILURE_SIGNATURES: '([^']*)'/.exec(
+        workflow,
+      )?.[1];
+      assert.ok(signatures, `${name}: INFRA_FAILURE_SIGNATURES not found`);
+      return signatures;
+    };
+    const signatures = readSignatures('qwen-autofix.yml');
+    const issueSignatures = readSignatures('main-ci-failure-issue.yml');
     assert.match(result.stdout, /::error::Host load gate breached/);
     assert.ok(
       new RegExp(signatures, 'i').test(result.stdout),
-      'the breach annotation must match INFRA_FAILURE_SIGNATURES',
+      'the breach annotation must match qwen-autofix INFRA_FAILURE_SIGNATURES',
     );
+    assert.ok(
+      new RegExp(issueSignatures, 'i').test(result.stdout),
+      'the breach annotation must match main-ci-failure INFRA_FAILURE_SIGNATURES',
+    );
+    assert.equal(issueSignatures, signatures);
   });
 });

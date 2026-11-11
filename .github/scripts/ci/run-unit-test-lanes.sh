@@ -194,9 +194,20 @@ run_lane_suites() {
     ' "$log")"
     # npm exits with the LAST failing workspace's status, so the batch rc
     # describes a different workspace than the block being judged. Read this
-    # workspace's own `npm error code N` out of its block; without one, fall
-    # back to the batch status (fail closed: a signal death is still >= 128).
-    block_rc="$(grep -oE '^npm error code [0-9]+' <<< "$block" | awk 'NR == 1 { print $4 }')"
+    # workspace's own `npm error code N` out of its block: npm prints one
+    # error stanza per failed script, and a workspace whose test:ci chains
+    # another npm script (integrations/* run `npm run build && vitest run`)
+    # carries that inner stanza first. The code that belongs to the workspace
+    # is the one attached to its LAST `npm error workspace <name>` line, so
+    # track the most recent code and keep the last pairing. Without any code
+    # line, or without a matching workspace line, fall back to the batch
+    # status (fail closed: a signal death is still >= 128).
+    block_rc="$(awk -v name="$name" '
+      /^npm error code [0-9]+$/ { code = $4 }
+      index($0, "npm error workspace " name "@") == 1 ||
+        $0 == "npm error workspace " name { candidate = code }
+      END { print candidate }
+    ' <<< "$block")"
     [ -n "$block_rc" ] || block_rc="$rc"
     if rpc_only_failure_text "$block_rc" <<< "$block"; then
       retryable+=("$name")

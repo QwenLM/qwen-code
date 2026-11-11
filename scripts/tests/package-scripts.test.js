@@ -1775,6 +1775,45 @@ describe('package scripts', () => {
           ).length,
         ).toBe(2);
 
+        // npm prints one error stanza per failed script, so a workspace whose
+        // test:ci chains another npm script (integrations/* run
+        // `npm run build && vitest run`) can carry the inner build's stanza
+        // before its own. The workspace's code is the one attached to its
+        // LAST `npm error workspace <name>` line: taking the block's first
+        // code would read 1 here and retry a run that was killed (137).
+        const nestedStanza = [
+          '> @qwen-code/web-shell@0.27.2 test:ci',
+          '> npm run build && vitest run',
+          '',
+          '> @qwen-code/web-shell@0.27.2 build',
+          '',
+          'npm error Lifecycle script `build` failed with error:',
+          'npm error code 1',
+          'npm error workspace @qwen-code/web-shell@0.27.2',
+          '',
+          '⎯⎯⎯⎯⎯⎯ Unhandled Errors ⎯⎯⎯⎯⎯⎯',
+          'Vitest caught 1 unhandled error during the test run.',
+          'Error: [vitest-worker]: Timeout calling "onTaskUpdate"',
+          '',
+          ' Test Files  2 passed (2)',
+          '      Tests  902 passed (902)',
+          '     Errors  1 error',
+          '',
+          'npm error Lifecycle script `test:ci` failed with error:',
+          'npm error code 137',
+          'npm error workspace @qwen-code/web-shell@0.27.2',
+          'npm error command sh -c npm run build && vitest run',
+        ].join('\n');
+        const nestedStanzaRun = run('rpc-retry-nested-stanza', {
+          report: nestedStanza,
+          reportRc: '137',
+        });
+        expect(nestedStanzaRun.rc, nestedStanzaRun.stdout).toBe('137');
+        expect(nestedStanzaRun.stdout).not.toContain('Every test passed');
+        expect([...nestedStanzaRun.calls].sort()).toEqual(
+          [...passing.calls].sort(),
+        );
+
         // Only Vitest's own unhandled-error block counts. A test's console
         // output is echoed at column 0, so a whole-text grep would let a
         // printed transport line license a retry for an unrelated error.
@@ -1896,10 +1935,16 @@ describe('package scripts', () => {
             ),
           ],
           // A signal death is not the transport giving up, however green the
-          // report printed before it.
+          // report printed before it. The stanza's code has to agree with the
+          // stub's own 137 (below): the per-workspace extraction reads the
+          // workspace's own code, not the batch status, so a stanza still
+          // saying 1 would make this fixture model a different failure.
           [
             'a signal death after an all-green report',
-            rpcReport('@qwen-code/web-shell'),
+            rpcReport('@qwen-code/web-shell').replace(
+              'npm error code 1',
+              'npm error code 137',
+            ),
             '137',
           ],
           // Vitest echoes a test's console output at column 0, so a workspace
@@ -1940,7 +1985,10 @@ describe('package scripts', () => {
 
         // One workspace's green report must not license another's retry: the
         // batch log holds every workspace's summary, and npm names the one
-        // that actually failed.
+        // that actually failed. Judging per workspace still re-runs the
+        // transport-only one — that retry is its own and cannot turn the lane
+        // green — while the workspace with a real failed test is never re-run
+        // and its failure keeps the lane red.
         const mixed = run('no-retry-mixed', {
           report: [
             rpcReport('@qwen-code/web-shell'),
@@ -1953,12 +2001,23 @@ describe('package scripts', () => {
           ].join('\n'),
         });
         expect(mixed.rc).toBe('1');
-        expect(mixed.stdout).not.toContain('Every test passed');
+        expect(mixed.stdout).toContain('Every test passed');
+        expect(
+          mixed.calls.filter((call) =>
+            call.includes('--workspace=@qwen-code/web-shell'),
+          ).length,
+        ).toBe(2);
+        expect(
+          mixed.calls.filter((call) =>
+            call.includes('--workspace=@qwen-code/sdk'),
+          ).length,
+        ).toBe(1);
 
         // A workspace whose report never arrived must not borrow its
         // neighbour's: the whole batch log holds the neighbour's all-green
-        // summary, and the retry is per workspace. Degrading the extraction
-        // from one workspace's block to the whole log would retry this one.
+        // summary, and judging per workspace means the summary-less one is
+        // never re-run while its transport-only neighbour may still be re-run
+        // for itself. The lane stays red on the summary-less failure.
         const missingBlock = run('no-retry-missing-block', {
           report: [
             '> @qwen-code/sdk@0.27.2 test:ci',
@@ -1969,10 +2028,17 @@ describe('package scripts', () => {
           ].join('\n'),
         });
         expect(missingBlock.rc).toBe('1');
-        expect(missingBlock.stdout).not.toContain('Every test passed');
-        expect([...missingBlock.calls].sort()).toEqual(
-          [...passing.calls].sort(),
-        );
+        expect(missingBlock.stdout).toContain('Every test passed');
+        expect(
+          missingBlock.calls.filter((call) =>
+            call.includes('--workspace=@qwen-code/sdk'),
+          ).length,
+        ).toBe(1);
+        expect(
+          missingBlock.calls.filter((call) =>
+            call.includes('--workspace=@qwen-code/web-shell'),
+          ).length,
+        ).toBe(2);
 
         // With nothing left beside the CLI and core suites, the step fails
         // rather than fall back to the root's test:ci, which reruns every
