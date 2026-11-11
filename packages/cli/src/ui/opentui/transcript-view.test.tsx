@@ -121,6 +121,7 @@ import { OpenTuiTranscriptView } from './transcript-view.js';
 import * as modRowHooks from '../hooks/use-mod-row.js';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import type { ModAssistantMessageProps } from '@qwen-code/qwen-code-core/mods/render-tree.js';
+import type { OpenTuiStreamEvent } from './event-adapter.js';
 import { C } from './theme.js';
 import {
   foldLiveEvent,
@@ -1007,6 +1008,49 @@ describe('OpenTuiTranscriptView', () => {
       const preview = render(<OpenTuiTranscriptView items={[item(false)]} />);
       expect(content(preview.container)).toContain('ANSWER_BODY');
       expect(modRow).toHaveBeenLastCalledWith(undefined, undefined, undefined);
+    } finally {
+      modRow.mockRestore();
+    }
+  });
+
+  it.each<[string, OpenTuiStreamEvent[]]>([
+    [
+      'live',
+      [
+        { type: 'user', text: 'Prompt' },
+        { type: 'text', delta: 'Opening block' },
+        { type: 'thinking', delta: 'Thought' },
+        { type: 'thinking-end' },
+        { type: 'text', delta: 'Continuation block' },
+        { type: 'done' },
+      ],
+    ],
+    [
+      'replayed',
+      projectHistoryToStreamEvents(
+        [
+          { id: 1, type: 'gemini', text: 'Opening block' },
+          { id: 2, type: 'gemini_content', text: 'Continuation block' },
+        ],
+        {},
+      ),
+    ],
+  ])('marks only the first block of a %s reply', (_mode, events) => {
+    const items = events.reduce<readonly LiveHistoryItem[]>(foldLiveEvent, []);
+    const modRow = vi
+      .spyOn(modRowHooks, 'useModRow')
+      .mockReturnValue(undefined);
+    try {
+      render(
+        <OpenTuiTranscriptView
+          items={items}
+          modRows={{ config: {} as Config, sessionId: 'session-1' }}
+        />,
+      );
+      expect(modRow.mock.calls.map(([, , input]) => input?.props)).toEqual([
+        { text: 'Opening block', isFirstOfReply: true },
+        { text: 'Continuation block', isFirstOfReply: false },
+      ]);
     } finally {
       modRow.mockRestore();
     }

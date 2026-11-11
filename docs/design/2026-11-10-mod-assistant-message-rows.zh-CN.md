@@ -61,7 +61,7 @@ Ink 只在虚拟视口（`ui.useTerminalBuffer`，交互终端默认开启）里
 
 ### OpenTUI
 
-OpenTUI 每个块只有一个助手条目：一段回复的文本在流式输出时和恢复会话重放时都折叠进同一个条目，Ink 的 `gemini_content` 条目会并入它前面的 `gemini` 条目。每个完整的条目是一行，`requestId` 是条目的 id，`isFirstOfReply` 始终为 true。
+OpenTUI 将连续的文本分片合并成一个助手条目。图片或思考块可以把一段回复的文本分成多个条目。重放时各个 `gemini` 和 `gemini_content` 历史条目保持独立。每个已完成的文本条目独占一行，`requestId` 使用该条目的 id。开头的 `gemini` 块的 `isFirstOfReply` 为 true，`gemini_content` 续块的该字段为 false。
 
 OpenTUI 的对话记录是保留式视图，只挂载视口附近的条目，所以挂载的行就是显示中的行，和 Ink 的虚拟视口一样；挂载的行在文本变化时会重画。两种屏幕模式都是如此，所以 OpenTUI 始终提供该站点。行高每帧测量，改写改变行高时下方的行会随之移动。会话预览和退出画面复用对话视图，但不提供行。
 
@@ -73,7 +73,7 @@ OpenTUI 的对话记录是保留式视图，只挂载视口附近的条目，所
 
 ### 复制提示
 
-`/copy` 读取存储的对话历史。改写行中的 Mermaid 或 LaTeX 块如果能在原行找到唯一且完全匹配的源码，就显示原块的 `/copy mermaid N` 或 `/copy latex N` 提示。新增、改动过或无法唯一匹配的块省略提示。
+`/copy` 读取存储的对话历史。在 Ink 中，改写行中的 Mermaid 或 LaTeX 块如果能在原行找到唯一且完全匹配的源码，就显示原块的 `/copy mermaid N` 或 `/copy latex N` 提示。新增、改动过或无法唯一匹配的块省略提示。
 
 ## 验证与验收
 
@@ -84,7 +84,7 @@ core 运行时测试，使用真实的 QuickJS worker：
 - 等待 `$.model.complete`（由另一个 Mod 代答）的 hook 能改写该行。
 - hook 等待模型调用时 dispatch 被放弃：dispatch 能结束，宿主调用被取消，下一个 dispatch 正常运行。
 
-CLI 测试覆盖逐行调度、跳过等待期间隐藏的行、重新挂载、invalidate、渲染时限、会话归属和源码复制提示。PTY 测试在两种终端里都运行：执行 `/branch`，检查继承的行为分支的会话重新绘制；执行 `/clear`，检查每行由哪个会话接收。
+CLI 测试覆盖逐行调度、跳过等待期间隐藏的行、重新挂载、invalidate、渲染时限、会话归属和 Ink 的源码复制提示。OpenTUI 测试检查实时回复和重放回复的首块标志。PTY 测试在两种终端里都运行。执行 `/branch` 时检查继承的行是否为分支会话重新绘制，执行 `/clear` 时检查每行由哪个会话接收。
 
 验收：在开启虚拟视口的 Ink 终端和 OpenTUI 终端里，一个改写每个回复块的 Mod，在块完整后显示改写后的文本，之前显示原文；`/copy` 仍复制原文。
 

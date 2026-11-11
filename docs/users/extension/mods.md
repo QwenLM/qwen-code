@@ -1134,13 +1134,13 @@ answer when switching sessions. The Mod sees rows from the new transcript once
 it is committed.
 Rows render one at a time, so while a row's hook waits, other Mod hooks wait for
 that row only. A render that takes more than 30 seconds is cancelled, including
-time spent waiting for a model call. In Ink, a long reply is split into several
-blocks while it streams, and each block is its own row; OpenTUI keeps each block
-whole, so `isFirstOfReply` is always true there.
+time spent waiting for a model call. Ink can split long replies into several
+blocks as they stream. In both terminals, `isFirstOfReply` is `true` on the
+opening block and `false` on continuation blocks.
 
-In a rewritten row, a Mermaid or LaTeX block with one exact source match in the
-original row shows the original block's `/copy mermaid N` or `/copy latex N`
-hint. New, changed, or ambiguous blocks omit the hint.
+In Ink, a Mermaid or LaTeX block in a rewritten row shows the original block's
+`/copy mermaid N` or `/copy latex N` hint if it has one exact source match in the
+original row. New, changed, or ambiguous blocks omit the hint.
 
 In Ink, reply rows are drawn only with the virtualized history
 (`ui.useTerminalBuffer`, on by default in interactive terminals). With history

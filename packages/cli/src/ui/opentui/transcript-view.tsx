@@ -688,6 +688,7 @@ function TranscriptItem({
           text={item.text}
           streaming={item.streaming}
           timestamp={showTimestamps ? item.timestamp : undefined}
+          isFirstOfReply={item.canonicalHistoryItem?.type !== 'gemini_content'}
           modRows={modRows}
         />
       );
@@ -832,18 +833,19 @@ function AssistantRow({
   text,
   streaming,
   timestamp,
+  isFirstOfReply,
   modRows,
 }: {
   id: string;
   text: string;
   streaming: boolean;
   timestamp?: number;
+  isFirstOfReply: boolean;
   modRows?: TranscriptViewProps['modRows'];
 }) {
   const meta = assistantMessageMeta();
   // A complete block is offered to the Mods, which may rewrite the text it
-  // shows; the item keeps its own. OpenTUI keeps a reply's blocks whole, so
-  // each row opens a reply.
+  // shows; the item keeps its own.
   const modInput = useMemo<ModAssistantMessageInput | undefined>(
     () =>
       modRows && !streaming
@@ -851,10 +853,10 @@ function AssistantRow({
             surface: 'terminal',
             component: 'AssistantMessage',
             requestId: id,
-            props: { text, isFirstOfReply: true },
+            props: { text, isFirstOfReply },
           }
         : undefined,
-    [modRows, streaming, id, text],
+    [modRows, streaming, id, text, isFirstOfReply],
   );
   const modProps = useModRow(modRows?.config, modRows?.sessionId, modInput);
   const content = sanitizeTerminalText(

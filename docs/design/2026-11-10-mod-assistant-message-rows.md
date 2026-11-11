@@ -61,7 +61,7 @@ A row whose input is larger than half a Mod payload is not raised, rather than h
 
 ### OpenTUI
 
-OpenTUI keeps one assistant item per block: a reply's text is folded into one item while it streams and on a resume replay, where Ink's `gemini_content` items join the `gemini` item before them. Each complete item is one row, its `requestId` is the item's id, and `isFirstOfReply` is always true.
+OpenTUI folds consecutive text chunks into one assistant item. An image or thought can split a reply's text across several items. Replay keeps each `gemini` and `gemini_content` history item separate. Each completed text item has its own row and uses its item id as `requestId`. The opening `gemini` block has `isFirstOfReply: true`, and `gemini_content` continuation blocks have `isFirstOfReply: false`.
 
 The OpenTUI transcript is a retained view that mounts only the items near the viewport, so a mounted row is a shown row, as in Ink's virtualized viewport, and any mounted row draws again when its text changes. It does so in both screen modes, so OpenTUI always offers the site. A row's height is measured on each frame, so a rewrite that changes it moves the rows below. The session preview and the quit screen reuse the transcript view and do not offer rows.
 
@@ -73,7 +73,7 @@ The two steps of a switch run in either order. Ink's `/resume` and `/branch` ado
 
 ### Copy hints
 
-`/copy` reads the stored conversation history. In a rewritten row, a Mermaid or LaTeX block with one exact source match in the original row shows the original block's `/copy mermaid N` or `/copy latex N` hint. New, modified or ambiguous blocks omit the hint.
+`/copy` reads the stored conversation history. In Ink, a Mermaid or LaTeX block in a rewritten row shows the original block's `/copy mermaid N` or `/copy latex N` hint if it has one exact source match in the original row. New, modified or ambiguous blocks omit the hint.
 
 ## Validation and acceptance
 
@@ -84,7 +84,7 @@ Core runtime tests with the real QuickJS worker:
 - A hook that awaits `$.model.complete`, answered by another Mod, rewrites the row.
 - A dispatch abandoned while its hook awaits a model call settles, cancels the host call, and the next dispatch runs.
 
-CLI tests cover serialization, skipping a row hidden while it waits, remounts, invalidation, the render deadline, session ownership and source-copy hints. The PTY test runs in both terminals. It exercises `/branch`, checking that the inherited rows are drawn again for the branch's session, and `/clear`, checking which session receives each row.
+CLI tests cover serialization, skipping a row hidden while it waits, remounts, invalidation, the render deadline, session ownership and Ink's source-copy hints. The OpenTUI tests check the first-block flag for live and replayed replies. The PTY test runs in both terminals. It exercises `/branch`, checking that the inherited rows are drawn again for the branch's session, and `/clear`, checking which session receives each row.
 
 Acceptance: in the Ink terminal with the virtualized viewport and in the OpenTUI terminal, a Mod that rewrites each reply block shows the rewritten text once the block is complete, and the original before; `/copy` still copies the original.
 
