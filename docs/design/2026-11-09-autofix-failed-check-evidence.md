@@ -109,18 +109,29 @@ completed with exit code 1` on a noisy multi-error log), and an 8 MiB
    render no excerpt. So the fetch passes the flag, falls back to the bare call
    only when stderr says `unknown flag` (older `gh` has neither the check nor the
    flag), and applies `stripVTControlCharacters` so raw ANSI never reaches
-   `feedback.md` or step stdout. It also strips bare CR: `stripVTControlCharacters`
-   removes escape sequences but leaves a `\r` that a fork-controlled log line
-   could use to visually overwrite a line's start in a terminal, and the workflow
-   already strips CR from untrusted comment bodies the same way. This is the same
-   shape as
-   `packages/cli/src/commands/autofix-pr/ci-log.ts`'s `jobLog`, and the behavioral
-   suite's fake `gh` reproduces the refusal so a missing flag turns it red. The
-   identical fix is applied to the patrol's own `GhClient.jobLog`
-   (`.github/scripts/ci-flaky-rerun.mjs`), which was equally log-blind on current
-   `gh`; it is handled here rather than deferred so the reused scrubber's fetch
-   actually works.
-8. **The fence cannot be closed by the log.** The excerpt's Markdown fence is
+   `feedback.md` or step stdout. This fetch shape — flag, old-`gh` fallback, VT
+   strip — is the same as `packages/cli/src/commands/autofix-pr/ci-log.ts`'s
+   `jobLog`, and the behavioral suite's fake `gh` reproduces the refusal so a
+   missing flag turns it red. The identical fix is applied to the patrol's own
+   `GhClient.jobLog` (`.github/scripts/ci-flaky-rerun.mjs`), which was equally
+   log-blind on current `gh`; it is handled here rather than deferred so the
+   reused scrubber's fetch actually works.
+8. **Terminal controls are stripped after redaction, in the shared scrubber.**
+   `stripVTControlCharacters` removes escape sequences but leaves the bare
+   C0/C1 controls: a `\r` lets a fork-controlled log line visually overwrite a
+   line's start in a terminal, and `\b`, `\x0b`, `\x0c`, DEL and the C1 range
+   repaint it just as well. `skillLog` therefore strips
+   `[\x00-\x08\x0b-\x1f\x7f-\x9f]` (everything but `\n` and `\t`) — but only
+   AFTER `redactLog`: the anchored secret patterns (`\bnpm_…`, `\bsk-…`,
+   `\beyJ…`, `\b<scheme>://`) need the word boundary a bare `\r` supplies, so
+   stripping first would concatenate `x\rnpm_…` into a token no anchor matches
+   and leak it under a preamble that promises redaction. Living in `skillLog`,
+   the strip covers both the collector's excerpt and the patrol's rendered
+   evidence (its only `jobLog` caller goes through `skillLog`). The sibling
+   fetches themselves are unchanged: `ci-log.ts`'s `jobLog` still writes bare
+   controls into `.qwen/tmp/autofix-pr-<n>-ci-<run>.log`, and the patrol's
+   `GhClient.jobLog` still returns them to its caller.
+9. **The fence cannot be closed by the log.** The excerpt's Markdown fence is
    sized longer than the longest backtick run inside it, so a log line carrying
    backticks cannot close the fence early and spill the rest into `feedback.md`
    as markup.
@@ -147,10 +158,16 @@ completed with exit code 1` on a noisy multi-error log), and an 8 MiB
   argument, and every degradation path through a fake `gh` on PATH. The fake
   `gh` reproduces a current gh's escape-sequence refusal (exit 1 unless the flag
   is passed) and an old gh's `unknown flag`, so the excerpt-rendering test
-  witnesses the flag and the ANSI-strip together.
+  witnesses the flag and the ANSI-strip together. Further cases pin the control
+  strip end-to-end: a secret after a bare `\r` is still redacted (the strip runs
+  after `redactLog`), backspace/C0/C1 controls are stripped while tab and
+  newline survive, and the text past the first control is retained (a
+  truncating implementation stays red).
 - `scripts/tests/ci-flaky-rerun.test.js` (vitest): the patrol's `GhClient.jobLog`
   passes the flag, falls back only on `unknown flag`, strips VT control
-  characters, and propagates a non-refusal error.
+  characters, and propagates a non-refusal error; `skillLog` strips terminal
+  controls after redaction (a secret after a bare CR is still redacted, and
+  backspace/vertical tab are gone).
 - `scripts/tests/qwen-autofix-workflow.test.js` (vitest): the call precedes the
   checkout and uses the working-tree path; the tolerant fallbacks and stderr
   sink; the section's position between the name-only lists and the gate
@@ -159,19 +176,22 @@ completed with exit code 1` on a noisy multi-error log), and an 8 MiB
 - Mutation checks: moving the call below the checkout, staging it under
   `RUNNER_TEMP`, dropping `|| true`, dropping the feedback guard, dropping
   either CI membership entry, and dropping the skill sentence each turn the
-  workflow pins red; dropping the flag, the ANSI strip, the CR strip, the
+  workflow pins red; dropping the flag, the ANSI strip, the control strip, the
   old-gh fallback, reverting the line cap to 60, fixing the fence at four
   backticks, narrowing the usage guard to `&&`, rendering the raw log, dropping
   the self-lane exclusion, the job cap, the dedupe, or adding `CANCELLED` each
-  turn the collector tests red; dropping the patrol's flag turns its witness red.
+  turn the collector tests red; moving the control strip before redaction,
+  narrowing it to `\r` alone, truncating at the first control, or widening it to
+  eat `\n`/`\t` each turn the collector or patrol witness red; dropping the
+  patrol's flag turns its witness red.
 - `scripts/tests/ci-platform-lanes.test.js` re-runs because `ci.yml` changed.
 
 ## Acceptance criteria
 
 - A red PR's `feedback.md` carries failed step names and a redacted excerpt for
   up to three failing jobs, and the excerpt actually renders against a current
-  `gh` (the flag is passed) with no raw ANSI or bare CR reaching `feedback.md`
-  or step stdout.
+  `gh` (the flag is passed) with no raw ANSI or terminal control characters
+  (bare CR, backspace, C0/C1) reaching `feedback.md` or step stdout.
 - No secret from a job log reaches `feedback.md` or step stdout.
 - An absent script, an unreadable rollup, or a failed API read never fails a
   round.

@@ -89,14 +89,23 @@ job id 直接来自检查的 `detailsUrl`（`…/actions/runs/<run>/job/<job>`�
    退出码 1、stdout 为空，而把非零退出吞掉的辅助函数会静默地不渲染任何摘要。
    因此抓取时传该标志，仅当 stderr 含 `unknown flag` 时回退到裸调用（旧版 `gh`
    既无该检查也无该标志），并做 `stripVTControlCharacters`，使原始 ANSI 不会到达
-   `feedback.md` 或 step stdout。同时脱去裸 CR：`stripVTControlCharacters` 去掉
-   转义序列却留下 `\r`，分支付控的日志行可借它在终端里视觉覆盖某一行开头，而
-   workflow 本就以同样方式对不可信评论正文脱 CR。这与
-   `packages/cli/src/commands/autofix-pr/ci-log.ts` 的 `jobLog` 形状一致，行为
-   套件的假 `gh` 会复现该拒绝，因此缺标志即变红。同样的修复也落到巡逻自己的
+   `feedback.md` 或 step stdout。这一抓取形状——标志、旧 gh 回退、脱 VT——与
+   `packages/cli/src/commands/autofix-pr/ci-log.ts` 的 `jobLog` 一致，行为套件
+   的假 `gh` 会复现该拒绝，因此缺标志即变红。同样的修复也落到巡逻自己的
    `GhClient.jobLog`（`.github/scripts/ci-flaky-rerun.mjs`）——它在当前 `gh` 下
    同样对日志盲；在此一并处理而非延后，使被复用的脱敏器的抓取真正可用。
-8. **围栏不会被日志闭合。** 摘要的 Markdown 围栏长度大于其内部最长的反引号串，
+8. **终端控制字符在脱敏之后、于共享脱敏器内剥离。** `stripVTControlCharacters`
+   去掉转义序列却留下裸的 C0/C1 控制字符：由 fork 控制的日志行可借 `\r` 在终端
+   里视觉覆盖某一行开头，`\b`、`\x0b`、`\x0c`、DEL 与 C1 区间同样能重绘该行。
+   因此 `skillLog` 剥离 `[\x00-\x08\x0b-\x1f\x7f-\x9f]`（除 `\n` 与 `\t` 外的
+   全部）——但只在 `redactLog` 之后：锚定的密钥模式（`\bnpm_…`、`\bsk-…`、
+   `\beyJ…`、`\b<scheme>://`）需要裸 `\r` 提供的词边界，先剥离会把 `x\rnpm_…`
+   拼接成任何锚点都匹配不到的 token，让它在承诺已脱敏的前言下泄露。剥离位于
+   `skillLog`，因此同时覆盖采集器摘要与巡逻渲染的证据（巡逻唯一的 `jobLog`
+   调用方经过 `skillLog`）。两个兄弟抓取本身不变：`ci-log.ts` 的 `jobLog` 仍会
+   把裸控制字符写进 `.qwen/tmp/autofix-pr-<n>-ci-<run>.log`，巡逻的
+   `GhClient.jobLog` 也仍把它们返回给调用方。
+9. **围栏不会被日志闭合。** 摘要的 Markdown 围栏长度大于其内部最长的反引号串，
    因此含反引号的日志行无法提前闭合围栏、把余下内容作为标记溢入
    `feedback.md`。
 
@@ -117,26 +126,32 @@ job id 直接来自检查的 `detailsUrl`（`…/actions/runs/<run>/job/<job>`�
   见证、约 120 行上限且保住失败汇总尾部、围栏大于反引号串、80 字符名字上限、
   标记清洗、每个参数缺失的 usage 守卫，以及通过 PATH 上的假 `gh` 覆盖每条退化
   路径。假 `gh` 复现当前 gh 的转义序列拒绝（不传标志即 exit 1）与旧 gh 的
-  `unknown flag`，因此渲染摘要的用例同时见证标志与脱 ANSI。
+  `unknown flag`，因此渲染摘要的用例同时见证标志与脱 ANSI。另有用例端到端钉住
+  控制字符剥离：裸 `\r` 之后的密钥仍被脱敏（剥离在 `redactLog` 之后）、
+  backspace/C0/C1 被剥离而 tab 与换行保留、首个控制字符之后的文本被保留
+  （截断实现保持红）。
 - `scripts/tests/ci-flaky-rerun.test.js`（vitest）：巡逻的 `GhClient.jobLog` 传
-  标志、仅在 `unknown flag` 时回退、脱去 VT 控制字符，并向上抛出非拒绝类错误。
+  标志、仅在 `unknown flag` 时回退、脱去 VT 控制字符，并向上抛出非拒绝类错误；
+  `skillLog` 在脱敏后剥离终端控制字符（裸 CR 后的密钥仍被脱敏，backspace 与
+  纵向制表符消失）。
 - `scripts/tests/qwen-autofix-workflow.test.js`（vitest）：调用先于 checkout 且
   使用工作树路径；容错回退与 stderr 去向；段落位于仅名称列表与 gate rejection
   之间、且在去毒 echo 之前；两个 helper 测试列表的 CI 成员资格；af-161 指针与
   skill 指引。
 - 变异验证：把调用移到 checkout 之后、改为 `RUNNER_TEMP` 暂存路径、去掉
   `|| true`、去掉反馈守卫、去掉任一 CI 成员条目、去掉 skill 句子，都会让
-  workflow 钉子变红；去掉标志、脱 ANSI、脱 CR、旧 gh 回退、把行数上限改回 60、
-  把围栏定长四反引号、把 usage 守卫收窄为 `&&`、渲染原始日志、去掉自车道排除、
-  job 上限、去重，或加入 `CANCELLED`，都会让采集器测试变红；去掉巡逻的标志会让
-  其见证变红。
+  workflow 钉子变红；去掉标志、脱 ANSI、脱控制字符、旧 gh 回退、把行数上限改回
+  60、把围栏定长四反引号、把 usage 守卫收窄为 `&&`、渲染原始日志、去掉自车道
+  排除、job 上限、去重，或加入 `CANCELLED`，都会让采集器测试变红；把控制字符
+  剥离移到脱敏之前、收窄为仅 `\r`、在首个控制字符处截断、或放宽到吞掉
+  `\n`/`\t`，都会让采集器或巡逻见证变红；去掉巡逻的标志会让其见证变红。
 - 因为改了 `ci.yml`，复跑 `scripts/tests/ci-platform-lanes.test.js`。
 
 ## 验收标准
 
 - 红 PR 的 `feedback.md` 带有失败步骤名，以及最多三个失败 job 的已脱敏摘要；
-  摘要在当前 `gh` 下确实渲染（传了标志），且没有原始 ANSI 或裸 CR 到达
-  `feedback.md` 或 step stdout。
+  摘要在当前 `gh` 下确实渲染（传了标志），且没有原始 ANSI 或终端控制字符
+  （裸 CR、backspace、C0/C1）到达 `feedback.md` 或 step stdout。
 - job 日志中的任何密钥都不会到达 `feedback.md` 或 step stdout。
 - 脚本缺失、rollup 不可读或 API 读取失败，绝不会让一轮失败。
 - 采集器及其导入的 helper 在切到 PR 分支之前、从可信 base 执行。

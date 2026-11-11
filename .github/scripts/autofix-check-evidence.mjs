@@ -152,22 +152,19 @@ function gh(args) {
 // always contain them, so a bare call exits 1 with empty stdout and the
 // excerpt would silently never render. Older gh has neither the check nor the
 // flag, so fall back to the bare call ONLY when stderr says `unknown flag`.
-// Strip VT control characters AND bare CR either way: raw ANSI would
-// otherwise reach feedback.md and step stdout (where the existing defang
-// handles only `::` and `##[`), and stripVTControlCharacters removes escape
-// sequences but leaves a bare `\r` that a fork-controlled log line could use
-// to visually overwrite a line's start in a terminal. The workflow strips CR
-// from untrusted comment bodies the same way one block above. Same fetch
-// shape as autofix-pr/ci-log.ts's jobLog.
+// Strip VT control characters either way: raw ANSI would otherwise reach
+// feedback.md and step stdout, where the existing defang handles only `::`
+// and `##[`. Bare CR and the other terminal controls are stripped downstream
+// by skillLog, AFTER redaction — stripping them here would delete the word
+// boundary redactLog's anchored secret patterns need. Same fetch shape as
+// autofix-pr/ci-log.ts's jobLog.
 function fetchLog(repo, id) {
   const path = `repos/${repo}/actions/jobs/${id}/logs`;
   let result = ghResult(['api', '--allow-escape-sequences', path]);
   if (result.out === null && result.stderr.includes('unknown flag')) {
     result = ghResult(['api', path]);
   }
-  return result.out === null
-    ? null
-    : stripVTControlCharacters(result.out).replace(/\r/g, '');
+  return result.out === null ? null : stripVTControlCharacters(result.out);
 }
 
 function fetchJob(repo, id) {

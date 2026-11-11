@@ -397,7 +397,45 @@ describe('CLI', () => {
     );
     assert.equal(result.status, 0, result.stderr);
     assert.ok(result.stdout.includes('real failure'));
+    // Retention, not just absence: truncating at the first CR would also
+    // pass the absence check while silently dropping the rest of the line.
+    assert.ok(result.stdout.includes('real failureOVERWRITTEN start'));
     assert.ok(!result.stdout.includes('\r'));
+  });
+
+  it('redacts a secret that follows a bare CR before stripping it', () => {
+    // The strip must run AFTER redactLog: the bare \r supplies the word
+    // boundary \bnpm_ needs. Stripping it first concatenates `x` onto the
+    // token, the anchor no longer matches, and the token rides into the
+    // excerpt under a preamble that promises redaction.
+    const result = runCli(
+      { statusCheckRollup: [failedCheck()] },
+      {
+        log: '##[error]Downloading pkg 42% x\rnpm_ABCDEFGHIJKLMNOPQRSTUV0123 installed\n',
+      },
+    );
+    assert.equal(result.status, 0, result.stderr);
+    assert.ok(result.stdout.includes('[redacted]'));
+    assert.ok(!result.stdout.includes('npm_ABCDEFGHIJKLMNOPQRSTUV0123'));
+  });
+
+  it('strips backspace and other C0/C1 controls, keeping tab and newline', () => {
+    // A \r-only strip leaves \b, \x0b, \x0c, DEL and the C1 range, which a
+    // terminal still applies to repaint the line. The wider class closes the
+    // whole family; \n and \t must survive (line structure and layout).
+    const result = runCli(
+      { statusCheckRollup: [failedCheck()] },
+      {
+        log: '##[error]AssertionError: real failure\b\b\bSPOOFED\ttail\x0b\x0c\x7f\x9f\n',
+      },
+    );
+    assert.equal(result.status, 0, result.stderr);
+    assert.ok(result.stdout.includes('real failure'));
+    assert.ok(result.stdout.includes('SPOOFED'));
+    assert.ok(result.stdout.includes('\ttail'));
+    for (const control of ['\b', '\x0b', '\x0c', '\x7f', '\x9f']) {
+      assert.ok(!result.stdout.includes(control));
+    }
   });
 
   it('stays silent when nothing is red', () => {

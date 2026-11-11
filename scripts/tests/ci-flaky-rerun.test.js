@@ -1115,6 +1115,21 @@ describe('ci flaky rerun patrol', () => {
     expect(evidence).toContain('TypeError: ensureTool is not a function');
   });
 
+  it('strips terminal controls after redaction, not before', () => {
+    // A bare \r supplies the word boundary \bnpm_ needs: stripping controls
+    // before redactLog would concatenate `x` onto the token and leak it. The
+    // strip must also cover backspace and friends, not just CR.
+    const evidence = skillLog(
+      '##[error]Downloading pkg 42% x\rnpm_ABCDEFGHIJKLMNOPQRSTUV0123 installed\b\bSPOOFED\x0b\n',
+    );
+    expect(evidence).toContain('[redacted]');
+    expect(evidence).not.toContain('npm_ABCDEFGHIJKLMNOPQRSTUV0123');
+    expect(evidence).toContain('installedSPOOFED');
+    expect(evidence).not.toContain('\r');
+    expect(evidence).not.toContain('\b');
+    expect(evidence).not.toContain('\x0b');
+  });
+
   it('keeps fallback errors', () => {
     expect(skillLog('Error: connect ECONNREFUSED')).toContain(
       'Error: connect ECONNREFUSED',

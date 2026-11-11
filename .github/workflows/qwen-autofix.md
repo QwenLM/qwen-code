@@ -4916,16 +4916,18 @@ render no excerpt at all. So: pass the flag; fall back to the bare
 call ONLY when stderr says `unknown flag` (older gh has neither the
 check nor the flag); and stripVTControlCharacters the result, because
 raw ANSI would otherwise reach feedback.md and step stdout, where the
-existing defang handles only `::` and `##[`. Strip bare CR alongside it:
-stripVTControlCharacters removes escape sequences but leaves a `\r`
-that a fork-controlled log line could use to visually overwrite a
-line's start in a terminal — the same CR strip the workflow applies to
-untrusted comment bodies one block above. The behavioral suite's
-fake gh reproduces the refusal, so a missing flag turns it red. The
-same fix lands on the patrol's own GhClient.jobLog, which was equally
-log-blind on current gh. The excerpt fence is sized past any backtick
-run inside it, so a log line carrying backticks cannot close the fence
-early and spill the rest into feedback.md as markdown.
+existing defang handles only `::` and `##[`. Bare CR and the other
+terminal controls are stripped downstream by skillLog, AFTER redactLog:
+stripVTControlCharacters leaves a `\r` that a fork-controlled log line
+could use to visually overwrite a line's start in a terminal (`\b` and
+the rest of C0/C1 repaint it just as well), but stripping before
+redaction would delete the word boundary the anchored secret patterns
+need. The behavioral suite's fake gh reproduces the refusal, so a
+missing flag turns it red. The same fix lands on the patrol's own
+GhClient.jobLog, which was equally log-blind on current gh. The
+excerpt fence is sized past any backtick run inside it, so a log line
+carrying backticks cannot close the fence early and spill the rest
+into feedback.md as markdown.
 
 PLACEMENT IS THE TRUST BOUNDARY. The call sits BEFORE this step
 switches the working tree to the PR branch, so the collector AND the

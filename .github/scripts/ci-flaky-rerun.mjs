@@ -225,7 +225,14 @@ function redactLog(log) {
 }
 
 export function skillLog(log) {
-  const lines = redactLog(log).split('\n');
+  // Strip AFTER redaction: a bare \r supplies the word boundary redactLog's
+  // anchored patterns (\bnpm_…, \bsk-…, \beyJ…) need; stripping first would
+  // concatenate `x\rnpm_…` into a token no anchor matches. Keep \n (line
+  // selection) and \t; the rest of C0/DEL/C1 can repaint a terminal line.
+  const lines = redactLog(log)
+    // eslint-disable-next-line no-control-regex -- log text must not control the terminal
+    .replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, '')
+    .split('\n');
   const selected = new Set();
   const primary = new Set();
   const summary =
