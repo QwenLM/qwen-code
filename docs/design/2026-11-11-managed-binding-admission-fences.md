@@ -26,8 +26,8 @@ The admission/fence methods follow one shape: a public interface method on the r
 
 The shared vocabulary is already public static and used well beyond this repository:
 
-- `harnessDrainKey`: `JdbcCsiApplicationRetirement`, `JdbcCsiActivationAdmission`, `JdbcHarnessPlacementStore`, `AgentLifecycleOperations`, `JdbcWorkspaceLifecycleStore`, `JournalFencing`, `WorkspaceCsiApplicationHistoryImage`, and others.
-- `storageFenceKey`: `JdbcSshWorkspaceStore`, `WorkspaceStorageGuard`, `ExternalStorageRegistrationStore`, `WorkspaceMigrationStore`, `WorkspaceCsiReservationStore`, `WorkspaceCsiApplicationInventory`, and others.
+- `harnessDrainKey`: `JdbcCsiApplicationRetirement`, `JdbcCsiActivationAdmission`, `JdbcHarnessPlacementStore`, `AgentLifecycleOperations`, `JdbcWorkspaceLifecycleStore`, `JournalFencing`, `WorkspaceCsiApplicationStore`, and others.
+- `storageFenceKey`: `JdbcSshWorkspaceStore`, `WorkspaceStorageGuard`, `ExternalStorageRegistrationStore`, `WorkspaceMigrationStore`, `WorkspaceCsiReservationStore`, and others.
 - `storageAliasKey`: `ExecutionAdmissionPlacement`, `JdbcCsiRetirementSeal`, `AgentSessionPolicies`, `JdbcCsiApplicationProgress`, `WorkspaceMigrationAdmission`, `LocalStorageOwners`, and others.
 - `beginHarnessLifecycle`: `AgentLifecycleOperations`.
 - `hasSharedRuntimeSessions`: `JdbcWorkspaceLifecycleStore`.
@@ -39,7 +39,7 @@ The interface methods (`requireHarnessAdmission`, `requireHarnessRecovery`, `req
 
 Extract a `RuntimeAdmissionFences` collaborator in `runtimebroker.persistence` that owns the static `Connection`-taking engine and the shared fence vocabulary. The repository keeps transaction ownership, the interface wrappers, and the binding CRUD/CAS/lease core.
 
-The class is `public final` with a private constructor, not package-private: roughly thirty-five callers live in `managedagent.persistence` and in verification test packages outside `runtimebroker.persistence`, and a package-private class cannot be imported cross-package. Only the six already-public vocabulary members are public; the entire engine surface stays package-private. This matches the existing public collaborators in the same package (`JdbcCsiActivationAdmission`, `JdbcCsiRetirementSeal`); ArchUnit enforces no visibility rule.
+The class is `public final` with a private constructor, not package-private: 38 production callers (plus 43 verification test files) live in `managedagent.persistence` and in test packages outside `runtimebroker.persistence`, and a package-private class cannot be imported cross-package. The six already-public vocabulary members stay public, and so does the `requireHarnessAdmission(Connection, RuntimeScope, String, RuntimeLifecycleAuthority)` delegator, because `WorkspaceCsiRuntimeAccess` calls it from another package; the rest of the engine surface is package-private. This matches the existing public collaborator in the same package (`JdbcCsiActivationAdmission`); ArchUnit enforces no visibility rule.
 
 ### What moves
 
@@ -59,7 +59,7 @@ Every method body moves verbatim, including the dialect lock clause, the `JdbcRe
 
 The shared vocabulary's callers switch their import and qualifier to `RuntimeAdmissionFences` in the same change. This is a mechanical sweep of 81 caller files (38 production, 43 verification test), one to three lines each; no call changes its arguments, transaction, or order. Pre-release, this is a hard cut with no deprecated bridge on the repository, matching the P0 decision.
 
-Inside the repository, the moved members are reached through static imports so the roughly forty intra-repository call sites stay textually unchanged. The one exception is `requireHarnessAdmission`: a member method shadows a same-name single-static-import entirely (JLS 15.12.1), and the interface wrappers must keep that name, so the thirteen `Connection`-taking call sites are qualified `RuntimeAdmissionFences.requireHarnessAdmission(...)` instead. Two pinned callers (`JournalCommit`, `WorkspaceRecoveryStore`) use fully-qualified references rather than a new import, because an import would grow each exactly one line past its ratchet pin; the reference change keeps them at their pinned sizes. The sweep also removes one pre-existing unused import (`CsiFilesRetirementProfile` in `JdbcCsiExecutionAdmission`, orphaned upstream) that the broker Checkstyle ruleset flags; the removal is behavior-neutral.
+Inside the repository, the moved members are reached through static imports so the roughly forty intra-repository call sites stay textually unchanged. The one exception is `requireHarnessAdmission`: a member method shadows a same-name single-static-import entirely (JLS 15.12.1), and the interface wrappers must keep that name, so the thirteen `Connection`-taking call sites are qualified `RuntimeAdmissionFences.requireHarnessAdmission(...)` instead. Among external callers, `WorkspaceRecoveryStore` sits exactly at its 803-line ratchet pin, so it uses a fully-qualified reference rather than a new import that would push it to 804; `JournalCommit` (774 lines after adding the import, well under its 880 pin) imports the collaborator normally.
 
 ## Design decisions and rationale
 
@@ -67,14 +67,15 @@ Inside the repository, the moved members are reached through static imports so t
 - **One collaborator, not two.** The key vocabulary and the SQL engine are cohesive (the engine consumes the keys); splitting them would add a class without a seam. Simplicity first.
 - **The vocabulary moves with the engine.** Leaving the widely shared keys on the repository would keep a static utility surface on a class meant to be a binding repository, and would force a second sweep later. Moving them now places the common SQL vocabulary in one named home.
 - **Hard cut over a bridge.** Pre-release, the module gate makes every caller enumerable; a bridge would keep the old surface alive and double it during migration.
-- **Public class, package-private engine.** Cross-package callers force public class visibility; only the shared vocabulary is public, so the engine surface stays internal to the persistence package.
+- **Public class, mostly package-private engine.** Cross-package callers force public class visibility; the shared vocabulary and the one cross-package admission delegator are public, while the rest of the engine stays internal to the persistence package.
 - **Qualify the shadowed name.** `requireHarnessAdmission` cannot be static-imported alongside the same-name interface wrapper (JLS 15.12.1); qualifying its `Connection`-taking call sites is the minimal correct choice, while every other moved member uses static imports.
 
 ## Constraints
 
 - SQL, transaction, concurrency and recovery semantics are invariant: the dialect lock clause, the database-time lease comparison, the fence set logic and every SQL string move byte-identical. A stale owner must still be unable to commit durable state or release a newer owner's resources.
 - The `contracts` interface and the in-memory repository are untouched; ArchUnit module boundaries pass unchanged.
-- The class-size ratchet only lowers: the repository pin drops to its post-extraction size, the new collaborator is pinned if it reaches 800 lines, and `GLOBAL_MAX_LINES` lowers from 2,662 to 2,574 once the repository is below the `ToolPublicationDataStore` pin.
+- The class-size ratchet only lowers: the repository pin drops to its post-extraction size, the new collaborator is pinned if it reaches 800 lines, and `GLOBAL_MAX_LINES` lowers from 2,662 to 2,549 (the actual size of `ToolPublicationDataStore`, the current maximum) once the repository is below it.
+- The lock-contract ownership manifest `verification/src/test/resources/lock-contract/sql-owners.txt` is compared as an exact ordered list by `SessionRowLockOrderTest`; any SQL statement whose owning file changes must be re-attributed in the manifest in the same change, or the contract test reddens.
 - Both Checkstyle executions apply (`checkstyle:check` and `checkstyle:check@runtime-broker-checkstyle`); the latter uses a different ruleset and requires trailing newlines and no blank line before a closing brace.
 
 ## Risks
@@ -91,12 +92,12 @@ Inside the repository, the moved members are reached through static imports so t
 
 ## Acceptance criteria
 
-- `JdbcRuntimeBindingRepository` drops from 2,662 to 2,319 lines (below 2,574); its pin lowers from 2,670 to 2,319 and `GLOBAL_MAX_LINES` from 2,662 to 2,574 in the same change. `RuntimeAdmissionFences` is 389 lines, below the 800-line pin threshold, so it is not pinned.
+- `JdbcRuntimeBindingRepository` drops from 2,662 to 2,319 lines (below 2,549); its pin lowers from 2,670 to 2,319 and `GLOBAL_MAX_LINES` from 2,662 to 2,549 in the same change. `RuntimeAdmissionFences` is 389 lines, below the 800-line pin threshold, so it is not pinned.
 - Every moved body is verbatim; the interface, the in-memory repository, and all SQL/transaction/lock semantics are unchanged.
-- Zero OpenAPI and schema diff; ArchUnit, both Checkstyle executions, and SpotBugs green; the full MySQL and Hosted/fault CI profiles green on the accepted revision.
+- Zero OpenAPI and schema diff; the lock-contract `sql-owners.txt` manifest re-attributed for the moved statements; ArchUnit, both Checkstyle executions, and SpotBugs green; the full MySQL and Hosted/fault CI profiles green on the accepted revision.
 
 ## Follow-up
 
 - The remaining binding-repository clusters (session-release operations, binding CRUD/CAS/lease) are later slices if further ratchet lowering is wanted.
-- `ToolPublicationDataStore` (2,574) becomes the next global-ceiling seed after this slice.
+- `ToolPublicationDataStore` (2,549 lines, pin 2,574) becomes the next global-ceiling seed after this slice.
 - The `QwenHostedHarnessConnector` decomposition named by the structure review remains a separate adapters slice, outside this ratchet scope.

@@ -26,8 +26,8 @@ admission/fence 方法遵循同一形状：仓库上的 public 接口方法经 `
 
 共享词汇已是 public static，且使用远超本仓库：
 
-- `harnessDrainKey`：`JdbcCsiApplicationRetirement`、`JdbcCsiActivationAdmission`、`JdbcHarnessPlacementStore`、`AgentLifecycleOperations`、`JdbcWorkspaceLifecycleStore`、`JournalFencing`、`WorkspaceCsiApplicationHistoryImage` 等。
-- `storageFenceKey`：`JdbcSshWorkspaceStore`、`WorkspaceStorageGuard`、`ExternalStorageRegistrationStore`、`WorkspaceMigrationStore`、`WorkspaceCsiReservationStore`、`WorkspaceCsiApplicationInventory` 等。
+- `harnessDrainKey`：`JdbcCsiApplicationRetirement`、`JdbcCsiActivationAdmission`、`JdbcHarnessPlacementStore`、`AgentLifecycleOperations`、`JdbcWorkspaceLifecycleStore`、`JournalFencing`、`WorkspaceCsiApplicationStore` 等。
+- `storageFenceKey`：`JdbcSshWorkspaceStore`、`WorkspaceStorageGuard`、`ExternalStorageRegistrationStore`、`WorkspaceMigrationStore`、`WorkspaceCsiReservationStore` 等。
 - `storageAliasKey`：`ExecutionAdmissionPlacement`、`JdbcCsiRetirementSeal`、`AgentSessionPolicies`、`JdbcCsiApplicationProgress`、`WorkspaceMigrationAdmission`、`LocalStorageOwners` 等。
 - `beginHarnessLifecycle`：`AgentLifecycleOperations`。
 - `hasSharedRuntimeSessions`：`JdbcWorkspaceLifecycleStore`。
@@ -39,7 +39,7 @@ admission/fence 方法遵循同一形状：仓库上的 public 接口方法经 `
 
 在 `runtimebroker.persistence` 抽出协作类 `RuntimeAdmissionFences`，持有收 `Connection` 的 static 引擎与共享 fence 词汇。仓库保留事务所有权、接口包装，以及绑定 CRUD/CAS/租约核心。
 
-该类是 `public final` 加私有构造器，而非包私有：约三十五个调用方位于 `managedagent.persistence` 及 `runtimebroker.persistence` 之外的 verification 测试包，包私有类无法跨包 import。只有六个本就 public 的词汇成员是 public；整个引擎面保持包私有。这与同包既有的 public 协作类（`JdbcCsiActivationAdmission`、`JdbcCsiRetirementSeal`）一致；ArchUnit 无可见性规则。
+该类是 `public final` 加私有构造器，而非包私有：38 个生产调用方（另有 43 个 verification 测试文件）位于 `managedagent.persistence` 及 `runtimebroker.persistence` 之外的测试包，包私有类无法跨包 import。六个本就 public 的词汇成员保持 public，`requireHarnessAdmission(Connection, RuntimeScope, String, RuntimeLifecycleAuthority)` 委托方法也是 public——因为 `WorkspaceCsiRuntimeAccess` 要跨包调用它；引擎其余面是包私有。这与同包既有的 public 协作类（`JdbcCsiActivationAdmission`）一致；ArchUnit 无可见性规则。
 
 ### 搬移内容
 
@@ -59,7 +59,7 @@ admission/fence 方法遵循同一形状：仓库上的 public 接口方法经 `
 
 共享词汇的调用方在同一变更里把 import 与限定名切换到 `RuntimeAdmissionFences`。这是对 81 个调用方文件（38 个生产、43 个 verification 测试）的机械迁移，每处一到三行；没有调用改变其参数、事务或顺序。首发前采用硬切，仓库上不留废弃桥接，与 P0 决策一致。
 
-仓库内部经 static import 引用搬移成员，使约四十处仓库内调用点文本不变。唯一例外是 `requireHarnessAdmission`：成员方法会完全遮蔽同名的 single-static-import（JLS 15.12.1），而接口包装必须保留该名，故十三处收 `Connection` 的调用点改用限定名 `RuntimeAdmissionFences.requireHarnessAdmission(...)`。两个被 pin 的调用方（`JournalCommit`、`WorkspaceRecoveryStore`）用全限定引用而非新 import，因为新 import 会使各超棘轮 pin 恰好一行；引用变更使其保持 pin 尺寸。迁移还移除一个既有的未用 import（`JdbcCsiExecutionAdmission` 中的 `CsiFilesRetirementProfile`，上游已孤立），broker Checkstyle 规则集会标记它；移除是行为中性的。
+仓库内部经 static import 引用搬移成员，使约四十处仓库内调用点文本不变。唯一例外是 `requireHarnessAdmission`：成员方法会完全遮蔽同名的 single-static-import（JLS 15.12.1），而接口包装必须保留该名，故十三处收 `Connection` 的调用点改用限定名 `RuntimeAdmissionFences.requireHarnessAdmission(...)`。外部调用方中，`WorkspaceRecoveryStore` 恰好顶到 803 行棘轮 pin，故用全限定引用而非新 import（新 import 会使其到 804）；`JournalCommit`（加 import 后 774 行，远低于 880 pin）正常 import 协作类。
 
 ## 设计决策与理由
 
@@ -67,14 +67,15 @@ admission/fence 方法遵循同一形状：仓库上的 public 接口方法经 `
 - **一个协作类，而非两个。** key 词汇与 SQL 引擎内聚（引擎消费 key）；拆开只会徒增一个没有缝的类。简单优先。
 - **词汇随引擎一起搬。** 把广泛共享的 key 留在仓库上，会让一个意在成为绑定仓库的类继续持有 static 工具面，并迫使日后再做一次迁移。现在搬移把公共 SQL 词汇放进一个命名的家。
 - **硬切优于桥接。** 首发前，模块门禁使每个调用方可枚举；桥接会让旧面存活并在迁移期翻倍。
-- **public 类，包私有引擎。** 跨包调用方迫使类可见性为 public；只有共享词汇是 public，故引擎面留在 persistence 包内部。
+- **public 类，引擎大部分包私有。** 跨包调用方迫使类可见性为 public；共享词汇与那一个跨包 admission 委托方法是 public，引擎其余面留在 persistence 包内部。
 - **限定被遮蔽的名。** `requireHarnessAdmission` 无法与同名接口包装一起 static import（JLS 15.12.1）；限定其收 `Connection` 的调用点是最小的正确选择，其余搬移成员都用 static import。
 
 ## 约束
 
 - SQL、事务、并发与恢复语义不变：方言锁子句、数据库时间租约比较、fence 集合逻辑与每条 SQL 字符串按字节搬移。陈旧 owner 仍不得提交持久状态或释放更新 owner 的资源。
 - `contracts` 接口与内存仓库不动；ArchUnit 模块边界原样通过。
-- 类尺寸棘轮只降：仓库 pin 降到抽取后尺寸，新协作类若达 800 行则 pin，仓库低于 `ToolPublicationDataStore` pin 后 `GLOBAL_MAX_LINES` 从 2,662 降到 2,574。
+- 类尺寸棘轮只降：仓库 pin 降到抽取后尺寸，新协作类若达 800 行则 pin，仓库低于 `ToolPublicationDataStore` 后 `GLOBAL_MAX_LINES` 从 2,662 降到 2,549（`ToolPublicationDataStore` 的实际尺寸，即当前最大类）。
+- lock-contract 归属清单 `verification/src/test/resources/lock-contract/sql-owners.txt` 由 `SessionRowLockOrderTest` 按精确有序列表比对；任何 SQL 语句的归属文件变更都必须在同一变更里于清单中重新归属，否则契约测试变红。
 - 两个 Checkstyle execution 都适用（`checkstyle:check` 与 `checkstyle:check@runtime-broker-checkstyle`）；后者用不同规则集，要求文件尾 newline、闭括号前无空行。
 
 ## 风险
@@ -91,12 +92,12 @@ admission/fence 方法遵循同一形状：仓库上的 public 接口方法经 `
 
 ## 接受标准
 
-- `JdbcRuntimeBindingRepository` 从 2,662 降到 2,319 行（低于 2,574）；其 pin 从 2,670 降到 2,319，`GLOBAL_MAX_LINES` 从 2,662 降到 2,574，在同一变更完成。`RuntimeAdmissionFences` 389 行，低于 800 行 pin 阈值，故不 pin。
+- `JdbcRuntimeBindingRepository` 从 2,662 降到 2,319 行（低于 2,549）；其 pin 从 2,670 降到 2,319，`GLOBAL_MAX_LINES` 从 2,662 降到 2,549，在同一变更完成。`RuntimeAdmissionFences` 389 行，低于 800 行 pin 阈值，故不 pin。
 - 每个搬移体逐字；接口、内存仓库与所有 SQL/事务/锁语义不变。
-- 零 OpenAPI 与 schema diff；ArchUnit、两个 Checkstyle execution、SpotBugs 绿；完整 MySQL 与 Hosted/fault CI profile 在接受修订上绿。
+- 零 OpenAPI 与 schema diff；lock-contract `sql-owners.txt` 清单为搬移语句重新归属；ArchUnit、两个 Checkstyle execution、SpotBugs 绿；完整 MySQL 与 Hosted/fault CI profile 在接受修订上绿。
 
 ## 后续
 
 - 仓库剩余聚类（session 释放操作、绑定 CRUD/CAS/租约）若想进一步下调棘轮，是后续切片。
-- 本切片后，`ToolPublicationDataStore`（2,574）成为下一个全局上限种子。
+- 本切片后，`ToolPublicationDataStore`（2,549 行，pin 2,574）成为下一个全局上限种子。
 - 结构评审点名的 `QwenHostedHarnessConnector` 分解仍是独立的 adapters 切片，在本棘轮范围之外。
