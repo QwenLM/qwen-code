@@ -123,7 +123,8 @@ public class O4OssGate extends O4MySqlGate {
 
     @Test
     void realPermissionFailurePreservesQuotaUntilAuthorizedRetry() throws Exception {
-        try (var restricted = new OssFixture(deniedClient()); var real = new OssFixture(client())) {
+        try (var restricted = new OssFixture(deniedClient(), false);
+                var real = new OssFixture(client())) {
             String objectKey = ownedPrefix() + "denied";
             retention.put(key, scope, "pub-1", objectKey, new byte[] {7}, real);
             addObject("one", objectKey, null);
@@ -168,8 +169,13 @@ public class O4OssGate extends O4MySqlGate {
         private final OSS client;
         private final AliyunToolPublicationObjectStore objects;
         private final Set<String> keys = new HashSet<>();
+        private final boolean probeConfiguration;
         private OssFixture(OSS client) {
+            this(client, true);
+        }
+        private OssFixture(OSS client, boolean probeConfiguration) {
             this.client = client;
+            this.probeConfiguration = probeConfiguration;
             try {
                 objects = new AliyunToolPublicationObjectStore(client, bucket());
             } catch (RuntimeException error) {
@@ -189,7 +195,13 @@ public class O4OssGate extends O4MySqlGate {
             objects.deleteIfPresent(key);
             keys.remove(key);
         }
-        @Override public void validateConfiguration() { objects.validateConfiguration(); }
+        @Override public void validateConfiguration() {
+            // A denied identity is expected to fail storage operations; the configuration
+            // probe is itself an operation, so it is skipped for the restricted fixture.
+            if (probeConfiguration) {
+                objects.validateConfiguration();
+            }
+        }
         @Override public void close() {
             RuntimeException failure = null;
             try {
