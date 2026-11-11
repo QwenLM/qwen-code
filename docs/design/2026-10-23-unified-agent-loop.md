@@ -441,7 +441,7 @@ OpenTUI's live turn, `livePromptEvents` in `live-session.ts`, already has the lo
 | ---- | --------------------------------------------------------------------------------------------------------------------- |
 | 4a   | every model round on the loop's `runModelRound`; the turn keeps its tool step; the parity suite runs on OpenTUI too   |
 | 4b   | a round's tool calls as one shared batch over `InteractiveModToolScheduler`, with the loop's finalizing and recording |
-| 4c   | the turn on the loop, whose next round takes the steering input queued for the tool boundary; a retry                 |
+| 4c   | verify the turn behavior already present after 4b: steering input at a tool boundary and a retry                      |
 | 4d   | default on, then remove the current loop                                                                              |
 
 PR 4a sends each model round of the live turn through `runModelRound`. The turn reads the round's events one at a time, as it reads the client's stream, and maps each as before. A turn that stops reading, because a newer turn replaced it or it was cancelled, ends the round, which closes the client's stream. What moves:
@@ -464,6 +464,16 @@ PR 4b runs a shared round's calls as one batch of the shared loop, `runToolBatch
 | a tool that ends the turn does not end it                 | it ends the turn, with the results in history                                                                                               |
 
 A tool a slash command runs keeps the current path, as on Ink.
+
+PR 4c covers the rest of the turn. The live turn already sends the round its batch continues with, built as the loop's `nextRound` builds a round, as an Ink turn does from PR 3c-1:
+
+| OpenTUI with the setting on, from PR 4b                                                                                                         | What PR 4c checks                                                                                                               |
+| ----------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| after the batch, the turn takes the steering input queued for the tool boundary and sends it after the batch's results, as a `ToolResult` round | the same after a batch of replays alone; a round that stops or is cancelled before it takes the input puts it back in the queue |
+| a batch that ends the turn sends no round                                                                                                       | the input stays queued when a tool ends the turn, when Esc cancels the batch and when the model replays an answered call again  |
+| a retry with Ctrl+Y sends its round with the `Retry` type on the shared round and runs its calls on the shared batch                            | the retry's turn takes the steering input after its batch as a fresh turn does                                                  |
+
+The turn's code therefore does not change. PR 4c adds unit tests for these cases on the shared path; the fresh-turn and retry cases compare both paths, while the remaining cases check the shared path only. The parity suite already runs its retry scenarios and the scenario for input queued while a tool runs on OpenTUI.
 
 ## Migration
 
@@ -489,7 +499,7 @@ A tool a slash command runs keeps the current path, as on Ink.
 | 3d    | Ink TUI: default on, then remove its current loop                                                                                                   |
 | 4a    | OpenTUI: every model round on the loop's round; the turn keeps its tool step; the parity suite on OpenTUI                                           |
 | 4b    | OpenTUI: a round's tool calls as one shared batch                                                                                                   |
-| 4c    | OpenTUI: the turn on the loop, with steering input at a tool boundary; a retry                                                                      |
+| 4c    | OpenTUI: verify the turn behavior already present after 4b, including steering input at a tool boundary and a retry                                 |
 | 4d    | OpenTUI: default on, then remove its current loop                                                                                                   |
 | 5     | AgentCore on a `Turn` round (subagents, background and forked agents, workflows)                                                                    |
 | 6     | speculation                                                                                                                                         |
@@ -578,7 +588,7 @@ A continuation's request runs under a prompt id of its own on the current loop a
 - a UserPromptSubmit hook that blocks;
 - a Stop hook that blocks once.
 
-On OpenTUI the suite leaves out the Goal, background-notification, cron and teammate scenarios, since OpenTUI does not start those turns, and checks the tool batches on the shared loop from PR 4b on. There, the replayed call is an intended difference: the scenario checks that only the run with the setting on answers it in place.
+On OpenTUI the suite leaves out the Goal, background-notification, cron and teammate scenarios, since OpenTUI does not start those turns, and checks the tool batches on the shared loop from PR 4b on. Its retry scenarios and the scenario for input queued while a tool runs cover PR 4c. There, the replayed call is an intended difference: the scenario checks that only the run with the setting on answers it in place.
 
 The suites run in the integration job, the TUI suite on Ink; the OpenTUI interactive E2E job, on main and nightly, runs the TUI suite on OpenTUI. The nightly E2E run, and one started by hand, also runs the whole integration suite with the setting on, in a Linux leg without a sandbox; it is the scheduled job a surface's default change waits on.
 

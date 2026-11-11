@@ -4084,8 +4084,6 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'trajectory.overview.lane.subagents': 'Subagent requests',
   'status.contextUsed': (v) => `${v?.pct ?? '0.0'}% context used`,
   'status.disconnected': 'Disconnected',
-  'status.modeHint': '(shift + tab or click to switch)',
-  'status.shortcuts': '? for shortcuts',
   'stream.cancel': 'esc to cancel',
   'stream.cancelArmed': 'Press Esc again to stop',
   'stream.tokens': (v) => `${v?.count ?? 0} tokens`,
@@ -4395,10 +4393,6 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'tasks.action.confirmHint': 'This will end the blocking turn.',
   'tasks.pill.agent': (v) => `${v?.count ?? 0} local agent`,
   'tasks.pill.agents': (v) => `${v?.count ?? 0} local agents`,
-  'tasks.pill.agentPaused': (v) => `${v?.count ?? 0} local agent paused`,
-  'tasks.pill.agentsPaused': (v) => `${v?.count ?? 0} local agents paused`,
-  'tasks.pill.done': (v) => `${v?.count ?? 0} task done`,
-  'tasks.pill.doneMany': (v) => `${v?.count ?? 0} tasks done`,
   'tasks.pill.monitor': (v) => `${v?.count ?? 0} monitor`,
   'tasks.pill.monitors': (v) => `${v?.count ?? 0} monitors`,
   'tasks.pill.shell': (v) => `${v?.count ?? 0} shell`,
@@ -4767,6 +4761,9 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'channels.editor.field.weixin.groupPolicy.description':
     'WeChat iLink Bot only supports direct messages, so groups stay disabled.',
   'channels.editor.field.weixin.groupPolicy.option.disabled': 'Disabled',
+  'channels.editor.field.weixin.allowedUsers': 'Pre-approved users (optional)',
+  'channels.editor.field.weixin.allowedUsers.description':
+    'Leave empty and approve people under "Pending requests" below instead — an approval is remembered. Fill this only to pre-approve someone whose platform user ID you already have (looks like oAbCd…@im.wechat). A WeChat name or handle does not match here and is silently ignored.',
   'channels.weixin.title': 'WeChat account',
   'channels.weixin.description':
     'Log in by scanning a QR code with WeChat. This account is shared by every WeChat channel on this daemon.',
@@ -9015,8 +9012,6 @@ const ZH: Messages = {
   'trajectory.overview.lane.subagents': '子代理请求',
   'status.contextUsed': (v) => `上下文已用 ${v?.pct ?? '0.0'}%`,
   'status.disconnected': '断开连接',
-  'status.modeHint': '(shift + tab 或点击切换)',
-  'status.shortcuts': '? 查看快捷键',
   'stream.cancel': 'esc 取消',
   'stream.cancelArmed': '再按一次 Esc 停止',
   'waitingGame.title': 'Juust Relax',
@@ -9300,10 +9295,6 @@ const ZH: Messages = {
   'tasks.action.confirmHint': '这会终结当前阻塞轮次。',
   'tasks.pill.agent': (v) => `${v?.count ?? 0} 个本地智能体`,
   'tasks.pill.agents': (v) => `${v?.count ?? 0} 个本地智能体`,
-  'tasks.pill.agentPaused': (v) => `${v?.count ?? 0} 个本地智能体已暂停`,
-  'tasks.pill.agentsPaused': (v) => `${v?.count ?? 0} 个本地智能体已暂停`,
-  'tasks.pill.done': (v) => `${v?.count ?? 0} 个任务完成`,
-  'tasks.pill.doneMany': (v) => `${v?.count ?? 0} 个任务完成`,
   'tasks.pill.monitor': (v) => `${v?.count ?? 0} 个监控`,
   'tasks.pill.monitors': (v) => `${v?.count ?? 0} 个监控`,
   'tasks.pill.shell': (v) => `${v?.count ?? 0} 个 shell`,
@@ -9650,6 +9641,9 @@ const ZH: Messages = {
   'channels.editor.field.weixin.groupPolicy.description':
     '微信 iLink Bot 只支持私聊，因此群聊始终禁用。',
   'channels.editor.field.weixin.groupPolicy.option.disabled': '禁用',
+  'channels.editor.field.weixin.allowedUsers': '预先放行的用户（可留空）',
+  'channels.editor.field.weixin.allowedUsers.description':
+    '建议留空，改在下方「待处理的配对请求」里批准用户——批准一次就会记住。只有在你已经拿到对方的平台用户 ID（形如 oAbCd…@im.wechat）时才填这里。填微信号或昵称不会生效，且不会有任何报错。',
   'channels.weixin.title': '微信账号',
   'channels.weixin.description':
     '使用微信扫码登录。该账号由此 daemon 上的所有微信 channel 共享。',
