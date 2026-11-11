@@ -44,6 +44,9 @@ import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.c
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.failed;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.invalid;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.isDetachedCapture;
+import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.isProtocolV3;
+import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.isPublicationV3;
+import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.isV3Family;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.renewalDelayMillis;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.safeStage;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.sshNoStartReceipt;
@@ -140,7 +143,7 @@ final class RuntimeExecutionDispatcher {
                     context.session().getHarnessSessionId(), null);
         }
         if (payload == null && ("deferred".equals(prepared.getReference().get("dispatchMode"))
-                || "deferred_v3".equals(prepared.getReference().get("dispatchMode")))
+                || isPublicationV3(prepared.getReference()))
                 && !prepared.isCancelRequested()) {
             throw conflict("runtime_execution_conflict", "Deferred execution requires its original payload");
         }
@@ -395,7 +398,7 @@ final class RuntimeExecutionDispatcher {
             reference.put("executionCallId", record.getExecutionCallId());
             return Map.copyOf(reference);
         }
-        if (!Integer.valueOf(3).equals(record.getReference().get("runtimeProtocol"))) {
+        if (!isProtocolV3(record.getReference())) {
             return record.getReference();
         }
         Map<String, Object> reference = new LinkedHashMap<>(record.getReference());
@@ -457,8 +460,7 @@ final class RuntimeExecutionDispatcher {
         }
         Map<String, Object> noStart = sshNoStartReceipt(binding, execution);
         if (noStart == null && (execution.getResult().containsKey("capture")
-                || Integer.valueOf(3).equals(execution.getReference().get("runtimeProtocol"))
-                || "deferred_v3".equals(execution.getReference().get("dispatchMode")))) {
+                || isV3Family(execution.getReference()))) {
             return CompletableFuture.completedFuture(null);
         }
         RuntimeSessionRecord session = sessionRepository.findById(binding.getRequest().getScope(),
@@ -472,7 +474,7 @@ final class RuntimeExecutionDispatcher {
             return failed(conflict("workspace_close_identity_unverified", "Persisted Tool ownership conflicts"));
         }
         if (noStart != null) {
-            CompletionStage<Map<String, Object>> acknowledgement = "deferred_v3".equals(execution.getReference().get("dispatchMode"))
+            CompletionStage<Map<String, Object>> acknowledgement = isPublicationV3(execution.getReference())
                     ? transport.acknowledgeV3(binding.getLease(), session.getSession(), execution.getReference(), noStart)
                     : transport.acknowledge(binding.getLease(), session.getSession(), execution.getReference(), noStart);
             return acknowledgement.thenAccept(answer -> {

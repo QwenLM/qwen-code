@@ -23,6 +23,7 @@ public final class ManagedSchemaContract {
                     "ma_extension_source_import",
                     "ma_extension_settings",
                     "ma_extension_operation",
+                    "ma_journal_pack",
                     "ma_resource",
                     "ma_resource_ref",
                     "ma_output_capture",
@@ -96,7 +97,8 @@ public final class ManagedSchemaContract {
         EXTERNAL_STORAGE,
         EXTERNAL_WORKSPACE,
         MEMORY,
-        SIDE_QUERY
+        SIDE_QUERY,
+        RESOURCE_ALLOCATE
     }
 
     public enum ReceiptScope {

@@ -51,7 +51,24 @@ final class ExternalWorkspaceSessionPolicies {
             effective = new AgentSessionPolicies.AgentPin(resolvedPin.revision(), null, resolvedPin.approvalMode(),
                     WorkspaceToolProfiles.EXTERNAL_FILES, false, false);
         }
-        return AgentSessionPolicies.selectApprovalMode(effective, command.requestedApprovalMode(), command.approvalSelectionSupported());
+        return selectApprovalMode(effective, command.requestedApprovalMode(), command.approvalSelectionSupported());
+    }
+
+    /** The requested approval mode, checked against the modes this pin publishes. */
+    static AgentSessionPolicies.AgentPin selectApprovalMode(AgentSessionPolicies.AgentPin pin,
+            String requested, boolean supported) {
+        if (requested == null) {
+            return pin;
+        }
+        if (!AgentSessionPolicies.availableApprovalModes(pin).contains(requested)
+                && !(supported && pin.digest() == null && "yolo".equals(requested)
+                        && WorkspaceToolProfiles.isPublicShell(pin.toolProfile()))) {
+            throw new com.alibaba.qwen.code.managedagent.exception.ManagedAgentException(400,
+                    "unsupported_approval_mode",
+                    "The selected approval mode is not available for this Agent.");
+        }
+        return new AgentSessionPolicies.AgentPin(pin.revision(), pin.digest(), requested, pin.toolProfile(),
+                pin.hooks(), pin.mcp());
     }
 
     /** The legacy v1 close refusal exempts an external-files Session on its registered EXTERNAL Workspace. */

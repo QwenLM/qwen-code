@@ -169,7 +169,7 @@ public final class JdbcRuntimeBindingRepository
                     try (var rows = lock.executeQuery()) {
                         if (!rows.next() || !physical.equals(rows.getString(1))
                                 || !com.alibaba.qwen.code.managedagent.persistence.StorageOwnerMembership.membersAllowed(connection, physical, true)) {
-                            throw unverifiedWorkspaceHolder();
+                            throw JdbcRepositorySupport.unverifiedWorkspaceHolder();
                         }
                     }
                 }
@@ -202,7 +202,7 @@ public final class JdbcRuntimeBindingRepository
             JdbcRepositorySupport.setIdentity(read, 3, session.getRuntimeSessionId());
             try (var rows = read.executeQuery()) {
                 if (!rows.next() || rows.getString(1) != null && !key.equals(rows.getString(1))) {
-                    throw unverifiedWorkspaceHolder();
+                    throw JdbcRepositorySupport.unverifiedWorkspaceHolder();
                 }
             }
         }
@@ -237,7 +237,7 @@ public final class JdbcRuntimeBindingRepository
                 }
                 if (!tenant.equals(row.getString("tenant_id"))
                         || !storage.equals(row.getString("storage_id"))) {
-                    throw unverifiedWorkspaceHolder();
+                    throw JdbcRepositorySupport.unverifiedWorkspaceHolder();
                 }
                 if (!"LOCAL".equals(row.getString("storage_kind"))
                         && !(includeSsh && "SSH_LOCAL".equals(row.getString("storage_kind")))) {
@@ -245,7 +245,7 @@ public final class JdbcRuntimeBindingRepository
                 }
                 String physical = row.getString("physical_key");
                 if (physical == null) {
-                    throw unverifiedWorkspaceHolder();
+                    throw JdbcRepositorySupport.unverifiedWorkspaceHolder();
                 }
                 return physical;
             }
@@ -283,14 +283,6 @@ public final class JdbcRuntimeBindingRepository
                 }
             }
         }
-    }
-
-    static RuntimeBrokerException unverifiedWorkspaceHolder() {
-        return new RuntimeBrokerException(
-                409,
-                "workspace_close_identity_unverified",
-                "Original Workspace holder differs",
-                false);
     }
 
     @Override

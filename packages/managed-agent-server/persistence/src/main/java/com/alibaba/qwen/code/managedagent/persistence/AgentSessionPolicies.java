@@ -158,19 +158,6 @@ final class AgentSessionPolicies {
                 || !definitions.pinnedContent(session).containsKey("hook_catalog"));
     }
 
-    static AgentPin selectApprovalMode(AgentPin pin, String requested, boolean supported) {
-        if (requested == null) {
-            return pin;
-        }
-        if (!availableApprovalModes(pin).contains(requested)
-                && !(supported && pin.digest() == null && "yolo".equals(requested)
-                        && WorkspaceToolProfiles.isPublicShell(pin.toolProfile()))) {
-            throw new ManagedAgentException(400, "unsupported_approval_mode",
-                    "The selected approval mode is not available for this Agent.");
-        }
-        return new AgentPin(pin.revision(), pin.digest(), requested, pin.toolProfile(), pin.hooks(), pin.mcp());
-    }
-
     // Called only for a new admission; a retry has already replayed and
     // never resolves a definition again.
     AgentPin resolveAgentPin(String tenantId, String agentId,
@@ -573,7 +560,8 @@ final class AgentSessionPolicies {
         if (modelCatalog.stream().noneMatch(option -> option.modelId().equals(modelId))) {
             throw new ManagedAgentException(400, "unsupported_model", "The model is not published by this host");
         }
-        requirePolicyChange(session, false);
+        // 模型选择只影响后续受理，已受理回合继续使用自己的不可变模型快照。
+        requirePolicyChange(session, true);
         long current = jdbc.queryForObject("SELECT model_revision FROM ma_session WHERE tenant_id = ?"
                 + " AND session_id = ?", Long.class, tenantId, sessionId);
         if (current != expectedRevision || current >= 9_007_199_254_740_991L) {

@@ -365,7 +365,7 @@ public final class JdbcExternalWorkspaceOwnership {
             RuntimeScope scope, boolean cleanup) throws SQLException {
         if (!WorkspaceExecutionProfile.isExternalWorkspaceRequest(request)
                 || !request.getScope().equals(scope)) {
-            throw JdbcRuntimeBindingRepository.unverifiedWorkspaceHolder();
+            throw JdbcRepositorySupport.unverifiedWorkspaceHolder();
         }
         JdbcRuntimeBindingRepository.requireHarnessAdmission(connection, scope, request.getIsolationKey(),
                 scope.getLifecycleAuthority(), cleanup
