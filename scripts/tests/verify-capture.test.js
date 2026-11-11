@@ -194,6 +194,19 @@ describe('verify-capture helper', () => {
       expect(colourOnly.equals(boldOnly)).toBe(false);
     }));
 
+  // The Linux unit shards for fork PRs run inside the ephemeral runner image.
+  // Without a font there, font-weight="bold" has no face to resolve and
+  // rasterises as a no-op: the test above then sees byte-identical bold and
+  // plain PNGs. Pin the image's font package so a slim-image cleanup cannot
+  // silently reintroduce that failure.
+  it('pins a font in the ephemeral runner image', () => {
+    const dockerfile = readFileSync(
+      path.join(repoRoot, 'scripts/ci/ephemeral-runner/Dockerfile'),
+      'utf8',
+    );
+    expect(dockerfile).toMatch(/apt-get install[\s\S]*?\bfonts-dejavu-core\b/);
+  });
+
   // 256-colour and truecolor sequences produce getFgColor() values >= 16,
   // which the bounds guard maps to FG_DEFAULT (#d4d4d4). Decode pixels and
   // assert the fallback grey is present, so deleting the guard cannot ship

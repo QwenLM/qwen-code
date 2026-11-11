@@ -7,10 +7,13 @@ ARG RUNNER_RELEASE_URL=https://github.com/actions/runner/releases/download
 ARG DEBIAN_MIRROR=deb.debian.org
 ARG PIP_INDEX_URL=https://pypi.org/simple
 
+# fonts-dejavu-core supplies the DejaVu faces: verify-capture resolves bold
+# through the host font stack, and the unit suite asserts a bold capture
+# differs from plain; without a font the two are byte-identical.
 RUN sed -i "s|deb.debian.org|${DEBIAN_MIRROR}|g" /etc/apt/sources.list.d/debian.sources \
     && apt-get update -o Acquire::http::Timeout=30 \
     && apt-get install -y --no-install-recommends \
-      build-essential ca-certificates curl file gh git git-lfs jq libicu72 \
+      build-essential ca-certificates curl file fonts-dejavu-core gh git git-lfs jq libicu72 \
       libkrb5-3 libssl3 libunwind8 procps python3 python3-pip python3-venv \
       sudo tmux unzip zip zlib1g \
     && rm -rf /var/lib/apt/lists/* \
