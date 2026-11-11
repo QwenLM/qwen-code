@@ -7,7 +7,36 @@ This guide covers setting up a Qwen Code channel on WeChat via the official iLin
 - A WeChat account that can scan QR codes (mobile app)
 - Access to the iLink Bot platform (WeChat's official bot API)
 
-## Setup
+## Setup in Web Shell
+
+The browser UI handles the whole flow, including the QR login — no terminal and
+no hand-edited settings file.
+
+1. Open **Channel settings** and pick **WeChat** from the available platforms.
+2. In the editor's credentials section, the WeChat account panel shows whether
+   you are logged in. Click **Log in with QR code**.
+3. Scan the rendered QR code with WeChat and confirm on your phone. The panel
+   advances from "Scan the QR code" to "Scanned" to "WeChat connected", and the
+   daemon stores the credential for you.
+4. Fill in the channel name, workspace, and access policy, then **Save**.
+5. Start the channel from its card.
+
+The panel also offers **Log in again** and **Log out**. If the QR expires, click
+**Refresh QR code**. When the encoder cannot render a QR, the panel shows the
+login URL as a link instead.
+
+Two things to know:
+
+- The account is **shared by every WeChat channel on this daemon**. Logging in
+  again replaces it. Channels that are already running keep the previous account
+  until you restart them.
+- Saving a channel does not require being logged in. You can pre-configure it,
+  but starting it does require a logged-in account.
+
+If the panel says the daemon does not support WeChat login, update the daemon or
+use the terminal path below.
+
+## Setup from the terminal
 
 ### 1. Log in via QR code
 
