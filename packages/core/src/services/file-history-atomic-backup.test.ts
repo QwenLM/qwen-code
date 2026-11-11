@@ -282,4 +282,19 @@ describe('atomic backup publication', () => {
     expect(entry.failed).toBeUndefined();
     expect(await fs.readdir(backupDir)).toEqual([]);
   });
+
+  it('cleans up a partial temporary file when the source vanishes mid-copy', async () => {
+    const file = await primeTracked('original-content');
+    vi.spyOn(fs, 'copyFile').mockImplementationOnce(async (_src, target) => {
+      await fs.writeFile(target as string, 'partial');
+      await fs.rm(file);
+      throw Object.assign(new Error('source gone'), { code: 'ENOENT' });
+    });
+    await service.trackEdit(file);
+
+    const entry = service.getSnapshots()[0].trackedFileBackups['a.txt']!;
+    expect(entry.backupFileName).toBeNull();
+    expect(entry.failed).toBeUndefined();
+    expect(await fs.readdir(backupDir)).toEqual([]);
+  });
 });

@@ -84,7 +84,9 @@ Change only `createBackup` and `safeCopyFile` in
    - `temporaryPath = `${backupPath}.${randomUUID()}.tmp`` — a **unique**
      temporary name per call.
    - `safeCopyFile(filePath, temporaryPath, constants.COPYFILE_EXCL)` —
-     exclusive copy; `'src-missing'` still returns a `null` backup.
+     exclusive copy; `'src-missing'` still returns a `null` backup, with a
+     best-effort unlink of the temporary file (the copy may have created it
+     before the source vanished).
    - `chmod(temporaryPath, srcStats.mode)` — permissions applied **before**
      publication.
    - `renameWithRetry(temporaryPath, backupPath, 3, 50)` — atomic publication
@@ -204,6 +206,14 @@ changed by this pilot.
 - **Cleanup failure** (e.g. permission flip on the backup directory): logged
   and swallowed; the original capture error still propagates, so failure
   reporting is unaffected. The orphan is swept later.
+- **Power-loss durability is out of scope**: the temporary file is not
+  `fsync`ed before publication, matching the preview reference. A power loss
+  (as opposed to a process crash or I/O error) within the filesystem
+  writeback window could still expose a stale or zero-length backup on some
+  filesystems. The pre-fix code had the same exposure; this change closes the
+  much larger process-crash window. Adding `fsync` (as `atomicWriteFile` and
+  the mod store do) is a candidate follow-up hardening, weighed against the
+  per-backup latency it adds.
 
 ## Validation plan
 
@@ -227,7 +237,9 @@ changed by this pilot.
    no temporary files (pins the unique-suffix adaptation).
 5. **Permissions**: the published backup carries the source file's mode.
 6. **Source-vanished race**: `copyFile` fails with ENOENT after the source is
-   deleted → a `null` backup is recorded, nothing published.
+   deleted → a `null` backup is recorded, nothing published. Includes the
+   mid-copy variant where the copy created a partial temporary file before
+   the source vanished → the temporary file is cleaned up as well.
 7. **Rename retry semantics**: a single transient `EPERM` rename is retried
    and the complete backup is published; a persistent `EPERM` exhausts the
    retries and surfaces as a failed capture with nothing published.
@@ -245,11 +257,15 @@ changed by this pilot.
 - Reproduction: four failure-injection probes failed on the base commit,
   including the end-to-end silent wrong-restore (rewind reported
   `filesFailed: []` while writing truncated bytes).
-- The permanent suite `file-history-atomic-backup.test.ts` (14 tests) passes
-  with the fix; a mutation arm reverting `createBackup` to the direct copy
-  failed 9/12, confirming the crash-safety assertions are load-bearing (the
-  3 behavior-preservation tests pass on both implementations by design).
-- Focused regression: 422 core tests across 7 file-history-related files and
+- The permanent suite `file-history-atomic-backup.test.ts` (15 tests) passes
+  with the fix. Mutation arms, re-run against the final suite: reverting
+  `createBackup` to the direct copy fails 11/15 (the 4 survivors are the
+  behavior-preservation tests — transient-EPERM retry, concurrent success,
+  permissions, and the source-vanished-before-copy shape — which pass on both
+  implementations by design); a retries=0 mutation reddens the transient-
+  EPERM test; removing the source-vanished temporary cleanup reddens the
+  mid-copy cleanup test.
+- Focused regression: 508 core tests across 8 file-history-related files and
   81 cli tests across 2 consumer files passed; build, bundle, and typecheck
   passed.
 - Interactive E2E (tmux, `node dist/cli.js` vs global qwen 0.27.2 baseline):
@@ -261,8 +277,17 @@ changed by this pilot.
   `rename` (probe-confirmed: a one-shot `EPERM` loses the capture with a bare
   rename, succeeds with the helper). Accepted and applied with two new
   regression tests (transient `EPERM` retried; persistent `EPERM` exhausts
-  into the failed contract); a retries=0 mutation reddens the transient
-  test. The suite grew to 14 tests, all green.
+  into the failed contract).
+- Post-PR multi-round audit (undirected + adversarial, real probes):
+  corrected the direct-copy mutation count to the re-measured 11/15; closed
+  the source-vanished mid-copy orphan edge with a best-effort cleanup and a
+  pinning test; probed a directory-occupied final path (EISDIR → honest
+  failed entry, nothing published), a read-only backup directory (EACCES
+  propagates, nothing published), and a directory source (nothing published);
+  recorded the power-loss durability limitation above. The two red CI jobs
+  were classified as infrastructure: shard 2/2 ran 29/29 test files green and
+  failed only in the post-test temporary-HOME `rm` cleanup step; the
+  No-Sandbox job is the aggregate gate propagating that result.
 
 ## Acceptance criteria
 

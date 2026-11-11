@@ -72,7 +72,8 @@ preview 分支（`packages/core/src/file-history/file-history.ts`）已解决此
    - `temporaryPath = `${backupPath}.${randomUUID()}.tmp``——每次调用**唯一**
      的临时名。
    - `safeCopyFile(filePath, temporaryPath, constants.COPYFILE_EXCL)`——独占
-     复制；`'src-missing'` 仍返回 `null` 备份。
+     复制；`'src-missing'` 仍返回 `null` 备份，并尽力 unlink 临时文件（复制
+     可能在源文件消失前已创建它）。
    - `chmod(temporaryPath, srcStats.mode)`——权限在发布**之前**设置。
    - `renameWithRetry(temporaryPath, backupPath, 3, 50)`——同目录/同文件系统
      上的原子发布，复用 `utils/atomicFileWrite.ts` 的共享助手（见下文）。
@@ -169,6 +170,11 @@ issue 要求**仅在确认 enter/exit worktree 存在真实错误恢复缺陷时
   `copyFile` 的结果一致，只是没有截断窗口。
 - **清理失败**（如备份目录权限翻转）：记日志并吞掉；原始捕获错误仍向上传播，
   失败报告不受影响。孤儿稍后被清扫。
+- **掉电持久性不在范围内**：临时文件发布前不做 `fsync`，与 preview 参考一致。
+  掉电（区别于进程崩溃或 I/O 错误）若发生在文件系统回写窗口内，某些文件系统
+  上仍可能暴露过期或零长备份。修复前的代码有同样的暴露；本变更关闭的是大得
+  多的进程崩溃窗口。加 `fsync`（如 `atomicWriteFile` 与 mod store 所做）是
+  候选后续加固，需权衡其给每次备份增加的延迟。
 
 ## 验证计划
 
@@ -188,7 +194,8 @@ issue 要求**仅在确认 enter/exit worktree 存在真实错误恢复缺陷时
    一个完整备份，且不留下临时文件（钉住唯一后缀适配）。
 5. **权限**：发布的备份携带源文件的 mode。
 6. **源文件消失竞态**：源文件被删除后 `copyFile` 以 ENOENT 失败 → 记录
-   `null` 备份，不发布任何内容。
+   `null` 备份，不发布任何内容。含复制中途变体：复制已创建部分临时文件后
+   源文件消失 → 临时文件同样被清理。
 7. **rename 重试语义**：单次瞬态 `EPERM` rename 被重试并发布完整备份；
    持续 `EPERM` 耗尽重试后按失败捕获暴露，不发布任何内容。
 8. **既有套件**：`fileHistoryService.test.ts` 与留存存储套件保持绿
@@ -202,10 +209,12 @@ issue 要求**仅在确认 enter/exit worktree 存在真实错误恢复缺陷时
 
 - 复现：4 个故障注入探针在基线 commit 上失败，包括端到端的静默错误恢复
   （rewind 报告 `filesFailed: []` 却写入截断字节）。
-- 正式套件 `file-history-atomic-backup.test.ts`（14 个用例）在修复后全部
-  通过；把 `createBackup` 回退为直接复制的变异臂 9/12 失败，证明崩溃安全
-  断言承重（3 个行为保持用例按设计在两种实现下都通过）。
-- 聚焦回归：7 个 file-history 相关文件的 422 个 core 用例、2 个消费者文件
+- 正式套件 `file-history-atomic-backup.test.ts`（15 个用例）在修复后全部
+  通过。变异臂对最终套件复跑：把 `createBackup` 回退为直接复制 11/15 失败
+  （4 个幸存者是行为保持用例——瞬态 EPERM 重试、并发成功、权限、复制前源
+  消失——按设计在两种实现下都通过）；retries=0 变异使瞬态 EPERM 用例变红；
+  删除源消失临时清理使复制中途清理用例变红。
+- 聚焦回归：8 个 file-history 相关文件的 508 个 core 用例、2 个消费者文件
   的 81 个 cli 用例通过；build、bundle、typecheck 通过。
 - 交互式 E2E（tmux，`node dist/cli.js` 对比全局 qwen 0.27.2 基线）：只发布
   完整备份、`<16-hex>@vN` 命名、字节精确、mode 保留、`@v2` 不扰动 `@v1`、
@@ -213,8 +222,14 @@ issue 要求**仅在确认 enter/exit worktree 存在真实错误恢复缺陷时
 - 代码评审（medium，已验证）：0 Critical、1 Suggestion——发布 rename 应复用
   共享助手 `renameWithRetry` 而非裸 `rename`（探针证实：一次性 `EPERM` 下
   裸 rename 丢失捕获，助手则成功）。已采纳并应用，新增两个回归用例（瞬态
-  `EPERM` 重试成功；持续 `EPERM` 耗尽后走 failed 契约）；retries=0 变异使
-  瞬态用例变红。套件增至 14 个用例，全绿。
+  `EPERM` 重试成功；持续 `EPERM` 耗尽后走 failed 契约）。
+- PR 后多轮审计（无方向 + 对抗，真实探针）：把直接复制变异计数更正为复测
+  的 11/15；以尽力清理 + 钉住用例关闭源消失复制中途的孤儿边界；探针验证
+  最终路径被目录占据（EISDIR → 诚实的 failed 条目，不发布任何内容）、只读
+  备份目录（EACCES 向上传播，不发布任何内容）、目录源文件（不发布任何
+  内容）；记录上述掉电持久性限制。两个红 CI job 定性为基础设施：shard 2/2
+  的 29/29 测试文件全绿，仅在测试后临时 HOME 的 `rm` 清理步骤失败；
+  No-Sandbox job 是传播该结果的聚合门。
 
 ## 验收标准
 

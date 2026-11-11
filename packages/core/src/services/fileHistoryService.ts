@@ -324,6 +324,10 @@ async function createBackup(
       constants.COPYFILE_EXCL,
     );
     if (result === 'src-missing') {
+      // The copy may have created the temporary file before the source
+      // vanished (Windows can interrupt an open-file copy); leave nothing
+      // behind. Best-effort: a failed unlink is swept with the session.
+      await unlink(temporaryPath).catch(() => undefined);
       return { backupFileName: null, version, backupTime: new Date() };
     }
     await chmod(temporaryPath, srcStats.mode);
