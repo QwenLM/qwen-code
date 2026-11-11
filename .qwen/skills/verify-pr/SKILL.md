@@ -52,9 +52,10 @@ The workflow (`qwen-triage.yml` `verify` job) guarantees:
   lane deepens both sides back to the oldest date among the PR's commits
   and their parents, at most 90 days. A merge base older than that stays
   out: a PR forked earlier keeps one only through a later merge of the
-  base whose parents both fall within those 90 days. When the previous
-  report's verified head is still not local, it fetches that commit alone,
-  without its parents, into `refs/verify/previous`. Each fetch is best-effort, so test
+  base whose parents both fall within those 90 days. The previous report's
+  verified head arrives as a `verify-head` marker in its header; when that
+  commit is still not local, the lane fetches it alone, without its
+  parents, into `refs/verify/previous`. Each fetch is best-effort, so test
   for what a step needs instead of assuming it:
   `git merge-base HEAD^1 HEAD^2` for the merge base, and
   `git log -1 --format=%P <oid>` for a commit's parents, which prints

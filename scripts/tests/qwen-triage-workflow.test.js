@@ -2292,6 +2292,11 @@ describe('qwen-triage verify workflow', () => {
         expect(git(origin, ['branch', '--contains', gone])).toBe('');
 
         const context = join(dir, 'tmp', 'verify-context');
+        // The published shape: the head marker in the header, a blank
+        // line, then the report prose. The step reads the marker; the
+        // prose is for human readers and may name other heads.
+        const published = (head, prose) =>
+          `<!-- qwen-triage:verify -->\n<!-- qwen-triage:verify-run=1 -->\n<!-- qwen-triage:verify-substantive -->\n<!-- qwen-triage:verify-head=${head} -->\n\n${prose}`;
         // The checkout as actions/checkout leaves it at fetch-depth 2.
         const checkout = (name, previousHead, tail = '') => {
           const ws = join(dir, name);
@@ -2310,11 +2315,14 @@ describe('qwen-triage verify workflow', () => {
           rmSync(context, { recursive: true, force: true });
           mkdirSync(context, { recursive: true });
           if (previousHead) {
-            // Another OID on an earlier line: only a "verified head" line names
-            // the previous head.
+            // The prose names the base tip too; only the marker names the
+            // previous head.
             writeFileSync(
               join(context, 'previous-report.md'),
-              `Compared with base tip \`${fork}\`.\n\nPR 7 round 2 against \`${fork}\` — **Verdict: \`findings\`** — Verified head: \`${previousHead}\` (\`git rev-parse HEAD^2\`), base tip \`${fork}\`.${tail}\n`,
+              published(
+                previousHead,
+                `Compared with base tip \`${fork}\`.\n\nPR 7 round 2 against \`${fork}\` — **Verdict: \`findings\`** — Verified head: \`${previousHead}\` (\`git rev-parse HEAD^2\`), base tip \`${fork}\`.${tail}\n`,
+              ),
             );
           }
           return ws;
@@ -2403,9 +2411,9 @@ describe('qwen-triage verify workflow', () => {
         expect(prCommits(cut)).toEqual([mergedBase, pr3].sort());
         expect(parents(cut, mergedBase)).toEqual([]);
 
-        // After a force-push the previous head is fetched by OID. Its line
-        // goes on to name thousands more: more than a pipe holds, so a reader
-        // that stops at the first line would have the grep feeding it killed.
+        // After a force-push the previous head is fetched by OID. The prose
+        // goes on to name thousands more OIDs: the header read must not be
+        // disturbed by the body's size.
         const pushed = checkout('pushed', gone, ` \`${fork}\``.repeat(5000));
         const pushedOut = run(pushed, day(38));
         expect(git(pushed, ['rev-parse', 'refs/verify/previous'])).toBe(gone);
@@ -2431,34 +2439,126 @@ describe('qwen-triage verify workflow', () => {
         );
         expect(unnamedOut).toContain('previous head none');
         // The shape real reports use (PR #13601): a bullet list in which the
-        // previous round's own head follows the verified one.
+        // previous round's own head follows the verified one. The marker,
+        // not the prose order, names the head.
         const bullets = checkout('bullets');
         writeFileSync(
           join(context, 'previous-report.md'),
-          `**Verdict: \`findings\`** — see below.\n\n- **Verified head:** \`${gone}\` (\`git rev-parse HEAD^2\`)\n- **Previous verified head (P):** \`${pr2}\`\n`,
+          published(
+            gone,
+            `**Verdict: \`findings\`** — see below.\n\n- **Verified head:** \`${gone}\` (\`git rev-parse HEAD^2\`)\n- **Previous verified head (P):** \`${pr2}\`\n`,
+          ),
         );
         expect(run(bullets, day(38))).toContain(`previous head ${gone}`);
         expect(git(bullets, ['rev-parse', 'refs/verify/previous'])).toBe(gone);
         // The same bullets the other way round: the `(P)` line names the
-        // round before, and is skipped.
+        // round before, and the marker still wins.
         const reversed = checkout('reversed');
         writeFileSync(
           join(context, 'previous-report.md'),
-          `**Verdict: \`findings\`** — see below.\n\n- **Previous verified head (P):** \`${pr2}\`\n- **Verified head:** \`${gone}\` (\`git rev-parse HEAD^2\`)\n`,
+          published(
+            gone,
+            `**Verdict: \`findings\`** — see below.\n\n- **Previous verified head (P):** \`${pr2}\`\n- **Verified head:** \`${gone}\` (\`git rev-parse HEAD^2\`)\n`,
+          ),
         );
         expect(run(reversed, day(38))).toContain(`previous head ${gone}`);
-        // What the skill tells the round to write is what the step reads:
-        // the report template's verdict line, with a head filled in.
-        const template = verifySkill.match(
-          /^\s*(.*\*\*Verdict: <word>\*\*.*`<40-hex head OID>`.*)$/m,
-        )?.[1];
-        expect(template).toBeTruthy();
-        const templated = checkout('templated');
+        // The verdict line's own prose mentions the previous round: the
+        // marker still names the head. The prose filter this read replaces
+        // deleted that line and emptied prev.
+        const mentioned = checkout('mentioned');
         writeFileSync(
           join(context, 'previous-report.md'),
-          `${template.replace('<40-hex head OID>', gone)}\n`,
+          published(
+            gone,
+            `PR 7 round 4 — addressed the previous round findings — **Verdict: pass** — 9/9 passed. Verified head: \`${gone}\`\n`,
+          ),
         );
-        expect(run(templated, day(38))).toContain(`previous head ${gone}`);
+        expect(run(mentioned, day(38))).toContain(`previous head ${gone}`);
+        expect(git(mentioned, ['rev-parse', 'refs/verify/previous'])).toBe(
+          gone,
+        );
+        // An earlier line names another round's head: the marker wins over
+        // the first prose match.
+        const stale = checkout('stale');
+        writeFileSync(
+          join(context, 'previous-report.md'),
+          published(
+            gone,
+            `Round 2 — **Verdict: pass** — Verified head: \`${pr2}\`\n\nPR 7 round 3 — **Verdict: \`findings\`** — Verified head: \`${gone}\`\n`,
+          ),
+        );
+        expect(run(stale, day(38))).toContain(`previous head ${gone}`);
+        expect(git(stale, ['rev-parse', 'refs/verify/previous'])).toBe(gone);
+        // A report published before the head marker: the usual header and
+        // a prose verdict line naming a head, but no marker to read — the
+        // round warns and classifies without one, never scraping the prose.
+        const legacy = checkout('legacy');
+        writeFileSync(
+          join(context, 'previous-report.md'),
+          `<!-- qwen-triage:verify -->\n<!-- qwen-triage:verify-run=1 -->\n<!-- qwen-triage:verify-substantive -->\n\nPR 7 round 2 — **Verdict: \`findings\`** — Verified head: \`${gone}\`\n`,
+        );
+        const legacyOut = run(legacy, day(38));
+        expect(legacyOut).toContain(
+          '::warning::The previous report names no verified head',
+        );
+        expect(legacyOut).toContain('previous head none');
+        expect(
+          spawnSync(
+            'git',
+            ['rev-parse', '-q', '--verify', 'refs/verify/previous'],
+            { cwd: legacy },
+          ).status,
+        ).not.toBe(0);
+        // The marker is header-scoped: quoted below the blank line — a
+        // report about this workflow would quote it — it is not read.
+        const quoted = checkout('quoted');
+        writeFileSync(
+          join(context, 'previous-report.md'),
+          `<!-- qwen-triage:verify -->\n<!-- qwen-triage:verify-substantive -->\n\nRound body:\n\n\`\`\`\n<!-- qwen-triage:verify-head=${gone} -->\n\`\`\`\n`,
+        );
+        const quotedOut = run(quoted, day(38));
+        expect(quotedOut).toContain(
+          '::warning::The previous report names no verified head',
+        );
+        expect(quotedOut).toContain('previous head none');
+        // What publish-verify stamps is what this step reads: run the
+        // publisher's own header assembly, append a report body, and feed
+        // the result through the step. A reword on either side breaks the
+        // chain.
+        const publishRun = stepIn(
+          'publish-verify',
+          'Post verification report comment',
+        )
+          .match(/run: \|-\n([\s\S]*)$/)?.[1]
+          .replace(/^ {10}/gm, '');
+        const stampHeader = publishRun.match(
+          /printf '%s\\n%s\\n' '<!-- qwen-triage:verify -->'[\s\S]*?(?=\n# The gate verdict travels)/,
+        )?.[0];
+        expect(stampHeader).toBeTruthy();
+        const stamped = checkout('stamped');
+        const headerFile = join(dir, 'stamped-header.md');
+        const stampRes = spawnSync(
+          'bash',
+          ['--noprofile', '--norc', '-eo', 'pipefail', '-c', stampHeader],
+          {
+            cwd: stamped,
+            encoding: 'utf8',
+            env: {
+              ...gitEnv,
+              BODY_FILE: headerFile,
+              RUN_MARKER: '<!-- qwen-triage:verify-run=1 -->',
+              FLAKE_VERDICT: '',
+              VERIFY_HEAD_OID: gone,
+            },
+          },
+        );
+        expect(stampRes.status, stampRes.stderr).toBe(0);
+        writeFileSync(
+          join(context, 'previous-report.md'),
+          `${readFileSync(headerFile, 'utf8')}\nPR 7 round 2 — **Verdict: \`findings\`** — Verified head: \`${gone}\`\n`,
+        );
+        expect(run(stamped, day(38))).toContain(`previous head ${gone}`);
+        expect(git(stamped, ['rev-parse', 'refs/verify/previous'])).toBe(gone);
 
         // Older than the floor: deepened to the floor, with a warning.
         const floored = checkout('floored');
@@ -2545,7 +2645,7 @@ describe('qwen-triage verify workflow', () => {
     const flat = verifySkill.replace(/\s+/g, ' ');
     expect(flat).not.toContain('Only these three commits exist locally');
     expect(flat).toContain(
-      "the lane deepens both sides back to the oldest date among the PR's commits and their parents, at most 90 days. A merge base older than that stays out: a PR forked earlier keeps one only through a later merge of the base whose parents both fall within those 90 days. When the previous report's verified head is still not local, it fetches that commit alone, without its parents, into `refs/verify/previous`.",
+      "the lane deepens both sides back to the oldest date among the PR's commits and their parents, at most 90 days. A merge base older than that stays out: a PR forked earlier keeps one only through a later merge of the base whose parents both fall within those 90 days. The previous report's verified head arrives as a `verify-head` marker in its header; when that commit is still not local, the lane fetches it alone, without its parents, into `refs/verify/previous`.",
     );
     // `git rev-parse <oid>^@` prints the argument and exits 128 for a
     // commit that is not local, so counting its lines finds a parent.
@@ -7410,6 +7510,48 @@ describe('qwen-triage verify publish fidelity', () => {
         expect(body).toContain(shown);
         expect(body.split('\n\n')[0].split('\n')).toEqual(header);
       });
+      // The pinned head travels as a header marker, ahead of the
+      // substantive marker the branch appends: the next round's deepen
+      // step reads it instead of scraping the report prose.
+      const oid = 'c3d5155f' + '0'.repeat(32);
+      const headMark = `<!-- qwen-triage:verify-head=${oid} -->`;
+      const substantive = '<!-- qwen-triage:verify-substantive -->';
+      const withHead = render(dir, {
+        NAME: 'hdr-head',
+        GITHUB_RUN_ID: '41',
+        AGENT_VERDICT: 'merge-ready',
+        VERIFY_HEAD_OID: oid,
+      });
+      expect(withHead.split('\n\n')[0].split('\n')).toEqual([
+        ...weak,
+        headMark,
+        substantive,
+      ]);
+      const flakyWithHead = render(dir, {
+        NAME: 'hdr-head-flaky',
+        GITHUB_RUN_ID: '41',
+        AGENT_VERDICT: 'merge-ready',
+        FLAKE_VERDICT: 'flaky',
+        VERIFY_HEAD_OID: oid,
+      });
+      expect(flakyWithHead.split('\n\n')[0].split('\n')).toEqual([
+        ...flakyWeak,
+        headMark,
+        substantive,
+      ]);
+      // Empty or malformed: no marker. A cancelled job's outputs come
+      // through empty, and a stray value must not reach the comment.
+      ['', 'XYZ', oid.slice(0, 39), `${oid}0`, 'g'.repeat(40)].forEach(
+        (bad, i) => {
+          const body = render(dir, {
+            NAME: `hdr-head-bad-${i}`,
+            GITHUB_RUN_ID: '41',
+            AGENT_VERDICT: 'merge-ready',
+            VERIFY_HEAD_OID: bad,
+          });
+          expect(body.split('\n\n')[0].split('\n')).toEqual(strong);
+        },
+      );
       // A run whose artifact holds no report has no findings to keep.
       rmSync(join(dir, 'work', 'verify-results', 'prA-verify-1', 'report.md'));
       const reportless = render(dir, {
@@ -7433,6 +7575,14 @@ describe('qwen-triage verify publish fidelity', () => {
         .join('\n');
       expect(code.match(/'<!-- qwen-triage:verify -->'/g)).toHaveLength(1);
       expect(code.match(/[^>]> "\$BODY_FILE"/g)).toHaveLength(1);
+      // The head marker names the head the pr step pinned and the pin step
+      // checked against the checkout — never an OID the agent's report wrote.
+      expect(
+        stepIn('publish-verify', 'Post verification report comment'),
+      ).toContain("VERIFY_HEAD_OID: '${{ needs.verify.outputs.head_oid }}'");
+      expect(job('verify')).toContain(
+        "head_oid: '${{ steps.pr.outputs.head_oid }}'",
+      );
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

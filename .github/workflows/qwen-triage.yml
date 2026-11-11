@@ -2876,6 +2876,10 @@ jobs:
       contents: 'read'
     outputs:
       pr_number: '${{ steps.pr.outputs.pr_number || github.event.issue.number }}'
+      # The head the pr step pinned and the pin step checked against the
+      # checkout: publish-verify stamps it into the report header so the
+      # next round's deepen step reads it as data, not report prose.
+      head_oid: '${{ steps.pr.outputs.head_oid }}'
       # steps.run sets the verdict for a real agent run; steps.prepare sets
       # 'fail' when install/build dies; steps.pr sets 'skipped'/'n/a'. All
       # empty -> the job broke before deciding (publish reports infra).
@@ -3668,22 +3672,25 @@ jobs:
             echo "::warning::Could not deepen the checkout to ${since}; the round sees the merge commit and its two parents only."
             since=''
           fi
-          # The previous round's verified head: the first OID after
-          # "verified head" in the bot's own report, skipping a line that
-          # names the round before ("Previous verified head (P)"). Deepening
-          # brings it when it is an ancestor; otherwise, after a force-push
-          # or a deepen that fell short, it arrives alone, without parents.
-          # `sed`, not `head`: under pipefail, grep's SIGPIPE would drop
-          # the OID found. `-k`: SIGKILL if a fetch outlives its SIGTERM.
-          # shellcheck disable=SC2016 # the backticks are Markdown's
-          prev="$(grep -iv '^[^`]*previous[^`]*verified head' "$RUNNER_TEMP/verify-context/previous-report.md" 2>/dev/null |
-            grep -io 'verified head.*' | grep -oE '\b[0-9a-f]{40}\b' | sed -n 1p)" || prev=''
+          # The previous round's verified head: publish-verify stamps it as
+          # a header marker, and this reads that, not the report prose — a
+          # reworded verdict line must not silently empty it. Header-scoped
+          # and line-exact, like every other marker lookup: a report can
+          # quote the marker further down. A report published before the
+          # marker carries none and warns below. Deepening brings the head
+          # when it is an ancestor; otherwise, after a force-push or a
+          # deepen that fell short, it arrives alone, without parents.
+          # `sed`, not `head`: under pipefail, a reader that exits at the
+          # first line would SIGPIPE the one feeding it. `-k`: SIGKILL if a
+          # fetch outlives its SIGTERM.
+          prev="$(sed -n '1,/^$/p' "$RUNNER_TEMP/verify-context/previous-report.md" 2>/dev/null |
+            sed -n 's/^<!-- qwen-triage:verify-head=\([0-9a-f]\{40\}\) -->$/\1/p' | sed -n 1p)" || prev=''
           if [ -n "$prev" ] && ! git cat-file -e "${prev}^{commit}" 2>/dev/null; then
             timeout -k 5 25 git fetch --no-tags --quiet --depth=1 origin "${prev}:refs/verify/previous" ||
               { echo "::warning::Could not fetch the previous verified head ${prev}."; prev=''; }
           elif [ -z "$prev" ] && [ -s "$RUNNER_TEMP/verify-context/previous-report.md" ]; then
-            # A first round has no report; a follow-up whose report names
-            # no head re-runs everything, and should say why.
+            # A first round has no report; a follow-up whose report carries
+            # no head marker re-runs everything, and should say why.
             echo "::warning::The previous report names no verified head; the round cannot classify against it."
           fi
           mb="$(git merge-base "$base" "$head" 2>/dev/null)" || mb=''
@@ -6027,6 +6034,7 @@ jobs:
           VERIFY_MODEL: '${{ needs.verify.outputs.model }}'
           VERIFY_CLI_VERSION: '${{ needs.verify.outputs.cli_version }}'
           VERIFY_SKILL_HASH: '${{ needs.verify.outputs.skill_hash }}'
+          VERIFY_HEAD_OID: '${{ needs.verify.outputs.head_oid }}'
           FLAKE_VERDICT: '${{ needs.verify.outputs.flake_verdict }}'
           FLAKE_SUMMARY: '${{ needs.verify.outputs.flake_summary }}'
           SKIP_REASON: '${{ needs.verify.outputs.skip_reason }}'
@@ -6496,11 +6504,11 @@ jobs:
           PARTIAL_ZH='本次验证运行未正常结束，下列内容可能不完整甚至缺失。仅作为评审证据，**不构成评审、批准或 CI 检查**。'
 
           # Every body opens with a header: the verify marker, this run's
-          # marker, the flaky marker when the gate demoted the run and, on a
-          # body that carries findings, the substantive marker, ended by a
-          # blank line. Every lookup reads markers only
-          # from a header, so it is started once, here, and each branch below
-          # appends to it.
+          # marker, the flaky marker when the gate demoted the run, the head
+          # marker when the pinned head is known and, on a body that carries
+          # findings, the substantive marker, ended by a blank line. Every
+          # lookup reads markers only from a header, so it is started once,
+          # here, and each branch below appends to it.
           printf '%s\n%s\n' '<!-- qwen-triage:verify -->' "$RUN_MARKER" > "$BODY_FILE"
           # Every branch a flaky verdict can reach demotes on it (the gate step
           # runs only on a prepared round it was asked to verify), so the
@@ -6509,6 +6517,14 @@ jobs:
           FLAKY_MARKER='<!-- qwen-triage:verify-flaky -->'
           if [ "${FLAKE_VERDICT:-}" = 'flaky' ]; then
             printf '%s\n' "$FLAKY_MARKER" >> "$BODY_FILE"
+          fi
+          # The head this round pinned, as data for the next round: its
+          # deepen step reads this marker, not the report prose a reworded
+          # verdict line could silently empty. Empty when the verify job
+          # broke before pinning (a cancellation empties the outputs), and
+          # the 40-hex guard then stamps nothing.
+          if [[ "${VERIFY_HEAD_OID:-}" =~ ^[0-9a-f]{40}$ ]]; then
+            printf '<!-- qwen-triage:verify-head=%s -->\n' "$VERIFY_HEAD_OID" >> "$BODY_FILE"
           fi
 
           # The gate verdict travels via job outputs: it survives a later
