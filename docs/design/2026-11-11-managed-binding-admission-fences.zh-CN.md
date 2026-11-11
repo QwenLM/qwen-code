@@ -28,7 +28,7 @@ admission/fence 方法遵循同一形状：仓库上的 public 接口方法经 `
 
 - `harnessDrainKey`：`JdbcCsiApplicationRetirement`、`JdbcCsiActivationAdmission`、`JdbcHarnessPlacementStore`、`AgentLifecycleOperations`、`JdbcWorkspaceLifecycleStore`、`JournalFencing`、`WorkspaceCsiApplicationHistoryImage` 等。
 - `storageFenceKey`：`JdbcSshWorkspaceStore`、`WorkspaceStorageGuard`、`ExternalStorageRegistrationStore`、`WorkspaceMigrationStore`、`WorkspaceCsiReservationStore`、`WorkspaceCsiApplicationInventory` 等。
-- `storageAliasKey`：`ExecutionAdmissionPlacement`、`JdbcCsiReadyAdmission`、`JdbcCsiRetirementSeal`、`AgentSessionPolicies`、`JdbcCsiApplicationProgress`、`WorkspaceMigrationAdmission`、`LocalStorageOwners` 等。
+- `storageAliasKey`：`ExecutionAdmissionPlacement`、`JdbcCsiRetirementSeal`、`AgentSessionPolicies`、`JdbcCsiApplicationProgress`、`WorkspaceMigrationAdmission`、`LocalStorageOwners` 等。
 - `beginHarnessLifecycle`：`AgentLifecycleOperations`。
 - `hasSharedRuntimeSessions`：`JdbcWorkspaceLifecycleStore`。
 - static `requireHarnessAdmission(Connection, ...)`：`WorkspaceCsiRuntimeAccess`。
@@ -39,7 +39,7 @@ admission/fence 方法遵循同一形状：仓库上的 public 接口方法经 `
 
 在 `runtimebroker.persistence` 抽出协作类 `RuntimeAdmissionFences`，持有收 `Connection` 的 static 引擎与共享 fence 词汇。仓库保留事务所有权、接口包装，以及绑定 CRUD/CAS/租约核心。
 
-该类是 `public final` 加私有构造器，而非包私有：约三十五个调用方位于 `managedagent.persistence` 及 `runtimebroker.persistence` 之外的 verification 测试包，包私有类无法跨包 import。只有六个本就 public 的词汇成员是 public；整个引擎面保持包私有。这与同包既有的 public 协作类（`JdbcCsiReadyAdmission`、`JdbcCsiActivationAdmission`）一致；ArchUnit 无可见性规则。
+该类是 `public final` 加私有构造器，而非包私有：约三十五个调用方位于 `managedagent.persistence` 及 `runtimebroker.persistence` 之外的 verification 测试包，包私有类无法跨包 import。只有六个本就 public 的词汇成员是 public；整个引擎面保持包私有。这与同包既有的 public 协作类（`JdbcCsiActivationAdmission`、`JdbcCsiRetirementSeal`）一致；ArchUnit 无可见性规则。
 
 ### 搬移内容
 
@@ -79,7 +79,7 @@ admission/fence 方法遵循同一形状：仓库上的 public 接口方法经 `
 
 ## 风险
 
-- **广度。** 迁移触及约二十个文件。缓解：每个调用点只改 import 与限定名；变更由 maintainer 发起，作为机械搬移而非行为变更来 review。
+- **广度。** 迁移触及 81 个调用方文件（38 生产、43 verification 测试）。缓解：每个调用点只改 import 与限定名；变更由 maintainer 发起，作为机械搬移而非行为变更来 review。
 - **安全相关 SQL。** admission 核心把关租户隔离与生命周期围栏。缓解：逐字搬移、既有的 fence/admission MySQL 集成案例，以及 CI 的 Hosted/fault profile。
 - **基线漂移。** 棘轮数字假设 #16922 已 merge 且采用上游当前 pin 基线。缓解：实现时像 broker 切片那样，对齐上游的 pin 与全局上限。
 

@@ -28,7 +28,7 @@ The shared vocabulary is already public static and used well beyond this reposit
 
 - `harnessDrainKey`: `JdbcCsiApplicationRetirement`, `JdbcCsiActivationAdmission`, `JdbcHarnessPlacementStore`, `AgentLifecycleOperations`, `JdbcWorkspaceLifecycleStore`, `JournalFencing`, `WorkspaceCsiApplicationHistoryImage`, and others.
 - `storageFenceKey`: `JdbcSshWorkspaceStore`, `WorkspaceStorageGuard`, `ExternalStorageRegistrationStore`, `WorkspaceMigrationStore`, `WorkspaceCsiReservationStore`, `WorkspaceCsiApplicationInventory`, and others.
-- `storageAliasKey`: `ExecutionAdmissionPlacement`, `JdbcCsiReadyAdmission`, `JdbcCsiRetirementSeal`, `AgentSessionPolicies`, `JdbcCsiApplicationProgress`, `WorkspaceMigrationAdmission`, `LocalStorageOwners`, and others.
+- `storageAliasKey`: `ExecutionAdmissionPlacement`, `JdbcCsiRetirementSeal`, `AgentSessionPolicies`, `JdbcCsiApplicationProgress`, `WorkspaceMigrationAdmission`, `LocalStorageOwners`, and others.
 - `beginHarnessLifecycle`: `AgentLifecycleOperations`.
 - `hasSharedRuntimeSessions`: `JdbcWorkspaceLifecycleStore`.
 - The static `requireHarnessAdmission(Connection, ...)`: `WorkspaceCsiRuntimeAccess`.
@@ -39,7 +39,7 @@ The interface methods (`requireHarnessAdmission`, `requireHarnessRecovery`, `req
 
 Extract a `RuntimeAdmissionFences` collaborator in `runtimebroker.persistence` that owns the static `Connection`-taking engine and the shared fence vocabulary. The repository keeps transaction ownership, the interface wrappers, and the binding CRUD/CAS/lease core.
 
-The class is `public final` with a private constructor, not package-private: roughly thirty-five callers live in `managedagent.persistence` and in verification test packages outside `runtimebroker.persistence`, and a package-private class cannot be imported cross-package. Only the six already-public vocabulary members are public; the entire engine surface stays package-private. This matches the existing public collaborators in the same package (`JdbcCsiReadyAdmission`, `JdbcCsiActivationAdmission`); ArchUnit enforces no visibility rule.
+The class is `public final` with a private constructor, not package-private: roughly thirty-five callers live in `managedagent.persistence` and in verification test packages outside `runtimebroker.persistence`, and a package-private class cannot be imported cross-package. Only the six already-public vocabulary members are public; the entire engine surface stays package-private. This matches the existing public collaborators in the same package (`JdbcCsiActivationAdmission`, `JdbcCsiRetirementSeal`); ArchUnit enforces no visibility rule.
 
 ### What moves
 
@@ -79,7 +79,7 @@ Inside the repository, the moved members are reached through static imports so t
 
 ## Risks
 
-- **Breadth.** The sweep touches roughly twenty files. Mitigation: each call site changes only its import and qualifier; the change is maintainer-initiated and reviewed as a mechanical move, not a behavior change.
+- **Breadth.** The sweep touches 81 caller files (38 production, 43 verification test). Mitigation: each call site changes only its import and qualifier; the change is maintainer-initiated and reviewed as a mechanical move, not a behavior change.
 - **Security-relevant SQL.** The admission core gates tenant isolation and lifecycle fencing. Mitigation: verbatim move, the existing fence/admission MySQL integration cases, and the Hosted/fault profiles in CI.
 - **Baseline drift.** The ratchet numbers assume #16922 has merged and upstream's current pin baseline. Mitigation: reconcile the pin and the global ceiling against upstream at implementation time, as the broker slice did.
 

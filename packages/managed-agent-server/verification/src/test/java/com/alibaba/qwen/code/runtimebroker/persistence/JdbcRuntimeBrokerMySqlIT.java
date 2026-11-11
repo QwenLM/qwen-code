@@ -166,7 +166,7 @@ class JdbcRuntimeBrokerMySqlIT {
                     required("mysql.user"), System.getProperty("mysql.password", ""));
             com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
             var bindings = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("close", new byte[32]));
-            var probe = JdbcRuntimeBindingRepository.class.getDeclaredMethod("hasHarnessDrain",
+            var probe = RuntimeAdmissionFences.class.getDeclaredMethod("hasHarnessDrain",
                     Connection.class, String.class, String.class);
             probe.setAccessible(true);
             try (var admission = source.getConnection(); var pool = Executors.newSingleThreadExecutor()) {
