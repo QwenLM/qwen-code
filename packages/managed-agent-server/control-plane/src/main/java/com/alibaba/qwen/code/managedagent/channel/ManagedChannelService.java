@@ -359,6 +359,15 @@ public class ManagedChannelService {
         deliveries.find(tenantId, channelId, resentId).ifPresent(existing -> {
             if (!existing.segmentId().equals(String.valueOf(first.get("segmentId")))
                     || existing.ordinal() != ((Number) first.get("ordinal")).intValue()) {
+                // A matching-chain replay converges by design, so reaching
+                // here is a real Harness/ledger divergence. Name the
+                // identities only — never the request body (see
+                // ApiExceptionHandler.logInternalRefusal).
+                LOG.warn("channel resend identity conflict tenant={}"
+                        + " channel={} delivery={} resent={} storedSegment={}"
+                        + " resentSegment={}", tenantId, channelId, deliveryId,
+                        resentId, existing.segmentId(),
+                        String.valueOf(first.get("segmentId")));
                 throw new ManagedAgentException(409, "channel_delivery_conflict",
                         "The resent delivery id already belongs to another segment.");
             }

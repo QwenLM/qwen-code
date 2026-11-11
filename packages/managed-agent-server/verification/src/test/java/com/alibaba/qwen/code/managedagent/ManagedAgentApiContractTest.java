@@ -109,6 +109,7 @@ import java.util.TreeMap;
 import java.util.TreeSet;
 import java.util.UUID;
 import java.util.stream.Collectors;
+import java.util.stream.StreamSupport;
 
 import static java.util.Map.entry;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -2877,6 +2878,15 @@ class ManagedAgentApiContractTest {
                         .header(TENANT, channelTenant).principal(reader),
                 null));
         assertThat(deliveries.path("data")).hasSize(2);
+        // Anchor the wire state by id, not position: both fixture rows share
+        // gmt_create and the route orders by delivery_id DESC, so data[0] is
+        // delivery-2. A list projection serving a wrong-but-valid state must
+        // red here, not pass on row count alone.
+        JsonNode listed = StreamSupport.stream(
+                deliveries.path("data").spliterator(), false)
+                .filter(row -> "delivery-1".equals(row.path("id").asText()))
+                .findFirst().orElseThrow();
+        assertThat(listed.path("state").asText()).isEqualTo("delivered");
         exchange(drift, "listAgentChannelDeliveries", 404,
                 get("/v1/agent-channels/{id}/deliveries", "missing")
                         .header(TENANT, channelTenant).principal(reader),
