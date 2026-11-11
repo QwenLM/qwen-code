@@ -227,6 +227,7 @@ export async function runAgentsJoin(
     error?: string;
     connected?: boolean;
     saved?: boolean;
+    recorded?: boolean;
     saveError?: string;
     providers?: string[];
   };
@@ -258,8 +259,10 @@ export async function runAgentsJoin(
     }
     return 1;
   }
-  // An older daemon does not send `saved`; it always claimed the save.
+  // An older daemon sends neither `saved` (it always claimed the save) nor
+  // `recorded`; without the latter, the warning keeps its remedy wording.
   const saved = result.saved !== false;
+  const recorded = result.recorded !== false;
   deps.out(
     `Joined ${target.serverUrl} as a runtime for workspace ${target.workspaceId}${
       result.providers?.length
@@ -269,10 +272,12 @@ export async function runAgentsJoin(
   );
   // Still a successful join: it is connected, and only the reconnect after a
   // restart is lost. The same command again keeps the connection and retries
-  // the save, so the warning points at that.
+  // the save, so the warning points at that — but only when the credential
+  // records this join's token; a re-join whose record write failed would be
+  // refused on rerun, and the advice must not send the operator into it.
   if (!saved) {
     deps.err(
-      `Warning: the daemon could not save this connection, so it will not reconnect after a restart or a workspace reload: ${result.saveError || 'no detail'}. Run the same command again to save it.`,
+      `Warning: the daemon could not save this connection, so it will not reconnect after a restart or a workspace reload: ${result.saveError || 'no detail'}${recorded ? '. Run the same command again to save it.' : ''}`,
     );
   }
   return 0;

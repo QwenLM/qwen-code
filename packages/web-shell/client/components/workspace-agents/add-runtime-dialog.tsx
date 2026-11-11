@@ -6,6 +6,7 @@
 
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { CheckCircle2, CopyIcon, LoaderCircle } from 'lucide-react';
+import { isDaemonUnavailableError } from '../../daemon/availability';
 import { useI18n } from '../../i18n';
 import { programLabel, runtimePrograms } from './agents-view-logic';
 import { Button } from '../ui/button';
@@ -264,20 +265,26 @@ function CommandLine({ text }: { text: string }) {
 /**
  * A join that went through, as the dialog sees it: whether the computer that
  * joined saved the connection. A `saveError` means it will not reconnect
- * after a restart or a workspace reload. `workspaceCwd`, from a remote
+ * after a restart or a workspace reload. `recorded: false` means the
+ * credential did not record this join's token, so a rerun of it would be
+ * refused and the notice must not advise one. `workspaceCwd`, from a remote
  * connect: the workspace the remote answered from, which its runtime
  * reports too. `false` is a connect that failed and was already reported
  * elsewhere; a failed join throws instead.
  */
 export type RuntimeJoinOutcome =
   | false
-  | { saveError?: string; workspaceCwd?: string };
+  | { saveError?: string; workspaceCwd?: string; recorded?: boolean };
 
 /**
  * Reads a `hosts/connect` answer, which `hosts/remote-connect` passes on. An
- * older daemon sends no `saved` field; it always claimed the save.
+ * older daemon sends no `saved` field; it always claimed the save. Nor
+ * `recorded`; without it, the notice keeps its remedy wording.
  */
-export function joinOutcome(answer: unknown): { saveError?: string } {
+export function joinOutcome(answer: unknown): {
+  saveError?: string;
+  recorded?: boolean;
+} {
   if (
     typeof answer !== 'object' ||
     answer === null ||
@@ -286,7 +293,12 @@ export function joinOutcome(answer: unknown): { saveError?: string } {
     return {};
   }
   const detail = (answer as { saveError?: unknown }).saveError;
-  return { saveError: typeof detail === 'string' ? detail : '' };
+  return {
+    saveError: typeof detail === 'string' ? detail : '',
+    ...((answer as { recorded?: unknown }).recorded === false
+      ? { recorded: false }
+      : {}),
+  };
 }
 
 /**
@@ -416,12 +428,15 @@ export function AddRuntimeDialog({
     }));
   // Why a computer that joined could not save the connection, one per
   // machine: this one (`here`, from the join form, shown on its joined
-  // result) and the remote (`there`, from the address-and-token form, shown
-  // under that form, and on the remote's connected result). An attempt
-  // replaces only its own, and a close drops only what was on screen.
-  const [notSaved, setNotSaved] = useState<{ here?: string; there?: string }>(
-    {},
-  );
+  // result, with `hereRecorded` saying whether a rerun of that join goes on)
+  // and the remote (`there`, from the address-and-token form, shown under
+  // that form, and on the remote's connected result). An attempt replaces
+  // only its own, and a close drops only what was on screen.
+  const [notSaved, setNotSaved] = useState<{
+    here?: string;
+    there?: string;
+    hereRecorded?: boolean;
+  }>({});
   // A join or connect in flight, read synchronously: a second submit in the
   // same tick (a double Enter) sees it before `busy` re-renders. Closing
   // does not cancel the request, so it stays in flight, the dialog stays busy
@@ -562,7 +577,11 @@ export function AddRuntimeDialog({
     if (!onJoinCoordinator || inFlight.current) return;
     // A new join replaces the previous one's notice, even one stopped by
     // validation.
-    setNotSaved((current) => ({ ...current, here: undefined }));
+    setNotSaved((current) => ({
+      ...current,
+      here: undefined,
+      hereRecorded: undefined,
+    }));
     if (!joinTarget) {
       setError('join', t('collab.runtime.joinBadLink'));
       return;
@@ -589,17 +608,20 @@ export function AddRuntimeDialog({
         setKeptTokenLink(undefined);
         if (outcome.saveError !== undefined) {
           const here = outcome.saveError;
-          setNotSaved((current) => ({ ...current, here }));
+          const hereRecorded = outcome.recorded !== false;
+          setNotSaved((current) => ({ ...current, here, hereRecorded }));
         }
       }
     } catch (cause) {
       // The same token sent again picks up what a failed join did (its
       // answer lost, or its first heartbeat failed), so it is kept for the
       // link it was sent with; only one the coordinator refused is dropped.
+      // A failure that never reached the daemon sent nothing: the token is
+      // the user's own, unbound, and survives any link edit.
       if (isRefusedJoinToken(cause)) {
         setJoinToken('');
         setKeptTokenLink(undefined);
-      } else {
+      } else if (!isDaemonUnavailableError(cause)) {
         setKeptTokenLink(joinLink);
       }
       const name = (cause as Error | undefined)?.name;
@@ -688,7 +710,9 @@ export function AddRuntimeDialog({
     if (!next && shownErrorOf !== undefined) setError(shownErrorOf);
     if (!next) {
       setNotSaved((current) => ({
-        ...(shownHere === undefined ? { here: current.here } : {}),
+        ...(shownHere === undefined
+          ? { here: current.here, hereRecorded: current.hereRecorded }
+          : {}),
         ...(shownThere === undefined ? { there: current.there } : {}),
       }));
     }
@@ -988,17 +1012,20 @@ export function AddRuntimeDialog({
 
         {(
           [
-            ['collab.runtime.notSavedHere', shownHere],
-            ['collab.runtime.notSavedThere', shownThere],
+            ['collab.runtime.notSavedHere', shownHere, notSaved.hereRecorded],
+            ['collab.runtime.notSavedThere', shownThere, undefined],
           ] as const
-        ).map(([key, saveError]) =>
+        ).map(([key, saveError, recorded]) =>
           saveError === undefined ? null : (
             <p
               key={key}
               role="status"
               className="rounded-md border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-muted-foreground break-words"
             >
-              {t(key, { error: saveError })}
+              {t(key, {
+                error: saveError,
+                recorded: recorded === false ? 'false' : 'true',
+              })}
             </p>
           ),
         )}

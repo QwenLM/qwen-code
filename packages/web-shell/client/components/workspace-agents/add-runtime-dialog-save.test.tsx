@@ -26,7 +26,7 @@ afterEach(() => {
 });
 
 const NOT_SAVED_HERE =
-  'This computer joined, but could not save the connection, so it will not reconnect after a restart or a workspace reload: disk full. Join again with the same link and token to save it.';
+  'This computer joined, but could not save the connection, so it will not reconnect after a restart or a workspace reload: disk full. Run the same join command again to save it.';
 const NOT_SAVED_THERE =
   'That computer connected, but could not save the connection, so it will not reconnect after a restart or a workspace reload: disk full';
 
@@ -190,9 +190,36 @@ it('renders the unsaved notice with a period when a join reports no save error',
   await submit('join-coordinator');
 
   expect(notSavedNotice()).toBe(
-    'This computer joined, but could not save the connection, so it will not reconnect after a restart or a workspace reload. Join again with the same link and token to save it.',
+    'This computer joined, but could not save the connection, so it will not reconnect after a restart or a workspace reload. Run the same join command again to save it.',
   );
 });
+
+it.each([
+  [
+    'the credential recorded the join',
+    { saveError: 'disk full', recorded: true },
+    NOT_SAVED_HERE,
+  ],
+  ['an older daemon answered', { saveError: 'disk full' }, NOT_SAVED_HERE],
+  [
+    'the credential did not record the join',
+    { saveError: 'disk full', recorded: false },
+    'This computer joined, but could not save the connection, so it will not reconnect after a restart or a workspace reload: disk full.',
+  ],
+] as const)(
+  'gates the unsaved notice’s rerun advice on whether %s',
+  async (_label, outcome, notice) => {
+    // A rerun of a join the credential did not record would be refused, so
+    // the notice must not advise one.
+    await renderDialog({ onJoinCoordinator: vi.fn(async () => outcome) });
+    await chooseTab('Join a coordinator');
+    await type('joinLink', 'https://hub.example:4170/join/ws_1');
+    await type('enrollmentToken', 'join-token');
+    await submit('join-coordinator');
+
+    expect(notSavedNotice()).toBe(notice);
+  },
+);
 
 it('shows the unsaved notice only under the form it is about', async () => {
   // A warning about one machine must not stay pinned under another's form,
@@ -1671,6 +1698,14 @@ it('keeps the token when the daemon was not reachable, so nothing was sent', asy
   await type('enrollmentToken', 'join-token');
   await submit('join-coordinator');
 
+  expect(
+    document.querySelector<HTMLInputElement>('input[name="enrollmentToken"]')!
+      .value,
+  ).toBe('join-token');
+
+  // Nothing was sent, so the token is the user's own: correcting the link
+  // (a typo, or the coordinator they meant) must not erase it.
+  await type('joinLink', 'https://other.example:4170/join/ws_1');
   expect(
     document.querySelector<HTMLInputElement>('input[name="enrollmentToken"]')!
       .value,

@@ -1270,7 +1270,7 @@ describe('enrolling', () => {
             enrollmentTokenHash: tokenHash('join-token'),
           });
 
-          await connect();
+          await expect(connect()).resolves.toEqual({ recorded: true });
 
           expect(sent).toEqual([]);
         },
@@ -1310,7 +1310,8 @@ describe('enrolling', () => {
           await fs.mkdir(path.dirname(files.credential), { recursive: true });
           await fs.writeFile(files.credential, JSON.stringify(saved));
 
-          await connect();
+          // Starts, but a rerun of this join would be refused.
+          await expect(connect()).resolves.toEqual({ recorded: false });
 
           expect(stderr.mock.calls.map(([line]) => String(line))).toContain(
             'Agent Host credential could not record its enrollment: ENOSPC: no space left on device\n',
@@ -1529,11 +1530,15 @@ describe('enrolling', () => {
         const again = join();
         answer();
 
-        await Promise.all([first, again]);
+        // Both get what the one join did, record included.
+        await expect(Promise.all([first, again])).resolves.toEqual([
+          { recorded: true },
+          { recorded: true },
+        ]);
         expect(sent).toHaveLength(1);
         // Joined, the same join sent again keeps the connection it made,
         // rather than starting it over.
-        await join();
+        await expect(join()).resolves.toEqual({ recorded: true });
         expect(sent).toHaveLength(1);
         expect(tokenHeartbeats).toEqual([]);
 

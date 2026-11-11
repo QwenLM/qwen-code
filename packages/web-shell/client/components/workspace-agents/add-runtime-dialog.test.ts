@@ -150,6 +150,21 @@ describe('joinOutcome', () => {
     expect(joinOutcome({ connected: true })).toEqual({});
     expect(joinOutcome(undefined)).toEqual({});
   });
+
+  it('reports a join the credential did not record, whose rerun is refused', () => {
+    expect(
+      joinOutcome({
+        connected: true,
+        saved: false,
+        saveError: 'disk full',
+        recorded: false,
+      }),
+    ).toEqual({ saveError: 'disk full', recorded: false });
+    // `recorded: true`, like an older daemon's silence, keeps the remedy.
+    expect(
+      joinOutcome({ connected: true, saved: false, recorded: true }),
+    ).toEqual({ saveError: '' });
+  });
 });
 
 describe('connectExistingWith', () => {

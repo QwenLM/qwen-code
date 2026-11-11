@@ -737,7 +737,7 @@ const activeConnections = new Map<
     bridge: AcpSessionBridge;
     generationGuard?: WorkspaceGenerationGuard;
     stop: AbortController;
-    start: Promise<void>;
+    start: Promise<{ recorded: boolean }>;
     /** {@link enrollmentTokenHash} of the join that started it, if any. */
     tokenHash?: string;
   }
@@ -751,9 +751,13 @@ function connectionKey(
   return JSON.stringify([serverUrl, workspaceId, workspaceCwd]);
 }
 
+/**
+ * `recorded`: the credential file records this join's token, so the same
+ * join again goes on with it; a rerun of one that records nothing is refused.
+ */
 export async function startAgentHostConnection(
   options: AgentHostConnectionOptions,
-): Promise<void> {
+): Promise<{ recorded: boolean }> {
   const key = connectionKey(
     normalizeServerUrl(options.serverUrl, options.allowHttp),
     options.workspaceId,
@@ -788,7 +792,7 @@ export async function startAgentHostConnection(
     ...(tokenHash !== undefined ? { tokenHash } : {}),
   });
   try {
-    await start;
+    return await start;
   } catch (error) {
     if (activeConnections.get(key)?.start === start)
       activeConnections.delete(key);
@@ -843,7 +847,7 @@ export function stopAgentHostConnection(target: {
 async function connectAgentHost(
   options: AgentHostConnectionOptions,
   stop: AbortController,
-): Promise<void> {
+): Promise<{ recorded: boolean }> {
   const assertOpen = () => {
     options.generationGuard?.assertOpen();
     stop.signal.throwIfAborted();
@@ -1796,6 +1800,7 @@ async function connectAgentHost(
       }
     }
   })();
+  return { recorded };
 }
 
 /**

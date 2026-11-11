@@ -142,9 +142,11 @@ export function registerAgentHostRuntimeRoutes(
 
   /**
    * `{serverUrl, workspaceId, enrollmentToken, allowHttp?}` →
-   * `{connected: true, saved, saveError?, workspaceCwd, providers}`. Saved,
-   * so the daemon reconnects after a restart or a workspace reload;
-   * `saved: false` says it will not, and why.
+   * `{connected: true, saved, recorded, saveError?, workspaceCwd, providers}`.
+   * Saved, so the daemon reconnects after a restart or a workspace reload;
+   * `saved: false` says it will not, and why. `recorded` says the credential
+   * records this join's token, so a rerun of it goes on and can retry the
+   * save; a client must not advise that rerun when it is false.
    */
   app.post(`${prefix}/hosts/connect`, mutate(), async (req, res) => {
     const runtime = runtimeFor(req, res);
@@ -171,7 +173,7 @@ export function registerAgentHostRuntimeRoutes(
       const { normalizeServerUrl, startAgentHostConnection } = await import(
         '../agent-host-client.js'
       );
-      await startAgentHostConnection({
+      const { recorded } = await startAgentHostConnection({
         bridge: runtime.bridge,
         workspaceCwd: runtime.workspaceCwd,
         serverUrl: url,
@@ -199,10 +201,11 @@ export function registerAgentHostRuntimeRoutes(
       // stands. The answer stays a success, because the join is done: a
       // client that treated this as a failed join would re-issue a join
       // that already happened, which keeps the connection and attempts
-      // only this save again — the remedy the warning points at. (Saving
-      // before connecting would make the failure retryable, but a failed
-      // join would then have to undo its record against a concurrent join
-      // or disconnect of the same connection.)
+      // only this save again — the remedy the warning points at when the
+      // credential records this join's token (`recorded`). (Saving before
+      // connecting would make the failure retryable, but a failed join
+      // would then have to undo its record against a concurrent join or
+      // disconnect of the same connection.)
       const saved =
         saveError === undefined ||
         (await findAgentHostConnection(record)) !== undefined;
@@ -216,6 +219,7 @@ export function registerAgentHostRuntimeRoutes(
       res.json({
         connected: true,
         saved,
+        recorded,
         ...(saved ? {} : { saveError }),
         workspaceCwd: runtime.workspaceCwd,
         providers,

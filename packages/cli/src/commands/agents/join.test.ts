@@ -126,6 +126,31 @@ it('says "no detail" when the daemon gives no reason for the failed save', async
   ]);
 });
 
+it('does not advise a rerun when the credential did not record the join', async () => {
+  // A re-join whose record write failed: its rerun would be refused, so
+  // the warning must not send the operator into it.
+  const { value, err } = deps({
+    fetch: vi.fn(async () =>
+      Response.json({
+        connected: true,
+        saved: false,
+        recorded: false,
+        saveError: 'ENOSPC: no space left on device',
+      }),
+    ) as unknown as typeof fetch,
+  });
+
+  const code = await runAgentsJoin(
+    { link: 'https://hub.example:4170/join/ws_1', 'allow-http': false },
+    value,
+  );
+
+  expect(code).toBe(0);
+  expect(err).toEqual([
+    'Warning: the daemon could not save this connection, so it will not reconnect after a restart or a workspace reload: ENOSPC: no space left on device',
+  ]);
+});
+
 it('reports a JSON null answer as a failed join rather than crashing', async () => {
   const { value, err } = deps({
     fetch: vi.fn(
