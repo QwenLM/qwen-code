@@ -426,8 +426,13 @@ entries, including `requireMention` values the new control did not author.
 3. A successful scan writes `appID` and `appSecret` into that workspace's channel
    config, and the editor shows the bound state.
 4. No response body, workspace event, or log line contains `appSecret`.
-5. Cancelling from the editor stops upstream polling; an abandoned session
-   expires and stops polling without a client.
+5. Closing the editor cancels a login **this panel created**, so upstream polling
+   stops and the slot is freed; a login the panel merely reattached from another
+   tab is left alone. Expiry is still the release path for leaving the page —
+   a reload or tab close runs no React cleanup, and no `pagehide` release is
+   implemented yet — and for the cases no client can report, such as a crashed
+   tab or a lost network. Closing the editor is therefore no longer expiry-bounded,
+   but reloading is; a `pagehide` release is follow-up work.
 6. A login started in one workspace is not readable or cancellable from another.
 7. Saving a new QQ channel leaves `allowMention` at its effective default of true.
 8. `groupAllPolicy: keyword` or `all` without the required session scope and group

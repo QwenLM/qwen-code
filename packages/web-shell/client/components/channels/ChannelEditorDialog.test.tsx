@@ -6,7 +6,7 @@
 
 // @vitest-environment jsdom
 
-import { act } from 'react';
+import { act, useState } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
@@ -5053,6 +5053,97 @@ describe('QR bind inside the editor', () => {
       });
       expect(onReload).toHaveBeenCalled();
       expect(onOpenChange).toHaveBeenCalledWith(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('releases the login when the real dialog closes', async () => {
+    // The panel's release hangs off unmount, so the premise needs exercising:
+    // a host that owns `open`, closed through the dialog's own Cancel button.
+    // If the dialog ever keeps its content mounted on close, this goes red.
+    const qqDescriptor: DaemonChannelTypeDescriptor = {
+      type: 'qq',
+      displayName: 'QQ',
+      manageable: true,
+      supportsQrLogin: true,
+      fields: [
+        { key: 'appID', label: 'App ID', kind: 'string' },
+        { key: 'appSecret', label: 'App Secret', kind: 'secret' },
+      ],
+    };
+    const instance = {
+      name: 'qq-bot',
+      config: { type: 'qq' },
+      secrets: { appSecret: { present: false } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' as const },
+    };
+    const pending = {
+      loginId: 'login-1',
+      channelType: 'qq',
+      channelName: 'qq-bot',
+      status: 'pending' as const,
+      expiresAt: 9_999_999,
+      qrCodeDataUrl: 'data:image/png;base64,AAAA',
+    };
+    const qrLoginActions = {
+      start: vi.fn().mockResolvedValue({ ...pending, attached: false }),
+      state: vi.fn().mockResolvedValue(pending),
+      cancel: vi.fn().mockResolvedValue({ ...pending, status: 'cancelled' }),
+    };
+
+    function Host() {
+      const [open, setOpen] = useState(true);
+      return (
+        <I18nProvider language="en">
+          <ChannelEditorDialog
+            open={open}
+            descriptor={qqDescriptor}
+            instance={instance as never}
+            expectedRevision="revision-1"
+            existingNames={[]}
+            workspaces={WORKSPACES}
+            workspaceCwd="/workspace/main"
+            onWorkspaceChange={vi.fn()}
+            onOpenChange={setOpen}
+            onSave={vi.fn().mockResolvedValue(undefined)}
+            onReload={vi.fn().mockResolvedValue(undefined)}
+            qrLoginActions={qrLoginActions}
+            listPairingRequests={vi.fn().mockResolvedValue({ requests: [] })}
+            approvePairingRequest={vi.fn()}
+            listPairingApprovals={vi.fn().mockResolvedValue({ senderIds: [] })}
+            revokePairingApproval={vi.fn()}
+          />
+        </I18nProvider>
+      );
+    }
+
+    vi.useFakeTimers();
+    try {
+      await act(async () => {
+        root.render(<Host />);
+      });
+      const scan = [...document.querySelectorAll('button')].find((b) =>
+        b.textContent?.includes('Scan to bind'),
+      );
+      expect(scan).toBeDefined();
+      await act(async () => {
+        scan!.click();
+      });
+      expect(qrLoginActions.cancel).not.toHaveBeenCalled();
+
+      // The footer Cancel is the last button carrying that label; the panel's
+      // own Cancel comes earlier in the tree.
+      const cancels = [...document.querySelectorAll('button')].filter((b) =>
+        b.textContent?.includes('Cancel'),
+      );
+      expect(cancels.length).toBeGreaterThan(0);
+      await act(async () => {
+        cancels[cancels.length - 1]!.click();
+      });
+
+      expect(qrLoginActions.cancel).toHaveBeenCalledWith('login-1');
     } finally {
       vi.useRealTimers();
     }
