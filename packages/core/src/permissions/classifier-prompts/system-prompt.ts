@@ -5,8 +5,8 @@
  *
  * Classifier system prompt template + builder.
  *
- * Built-in ALLOW / SOFT BLOCK / HARD BLOCK / ENVIRONMENT lists are hardcoded
- * here. User-configured hints
+ * Built-in ALLOW / SOFT BLOCK / HARD BLOCK / ENVIRONMENT / USER INTENT lists
+ * are hardcoded here. User-configured hints
  * (`permissions.autoMode.hints.{allow,softDeny,hardDeny}`) and environment
  * (`permissions.autoMode.environment`) are appended additively to the
  * corresponding section. Replace-mode is not supported.
@@ -188,6 +188,9 @@ whether the action should be ALLOWED or BLOCKED.
  *
  * Stage-specific suffix (see classifier orchestrator) is appended separately.
  */
+/** A `{{NAME}}` slot in {@link PROMPT_TEMPLATE}. */
+const PLACEHOLDER = /\{\{([A-Z_]+)\}\}/g;
+
 export function buildClassifierSystemPrompt(config: Config): string {
   const settings = config.getAutoModeSettings();
   const hints = settings.hints ?? {};
@@ -205,17 +208,22 @@ export function buildClassifierSystemPrompt(config: Config): string {
     userHardDeny,
   );
 
-  // Built-in placeholders are filled before user-supplied text is spliced in,
-  // so a hint containing a placeholder literal cannot capture a replacement.
+  const sections = new Map<string, string>([
+    ['DEFAULT_ALLOW', formatBuiltin(BUILTIN_ALLOW)],
+    ['DEFAULT_SOFT_DENY', formatBuiltin(BUILTIN_SOFT_DENY)],
+    ['DEFAULT_HARD_DENY', formatBuiltin(BUILTIN_HARD_DENY)],
+    ['USER_INTENT', formatBuiltin(BUILTIN_USER_INTENT)],
+    ['USER_SECTIONS', userSections],
+    ['ENVIRONMENT', formatSection(BUILTIN_ENVIRONMENT, userEnv)],
+  ]);
+
+  // One pass over the template. A value that has been spliced in is never
+  // scanned again, so a placeholder literal in a user hint stays text, and
+  // the function form keeps `$&`-style patterns in a hint from expanding.
   return PROMPT_TEMPLATE.replace(
-    '{{DEFAULT_ALLOW}}',
-    formatBuiltin(BUILTIN_ALLOW),
-  )
-    .replace('{{DEFAULT_SOFT_DENY}}', formatBuiltin(BUILTIN_SOFT_DENY))
-    .replace('{{DEFAULT_HARD_DENY}}', formatBuiltin(BUILTIN_HARD_DENY))
-    .replace('{{USER_INTENT}}', formatBuiltin(BUILTIN_USER_INTENT))
-    .replace('{{USER_SECTIONS}}', userSections)
-    .replace('{{ENVIRONMENT}}', formatSection(BUILTIN_ENVIRONMENT, userEnv));
+    PLACEHOLDER,
+    (placeholder, name: string) => sections.get(name) ?? placeholder,
+  );
 }
 
 /**

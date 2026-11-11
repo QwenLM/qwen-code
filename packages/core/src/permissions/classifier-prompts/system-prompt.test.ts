@@ -379,4 +379,30 @@ describe('user intent', () => {
     );
     expect(section).not.toContain('{{USER_INTENT}}');
   });
+
+  it('leaves a placeholder a user hint quotes as text, for every section', () => {
+    // Replacing one placeholder at a time rescans text already spliced in, so
+    // a hint quoting a placeholder that is filled later captured its value.
+    const prompt = promptFor({ hints: { allow: ['{{ENVIRONMENT}}'] } });
+    const environment = prompt.slice(
+      prompt.indexOf('## Environment'),
+      prompt.indexOf('## User intent'),
+    );
+
+    expect(environment).toContain(
+      'The user runs the agent in their development environment.',
+    );
+    expect(environment).not.toContain('{{ENVIRONMENT}}');
+    expect(prompt).toContain('{{ENVIRONMENT}}');
+  });
+
+  it('does not expand a replacement pattern a user hint contains', () => {
+    const prompt = promptFor({
+      environment: ['costs $& per call'],
+      hints: { allow: ['run $` first'] },
+    });
+
+    expect(prompt).toContain('costs $& per call');
+    expect(prompt).toContain('run $` first');
+  });
 });
