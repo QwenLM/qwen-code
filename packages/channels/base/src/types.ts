@@ -633,7 +633,15 @@ export interface ChannelConfigNumberFieldDescriptor
   required?: boolean;
   envResolvable?: never;
   multiline?: never;
+  /** Exclusive lower bound: the value must be strictly greater than this. */
   exclusiveMinimum?: number;
+  /**
+   * Inclusive lower bound: the value may equal this. Needed because a field
+   * whose real floor is 0 cannot express it with `exclusiveMinimum` — writing
+   * -1 to admit 0 also admits (-1, 0), which the editor then accepts and the
+   * adapter rejects at save. When both are declared the stricter one wins.
+   */
+  minimum?: number;
   /** Inclusive upper bound. A poll interval above Node's 32-bit timer range is
    * clamped to 1ms, so an unbounded interval field can persist a hot loop. */
   maximum?: number;
@@ -746,6 +754,16 @@ export interface ChannelPlugin {
 
   /** Opt in to shared task, response, and turn output grouping. */
   supportsOutputMode?: boolean;
+
+  /** Sends notifications without receiving messages or creating conversations. */
+  outboundOnly?: boolean;
+
+  /** Adapter-owned logical destination; endpoint credentials stay in config. */
+  defaultDeliveryTarget?: {
+    type: 'user' | 'chat';
+    id: string;
+    label?: string;
+  };
 
   /** Serializable metadata for safe configuration management. */
   management?: ChannelManagementDescriptor;

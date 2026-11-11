@@ -3578,6 +3578,125 @@ describe('GitHub per-repository settings', () => {
       'Enter a number greater than 0 and at most 86400000.',
     );
   });
+
+  it('words an inclusive floor as "at least", not "greater than"', async () => {
+    // Naming the exclusive bound here would tell the operator "greater than
+    // -1" — a floor the validator does not enforce, and one that reads as if
+    // -0.5 were legal.
+    const inclusive: DaemonChannelTypeDescriptor = {
+      type: 'example',
+      displayName: 'Example',
+      manageable: true,
+      fields: [
+        {
+          key: 'reserve',
+          label: 'Reserve',
+          kind: 'number',
+          minimum: 0,
+          maximum: 5000,
+        },
+      ],
+    };
+    await renderDialog({ descriptor: inclusive });
+    await act(async () => {
+      setInputValue(inputByLabel('Reserve')!, '-0.5');
+    });
+    await save();
+
+    expect(document.body.textContent).toContain(
+      'Enter a number at least 0 and at most 5000.',
+    );
+    expect(document.body.textContent).not.toContain('greater than');
+  });
+
+  it('names the exclusive floor on a tie, because equality is rejected', async () => {
+    // Both bounds at 5: the validator rejects 5, so "at least 5" would name a
+    // floor it does not enforce — the very defect this change removes.
+    const tie: DaemonChannelTypeDescriptor = {
+      type: 'example',
+      displayName: 'Example',
+      manageable: true,
+      fields: [
+        {
+          key: 'reserve',
+          label: 'Reserve',
+          kind: 'number',
+          exclusiveMinimum: 5,
+          minimum: 5,
+          maximum: 10,
+        },
+      ],
+    };
+    await renderDialog({ descriptor: tie });
+    await act(async () => {
+      setInputValue(inputByLabel('Reserve')!, '5');
+    });
+    await save();
+
+    expect(document.body.textContent).toContain(
+      'Enter a number greater than 5 and at most 10.',
+    );
+    expect(document.body.textContent).not.toContain('at least');
+  });
+
+  it('names the exclusive floor when it is stricter than the inclusive one', async () => {
+    // Dropping the comparison entirely would always name the inclusive bound,
+    // and here that is the weaker one: the validator rejects 5, so "at least
+    // 2" would advertise a value the save refuses.
+    const weakerInclusive: DaemonChannelTypeDescriptor = {
+      type: 'example',
+      displayName: 'Example',
+      manageable: true,
+      fields: [
+        {
+          key: 'reserve',
+          label: 'Reserve',
+          kind: 'number',
+          exclusiveMinimum: 5,
+          minimum: 2,
+          maximum: 10,
+        },
+      ],
+    };
+    await renderDialog({ descriptor: weakerInclusive });
+    await act(async () => {
+      setInputValue(inputByLabel('Reserve')!, '3');
+    });
+    await save();
+
+    expect(document.body.textContent).toContain(
+      'Enter a number greater than 5 and at most 10.',
+    );
+    expect(document.body.textContent).not.toContain('at least');
+  });
+
+  it('names the inclusive floor when it is strictly above the exclusive one', async () => {
+    const both: DaemonChannelTypeDescriptor = {
+      type: 'example',
+      displayName: 'Example',
+      manageable: true,
+      fields: [
+        {
+          key: 'reserve',
+          label: 'Reserve',
+          kind: 'number',
+          exclusiveMinimum: 0,
+          minimum: 2,
+          maximum: 10,
+        },
+      ],
+    };
+    await renderDialog({ descriptor: both });
+    await act(async () => {
+      setInputValue(inputByLabel('Reserve')!, '1');
+    });
+    await save();
+
+    expect(document.body.textContent).toContain(
+      'Enter a number at least 2 and at most 10.',
+    );
+    expect(document.body.textContent).not.toContain('greater than');
+  });
 });
 
 describe('Channel editor progressive disclosure', () => {
@@ -4357,6 +4476,43 @@ describe('ChannelEditorDialog WeChat login', () => {
     // Descriptor labels are English, so a missing i18n key would surface them.
     expect(labels.some((text) => text.includes('Group Policy'))).toBe(false);
   });
+
+  it.each(['en', 'zh-CN'] as const)(
+    'tells the operator the allowlist is optional and wants a platform id in %s',
+    async (language) => {
+      // The shared copy says "stable user IDs", which reads as a WeChat handle
+      // and yields a silently inert entry. The platform override must say the
+      // field can stay empty, name the pairing block, and show the id shape.
+      await renderDialog({
+        descriptor: WEIXIN,
+        weixinLogin: loginApi(),
+        language,
+      });
+
+      const text = document.body.textContent ?? '';
+      if (language === 'zh-CN') {
+        expect(text).toContain('预先放行的用户（可留空）');
+        expect(text).toContain('建议留空');
+        expect(text).toContain('待处理的配对请求');
+        expect(text).toContain('填微信号或昵称不会生效');
+      } else {
+        expect(text).toContain('Pre-approved users (optional)');
+        expect(text).toContain('Leave empty');
+        expect(text).toContain('Pending requests');
+        expect(text).toContain('A WeChat name or handle does not match');
+      }
+      // Both locales show the id shape, and neither falls back to the shared
+      // wording that caused the confusion.
+      expect(text).toContain('oAbCd…@im.wechat');
+      expect(text).not.toContain('Comma-separated stable user IDs');
+      expect(text).not.toContain('用英文逗号分隔稳定用户 ID');
+
+      const input = inputByLabel(
+        language === 'zh-CN' ? '预先放行的用户' : 'Pre-approved users',
+      );
+      expect(input?.getAttribute('placeholder')).toBe('oAbCd…@im.wechat');
+    },
+  );
 });
 
 /**

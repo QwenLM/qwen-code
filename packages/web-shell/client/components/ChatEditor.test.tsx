@@ -3286,11 +3286,18 @@ describe('ChatEditor Plan toolbar switch fallback', () => {
         .querySelector<HTMLButtonElement>('[data-web-shell-mode-button]')
         ?.click(),
     );
+    expect(
+      document.querySelector('[data-web-shell-mode-popover]'),
+    ).not.toBeNull();
     const buttons = Array.from(
       document.querySelectorAll<HTMLButtonElement>(
         '[data-web-shell-toolbar-popover] button',
       ),
     );
+    const fullAccess = buttons.find((button) =>
+      button.textContent?.includes('(yolo)'),
+    );
+    expect(fullAccess?.className).toContain('dropdownItemDanger');
     const labels = buttons.map((button) => button.textContent ?? '');
     expect(labels.some((label) => label.includes('(plan)'))).toBe(false);
     for (const mode of ['default', 'auto-edit', 'auto', 'yolo']) {

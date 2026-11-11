@@ -1547,7 +1547,8 @@ public class SurfaceAdmissionAcceptanceTest {
             query.add("expectedScopeRevision=" + digest());
             query.add("uploadId=11111111-1111-4111-8111-111111111111");
         }
-        if (entry.capabilities().contains(Capability.EXTENSION_PUBLISH)) {
+        if (entry.capabilities().contains(Capability.EXTENSION_PUBLISH)
+                && entry != SurfaceRegistry.PUBLIC_EXTENSION_SOURCE_IMPORT) {
             if (entry.template().contains("/imports")) {
                 String metadata = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(
                         ("{\"sourceKind\":\"skill\",\"sourceDigest\":\"" + digest() + "\",\"compilerVersion\":1,"
@@ -1596,10 +1597,14 @@ public class SurfaceAdmissionAcceptanceTest {
             default -> post(path);
         };
         request.header(TenantContextFilter.HEADER, headerTenant);
+        if (entry == SurfaceRegistry.PUBLIC_EXTENSION_SOURCE_LOOKUP) {
+            request.header("Idempotency-Key", nextKey());
+        }
         if ("POST".equals(entry.method()) || "PATCH".equals(entry.method()) || "PUT".equals(entry.method())) {
             boolean octets = entry.capabilities().contains(
                     Capability.PUB_SEGMENT) || entry.capabilities().contains(
-                    Capability.PUB_RESOURCE) || entry.capabilities().contains(Capability.EXTENSION_PUBLISH)
+                    Capability.PUB_RESOURCE) || (entry.capabilities().contains(Capability.EXTENSION_PUBLISH)
+                    && entry != SurfaceRegistry.PUBLIC_EXTENSION_SOURCE_IMPORT)
                     || entry.capabilities().contains(Capability.WORKSPACE_FILES_UPLOAD);
             request.contentType(octets ? MediaType.APPLICATION_OCTET_STREAM
                     : MediaType.APPLICATION_JSON);
@@ -1633,6 +1638,10 @@ public class SurfaceAdmissionAcceptanceTest {
 
     private String bodyFor(SurfaceRegistry entry, String tenant,
             String session) {
+        if (entry == SurfaceRegistry.PUBLIC_EXTENSION_SOURCE_IMPORT) {
+            return "{\"reference\":{\"providerId\":\"test\",\"kind\":\"skill\",\"resourceId\":\"source\",\"revision\":\"1\"},"
+                    + "\"target\":{\"platform\":\"linux\",\"arch\":\"any\"}}";
+        }
         if (entry == SurfaceRegistry.INTERNAL_WRITER_QUIESCE_OWNERSHIP
                 || entry == SurfaceRegistry.INTERNAL_WRITER_RELEASE_OWNERSHIP) {
             String scope = "\"workspaceId\":\"ws\",\"writerId\":\"boot-probe\",\"writerGeneration\":1,"
