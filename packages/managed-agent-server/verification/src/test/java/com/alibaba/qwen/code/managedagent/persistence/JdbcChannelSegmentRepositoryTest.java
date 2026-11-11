@@ -150,18 +150,69 @@ class JdbcChannelSegmentRepositoryTest {
 
     @Test
     void aBatchBackfillsExistingRowsAndCarriesReceiptsOnNewOnes() {
+        // The pre-existing null-receipt row sits at batch position 0 but
+        // carries ordinal 1, and the new row at position 1 carries ordinal 0,
+        // so neither skipping count-0 rows nor indexing the insert counts by
+        // ordinal instead of batch position can hide.
         segments.plan(tenant, channel, "d1",
-                List.of(new SegmentLedger("d1:0", 0, null)));
-        segments.receipt(tenant, channel, "d1", 0, "m0");
-        // One batch mixes a pre-existing row (insert ignored, backfill guarded
-        // by the per-row count) and a new row (the insert carries its receipt).
+                List.of(new SegmentLedger("d1:1", 1, null)));
         segments.plan(tenant, channel, "d1", List.of(
-                new SegmentLedger("d1:0", 0, "other"),
-                new SegmentLedger("d1:1", 1, "m1")));
+                new SegmentLedger("d1:1", 1, "m1"),
+                new SegmentLedger("d1:0", 0, "m0")));
         assertThat(segments.list(tenant, channel, "d1"))
                 .extracting(SegmentLedger::providerReceipt)
                 .containsExactly("m0", "m1");
         assertThat(count()).isEqualTo(2);
+    }
+
+    @Test
+    void aDriverReportingNoPerRowCountStillBackfills() {
+        segments.plan(tenant, channel, "d1",
+                List.of(new SegmentLedger("d1:0", 0, null)));
+        // A driver that reports SUCCESS_NO_INFO for the insert batch: the
+        // count is neither 1 (fresh insert) nor 0 (ignored), so the backfill
+        // must still run via the guarded update. Dropping the != 1 fallback
+        // (or turning it into == 0) leaves the receipt null and reds this case.
+        JdbcTemplate spied = org.mockito.Mockito.spy(jdbc);
+        org.mockito.Mockito.doReturn(
+                new int[]{java.sql.Statement.SUCCESS_NO_INFO})
+                .when(spied).batchUpdate(
+                        org.mockito.ArgumentMatchers.startsWith("INSERT IGNORE"),
+                        org.mockito.ArgumentMatchers.any(
+                                org.springframework.jdbc.core.BatchPreparedStatementSetter.class));
+        new JdbcChannelSegmentRepository(spied).plan(tenant, channel, "d1",
+                List.of(new SegmentLedger("d1:0", 0, "m0")));
+        assertThat(segments.list(tenant, channel, "d1").get(0).providerReceipt())
+                .isEqualTo("m0");
+    }
+
+    @Test
+    void aReclaimBatchesTheBackfillWithoutPerRowUpdates() {
+        segments.plan(tenant, channel, "d1", java.util.stream.IntStream.range(0, 3)
+                .mapToObj(i -> new SegmentLedger("d1:" + i, i, null)).toList());
+        segments.receipt(tenant, channel, "d1", 0, "m0");
+        segments.receipt(tenant, channel, "d1", 1, "m1");
+        segments.receipt(tenant, channel, "d1", 2, "m2");
+        // A re-claim where every row is pre-existing and receipted: the
+        // backfill must be one guarded batch, not a per-row UPDATE round trip
+        // per segment. Reverting it to per-row receiptOnce reds this case.
+        JdbcTemplate spied = org.mockito.Mockito.spy(jdbc);
+        new JdbcChannelSegmentRepository(spied).plan(tenant, channel, "d1",
+                java.util.stream.IntStream.range(0, 3)
+                        .mapToObj(i -> new SegmentLedger("d1:" + i, i, "m" + i))
+                        .toList());
+        // The backfill is one guarded batch (the Collection overload), not a
+        // per-row receiptOnce UPDATE per segment.
+        org.mockito.Mockito.verify(spied, org.mockito.Mockito.times(1))
+                .batchUpdate(
+                        org.mockito.ArgumentMatchers.startsWith("UPDATE ma_channel_segment"),
+                        org.mockito.ArgumentMatchers.any(java.util.Collection.class),
+                        org.mockito.ArgumentMatchers.anyInt(),
+                        org.mockito.ArgumentMatchers.any(
+                                org.springframework.jdbc.core.ParameterizedPreparedStatementSetter.class));
+        assertThat(segments.list(tenant, channel, "d1"))
+                .extracting(SegmentLedger::providerReceipt)
+                .containsExactly("m0", "m1", "m2");
     }
 
     @Test

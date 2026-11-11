@@ -422,29 +422,36 @@ public class ManagedChannelService {
         // that already lists every segment with a receipt has nothing left to
         // read from the record, so converge it from its own receipts and skip
         // the LONGTEXT read + parse + re-plan every sweep would otherwise pay
-        // (#16818 A).
-        if (!convergeFullyReceiptedFromLedger(tenantId, channelId, deliveryId,
-                claim.claimGeneration())) {
-            instances.findDeliveryRecord(tenantId, claim.sessionId(), deliveryId)
-                    .ifPresent(record -> {
-                        String json = instances.readResource(tenantId,
-                                claim.sessionId(), record.recordResourceId());
-                        JsonNode tree = json == null ? null
-                                : readJson(json, "channel delivery record");
-                        if (tree != null) {
-                            planSegments(tenantId, channelId, deliveryId, tree);
-                        }
-                        String state = record.deliveryState();
-                        if (!"planned".equals(state)) {
-                            stepLedger(tenantId, channelId, deliveryId, state,
-                                    "delivered".equals(state) && tree != null
-                                            ? lastSegmentReceipt(tree) : null,
-                                    claim.claimGeneration());
-                        }
-                    });
-        }
+        // (#16818 A). The delivery row is loaded once and threaded through;
+        // whenever a step occurs its returned row is adopted so the state
+        // acted on below stays fresh without a second point SELECT.
         Optional<ChannelDelivery> ledger = deliveries.find(tenantId,
                 channelId, deliveryId);
+        Optional<ChannelDelivery> converged = convergeFullyReceiptedFromLedger(
+                ledger, tenantId, channelId, deliveryId, claim.claimGeneration());
+        if (converged.isPresent()) {
+            ledger = converged;
+        } else {
+            var record = instances.findDeliveryRecord(tenantId,
+                    claim.sessionId(), deliveryId);
+            if (record.isPresent()) {
+                String json = instances.readResource(tenantId,
+                        claim.sessionId(), record.get().recordResourceId());
+                JsonNode tree = json == null ? null
+                        : readJson(json, "channel delivery record");
+                if (tree != null) {
+                    planSegments(tenantId, channelId, deliveryId, tree);
+                }
+                String state = record.get().deliveryState();
+                if (!"planned".equals(state)) {
+                    ledger = Optional.of(stepLedger(tenantId, channelId,
+                            deliveryId, state,
+                            "delivered".equals(state) && tree != null
+                                    ? lastSegmentReceipt(tree) : null,
+                            claim.claimGeneration()));
+                }
+            }
+        }
         if (ledger.isPresent() && "planned".equals(ledger.get().state())) {
             // The claim row committed but the claimed-delivery commit never
             // landed, and the lease already lapsed — the failed claim is
@@ -481,31 +488,32 @@ public class ManagedChannelService {
      * When the ledger already lists every segment with a receipt, the record
      * body has nothing left to converge: every segment is provably accepted,
      * so the delivery is delivered. Close a lagging line from the ledger's own
-     * receipts and return true so the caller skips the record read. This is
-     * the crash window where the last receipt landed but its step to delivered
-     * failed — converging from the ledger closes it without the LONGTEXT read.
-     * A missing row or any null receipt returns false: the record still has
-     * something to converge, so the caller keeps the read. Convergence stays
-     * ahead of the settle path that follows.
+     * receipts and return the fresh row so the caller skips the record read.
+     * This is the crash window where the last receipt landed but its step to
+     * delivered failed — converging from the ledger closes it without the
+     * LONGTEXT read. A missing row or any null receipt returns empty: the
+     * record still has something to converge, so the caller keeps the read.
+     * The caller passes the row it already loaded, so the gate adds no extra
+     * delivery point SELECT. Convergence stays ahead of the settle path.
      */
-    private boolean convergeFullyReceiptedFromLedger(String tenantId,
-            String channelId, String deliveryId, Long claimGeneration) {
-        Optional<ChannelDelivery> ledger = deliveries.find(tenantId, channelId,
-                deliveryId);
+    private Optional<ChannelDelivery> convergeFullyReceiptedFromLedger(
+            Optional<ChannelDelivery> ledger, String tenantId, String channelId,
+            String deliveryId, Long claimGeneration) {
         if (ledger.isEmpty()) {
-            return false;
+            return Optional.empty();
         }
         List<SegmentLedger> ledgerSegments = segments.list(tenantId, channelId,
                 deliveryId);
         if (ledgerSegments.isEmpty() || ledgerSegments.stream()
                 .anyMatch(segment -> segment.providerReceipt() == null)) {
-            return false;
+            return Optional.empty();
         }
         if (!"delivered".equals(ledger.get().state())) {
-            stepLedger(tenantId, channelId, deliveryId, "delivered",
-                    ledgerSegments.getLast().providerReceipt(), claimGeneration);
+            return Optional.of(stepLedger(tenantId, channelId, deliveryId,
+                    "delivered", ledgerSegments.getLast().providerReceipt(),
+                    claimGeneration));
         }
-        return true;
+        return ledger;
     }
 
     /** The last provider receipt the committed record holds, when any. */

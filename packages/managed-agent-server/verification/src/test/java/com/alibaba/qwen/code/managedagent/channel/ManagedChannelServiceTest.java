@@ -566,7 +566,12 @@ class ManagedChannelServiceTest {
         // The crash window: every segment receipt landed but the line's last
         // step to delivered failed, so the ledger lags at partial while every
         // segment holds a receipt. The sweep still selects a partial line.
-        jdbc.update("UPDATE ma_delivery SET transport_state = 'partial'"
+        // Clear the delivery receipt too: transition writes it via
+        // COALESCE(?, provider_receipt_json), so a preset value would survive
+        // whatever the gate forwards and the assertion below would not pin the
+        // gate's one durable write.
+        jdbc.update("UPDATE ma_delivery SET transport_state = 'partial',"
+                        + " provider_receipt_json = NULL"
                         + " WHERE tenant_id = ? AND delivery_id = ?",
                 TENANT, deliveryId);
         assertThat(segmentLedger.list(TENANT, channel, deliveryId))

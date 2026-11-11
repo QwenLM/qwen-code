@@ -84,19 +84,31 @@ public final class JdbcChannelSegmentRepository
                         return segments.size();
                     }
                 });
-        // A row the insert just created already carries the receipt; only a
+        // A row the insert just created already carries its receipt; only a
         // pre-existing row (insert ignored, count 0) needs the write-once
-        // backfill, which never overwrites a receipt it already holds. A
-        // driver that reports no per-row count (-2) falls back to the guarded
-        // update, a no-op on a row already receipted.
+        // backfill. A driver that reports no per-row count (SUCCESS_NO_INFO)
+        // also takes the guarded update, a no-op on a row already receipted.
+        // Batch the backfill like the insert: a re-claimed partial otherwise
+        // pays one no-op UPDATE round trip per receipted segment (#16818 B).
+        List<SegmentLedger> backfill = new ArrayList<>();
         for (int index = 0; index < segments.size(); index++) {
             SegmentLedger segment = segments.get(index);
-            if (segment.providerReceipt() == null) {
-                continue;
+            if (segment.providerReceipt() != null && inserted[index] != 1) {
+                backfill.add(segment);
             }
-            if (index >= inserted.length || inserted[index] != 1) {
-                receiptOnce(key, segment.ordinal(), segment.providerReceipt(), now);
-            }
+        }
+        if (!backfill.isEmpty()) {
+            jdbc.batchUpdate("UPDATE ma_channel_segment SET provider_receipt_json = ?,"
+                            + " gmt_modified = ? WHERE delivery_key = ?"
+                            + " AND segment_ordinal = ? AND provider_receipt_json IS NULL",
+                    backfill, backfill.size(),
+                    (statement, segment) -> {
+                        statement.setString(1, JdbcChannelDeliveryRepository
+                                .receiptJson(segment.providerReceipt()));
+                        statement.setLong(2, now);
+                        statement.setString(3, key);
+                        statement.setInt(4, segment.ordinal());
+                    });
         }
     }
 
@@ -169,14 +181,11 @@ public final class JdbcChannelSegmentRepository
                         + " ORDER BY delivery_key, segment_ordinal",
                 resultSet -> {
                     while (resultSet.next()) {
+                        // The same mapper list uses, so the two read paths can
+                        // never publish different segments for one delivery.
                         byDelivery.get(keyToDelivery.get(
                                 resultSet.getString("delivery_key")))
-                                .add(new SegmentLedger(
-                                        resultSet.getString("segment_id"),
-                                        resultSet.getInt("segment_ordinal"),
-                                        JdbcChannelDeliveryRepository.receipt(
-                                                resultSet.getString(
-                                                        "provider_receipt_json"))));
+                                .add(MAPPER.mapRow(resultSet, 0));
                     }
                     return byDelivery;
                 },

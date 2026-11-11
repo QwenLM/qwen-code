@@ -49,7 +49,9 @@ while every segment holds a receipt, and the sweep keeps selecting that
 record read; gating on the receipts alone and merely skipping the read would
 strand it at `partial`. Convergence stays ahead of the settle path: the gate
 runs before the existing record-read block, and the settle path that follows is
-unchanged.
+unchanged. The delivery row is loaded once and threaded through the gate and the
+settle path; whenever a step occurs its returned row is adopted, so the gate
+adds no extra delivery point SELECT on the common sweep path.
 
 ### B. Batch the plan inserts and the list read
 
@@ -59,16 +61,20 @@ drives the write-once backfill from the per-row counts: a row the insert just
 created (count 1) already carries its receipt, so only a pre-existing row
 (count 0, insert ignored) needs the guarded `UPDATE`. A driver that reports no
 per-row count (`SUCCESS_NO_INFO`, -2) falls back to the guarded update, which is
-a no-op on a row already receipted. The `provider_receipt_json IS NULL` guard is
-unchanged, so a replay or a racing second receipt never overwrites a stored
-receipt.
+a no-op on a row already receipted. The backfill is batched like the insert —
+one guarded `UPDATE` batch for the rows that need it — so a re-claimed partial
+does not pay a no-op statement round trip per receipted segment. The
+`provider_receipt_json IS NULL` guard is unchanged, so a replay or a racing
+second receipt never overwrites a stored receipt.
 
 The delivery-list N+1 is batched too: a new
 `ChannelSegmentRepository.listByDelivery` reads the whole page's segments in one
 `WHERE delivery_key IN (...)` query, grouped by deliveryId (each ordered by
 ordinal, every requested id keeping an entry — empty when it holds no segments).
-`listDeliveries` reads the page once instead of a segment query per row.
-`getDelivery` keeps the single-delivery `list` read.
+It maps rows through the same `RowMapper` that `list` uses, so the two read paths
+cannot publish different `segments` for one delivery. `listDeliveries` reads the
+page once instead of a segment query per row. `getDelivery` keeps the
+single-delivery `list` read.
 
 ## Files affected
 
@@ -101,16 +107,23 @@ ordinal, every requested id keeping an entry — empty when it holds no segments
 ## Verification plan
 
 - The gate's skip is pinned by a Mockito spy on a plain instance store: a
-  fully-receipted ledger whose line is forced back to `partial` (the crash
-  window) converges to `delivered` with the last segment's receipt while
-  `readResource` is verified never called; removing the gate reds it (the read
-  would run). A companion case with a null receipt verifies the read is kept.
+  fully-receipted ledger whose line is forced back to `partial` and whose
+  delivery receipt is cleared (the crash window) converges to `delivered` with
+  the last segment's receipt while `readResource` is verified never called;
+  removing the gate reds it (the read would run), and forwarding a null receipt
+  reds the receipt assertion (the fixture clears the column so the gate's write
+  is load-bearing, not a preset value surviving `COALESCE`). A companion case
+  with a null receipt verifies the read is kept.
 - The batched plan is pinned by the existing backfill/idempotence cases plus a
-  64-segment batch and a mixed batch (one pre-existing row backfilled, one new
-  row carrying its receipt); reverting the count-driven backfill reds the
-  backfill case. The MySQL gate reruns these on a real database.
+  64-segment batch and a mixed batch whose pre-existing null-receipt row sits at
+  a batch position different from its ordinal, so skipping count-0 rows or
+  indexing the counts by ordinal both red. A stubbed insert batch returning
+  `SUCCESS_NO_INFO` pins the no-per-row-count fallback. The backfill is batched,
+  so a re-claim issues one guarded `UPDATE` batch rather than a statement per
+  receipted segment. The MySQL gate reruns these on a real database.
 - The grouped list read is pinned by a multi-delivery page (one delivery empty)
-  asserting per-delivery grouping and ordinal order.
+  asserting per-delivery grouping and ordinal order, and maps through the same
+  `RowMapper` as `list`.
 - Checkstyle passes on the changed modules; the real-MySQL concurrency leg and
   full CI suites remain the verification baseline.
 
