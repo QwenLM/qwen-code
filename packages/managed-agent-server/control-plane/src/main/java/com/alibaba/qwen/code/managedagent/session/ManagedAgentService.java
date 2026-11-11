@@ -2128,14 +2128,6 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
         return ManagedUserMessagePolicy.normalizeInput(input);
     }
 
-    private static Object normalizeValue(Object value) {
-        return ManagedUserMessagePolicy.normalizeValue(value);
-    }
-
-    static String replaceLoneSurrogates(String text) {
-        return ManagedUserMessagePolicy.replaceLoneSurrogates(text);
-    }
-
     private static String metadataTitle(String explicitTitle,
             Map<String, Object> metadata) {
         if (metadata == null || metadata.isEmpty()) {

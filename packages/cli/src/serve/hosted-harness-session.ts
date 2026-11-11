@@ -8552,6 +8552,8 @@ export function registerHostedHarnessSessionRoutes(
             await loop.stop(stopSettle);
           await session.shell?.publisher?.close();
           await session.backgroundLane?.publisher?.close();
+          // Terminal on a close as on a delete; HostedMcpSession.closeResources
+          // says why that is safe.
           await session.mcp?.closeResources({ terminal: true });
         }
         res.json({

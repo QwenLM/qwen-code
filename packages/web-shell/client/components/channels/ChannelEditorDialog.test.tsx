@@ -14,6 +14,7 @@ import type {
   DaemonChannelTypeDescriptor,
   DaemonWorkspaceCapability,
 } from '@qwen-code/sdk/daemon';
+import { plugin as emailPlugin } from '@qwen-code/channel-email';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -112,6 +113,13 @@ const GITHUB_BOUND: DaemonChannelTypeDescriptor = {
       kind: 'boolean',
       default: 'false',
       description: 'Descriptor description for bound sessions',
+    },
+    {
+      key: 'requireBoundWatch',
+      label: 'Bound watch gate (descriptor)',
+      kind: 'boolean',
+      default: 'false',
+      description: 'Descriptor description for the bound watch gate',
     },
     {
       key: 'prWatchEvents',
@@ -351,7 +359,7 @@ const WORKSPACES: DaemonWorkspaceCapability[] = [
 ];
 
 const { ChannelEditorDialog } = await import('./ChannelEditorDialog');
-const { I18nProvider } = await import('../../i18n');
+const { I18nProvider, getTranslator } = await import('../../i18n');
 
 let container: HTMLDivElement;
 let root: Root;
@@ -827,6 +835,11 @@ describe('ChannelEditorDialog', () => {
     expect(labels.some((t) => t.includes('Deliver To PR-Bound Sessions'))).toBe(
       true,
     );
+    expect(
+      labels.some((t) =>
+        t.includes('Require Active Watch For Review/Verify Sessions'),
+      ),
+    ).toBe(true);
     expect(labels.some((t) => t.includes('PR Watch Events'))).toBe(true);
     // No descriptor fallback may leak through for these keys.
     expect(labels.some((t) => t.includes('(descriptor)'))).toBe(false);
@@ -850,6 +863,9 @@ describe('ChannelEditorDialog', () => {
       (l) => l.textContent ?? '',
     );
     expect(labels.some((t) => t.includes('投递到 PR 绑定会话'))).toBe(true);
+    expect(labels.some((t) => t.includes('评审/验证会话须有活跃监视'))).toBe(
+      true,
+    );
     expect(labels.some((t) => t.includes('PR 状态监视事件'))).toBe(true);
     expect(labels.some((t) => t.includes('(descriptor)'))).toBe(false);
     // With the `.description` keys dropped from BOTH locale maps the
@@ -918,6 +934,123 @@ describe('ChannelEditorDialog', () => {
     expect(document.body.textContent).toContain(
       '开启上方「投递到 PR 绑定会话」后即可选择监视事件。',
     );
+    expect(document.body.textContent).toContain(
+      '开启上方「投递到 PR 绑定会话」后即可要求活跃监视。',
+    );
+  });
+
+  it('disables the watch gate switch with an inline hint until delivery is on', async () => {
+    await renderDialog({ descriptor: GITHUB_BOUND });
+
+    const gate = fieldByLabel(
+      'Require Active Watch For Review/Verify Sessions',
+    ) as HTMLButtonElement;
+    expect(gate).not.toBeNull();
+    expect(gate.getAttribute('role')).toBe('switch');
+    expect(gate.disabled).toBe(true);
+    expect(document.body.textContent).toContain(
+      'Enable "Deliver To PR-Bound Sessions" above to require an active watch.',
+    );
+    const describedBy = gate.getAttribute('aria-describedby');
+    expect(describedBy).not.toBeNull();
+    expect(document.getElementById(describedBy!)?.textContent).toContain(
+      'above to require an active watch',
+    );
+
+    await act(async () => {
+      document
+        .querySelector<HTMLButtonElement>('button[role="switch"]')!
+        .click();
+    });
+
+    expect(gate.disabled).toBe(false);
+    expect(document.body.textContent).not.toContain(
+      'above to require an active watch.',
+    );
+  });
+
+  it('names the delivery dependency when a stored watch gate lacks it', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'github-bot',
+      config: {
+        type: 'github',
+        requireBoundWatch: true,
+      },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    await renderDialog({ descriptor: GITHUB_BOUND, instance, onSave });
+
+    const gate = fieldByLabel(
+      'Require Active Watch For Review/Verify Sessions',
+    ) as HTMLButtonElement;
+    expect(gate.getAttribute('aria-checked')).toBe('true');
+    // A stored true stays clearable while the prerequisite is off.
+    expect(gate.disabled).toBe(false);
+
+    const save = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Save',
+    );
+    await act(async () => {
+      save?.click();
+    });
+
+    expect(onSave).not.toHaveBeenCalled();
+    // The gate field's own message — not the prWatchEvents one, which names a
+    // control this operator never touched.
+    expect(document.body.textContent).toContain(
+      'Enable "Deliver To PR-Bound Sessions" to require an active watch.',
+    );
+    expect(document.body.textContent).not.toContain(
+      'to save the selected watch events.',
+    );
+
+    // Unticking the gate is itself a remedy: it re-derives the shown error
+    // without another Save (a valid draft must not keep a stale alert).
+    await act(async () => {
+      gate.click();
+    });
+    expect(gate.getAttribute('aria-checked')).toBe('false');
+    // The validation error is gone; the disabled hint (which says "above to
+    // require…") legitimately remains while delivery is still off.
+    expect(document.body.textContent).not.toContain(
+      'Enable "Deliver To PR-Bound Sessions" to require an active watch.',
+    );
+  });
+
+  it('keeps the gate hint live region mounted before the hint appears', async () => {
+    // A live region that enters the DOM already filled is never announced.
+    // The region must exist (empty) while delivery is on, then carry the hint
+    // when delivery toggles off — the same node throughout.
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'github-bot',
+      config: { type: 'github', deliverToBoundSessions: true },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    await renderDialog({ descriptor: GITHUB_BOUND, instance });
+
+    const gate = fieldByLabel(
+      'Require Active Watch For Review/Verify Sessions',
+    ) as HTMLButtonElement;
+    const region = Array.from(
+      document.querySelectorAll<HTMLElement>('span[aria-live="polite"]'),
+    ).find((node) => node.id.endsWith('-requireBoundWatch-disabled-hint'));
+    expect(region).toBeDefined();
+    expect(region!.textContent).toBe('');
+
+    // Toggle delivery off (the first switch).
+    await act(async () => {
+      document
+        .querySelector<HTMLButtonElement>('button[role="switch"]')!
+        .click();
+    });
+    expect(region!.isConnected).toBe(true);
+    expect(region!.textContent).toContain('above to require an active watch');
+    expect(gate.disabled).toBe(true);
   });
 
   it('saves the selected watch events once delivery is enabled', async () => {
@@ -3445,6 +3578,125 @@ describe('GitHub per-repository settings', () => {
       'Enter a number greater than 0 and at most 86400000.',
     );
   });
+
+  it('words an inclusive floor as "at least", not "greater than"', async () => {
+    // Naming the exclusive bound here would tell the operator "greater than
+    // -1" — a floor the validator does not enforce, and one that reads as if
+    // -0.5 were legal.
+    const inclusive: DaemonChannelTypeDescriptor = {
+      type: 'example',
+      displayName: 'Example',
+      manageable: true,
+      fields: [
+        {
+          key: 'reserve',
+          label: 'Reserve',
+          kind: 'number',
+          minimum: 0,
+          maximum: 5000,
+        },
+      ],
+    };
+    await renderDialog({ descriptor: inclusive });
+    await act(async () => {
+      setInputValue(inputByLabel('Reserve')!, '-0.5');
+    });
+    await save();
+
+    expect(document.body.textContent).toContain(
+      'Enter a number at least 0 and at most 5000.',
+    );
+    expect(document.body.textContent).not.toContain('greater than');
+  });
+
+  it('names the exclusive floor on a tie, because equality is rejected', async () => {
+    // Both bounds at 5: the validator rejects 5, so "at least 5" would name a
+    // floor it does not enforce — the very defect this change removes.
+    const tie: DaemonChannelTypeDescriptor = {
+      type: 'example',
+      displayName: 'Example',
+      manageable: true,
+      fields: [
+        {
+          key: 'reserve',
+          label: 'Reserve',
+          kind: 'number',
+          exclusiveMinimum: 5,
+          minimum: 5,
+          maximum: 10,
+        },
+      ],
+    };
+    await renderDialog({ descriptor: tie });
+    await act(async () => {
+      setInputValue(inputByLabel('Reserve')!, '5');
+    });
+    await save();
+
+    expect(document.body.textContent).toContain(
+      'Enter a number greater than 5 and at most 10.',
+    );
+    expect(document.body.textContent).not.toContain('at least');
+  });
+
+  it('names the exclusive floor when it is stricter than the inclusive one', async () => {
+    // Dropping the comparison entirely would always name the inclusive bound,
+    // and here that is the weaker one: the validator rejects 5, so "at least
+    // 2" would advertise a value the save refuses.
+    const weakerInclusive: DaemonChannelTypeDescriptor = {
+      type: 'example',
+      displayName: 'Example',
+      manageable: true,
+      fields: [
+        {
+          key: 'reserve',
+          label: 'Reserve',
+          kind: 'number',
+          exclusiveMinimum: 5,
+          minimum: 2,
+          maximum: 10,
+        },
+      ],
+    };
+    await renderDialog({ descriptor: weakerInclusive });
+    await act(async () => {
+      setInputValue(inputByLabel('Reserve')!, '3');
+    });
+    await save();
+
+    expect(document.body.textContent).toContain(
+      'Enter a number greater than 5 and at most 10.',
+    );
+    expect(document.body.textContent).not.toContain('at least');
+  });
+
+  it('names the inclusive floor when it is strictly above the exclusive one', async () => {
+    const both: DaemonChannelTypeDescriptor = {
+      type: 'example',
+      displayName: 'Example',
+      manageable: true,
+      fields: [
+        {
+          key: 'reserve',
+          label: 'Reserve',
+          kind: 'number',
+          exclusiveMinimum: 0,
+          minimum: 2,
+          maximum: 10,
+        },
+      ],
+    };
+    await renderDialog({ descriptor: both });
+    await act(async () => {
+      setInputValue(inputByLabel('Reserve')!, '1');
+    });
+    await save();
+
+    expect(document.body.textContent).toContain(
+      'Enter a number at least 2 and at most 10.',
+    );
+    expect(document.body.textContent).not.toContain('greater than');
+  });
 });
 
 describe('Channel editor progressive disclosure', () => {
@@ -4075,5 +4327,734 @@ describe('GitHub repository event filter', () => {
     };
     expect(request.config['repoFilterMode']).toBe('off');
     expect(request.config['repoFilter']).toEqual(['Owner/Parked']);
+  });
+});
+
+describe('ChannelEditorDialog WeChat login', () => {
+  // Mirrors the weixin plugin's management fields plus the shared controls the
+  // registry appends. Hand-built because @qwen-code/channel-weixin is not a
+  // web-shell devDependency; channel-editor-parity.test.ts owns the drift check
+  // for the platform it can import.
+  const WEIXIN: DaemonChannelTypeDescriptor = {
+    type: 'weixin',
+    displayName: 'WeChat',
+    manageable: true,
+    fields: [
+      {
+        key: 'groupPolicy',
+        label: 'Group Policy',
+        kind: 'enum',
+        required: true,
+        default: 'disabled',
+        options: [{ value: 'disabled', label: 'Disabled' }],
+      },
+      {
+        key: 'privatePolicy',
+        label: 'Private Policy',
+        kind: 'enum',
+        required: true,
+        default: 'pairing',
+        options: [
+          { value: 'disabled', label: 'Disabled' },
+          { value: 'pairing', label: 'Pairing' },
+          { value: 'allowlist', label: 'Allowlist' },
+          { value: 'open', label: 'Open' },
+        ],
+      },
+      { key: 'allowedUsers', label: 'Allowed Users', kind: 'string-list' },
+    ],
+  };
+
+  function loginApi() {
+    return {
+      status: vi.fn().mockResolvedValue({ enabled: true, configured: false }),
+      start: vi.fn(),
+      poll: vi.fn(),
+      cancel: vi.fn(),
+      revoke: vi.fn(),
+    };
+  }
+
+  async function saveDialog() {
+    const save = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Save',
+    );
+    await act(async () => {
+      save?.click();
+    });
+  }
+
+  it('renders the login panel for a WeChat channel', async () => {
+    const api = loginApi();
+    await renderDialog({ descriptor: WEIXIN, weixinLogin: api });
+
+    expect(api.status).toHaveBeenCalled();
+    expect(
+      document.querySelector('[data-testid="weixin-login-panel"]'),
+    ).not.toBeNull();
+    expect(document.body.textContent).toContain('Not logged in');
+  });
+
+  it('does not render the panel for other platforms', async () => {
+    const api = loginApi();
+    await renderDialog({ descriptor: DINGTALK, weixinLogin: api });
+
+    expect(api.status).not.toHaveBeenCalled();
+    expect(
+      document.querySelector('[data-testid="weixin-login-panel"]'),
+    ).toBeNull();
+  });
+
+  it('renders exactly one credentials heading for WeChat', async () => {
+    // The panel brings its own "Credentials" section. The field loop must not
+    // add a second one: groupPolicy/privatePolicy/allowedUsers are shared
+    // access fields and baseUrl is a connection field, so the loop's
+    // credentials section has no fields and does not render.
+    await renderDialog({ descriptor: WEIXIN, weixinLogin: loginApi() });
+
+    const headings = Array.from(document.querySelectorAll('h3')).filter(
+      (heading) => heading.textContent?.trim() === 'Credentials',
+    );
+    expect(headings).toHaveLength(1);
+  });
+
+  it('omits the panel when the host supplies no login API', async () => {
+    await renderDialog({ descriptor: WEIXIN });
+
+    expect(
+      document.querySelector('[data-testid="weixin-login-panel"]'),
+    ).toBeNull();
+  });
+
+  it('renders no credential input, because the token comes from QR login', async () => {
+    await renderDialog({ descriptor: WEIXIN, weixinLogin: loginApi() });
+
+    expect(document.querySelector('input[type="password"]')).toBeNull();
+    const labels = Array.from(document.querySelectorAll('label')).map(
+      (label) => label.textContent ?? '',
+    );
+    expect(labels.some((text) => /token|secret/i.test(text))).toBe(false);
+  });
+
+  it('saves a WeChat channel while logged out', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    await renderDialog({
+      descriptor: WEIXIN,
+      weixinLogin: loginApi(),
+      onSave,
+    });
+
+    await act(async () => {
+      setInputValue(inputByLabel('Instance name')!, 'my-weixin');
+    });
+    await saveDialog();
+
+    expect(onSave).toHaveBeenCalledTimes(1);
+    const [name, request] = onSave.mock.calls[0] as [
+      string,
+      { config: Record<string, unknown> },
+    ];
+    expect(name).toBe('my-weixin');
+    expect(request.config['type']).toBe('weixin');
+    // Login state must not gate configuration: the credential is independent.
+    expect(request.config['groupPolicy']).toBe('disabled');
+  });
+
+  it('localizes the WeChat field labels in zh-CN', async () => {
+    await renderDialog({
+      descriptor: WEIXIN,
+      weixinLogin: loginApi(),
+      language: 'zh-CN',
+    });
+
+    expect(document.body.textContent).toContain('未登录');
+    expect(document.body.textContent).toContain('扫码登录');
+    const labels = Array.from(document.querySelectorAll('label')).map(
+      (label) => label.textContent ?? '',
+    );
+    expect(labels.some((text) => text.includes('群聊策略'))).toBe(true);
+    // Descriptor labels are English, so a missing i18n key would surface them.
+    expect(labels.some((text) => text.includes('Group Policy'))).toBe(false);
+  });
+
+  it.each(['en', 'zh-CN'] as const)(
+    'tells the operator the allowlist is optional and wants a platform id in %s',
+    async (language) => {
+      // The shared copy says "stable user IDs", which reads as a WeChat handle
+      // and yields a silently inert entry. The platform override must say the
+      // field can stay empty, name the pairing block, and show the id shape.
+      await renderDialog({
+        descriptor: WEIXIN,
+        weixinLogin: loginApi(),
+        language,
+      });
+
+      const text = document.body.textContent ?? '';
+      if (language === 'zh-CN') {
+        expect(text).toContain('预先放行的用户（可留空）');
+        expect(text).toContain('建议留空');
+        expect(text).toContain('待处理的配对请求');
+        expect(text).toContain('填微信号或昵称不会生效');
+      } else {
+        expect(text).toContain('Pre-approved users (optional)');
+        expect(text).toContain('Leave empty');
+        expect(text).toContain('Pending requests');
+        expect(text).toContain('A WeChat name or handle does not match');
+      }
+      // Both locales show the id shape, and neither falls back to the shared
+      // wording that caused the confusion.
+      expect(text).toContain('oAbCd…@im.wechat');
+      expect(text).not.toContain('Comma-separated stable user IDs');
+      expect(text).not.toContain('用英文逗号分隔稳定用户 ID');
+
+      const input = inputByLabel(
+        language === 'zh-CN' ? '预先放行的用户' : 'Pre-approved users',
+      );
+      expect(input?.getAttribute('placeholder')).toBe('oAbCd…@im.wechat');
+    },
+  );
+});
+
+/**
+ * Email's access shape as the daemon ships it: the plugin declares
+ * `privatePolicy` without `pairing`, and the registry injects `groupPolicy`
+ * because the plugin does not declare it. The adapter builds every envelope
+ * with `isGroup: false`, so the injected group controls must not reach the
+ * operator.
+ *
+ * The credential labels are deliberately the raw config keys and the
+ * descriptions are deliberately not the final copy. `fieldLabel` and
+ * `fieldDescription` fall back to the descriptor, so a fixture carrying the
+ * finished English text would pass with the whole i18n layer deleted. The real
+ * plugin's own labels are pinned at the producer, by
+ * `packages/cli/src/commands/channel/email-baseline.test.ts`.
+ */
+const EMAIL: DaemonChannelTypeDescriptor = {
+  type: 'email',
+  displayName: 'Email',
+  manageable: true,
+  fields: [
+    { key: 'address', label: 'address', kind: 'string', required: true },
+    { key: 'imapHost', label: 'imapHost', kind: 'string', required: true },
+    {
+      key: 'imapPassword',
+      label: 'imapPassword',
+      kind: 'secret',
+      required: true,
+    },
+    {
+      key: 'smtpPassword',
+      label: 'smtpPassword',
+      kind: 'secret',
+      required: true,
+    },
+    {
+      key: 'imapSecure',
+      label: 'IMAP Implicit TLS',
+      kind: 'boolean',
+      default: 'true',
+      description: 'Descriptor description',
+    },
+    {
+      key: 'proactiveRecipients',
+      label: 'Proactive Recipients',
+      kind: 'string-list',
+      description: 'Descriptor description',
+    },
+    // The rest of the plugin's field table, so the locale sweep below renders
+    // every key FIELD_LABEL_KEYS.email maps rather than only the six the
+    // targeted assertions name.
+    { key: 'imapUser', label: 'imapUser', kind: 'string', required: true },
+    { key: 'smtpHost', label: 'smtpHost', kind: 'string', required: true },
+    { key: 'smtpUser', label: 'smtpUser', kind: 'string', required: true },
+    { key: 'folder', label: 'IMAP Folder', kind: 'string', default: 'INBOX' },
+    {
+      key: 'imapPort',
+      label: 'IMAP Port',
+      kind: 'number',
+      exclusiveMinimum: 0,
+    },
+    {
+      key: 'smtpPort',
+      label: 'SMTP Port',
+      kind: 'number',
+      exclusiveMinimum: 0,
+    },
+    {
+      key: 'smtpSecure',
+      label: 'SMTP Implicit TLS',
+      kind: 'boolean',
+      default: 'true',
+      description: 'Descriptor description',
+    },
+    {
+      key: 'pollInterval',
+      label: 'Poll Interval (ms)',
+      kind: 'number',
+      exclusiveMinimum: 0,
+      default: '60000',
+    },
+    {
+      key: 'maxMessageBytes',
+      label: 'Message Size Limit (bytes)',
+      kind: 'number',
+      exclusiveMinimum: 0,
+    },
+    {
+      key: 'maxAttachmentBytes',
+      label: 'Attachment Size Limit (bytes)',
+      kind: 'number',
+      exclusiveMinimum: 0,
+    },
+    {
+      key: 'maxTextLength',
+      label: 'Text Character Limit',
+      kind: 'number',
+      exclusiveMinimum: 0,
+    },
+    {
+      key: 'privatePolicy',
+      label: 'Private Policy',
+      kind: 'enum',
+      required: true,
+      default: 'allowlist',
+      options: [
+        { value: 'disabled', label: 'Disabled' },
+        { value: 'allowlist', label: 'Allowlist' },
+        { value: 'open', label: 'Open' },
+      ],
+    },
+    {
+      key: 'groupPolicy',
+      label: 'Group Policy',
+      kind: 'enum',
+      required: true,
+      default: 'disabled',
+      options: [
+        { value: 'disabled', label: 'Disabled' },
+        { value: 'pairing', label: 'Pairing' },
+        { value: 'allowlist', label: 'Allowlist' },
+        { value: 'open', label: 'Open' },
+      ],
+    },
+    { key: 'allowedUsers', label: 'Allowed Users', kind: 'string-list' },
+    { key: 'operators', label: 'Session Operators', kind: 'string-list' },
+  ],
+};
+
+// Derive the checked field keys from the REAL plugin descriptor (not a hand
+// copy) so a newly declared Email field cannot silently escape the sweep.
+// privatePolicy uses the shared label; allowedUsers/operators are shared keys
+// that Email overrides with address-specific copy.
+const EMAIL_MAPPED_FIELDS = [
+  ...(emailPlugin.management?.fields ?? [])
+    .map((f) => f.key)
+    .filter((k) => k !== 'privatePolicy'),
+  'allowedUsers',
+  'operators',
+];
+const EMAIL_INSTANCE: DaemonChannelInstanceSnapshot = {
+  name: 'agent-mail',
+  config: {
+    type: 'email',
+    address: 'agent@example.com',
+    imapHost: 'imap.example.com',
+    imapUser: 'agent@example.com',
+    smtpHost: 'smtp.example.com',
+    smtpUser: 'agent@example.com',
+    privatePolicy: 'allowlist',
+  },
+  secrets: {
+    imapPassword: { present: true, source: 'environment' },
+    smtpPassword: { present: true, source: 'environment' },
+  },
+  startsWithServe: false,
+  runtime: { state: 'stopped' },
+};
+
+describe('Email channel editor', () => {
+  function labelTexts(): string[] {
+    return Array.from(document.querySelectorAll('label')).map(
+      (label) => label.textContent ?? '',
+    );
+  }
+
+  it('renders readable English labels instead of raw config keys', async () => {
+    await renderDialog({ descriptor: EMAIL, instance: EMAIL_INSTANCE });
+
+    const labels = labelTexts();
+    expect(labels.some((t) => t.includes('Mailbox Address'))).toBe(true);
+    expect(labels.some((t) => t.includes('IMAP Host'))).toBe(true);
+    expect(labels.some((t) => t.includes('IMAP Password'))).toBe(true);
+    expect(labels.some((t) => t.includes('SMTP Password'))).toBe(true);
+    // The descriptor used to carry `label: key` for all seven required fields.
+    // Exact match on the star-stripped label: a raw fallback renders exactly the
+    // key, while a legitimate label like "Allowed email addresses" merely
+    // contains "address" as a substring and must not trip the guard.
+    const normalized = labels.map((t) => t.replace(/\*+$/, '').trim());
+    for (const raw of [
+      'address',
+      'imapHost',
+      'imapUser',
+      'smtpHost',
+      'smtpUser',
+      'imapPassword',
+      'smtpPassword',
+    ]) {
+      expect(normalized).not.toContain(raw);
+    }
+    expect(document.body.textContent ?? '').not.toContain(
+      'Descriptor description',
+    );
+    expect(descriptionOf(fieldByLabel('IMAP Implicit TLS'))).toContain(
+      'STARTTLS is mandatory',
+    );
+    expect(descriptionOf(fieldByLabel('Proactive Recipients'))).toContain(
+      'Empty disables proactive email',
+    );
+  });
+
+  it('renders readable zh-CN labels instead of raw config keys', async () => {
+    await renderDialog({
+      descriptor: EMAIL,
+      instance: EMAIL_INSTANCE,
+      language: 'zh-CN',
+    });
+
+    const labels = labelTexts();
+    expect(labels.some((t) => t.includes('邮箱地址'))).toBe(true);
+    expect(labels.some((t) => t.includes('IMAP 服务器'))).toBe(true);
+    expect(labels.some((t) => t.includes('IMAP 密码'))).toBe(true);
+    expect(labels.some((t) => t.includes('SMTP 密码'))).toBe(true);
+    const normalized = labels.map((t) => t.replace(/\*+$/, '').trim());
+    for (const raw of [
+      'address',
+      'imapHost',
+      'imapUser',
+      'smtpHost',
+      'smtpUser',
+      'imapPassword',
+      'smtpPassword',
+    ]) {
+      expect(normalized).not.toContain(raw);
+    }
+    // getTranslator resolves messages[key] ?? EN[key] ?? key, so a zh-CN gap
+    // renders the ENGLISH copy, not the descriptor. These per-locale label and
+    // description assertions are therefore what pin the translation; the
+    // both-locale sweep below cannot see a single-locale gap.
+    expect(document.body.textContent ?? '').not.toContain(
+      'Descriptor description',
+    );
+    expect(descriptionOf(fieldByLabel('IMAP 隐式 TLS'))).toContain(
+      '关闭后必须使用 STARTTLS',
+    );
+    expect(descriptionOf(fieldByLabel('SMTP 隐式 TLS'))).toContain(
+      '关闭后必须使用 STARTTLS',
+    );
+    expect(descriptionOf(fieldByLabel('主动投递收件人'))).toContain(
+      '留空则禁用主动投递邮件',
+    );
+    expect(descriptionOf(fieldByLabel('允许的邮箱地址'))).toContain(
+      '裸邮箱地址',
+    );
+  });
+
+  it('renders every mapped Email label from the catalog in both locales', async () => {
+    // This sweep catches a key missing from BOTH locale maps: getTranslator
+    // falls back to EN before it returns the raw key, so a single-locale gap
+    // renders English and stays green here — the targeted per-locale
+    // assertions above pin each language. What this adds is the both-missing
+    // case across the WHOLE map, where the operator would see the raw catalog
+    // key as the field's label.
+    // The fixture must carry every field the real plugin declares, so a new
+    // plugin field cannot escape the sweep by being absent from the fixture.
+    for (const key of emailPlugin.management?.fields ?? []) {
+      expect(EMAIL.fields.some((f) => f.key === key.key)).toBe(true);
+    }
+    for (const [language, advancedLabel] of [
+      ['en', 'Advanced settings'],
+      ['zh-CN', '高级设置'],
+    ] as const) {
+      await renderDialog({
+        descriptor: EMAIL,
+        instance: EMAIL_INSTANCE,
+        language,
+      });
+      await expandAdvancedSettings(advancedLabel);
+
+      const labels = labelTexts();
+      expect(
+        labels.filter((text) => text.includes('channels.editor.field.')),
+      ).toEqual([]);
+      // Guard against a vacuous sweep: the fields must actually have rendered.
+      expect(labels.length).toBeGreaterThan(15);
+
+      // Per-key, per-locale: the catalog must actually contain the key (a
+      // single-locale gap falls back to EN, which the raw-key sweep above
+      // cannot see), and the rendered label must be that catalog value. This
+      // is what pins each translation rather than only the both-missing case.
+      const t = getTranslator(language);
+      const en = getTranslator('en');
+      // Pin the field->label ASSOCIATION, not just the set of strings: each
+      // control's label carries htmlFor ending in the field key, so transposing
+      // two catalog entries (imapUser <-> smtpUser) must go red here even though
+      // both strings still appear once in the flattened list.
+      for (const field of EMAIL_MAPPED_FIELDS) {
+        const i18nKey = `channels.editor.field.email.${field}`;
+        const catalog = t(i18nKey);
+        expect(catalog).not.toBe(i18nKey);
+        const label = document.querySelector(`label[for$="-${field}"]`);
+        expect(label).not.toBeNull();
+        // Required labels render a trailing aria-hidden asterisk.
+        const text = (label?.textContent ?? '').replace(/\*+$/, '').trim();
+        expect(text).toBe(catalog);
+        // A zh-CN gap silently falls back to EN (rendered == catalog == EN), so
+        // requiring zh != en is what pins the zh catalog entry's presence.
+        if (language === 'zh-CN') expect(catalog).not.toBe(en(i18nKey));
+      }
+    }
+  });
+
+  it('files the mailbox endpoints under Connection, not Credentials', async () => {
+    await renderDialog({ descriptor: EMAIL, instance: EMAIL_INSTANCE });
+
+    expect(sectionHeadingOf(fieldByLabel('IMAP Host'))).toBe('Connection');
+    expect(sectionHeadingOf(fieldByLabel('SMTP Host'))).toBe('Connection');
+    expect(sectionHeadingOf(fieldByLabel('IMAP Port'))).toBe('Connection');
+    expect(sectionHeadingOf(fieldByLabel('SMTP Port'))).toBe('Connection');
+    expect(sectionHeadingOf(fieldByLabel('IMAP Implicit TLS'))).toBe(
+      'Connection',
+    );
+    expect(sectionHeadingOf(fieldByLabel('SMTP Implicit TLS'))).toBe(
+      'Connection',
+    );
+    expect(sectionHeadingOf(fieldByLabel('Mailbox Address'))).toBe(
+      'Credentials',
+    );
+  });
+
+  it('files mailbox tuning under Advanced, not Credentials', async () => {
+    await renderDialog({ descriptor: EMAIL, instance: EMAIL_INSTANCE });
+    await expandAdvancedSettings();
+
+    // The polled folder and the three size caps are rarely changed tuning,
+    // not credentials. Each must live in the advanced disclosure panel; if a
+    // key drops out of ADVANCED_FIELD_KEYS it falls back to Credentials and
+    // this assertion goes red.
+    for (const label of [
+      'IMAP Folder',
+      'Message Size Limit (bytes)',
+      'Attachment Size Limit (bytes)',
+      'Text Character Limit',
+    ]) {
+      const control = fieldByLabel(label);
+      expect(control).not.toBeNull();
+      const panel = control?.closest('[data-slot="collapsible"]');
+      expect(panel).not.toBeNull();
+      expect(panel?.textContent).toContain('Advanced settings');
+      expect(sectionHeadingOf(control)).not.toBe('Credentials');
+    }
+  });
+
+  it('offers no group control for a private-only channel', async () => {
+    await renderDialog({ descriptor: EMAIL, instance: EMAIL_INSTANCE });
+
+    const labels = labelTexts();
+    expect(labels.some((t) => t.includes('Group policy'))).toBe(false);
+    expect(labels.some((t) => t.includes('Allowed group IDs'))).toBe(false);
+    expect(labels.some((t) => t.includes('Who can talk in groups'))).toBe(
+      false,
+    );
+    // Direct-message access is still editable: only the group axis is inert.
+    expect(labels.some((t) => t.includes('Direct message policy'))).toBe(true);
+    // Email overrides the shared "user IDs / without pairing" copy with
+    // address-specific hints, since the adapter only accepts bare mailboxes.
+    expect(labels.some((t) => t.includes('Allowed email addresses'))).toBe(
+      true,
+    );
+    expect(labels.some((t) => t.includes('Session operator addresses'))).toBe(
+      true,
+    );
+    expect(descriptionOf(fieldByLabel('Allowed email addresses'))).toContain(
+      'bare mailbox addresses',
+    );
+    expect(
+      descriptionOf(fieldByLabel('Allowed email addresses')),
+    ).not.toContain('without pairing');
+  });
+
+  it('does not resurrect group controls from a stored pairing policy', async () => {
+    await renderDialog({
+      descriptor: EMAIL,
+      instance: {
+        ...EMAIL_INSTANCE,
+        config: {
+          ...EMAIL_INSTANCE.config,
+          groupPolicy: 'pairing',
+          groups: { '*': { senders: 'allowlist', allowedUsers: ['alice'] } },
+        },
+      },
+    });
+
+    const labels = labelTexts();
+    expect(labels.some((t) => t.includes('Group policy'))).toBe(false);
+    expect(labels.some((t) => t.includes('Allowed group IDs'))).toBe(false);
+    // The panel's real headings are "Pending requests" / "Pairing approvals";
+    // "Pairing requests" never renders, so asserting its absence was vacuous.
+    expect(document.body.textContent ?? '').not.toContain('Pending requests');
+    expect(document.body.textContent ?? '').not.toContain('Pairing approvals');
+  });
+
+  it('keeps the pairing panel closed when the descriptor lacks the group field', async () => {
+    // The registry always injects groupPolicy today, so the stored-config
+    // fallback arm of effectiveGroupPolicy is normally unreachable. Drive it
+    // anyway: with the field absent from the descriptor, only the private-only
+    // branch stops a stored 'pairing' from resurrecting the panel.
+    const noGroupDescriptor = {
+      ...EMAIL,
+      fields: EMAIL.fields.filter((f) => f.key !== 'groupPolicy'),
+    };
+    await renderDialog({
+      descriptor: noGroupDescriptor,
+      instance: {
+        ...EMAIL_INSTANCE,
+        config: {
+          ...EMAIL_INSTANCE.config,
+          groupPolicy: 'pairing',
+          groups: { '*': { senders: 'allowlist', allowedUsers: ['alice'] } },
+        },
+      },
+    });
+
+    expect(document.body.textContent ?? '').not.toContain('Pending requests');
+    expect(document.body.textContent ?? '').not.toContain('Pairing approvals');
+  });
+
+  it('offers exactly the three private policies the adapter supports', async () => {
+    await renderDialog({ descriptor: EMAIL, instance: EMAIL_INSTANCE });
+
+    const trigger = fieldByLabel('Direct message policy');
+    expect(trigger).not.toBeNull();
+    await act(async () => {
+      trigger!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    const options = Array.from(
+      document.querySelectorAll<HTMLElement>('[role="option"]'),
+    ).map((option) => option.textContent?.trim());
+    expect(options).toEqual(['Disabled', 'Allowlist', 'Open']);
+  });
+
+  it('renders proactive recipients as a comma-separated text input', async () => {
+    await renderDialog({ descriptor: EMAIL, instance: EMAIL_INSTANCE });
+
+    const input = inputByLabel('Proactive Recipients');
+    expect(input).not.toBeNull();
+    expect(input!.type).toBe('text');
+    expect(
+      document.querySelectorAll(
+        '[role="group"][aria-label="Proactive Recipients"]',
+      ).length,
+    ).toBe(0);
+  });
+
+  it('saves without writing a group policy', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    await renderDialog({
+      descriptor: EMAIL,
+      instance: EMAIL_INSTANCE,
+      onSave,
+    });
+
+    const save = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Save',
+    );
+    await act(async () => save?.click());
+
+    expect(onSave).toHaveBeenCalledTimes(1);
+    const request = onSave.mock.calls[0]![1] as {
+      config: Record<string, unknown>;
+      secrets: Record<string, { operation: string }>;
+    };
+    expect(request.config).not.toHaveProperty('groupPolicy');
+    expect(request.config).not.toHaveProperty('groups');
+    expect(request.config['privatePolicy']).toBe('allowlist');
+    expect(request.secrets['imapPassword']).toEqual({ operation: 'preserve' });
+    expect(request.secrets['smtpPassword']).toEqual({ operation: 'preserve' });
+  });
+
+  it('leaves the group controls on a group-capable sibling', async () => {
+    await renderDialog({ descriptor: DINGTALK_WITH_ACCESS });
+
+    const labels = labelTexts();
+    expect(labels.some((t) => t.includes('Group policy'))).toBe(true);
+  });
+});
+
+describe('QR bind inside the editor', () => {
+  it('closes the editor on a successful bind so the stale draft cannot unbind it', async () => {
+    // The draft is seeded from the pre-bind instance. Leaving the editor open
+    // would let the next Save submit the old empty credentials, which the
+    // upsert maps to a secret clear — silently undoing the bind.
+    const qqDescriptor: DaemonChannelTypeDescriptor = {
+      type: 'qq',
+      displayName: 'QQ',
+      manageable: true,
+      supportsQrLogin: true,
+      fields: [
+        { key: 'appID', label: 'App ID', kind: 'string' },
+        { key: 'appSecret', label: 'App Secret', kind: 'secret' },
+      ],
+    };
+    const instance = {
+      name: 'qq-bot',
+      config: { type: 'qq' },
+      secrets: { appSecret: { present: false } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' as const },
+    };
+    const pending = {
+      loginId: 'login-1',
+      channelType: 'qq',
+      channelName: 'qq-bot',
+      status: 'pending' as const,
+      expiresAt: 9_999_999,
+      qrCodeDataUrl: 'data:image/png;base64,AAAA',
+    };
+    const onOpenChange = vi.fn();
+    const onReload = vi.fn().mockResolvedValue(undefined);
+    const qrLoginActions = {
+      start: vi.fn().mockResolvedValue({ ...pending, attached: false }),
+      state: vi.fn().mockResolvedValue({
+        ...pending,
+        status: 'succeeded' as const,
+        qrCodeDataUrl: undefined,
+      }),
+      cancel: vi.fn(),
+    };
+    vi.useFakeTimers();
+    try {
+      await renderDialog({
+        descriptor: qqDescriptor,
+        instance: instance as never,
+        qrLoginActions,
+        onOpenChange,
+        onReload,
+      });
+      const scan = [...document.querySelectorAll('button')].find((b) =>
+        b.textContent?.includes('Scan to bind'),
+      );
+      expect(scan).toBeDefined();
+      await act(async () => {
+        scan!.click();
+      });
+      expect(onOpenChange).not.toHaveBeenCalled();
+      await act(async () => {
+        vi.advanceTimersByTime(2_000);
+      });
+      expect(onReload).toHaveBeenCalled();
+      expect(onOpenChange).toHaveBeenCalledWith(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

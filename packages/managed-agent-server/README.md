@@ -277,29 +277,23 @@ revalidation window: [English](../../docs/design/2026-10-02-managed-agent-query-
 
 ## Asynchronous tool publication verification
 
-Enable `qwen.managed-agent.tool-publication.async-verification-enabled`
-(default `false`) to use asynchronous admission. `verification-concurrency`
-defaults to `2` and controls the dedicated verifier pool, independently of
-retention and GC.
+Every producer operation (segment, resource, seal, prefix and finish) is
+admitted asynchronously. The server stores the inputs, returns HTTP 202 with
+`state: PENDING`, and a dedicated verifier pool reads back, scans and installs
+the result; `verification-concurrency` (default `2`) sizes that pool,
+independently of retention and GC. Clients poll the operation status until it
+is `SUCCEEDED`. `FAILED` carries only a safe `error: {status, code}` and must
+be handled as a terminal error, outside network retry handling. The adapter
+keeps awaiting verified success before completing publish, seal, prefix, or
+finish.
 
-Clients that support asynchronous verification send
-`X-Qwen-Tool-Publication-Async: 1` and poll the operation status after HTTP 202.
-Synchronous responses remain supported when asynchronous verification is
-disabled or the request does not opt in. A mode is saved
-when each operation is created, so retries do not change it. `FAILED` carries
-only a safe `error: {status, code}` and must be handled as a terminal error,
-outside network retry handling. The adapter keeps awaiting verified success
-before completing publish, seal, prefix, or finish.
+Historical success replay returns the prior receipt; actual reads and final
+integrity checks still validate current storage bytes.
 
-For rollback, disable new async admission and leave the verifier and head
-authorization running until accepted work drains. Do not downgrade the server
-while pending async operations still need verification. Historical async
-success replay returns the prior receipt; actual reads and final integrity
-checks still validate current storage bytes.
-
-Design and client migration contract:
-[English](../../docs/design/2026-10-07-managed-tool-publication-async-verification.md) |
-[简体中文](../../docs/design/2026-10-07-managed-tool-publication-async-verification.zh-CN.md).
+Design: [English](../../docs/design/2026-10-07-managed-tool-publication-async-verification.md) |
+[简体中文](../../docs/design/2026-10-07-managed-tool-publication-async-verification.zh-CN.md);
+single verification mode: [English](../../docs/design/2026-11-10-managed-tool-publication-single-verification-mode.md) |
+[简体中文](../../docs/design/2026-11-10-managed-tool-publication-single-verification-mode.zh-CN.md).
 
 ## Experimental reference distribution
 
@@ -2164,7 +2158,7 @@ Use the Session's **Manage MCP** entry or the MCP management page. Add or edit s
 
 Management reattaches only to a Session resident in the current Harness and never triggers cleanup, recovery or wake dispatch. After a Harness restart, continue or recover the Session through its normal execution flow first; management otherwise returns `hosted_mcp_session_load_required`. A new empty Session may initialize through management without sending a Turn. Command status never creates a Session, and uncertain creation never loads a cold journal implicitly. Cleanup-only recovery attachments also refuse management until a normal execution load upgrades them.
 
-The original AgentDefinition and Skills stay pinned. Explicit management commands append independent Session MCP settings revisions; they do not change other Sessions or future defaults. Each snapshot retains at most 32 server identities including removed tombstones, with at most 16 enabled selections; the existing shared Runtime connection quota still applies. Removed and disabled selections survive Session reload. Direct detach remains governed by the existing lifecycle protocol. The Session retains its original owner and MCP history until ordered close, so Plan remains unavailable after MCP management even when every server is removed. File/Shell tools, approvals, backups and rewind retain their ordinary behavior. Restart drains the selected connection before reconnecting, without restarting a shared worker.
+The original AgentDefinition and Skills stay pinned. Explicit management commands append independent Session MCP settings revisions; they do not change other Sessions or future defaults. Each snapshot retains at most 32 live selections (enabled or disabled) and at most 96 total entries including removed tombstones, with at most 16 enabled selections. The total bound is sized against the effective bundle, which carries the retained array once next to package views, prepared pins and catalogs; composed at the widest field values with 32 package views, 32 prepared pins and 16 base pins it measures about 63.9 KiB against that resource's 64 KiB write limit, and the existing shared Runtime connection quota still applies. Every carrier enforces that limit independently, and a bundle that would exceed it is refused before publication, leaving the previous active configuration in place. Removed and disabled selections survive Session reload. Direct detach remains governed by the existing lifecycle protocol. The Session retains its original owner and MCP history until ordered close, so Plan remains unavailable after MCP management even when every server is removed. File/Shell tools, approvals, backups and rewind retain their ordinary behavior. Restart drains the selected connection before reconnecting, without restarting a shared worker.
 
 Public routes are `GET /v1/agents/sessions/{sessionId}/mcp-management`, `POST /v1/agents/sessions/{sessionId}/mcp-management/commands` with `Idempotency-Key`, and `GET /v1/agents/sessions/{sessionId}/mcp-management/commands/{operationId}`. WebShell has corresponding POST query, submit and operation-query routes under `/api/agent/web-shell/v1/session-mcp/management/`. Commands include `action`, `serverId` and `expectedRevision`; add/edit also include the exact selected `server` pin. Management requires Workspace execution permission and a public active Session. The settings commit rechecks idle/Plan/lifecycle admission atomically; a static settings revision or catalog is not proof of a healthy connection.
 

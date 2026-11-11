@@ -98,6 +98,11 @@ interface Scenario {
   /** Text both runs' model requests must contain. */
   sent?: string;
   /**
+   * An intended difference on OpenTUI, listed in the design doc: text only
+   * the run with the setting on sends, in place of comparing the runs.
+   */
+  openTuiSends?: string;
+  /**
    * The model's reply to a streaming request, from its message history;
    * `index` counts this run's streaming requests, retries included.
    */
@@ -340,8 +345,6 @@ const hooks = (event: string, script: string) => ({
 const renderer = pickE2eRenderer();
 const describeTui = IS_CONTAINER_SANDBOX ? describe.skip : describe;
 const SUITE = `${renderer === 'ink' ? 'Ink' : 'OpenTUI'} TUI agent loop parity (experimental.unifiedAgentLoop)`;
-/** Ink runs its tool batches on the shared loop; OpenTUI does not yet. */
-const sharesToolBatches = renderer === 'ink';
 
 describeTui(SUITE, () => {
   let server: FakeOpenAIServer | undefined;
@@ -664,6 +667,8 @@ describeTui(SUITE, () => {
       // The second response repeats the first call's provider id and
       // arguments next to a fresh call, so the batch answers the replay.
       name: 'a replayed call next to a fresh one',
+      // OpenTUI's current path runs the replay again; the batch answers it.
+      openTuiSends: 'was already handled',
       requests: 3,
       rounds: 3,
       batches: 2,
@@ -1082,7 +1087,7 @@ describeTui(SUITE, () => {
     expect(current.sharedRounds).toBe(0);
     expect(shared.sharedRounds).toBe(scenario.rounds);
     expect(current.sharedBatches).toBe(0);
-    expect(shared.sharedBatches).toBe(sharesToolBatches ? scenario.batches : 0);
+    expect(shared.sharedBatches).toBe(scenario.batches);
     for (const run of [current, shared]) {
       expect(run.requests).toHaveLength(scenario.requests);
       if (scenario.sideRequests !== undefined)
@@ -1093,6 +1098,13 @@ describeTui(SUITE, () => {
         expect(JSON.stringify(run.records)).toContain(scenario.recorded);
       if (scenario.sent)
         expect(JSON.stringify(run.requests)).toContain(scenario.sent);
+    }
+    if (renderer === 'opentui' && scenario.openTuiSends) {
+      expect(JSON.stringify(shared.requests)).toContain(scenario.openTuiSends);
+      expect(JSON.stringify(current.requests)).not.toContain(
+        scenario.openTuiSends,
+      );
+      return;
     }
     expect(shared.requests).toEqual(current.requests);
     expect(shared.sideRequests).toEqual(current.sideRequests);
