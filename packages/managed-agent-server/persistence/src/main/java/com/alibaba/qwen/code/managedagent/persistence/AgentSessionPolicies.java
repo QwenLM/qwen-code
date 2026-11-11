@@ -573,7 +573,8 @@ final class AgentSessionPolicies {
         if (modelCatalog.stream().noneMatch(option -> option.modelId().equals(modelId))) {
             throw new ManagedAgentException(400, "unsupported_model", "The model is not published by this host");
         }
-        requirePolicyChange(session, false);
+        // 模型选择只影响后续受理，已受理回合继续使用自己的不可变模型快照。
+        requirePolicyChange(session, true);
         long current = jdbc.queryForObject("SELECT model_revision FROM ma_session WHERE tenant_id = ?"
                 + " AND session_id = ?", Long.class, tenantId, sessionId);
         if (current != expectedRevision || current >= 9_007_199_254_740_991L) {

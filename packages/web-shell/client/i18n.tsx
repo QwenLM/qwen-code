@@ -516,19 +516,14 @@ const EN: Messages = {
   'managed.model.optionsError': 'Could not load available models.',
   'managed.model.reload': 'Reload models',
   'managed.model.nextTurn':
-    'Change the model while idle. Your next message uses the selected model; conversation history is kept.',
+    'Your next message uses the selected model. An already running task keeps its model; conversation history is kept.',
   'managed.model.changing': 'Changing model…',
-  'managed.model.unconfirmed':
-    'The model change is not confirmed. Continue confirming the original request.',
-  'managed.model.confirm': 'Continue confirming',
   'managed.model.busy':
-    'Finish the active task, approval or unconfirmed request before changing model.',
-  'managed.model.storage':
-    'Browser session storage is unavailable. The model change cannot start safely.',
+    'Model changes are temporarily unavailable for this session. Try again shortly.',
   'managed.model.conflict':
     'The model has changed. Review the current selection and try again.',
   'managed.model.failed':
-    'The model change was refused. Review the available models and try again.',
+    'Could not change the model. Check the current selection and try again.',
   'managed.approvalOptionsLoading': 'Loading approval modes…',
   'managed.approvalOptionsLoadFailed': 'Could not load approval modes.',
   'managed.approvalOptionsInvalid':
@@ -5644,15 +5639,11 @@ const ZH: Messages = {
   'managed.model.optionsError': '加载可用模型失败。',
   'managed.model.reload': '重新加载模型',
   'managed.model.nextTurn':
-    '空闲时可切换模型；下一条消息使用所选模型，对话历史保留。',
+    '下一条消息使用所选模型；已经运行的任务保持原模型，对话历史保留。',
   'managed.model.changing': '正在切换模型…',
-  'managed.model.unconfirmed': '模型切换尚未确认，请继续确认原请求。',
-  'managed.model.confirm': '继续确认',
-  'managed.model.busy':
-    '请先完成正在执行的任务、审批或未确认请求，再切换模型。',
-  'managed.model.storage': '浏览器会话存储不可用，无法安全发起模型切换。',
+  'managed.model.busy': '当前会话暂时无法切换模型，请稍后重试。',
   'managed.model.conflict': '当前模型已变化，请检查选择后重试。',
-  'managed.model.failed': '模型切换被拒绝，请检查可用模型后重试。',
+  'managed.model.failed': '模型切换失败，请检查当前模型后重试。',
   'managed.approvalOptionsLoading': '正在加载审批策略…',
   'managed.approvalOptionsLoadFailed': '加载审批策略失败。',
   'managed.approvalOptionsInvalid': '服务返回了不支持的审批策略。',
