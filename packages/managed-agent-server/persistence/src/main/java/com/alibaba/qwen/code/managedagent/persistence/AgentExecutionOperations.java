@@ -21,7 +21,7 @@ import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceAccess;
-import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -809,8 +809,8 @@ final class AgentExecutionOperations {
                         result.getLong("sealed") > 0),
                 tenantId, sessionId,
                 JdbcManagedSessionStore.commandKeyHash(operation, commandId),
-                JdbcRuntimeBindingRepository.harnessDrainKey(tenantId),
-                JdbcRuntimeBindingRepository.harnessDrainKey(sessionId), tenantId,
+                RuntimeAdmissionFences.harnessDrainKey(tenantId),
+                RuntimeAdmissionFences.harnessDrainKey(sessionId), tenantId,
                 sessionId);
     }
 
