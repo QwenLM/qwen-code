@@ -25,10 +25,13 @@ jobs:
         uses: 'actions/setup-node@v4'
         with:
           node-version: 22
-          cache: 'npm'
+          package-manager-cache: false
+
+      - name: 'Enable Corepack'
+        run: 'corepack enable'
 
       - name: 'Install dependencies'
-        run: 'npm ci'
+        run: 'corepack pnpm install --frozen-lockfile'
 
       - name: 'Build Core'
         run: 'npm run build --workspace=@qwen-code/qwen-code-core'
