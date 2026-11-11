@@ -1864,6 +1864,66 @@ describe('stripAnalysisBlock', () => {
     expect(stripAnalysisBlock(input)).toBe(input);
   });
 
+  describe('reviewed boundary guards', () => {
+    const real = '<state_snapshot>REAL</state_snapshot>';
+    const draft = '<state_snapshot>DRAFT</state_snapshot>';
+
+    it.each(['think', 'thinking', 'reasoning'])(
+      'accepts an instructed preamble closed with %s after a lead-in',
+      (tag) => {
+        expect(
+          stripAnalysisBlock(`Sure! <analysis>\ndraft\n</${tag}>\n${real}`),
+        ).toBe(real);
+      },
+    );
+
+    it('keeps a mid-line instructed-tag mention after a quoted envelope closer', () => {
+      const input =
+        '<state_snapshot>\nThe format ends with </state_snapshot> verbatim.\n' +
+        'Note: the <analysis> tag is literal.\n</state_snapshot>';
+      expect(stripAnalysisBlock(input)).toBe(input);
+    });
+
+    it.each(['think', 'thinking', 'reasoning'])(
+      'does not close unfinished instructed analysis with %s quoted in the payload',
+      (tag) => {
+        expect(
+          stripAnalysisBlock(
+            '<analysis>draft\n<state_snapshot>\n' +
+              `<primary_request_and_intent>Use </${tag}> natively.` +
+              '</primary_request_and_intent>\n</state_snapshot>',
+          ),
+        ).toBe('');
+      },
+    );
+
+    it('rejects a refused envelope even when a lead-in remains', () => {
+      expect(
+        stripAnalysisBlock(
+          'Sure! <analysis>\ndraft\n<state_snapshot>\n' +
+            '<primary_request_and_intent>Use </think> natively.' +
+            '</primary_request_and_intent>\n</state_snapshot>',
+        ),
+      ).toBe('');
+    });
+
+    it.each<[string, string, string]>([
+      ['analysis', 'Note: <analysis>', 'Note: trailing prose summary'],
+      ['think', '<think>', 'trailing prose summary'],
+      ['thinking', '<thinking>', 'trailing prose summary'],
+      ['reasoning', '<reasoning>', 'trailing prose summary'],
+    ])(
+      'does not bind a draft inside a closed same-name %s block',
+      (tag, prefix, expected) => {
+        expect(
+          stripAnalysisBlock(
+            `${prefix}draft\n${draft}\n</${tag}>\ntrailing prose summary`,
+          ),
+        ).toBe(expected);
+      },
+    );
+  });
+
   it('drops scratchpad after a list marker or same-line prose prefix', () => {
     // The instructed tag is unambiguous wherever it starts; only the prefix
     // on its line survives.

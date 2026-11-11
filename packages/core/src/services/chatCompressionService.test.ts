@@ -1252,6 +1252,65 @@ describe('ChatCompressionService', () => {
   describe('PostCompact hook', () => {
     beforeEach(installHookSystem);
 
+    it.each<[string, string, string]>([
+      [
+        'native closer after a same-line lead-in',
+        'Sure! <analysis>\ndraft\n</think>\n<state_snapshot>REAL</state_snapshot>',
+        '<state_snapshot>REAL</state_snapshot>',
+      ],
+      [
+        'a prose mention after a quoted envelope closer',
+        '<state_snapshot>\nThe format ends with </state_snapshot> verbatim.\n' +
+          'Note: the <analysis> tag is literal.\n</state_snapshot>',
+        '<state_snapshot>\nThe format ends with </state_snapshot> verbatim.\n' +
+          'Note: the <analysis> tag is literal.\n</state_snapshot>',
+      ],
+      [
+        'a native closer quoted inside unfinished instructed analysis',
+        '<analysis>draft\n<state_snapshot>\n' +
+          '<primary_request_and_intent>Use </think> natively.' +
+          '</primary_request_and_intent>\n</state_snapshot>',
+        '',
+      ],
+      [
+        'a refused envelope with a lead-in',
+        'Sure! <analysis>\ndraft\n<state_snapshot>\n' +
+          '<primary_request_and_intent>Use </think> natively.' +
+          '</primary_request_and_intent>\n</state_snapshot>',
+        '',
+      ],
+      [
+        'a closed same-name block containing only a draft envelope',
+        'Note: <analysis>draft\n<state_snapshot>DRAFT</state_snapshot>' +
+          '\n</analysis>\ntrailing prose summary',
+        'Note: trailing prose summary',
+      ],
+    ])(
+      'preserves narrow summary boundaries through history and hook: %s',
+      async (_label, input, expected) => {
+        arrangeForced(input);
+        setWindow(200_000);
+        const result = await run({ force: true });
+        if (!expected) {
+          expectNoNewHistory(
+            result,
+            CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY,
+          );
+          expect(mockFirePostCompactEvent).not.toHaveBeenCalled();
+          return;
+        }
+        expectCompressed(result);
+        expect(result.newHistory![0].parts![0].text).toBe(
+          `${expected}\n\nResume the prior task using the summary above. Continue from the last in-flight step; do not acknowledge the summary, do not re-introduce, do not greet the user again.`,
+        );
+        expect(mockFirePostCompactEvent).toHaveBeenCalledWith(
+          PostCompactTrigger.Manual,
+          expected,
+          undefined,
+        );
+      },
+    );
+
     it('should fire PostCompact hook with Manual trigger when force=true', async () => {
       arrangeForced();
       await run({ force: true }); // force = true -> Manual trigger

@@ -562,7 +562,7 @@ const RESUME_TRAILER =
  */
 const REASONING_TAG_NAMES = '(?:analysis|think|thinking|reasoning)';
 const CLOSED_REASONING_BLOCK = new RegExp(
-  `(?<=^|\\n)[ \\t]*<${REASONING_TAG_NAMES}>[\\s\\S]*?<\\/${REASONING_TAG_NAMES}>\\s*`,
+  `(?<=^|\\n)[ \\t]*<(${REASONING_TAG_NAMES})>[\\s\\S]*?<\\/(${REASONING_TAG_NAMES})>\\s*`,
   'gi',
 );
 // The instructed tag also shows up closed mid-line, behind a lead-in like
@@ -591,16 +591,27 @@ const UNCLOSED_REASONING_BLOCK = new RegExp(
 const ENVELOPE_OPEN = '<state_snapshot>';
 const ENVELOPE_CLOSE = '</state_snapshot>';
 
-// Spans of every closed reasoning block in the text, so an envelope drafted
-// inside one can be recognized as discarded scratch and skipped.
-function closedReasoningSpans(text: string): Array<[number, number]> {
-  const spans: Array<[number, number]> = [];
+const CLOSED_PREAMBLE_ANALYSIS_BLOCK = new RegExp(
+  `<analysis>[\\s\\S]*?<\\/${REASONING_TAG_NAMES}>\\s*`,
+  'gi',
+);
+const OPEN_ANALYSIS_PREAMBLE =
+  /(?:^|\n)[ \t]*<analysis>|<analysis>[ \t]*(?=\n|$)/i;
+
+// Keep same-name closures distinct from native cross-pair artifacts.
+function closedReasoningSpans(text: string): Array<[number, number, boolean]> {
+  const spans: Array<[number, number, boolean]> = [];
   for (const pattern of [
     CLOSED_REASONING_BLOCK,
     CLOSED_ANALYSIS_BLOCK_ANYWHERE,
   ]) {
     for (const match of text.matchAll(pattern)) {
-      spans.push([match.index, match.index + match[0].length]);
+      spans.push([
+        match.index,
+        match.index + match[0].length,
+        pattern === CLOSED_ANALYSIS_BLOCK_ANYWHERE ||
+          match[1].toLowerCase() === match[2].toLowerCase(),
+      ]);
     }
   }
   return spans;
@@ -625,11 +636,9 @@ export function stripAnalysisBlock(rawSummary: string): string {
       closeAt = match.index;
     }
   }
-  // Every closer landing inside a reasoning span means the span boundaries
-  // are the artifact (an unterminated opener paired with a quoted or
-  // cross-name closer past the envelope), not proof the envelope is scratch.
-  // Bind the last closer anyway; dropping the envelope here fails the summary
-  // empty and strikes the consecutive-failure breaker.
+  // Cross-name spans can end at a quoted closer past the envelope. Keep a
+  // tentative bound; a same-name block enclosing the candidate is rejected
+  // below instead of treating every such span as a quoting artifact.
   if (closeAt === -1) {
     closeAt = lastCloseAt;
   }
@@ -641,6 +650,7 @@ export function stripAnalysisBlock(rawSummary: string): string {
   const hasOutOfSpanOpener = openers.some(
     (m) => !inReasoningSpan(openerStart(m)),
   );
+  let refusedEnvelope = false;
   for (const match of openers) {
     const start = openerStart(match);
     if (closeAt < start + ENVELOPE_OPEN.length) {
@@ -649,12 +659,13 @@ export function stripAnalysisBlock(rawSummary: string): string {
     if (!rawSummary.slice(start + ENVELOPE_OPEN.length, closeAt).trim()) {
       continue; // an empty span is a mention, not an envelope
     }
-    // An opener inside a closed reasoning block is normally a draft the
-    // model already discarded, but only skip it when a line-start opener
-    // outside every span exists. Otherwise the span is the artifact (a
-    // quoted or cross-name closer pairing) and this envelope is the only
-    // summary we have.
-    if (hasOutOfSpanOpener && inReasoningSpan(start)) {
+    if (
+      (hasOutOfSpanOpener && inReasoningSpan(start)) ||
+      reasoningSpans.some(
+        ([s, e, sameName]) =>
+          sameName && start >= s && start < e && closeAt >= s && closeAt < e,
+      )
+    ) {
       continue;
     }
     // A state_snapshot quoted inside an unclosed instructed scratchpad is a
@@ -665,9 +676,10 @@ export function stripAnalysisBlock(rawSummary: string): string {
     // text on the same line, is not an opener and does not refuse.
     const preamble = rawSummary
       .slice(0, start)
-      .replace(CLOSED_ANALYSIS_BLOCK_ANYWHERE, '')
+      .replace(CLOSED_PREAMBLE_ANALYSIS_BLOCK, '')
       .replace(CLOSED_REASONING_BLOCK, '');
-    if (/(?:^|\n)[ \t]*<analysis>|<analysis>[ \t]*(?=\n|$)/i.test(preamble)) {
+    if (OPEN_ANALYSIS_PREAMBLE.test(preamble)) {
+      refusedEnvelope = true;
       continue;
     }
     const end = closeAt + ENVELOPE_CLOSE.length;
@@ -716,7 +728,7 @@ export function stripAnalysisBlock(rawSummary: string): string {
       // An instructed tag still open in the gap is a scratchpad truncated
       // mid-draft; gluing the rebound closer on here would duplicate it.
       // Refuse this binding and let the generic passes strip the scratch.
-      if (/<analysis>/i.test(gap)) {
+      if (OPEN_ANALYSIS_PREAMBLE.test(gap)) {
         continue;
       }
     }
@@ -727,6 +739,7 @@ export function stripAnalysisBlock(rawSummary: string): string {
       suffix
     ).trim();
   }
+  if (refusedEnvelope) return '';
   // First pass: strip well-formed reasoning blocks (handles multiple via
   // `/g`, newlines via `[\s\S]`, any of the native closer tags above). The
   // instructed tag is stripped unanchored first, so a closed mid-line block
