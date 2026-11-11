@@ -6,8 +6,10 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import {
+  CI_PLUMBING_STEPS,
   GATE_FILES,
   TEXT_ACCEPT,
+  extractLintGateSlice,
   findStaleGateFiles,
   ignoreLines,
   renderReport,
@@ -945,4 +947,355 @@ test('relocating the ignores block never compares equal', async () => {
     });
     assert.equal(stale.length, 1);
   }
+});
+
+// --- ci.yml: the lint gate slice -------------------------------------------
+
+const CI_FILE = '.github/workflows/ci.yml';
+const CI_OPTS = { ...BASE_OPTS, gateFiles: [CI_FILE] };
+const MERGE_BASE_SHA = 'b'.repeat(40);
+const realCi = readFileSync(join(repoRoot, CI_FILE), 'utf8');
+
+// Serves the stale ci.yml verdict — whose compare already carries the merge
+// base — and the two content reads. Refs are pinned: the base side must be read
+// at the base TIP and the branch side at the MERGE BASE, so a fetch at the head
+// is a bug, not a match. A second compare is refused: the narrowing must reuse
+// the containment compare, because a fresh `base...head` one is ~4 MB here and
+// timed out against the live API.
+function ciFetch(baseText, branchText, calls = [], mergeBase = MERGE_BASE_SHA) {
+  return {
+    fetchJson: async (path) => {
+      calls.push(path);
+      if (path.startsWith('/repos/QwenLM/qwen-code/commits?'))
+        return commitsResponse(GATE_SHA);
+      if (path.startsWith(`/repos/QwenLM/qwen-code/compare/${GATE_SHA}...`))
+        return {
+          status: 'diverged',
+          merge_base_commit: mergeBase ? { sha: mergeBase } : undefined,
+        };
+      throw new Error(`unexpected json path: ${path}`);
+    },
+    fetchText: async (path) => {
+      calls.push(path);
+      const prefix = `/repos/QwenLM/qwen-code/contents/${CI_FILE}?ref=`;
+      if (path === `${prefix}main`) return baseText;
+      if (path === `${prefix}${MERGE_BASE_SHA}`) return branchText;
+      throw new Error(`unexpected text path: ${path}`);
+    },
+  };
+}
+
+// Replace one step's body inside the LINT JOB of the real workflow, so every
+// fixture keeps the surrounding structure the extractor has to parse. Scoped to
+// that job because several plumbing names repeat across jobs — the first match
+// in the file is usually a test lane, which the slice drops.
+function withStepText(name, from, to) {
+  const jobAt = realCi.indexOf('\n  lint_and_static:');
+  const jobEnd = realCi.indexOf('\n  web_shell_e2e_smoke:', jobAt);
+  const offset = realCi.indexOf(`      - name: '${name}'`, jobAt);
+  assert.ok(
+    offset > jobAt && offset < jobEnd,
+    `step ${name} not found in lint_and_static`,
+  );
+  const next = realCi.indexOf("\n      - name: '", offset + 1);
+  const end = next === -1 || next > jobEnd ? jobEnd : next;
+  const block = realCi.slice(offset, end);
+  assert.ok(block.includes(from), `${name} does not contain ${from}`);
+  return realCi.slice(0, offset) + block.replace(from, to) + realCi.slice(end);
+}
+
+test('extracts the lint gate slice from the real workflow', () => {
+  // Anchor-drift guard: a reformat that defeats the line anchors must redden
+  // here rather than silently disable the narrowing for every PR in CI.
+  const slice = extractLintGateSlice(realCi);
+  assert.ok(slice, 'lint gate slice not found in the real ci.yml');
+  for (const linter of [
+    'node scripts/lint.js --eslint',
+    'node scripts/lint.js --prettier',
+    'node scripts/lint.js --actionlint',
+    'node scripts/lint.js --shellcheck',
+    'node scripts/lint.js --yamllint',
+    'node scripts/lint.js --sensitive-keywords',
+  ]) {
+    assert.ok(slice.includes(linter), `slice dropped ${linter}`);
+  }
+  // The profile classifier and the helper-test lists are gate-defining too.
+  assert.ok(slice.includes('  classify_pr:'));
+  assert.ok(slice.includes('HELPER_TESTS_DEP_FREE'));
+  assert.ok(slice.includes('ACTIONLINT_VERSION'));
+  // Strictly smaller than the file: the point of the narrowing is that most of
+  // ci.yml is not this gate.
+  assert.ok(
+    slice.split('\n').length < realCi.split('\n').length / 2,
+    'the slice is not meaningfully narrower than the whole file',
+  );
+});
+
+test('every lint job step is classified, and no plumbing name is stale', () => {
+  // The two halves of the fail-closed contract. A step named in neither list
+  // stays in the slice (safe), but a plumbing name that no longer exists in the
+  // workflow silently excludes nothing and rots, so require each one to be
+  // real. And require every linter-running step to be OUT of the plumbing set,
+  // which is the misclassification that would hide a gate change.
+  const names = [...realCi.matchAll(/^ {6}- name: '([^']*)'\s*$/gm)].map(
+    (m) => m[1],
+  );
+  for (const name of CI_PLUMBING_STEPS) {
+    assert.ok(
+      names.includes(name),
+      `plumbing step '${name}' is not in ci.yml any more — drop the entry`,
+    );
+  }
+  const lintStart = realCi.indexOf('\n  lint_and_static:');
+  const lintEnd = realCi.indexOf('\n  web_shell_e2e_smoke:', lintStart);
+  const lintJob = realCi.slice(lintStart, lintEnd);
+  const blocks = lintJob.split(/\n(?= {6}- name: ')/);
+  for (const block of blocks) {
+    const name = /^ {6}- name: '([^']*)'/m.exec(block)?.[1];
+    if (!name || !CI_PLUMBING_STEPS.has(name)) continue;
+    assert.ok(
+      !/scripts\/lint\.js|node --test|npm run |prettier|eslint|actionlint|shellcheck|yamllint/.test(
+        block,
+      ),
+      `'${name}' is classified as plumbing but invokes a linter`,
+    );
+  }
+});
+
+test('a base-side runner-routing edit does not stale the branch', async () => {
+  // Mutation witness: removing ci.yml from NARROWINGS leaves this stale. This
+  // is the measured shape — 6 of 13 recent ci.yml commits were plumbing churn
+  // that asked every in-flight PR to rebase.
+  const calls = [];
+  const branch = realCi;
+  const base = withStepText(
+    'Restore workspace ownership',
+    'sudo -n chown',
+    'sudo -n -E chown',
+  );
+  const stale = await findStaleGateFiles({
+    ...CI_OPTS,
+    ...ciFetch(base, branch, calls),
+  });
+  assert.deepEqual(stale, []);
+  // The containment lookup and its compare, then the two content reads — no
+  // third compare. A fresh `base...head` compare is ~4 MB on this repo and
+  // timed out at curl's ceiling against the live API, which would have reached
+  // main()'s fail-open and discarded every other gate file's verdict.
+  assert.equal(calls.length, 4);
+  assert.equal(
+    calls.filter((c) => c.includes('/compare/')).length,
+    1,
+    'the narrowing must reuse the containment compare, not fetch a second one',
+  );
+});
+
+test('a base-side lint lane edit still stales the branch', async () => {
+  // Mutation witness: a slice that keeps only the job headers passes this
+  // wrongly — it would certify every branch against a changed Prettier lane,
+  // which is the #11117 → #11216 incident this check exists for.
+  const base = withStepText(
+    'Run Prettier',
+    'node scripts/lint.js --prettier',
+    'node scripts/lint.js --prettier --write',
+  );
+  const stale = await findStaleGateFiles({
+    ...CI_OPTS,
+    ...ciFetch(base, realCi),
+  });
+  assert.equal(stale.length, 1);
+  assert.equal(stale[0].file, CI_FILE);
+});
+
+test('a base-side helper-test list change still stales the branch', async () => {
+  // The workflow env is above `jobs:` and gate-defining: dropping a suite from
+  // HELPER_TESTS is a narrower gate, and the slice must see it.
+  const base = realCi.replace(
+    '  HELPER_TESTS: ',
+    "  HELPER_TESTS: '.github/scripts/check-ci-budget.test.mjs' #\n  HELPER_TESTS_UNUSED: ",
+  );
+  const stale = await findStaleGateFiles({
+    ...CI_OPTS,
+    ...ciFetch(base, realCi),
+  });
+  assert.equal(stale.length, 1);
+});
+
+test('a base-side profile classifier change still stales the branch', async () => {
+  // classify_pr decides which profile runs, and the profile decides which
+  // linters run, so it belongs in the slice even though it is a different job.
+  const base = realCi.replace(
+    '            docs_only|github_ci_only|full) ;;',
+    '            docs_only|github_ci_only|java_only|full) ;;',
+  );
+  assert.notEqual(base, realCi, 'classifier anchor not found');
+  const stale = await findStaleGateFiles({
+    ...CI_OPTS,
+    ...ciFetch(base, realCi),
+  });
+  assert.equal(stale.length, 1);
+});
+
+test('an unclassifiable step refuses the narrowing, and says so', async () => {
+  // Fail closed: an unnamed `- uses:` step cannot be classified, so the
+  // extractor must return null and the whole-file verdict must stand. A silent
+  // drop would hide whatever that step does.
+  const logged = [];
+  const original = console.log;
+  console.log = (m) => logged.push(String(m));
+  let stale;
+  try {
+    const base = realCi.replace(
+      "      - name: 'Run Prettier'",
+      "      - uses: './.github/actions/unknown'\n      - name: 'Run Prettier'",
+    );
+    stale = await findStaleGateFiles({
+      ...CI_OPTS,
+      ...ciFetch(base, realCi),
+    });
+  } finally {
+    console.log = original;
+  }
+  assert.equal(stale.length, 1);
+  assert.ok(
+    logged.some(
+      (m) =>
+        m.includes(`could not narrow ${CI_FILE}`) &&
+        m.includes('lint gate slice'),
+    ),
+    'an unclassifiable shape must annotate why the verdict was kept',
+  );
+});
+
+test('a plumbing step that invokes a linter refuses the narrowing', () => {
+  // The label is not trusted on its own: a step moved into the plumbing set
+  // while still running a linter would hide a real gate change.
+  const base = withStepText(
+    'Disk floor gate (self-hosted)',
+    "        run: 'bash .github/scripts/check-disk-floor.sh",
+    "        run: 'node scripts/lint.js --prettier && bash .github/scripts/check-disk-floor.sh",
+  );
+  assert.equal(extractLintGateSlice(base), null);
+});
+
+test('a missing gate job refuses the narrowing', () => {
+  // Renaming the lint job must not read as "no gate to compare".
+  assert.equal(
+    extractLintGateSlice(realCi.replace('\n  lint_and_static:', '\n  lint:')),
+    null,
+  );
+  assert.equal(
+    extractLintGateSlice(realCi.replace('\n  classify_pr:', '\n  classify:')),
+    null,
+  );
+  assert.equal(extractLintGateSlice('name: x\n'), null);
+});
+
+test('a duplicated job key refuses the narrowing', () => {
+  // YAML would take the last one; a Map that silently overwrites would compare
+  // a slice built from whichever copy the parser happened to keep.
+  const at = realCi.indexOf('\n  lint_and_static:');
+  const end = realCi.indexOf('\n  web_shell_e2e_smoke:', at);
+  const duplicated =
+    realCi.slice(0, end) + realCi.slice(at, end) + realCi.slice(end);
+  assert.equal(extractLintGateSlice(duplicated), null);
+});
+
+test('a dropped job key takes its block-scalar body with it', () => {
+  // `timeout-minutes` is plumbing, but its value can be a block scalar indented
+  // by only two spaces. A fixed six-space continuation test leaves that body
+  // orphaned under the preceding key — and a blank-line-swallowing scan runs
+  // past the NEXT key and drops gate content with it.
+  const jobAt = realCi.indexOf('\n  lint_and_static:');
+  const jobEnd = realCi.indexOf('\n  web_shell_e2e_smoke:', jobAt);
+  const job = realCi.slice(jobAt, jobEnd);
+  const patched = job.replace(
+    /^    timeout-minutes: .*$/m,
+    '    timeout-minutes: |-\n      45\n    env:\n      KEEP_ME: 1',
+  );
+  assert.notEqual(patched, job, 'timeout-minutes anchor not found');
+  const blockScalar = realCi.slice(0, jobAt) + patched + realCi.slice(jobEnd);
+  const slice = extractLintGateSlice(blockScalar);
+  assert.ok(slice, 'the block-scalar shape must still be parseable');
+  assert.ok(
+    !/^ {4}timeout-minutes:/m.test(slice),
+    'the job-level plumbing key must be gone',
+  );
+  // Step-level timeouts are gate content (a 5-minute actionlint cap), so only
+  // the four-space job key is dropped.
+  assert.ok(
+    /^ {8}timeout-minutes:/m.test(slice),
+    'step-level timeouts must survive',
+  );
+  assert.ok(
+    slice.includes('KEEP_ME: 1'),
+    'the scan must stop at the next key, not swallow it',
+  );
+});
+
+test('a comment-only base-side edit does not stale the branch', () => {
+  // Most of ci.yml's churn is prose. Only whole-line comments are dropped, so
+  // this is safe; a `#` inside a shell body is content and must survive.
+  const commented = realCi.replace(
+    "      - name: 'Run Prettier'",
+    "      # A new explanatory paragraph about the Prettier lane.\n      - name: 'Run Prettier'",
+  );
+  assert.equal(extractLintGateSlice(commented), extractLintGateSlice(realCi));
+  const inBody = withStepText(
+    'Use trusted CI profile',
+    '          profile="${TRUSTED_CI_PROFILE:-full}"',
+    '          profile="${TRUSTED_CI_PROFILE:-full}" # keep',
+  );
+  const inBodySlice = extractLintGateSlice(inBody);
+  assert.notEqual(inBodySlice, extractLintGateSlice(realCi));
+  assert.ok(
+    inBodySlice.includes('profile="${TRUSTED_CI_PROFILE:-full}" # keep'),
+    'a trailing comment inside a shell body is content, not a comment line',
+  );
+});
+
+test('a compare without a merge base keeps the verdict, and says so', async () => {
+  // Fail closed, not open: an absent merge_base_commit must not be read as
+  // "nothing to compare".
+  const logged = [];
+  const original = console.log;
+  console.log = (m) => logged.push(String(m));
+  let stale;
+  try {
+    stale = await findStaleGateFiles({
+      ...CI_OPTS,
+      ...ciFetch(realCi, realCi, [], null),
+    });
+  } finally {
+    console.log = original;
+  }
+  assert.equal(stale.length, 1);
+  assert.ok(
+    logged.some((m) => m.includes('no merge base commit')),
+    'a missing merge base must annotate why the verdict was kept',
+  );
+});
+
+test('the ci.yml slice is compared at the merge base, not at the head', async () => {
+  // A branch that edits the gate itself must not be flagged for its own edit:
+  // main will not carry that edit until the branch merges, so a head-side
+  // comparison would keep demanding a rebase that can never satisfy it. Here
+  // the branch's own copy weakens the Prettier lane while both sides of the
+  // comparison are clean, and the fake refuses any read at the head SHA — so
+  // fetching the head instead of the merge base fails rather than passing.
+  const branch = withStepText(
+    'Run Prettier',
+    'node scripts/lint.js --prettier',
+    'node scripts/lint.js --prettier --write',
+  );
+  assert.notEqual(
+    extractLintGateSlice(branch),
+    extractLintGateSlice(realCi),
+    'the fixture must actually change the gate',
+  );
+  const stale = await findStaleGateFiles({
+    ...CI_OPTS,
+    ...ciFetch(realCi, realCi),
+  });
+  assert.deepEqual(stale, []);
 });
