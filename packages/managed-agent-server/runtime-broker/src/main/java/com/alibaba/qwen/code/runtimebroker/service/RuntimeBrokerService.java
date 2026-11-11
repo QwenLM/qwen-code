@@ -1540,6 +1540,42 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
         return rows.isEmpty() ? null : rows.get(0);
     }
 
+    @Override
+    public CompletionStage<ToolExecutionRecord> abandonTerminalHold(
+            String harnessSessionId, String terminalId) {
+        requireOpen(closed);
+        String harness = BrokerValues.requirePathSafe(
+                BrokerValues.requireId(harnessSessionId, "harnessSessionId"),
+                "harnessSessionId");
+        String terminal = BrokerValues.requirePathSafe(
+                BrokerValues.requireId(terminalId, "terminalId"), "terminalId");
+        String runtime = "terminal-" + terminal;
+        return mapStoreFailure(safeStage(() -> acquire(harness, runtime, "bootstrap", null, null)
+                .thenCompose(ignored -> bindingRegistry.requireReadySession(harness, runtime))
+                .thenApply(context -> {
+                    context.lock();
+                    try {
+                        bindingRegistry.requireReadySessionRecord(context);
+                        ToolExecutionRecord active = activeTerminalHold(context);
+                        if (active == null) {
+                            return null;
+                        }
+                        requireTerminalHoldOwner(active, harness, runtime);
+                        // The attach never produced a PTY, so there is no exit
+                        // to prove; settle the hold directly instead of letting
+                        // it wedge on an unknown control answer.
+                        Map<String, Object> result = new LinkedHashMap<>();
+                        result.put("executionStatus", "success");
+                        result.put("responseParts", List.of());
+                        result.put("capture", null);
+                        return executionRepository.settlePrepared(
+                                active, result, clock.instant());
+                    } finally {
+                        context.unlock();
+                    }
+                })));
+    }
+
     public CompletionStage<ToolExecutionRecord> prepareCsiExecution(String harnessSessionId, String runtimeSessionId,
             String idempotencyKey, Map<String, Object> reference, byte[] inputBytes, byte[] definitionBytes) {
         requireOpen(closed);

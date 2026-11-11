@@ -81,12 +81,12 @@ public final class TerminalRelayHandler extends AbstractWebSocketHandler
                 closeQuietly(session, CloseStatus.SERVER_ERROR);
                 return;
             }
-            openWorker(session, relay, lease, workerUri);
+            openWorker(session, relay, lease, workerUri, sessionId, terminalId);
         });
     }
 
     private void openWorker(WebSocketSession session, Relay relay,
-            RuntimeLease lease, URI workerUri) {
+            RuntimeLease lease, URI workerUri, String sessionId, String terminalId) {
         try {
             client.newWebSocketBuilder()
                     .header("Authorization", "Bearer " + lease.getToken())
@@ -98,12 +98,29 @@ public final class TerminalRelayHandler extends AbstractWebSocketHandler
                     .whenComplete((worker, error) -> {
                         if (error != null) {
                             relay.fail();
+                            abandonHold(sessionId, terminalId);
                             closeQuietly(session, CloseStatus.SERVER_ERROR);
                         }
                     });
         } catch (RuntimeException error) {
             relay.fail();
+            abandonHold(sessionId, terminalId);
             closeQuietly(session, CloseStatus.SERVER_ERROR);
+        }
+    }
+
+    /** The worker refused the attach before a PTY existed; discharge the hold
+     * admitted ahead of it so a refused attach never leaves a permanent hold.
+     * Best-effort: a failure here leaves the hold to the drain, never masks
+     * the refused upgrade. */
+    private void abandonHold(String sessionId, String terminalId) {
+        try {
+            broker.abandonTerminalHold(sessionId, terminalId)
+                    .whenComplete((ignored, error) -> {
+                        // The drain remains the backstop if this cannot settle.
+                    });
+        } catch (RuntimeException ignored) {
+            // The drain remains the backstop.
         }
     }
 

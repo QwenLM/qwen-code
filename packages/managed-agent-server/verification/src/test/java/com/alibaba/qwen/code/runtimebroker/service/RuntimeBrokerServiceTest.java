@@ -2097,6 +2097,26 @@ class RuntimeBrokerServiceTest {
     }
 
     @Test
+    void terminalHoldAbandonDischargesARefusedAttach() throws Exception {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            ToolExecutionRecord hold = join(fixture.service.admitTerminalHold(
+                    "harness", "term-1"));
+            assertEquals(ToolExecutionRecord.State.PREPARED, hold.getState());
+            assertEquals("runtime_session_held",
+                    failure(fixture.service.release("harness", "terminal-term-1")).getCode());
+            // The worker refused the attach before a PTY existed; the control
+            // plane discharges the hold so it never wedges on an unknown answer.
+            ToolExecutionRecord abandoned = join(fixture.service.abandonTerminalHold(
+                    "harness", "term-1"));
+            assertEquals(ToolExecutionRecord.State.SETTLED, abandoned.getState());
+            // Abandoning again is a no-op: no active hold remains.
+            org.junit.jupiter.api.Assertions.assertNull(join(
+                    fixture.service.abandonTerminalHold("harness", "term-1")));
+            assertTrue(join(fixture.service.release("harness", "terminal-term-1")));
+        }
+    }
+
+    @Test
     void terminalHoldStopProvesExitWithTerminalKinds() throws Exception {
         try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
             join(fixture.service.admitTerminalHold("harness", "term-1"));

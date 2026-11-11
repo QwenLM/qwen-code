@@ -64,6 +64,15 @@ public interface RuntimeBrokerOperations {
     public CompletionStage<ToolExecutionRecord> admitTerminalHold(
             String harnessSessionId, String terminalId);
 
+    /** Discharges a terminal hold whose worker attach never succeeded. The
+     * hold is admitted before the worker terminal exists so a racing close
+     * cannot release the Runtime; when the attach is refused there is no PTY
+     * to prove an exit for, so the control plane settles the hold itself
+     * rather than leaving it to wedge on an {@code unknown} control answer.
+     * Returns null when no active hold remains. */
+    public CompletionStage<ToolExecutionRecord> abandonTerminalHold(
+            String harnessSessionId, String terminalId);
+
     public CompletionStage<ToolExecutionRecord> prepareCsiExecution(String harnessSessionId, String runtimeSessionId,
             String idempotencyKey, Map<String, Object> reference, byte[] inputBytes, byte[] definitionBytes);
 
