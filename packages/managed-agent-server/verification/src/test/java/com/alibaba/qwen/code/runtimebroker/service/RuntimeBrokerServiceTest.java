@@ -2068,6 +2068,35 @@ class RuntimeBrokerServiceTest {
     }
 
     @Test
+    void terminalHoldRecreateAfterSettlementAdmitsAFreshActiveHold() throws Exception {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            ToolExecutionRecord first = join(fixture.service.admitTerminalHold(
+                    "harness", "term-1"));
+            assertEquals("terminal-attach:term-1:process", first.getExecutionCallId());
+            Map<String, Object> exited = new LinkedHashMap<>();
+            exited.put("operationId", "term-1");
+            exited.put("state", "exited");
+            exited.put("evidence", Map.of("exitCode", 0));
+            fixture.transport.controlResult = CompletableFuture.completedFuture(exited);
+            ToolExecutionRecord settled = join(fixture.service.observeBackgroundProcess(
+                    "harness", "terminal-term-1", "terminal-attach:term-1"));
+            assertEquals(ToolExecutionRecord.State.SETTLED, settled.getState());
+            // A reconnect after settlement must admit a fresh ACTIVE hold: the
+            // settled one no longer protects a re-created PTY, so handing it
+            // back would let the Runtime retire under a live terminal.
+            ToolExecutionRecord recreated = join(fixture.service.admitTerminalHold(
+                    "harness", "term-1"));
+            org.junit.jupiter.api.Assertions.assertNotEquals(
+                    first.getExecutionCallId(), recreated.getExecutionCallId());
+            assertEquals(ToolExecutionRecord.State.PREPARED, recreated.getState());
+            assertEquals("terminal-term-1", recreated.getRuntimeSessionId());
+            // A further reconnect reuses the fresh hold instead of leaking another.
+            assertEquals(recreated.getExecutionCallId(), join(fixture.service.admitTerminalHold(
+                    "harness", "term-1")).getExecutionCallId());
+        }
+    }
+
+    @Test
     void terminalHoldStopProvesExitWithTerminalKinds() throws Exception {
         try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
             join(fixture.service.admitTerminalHold("harness", "term-1"));

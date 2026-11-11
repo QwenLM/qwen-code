@@ -1449,15 +1449,18 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
         String terminal = BrokerValues.requirePathSafe(
                 BrokerValues.requireId(terminalId, "terminalId"), "terminalId");
         // A terminal owns a deterministic Runtime Session of its own, so the
-        // relay never has to resolve one and a reconnect reuses the same hold.
+        // relay never has to resolve one. The deterministic process id is the
+        // cross-Session guard (a terminal id is only unique within a Session);
+        // the active hold is found through the Runtime Session so a reconnect
+        // reuses it, while a re-create after settlement admits a fresh hold
+        // instead of handing back a settled one that no longer protects a PTY.
         String runtime = "terminal-" + terminal;
-        String invocationId = "terminal-attach:" + terminal;
-        String processId = invocationId + ":process";
+        String baseInvocationId = "terminal-attach:" + terminal;
+        String baseProcessId = baseInvocationId + ":process";
         return mapStoreFailure(safeStage(() -> {
-            ToolExecutionRecord existing = executionRepository.findByExecutionCallId(processId);
-            if (existing != null) {
-                requireTerminalHoldOwner(existing, harness, runtime);
-                return CompletableFuture.completedFuture(existing);
+            ToolExecutionRecord base = executionRepository.findByExecutionCallId(baseProcessId);
+            if (base != null) {
+                requireTerminalHoldOwner(base, harness, runtime);
             }
             return acquire(harness, runtime, "bootstrap", null, null)
                     .thenCompose(ignored -> bindingRegistry.requireReadySession(harness, runtime))
@@ -1465,12 +1468,22 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                         context.lock();
                         try {
                             bindingRegistry.requireReadySessionRecord(context);
-                            ToolExecutionRecord again = executionRepository
-                                    .findByExecutionCallId(processId);
-                            if (again != null) {
-                                requireTerminalHoldOwner(again, harness, runtime);
-                                return again;
+                            ToolExecutionRecord baseAgain = executionRepository
+                                    .findByExecutionCallId(baseProcessId);
+                            if (baseAgain != null) {
+                                requireTerminalHoldOwner(baseAgain, harness, runtime);
                             }
+                            ToolExecutionRecord active = activeTerminalHold(context);
+                            if (active != null) {
+                                return active;
+                            }
+                            // The first attach keeps the deterministic identity;
+                            // a re-create after the previous hold settled takes
+                            // a fresh one so it never collides with that row.
+                            String invocationId = baseAgain == null
+                                    ? baseInvocationId
+                                    : baseInvocationId + ":" + UUID.randomUUID();
+                            String processId = invocationId + ":process";
                             String digest = "sha256:" + DigestUtils.sha256Hex(terminal);
                             Map<String, Object> reference = Map.of(
                                     "sessionId", runtime,
@@ -1509,6 +1522,22 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
             throw conflict("runtime_terminal_hold_conflict",
                     "Terminal hold belongs to another Session");
         }
+    }
+
+    /** The non-terminal hold of this terminal's dedicated Runtime Session, or
+     * null once the previous hold settled. A settled hold no longer protects a
+     * re-created PTY, so the caller must admit a fresh one rather than reuse it.
+     * The session carries at most one live terminal hold (admission is locked),
+     * so the first background row is that hold. */
+    private ToolExecutionRecord activeTerminalHold(SessionContext context) {
+        RuntimeSessionRecord session = sessionRepository.findById(
+                context.session().getScope(), context.session().getRuntimeSessionId());
+        if (session == null) {
+            return null;
+        }
+        List<ToolExecutionRecord> rows = executionRepository
+                .findBackgroundProcesses(session, null, 100);
+        return rows.isEmpty() ? null : rows.get(0);
     }
 
     public CompletionStage<ToolExecutionRecord> prepareCsiExecution(String harnessSessionId, String runtimeSessionId,
