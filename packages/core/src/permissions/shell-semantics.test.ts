@@ -810,6 +810,31 @@ describe('extractShellOperationsAcrossCommand', () => {
       [write('/repo/evil.txt')],
     ],
     [
+      // R27-3: the `#` boundary in `echo a\ # …` cannot be proven, so the `<<`
+      // after it is refused as an opener and the following lines stay code.
+      // bash keeps them as heredoc body instead, so the path this analysis
+      // resolved cannot be vouched for: mark the operation cwd-unknown the way
+      // the pre-refactor head did, and consumers escalate to "ask".
+      'marks a write cwd-unknown when an opener was refused on an ambiguous tail',
+      'echo a\\ # <<EOF\ncat > out.txt\nEOF',
+      [uncertainWrite('/repo/out.txt')],
+    ],
+    [
+      'marks a write cwd-unknown when a substitution-closing hash buried the opener',
+      '$(echo SUB)# note <<EOF\ncat > out.txt\nEOF',
+      [uncertainWrite('/repo/out.txt')],
+    ],
+    [
+      'marks a relocated write cwd-unknown after a refused opener',
+      'echo a\\ # <<EOF\ncd /tmp\nEOF\necho hi > out.txt',
+      [uncertainWrite('/tmp/out.txt')],
+    ],
+    [
+      'marks a relocated write cwd-unknown after a substitution hash buried the opener',
+      '$(echo SUB)# note <<EOF\ncd /tmp\nEOF\necho hi > out.txt',
+      [uncertainWrite('/tmp/out.txt')],
+    ],
+    [
       // A definite comment tail is never executed, so its `>` is not a write.
       'drops a redirect inside a definite comment',
       'echo a # x > evil.txt',

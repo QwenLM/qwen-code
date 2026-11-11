@@ -2638,6 +2638,17 @@ function extractFindExecOps(args: string[], cwd: string): ShellOperation[] {
 
 interface StrippedHeredocs {
   text: string;
+  /**
+   * True when a `<<` could not be accepted as an opener because the state
+   * around it was unprovable. The following lines then stay code, and bash may
+   * have read them as that opener's body instead, so every path this analysis
+   * resolves cannot be vouched for: the caller marks the operations
+   * `cwdUnknown` so consumers escalate to "ask" rather than trust a path that
+   * may be wrong. This is the narrow form of the removed escalation: it says
+   * nothing about the command's text, only that the cwd it resolved against is
+   * not trustworthy.
+   */
+  refusedOpener: boolean;
 }
 
 function stripHeredocBodies(command: string): StrippedHeredocs {
@@ -2645,6 +2656,7 @@ function stripHeredocBodies(command: string): StrippedHeredocs {
   const kept: string[] = [];
   const pendingDelimiters: string[] = [];
   const lexer = new HeredocLexer();
+  let refusedOpener = false;
 
   let index = 0;
   while (index < lines.length) {
@@ -2675,6 +2687,7 @@ function stripHeredocBodies(command: string): StrippedHeredocs {
 
     kept.push(logical);
     pendingDelimiters.push(...lexer.scan(logical));
+    if (lexer.takeOpenerRefused()) refusedOpener = true;
     const commentStart = lexer.takeCommentStart();
     if (commentStart !== null) {
       // bash never executes a commented tail; dropping it keeps a `>` inside
@@ -2684,7 +2697,7 @@ function stripHeredocBodies(command: string): StrippedHeredocs {
     index++;
   }
 
-  return { text: kept.join('\n') };
+  return { text: kept.join('\n'), refusedOpener };
 }
 
 /**
@@ -2760,6 +2773,13 @@ class HeredocLexer {
    * exactly what is unproven, and swallowing lines could hide a real command.
    */
   private ambiguousCommentTail = false;
+  /**
+   * True when a `<<` on the line just scanned was refused because the state
+   * around it was unprovable. The caller cannot tell which lines bash read as
+   * that opener's body, so it resolves no path against this cwd with
+   * confidence and marks the operations as cwd-unknown.
+   */
+  private openerRefused = false;
   /** Offset of a definitively-commented tail on the line just scanned. */
   private commentStart: number | null = null;
   /**
@@ -2785,6 +2805,13 @@ class HeredocLexer {
     const start = this.commentStart;
     this.commentStart = null;
     return start;
+  }
+
+  /** True when the last scanned line refused a `<<` it could not prove. */
+  takeOpenerRefused(): boolean {
+    const refused = this.openerRefused;
+    this.openerRefused = false;
+    return refused;
   }
 
   scan(line: string): string[] {
@@ -2912,7 +2939,10 @@ class HeredocLexer {
       if (this.ambiguousCommentTail) {
         // Seen, but not trusted as a boundary: keep the following lines as
         // code, so a redirect there stays visible instead of hiding behind a
-        // guessed comment.
+        // guessed comment. bash may have read those lines as this opener's
+        // body instead, so the caller can no longer vouch for the cwd it
+        // resolves against.
+        this.openerRefused = true;
         index++;
         continue;
       }
@@ -3017,7 +3047,7 @@ function walkCompoundCommand(
   depth: number,
   initialCwdUnknown: boolean,
 ): ShellOperation[] {
-  const { text: heredocStripped } = stripHeredocBodies(command);
+  const { text: heredocStripped, refusedOpener } = stripHeredocBodies(command);
   const subCommands = splitCompoundCommandSegments(heredocStripped);
 
   const ops: ShellOperation[] = [];
@@ -3036,7 +3066,7 @@ function walkCompoundCommand(
     if (cdTarget.kind !== 'not-cd') {
       const redirectOps = toRedirectOperations(cdTarget.redirects);
       ops.push(
-        ...(cwdUnknown
+        ...(cwdUnknown || refusedOpener
           ? markCwdUnknownOps(redirectOps, sub, effectiveCwd)
           : redirectOps),
       );
@@ -3072,8 +3102,11 @@ function walkCompoundCommand(
       );
     }
 
+    // A refused opener means the lines after it may really be its body, so the
+    // cwd these paths were resolved against cannot be vouched for; mark the
+    // operations the same way an unknown `cd` is marked (R27-3).
     const subOps = extractShellOperations(sub, effectiveCwd);
-    if (cwdUnknown) {
+    if (cwdUnknown || refusedOpener) {
       ops.push(...markCwdUnknownOps(subOps, sub, effectiveCwd));
     } else {
       ops.push(...subOps);
