@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { Message, TurnCollapseHead } from '../adapters/types';
+import { transcriptBlocksToDaemonMessages } from '../adapters/transcriptToMessages';
 import {
   attachTurnOutputs,
   applyTurnCollapse,
@@ -3111,6 +3112,72 @@ it('retains the main reply when a background task ack follows the notification m
     },
     makeAckMessage('ack'),
   ];
+  const rows = collapseItems(groupParallelAgents(messages));
+  expect(
+    rows.some(
+      (item) => item.type === 'message' && item.message.id === 'report',
+    ),
+  ).toBe(true);
+  expect(
+    rows.some((item) => item.type === 'message' && item.message.id === 'ack'),
+  ).toBe(false);
+});
+
+it('folds a restored shell ack whose tag the adapter re-derives from the turn envelope', () => {
+  // Restored transcript shape: the persisted record keeps the turn's
+  // `backgroundTurn` envelope but no `_meta.source` on the ack, so the
+  // adapter must re-derive the tag or the fold would lose the report.
+  const turn = {
+    turnId: 'auto-task',
+    taskId: 'task',
+    kind: 'shell' as const,
+    sourceTurnId: 'u1',
+    startedAt: 100,
+  };
+  const messages = transcriptBlocksToDaemonMessages([
+    {
+      id: 'u1',
+      kind: 'user',
+      text: 'run the check',
+      streaming: false,
+      clientReceivedAt: 1,
+      createdAt: 1,
+      updatedAt: 1,
+    },
+    {
+      id: 'report',
+      kind: 'assistant',
+      text: 'All checks passed.',
+      streaming: false,
+      clientReceivedAt: 2,
+      createdAt: 2,
+      updatedAt: 2,
+    },
+    {
+      id: 'notification',
+      kind: 'user',
+      text: '<task-notification>done</task-notification>',
+      streaming: false,
+      clientReceivedAt: 3,
+      createdAt: 3,
+      updatedAt: 3,
+      meta: {
+        source: 'background_notification',
+        backgroundTask: { kind: 'shell', taskId: 'task', status: 'completed' },
+      },
+      backgroundTurn: turn,
+    },
+    {
+      id: 'ack',
+      kind: 'assistant',
+      text: 'Background task finished.',
+      streaming: false,
+      clientReceivedAt: 4,
+      createdAt: 4,
+      updatedAt: 4,
+      backgroundTurn: turn,
+    },
+  ]);
   const rows = collapseItems(groupParallelAgents(messages));
   expect(
     rows.some(

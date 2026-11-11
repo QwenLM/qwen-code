@@ -795,9 +795,13 @@ export function transcriptBlocksToDaemonMessages(
         // with `_meta.source`. Keep only that tag: other `_meta.source`
         // values (e.g. `slash_command`) are provenance, not message state.
         // The turn-collapse ack fold and /copy read it to tell a
-        // bookkeeping ack from a real reply.
+        // bookkeeping ack from a real reply. The persisted transcript keeps
+        // the turn's `backgroundTurn` envelope but drops `_meta.source`, so
+        // a restored session re-derives the tag from it and folds its acks
+        // the same way the live one did.
         const source =
-          getString(meta, 'source') === BACKGROUND_NOTIFICATION_RESPONSE
+          getString(meta, 'source') === BACKGROUND_NOTIFICATION_RESPONSE ||
+          backgroundTurn
             ? BACKGROUND_NOTIFICATION_RESPONSE
             : undefined;
         const reportedArtifacts = readReportedArtifacts(meta ?? undefined);
