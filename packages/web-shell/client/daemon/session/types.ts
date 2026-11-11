@@ -186,6 +186,14 @@ export interface DaemonConnectionState {
    * `session_archived` answer for the session it tried to load.
    */
   sessionArchived?: boolean;
+  /**
+   * True while the connection is parked after the daemon published a terminal
+   * `session_closed` with reason `client_close` (the user explicitly archived
+   * or deleted the session). The session will not return and the reconnect
+   * loop stops. Other `session_closed` reasons keep the normal reconnect
+   * behavior and never set this.
+   */
+  userClosedSession?: boolean;
 }
 
 export interface DaemonReasoningControls {

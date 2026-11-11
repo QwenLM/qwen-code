@@ -86,9 +86,11 @@ function isStandaloneSessionConflictError(error: unknown): boolean {
 
 /**
  * Reports, from inside a pane's own provider, the moment the connection
- * parks on the daemon's terminal `session_archived` answer (409). SplitView
- * acts on it whether or not the catalog page is complete: it is the pane's
- * own authoritative answer.
+ * parks on the daemon's terminal answer for the pane's session — the 409
+ * `session_archived` to a load, or the terminal `session_closed`
+ * (reason `client_close`) published when the user archives or deletes it.
+ * SplitView acts on it whether or not the catalog page is complete: it is
+ * the pane's own authoritative answer.
  */
 function TerminalArchivedReporter({
   sessionId,
@@ -99,7 +101,8 @@ function TerminalArchivedReporter({
 }) {
   const { connection } = useSession();
   const archived =
-    connection.sessionArchived === true &&
+    (connection.sessionArchived === true ||
+      connection.userClosedSession === true) &&
     connection.status === 'disconnected' &&
     connection.sessionId === undefined;
   useEffect(() => {
@@ -320,7 +323,8 @@ export function SplitView({
     otherNotReadyCwds,
   ]);
   // Sessions a pane's own provider has already answered terminal: parked on
-  // the daemon's 409 session_archived. Authoritative per pane, so it prunes
+  // the daemon's 409 session_archived, or on the user-initiated
+  // session_closed (archive/delete). Authoritative per pane, so it prunes
   // whether or not the catalog page is complete.
   const [terminalArchivedIds, setTerminalArchivedIds] = useState<
     ReadonlySet<string>
@@ -645,8 +649,9 @@ export function SplitView({
   // current session) is never pruned. Standalone panes (deep-linked) never
   // appear in a workspace list: probe them and keep them on any non-not-found
   // outcome — a transient probe failure must not close a live pane. A pane
-  // whose own provider parked on the terminal `session_archived` answer is
-  // pruned on that answer alone, whatever the page state.
+  // whose own provider parked on a terminal answer (the 409
+  // `session_archived`, or the user-initiated `session_closed`) is pruned on
+  // that answer alone, whatever the page state.
   useEffect(() => {
     if (activeSessionPage === undefined || otherSessionsLoading) return;
     const terminalIds = paneIds.filter(

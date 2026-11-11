@@ -33,6 +33,9 @@ let waitingSessions: Set<string>;
 // Session ids whose pane provider is parked on the terminal session_archived
 // answer (409) — drives the mocked `useSession` per pane.
 let terminalArchived: Set<string>;
+// Session ids whose pane provider parked on the terminal session_closed
+// (user-initiated archive/delete) — drives the mocked `useSession` per pane.
+let terminalClosed: Set<string>;
 const scrollPaneIntoView = vi.fn();
 const confirmApproval = vi.fn();
 const PaneSessionContext = React.createContext<string | undefined>(undefined);
@@ -60,23 +63,37 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
     workspaceCwd: connectionState.workspaceCwd,
   }),
   // Per-pane connection state (each pane's DaemonSessionProvider). A test can
-  // park a pane on the daemon's terminal session_archived answer (409): add
-  // the id to `terminalArchived` and re-render. The parked shape is the one
-  // the real provider emits (pinned in DaemonSessionProvider.test.tsx).
+  // park a pane on the daemon's terminal answers: add the id to
+  // `terminalArchived` (409 session_archived) or `terminalClosed` (terminal
+  // session_closed, user-initiated archive/delete) and re-render. The parked
+  // shapes are the ones the real provider emits (pinned in
+  // DaemonSessionProvider.test.tsx).
   useSession: () => {
     const sessionId = React.useContext(PaneSessionContext);
     const archived = sessionId !== undefined && terminalArchived.has(sessionId);
-    return {
-      connection: archived
-        ? {
-            status: 'disconnected',
-            sessionId: undefined,
-            error: `Session "${sessionId}" is archived. Unarchive it before loading.`,
-            errorStatus: 409,
-            sessionArchived: true,
-          }
-        : { status: 'connected', sessionId, error: undefined },
-    };
+    const closed = sessionId !== undefined && terminalClosed.has(sessionId);
+    if (archived) {
+      return {
+        connection: {
+          status: 'disconnected',
+          sessionId: undefined,
+          error: `Session "${sessionId}" is archived. Unarchive it before loading.`,
+          errorStatus: 409,
+          sessionArchived: true,
+        },
+      };
+    }
+    if (closed) {
+      return {
+        connection: {
+          status: 'disconnected',
+          sessionId: undefined,
+          error: undefined,
+          userClosedSession: true,
+        },
+      };
+    }
+    return { connection: { status: 'connected', sessionId, error: undefined } };
   },
   // Stateful, like the real hook: reload() re-renders with the CURRENT module
   // store. This lets a test prove the picker renders sessions that appeared
@@ -318,6 +335,7 @@ beforeEach(() => {
     notReadyCwds: [],
   };
   terminalArchived = new Set();
+  terminalClosed = new Set();
   primaryPageMeta = {};
   workspaceClient = {
     // A workspace session id is not a standalone session: the prune probe
@@ -2052,6 +2070,55 @@ describe('SplitView', () => {
         expect(onPanesChange).toHaveBeenLastCalledWith(['s1']);
       },
     );
+
+    it.each([
+      ['a nextCursor', { nextCursor: 'cursor-2' }],
+      ['truncated', { truncated: true }],
+      ['liveMergeFailed', { liveMergeFailed: true }],
+      ['stale', { stale: true }],
+      ['errored', { error: new Error('refresh failed') }],
+    ])(
+      'prunes a terminal-closed pane while the page has %s',
+      async (_label, meta) => {
+        // The pane's own terminal session_closed (the user archived or
+        // deleted it while the pane was live) is an authoritative per-pane
+        // signal: prune it without waiting for a settled catalog refresh.
+        primaryPageMeta = meta;
+        const onPanesChange = vi.fn();
+        render({ sessionIds: ['s1', 's2'], onPanesChange });
+        await flushAsync();
+        await pushCatalog(sessionsState.filter((s) => s.sessionId !== 's2'));
+        expect(onPanesChange).not.toHaveBeenCalled();
+        terminalClosed.add('s2');
+        rerender({ sessionIds: ['s1', 's2'], onPanesChange });
+        expect(onPanesChange).toHaveBeenLastCalledWith(['s1']);
+      },
+    );
+
+    it('never prunes the current session parked on its terminal close', async () => {
+      // Same exemption as the terminal-409 park: the seed pane keeps its
+      // exemption through the user-initiated close, on an incomplete page
+      // and on a complete one.
+      primaryPageMeta = { nextCursor: 'cursor-2' };
+      const onPanesChange = vi.fn();
+      const onExit = vi.fn();
+      render({ sessionIds: ['s3', 's1'], onPanesChange, onExit });
+      await flushAsync();
+      terminalClosed.add('s3');
+      connectionState = {
+        ...connectionState,
+        sessionId: undefined,
+        status: 'disconnected',
+      };
+      rerender({ sessionIds: ['s3', 's1'], onPanesChange, onExit });
+      await flushAsync();
+      expect(onPanesChange).not.toHaveBeenCalled();
+      primaryPageMeta = {};
+      await pushCatalog(sessionsState.filter((s) => s.sessionId !== 's3'));
+      expect(onPanesChange).not.toHaveBeenCalled();
+      expect(onExit).not.toHaveBeenCalled();
+      expect(panes()).toHaveLength(2);
+    });
 
     it('prunes a terminal-archived pane in an uncontrolled split', async () => {
       primaryPageMeta = { nextCursor: 'cursor-2' };
