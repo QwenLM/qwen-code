@@ -861,17 +861,20 @@ export function WorkspaceSection({
     sessions,
   ]);
   // Same rule the sidebar applies to its own catalog: an open rename keeps
-  // its row mounted when a refresh reorders other sessions ahead of it. Group
-  // sections keep the fixed preview bound here because their expansion count
-  // lives inside SessionGroupSection; the flat list measures its live visible
-  // count in rendered-row space via editingRowBeyondBound below.
+  // its row mounted when a refresh reorders other sessions ahead of it. The
+  // shared index test is measured in whichever sequence the caller slices:
+  // group sections pass the raw catalog against the fixed preview bound (their
+  // expansion count lives inside SessionGroupSection), while the flat list
+  // passes rendered tree rows against its live visible count below.
+  const editingIndexBeyond = (index: number, bound: number): boolean =>
+    editingSessionId !== undefined && index >= bound;
   const revealsEditingSession = (
     items: readonly DaemonSessionSummary[],
-    bound: number,
   ): boolean =>
-    editingSessionId !== undefined &&
-    items.findIndex((session) => session.sessionId === editingSessionId) >=
-      bound;
+    editingIndexBeyond(
+      items.findIndex((session) => session.sessionId === editingSessionId),
+      SIDEBAR_SESSION_PREVIEW_LIMIT,
+    );
 
   const sessionTree = useSessionTree(storageId, searchedSessions, searchActive);
   const buildSessionTreeRows = (
@@ -938,11 +941,12 @@ export function WorkspaceSection({
   // Measure the edited row in the rendered tree-row sequence (the one actually
   // sliced), not the raw catalog: collapsed parents hide their children, so a
   // raw-array index diverges from the rendered row count.
-  const editingRowBeyondBound =
-    editingSessionId !== undefined &&
+  const editingRowBeyondBound = editingIndexBeyond(
     directTreeRows.findIndex(
       (row) => row.session.sessionId === editingSessionId,
-    ) >= visibleSessionCount;
+    ),
+    visibleSessionCount,
+  );
   const directSessions =
     searchActive ||
     !limitSessions ||
@@ -1197,10 +1201,7 @@ export function WorkspaceSection({
                       limitSessions={
                         limitSessions &&
                         !searchActive &&
-                        !revealsEditingSession(
-                          group.sessions,
-                          SIDEBAR_SESSION_PREVIEW_LIMIT,
-                        )
+                        !revealsEditingSession(group.sessions)
                       }
                       expanded={!collapsedGroupIds.has(group.id)}
                       onToggle={() => {
@@ -1230,10 +1231,7 @@ export function WorkspaceSection({
                       limitSessions={
                         limitSessions &&
                         !searchActive &&
-                        !revealsEditingSession(
-                          sessions,
-                          SIDEBAR_SESSION_PREVIEW_LIMIT,
-                        )
+                        !revealsEditingSession(sessions)
                       }
                       color={group.color}
                       expanded={!collapsedGroupIds.has(group.id)}
@@ -1272,10 +1270,7 @@ export function WorkspaceSection({
                     limitSessions={
                       limitSessions &&
                       !searchActive &&
-                      !revealsEditingSession(
-                        section.sessions,
-                        SIDEBAR_SESSION_PREVIEW_LIMIT,
-                      )
+                      !revealsEditingSession(section.sessions)
                     }
                     icon={
                       <CalendarClockIcon data-web-shell-scheduled-task-group />
@@ -1302,10 +1297,7 @@ export function WorkspaceSection({
                     limitSessions={
                       limitSessions &&
                       !searchActive &&
-                      !revealsEditingSession(
-                        groupedSessions.ungrouped,
-                        SIDEBAR_SESSION_PREVIEW_LIMIT,
-                      )
+                      !revealsEditingSession(groupedSessions.ungrouped)
                     }
                     expanded={!collapsedGroupIds.has('ungrouped')}
                     onToggle={() => {

@@ -62,8 +62,11 @@ index against the fixed five. Row space matters because a collapsed parent
 hides its children, so a raw index diverges from the rendered row count.
 Renaming an already-visible row therefore no longer mounts the whole catalog;
 group sections keep the fixed preview bound because their expansion count
-lives inside `SessionGroupSection`. Every renderer restores the count to 5 on
-the resets it already had — section collapse, workspace/source change, sort
+lives inside `SessionGroupSection`. A single shared index test
+(`editingIndexBeyond(index, bound)`) backs both the group helper (raw catalog,
+fixed bound) and the flat list (rendered rows, live bound), so the guard rule
+lives in one place per file. Every renderer restores the count to 5 on the
+resets it already had — section collapse, workspace/source change, sort
 change (standalone), and bulk collapse/expand — and `RecentSessions` gains the
 collapse and source/sort resets its four siblings already had.
 
@@ -74,7 +77,10 @@ server-side load-more button is decoupled from the preview gate (rendered on
 `cursor` alone), and `loadMore` reveals the already-loaded catalog plus the
 appended page (`max(count, loadedLength) + appendedLength`), so a fetched page
 stays rendered in full even when clicked from the five-row preview, instead of
-re-arming the preview and hiding most of the rows the user just asked for.
+re-arming the preview and hiding most of the rows the user just asked for. If
+the group collapses while a page is in flight, the reveal write is skipped
+(the fetched data and cursor are kept), so a late page cannot re-expand a list
+the collapse reset already returned to the preview.
 
 ## Design Decisions
 

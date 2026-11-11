@@ -6300,31 +6300,37 @@ export function WebShellSidebar({
   const body = useMemo(() => {
     // Rename only has to reveal the edited row. Expanding the whole catalog —
     // or even the whole section — mounted hundreds of rows exactly when the
-    // rename editor opened, which is what made typing lag. Group sections keep
-    // the fixed preview bound here because their own expansion count lives
-    // inside SessionGroupSection; the flat list measures its live visible count
-    // in rendered-row space inside renderFlatSessions.
-    const editingSessionBeyondPreview = (
-      items: readonly DaemonSessionSummary[],
-      bound: number,
-    ): boolean =>
+    // rename editor opened, which is what made typing lag. The shared index
+    // test below is measured in whichever sequence the caller slices: group
+    // sections pass the raw catalog against the fixed preview bound (their own
+    // expansion count lives inside SessionGroupSection), while the flat list
+    // passes rendered tree rows against its live visible count.
+    const editingIndexBeyond = (index: number, bound: number): boolean =>
       !pinnedSectionHostsEditing &&
       editingSessionIdentity !== null &&
-      items.findIndex(
-        (session) => getIdentityForSession(session) === editingSessionIdentity,
-      ) >= bound;
+      index >= bound;
+    const editingSessionBeyondPreview = (
+      items: readonly DaemonSessionSummary[],
+    ): boolean =>
+      editingIndexBeyond(
+        items.findIndex(
+          (session) =>
+            getIdentityForSession(session) === editingSessionIdentity,
+        ),
+        SIDEBAR_SESSION_PREVIEW_LIMIT,
+      );
     const renderFlatSessions = () => {
       const treeRows = sessionTree.buildRows(filteredSessions);
       // Measure the edited row in the rendered tree-row sequence (the one
       // actually sliced), not the raw catalog: collapsed parents hide their
       // children, so a raw-array index diverges from the rendered row count.
-      const editingRowBeyondBound =
-        !pinnedSectionHostsEditing &&
-        editingSessionIdentity !== null &&
+      const editingRowBeyondBound = editingIndexBeyond(
         treeRows.findIndex(
           (row) =>
             getIdentityForSession(row.session) === editingSessionIdentity,
-        ) >= projectSessionVisibleCount;
+        ),
+        projectSessionVisibleCount,
+      );
       const unlimited = Boolean(searchQuery.trim()) || editingRowBeyondBound;
       const previewLimited =
         !unlimited && treeRows.length > projectSessionVisibleCount;
@@ -6397,10 +6403,8 @@ export function WebShellSidebar({
             label={section.label}
             count={tree.rows.length}
             limitSessions={
-              !editingSessionBeyondPreview(
-                section.sessions,
-                SIDEBAR_SESSION_PREVIEW_LIMIT,
-              ) && !searchQuery.trim()
+              !editingSessionBeyondPreview(section.sessions) &&
+              !searchQuery.trim()
             }
             expanded={!collapsedSessionSectionIds.has(section.id)}
             onToggle={() => toggleSessionSection(section.id)}
@@ -6434,10 +6438,8 @@ export function WebShellSidebar({
             ) : undefined
           }
           limitSessions={
-            !editingSessionBeyondPreview(
-              section.sessions,
-              SIDEBAR_SESSION_PREVIEW_LIMIT,
-            ) && !searchQuery.trim()
+            !editingSessionBeyondPreview(section.sessions) &&
+            !searchQuery.trim()
           }
           expanded={expanded}
           onToggle={() => toggleSessionSection(section.id)}

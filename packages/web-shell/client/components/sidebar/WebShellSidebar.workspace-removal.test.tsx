@@ -6444,6 +6444,63 @@ describe('WebShellSidebar session list notices', () => {
     expect(container.textContent).not.toContain('Preview session 16');
   });
 
+  it('keeps the expanded bound when renaming a visible tree row', async () => {
+    // A collapsed parent carrying 100 children sits ahead of 100 roots: 201
+    // raw sessions render as 101 rows. The 15th rendered row (Root 13) has raw
+    // index 114, so a raw-catalog bound would mount the whole tree on rename.
+    active.sessions = [
+      {
+        sessionId: 'p',
+        displayName: 'Collapsed parent',
+        workspaceCwd: '/tmp/project',
+        sourceType: 'default',
+        updatedAt: '2026-02-01T00:00:00.000Z',
+      },
+      ...Array.from({ length: 100 }, (_, index) => ({
+        sessionId: `c-${index}`,
+        displayName: `Child ${index}`,
+        parentSessionId: 'p',
+        workspaceCwd: '/tmp/project',
+        sourceType: 'default',
+        updatedAt: '2026-01-15T00:00:00.000Z',
+      })),
+      ...Array.from({ length: 100 }, (_, index) => ({
+        sessionId: `s-${index}`,
+        displayName: `Root ${index}`,
+        workspaceCwd: '/tmp/project',
+        sourceType: 'default',
+        updatedAt: '2026-01-10T00:00:00.000Z',
+      })),
+    ];
+    active.data = active.sessions;
+    vi.spyOn(HTMLInputElement.prototype, 'focus').mockImplementation(() => {});
+
+    renderSidebar({
+      sessionActions: { items: ['rename'], inlineItems: ['rename'] },
+    });
+    await ensureWorkspaceExpanded('project');
+    const sessionRows = () =>
+      container.querySelectorAll<HTMLElement>('[class*="sessionRow"]');
+    const expandButton = () =>
+      Array.from(container.querySelectorAll<HTMLButtonElement>('button')).find(
+        (button) => /^Show \d+ more$/.test(button.textContent ?? ''),
+      );
+    expect(sessionRows()).toHaveLength(5);
+    act(() => click(expandButton()!));
+    expect(sessionRows()).toHaveLength(15);
+
+    await act(async () => {
+      click(inlineSessionAction('Root 13', 'Rename')!);
+      await Promise.resolve();
+    });
+
+    expect(container.querySelector('input')).not.toBeNull();
+    // Root 13 is the 15th rendered row; renaming it must keep the 15-row bound
+    // instead of mounting all 101 tree rows.
+    expect(sessionRows()).toHaveLength(15);
+    expect(expandButton()).toBeDefined();
+  });
+
   it('resets the flat preview when the workspace collapses and re-expands', async () => {
     active.sessions = Array.from({ length: 16 }, (_, index) => ({
       sessionId: `session-${index + 1}`,

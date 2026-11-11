@@ -156,6 +156,8 @@ export function StandaloneRecents({
   const [expanded, setExpanded] = useState(() =>
     readWorkspaceExpanded(expansionId),
   );
+  const expandedRef = useRef(expanded);
+  expandedRef.current = expanded;
   const [visibleCount, setVisibleCount] = useState(
     SIDEBAR_SESSION_PREVIEW_LIMIT,
   );
@@ -290,10 +292,15 @@ export function StandaloneRecents({
       // A fetched page must stay visible in full: reveal the already-loaded
       // catalog plus the appended page, rather than adding the page length to
       // a count that may still trail the catalog (e.g. the five-row preview).
-      setVisibleCount(
-        (count) =>
-          Math.max(count, sessionsRef.current.length) + appended.length,
-      );
+      // Skip the reveal if the group collapsed while the page was in flight —
+      // the collapse reset already returned it to the preview, and writing a
+      // reveal here would re-expand it on the next open. The data is kept.
+      if (expandedRef.current) {
+        setVisibleCount(
+          (count) =>
+            Math.max(count, sessionsRef.current.length) + appended.length,
+        );
+      }
       setCursor(page.nextCursor);
       setLoadError(undefined);
     } catch (error) {

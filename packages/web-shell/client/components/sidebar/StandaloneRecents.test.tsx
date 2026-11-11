@@ -679,6 +679,58 @@ describe('StandaloneRecents', () => {
     expect(showMore()).toBeDefined();
   });
 
+  it('keeps the preview when a server page resolves after collapse', async () => {
+    let resolvePage!: (value: {
+      sessions: DaemonStandaloneSessionSummary[];
+    }) => void;
+    list
+      .mockResolvedValueOnce({
+        sessions: Array.from({ length: 50 }, (_, index) =>
+          summary(`p1-${index}`, `Page1 chat ${index}`),
+        ),
+        nextCursor: 'next',
+      })
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolvePage = resolve;
+          }),
+      );
+    await render();
+    const loadMore = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent === 'sidebar.showAllSessions',
+    );
+    expect(loadMore).toBeDefined();
+    // Start the page fetch, then collapse before it resolves.
+    await act(async () => {
+      loadMore!.click();
+      await Promise.resolve();
+    });
+    const toggle = () =>
+      container.querySelector<HTMLButtonElement>(
+        '[data-testid="standalone-active-group"] > div > button',
+      )!;
+    await act(async () => toggle().click());
+    await act(async () => {
+      resolvePage({
+        sessions: Array.from({ length: 50 }, (_, index) =>
+          summary(`p2-${index}`, `Page2 chat ${index}`),
+        ) as DaemonStandaloneSessionSummary[],
+      });
+      await Promise.resolve();
+    });
+    // Re-expand: the collapse reset must still hold five rows, not the whole
+    // catalog the late page would have revealed.
+    await act(async () => toggle().click());
+    expect(container.textContent).toContain('Page1 chat 0');
+    expect(container.textContent).not.toContain('Page1 chat 5');
+    expect(container.textContent).not.toContain('Page2 chat 49');
+    const showMore = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent === 'sidebar.showMoreSessions',
+    );
+    expect(showMore).toBeDefined();
+  });
+
   it('unlocks pagination when a refresh replaces an in-flight page', async () => {
     let resolveMore!: (value: {
       sessions: DaemonStandaloneSessionSummary[];
