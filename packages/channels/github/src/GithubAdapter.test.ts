@@ -6311,6 +6311,153 @@ describe('GithubChannel', () => {
       expect(existsSync(auditPath())).toBe(false);
     });
 
+    it.each([
+      [
+        'keeps every reply when GitHub does not accept the credential',
+        Object.assign(new Error('Bad credentials'), { status: 401 }),
+        ['first', 'second'],
+        1,
+        [],
+      ],
+      [
+        'drops the reply a server error answered and keeps the later ones',
+        Object.assign(new Error('Bad Gateway'), { status: 502 }),
+        ['second'],
+        1,
+        ['failed_ambiguous'],
+      ],
+      [
+        'drops the reply a bare 429 answered and keeps the later ones',
+        Object.assign(new Error('Too Many Requests'), { status: 429 }),
+        ['second'],
+        1,
+        ['failed_ambiguous'],
+      ],
+      [
+        'drops the reply a network failure answered and keeps the later ones',
+        Object.assign(new Error('getaddrinfo ENOTFOUND api.github.com'), {
+          status: 500,
+        }),
+        ['second'],
+        1,
+        ['failed_ambiguous'],
+      ],
+    ])('%s', async (_name, error, left, calls, outcomes) => {
+      writePending([
+        pendingRecord({ id: 'first', sourceMessageId: '1001' }),
+        pendingRecord({ id: 'second', sourceMessageId: '1002' }),
+      ]);
+      mockOctokit.rest.issues.createComment.mockRejectedValue(error);
+
+      await retryPendingForTest();
+
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(
+        calls,
+      );
+      expect(
+        JSON.parse(readFileSync(pendingPath(), 'utf-8')).map(
+          (record: { id: string }) => record.id,
+        ),
+      ).toEqual(left);
+      expect(
+        existsSync(auditPath())
+          ? readFileSync(auditPath(), 'utf-8')
+              .trim()
+              .split('\n')
+              .map((line) => JSON.parse(line).outcome)
+          : [],
+      ).toEqual(outcomes);
+    });
+
+    it.each([
+      [
+        'GitHub cannot find',
+        Object.assign(new Error('Not Found'), { status: 404 }),
+      ],
+      [
+        'the token may not write to',
+        Object.assign(
+          new Error('Resource not accessible by personal access token'),
+          {
+            status: 403,
+            response: { headers: { 'x-ratelimit-remaining': '4999' } },
+          },
+        ),
+      ],
+      [
+        'GitHub rejects as invalid',
+        Object.assign(new Error('Validation Failed'), { status: 422 }),
+      ],
+    ])(
+      'drops a reply %s and goes on with the later ones',
+      async (_name, error) => {
+        writePending([
+          pendingRecord({ id: 'first', sourceMessageId: '1001' }),
+          pendingRecord({ id: 'second', sourceMessageId: '1002' }),
+        ]);
+        mockOctokit.rest.issues.createComment
+          .mockRejectedValueOnce(error)
+          .mockResolvedValue({ data: { id: 1, html_url: 'https://x/1' } });
+
+        await retryPendingForTest();
+
+        expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(2);
+        expect(existsSync(pendingPath())).toBe(false);
+      },
+    );
+
+    it('drops a reply another writer records as posted while the pass runs', async () => {
+      writePending([
+        pendingRecord({ id: 'first', sourceMessageId: '1001' }),
+        pendingRecord({ id: 'second', sourceMessageId: '1002' }),
+      ]);
+      let answer!: (value: unknown) => void;
+      mockOctokit.rest.issues.createComment
+        .mockImplementationOnce(
+          () =>
+            new Promise((resolve) => {
+              answer = resolve;
+            }),
+        )
+        .mockResolvedValue({ data: { id: 2, html_url: 'https://x/2' } });
+
+      const pass = retryPendingForTest();
+      await vi.waitFor(() =>
+        expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1),
+      );
+      mkdirSync(join(auditPath(), '..'), { recursive: true });
+      nodeFs.appendFileSync(
+        auditPath(),
+        `${JSON.stringify({
+          at: '2026-07-30T00:00:00.000Z',
+          type: 'github_publication',
+          outcome: 'posted',
+          channel: 'test-github',
+          pendingId: 'second',
+          commentId: 9,
+        })}\n`,
+      );
+      answer({ data: { id: 1, html_url: 'https://x/1' } });
+      await pass;
+
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
+      expect(existsSync(pendingPath())).toBe(false);
+    });
+
+    it('posts a reply listed twice in the pending file once', async () => {
+      writePending([
+        pendingRecord({ id: 'dup' }),
+        pendingRecord({ id: 'dup' }),
+      ]);
+      mockOctokit.rest.issues.createComment.mockResolvedValue({
+        data: { id: 1, html_url: 'https://x/1' },
+      });
+
+      await retryPendingForTest();
+
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
+    });
+
     it('stops the pass on an exhausted hourly budget as well', async () => {
       writePending([
         pendingRecord({ id: 'first', sourceMessageId: '1001' }),
@@ -6848,6 +6995,778 @@ describe('GithubChannel', () => {
       expect(audit).toContain('"outcome":"failed_ambiguous"');
       expect(audit).not.toContain('"outcome":"failed"');
       expect(existsSync(pendingPath())).toBe(false);
+    });
+
+    describe('stored replies while the channel runs', () => {
+      const T0 = Date.UTC(2026, 6, 30, 12, 0, 0);
+      let now = T0;
+      let clock: { mockRestore: () => void };
+      const refusal = (headers: Record<string, string | number> = {}) =>
+        Object.assign(new Error('API rate limit exceeded'), {
+          status: 403,
+          response: { headers: { 'x-ratelimit-remaining': '0', ...headers } },
+        });
+      const posted = {
+        data: {
+          id: 77,
+          html_url: 'https://github.com/owner/repo/issues/42#issuecomment-77',
+        },
+      };
+      const priv = () =>
+        channel as unknown as {
+          pollOnce: () => Promise<void>;
+          pendingFinalDeliveryRetry: Promise<void> | undefined;
+          sleepForRetry: (ms: number) => Promise<void>;
+          publishFinalResponse: (
+            chatId: string,
+            threadId: string,
+            text: string,
+            sessionId: string,
+          ) => Promise<void>;
+        };
+      const pendingIds = (): string[] =>
+        existsSync(pendingPath())
+          ? JSON.parse(readFileSync(pendingPath(), 'utf-8')).map(
+              (record: { id: string }) => record.id,
+            )
+          : [];
+      const replies = () =>
+        mockOctokit.rest.issues.createComment.mock.calls.length;
+
+      async function start() {
+        // Retry waits end at once; the clock below decides the schedule.
+        priv().sleepForRetry = vi.fn().mockResolvedValue(undefined);
+        await connectForPublication();
+        await priv().pendingFinalDeliveryRetry;
+      }
+
+      async function pollAt(minutes: number) {
+        now = T0 + minutes * 60_000;
+        await priv().pollOnce();
+        await priv().pendingFinalDeliveryRetry;
+      }
+
+      async function publishSecondRefused() {
+        const createComment = mockOctokit.rest.issues.createComment;
+        const fallback = createComment.getMockImplementation();
+        createComment
+          .mockRejectedValueOnce(refusal())
+          .mockRejectedValueOnce(refusal())
+          .mockRejectedValueOnce(refusal());
+        await expect(
+          priv().publishFinalResponse(
+            'owner/repo',
+            'issue:43',
+            'Another reply',
+            'session-publication',
+          ),
+        ).rejects.toBeDefined();
+        if (fallback) createComment.mockImplementation(fallback);
+      }
+
+      async function publishRefused(headers?: Record<string, string | number>) {
+        mockOctokit.rest.issues.createComment
+          .mockRejectedValueOnce(refusal(headers))
+          .mockRejectedValueOnce(refusal(headers))
+          .mockRejectedValueOnce(refusal(headers));
+        await expect(
+          priv().publishFinalResponse(
+            'owner/repo',
+            'issue:42',
+            'Final reply',
+            'session-publication',
+          ),
+        ).rejects.toBeDefined();
+        expect(pendingIds()).toHaveLength(1);
+      }
+
+      beforeEach(() => {
+        now = T0;
+        clock = vi.spyOn(Date, 'now').mockImplementation(() => now);
+      });
+      afterEach(() => {
+        clock.mockRestore();
+      });
+
+      it('posts a stored reply on a later poll once GitHub says the limit is over', async () => {
+        await start();
+        mockOctokit.rest.issues.createComment.mockResolvedValue(posted);
+        await publishRefused({
+          'x-ratelimit-reset': Math.floor(T0 / 1000) + 10 * 60,
+        });
+
+        await pollAt(9);
+        expect(replies()).toBe(3);
+
+        await pollAt(11);
+        expect(replies()).toBe(4);
+        expect(pendingIds()).toEqual([]);
+        expect(readFileSync(auditPath(), 'utf-8')).toContain(
+          '"outcome":"posted"',
+        );
+      });
+
+      it('runs no further pass once the stored replies are posted', async () => {
+        const pass = vi.spyOn(
+          channel as unknown as {
+            retryPendingFinalDeliveries: () => Promise<unknown>;
+          },
+          'retryPendingFinalDeliveries',
+        );
+        await start();
+        mockOctokit.rest.issues.createComment.mockResolvedValue(posted);
+        await publishRefused();
+        await pollAt(6);
+        expect(pendingIds()).toEqual([]);
+
+        await pollAt(20);
+        await pollAt(40);
+        // The pass at start and the one that posted the reply.
+        expect(pass).toHaveBeenCalledTimes(2);
+      });
+
+      it('posts a stored reply once even when the state directory stops taking writes', async () => {
+        const pass = vi.spyOn(
+          channel as unknown as {
+            retryPendingFinalDeliveries: () => Promise<unknown>;
+          },
+          'retryPendingFinalDeliveries',
+        );
+        await start();
+        mockOctokit.rest.issues.createComment.mockResolvedValue(posted);
+        await publishRefused();
+        const readOnly = () =>
+          Object.assign(new Error('EROFS: read-only file system'), {
+            code: 'EROFS',
+          });
+        const append = nodeFs.appendFileSync;
+        const unlink = nodeFs.unlinkSync;
+        // Neither the posted audit row nor the removal of the stored reply
+        // lands.
+        const appendSpy = vi
+          .spyOn(nodeFs, 'appendFileSync')
+          .mockImplementation(((
+            path: nodeFs.PathOrFileDescriptor,
+            ...rest: unknown[]
+          ) => {
+            if (String(path).endsWith('-github-audit.jsonl')) throw readOnly();
+            return (append as (...args: unknown[]) => void)(path, ...rest);
+          }) as typeof nodeFs.appendFileSync);
+        const unlinkSpy = vi.spyOn(nodeFs, 'unlinkSync').mockImplementation(((
+          path: nodeFs.PathLike,
+        ) => {
+          if (String(path).endsWith('-github-pending-deliveries.json')) {
+            throw readOnly();
+          }
+          return (unlink as (p: nodeFs.PathLike) => void)(path);
+        }) as typeof nodeFs.unlinkSync);
+        const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+        try {
+          await pollAt(6);
+          await pollAt(12);
+          await pollAt(30);
+          // Only the posted reply is left, so no further pass is scheduled.
+          expect(pass).toHaveBeenCalledTimes(2);
+          // Another refused reply schedules a pass, which must not post the
+          // first one again.
+          await publishSecondRefused();
+          await pollAt(90);
+          // Nor does the pass at start after a reconnect of this instance.
+          channel.disconnect();
+          await connectForPublication();
+          await priv().pendingFinalDeliveryRetry;
+        } finally {
+          appendSpy.mockRestore();
+          unlinkSpy.mockRestore();
+          stderr.mockRestore();
+        }
+
+        const sentTo = (issue: number) =>
+          mockOctokit.rest.issues.createComment.mock.calls.filter(
+            ([request]) =>
+              (request as { issue_number: number }).issue_number === issue,
+          );
+        expect(sentTo(42)).toHaveLength(4);
+        expect(sentTo(43)).toHaveLength(4);
+        expect(pass).toHaveBeenCalledTimes(4);
+      });
+
+      it('sends a reply with an ambiguous answer once even when it cannot be removed', async () => {
+        await start();
+        await publishRefused();
+        const unlink = nodeFs.unlinkSync;
+        const unlinkSpy = vi.spyOn(nodeFs, 'unlinkSync').mockImplementation(((
+          path: nodeFs.PathLike,
+        ) => {
+          if (String(path).endsWith('-github-pending-deliveries.json')) {
+            throw Object.assign(new Error('EROFS: read-only file system'), {
+              code: 'EROFS',
+            });
+          }
+          return (unlink as (p: nodeFs.PathLike) => void)(path);
+        }) as typeof nodeFs.unlinkSync);
+        const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+        try {
+          // GitHub may have created the comment: never send it again.
+          mockOctokit.rest.issues.createComment.mockRejectedValue(
+            Object.assign(new Error('Bad Gateway'), { status: 502 }),
+          );
+          await pollAt(6);
+          await publishSecondRefused();
+          await pollAt(90);
+        } finally {
+          unlinkSpy.mockRestore();
+          stderr.mockRestore();
+        }
+
+        expect(
+          mockOctokit.rest.issues.createComment.mock.calls.filter(
+            ([request]) =>
+              (request as { issue_number: number }).issue_number === 42,
+          ),
+        ).toHaveLength(4);
+      });
+
+      it('schedules later passes, further apart, when the stored replies cannot be read', async () => {
+        const pass = vi.spyOn(
+          channel as unknown as {
+            retryPendingFinalDeliveries: () => Promise<unknown>;
+          },
+          'retryPendingFinalDeliveries',
+        );
+        await start();
+        mockOctokit.rest.issues.createComment.mockResolvedValue(posted);
+        await publishRefused();
+        const read = nodeFs.readFileSync;
+        const readSpy = vi.spyOn(nodeFs, 'readFileSync').mockImplementation(((
+          path: nodeFs.PathOrFileDescriptor,
+          ...rest: unknown[]
+        ) => {
+          if (String(path).endsWith('-github-pending-deliveries.json')) {
+            throw Object.assign(new Error('EIO: i/o error'), { code: 'EIO' });
+          }
+          return (read as (...args: unknown[]) => unknown)(path, ...rest);
+        }) as typeof nodeFs.readFileSync);
+        const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+        try {
+          // Passes at 6 and 16, then the next one waits twenty minutes.
+          for (let minute = 6; minute <= 35; minute += 1) await pollAt(minute);
+        } finally {
+          readSpy.mockRestore();
+          stderr.mockRestore();
+        }
+        expect(replies()).toBe(3);
+        expect(pass).toHaveBeenCalledTimes(3);
+
+        await pollAt(37);
+        expect(replies()).toBe(4);
+        expect(pendingIds()).toEqual([]);
+      });
+
+      it('does not send a reply an earlier process posted when its removal keeps failing', async () => {
+        writePending([pendingRecord()]);
+        mkdirSync(join(auditPath(), '..'), { recursive: true });
+        writeFileSync(
+          auditPath(),
+          `${JSON.stringify({
+            at: '2026-07-30T00:00:00.000Z',
+            type: 'github_publication',
+            outcome: 'posted',
+            channel: 'test-github',
+            pendingId: 'pending',
+            commentId: 1,
+          })}\n`,
+        );
+        const unlink = nodeFs.unlinkSync;
+        const unlinkSpy = vi.spyOn(nodeFs, 'unlinkSync').mockImplementation(((
+          path: nodeFs.PathLike,
+        ) => {
+          if (String(path).endsWith('-github-pending-deliveries.json')) {
+            throw Object.assign(new Error('EROFS: read-only file system'), {
+              code: 'EROFS',
+            });
+          }
+          return (unlink as (p: nodeFs.PathLike) => void)(path);
+        }) as typeof nodeFs.unlinkSync);
+        const read = nodeFs.readFileSync;
+        let auditReadable = true;
+        const readSpy = vi.spyOn(nodeFs, 'readFileSync').mockImplementation(((
+          path: nodeFs.PathOrFileDescriptor,
+          ...rest: unknown[]
+        ) => {
+          if (!auditReadable && String(path).endsWith('-github-audit.jsonl')) {
+            throw Object.assign(new Error('EMFILE: too many open files'), {
+              code: 'EMFILE',
+            });
+          }
+          return (read as (...args: unknown[]) => unknown)(path, ...rest);
+        }) as typeof nodeFs.readFileSync);
+        const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+        try {
+          mockOctokit.rest.issues.createComment.mockResolvedValue(posted);
+          await start();
+          // The pass at start drops it by the audit but cannot remove it.
+          expect(pendingIds()).toEqual(['pending']);
+          auditReadable = false;
+          await publishSecondRefused();
+          await pollAt(90);
+        } finally {
+          unlinkSpy.mockRestore();
+          readSpy.mockRestore();
+          stderr.mockRestore();
+        }
+
+        expect(
+          mockOctokit.rest.issues.createComment.mock.calls.filter(
+            ([request]) =>
+              (request as { issue_number: number }).issue_number === 42,
+          ),
+        ).toHaveLength(0);
+      });
+
+      it('lets the pass at start make its three attempts after a reconnect', async () => {
+        await start();
+        await publishRefused();
+        now = T0 + 30 * 60_000;
+        channel.disconnect();
+        mockOctokit.rest.issues.createComment.mockRejectedValue(refusal());
+        await connectForPublication();
+        await priv().pendingFinalDeliveryRetry;
+
+        expect(replies()).toBe(6);
+      });
+
+      it('sends a reply with an ambiguous answer once even when its audit row fails', async () => {
+        await start();
+        await publishRefused();
+        const audit = channel as unknown as {
+          recordPublicationAudit: (record: { outcome: string }) => void;
+        };
+        const original = audit.recordPublicationAudit.bind(channel);
+        const auditSpy = vi
+          .spyOn(audit, 'recordPublicationAudit')
+          .mockImplementation((record) => {
+            if (record.outcome === 'failed_ambiguous') {
+              throw new Error('audit down');
+            }
+            original(record);
+          });
+        const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+        try {
+          mockOctokit.rest.issues.createComment.mockRejectedValue(
+            Object.assign(new Error('Bad Gateway'), { status: 502 }),
+          );
+          for (let minute = 6; minute <= 90; minute += 1) await pollAt(minute);
+        } finally {
+          auditSpy.mockRestore();
+          stderr.mockRestore();
+        }
+
+        expect(replies()).toBe(4);
+      });
+
+      it('schedules the next pass when a pass fails part-way', async () => {
+        await start();
+        mockOctokit.rest.issues.createComment.mockResolvedValue(posted);
+        await publishRefused();
+        const build = vi
+          .spyOn(
+            channel as unknown as { buildPublicationAuditBase: () => unknown },
+            'buildPublicationAuditBase',
+          )
+          .mockImplementationOnce(() => {
+            throw new Error('unexpected');
+          });
+        const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+        try {
+          await pollAt(6);
+          expect(replies()).toBe(3);
+          await pollAt(17);
+        } finally {
+          build.mockRestore();
+          stderr.mockRestore();
+        }
+        expect(replies()).toBe(4);
+        expect(pendingIds()).toEqual([]);
+      });
+
+      it('doubles the wait up to the hour', async () => {
+        await start();
+        await publishRefused();
+        mockOctokit.rest.issues.createComment.mockRejectedValue(refusal());
+        // Passes at 6, then 10, 20, 40 and 60 (the cap) minutes apart.
+        for (const minute of [6, 17, 38, 79]) {
+          await pollAt(minute - 2);
+          const before = replies();
+          await pollAt(minute);
+          expect(replies()).toBe(before + 1);
+        }
+        await pollAt(137);
+        expect(replies()).toBe(7);
+        await pollAt(140);
+        expect(replies()).toBe(8);
+      });
+
+      it('schedules no pass after a pass the channel stop cut short', async () => {
+        await start();
+        await publishRefused();
+        let answer!: (value: unknown) => void;
+        mockOctokit.rest.issues.createComment.mockImplementation(
+          () =>
+            new Promise((resolve) => {
+              answer = resolve;
+            }),
+        );
+        now = T0 + 6 * 60_000;
+        await priv().pollOnce();
+        const running = priv().pendingFinalDeliveryRetry;
+        channel.disconnect();
+        answer(posted);
+        await running;
+
+        expect(
+          (channel as unknown as { pendingFinalDeliveryRetryAt?: number })
+            .pendingFinalDeliveryRetryAt,
+        ).toBeUndefined();
+      });
+
+      it('schedules a pass when a reconnect lands before the cut-short pass settles', async () => {
+        await start();
+        await publishRefused();
+        let fail!: (err: unknown) => void;
+        mockOctokit.rest.issues.createComment.mockImplementation(
+          () =>
+            new Promise((_resolve, reject) => {
+              fail = reject;
+            }),
+        );
+        now = T0 + 6 * 60_000;
+        await priv().pollOnce();
+        const running = priv().pendingFinalDeliveryRetry;
+        channel.disconnect();
+        // The failed write's deferred abort cuts the pass short. The
+        // reconnect must land before the pass settles: once it settles,
+        // connect()'s own start pass takes over and the race is gone.
+        fail(refusal());
+        await connectForPublication();
+        await running;
+        mockOctokit.rest.issues.createComment.mockResolvedValue(posted);
+
+        await pollAt(17);
+        // Three in-call refusals, the cut-short attempt, and the delivery.
+        expect(replies()).toBe(5);
+        expect(pendingIds()).toEqual([]);
+      });
+
+      it.each([
+        [
+          'a secondary limit with budget left waits the minimum, not the reset',
+          {
+            'x-ratelimit-remaining': '4999',
+            'x-ratelimit-reset': Math.floor(T0 / 1000) + 55 * 60,
+          },
+          'You have exceeded a secondary rate limit.',
+          5,
+        ],
+        [
+          'retry-after wins over the reset',
+          {
+            'retry-after': String(10 * 60),
+            'x-ratelimit-reset': Math.floor(T0 / 1000) + 40 * 60,
+          },
+          'API rate limit exceeded',
+          10,
+        ],
+        [
+          'a short retry-after still waits the minimum',
+          { 'retry-after': '60' },
+          'API rate limit exceeded',
+          5,
+        ],
+        [
+          'a reset already past waits the minimum',
+          { 'x-ratelimit-reset': Math.floor(T0 / 1000) - 60 },
+          'API rate limit exceeded',
+          5,
+        ],
+        [
+          'a retry-after that is a date waits the minimum',
+          { 'retry-after': 'Wed, 30 Jul 2026 13:00:00 GMT' },
+          'API rate limit exceeded',
+          5,
+        ],
+      ])('schedules the pass: %s', async (_name, headers, message, minutes) => {
+        await start();
+        mockOctokit.rest.issues.createComment.mockResolvedValue(posted);
+        const refused = Object.assign(new Error(message), {
+          status: 403,
+          response: { headers: { 'x-ratelimit-remaining': '0', ...headers } },
+        });
+        mockOctokit.rest.issues.createComment
+          .mockRejectedValueOnce(refused)
+          .mockRejectedValueOnce(refused)
+          .mockRejectedValueOnce(refused);
+        await expect(
+          priv().publishFinalResponse(
+            'owner/repo',
+            'issue:42',
+            'Final reply',
+            'session-publication',
+          ),
+        ).rejects.toBeDefined();
+
+        await pollAt(minutes - 0.5);
+        expect(replies()).toBe(3);
+        await pollAt(minutes + 0.5);
+        expect(replies()).toBe(4);
+      });
+
+      it("takes the next pass's wait from the pass's own refusal", async () => {
+        await start();
+        await publishRefused();
+        mockOctokit.rest.issues.createComment
+          .mockRejectedValueOnce(
+            refusal({
+              'x-ratelimit-reset':
+                Math.floor((T0 + 6 * 60_000) / 1000) + 20 * 60,
+            }),
+          )
+          .mockResolvedValue(posted);
+        await pollAt(6);
+        expect(replies()).toBe(4);
+
+        await pollAt(25);
+        expect(replies()).toBe(4);
+        await pollAt(27);
+        expect(replies()).toBe(5);
+      });
+
+      it('takes the wait from a rate limit without a budget count as well', async () => {
+        await start();
+        writePending([
+          pendingRecord({ id: 'first', sourceMessageId: '1001' }),
+          pendingRecord({ id: 'second', sourceMessageId: '1002' }),
+        ]);
+        const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+        try {
+          (
+            channel as unknown as {
+              schedulePendingFinalDeliveryRetry: () => void;
+            }
+          ).schedulePendingFinalDeliveryRetry();
+          // No budget count: the first reply is dropped as ambiguous, the
+          // second kept, and the limit's retry-after sets the next pass.
+          mockOctokit.rest.issues.createComment
+            .mockRejectedValueOnce(
+              Object.assign(new Error('rate limited'), {
+                status: 429,
+                response: { headers: { 'retry-after': String(15 * 60) } },
+              }),
+            )
+            .mockResolvedValue(posted);
+          await pollAt(6);
+          expect(pendingIds()).toEqual(['second']);
+          expect(
+            stderr.mock.calls.some(([line]) =>
+              String(line).includes(
+                'pending GitHub delivery retry stopped early; any later stored replies wait for the next retry: rate limited',
+              ),
+            ),
+          ).toBe(true);
+
+          await pollAt(20);
+          expect(pendingIds()).toEqual(['second']);
+          await pollAt(22);
+          expect(pendingIds()).toEqual([]);
+        } finally {
+          stderr.mockRestore();
+        }
+      });
+
+      it('keeps the later schedule when another refusal asks for less', async () => {
+        await start();
+        mockOctokit.rest.issues.createComment.mockResolvedValue(posted);
+        await publishRefused({
+          'x-ratelimit-reset': Math.floor(T0 / 1000) + 30 * 60,
+        });
+        mockOctokit.rest.issues.createComment
+          .mockRejectedValueOnce(refusal())
+          .mockRejectedValueOnce(refusal())
+          .mockRejectedValueOnce(refusal());
+        await expect(
+          priv().publishFinalResponse(
+            'owner/repo',
+            'issue:43',
+            'Another reply',
+            'session-publication',
+          ),
+        ).rejects.toBeDefined();
+        expect(pendingIds()).toHaveLength(2);
+
+        await pollAt(10);
+        expect(replies()).toBe(6);
+        await pollAt(31);
+        expect(replies()).toBe(8);
+        expect(pendingIds()).toEqual([]);
+      });
+
+      it('keeps a reply GitHub still refuses, waiting twice as long after each refused pass', async () => {
+        await start();
+        // No reset time: the minimum wait applies.
+        await publishRefused();
+        await pollAt(4);
+        expect(replies()).toBe(3);
+
+        // A pass while the channel runs makes one attempt per reply.
+        mockOctokit.rest.issues.createComment.mockRejectedValue(refusal());
+        await pollAt(6);
+        expect(replies()).toBe(4);
+        expect(pendingIds()).toHaveLength(1);
+
+        // Ten minutes after the first refused pass, twenty after the second.
+        await pollAt(15);
+        expect(replies()).toBe(4);
+        await pollAt(17);
+        expect(replies()).toBe(5);
+
+        mockOctokit.rest.issues.createComment.mockResolvedValue(posted);
+        await pollAt(36);
+        expect(replies()).toBe(5);
+        await pollAt(38);
+        expect(replies()).toBe(6);
+        expect(pendingIds()).toEqual([]);
+
+        // A pass that went through starts the doubling again.
+        await publishSecondRefused();
+        expect(replies()).toBe(9);
+        await pollAt(44);
+        expect(replies()).toBe(10);
+        expect(pendingIds()).toEqual([]);
+      });
+
+      it('keeps the doubled wait for a reply refused after a refused pass', async () => {
+        await start();
+        await publishRefused();
+        mockOctokit.rest.issues.createComment.mockRejectedValue(refusal());
+        await pollAt(6);
+        expect(replies()).toBe(4);
+
+        // Ten minutes after this refusal, not five.
+        now = T0 + 8 * 60_000;
+        await publishSecondRefused();
+        expect(replies()).toBe(7);
+        mockOctokit.rest.issues.createComment.mockResolvedValue(posted);
+        await pollAt(17);
+        expect(replies()).toBe(7);
+        await pollAt(19);
+        expect(replies()).toBe(9);
+        expect(pendingIds()).toEqual([]);
+      });
+
+      it('starts the pass from a poll that fails after listing its notifications', async () => {
+        await start();
+        mockOctokit.rest.issues.createComment.mockResolvedValue(posted);
+        await publishRefused();
+        (
+          channel as unknown as { cursor: { lastProcessedAt: string } }
+        ).cursor.lastProcessedAt = new Date(T0).toISOString();
+        mockOctokit.rest.activity.markNotificationsAsRead.mockRejectedValue(
+          new Error('read-only PAT'),
+        );
+        mockOctokit.paginate
+          .mockResolvedValueOnce([
+            makeNotification({
+              reason: 'subscribed',
+              updated_at: new Date(T0 + 6 * 60_000).toISOString(),
+            }),
+          ])
+          .mockResolvedValueOnce([]);
+        mockOctokit.rest.issues.get.mockResolvedValue({
+          data: {
+            body: 'plain issue body',
+            created_at: new Date(T0 - 60_000).toISOString(),
+            user: { id: 10002, login: 'bob' },
+          },
+        });
+        now = T0 + 6 * 60_000;
+        const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+        try {
+          await expect(priv().pollOnce()).rejects.toThrow('read-only PAT');
+          expect(stderr.mock.calls.join('')).not.toContain('API error');
+          await priv().pendingFinalDeliveryRetry;
+        } finally {
+          stderr.mockRestore();
+        }
+        expect(replies()).toBe(4);
+        expect(pendingIds()).toEqual([]);
+      });
+
+      it('waits at most an hour for a far retry-after', async () => {
+        await start();
+        mockOctokit.rest.issues.createComment.mockResolvedValue(posted);
+        await publishRefused({ 'retry-after': String(3 * 60 * 60) });
+
+        await pollAt(59);
+        expect(replies()).toBe(3);
+        await pollAt(61);
+        expect(replies()).toBe(4);
+      });
+
+      it('schedules a later pass when the pass at start leaves a reply', async () => {
+        writePending([pendingRecord()]);
+        mockOctokit.rest.issues.createComment
+          .mockRejectedValueOnce(refusal())
+          .mockRejectedValueOnce(refusal())
+          .mockRejectedValueOnce(refusal())
+          .mockResolvedValue(posted);
+        await start();
+        expect(replies()).toBe(3);
+        expect(pendingIds()).toEqual(['pending']);
+
+        // A refused pass: the next one waits ten minutes.
+        await pollAt(9);
+        expect(replies()).toBe(3);
+        await pollAt(11);
+        expect(replies()).toBe(4);
+        expect(pendingIds()).toEqual([]);
+      });
+
+      it('starts no pass from a poll that could not reach GitHub', async () => {
+        await start();
+        mockOctokit.rest.issues.createComment.mockResolvedValue(posted);
+        await publishRefused();
+        const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+        try {
+          mockOctokit.paginate.mockRejectedValue(
+            Object.assign(new Error('getaddrinfo ENOTFOUND api.github.com'), {
+              status: 500,
+            }),
+          );
+          for (let minute = 6; minute <= 60; minute += 5) {
+            await pollAt(minute).catch(() => {});
+          }
+          expect(replies()).toBe(3);
+          expect(pendingIds()).toHaveLength(1);
+
+          mockOctokit.paginate.mockResolvedValue([]);
+          await pollAt(61);
+        } finally {
+          stderr.mockRestore();
+        }
+        expect(replies()).toBe(4);
+        expect(pendingIds()).toEqual([]);
+      });
+
+      it('starts no pass while the channel is stopped', async () => {
+        await start();
+        mockOctokit.rest.issues.createComment.mockResolvedValue(posted);
+        await publishRefused();
+        channel.disconnect();
+
+        await pollAt(30);
+        expect(replies()).toBe(3);
+        expect(pendingIds()).toHaveLength(1);
+      });
     });
 
     it('audits a definite no-write publication failure as retryable failed (R6-A3)', async () => {

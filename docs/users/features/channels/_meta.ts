@@ -3,6 +3,7 @@ export default {
   telegram: 'Telegram',
   weixin: 'WeChat',
   dingtalk: 'DingTalk',
+  'dingtalk-webhook': 'DingTalk Webhook Sending',
   dws: 'DingTalk Workspace',
   wecom: 'WeCom',
   'wecom-callback': 'WeCom Callback',

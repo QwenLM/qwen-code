@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Qwen Managed Agent Public and WebShell API",
-    "version": "1.112.0",
+    "version": "1.114.0",
     "description": "Canonical first-release contract for the public Managed Agent resources and the WebShell adapter. Implemented routes and fields describe the current matching Server, Broker, Harness and WebShell build. Partial entries have remaining implementation or contract-test work; planned entries are not current server capabilities and must be excluded from production SDKs. Turn submission and cancellation always return the durable operation identifier and its persisted admission and delivery state. Session-list cursors are bound to the normalized archive state and title query. Earlier development API shapes, checkpoints and database catalogs are unsupported; initialize fresh state for this build. Runtime feature capabilities and deployment policy still govern optional execution modes. Public conversation history reads directly from mutable message projections; persisted conversation snapshots and fixed-content paging are no longer provided. Retained removed MCP-management entries stay in the response snapshot: only non-removed entries count toward the 32-server selection capacity, so the servers array may exceed 32 while preserving tombstones."
   },
   "servers": [
@@ -3878,7 +3878,7 @@
         "tags": ["WebShell"],
         "operationId": "changeWebShellSessionModel",
         "x-qwen-implementation-status": "implemented",
-        "description": "Change the model of an idle Workspace Session for later Turns. The actor-scoped idempotency key replays an earlier completed change before current admission checks; expectedRevision prevents overwriting a concurrent selection.",
+        "description": "Change the model selection of a Workspace Session for later Turns, including while a Turn or approval is active. Already admitted Turns keep their immutable model snapshot. Lifecycle, recovery and unsettled context changes remain guarded. The actor-scoped idempotency key replays an earlier completed change before current admission checks; expectedRevision prevents overwriting a concurrent selection.",
         "requestBody": {
           "required": true,
           "content": {
@@ -12098,7 +12098,7 @@
           },
           "modelChange": {
             "type": "boolean",
-            "description": "The caller may request an idle Session model change using the server model catalog. Missing means unsupported; authorization and revision admission still apply."
+            "description": "The caller may change the Session model selection for later Turns using the server model catalog, including while a Turn or approval is active. Missing means unsupported; authorization, recovery and revision admission still apply."
           },
           "approvalModeChange": {
             "type": "boolean",
@@ -16783,7 +16783,7 @@
           "catalog_revision": {
             "type": "integer",
             "minimum": 1,
-            "maximum": 9007199254740991
+            "maximum": 9007199254740990
           },
           "definition_digest": {
             "type": "string",

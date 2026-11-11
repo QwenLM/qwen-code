@@ -105,7 +105,9 @@ If the 微信ClawBot conversation is missing, the plugin is not active yet. Per 
 
 ## Who is allowed to talk to it
 
-Under the default `privatePolicy: "pairing"`, the first message from an unrecognized sender is **held, not answered**: the channel records a pairing request and drops that message. Approve the request, then **send another message** — approving does not replay the one that was held.
+Under the default `privatePolicy: "pairing"`, the first message from an unrecognized sender is **not passed to the agent**: the channel records a pairing request, replies with an 8-character pairing code, and drops the message itself. So a reply does arrive — just not an answer to what you asked. Approve the request, then **send another message**; approving does not replay the one that was dropped.
+
+In the 微信ClawBot conversation you are the only sender, so the request you approve is the one your own first message created. See [DM Pairing](./overview#dm-pairing) for the full flow, including approving by code from the terminal.
 
 `allowedUsers` pre-approves senders so they skip pairing. It matches the **platform user ID**, which looks like `oAbCd…@im.wechat` — not a WeChat name or handle. An entry that does not match is silently ignored, so a handle typed here looks configured but never takes effect.
 
