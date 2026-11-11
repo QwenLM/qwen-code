@@ -9069,7 +9069,95 @@ describe('Hosted Harness no-tool session', () => {
     await headers(supertest(server).delete(`/session/${SESSION_ID}`));
   });
 
-  async function prewriteLoopWakeupInput(notBefore: number): Promise<void> {
+  it('a delivered loop tick arms its successor through the wired funnel', async () => {
+    const gateKey = 'QWEN_MANAGED_AGENT_LOOP_ENABLED';
+    const gateBefore = process.env[gateKey];
+    process.env[gateKey] = 'true';
+    try {
+      await prewriteLoopWakeupInput(
+        Date.now() - 1_000,
+        'hosted-workspace-shell/3',
+      );
+      mockBrokerBroker();
+      state.model.mockReset();
+      state.model.mockImplementation(async (input) => {
+        // The delivered tick publishes its classifier and arms the next tick
+        // through the tool turn the wake driver wired.
+        input.setLoopClassifier?.(async () => ({
+          allowed: true,
+          reason: null,
+        }));
+        const call = {
+          name: 'loop_wakeup',
+          callId: 'call-successor-arm',
+          args: { delaySeconds: 60, prompt: '/loop next tick' },
+          isClientInitiated: false,
+          prompt_id: input.promptId,
+        };
+        await input.toolTurn.execute(
+          [call],
+          [
+            {
+              functionCall: {
+                id: call.callId,
+                name: call.name,
+                args: call.args,
+              },
+            },
+          ],
+          'stub-model',
+          input.signal,
+        );
+        return { text: 'armed successor', model: 'stub-model' };
+      });
+      const server = await app(true);
+      const loaded = await headers(
+        supertest(server).post(`/session/${SESSION_ID}/load`),
+      ).send({ managedSessionStore: store() });
+      expect(loaded.status).toBe(200);
+      // Removing loops/wakeKick/setLoopClassifier from the wake driver's tool
+      // turn makes the delivered tick's arm throw and no successor lands.
+      await vi.waitFor(
+        async () => {
+          const journal = await LocalJsonlManagedSessionJournalStore.read({
+            transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+            runtimeBaseDir: state.root,
+            sessionKey: {
+              tenantId: 'tenant',
+              workspaceId: 'workspace',
+              sessionId: SESSION_ID,
+            },
+          });
+          const loopInputs = journal.events.filter(
+            (event) =>
+              event.kind === 'input.accepted' &&
+              event.payload['source'] === 'loop',
+          );
+          expect(loopInputs).toHaveLength(2);
+          const first = loopInputs.find(
+            (event) => event.payload['inputId'] === 'loop:wakeup-compaction',
+          );
+          const successor = loopInputs.find(
+            (event) => event.payload['inputId'] !== 'loop:wakeup-compaction',
+          );
+          expect(successor).toBeDefined();
+          expect(successor!.payload['notBefore']).toBeGreaterThan(
+            first!.payload['notBefore'] as number,
+          );
+        },
+        { timeout: settleTimeoutMs(), interval: 50 },
+      );
+      await headers(supertest(server).delete(`/session/${SESSION_ID}`));
+    } finally {
+      if (gateBefore === undefined) delete process.env[gateKey];
+      else process.env[gateKey] = gateBefore;
+    }
+  });
+
+  async function prewriteLoopWakeupInput(
+    notBefore: number,
+    toolProfile = 'hosted-workspace-shell/1',
+  ): Promise<void> {
     const key = {
       tenantId: 'tenant',
       workspaceId: 'workspace',
@@ -9101,7 +9189,7 @@ describe('Hosted Harness no-tool session', () => {
             JSON.stringify({
               engine: 'managed',
               sessionId: SESSION_ID,
-              toolProfile: 'hosted-workspace-shell/1',
+              toolProfile,
               hookCatalog: hookPin,
             }),
           ),
