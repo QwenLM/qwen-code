@@ -95,6 +95,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
       error instanceof Error ? error.message : String(error),
     ideContextStore: {
       get: () => undefined,
+      getWorkspaceTrust: () => undefined,
     },
     isWithinRoot: (location: string, root: string) =>
       location === root || location.startsWith(`${root}/`),
