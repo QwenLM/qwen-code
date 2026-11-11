@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Readable } from 'node:stream';
 import { chromium, type Browser, type Page } from 'playwright';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import {
@@ -39,64 +38,109 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
       await browser?.close();
     });
 
-    async function newView(page: Page, html: string) {
+    async function newView(page: Page, html: string, toolCallId?: string) {
       const before = page.frames().length;
-      await page.evaluate(() => {
+      await page.evaluate((id) => {
         const frame = document.createElement('iframe');
         frame.name = 'view';
-        document.body.append(frame);
-      });
+        if (id) {
+          const row = document.createElement('div');
+          row.dataset.transcriptToolCallId = id;
+          row.append(frame);
+          document.body.append(row);
+        } else {
+          document.body.append(frame);
+        }
+      }, toolCallId);
       const frame = page.frames()[before];
       await frame.setContent(html);
       return frame;
     }
 
-    it.each([
+    const formDetails =
+      ' Date: 2026-12-05. Budget: CNY 180 per person. Notes: two vegetarians.';
+    it.each<{
+      submissions: number;
+      batched: boolean;
+      additionalUserTurn?: boolean;
+      answer?: string;
+      answerUsesValues?: boolean;
+    }>([
       { submissions: 1, batched: false },
       { submissions: 2, batched: false },
       { submissions: 2, batched: true },
+      { submissions: 1, batched: false, additionalUserTurn: true },
+      { submissions: 1, batched: true, additionalUserTurn: true },
       {
         submissions: 1,
         batched: false,
-        answer: '**12** people should try the escape room',
+        answer: '**12** people should try the escape room.' + formDetails,
       },
       {
         submissions: 1,
         batched: false,
-        answer: 'A 12-person team should try the escape room',
-      },
-      { submissions: 1, batched: false, answer: '建议 12 人一起体验密室逃脱' },
-      { submissions: 1, batched: false, answer: '人数：12，建议密室逃脱' },
-      { submissions: 1, batched: false, answer: '共12个人一起体验密室逃脱' },
-      {
-        submissions: 1,
-        batched: false,
-        answer: '建议 12 名同事参加密室逃脱',
+        answer: 'A 12-person team should try the escape room.' + formDetails,
       },
       {
         submissions: 1,
         batched: false,
-        answer: 'Participants: 12; activity: escape room',
+        answer: '建议 12 人一起体验密室逃脱。' + formDetails,
       },
       {
         submissions: 1,
         batched: false,
-        answer:
-          'For 8 people at CNY 150 each on 2026-12-05, choose an escape room; no dietary needs.',
+        answer: '人数：12，建议密室逃脱。' + formDetails,
+      },
+      {
+        submissions: 1,
+        batched: false,
+        answer: '共12个人一起体验密室逃脱。' + formDetails,
+      },
+      {
+        submissions: 1,
+        batched: false,
+        answer: '建议 12 名同事参加密室逃脱。' + formDetails,
+      },
+      {
+        submissions: 1,
+        batched: false,
+        answer: 'Participants: 12. Activity: escape room.' + formDetails,
+      },
+      {
+        submissions: 1,
+        batched: false,
+        answer: 'For 8 people, choose an escape room.' + formDetails,
         answerUsesValues: false,
       },
       {
         submissions: 1,
         batched: false,
-        answer: 'For 112 people on 2026-12-05, choose an escape room.',
+        answer: 'For 112 people, choose an escape room.' + formDetails,
         answerUsesValues: false,
       },
+      {
+        submissions: 1,
+        batched: false,
+        answer: 'Participants: 12.5. Activity: escape room.' + formDetails,
+        answerUsesValues: false,
+      },
+      ...[
+        formDetails.replace('2026-12-05', '2026-12-19'),
+        formDetails.replace('180 per person', '999 per person (CNY 180 total)'),
+        formDetails.replace('two vegetarians', 'no dietary needs'),
+      ].map((details) => ({
+        submissions: 1,
+        batched: false,
+        answer: 'For 12 people, choose an escape room.' + details,
+        answerUsesValues: false,
+      })),
     ])(
-      'counts $submissions submissions (batched=$batched) and checks answer=$answer',
+      'counts $submissions submissions (batched=$batched, additional=$additionalUserTurn) and checks answer=$answer',
       async ({
         submissions,
         batched,
-        answer = '12 people should try the escape room',
+        additionalUserTurn = false,
+        answer = '12 people should try the escape room.' + formDetails,
         answerUsesValues = true,
       }) => {
         const page = await browser.newPage();
@@ -142,6 +186,12 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
               if (!batched) requests.push(request(messages));
               messages.push({ role: 'assistant', content: 'Response' });
             }
+            if (additionalUserTurn) {
+              messages.push({
+                role: 'user',
+                content: 'Unexpected extra message',
+              });
+            }
             // A retry or tool continuation repeats the existing user turn.
             requests.push(request(messages));
           });
@@ -171,7 +221,7 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
           const results = await runActivityForm(env, 'form');
           expect(
             results.find((check) => check.id === 'form.one-submission')?.status,
-          ).toBe(submissions === 1 ? 'pass' : 'fail');
+          ).toBe(submissions === 1 && !additionalUserTurn ? 'pass' : 'fail');
           expect(
             results.find((check) => check.id === 'form.submits-every-field')
               ?.status,
@@ -371,6 +421,7 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
       'history-loss',
       'inert-add',
       'no-edit',
+      'inert-edit',
     ] as const)(
       'checks checklist progress and undo persistence: %s',
       async (mode) => {
@@ -388,6 +439,12 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
               let history = saved?.history || [];
               const byId = id => document.getElementById(id);
               const snapshot = () => JSON.parse(JSON.stringify(items));
+              function applyFilter() {
+                const filter = byId('filter').value;
+                for (const row of byId('items').children) {
+                  row.hidden = filter !== 'all' && filter !== row.dataset.status;
+                }
+              }
               function render() {
                 byId('empty').hidden = !!items.length;
                 byId('items').innerHTML = '';
@@ -396,8 +453,7 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
                 ordered.forEach(({ item, index }) => {
                   const slot = 'item-' + (index + 1);
                   const row = document.createElement('li');
-                  const filter = byId('filter').value;
-                  row.hidden = filter === 'done' ? !item.done : filter === 'open' ? item.done : false;
+                  row.dataset.status = item.done ? 'done' : 'open';
                   const text = ${JSON.stringify(mode)} === 'no-edit'
                     ? '<span id="' + slot + '-text"></span>'
                     : '<input id="' + slot + '-text">';
@@ -405,11 +461,14 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
                   byId('items').append(row);
                   if (${JSON.stringify(mode)} === 'no-edit') byId(slot + '-text').textContent = item.text;
                   else byId(slot + '-text').value = item.text;
-                  byId(slot + '-text').onchange = event => { history.push(snapshot()); item.text = event.target.value; render(); };
+                  if (${JSON.stringify(mode)} !== 'inert-edit') {
+                    byId(slot + '-text').onchange = event => { history.push(snapshot()); item.text = event.target.value; render(); };
+                  }
                   byId(slot + '-check').checked = item.done;
                   byId(slot + '-check').onchange = event => { history.push(snapshot()); item.done = event.target.checked; render(); };
                   byId(slot + '-delete').onclick = () => { history.push(snapshot()); items.splice(index, 1); render(); };
                 });
+                applyFilter();
                 localStorage.setItem(key, JSON.stringify({
                   items: ${JSON.stringify(mode)} === 'progress-loss' ? items.map(item => ({ ...item, done: false })) : items,
                   history: ${JSON.stringify(mode)} === 'history-loss' ? [] : history,
@@ -419,7 +478,7 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
                 if (${JSON.stringify(mode)} === 'inert-add') return;
                 history.push(snapshot()); items.push({ text: byId('new-item').value, done: false }); byId('new-item').value = ''; render();
               };
-              byId('filter').onchange = render;
+              byId('filter').onchange = applyFilter;
               byId('undo').onclick = () => { if (history.length) items = history.pop(); render(); };
               render();
             </script>`;
@@ -533,7 +592,9 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
           ]) {
             expect(status(id)).toBe('pass');
           }
-          expect(status('edit')).toBe(mode === 'no-edit' ? 'fail' : 'pass');
+          expect(status('edit')).toBe(
+            mode === 'no-edit' || mode === 'inert-edit' ? 'fail' : 'pass',
+          );
           // Nothing the host offers acknowledges a save yet.
           expect(status('save-acknowledged')).toBe('not-applicable');
         } finally {
@@ -545,6 +606,7 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
     it.each([
       { mode: 'in-place', resetFault: 'none', initialPlan: 'basic' },
       { mode: 'new-card', resetFault: 'none', initialPlan: 'basic' },
+      { mode: 'replace-card', resetFault: 'none', initialPlan: 'basic' },
       { mode: 'in-place', resetFault: 'none', initialPlan: 'pro' },
       { mode: 'in-place', resetFault: 'billing', initialPlan: 'basic' },
       { mode: 'in-place', resetFault: 'plan', initialPlan: 'basic' },
@@ -552,14 +614,30 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
       { mode: 'in-place', resetFault: 'none', initialPlan: null },
       { mode: 'new-card', resetFault: 'none', initialPlan: null },
       { mode: 'in-place', resetFault: 'plan', initialPlan: null },
-    ] as const)(
-      'observes $mode comparator updates (reset=$resetFault, initialPlan=$initialPlan)',
-      async ({ mode, resetFault, initialPlan }) => {
+      {
+        mode: 'in-place',
+        resetFault: 'none',
+        initialPlan: 'basic',
+        exportMode: 'wrong-plan',
+      },
+      {
+        mode: 'in-place',
+        resetFault: 'none',
+        initialPlan: 'basic',
+        exportMode: 'moving-button',
+      },
+    ])(
+      'observes $mode comparator updates (reset=$resetFault, initialPlan=$initialPlan, export=$exportMode)',
+      async ({ mode, resetFault, initialPlan, exportMode }) => {
         const initialAnnual = initialPlan === 'pro';
         const page = await browser.newPage();
         page.setDefaultTimeout(1_000);
         try {
           vi.spyOn(page, 'waitForTimeout').mockResolvedValue();
+          const csv =
+            exportMode === 'wrong-plan'
+              ? 'plan,payment\npro,14227.20\nteam,0\n'
+              : '"plan","payment"\r\n"team","14,227.2"\r\n';
           const html = `
             <input id="seats" value="6">
             <input type="radio" name="billing" id="billing-monthly" ${initialAnnual ? '' : 'checked'}>
@@ -584,22 +662,44 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
               }
               document.addEventListener('input', render);
               document.addEventListener('change', render);
+              document.getElementById('export').onclick = () => {
+                const link = document.createElement('a');
+                link.href = URL.createObjectURL(new Blob([${JSON.stringify(csv)}], { type: 'text/csv' }));
+                link.download = 'comparator.csv';
+                link.click();
+              };
               render();
             </script>`;
-          let view = await newView(page, html);
+          let cardCount = 1;
+          let view = await newView(page, html, 'call-1');
           const initialPayment = await view
             .locator('#team-payment')
             .textContent();
           const env = {
             page,
+            cardTimeoutMs: 100,
             startSession: async () => {},
             waitForCard: (index: number) => waitForCardOn(page, index, 100),
             waitForIdle: async () => {},
             send: async (prompt: string) => {
               const reset = prompt === 'reset';
-              if (mode === 'new-card') view = await newView(page, html);
+              if (mode === 'replace-card') {
+                await page
+                  .locator('[data-transcript-tool-call-id]')
+                  .last()
+                  .evaluate((row) => row.remove());
+              }
+              if (mode !== 'in-place') {
+                view = await newView(page, html, `call-${++cardCount}`);
+              }
               await view.evaluate(
-                ({ reset, resetFault, initialAnnual, initialPlan }) => {
+                ({
+                  reset,
+                  resetFault,
+                  initialAnnual,
+                  initialPlan,
+                  exportMode,
+                }) => {
                   (
                     document.getElementById('support') as HTMLInputElement
                   ).checked = !reset;
@@ -626,16 +726,22 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
                     ).checked = true;
                   if (!reset || resetFault !== 'amounts')
                     document.dispatchEvent(new Event('input'));
+                  if (!reset && exportMode === 'moving-button') {
+                    document
+                      .getElementById('export')!
+                      .animate(
+                        [
+                          { transform: 'translateX(0px)' },
+                          { transform: 'translateX(80px)' },
+                        ],
+                        { duration: 4_500, fill: 'forwards' },
+                      );
+                  }
                 },
-                { reset, resetFault, initialAnnual, initialPlan },
+                { reset, resetFault, initialAnnual, initialPlan, exportMode },
               );
             },
           } as unknown as AcceptanceEnv;
-          vi.spyOn(page, 'waitForEvent').mockResolvedValue({
-            createReadStream: async () =>
-              // A correct total written without zero padding or grouped.
-              Readable.from(['plan,payment\nteam,"14,227.2"\n']),
-          } as never);
 
           const results = await runComparator(env, {
             initial: 'initial',
@@ -667,7 +773,8 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
             'comparator.keeps-choices': 'pass',
             'comparator.extends-existing-card':
               mode === 'in-place' ? 'pass' : 'fail',
-            'comparator.exports-current-csv': 'pass',
+            'comparator.exports-current-csv':
+              exportMode === 'wrong-plan' ? 'fail' : 'pass',
             'comparator.reset-via-follow-up':
               resetFault === 'none' ? 'pass' : 'fail',
           });
@@ -695,25 +802,17 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
             <span id="basic-monthly"></span><span id="basic-payment"></span>
             <span id="pro-monthly"></span><span id="pro-payment"></span>
             <span id="team-monthly"></span><span id="team-payment"></span>`,
+            'call-1',
           );
-          let cards = 0;
           const env = {
             page,
+            cardTimeoutMs: 100,
             startSession: async () => {},
-            waitForCard: async () => {
-              cards++;
-              if (fault === 'no-follow-up-card' && cards === 2) {
-                throw new Error('card 0 did not render within 100 ms');
-              }
-              return { view, app: page.mainFrame() };
-            },
+            waitForCard: async () => ({ view, app: page.mainFrame() }),
             waitForIdle: async () => {},
             send: async () => {},
           } as unknown as AcceptanceEnv;
-          const exported = vi.spyOn(page, 'waitForEvent').mockResolvedValue({
-            createReadStream: async () =>
-              Readable.from(['plan,payment\nteam,14227.20\n']),
-          } as never);
+          const exported = vi.spyOn(page, 'waitForEvent');
 
           const results = await runComparator(env, {
             initial: 'initial',

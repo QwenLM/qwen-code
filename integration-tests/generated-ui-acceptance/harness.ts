@@ -16,6 +16,7 @@
  * no turn and that one explicit submission starts exactly one.
  */
 
+import { randomBytes } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import {
   createServer,
@@ -26,6 +27,11 @@ import {
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
+import {
+  BUNDLED_GENERATED_UI_SERVER,
+  BUNDLED_GENERATED_UI_TOOL,
+} from '@qwen-code/qwen-code-core/config/generated-ui.js';
+import { ToolNames } from '@qwen-code/qwen-code-core/tools/tool-names.js';
 import {
   chromium,
   type Browser,
@@ -45,7 +51,7 @@ import {
   type SpawnedDaemon,
 } from '../cli/_daemon-harness.js';
 
-export const SHOW_TOOL = 'mcp__generated-ui__generated_ui_show';
+export const SHOW_TOOL = `mcp__${BUNDLED_GENERATED_UI_SERVER}__${BUNDLED_GENERATED_UI_TOOL}`;
 const CLASSIFIER_MARKER = 'Pending tool call to classify';
 
 export interface ChatMessage {
@@ -180,8 +186,14 @@ async function startRecordingProxy(model: LiveModel): Promise<ModelBackend> {
   const requests: RecordedRequest[] = [];
   let pending = 0;
   const upstream = model.baseUrl.replace(/\/+$/, '');
+  const proxyKey = randomBytes(32).toString('hex');
   const server: Server = createServer(
     async (request: IncomingMessage, response: ServerResponse) => {
+      if (request.headers.authorization !== `Bearer ${proxyKey}`) {
+        response.writeHead(401, { 'www-authenticate': 'Bearer' });
+        response.end();
+        return;
+      }
       const controller = new AbortController();
       // A streamed answer counts as running until its response closes.
       pending++;
@@ -246,7 +258,7 @@ async function startRecordingProxy(model: LiveModel): Promise<ModelBackend> {
   const { port } = server.address() as AddressInfo;
   return {
     baseUrl: `http://127.0.0.1:${port}`,
-    apiKey: 'proxy-key',
+    apiKey: proxyKey,
     model: model.model,
     requests,
     inFlight: () => pending,
@@ -292,8 +304,6 @@ export interface AcceptanceEnv {
    * for `quietMs`: no response in flight, no new request, no running composer.
    */
   waitForIdle(quietMs?: number, timeoutMs?: number): Promise<void>;
-  /** Approves a pending tool call when the host asks. */
-  approvePending(): Promise<boolean>;
   /** Browser console output from the page and its frames. */
   logs: string[];
   /** Saves a full-page screenshot under the run's root, for diagnosis. */
@@ -301,7 +311,6 @@ export interface AcceptanceEnv {
   close(): Promise<void>;
 }
 
-const APPROVE_LABEL = 'Yes, allow once';
 /** The only operator variables the daemon inherits. */
 export const INHERITED_ENV = ['PATH', 'TMPDIR', 'LANG', 'LC_ALL'] as const;
 /** Labels the composer's submit button shows while a turn runs (English UI). */
@@ -336,6 +345,15 @@ export async function startAcceptanceEnv(options: {
       model: { skipNextSpeakerCheck: true },
       ui: { enableFollowupSuggestions: false },
       memory: { enableManagedAutoMemory: false, enableManagedAutoDream: false },
+      tools: { approvalMode: 'default' },
+      permissions: {
+        allow: [SHOW_TOOL, `Skill(${BUNDLED_GENERATED_UI_SERVER})`],
+        deny: Object.values(ToolNames).filter(
+          (name) => name !== ToolNames.SKILL,
+        ),
+      },
+      mcp: { allowed: [BUNDLED_GENERATED_UI_SERVER] },
+      skills: { disabledLevels: ['project', 'user', 'extension'] },
     }),
   );
   await fs.writeFile(
@@ -463,20 +481,8 @@ export async function startAcceptanceEnv(options: {
       await submit(prompt);
     },
     send: submit,
-    async approvePending() {
-      const approve = page
-        .locator('button', { hasText: APPROVE_LABEL })
-        .first();
-      if (await approve.isVisible().catch(() => false)) {
-        await approve.click();
-        return true;
-      }
-      return false;
-    },
     async waitForCard(index, timeoutMs = cardTimeoutMs) {
-      const card = await waitForCardOn(page, index, timeoutMs, () =>
-        env.approvePending(),
-      );
+      const card = await waitForCardOn(page, index, timeoutMs);
       if (index === 0 && env.firstCardMs === undefined) {
         env.firstCardMs = Date.now() - sessionStartedAt;
       }
@@ -488,7 +494,6 @@ export async function startAcceptanceEnv(options: {
       let since = Date.now();
       let started = false;
       while (Date.now() < deadline) {
-        await env.approvePending();
         await page.waitForTimeout(500);
         const busy =
           backend.inFlight() > 0 ||
@@ -568,17 +573,15 @@ export async function waitForCardOn(
   page: Page,
   index: number,
   timeoutMs = 180_000,
-  onPoll: () => Promise<unknown> = async () => {},
 ): Promise<Card> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    await onPoll();
     const view = page.frames().filter((frame) => frame.name() === 'view')[
       index
     ];
     if (view && !view.isDetached()) {
       const ready = await view
-        .locator('body *')
+        .locator('body *:visible')
         .first()
         .isVisible()
         .catch(() => false);
@@ -628,8 +631,8 @@ export async function text(view: Frame, id: string): Promise<string> {
  */
 const STILL_MS = 1_200;
 
-/** Clicks `target` once it has stopped moving, as a person would. */
-export async function clickWhenStill(
+/** Waits for `target` to stop moving before arming a click's side effects. */
+export async function waitForStill(
   target: Locator,
   timeoutMs = 10_000,
 ): Promise<void> {
@@ -643,10 +646,19 @@ export async function clickWhenStill(
       last = position ?? undefined;
       since = Date.now();
     } else if (position && Date.now() - since >= STILL_MS) {
-      break;
+      return;
     }
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
+  throw new Error(`control did not stop moving within ${timeoutMs} ms`);
+}
+
+/** Clicks `target` once it has stopped moving, as a person would. */
+export async function clickWhenStill(
+  target: Locator,
+  timeoutMs?: number,
+): Promise<void> {
+  await waitForStill(target, timeoutMs);
   await target.click();
 }
 

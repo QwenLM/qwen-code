@@ -27,14 +27,17 @@ import {
   comparatorMonthlyEquivalent,
   comparatorPayment,
   type ComparatorInputs,
+  type Plan,
 } from './fixtures.js';
 import {
   clickWhenStill,
+  messageText,
   setValue,
   settle,
   text,
   userTurns,
   waitForCardOn,
+  waitForStill,
   type AcceptanceEnv,
   type Card,
 } from './harness.js';
@@ -532,25 +535,29 @@ export async function runChecklist(
       );
     });
 
-    await checks.guard('repeated-undo', 'case 2', async () => {
-      await clickWhenStill(view.locator('#undo'));
-      const afterFirst = await settle(
-        () => itemTexts(view),
-        (value) => value.includes('Actions'),
-      );
-      await clickWhenStill(view.locator('#undo'));
-      await env.page.waitForTimeout(500);
-      const slot = await itemSlot(view, 'Notes');
-      const notesChecked = slot
-        ? await view.locator(`#${slot}-check`).isChecked()
-        : undefined;
-      return checks.expect(
-        'repeated-undo',
-        'case 2',
-        afterFirst.includes('Actions') && notesChecked === false,
-        `after one undo: ${JSON.stringify(afterFirst)}; after two, Notes checked=${notesChecked}`,
-      );
-    });
+    const undoWorks = await checks.guard(
+      'repeated-undo',
+      'case 2',
+      async () => {
+        await clickWhenStill(view.locator('#undo'));
+        const afterFirst = await settle(
+          () => itemTexts(view),
+          (value) => value.includes('Actions'),
+        );
+        await clickWhenStill(view.locator('#undo'));
+        await env.page.waitForTimeout(500);
+        const slot = await itemSlot(view, 'Notes');
+        const notesChecked = slot
+          ? await view.locator(`#${slot}-check`).isChecked()
+          : undefined;
+        return checks.expect(
+          'repeated-undo',
+          'case 2',
+          afterFirst.includes('Actions') && notesChecked === false,
+          `after one undo: ${JSON.stringify(afterFirst)}; after two, Notes checked=${notesChecked}`,
+        );
+      },
+    );
 
     await checks.guard('edit', 'case 2', async () => {
       const before = await itemTexts(view);
@@ -571,20 +578,45 @@ export async function runChecklist(
           `item text of "Agenda" is not an editable field (slot ${slot ?? 'not found'})`,
         );
       }
-      await field.fill(EDITED_LABEL);
-      // Leaving the field commits the edit.
-      await field.press('Tab');
-      const texts = await settle(
-        () => itemTexts(view),
-        (value) => value.includes(EDITED_LABEL),
+      if (!undoWorks) {
+        return checks.add(
+          'edit',
+          'case 2',
+          'not-applicable',
+          'undo did not work, so a committed rename cannot be verified',
+        );
+      }
+      const rename = async (target: typeof field) => {
+        await target.fill(EDITED_LABEL);
+        await target.press('Tab');
+      };
+      const itemSet = (labels: string[]) => JSON.stringify([...labels].sort());
+      const original = itemSet(before);
+      const renamed = itemSet(
+        before.map((label) => (label === 'Agenda' ? EDITED_LABEL : label)),
       );
+      const readItems = async () => itemSet(await itemTexts(view));
+      await rename(field);
+      const edited = await settle(readItems, (labels) => labels === renamed);
+      // Undo must restore exactly the previous list, proving the rename was committed.
+      await clickWhenStill(view.locator('#undo'));
+      const undone = await settle(readItems, (labels) => labels === original);
+      if (edited !== renamed || undone !== original) {
+        return checks.expect(
+          'edit',
+          'case 2',
+          false,
+          `expected ${renamed} after rename and ${original} after undo, saw ${edited} and ${undone}`,
+        );
+      }
+      const restoredSlot = await itemSlot(view, 'Agenda');
+      await rename(view.locator(`#${restoredSlot}-text`));
+      const restored = await settle(readItems, (labels) => labels === renamed);
       return checks.expect(
         'edit',
         'case 2',
-        texts.includes(EDITED_LABEL) &&
-          !texts.includes('Agenda') &&
-          texts.length === before.length,
-        `items before edit: ${JSON.stringify(before)}; after: ${JSON.stringify(texts)}`,
+        restored === renamed,
+        `expected ${renamed} after applying the rename again, saw ${restored}`,
       );
     });
   } else {
@@ -762,11 +794,19 @@ export const FORM_VALUES: Record<string, string> = {
 };
 
 /** Activity form: edits send nothing; one explicit submission sends every field once. */
-function submittedTurns(env: AcceptanceEnv, before: number) {
-  return env
-    .mainRequests()
-    .slice(before)
-    .filter((request) => request.lastUserText.includes('"inputs"'));
+function submittedParameters(
+  env: AcceptanceEnv,
+  requestMark: number,
+  priorUserTurns: number,
+) {
+  for (const request of env.mainRequests().slice(requestMark)) {
+    const userMessages = request.messages.filter(({ role }) => role === 'user');
+    for (const message of userMessages.slice(priorUserTurns)) {
+      const text = messageText(message.content);
+      if (text.includes('"inputs"')) return text;
+    }
+  }
+  return undefined;
 }
 
 interface ContinuationEntry {
@@ -829,9 +869,7 @@ export async function runActivityForm(
   const card = await env.waitForCard(0);
   await env.waitForIdle();
   const { view, app } = card;
-  const initialRequests = env.mainRequests();
-  const before = initialRequests.length;
-  const turnsBefore = Math.max(0, ...initialRequests.map(userTurns));
+  const before = env.mainRequests().length;
 
   await checks.guard('edits-start-no-turn', 'case 3 / R3', async () => {
     for (const [id, value] of Object.entries(FORM_VALUES)) {
@@ -846,7 +884,8 @@ export async function runActivityForm(
     );
   });
 
-  let repliesBefore = 0;
+  let repliesBefore: number | undefined;
+  let hasSubmittedParameters = false;
   await checks.guard(
     'one-submission',
     'case 3 / R3',
@@ -860,6 +899,10 @@ export async function runActivityForm(
       await button.scrollIntoViewIfNeeded();
       await recordContinuation(app);
       repliesBefore = (await env.assistantTexts()).length;
+      const beforeClick = env.mainRequests();
+      const clickMark = beforeClick.length;
+      const turnsBefore = Math.max(0, ...beforeClick.map(userTurns));
+      const submission = () => submittedParameters(env, clickMark, turnsBefore);
       // First attempt straight after typing, at a person's pace: a zero-delay
       // synthetic click releases the button inside the few milliseconds the
       // host disables it while the edited field loses focus, so the browser
@@ -883,12 +926,12 @@ export async function runActivityForm(
           200_000,
         );
         await settle(
-          () => Promise.resolve(submittedTurns(env, before).length),
-          (count) => count > 0,
+          async () => submission(),
+          (parameters) => parameters !== undefined,
           afterFirst.some((entry) => entry.state === 'accepted') ? 30_000 : 0,
         );
       }
-      const firstSubmitted = submittedTurns(env, before).length > 0;
+      const firstSubmitted = submission() !== undefined;
       checks.expect(
         'first-click-submits',
         'case 3',
@@ -900,29 +943,31 @@ export async function runActivityForm(
         await button.click({ delay: HUMAN_CLICK_MS });
       }
       await settle(
-        () => Promise.resolve(submittedTurns(env, before).length),
-        (count) => count > 0,
+        async () => submission(),
+        (parameters) => parameters !== undefined,
         60_000,
       );
       await env.waitForIdle();
-      const submitted = submittedTurns(env, before);
+      const submitted = submission();
+      hasSubmittedParameters = submitted !== undefined;
+      const afterClick = env.mainRequests().slice(clickMark);
       const newTurns =
-        Math.max(turnsBefore, ...submitted.map(userTurns)) - turnsBefore;
+        Math.max(turnsBefore, ...afterClick.map(userTurns)) - turnsBefore;
       const log = await continuationLog(app);
       checks.expect(
         'one-submission',
         'case 3 / R3',
-        newTurns === 1,
+        hasSubmittedParameters && newTurns === 1,
         `${newTurns} submitted user turn(s); status: ${describeLog(log)}`,
       );
-      const inputs = parseSubmittedInputs(submitted[0]?.lastUserText ?? '');
+      const inputs = parseSubmittedInputs(submitted ?? '');
       const missing = Object.entries(FORM_VALUES).filter(
         ([id, value]) => inputs[id]?.value !== value,
       );
       checks.expect(
         'submits-every-field',
         'case 3',
-        submitted.length > 0 && missing.length === 0,
+        hasSubmittedParameters && missing.length === 0,
         `missing or different: ${JSON.stringify(Object.fromEntries(missing.map(([id]) => [id, inputs[id]?.value])))}`,
       );
       const status = log[log.length - 1]?.state ?? null;
@@ -942,14 +987,24 @@ export async function runActivityForm(
   );
 
   await checks.guard('answer-uses-values', 'case 3', async () => {
+    const replyIndex = repliesBefore;
+    if (!hasSubmittedParameters || replyIndex === undefined) {
+      return checks.add(
+        'answer-uses-values',
+        'case 3',
+        'not-applicable',
+        'no parameter submission reached the model',
+      );
+    }
     // The answer to the submission is the first reply after it; a long
     // thinking phase can outlast the idle wait, so wait for the reply itself.
     const replies = await settle(
       () => env.assistantTexts(),
-      (texts) => texts.length > repliesBefore,
+      (texts) => texts.length > replyIndex,
       env.cardTimeoutMs,
     );
-    if (replies.length <= repliesBefore) {
+    const reply = replies[replyIndex];
+    if (!reply) {
       return checks.expect(
         'answer-uses-values',
         'case 3',
@@ -957,18 +1012,32 @@ export async function runActivityForm(
         'no assistant reply followed the submission',
       );
     }
-    const body = replies.slice(repliesBefore).join('\n');
+    const body = reply.normalize('NFKC').replace(/[*_`]/g, '');
     const participants = FORM_VALUES.participants;
     const participantCount = new RegExp(
-      `(?:\\b${participants}\\s*[-–]?\\s*(?:people|persons?|participants?|attendees?)\\b|(?<!\\d)${participants}\\s*(?:人|位|个|名)|(?:\\b(?:participants?|attendees?)|人数)\\s*[:：为是]?\\s*${participants}(?![\\d.]))`,
+      `(?:\\b${participants}\\s*[-–]?\\s*(?:people|persons?|participants?|attendees?)\\b|(?<!\\d)${participants}\\s*(?:人|位|个|名)|(?:\\b(?:participants?|attendees?)|人数)\\s*[:：为是]?\\s*${participants}(?!\\d|\\.\\d))`,
       'i',
     );
+    const date = new RegExp(`(?<!\\d)${FORM_VALUES.date}(?!\\d)`);
+    const budget = new RegExp(
+      `\\bCNY\\s*${FORM_VALUES.budget}(?:\\.0+)?\\s*(?:each\\b|per\\s+person\\b|/\\s*人)`,
+      'i',
+    );
+    const matched = {
+      activity: /escape[\s-]*room|密室/i.test(body),
+      date: date.test(body),
+      participants: participantCount.test(body),
+      budget: budget.test(body),
+      notes: body.toLowerCase().includes(FORM_VALUES.notes),
+    };
+    const missing = Object.entries(matched)
+      .filter(([, ok]) => !ok)
+      .map(([field]) => field);
     return checks.expect(
       'answer-uses-values',
       'case 3',
-      participantCount.test(body.replace(/[*_`]/g, '')) &&
-        /escape|密室/i.test(body),
-      `reply after submission: "${body.slice(0, 160)}"`,
+      missing.length === 0,
+      `reply did not use ${missing.join(', ')}: "${reply.slice(0, 160)}"`,
     );
   });
   return checks.results;
@@ -1026,6 +1095,116 @@ async function selectedRadioId(view: Frame, group: 'billing' | 'plan') {
     });
 }
 
+async function comparatorCardId(view: Frame): Promise<string | null> {
+  let outerFrame = view;
+  let parent = outerFrame.parentFrame();
+  while (parent && parent !== view.page().mainFrame()) {
+    outerFrame = parent;
+    parent = outerFrame.parentFrame();
+  }
+  const iframe = await outerFrame.frameElement();
+  try {
+    return await iframe.evaluate((element) =>
+      element instanceof Element
+        ? (element
+            .closest('[data-transcript-tool-call-id]')
+            ?.getAttribute('data-transcript-tool-call-id') ?? null)
+        : null,
+    );
+  } finally {
+    await iframe.dispose();
+  }
+}
+
+const COMPARATOR_FIELDS = [
+  '#seats',
+  '#support',
+  'input[id^="billing-"]',
+  'input[id^="plan-"]',
+  ...PLANS.flatMap((plan) => [`#${plan}-monthly`, `#${plan}-payment`]),
+].join(', ');
+
+async function comparatorCards(page: Page) {
+  const views = page.frames().filter((frame) => frame.name() === 'view');
+  const cards = await Promise.all(
+    views.map(async (view) => {
+      try {
+        // Parked frames have no transcript tool row and cannot establish card identity.
+        const id = await comparatorCardId(view);
+        if (!id) return undefined;
+        const fields = await view
+          .locator(COMPARATOR_FIELDS)
+          .evaluateAll((nodes) =>
+            nodes
+              .map((node) =>
+                node instanceof HTMLInputElement
+                  ? [node.id, node.value, node.checked]
+                  : [node.id, node.textContent?.trim()],
+              )
+              .sort(([a], [b]) => String(a).localeCompare(String(b))),
+          );
+        return {
+          view,
+          id,
+          state: fields.length ? JSON.stringify(fields) : null,
+        };
+      } catch {
+        // A transcript row can detach while its iframe is being read.
+        return undefined;
+      }
+    }),
+  );
+  return cards.filter((card) => card !== undefined);
+}
+
+async function followUpComparator(env: AcceptanceEnv, prompt: string) {
+  const before = new Map(
+    (await comparatorCards(env.page)).map(({ id, state }) => [id, state]),
+  );
+  await env.send(prompt);
+  await env.waitForIdle();
+  const changed = await settle(
+    async () =>
+      (await comparatorCards(env.page)).findLast(({ id, state }) => {
+        const previous = before.get(id);
+        return (
+          previous === undefined ||
+          (previous !== null && state !== null && previous !== state)
+        );
+      }),
+    (card) => card !== undefined,
+    Math.min(env.cardTimeoutMs, 5_000),
+  );
+  if (!changed)
+    throw new Error('follow-up produced no new or revised comparator card');
+  await changed.view
+    .locator('body *:visible')
+    .first()
+    .waitFor({ timeout: env.cardTimeoutMs });
+  return changed;
+}
+
+function csvPayment(csv: string, plan: Plan): number | undefined {
+  const [header, ...rows] = csv.trim().split(/\r?\n/);
+  if (!/^(?:"plan"|plan)\s*,\s*(?:"payment"|payment)$/i.test(header.trim())) {
+    return undefined;
+  }
+  const selectedPayments: string[] = [];
+  for (const row of rows) {
+    if (!row.trim()) continue;
+    const fields =
+      /^\s*(?:"([a-z]+)"|([a-z]+))\s*,\s*(?:"([^"]+)"|([^,"]+))\s*$/i.exec(row);
+    if (!fields) return undefined;
+    const [, quotedPlan, barePlan, quotedPayment, barePayment] = fields;
+    const key = (quotedPlan ?? barePlan).toLowerCase();
+    if (!PLANS.some((candidate) => candidate === key)) return undefined;
+    if (key === plan) selectedPayments.push(quotedPayment ?? barePayment);
+  }
+  return selectedPayments.length === 1
+    ? parseSingleAmount(selectedPayments[0])
+    : undefined;
+}
+
 /** Comparator: monthly equivalent vs payment, extension across turns, export, reset. */
 export async function runComparator(
   env: AcceptanceEnv,
@@ -1035,6 +1214,7 @@ export async function runComparator(
   await env.startSession(prompts.initial);
   const first = await env.waitForCard(0);
   await env.waitForIdle();
+  const firstId = await comparatorCardId(first.view).catch(() => null);
   // A view without a contract control still reports every check: the reads
   // degrade to null and the checks that need them fail with the reason.
   const initialSeats = await first.view
@@ -1075,19 +1255,17 @@ export async function runComparator(
     );
   });
 
-  const views = () => env.page.frames().filter((f) => f.name() === 'view');
-  let second: Card | undefined;
+  let second: Awaited<ReturnType<typeof followUpComparator>> | undefined;
   await checks.guard(
     'support-totals',
     'case 4',
     async () => {
       // Let the applied values settle into the composer before the follow-up.
       await env.page.waitForTimeout(1_500);
-      await env.send(prompts.support);
-      await env.waitForIdle();
-      second = await env.waitForCard(Math.max(0, views().length - 1));
+      const updated = await followUpComparator(env, prompts.support);
+      second = updated;
       const observed = await settle(
-        () => readComparator(second!.view),
+        () => readComparator(updated.view),
         (value) => comparatorMatches(value, COMPARATOR_SCENARIO),
       );
       checks.expect(
@@ -1114,8 +1292,8 @@ export async function runComparator(
       return checks.expect(
         'extends-existing-card',
         'R5',
-        views().length === 1 && support,
-        `after the follow-up: ${views().length} independent cards, support=${support}`,
+        updated.id === firstId && support,
+        `after the follow-up: initial card=${firstId}, updated card=${updated.id}, support=${support}`,
       );
     },
     [
@@ -1132,11 +1310,13 @@ export async function runComparator(
       );
       return false;
     }
-    const target = second;
+    const exportButton = second.view.locator('#export');
+    await exportButton.scrollIntoViewIfNeeded({ timeout: 10_000 });
+    await waitForStill(exportButton);
     const download = env.page
       .waitForEvent('download', { timeout: 5_000 })
       .catch(() => undefined);
-    await clickWhenStill(target.view.locator('#export'));
+    await exportButton.click();
     const file = await download;
     if (!file) {
       return checks.expect(
@@ -1152,17 +1332,14 @@ export async function runComparator(
     return checks.expect(
       'exports-current-csv',
       'case 4 / R5',
-      parseAmounts(csv).includes(
-        comparatorPayment('team', COMPARATOR_SCENARIO),
-      ),
-      `CSV did not contain the current team total: ${csv.slice(0, 120)}`,
+      csvPayment(csv, COMPARATOR_SELECTED_PLAN) ===
+        comparatorPayment(COMPARATOR_SELECTED_PLAN, COMPARATOR_SCENARIO),
+      `CSV did not contain the current payment for ${COMPARATOR_SELECTED_PLAN}: ${csv.slice(0, 120)}`,
     );
   });
 
   await checks.guard('reset-via-follow-up', 'case 4', async () => {
-    await env.send(prompts.reset);
-    await env.waitForIdle();
-    const reset = await env.waitForCard(Math.max(0, views().length - 1));
+    const reset = await followUpComparator(env, prompts.reset);
     const observed = await settle(
       () => readComparator(reset.view),
       (value) => comparatorMatches(value, initialInputs),

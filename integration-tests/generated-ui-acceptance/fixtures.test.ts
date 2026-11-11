@@ -68,4 +68,13 @@ describe('money parsing', () => {
     expect(parseShareAmount('Person 1 (14.3%) 137.84')).toBe(13_784);
     expect(parseShareAmount('第 3 位：１３７．８４ 元')).toBe(13_784);
   });
+
+  it('keeps the sign of displayed negative shares', () => {
+    expect(parseShareAmount('Person 1: CNY -137.84 of 964.85')).toBe(-13_784);
+    expect(parseShareAmount('Person 1: -¥1\u202F234.50')).toBe(-123_450);
+    expect(parseShareAmount('第 3 位：−￥１４，２２７．２０ 元')).toBe(
+      -1_422_720,
+    );
+    expect(parseAmounts('-CNY 137.84')).toEqual([-13_784]);
+  });
 });

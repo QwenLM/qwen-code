@@ -48,6 +48,7 @@ export const ACTIVITY_FORM_PROMPT = [
   '',
   CONTRACT_PREAMBLE,
   'Inputs: activity (select with values hiking, bowling, escape-room), date (text, YYYY-MM-DD), participants, budget (CNY per person), notes (textarea).',
+  'In the first reply after submission, base your advice on all five fields. Include the date as YYYY-MM-DD, express the budget as CNY <amount> per person, and quote the submitted notes as entered.',
 ].join('\n');
 
 export const COMPARATOR_PROMPT = [
@@ -67,6 +68,7 @@ export const COMPARATOR_SUPPORT_PROMPT = [
   '',
   CONTRACT_PREAMBLE,
   'Keep the earlier IDs, add support (checkbox, checked) and keep the export button.',
+  'Export CSV with header plan,payment. Use basic, pro or team as the plan key and the current actual payment in CNY, including the selected plan.',
 ].join('\n');
 
 export const COMPARATOR_RESET_PROMPT =

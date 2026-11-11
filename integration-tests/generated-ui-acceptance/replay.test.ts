@@ -16,6 +16,7 @@
 
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
+import { ToolNames } from '@qwen-code/qwen-code-core/tools/tool-names.js';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   runActivityForm,
@@ -24,6 +25,7 @@ import {
   runComparator,
 } from './cases.js';
 import {
+  SHOW_TOOL,
   startAcceptanceEnv,
   type AcceptanceEnv,
   type ReplayScript,
@@ -69,11 +71,18 @@ async function run(
     workspaces,
   });
   const checks = await drive(env);
+  const requests = env.mainRequests();
+  const otherTools = new Set(
+    requests
+      .flatMap((request) => request.tools)
+      .filter((name) => name !== SHOW_TOOL && name !== ToolNames.SKILL),
+  );
+  expect([...otherTools]).toEqual([]);
   const result: CaseResult = {
     case: name,
     model: 'replay',
     trial: 1,
-    ...toolUse(env.mainRequests()),
+    ...toolUse(requests),
     secondsToFirstCard:
       env.firstCardMs === undefined
         ? undefined

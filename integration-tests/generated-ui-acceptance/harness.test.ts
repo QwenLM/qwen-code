@@ -8,11 +8,22 @@ import * as fs from 'node:fs/promises';
 import { createServer, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import * as path from 'node:path';
-import type { Browser, BrowserContext, BrowserType, Page } from 'playwright';
+import type {
+  Browser,
+  BrowserContext,
+  BrowserType,
+  Frame,
+  Page,
+} from 'playwright';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { startFakeOpenAIServer } from '../fake-openai-server.js';
 import type { spawnDaemon, SpawnedDaemon } from '../cli/_daemon-harness.js';
-import { startAcceptanceEnv, type AcceptanceEnv } from './harness.js';
+import {
+  SHOW_TOOL,
+  startAcceptanceEnv,
+  waitForCardOn,
+  type AcceptanceEnv,
+} from './harness.js';
 
 const mocks = vi.hoisted(() => ({
   startFakeOpenAIServer: vi.fn<typeof startFakeOpenAIServer>(),
@@ -76,6 +87,18 @@ const options = {
   mode: { kind: 'replay', script: () => ({ content: '' }) },
 } as const;
 
+function liveMode(port: number) {
+  return {
+    kind: 'live',
+    model: {
+      label: 'test',
+      baseUrl: `http://127.0.0.1:${port}`,
+      apiKey: 'test-key',
+      model: 'test',
+    },
+  } as const;
+}
+
 describe('acceptance environment startup', () => {
   it.each(['replay', 'live'] as const)(
     'waits for MCP discovery before the first %s prompt',
@@ -84,18 +107,7 @@ describe('acceptance environment startup', () => {
       let env: AcceptanceEnv | undefined;
       try {
         env = await startAcceptanceEnv({
-          mode:
-            kind === 'replay'
-              ? options.mode
-              : {
-                  kind,
-                  model: {
-                    label: 'test',
-                    baseUrl: 'http://127.0.0.1:1',
-                    apiKey: 'test-key',
-                    model: 'test',
-                  },
-                },
+          mode: kind === 'replay' ? options.mode : liveMode(1),
         });
         expect(mocks.spawnDaemon).toHaveBeenCalledWith(
           expect.objectContaining({
@@ -110,6 +122,32 @@ describe('acceptance environment startup', () => {
       }
     },
   );
+
+  it('authorizes only the Generated UI call and its bundled skill', async () => {
+    const env = await startAcceptanceEnv(options);
+    try {
+      const settings = JSON.parse(
+        await fs.readFile(path.join(env.root, 'home', 'settings.json'), 'utf8'),
+      );
+      expect(settings.tools.approvalMode).toBe('default');
+      expect(settings.permissions.allow).toEqual([
+        SHOW_TOOL,
+        'Skill(generated-ui)',
+      ]);
+      expect(settings.permissions.deny).toEqual(
+        expect.arrayContaining([
+          'run_shell_command',
+          'edit',
+          'write_file',
+          'agent',
+          'workflow',
+        ]),
+      );
+      expect(settings.mcp.allowed).toEqual(['generated-ui']);
+    } finally {
+      await env.close();
+    }
+  });
 });
 
 describe('acceptance daemon environment', () => {
@@ -172,6 +210,59 @@ describe('acceptance environment setup cleanup', () => {
 });
 
 describe('live recording proxy', () => {
+  function proxyFetch(init?: RequestInit) {
+    const env = mocks.spawnDaemon.mock.calls[0][0]?.env;
+    const headers = new Headers(init?.headers);
+    headers.set('authorization', `Bearer ${env?.['OPENAI_API_KEY']}`);
+    return fetch(`${env?.['OPENAI_BASE_URL']}/chat/completions`, {
+      ...init,
+      headers,
+    });
+  }
+
+  it('authenticates clients before recording or forwarding', async () => {
+    const authorizations: Array<string | undefined> = [];
+    const upstream = createServer((request, response) => {
+      authorizations.push(request.headers.authorization);
+      response.end('ok');
+    });
+    await new Promise<void>((resolve) =>
+      upstream.listen(0, '127.0.0.1', resolve),
+    );
+    let env: AcceptanceEnv | undefined;
+    try {
+      env = await startAcceptanceEnv({
+        mode: liveMode((upstream.address() as AddressInfo).port),
+      });
+      const daemonEnv = mocks.spawnDaemon.mock.calls[0][0]?.env;
+      const url = `${daemonEnv?.['OPENAI_BASE_URL']}/chat/completions`;
+      const body = JSON.stringify({
+        messages: [{ role: 'user', content: 'test message' }],
+      });
+      expect(daemonEnv?.['OPENAI_API_KEY']).toMatch(/^[a-f0-9]{64}$/);
+
+      const missing = await fetch(url, { method: 'POST', body });
+      expect(missing.status).toBe(401);
+      const invalid = await fetch(url, {
+        method: 'POST',
+        headers: { authorization: 'Bearer wrong-key' },
+        body,
+      });
+      expect(invalid.status).toBe(401);
+      expect(authorizations).toEqual([]);
+      expect(env.requests).toEqual([]);
+
+      const valid = await proxyFetch({ method: 'POST', body });
+      expect(await valid.text()).toBe('ok');
+      expect(authorizations).toEqual(['Bearer test-key']);
+      expect(env.requests).toMatchObject([{ lastUserText: 'test message' }]);
+    } finally {
+      await env?.close();
+      upstream.closeAllConnections();
+      await new Promise<void>((resolve) => upstream.close(() => resolve()));
+    }
+  });
+
   it.each(['client disconnect', 'proxy close'])(
     'cancels upstream generation after %s',
     async (cause) => {
@@ -195,20 +286,8 @@ describe('live recording proxy', () => {
       const controller = new AbortController();
       try {
         const { port } = upstream.address() as AddressInfo;
-        env = await startAcceptanceEnv({
-          mode: {
-            kind: 'live',
-            model: {
-              label: 'test',
-              baseUrl: `http://127.0.0.1:${port}`,
-              apiKey: 'test-key',
-              model: 'test',
-            },
-          },
-        });
-        const baseUrl =
-          mocks.spawnDaemon.mock.calls[0][0]?.env?.['OPENAI_BASE_URL'];
-        const response = await fetch(`${baseUrl}/chat/completions`, {
+        env = await startAcceptanceEnv({ mode: liveMode(port) });
+        const response = await proxyFetch({
           signal: controller.signal,
         });
         const first = await response.body!.getReader().read();
@@ -218,7 +297,7 @@ describe('live recording proxy', () => {
 
         await expect.poll(() => upstreamClosed, { timeout: 2_000 }).toBe(true);
         if (cause === 'client disconnect') {
-          const next = await fetch(`${baseUrl}/chat/completions`);
+          const next = await proxyFetch();
           expect(await next.text()).toBe('ok');
         }
       } finally {
@@ -252,21 +331,9 @@ describe('live recording proxy', () => {
       let env: AcceptanceEnv | undefined;
       try {
         const { port } = upstream.address() as AddressInfo;
-        env = await startAcceptanceEnv({
-          mode: {
-            kind: 'live',
-            model: {
-              label: 'test',
-              baseUrl: `http://127.0.0.1:${port}`,
-              apiKey: 'test-key',
-              model: 'test',
-            },
-          },
-        });
-        const baseUrl =
-          mocks.spawnDaemon.mock.calls[0][0]?.env?.['OPENAI_BASE_URL'];
+        env = await startAcceptanceEnv({ mode: liveMode(port) });
         const signal = AbortSignal.timeout(5_000);
-        const response = await fetch(`${baseUrl}/chat/completions`, {
+        const response = await proxyFetch({
           method: 'POST',
           body: '{}',
           signal,
@@ -287,7 +354,7 @@ describe('live recording proxy', () => {
             error: { message: expect.any(String) },
           });
         }
-        const next = await fetch(`${baseUrl}/chat/completions`);
+        const next = await proxyFetch();
         expect(next.status).toBe(200);
         expect(await next.text()).toBe('ok');
       } finally {
@@ -297,4 +364,24 @@ describe('live recording proxy', () => {
       }
     },
   );
+});
+
+describe('card readiness', () => {
+  it('finds visible content when the first element is hidden', async () => {
+    const app = { name: () => 'app' } as Frame;
+    const view = {
+      name: () => 'view',
+      parentFrame: () => app,
+      isDetached: () => false,
+      locator: (selector: string) => ({
+        first: () => ({ isVisible: async () => selector === 'body *:visible' }),
+      }),
+    } as unknown as Frame;
+    const page = {
+      frames: () => [app, view],
+      waitForTimeout: async () => {},
+    } as unknown as Page;
+
+    await expect(waitForCardOn(page, 0, 20)).resolves.toEqual({ view, app });
+  });
 });
