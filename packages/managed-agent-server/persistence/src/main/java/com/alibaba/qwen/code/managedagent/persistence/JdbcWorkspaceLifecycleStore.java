@@ -43,10 +43,21 @@ public class JdbcWorkspaceLifecycleStore
     private final ObjectProvider<RuntimeBindingRepository> bindings;
     private WorkspaceProfileLifecycleVerifier profiles;
     private ResidentWorkspaces residents = new ResidentWorkspaces(java.util.List.of());
+    private JdbcJournalPacks packs;
 
     @org.springframework.beans.factory.annotation.Autowired
     void setResidentConfiguration(com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings properties) {
         residents = new ResidentWorkspaces(properties.getRuntimeBroker().getResidentWorkspaces());
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    void setJournalPacks(JdbcJournalPacks packs) {
+        this.packs = packs;
+    }
+
+    java.util.Set<String> requireIdleJournalWithPacks(String tenant, String session,
+            boolean allowCleanup, boolean v2) {
+        return requireIdleJournal(jdbc, json, tenant, session, allowCleanup, v2, packs);
     }
 
     @org.springframework.beans.factory.annotation.Autowired
@@ -117,6 +128,10 @@ public class JdbcWorkspaceLifecycleStore
     }
 
     public static java.util.Set<String> requireIdleJournal(JdbcTemplate jdbc, ObjectMapper json, String tenant, String session, boolean allowCleanup, boolean v2) {
+        return requireIdleJournal(jdbc, json, tenant, session, allowCleanup, v2, null);
+    }
+
+    public static java.util.Set<String> requireIdleJournal(JdbcTemplate jdbc, ObjectMapper json, String tenant, String session, boolean allowCleanup, boolean v2, JdbcJournalPacks packs) {
         var heads = WorkspaceOperations.rows(jdbc, "SELECT tenant_id, session_id, compacted_through_revision, journal_revision"
                 + " FROM ma_session_head"
                 + " WHERE tenant_key = ? AND harness_key = ? AND head_kind = 'MANAGED_SESSION' FOR UPDATE",
@@ -140,9 +155,9 @@ public class JdbcWorkspaceLifecycleStore
         // is repeated as a locking read, which reads the journal as committed
         // now and decides on that (#13800 R2-3). Only a journal that still
         // falls short of its own head fails closed.
-        var scan = scanJournal(jdbc, json, tenant, session, v2, false);
+        var scan = scanJournal(jdbc, json, tenant, session, v2, false, packs);
         if (scan.maxRevision() < headRevision) {
-            scan = scanJournal(jdbc, json, tenant, session, v2, true);
+            scan = scanJournal(jdbc, json, tenant, session, v2, true, packs);
             if (scan.maxRevision() < headRevision) {
                 throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_journal_unverified");
             }
@@ -160,16 +175,25 @@ public class JdbcWorkspaceLifecycleStore
     }
 
     private static JournalScan scanJournal(JdbcTemplate jdbc, ObjectMapper json, String tenant, String session,
-            boolean v2, boolean locking) {
+            boolean v2, boolean locking, JdbcJournalPacks packs) {
         final long[] maxScanned = {0};
         var pending = new java.util.HashSet<String>();
         var cleanup = new java.util.HashMap<String, String>();
         var settled = new java.util.HashSet<String>();
         var accepted = new java.util.HashSet<String>();
-        jdbc.query("SELECT journal_revision, record_bytes FROM ma_session_journal_tx WHERE tenant_id = ? AND session_id = ?"
+        jdbc.query("SELECT journal_revision, record_bytes, record_digest, byte_length FROM ma_session_journal_tx WHERE tenant_id = ? AND session_id = ?"
                 + " ORDER BY journal_revision" + (locking ? " FOR UPDATE" : ""), row -> {
-                maxScanned[0] = Math.max(maxScanned[0], row.getLong("journal_revision"));
-                for (String line : new String(row.getBytes("record_bytes"), StandardCharsets.UTF_8).split("\n")) {
+                long revision = row.getLong("journal_revision");
+                maxScanned[0] = Math.max(maxScanned[0], revision);
+                byte[] bytes = row.getBytes("record_bytes");
+                if (bytes == null && packs != null) {
+                    bytes = packs.resolveBytes(tenant, session, revision,
+                            row.getString("record_digest"), row.getLong("byte_length"));
+                }
+                if (bytes == null) {
+                    throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_journal_unverified");
+                }
+                for (String line : new String(bytes, StandardCharsets.UTF_8).split("\n")) {
                     try {
                         JsonNode event = json.readTree(line).path("managedSession");
                         String turn = event.path("payload").path("turnId").asText();
@@ -211,7 +235,7 @@ public class JdbcWorkspaceLifecycleStore
             return parse(saved);
         }
         try {
-            requireIdleJournal(jdbc, json, operation.tenantId(), operation.sessionId());
+            requireIdleJournal(jdbc, json, operation.tenantId(), operation.sessionId(), false, false, packs);
         } catch (ManagedAgentException blocked) {
             return null;
         }
@@ -358,7 +382,7 @@ public class JdbcWorkspaceLifecycleStore
     }
 
     private void verifyEffects(OperationRecord operation, JsonNode receipt) {
-        requireIdleJournal(jdbc, json, operation.tenantId(), operation.sessionId(), false, operation.lifecycleProtocolVersion() == 2);
+        requireIdleJournal(jdbc, json, operation.tenantId(), operation.sessionId(), false, operation.lifecycleProtocolVersion() == 2, packs);
         // The receipt's own operation id is the hook-execution namespace:
         // the Hook executions it certifies were recorded under the operation
         // that ran them. A resumed operation carries the receipt its failed
