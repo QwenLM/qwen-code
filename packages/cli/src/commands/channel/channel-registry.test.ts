@@ -55,6 +55,7 @@ describe('channel registry', () => {
       type: plugin.channelType,
       displayName: plugin.displayName,
       manageable: true,
+      supportsQrLogin: false,
       outboundOnly: true,
       defaultDeliveryTarget: {
         type: 'chat',
@@ -74,6 +75,7 @@ describe('channel registry', () => {
       'displayName',
       'fields',
       'manageable',
+      'supportsQrLogin',
       'type',
     ]);
     expect(entry?.fields).toContainEqual(
@@ -162,6 +164,7 @@ describe('channel registry', () => {
         type: plugin.channelType,
         displayName: plugin.displayName,
         manageable: false,
+        supportsQrLogin: false,
         fields: [],
       });
     } finally {
@@ -188,6 +191,7 @@ describe('channel registry', () => {
         type: plugin.channelType,
         displayName: plugin.displayName,
         manageable: false,
+        supportsQrLogin: false,
         fields: [],
       });
     } finally {
