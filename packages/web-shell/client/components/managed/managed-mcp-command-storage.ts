@@ -74,6 +74,7 @@ function validAttempt(value: unknown): value is ManagedMcpCommandAttempt {
     pin.serverId === command.serverId &&
     Number.isSafeInteger(pin.serverRevision) &&
     Number(pin.serverRevision) >= 1 &&
+    Number(pin.serverRevision) < Number.MAX_SAFE_INTEGER &&
     typeof pin.definitionDigest === 'string' &&
     /^[0-9a-f]{64}$/.test(pin.definitionDigest)
   );
