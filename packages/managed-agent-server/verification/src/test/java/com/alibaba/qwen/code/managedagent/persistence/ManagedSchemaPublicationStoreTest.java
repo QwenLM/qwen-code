@@ -27,6 +27,7 @@ import java.util.UUID;
 
 import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.PUBLICATION_TOKEN;
 import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.WRITER_TOKEN;
+import static com.alibaba.qwen.code.managedagent.persistence.PublicationVerification.verified;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -53,16 +54,16 @@ public class ManagedSchemaPublicationStoreTest {
         byte[] output = "hello".getBytes(StandardCharsets.UTF_8);
         String digest = ToolPublicationContract.sha256(output);
         assertThat(data.publishSegment(key, "pub-1", PUBLICATION_TOKEN, "upload", "stdout", 0,
-                output, digest, true).path("state").asText()).isEqualTo("PENDING");
+                output, digest).path("state").asText()).isEqualTo("PENDING");
         assertThat(data.verifyNextOperation()).isTrue();
         assertThat(data.operationStatus(key, "pub-1", PUBLICATION_TOKEN, "upload").path("state").asText())
                 .isEqualTo("SUCCEEDED");
         assertThatThrownBy(() -> data.prefix(key, "pub-1", PUBLICATION_TOKEN, "upload", "stdout"))
                 .hasMessageContaining("conflict");
-        data.seal(key, "pub-1", PUBLICATION_TOKEN, "seal-out", "stdout", 1, output.length, digest);
-        data.seal(key, "pub-1", PUBLICATION_TOKEN, "seal-err", "stderr", 0, 0,
+        verified(data).seal(key, "pub-1", PUBLICATION_TOKEN, "seal-out", "stdout", 1, output.length, digest);
+        verified(data).seal(key, "pub-1", PUBLICATION_TOKEN, "seal-err", "stderr", 0, 0,
                 ToolPublicationContract.sha256(new byte[0]));
-        assertThat(data.prefix(key, "pub-1", PUBLICATION_TOKEN, "prefix", "stdout").path("sealed").asBoolean()).isTrue();
+        assertThat(verified(data).prefix(key, "pub-1", PUBLICATION_TOKEN, "prefix", "stdout").path("sealed").asBoolean()).isTrue();
         assertThatThrownBy(() -> data.publishSegment(key, "pub-1", PUBLICATION_TOKEN, "late", "stdout", 1,
                 output, digest)).hasMessageContaining("sealed");
         assertThat(fixture.jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource WHERE kind = X'6d616e616765642d746f6f6c2d7365616c2d6d616e6966657374'",
@@ -76,7 +77,7 @@ public class ManagedSchemaPublicationStoreTest {
         terminal.set("capture", json.createObjectNode().put("captureStatus", "unavailable")
                 .put("captureReason", "storage_failed").put("previewTruncated", false)
                 .put("deliveryStatus", "pending").putNull("manifest"));
-        data.finish(key, "pub-1", PUBLICATION_TOKEN, "finish", terminal.toString().getBytes(StandardCharsets.UTF_8));
+        verified(data).finish(key, "pub-1", PUBLICATION_TOKEN, "finish", terminal.toString().getBytes(StandardCharsets.UTF_8));
         var outcome = json.createObjectNode().put("schemaVersion", 1).put("decision", "blocked").putNull("manifestRef");
         outcome.set("envelope", terminal);
         var history = json.createObjectNode().put("messageId", "11111111-1111-4111-8111-111111111111")
@@ -124,6 +125,15 @@ public class ManagedSchemaPublicationStoreTest {
         @Override public InputStream open(String key) {
             assertThat(TransactionSynchronizationManager.isActualTransactionActive()).isFalse();
             return new ByteArrayInputStream(objects.get(key));
+        }
+        @Override public InputStream openRange(String key, long offset, long length, Runnable guard) {
+            guard.run();
+            assertThat(TransactionSynchronizationManager.isActualTransactionActive()).isFalse();
+            byte[] value = objects.get(key);
+            if (value == null || offset < 0 || length < 0 || offset + length > value.length) {
+                throw new IllegalArgumentException("Invalid object range");
+            }
+            return new ByteArrayInputStream(value, (int) offset, (int) length);
         }
         @Override public void validateConfiguration() { }
     }

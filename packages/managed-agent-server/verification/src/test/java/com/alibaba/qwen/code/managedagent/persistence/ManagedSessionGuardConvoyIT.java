@@ -65,6 +65,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+import static com.alibaba.qwen.code.managedagent.persistence.PublicationVerification.verified;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -502,6 +503,16 @@ class ManagedSessionGuardConvoyIT {
 
         ToolPublicationObjectStore objects = new ToolPublicationObjectStore() {
             @Override
+            public InputStream openRange(String key, long offset, long length, Runnable guard) {
+                guard.run();
+                try (InputStream full = open(key)) {
+                    byte[] bytes = full.readAllBytes();
+                    return new java.io.ByteArrayInputStream(bytes, (int) offset, (int) length);
+                } catch (java.io.IOException error) {
+                    throw new IllegalStateException(error);
+                }
+            }
+            @Override
             public void putIfAbsent(String objectKey, byte[] bytes) {
                 throw new AssertionError("Inline fixture expected");
             }
@@ -530,7 +541,7 @@ class ManagedSessionGuardConvoyIT {
             assertThat(completesWhileHeld(() -> journal.store.verifyDispatch(execution, "pub-1",
                     PublicationJournalFixture.PUBLICATION_TOKEN)).path("publicationId").asText())
                     .isEqualTo("pub-1");
-            completesWhileHeld(() -> data.finish(key, "pub-1", PublicationJournalFixture.PUBLICATION_TOKEN,
+            completesWhileHeld(() -> verified(data).finish(key, "pub-1", PublicationJournalFixture.PUBLICATION_TOKEN,
                     "finish", envelope.toString().getBytes(StandardCharsets.UTF_8)));
         } finally {
             manager.rollback(hold);

@@ -106,7 +106,7 @@ public final class WorkspaceCsiRuntimeMain {
                 new JdbcManagedExtensionRecordStore(jdbc), null, null,
                 com.alibaba.qwen.code.managedagent.contracts.persistence.StorageReadPolicy.inProcess(),
                 null, null, null, null, null,
-                com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy.unbound(), bindings);
+                com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy.unbound(), bindings, null);
         var application = new WorkspaceCsiApplicationStore(jdbc, manager, nativeStore, bindings, sessions, new com.alibaba.qwen.code.runtimebroker.adapter.HttpRuntimeTransport());
         var access = new WorkspaceCsiRuntimeAccess(jdbc, manager, json, properties, request.registration(),
                 request.sessionId(), request.runtimeRequestKey(), bindings, sessions, http, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());

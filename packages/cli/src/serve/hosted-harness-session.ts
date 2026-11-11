@@ -8560,30 +8560,12 @@ export function registerHostedHarnessSessionRoutes(
           // needs a keep-READY drain to close: the release used here would
           // tombstone the deterministic Hook owner (R13-1/R14-1).
           let heldDrainUnproven = false;
-          const reloadStableOwners = sessionReloadStableOwnerIds(session);
           if (brokerOptions)
             for (const heldTurn of [...session.heldRuntimeTurns]) {
-              // A detach must never terminally release a reload-stable owner:
-              // the id is recomputed on the next load and a RELEASED row makes
-              // every later acquire refused (R13-1/R14-1). The restore can
-              // seed one here from the Broker's hold rows, and the load cannot
-              // know which protocol will close it, so the invariant lives at
-              // the release rather than at a restore gate (R28-1). Leaving the
-              // entry owed keeps the handback below refusing busy — the honest
-              // park #16579 tracks. A delete is terminal, so it may release.
-              if (
-                kind !== 'delete' &&
-                reloadStableOwners.has(hostedRuntimeSessionId(heldTurn))
-              ) {
-                // The owner's Runtime is deliberately left running, so this
-                // close proved no stop. Settle the loops on runtime_lost below
-                // rather than certifying a stop_requested it never issued.
-                heldDrainUnproven = true;
-                writeStderrLineSafe(
-                  `qwen serve: Hosted Harness detach keeps reload-stable owner ${hostedRuntimeSessionId(heldTurn)} running: release deferred, obligation still owed (#16579).`,
-                );
-                continue;
-              }
+              // No reload-stable exemption here: both v2 lifecycle operations
+              // end the Session (#16728/#16882), so nothing recomputes these
+              // ids afterwards. The v1 detach below keeps the exemption,
+              // because that is the route a reload can follow.
               try {
                 await new HostedWorkspaceBroker(
                   brokerOptions,
@@ -8618,21 +8600,20 @@ export function registerHostedHarnessSessionRoutes(
                 throw cause;
               }
             }
-          // Only a delete is terminal; a close keeps the deterministic owner
-          // re-acquirable across the reload (R14-1).
-          await session.hooks?.close({ terminal: kind === 'delete' });
-          if (kind === 'delete')
-            heldDrainUnproven =
-              (await releaseOrphanedConfigOwners(session)) || heldDrainUnproven;
+          // Both public lifecycle operations end the Session (#16728/#16882):
+          // nothing reopens a v2-closed Session, so the owner is released
+          // terminally here. The v1 detach below still keeps its owner
+          // re-acquirable — that is the route a reload can actually follow.
+          await session.hooks?.close({ terminal: true });
           heldDrainUnproven =
-            (await releaseLeaseNow(session, kind === 'delete')) ||
-            heldDrainUnproven;
-          // An unprovable drain, an owner this detach deliberately left
-          // running, and a Session whose own settlement already failed all
-          // proved nothing stopped, so they settle on the runtime_lost line —
-          // the only state rebuildFromRuntimeLost accepts (R25-1/R26-1,
-          // matching the v1 close). v2 has no heldDrainFailed: that arm throws
-          // above instead.
+            (await releaseOrphanedConfigOwners(session)) || heldDrainUnproven;
+          heldDrainUnproven =
+            (await releaseLeaseNow(session, true)) || heldDrainUnproven;
+          // Neither an unprovable drain nor a Session whose own settlement
+          // already failed proved to the Runtime that anything stopped, so
+          // both settle on the runtime_lost line — the only state
+          // rebuildFromRuntimeLost accepts (R25-1/R26-1, matching the v1
+          // close). v2 has no heldDrainFailed: that arm throws above instead.
           const stopSettle =
             session.blocked || heldDrainUnproven
               ? 'runtime_lost'
@@ -8644,7 +8625,9 @@ export function registerHostedHarnessSessionRoutes(
             await loop.stop(stopSettle);
           await session.shell?.publisher?.close();
           await session.backgroundLane?.publisher?.close();
-          await session.mcp?.closeResources({ terminal: kind === 'delete' });
+          // Terminal on a close as on a delete; HostedMcpSession.closeResources
+          // says why that is safe.
+          await session.mcp?.closeResources({ terminal: true });
         }
         res.json({
           protocolVersion: 2,
@@ -10532,19 +10515,15 @@ export function registerHostedHarnessSessionRoutes(
     session: HostedSession,
   ): Promise<boolean> => {
     if (!brokerOptions) return false;
-    // Only a Hooks session that OWNS its broker ran those sweeps: `ownsBroker`
-    // gates both `releaseEarlierOwners` and the terminal owner release, and
-    // delegating the broker to MCP clears it. Sharing the broker is how this
-    // file spells that delegation — Hooks is constructed on
-    // `session.mcp?.broker` and delegated whenever the two brokers match, the
-    // same test the apply path already uses (R9-2).
-    if (session.hooks && session.hooks.broker !== session.mcp?.broker)
-      return false;
     let unproven = false;
     const sessionKey = session.managed.authority.sessionHeader.sessionKey;
     // The very set the exemption uses, so the two sides cannot drift one
-    // owner family at a time (R9-1). Skipping the live ids leaves exactly the
-    // owners whose own close is absent or delegated away.
+    // owner family at a time (R9-1). Only a live broker id is skipped: that
+    // one has a close of its own. Everything else is swept even when a Hooks
+    // session exists — an owner `configure()` acquired but no Hook ever ran
+    // has no `hook_execution` record, so `releaseEarlierOwners` cannot name
+    // it (R8-1), and a delegated Hooks session sweeps nothing at all (R9-2).
+    // The redundant release of an owner Hooks did sweep is absorbed below.
     const live = new Set(
       [
         session.hooks?.broker.runtimeSessionId,

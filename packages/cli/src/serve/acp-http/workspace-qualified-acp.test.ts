@@ -2035,6 +2035,9 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
   });
 
   it('runs secondary workspace forget tasks on the secondary bridge with scope', async () => {
+    vi.mocked(
+      secondaryBridge.isWorkspaceMemoryRememberAvailable,
+    ).mockResolvedValue(false);
     await sendWsRequest('/workspaces/secondary-id/acp', {
       jsonrpc: '2.0',
       id: 2,

@@ -687,6 +687,7 @@ async function mcpApp(
   unknownConfigure = false,
   serverIds = ['demo'],
   toolProfile = 'hosted-workspace-mcp/1',
+  extra: Record<string, unknown> = {},
 ) {
   const requests: ManagedMcpControl[] = [];
   const replies = new Map<string, ManagedMcpOperationView>();
@@ -765,6 +766,7 @@ async function mcpApp(
       serverRevision: 1,
       definitionDigest: 'a'.repeat(64),
     })),
+    ...extra,
   });
   expect(created.status).toBe(200);
   const authorize = (request: supertest.Test) =>
@@ -3042,6 +3044,7 @@ describe('Hosted Harness no-tool session', () => {
           })
           .expect(200);
       }
+      expect(release).toHaveBeenCalledExactlyOnceWith({ drain: true });
       expect(state.model).not.toHaveBeenCalled();
       await authorize(supertest(server).post(`/session/${SESSION_ID}/detach`))
         .send({ authority: { ...operation.authority, claimGeneration: 2 } })
@@ -3138,6 +3141,10 @@ describe('Hosted Harness no-tool session', () => {
   });
 
   it('v2 MCP effects retain the owner until resources settle', async () => {
+    const closeResources = vi.spyOn(
+      HostedMcpSession.prototype,
+      'closeResources',
+    );
     const { server, authorize, requests } = await mcpApp();
     await authorize(
       supertest(server).post(`/session/${SESSION_ID}/mcp/operations`),
@@ -3166,8 +3173,9 @@ describe('Hosted Harness no-tool session', () => {
     expect(
       requests.filter((request) => request.kind === 'mcp-release'),
     ).toHaveLength(0);
-    // R14-1: kind:'close' is a detach — the owner hands its mount back through
-    // releaseMount but stays re-acquirable; only a delete terminally releases.
+    // The terminal release happens in settle_resources, the last phase; a
+    // reload of a closing Session carries a lifecycle authority, which sets
+    // mcpClosing, so no acquire follows it.
     vi.spyOn(HostedWorkspaceBroker.prototype, 'mountClaim').mockReturnValue(
       'v2-close-claim',
     );
@@ -3184,9 +3192,143 @@ describe('Hosted Harness no-tool session', () => {
     expect(
       requests.filter((request) => request.kind === 'mcp-release'),
     ).toHaveLength(1);
-    expect(releaseMount).toHaveBeenCalledWith('v2-close-claim');
-    expect(HostedWorkspaceBroker.prototype.release).not.toHaveBeenCalled();
+    // The MCP session's own owner is the one released, and every row it
+    // configured ends released, as the release fault gates require.
+    const mcp = closeResources.mock.contexts[0] as HostedMcpSession;
+    expect(
+      vi.mocked(HostedWorkspaceBroker.prototype.release).mock.contexts,
+    ).toContain(mcp.broker);
+    expect(releaseMount).not.toHaveBeenCalled();
+    const releaseStates = () =>
+      (Reflect.get(mcp, 'session') as ManagedSession).authority
+        .extensionRecordsInDomain('mcp_configuration')
+        .map(
+          (entry) => (entry.record as { releaseState?: string }).releaseState,
+        );
+    expect(releaseStates()).not.toHaveLength(0);
+    expect(releaseStates()).toEqual(releaseStates().map(() => 'released'));
+    // A retried settle_resources, as after a lost answer, finds every row
+    // released: it dispatches no second release and acquires nothing.
+    const acquire = vi.mocked(HostedWorkspaceBroker.prototype.acquire);
+    acquire.mockClear();
+    await authorize(supertest(server).post(`/session/${SESSION_ID}/lifecycle`))
+      .send({ ...operation, phase: 'settle_resources' })
+      .expect(200);
+    expect(
+      requests.filter((request) => request.kind === 'mcp-release'),
+    ).toHaveLength(1);
+    expect(acquire).not.toHaveBeenCalled();
+    expect(releaseStates()).toEqual(releaseStates().map(() => 'released'));
     expect(state.model).not.toHaveBeenCalled();
+    await authorize(supertest(server).post(`/session/${SESSION_ID}/detach`))
+      .send({ authority: operation.authority })
+      .expect(204);
+  });
+
+  it('releases the Hook owner it shares with MCP on a v2 close', async () => {
+    // With both an MCP server and a Hook catalog the Hook session borrows the
+    // MCP broker, so the MCP release on a close releases the owner the
+    // SessionEnd Hook ran on as well.
+    const catalog: ManagedHookCatalog = {
+      ...hookPin,
+      hooks: [HookEventName.SessionEnd, HookEventName.SessionDelete].map(
+        (eventName) => ({
+          hookId: eventName,
+          eventName,
+          sequential: false,
+          async: false,
+          failClosed: true,
+          onceKey: null,
+          config: { type: 'command' as const },
+        }),
+      ),
+    };
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
+    vi.spyOn(
+      HostedWorkspaceBroker.prototype,
+      'authorizeLifecycle',
+    ).mockResolvedValue();
+    const hookRequests: ManagedHookControl[] = [];
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'hookControl').mockImplementation(
+      async (operation) => {
+        hookRequests.push(operation);
+        if (operation.kind === 'hook-catalog')
+          return {
+            operationId: operation.operationId,
+            state: 'settled',
+            catalog: { ...catalog, ...operation.pin },
+          };
+        return {
+          operationId: operation.operationId,
+          state: 'settled',
+          result: { success: true, outcome: 'success', duration: 0 },
+        };
+      },
+    );
+    const closeResources = vi.spyOn(
+      HostedMcpSession.prototype,
+      'closeResources',
+    );
+    const hookClose = vi.spyOn(HostedHookSession.prototype, 'close');
+    const { server, authorize, requests } = await mcpApp(
+      false,
+      ['demo'],
+      'hosted-workspace-mcp/1',
+      { hookCatalog: hookPin, approvalMode: 'yolo' },
+    );
+    await authorize(
+      supertest(server).post(`/session/${SESSION_ID}/mcp/operations`),
+    )
+      .send({
+        operationId: randomUUID(),
+        serverId: 'demo',
+        request: { kind: 'resource_read', uri: 'memory://note' },
+      })
+      .expect(202);
+    const operation = {
+      protocolVersion: 2,
+      kind: 'close',
+      toolProfile: 'hosted-workspace-mcp/1',
+      sessionKey: {
+        tenantId: 'tenant',
+        workspaceId: 'workspace',
+        sessionId: SESSION_ID,
+      },
+      authority: { operationId: 'v2-shared', claimGeneration: 1 },
+    };
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'mountClaim').mockReturnValue(
+      'v2-close-claim',
+    );
+    const releaseMount = vi
+      .spyOn(HostedWorkspaceBroker.prototype, 'releaseMount')
+      .mockResolvedValue();
+    for (const phase of ['effects', 'prepare_resources', 'settle_resources']) {
+      await authorize(
+        supertest(server).post(`/session/${SESSION_ID}/lifecycle`),
+      )
+        .send({ ...operation, phase })
+        .expect(200);
+    }
+    expect(
+      hookRequests.filter((request) => request.kind === 'hook-execute'),
+    ).not.toHaveLength(0);
+    const mcp = closeResources.mock.contexts[0] as HostedMcpSession;
+    const hooks = hookClose.mock.contexts[0] as HostedHookSession;
+    expect(hooks.broker).toBe(mcp.broker);
+    expect(
+      requests.filter((request) => request.kind === 'mcp-release'),
+    ).toHaveLength(1);
+    expect(
+      vi.mocked(HostedWorkspaceBroker.prototype.release).mock.contexts,
+    ).toContain(mcp.broker);
+    expect(releaseMount).not.toHaveBeenCalled();
+    const releaseStates = (
+      Reflect.get(mcp, 'session') as ManagedSession
+    ).authority
+      .extensionRecordsInDomain('mcp_configuration')
+      .map((entry) => (entry.record as { releaseState?: string }).releaseState);
+    expect(releaseStates).not.toHaveLength(0);
+    expect(releaseStates).toEqual(releaseStates.map(() => 'released'));
     await authorize(supertest(server).post(`/session/${SESSION_ID}/detach`))
       .send({ authority: operation.authority })
       .expect(204);
@@ -10549,7 +10691,9 @@ describe('Hosted Harness no-tool session', () => {
         }),
     );
     expect((await receive('msg_running')).status).toBe(202);
-    await vi.waitFor(() => expect(state.model).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(state.model).toHaveBeenCalledTimes(1), {
+      timeout: settleTimeoutMs(),
+    });
     expect((await receive('msg_waiting')).status).toBe(202);
     const stop = () =>
       headers(
@@ -22850,19 +22994,15 @@ describe('Hosted Harness no-tool session', () => {
     },
   );
 
-  it('drains a held Runtime before the non-terminal Hook mount handback on a v2 close (R22-1)', async () => {
+  it('drains a held Runtime before terminal Hook owner release on a v2 close', async () => {
     const toolProfile = 'hosted-workspace-shell/1';
     const f = await recoveryFileSession(toolProfile);
     await f.submit();
     await f.idle();
     f.resident.monitorWake?.close();
     await f.owe();
-    // A Hook-configured turn shares this Runtime and leaves a live background
-    // Shell (its finish() skips the release). The Broker's release-mount guard
-    // refuses while that row is active, and only the drain proves it stopped,
-    // so a handback issued first parks the detach on recovery-required for as
-    // long as the process lives. Model that guard at the seam: releaseMount
-    // refuses until the drain has run.
+    // A Hook-configured turn leaves a background Shell on its shared owner.
+    // Cleanup debt must drain before the public lifecycle releases that owner.
     let backgroundLive = true;
     const order: string[] = [];
     vi.mocked(HostedWorkspaceBroker.prototype.release).mockImplementation(
@@ -22893,9 +23033,15 @@ describe('Hosted Harness no-tool session', () => {
       () => false,
       `extensions-components-${'e'.repeat(64)}`,
     );
-    // The Hook turn already acquired and holds the mount; the deterministic
-    // owner id keeps the close non-terminal (R13-1).
     vi.spyOn(hooks, 'mountHeld', 'get').mockReturnValue(true);
+    const originalClose = hooks.close.bind(hooks);
+    const closeHook = vi
+      .spyOn(hooks, 'close')
+      .mockImplementation(async (opts) => {
+        expect(backgroundLive).toBe(false);
+        order.push('owner-close');
+        await originalClose(opts);
+      });
     f.resident.hooks = hooks;
     await f
       .authorize(supertest(f.server).post(`/session/${SESSION_ID}/lifecycle`))
@@ -22908,9 +23054,9 @@ describe('Hosted Harness no-tool session', () => {
         authority: { operationId: 'close-drain-order', claimGeneration: 1 },
       })
       .expect(200);
-    // The 200 above is the witness: a handback issued before the drain refuses
-    // busy, and the route parks the detach on 503 instead of attaching.
-    expect(order).toContain('handback');
+    expect(closeHook).toHaveBeenCalledExactlyOnceWith({ terminal: true });
+    expect(order.indexOf('drain')).toBeLessThan(order.indexOf('owner-close'));
+    expect(order).not.toContain('handback');
   });
 
   it('drains a registered held Runtime with no cleanup debt on a v2 close (R24-1)', async () => {
@@ -26133,6 +26279,13 @@ describe('Hosted Harness tool approvals', () => {
       retained: true,
       delegated: true,
     },
+    {
+      arm: 'legacy delete, owner acquired but no Hook ran',
+      terminal: true,
+      protocol: 1,
+      retained: true,
+      noHookRun: true,
+    },
   ])(
     'releases the orphaned config-scoped owners a hook-free apply left behind ($arm)',
     async ({
@@ -26142,7 +26295,10 @@ describe('Hosted Harness tool approvals', () => {
       refused = false,
       reconciling = false,
       delegated = false,
+      noHookRun = false,
     }) => {
+      // Both v2 operations end the Session (main #16728/#16882).
+      const endsSession = terminal || protocol === 2;
       // R7-1, driven end to end: no session field is assigned by this test.
       // Installing hooks, firing one, then applying a revision whose bundle
       // carries no Hook catalog is enough for the real drain to nil the Hook
@@ -26309,15 +26465,19 @@ describe('Hosted Harness tool approvals', () => {
         .expect(200);
       const authorize = (request: supertest.Test) =>
         headers(request).set('X-Qwen-Client-Id', created.body.clientId);
-      await authorize(
-        supertest(server).post(`/session/${SESSION_ID}/hooks/operations`),
-      )
-        .send({
-          operationId: randomUUID(),
-          event: 'Notification',
-          input: { message: 'ready', notification_type: 'test' },
-        })
-        .expect(200);
+      // R8-1: `configure()` acquires the owner before any Hook fires, so an
+      // owner with no Hook run has no `hook_execution` record for
+      // `releaseEarlierOwners` to enumerate.
+      if (!noHookRun)
+        await authorize(
+          supertest(server).post(`/session/${SESSION_ID}/hooks/operations`),
+        )
+          .send({
+            operationId: randomUUID(),
+            event: 'Notification',
+            input: { message: 'ready', notification_type: 'test' },
+          })
+          .expect(200);
       const residentOf = () =>
         (
           wakeDeps.last as {
@@ -26418,7 +26578,7 @@ describe('Hosted Harness tool approvals', () => {
       expect(settled.status).toBe(protocol === 2 ? 200 : 204);
       // Absorbing the 503 is only half the sibling discipline: the stop it
       // could not prove must settle runtime_lost, not stop_requested.
-      if (terminal && !refused)
+      if (endsSession && !refused)
         expect(stop).toHaveBeenCalledWith(
           reconciling ? 'runtime_lost' : 'stop_requested',
         );
@@ -26428,8 +26588,12 @@ describe('Hosted Harness tool approvals', () => {
       // Exactly once: with a live Hooks session its own close already swept
       // the superseded owner, and sweeping again here would rethrow the hold
       // fence that close absorbs into a retry (N4).
+      // A broker-owning Hooks session sweeps the earlier owner itself AND the
+      // orphan sweep no longer short-circuits (R8-1), so that shape releases it
+      // twice; the redundant call is absorbed. Every other shape has exactly
+      // one releaser.
       expect(released.filter((id) => id === ownerFor(1))).toHaveLength(
-        terminal ? 1 : 0,
+        endsSession ? (retained && !delegated && !noHookRun ? 2 : 1) : 0,
       );
     },
   );
@@ -26458,6 +26622,10 @@ describe('Hosted Harness tool approvals', () => {
   )(
     'stops only what it may stop with a restored config-scoped owner ($arm)',
     async ({ terminal, protocol, carrier }) => {
+      // Under main's lifecycle model (#16728/#16882) BOTH v2 operations end
+      // the Session, so a v2 close discharges the owner exactly like a delete.
+      // Only the v1 detach is a non-terminal exit a reload can follow.
+      const endsSession = terminal || protocol === 2;
       // R28-1 on a Session that really owns the id: the owner is derived from
       // (sessionKey, configRevision) by an active extension bundle, not typed
       // as a literal. Three ids ride the restore — the owner, an ordinary turn,
@@ -26763,13 +26931,13 @@ describe('Hosted Harness tool approvals', () => {
       // ran, and the lookalike pins that the exemption is not the prefix.
       expect(releasedOwners.has(hostedRuntimeSessionId(ordinary))).toBe(true);
       expect(releasedOwners.has(lookalike)).toBe(true);
-      expect(releasedOwners.has(owner)).toBe(terminal);
+      expect(releasedOwners.has(owner)).toBe(endsSession);
       // Skipping is not discharging: the obligation stays owed. What finally
       // releases the owner is a terminal close on a successor resident after
       // a reload — this resident cannot offer one, because the v2 close pins
       // lifecycleKind and every later kind conflicts (R2-6/R3-5).
       expect(resident.heldRuntimeTurns.has(owner)).toBe(
-        leaseCarried ? false : !terminal,
+        leaseCarried ? false : !endsSession,
       );
       if (carrier === 'ordinary lease') {
         // M06: the deferral must not swallow an ordinary recovered lease.
@@ -26786,7 +26954,7 @@ describe('Hosted Harness tool approvals', () => {
             `detach keeps reload-stable owner ${owner} running: release deferred`,
           ),
         ),
-      ).toBe(!terminal && !leaseCarried);
+      ).toBe(protocol !== 2 && !terminal && !leaseCarried);
       if (carrier === 'lease' || carrier === 'durable lease') {
         // R4-1: the lease path names the id it left running, like the drains
         // — but only when it really left it running. A terminal route releases
@@ -26799,7 +26967,7 @@ describe('Hosted Harness tool approvals', () => {
               `keeps reload-stable owner ${owner} running: release deferred`,
             ),
           ),
-        ).toBe(!terminal);
+        ).toBe(protocol !== 2 && !terminal);
       }
       // The settle argument is reached on every arm, so a wrong one fails
       // rather than passing silently. A skipped owner proved no stop (R1-1);
@@ -26807,7 +26975,7 @@ describe('Hosted Harness tool approvals', () => {
       // carrier settles stop_requested even on a detach. The stderr spy is
       // restored by this describe's afterEach, which also runs on a throw.
       expect(stop).toHaveBeenCalledWith(
-        terminal || carrier === 'ordinary lease'
+        endsSession || carrier === 'ordinary lease'
           ? 'stop_requested'
           : 'runtime_lost',
       );

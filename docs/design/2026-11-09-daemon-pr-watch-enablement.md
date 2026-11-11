@@ -2,17 +2,17 @@
 
 [English](2026-11-09-daemon-pr-watch-enablement.md) | [简体中文](2026-11-09-daemon-pr-watch-enablement.zh-CN.md)
 
-Status: proposed (2026-11-09), partially landed (#16732 and this increment). This is the increment after [delivery drain](2026-11-08-daemon-pr-watch-drain.md) (merged as #16656) of [PR state transitions from the daemon PR refresh](2026-11-04-daemon-pr-state-transitions.md) (the "master design"). It covers the four items the drain increment deferred to enablement: the shared restore (§1), the resume-drain hook (§2), the lifecycle close reorder (§3), and the daemon-level deps provisioning (§4). **Landed so far: §3 in full and the host enumerator from §4 (#16732), plus §1, the shared restore, in this increment.** §2, the rest of §4 and §5 are still ahead; each section below is marked accordingly. **The off switch stays `false` and the `sessionPrWatch` setting is still not read** — configuration (§6), the channel alias and turning the switch on (§7) remain PR B. No build may ever run both pollers.
+Status: proposed (2026-11-09), partially landed (#16732 and this increment). This is the increment after [delivery drain](2026-11-08-daemon-pr-watch-drain.md) (merged as #16656) of [PR state transitions from the daemon PR refresh](2026-11-04-daemon-pr-state-transitions.md) (the "master design"). It covers the four items the drain increment deferred to enablement: the shared restore (§1), the resume-drain hook (§2), the lifecycle close reorder (§3), and the daemon-level deps provisioning (§4). **Landed so far: §3 in full and the host enumerator from §4 (#16732); §1, the shared restore (#16810); §5, the listing write and `listedKeys`.** §2 and the rest of §4 are still ahead, and they land together because §4 supplies the consumers §2 needs; each section below is marked accordingly. **The off switch stays `false` and the `sessionPrWatch` setting is still not read** — configuration (§6), the channel alias and turning the switch on (§7) remain PR B. No build may ever run both pollers.
 
 ## Problem
 
-The drain is complete but unreachable. `runPrWatchDrainTick` takes its restore, admission, registry and self-push access as injected dependencies, and nothing in production populates them: `getPrWatchDeps` and `getPrDrainDeps` have no production caller, `defaultPrWatchDir()` and `releasePrWatchOwnershipSync()` are referenced only by tests. Three consequences follow, and each is a defect the moment PR B flips the switch:
+The drain is complete but unreachable. `runPrWatchDrainTick` takes its restore, admission, registry and self-push access as injected dependencies, and nothing in production populates them: `getPrWatchDeps` and `getPrDrainDeps` have no production caller, `defaultPrWatchDir()` and `releasePrWatchOwnershipSync()` are referenced only by tests. Three consequences follow once PR B flips the switch — two of correctness, one of latency:
 
 - A dormant recipient can never be woken. The real restore lived in `restoreSessionHandler`, a route closure inside `registerSessionRoutes`, reachable only over HTTP; §1 moved its reusable core into `server/session-restore.ts`. The channel reaches it through the SDK (`commands/channel/daemon-worker.ts:1057-1063`), which the daemon cannot use for its own in-process delivery.
-- `wakeDormant: false` strands entries forever. The drain holds them for the session's next live turn, but no hook drains on resume, so nothing consumes them.
+- `wakeDormant: false` delays delivery by up to one refresh interval. It does **not** strand entries: the drain runs after the observation on every tick, re-reads each watch file's `pending` list, and only takes the dormant branch when `isSessionLive` is false — so once the session is live, the next tick delivers. What is missing is immediacy: nothing drains at the moment of resume, so a transition can wait a full interval (5 minutes by default) for a session the user is already looking at.
 - Shutdown overlaps a successor. Nothing stops the watch or releases the owner record, so a successor daemon can claim while the predecessor's restores and admissions are still in flight (master §2).
 
-Two further gaps are load-bearing for correctness rather than reachability: the observation discards the bindings scan's `partial` flag (its own comment says enablement MUST thread it before any negative decision), and the slim listing never writes `state` to a watch file nor supplies `listedKeys`, so a closed PR the listing returns stays in the view rotation forever.
+Two further gaps were load-bearing for correctness rather than reachability, and both are now settled in section 5: the observation's discarded `partial` flag needs no threading (it makes no negative decision, so an added option would have no reader), and the slim listing now writes `state` to the watch file and supplies `listedKeys`, so a closed PR the listing returned leaves the view rotation. The listing write also fires the `state_change` that the view it replaces would have fired.
 
 ## Current state
 
@@ -29,9 +29,9 @@ Two further gaps are load-bearing for correctness rather than reachability: the 
 
 - Extract the restore core into a function the route and the drain both call in-process, with the route's HTTP behaviour byte-compatible.
 - Give the drain a real `wakeSession` that mints and releases a client registration, classifying outcomes as the channel does.
-- Drain on resume so `wakeDormant: false` entries are consumed on the session's next live turn.
+- Drain at the moment of resume, so a `wakeDormant: false` entry is delivered as soon as the session is live instead of at the next refresh tick.
 - Stop the watch and release the owner record on shutdown, after in-flight work settles.
-- Populate both deps seams: watch directory and lock registry, allowed hosts, admission, restore, self-push ledger, and the scan's `partial`.
+- Populate both deps seams: watch directory and lock registry, allowed hosts, admission, restore, and the self-push ledger. The scan's `partial` needs no threading into the observation — see section 5.
 - Write the slim listing's `state` to watch files and supply `listedKeys`.
 - Keep the switch off and the setting unread: zero behaviour or API-volume change in production.
 
@@ -64,7 +64,9 @@ Five boundaries are decided explicitly:
 
 ### 2. Resume-drain hook (not yet landed)
 
-The shared restore takes an optional `onRestored` callback, invoked after the session is live and the generation assertion passes, before the function returns. The route passes nothing (behaviour unchanged); the drain's `wakeSession` provisioning passes a hook that schedules a drain for that session's bound PRs.
+This is a **latency optimization, not a correctness fix**. Delivery already happens without it: the drain runs every tick, re-reads `pending`, and delivers to a recipient once `isSessionLive` is true. The hook removes the wait between a user's resume and the next tick.
+
+The shared restore takes an optional `onRestored` callback, invoked after the session is live and the generation assertion passes. **The caller that matters is the route, not the drain.** A hook supplied only by the drain's own `wakeSession` provisioning would fire on the `wakeDormant: true` path — the drain restoring a session itself — and never on a user's resume, so it would not deliver the case this section exists for. Wiring it therefore needs a route-to-drain seam: an injected `onSessionRestored`-style dependency on the session routes, populated from the same late-bound getter as the drain deps, which schedules a drain for that session's bound PRs. Until that seam exists the callback has no caller, so it lands together with the seam or not at all.
 
 The hook **must not be awaited inside the restore**. `PathMutexRegistry.runExclusive` is not re-entrant, and the drain's own `restoreAndAdmit` re-acquires the same per-PR lock after its wake. Awaiting a drain from inside a restore that a drain dispatched would invert the await direction and can deadlock. The hook therefore fires the drain without waiting (`void`, with its own failure logging), exactly as the drain already fires restores. It also runs after the core's `finally` has released the reservation and the worktree lock — §1 moved both releases inside the core, so the hook must sit after that `finally`, not before it — so a drain that re-enters the same session's restore cannot collide with the pending reservation count.
 
@@ -93,11 +95,17 @@ The arms must be **sequential, not parallel**. Sampling drain-idle alongside the
 - **Self-push ledger**: `cloneWorktreesOf` from the candidate's clone (the bridge live summary's `worktree.path`, else the binding's `workspaceCwd`), then `vouchedScanRoots`, `autofixPrPaths`, `readState`, accepted only when `sameRepository` and the `sessionId` match. The untrusted primary uses the coordinate alone — no git runs in its checkout. Any refusal means no ledger and the transition delivers.
 - **Actions**: not provisioned. `sessionPrWatch.actions` is PR B; the drain's empty-map normalisation already treats an absent map as the generic prompt.
 
-### 5. Listing write, listedKeys and partial (not yet landed)
+### 5. Listing write and listedKeys (landed)
 
 The refresh's slim listing already knows each listed PR's state. Under the same gate, and only when the daemon holds the owner record, write `state` and `observedAt` to that PR's watch file under its per-PR lock — the same atomic write the observation uses, initialising silently when no file exists. Collect the listed keys into `listedKeys` and pass them to the observation so a closed PR the listing returned leaves the view rotation (master §1).
 
-Thread the bindings scan's `partial` flag into the observation options. The observation makes no negative decision today, but the drain already does, and the flag must reach it from the same scan rather than being recomputed. The drain's caller-side `coveragePartial` (added in #16656) stays: it covers the registry entries `listAll()` omits, which the scan's own flag cannot see.
+**The `partial` item is already satisfied and needs no code.** An earlier draft of this section asked for the bindings scan's `partial` flag to be threaded into the observation options. Reading the code: the drain already ORs each workspace scan's own `partial` into the flag it seeded from the caller-side `coveragePartial`, and already consumes it at both negative decisions — the watch-file deletion guard and the pending-drop guard. The observation, by contrast, makes no negative decision at all, so an added `partial` option there would have no reader: a dead switch. The discarded flag in the observation tick is therefore correct as it stands, and its comment should say the requirement is met rather than outstanding. The caller-side `coveragePartial` (added in #16656) still covers what a per-workspace scan cannot see — the registry entries `listAll()` omits.
+
+**Tick ordering decides where the keys come from.** The timer runs the observation before the refresh, so the listing that produces `listedKeys` runs _after_ the observation that consumes them. The refresh therefore returns the keys it listed, and the timer carries them per workspace into the next tick's observation. The state write is immediate; only the exit from the view rotation lags one tick, which is the same interval the rotation already works on. The two mechanisms are complementary, not redundant: the stored `state` lets `effectiveState` become closed or merged without spending a view, while `listedKeys` distinguishes a closed PR the listing covered from one it did not — the latter stays in rotation to catch a reopen.
+
+**The listing is a transition producer, not just a state recorder.** Writing `state` makes the observation skip the view that would have detected the same change, and that view is the only other caller of `detectPrTransitions` — the only producer of `pending`, which is all the drain delivers. So a closure or merge whose first observer is the listing must fire its own `state_change`, or it is recorded as a fait accompli and never delivered. The write therefore runs the same detector, carrying the previous `headSha` and `checks` forward so that only `state_change` can fire — no `head_change`, `ci_failure` or `merge_conflict`. A file with no `headSha` is not baselined and initialises silently, exactly as it does on the view path. This is not the narrow same-tick window only: it is every PR the observation did not reach that tick — the view cap, the deadline truncation, a failed view, or another workspace having viewed it first.
+
+**Only PRs the shared scan binds get a file, on an allowed host.** The binder set is the shared bindings scan's own answer, not a re-derivation of it: that scan excludes archived, hidden-catalog and unreadable sessions, and the drain deletes a watch file it does not list. Approximating it — for example by enumerating active sidecars directly — recreates the churn for whichever exclusion was missed, so the refresh calls the scan itself. The write also applies the observation's `allowedHosts` gate: the drain delivers `pending` with no host check of its own, so writing a transition for a host the observation refuses to view would deliver an event for it. `listedKeys` still reports the listing's full coverage — the observation consults a key only for the bindings it scanned itself, so a key it never looks up is harmless.
 
 ## Files affected
 
@@ -116,10 +124,11 @@ Thread the bindings scan's `partial` flag into the observation options. The obse
 | `packages/cli/src/serve/server/pr-watch-deps.ts` (new)          | build the observation and drain deps: hosts, admission, restore mapping, ledger                                                                                 |
 | `packages/cli/src/serve/run-qwen-serve.ts`                      | populate both seams via late-bound getters; register the shutdown drain                                                                                         |
 | `packages/cli/src/serve/serve-app-lifecycle.ts`                 | no shape change; the new drain registers through the existing `addAppDrain`                                                                                     |
-| `packages/cli/src/serve/server/session-pr-refresh.ts`           | listing→watch write, `listedKeys`, `partial` threading; `stopWatch` and the tick settle signal                                                                  |
+| `packages/cli/src/serve/server/pr-watch-observation.ts`         | the tick option that carries the listing's keys per workspace into the rotation decision (landed)                                                               |
+| `packages/cli/src/serve/server/session-pr-refresh.ts`           | listing→watch write and `listedKeys` (landed); `stopWatch` and the tick settle signal (#16732). No `partial` threading — see §5                                 |
 | `docs/design/2026-11-09-daemon-pr-watch-enablement.md` (+zh-CN) | this design                                                                                                                                                     |
 
-The rows for `session-restore.ts`, `routes/session.ts`, `worktree-ownership-op.ts` and the four test files are not part of #16732 — they land with §1 in this increment. `pr-watch-deps.ts` lands with the rest of §4. Two more rows are partial: `session-pr-refresh.ts` landed `stopWatch` and the tick settle signal but not the listing write, `listedKeys` or `partial` threading; `run-qwen-serve.ts` landed the shutdown drain registration but not the two seams.
+The rows for `session-restore.ts`, `routes/session.ts`, `worktree-ownership-op.ts` and the four test files are not part of #16732 — they land with §1 in this increment. `pr-watch-deps.ts` lands with the rest of §4. `session-pr-refresh.ts` is now complete for §5: `stopWatch` and the tick settle signal landed in #16732, the listing write and `listedKeys` here, and no `partial` threading is needed. `run-qwen-serve.ts` remains partial — it landed the shutdown drain registration but not the two seams.
 
 ## Key design decisions
 
@@ -157,7 +166,7 @@ The rows for `session-restore.ts`, `routes/session.ts`, `worktree-ownership-op.t
 1. With the switch off, production behaviour and API volume are unchanged; no new seam is read.
 2. The route's HTTP behaviour is byte-compatible: every existing load/resume test passes with its assertions, title and count unchanged.
 3. With the switch on (tests), a dormant recipient is restored through the shared core, delivered to, and its registration released once the prompt settles.
-4. `wakeDormant: false` entries are consumed on the session's next resume.
+4. A `wakeDormant: false` entry is delivered on the resume itself rather than at the next refresh tick. (Delivery on the next tick already holds without this slice; the criterion is the latency, not the delivery.)
 5. Shutdown stops the watch, waits for in-flight work, and only then releases the owner record.
 6. A closed PR the slim listing returns is not viewed again; the listing's `state` reaches the watch file.
 7. Views go only to allowed hosts; a binding on any other host causes no `gh` call.

@@ -25,6 +25,7 @@ import {
   type ManagedExtensionMcpSelection,
   type ManagedExtensionPrepareResult,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-package.js';
+import { managedSessionInlineResourceBytes } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 import type { ManagedPackageContributions } from '@qwen-code/qwen-code-core/extension/managed-package.js';
 import type { ManagedHookCatalogPin } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-protocol.js';
 import type { ManagedSessionDurableRef } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
@@ -657,15 +658,19 @@ export class HostedExtensionSession {
         ? previous.mcpRevision + 1
         : baseline.mcpRevision + (record.command.mcpChange ? 1 : 0),
       independentMcpSelections: selected,
-      ...(record.mode === 'apply' && record.command.mcpChange
-        ? { mcpChange: record.command.mcpChange }
-        : {}),
       baseMcpServers,
       baseHookCatalog: baseline.baseHookCatalog,
       packages,
       mcpServers: prepared.mcpServers,
       hookCatalog: prepared.hookCatalog,
     });
+    if (
+      Buffer.byteLength(JSON.stringify(bundle)) >
+      managedSessionInlineResourceBytes('managed-extension-config-bundle')
+    )
+      throw new HostedMcpConflictError(
+        'Extension configuration exceeds its inline resource capacity.',
+      );
     const bundleRef = await this.publish(
       'managed-extension-config-bundle',
       bundle,
