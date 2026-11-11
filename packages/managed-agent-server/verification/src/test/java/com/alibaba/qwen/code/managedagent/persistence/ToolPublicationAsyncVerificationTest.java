@@ -1102,6 +1102,20 @@ public class ToolPublicationAsyncVerificationTest {
         }
 
         @Override
+        public InputStream openRange(String objectKey, long offset, long length, Runnable guard) {
+            guard.run();
+            try (InputStream full = open(objectKey)) {
+                byte[] bytes = full.readAllBytes();
+                if (offset < 0 || length < 0 || offset + length > bytes.length) {
+                    throw new IllegalArgumentException("Invalid object range");
+                }
+                return new ByteArrayInputStream(bytes, (int) offset, (int) length);
+            } catch (java.io.IOException error) {
+                throw new IllegalStateException("Test range read failed", error);
+            }
+        }
+
+        @Override
         public InputStream open(String objectKey) {
             assertThat(TransactionSynchronizationManager.isActualTransactionActive()).isFalse();
             int read = opens.incrementAndGet();

@@ -23,6 +23,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpServer;
@@ -216,6 +217,16 @@ class HostedWorkspaceToolTurnIT {
     private static void registerUnicodePublication(GenericApplicationContext context) {
         var objects = new ConcurrentHashMap<String, byte[]>();
         context.registerBean("unicodeObjects", ToolPublicationObjectStore.class, () -> new ToolPublicationObjectStore() {
+            @Override
+            public InputStream openRange(String key, long offset, long length, Runnable guard) {
+                guard.run();
+                try (InputStream full = open(key)) {
+                    byte[] bytes = full.readAllBytes();
+                    return new java.io.ByteArrayInputStream(bytes, (int) offset, (int) length);
+                } catch (java.io.IOException error) {
+                    throw new IllegalStateException(error);
+                }
+            }
             @Override
             public void putIfAbsent(String key, byte[] bytes) {
                 byte[] previous = objects.putIfAbsent(key, bytes.clone());
@@ -681,7 +692,7 @@ class HostedWorkspaceToolTurnIT {
         String storageId = "storage-" + index;
         String physical = jdbc.queryForObject("SELECT physical_key FROM ma_storage"
                 + " WHERE alias_key = ? AND tenant_id = ? AND storage_id = ?", String.class,
-                com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository.storageAliasKey(tenant, storageId),
+                RuntimeAdmissionFences.storageAliasKey(tenant, storageId),
                 tenant, storageId);
         assertThat(physical).isNotBlank();
         Map<String, Object> member = jdbc.queryForMap("SELECT binding_id, runtime_generation, runtime_session_id,"
