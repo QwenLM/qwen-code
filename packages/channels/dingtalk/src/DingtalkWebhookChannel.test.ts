@@ -378,6 +378,30 @@ describe('DingTalk webhook lifecycle', () => {
     expect(fetchMock).toHaveBeenCalledOnce();
   });
 
+  it.each([true, false])(
+    'does not abort a settled request on disconnect (success=%s)',
+    async (success) => {
+      const { channel } = make();
+      fetchMock.mockResolvedValueOnce(
+        Response.json({ errcode: success ? 0 : 310000 }),
+      );
+      await channel.connect();
+      const result = channel.sendMessage('default', 'text');
+      if (success) {
+        await result;
+      } else {
+        await expect(result).rejects.toThrow('code 310000');
+      }
+      expect(fetchMock).toHaveBeenCalledOnce();
+      const signal = fetchMock.mock.calls[0]![1]?.signal;
+      expect(signal?.aborted).toBe(false);
+
+      channel.disconnect();
+      await channel.waitForDisconnect();
+      expect(signal?.aborted).toBe(false);
+    },
+  );
+
   it('cancels and drains concurrent sends on disconnect, then can reconnect', async () => {
     const { channel } = make();
     await channel.connect();
