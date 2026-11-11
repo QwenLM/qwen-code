@@ -539,8 +539,7 @@ public final class ToolPublicationDataStore {
         return null;
     }
 
-    private boolean deferOrFailUnclaimedVerification(String scope, String publicationId, String operationId,
-            long epoch, RuntimeException error) {
+    private boolean deferOrFailUnclaimedVerification(String scope, String publicationId, String operationId, long epoch, RuntimeException error) {
         String[] releasedObject = new String[1];
         boolean handled = Boolean.TRUE.equals(transactions.execute(status -> {
             retention.lockRetainedPublication(scope, publicationId);
@@ -598,8 +597,7 @@ public final class ToolPublicationDataStore {
         deleteReleasedObject(objectKey);
     }
 
-    private void deferVerification(String scope, String publicationId, String operationId,
-            Timestamp current, Timestamp deadline, RuntimeException error) {
+    private void deferVerification(String scope, String publicationId, String operationId, Timestamp current, Timestamp deadline, RuntimeException error) {
         jdbc.update("UPDATE ma_operation SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", claim_owner = NULL, claim_until = NULL, verification_next_at = ? WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH') AND scope_key = ? AND publication_id = ? AND operation_id = ?",
                 new Timestamp(Math.min(current.getTime() + 1000, deadline.getTime())), scope, publicationId, operationId);
         LOG.info("Tool publication verification retry scope={} operation={} cause={}",
@@ -664,16 +662,14 @@ public final class ToolPublicationDataStore {
         LOG.info("Tool publication verification expired operation={}", operationId);
     }
 
-    public JsonNode publishSegment(JsonNode key, String publicationId, String token,
-            String operationId, String streamId, int ordinal, byte[] input, String expectedDigest) {
+    public JsonNode publishSegment(JsonNode key, String publicationId, String token, String operationId, String streamId, int ordinal, byte[] input, String expectedDigest) {
         require("stdout".equals(streamId) || "stderr".equals(streamId), "Invalid stream ID");
         require(ordinal >= 0 && ordinal < 65536, "Invalid ordinal");
         return publish(key, publicationId, token, operationId, "segment:" + streamId + ":" + ordinal,
                 null, input, expectedDigest, MAX_SEGMENT);
     }
 
-    public JsonNode publishResource(JsonNode key, String publicationId, String token,
-            String operationId, String slot, String kind, byte[] input) {
+    public JsonNode publishResource(JsonNode key, String publicationId, String token, String operationId, String slot, String kind, byte[] input) {
         require(kind != null && (("managed-tool-result-page".equals(kind)
                 && slot.matches("page:(stdout|stderr):(?:0|[1-9][0-9]{0,4})"))
                 || ("managed-tool-result-manifest".equals(kind) && "manifest:1".equals(slot))
@@ -693,8 +689,7 @@ public final class ToolPublicationDataStore {
     }
 
     /** Admits a seal; inside the verifier context, verifies the accepted seal instead. */
-    public JsonNode seal(JsonNode key, String publicationId, String token, String operationId,
-            String streamId, int segmentCount, long byteLength, String digest) {
+    public JsonNode seal(JsonNode key, String publicationId, String token, String operationId, String streamId, int segmentCount, long byteLength, String digest) {
         requireStagedCall(key, publicationId);
         require("stdout".equals(streamId) || "stderr".equals(streamId), "Invalid stream ID");
         require(segmentCount >= 0 && segmentCount <= 65536 && byteLength >= 0
@@ -748,8 +743,7 @@ public final class ToolPublicationDataStore {
     }
 
     /** Admits a prefix scan; inside the verifier context, performs the accepted scan instead. */
-    public JsonNode prefix(JsonNode key, String publicationId, String token, String operationId,
-            String streamId) {
+    public JsonNode prefix(JsonNode key, String publicationId, String token, String operationId, String streamId) {
         requireStagedCall(key, publicationId);
         require("stdout".equals(streamId) || "stderr".equals(streamId), "Invalid stream ID");
         String scope = scope(key);
@@ -977,9 +971,19 @@ public final class ToolPublicationDataStore {
                 publicationId, resourceId));
         require(outcome.path("envelope").equals(finished.path("result")),
                 "Original receipt result changed");
-        byte[] records = jdbc.queryForObject("SELECT record_bytes FROM ma_session_journal_tx"
-                + " WHERE tenant_id = ? AND session_id = ? AND journal_revision = ?",
-                byte[].class, text(key, "tenantId"), text(key, "sessionId"), revision);
+        var journalRows = jdbc.query("SELECT record_bytes, record_digest, byte_length FROM"
+                + " ma_session_journal_tx WHERE tenant_id = ? AND session_id = ? AND journal_revision = ?",
+                (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow),
+                text(key, "tenantId"), text(key, "sessionId"), revision);
+        require(journalRows.size() == 1, "Original receipt journal is missing");
+        byte[] records = (byte[]) journalRows.getFirst().get("record_bytes");
+        if (records == null) {
+            JdbcJournalPacks packs = sessions.journalPacks();
+            records = packs == null ? null : packs.resolveBytes(text(key, "tenantId"),
+                    text(key, "sessionId"), revision,
+                    (String) journalRows.getFirst().get("record_digest"),
+                    ((Number) journalRows.getFirst().get("byte_length")).longValue());
+        }
         require(records != null, "Original receipt journal is missing");
         boolean matched = false;
         for (String line : new String(records, StandardCharsets.UTF_8).split("\n")) {
@@ -1042,8 +1046,7 @@ public final class ToolPublicationDataStore {
         return response;
     }
 
-    public JsonNode prepareAdmission(JsonNode key, String publicationId,
-            String writerId, long writerGeneration, String writerToken, JsonNode outcome) {
+    public JsonNode prepareAdmission(JsonNode key, String publicationId, String writerId, long writerGeneration, String writerToken, JsonNode outcome) {
         requireStagedCall(key, publicationId);
         require(outcome != null && outcome.isObject()
                 && outcome.path("schemaVersion").asInt(-1) == 1,
@@ -1153,8 +1156,7 @@ public final class ToolPublicationDataStore {
     }
 
     /** Admits a finish; inside the verifier context, verifies the accepted terminal instead. */
-    public JsonNode finish(JsonNode key, String publicationId, String token,
-            String operationId, byte[] bytes) {
+    public JsonNode finish(JsonNode key, String publicationId, String token, String operationId, byte[] bytes) {
         requireStagedCall(key, publicationId);
         require(bytes != null, "Missing terminal result");
         JsonNode result = ToolPublicationContract.parseToolResult("result", bytes, MAX_TERMINAL);
@@ -1196,8 +1198,7 @@ public final class ToolPublicationDataStore {
                 token, operationId, claim, bytes, digest));
     }
 
-    private FinishClaim beginFinish(JsonNode key, String scope, String publicationId,
-            String token, String operationId, int length, String digest) {
+    private FinishClaim beginFinish(JsonNode key, String scope, String publicationId, String token, String operationId, int length, String digest) {
         require(operationId != null && operationId.matches("[a-z0-9_-]{1,128}"),
                 "Invalid finish operation ID");
         var authorization = authorizeClaim(key, scope, publicationId, token);
@@ -1284,8 +1285,7 @@ public final class ToolPublicationDataStore {
         return new FinishClaim(epoch, predecessor, objectKey, resourceId, binding, null);
     }
 
-    private JsonNode installFinish(JsonNode key, String scope, String publicationId, String token,
-            String operationId, FinishClaim claim, byte[] bytes, String digest) {
+    private JsonNode installFinish(JsonNode key, String scope, String publicationId, String token, String operationId, FinishClaim claim, byte[] bytes, String digest) {
         authorize(key, scope, publicationId, token);
         List<Operation> current = operation(scope, publicationId, operationId, true);
         requireOperationClaim(current, claim.epoch(), now());
@@ -1327,8 +1327,7 @@ public final class ToolPublicationDataStore {
         return receipt;
     }
 
-    private void validateFinished(JsonNode key, String publicationId, JsonNode binding,
-            JsonNode result, Runnable heartbeat) {
+    private void validateFinished(JsonNode key, String publicationId, JsonNode binding, JsonNode result, Runnable heartbeat) {
         JsonNode capture = result.path("capture");
         JsonNode manifestRef = capture.path("manifest");
         if (manifestRef.isNull()) {
@@ -1415,8 +1414,7 @@ public final class ToolPublicationDataStore {
                 "Finished capture status conflicts with its streams");
     }
 
-    private ScanClaim claimScan(JsonNode key, String scope, String publicationId, String token,
-            String operationId, String slot, String requestDigest) {
+    private ScanClaim claimScan(JsonNode key, String scope, String publicationId, String token, String operationId, String slot, String requestDigest) {
         require(operationId != null && operationId.matches("[a-z0-9_-]{1,128}"),
                 "Invalid publication operation ID");
         var authorization = authorizeClaim(key, scope, publicationId, token);
@@ -1524,8 +1522,7 @@ public final class ToolPublicationDataStore {
         });
     }
 
-    private StreamScan scan(String scope, String publicationId, String streamId,
-            int expectedCount, Runnable heartbeat) {
+    private StreamScan scan(String scope, String publicationId, String streamId, int expectedCount, Runnable heartbeat) {
         List<Stored> rows = jdbc.query("SELECT slot_key, resource_id, byte_length, sha256, capture_object_key AS object_key,"
                         + " capture_state AS state, operation_id FROM ma_resource WHERE scope_key = ?"
                         + " AND publication_id = ? AND slot_key LIKE ?",
@@ -1577,8 +1574,7 @@ public final class ToolPublicationDataStore {
         return new StreamScan(count, length, HexFormat.of().formatHex(aggregate.digest()));
     }
 
-    private Runnable heartbeat(JsonNode key, String scope, String publicationId, String token,
-            String operationId, long epoch) {
+    private Runnable heartbeat(JsonNode key, String scope, String publicationId, String token, String operationId, long epoch) {
         long interval = Math.max(1, claimTimeout.toNanos() / 3);
         return new Runnable() {
             private long next = System.nanoTime() + interval;
@@ -1632,8 +1628,7 @@ public final class ToolPublicationDataStore {
         });
     }
 
-    private void quarantineCandidate(String scope, String publicationId,
-            String slot, String operationId) {
+    private void quarantineCandidate(String scope, String publicationId, String slot, String operationId) {
         transactions.executeWithoutResult(status -> {
             retention.lockRetainedPublication(scope, publicationId);
             requireVerificationClaim(scope, publicationId);
@@ -1644,8 +1639,7 @@ public final class ToolPublicationDataStore {
         });
     }
 
-    private JsonNode publish(JsonNode key, String publicationId, String token, String operationId,
-            String slot, String kind, byte[] input, String expectedDigest, int maximum) {
+    private JsonNode publish(JsonNode key, String publicationId, String token, String operationId, String slot, String kind, byte[] input, String expectedDigest, int maximum) {
         requireStagedCall(key, publicationId);
         require(input != null && input.length > 0 && input.length <= maximum, "Invalid publication size");
         require(operationId != null && operationId.matches("[a-z0-9_-]{1,128}"),
@@ -1658,8 +1652,7 @@ public final class ToolPublicationDataStore {
                 requestDigest(slot, bytes.length, digest), JSON.createObjectNode(), kind, bytes, digest);
     }
 
-    private Candidate claim(JsonNode key, String scope, String publicationId, String token,
-            String operationId, String slot, String kind, int length, String digest) {
+    private Candidate claim(JsonNode key, String scope, String publicationId, String token, String operationId, String slot, String kind, int length, String digest) {
         var authorization = authorizeClaim(key, scope, publicationId, token);
         JsonNode binding = authorization.binding();
         if (authorization.execution().getState()
@@ -1749,8 +1742,7 @@ public final class ToolPublicationDataStore {
         return new Candidate(objectKey, resourceId, epoch, null);
     }
 
-    private JsonNode install(JsonNode key, String scope, String publicationId, String token,
-            String operationId, Candidate candidate, String kind, int length, byte[] bytes, String digest) {
+    private JsonNode install(JsonNode key, String scope, String publicationId, String token, String operationId, Candidate candidate, String kind, int length, byte[] bytes, String digest) {
         JsonNode binding = authorize(key, scope, publicationId, token);
         String active = jdbc.queryForObject("SELECT active_operation_id FROM ma_output_capture"
                 + " WHERE scope_key = ? AND publication_id = ?", String.class, scope, publicationId);
@@ -1780,8 +1772,7 @@ public final class ToolPublicationDataStore {
         return slot.startsWith("segment:") ? "capture" : "producer";
     }
 
-    private JsonNode receipt(JsonNode binding, String slot, String resourceId, String kind,
-            int length, String digest) {
+    private JsonNode receipt(JsonNode binding, String slot, String resourceId, String kind, int length, String digest) {
         ObjectNode result = JSON.createObjectNode();
         if (kind != null) {
             return result.put("resourceId", resourceId).put("kind", kind)
@@ -1799,8 +1790,7 @@ public final class ToolPublicationDataStore {
         return binding;
     }
 
-    private ToolPublicationStore.ProducerBinding authorizeClaim(JsonNode key, String scope,
-            String publicationId, String token) {
+    private ToolPublicationStore.ProducerBinding authorizeClaim(JsonNode key, String scope, String publicationId, String token) {
         var authorization = token == null ? verificationAuthorization(scope, publicationId)
                 : grants.producerClaimBindingLocked(scope, publicationId, token);
         require(authorization.binding().path("sessionKey").equals(key), "Publication scope conflicts");
@@ -1823,8 +1813,7 @@ public final class ToolPublicationDataStore {
         return grants.lockOriginalSettledResult(key, publicationId, finished);
     }
 
-    private JsonNode exactSucceededReplay(String scope, String publicationId, String operationId,
-            String slot, String requestDigest) {
+    private JsonNode exactSucceededReplay(String scope, String publicationId, String operationId, String slot, String requestDigest) {
         var publication = jdbc.query("SELECT producer_phase, finish_operation_id,"
                 + " terminal_resource_id, CASE WHEN is_quarantined THEN 1 ELSE 0 END AS is_quarantined"
                 + " FROM ma_output_capture WHERE scope_key = ? AND publication_id = ?", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow),
@@ -1903,8 +1892,7 @@ public final class ToolPublicationDataStore {
         return result;
     }
 
-    private void persistSeal(String scope, String publicationId, String stream, int count, long length,
-            String digest, String operationId) {
+    private void persistSeal(String scope, String publicationId, String stream, int count, long length, String digest, String operationId) {
         jdbc.query("SELECT publication_id FROM ma_output_capture WHERE scope_key = ?"
                 + " AND publication_id = ? FOR UPDATE", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow), scope, publicationId);
         List<Map<String, Object>> rows = new ArrayList<>(sealRows(scope, publicationId, null));
@@ -1936,8 +1924,7 @@ public final class ToolPublicationDataStore {
         jdbc.update("UPDATE ma_output_capture SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", seal_manifest_resource_key = ?, seal_manifest_sha256 = ? WHERE scope_key = ? AND publication_id = ?", resourceKey, sha, scope, publicationId);
     }
 
-    private void insertCaptureResource(String scope, String publicationId, String slot, String resourceId,
-            String kind, long length, String digest, String objectKey, String operationId, Timestamp createdAt) {
+    private void insertCaptureResource(String scope, String publicationId, String slot, String resourceId, String kind, long length, String digest, String objectKey, String operationId, Timestamp createdAt) {
         var capture = jdbc.query("SELECT tenant_id, workspace_id, session_id FROM ma_output_capture"
                 + " WHERE scope_key = ? AND publication_id = ?", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow), scope, publicationId).getFirst();
         String tenant = (String) capture.get("tenant_id");
@@ -2044,8 +2031,7 @@ public final class ToolPublicationDataStore {
         }
     }
 
-    byte[] readResource(JsonNode key, String publicationId, String resourceId,
-            com.alibaba.qwen.code.managedagent.contracts.artifact.ArtifactReadLease lease, Runnable guard) {
+    byte[] readResource(JsonNode key, String publicationId, String resourceId, com.alibaba.qwen.code.managedagent.contracts.artifact.ArtifactReadLease lease, Runnable guard) {
         guard.run();
         byte[] bytes = readResourceInternal(key, publicationId, resourceId, lease, guard);
         lease.check();
@@ -2053,8 +2039,7 @@ public final class ToolPublicationDataStore {
         return bytes;
     }
 
-    private byte[] readResourceInternal(JsonNode key, String publicationId, String resourceId,
-            com.alibaba.qwen.code.managedagent.contracts.artifact.ArtifactReadLease lease, Runnable guard) {
+    private byte[] readResourceInternal(JsonNode key, String publicationId, String resourceId, com.alibaba.qwen.code.managedagent.contracts.artifact.ArtifactReadLease lease, Runnable guard) {
         lease.requireScope(key);
         lease.check();
         String scope = scope(key);
@@ -2089,8 +2074,7 @@ public final class ToolPublicationDataStore {
         return bytes;
     }
 
-    public byte[] readRange(JsonNode key, String publicationId, String writerToken,
-            JsonNode manifestRef, JsonNode expectedIdentity, String streamId, long offset, int length) {
+    public byte[] readRange(JsonNode key, String publicationId, String writerToken, JsonNode manifestRef, JsonNode expectedIdentity, String streamId, long offset, int length) {
         sessions.restore(text(key, "tenantId"), text(key, "workspaceId"),
                 text(key, "sessionId"), writerToken);
         try (var lease = retention.read(key)) {
@@ -2137,8 +2121,7 @@ public final class ToolPublicationDataStore {
         return verifiedStream(key, publicationId, manifestRef, expectedIdentity, streamId, true, lease, guard);
     }
 
-    void requireReferenced(JsonNode key, String publicationId, JsonNode outcomeRef,
-            long revision, long sequence) {
+    void requireReferenced(JsonNode key, String publicationId, JsonNode outcomeRef, long revision, long sequence) {
         require(referenced(referencedPublications(key, List.of(publicationId)).get(publicationId),
                 outcomeRef, revision, sequence), "Publication receipt is unavailable");
     }
@@ -2178,8 +2161,7 @@ public final class ToolPublicationDataStore {
                 && row.get("receipt_sequence") instanceof Number q && q.longValue() == sequence;
     }
 
-    private VerifiedStream verifiedStream(JsonNode key, String publicationId,
-            JsonNode manifestRef, JsonNode expectedIdentity, String streamId, boolean requireFinished, com.alibaba.qwen.code.managedagent.contracts.artifact.ArtifactReadLease lease, Runnable guard) {
+    private VerifiedStream verifiedStream(JsonNode key, String publicationId, JsonNode manifestRef, JsonNode expectedIdentity, String streamId, boolean requireFinished, com.alibaba.qwen.code.managedagent.contracts.artifact.ArtifactReadLease lease, Runnable guard) {
         guard.run();
         String scope = scope(key);
         var publications = jdbc.query("SELECT binding_json, producer_phase,"
@@ -2378,15 +2360,13 @@ public final class ToolPublicationDataStore {
         }
     }
 
-    private byte[] referencedResource(JsonNode key, String publicationId, JsonNode ref,
-            String kind, int maximum) {
+    private byte[] referencedResource(JsonNode key, String publicationId, JsonNode ref, String kind, int maximum) {
         try (var lease = retention.read(key)) {
             return referencedResource(key, publicationId, ref, kind, maximum, lease, lease::check);
         }
     }
 
-    private byte[] referencedResource(JsonNode key, String publicationId, JsonNode ref,
-            String kind, int maximum, com.alibaba.qwen.code.managedagent.contracts.artifact.ArtifactReadLease lease, Runnable guard) {
+    private byte[] referencedResource(JsonNode key, String publicationId, JsonNode ref, String kind, int maximum, com.alibaba.qwen.code.managedagent.contracts.artifact.ArtifactReadLease lease, Runnable guard) {
         guard.run();
         Resource resource = catalogResource(key, publicationId, text(ref, "resourceId"));
         require(refMatches(resource, ref, kind) && resource.length() <= maximum,
@@ -2522,8 +2502,7 @@ public final class ToolPublicationDataStore {
         return verificationBudget.timeout(operationTimeout, bytes);
     }
 
-    private static void requireContract(boolean valid, int status,
-            String code, String message) {
+    private static void requireContract(boolean valid, int status, String code, String message) {
         if (!valid) {
             throw new ManagedAgentException(status, code, message);
         }
@@ -2550,8 +2529,7 @@ public final class ToolPublicationDataStore {
     private record ScanClaim(long epoch, JsonNode receipt) {
     }
 
-    private record FinishClaim(long epoch, String predecessor, String objectKey,
-            String resourceId, JsonNode binding, JsonNode receipt) {
+    private record FinishClaim(long epoch, String predecessor, String objectKey, String resourceId, JsonNode binding, JsonNode receipt) {
     }
 
     private record AdmissionCandidate(String resourceId, String objectKey, boolean verified) {
@@ -2560,15 +2538,12 @@ public final class ToolPublicationDataStore {
     private record StreamScan(int segmentCount, long byteLength, String digest) {
     }
 
-    private record Stored(String slot, String resourceId, long length, String digest,
-            String objectKey, String state, String operationId) {
+    private record Stored(String slot, String resourceId, long length, String digest, String objectKey, String state, String operationId) {
     }
 
-    private record Operation(String digest, String slot, String state, long epoch,
-            Timestamp claimUntil, Timestamp deadline, boolean ready) {
+    private record Operation(String digest, String slot, String state, long epoch, Timestamp claimUntil, Timestamp deadline, boolean ready) {
     }
 
-    private record Resource(String slot, String kind, long length, String digest, String objectKey,
-            byte[] inlineBytes, String state) {
+    private record Resource(String slot, String kind, long length, String digest, String objectKey, byte[] inlineBytes, String state) {
     }
 }

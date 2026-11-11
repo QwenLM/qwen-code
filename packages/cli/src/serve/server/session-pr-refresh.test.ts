@@ -41,8 +41,11 @@ import * as sessionListModule from './session-list.js';
 import { PathMutexRegistry } from '../fs/path-mutex-registry.js';
 import {
   prWatchOwnerPath,
+  buildPrWatchOwnerRecord,
+  prWatchFilePath,
   readPrWatchStateSync,
   writePrWatchStateSync,
+  PR_WATCH_PENDING_CAP,
 } from './pr-watch-store.js';
 import {
   refreshWorkspaceSessionPrStates,
@@ -1924,6 +1927,623 @@ describe('refreshWorkspaceSessionPrStates', () => {
       await fsp.rm(parent, { recursive: true, force: true });
     }
   });
+
+  describe('PR watch listing write', () => {
+    const identity42 = {
+      host: 'github.com',
+      repo: 'o/r',
+      number: 42,
+    } as const;
+
+    const allowedHosts = new Set(['github.com']);
+
+    async function seedHiddenCatalogSession(sessionId: string): Promise<void> {
+      await seedSession(sessionId);
+      const chatsDir = path.join(
+        new Storage(workspaceCwd).getProjectDir(),
+        'chats',
+      );
+      await fsp.appendFile(
+        path.join(chatsDir, `${sessionId}.jsonl`),
+        `${JSON.stringify({
+          uuid: `${sessionId}-source`,
+          parentUuid: `${sessionId}-user-1`,
+          sessionId,
+          timestamp: '2026-08-01T00:00:01.000Z',
+          type: 'system',
+          subtype: 'session_source',
+          systemPayload: { sourceType: 'agent-host' },
+          cwd: workspaceCwd,
+        })}\n`,
+        'utf8',
+      );
+    }
+
+    async function withWatchDir(
+      run: (watchDir: string) => Promise<void>,
+    ): Promise<void> {
+      const watchDir = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'pr-watch-listing-'),
+      );
+      try {
+        await run(watchDir);
+      } finally {
+        await removeTempTree(watchDir);
+      }
+    }
+
+    async function seedBinding(...numbers: number[]): Promise<void> {
+      await seedSession(SESSION_A);
+      const prPath = sessionService.getPrSessionPathForArchiveState(
+        SESSION_A,
+        'active',
+      );
+      for (const number of numbers.length > 0 ? numbers : [42]) {
+        await upsertSessionPr(prPath, {
+          number,
+          url: `https://github.com/o/r/pull/${number}`,
+          state: 'open',
+        });
+      }
+    }
+
+    it('records each listed state and returns the keys it covered', async () => {
+      await seedBinding(42, 43, 44);
+      const watchDir = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'pr-watch-listing-'),
+      );
+      fetchGitHubPullRequestsMock.mockResolvedValue({
+        kind: 'ok',
+        pullRequests: [
+          pr(42, 'closed'),
+          { ...pr(43, 'open'), state: 'draft' },
+          pr(44, 'merged'),
+        ],
+      });
+      try {
+        const result = await refreshWorkspaceSessionPrStates(
+          runtime,
+          undefined,
+          {
+            prWatch: { watchDir, locks: new PathMutexRegistry(), allowedHosts },
+            now: () => Date.parse('2026-11-10T00:00:00.000Z'),
+          },
+        );
+
+        expect(result.listedKeys).toEqual(
+          new Set([
+            'github.com/o/r#42',
+            'github.com/o/r#43',
+            'github.com/o/r#44',
+          ]),
+        );
+        const closed = readPrWatchStateSync(watchDir, identity42);
+        expect(closed.kind).toBe('state');
+        if (closed.kind !== 'state') throw new Error('unreachable');
+        expect(closed.state.state).toBe('closed');
+        expect(closed.state.observedAt).toBe('2026-11-10T00:00:00.000Z');
+        // A draft is still open in the watch snapshot.
+        const draft = readPrWatchStateSync(watchDir, {
+          ...identity42,
+          number: 43,
+        });
+        expect(draft.kind === 'state' && draft.state.state).toBe('open');
+        const merged = readPrWatchStateSync(watchDir, {
+          ...identity42,
+          number: 44,
+        });
+        expect(merged.kind === 'state' && merged.state.state).toBe('merged');
+      } finally {
+        await removeTempTree(watchDir);
+      }
+    });
+
+    it('preserves an existing watch file rather than replacing it', async () => {
+      await seedBinding();
+      const watchDir = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'pr-watch-listing-'),
+      );
+      writePrWatchStateSync(watchDir, identity42, {
+        pr: identity42,
+        state: 'open',
+        headSha: 'b'.repeat(40),
+        delivered: ['ci_failure@old'],
+        pending: [
+          {
+            type: 'ci_failure',
+            key: 'ci_failure@queued',
+            summary: 'CI failed',
+            detectedAt: '2026-11-09T00:00:00.000Z',
+          },
+        ],
+      });
+      fetchGitHubPullRequestsMock.mockResolvedValue({
+        kind: 'ok',
+        pullRequests: [pr(42, 'closed')],
+      });
+      try {
+        await refreshWorkspaceSessionPrStates(runtime, undefined, {
+          prWatch: { watchDir, locks: new PathMutexRegistry(), allowedHosts },
+        });
+        const after = readPrWatchStateSync(watchDir, identity42);
+        expect(after.kind).toBe('state');
+        if (after.kind !== 'state') throw new Error('unreachable');
+        expect(after.state.state).toBe('closed');
+        // The listing observes state only; the view's own fields survive.
+        expect(after.state.headSha).toBe('b'.repeat(40));
+        expect(after.state.delivered).toEqual(['ci_failure@old']);
+        // The undelivered queue survives, and the closure the listing just
+        // observed is appended to it — the listing is an observer, so it must
+        // fire the state_change the now-skipped view would have fired.
+        expect(after.state.pending).toEqual([
+          {
+            type: 'ci_failure',
+            key: 'ci_failure@queued',
+            summary: 'CI failed',
+            detectedAt: '2026-11-09T00:00:00.000Z',
+          },
+          expect.objectContaining({
+            type: 'state_change',
+            summary: 'PR closed',
+          }),
+        ]);
+      } finally {
+        await removeTempTree(watchDir);
+      }
+    });
+
+    it('writes nothing while another daemon holds the owner record', async () => {
+      await seedBinding();
+      const watchDir = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'pr-watch-listing-'),
+      );
+      // A record this machine cannot verify — a foreign PID namespace — blocks
+      // the claim outright. A foreign pid alone would not: the claim only
+      // treats a record as live when its process token matches, so a stale
+      // pid with our own token is swept rather than honoured.
+      const record = buildPrWatchOwnerRecord();
+      await fsp.writeFile(
+        prWatchOwnerPath(watchDir),
+        JSON.stringify({ ...record, pidNs: (record.pidNs ?? 0) + 1 }),
+        'utf8',
+      );
+      fetchGitHubPullRequestsMock.mockResolvedValue({
+        kind: 'ok',
+        pullRequests: [pr(42, 'closed')],
+      });
+      try {
+        const result = await refreshWorkspaceSessionPrStates(
+          runtime,
+          undefined,
+          {
+            prWatch: { watchDir, locks: new PathMutexRegistry(), allowedHosts },
+          },
+        );
+        // The keys are still reported: they describe what the listing saw,
+        // not what this daemon was allowed to write.
+        expect(result.listedKeys).toEqual(new Set(['github.com/o/r#42']));
+        expect(readPrWatchStateSync(watchDir, identity42).kind).toBe('absent');
+      } finally {
+        await removeTempTree(watchDir);
+      }
+    });
+
+    it('takes the per-PR lock before writing', async () => {
+      await seedBinding();
+      const watchDir = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'pr-watch-listing-lock-'),
+      );
+      const locks = new PathMutexRegistry();
+      let openGate: () => void = () => {};
+      const gate = new Promise<void>((resolve) => {
+        openGate = resolve;
+      });
+      let holding = false;
+      // Hold the lock the observation takes — the watch file path, not the
+      // logical key. Holding the key would let a write that locks the key
+      // proceed and this case would pass while serializing with nothing.
+      const held = locks.runExclusive(
+        prWatchFilePath(watchDir, identity42),
+        async () => {
+          holding = true;
+          await gate;
+        },
+      );
+      // Wait on the condition, not on a turn budget: the refresh does real
+      // filesystem work before it reaches the lock, so any fixed number of
+      // event-loop turns is a machine-speed verdict. A bare promise wait would
+      // hang instead of reddening when the lock is never taken at all.
+      await vi.waitFor(() => expect(holding).toBe(true), { timeout: 15_000 });
+      fetchGitHubPullRequestsMock.mockResolvedValue({
+        kind: 'ok',
+        pullRequests: [pr(42, 'closed')],
+      });
+      let pending: Promise<unknown> | undefined;
+      try {
+        // Record the lock attempt itself, so the assertion is about a lock that
+        // was actually taken rather than one that has not been reached yet.
+        const attempts: string[] = [];
+        const real = locks.runExclusive.bind(locks);
+        locks.runExclusive = <T>(
+          key: string,
+          fn: () => Promise<T>,
+          signal?: AbortSignal,
+        ): Promise<T> => {
+          attempts.push(key);
+          return real(key, fn, signal);
+        };
+        pending = refreshWorkspaceSessionPrStates(runtime, undefined, {
+          prWatch: { watchDir, locks, allowedHosts },
+        });
+        await vi.waitFor(() => expect(attempts).toHaveLength(1), {
+          timeout: 15_000,
+        });
+        // The identity is the watch file path, not the logical key.
+        expect(attempts).toEqual([prWatchFilePath(watchDir, identity42)]);
+        // The lock is held by someone else, so the write must still be waiting.
+        expect(readPrWatchStateSync(watchDir, identity42).kind).toBe('absent');
+        openGate();
+        await held;
+        await pending;
+        expect(readPrWatchStateSync(watchDir, identity42).kind).toBe('state');
+      } finally {
+        openGate();
+        await held;
+        // Settle the refresh before removing the tree: otherwise it writes into
+        // a fixture that is already being torn down and removeTempTree throws
+        // ENOTEMPTY, masking whatever the case actually asserted.
+        await pending?.catch(() => {});
+        await removeTempTree(watchDir);
+      }
+    });
+
+    it('logs and re-initialises an invalid watch file', async () => {
+      await seedBinding();
+      const watchDir = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'pr-watch-listing-invalid-'),
+      );
+      await fsp.writeFile(
+        prWatchFilePath(watchDir, identity42),
+        'not json at all',
+        'utf8',
+      );
+      const logged: string[] = [];
+      fetchGitHubPullRequestsMock.mockResolvedValue({
+        kind: 'ok',
+        pullRequests: [pr(42, 'closed')],
+      });
+      try {
+        await refreshWorkspaceSessionPrStates(runtime, undefined, {
+          prWatch: {
+            watchDir,
+            locks: new PathMutexRegistry(),
+            allowedHosts,
+            log: (m) => logged.push(m),
+          },
+        });
+        const after = readPrWatchStateSync(watchDir, identity42);
+        expect(after.kind).toBe('state');
+        if (after.kind !== 'state') throw new Error('unreachable');
+        expect(after.state.state).toBe('closed');
+        // A lost baseline must not be silent on this path either.
+        expect(logged.some((m) => m.includes('invalid watch file'))).toBe(true);
+      } finally {
+        await removeTempTree(watchDir);
+      }
+    });
+
+    it('does not create a watch file for a listed PR with no binding', async () => {
+      await seedBinding(42);
+      const watchDir = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'pr-watch-listing-unbound-'),
+      );
+      fetchGitHubPullRequestsMock.mockResolvedValue({
+        kind: 'ok',
+        pullRequests: [pr(42, 'closed'), pr(43, 'closed')],
+      });
+      try {
+        const result = await refreshWorkspaceSessionPrStates(
+          runtime,
+          undefined,
+          {
+            prWatch: { watchDir, locks: new PathMutexRegistry(), allowedHosts },
+          },
+        );
+        // The key is still reported — it describes what the listing covered.
+        expect(result.listedKeys).toEqual(
+          new Set(['github.com/o/r#42', 'github.com/o/r#43']),
+        );
+        expect(readPrWatchStateSync(watchDir, identity42).kind).toBe('state');
+        // But the unbound one gets no file: the drain deletes unbound files on
+        // a complete scan, so writing it would churn every tick.
+        expect(
+          readPrWatchStateSync(watchDir, { ...identity42, number: 43 }).kind,
+        ).toBe('absent');
+      } finally {
+        await removeTempTree(watchDir);
+      }
+    });
+
+    it('does not create a watch file for a PR bound only to an archived session', async () => {
+      await seedBinding(42);
+      await seedArchivedSession(SESSION_B);
+      await upsertSessionPr(
+        sessionService.getPrSessionPathForArchiveState(SESSION_B, 'archived'),
+        {
+          number: 43,
+          url: 'https://github.com/o/r/pull/43',
+          state: 'open',
+        },
+      );
+      const watchDir = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'pr-watch-listing-archived-'),
+      );
+      fetchGitHubPullRequestsMock.mockResolvedValue({
+        kind: 'ok',
+        pullRequests: [pr(42, 'closed'), pr(43, 'closed')],
+      });
+      try {
+        const result = await refreshWorkspaceSessionPrStates(
+          runtime,
+          undefined,
+          {
+            prWatch: { watchDir, locks: new PathMutexRegistry(), allowedHosts },
+          },
+        );
+        expect(result.listedKeys).toEqual(
+          new Set(['github.com/o/r#42', 'github.com/o/r#43']),
+        );
+        expect(readPrWatchStateSync(watchDir, identity42).kind).toBe('state');
+        // The binder scan the observation and drain share excludes archived
+        // sessions, so this PR is unbound to them despite having a sidecar.
+        expect(
+          readPrWatchStateSync(watchDir, { ...identity42, number: 43 }).kind,
+        ).toBe('absent');
+      } finally {
+        await removeTempTree(watchDir);
+      }
+    });
+
+    it('fires the state_change the skipped view would have fired', async () => {
+      await seedBinding();
+      await withWatchDir(async (watchDir) => {
+        writePrWatchStateSync(watchDir, identity42, {
+          pr: identity42,
+          state: 'open',
+          headSha: 'c'.repeat(40),
+          checks: 'passing',
+        });
+        fetchGitHubPullRequestsMock.mockResolvedValue({
+          kind: 'ok',
+          pullRequests: [pr(42, 'merged')],
+        });
+        await refreshWorkspaceSessionPrStates(runtime, undefined, {
+          prWatch: {
+            watchDir,
+            locks: new PathMutexRegistry(),
+            allowedHosts,
+          },
+          now: () => Date.parse('2026-11-10T00:00:00.000Z'),
+        });
+        const after = readPrWatchStateSync(watchDir, identity42);
+        expect(after.kind).toBe('state');
+        if (after.kind !== 'state') throw new Error('unreachable');
+        expect(after.state.state).toBe('merged');
+        // The view is the only other producer of transitions and the write
+        // above makes the observation skip it, so without this entry the merge
+        // would never be delivered.
+        expect(after.state.pending).toEqual([
+          {
+            type: 'state_change',
+            key: expect.stringContaining('state_change'),
+            summary: 'PR merged',
+            detectedAt: '2026-11-10T00:00:00.000Z',
+          },
+        ]);
+      });
+    });
+
+    it('initialises silently when the watch file has no head baseline', async () => {
+      await seedBinding();
+      await withWatchDir(async (watchDir) => {
+        // A slim file: state and observedAt only, exactly what a previous
+        // listing write leaves. The view path initialises silently on it too.
+        writePrWatchStateSync(watchDir, identity42, {
+          pr: identity42,
+          state: 'open',
+          observedAt: '2026-11-09T00:00:00.000Z',
+        });
+        fetchGitHubPullRequestsMock.mockResolvedValue({
+          kind: 'ok',
+          pullRequests: [pr(42, 'closed')],
+        });
+        await refreshWorkspaceSessionPrStates(runtime, undefined, {
+          prWatch: {
+            watchDir,
+            locks: new PathMutexRegistry(),
+            allowedHosts,
+          },
+        });
+        const after = readPrWatchStateSync(watchDir, identity42);
+        expect(after.kind).toBe('state');
+        if (after.kind !== 'state') throw new Error('unreachable');
+        expect(after.state.state).toBe('closed');
+        expect(after.state.pending).toBeUndefined();
+      });
+    });
+
+    it('does not fire again for a PR already recorded as closed', async () => {
+      await seedBinding();
+      await withWatchDir(async (watchDir) => {
+        writePrWatchStateSync(watchDir, identity42, {
+          pr: identity42,
+          state: 'closed',
+          headSha: 'c'.repeat(40),
+          checks: 'passing',
+        });
+        fetchGitHubPullRequestsMock.mockResolvedValue({
+          kind: 'ok',
+          pullRequests: [pr(42, 'closed')],
+        });
+        await refreshWorkspaceSessionPrStates(runtime, undefined, {
+          prWatch: {
+            watchDir,
+            locks: new PathMutexRegistry(),
+            allowedHosts,
+          },
+        });
+        const after = readPrWatchStateSync(watchDir, identity42);
+        expect(after.kind).toBe('state');
+        if (after.kind !== 'state') throw new Error('unreachable');
+        expect(after.state.pending).toBeUndefined();
+      });
+    });
+
+    it('does not write for a PR bound only to a hidden-catalog session', async () => {
+      await seedHiddenCatalogSession(SESSION_B);
+      await upsertSessionPr(
+        sessionService.getPrSessionPathForArchiveState(SESSION_B, 'active'),
+        {
+          number: 47,
+          url: 'https://github.com/o/r/pull/47',
+          state: 'open',
+        },
+      );
+      await withWatchDir(async (watchDir) => {
+        fetchGitHubPullRequestsMock.mockResolvedValue({
+          kind: 'ok',
+          pullRequests: [pr(47, 'closed')],
+        });
+        const result = await refreshWorkspaceSessionPrStates(
+          runtime,
+          undefined,
+          {
+            prWatch: {
+              watchDir,
+              locks: new PathMutexRegistry(),
+              allowedHosts,
+            },
+          },
+        );
+        expect(result.listedKeys).toEqual(new Set(['github.com/o/r#47']));
+        // The shared scan drops hidden-catalog sessions, so the drain would
+        // delete this file on every complete scan.
+        expect(
+          readPrWatchStateSync(watchDir, { ...identity42, number: 47 }).kind,
+        ).toBe('absent');
+      });
+    });
+
+    it('does not write for a host outside the allowed set', async () => {
+      await seedBinding();
+      await withWatchDir(async (watchDir) => {
+        fetchGitHubPullRequestsMock.mockResolvedValue({
+          kind: 'ok',
+          pullRequests: [pr(42, 'closed')],
+        });
+        const result = await refreshWorkspaceSessionPrStates(
+          runtime,
+          undefined,
+          {
+            prWatch: {
+              watchDir,
+              locks: new PathMutexRegistry(),
+              allowedHosts: new Set(['github.example.com']),
+            },
+          },
+        );
+        // The key is still reported; only the write is gated. The drain
+        // delivers pending with no host check, so writing here would deliver
+        // an event for a host the observation refuses to view.
+        expect(result.listedKeys).toEqual(new Set(['github.com/o/r#42']));
+        expect(readPrWatchStateSync(watchDir, identity42).kind).toBe('absent');
+      });
+    });
+
+    it.skipIf(!arePermissionBitsEnforced())(
+      'does not overwrite a watch file it could not read',
+      async () => {
+        await seedBinding();
+        await withWatchDir(async (watchDir) => {
+          const filePath = prWatchFilePath(watchDir, identity42);
+          await fsp.writeFile(filePath, '{"pr":{}}', 'utf8');
+          await fsp.chmod(filePath, 0o000);
+          fetchGitHubPullRequestsMock.mockResolvedValue({
+            kind: 'ok',
+            pullRequests: [pr(42, 'closed')],
+          });
+          try {
+            await refreshWorkspaceSessionPrStates(runtime, undefined, {
+              prWatch: {
+                watchDir,
+                locks: new PathMutexRegistry(),
+                allowedHosts,
+              },
+            });
+            // Still unreadable: the write goes through temp-file-and-rename,
+            // which succeeds over an unreadable target, so without the
+            // fail-closed return this file would have been replaced.
+            expect(readPrWatchStateSync(watchDir, identity42).kind).toBe(
+              'error',
+            );
+          } finally {
+            await fsp.chmod(filePath, 0o600);
+          }
+        });
+      },
+    );
+
+    it('logs when the listing write evicts an undelivered transition', async () => {
+      await seedBinding();
+      await withWatchDir(async (watchDir) => {
+        const full = Array.from({ length: PR_WATCH_PENDING_CAP }, (_, i) => ({
+          type: 'ci_failure' as const,
+          key: `ci_failure@queued-${i}`,
+          summary: 'CI failed',
+          detectedAt: '2026-11-09T00:00:00.000Z',
+        }));
+        writePrWatchStateSync(watchDir, identity42, {
+          pr: identity42,
+          state: 'open',
+          headSha: 'c'.repeat(40),
+          checks: 'passing',
+          pending: full,
+        });
+        const logged: string[] = [];
+        fetchGitHubPullRequestsMock.mockResolvedValue({
+          kind: 'ok',
+          pullRequests: [pr(42, 'closed')],
+        });
+        await refreshWorkspaceSessionPrStates(runtime, undefined, {
+          prWatch: {
+            watchDir,
+            locks: new PathMutexRegistry(),
+            allowedHosts,
+            log: (m) => logged.push(m),
+          },
+        });
+        const after = readPrWatchStateSync(watchDir, identity42);
+        expect(after.kind).toBe('state');
+        if (after.kind !== 'state') throw new Error('unreachable');
+        expect(after.state.pending).toHaveLength(PR_WATCH_PENDING_CAP);
+        // The oldest entry was evicted, so the diagnostic must say so — the
+        // view path logs the same overflow.
+        expect(after.state.pending?.[0]?.key).toBe('ci_failure@queued-1');
+        expect(logged.some((m) => m.includes('pending overflow'))).toBe(true);
+      });
+    });
+
+    it('leaves the result shape untouched without the watch seam', async () => {
+      await seedBinding();
+      fetchGitHubPullRequestsMock.mockResolvedValue({
+        kind: 'ok',
+        pullRequests: [pr(42, 'closed')],
+      });
+      const result = await refreshWorkspaceSessionPrStates(runtime);
+      expect(result).toEqual({ scanned: 1, updated: 1 });
+      expect('listedKeys' in result).toBe(false);
+    });
+  });
 });
 
 describe('startSessionPrRefreshTimer', () => {
@@ -2012,6 +2632,63 @@ describe('startSessionPrRefreshTimer', () => {
         env: { QWEN_SESSION_PR_REFRESH_MINUTES: '0' },
       }),
     ).toBeUndefined();
+  });
+
+  it('threads the watch log into the listing write seam', async () => {
+    const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
+    const registry = createWorkspaceRegistry([trustedRuntime]);
+    await seedPendingBinding(trustedRuntime, SESSION_A, 42);
+    const watchDir = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-pr-watch-log-seam-'),
+    );
+    // A directory where the watch file belongs makes every read fail. The
+    // observation logs its own wording and skips; only the listing write says
+    // "listing write skipped", so asserting that substring cannot be satisfied
+    // by the observation's log alone.
+    const identity = { host: 'github.com', repo: 'o/r', number: 42 };
+    await fsp.mkdir(prWatchFilePath(watchDir, identity));
+    const logged: string[] = [];
+    const now = () => Date.parse('2026-11-08T00:00:00.000Z');
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(42, 'closed')],
+    });
+    vi.useFakeTimers();
+    const handle = startSessionPrRefreshTimer({
+      workspaceRegistry: registry,
+      env: {},
+      now,
+      observationEnabled: true,
+      getPrWatchDeps: () => ({
+        watchDir,
+        locks: new PathMutexRegistry(),
+        allowedHosts: new Set(['github.com']),
+        viewPullRequest: async (url: string) => ({
+          kind: 'ok' as const,
+          view: {
+            url,
+            title: 'PR 42',
+            headSha: 'a'.repeat(40),
+            state: 'open' as const,
+            checks: 'passing' as const,
+            failingChecks: [] as string[],
+          },
+        }),
+        now,
+        log: (m: string) => logged.push(m),
+      }),
+    });
+    try {
+      await vi.advanceTimersByTimeAsync(60_000);
+      await vi.waitFor(() => {
+        expect(logged.some((m) => m.includes('listing write skipped'))).toBe(
+          true,
+        );
+      });
+    } finally {
+      handle?.dispose();
+      await removeTempTree(watchDir);
+    }
   });
 
   it('never reads the PR-watch deps while the observation switch is off', async () => {
