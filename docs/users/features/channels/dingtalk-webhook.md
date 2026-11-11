@@ -1,0 +1,98 @@
+# DingTalk Webhook Sending
+
+Use a DingTalk custom robot to post notifications and task results to its group.
+This sending mode does not require an application bot, a long connection, a
+public callback server or a conversation ID. For conversations with an agent,
+use the [DingTalk application bot](./dingtalk) instead.
+
+## Create the robot
+
+1. Add a custom robot in the destination DingTalk group.
+2. Copy its webhook URL, beginning with
+   `https://oapi.dingtalk.com/robot/send?access_token=...`.
+3. Configure the robot's security settings. If signing is enabled, also copy its
+   signing secret. Keyword and IP restrictions still apply to every message.
+
+The webhook URL contains a credential. Store it as a secret or environment
+reference, not in a scheduled task's prompt or delivery target.
+
+## Configure a Channel
+
+Add a named instance to the workspace's Channel settings:
+
+```json
+{
+  "channels": {
+    "team-notices": {
+      "type": "dingtalk-webhook",
+      "webhookUrl": "$DINGTALK_WEBHOOK_URL",
+      "signingSecret": "$DINGTALK_WEBHOOK_SECRET"
+    }
+  }
+}
+```
+
+Set the referenced variables in the environment used to start Qwen Code. Omit
+`signingSecret` when the robot does not require signing. This secret is the
+custom robot's signing secret, not an application's Client Secret.
+
+Run the daemon in that workspace:
+
+```bash
+qwen serve --channel team-notices
+```
+
+One named instance represents one configured group. Create additional instances
+for other groups. Updating an instance's URL changes the destination for future
+deliveries that reference it.
+
+## Explicit API delivery
+
+Notify and explicit prompt/scheduled delivery use the existing Channel target
+format. This adapter defines `chat/default` as its only logical destination:
+
+```json
+{
+  "text": "The daily report is ready.",
+  "delivery": {
+    "kind": "channel",
+    "target": {
+      "channelName": "team-notices",
+      "type": "chat",
+      "id": "default"
+    }
+  }
+}
+```
+
+This is a workspace Notify request body. `default` is an adapter-owned alias,
+not a DingTalk conversation ID. Other IDs and user targets are rejected; the
+adapter never ignores an arbitrary requested destination. The webhook URL and
+signing secret stay in Channel configuration.
+
+## Delivery behavior
+
+- Sends messages as Markdown, with a short title derived from the first line.
+  Ordinary text is also accepted. The adapter preserves the supplied Markdown,
+  including table syntax; rendering is handled by the DingTalk client.
+- It does not receive messages, run inbound webhook tasks or enable Channel loops.
+- Checks both HTTP status and DingTalk's business response. Rejected signatures,
+  credentials, security rules and rate limits are failures with sanitized errors.
+- Does not automatically retry. A timeout can leave remote acceptance unknown.
+- Uses the workspace proxy configuration, including `NO_PROXY` bypasses.
+- Cancels in-flight sending when the Channel stops. Reload uses the updated
+  saved configuration.
+- Keeps the shared delivery size protection, which marks truncated results.
+  The first release sends that result as one message and lets DingTalk reject
+  oversized content. Rejection is reported as a delivery failure; the adapter
+  does not send a shortened copy, split messages or retry. DingTalk's exact
+  Markdown size limit and its unit have not been verified, so passing the shared
+  size check does not guarantee delivery. Keep scheduled reports concise.
+- Scheduled delivery retains its existing best-effort successful-final-result
+  behavior. This does not introduce failure/cancellation alerts, a durable retry
+  queue, attachments or a generic webhook payload contract.
+
+See DingTalk's [sending API](https://open.dingtalk.com/document/orgapp/custom-robots-send-group-messages),
+[message types](https://open.dingtalk.com/document/orgapp/custom-bot-send-message-type),
+and [security settings](https://open.dingtalk.com/document/orgapp/customize-robot-security-settings)
+for platform requirements.
