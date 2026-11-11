@@ -103,7 +103,9 @@ refresh 的 slim listing 已知每个被列出 PR 的 state。在同一门控下
 
 **tick 次序决定了键从哪来。** timer 先跑观测再跑 refresh，所以产出 `listedKeys` 的 listing 在消费它的观测**之后**运行。因此 refresh 返回它列出的键，timer 按 workspace 把它们带进下一个 tick 的观测。state 写入是即时的；只有「退出 view 轮转」滞后一个 tick，而这本就是轮转的工作间隔。两个机制互补而非冗余：存下的 `state` 让 `effectiveState` 无需花一次 view 就变成 closed 或 merged，而 `listedKeys` 区分「listing 覆盖到的 closed PR」与「没覆盖到的」——后者留在轮转里以捕捉 reopen。
 
-**只有具备 active 绑定的 PR 才写文件。** listing 覆盖 refresh 跟踪的每个 PR，包括只绑在归档会话上的那些，但 watch 子系统的 binder 集合来自共享的绑定扫描，它只枚举 active sidecar 并排除归档会话。为「没有任何 watch 消费者认为其有绑定」的 PR 建文件会被 drain 撤销：它在覆盖完整的扫描上删除无绑定的 watch 文件，所以一旦 §4 填上它的 deps，同一批文件就会每 tick 建了又删，还各带一行删除日志。`listedKeys` 仍报告 listing 的完整覆盖——观测只对自己扫到的绑定查键，因此它从不查的键是无害的。
+**listing 是跃迁的生产者，不只是 state 的记录者。** 写入 `state` 会让观测跳过那次本会检测到同一变更的 view，而该 view 是 `detectPrTransitions` 唯一的另一个调用方——也是 `pending` 唯一的生产者，而 drain 只投递 `pending`。所以「第一个观测者是 listing」的关闭或合并必须自己触发 `state_change`，否则它被记成既成事实、永不投递。因此该写入运行同一个检测器，并把先前的 `headSha` 与 `checks` 前向携带，使得只可能触发 `state_change`——不会有 `head_change`、`ci_failure` 或 `merge_conflict`。没有 `headSha` 的文件不算已建基线，静默初始化，与 view 路径完全一致。这不限于同 tick 的窄窗口：而是该 tick 观测未触及的每个 PR——view 上限、deadline 截断、view 失败、或已被别的 workspace 先 view 掉。
+
+**只有共享 scan 认定有绑定、且主机在允许集合内的 PR 才写文件。** binder 集合取共享绑定扫描自己的答案，而不是对它的再推导：该扫描排除归档、hidden-catalog 与不可读的会话，而 drain 会删除它没有列出的 watch 文件。近似它——例如直接枚举 active sidecar——会为漏掉的那扇排除门重新制造抖动，所以 refresh 直接调用该扫描。写入还施加观测的 `allowedHosts` 门控：drain 投递 `pending` 时自己不做任何主机检查，所以为「观测拒绝 view 的主机」写跃迁就会为它投递事件。`listedKeys` 仍报告 listing 的完整覆盖——观测只对自己扫到的绑定查键，因此它从不查的键是无害的。
 
 ## 涉及文件
 

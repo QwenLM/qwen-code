@@ -51,7 +51,13 @@ import {
   runPrWatchObservationTick,
   type PrWatchObservationTickDeps,
   prWatchIdentityFromUrl,
+  detectPrTransitions,
+  normalizeWatchHost,
 } from './pr-watch-observation.js';
+import {
+  scanWorkspaceBindings,
+  type SessionPrBindingSummary,
+} from '../routes/session-pr-bindings.js';
 import {
   createPrWatchDrainState,
   runPrWatchDrainTick,
@@ -125,6 +131,12 @@ export interface SessionPrRefreshOptions {
   prWatch?: {
     watchDir: string;
     locks: PathMutexRegistry;
+    /**
+     * The same set the observation gates views on. The listing write needs it
+     * too: it now records transitions, and the drain delivers `pending`
+     * without any host check of its own.
+     */
+    allowedHosts: ReadonlySet<string>;
     log?: (message: string) => void;
   };
 }
@@ -219,6 +231,10 @@ async function recordListedPrStates(
     // complete scan, so writing them would create and delete the same files
     // every tick — and log a deletion for each.
     if (!boundKeys.has(key)) continue;
+    // The observation refuses to view a non-allowed host, and the drain
+    // delivers `pending` with no host check of its own — so writing a
+    // transition for one would deliver an event the watch may not observe.
+    if (!prWatch.allowedHosts.has(normalizeWatchHost(identity.host))) continue;
     // The watch snapshot has no 'draft' variant — a draft is still open.
     const state = pr.state === 'draft' ? 'open' : pr.state;
     rows.push({ identity, state });
@@ -257,10 +273,36 @@ async function recordListedPrStates(
           }
           const base =
             existing.kind === 'state' ? existing.state : { pr: identity };
+          // The listing is an observation too. When it is the first to see a
+          // baselined PR leave open, it must fire the state_change the view
+          // would have fired: the write below makes the observation skip that
+          // view, and the view is the only other producer of transitions, so
+          // without this the closure is recorded as a fait accompli and never
+          // delivered. Reuse the detector so the two producers cannot drift.
+          // Carrying the previous head/checks forward is what keeps it to
+          // state_change alone — no head_change, ci_failure or merge_conflict.
+          // A file with no headSha is not baselined and initialises silently,
+          // exactly as it does on the view path.
+          const detection =
+            base.headSha !== undefined
+              ? detectPrTransitions(
+                  identity,
+                  base,
+                  {
+                    state,
+                    headSha: base.headSha,
+                    checks: base.checks ?? 'none',
+                  },
+                  observedAt,
+                )
+              : undefined;
           writePrWatchStateSync(prWatch.watchDir, identity, {
             ...base,
             state,
             observedAt,
+            ...(detection?.state.pending !== undefined
+              ? { pending: detection.state.pending }
+              : {}),
           });
         },
       );
@@ -299,9 +341,29 @@ export async function refreshWorkspaceSessionPrStates(
   const assertGenerationOpen = (): void =>
     runtime.generationGuard?.assertOpen();
   const sessionService = createWorkspaceRuntimeSessionService(runtime);
-  // Every active binding's PR identity, not just the ones needing a refresh:
-  // a merged binding is terminal for the sweep but still owns its watch file.
+  // The watch's binder set is the shared scan's own answer, not a re-derivation
+  // of it: that scan excludes archived, hidden-catalog and unreadable sessions,
+  // and the drain deletes a watch file it does not list. Approximating it here
+  // would recreate that churn for whichever exclusion was missed.
   const boundKeys = new Set<string>();
+  if (options.prWatch) {
+    const log = options.prWatch.log ?? (() => {});
+    const bindings: SessionPrBindingSummary[] = [];
+    try {
+      await scanWorkspaceBindings(runtime, bindings);
+    } catch (error) {
+      // Unknown binders, not absent ones: write nothing rather than guess.
+      log(
+        `PR watch: bindings scan failed for ${runtime.workspaceCwd}; listing write skipped: ${String(error)}`,
+      );
+    }
+    for (const summary of bindings) {
+      for (const entry of summary.prs) {
+        const identity = prWatchIdentityFromUrl(entry.url);
+        if (identity) boundKeys.add(prWatchFileKey(identity));
+      }
+    }
+  }
   const pendingNumbers: Array<{
     sessionId: string;
     prPath: string;
@@ -342,16 +404,6 @@ export async function refreshWorkspaceSessionPrStates(
       }
       if (!prs) continue;
       scanned += 1;
-      // Active only: the watch subsystem's binders come from
-      // scanWorkspaceBindings, which excludes archived sessions. To the drain
-      // an archived-only binding is unbound, so its file would be deleted
-      // again on the next complete scan.
-      if (archiveState === 'active') {
-        for (const entry of prs) {
-          const identity = prWatchIdentityFromUrl(entry.url);
-          if (identity) boundKeys.add(prWatchFileKey(identity));
-        }
-      }
       const pending = prs.filter(
         // Only merged is terminal: closed PRs can be reopened, so they
         // keep participating in the sweep.
@@ -687,7 +739,7 @@ export function startSessionPrRefreshTimer(deps: {
   // produced are consumed by the next tick's observation. Kept per workspace
   // for the same reason the view offsets are.
   const listedKeysByWorkspace = new Map<string, ReadonlySet<string>>();
-  let watchSeam: { watchDir: string; locks: PathMutexRegistry } | undefined;
+  let watchSeam: NonNullable<SessionPrRefreshOptions['prWatch']> | undefined;
   let watchTickCount = 0;
   // Retained binding rows, in-flight marks and restore slots for the delivery
   // drain, kept across ticks (master §4/§5).
@@ -736,6 +788,11 @@ export function startSessionPrRefreshTimer(deps: {
           watchSeam = {
             watchDir: watchDeps.watchDir,
             locks: watchDeps.locks,
+            allowedHosts: watchDeps.allowedHosts,
+            // Without this the seam's `log` is a declared-and-read field with
+            // no setter, and every listing-write refusal stays silent — the
+            // claim's contract is that a blocked outcome is always logged.
+            ...(watchDeps.log ? { log: watchDeps.log } : {}),
           };
           const watchWorkspaces = live.filter((r) => r.trusted || r.primary);
           const rotation = watchTickCount % Math.max(watchWorkspaces.length, 1);
