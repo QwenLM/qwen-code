@@ -493,7 +493,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description Change the model of an idle Workspace Session for later Turns. The actor-scoped idempotency key replays an earlier completed change before current admission checks; expectedRevision prevents overwriting a concurrent selection. */
+        /** @description Change the model selection of a Workspace Session for later Turns, including while a Turn or approval is active. Already admitted Turns keep their immutable model snapshot. Lifecycle, recovery and unsettled context changes remain guarded. The actor-scoped idempotency key replays an earlier completed change before current admission checks; expectedRevision prevents overwriting a concurrent selection. */
         post: operations["changeWebShellSessionModel"];
         delete?: never;
         options?: never;
@@ -1811,7 +1811,7 @@ export interface components {
             sessionDelete?: boolean;
             /** @description Present only for persisted Shell Sessions, with no schema default; files and unbound Sessions omit it. True when Workspace files, Shell deployment admission and a valid persisted approval mode are valid. False prevents fresh sending. Disabling only the Shell flag preserves accepted cancellation and approval while Workspace files remain enabled and persisted approval remains valid; files-off or invalid approval can refuse attachment. This capability does not override authorization or recovery refusals. */
             foregroundShell?: boolean;
-            /** @description The caller may request an idle Session model change using the server model catalog. Missing means unsupported; authorization and revision admission still apply. */
+            /** @description The caller may change the Session model selection for later Turns using the server model catalog, including while a Turn or approval is active. Missing means unsupported; authorization, recovery and revision admission still apply. */
             modelChange?: boolean;
             /** @description The caller owns this eligible Workspace Session with current OPERATOR or OWNER access. Built-in qwen-code requires approval-selection/1; stored AgentDefinitions on exactly hosted-workspace-files/1, hosted-workspace-files/3 or hosted-workspace-shell/1 also require agent-definition-approval-selection/1. Idle-state admission is checked separately. Missing means false. */
             approvalModeChange?: boolean;
@@ -2921,11 +2921,26 @@ export interface components {
             /** @description Exact source commit, resolved npm version, or imported content revision. Supplied together with sourceType. */
             sourceRevision?: string;
         };
+        ManagedExtensionSourceReference: {
+            providerId: string;
+            /** @enum {string} */
+            kind: "skill" | "extension";
+            resourceId: string;
+            /** @description Exact immutable business revision. Dynamic selectors must be resolved by the business entry point. */
+            revision: string;
+        };
+        ManagedExtensionSourceOrigin: {
+            reference: components["schemas"]["ManagedExtensionSourceReference"];
+            /** @description SHA-256 of the actual raw archive bytes, distinct from packageDigest. */
+            sourceDigest: string;
+            requestDigest: string;
+        };
         ManagedExtensionPackage: {
             pin: components["schemas"]["ManagedExtensionPackagePin"];
             manifest: components["schemas"]["ManagedExtensionPackageManifest"];
             /** Format: int64 */
             byteLength: number;
+            source?: components["schemas"]["ManagedExtensionSourceOrigin"];
         };
         ManagedExtensionPackageCatalog: {
             supported: boolean;

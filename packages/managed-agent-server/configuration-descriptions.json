@@ -75,9 +75,47 @@
     "qwen.managed-agent.tool-publication": {
       "en": "Durable publication of Hosted Shell tool output to object storage: the storage target, capacity limits, operation and verification deadlines, and garbage collection.",
       "zh": "将 Hosted Shell 工具输出持久发布到对象存储：存储位置、容量上限、操作与校验期限，以及垃圾回收。"
+    },
+    "qwen.managed-agent.session-resources": {
+      "en": "Externalization of oversized private Session resources and cold storage of closed Session journals into immutable object storage, with independent default-off controls for resource writes, pack building, and SQL body eviction.",
+      "zh": "将超大的私有 Session 资源与已关闭 Session 的日志冷藏到不可变对象存储；资源写入、pack 构建与 SQL 正文腾空由各自独立、默认关闭的开关控制。"
     }
   },
   "properties": {
+    "qwen.managed-agent.session-resources.enabled": {
+      "en": "Whether oversized private Session resources may be externalized to immutable object storage (allocate/upload/finalize before journal commit). While false, over-cap resources are refused with HTTP 501 `managed_session_oss_disabled`; already-externalized resources remain readable.",
+      "zh": "是否允许把超大的私有 Session 资源外置到不可变对象存储（journal 提交前 allocate/upload/finalize）。为 false 时超上限资源返回 HTTP 501 `managed_session_oss_disabled`；已外置资源仍可读取。"
+    },
+    "qwen.managed-agent.session-resources.oss-key-prefix": {
+      "en": "Key prefix under the configured object-storage bucket for externalized Session resources and journal packs.",
+      "zh": "已配置对象存储 bucket 中用于外置 Session 资源与 journal pack 的 key 前缀。"
+    },
+    "qwen.managed-agent.session-resources.pack-job-enabled": {
+      "en": "Whether the background sweeper builds and publishes immutable journal packs for eligible Sessions. Requires `qwen.managed-agent.session-resources.enabled`. Pack building never deletes SQL bodies.",
+      "zh": "后台清扫任务是否为符合条件的 Session 构建并发布不可变 journal pack。需要开启 `qwen.managed-agent.session-resources.enabled`。构建 pack 绝不删除 SQL 正文。"
+    },
+    "qwen.managed-agent.session-resources.deletion-enabled": {
+      "en": "Whether covered SQL journal bodies may be evicted after the deletion grace period. Requires pack-only mode to be qualified first; eviction is fenced by the head watermark and grace period.",
+      "zh": "是否允许在删除宽限期后腾空被 pack 覆盖的 SQL journal 正文。需先完成只打包模式的资格验证；腾空受 head 水位与宽限期围栏保护。"
+    },
+    "qwen.managed-agent.session-resources.pack-target-bytes": {
+      "en": "Target compressed size of a single journal pack; the pack range shrinks adaptively to stay within it.",
+      "zh": "单个 journal pack 的目标压缩后大小；pack 范围会自适应收缩以不超过该值。"
+    },
+    "qwen.managed-agent.session-resources.pack-max-transactions": {
+      "en": "Maximum number of journal transactions packed into one journal pack.",
+      "zh": "单个 journal pack 最多容纳的 journal 事务数。"
+    },
+    "qwen.managed-agent.session-resources.deletion-grace": {
+      "en": "Grace period after a pack is published and its publisher fenced before covered SQL bodies may be evicted; must exceed the backup replication lag. A plain number is seconds.",
+      "zh": "pack 发布且发布者被围栏后、到可腾空被覆盖 SQL 正文之间的宽限期；必须大于备份复制 lag。纯数字按秒解析。",
+      "type": "duration"
+    },
+    "qwen.managed-agent.session-resources.scan-delay": {
+      "en": "Interval between background journal-compaction sweeper passes. A plain number is milliseconds; a value with a unit such as `30s` is also accepted.",
+      "zh": "后台 journal compaction 清扫任务的运行间隔。纯数字按毫秒解析，也可使用带单位的值如 `30s`。",
+      "type": "duration"
+    },
     "qwen.managed-agent.agent-revision": {
       "en": "The revision label of the built-in `qwen-code` agent, pinned on each Session that uses it; a request naming any other revision of `qwen-code` is refused. Must be 1 to 128 characters (startup refusal).",
       "zh": "内置 `qwen-code` agent 的修订号标签，会固定在使用它的每个 Session 上；请求中指定 `qwen-code` 的其他修订号会被拒绝。长度必须为 1 到 128 个字符（否则启动时拒绝）。"

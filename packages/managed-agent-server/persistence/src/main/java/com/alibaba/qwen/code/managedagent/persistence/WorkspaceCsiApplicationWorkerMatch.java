@@ -2,8 +2,11 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiApplicationJson;
 import com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof;
+import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcCsiRetirementEvidence;
 import com.alibaba.qwen.code.runtimebroker.transport.CsiFileFinalizeProtocol;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
@@ -16,15 +19,18 @@ import static com.alibaba.qwen.code.managedagent.contracts.persistence.Workspace
 import static com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiApplicationJson.require;
 
 final class WorkspaceCsiApplicationWorkerMatch {
+    private static final ObjectMapper JSON = new ObjectMapper();
+    private static final int MAX_BYTES = 32 * 1024 * 1024;
+    private static final int MAX_ITEMS = 4096;
+
     private WorkspaceCsiApplicationWorkerMatch() {
     }
 
-    static void verify(WorkspaceCsiApplicationInventory.Snapshot inventory,
-            CsiNativeActivationProof.TerminalProof terminal, byte[] raw, Map<String, Object> request) {
-        require(inventory.blockers().isEmpty());
+    static void verify(JdbcCsiRetirementEvidence.Evidence evidence, byte[] raw,
+            Map<String, Object> request) {
         CsiFileFinalizeProtocol.response(raw, request);
-        JsonNode observation = WorkspaceCsiApplicationJson.object(raw, WorkspaceCsiApplicationInventory.MAX_BYTES);
-        var prefix = terminal.predecessorPrefix();
+        JsonNode observation = WorkspaceCsiApplicationJson.object(raw, MAX_BYTES);
+        var prefix = evidence.terminal().predecessorPrefix();
         require(prefix.fileHistory() != null);
         JsonNode execution = observation.path("execution");
         closed(execution, Set.of("state", "workState", "pendingStarts", "pendingInvocations", "blockers",
@@ -45,16 +51,14 @@ final class WorkspaceCsiApplicationWorkerMatch {
         empty(secondary.path("providerSessions"));
         empty(secondary.path("closedSessions"));
         require(number(secondary.get("mcpCalls")) == 0);
-        Map<String, WorkspaceCsiApplicationInventory.Row> expected = new HashMap<>();
+        Map<String, ToolExecutionRecord> expected = new HashMap<>();
         Set<String> executionCalls = new HashSet<>();
-        for (var row : inventory.table("ma_tool_execution").rows()) {
-            if (row.membership() == WorkspaceCsiApplicationInventory.Membership.ORIGINAL) {
-                JsonNode nativeRef = object(row.text("reference_json"));
-                String nativeCall = text(nativeRef, "callId");
-                require(nativeCall.equals(row.text("tool_call_id"))
-                        && executionCalls.add(row.text("execution_call_id"))
-                        && expected.put(nativeCall, row) == null);
-            }
+        for (var member : evidence.executions()) {
+            JsonNode nativeRef = JSON.valueToTree(member.getReference());
+            String nativeCall = text(nativeRef, "callId");
+            require(nativeCall.equals(member.getToolCallId())
+                    && executionCalls.add(member.getExecutionCallId())
+                    && expected.put(nativeCall, member) == null);
         }
         require(executionCalls.equals(prefix.receipts().keySet()));
         Set<String> entries = new HashSet<>();
@@ -71,12 +75,12 @@ final class WorkspaceCsiApplicationWorkerMatch {
             closed(reference, Set.of("sessionId", "promptId", "callId", "argsDigest"));
             String call = text(reference, "callId");
             require(entries.add(call) && expected.containsKey(call));
-            var row = expected.get(call);
-            JsonNode nativeRef = object(row.text("reference_json"));
+            var member = expected.get(call);
+            JsonNode nativeRef = JSON.valueToTree(member.getReference());
             for (String field : List.of("sessionId", "promptId", "callId", "argsDigest")) {
                 require(reference.path(field).equals(nativeRef.path(field)));
             }
-            JsonNode wrapper = resource(inventory, nativeRef.path("inputRef"));
+            JsonNode wrapper = resource(evidence, nativeRef.path("inputRef"));
             closed(wrapper, Set.of("harnessSessionId", "runtimeSessionId", "payloadJson"));
             require(wrapper.path("harnessSessionId").equals(reference.path("sessionId"))
                     && wrapper.path("runtimeSessionId").equals(reference.path("sessionId")));
@@ -89,9 +93,9 @@ final class WorkspaceCsiApplicationWorkerMatch {
                     && payload.path("toolName").equals(entry.path("toolName"))
                     && payload.path("input").isObject() && payload.path("input").equals(entry.path("input"))
                     && object(text(entry, "inputJson")).equals(payload.path("input")));
-            JsonNode result = object(row.text("result_json"));
+            JsonNode result = JSON.valueToTree(member.getResult());
             require(result.equals(entry.path("result"))
-                    && result.equals(prefix.receipts().get(row.text("execution_call_id")).body().path("envelope")));
+                    && result.equals(prefix.receipts().get(member.getExecutionCallId()).body().path("envelope")));
         }
         require(entries.equals(expected.keySet()));
         Map<String, CsiNativeActivationProof.FrozenBatch> expectedPreparations = new HashMap<>();
@@ -108,8 +112,8 @@ final class WorkspaceCsiApplicationWorkerMatch {
             require(preparations.add(id) && expectedPreparations.containsKey(id));
             var batch = expectedPreparations.get(id);
             require(batch.intentRef().equals(preparation.path("reference")));
-            resource(inventory, batch.intentRef());
-            JsonNode prepared = resource(inventory, batch.preparedRef());
+            resource(evidence, batch.intentRef());
+            JsonNode prepared = resource(evidence, batch.preparedRef());
             JsonNode actual = preparation.path("observation");
             closed(actual, Set.of("state", "backupDirectory", "retainedBackups"));
             for (String field : List.of("state", "backupDirectory", "retainedBackups")) {
@@ -187,7 +191,7 @@ final class WorkspaceCsiApplicationWorkerMatch {
     }
 
     private static Map<String, JsonNode> indexed(JsonNode values, String key) {
-        require(values.isArray() && values.size() <= WorkspaceCsiApplicationInventory.MAX_ROWS);
+        require(values.isArray() && values.size() <= MAX_ITEMS);
         Map<String, JsonNode> result = new HashMap<>();
         for (JsonNode value : values) {
             require(result.put(text(value, key), value) == null);
@@ -195,22 +199,16 @@ final class WorkspaceCsiApplicationWorkerMatch {
         return result;
     }
 
-    private static JsonNode resource(WorkspaceCsiApplicationInventory.Snapshot inventory, JsonNode ref) {
+    private static JsonNode resource(JdbcCsiRetirementEvidence.Evidence evidence, JsonNode ref) {
         closed(ref, Set.of("resourceId", "kind", "schemaVersion", "byteLength", "digest"));
-        var rows = inventory.table("ma_resource").rows().stream()
-                .filter(row -> row.membership() == WorkspaceCsiApplicationInventory.Membership.ORIGINAL
-                        && text(ref, "resourceId").equals(row.text("resource_id"))).toList();
-        require(rows.size() == 1);
-        var row = rows.getFirst();
-        byte[] bytes = row.binary("inline_bytes");
-        require(text(ref, "kind").equals(row.text("kind")) && number(ref.get("schemaVersion")) == row.number("schema_version")
-                && number(ref.get("byteLength")) == row.number("byte_length") && bytes != null
-                && bytes.length == number(ref.get("byteLength")) && CsiNativeActivationProof.sha256(bytes).equals(text(ref, "digest")));
+        byte[] bytes = evidence.resources().apply(ref);
+        require(bytes != null && bytes.length == number(ref.get("byteLength"))
+                && CsiNativeActivationProof.sha256(bytes).equals(text(ref, "digest")));
         return object(bytes);
     }
 
     private static JsonNode object(String value) { return object(value.getBytes(StandardCharsets.UTF_8)); }
-    private static JsonNode object(byte[] bytes) { return WorkspaceCsiApplicationJson.object(bytes, WorkspaceCsiApplicationInventory.MAX_BYTES); }
+    private static JsonNode object(byte[] bytes) { return WorkspaceCsiApplicationJson.object(bytes, MAX_BYTES); }
     private static String text(JsonNode value, String field) {
         require(value.path(field).isTextual() && !value.path(field).textValue().isEmpty());
         return value.path(field).textValue();

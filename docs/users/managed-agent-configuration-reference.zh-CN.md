@@ -307,6 +307,21 @@ SSH Runtime 节点：服务端通过 SSH 访问的主机，用户可以在这些
 | `enabled` | — | 布尔 | — | 是否提供 SSH Workspace：节点 `access` 中列出的 actor 可以浏览该节点允许的根目录，并把其中的目录登记为 Workspace；关闭时这些路由返回 `404 ssh_runtime_disabled`。未开启 `qwen.managed-agent.harness.workspace-files-enabled` 或未配置 `qwen.managed-agent.runtime-broker.ssh.nodes`、使用外部 provisioner，或处于 `managed-local` profile 时，启动时拒绝。 |
 | `nodes` | — | YAML 列表 | *（空）* | SSH Runtime 节点，以列表形式写在配置文件（YAML）中。每一项包含 `node-id` 和 `display-name`；`ssh-host`（服务端账号 SSH 配置中的主机别名）；节点上的绝对路径 `node-executable`、`qwen-entry` 和 `state-directory`；`allowed-roots`（至少一个绝对目录，Workspace 只能登记在其下）；`publication-port`（节点上的 loopback 端口，工具发布通过 SSH 转发到这里）；`qwen-version`（必填，必须与节点报告的版本一致）；`access`（允许使用该节点的 `tenant-id` 与 `actor-id` 组合）。条目无效时启动时拒绝。配置了节点后，`qwen.managed-agent.tool-publication.service-base-url` 必须是 `http` URL。 |
 
+## `qwen.managed-agent.session-resources`
+
+将超大的私有 Session 资源与已关闭 Session 的日志冷藏到不可变对象存储；资源写入、pack 构建与 SQL 正文腾空由各自独立、默认关闭的开关控制。
+
+| 属性 | 环境变量 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- | --- |
+| `deletion-enabled` | — | 布尔 | `false` | 是否允许在删除宽限期后腾空被 pack 覆盖的 SQL journal 正文。需先完成只打包模式的资格验证；腾空受 head 水位与宽限期围栏保护。 |
+| `deletion-grace` | — | 时长 | `72h` | pack 发布且发布者被围栏后、到可腾空被覆盖 SQL 正文之间的宽限期；必须大于备份复制 lag。纯数字按秒解析。 |
+| `enabled` | — | 布尔 | `false` | 是否允许把超大的私有 Session 资源外置到不可变对象存储（journal 提交前 allocate/upload/finalize）。为 false 时超上限资源返回 HTTP 501 `managed_session_oss_disabled`；已外置资源仍可读取。 |
+| `oss-key-prefix` | — | 字符串 | `session-resources/` | 已配置对象存储 bucket 中用于外置 Session 资源与 journal pack 的 key 前缀。 |
+| `pack-job-enabled` | — | 布尔 | `false` | 后台清扫任务是否为符合条件的 Session 构建并发布不可变 journal pack。需要开启 `qwen.managed-agent.session-resources.enabled`。构建 pack 绝不删除 SQL 正文。 |
+| `pack-max-transactions` | — | 整数 | `4096` | 单个 journal pack 最多容纳的 journal 事务数。 |
+| `pack-target-bytes` | — | 整数 | — | 单个 journal pack 的目标压缩后大小；pack 范围会自适应收缩以不超过该值。 |
+| `scan-delay` | — | 时长 | `30s` | 后台 journal compaction 清扫任务的运行间隔。纯数字按毫秒解析，也可使用带单位的值如 `30s`。 |
+
 ## `qwen.managed-agent.session-store`
 
 私有的 Managed Session Store：Hosted Harness 通过本服务的内部路由读写 Session 日志；以及保护它的写入凭据与写入租约。

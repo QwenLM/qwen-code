@@ -130,6 +130,12 @@ public class JdbcManagedExtensionRecordStore
     private final ManagedModelDiagnosticProjection modelDiagnostics;
     private final ManagedActivityDiagnosticProjection activityDiagnostics;
     private final ManagedMcpSettingsProjection mcpSettingsProjection;
+    private JdbcJournalPacks packs;
+
+    @Autowired(required = false)
+    void setJournalPacks(JdbcJournalPacks packs) { this.packs = packs; }
+
+    JdbcJournalPacks journalPacks() { return packs; }
 
     @Autowired
     public JdbcManagedExtensionRecordStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc,
