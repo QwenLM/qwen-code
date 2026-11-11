@@ -715,13 +715,19 @@ class ManagedChannelServiceTest {
         // The guard must reject on the ordinal before planning: findOrCreate
         // would also reject, but only after orphan segment rows were written.
         assertThat(segmentLedger.list(TENANT, channel, resentId)).isEmpty();
+        // No claim row may survive the refusal either: the reconciler converges
+        // from claim rows without consulting this guard, so a stray claim would
+        // import the refused chain on the next sweep.
+        assertThat(instances.findClaim(TENANT, channel, resentId)).isEmpty();
         // An ordinal-only divergence keeps the segment ids identical, so the
-        // conflict WARN must carry both ordinals to say what diverged.
+        // conflict WARN must carry both ordinals to say what diverged, and name
+        // the old chain as delivery= and the new one as resent=.
         assertThat(logged.list).anySatisfy(event -> {
             assertThat(event.getLevel())
                     .isEqualTo(ch.qos.logback.classic.Level.WARN);
             assertThat(event.getFormattedMessage())
                     .contains("channel resend identity conflict")
+                    .contains("delivery=" + deliveryId + " resent=" + resentId)
                     .contains("storedOrdinal=5")
                     .contains("resentOrdinal=0");
         });
@@ -766,13 +772,19 @@ class ManagedChannelServiceTest {
         assertThat(segmentLedger.list(TENANT, channel, resentId))
                 .extracting(SegmentLedger::segmentId)
                 .containsExactly("other:0");
+        // No claim row may survive the refusal: the reconciler converges from
+        // claim rows without this guard, so a stray claim would import the
+        // refused chain on the next sweep.
+        assertThat(instances.findClaim(TENANT, channel, resentId)).isEmpty();
         // The two segment ids genuinely differ here, so the WARN must name
         // which side is the stored truth; swapping the two id arguments reds.
+        // It must also name the old chain as delivery= and the new as resent=.
         assertThat(logged.list).anySatisfy(event -> {
             assertThat(event.getLevel())
                     .isEqualTo(ch.qos.logback.classic.Level.WARN);
             assertThat(event.getFormattedMessage())
                     .contains("channel resend identity conflict")
+                    .contains("delivery=" + deliveryId + " resent=" + resentId)
                     .contains("storedSegment=other:0")
                     .contains("resentSegment=" + resentId + ":0");
         });
