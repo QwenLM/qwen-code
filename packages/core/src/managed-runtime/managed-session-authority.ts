@@ -1957,6 +1957,7 @@ export class LocalManagedSessionAuthority {
               .filter((event) => event.kind === 'turn.settled')
               .map((event) => event.payload['turnId']),
           );
+          const now = this.now();
           if (
             maintenance.historyCutSequence > this.committed ||
             this.events.some(
@@ -1964,7 +1965,16 @@ export class LocalManagedSessionAuthority {
                 (event.kind === 'message.committed' &&
                   event.sequence > maintenance.historyCutSequence) ||
                 (event.kind === 'input.accepted' &&
-                  !settled.has(event.payload['turnId'])),
+                  !settled.has(event.payload['turnId']) &&
+                  // A not-yet-due loop wakeup is deferred, not about to run:
+                  // it must not hold compaction for its whole delay window.
+                  // Its continuation re-reads guidance after a compaction, so
+                  // compacting beneath it is safe. A due loop input still blocks.
+                  !(
+                    event.payload['source'] === 'loop' &&
+                    typeof event.payload['notBefore'] === 'number' &&
+                    event.payload['notBefore'] > now
+                  )),
             )
           )
             throw new ManagedSessionConflictError(
@@ -4533,11 +4543,12 @@ function inputEvents(
         contentRef: input.contentRef,
         deadline: input.deadline,
         admissionRef: input.admissionRef,
-        // Omit the field for callers that do not set it: closed readers
+        // Omit the field unless a concrete fire time is set: closed readers
         // (the CSI native-activation proof, older parsers) require exactly
-        // the six legacy fields, so an explicit null would break ordinary
-        // input admission even with the loop feature off.
-        ...(input.notBefore !== undefined
+        // the six legacy fields, so even an explicit null would break
+        // ordinary input admission with the loop feature off. An absent
+        // field and a null both mean immediate delivery to the wake pump.
+        ...(typeof input.notBefore === 'number'
           ? { notBefore: input.notBefore }
           : {}),
       },

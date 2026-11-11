@@ -359,6 +359,8 @@ export class HostedMonitorWakeScheduler {
    * a far-future wakeup.
    */
   private deferIfPending(): void {
+    // A close that lands mid-pass must not leave a timer armed behind it.
+    if (this.closed) return;
     const until = this.deps.deferUntil?.();
     if (until === undefined) return;
     const delay = Math.max(0, until - Date.now());

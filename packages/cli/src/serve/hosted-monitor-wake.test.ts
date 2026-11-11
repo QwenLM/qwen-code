@@ -797,6 +797,33 @@ describe('HostedMonitorWakeScheduler deferral', () => {
     await vi.advanceTimersByTimeAsync(3_600_000);
     expect(nextCalls).toBe(1);
   });
+
+  it('a close landing mid-pass does not arm a deferral timer behind it', async () => {
+    vi.useFakeTimers();
+    let resolveNext!: (turn: HostedMonitorWakeTurn | undefined) => void;
+    const pendingNext = new Promise<HostedMonitorWakeTurn | undefined>(
+      (resolve) => {
+        resolveNext = resolve;
+      },
+    );
+    const scheduler = new HostedMonitorWakeScheduler({
+      next: () => pendingNext,
+      deferUntil: () => Date.now() + 3_600_000,
+      state: () => 'idle',
+      runTurn: async () => 'settled',
+      failed: (cause) => {
+        throw cause instanceof Error ? cause : new Error(String(cause));
+      },
+    });
+    scheduler.kick();
+    // The pass is now awaiting next(); close before it resolves.
+    await vi.advanceTimersByTimeAsync(0);
+    scheduler.close();
+    resolveNext(undefined);
+    await vi.advanceTimersByTimeAsync(0);
+    // The in-flight pass must not arm a timer on the closed scheduler.
+    expect(vi.getTimerCount()).toBe(0);
+  });
 });
 
 describe('wakeHasPriorAttempt', () => {
