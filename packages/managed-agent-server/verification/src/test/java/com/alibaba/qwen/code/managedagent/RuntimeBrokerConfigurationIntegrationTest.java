@@ -105,6 +105,25 @@ class RuntimeBrokerConfigurationIntegrationTest {
                 .isEqualTo("test-key");
     }
 
+    @Test
+    void wiresTheTerminalEndpointThroughTheRealServletEntry() {
+        // With the Broker on, the API component scan creates the ticket
+        // controller; the only producers of its dependencies are
+        // TerminalWebSocketConfig's beans, which the servlet configuration
+        // must import. A missing import fails the whole context at startup
+        // (NoSuchBeanDefinitionException), even with the web-terminal opt-in
+        // still off — the isolated config test cannot catch that wiring.
+        assertThat(context.getBean(
+                com.alibaba.qwen.code.managedagent.api.TerminalTicketStore.class))
+                .isNotNull();
+        assertThat(context.getBean(
+                com.alibaba.qwen.code.managedagent.workspace.runtime.WorkspaceTerminalRelayService.class))
+                .isNotNull();
+        assertThat(context.getBean(
+                com.alibaba.qwen.code.managedagent.api.TerminalTicketController.class))
+                .isNotNull();
+    }
+
     private Integer columnCount(String columnName) {
         return jdbcTemplate.queryForObject(
                 "SELECT COUNT(*) FROM information_schema.columns "

@@ -45,4 +45,16 @@ public final class PublicSurface {
                 || path.startsWith("/v1/agent-channels/")
                 || path.startsWith("/api/agent/web-shell/v1/");
     }
+
+    /**
+     * The terminal WebSocket upgrade authenticates with the single-use ticket
+     * carried in the bearer subprotocol, not the tenant/signature headers a
+     * browser upgrade cannot set. Only this exact upgrade path is exempt from
+     * the header filters; the ticket-minting POST stays on the authenticated
+     * surface, and the handshake interceptor still consumes and validates the
+     * ticket before the relay opens the worker.
+     */
+    public static boolean terminalUpgrade(String path) {
+        return path.matches("/api/agent/web-shell/v1/sessions/[^/]+/terminal");
+    }
 }

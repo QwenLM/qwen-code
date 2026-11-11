@@ -103,6 +103,30 @@ class TenantContextFilterTest {
         assertThat(passed.getRequest()).isSameAs(unrelated);
     }
 
+    @Test
+    void exemptsTheTerminalUpgradeButNotTheTicketMint() throws Exception {
+        // The upgrade carries its identity in the single-use ticket, not the
+        // tenant header a browser WebSocket cannot set, so it must pass the
+        // filter without one.
+        MockHttpServletRequest upgrade = new MockHttpServletRequest("GET",
+                "/api/agent/web-shell/v1/sessions/s1/terminal");
+        MockFilterChain passed = new MockFilterChain();
+        MockHttpServletResponse response = new MockHttpServletResponse();
+        filter.doFilter(upgrade, response, passed);
+        assertThat(passed.getRequest()).isSameAs(upgrade);
+        assertThat(response.getStatus()).isEqualTo(200);
+
+        // The ticket-minting POST stays on the authenticated surface.
+        MockHttpServletRequest mint = new MockHttpServletRequest("POST",
+                "/api/agent/web-shell/v1/sessions/terminal-ticket");
+        MockFilterChain blocked = new MockFilterChain();
+        MockHttpServletResponse mintResponse = new MockHttpServletResponse();
+        filter.doFilter(mint, mintResponse, blocked);
+        assertThat(mintResponse.getStatus()).isEqualTo(400);
+        assertThat(mintResponse.getContentAsString()).contains("invalid_tenant");
+        assertThat(blocked.getRequest()).isNull();
+    }
+
     private static MockHttpServletRequest request(String tenant) {
         MockHttpServletRequest request = new MockHttpServletRequest(
                 "POST", "/v1/agents/sessions");

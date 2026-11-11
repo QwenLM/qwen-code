@@ -535,6 +535,32 @@ public class SignatureAuthFilterTest {
         return request;
     }
 
+    @Test
+    public void exemptsTheTerminalUpgradeInSignedMode() throws Exception {
+        SignatureAuthFilter filter = filter(signed());
+        // The upgrade authenticates with the single-use ticket, not the
+        // signature headers a browser WebSocket cannot set.
+        MockHttpServletRequest upgrade = request("GET",
+                "/api/agent/web-shell/v1/sessions/s1/terminal");
+        MockFilterChain passed = new MockFilterChain();
+        MockHttpServletResponse response = new MockHttpServletResponse();
+        filter.doFilter(upgrade, response, passed);
+        assertThat(passed.getRequest()).isSameAs(upgrade);
+        assertThat(response.getStatus()).isEqualTo(200);
+
+        // The ticket-minting POST stays on the signed surface: without the
+        // signature headers it is refused, not exempted.
+        MockHttpServletRequest mint = request("POST",
+                "/api/agent/web-shell/v1/sessions/terminal-ticket");
+        MockFilterChain blocked = new MockFilterChain();
+        MockHttpServletResponse mintResponse = new MockHttpServletResponse();
+        filter.doFilter(mint, mintResponse, blocked);
+        assertThat(mintResponse.getStatus()).isEqualTo(401);
+        assertThat(mintResponse.getContentAsString())
+                .contains("authentication_required");
+        assertThat(blocked.getRequest()).isNull();
+    }
+
     private static SignatureAuthFilter filter(BrokerSecurity security) {
         return new SignatureAuthFilter(security, JSON);
     }

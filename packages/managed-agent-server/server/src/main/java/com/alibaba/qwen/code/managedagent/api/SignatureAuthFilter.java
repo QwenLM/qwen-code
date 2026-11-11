@@ -56,10 +56,15 @@ public class SignatureAuthFilter extends OncePerRequestFilter
         if (security.getMode() != BrokerSecurity.Mode.SIGNED) {
             return true;
         }
+        String path = PublicSurface.pathWithinApplication(request);
+        // The terminal upgrade authenticates with the single-use ticket, not
+        // the signature headers a browser WebSocket cannot set.
+        if (PublicSurface.terminalUpgrade(path)) {
+            return true;
+        }
         // Coverage follows the routed path (as the tenant filter does); the
         // canonical string still signs the raw request URI.
-        return !PublicSurface.covers(
-                PublicSurface.pathWithinApplication(request));
+        return !PublicSurface.covers(path);
     }
 
     @Override

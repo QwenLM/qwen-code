@@ -41,6 +41,11 @@ public class TenantContextFilter extends OncePerRequestFilter {
     @Override
     protected boolean shouldNotFilter(HttpServletRequest request) {
         String path = PublicSurface.pathWithinApplication(request);
+        // The terminal upgrade carries its identity in the single-use ticket,
+        // not the tenant header a browser WebSocket cannot set.
+        if (PublicSurface.terminalUpgrade(path)) {
+            return true;
+        }
         return !PublicSurface.covers(path)
                 && !path.startsWith(MANAGED_SESSION_STORE_PREFIX)
                 && !path.startsWith(TOOL_PUBLICATION_PREFIX)
