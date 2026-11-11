@@ -517,27 +517,45 @@ describe.skipIf(process.platform === 'win32')(
       },
     );
 
-    it('runs GitHub-only lanes without installed Node dependencies', () => {
-      const isolated = join(root, 'isolated');
-      mkdirSync(isolated);
-      writeFileSync(join(isolated, 'package.json'), '{"type":"module"}');
-      copyFileSync(lintScript, join(isolated, 'lint.js'));
-      copyFileSync(
-        join(dirname(lintScript), 'lint-scope.js'),
-        join(isolated, 'lint-scope.js'),
-      );
-      put('workflow.yml', 'name: test\n');
-      commit();
-      const result = run(['yamllint'], '', join(isolated, 'lint.js'));
-      expect(result.status, result.stderr).toBe(0);
-      expect(result.stdout).toContain('Incremental PR lint.');
-      expect(result.calls).toEqual([
-        {
-          name: 'yamllint',
-          args: ['--format', 'github', '--', './workflow.yml'],
-        },
-      ]);
-    });
+    it.each(['direct', 'symlinked', 'file-symlinked', 'preserved-symlinked'])(
+      'runs GitHub-only lanes without installed Node dependencies (%s entry)',
+      (entry) => {
+        const isolated = join(root, 'isolated');
+        mkdirSync(isolated);
+        writeFileSync(join(isolated, 'package.json'), '{"type":"module"}');
+        copyFileSync(lintScript, join(isolated, 'lint.js'));
+        copyFileSync(
+          join(dirname(lintScript), 'lint-scope.js'),
+          join(isolated, 'lint-scope.js'),
+        );
+        put('workflow.yml', 'name: test\n');
+        commit();
+        let scriptDirectory = isolated;
+        if (entry === 'symlinked' || entry === 'preserved-symlinked') {
+          scriptDirectory = join(root, 'isolated-link');
+          symlinkSync(isolated, scriptDirectory, 'dir');
+        }
+        let script = join(scriptDirectory, 'lint.js');
+        if (entry === 'file-symlinked') {
+          script = join(isolated, 'lint-link.js');
+          symlinkSync(join(isolated, 'lint.js'), script);
+        }
+        const result = run(['yamllint'], '', script, {
+          env:
+            entry === 'preserved-symlinked'
+              ? { NODE_OPTIONS: '--preserve-symlinks-main' }
+              : {},
+        });
+        expect(result.status, result.stderr).toBe(0);
+        expect(result.stdout).toContain('Incremental PR lint.');
+        expect(result.calls).toEqual([
+          {
+            name: 'yamllint',
+            args: ['--format', 'github', '--', './workflow.yml'],
+          },
+        ]);
+      },
+    );
 
     it('invokes the existing full shell lane for changed sourced helpers', () => {
       put('entry.sh', '#!/bin/sh\n. ./helper\n');
