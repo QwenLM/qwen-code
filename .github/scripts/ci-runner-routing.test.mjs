@@ -1078,6 +1078,48 @@ describe('credential-free jobs on the disposable pool', () => {
       /(?:else\s*\n\s*|\|\|\s*)echo "::warning::/,
     );
   });
+
+  it('web-shell-managed-host.yml build: only PR events ride the disposable pool', () => {
+    // Same credential-free boundary as the capture, but this lane also runs on
+    // post-merge push and manual dispatch, and those witnesses must stay
+    // hosted. Assert the effect per event rather than comparing the selector
+    // text to a copy of itself: flipping the event term and updating a pinned
+    // literal in the same commit leaves a text-only pin green. The pool label
+    // comes from the same config the capture case reads, so a config-only
+    // rename reds this lane too instead of leaving it requesting a label no
+    // runner advertises.
+    const doc = parse(
+      readFileSync(join(workflowsDir, 'web-shell-managed-host.yml'), 'utf8'),
+    );
+    const runsOn = String(doc.jobs.build['runs-on']);
+    for (const eventName of ['push', 'workflow_dispatch', 'merge_group']) {
+      for (const ecsDisabled of [false, true]) {
+        assert.deepEqual(
+          evalRunsOn(runsOn, { eventName, ecsDisabled, sameRepo: true }),
+          JSON.parse(HOSTED),
+          `managed-host ${eventName} must stay hosted ecsDisabled=${ecsDisabled}`,
+        );
+      }
+    }
+    assert.deepEqual(
+      evalRunsOn(runsOn, {
+        eventName: 'pull_request',
+        ecsDisabled: false,
+        sameRepo: true,
+      }),
+      EPHEMERAL,
+      'managed-host PR builds ride the disposable pool',
+    );
+    assert.deepEqual(
+      evalRunsOn(runsOn, {
+        eventName: 'pull_request',
+        ecsDisabled: true,
+        sameRepo: true,
+      }),
+      JSON.parse(HOSTED),
+      'kill-switch must revert managed-host PR builds to hosted',
+    );
+  });
 });
 
 describe('ci.yml web_shell_e2e_smoke runner routing', () => {
