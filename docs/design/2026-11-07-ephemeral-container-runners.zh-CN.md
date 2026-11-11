@@ -209,6 +209,28 @@ push 和手动运行仍走 GitHub-hosted；带 OSS 凭据和 `CI_BOT_PAT` 的 Vi
 GitHub-hosted。fork 运行仍看不到该变量，因此其逃生路径仍是在 `main` 修改
 workflow selector 后触发全新事件。
 
+两条泳道都刻意只在托管分支恢复 pnpm store。池槽位是没有 store 的全新容器，
+因此每次池上运行都要付一次冷安装：Managed Host 泳道实测安装 2 分 45 秒、
+构建 4 分 07 秒（合计 6 分 52 秒，job 130475867804），capture 泳道两次冷装
+实测 22 分 18 秒。90 分钟上限买的就是这段时间，这里选择接受而不是优化：
+在本池上恢复 GitHub Actions 缓存意味着要经槽位的出网代理访问缓存服务，
+而从随任务销毁的容器里存回缓存只有上传成本、没有收益。池上 store 缓存是
+独立决策，与 #16514 的容量工作一并跟踪。
+
+槽位出网同样是已声明的暴露面，而不是新增门禁。本次路由改动的首次池上 capture
+在一个连不上 github.com 的 hz5 槽位上失败于 `Checkout PR head`
+（run 42998471929），而同一次运行中 hz4 上的 Managed Host 任务正常 checkout
+并构建成功。当前接受这一风险并按需重跑：capture 产出的是可选预览、不是必需
+检查，坏槽位让该 PR 失去截图而不是失去合并资格，而 GitHub Actions 也不提供
+任务级重试。同仓 PR 还可以使用 `MAINTAINER_ECS_RUNNER_DISABLED=true`；按泳道
+的出网预检应与 #16514 的池网络工作一起做，不属于本次路由改动。
+
+把超时写成表达式还有第二项已接受的代价：PR 阶段预算门禁把非数字的
+`timeout-minutes` 记为「无固定超时」，因此 `.ci-budget` 中 Managed Host 泳道
+现在是 `1 0 1`，门禁不再约束它托管的 20 分钟上限。capture 泳道的上限改成
+表达式时已经付过同样的代价。要让托管上限继续可见，需要门禁本身理解按路由
+取值的表达式，那是独立的改动。
+
 池标签为 `ecs-qwen-ephemeral`，首期部署注册了十个 ARM64 runner，
 2026-11-08 实时查询显示 hz4 上有 22 个在线槽位注册。只注册
 `self-hosted` 和这个专用标签，不注册通用 Linux、ARM64 标签，避免其他宽泛

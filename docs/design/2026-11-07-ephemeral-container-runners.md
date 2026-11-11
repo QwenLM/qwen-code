@@ -276,6 +276,34 @@ returns these PR jobs to GitHub-hosted runners. Fork runs still cannot observe
 that variable, so their escape path remains a workflow selector change on
 `main` followed by a fresh event.
 
+Both lanes deliberately keep their pnpm store restore on the hosted arm only.
+A pool slot is a fresh container with no store, so every pooled run pays a cold
+install: the Managed Host lane measured 2m45s install plus 4m07s of builds
+(6m52s total, job 130475867804), against the two cold installs the capture lane
+measured at 22m18s. That is what the 90-minute ceilings buy, and it is accepted
+here rather than optimized: restoring the GitHub Actions cache on this pool
+means reaching the cache service through the slot's egress proxy, and saving
+from a container that dies with its job is upload cost with no return. Pool
+store caching is a separate decision, tracked with the capacity work in #16514.
+
+A slot's egress is likewise a declared exposure, not a new gate. The first
+pooled capture of this routing change failed in `Checkout PR head` on an hz5
+slot that could not reach github.com (run 42998471929), while the Managed Host
+job on hz4 checked out and built normally in the same run. Accepted for now,
+with a re-run on demand: the capture publishes an optional preview and is not a
+required check, so a broken slot costs that PR its images rather than its merge,
+and GitHub Actions offers no job-level retry. Same-repo PRs can also take
+`MAINTAINER_ECS_RUNNER_DISABLED=true`; a per-lane egress preflight belongs with
+the pool's network work in #16514, not in this routing change.
+
+Recording the timeout as an expression has a second, accepted cost: the
+PR-stage budget gate counts a non-numeric `timeout-minutes` as "no fixed
+timeout", so `.ci-budget` now carries `1 0 1` for the Managed Host lane and the
+gate no longer bounds its hosted 20-minute ceiling. The capture lane already
+paid this when its ceiling became an expression. Keeping the hosted bound
+visible would need the gate to understand routed expressions, which is its own
+change.
+
 The pool label is `ecs-qwen-ephemeral`; the initial deployment registered ten
 ARM64 runners, and the 2026-11-08 live query showed 22 online slot
 registrations on hz4.
