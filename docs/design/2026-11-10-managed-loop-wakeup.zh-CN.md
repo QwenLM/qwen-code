@@ -209,7 +209,10 @@ Managed Session 今天无法运行这条路径：
    部署开关 `qwen.managed-agent.loop.enabled` 在验收证据落地前默认 false，
    对应 automation 的 opt-in 历史。它是进程级 Harness 契约，而非控制面
    settings 键：部署通过在 Harness 环境设置
-   `QWEN_MANAGED_AGENT_LOOP_ENABLED=true` 启用。开关只门控安排：关闭时
+   `QWEN_MANAGED_AGENT_LOOP_ENABLED=true` 启用。开关本身不选择工具面：
+   会话还须运行在 `hosted-workspace-shell/3` profile 上，由 Harness 经
+   `QWEN_HOSTED_LIFECYCLE_V2_PROFILES` 通告（profile 列表须包含
+   `hosted-workspace-shell/3`）。开关只门控安排：关闭时
    `loop_wakeup` 被拒绝，但已安排的唤醒存活——pump 投递 journal input
    不看工具是否声明——且 `cron_list`/`cron_delete` 仍能列出并取消它。
    由于该取消是模型调用的工具，运维还有一条非模型路径：控制面的内部

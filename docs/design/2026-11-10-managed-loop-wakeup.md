@@ -255,6 +255,10 @@ The facts below are from this repository at `488845a4a81`.
    It is a process-scoped Harness contract, not a control-plane settings
    key: the deployment enables it by setting
    `QWEN_MANAGED_AGENT_LOOP_ENABLED=true` in the Harness environment.
+   The gate alone does not select the tool surface: the session must also
+   run on the `hosted-workspace-shell/3` profile, which the Harness
+   advertises through `QWEN_HOSTED_LIFECYCLE_V2_PROFILES` (the profile
+   list must include `hosted-workspace-shell/3`).
    The gate gates arming only: with it off, `loop_wakeup` is refused,
    but an already-armed wakeup survives — the pump delivers journal
    inputs regardless of tool declarations — and `cron_list`/`cron_delete`
