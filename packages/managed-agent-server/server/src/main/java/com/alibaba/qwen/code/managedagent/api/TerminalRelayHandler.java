@@ -210,7 +210,16 @@ public final class TerminalRelayHandler extends AbstractWebSocketHandler
         private final Object sendLock = new Object();
         private CompletionStage<WebSocket> sendTail =
                 CompletableFuture.completedFuture(null);
+        // The browser socket is open on 101 before the worker upgrade completes
+        // (hold admission + handshake). Frames sent in that window — the initial
+        // resize and early keystrokes — must queue, not be silently dropped.
+        private final java.util.List<PendingSend> preAttach = new java.util.ArrayList<>();
         private volatile boolean failed;
+
+        private record PendingSend(
+                java.util.function.Function<WebSocket, CompletionStage<WebSocket>> op,
+                int bytes) {
+        }
 
         Relay(WebSocketSession browser) {
             this.browser = browser;
@@ -224,7 +233,13 @@ public final class TerminalRelayHandler extends AbstractWebSocketHandler
                 webSocket.sendClose(WebSocket.NORMAL_CLOSURE, "");
                 return;
             }
-            worker.set(webSocket);
+            synchronized (sendLock) {
+                worker.set(webSocket);
+                for (PendingSend pending : preAttach) {
+                    chainSend(webSocket, pending.op(), pending.bytes());
+                }
+                preAttach.clear();
+            }
             webSocket.request(1);
         }
 
@@ -271,7 +286,11 @@ public final class TerminalRelayHandler extends AbstractWebSocketHandler
         @Override
         public CompletionStage<?> onClose(WebSocket webSocket, int statusCode,
                 String reason) {
-            closeQuietly(browser, CloseStatus.NORMAL);
+            // Forward the worker's close code: the panel's non-retryable policy
+            // keys on it (e.g. 4001 fatal failure). Rewriting every close to
+            // 1000 would make a fatally failed terminal reconnect forever.
+            fail();
+            closeQuietly(browser, new CloseStatus(statusCode));
             return null;
         }
 
@@ -297,10 +316,6 @@ public final class TerminalRelayHandler extends AbstractWebSocketHandler
          * the connection. */
         private void send(java.util.function.Function<WebSocket,
                 CompletionStage<WebSocket>> op, int bytes) {
-            WebSocket webSocket = worker.get();
-            if (webSocket == null || failed) {
-                return;
-            }
             synchronized (sendLock) {
                 if (failed) {
                     return;
@@ -312,19 +327,34 @@ public final class TerminalRelayHandler extends AbstractWebSocketHandler
                     closeQuietly(browser, CloseStatus.TOO_BIG_TO_PROCESS);
                     return;
                 }
-                sendTail = sendTail.thenCompose(ignored -> {
-                    if (failed) {
-                        return CompletableFuture.completedFuture(webSocket);
-                    }
-                    return op.apply(webSocket);
-                }).whenComplete((ignored, error) -> {
-                    pendingBytes.addAndGet(-bytes);
-                    if (error != null) {
-                        fail();
-                        closeQuietly(browser, CloseStatus.SERVER_ERROR);
-                    }
-                });
+                WebSocket webSocket = worker.get();
+                if (webSocket == null) {
+                    // The worker upgrade is still in flight; hold the frame
+                    // (already accounted) until onOpen flushes the queue.
+                    preAttach.add(new PendingSend(op, bytes));
+                    return;
+                }
+                chainSend(webSocket, op, bytes);
             }
+        }
+
+        /** Chains one already-accounted send onto the pending tail; the caller
+         * holds {@code sendLock}. */
+        private void chainSend(WebSocket webSocket,
+                java.util.function.Function<WebSocket, CompletionStage<WebSocket>> op,
+                int bytes) {
+            sendTail = sendTail.thenCompose(ignored -> {
+                if (failed) {
+                    return CompletableFuture.completedFuture(webSocket);
+                }
+                return op.apply(webSocket);
+            }).whenComplete((ignored, error) -> {
+                pendingBytes.addAndGet(-bytes);
+                if (error != null) {
+                    fail();
+                    closeQuietly(browser, CloseStatus.SERVER_ERROR);
+                }
+            });
         }
 
         private void sendToBrowser(org.springframework.web.socket.WebSocketMessage<?> message) {

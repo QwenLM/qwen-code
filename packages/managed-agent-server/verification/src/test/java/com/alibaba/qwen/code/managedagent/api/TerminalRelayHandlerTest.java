@@ -8,6 +8,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.TerminalHoldAdmission;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.springframework.web.socket.BinaryMessage;
 import org.springframework.web.socket.CloseStatus;
 import org.springframework.web.socket.WebSocketMessage;
@@ -30,6 +31,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
@@ -226,6 +228,56 @@ class TerminalRelayHandlerTest {
         sends.get(1).complete(worker);
         assertThat(delivered).containsExactly(first, second);
         verify(attached.browser, never()).close(any(CloseStatus.class));
+    }
+
+    @Test
+    void forwardsTheWorkerCloseCodeToTheBrowser() throws Exception {
+        WebSocket worker = mock(WebSocket.class);
+        Attached attached = attach(worker);
+        // A fatal worker failure closes 4001; the browser must see 4001 so the
+        // panel's non-retryable policy stops reconnecting (not a rewritten 1000).
+        attached.relay.onClose(worker, 4001, "fatal");
+        verify(attached.browser).close(argThat(status -> status.getCode() == 4001));
+    }
+
+    @Test
+    void queuesBrowserFramesUntilTheWorkerAttaches() throws Exception {
+        RuntimeBrokerOperations broker = mock(RuntimeBrokerOperations.class);
+        when(broker.admitTerminalHold("session-a", "term-1"))
+                .thenReturn(CompletableFuture.completedFuture(
+                        new TerminalHoldAdmission(
+                                hold("terminal-attach:term-1:process"), true)));
+        HttpClient client = mock(HttpClient.class);
+        WebSocket.Builder builder = mock(WebSocket.Builder.class);
+        when(client.newWebSocketBuilder()).thenReturn(builder);
+        when(builder.header(anyString(), anyString())).thenReturn(builder);
+        when(builder.connectTimeout(any())).thenReturn(builder);
+        WebSocket worker = mock(WebSocket.class);
+        when(worker.sendBinary(any(ByteBuffer.class), eq(true)))
+                .thenReturn(CompletableFuture.completedFuture(worker));
+        AtomicReference<WebSocket.Listener> relayRef = new AtomicReference<>();
+        when(builder.buildAsync(any(URI.class), any(WebSocket.Listener.class)))
+                .thenAnswer(invocation -> {
+                    relayRef.set(invocation.getArgument(1));
+                    // The worker upgrade is still in flight: onOpen has not run.
+                    return CompletableFuture.completedFuture(worker);
+                });
+        WebSocketSession browser = session();
+        TerminalRelayHandler handler = new TerminalRelayHandler(broker, client);
+        handler.afterConnectionEstablished(browser);
+
+        byte[] frame = "early-resize".getBytes(StandardCharsets.UTF_8);
+        handler.handleBinaryMessage(browser, new BinaryMessage(frame));
+        // Queued, not dropped and not yet sent.
+        verify(worker, never()).sendBinary(any(ByteBuffer.class), eq(true));
+
+        relayRef.get().onOpen(worker);
+        ArgumentCaptor<ByteBuffer> captor = ArgumentCaptor.forClass(ByteBuffer.class);
+        verify(worker).sendBinary(captor.capture(), eq(true));
+        ByteBuffer delivered = captor.getValue();
+        byte[] bytes = new byte[delivered.remaining()];
+        delivered.get(bytes);
+        assertThat(bytes).isEqualTo(frame);
     }
 
     /** A relay attached to a mock worker, exposing the JDK listener the relay
