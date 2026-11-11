@@ -738,7 +738,13 @@ export function startSessionPrRefreshTimer(deps: {
    * stays governed by the internal constant (off).
    */
   observationEnabled?: boolean;
-}): { dispose(): void; stopWatch(): Promise<void> } | undefined {
+}):
+  | {
+      dispose(): void;
+      stopWatch(): Promise<void>;
+      drainNow(workspaceCwd: string): Promise<void>;
+    }
+  | undefined {
   const intervalMs = resolveSessionPrRefreshIntervalMs(deps.env ?? process.env);
   if (intervalMs === undefined) return undefined;
   // Rotating Aone view-window offset per workspace: each sweep advances the
@@ -951,6 +957,24 @@ export function startSessionPrRefreshTimer(deps: {
         waitForTick: tickIdle,
         log: (message) => process.stderr.write(`[serve] ${message}\n`),
       });
+    },
+    /**
+     * Deliver a just-restored session's pending transitions without waiting for
+     * the next tick (design §2). Runs on this timer's own drain state: a second
+     * state would not see the in-flight marks and could deliver twice.
+     *
+     * Coverage is declared partial on purpose. Only one workspace is scanned,
+     * so every other workspace's bindings are absent from the rows — a complete
+     * scan would let the drain delete their watch files as unbound.
+     */
+    async drainNow(workspaceCwd: string): Promise<void> {
+      const drainDeps = deps.getPrDrainDeps?.();
+      if (!drainDeps) return;
+      const runtime = deps.workspaceRegistry
+        .listAll()
+        .find((candidate) => candidate.workspaceCwd === workspaceCwd);
+      if (!runtime) return;
+      await runPrWatchDrainTick([runtime], drainDeps, prDrainState, true);
     },
   };
 }

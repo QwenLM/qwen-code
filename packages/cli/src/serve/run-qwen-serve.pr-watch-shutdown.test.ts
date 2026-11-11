@@ -88,9 +88,10 @@ describe('runQwenServe PR-watch shutdown wiring', () => {
     fs.mkdirSync(workspace);
     const stopWatch = vi.fn(async () => {});
     const dispose = vi.fn();
+    const drainNow = vi.fn(async () => {});
     const start = vi
       .spyOn(refreshModule, 'startSessionPrRefreshTimer')
-      .mockReturnValue({ dispose, stopWatch });
+      .mockReturnValue({ dispose, stopWatch, drainNow });
     vi.spyOn(acpBridge, 'createAcpSessionBridge').mockImplementation(
       () => bridge() as ReturnType<typeof acpBridge.createAcpSessionBridge>,
     );

@@ -2634,6 +2634,95 @@ describe('startSessionPrRefreshTimer', () => {
     ).toBeUndefined();
   });
 
+  it('drainNow keeps watch files the single-workspace scan cannot see', async () => {
+    const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
+    const registry = createWorkspaceRegistry([trustedRuntime]);
+    await seedPendingBinding(trustedRuntime, SESSION_A, 42);
+    const watchDir = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-pr-watch-drain-now-'),
+    );
+    // A watch file with no binder in this scan. A targeted drain scans one
+    // workspace, so every other workspace's bindings are absent from the rows:
+    // declaring the coverage complete would delete this file as unbound.
+    const orphan = { host: 'github.com', repo: 'other/repo', number: 99 };
+    writePrWatchStateSync(watchDir, orphan, {
+      pr: orphan,
+      state: 'open',
+      headSha: 'a'.repeat(40),
+      checks: 'passing',
+    });
+    const handle = startSessionPrRefreshTimer({
+      workspaceRegistry: registry,
+      env: {},
+      observationEnabled: true,
+      getPrDrainDeps: () => ({
+        watchDir,
+        locks: new PathMutexRegistry(),
+        scanBindings: async () => ({
+          bindings: [
+            {
+              sessionId: SESSION_A,
+              workspaceCwd: trustedCwd,
+              prs: [{ number: 42, url: 'https://github.com/o/r/pull/42' }],
+            },
+          ],
+          partial: false,
+        }),
+        resolveRuntime: () => trustedRuntime,
+        isSessionLive: () => false,
+        wakeSession: async () => ({ kind: 'unavailable' as const }),
+        admitPrompt: async () => ({ deduplicated: false }),
+        readPushedHeads: async () => undefined,
+      }),
+    });
+    try {
+      await handle?.drainNow(trustedCwd);
+      expect(readPrWatchStateSync(watchDir, orphan).kind).toBe('state');
+    } finally {
+      handle?.dispose();
+      await removeTempTree(watchDir);
+    }
+  });
+
+  it('drainNow is inert without drain deps or a registered workspace', async () => {
+    const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
+    const registry = createWorkspaceRegistry([trustedRuntime]);
+    const scanBindings = vi.fn(async () => ({ bindings: [], partial: false }));
+    const handle = startSessionPrRefreshTimer({
+      workspaceRegistry: registry,
+      env: {},
+      observationEnabled: true,
+      getPrDrainDeps: () => undefined,
+    });
+    try {
+      await handle?.drainNow(trustedCwd);
+      expect(scanBindings).not.toHaveBeenCalled();
+      const withDeps = startSessionPrRefreshTimer({
+        workspaceRegistry: registry,
+        env: {},
+        observationEnabled: true,
+        getPrDrainDeps: () => ({
+          watchDir: trustedCwd,
+          locks: new PathMutexRegistry(),
+          scanBindings,
+          resolveRuntime: () => trustedRuntime,
+          isSessionLive: () => false,
+          wakeSession: async () => ({ kind: 'unavailable' as const }),
+          admitPrompt: async () => ({ deduplicated: false }),
+          readPushedHeads: async () => undefined,
+        }),
+      });
+      try {
+        await withDeps?.drainNow('/not-registered');
+        expect(scanBindings).not.toHaveBeenCalled();
+      } finally {
+        withDeps?.dispose();
+      }
+    } finally {
+      handle?.dispose();
+    }
+  });
+
   it('threads the watch log into the listing write seam', async () => {
     const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
     const registry = createWorkspaceRegistry([trustedRuntime]);

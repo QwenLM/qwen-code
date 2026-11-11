@@ -4913,7 +4913,11 @@ async function runQwenServeImpl(
   // pulls the SessionService chain, which must stay out of the pre-listen
   // static closure; the generation guards dispose-vs-async-start races.
   let sessionPrRefreshTimer:
-    | { dispose(): void; stopWatch(): Promise<void> }
+    | {
+        dispose(): void;
+        stopWatch(): Promise<void>;
+        drainNow(workspaceCwd: string): Promise<void>;
+      }
     | undefined;
   let sessionPrRefreshGeneration = 0;
   // Kept separately from the timer handle: the event-loop-monitor cleanup
@@ -7733,6 +7737,23 @@ async function runQwenServeImpl(
           });
           const handle = sessionPrRefreshTimer;
           stopPrWatchOnShutdown = handle ? () => handle.stopWatch() : undefined;
+          // Design §2: a user's resume delivers the session's pending
+          // transitions now instead of at the next tick. Read the timer at call
+          // time so a re-entry that replaced it is honoured, and never await —
+          // the watch's per-PR lock is not re-entrant.
+          (
+            app.locals as { prWatchDrainNow?: (cwd: string) => void }
+          ).prWatchDrainNow = (workspaceCwd) => {
+            void sessionPrRefreshTimer
+              ?.drainNow(workspaceCwd)
+              .catch((error: unknown) => {
+                daemonLog.warn(
+                  `PR watch resume drain failed: ${
+                    error instanceof Error ? error.message : String(error)
+                  }`,
+                );
+              });
+          };
         })
         .catch((error) => {
           // Degrade to "no PR-state sweep" instead of leaking an unhandled

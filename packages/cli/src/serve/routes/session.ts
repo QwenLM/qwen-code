@@ -319,6 +319,17 @@ interface RegisterSessionRoutesDeps {
   workspaceRegistry: WorkspaceRegistry;
   archiveCoordinator: SessionArchiveCoordinator;
   requestedSessionIdAdmission?: RequestedSessionIdAdmission;
+  /**
+   * Fired after a load/resume makes a session live, so the PR watch can deliver
+   * its pending transitions now instead of at the next tick (design §2). Never
+   * awaited: the watch's per-PR lock is not re-entrant, and a restore the drain
+   * itself dispatched must not wait on a drain.
+   */
+  onSessionRestored?: (input: {
+    runtime: WorkspaceRuntime;
+    workspaceCwd: string;
+    sessionId: string;
+  }) => void;
   mutate: (opts?: { strict?: boolean }) => RequestHandler;
   sendBridgeError: SendBridgeError;
   daemonLog?: DaemonLogger;
@@ -4075,6 +4086,17 @@ export function registerSessionRoutes(
         res
           .status(200)
           .json(redactSdkSurfaceReplay(outcome.session, runtime.trusted));
+        // The core's finally has already released the reservation and the
+        // worktree lock by the time it returns. Never awaited: the watch's
+        // per-PR lock is not re-entrant, and a restore the drain dispatched
+        // must not wait on a drain.
+        try {
+          deps.onSessionRestored?.({ runtime, workspaceCwd, sessionId });
+        } catch (err) {
+          daemonLog?.warn(
+            `session restored hook failed for ${sessionId}: ${String(err)}`,
+          );
+        }
       } catch (err) {
         if (err instanceof RequestedSessionIdAdmissionError) {
           sendRequestedSessionIdAdmissionError(res, err, route);
