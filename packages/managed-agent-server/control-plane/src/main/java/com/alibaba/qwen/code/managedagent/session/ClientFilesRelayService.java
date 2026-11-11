@@ -41,8 +41,11 @@ import java.util.concurrent.TimeUnit;
  * Ephemeral client filesystem registrations. The browser keeps its directory
  * grant and runs the MCP server; this service relays opaque JSON-RPC between
  * the Runtime and the browser through a bounded TTL queue. Registrations are
- * session state, not journal records: no file content, credential or directory
- * path is persisted or projected.
+ * session state, not journal records. The queue rows carry the size-bounded
+ * JSON-RPC bodies — which may include file content — only until they settle or
+ * expire, and are then deleted by the retention sweep; no credential or
+ * directory path is persisted, and no file content enters the journal or public
+ * events beyond the normal durable tool-result policy.
  */
 @Service
 public class ClientFilesRelayService {
@@ -179,7 +182,12 @@ public class ClientFilesRelayService {
         if (binding == null) {
             return null;
         }
-        return new Status(binding.serverId(), binding.generation(), binding.state(), binding.expiresAt());
+        // An expired binding can no longer serve (the credential and ownership
+        // checks refuse it by expiry), so report it closed even before the
+        // sweep flips the row.
+        String state = binding.expiresAt() <= System.currentTimeMillis()
+                ? ClientFilesModels.STATE_CLOSED : binding.state();
+        return new Status(binding.serverId(), binding.generation(), state, binding.expiresAt());
     }
 
     /**
@@ -352,11 +360,26 @@ public class ClientFilesRelayService {
         if (!settings.getClientFiles().isEnabled()) {
             return;
         }
-        relay.expireBefore(System.currentTimeMillis(), 64);
+        long now = System.currentTimeMillis();
+        // Drain the expiry backlog within a bounded total so a mass disconnect
+        // does not leave expired rows occupying queue slots for many ticks.
+        for (int batch = 0; batch < 16; batch++) {
+            if (relay.expireBefore(now, 64) < 64) {
+                break;
+            }
+        }
+        // Close bindings whose deadline passed so status stops reporting active
+        // for a credential the relay already refuses.
+        relay.closeExpiredBindings(now, 64);
+        // Drop settled rows past a retention cutoff that exceeds request-ttl, so
+        // answered rows stay readable until waiters settle but the bounded queue
+        // does not grow for the life of a long-lived Session.
+        long retention = settings.getClientFiles().getRequestTtl().toMillis() + 60_000;
+        relay.deleteSettledBefore(now - retention, 256);
     }
 
     private void enqueue(Binding binding, String requestId, String body, long now) {
-        if (relay.queuedCount(binding.tenantId(), binding.sessionId(), binding.generation())
+        if (relay.queuedCount(binding.tenantId(), binding.sessionId(), binding.generation(), now)
                 >= settings.getClientFiles().getQueueDepth()) {
             throw error(409, "client_files_queue_full");
         }

@@ -9625,7 +9625,7 @@
       "post": {
         "tags": ["WebShell"],
         "operationId": "registerWebShellClientFiles",
-        "description": "Registers the calling actor's client directory grant into the Session and issues the one-time relay credential for the Runtime MCP leg. Requires the deployment opt-in and current execution authority on the bound ACTIVE Workspace. Registration is ephemeral session state; no file content is persisted.",
+        "description": "Registers the calling actor's client directory grant into the Session and issues the one-time relay credential for the Runtime MCP leg. Requires the deployment opt-in and current execution authority on the bound ACTIVE Workspace. Registration is ephemeral session state: the bounded TTL queue holds the size-bounded JSON-RPC bodies (which may include file content) only until they settle or expire, no credential or directory path is persisted, and no file content enters the journal or public events beyond the normal durable tool-result policy.",
         "x-qwen-implementation-status": "implemented",
         "responses": {
           "200": {

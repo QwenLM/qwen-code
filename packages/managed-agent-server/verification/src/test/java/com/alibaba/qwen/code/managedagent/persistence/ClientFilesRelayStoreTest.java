@@ -117,7 +117,7 @@ class ClientFilesRelayStoreTest {
         tx(() -> store.register(tenant, session, actor, "local-files", "a".repeat(64), 9_000L, 1_000L));
         tx(() -> store.enqueue(tenant, session, 1L, "req-1", "{\"id\":\"req-1\"}", 9_000L, 1_000L));
         tx(() -> store.enqueue(tenant, session, 1L, "req-2", "{\"id\":\"req-2\"}", 9_000L, 1_100L));
-        assertThat(tx(() -> store.queuedCount(tenant, session, 1L))).isEqualTo(2);
+        assertThat(tx(() -> store.queuedCount(tenant, session, 1L, 2_000L))).isEqualTo(2);
         List<QueuedRequest> queued = tx(() -> store.queued(tenant, session, 1L, 10));
         assertThat(queued).extracting(QueuedRequest::requestId).containsExactly("req-1", "req-2");
         assertThatThrownBy(() -> tx(() -> store.enqueue(tenant, session, 1L, "req-1", "{}", 9_000L, 1_200L)))
@@ -132,7 +132,7 @@ class ClientFilesRelayStoreTest {
         assertThat(tx(() -> store.answer(tenant, session, 1L, "req-1", "{\"ok\":true}", 2_000L))).isTrue();
         assertThat(tx(() -> store.answer(tenant, session, 1L, "req-1", "{\"ok\":false}", 2_100L))).isFalse();
         assertThat(tx(() -> store.fail(tenant, session, 1L, "req-2", ClientFilesModels.ERROR_OFFLINE, 2_200L))).isTrue();
-        assertThat(tx(() -> store.queuedCount(tenant, session, 1L))).isZero();
+        assertThat(tx(() -> store.queuedCount(tenant, session, 1L, 2_000L))).isZero();
         assertThat(jdbc.queryForObject("SELECT response_json FROM ma_client_files_request WHERE request_id='req-1'",
                 String.class)).isEqualTo("{\"ok\":true}");
         assertThat(jdbc.queryForObject("SELECT error_code FROM ma_client_files_request WHERE request_id='req-2'",
@@ -146,7 +146,7 @@ class ClientFilesRelayStoreTest {
         tx(() -> store.register(tenant, session, actor, "local-files", "b".repeat(64), 19_000L, 2_000L));
         tx(() -> store.enqueue(tenant, session, 2L, "req-2", "{}", 19_000L, 2_000L));
         assertThat(tx(() -> store.failQueued(tenant, session, 1L, ClientFilesModels.ERROR_OFFLINE, 3_000L))).isEqualTo(1);
-        assertThat(tx(() -> store.queuedCount(tenant, session, 2L))).isEqualTo(1);
+        assertThat(tx(() -> store.queuedCount(tenant, session, 2L, 3_000L))).isEqualTo(1);
     }
 
     @Test
@@ -160,7 +160,49 @@ class ClientFilesRelayStoreTest {
         assertThat(tx(() -> store.expireBefore(2_000L, 10))).isEqualTo(1);
         assertThat(jdbc.queryForObject("SELECT state FROM ma_client_files_request WHERE request_id='req-3'",
                 String.class)).isEqualTo(ClientFilesModels.REQUEST_ANSWERED);
-        assertThat(tx(() -> store.queuedCount(tenant, session, 1L))).isZero();
+        assertThat(tx(() -> store.queuedCount(tenant, session, 1L, 2_000L))).isZero();
+    }
+
+    @Test
+    void queuedCountExcludesExpiredButUnwalkedRows() {
+        tx(() -> store.register(tenant, session, actor, "local-files", "a".repeat(64), 9_000L, 1_000L));
+        tx(() -> store.enqueue(tenant, session, 1L, "req-1", "{}", 1_500L, 1_000L));
+        // Still state=queued (the sweep has not run), but past its deadline: it
+        // must not occupy a queue slot.
+        assertThat(tx(() -> store.queuedCount(tenant, session, 1L, 2_000L))).isZero();
+        assertThat(tx(() -> store.queuedCount(tenant, session, 1L, 1_000L))).isEqualTo(1);
+    }
+
+    @Test
+    void closeExpiredBindingsClosesOnlyOverdueActiveBindings() {
+        tx(() -> store.register(tenant, session, actor, "local-files", "a".repeat(64), 5_000L, 1_000L));
+        tx(() -> store.register(tenant, "session-2", actor, "local-files", "b".repeat(64), 20_000L, 1_000L));
+        assertThat(tx(() -> store.closeExpiredBindings(10_000L, 10))).isEqualTo(1);
+        assertThat(tx(() -> store.find(tenant, session)).state()).isEqualTo(ClientFilesModels.STATE_CLOSED);
+        assertThat(tx(() -> store.find(tenant, "session-2")).state()).isEqualTo(ClientFilesModels.STATE_ACTIVE);
+        // Idempotent: a closed binding is not counted again.
+        assertThat(tx(() -> store.closeExpiredBindings(10_000L, 10))).isZero();
+    }
+
+    @Test
+    void deleteSettledBeforeDropsOnlyOldSettledRows() {
+        tx(() -> store.register(tenant, session, actor, "local-files", "a".repeat(64), 9_000L, 1_000L));
+        tx(() -> store.enqueue(tenant, session, 1L, "answered", "{}", 9_000L, 1_000L));
+        tx(() -> store.answer(tenant, session, 1L, "answered", "{}", 1_000L));
+        tx(() -> store.enqueue(tenant, session, 1L, "failed", "{}", 9_000L, 1_000L));
+        tx(() -> store.fail(tenant, session, 1L, "failed", ClientFilesModels.ERROR_OFFLINE, 1_000L));
+        tx(() -> store.enqueue(tenant, session, 1L, "recent", "{}", 9_000L, 1_000L));
+        tx(() -> store.answer(tenant, session, 1L, "recent", "{}", 8_000L));
+        tx(() -> store.enqueue(tenant, session, 1L, "queued", "{}", 9_000L, 1_000L));
+        // Cutoff 5_000: the rows settled at 1_000 go; the row settled at 8_000
+        // and the still-queued row stay.
+        assertThat(tx(() -> store.deleteSettledBefore(5_000L, 10))).isEqualTo(2);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_client_files_request", Integer.class))
+                .isEqualTo(2);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_client_files_request WHERE request_id='queued'",
+                Integer.class)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_client_files_request WHERE request_id='recent'",
+                Integer.class)).isEqualTo(1);
     }
 
     @Test

@@ -197,8 +197,8 @@
       "type": "duration"
     },
     "qwen.managed-agent.client-files.enabled": {
-      "en": "Whether a Managed Web Shell user may register a client directory into a Session and let the agent use its file tools through the control-plane relay. Off by default; while off, every client-files route refuses registration and no relay state is created. Client file content never enters the session journal or public events.",
-      "zh": "是否允许 Managed Web Shell 用户把客户端目录注册进 Session，让 agent 经控制面 relay 使用其文件工具。默认关闭；关闭时所有 client-files 路由拒绝注册，不创建任何 relay 状态。客户端文件内容绝不进入会话 journal 或公共事件。"
+      "en": "Whether a Managed Web Shell user may register a client directory into a Session and let the agent use its file tools through the control-plane relay. Off by default; while off, every client-files route refuses registration and no relay state is created. Client file content never enters the session journal or public events; the relay's bounded TTL queue holds the size-bounded JSON-RPC request/response bodies (which may include file content) only until they settle or expire, then deletes them.",
+      "zh": "是否允许 Managed Web Shell 用户把客户端目录注册进 Session，让 agent 经控制面 relay 使用其文件工具。默认关闭；关闭时所有 client-files 路由拒绝注册，不创建任何 relay 状态。客户端文件内容绝不进入会话 journal 或公共事件；relay 的有界 TTL 队列仅在受大小限制的 JSON-RPC 请求/响应体（可能含文件内容）结算或过期前暂存，随后删除。"
     },
     "qwen.managed-agent.client-files.max-payload-bytes": {
       "en": "The largest JSON-RPC request or response body, in bytes, the relay forwards between the Runtime and the browser; a larger payload is refused with a structured error. Aligns with the worker MCP result cap by default (60 KiB).",

@@ -33,7 +33,7 @@ public interface ClientFilesRelay {
     void enqueue(String tenantId, String sessionId, long generation, String requestId,
             String payloadJson, long expiresAt, long now);
 
-    int queuedCount(String tenantId, String sessionId, long generation);
+    int queuedCount(String tenantId, String sessionId, long generation, long now);
 
     List<QueuedRequest> queued(String tenantId, String sessionId, long generation, int limit);
 
@@ -48,6 +48,12 @@ public interface ClientFilesRelay {
     int failQueued(String tenantId, String sessionId, long generation, String errorCode, long now);
 
     int expireBefore(long now, int limit);
+
+    /** Closes active bindings whose deadline has passed; returns the count. */
+    int closeExpiredBindings(long now, int limit);
+
+    /** Deletes settled request rows older than the retention cutoff. */
+    int deleteSettledBefore(long cutoff, int limit);
 
     void deleteSession(String tenantId, String sessionId);
 }

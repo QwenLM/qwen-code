@@ -311,6 +311,23 @@ public class ManagedAgentProperties
         }
     }
 
+    // The Harness reaches the relay MCP endpoint on this server's internal
+    // listener, so the relay URL derives from it the way the store URL does.
+    // Enabling the feature with no derivable URL fails the boot rather than
+    // answering 503 on every registration with no diagnostic.
+    private void applyClientFilesDefaults() {
+        if (!clientFiles.isEnabled()) {
+            return;
+        }
+        if (StringUtils.isBlank(clientFiles.getRelayUrl()) && environment != null) {
+            clientFiles.setRelayUrl(localStoreBaseUrl());
+        }
+        if (StringUtils.isBlank(clientFiles.getRelayUrl())) {
+            throw new IllegalStateException("client-files.enabled requires client-files.relay-url"
+                    + " (or an internal listener to derive it from)");
+        }
+    }
+
     private String localStoreBaseUrl() {
         boolean internal = internalServer.getPort() > 0;
         int port = internal ? internalServer.getPort()
@@ -333,6 +350,7 @@ public class ManagedAgentProperties
     @PostConstruct
     void validateWorkspaceFiles() {
         applySessionStoreDefaults();
+        applyClientFilesDefaults();
         applyHarnessCredentialsFile();
         // The sweep runs first, so a bare milliseconds-style override
         // warns with the unit hint before the range check below fails the

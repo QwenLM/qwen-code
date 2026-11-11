@@ -4,8 +4,11 @@
 
 ## 状态
 
-提案，2026-11-10。未批准、未实现。调研基线：分支 `x5`，提交 `488845a4a81`。
-下文所有「现状」结论均读自该树；实现时须对当时的 main 重新核实。
+已实现，2026-11-11（PR #16844）。relay、harness 本地 MCP 客户端、Web Shell
+桥接与三进程联合集成测试均已交付，并在一次性 MySQL 上通过验证。调研基线：
+分支 `x5`，提交 `488845a4a81`；下文「现状」结论均读自该树。交付的拓扑把
+relay MCP 客户端放在 **harness**（`HostedClientFilesSession`），而非 worker——
+见开放问题 1，worker 的 journal-grant 门控对临时注册排除了该路径。
 
 ## 问题
 
@@ -68,8 +71,9 @@ catalog 单类上限 `16 KiB`。
   作用域为单个 Session 与单个 actor。
 - 对客户端文件的写操作走 Hosted 审批路径。
 - 不新增 WebSocket 基础设施、不引入 CDP、不改 Hosted Harness profile 禁令。
-  relay 状态（绑定、排队请求、凭据）绝不持久化客户端文件内容；工具参数与
-  结果遵循会话常规持久工具结果策略（决策 6）。
+  relay 绑定元数据与凭据绝不持久化客户端文件内容；有界 TTL 队列仅在受大小
+  限制的 JSON-RPC 体（可能含文件内容）结算或过期前暂存。工具参数与结果遵循
+  会话常规持久工具结果策略（决策 6）。
 
 ## 非目标
 
@@ -95,8 +99,8 @@ Java 用临时 SSE 下行 + POST 上行把两者接起来。
 Java 控制面 — Client Files Relay
   会话级绑定、请求队列、授权复查、限额
     ▲ Streamable HTTP MCP（会话 relay token）
-Hosted Harness worker — ManagedMcpRuntime
-  临时会话定义：transport=streamable-http，
+Hosted Harness — HostedClientFilesSession（harness 本地）
+  临时会话客户端：transport=streamable-http，
   url=relay 内部端点，headers={relay token}
 ```
 
@@ -108,14 +112,15 @@ Hosted Harness worker — ManagedMcpRuntime
    校验 actor 对该 Session 所属 Workspace 的执行授权，创建绑定
    `(tenant, workspace, session, actor, connection generation)`，签发短时效
    会话 relay token。
-3. Java 指示该 Session 的 Runtime（内部、服务鉴权路由）为本 Session 安装一个
-   **临时** MCP 定义：`transport: 'streamable-http'`，`url` = relay 内部 MCP
-   端点，`headers` = relay token。worker 跑现有 configure/discover 握手；
-   `tools/list` 经 relay 到浏览器再返回。
+3. Java 指示该 Session 的 harness（内部、服务鉴权的 `client-files` 路由）连接
+   一个**临时** harness 本地 MCP 客户端（`HostedClientFilesSession`）：
+   `transport: 'streamable-http'`，`url` = relay 内部 MCP 端点，`headers` =
+   relay token。harness 跑 configure/discover 握手；`tools/list` 经 relay 到
+   浏览器再返回。worker 不变（开放问题 1）。
 4. Java 以发现的工具数确认注册；UI 显示已连接状态，对齐 `LocalFilesControl`
    的阶段模型。
-5. Turn 中的工具调用走 `mcp-invoke` → relay → 浏览器 → relay → worker，受
-   下文限额约束。写工具在 invoke 分发前要求 Hosted 审批。
+5. Turn 中的工具调用走 harness 本地 invoke → relay → 浏览器 → relay →
+   harness，受下文限额约束。写工具在 invoke 分发前要求 Hosted 审批。
 
 ### 拆除与失败
 
@@ -135,11 +140,12 @@ Hosted Harness worker — ManagedMcpRuntime
 持久化为 configuration，会让用户每次关标签页都留下搁浅的恢复状态。
 
 决定：client-files 注册是**临时会话状态**。不创建 `mcp_configuration` 行、
-不创建 extension 记录、不产生携带文件内容的公共事件。worker 仅在内存保存
-定义与 catalog；控制面保存绑定元数据（id、generation、时间戳——token 绝不
-明文、文件内容绝不保存）。临时 catalog 汇入 `HostedWorkspaceToolTurn`
-（今天由 `HostedMcpSession.tools()` 供给）的具体内存路径，是 runtime 切片
-要敲定的实现决策；它不得加宽持久 MCP 路径。
+不创建 extension 记录、不产生携带文件内容的公共事件。harness 仅在内存保存
+定义与 catalog（`HostedClientFilesSession`）；控制面保存绑定元数据（id、
+generation、时间戳——token 绝不明文、目录路径绝不保存），外加一个有界 TTL
+队列，其行仅在受大小限制的 JSON-RPC 体（可能含文件内容）结算或过期前暂存，
+随后由保留期清扫删除。临时 catalog 汇入 `HostedWorkspaceToolTurn`，与
+`HostedMcpSession.tools()` 并列，不加宽持久 MCP 路径。
 
 ### 多节点路由
 
@@ -232,14 +238,15 @@ IT（切片 4）实证。
 ## 验证计划
 
 - TypeScript 单测：relay 传输适配器（请求/响应配对、重连、离线错误）、
-  `ManagedMcpRuntime` 临时定义安装/丢弃、工具 turn 的 catalog 汇入与摘除、
-  fail-closed 路径。每个守卫做变异钉：删掉离线错误、授权复查或所有权栅栏，
-  必须让指名用例变红。
+  `HostedClientFilesSession` 临时定义安装/丢弃、工具 turn 的 catalog 汇入与
+  摘除、fail-closed 路径。每个守卫做变异钉：删掉离线错误、授权复查或所有权
+  栅栏，必须让指名用例变红。
 - Java 测试：每条新路由的 OpenAPI 契约 + SurfaceRegistry 条目；准入测试
   （匿名、跨租户、只读 actor、未知会话、draining 会话）；队列 TTL/溢出；
-  token 卫生（任何持久行与下发事件不含 token 或文件内容）。
-- 集成：扩展 `HostedMcp*IT` 家族，加 client-files relay 夹具——浏览器夹具 ↔
-  Java ↔ 真实 worker——覆盖注册 → 发现 → 读 → 经审批的写 → 断开 → 结构化
+  token 卫生（任何持久行与下发事件不含 token 或目录路径；队列体受 TTL 约束，
+  结算后删除）。
+- 集成：扩展 `Hosted*IT` 家族，加 client-files relay 夹具——浏览器夹具 ↔
+  Java ↔ 真实 harness——覆盖注册 → 发现 → 读 → 经审批的写 → 断开 → 结构化
   失败，以及 harness 重启后重新注册、流中途撤销授权。
 - `.qwen/e2e-tests/` 下的 E2E 测试计划：真实浏览器（Chromium）驱动 Managed
   Web Shell 打一次性控制面；先 dry-run 基线。不可用的联合门禁如实记录。
@@ -254,10 +261,11 @@ IT（切片 4）实证。
 2. 关标签页摘除工具，在途调用以 `client_files_offline` 失败；任何调用绝不
    以 Workspace 存储为回退。
 3. 撤销 actor 授权在复查间隔内停止请求投递；只读 actor 不能注册。
-4. relay 状态（绑定、排队请求、凭据）不持久化客户端文件内容；持久事件、
-   Items、投影、日志、metrics 中不出现 relay token 或目录路径。client-files
-   工具参数与结果遵循会话常规持久工具结果策略（决策 6），与 Workspace 工具
-   结果受同样的租户隔离与读授权保护。
+4. relay 绑定元数据与凭据不持久化客户端文件内容；有界 TTL 队列仅在受大小
+   限制的 JSON-RPC 体（可能含文件内容）结算或过期前暂存，随后删除。持久
+   事件、Items、投影、日志、metrics 中不出现 relay token 或目录路径。
+   client-files 工具参数与结果遵循会话常规持久工具结果策略（决策 6），与
+   Workspace 工具结果受同样的租户隔离与读授权保护。
 5. Harness 重启不留下搁浅恢复状态；UI 提供重连，新手势重新注册成功。
 6. 所有新路由通过 OpenAPI 契约与 SurfaceRegistry 门禁；功能开关默认 OFF，
    关闭部署的行为与今天逐字节一致。

@@ -42252,4 +42252,84 @@ describe('client files registration route', () => {
       );
     }
   });
+
+  it('admits unregister during a blocked Turn but still refuses register', async () => {
+    const { peer, url } = await relayPeer();
+    const server = await app(true);
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+      toolProfile: 'hosted-workspace-files/1',
+    });
+    expect(created.status).toBe(200);
+    const clientId = created.body.clientId as string;
+    try {
+      const dispatch = JSON.parse(
+        await readFile(
+          new URL(
+            '../../../managed-agent-server/verification/src/test/resources/clientfiles/dispatch-register.json',
+            import.meta.url,
+          ),
+          'utf8',
+        ),
+      ) as Record<string, unknown>;
+      const registered = await headers(
+        supertest(server).post(`/session/${SESSION_ID}/client-files`),
+      )
+        .set('X-Qwen-Client-Id', clientId)
+        .send({ ...dispatch, url });
+      expect(registered.status).toBe(200);
+
+      // Park a Turn so the Session is blocked (an active Turn would gate
+      // register); unregister must still be admitted so the catalog does not
+      // outlive the binding.
+      state.model.mockRejectedValueOnce(
+        new HostedToolRecoveryRequiredError(new Error('store gone')),
+      );
+      const prompt = [{ type: 'text', text: 'hello' }];
+      await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+        .set('X-Qwen-Client-Id', clientId)
+        .send({
+          prompt,
+          promptId: PROMPT_ID,
+          payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+        })
+        .expect(202);
+      await vi.waitFor(
+        async () => {
+          const status = await headers(
+            supertest(server).get(`/session/${SESSION_ID}/status`),
+          ).set('X-Qwen-Client-Id', clientId);
+          expect(status.body.recoveryBlocked).toBe(true);
+        },
+        { timeout: settleTimeoutMs() },
+      );
+
+      const blockedRegister = await headers(
+        supertest(server).post(`/session/${SESSION_ID}/client-files`),
+      )
+        .set('X-Qwen-Client-Id', clientId)
+        .send({ ...dispatch, url, generation: 2 });
+      expect(blockedRegister.status).toBe(409);
+      expect(blockedRegister.body.code).toBe('hosted_turn_active');
+
+      const unregistered = await headers(
+        supertest(server).post(`/session/${SESSION_ID}/client-files`),
+      )
+        .set('X-Qwen-Client-Id', clientId)
+        .send({ action: 'unregister' });
+      expect(unregistered.status).toBe(200);
+      expect(unregistered.body.registered).toBe(false);
+    } finally {
+      await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
+        'X-Qwen-Client-Id',
+        clientId,
+      );
+      await new Promise<void>((resolve) => {
+        peer.close(() => resolve());
+        peer.closeAllConnections();
+      });
+    }
+  });
 });

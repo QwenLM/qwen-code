@@ -4,9 +4,13 @@
 
 ## Status
 
-Proposal, 2026-11-10. Not approved, not implemented. Investigation baseline:
-branch `x5` at `488845a4a81`. Every "current state" claim below was read from
-that tree; implementation must re-verify against the then-current main.
+Implemented, 2026-11-11 (PR #16844). The relay, the harness-local MCP client,
+the Web Shell bridge, and the three-process joint integration test are
+delivered and qualified on a disposable MySQL. Investigation baseline: branch
+`x5` at `488845a4a81`; the "current state" claims below were read from that
+tree. The topology as delivered places the relay MCP client in the **harness**
+(`HostedClientFilesSession`), not the worker — see open question 1, which the
+worker's journal-grant gating rules out for an ephemeral registration.
 
 ## Problem
 
@@ -78,9 +82,11 @@ per-request timeout ceiling `600 s`, catalog category cap `16 KiB`.
   Session and one actor.
 - Write operations on client files go through the Hosted approval path.
 - No new WebSocket infrastructure, no CDP, no change to the Hosted Harness
-  profile prohibitions. Relay state (bindings, queued requests, credentials)
-  never persists client file content; tool arguments and results follow the
-  Session's normal durable tool-result policy (decision 6).
+  profile prohibitions. Relay binding metadata and credentials never persist
+  client file content; the bounded TTL queue holds the size-bounded JSON-RPC
+  bodies (which may include file content) only until they settle or expire.
+  Tool arguments and results follow the Session's normal durable tool-result
+  policy (decision 6).
 
 ## Non-goals
 
@@ -108,8 +114,8 @@ Browser (Managed Web Shell)
 Java control plane — Client Files Relay
   session-scoped binding, request queue, grant recheck, caps
     ▲ Streamable HTTP MCP (session relay token)
-Hosted Harness worker — ManagedMcpRuntime
-  ephemeral session definition: transport=streamable-http,
+Hosted Harness — HostedClientFilesSession (harness-local)
+  ephemeral session client: transport=streamable-http,
   url=relay internal endpoint, headers={relay token}
 ```
 
@@ -121,17 +127,17 @@ Hosted Harness worker — ManagedMcpRuntime
    Session id. Java checks the actor's execution grant on the Session's
    Workspace, creates a binding `(tenant, workspace, session, actor,
 connection generation)`, and issues a short-lived session relay token.
-3. Java instructs the Session's Runtime (internal, service-authenticated
-   route) to install an **ephemeral** MCP definition for this Session:
-   `transport: 'streamable-http'`, `url` = the relay's internal MCP endpoint,
-   `headers` = the relay token. The worker runs the existing
-   configure/discover handshake; `tools/list` travels through the relay to
-   the browser and back.
+3. Java instructs the Session's harness (internal, service-authenticated
+   `client-files` route) to connect an **ephemeral** harness-local MCP client
+   (`HostedClientFilesSession`): `transport: 'streamable-http'`, `url` = the
+   relay's internal MCP endpoint, `headers` = the relay token. The harness
+   runs the configure/discover handshake; `tools/list` travels through the
+   relay to the browser and back. The worker is unchanged (open question 1).
 4. Java acks the registration with the discovered tool count; the UI shows
    the connected state, mirroring `LocalFilesControl` phases.
-5. Tool calls during a Turn flow `mcp-invoke` → relay → browser → relay →
-   worker, subject to the caps below. Write tools require Hosted approval
-   before the invoke is dispatched.
+5. Tool calls during a Turn flow harness-local invoke → relay → browser →
+   relay → harness, subject to the caps below. Write tools require Hosted
+   approval before the invoke is dispatched.
 
 ### Teardown and failure
 
@@ -158,12 +164,14 @@ configuration would strand recovery states every time a user closes a tab.
 
 Decision: client-files registrations are **ephemeral session state**. They
 create no `mcp_configuration` rows, no extension records, and no public
-events carrying file content. The worker keeps the definition and catalog in
-memory only; the control plane keeps binding metadata (ids, generation,
-timestamps — never tokens in plaintext, never file content). The exact
-in-memory catalog contribution path into `HostedWorkspaceToolTurn`
-(today fed by `HostedMcpSession.tools()`) is an implementation decision to
-finalize in the runtime slice; it must not widen the durable MCP path.
+events carrying file content. The harness keeps the definition and catalog in
+memory only (`HostedClientFilesSession`); the control plane keeps binding
+metadata (ids, generation, timestamps — never tokens in plaintext, never the
+directory path) plus a bounded TTL queue whose rows carry the size-bounded
+JSON-RPC bodies (which may include file content) only until they settle or
+expire, after which the retention sweep deletes them. The in-memory catalog
+contributes into `HostedWorkspaceToolTurn` beside `HostedMcpSession.tools()`
+without widening the durable MCP path.
 
 ### Multi-node routing
 
@@ -289,15 +297,16 @@ Per the repository's route-ownership rule:
 
 - TypeScript unit tests: relay transport adapter (request/response pairing,
   reconnect, offline errors), ephemeral definition install/drop in
-  `ManagedMcpRuntime`, catalog contribution and removal in the tool turn,
-  fail-closed paths. Mutation-pin each guard: removing the offline error, the
-  grant recheck, or the ownership fence must turn a named test red.
+  `HostedClientFilesSession`, catalog contribution and removal in the tool
+  turn, fail-closed paths. Mutation-pin each guard: removing the offline error,
+  the grant recheck, or the ownership fence must turn a named test red.
 - Java tests: OpenAPI contract + SurfaceRegistry entries for every new
   route; admission tests (anonymous, cross-tenant, read-only actor, unknown
   session, draining session); queue TTL/overflow; token hygiene (no token or
-  file content in any persisted row or emitted event).
-- Integration: extend the `HostedMcp*IT` family with a client-files relay
-  fixture — browser fixture ↔ Java ↔ real worker — covering register →
+  directory path in any persisted row or emitted event; queue bodies are
+  TTL-bounded and deleted on settlement).
+- Integration: extend the `Hosted*IT` family with a client-files relay
+  fixture — browser fixture ↔ Java ↔ real harness — covering register →
   discover → read → approved write → disconnect → structured failure, plus
   harness-restart re-registration and grant-revocation mid-stream.
 - E2E test plan under `.qwen/e2e-tests/` with a real browser (Chromium)
@@ -318,12 +327,13 @@ Per the repository's route-ownership rule:
    fallback.
 3. Revoking the actor's grant stops request delivery within the recheck
    interval; a read-only actor cannot register.
-4. Relay state (bindings, queued requests, credentials) persists no client
-   file content, and no relay token or directory path appears in durable
-   events, items, projections, logs, or metrics. Client-files tool arguments
-   and results follow the Session's normal durable tool-result policy
-   (decision 6), under the same tenant isolation and read grants as
-   Workspace tool results.
+4. Relay binding metadata and credentials persist no client file content; the
+   bounded TTL queue holds the size-bounded JSON-RPC bodies (which may include
+   file content) only until they settle or expire, then deletes them. No relay
+   token or directory path appears in durable events, items, projections, logs,
+   or metrics. Client-files tool arguments and results follow the Session's
+   normal durable tool-result policy (decision 6), under the same tenant
+   isolation and read grants as Workspace tool results.
 5. Harness restart leaves no stranded recovery state; the UI offers
    reconnect and re-registration succeeds with a fresh gesture.
 6. All new routes pass the OpenAPI contract and SurfaceRegistry gates; the

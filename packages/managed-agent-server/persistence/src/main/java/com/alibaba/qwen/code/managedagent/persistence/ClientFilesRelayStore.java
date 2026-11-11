@@ -123,11 +123,14 @@ public class ClientFilesRelayStore implements ClientFilesRelay {
     }
 
     @Override
-    public int queuedCount(String tenantId, String sessionId, long generation) {
+    public int queuedCount(String tenantId, String sessionId, long generation, long now) {
+        // An expired-but-unwalked row must not occupy a queue slot, so the
+        // depth check excludes rows past their deadline as well as settled ones.
         Integer count = jdbc.queryForObject("SELECT COUNT(*) FROM ma_client_files_request"
-                        + " WHERE session_scope_key=? AND binding_generation=? AND state=?",
+                        + " WHERE session_scope_key=? AND binding_generation=? AND state=?"
+                        + " AND expires_at>?",
                 Integer.class, ManagedSchemaKeys.key(tenantId, sessionId), generation,
-                ClientFilesModels.REQUEST_QUEUED);
+                ClientFilesModels.REQUEST_QUEUED, now);
         return count == null ? 0 : count;
     }
 
@@ -142,10 +145,14 @@ public class ClientFilesRelayStore implements ClientFilesRelay {
 
     @Override
     public QueuedRequest request(String tenantId, String sessionId, long generation, String requestId) {
+        // Resolve by the unique request_key (the same derivation enqueue uses)
+        // so the waiter poller hits the business-key index instead of scanning
+        // the Session's whole request history on every tick.
+        String requestKey = ManagedSchemaKeys.key(
+                ManagedSchemaKeys.key(tenantId, sessionId), generation + ":" + requestId);
         List<QueuedRequest> rows = jdbc.query("SELECT " + REQUEST_COLUMNS
-                        + " FROM ma_client_files_request WHERE session_scope_key=?"
-                        + " AND binding_generation=? AND request_id=?",
-                REQUEST_MAPPER, ManagedSchemaKeys.key(tenantId, sessionId), generation, requestId);
+                        + " FROM ma_client_files_request WHERE request_key=?",
+                REQUEST_MAPPER, requestKey);
         return rows.isEmpty() ? null : rows.get(0);
     }
 
@@ -183,6 +190,21 @@ public class ClientFilesRelayStore implements ClientFilesRelay {
         return jdbc.update("UPDATE ma_client_files_request SET state=?,gmt_modified=?"
                         + " WHERE state=? AND expires_at<=? LIMIT ?",
                 ClientFilesModels.REQUEST_EXPIRED, now, ClientFilesModels.REQUEST_QUEUED, now, limit);
+    }
+
+    @Override
+    public int closeExpiredBindings(long now, int limit) {
+        return jdbc.update("UPDATE ma_client_files_binding SET state=?,gmt_modified=?"
+                        + " WHERE state=? AND expires_at<=? LIMIT ?",
+                ClientFilesModels.STATE_CLOSED, now, ClientFilesModels.STATE_ACTIVE, now, limit);
+    }
+
+    @Override
+    public int deleteSettledBefore(long cutoff, int limit) {
+        return jdbc.update("DELETE FROM ma_client_files_request WHERE state IN (?,?,?)"
+                        + " AND gmt_modified<? LIMIT ?",
+                ClientFilesModels.REQUEST_ANSWERED, ClientFilesModels.REQUEST_FAILED,
+                ClientFilesModels.REQUEST_EXPIRED, cutoff, limit);
     }
 
     @Override

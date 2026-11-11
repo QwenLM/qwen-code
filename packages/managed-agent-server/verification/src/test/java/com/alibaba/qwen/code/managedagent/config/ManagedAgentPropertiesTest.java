@@ -110,6 +110,29 @@ public class ManagedAgentPropertiesTest {
     }
 
     @Test
+    void clientFilesEnabledWithoutADerivableRelayUrlFailsTheBoot() {
+        var properties = new ManagedAgentProperties();
+        properties.getClientFiles().setEnabled(true);
+        // No relay-url and no environment to derive one from: the boot must
+        // refuse rather than answer 503 on every registration silently.
+        assertThatThrownBy(properties::validateWorkspaceFiles)
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("client-files.relay-url");
+        properties.getClientFiles().setRelayUrl("http://127.0.0.1:4170");
+        assertThatCode(properties::validateWorkspaceFiles).doesNotThrowAnyException();
+    }
+
+    @Test
+    void clientFilesRelayUrlDerivesFromTheInternalListener() {
+        var properties = new ManagedAgentProperties();
+        properties.setEnvironment(new org.springframework.mock.env.MockEnvironment());
+        properties.getInternalServer().setPort(4170);
+        properties.getClientFiles().setEnabled(true);
+        assertThatCode(properties::validateWorkspaceFiles).doesNotThrowAnyException();
+        assertThat(properties.getClientFiles().getRelayUrl()).isEqualTo("http://127.0.0.1:4170");
+    }
+
+    @Test
     void preflightValidatesTheSelectedProviderAfterLoadingHarnessCredentials(@TempDir Path directory) throws Exception {
         for (String digest : List.of("SHA256:" + "A".repeat(64), "sha256:" + "a".repeat(64))) {
             var properties = new ManagedAgentProperties();

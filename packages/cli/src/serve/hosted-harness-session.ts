@@ -9273,14 +9273,17 @@ export function registerHostedHarnessSessionRoutes(
   app.post('/session/:id/client-files', async (req, res) => {
     const session = identity(req, sessions);
     if (!session) return error(res, 404, 'hosted_session_not_found');
-    if (session.active || session.blocked)
-      return error(res, 409, 'hosted_turn_active');
     const body = object(req.body);
     const action = body?.['action'];
     if (action === 'unregister') {
+      // Unregister is admitted during a Turn: it only drops the catalog and
+      // connection so later Turns stop advertising tools whose binding is
+      // gone. Only register needs the idle gate.
       await session.clientFiles?.unregister();
       return res.json({ registered: false });
     }
+    if (session.active || session.blocked)
+      return error(res, 409, 'hosted_turn_active');
     if (action !== 'register')
       return error(res, 400, 'invalid_client_files_action');
     const serverId = body?.['serverId'];
