@@ -15,7 +15,9 @@ import type { ManagedSessionKey } from './managed-session-records.js';
 export const MANAGED_TERMINAL_ROUTE = '/internal/managed-runtime/v3/terminals';
 
 interface Identity {
-  readonly sessionKey: ManagedSessionKey;
+  // A terminal is addressed by tenant + Session (the Session is the workspace
+  // selector); unlike a Turn it carries no separate workspaceId.
+  readonly sessionKey: Pick<ManagedSessionKey, 'tenantId' | 'sessionId'>;
   readonly operationId: string;
 }
 
