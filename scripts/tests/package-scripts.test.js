@@ -1140,6 +1140,32 @@ describe('package scripts', () => {
     expect(Number(pnpmCap)).toBeGreaterThanOrEqual(Number(buildCap));
   });
 
+  it('keeps the web-shell build heap cap wrapping the whole build chain', () => {
+    const webshellPkg = JSON.parse(
+      readFileSync(
+        path.join(root, 'packages/web-shell', 'package.json'),
+        'utf8',
+      ),
+    );
+    const { build } = webshellPkg.scripts;
+    const cap = heapCap(build);
+    expect(cap).toBeDefined();
+    // #16859: the v0.27.2 VSCode companion release OOMed on both macOS legs
+    // (run 42884546167) — V8's default heap is 2 GiB on runners below 15 GB
+    // of RAM, while the web-shell build peaks at ~2.05-2.25 GB. Repro
+    // bracketed the minimum viable cap in (2048, 2176] MB; 4096 gives ~2x
+    // headroom.
+    expect(Number(cap)).toBeGreaterThanOrEqual(4096);
+    // The cap must wrap the whole chain: cross-env only on the head of an
+    // `a && b` script drops every later step back to the default heap, so
+    // build must be exactly cross-env wrapping the build:steps delegate —
+    // any inserted or appended step would escape the raised cap.
+    expect(build).toMatch(
+      /^cross-env NODE_OPTIONS="--max-old-space-size=\d+" npm run build:steps$/,
+    );
+    expect(webshellPkg.scripts['build:steps']).toBeDefined();
+  });
+
   it('selects the CLI dependency closure without selecting the same-named root', () => {
     const buildScript = readFileSync(
       path.join(root, 'scripts/build.js'),
@@ -1235,7 +1261,7 @@ describe('package scripts', () => {
     // exactly one shard. The lane script's own test injects the variable into
     // its stub env, so it proves the script obeys it and nothing else proves
     // CI sets it: flipping this to a constant, inverting it, or dropping it
-    // while resolving a conflict runs the regression on seven wrong shards or
+    // while resolving a conflict runs the regression on one wrong shard or
     // nowhere, and the only CI coverage of that suite goes with it.
     expect(step).toContain(
       "QWEN_CI_SKIP_STANDALONE_RUNTIMES: \"${{ matrix.shard != 1 && '1' || '' }}\"",

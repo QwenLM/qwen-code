@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.RuntimeBroker.WorkspaceMount;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.StorageIdentityReader;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
@@ -136,12 +137,12 @@ class LocalStorageAliasTest {
     void maintenanceAliasesAreExclusiveAndOldStepCannotReleaseTheSuccessor() {
         var first = binding("tenant", "storage");
         var second = binding("other-tenant", "other-storage");
-        var children = new ChildWorkspaceStore(jdbc, manager);
+        var children = new JdbcChildWorkspaceStore(jdbc, manager);
         var firstRow = children.admit("tenant", "parent", "run", first, System.currentTimeMillis());
         var secondRow = children.admit("other-tenant", "parent", "run", second, System.currentTimeMillis());
         var firstClaim = children.claim(firstRow, "first-worker", System.currentTimeMillis(), 60_000);
         var secondClaim = children.claim(secondRow, "second-worker", System.currentTimeMillis(), 60_000);
-        var authority = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new WorkspaceExecutionStore(jdbc, manager));
+        var authority = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new JdbcWorkspaceExecutionStore(jdbc, manager));
         String step = authority.holdForMaintenance(first, firstRow.childWorkspaceId(), firstClaim.claimGeneration());
         assertThatThrownBy(() -> authority.holdForMaintenance(second, secondRow.childWorkspaceId(), secondClaim.claimGeneration()))
                 .isInstanceOfSatisfying(RuntimeBrokerException.class, error -> assertThat(error.getCode()).isEqualTo("workspace_busy"));
@@ -258,7 +259,7 @@ class LocalStorageAliasTest {
     @Test
     void physicalFenceRefusesNewChildWorkOnEveryAlias() {
         guard.fence("tenant", "storage", 1, UUID.randomUUID().toString());
-        var children = new ChildWorkspaceStore(jdbc, manager);
+        var children = new JdbcChildWorkspaceStore(jdbc, manager);
         assertThatThrownBy(() -> children.admit("other-tenant", "parent", "run", binding("other-tenant", "other-storage"), System.currentTimeMillis()))
                 .isInstanceOf(RuntimeBrokerException.class);
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation WHERE operation_kind = 'CHILD_WORKSPACE'", Integer.class)).isZero();
@@ -322,19 +323,19 @@ class LocalStorageAliasTest {
 
     @Test
     void anOrphanedChildWorkspaceStillBlocksOtherAliasHandover() {
-        var child = new ChildWorkspaceStore(jdbc, manager).admit("other-tenant", "retired-parent", "unclosed",
+        var child = new JdbcChildWorkspaceStore(jdbc, manager).admit("other-tenant", "retired-parent", "unclosed",
                 binding("other-tenant", "other-storage"), 1);
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session", Integer.class)).isZero();
-        for (String state : List.of(ChildWorkspaceStore.PREPARING, ChildWorkspaceStore.READY, ChildWorkspaceStore.MERGING,
-                ChildWorkspaceStore.APPLYING, ChildWorkspaceStore.APPLIED, ChildWorkspaceStore.DISCARDING,
-                ChildWorkspaceStore.CONFLICTED, ChildWorkspaceStore.BLOCKED, ChildWorkspaceStore.FAILED)) {
+        for (String state : List.of(JdbcChildWorkspaceStore.PREPARING, JdbcChildWorkspaceStore.READY, JdbcChildWorkspaceStore.MERGING,
+                JdbcChildWorkspaceStore.APPLYING, JdbcChildWorkspaceStore.APPLIED, JdbcChildWorkspaceStore.DISCARDING,
+                JdbcChildWorkspaceStore.CONFLICTED, JdbcChildWorkspaceStore.BLOCKED, JdbcChildWorkspaceStore.FAILED)) {
             jdbc.update("UPDATE ma_operation SET state = ?, phase = ? WHERE operation_key = ?", state, state,
                     WorkspaceOperations.key(WorkspaceOperations.Kind.CHILD_WORKSPACE, "other-tenant", child.childWorkspaceId()));
             jdbc.update("UPDATE ma_workspace SET child_state = ? WHERE tenant_id = ? AND workspace_id = ?", state, "other-tenant", child.childWorkspaceId());
             assertUncovered(() -> guard.fence("tenant", "storage", 1, UUID.randomUUID().toString()));
             assertThat(jdbc.queryForObject("SELECT mount_state FROM ma_storage_owner", String.class)).isEqualTo("READY");
         }
-        for (String state : List.of(ChildWorkspaceStore.MERGED, ChildWorkspaceStore.DISCARDED)) {
+        for (String state : List.of(JdbcChildWorkspaceStore.MERGED, JdbcChildWorkspaceStore.DISCARDED)) {
             jdbc.update("UPDATE ma_operation SET state = ?, phase = ? WHERE operation_key = ?", state, state,
                     WorkspaceOperations.key(WorkspaceOperations.Kind.CHILD_WORKSPACE, "other-tenant", child.childWorkspaceId()));
             jdbc.update("UPDATE ma_workspace SET child_state = ? WHERE tenant_id = ? AND workspace_id = ?", state, "other-tenant", child.childWorkspaceId());
@@ -361,7 +362,7 @@ class LocalStorageAliasTest {
     private void session(String tenant, String storage, String session) {
         jdbc.update("INSERT INTO ma_session (tenant_id, session_id, session_kind, workspace_storage_id, tenant_key, session_key, session_scope_key, gmt_create, gmt_modified)"
                 + " VALUES (?, ?, 'CONTROL', ?, ?, ?, ?, 1, 1)", tenant, session, storage,
-                JdbcRuntimeBindingRepository.harnessDrainKey(tenant), JdbcRuntimeBindingRepository.harnessDrainKey(session), com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session));
+                JdbcRuntimeBindingRepository.harnessDrainKey(tenant), JdbcRuntimeBindingRepository.harnessDrainKey(session), ManagedSessionStore.sessionScopeKey(tenant, session));
     }
 
     private static void assertUncovered(Runnable action) {

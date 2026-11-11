@@ -43,7 +43,7 @@ class WorkspaceCreationAdmissionLockMySqlIT extends WorkspaceCreationAdmissionLo
         var observer = new JdbcTemplate(source);
         try (var pool = Executors.newFixedThreadPool(2)) {
             var admission = pool.submit(() -> transactions.execute(status -> {
-                WorkspaceLifecycleStore.lockPlacement(jdbc, "tenant");
+                JdbcWorkspaceLifecycleStore.lockPlacement(jdbc, "tenant");
                 var selected = registry.resolveForCreation("tenant", "actor", new WorkspaceSelection("chosen", "."));
                 assertThat(selected.binding().getWorkspaceId()).isEqualTo("chosen");
                 resolved.countDown();
@@ -110,7 +110,7 @@ class WorkspaceCreationAdmissionLockMySqlIT extends WorkspaceCreationAdmissionLo
         var observer = new JdbcTemplate(source);
         try (var pool = Executors.newFixedThreadPool(2)) {
             var admission = pool.submit(() -> transactions.executeWithoutResult(status -> {
-                WorkspaceLifecycleStore.lockPlacement(jdbc, "tenant");
+                JdbcWorkspaceLifecycleStore.lockPlacement(jdbc, "tenant");
                 var selected = registry.resolveForCreation("tenant", "actor", null).binding();
                 assertThat(selected.getWorkspaceId()).isEqualTo("chosen");
                 assertThat(selected.getWorkspaceGeneration()).isEqualTo(1);

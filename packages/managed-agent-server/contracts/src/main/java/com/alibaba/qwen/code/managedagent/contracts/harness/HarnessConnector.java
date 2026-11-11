@@ -56,6 +56,22 @@ public interface HarnessConnector extends AutoCloseable {
 
     public default boolean supportsContextCompression() { return false; }
 
+    public default boolean supportsSideQueries() { return false; }
+
+    /** Selects an instance without acquiring or changing Session placement. */
+    public default SideQueryTarget prepareSideQuery() {
+        throw new UnsupportedOperationException("Side queries are unavailable");
+    }
+
+    public interface SideQueryTarget extends AutoCloseable {
+        public String instanceId();
+        public String bootId();
+        public Map<String, Object> submit(Map<String, Object> body);
+        public Map<String, Object> status(String queryId, Map<String, Object> claim);
+        public void cancel(String queryId, Map<String, Object> claim);
+        @Override public void close();
+    }
+
     @FunctionalInterface
     public interface ContextCompressionSubmission {
         public Map<String, Object> submit();
@@ -114,6 +130,20 @@ public interface HarnessConnector extends AutoCloseable {
 
     public default Map<String, Object> previewPackage(Map<String, Object> metadata, java.io.InputStream source) {
         throw new UnsupportedOperationException("Managed package preview is unavailable");
+    }
+
+    public default boolean supportsRuntimeSkillImport() { return false; }
+
+    public default Map<String, Object> runtimeSkillCandidates(String tenant, String session) {
+        throw new UnsupportedOperationException("Runtime Skill import is unavailable");
+    }
+
+    public default Map<String, Object> runtimeSkillSnapshot(String tenant, String session, Map<String, Object> request) {
+        throw new UnsupportedOperationException("Runtime Skill import is unavailable");
+    }
+
+    public default Map<String, Object> runtimeSkillArchive(String tenant, String session, Map<String, Object> request) {
+        throw new UnsupportedOperationException("Runtime Skill import is unavailable");
     }
 
     public default Map<String, Object> applyExtensions(String tenantId, String sessionId, Map<String, Object> command) {

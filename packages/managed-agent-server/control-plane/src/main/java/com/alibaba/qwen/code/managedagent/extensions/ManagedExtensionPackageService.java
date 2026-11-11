@@ -9,6 +9,8 @@ import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionP
 import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages.Pin;
 import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages.Settings;
 import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages.SettingsCommand;
+import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages.SourceOrigin;
+import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionSource;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.repository.ExtensionPackageRepository;
@@ -26,7 +28,8 @@ import org.springframework.stereotype.Service;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Path;
+import java.nio.file.Files;
+import java.time.Instant;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
@@ -42,9 +45,23 @@ public class ManagedExtensionPackageService implements ExtensionPackages {
     private final ExtensionArchives archives;
     private final ObjectMapper json;
     private HarnessConnector harness;
+    private Map<String, ManagedExtensionSource> sources = Map.of();
+    private final java.util.concurrent.Semaphore sourceStaging = new java.util.concurrent.Semaphore(4);
 
     @org.springframework.beans.factory.annotation.Autowired
     public void configurePreparation(@org.springframework.context.annotation.Lazy HarnessConnector value) { harness = value; }
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    public void configureSources(List<ManagedExtensionSource> providers) {
+        Map<String, ManagedExtensionSource> registry = new java.util.LinkedHashMap<>();
+        for (ManagedExtensionSource source : providers) {
+            if (source.id() == null || !source.id().matches("[a-z][a-z0-9-]{0,63}")
+                    || registry.putIfAbsent(source.id(), source) != null) {
+                throw new IllegalStateException("Invalid or duplicate Managed extension source ID");
+            }
+        }
+        sources = Map.copyOf(registry);
+    }
 
     public ManagedExtensionPackageService(ExtensionPackageRepository repository,
             ManagedWorkspaceRegistry workspaces, ManagedAgentSettings properties,
@@ -57,10 +74,187 @@ public class ManagedExtensionPackageService implements ExtensionPackages {
     }
     public Catalog list(String tenant, String actor, String workspace) {
         requireAccess(tenant, actor, workspace, false);
-        var packages = repository.list(tenant, workspace);
+        var packages = repository.list(tenant, workspace).stream().filter(entry -> visible(tenant, actor, workspace, entry)).toList();
         boolean supported = selfServiceSupported();
         return new Catalog(properties.getExtensions().isEnabled() && archives.configured(), packages,
                 new ManagedExtensionPackages.SelfService(supported, supported && canPublish(tenant, actor, workspace)));
+    }
+
+    public boolean supported() { return properties.getExtensions().isEnabled() && archives.configured(); }
+
+    private boolean visible(String tenant, String actor, String workspace, Package entry) {
+        try {
+            authorizeSource(tenant, actor, workspace, entry);
+            return true;
+        } catch (ManagedAgentException error) {
+            if (error.getStatus() == 404) {
+                return false;
+            }
+            throw error;
+        }
+    }
+
+    private void authorizeSource(String tenant, String actor, String workspace, Package entry) {
+        if (entry.source() != null) {
+            var resolved = resolveSource(context(tenant, actor, workspace, UUID.randomUUID().toString()), entry.source().reference());
+            if (!entry.source().reference().equals(resolved.reference())) {
+                throw new ManagedAgentException(409, "extension_source_changed", "The saved source identity has changed.");
+            }
+        }
+    }
+
+    private ManagedExtensionSource.Context context(String tenant, String actor, String workspace, String requestId) {
+        return new ManagedExtensionSource.Context(tenant, actor, workspace, requestId, Instant.now().plusSeconds(120));
+    }
+
+    private ManagedExtensionSource.Resolved resolveSource(ManagedExtensionSource.Context context, ManagedExtensionSource.Reference reference) {
+        if (org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive()) {
+            throw new IllegalStateException("Business extension sources must be resolved outside Managed SQL transactions");
+        }
+        var provider = sources.get(reference.providerId());
+        if (provider == null) {
+            throw new ManagedAgentException(503, "extension_source_unavailable", "The extension source provider is unavailable.");
+        }
+        try {
+            context.checkDeadline();
+            var result = provider.resolve(context, reference);
+            context.checkDeadline();
+            if (result == null || result.reference() == null || result.archiveId() == null || result.archiveId().isBlank()
+                    || !reference.providerId().equals(result.reference().providerId())
+                    || !reference.kind().equals(result.reference().kind()) || !reference.resourceId().equals(result.reference().resourceId())
+                    || !reference.revision().equals(result.reference().revision())) {
+                throw new ManagedAgentException(409, "extension_source_invalid", "The extension source returned a different reference.");
+            }
+            if (result.expectedDigest() != null) {
+                requireDigest(result.expectedDigest());
+            }
+            return result;
+        } catch (ManagedExtensionSource.Failure error) {
+            throw sourceFailure(error);
+        } catch (IOException error) {
+            throw new ManagedAgentException(503, "extension_source_unavailable", "The extension source is unavailable.", error);
+        }
+    }
+
+    private static ManagedAgentException sourceFailure(ManagedExtensionSource.Failure error) {
+        return switch (error.reason()) {
+            case NOT_FOUND -> new ManagedAgentException(404, "extension_package_not_found", "Extension package was not found.", error);
+            case UNAVAILABLE -> new ManagedAgentException(503, "extension_source_unavailable", "The extension source is unavailable.", error);
+            case INVALID_SOURCE -> new ManagedAgentException(409, "extension_source_invalid", "The extension source archive is invalid.", error);
+        };
+    }
+
+    public ManagedExtensionPackages.SourceImportResult importSource(String tenant, String actor, String workspace,
+            String key, ManagedExtensionPackages.SourceImport command) throws IOException {
+        ManagedAgentService.validateIdempotencyKey(key);
+        requireExecutionAccess(tenant, actor, workspace);
+        if (command == null || command.reference() == null || command.target() == null) {
+            throw invalid();
+        }
+        decodeImportMetadata(encode(new ManagedExtensionPackages.ImportMetadata(command.reference().kind(), command.target(), "0".repeat(64), 1, null)));
+        String requestDigest = DigestUtils.sha256Hex(encode(command));
+        String operationId = operationId(tenant, actor, workspace, "source-import", key);
+        repository.prepareSourceImport(tenant, actor, workspace, operationId, requestDigest, command,
+                write -> requireAccess(tenant, actor, workspace, write));
+        Operation recorded = repository.findOperation(tenant, actor, workspace, operationId, requestDigest,
+                write -> requireAccess(tenant, actor, workspace, write));
+        if (recorded != null && "settled".equals(recorded.state())) {
+            return sourceResult(tenant, workspace, recorded);
+        }
+        requireSelfService();
+        var context = context(tenant, actor, workspace, operationId);
+        var resolved = resolveSource(context, command.reference());
+        if (!sourceStaging.tryAcquire()) {
+            throw new ManagedAgentException(503, "extension_staging_busy", "Extension source staging is busy.");
+        }
+        java.nio.file.Path temporary = null;
+        try {
+            temporary = Files.createTempFile("managed-extension-source-", ".archive");
+            var hash = DigestUtils.getSha256Digest();
+            long length = 0;
+            try (var source = sources.get(resolved.reference().providerId()).open(context, resolved);
+                    var output = Files.newOutputStream(temporary)) {
+                byte[] buffer = new byte[64 * 1024];
+                int count;
+                while ((count = source.read(buffer)) != -1) {
+                    context.checkDeadline();
+                    length += count;
+                    if (length > ManagedExtensionPackages.MAX_ARCHIVE_BYTES) {
+                        throw new ManagedAgentException(413, "extension_package_too_large", "Extension source exceeds 100 MiB.");
+                    }
+                    hash.update(buffer, 0, count);
+                    output.write(buffer, 0, count);
+                }
+                context.checkDeadline();
+            } catch (IOException error) {
+                throw new ManagedAgentException(503, "extension_source_unavailable", "The extension source archive cannot be read.", error);
+            }
+            String sourceDigest = org.apache.commons.codec.binary.Hex.encodeHexString(hash.digest());
+            if (length == 0 || resolved.expectedDigest() != null && !resolved.expectedDigest().equals(sourceDigest)) {
+                throw new ManagedAgentException(409, "extension_source_changed", "The source archive does not match its revision.");
+            }
+            var input = decodeImportMetadata(encode(new ManagedExtensionPackages.ImportMetadata(
+                    resolved.reference().kind(), command.target(), sourceDigest, 1, null)));
+            try (var source = Files.newInputStream(temporary);
+                    var prepared = prepareCall(() -> harness.preparePackage(envelope(tenant, actor, workspace, input), source))) {
+                JsonNode descriptor = json.valueToTree(prepared.descriptor());
+                String digest = descriptor.path("packageDigest").asText();
+                requireDigest(digest);
+                var manifest = decodeManifest(Base64.getUrlEncoder().withoutPadding()
+                        .encodeToString(json.writeValueAsBytes(descriptor.get("manifest"))));
+                if (!command.target().equals(manifest.target())) {
+                    throw new ManagedAgentException(409, "package_target_mismatch", "Prepared package target differs.");
+                }
+                var reference = resolved.reference();
+                String id = "ext_" + UUID.nameUUIDFromBytes(ManagedSchemaKeys.key("source", tenant, workspace,
+                        reference.providerId(), reference.kind(), reference.resourceId()).getBytes(StandardCharsets.UTF_8));
+                var previous = repository.list(tenant, workspace).stream().filter(entry -> id.equals(entry.pin().extensionId())).findFirst();
+                if (previous.isPresent() && !previous.get().manifest().name().equals(manifest.name())) {
+                    throw new ManagedAgentException(409, "extension_namespace_conflict", "An update must retain the package namespace.");
+                }
+                var origin = new SourceOrigin(reference, sourceDigest, requestDigest);
+                var operation = repository.preparePublish(tenant, actor, workspace, previous.isPresent() ? id : null, id,
+                        digest, operationId, requestDigest, encode(manifest), origin, write -> requireAccess(tenant, actor, workspace, write));
+                if (!"settled".equals(operation.state())) {
+                    long bytes = archives.put(tenant, workspace, operation.packageDigest(), prepared.archive());
+                    operation = repository.finishPublish(tenant, actor, workspace, id, operation.packageDigest(), operationId,
+                            bytes, operation, write -> requireAccess(tenant, actor, workspace, write));
+                }
+                return sourceResult(tenant, workspace, operation);
+            }
+        } catch (ManagedExtensionSource.Failure error) {
+            throw sourceFailure(error);
+        } finally {
+            try {
+                if (temporary != null) {
+                    Files.deleteIfExists(temporary);
+                }
+            } finally {
+                sourceStaging.release();
+            }
+        }
+    }
+
+    public ManagedExtensionPackages.SourceImportResult sourceReceipt(String tenant, String actor, String workspace, String operationId) {
+        var command = repository.sourceImport(tenant, actor, workspace, operationId,
+                write -> requireAccess(tenant, actor, workspace, write));
+        var operation = repository.findOperation(tenant, actor, workspace, operationId, DigestUtils.sha256Hex(encode(command)),
+                write -> requireAccess(tenant, actor, workspace, write));
+        return operation == null ? new ManagedExtensionPackages.SourceImportResult(operationId, "pending", command.reference(), null, null, null)
+                : sourceResult(tenant, workspace, operation);
+    }
+
+    public ManagedExtensionPackages.SourceImportResult lookupSourceImport(String tenant, String actor, String workspace, String key) {
+        ManagedAgentService.validateIdempotencyKey(key);
+        return sourceReceipt(tenant, actor, workspace, operationId(tenant, actor, workspace, "source-import", key));
+    }
+
+    private ManagedExtensionPackages.SourceImportResult sourceResult(String tenant, String workspace, Operation operation) {
+        Package saved = repository.publication(tenant, workspace, operation);
+        if (saved.source() == null) {
+            throw missing();
+        }
+        return new ManagedExtensionPackages.SourceImportResult(operation, saved.source(), saved.pin());
     }
 
     public boolean canPublish(String tenant, String actor, String workspace) {
@@ -73,6 +267,8 @@ public class ManagedExtensionPackageService implements ExtensionPackages {
     private boolean supportsPreparation() { return harness != null && harness.supportsPackagePreparation(); }
 
     public boolean selfServiceSupported() { return properties.getExtensions().isSelfServiceEnabled() && supportsPreparation(); }
+
+    public boolean runtimeSkillImportEnabled() { return selfServiceSupported() && properties.getExtensions().isRuntimeSkillImportEnabled(); }
 
     private void requireSelfService() {
         if (!selfServiceSupported()) {
@@ -135,8 +331,8 @@ public class ManagedExtensionPackageService implements ExtensionPackages {
         requirePreparation();
         Package saved = get(tenant, actor, workspace, pin.extensionId(), pin.packageRevision(), pin.packageDigest());
         var input = new ManagedExtensionPackages.ImportMetadata("extension", saved.manifest().target(), pin.packageDigest(), 1, null);
-        try (var source = java.nio.file.Files.newInputStream(archive(tenant, actor, workspace,
-                pin.extensionId(), pin.packageRevision(), pin.packageDigest()), java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
+        try (var lease = archive(tenant, actor, workspace, pin.extensionId(), pin.packageRevision(), pin.packageDigest());
+                var source = Files.newInputStream(lease.path(), java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
             JsonNode result = json.valueToTree(prepareCall(() -> harness.inspectPackage(envelope(tenant, actor, workspace, input), source)));
             if (!result.isObject() || !result.path("files").isArray() || result.path("files").size() > 256
                     || !result.path("fileCount").canConvertToInt() || result.path("fileCount").asInt() < result.path("files").size()
@@ -196,17 +392,46 @@ public class ManagedExtensionPackageService implements ExtensionPackages {
     }
 
     public void requireSelection(String tenant, String actor, String workspace, List<Pin> pins) {
+        requireSelection(tenant, actor, workspace, pins, null);
+    }
+
+    private record AuthorizedSelection(String tenant, String actor, String workspace, List<Pin> pins,
+            List<Package> packages, Instant deadline) implements Selection { }
+
+    public Selection authorizeSelection(String tenant, String actor, String workspace, List<Pin> pins) {
+        var saved = selection(tenant, actor, workspace, pins);
+        for (Package entry : saved) {
+            authorizeSource(tenant, actor, workspace, entry);
+        }
+        return new AuthorizedSelection(tenant, actor, workspace, List.copyOf(pins), saved, Instant.now().plusSeconds(120));
+    }
+
+    public void requireSelection(String tenant, String actor, String workspace, List<Pin> pins, Selection authorization) {
+        var saved = selection(tenant, actor, workspace, pins);
+        if (authorization instanceof AuthorizedSelection frozen && tenant.equals(frozen.tenant()) && actor.equals(frozen.actor())
+                && workspace.equals(frozen.workspace()) && pins.equals(frozen.pins()) && saved.equals(frozen.packages())
+                && Instant.now().isBefore(frozen.deadline())) {
+            return;
+        }
+        if (authorization != null || saved.stream().anyMatch(entry -> entry.source() != null)) {
+            throw new ManagedAgentException(409, "extension_selection_changed", "Authorize the complete extension selection before admission.");
+        }
+    }
+
+    private List<Package> selection(String tenant, String actor, String workspace, List<Pin> pins) {
         requireExecutionAccess(tenant, actor, workspace);
         if (pins == null || pins.size() > 32 || pins.stream().anyMatch(java.util.Objects::isNull)
                 || pins.stream().map(Pin::extensionId).distinct().count() != pins.size()) {
             throw invalid();
         }
+        var saved = new java.util.ArrayList<Package>();
         for (Pin pin : pins) {
-            repository.get(tenant, workspace, pin);
+            saved.add(repository.get(tenant, workspace, pin));
             if (pin.settingsRevision() != null && !repository.hasSettings(tenant, workspace, pin)) {
                 throw missing();
             }
         }
+        return List.copyOf(saved);
     }
 
     public Manifest decodeManifest(String encoded) {
@@ -250,6 +475,9 @@ public class ManagedExtensionPackageService implements ExtensionPackages {
             requireExecutionAccess(tenant, actor, workspace);
             Package previous = repository.list(tenant, workspace).stream()
                     .filter(entry -> extensionId.equals(entry.pin().extensionId())).findFirst().orElseThrow(ManagedExtensionPackageService::missing);
+            if (previous.source() != null) {
+                throw new ManagedAgentException(409, "extension_source_conflict", "Source-bound extensions require a source import.");
+            }
             if (!previous.manifest().name().equals(manifest.name())) {
                 throw new ManagedAgentException(409, "extension_namespace_conflict", "An update must retain the package namespace.");
             }
@@ -276,7 +504,7 @@ public class ManagedExtensionPackageService implements ExtensionPackages {
 
     public Operation lookup(String tenant, String actor, String workspace, String kind, String key) {
         ManagedAgentService.validateIdempotencyKey(key);
-        if (kind == null || !Set.of("publish", "settings").contains(kind)) {
+        if (kind == null || !Set.of("publish", "settings", "source-import").contains(kind)) {
             throw invalid();
         }
         return operation(tenant, actor, workspace, operationId(tenant, actor, workspace, kind, key));
@@ -284,22 +512,27 @@ public class ManagedExtensionPackageService implements ExtensionPackages {
 
     public Package get(String tenant, String actor, String workspace, String extensionId, long revision, String digest) {
         requireAccess(tenant, actor, workspace, false);
-        return repository.get(tenant, workspace, new Pin(extensionId, revision, digest, null));
+        Package saved = repository.get(tenant, workspace, new Pin(extensionId, revision, digest, null));
+        authorizeSource(tenant, actor, workspace, saved);
+        return saved;
     }
 
-    public Path archive(String tenant, String actor, String workspace, String extensionId, long revision,
+    public ExtensionArchives.Archive archive(String tenant, String actor, String workspace, String extensionId, long revision,
             String digest) throws IOException {
         Package saved = get(tenant, actor, workspace, extensionId, revision, digest);
         return archives.verify(tenant, workspace, digest, saved.byteLength());
     }
 
     public Settings settings(String tenant, String actor, String workspace, String extensionId) {
+        authorizeExtension(tenant, actor, workspace, extensionId);
         return repository.settings(tenant, actor, workspace, extensionId,
                 write -> requireAccess(tenant, actor, workspace, write));
     }
 
     public Operation saveSettings(String tenant, String actor, String workspace, String extensionId,
             String idempotencyKey, SettingsCommand command) {
+        requireAccess(tenant, actor, workspace, true);
+        authorizeExtension(tenant, actor, workspace, extensionId);
         ManagedAgentService.validateIdempotencyKey(idempotencyKey);
         requireId(extensionId);
         if (command == null || command.expectedRevision() < 0 || command.expectedRevision() >= 9_007_199_254_740_991L
@@ -317,6 +550,13 @@ public class ManagedExtensionPackageService implements ExtensionPackages {
         String requestDigest = DigestUtils.sha256Hex(encode(List.of(extensionId, command.expectedRevision())));
         return repository.saveSettings(tenant, actor, workspace, extensionId, operationId, requestDigest, command, plaintext,
                 write -> requireAccess(tenant, actor, workspace, write));
+    }
+
+    private void authorizeExtension(String tenant, String actor, String workspace, String extensionId) {
+        requireAccess(tenant, actor, workspace, false);
+        Package saved = repository.list(tenant, workspace).stream().filter(entry -> extensionId.equals(entry.pin().extensionId()))
+                .findFirst().orElseThrow(ManagedExtensionPackageService::missing);
+        authorizeSource(tenant, actor, workspace, saved);
     }
 
     public ResolvedPackage resolvePin(String tenant, String workspace, Pin pin) throws IOException {

@@ -2005,6 +2005,18 @@ describe('PermissionManager', () => {
       expect(await pm.evaluate(sh(command))).toBe('allow');
     });
 
+    // R7-9: an unresolvable -c payload may be the option terminator, so a
+    // wrapper wildcard must not auto-allow the unreadable spelling while
+    // the readable twin asks.
+    it('does not auto-allow an unresolvable wrapper payload via a wildcard', async () => {
+      pm = makeShellPm('bash', { permissionsAllow: ['Bash(bash -c *)'] });
+      expect(await pm.evaluate(mon('bash -c $CMD'))).toBe('ask');
+      expect(await pm.evaluate(mon("sh -c $(printf -- --) 'echo run'"))).toBe(
+        'ask',
+      );
+      expect(await pm.evaluate(mon("bash -c 'echo hi'"))).toBe('allow');
+    });
+
     // The comment fast path is sound only when the scanned string is what the
     // shell executes: true for run_shell_command, not for monitor, where
     // normalizePermissionContext() analyses the quote-stripped `safetyCommand`

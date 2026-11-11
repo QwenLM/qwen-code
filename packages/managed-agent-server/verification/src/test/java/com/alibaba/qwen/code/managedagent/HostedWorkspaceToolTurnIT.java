@@ -7,13 +7,14 @@ import com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObje
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationAdmissionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationDataStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationStore;
-import com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageGuard;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.session.HarnessEventProjector;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
@@ -216,6 +217,16 @@ class HostedWorkspaceToolTurnIT {
         var objects = new ConcurrentHashMap<String, byte[]>();
         context.registerBean("unicodeObjects", ToolPublicationObjectStore.class, () -> new ToolPublicationObjectStore() {
             @Override
+            public InputStream openRange(String key, long offset, long length, Runnable guard) {
+                guard.run();
+                try (InputStream full = open(key)) {
+                    byte[] bytes = full.readAllBytes();
+                    return new java.io.ByteArrayInputStream(bytes, (int) offset, (int) length);
+                } catch (java.io.IOException error) {
+                    throw new IllegalStateException(error);
+                }
+            }
+            @Override
             public void putIfAbsent(String key, byte[] bytes) {
                 byte[] previous = objects.putIfAbsent(key, bytes.clone());
                 if (previous != null && !java.util.Arrays.equals(previous, bytes)) {
@@ -235,12 +246,12 @@ class HostedWorkspaceToolTurnIT {
         });
         context.registerBean("unicodeGrants", ToolPublicationStore.class, () -> new ToolPublicationStore(
                 context.getBean("managedJdbcTemplate", JdbcTemplate.class), context.getBean(PlatformTransactionManager.class),
-                context.getBean(ManagedSessionStore.class), context.getBean(ToolExecutionRepository.class),
+                context.getBean(JdbcManagedSessionStore.class), context.getBean(ToolExecutionRepository.class),
                 context.getBean(RuntimeBindingRepository.class),
                 new ToolPublicationStore.Capacity(1024 * 1024, 16 * 1024 * 1024, 64 * 1024 * 1024, 4)));
         context.registerBean("unicodeData", ToolPublicationDataStore.class, () -> new ToolPublicationDataStore(
                 context.getBean("managedJdbcTemplate", JdbcTemplate.class), context.getBean(PlatformTransactionManager.class),
-                context.getBean(ToolPublicationStore.class), context.getBean(ManagedSessionStore.class),
+                context.getBean(ToolPublicationStore.class), context.getBean(JdbcManagedSessionStore.class),
                 context.getBean(ToolPublicationObjectStore.class), Duration.ofSeconds(30), Duration.ofSeconds(5),
                 new ToolPublicationDataStore.VerificationBudget(1024 * 1024, Duration.ofMinutes(25))));
         context.registerBean("unicodePublicationController", ToolPublicationController.class, () -> {
@@ -249,7 +260,7 @@ class HostedWorkspaceToolTurnIT {
             return new ToolPublicationController(context.getBean(ToolPublicationStore.class),
                     context.getBean(ToolPublicationDataStore.class),
                     new ToolPublicationAdmissionStore(context.getBean("managedJdbcTemplate", JdbcTemplate.class),
-                            context.getBean(PlatformTransactionManager.class), context.getBean(ManagedSessionStore.class),
+                            context.getBean(PlatformTransactionManager.class), context.getBean(JdbcManagedSessionStore.class),
                             context.getBean(ToolPublicationDataStore.class)), properties);
         });
     }
@@ -456,7 +467,7 @@ class HostedWorkspaceToolTurnIT {
                             () -> new EmbeddedRuntimeBroker(spring.getBean(AgentStateStore.class),
                                     spring.getBean(ManagedAgentProperties.class), spring.getBean(RuntimeBindingRepository.class),
                                     spring.getBean(RuntimeSessionRepository.class), spring.getBean(ToolExecutionRepository.class),
-                                    spring.getBean(WorkspaceExecutionStore.class))) : null;
+                                    spring.getBean(JdbcWorkspaceExecutionStore.class))) : null;
             HostedWorkspaceColdLoadProbe coldLoadProbe = new HostedWorkspaceColdLoadProbe(jdbc, tenant, sessions,
                     "http://127.0.0.1:" + spring.getWebServer().getPort(), gateServer);
             HostedOperatorRecoveryProbe operatorProbe = operatorRecovery
@@ -687,14 +698,17 @@ class HostedWorkspaceToolTurnIT {
                 + " session_state, execution_storage_key, is_rewind_pending FROM ma_runtime_session"
                 + " WHERE tenant_id = ? AND harness_session_id = ? AND runtime_session_id = ?",
                 tenant, session.get("sessionId"), report.path("promptId").asText());
-        boolean released = storeFaults ? fault.equals("turn-reply") : List.of("prepare", "start", "release").contains(fault);
+        boolean released = storeFaults ? fault.equals("turn-reply")
+                : List.of("prepare", "start", "release", "release-before-forward").contains(fault);
         // #13800: a turn that recovery-blocks no longer parks its mount
         // forever — its handback clears membership once nothing is
         // unproven (every execution SETTLED, no control in flight) and the
         // Runtime Session stays READY for the fleet. The one family whose
         // work genuinely never settles here — the PREPARED prepare-twice
         // execution — retains its original membership until its outcome
-        // is known.
+        // is known. A settled turn's owed release is paid by the detach's
+        // terminal drain (#16484), so release-before-forward ends RELEASED
+        // like release; only the never-settled turns above stay READY.
         boolean retained = !storeFaults && fault.equals("prepare-twice");
         assertThat(member.get("execution_storage_key")).as(fault + " execution membership")
                 .isEqualTo(retained ? physical : null);
@@ -703,7 +717,7 @@ class HostedWorkspaceToolTurnIT {
             assertThat(member.get("binding_id")).isEqualTo(executions.getFirst().get("binding_id"));
             assertThat(member.get("runtime_generation")).isEqualTo(executions.getFirst().get("runtime_generation"));
         }
-        assertThat(member.get("session_state")).isEqualTo(released ? "RELEASED" : "READY");
+        assertThat(member.get("session_state")).as(fault + " owner state").isEqualTo(released ? "RELEASED" : "READY");
         if (storeFaults) {
             assertStoreJournal(jdbc, tenant, session, report);
         }
@@ -774,7 +788,7 @@ class HostedWorkspaceToolTurnIT {
             // Led by the indexed session scope key, as in HostedGateTestSupport:
             // the raw tenant+session form scans the lane's accumulated ma_resource rows.
             List<Map<String, Object>> stored = jdbc.queryForList("SELECT " + ManagedSchemaProjection.RESOURCE.columns() + " FROM ma_resource WHERE session_scope_key = ? AND resource_id = ? AND tenant_id = ? AND session_id = ?",
-                    com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, sessionId), resource.path("resourceId").asText(), tenant, sessionId);
+                    ManagedSessionStore.sessionScopeKey(tenant, sessionId), resource.path("resourceId").asText(), tenant, sessionId);
             if (!applied) {
                 if (resource.has("bytesBase64")) {
                     assertThat(stored).as(fault + " rolled-back resource").isEmpty();
@@ -857,7 +871,7 @@ class HostedWorkspaceToolTurnIT {
         assertThat(head.get("latest_checkpoint_resource_id")).isEqualTo(checkpointId);
         byte[] checkpoint = jdbc.queryForObject("SELECT inline_bytes FROM ma_resource"
                 + " WHERE session_scope_key = ? AND resource_id = ? AND tenant_id = ? AND session_id = ?", byte[].class,
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, sessionId), checkpointId, tenant, sessionId);
+                ManagedSessionStore.sessionScopeKey(tenant, sessionId), checkpointId, tenant, sessionId);
         String phase = mapper.readTree(checkpoint).path("continuation").path("phase").asText();
         if (fault.startsWith("result-")) {
             assertThat(phase).isEqualTo("await_runtime");

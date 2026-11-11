@@ -4,8 +4,8 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedMcpSettings;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -35,7 +35,7 @@ import static org.assertj.core.api.Assertions.*;
         "qwen.managed-agent.harness.enabled=false"
 })
 class ManagedExtensionConfigurationAdmissionTest {
-    @Autowired private ManagedSessionStore store;
+    @Autowired private JdbcManagedSessionStore store;
     @Autowired private AgentStateStore sessions;
     @Qualifier("managedJdbcTemplate")
     @Autowired private JdbcTemplate jdbc;
@@ -82,6 +82,7 @@ class ManagedExtensionConfigurationAdmissionTest {
         String operation = UUID.randomUUID().toString();
         ObjectNode content = ManagedConfigInstallContractTest.record(ManagedConfigInstallContractTest.content("nullable_preparing"), 1);
         assertBusy(() -> transaction(() -> sessions.requireExtensionManagement("tenant", "actor", parent, operation, true)));
+        assertThatCode(() -> transaction(() -> sessions.requireExtensionManagement("tenant", "actor", parent, operation, false))).doesNotThrowAnyException();
         assertBusy(() -> transaction(() -> {
             sessions.requireConfigurationCommit("tenant", workspace, parent, content);
             return null;

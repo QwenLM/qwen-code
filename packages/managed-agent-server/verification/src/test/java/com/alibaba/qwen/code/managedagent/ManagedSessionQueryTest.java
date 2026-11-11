@@ -1,7 +1,7 @@
 package com.alibaba.qwen.code.managedagent;
 
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.BeforeEach;
@@ -24,7 +24,7 @@ class ManagedSessionQueryTest {
     private static final String SESSION = "query-session";
     private static final String TOKEN = "extension-writer-token-0123456789";
     protected JdbcTemplate jdbc;
-    private ManagedSessionStore sessions;
+    private JdbcManagedSessionStore sessions;
     private TransactionTemplate tx;
     private ExtensionRecordJournal journal;
 
@@ -94,8 +94,11 @@ class ManagedSessionQueryTest {
                 .hasMessageContaining("position");
         assertThatThrownBy(() -> sessions.recentTransactions(TENANT, WORKSPACE, SESSION, TOKEN, null, null, 101))
                 .hasMessageContaining("position");
-        jdbc.update("UPDATE ma_session_journal_tx SET byte_length = ? WHERE tenant_id = ? AND session_id = ?",
-                8 * 1024 * 1024 + 1, TENANT, SESSION);
+        byte[] oversized = new byte[8 * 1024 * 1024 + 1];
+        jdbc.update("UPDATE ma_session_journal_tx SET record_bytes = ?, byte_length = ?, record_digest = ?"
+                        + " WHERE tenant_id = ? AND session_id = ?",
+                oversized, oversized.length,
+                org.apache.commons.codec.digest.DigestUtils.sha256Hex(oversized), TENANT, SESSION);
         assertThatThrownBy(() -> sessions.recentTransactions(TENANT, WORKSPACE, SESSION, TOKEN, null, null, 1))
                 .isInstanceOf(com.alibaba.qwen.code.managedagent.exception.ManagedAgentException.class);
         assertThatThrownBy(() -> sessions.commandTransaction(TENANT, WORKSPACE, SESSION, TOKEN, null,
