@@ -146,6 +146,74 @@ describe('useManagedModelChange', () => {
     expect(current.blocked).toBe(false);
   });
 
+  it('reconciles an acknowledged write through the summary poll after a failed readback', async () => {
+    refresh.mockRejectedValueOnce(new TypeError('read failed'));
+    await render();
+    await act(async () => {
+      await current.submit('B');
+    });
+    expect(current.blocked).toBe(true);
+    expect(current.pending?.acknowledgedRevision).toBe(1);
+    await render(changed);
+    expect(current.blocked).toBe(false);
+    expect(current.errorCode).toBeUndefined();
+    expect(sessionStorage.getItem(key)).toBeNull();
+    expect(provider.modelChange!.submit).toHaveBeenCalledOnce();
+  });
+
+  it('restores the acknowledged revision on remount and confirms through reads only', async () => {
+    refresh.mockRejectedValueOnce(new TypeError('read failed'));
+    await render();
+    await act(async () => {
+      await current.submit('B');
+    });
+    await act(async () => root.unmount());
+    root = createRoot(document.createElement('div'));
+    await render();
+    expect(current.pending?.acknowledgedRevision).toBe(1);
+    await act(async () => {
+      await current.confirm();
+    });
+    expect(current.blocked).toBe(false);
+    expect(sessionStorage.getItem(key)).toBeNull();
+    expect(provider.modelChange!.submit).toHaveBeenCalledOnce();
+  });
+
+  it('does not infer a lost write response from a matching later model selection', async () => {
+    vi.mocked(provider.modelChange!.submit).mockRejectedValueOnce(
+      new TypeError('lost response'),
+    );
+    await render();
+    await act(async () => {
+      await current.submit('B');
+    });
+    const saved = sessionStorage.getItem(key);
+    await render(changed);
+    expect(current.blocked).toBe(true);
+    expect(sessionStorage.getItem(key)).toBe(saved);
+    expect(provider.modelChange!.submit).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ['turn_active', false],
+    ['idempotency_conflict', true],
+  ])(
+    'classifies structured host rejection %s without depending on an error class',
+    async (code, blocked) => {
+      vi.mocked(provider.modelChange!.submit).mockRejectedValue({
+        kind: 'managed-model-rejected',
+        code,
+      });
+      await render();
+      await act(async () => {
+        await current.submit('B');
+      });
+      expect(current.blocked).toBe(blocked);
+      expect(current.errorCode).toBe(blocked ? 'unconfirmed' : code);
+      expect(provider.modelChange!.submit).toHaveBeenCalledOnce();
+    },
+  );
+
   it.each([
     'model_selection_conflict',
     'turn_active',
@@ -214,6 +282,7 @@ describe('useManagedModelChange', () => {
       await current.confirm();
     });
     expect(current.blocked).toBe(false);
+    expect(provider.modelChange!.submit).toHaveBeenCalledOnce();
   });
 
   it('ignores stale options from another Session and never changes its selection', async () => {
