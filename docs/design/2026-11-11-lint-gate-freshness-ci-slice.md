@@ -243,10 +243,17 @@ over-rejects, which is the safe direction.
   they do not belong to the `Lint & Static` lane, so a branch's green on that lane
   never depended on them.
 - **Accepted residual risk:** `Checkout` and `Verify checkout includes expected
-head commit` stay outside the slice. A base-side `ref:` or `fetch-depth:` edit,
-  or an edit to that verification step's body, is invisible here. A wrong tree
-  still reddens the lane at the verification step; going silent takes two
-  coordinated edits.
+head commit` stay outside the slice. One base-side `ref:` edit silences the check
+  and changes what is linted: pointing the checkout at a merge ref makes the
+  verification step pass, because it only asks whether the expected head is an
+  ancestor and a merge ref contains it, so the lane stays green while lint runs on
+  the merge tree. That tree is a superset of the branch tree, so bad code cannot
+  escape it; the widening costs attribution — base-side problems get charged to the
+  branch — on an advisory lane whose post-merge push lint is the backstop. A
+  `fetch-depth:` edit is invisible here too and does not move the linted tree: a
+  depth too short to resolve the incremental merge base makes `lint-scope.js` fall
+  back to `full: true`, a wider run. Editing that verification step's body removes
+  the guard but leaves the tree untouched.
 - **Accepted residual risk:** `classify_pr`'s `Checkout trusted CI classifier` is
   in the same class — the checkout is excluded while the step that actually
   selects the profile is kept.

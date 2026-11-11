@@ -133,7 +133,7 @@ merge base 取自该检查**已经做过**的包含比较，因此 narrowing 不
 - **本 PR 合入会要求所有在途 PR rebase 一次。** 该检查以整文件包含判定监听自身文件，所以这次修改本身就是一次 base 侧闸门改动——与它引入时造成的那一次性波及相同。
 - **锚点漂移。** 破坏行锚点的重排版会让 narrowing 失效。它 fail-closed 并输出告警，且测试读取真实文件，因此漂移会先在这里变红。
 - 切片只覆盖 `Lint & Static` lane 的闸门。`test_build` 自带两个静态检查（`check-serve-fast-path-bundle.js`、`check:core-subpath-exports`）；整文件包含时，它们 base 侧的改动曾受覆盖，本次收窄后**不再覆盖**。这是**接受的净缩减**：它们不属于 `Lint & Static` lane，分支在那条 lane 上的绿本来就不依赖它们。
-- **接受的残余风险：** `Checkout` 与 `Verify checkout includes expected head commit` 在切片之外。base 侧修改 `ref:` 或 `fetch-depth:`，或修改那条校验步骤的正文，都不会被本检查发现。取错树仍会由该校验步骤把 lane 弄红；要静默需要两处协同改动。
+- **接受的残余风险：** `Checkout` 与 `Verify checkout includes expected head commit` 在切片之外。只改 base 侧的 `ref:` 一处就能让本检查失声，同时改变被 lint 的对象：把 checkout 指向 merge ref 后校验步骤仍通过，因为它只判断期望 head 是否为祖先，而 merge ref 天然包含它，于是 lane 保持绿、lint 却跑在合并树上。合并树是分支树的超集，坏代码不会因此逃逸；变宽的代价是归因——base 侧的问题会被算到分支头上——而这条 lane 是 advisory，合入后 push 触发的 lint 是兜底。`fetch-depth:` 的改动同样不可见，但它挪不动被 lint 的树：深度不足以致无法解析增量 merge base 时，`lint-scope.js` 回退到 `full: true`，即更宽的全量检查。改那条校验步骤的正文会移除守卫，但不改变被检查的树。
 - **接受的残余风险：** `classify_pr` 的 `Checkout trusted CI classifier` 属同一类——checkout 被排除，而真正选择 profile 的步骤保留在切片内。
 - **接受的残余风险：** job 级的 `runs-on` 与 `timeout-minutes` 被丢弃。routing 可以经 self-hosted Node action 间接改变 linter 的运行时；收紧 timeout 会在合入后打红 `main`，而不是打红分支。
 - **接受的残余风险：** `.github/actions/**` 不在 `GATE_FILES` 中。保留步骤对本地 action 的引用在切片内，但 action 的实现不在，因此 base 侧对该实现的改动对本检查不可见——这是本 PR 之前就存在的缺口，留待 follow-up。
