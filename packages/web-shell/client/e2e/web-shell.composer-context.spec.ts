@@ -43,6 +43,10 @@ test('connected composer context background', async ({ page }, testInfo) => {
     page.locator('[data-slot=dropdown-menu-content]'),
   ).toHaveAttribute('data-side', 'top');
   await page.keyboard.press('Escape');
+  // Escape restores focus to the Workspace button. At the narrow width its
+  // focus-triggered tooltip can then open alongside the git tooltip below,
+  // so start the mobile hover check from a neutral focus state.
+  await row.getByRole('button', { name: 'Workspace', exact: true }).blur();
   await page.setViewportSize({ width: 390, height: 844 });
   await git.hover();
   await expect(page.getByRole('tooltip')).toHaveText(branch);

@@ -707,7 +707,7 @@ class HostedWorkspaceToolTurnIT {
             assertThat(member.get("binding_id")).isEqualTo(executions.getFirst().get("binding_id"));
             assertThat(member.get("runtime_generation")).isEqualTo(executions.getFirst().get("runtime_generation"));
         }
-        assertThat(member.get("session_state")).isEqualTo(released ? "RELEASED" : "READY");
+        assertThat(member.get("session_state")).as(fault + " owner state").isEqualTo(released ? "RELEASED" : "READY");
         if (storeFaults) {
             assertStoreJournal(jdbc, tenant, session, report);
         }

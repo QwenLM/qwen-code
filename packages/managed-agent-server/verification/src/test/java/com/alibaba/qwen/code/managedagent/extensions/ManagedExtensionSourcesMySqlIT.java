@@ -1,20 +1,19 @@
-package com.alibaba.qwen.code.managedagent.persistence;
+package com.alibaba.qwen.code.managedagent.extensions;
 
+import com.alibaba.qwen.code.managedagent.persistence.IsolatedManagedSchemaMySqlTestDatabase;
 import org.junit.jupiter.api.AfterEach;
 
-import javax.sql.DataSource;
-
-class WorkspaceCsiRetainedArtifactsMySqlIT extends WorkspaceCsiRetainedArtifactsTest {
+class ManagedExtensionSourcesMySqlIT extends ManagedExtensionPackageServiceTest {
     private IsolatedManagedSchemaMySqlTestDatabase database;
 
     @Override
-    protected DataSource dataSource() {
+    protected javax.sql.DataSource dataSource() {
         database = new IsolatedManagedSchemaMySqlTestDatabase();
         return database.source();
     }
 
     @AfterEach
-    void removeOwnedDatabase() {
+    void closeDatabase() {
         if (database != null) {
             database.close();
         }
