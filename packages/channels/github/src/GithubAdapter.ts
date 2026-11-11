@@ -2170,11 +2170,11 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           this.pendingFinalDeliveryRetry = undefined;
           this.pendingFinalDeliveryRetryAbort = undefined;
         }
-        // A stopped channel retries at its next start instead.
-        if (
-          retryAbort.signal.aborted ||
-          this.pendingFinalDeliveryRetryStopRequested
-        ) {
+        // A channel that is still stopped retries at its next start instead.
+        // The abort alone must not suppress the schedule: a reconnect clears
+        // the stop flag while this pass is still settling, and its start call
+        // was dropped because this promise was still assigned.
+        if (this.pendingFinalDeliveryRetryStopRequested) {
           return;
         }
         if (this.hasUnsettledPendingDeliveries()) {

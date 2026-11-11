@@ -7429,6 +7429,34 @@ describe('GithubChannel', () => {
         ).toBeUndefined();
       });
 
+      it('schedules a pass when a reconnect lands before the cut-short pass settles', async () => {
+        await start();
+        await publishRefused();
+        let fail!: (err: unknown) => void;
+        mockOctokit.rest.issues.createComment.mockImplementation(
+          () =>
+            new Promise((_resolve, reject) => {
+              fail = reject;
+            }),
+        );
+        now = T0 + 6 * 60_000;
+        await priv().pollOnce();
+        const running = priv().pendingFinalDeliveryRetry;
+        channel.disconnect();
+        // The failed write's deferred abort cuts the pass short. The
+        // reconnect must land before the pass settles: once it settles,
+        // connect()'s own start pass takes over and the race is gone.
+        fail(refusal());
+        await connectForPublication();
+        await running;
+        mockOctokit.rest.issues.createComment.mockResolvedValue(posted);
+
+        await pollAt(17);
+        // Three in-call refusals, the cut-short attempt, and the delivery.
+        expect(replies()).toBe(5);
+        expect(pendingIds()).toEqual([]);
+      });
+
       it.each([
         [
           'a secondary limit with budget left waits the minimum, not the reset',
