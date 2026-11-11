@@ -7483,10 +7483,16 @@ describe('Session', () => {
     expect(textParts(notificationCall.message)).toContain(reminder);
   });
 
-  it('delivers background workflow completions through the session queue', async () => {
-    mockChat.sendMessageStream = vi
-      .fn()
-      .mockImplementation(async () => createEmptyStream());
+  it('retains the Channel route during a workflow completion turn', async () => {
+    const observeContext = vi.fn();
+    mockWorkflowRunRegistry.get.mockReturnValue({ channelWorkflowOrigin });
+    mockChat.sendMessageStream = vi.fn().mockImplementation(async () => {
+      observeContext(
+        core.getInvocationContext(),
+        core.getChannelWorkflowOrigin(),
+      );
+      return createEmptyStream();
+    });
     const callback = mockWorkflowRunRegistry.setCompletionCallback.mock
       .calls[0][0] as (
       displayText: string,
@@ -7498,10 +7504,19 @@ describe('Session', () => {
       },
     ) => void;
 
-    callback('Workflow completed.', '<task-notification/>', {
-      runId: 'wf_1234abcd',
-      status: 'completed',
-    });
+    core.runWithInvocationContext(
+      {
+        version: 1,
+        sessionId: 'test-session-id',
+        promptId: 'original-prompt',
+        workflowModeWriteAllowed: true,
+      },
+      () =>
+        callback('Workflow completed.', '<task-notification/>', {
+          runId: 'wf_1234abcd',
+          status: 'completed',
+        }),
+    );
 
     await vi.waitFor(() =>
       expect(mockChatRecordingService.recordNotification).toHaveBeenCalledWith(
@@ -7512,6 +7527,12 @@ describe('Session', () => {
           status: 'completed',
           kind: 'workflow',
         }),
+      ),
+    );
+    await vi.waitFor(() =>
+      expect(observeContext).toHaveBeenCalledWith(
+        undefined,
+        channelWorkflowOrigin,
       ),
     );
   });

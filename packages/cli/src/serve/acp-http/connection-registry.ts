@@ -117,6 +117,8 @@ export interface SessionBinding {
    * the agent burning model quota on a result nobody will read.
    */
   promptAbort?: AbortController;
+  suspendWorkflowApprovals?: () => (() => void) | undefined;
+  resumeWorkflowApprovals?: () => void;
   /**
    * Armed by `detachSessionStream` when the session stream closes at the
    * transport level (proxy idle-close, network blip) WITHOUT an explicit
@@ -337,17 +339,11 @@ export class AcpConnection {
     return this.ownedSessions.has(sessionId);
   }
 
-  /**
-   * True when an outstanding permission vote can depend on this client.
-   * A workflow approval relayed from another client does not hold this
-   * connection's prompt open after its stream detaches.
-   */
-  hasPendingClientRequest(sessionId: string): boolean {
-    const clientId = this.sessions.get(sessionId)?.clientId;
+  private hasPendingPromptPermission(sessionId: string): boolean {
     for (const req of this.pending.values()) {
-      if (req.sessionId !== sessionId) continue;
-      const originator = req.backgroundWorkflowApproval?.originatorClientId;
-      if (originator === undefined || originator === clientId) return true;
+      if (req.sessionId === sessionId && !req.backgroundWorkflowApproval) {
+        return true;
+      }
     }
     return false;
   }
@@ -706,6 +702,8 @@ export class AcpConnection {
     // must stay in lockstep.
     binding.stream = stream;
     binding.usesConnectionStream = stream === this.connStream;
+    binding.resumeWorkflowApprovals?.();
+    binding.resumeWorkflowApprovals = undefined;
     if (prevStream && prevStream !== stream && prevStream !== this.connStream) {
       if (!this.requeuePendingSessionReplies(binding, prevStream)) {
         prevStream.close();
@@ -901,9 +899,11 @@ export class AcpConnection {
         this.preserveRunningPromptsOnDisconnect &&
         binding.promptAbort &&
         !binding.promptAbort.signal.aborted &&
-        !this.hasPendingClientRequest(sessionId)
-      )
+        !this.hasPendingPromptPermission(sessionId)
+      ) {
+        binding.resumeWorkflowApprovals = binding.suspendWorkflowApprovals?.();
         return;
+      }
       // Grace expired with no reconnect → full teardown (aborts the prompt,
       // releases ownership, detaches the bridge client). Log it so an operator
       // debugging a vanished session can tell grace-expiry teardown apart from
@@ -1012,6 +1012,7 @@ export class AcpConnection {
       binding.stream.close();
     }
     this.abandonPendingForSession(binding.sessionId, binding.clientId);
+    binding.resumeWorkflowApprovals?.();
     this.onDetachSession?.(binding.sessionId, binding.clientId);
   }
 

@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { realpathSync } from 'node:fs';
+import { isSubpath } from '../utils/paths.js';
 import {
   IDE_MAX_OPEN_FILES,
   IDE_MAX_SELECTED_TEXT_LENGTH,
@@ -14,6 +16,7 @@ type IdeContextSubscriber = (ideContext?: IdeContext) => void;
 
 export class IdeContextStore {
   private ideContextState?: IdeContext;
+  private workspaceRoots?: readonly string[];
   private readonly subscribers = new Set<IdeContextSubscriber>();
 
   /**
@@ -29,7 +32,8 @@ export class IdeContextStore {
    * Sets the IDE context and notifies all registered subscribers of the change.
    * @param newIdeContext The new IDE context from the IDE.
    */
-  set(newIdeContext: IdeContext): void {
+  set(newIdeContext: IdeContext, workspaceRoots?: readonly string[]): void {
+    this.workspaceRoots = workspaceRoots;
     const { workspaceState } = newIdeContext;
     if (!workspaceState) {
       this.ideContextState = newIdeContext;
@@ -87,6 +91,7 @@ export class IdeContextStore {
    */
   clear(): void {
     this.ideContextState = undefined;
+    this.workspaceRoots = undefined;
     this.notifySubscribers();
   }
 
@@ -96,6 +101,24 @@ export class IdeContextStore {
    */
   get(): IdeContext | undefined {
     return this.ideContextState;
+  }
+
+  getWorkspaceTrust(workspaceDir: string): boolean | undefined {
+    const isTrusted = this.get()?.workspaceState?.isTrusted;
+    if (isTrusted === undefined) return undefined;
+    if (!this.workspaceRoots && workspaceDir === process.cwd()) {
+      return isTrusted;
+    }
+    try {
+      const realpath = realpathSync.native ?? realpathSync;
+      const canonicalDir = realpath(workspaceDir);
+      const matches = this.workspaceRoots
+        ? this.workspaceRoots.some((root) => isSubpath(root, canonicalDir))
+        : canonicalDir === realpath(process.cwd());
+      return matches ? isTrusted : undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   /**

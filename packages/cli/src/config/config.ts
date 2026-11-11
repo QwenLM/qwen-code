@@ -133,7 +133,6 @@ import { isValidSessionId, normalizeSessionIdForLookup } from './session-id.js';
 export { isValidSessionId } from './session-id.js';
 
 import { isWorkspaceTrusted } from './trustedFolders.js';
-import { arePathsEquivalent } from './path-comparison.js';
 import { assembleMcpServers } from './mcpServers.js';
 import { getPendingGatedMcpServers } from './mcpApprovals.js';
 import {
@@ -1937,15 +1936,10 @@ export async function loadCliConfig(
   const ideMode = !sandboxEnabled && (settings.ide?.enabled ?? false);
 
   const isAcpMode = argv.acp || argv.experimentalAcp;
-  const useIdeWorkspaceTrust =
-    !isAcpMode || arePathsEquivalent(cwd, process.cwd());
   const folderTrust = settings.security?.folderTrust?.enabled ?? false;
   const trustedFolder =
-    isWorkspaceTrusted(
-      settings,
-      undefined,
-      useIdeWorkspaceTrust ? undefined : cwd,
-    ).isTrusted === true;
+    isWorkspaceTrusted(settings, undefined, isAcpMode ? cwd : undefined)
+      .isTrusted === true;
 
   // Custom style files are prompts: a project's are read only from a trusted
   // workspace, and none at all in --bare / --safe-mode, which keep built-ins.
@@ -2665,9 +2659,9 @@ export async function loadCliConfig(
   // said no to this exact block, and trust does not override that decision.
   // Mirror Config.isExplicitlyTrustedFolder(): IDE-reported workspace trust
   // counts even with the feature off, as the docs promise.
-  const ideTrust = useIdeWorkspaceTrust
-    ? ideContextStore.get()?.workspaceState?.isTrusted
-    : undefined;
+  const ideTrust = isAcpMode
+    ? ideContextStore.getWorkspaceTrust(cwd)
+    : ideContextStore.get()?.workspaceState?.isTrusted;
   const explicitlyTrusted =
     (folderTrust || ideTrust !== undefined) && trustedFolder;
   const projectHooksPendingApproval = gateHooks
@@ -3004,7 +2998,6 @@ export async function loadCliConfig(
     folderTrust,
     interactive,
     trustedFolder,
-    useIdeWorkspaceTrust,
     useRipgrep: settings.tools?.useRipgrep,
     useBuiltinRipgrep: settings.tools?.useBuiltinRipgrep,
     workflowsEnabled: settings.tools?.workflowsEnabled,

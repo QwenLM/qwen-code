@@ -5942,6 +5942,7 @@ describe('loadCliConfig folderTrust', () => {
     process.argv = originalArgv;
     vi.unstubAllEnvs();
     vi.restoreAllMocks();
+    ServerConfig.ideContextStore.clear();
   });
 
   it('should be false when folderTrust is false', async () => {
@@ -6011,10 +6012,10 @@ describe('loadCliConfig folderTrust', () => {
   it('does not turn implicit trust into explicit trust for a foreign ACP workspace', async () => {
     process.argv = ['node', 'script.js', '--acp'];
     const argv = await parseArguments();
-    const sessionCwd = path.join(process.cwd(), 'other-workspace');
-    vi.spyOn(ServerConfig.ideContextStore, 'get').mockReturnValue({
-      workspaceState: { isTrusted: true },
-    });
+    const sessionCwd = path.dirname(process.cwd());
+    ServerConfig.ideContextStore.set({ workspaceState: { isTrusted: true } }, [
+      process.cwd(),
+    ]);
 
     const config = await loadCliConfig(
       { hooks: { Stop: [{ hooks: [{ type: 'command', command: 'x' }] }] } },
@@ -6026,6 +6027,42 @@ describe('loadCliConfig folderTrust', () => {
     expect(config.isTrustedFolder()).toBe(true);
     expect(config.isExplicitlyTrustedFolder()).toBe(false);
     expect(config.isProjectHooksPendingApproval()).toBe(true);
+  });
+
+  it('honors IDE trust for an ACP session at the connected workspace root', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      '--acp',
+      '--approval-mode',
+      'auto-edit',
+    ];
+    const argv = await parseArguments();
+    const sessionCwd = path.dirname(process.cwd());
+    const { isWorkspaceTrusted: actualIsWorkspaceTrusted } =
+      await vi.importActual<typeof import('./trustedFolders.js')>(
+        './trustedFolders.js',
+      );
+    vi.mocked(isWorkspaceTrusted).mockImplementation(actualIsWorkspaceTrusted);
+    ServerConfig.ideContextStore.set({ workspaceState: { isTrusted: true } }, [
+      sessionCwd,
+    ]);
+
+    const config = await loadCliConfig(
+      { security: { folderTrust: { enabled: true } } },
+      argv,
+      sessionCwd,
+      [],
+    );
+
+    expect(config.getApprovalMode()).toBe(ServerConfig.ApprovalMode.AUTO_EDIT);
+    expect(config.isTrustedFolder()).toBe(true);
+    expect(config.isExplicitlyTrustedFolder()).toBe(true);
+
+    ServerConfig.ideContextStore.set({ workspaceState: { isTrusted: false } }, [
+      sessionCwd,
+    ]);
+    expect(config.isTrustedFolder()).toBe(false);
   });
 
   it('honors live IDE trust for an ACP session in the process workspace', async () => {

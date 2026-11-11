@@ -214,6 +214,8 @@ class FakeBridge {
   honorRequestedSessionId = true;
   spawnAttached = false;
   spawnClientId: string | undefined = 'client-1';
+  suspendClientWorkflowApprovals =
+    vi.fn<HttpAcpBridge['suspendClientWorkflowApprovals']>();
   loadRequests: Array<{
     sessionId: string;
     historyReplay?: string;
@@ -2651,6 +2653,55 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       });
     } finally {
       reader.close();
+    }
+  });
+
+  it('suspends the designated workflow voter after remote grace while its prompt runs', async () => {
+    const connId = await initialize();
+    await newSession(connId);
+    const conn = acpHandle!.registry.get(connId)!;
+    conn.preserveRunningPromptsOnDisconnect = true;
+    const originalStream = await openStream(connId, 'sess-1');
+    await waitUntil(() => bridge.subscribeCalls.length === 1);
+    const binding = conn.sessions.get('sess-1')!;
+    const resume = vi.fn();
+    bridge.suspendClientWorkflowApprovals.mockReturnValue(resume);
+    let finishPrompt!: () => void;
+    const promptFinished = new Promise<void>((resolve) => {
+      finishPrompt = resolve;
+    });
+    bridge.promptBehavior = async () => {
+      await promptFinished;
+      return { stopReason: 'end_turn' };
+    };
+    try {
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 5,
+        method: 'session/prompt',
+        params: {
+          sessionId: 'sess-1',
+          prompt: [{ type: 'text', text: 'Follow-up' }],
+        },
+      });
+      await waitUntil(() => binding.promptAbort !== undefined);
+      conn.detachSessionStream('sess-1', binding.stream!, 1);
+      await originalStream.body?.cancel().catch(() => {});
+      await waitUntil(
+        () => bridge.suspendClientWorkflowApprovals.mock.calls.length > 0,
+      );
+      expect(
+        bridge.suspendClientWorkflowApprovals,
+      ).toHaveBeenCalledExactlyOnceWith('sess-1', 'client-1');
+      expect(binding.promptAbort?.signal.aborted).toBe(false);
+      expect(conn.ownsSession('sess-1')).toBe(true);
+      expect(conn.pending.size).toBe(0);
+      const resumed = await openStream(connId, 'sess-1');
+      expect(resume).toHaveBeenCalledTimes(1);
+      await resumed.body?.cancel().catch(() => {});
+    } finally {
+      finishPrompt();
+      await originalStream.body?.cancel().catch(() => {});
     }
   });
 

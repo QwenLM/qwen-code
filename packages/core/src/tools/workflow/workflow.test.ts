@@ -42,6 +42,7 @@ import { computeWorkflowScriptDigest } from '../../agents/runtime/workflow-saved
 import { convertToFunctionResponse } from '../../core/coreToolScheduler.js';
 import { WorkflowAgentFailedError } from '../../agents/runtime/workflow-agent-failure.js';
 import { WORKFLOW_AUTHORING_SKILL_NAME } from '../../skills/workflow-authoring-skill.js';
+import { runWithInvocationContext } from '../../utils/invocation-context.js';
 
 /**
  * The description, fixed at construction, points at the `workflow-authoring`
@@ -992,6 +993,54 @@ await agent('scan package.json')
       }
     },
   );
+
+  it('keeps workflows in the foreground when the Channel target cannot receive a background result', () => {
+    const { config, registry } = configWithRegistry(ACP);
+    registry.setCompletionCallback(vi.fn());
+    const tool = new WorkflowTool(config);
+    const origin = {
+      channelName: 'qq',
+      chatId: 'group',
+      senderId: 'member',
+      backgroundWorkflowBlocked: true as const,
+    };
+    runWithInvocationContext(
+      undefined,
+      () => {
+        expect(() => tool.build({ script: 'return 1' })).not.toThrow();
+        expect(() =>
+          tool.build({ script: 'return 1', run_in_background: true }),
+        ).toThrow(/channel target cannot receive background results/i);
+      },
+      origin,
+    );
+    expect(
+      tool.build({ script: 'return 1', run_in_background: true }).params,
+    ).toMatchObject({ run_in_background: true });
+  });
+
+  it('rechecks the workflow controls before executing a detached invocation', async () => {
+    let enabled = true;
+    const { config, registry } = configWithRegistry({
+      ...ACP,
+      ...QUIET,
+      isWorkflowsEnabled: () => enabled,
+    });
+    registry.setCompletionCallback(vi.fn());
+    const invocation = new WorkflowTool(config).build({
+      script: 'return 1',
+      run_in_background: true,
+    });
+
+    enabled = false;
+    await expect(invocation.execute(live())).resolves.toMatchObject({
+      error: {
+        message: expect.stringContaining('workflow controls are off'),
+        type: ToolErrorType.EXECUTION_DENIED,
+      },
+    });
+    expect(registry.list()).toHaveLength(0);
+  });
 
   // An ACP session (Web Shell, IDE clients) is spawned on pipes, so it reads
   // as non-interactive; its session registers the completion channel that

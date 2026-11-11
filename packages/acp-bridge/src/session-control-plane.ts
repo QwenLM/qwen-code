@@ -286,6 +286,7 @@ import { defaultSpawnChannelFactory } from './spawnChannel.js';
 import { writeStderrLine } from './internal/stderrLine.js';
 import {
   BridgeClient,
+  hasAvailableWorkflowApprovalClient,
   KNOWN_APPROVAL_MODES,
   type BridgeClientDeferredArtifactBatch,
 } from './bridgeClient.js';
@@ -957,6 +958,7 @@ interface SessionEntry {
    * it as trusted originator metadata if it appears in this set.
    */
   clientIds: Map<string, number>;
+  suspendedWorkflowApprovalRefs?: Map<string, Set<symbol>>;
   /**
    * Admitted id for the prompt currently running on this session. ACP enforces
    * one active prompt per session, and this bridge FIFO-serializes prompts, so
@@ -4778,16 +4780,26 @@ export function createSessionControlPlane(
     return clientId;
   };
 
+  const cancelUnavailableWorkflowApprovals = (
+    entry: SessionEntry,
+    clientId: string,
+  ): void => {
+    if (!hasAvailableWorkflowApprovalClient(entry, clientId)) {
+      permissionMediator.cancelDesignatedWorkflowApprovalsForClient(
+        entry.sessionId,
+        clientId,
+      );
+    }
+  };
+
   const unregisterClient = (entry: SessionEntry, clientId?: string): void => {
     if (clientId === undefined) return;
     const count = entry.clientIds.get(clientId);
     if (count === undefined) return;
     if (count <= 1) {
       entry.clientIds.delete(clientId);
-      permissionMediator.cancelDesignatedWorkflowApprovalsForClient(
-        entry.sessionId,
-        clientId,
-      );
+      entry.suspendedWorkflowApprovalRefs?.delete(clientId);
+      cancelUnavailableWorkflowApprovals(entry, clientId);
       entry.attachments.cancelClientUploads(clientId);
       for (const call of entry.mcpAppCalls?.values() ?? []) {
         if (call.clientId === clientId) call.cancel();
@@ -4801,6 +4813,7 @@ export function createSessionControlPlane(
       entry.clientLastSeenAt.delete(clientId);
     } else {
       entry.clientIds.set(clientId, count - 1);
+      cancelUnavailableWorkflowApprovals(entry, clientId);
     }
   };
 
@@ -17176,6 +17189,24 @@ export function createSessionControlPlane(
         }
       }
       return true;
+    },
+
+    suspendClientWorkflowApprovals(sessionId, clientId) {
+      if (permissionMediator.policy !== 'designated') return undefined;
+      const entry = byId.get(sessionId);
+      if (!entry?.clientIds.has(clientId)) return undefined;
+      const clients = (entry.suspendedWorkflowApprovalRefs ??= new Map());
+      let refs = clients.get(clientId);
+      if (!refs) {
+        refs = new Set();
+        clients.set(clientId, refs);
+      }
+      const token = Symbol();
+      refs.add(token);
+      cancelUnavailableWorkflowApprovals(entry, clientId);
+      return () => {
+        if (refs.delete(token) && refs.size === 0) clients.delete(clientId);
+      };
     },
 
     async detachClient(sessionId, clientId) {

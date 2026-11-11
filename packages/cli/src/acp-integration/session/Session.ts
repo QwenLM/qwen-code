@@ -14241,14 +14241,17 @@ export class Session implements SessionContext {
             const execute = () =>
               goalTurnContext.exit(() =>
                 runOutsideAgentContext(() =>
-                  runWithInvocationContext(undefined, () =>
-                    sessionIdContext.run(this.config.getSessionId(), () =>
-                      this.#executeBackgroundNotificationPromptInner(
-                        item,
-                        turn,
-                        channelTask,
+                  runWithInvocationContext(
+                    undefined,
+                    () =>
+                      sessionIdContext.run(this.config.getSessionId(), () =>
+                        this.#executeBackgroundNotificationPromptInner(
+                          item,
+                          turn,
+                          channelTask,
+                        ),
                       ),
-                    ),
+                    item.channelWorkflowOrigin,
                   ),
                 ),
               );

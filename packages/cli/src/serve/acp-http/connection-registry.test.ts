@@ -1448,7 +1448,11 @@ describe('ConnectionRegistry.getSnapshot', () => {
     }
   });
 
-  it.each(['no pending vote', "another client's workflow vote"] as const)(
+  it.each([
+    'no pending vote',
+    'an observed workflow vote',
+    'its own workflow vote',
+  ] as const)(
     'keeps a remote prompt beyond disconnect grace with %s',
     (pending) => {
       vi.useFakeTimers();
@@ -1466,25 +1470,35 @@ describe('ConnectionRegistry.getSnapshot', () => {
         );
         const running = new AbortController();
         binding.promptAbort = running;
+        const resume = vi.fn();
+        const suspend = vi.fn(() => resume);
+        binding.suspendWorkflowApprovals = suspend;
         if (pending !== 'no pending vote') {
           binding.clientId = 'observer';
           conn.pending.set('workflow-vote', {
             sessionId: 'remote-session',
             bridgeRequestId: 'workflow-vote',
             kind: 'permission',
-            backgroundWorkflowApproval: { originatorClientId: 'originator' },
+            backgroundWorkflowApproval: {
+              originatorClientId:
+                pending === 'its own workflow vote' ? 'observer' : 'originator',
+            },
           });
         }
         conn.detachSessionStream('remote-session', stream, 10_000);
+        expect(suspend).not.toHaveBeenCalled();
         vi.advanceTimersByTime(31 * 60_000);
         expect(running.signal.aborted).toBe(false);
         expect(registry.get(conn.connectionId)).toBe(conn);
         expect(conn.ownsSession('remote-session')).toBe(true);
         expect(detached).not.toHaveBeenCalled();
+        expect(suspend).toHaveBeenCalledTimes(1);
+        expect(resume).not.toHaveBeenCalled();
         binding.promptAbort = undefined;
         conn.promptSettled('remote-session');
         expect(conn.ownsSession('remote-session')).toBe(false);
         expect(conn.pending.size).toBe(0);
+        expect(resume).toHaveBeenCalledTimes(1);
         expect(detached).toHaveBeenCalled();
       } finally {
         registry.dispose();
@@ -1492,6 +1506,39 @@ describe('ConnectionRegistry.getSnapshot', () => {
       }
     },
   );
+
+  it('restores remote workflow approvals when a preserved prompt reconnects', () => {
+    vi.useFakeTimers();
+    const registry = new ConnectionRegistry();
+    try {
+      const conn = registry.create(false)!;
+      conn.preserveRunningPromptsOnDisconnect = true;
+      conn.ownSession('remote-session');
+      const stream = new FakeStream('sse');
+      const binding = conn.attachSessionStream(
+        'remote-session',
+        stream,
+        new AbortController(),
+      );
+      binding.promptAbort = new AbortController();
+      const resume = vi.fn();
+      binding.suspendWorkflowApprovals = vi.fn(() => resume);
+
+      conn.detachSessionStream('remote-session', stream, 10_000);
+      vi.advanceTimersByTime(10_000);
+      conn.attachSessionStream(
+        'remote-session',
+        new FakeStream('sse'),
+        new AbortController(),
+      );
+      expect(resume).toHaveBeenCalledTimes(1);
+      expect(binding.promptAbort.signal.aborted).toBe(false);
+      expect(binding.resumeWorkflowApprovals).toBeUndefined();
+    } finally {
+      registry.dispose();
+      vi.useRealTimers();
+    }
+  });
 
   it('tears down a permission-blocked prompt at grace expiry instead of preserving it', () => {
     vi.useFakeTimers();

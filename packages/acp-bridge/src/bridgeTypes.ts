@@ -3247,6 +3247,16 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
    */
   detachClient(sessionId: string, clientId?: string): Promise<void>;
 
+  /**
+   * Suspend one disconnected ACP registration for designated workflow
+   * approvals while its foreground prompt finishes. Returns the release
+   * callback used on stream reattach or before detaching that registration.
+   */
+  suspendClientWorkflowApprovals(
+    sessionId: string,
+    clientId: string,
+  ): (() => void) | undefined;
+
   /** Test/inspection hook: number of live sessions. */
   readonly sessionCount: number;
 

@@ -15781,12 +15781,25 @@ class QwenAgent implements Agent {
 
         const results = await Promise.allSettled(
           sessions.map(async ([id, session]) => {
-            const reasoningError = session
-              .getConfig()
-              .stageReasoningOverrides?.(
-                newMerged.modelProviders,
-                newMerged.providerProtocol ?? {},
-              );
+            const config = session.getConfig();
+            // Workflow admission and controls follow the live flag even
+            // while a turn or a detached workflow is running.
+            const workflowsWereEnabled = config.isWorkflowsEnabled();
+            config.setWorkflowsEnabled(newMerged.tools?.workflowsEnabled);
+            if (config.isWorkflowsEnabled() !== workflowsWereEnabled) {
+              try {
+                await session.sendAvailableCommandsUpdate();
+              } catch (err) {
+                debugLogger.warn(
+                  `reload: sendAvailableCommandsUpdate failed for session ${id}: ${err}`,
+                );
+              }
+            }
+
+            const reasoningError = config.stageReasoningOverrides?.(
+              newMerged.modelProviders,
+              newMerged.providerProtocol ?? {},
+            );
             if (reasoningError)
               await session
                 .sendUpdate({
@@ -15801,7 +15814,6 @@ class QwenAgent implements Agent {
               skipped.push(id);
               return;
             }
-            const config = session.getConfig();
             const authType = config.getAuthType();
 
             const sessionProvidersChanged =
@@ -15876,30 +15888,9 @@ class QwenAgent implements Agent {
               config.setDisabledTools(new Set(disabled));
             }
 
-            // `/capabilities` reads `tools.workflowsEnabled` live from
-            // the reloaded settings; a session alive before the reload
-            // was constructed with the old value and would keep
-            // answering canUseWorkflowControls with it, so the
-            // advertisement and the controls it gates would diverge.
-            // The merged view is already workspace-stripped, so a repo
-            // cannot self-grant here any more than at construction.
-            const workflowsWereEnabled = config.isWorkflowsEnabled();
-            config.setWorkflowsEnabled(newMerged.tools?.workflowsEnabled);
             config.setWorkflowKeywordTriggerEnabled(
               newMerged.ui?.disableWorkflowKeywordTrigger !== true,
             );
-            if (config.isWorkflowsEnabled() !== workflowsWereEnabled) {
-              // The `workflows` slash command comes and goes with the
-              // flag; a client holding the old list would keep offering
-              // (or hiding) it.
-              try {
-                await session.sendAvailableCommandsUpdate();
-              } catch (err) {
-                debugLogger.warn(
-                  `reload: sendAvailableCommandsUpdate failed for session ${id}: ${err}`,
-                );
-              }
-            }
 
             // Apply the reloaded approval mode only when it differs from
             // what this session last converged on (see the record's

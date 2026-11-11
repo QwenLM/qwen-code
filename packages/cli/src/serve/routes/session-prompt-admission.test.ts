@@ -110,6 +110,7 @@ describe('classifyPromptRequest', () => {
     senderId: 'launch-user',
     threadId: 'launch-thread',
     userInitiated: true,
+    backgroundWorkflowBlocked: true,
   };
   afterEach(() => {
     revokeChannelWorkerPromptAuthorization('worker-token');

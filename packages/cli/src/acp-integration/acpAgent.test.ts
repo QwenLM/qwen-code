@@ -38357,7 +38357,7 @@ describe('sessionLanguage multi-session propagation', () => {
     await agentPromise;
   });
 
-  it('propagates tools.workflowsEnabled to existing sessions on reload', async () => {
+  it('propagates tools.workflowsEnabled to idle and busy sessions on reload', async () => {
     // R11-2: /capabilities reads the flag live from the reloaded
     // settings, but a session alive before the reload was constructed
     // with the old value. Without propagation its control surfaces kept
@@ -38401,6 +38401,7 @@ describe('sessionLanguage multi-session propagation', () => {
       }),
     });
     const sendAvailableCommandsUpdate = vi.fn().mockResolvedValue(undefined);
+    const isIdle = vi.fn().mockReturnValue(true);
 
     vi.mocked(loadSettings).mockReturnValue(settings);
     vi.mocked(loadCliConfig).mockResolvedValue(cfg as unknown as Config);
@@ -38411,7 +38412,7 @@ describe('sessionLanguage multi-session propagation', () => {
           getId: vi.fn().mockReturnValue('s-wf-reload'),
           shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
           getConfig: vi.fn().mockReturnValue(cfg),
-          isIdle: vi.fn().mockReturnValue(true),
+          isIdle,
           sendAvailableCommandsUpdate,
           clearActiveTodoPlanRevision: vi.fn(),
           clearTodoStopGuardTrust: vi.fn(),
@@ -38477,6 +38478,30 @@ describe('sessionLanguage multi-session propagation', () => {
       [false],
       [true],
     ]);
+
+    reloadedSettings = { tools: { workflowsEnabled: true } };
+    await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
+    expect(workflowsEnabled).toBe(true);
+    cfg.setImageModel.mockClear();
+    sendAvailableCommandsUpdate.mockClear();
+
+    isIdle.mockReturnValue(false);
+    reloadedSettings = { tools: { workflowsEnabled: false } };
+    const busyReload = await agent.extMethod(
+      SERVE_CONTROL_EXT_METHODS.workspaceReload,
+      {},
+    );
+    expect(busyReload).toMatchObject({
+      sessionsRefreshed: [],
+      sessionsSkipped: ['s-wf-reload'],
+    });
+    expect(workflowsEnabled).toBe(false);
+    expect(sendAvailableCommandsUpdate).toHaveBeenCalledOnce();
+    expect(cfg.setImageModel).not.toHaveBeenCalled();
+    await expect(cancelWorkflow()).resolves.toEqual({
+      cancelled: false,
+      reason: 'disabled',
+    });
 
     mockConnectionState.resolve();
     await agentPromise;

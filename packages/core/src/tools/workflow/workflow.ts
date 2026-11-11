@@ -43,6 +43,7 @@ import { ToolNames, ToolDisplayNames } from '../tool-names.js';
 // error code rather than an ad-hoc bare `{ message }` object.
 import { ToolErrorType } from '../tool-error.js';
 import type { Config } from '../../config/config.js';
+import { getChannelWorkflowOrigin } from '../../utils/invocation-context.js';
 import type { WorkflowAgentDispatch } from '../../agents/runtime/workflow-orchestrator.js';
 import {
   DEFAULT_MAX_AGENTS_PER_RUN,
@@ -544,6 +545,16 @@ class WorkflowToolInvocation extends BaseToolInvocation<
     if (runInBackground && signal.aborted) {
       return startCancelledResult();
     }
+    if (runInBackground && !this.sessionOwned) {
+      const error = getBackgroundWorkflowError(this.config);
+      if (error) {
+        return {
+          llmContent: error,
+          returnDisplay: error,
+          error: { message: error, type: ToolErrorType.EXECUTION_DENIED },
+        };
+      }
+    }
     const load = this.loadReferencedScript();
     let handle: WorkflowRunHandle;
     try {
@@ -962,6 +973,24 @@ function buildBackgroundStartText(
     `You will be notified when it settles. Use /workflows ${sanitizeLine(handle.runId)} for the live phase tree.`,
   );
   return lines.join('\n');
+}
+
+function getBackgroundWorkflowError(config: Config): string | null {
+  if (!hostSupportsBackgroundWorkflows(config)) {
+    if (config.isSessionAgentSession?.() === true) {
+      return 'WorkflowTool: Qwen Session Agents must run workflows in the foreground to return the result to the calling session. Omit `run_in_background`.';
+    }
+    if (getChannelWorkflowOrigin()?.backgroundWorkflowBlocked === true) {
+      return 'WorkflowTool: this channel target cannot receive background results. Omit `run_in_background` to run the workflow in the foreground.';
+    }
+    return config.getExperimentalZedIntegration?.() === true
+      ? 'WorkflowTool: `run_in_background` is not available in this session: its workflow controls are off (workflows disabled, bare mode, or an untrusted workspace), so a background run could not be watched or stopped.'
+      : 'WorkflowTool: `run_in_background` is available only in the interactive TUI and ACP clients such as Web Shell.';
+  }
+  if (!config.getWorkflowRunRegistry().hasCompletionCallback()) {
+    return 'WorkflowTool: `run_in_background` requires an active workflow completion channel.';
+  }
+  return null;
 }
 
 function startCancelledResult(): WorkflowToolResult {
@@ -1895,20 +1924,9 @@ export class WorkflowTool extends BaseDeclarativeTool<
     ) {
       return 'WorkflowTool: `resumeFromRunId` must match the generated id format `wf_<hex>`.';
     }
-    if (params.run_in_background === true) {
-      if (!hostSupportsBackgroundWorkflows(this.config)) {
-        if (this.config.isSessionAgentSession?.() === true) {
-          return 'WorkflowTool: Qwen Session Agents must run workflows in the foreground to return the result to the calling session. Omit `run_in_background`.';
-        }
-        return this.config.getExperimentalZedIntegration?.() === true
-          ? 'WorkflowTool: `run_in_background` is not available in this session: its workflow controls are off (workflows disabled, bare mode, or an untrusted workspace), so a background run could not be watched or stopped.'
-          : 'WorkflowTool: `run_in_background` is available only in the interactive TUI and ACP clients such as Web Shell.';
-      }
-      if (!this.config.getWorkflowRunRegistry().hasCompletionCallback()) {
-        return 'WorkflowTool: `run_in_background` requires an active workflow completion channel.';
-      }
-    }
-    return null;
+    return params.run_in_background === true
+      ? getBackgroundWorkflowError(this.config)
+      : null;
   }
 
   protected createInvocation(

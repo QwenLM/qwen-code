@@ -1996,6 +1996,10 @@ export abstract class ChannelBase {
     return this.supportsProactiveTarget(target);
   }
 
+  protected canDeliverBackgroundWorkflow(_target: SessionTarget): boolean {
+    return true;
+  }
+
   protected async pushProactive(
     target: SessionTarget,
     text: string,
@@ -7802,15 +7806,21 @@ export abstract class ChannelBase {
           if (!this.canStartInboundTurn()) {
             throw new ChannelPromptCancelledError();
           }
+          const workflowTarget: SessionTarget = {
+            channelName: this.name,
+            chatId: envelope.chatId,
+            threadId: envelope.threadId,
+            senderId: envelope.senderId,
+            isGroup: envelope.isGroup,
+            messageRoute: envelope.messageRoute,
+          };
           let response = await promptBridge.prompt(sessionId, promptToSend, {
             workflowOrigin: {
-              channelName: this.name,
-              chatId: envelope.chatId,
-              threadId: envelope.threadId,
-              senderId: envelope.senderId,
-              isGroup: envelope.isGroup,
-              messageRoute: envelope.messageRoute,
+              ...workflowTarget,
               userInitiated: true,
+              ...(!this.canDeliverBackgroundWorkflow(workflowTarget)
+                ? { backgroundWorkflowBlocked: true }
+                : {}),
             },
             ...(this.config.outputMode === 'per_task'
               ? {

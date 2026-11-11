@@ -3006,7 +3006,7 @@ export class DingtalkChannel extends ChannelBase {
             !this.supportsProactiveTarget(target.target)
           ) {
             preparedReplyBody ??= await this.prepareBackgroundOutput(
-              target.target,
+              target,
               body,
             );
           }
@@ -3083,10 +3083,13 @@ export class DingtalkChannel extends ChannelBase {
   }
 
   private prepareBackgroundOutput(
-    target: SessionTarget,
+    { target, workflowOrigin }: BackgroundOutputTarget,
     text: string,
   ): Promise<string> {
-    return this.supportsProactiveSend() && this.supportsProactiveTarget(target)
+    const useProactive =
+      (workflowOrigin !== undefined && !workflowOrigin.userInitiated) ||
+      (this.supportsProactiveSend() && this.supportsProactiveTarget(target));
+    return useProactive
       ? this.prepareFileOutput(text, (file, mediaId) =>
           this.sendProactiveFile(target, file, mediaId),
         )
@@ -3101,19 +3104,23 @@ export class DingtalkChannel extends ChannelBase {
     result?: { status: string; partial?: boolean },
   ): Promise<void> {
     const { target, sourceLabel, workflowOrigin } = delivery;
+    const unattendedWorkflow =
+      workflowOrigin !== undefined && !workflowOrigin.userInitiated;
+    const resultChatId =
+      target.isGroup || unattendedWorkflow ? target.chatId : target.senderId;
     if (
       this.statusCardController &&
       this.supportsProactiveDeliveryTarget(target) &&
-      (target.isGroup === true || this.isStableTargetId(target.senderId))
+      this.isStableTargetId(resultChatId)
     ) {
       if (!prepared) {
-        text = await this.prepareBackgroundOutput(target, text);
+        text = await this.prepareBackgroundOutput(delivery, text);
         prepared = true;
       }
       if (
         await this.statusCardController.deliverCompletedResult(
           {
-            chatId: target.isGroup ? target.chatId : target.senderId,
+            chatId: resultChatId,
             isGroup: target.isGroup === true,
           },
           text,
@@ -3128,7 +3135,7 @@ export class DingtalkChannel extends ChannelBase {
       return super.deliverBackgroundResponseToTarget(sessionId, text, delivery);
     }
     if (workflowOrigin) {
-      if (!workflowOrigin.userInitiated) {
+      if (unattendedWorkflow) {
         return this.pushProactive(target, text, sourceLabel);
       }
       return this.sendReply(

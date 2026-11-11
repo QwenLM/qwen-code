@@ -27,6 +27,7 @@ export interface ChannelWorkflowOrigin {
   readonly isGroup?: boolean;
   readonly messageRoute?: string;
   readonly userInitiated?: true;
+  readonly backgroundWorkflowBlocked?: true;
 }
 
 const invocationContextKeys = new Set([

@@ -6410,6 +6410,11 @@ export class AcpDispatcher {
     binding.promptAbort?.abort();
     const abort = new AbortController();
     binding.promptAbort = abort;
+    const { clientId } = binding;
+    if (conn.preserveRunningPromptsOnDisconnect && clientId !== undefined) {
+      binding.suspendWorkflowApprovals = () =>
+        this.bridge.suspendClientWorkflowApprovals?.(sessionId, clientId);
+    }
     const metadata = params['_meta'] as Record<string, unknown> | undefined;
     const submittedPrompt = metadata?.[SUBMITTED_PROMPT_META_KEY];
     try {

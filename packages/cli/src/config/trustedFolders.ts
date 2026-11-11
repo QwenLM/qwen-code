@@ -18,10 +18,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import type { Settings } from './settings.js';
 import { parseJsoncObject, updateJsoncContent } from '../utils/jsonc-editor.js';
-import {
-  arePathsEquivalent,
-  getPathComparisonVariants,
-} from './path-comparison.js';
+import { getPathComparisonVariants } from './path-comparison.js';
 import {
   buildTrustPrecedenceRules,
   resolveTrustDecision,
@@ -406,11 +403,8 @@ export function getWorkspaceTrustStatus(
     };
   }
 
-  const ideTrust = ideContextStore.get()?.workspaceState?.isTrusted;
-  if (
-    ideTrust !== undefined &&
-    arePathsEquivalent(workspaceCwd, process.cwd())
-  ) {
+  const ideTrust = ideContextStore.getWorkspaceTrust(workspaceCwd);
+  if (ideTrust !== undefined) {
     return {
       v: 1,
       workspaceCwd,
@@ -457,13 +451,11 @@ export function isWorkspaceTrusted(
     return { isTrusted: true, source: undefined };
   }
 
-  const ideTrust = ideContextStore.get()?.workspaceState?.isTrusted;
-  if (
-    ideTrust !== undefined &&
-    (workspacePath === undefined ||
-      arePathsEquivalent(workspacePath, process.cwd()))
-  ) {
-    return { isTrusted: ideTrust, source: 'ide' };
+  if (workspacePath === undefined) {
+    const ideTrust = ideContextStore.get()?.workspaceState?.isTrusted;
+    if (ideTrust !== undefined) {
+      return { isTrusted: ideTrust, source: 'ide' };
+    }
   }
 
   return trustStatusToResult(

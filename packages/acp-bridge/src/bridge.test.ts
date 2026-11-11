@@ -25891,6 +25891,103 @@ describe('createAcpSessionBridge', () => {
       }
     });
 
+    const requestDetachedWorkflowApproval = (
+      conn: AgentSideConnection,
+      sessionId: string,
+      clientId: string | undefined,
+      toolCallId: string,
+    ) =>
+      conn.requestPermission({
+        sessionId,
+        _meta: { workflowOriginatorClientId: clientId },
+        toolCall: {
+          toolCallId,
+          title: 'Workflow tool',
+          _meta: {
+            workflowApproval: true,
+            backgroundWorkflowApproval: true,
+          },
+        },
+        options: [{ optionId: 'allow', name: 'Allow', kind: 'allow_once' }],
+      });
+
+    it('keeps a foreground prompt while its detached ACP workflow approvals are suspended', async () => {
+      const started = deferred<void>();
+      const finished = deferred<PromptResponse>();
+      const { bridge, session, conn } = await setupForPermission(
+        { permissionPolicy: 'designated' },
+        new FakeAgent({
+          promptImpl: () => {
+            started.resolve();
+            return finished.promise;
+          },
+        }),
+      );
+      const { sessionId, clientId } = session;
+      const request = (toolCallId: string) =>
+        requestDetachedWorkflowApproval(conn, sessionId, clientId, toolCallId);
+      try {
+        const followUp = bridge.sendPrompt(
+          sessionId,
+          { sessionId, prompt: [{ type: 'text', text: 'Follow-up' }] },
+          undefined,
+          { clientId },
+        );
+        void followUp.catch(() => {});
+        await started.promise;
+
+        const resume = bridge.suspendClientWorkflowApprovals(
+          sessionId,
+          clientId!,
+        )!;
+        const lastEventId = bridge.getSessionLastEventId(sessionId);
+        await expect(request('workflow-late')).resolves.toMatchObject({
+          outcome: { outcome: 'cancelled' },
+        });
+        expect(bridge.getSessionLastEventId(sessionId)).toBe(lastEventId);
+        expect(bridge.pendingPermissionCount).toBe(0);
+
+        const pollingClient = await bridge.spawnOrAttach({
+          workspaceCwd: WS_A,
+          clientId,
+        });
+        expect(pollingClient.clientId).toBe(clientId);
+        const pending = request('workflow-polling');
+        await vi.waitFor(() => expect(bridge.pendingPermissionCount).toBe(1));
+
+        await bridge.detachClient(sessionId, pollingClient.clientId);
+        await expect(pending).resolves.toMatchObject({
+          outcome: { outcome: 'cancelled' },
+        });
+        expect(bridge.pendingPermissionCount).toBe(0);
+        expect(bridge.getSessionSummary(sessionId)?.hasActivePrompt).toBe(true);
+
+        resume();
+        const resumed = request('workflow-reconnected');
+        await vi.waitFor(() => expect(bridge.pendingPermissionCount).toBe(1));
+        const requestId =
+          bridge.getSessionSummary(sessionId)?.pendingInteractions?.[0]
+            ?.requestId;
+        const outcome = { outcome: 'selected' as const, optionId: 'allow' };
+        expect(
+          bridge.respondToSessionPermission(
+            sessionId,
+            requestId!,
+            { outcome },
+            { clientId },
+          ),
+        ).toBe(true);
+        await expect(resumed).resolves.toMatchObject({ outcome });
+        finished.resolve({ stopReason: 'end_turn' });
+        await expect(followUp).resolves.toMatchObject({
+          stopReason: 'end_turn',
+        });
+      } finally {
+        finished.resolve({ stopReason: 'end_turn' });
+        await bridge.shutdown();
+      }
+    });
+
     it.each(['designated', 'first-responder'] as const)(
       'handles detached workflow approvals when the originator detaches under %s',
       async (permissionPolicy) => {
@@ -25909,21 +26006,12 @@ describe('createAcpSessionBridge', () => {
           expect(other.clientId).not.toBe(clientId);
 
           const requestWorkflowApproval = (toolCallId: string) =>
-            conn.requestPermission({
+            requestDetachedWorkflowApproval(
+              conn,
               sessionId,
-              _meta: { workflowOriginatorClientId: clientId },
-              toolCall: {
-                toolCallId,
-                title: 'Workflow tool',
-                _meta: {
-                  workflowApproval: true,
-                  backgroundWorkflowApproval: true,
-                },
-              },
-              options: [
-                { optionId: 'allow', name: 'Allow', kind: 'allow_once' },
-              ],
-            });
+              clientId,
+              toolCallId,
+            );
           const pending = requestWorkflowApproval('workflow-first');
           await vi.waitFor(() => expect(bridge.pendingPermissionCount).toBe(1));
 

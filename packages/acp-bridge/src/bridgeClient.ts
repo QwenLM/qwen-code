@@ -688,7 +688,8 @@ function sliceLineRange(
  *
  * Only the fields declared on this narrowed interface cross the boundary:
  * `sessionId`, `events`,
- * `clientIds`, `pendingPermissionIds`, `pendingInteractions`, `activePromptId`,
+ * `clientIds`, `suspendedWorkflowApprovalRefs`, `pendingPermissionIds`,
+ * `pendingInteractions`, `activePromptId`,
  * `activePromptOriginatorClientId`. New fields
  * BridgeClient grows must be added here too (and the factory's
  * `SessionEntry` is required to provide them — TS enforces the
@@ -712,6 +713,7 @@ export interface BridgeClientSessionEntry {
   attachments: SessionAttachmentStore;
   recordingDegraded: boolean;
   clientIds: ReadonlyMap<string, number>;
+  suspendedWorkflowApprovalRefs?: ReadonlyMap<string, ReadonlySet<symbol>>;
   pendingPermissionIds: Set<string>;
   /** Pollable pending human interactions, keyed by permission request id. */
   pendingInteractions: Map<string, BridgePendingInteraction>;
@@ -770,6 +772,19 @@ export interface BridgeClientDeferredArtifactBatch {
   artifacts: SessionArtifactInput[];
   options?: Parameters<SessionArtifactStore['upsertMany']>[1];
   turn: Pick<BridgeEvent, 'promptId' | 'originatorClientId'>;
+}
+
+export function hasAvailableWorkflowApprovalClient(
+  entry: Pick<
+    BridgeClientSessionEntry,
+    'clientIds' | 'suspendedWorkflowApprovalRefs'
+  >,
+  clientId: string,
+): boolean {
+  return (
+    (entry.clientIds.get(clientId) ?? 0) >
+    (entry.suspendedWorkflowApprovalRefs?.get(clientId)?.size ?? 0)
+  );
 }
 
 interface PreparedSessionUpdateFrames {
@@ -1087,7 +1102,7 @@ export class BridgeClient implements Client {
     ) {
       if (
         this.mediator.policy === 'designated' &&
-        !entry.clientIds.has(workflowOriginatorClientId)
+        !hasAvailableWorkflowApprovalClient(entry, workflowOriginatorClientId)
       ) {
         return resolutionToAcpResponse({
           kind: 'cancelled',

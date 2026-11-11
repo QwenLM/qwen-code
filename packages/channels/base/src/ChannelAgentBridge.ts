@@ -128,7 +128,7 @@ export interface PermissionResolvedEvent {
 }
 
 export type ChannelWorkflowOrigin = Readonly<
-  SessionTarget & { userInitiated?: true }
+  SessionTarget & { userInitiated?: true; backgroundWorkflowBlocked?: true }
 >;
 
 export function parseChannelWorkflowOrigin(
@@ -145,6 +145,7 @@ export function parseChannelWorkflowOrigin(
     isGroup,
     messageRoute,
     userInitiated,
+    backgroundWorkflowBlocked,
   } = value as Record<string, unknown>;
   if (
     typeof channelName !== 'string' ||
@@ -157,7 +158,9 @@ export function parseChannelWorkflowOrigin(
     (isGroup !== undefined && typeof isGroup !== 'boolean') ||
     (messageRoute !== undefined &&
       (typeof messageRoute !== 'string' || !messageRoute)) ||
-    (userInitiated !== undefined && userInitiated !== true)
+    (userInitiated !== undefined && userInitiated !== true) ||
+    (backgroundWorkflowBlocked !== undefined &&
+      backgroundWorkflowBlocked !== true)
   ) {
     return undefined;
   }
@@ -169,6 +172,9 @@ export function parseChannelWorkflowOrigin(
     ...(isGroup !== undefined ? { isGroup } : {}),
     ...(messageRoute !== undefined ? { messageRoute } : {}),
     ...(userInitiated === true ? { userInitiated } : {}),
+    ...(backgroundWorkflowBlocked === true
+      ? { backgroundWorkflowBlocked }
+      : {}),
   });
 }
 

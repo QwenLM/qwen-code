@@ -20,6 +20,7 @@ import {
   createAbortController,
   createChildAbortController,
 } from '../../utils/abortController.js';
+import { getChannelWorkflowOrigin } from '../../utils/invocation-context.js';
 import {
   getWorkflowTaskMutationKey,
   isTerminalWorkflowStatus,
@@ -191,7 +192,8 @@ export function hostSupportsBackgroundWorkflows(
       config.isSessionAgentSession?.() !== true &&
       config.isWorkflowsEnabled?.() === true &&
       config.getBareMode?.() !== true &&
-      config.isTrustedFolder?.() === true
+      config.isTrustedFolder?.() === true &&
+      getChannelWorkflowOrigin()?.backgroundWorkflowBlocked !== true
     );
   }
   return config.isInteractive?.() === true;

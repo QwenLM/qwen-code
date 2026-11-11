@@ -13731,6 +13731,82 @@ describe('DingtalkChannel proactive send', () => {
     expect(createChannel().supportsProactiveSend()).toBe(true);
   });
 
+  it.each([
+    ['per_turn', false],
+    ['per_task', false],
+    ['per_response', true],
+  ] as const)(
+    'delivers unattended direct workflow files proactively in %s mode',
+    async (outputMode, withCard) => {
+      const file = createTempFile();
+      try {
+        const channel = createChannel({
+          cwd: file.dir,
+          outputMode,
+          interactiveCards: withCard ? {} : undefined,
+        });
+        const origin = {
+          ...directTarget,
+          channelName: 'test-dingtalk',
+          senderId: 'webhook:report',
+        };
+        seedSessionTarget(channel, 'session-1', origin);
+        const { directSendCalls } = stubProactiveFetch(
+          () => new Response(JSON.stringify({ processQueryKey: 'send-1' })),
+        );
+        const create = vi
+          .spyOn(DingtalkInteractiveCardClient.prototype, 'createAndDeliver')
+          .mockResolvedValue(undefined);
+
+        await channel.dispatchBackgroundResponse(
+          'session-1',
+          `Report ready.\n[FILE: ${file.path}]`,
+          {
+            taskId: 'workflow-1',
+            turnId: 'notification-1',
+            kind: 'workflow',
+            status: 'completed',
+            turnComplete: true,
+            channelWorkflowOrigin: origin,
+          },
+        );
+
+        const calls = directSendCalls();
+        expect(calls).toHaveLength(withCard ? 1 : 2);
+        expect(
+          JSON.parse(String((calls[0]![1] as RequestInit).body)),
+        ).toMatchObject({
+          userIds: [origin.chatId],
+          msgKey: 'sampleFile',
+        });
+        expect(msgParamOf(calls[0]!)).toMatchObject({ fileName: 'report.txt' });
+        if (withCard) {
+          expect(create).toHaveBeenCalledWith(
+            expect.objectContaining({
+              target: { chatId: origin.chatId, isGroup: false },
+              cardParamMap: expect.objectContaining({
+                content: expect.stringContaining('Report ready.'),
+              }),
+            }),
+          );
+        } else {
+          expect(
+            JSON.parse(String((calls[1]![1] as RequestInit).body)),
+          ).toMatchObject({
+            userIds: [origin.chatId],
+            msgKey: 'sampleMarkdown',
+          });
+          expect(msgParamOf(calls[1]!).text).toContain('Report ready.');
+          expect(msgParamOf(calls[1]!).text).not.toContain(
+            'File delivery failed',
+          );
+        }
+      } finally {
+        rmSync(file.dir, { recursive: true, force: true });
+      }
+    },
+  );
+
   it('accepts direct-message targets only for webhooks', () => {
     const channel = proactive(createChannel());
     expect(channel.supportsProactiveTarget(groupTarget)).toBe(true);

@@ -1616,8 +1616,6 @@ export interface ConfigParameters {
   autoCompactThreshold?: number;
   interactive?: boolean;
   trustedFolder?: boolean;
-  /** Whether the process-wide IDE trust decision applies to this workspace. */
-  useIdeWorkspaceTrust?: boolean;
   defaultFileEncoding?: FileEncodingType;
   useRipgrep?: boolean;
   useBuiltinRipgrep?: boolean;
@@ -3328,7 +3326,6 @@ export class Config {
   private readonly autoCompactThreshold: number | undefined;
   private readonly interactive: boolean;
   private readonly trustedFolder: boolean | undefined;
-  private readonly useIdeWorkspaceTrust: boolean;
   private readonly useRipgrep: boolean;
   private readonly useBuiltinRipgrep: boolean;
   private readonly shouldUseNodePtyShell: boolean;
@@ -3787,7 +3784,6 @@ export class Config {
     this.autoCompactThreshold = params.autoCompactThreshold;
     this.interactive = params.interactive ?? false;
     this.trustedFolder = params.trustedFolder;
-    this.useIdeWorkspaceTrust = params.useIdeWorkspaceTrust ?? true;
     this.skipLoopDetection = params.skipLoopDetection ?? false;
     // Embedders bypass the CLI's check; an unknown mode would act as `off`.
     this.loopProtection = isLoopProtectionMode(params.loopProtection)
@@ -12326,9 +12322,9 @@ export class Config {
   }
 
   private getIdeWorkspaceTrust(): boolean | undefined {
-    return this.useIdeWorkspaceTrust
-      ? ideContextStore.get()?.workspaceState?.isTrusted
-      : undefined;
+    return this.experimentalZedIntegration
+      ? ideContextStore.getWorkspaceTrust(this.getTargetDir())
+      : ideContextStore.get()?.workspaceState?.isTrusted;
   }
 
   isTrustedFolder(): boolean {
