@@ -40,7 +40,11 @@ interface ManagedTerminalSurfaceProps {
 function admissionRefused(error: unknown): boolean {
   if (typeof error !== 'object' || error === null) return false;
   const status = (error as { status?: unknown }).status;
-  return status === 401 || status === 403 || status === 404 || status === 409;
+  // 409 workspace_unavailable is deliberately retryable: it also answers a
+  // binding that is not READY yet (bootstrapping or being replaced), which is
+  // transient. Treating it as permanent would kill the panel for a terminal
+  // that is fine seconds later.
+  return status === 401 || status === 403 || status === 404;
 }
 
 function ManagedTerminalSurface({
@@ -120,7 +124,8 @@ function ManagedTerminalSurface({
     }
 
     function writeLostNotice() {
-      if (noticeWritten) return;
+      // The lost notice is the terminal state: it must replace a stale
+      // "reconnecting" notice, not be swallowed by the shared latch.
       writeNotice(tRef.current('terminal.notice.lost'), '31');
       noticeWritten = true;
     }
@@ -410,6 +415,15 @@ export function ManagedTerminalPanel({
         // mode); Radix would otherwise dismiss the dialog and release the PTY.
         // Close stays available through the explicit dialog close control.
         onEscapeKeyDown={(event) => {
+          event.preventDefault();
+        }}
+        // A click on the modal backdrop (or any outside interaction) must not
+        // dismiss the dialog either: that would unmount the surface and release
+        // the running PTY, the same outcome the Escape guard prevents.
+        onPointerDownOutside={(event) => {
+          event.preventDefault();
+        }}
+        onInteractOutside={(event) => {
           event.preventDefault();
         }}
         onCloseAutoFocus={(event) => {

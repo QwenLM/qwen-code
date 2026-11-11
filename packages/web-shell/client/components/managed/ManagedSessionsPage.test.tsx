@@ -62,6 +62,33 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   // The shared approval card asks whether a tool is an agent launch.
   isAgentTool: () => false,
 }));
+// The terminal surface renders xterm, which jsdom cannot host; mock it so the
+// panel can mount in the page-level terminal tests.
+const terminalMock = {
+  cols: 80,
+  rows: 24,
+  loadAddon: vi.fn(),
+  open: vi.fn(),
+  resize: vi.fn(),
+  write: vi.fn((_text: string, callback?: () => void) => callback?.()),
+  writeln: vi.fn(),
+  focus: vi.fn(),
+  blur: vi.fn(),
+  refresh: vi.fn(),
+  dispose: vi.fn(),
+  onData: vi.fn((_listener: (data: string) => void) => ({ dispose: vi.fn() })),
+  parser: {
+    registerCsiHandler: vi.fn(
+      (_id: { final: string }, _handler: () => boolean) => ({
+        dispose: vi.fn(),
+      }),
+    ),
+  },
+};
+vi.mock('@xterm/xterm', () => ({ Terminal: vi.fn(() => terminalMock) }));
+vi.mock('@xterm/addon-fit', () => ({
+  FitAddon: vi.fn(() => ({ fit: vi.fn() })),
+}));
 vi.mock('../MessageList', () => ({
   MessageList: ({
     messages,
@@ -482,6 +509,65 @@ describe('ManagedSessionsPage', () => {
       expect(button !== undefined).toBe(shown);
     },
   );
+
+  it('keeps the terminal mounted across transient interactive and summary dips', async () => {
+    vi.useFakeTimers();
+    const sent: unknown[] = [];
+    class FakeWs {
+      static OPEN = 1;
+      readyState = 0;
+      binaryType = '';
+      onopen: (() => void) | null = null;
+      onclose: ((event: { code: number }) => void) | null = null;
+      onmessage: ((event: { data: unknown }) => void) | null = null;
+      onerror: (() => void) | null = null;
+      constructor(
+        public url: string,
+        public protocols?: string | string[],
+      ) {}
+      send(data: unknown) {
+        sent.push(data);
+      }
+      close() {
+        this.readyState = 3;
+      }
+    }
+    vi.stubGlobal('WebSocket', FakeWs);
+    provider = {
+      ...provider,
+      terminal: {
+        ticket: vi
+          .fn()
+          .mockResolvedValue({ ticket: 't', expiresInSeconds: 30 }),
+        webSocketUrl: () => 'ws://managed-test/terminal',
+      },
+    };
+    mocks.client.getSession.mockResolvedValue(
+      summary('s1', {
+        capabilities: { canSend: false, canCancel: false, terminal: true },
+      }),
+    );
+    await render('s1');
+    const button = [...container.querySelectorAll('button')].find(
+      (item) => item.textContent === 'Terminal',
+    );
+    await act(async () => {
+      button!.click();
+      await flush();
+    });
+    expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+    // A side panel opens: interactive dips false, but the live terminal must
+    // not unmount (that would send the release frame and SIGTERM the PTY).
+    await render('s1', 'en', provider, null, false);
+    expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+    // A reload briefly clears the summary; the terminal must still survive.
+    mocks.client.getSession.mockResolvedValue(summary('s1', {}));
+    await render('s1', 'en', provider, null, true);
+    expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+    expect(sent).not.toContain('\x00{"type":"release"}');
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
 
   it('clears diagnostic content when the Session read loses permission', async () => {
     vi.useFakeTimers();

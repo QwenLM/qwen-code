@@ -1457,8 +1457,12 @@ function ManagedSessionsContent({
     : undefined;
   useEffect(() => {
     if (!terminalOpen || !currentSummary) return;
-    if (currentSummary.capabilities.terminal === true && provider.terminal)
+    if (currentSummary.capabilities.terminal === true && provider.terminal) {
+      // The capability recovered (e.g. after a runtime restart): drop any stale
+      // "no longer available" notice left by an earlier dip.
+      setTerminalLost(false);
       return;
+    }
     setTerminalSession(undefined);
     setTerminalLost(true);
   }, [terminalOpen, currentSummary, provider.terminal]);
@@ -3263,21 +3267,22 @@ function ManagedSessionsContent({
             }}
           />
         )}
-        {interactive &&
-          terminalPanelOpen &&
-          sessionId &&
-          terminalId &&
-          provider.terminal && (
-            <ManagedTerminalPanel
-              key={`${provider.storageKey}:${sessionId}:${terminalId}`}
-              terminal={provider.terminal}
-              sessionId={sessionId}
-              terminalId={terminalId}
-              clientId={clientId}
-              onClose={() => setTerminalSession(undefined)}
-              restoreFocus={() => terminalTriggerRef.current?.focus()}
-            />
-          )}
+        {/* Keep the panel mounted while the user has it open, independent of
+            transient dips: `interactive` goes false when a side panel opens and
+            the summary is briefly absent during a reload. Unmounting here would
+            send the release frame and SIGTERM the live PTY. A genuine capability
+            loss clears terminalSession via the effect below, which unmounts. */}
+        {terminalOpen && sessionId && terminalId && provider.terminal && (
+          <ManagedTerminalPanel
+            key={`${provider.storageKey}:${sessionId}:${terminalId}`}
+            terminal={provider.terminal}
+            sessionId={sessionId}
+            terminalId={terminalId}
+            clientId={clientId}
+            onClose={() => setTerminalSession(undefined)}
+            restoreFocus={() => terminalTriggerRef.current?.focus()}
+          />
+        )}
         {provider.sideQueries && (
           <ManagedSideQueryPanel
             sideQueries={sideQueries}

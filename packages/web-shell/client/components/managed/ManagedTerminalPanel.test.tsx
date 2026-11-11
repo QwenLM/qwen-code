@@ -217,6 +217,59 @@ describe('ManagedTerminalPanel', () => {
     expect(ticketFn).toHaveBeenCalledTimes(1);
   });
 
+  it('retries a transient workspace_unavailable instead of ending', async () => {
+    const ticketFn = vi
+      .fn()
+      .mockRejectedValueOnce(
+        Object.assign(new Error('bootstrapping'), {
+          status: 409,
+          code: 'workspace_unavailable',
+        }),
+      )
+      .mockResolvedValueOnce({ ticket: 'ticket-two', expiresInSeconds: 30 });
+    await render(ticketFn);
+    expect(FakeWebSocket.instances).toHaveLength(0);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+    });
+    expect(ticketFn).toHaveBeenCalledTimes(2);
+    expect(FakeWebSocket.instances).toHaveLength(1);
+  });
+
+  it('shows the lost notice even after a reconnect notice', async () => {
+    const ticketFn = vi
+      .fn()
+      .mockResolvedValueOnce({ ticket: 'ticket-one', expiresInSeconds: 30 })
+      .mockRejectedValue(Object.assign(new Error('refused'), { status: 403 }));
+    await render(ticketFn);
+    const first = FakeWebSocket.instances[0]!;
+    first.open();
+    first.closeWith(1006);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+    });
+    expect(terminalMock.writeln).toHaveBeenCalledWith(
+      expect.stringContaining('This terminal is no longer available.'),
+    );
+  });
+
+  it('keeps the dialog open on a backdrop pointer-down', async () => {
+    const ticketFn = vi
+      .fn()
+      .mockResolvedValue({ ticket: 'ticket-one', expiresInSeconds: 30 });
+    await render(ticketFn);
+    const ws = FakeWebSocket.instances[0]!;
+    ws.open();
+    await act(async () => {
+      document.body.dispatchEvent(
+        new MouseEvent('pointerdown', { bubbles: true, cancelable: true }),
+      );
+    });
+    await flush();
+    expect(onClose).not.toHaveBeenCalled();
+    expect(ws.send).not.toHaveBeenCalledWith('\x00{"type":"release"}');
+  });
+
   it('releases the terminal and disposes xterm on unmount', async () => {
     const ticketFn = vi
       .fn()
