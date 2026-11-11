@@ -205,4 +205,53 @@ describe('LoopEventBus', () => {
     await flush();
     expect(seen.at(-1)).toBe('a-end');
   });
+
+  it('preserves a caller-supplied eventId', async () => {
+    const bus = new LoopEventBus();
+    const seen: AnyBusEvent[] = [];
+    bus.subscribe('loop', ['loop.started'], (e) => {
+      seen.push(e);
+    });
+    bus.publish({
+      ...createBusEvent('loop.started', base('r1'), { promptId: 'p' }),
+      eventId: 'fixed-id',
+    });
+    await flush();
+    expect(seen[0].eventId).toBe('fixed-id');
+  });
+
+  it('drains the delivery chain map after settling', async () => {
+    const bus = new LoopEventBus();
+    bus.subscribe('loop', ['loop.started'], () => {});
+    for (let i = 0; i < 50; i++) {
+      bus.publish(
+        createBusEvent('loop.started', base(`r${i}`), { promptId: 'p' }),
+      );
+    }
+    await flush();
+    await flush();
+    const chains = (bus as unknown as { chains: Map<string, unknown> }).chains;
+    expect(chains.size).toBe(0);
+  });
+
+  it('propagates promptId onto handler.failed', async () => {
+    const bus = new LoopEventBus();
+    const failures: AnyBusEvent[] = [];
+    bus.subscribe('llm', ['loop.cancelled'], () => {
+      throw new Error('boom');
+    });
+    bus.subscribe('loop', ['handler.failed'], (e) => {
+      failures.push(e);
+    });
+    bus.publish(
+      createBusEvent(
+        'loop.cancelled',
+        { runId: 'r1', promptId: 'prompt-9' },
+        { reason: 'abort' },
+      ),
+    );
+    await flush();
+    expect(failures).toHaveLength(1);
+    expect(failures[0].promptId).toBe('prompt-9');
+  });
 });
