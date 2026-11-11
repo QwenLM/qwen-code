@@ -11,6 +11,9 @@ import { createRoot, type Root } from 'react-dom/client';
 import { createPortal } from 'react-dom';
 import { DAEMON_APPROVAL_MODES } from './test/sidebarHarness';
 const notificationScrollToBottom = vi.hoisted(() => vi.fn());
+const messageListScrollToMessage = vi.hoisted(() =>
+  vi.fn((_messageId: string, _callId?: string) => true),
+);
 const approvalModesProbe = vi.hoisted(() => ({
   cwd: undefined as string | undefined,
   setting: undefined as unknown,
@@ -942,12 +945,13 @@ const {
       latestChatEditorProps: null as ChatEditorTestProps | null,
       onChatEditorLayout: null as ((props: ChatEditorTestProps) => void) | null,
       latestToastHostElevated: false,
-      latestStatusBarTasks: null as
-        | DaemonSessionTaskWithWorkflowStatus[]
+      latestTaskChipsTasks: null as
+        | readonly DaemonSessionTaskWithWorkflowStatus[]
         | null,
-      latestStatusBarOnOpenTasks: null as (() => void) | null,
-      latestStatusBarHideSettings: false,
-      latestStatusBarOnSelectModel: null as (() => void) | null,
+      latestTaskChipsIncludeAgents: null as boolean | null,
+      latestTaskChipsOnSelectTask: null as
+        | ((task: DaemonSessionTaskWithWorkflowStatus) => void)
+        | null,
       openTurnCalls: undefined as
         | ((
             turnId: string,
@@ -1668,6 +1672,7 @@ vi.mock('./components/TranscriptViewport', async () => {
         useWebShellCustomization().hostOwnsArtifactPreview;
       React.useImperativeHandle(ref, () => ({
         scrollToBottom: notificationScrollToBottom,
+        scrollToMessage: messageListScrollToMessage,
       }));
       return React.createElement(
         'div',
@@ -2366,21 +2371,21 @@ function mockComponent(path: string, exportName: string): void {
   });
 }
 
-vi.doMock('./components/StatusBar', async () => {
+vi.doMock('./components/ComposerTaskChips', async () => {
   const React = await import('react');
   return {
-    StatusBar: (props: {
-      tasks?: DaemonSessionTaskWithWorkflowStatus[];
-      onOpenTasks?: () => void;
-      hideSettings?: boolean;
-      onSelectModel?: () => void;
-    }) => {
-      testState.latestStatusBarTasks = props.tasks ?? [];
-      testState.latestStatusBarOnOpenTasks = props.onOpenTasks ?? null;
-      testState.latestStatusBarHideSettings = props.hideSettings ?? false;
-      testState.latestStatusBarOnSelectModel = props.onSelectModel ?? null;
-      return React.createElement('div');
-    },
+    ComposerTaskChips: React.forwardRef(function ComposerTaskChips(props: {
+      tasks: readonly DaemonSessionTaskWithWorkflowStatus[];
+      includeAgents: boolean;
+      onSelectTask: (task: DaemonSessionTaskWithWorkflowStatus) => void;
+    }) {
+      testState.latestTaskChipsTasks = props.tasks;
+      testState.latestTaskChipsIncludeAgents = props.includeAgents;
+      testState.latestTaskChipsOnSelectTask = props.onSelectTask;
+      return React.createElement('div', {
+        'data-testid': 'composer-task-chips',
+      });
+    }),
   };
 });
 vi.doMock('./components/StreamingStatus', async () => {
@@ -3101,6 +3106,27 @@ const { I18nProvider } = await import('./i18n');
 ).IS_REACT_ACT_ENVIRONMENT = true;
 
 const mounted: Array<{ root: Root; container: HTMLElement }> = [];
+
+/** A live workflow run with no tool call in the transcript. */
+const unlinkedWorkflowTask: DaemonSessionWorkflowTaskStatus = {
+  kind: 'workflow',
+  id: 'workflow-unlinked',
+  label: 'review-and-fix',
+  description: 'Review and fix',
+  status: 'running',
+  startTime: 1,
+  runtimeMs: 10,
+  isBackgrounded: true,
+  currentPhase: null,
+  phaseVisits: [],
+  dispatches: [],
+  agentsDispatched: 0,
+  agentsCompleted: 0,
+  tokensSpent: 0,
+  tokenBudgetTotal: null,
+  recentLogs: [],
+  pendingApprovalCount: 0,
+};
 
 describe('canArchiveSideTaskSummary', () => {
   it.each([
@@ -12841,10 +12867,9 @@ beforeEach(() => {
   testState.latestChatEditorProps = null;
   testState.onChatEditorLayout = null;
   testState.latestToastHostElevated = false;
-  testState.latestStatusBarTasks = null;
-  testState.latestStatusBarOnOpenTasks = null;
-  testState.latestStatusBarHideSettings = false;
-  testState.latestStatusBarOnSelectModel = null;
+  testState.latestTaskChipsTasks = null;
+  testState.latestTaskChipsIncludeAgents = null;
+  testState.latestTaskChipsOnSelectTask = null;
   testState.latestMessageListProps = null;
   testState.backgroundDetails = undefined;
   testState.openTurnCalls = undefined;
@@ -14054,7 +14079,7 @@ describe('App plan todos', () => {
     await flush();
 
     await act(async () => {
-      testState.latestStatusBarOnOpenTasks?.();
+      testState.latestTaskChipsOnSelectTask?.(unlinkedWorkflowTask);
       await Promise.resolve();
     });
 
@@ -14888,7 +14913,7 @@ describe('App session workflow', () => {
     await flush();
 
     await act(async () => {
-      testState.latestStatusBarOnOpenTasks?.();
+      testState.latestTaskChipsOnSelectTask?.(unlinkedWorkflowTask);
       await Promise.resolve();
     });
     await flush();
@@ -18992,27 +19017,7 @@ describe('App session callbacks', () => {
     expect(testState.latestChatEditorProps?.contextWindow).toBe(0);
   });
 
-  it('keeps legacy task status for a custom header without explicit header configuration', () => {
-    const monitor: DaemonSessionMonitorTaskStatus = {
-      kind: 'monitor',
-      id: 'monitor-1',
-      label: 'Watch server',
-      description: 'Watch server',
-      status: 'running',
-      startTime: 1,
-      runtimeMs: 10,
-    };
-    testState.backgroundTasks = [monitor];
-
-    renderApp({
-      header: undefined,
-      renderChatHeader: () => <header>Custom session header</header>,
-    });
-
-    expect(testState.latestStatusBarTasks).toEqual([monitor]);
-  });
-
-  it('feeds the footer pill the task snapshot while a background agent runs', () => {
+  it('feeds the composer task chips the full task snapshot', () => {
     const agent: DaemonSessionAgentTaskStatus = {
       kind: 'agent',
       id: 'agent-running',
@@ -19050,71 +19055,145 @@ describe('App session callbacks', () => {
       },
     });
 
-    // The pill must see the unfiltered snapshot (the design doc's
-    // "1 shell, 3 local agents"), not an agents-only projection.
-    expect(testState.latestStatusBarTasks).toEqual([agent, shell]);
+    // The chips pick the unfinished tasks themselves, background agents
+    // included, so they need the unfiltered snapshot.
+    expect(testState.latestTaskChipsTasks).toEqual([agent, shell]);
+    expect(testState.latestTaskChipsIncludeAgents).toBe(true);
   });
 
-  it('keeps the footer pill suppressed in the shipped entry without a running agent', () => {
-    const monitor: DaemonSessionMonitorTaskStatus = {
-      kind: 'monitor',
-      id: 'monitor-suppressed',
-      label: 'Watch build',
-      description: 'Watch build',
-      status: 'running',
-      startTime: 2,
-      runtimeMs: 20,
-    };
-    // A parked (paused) background agent must not re-open the pill: the
-    // gate is hasActiveBackgroundAgent (running only), not a kind check.
-    const pausedAgent: DaemonSessionAgentTaskStatus = {
-      kind: 'agent',
-      id: 'agent-paused',
-      label: 'Research',
-      description: 'Research',
-      status: 'paused',
-      startTime: 3,
-      runtimeMs: 30,
-      isBackgrounded: true,
-      subagentType: 'general-purpose',
-    };
-    testState.backgroundTasks = [monitor, pausedAgent];
-
-    renderApp();
-
-    expect(testState.latestStatusBarTasks).toEqual([]);
-  });
-
-  it('keeps background agents out of headerless embed footers', () => {
+  it('keeps background agents out of the chips in headerless embeds', () => {
     // Headerless embeds (e.g. the VS Code companion, header={{ items: [] }})
-    // land on the !environmentTasksReplacementEnabled arm: they keep the
-    // pre-filtered composer tasks, so a live background agent must not
-    // open or feed their footer.
-    const agent: DaemonSessionAgentTaskStatus = {
-      kind: 'agent',
-      id: 'agent-embed',
-      label: 'Research',
-      description: 'Research',
-      status: 'running',
-      startTime: 1,
-      runtimeMs: 10,
-      isBackgrounded: true,
-      subagentType: 'general-purpose',
-    };
-    const monitor: DaemonSessionMonitorTaskStatus = {
-      kind: 'monitor',
-      id: 'monitor-embed',
-      label: 'Watch build',
-      description: 'Watch build',
-      status: 'running',
-      startTime: 2,
-      runtimeMs: 20,
-    };
-    testState.backgroundTasks = [agent, monitor];
-
+    // have no environment panel and keep background agents out of their
+    // task surfaces.
     renderApp({ header: { items: [] } });
 
-    expect(testState.latestStatusBarTasks).toEqual([monitor]);
+    expect(testState.latestTaskChipsIncludeAgents).toBe(false);
+  });
+
+  it('keeps background agents out of the chips for a custom header without explicit header configuration', () => {
+    renderApp({
+      header: undefined,
+      renderChatHeader: () => <header>Custom session header</header>,
+    });
+
+    expect(testState.latestTaskChipsIncludeAgents).toBe(false);
+  });
+
+  it('leaves task chips to a host-provided footer', () => {
+    const { container } = renderApp({
+      renderFooter: () => <footer>Host footer</footer>,
+    });
+
+    expect(
+      container.querySelector('[data-testid="composer-task-chips"]'),
+    ).toBeNull();
+    expect(testState.latestTaskChipsTasks).toBeNull();
+  });
+
+  it('locates a workflow chip in the transcript and opens its row', async () => {
+    testState.messages = [
+      {
+        id: 'workflow-message',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'workflow-call',
+            toolName: 'Workflow',
+            status: 'completed',
+            args: {},
+          },
+        ],
+      },
+    ];
+    renderApp();
+    await flush();
+    messageListScrollToMessage.mockClear();
+
+    await act(async () => {
+      testState.latestTaskChipsOnSelectTask?.({
+        ...unlinkedWorkflowTask,
+        toolUseId: 'workflow-call',
+      });
+      await Promise.resolve();
+    });
+
+    expect(messageListScrollToMessage).toHaveBeenCalledWith(
+      'workflow-message',
+      'workflow-call',
+    );
+    expect(testState.latestTasksStatusProps).toBeNull();
+  });
+
+  it.each([
+    ['the shipped entry', {}],
+    ['a headerless embed', { header: { items: [] } }],
+  ] as const)(
+    'opens shell, monitor and agent chips in the right panel in %s',
+    async (_entry, options) => {
+      const shell: DaemonSessionShellTaskStatus = {
+        kind: 'shell',
+        id: 'shell-chip',
+        label: 'npm run dev',
+        description: 'npm run dev',
+        status: 'running',
+        startTime: 1,
+        runtimeMs: 10,
+        command: 'npm run dev',
+        cwd: '/tmp/project',
+      };
+      const monitor: DaemonSessionMonitorTaskStatus = {
+        kind: 'monitor',
+        id: 'monitor-chip',
+        label: 'Watch server log',
+        description: 'Watch server log',
+        status: 'running',
+        startTime: 2,
+        runtimeMs: 20,
+      };
+      const agent: DaemonSessionAgentTaskStatus = {
+        kind: 'agent',
+        id: 'agent-chip',
+        label: 'Research the API',
+        description: 'Research the API',
+        status: 'running',
+        startTime: 3,
+        runtimeMs: 30,
+        isBackgrounded: true,
+        subagentType: 'general-purpose',
+      };
+      const { container } = renderApp(options);
+      await flush();
+
+      for (const task of [shell, monitor, agent]) {
+        await act(async () => {
+          testState.latestTaskChipsOnSelectTask?.(task);
+          await Promise.resolve();
+        });
+        await flush();
+      }
+
+      // One right-panel tab per chip, none of them the tasks dialog.
+      expect(container.querySelectorAll('button[title="Close"]')).toHaveLength(
+        3,
+      );
+      expect(container.querySelector('button[title="npm"]')).not.toBeNull();
+      expect(container.textContent).toContain('Watch server log');
+      expect(container.textContent).toContain('Agent: Research the API');
+      expect(testState.latestTasksStatusProps).toBeNull();
+    },
+  );
+
+  it('opens the tasks dialog for a workflow chip with no transcript row', async () => {
+    renderApp();
+    await flush();
+
+    await act(async () => {
+      testState.latestTaskChipsOnSelectTask?.(unlinkedWorkflowTask);
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(testState.latestTasksStatusProps).not.toBeNull();
   });
 
   it('passes agent tasks to a host-provided footer', () => {
@@ -22779,24 +22858,6 @@ describe('App session callbacks', () => {
     await act(async () => {
       testState.latestChatEditorProps?.onSubmit('/model');
       await Promise.resolve();
-    });
-
-    expect(onToast).toHaveBeenCalledWith(
-      'info',
-      'Models are unavailable; the daemon default will be used.',
-    );
-  });
-
-  it('toasts instead of opening the model dialog from the status bar when standalone models are unavailable', async () => {
-    const onToast = vi.fn();
-    mockConnection.sessionId = undefined;
-    mockConnection.sessionContext = { kind: 'standalone' };
-    mockConnection.models = [];
-    renderApp({ onToast });
-    await flush();
-
-    act(() => {
-      testState.latestStatusBarOnSelectModel?.();
     });
 
     expect(onToast).toHaveBeenCalledWith(
@@ -46073,7 +46134,7 @@ describe('App session callbacks', () => {
     },
   );
 
-  it('keeps a status-bar model picker open when a stale settings key is excluded', async () => {
+  it('keeps a /model picker open when a stale settings key is excluded', async () => {
     mockConnection.workspaceCwd = '/work/secondary';
     mockWorkspace.capabilities = {
       workspaceCwd: '/work/primary',
@@ -46113,17 +46174,16 @@ describe('App session callbacks', () => {
         ?.click();
       await Promise.resolve();
     });
-    // The status-bar model chip opens a 'main' picker without touching the
-    // settings-dialog key.
-    act(() => {
-      testState.latestStatusBarOnSelectModel?.();
-    });
+    // /model opens a 'main' picker without touching the settings-dialog key.
+    testState.prompt = '/model';
+    await clickSubmit(container);
+    await flush();
     expect(
       container.querySelector('[data-testid="model-select"]'),
     ).not.toBeNull();
     rerender({ settings: { excludeItems: ['setting:voice-model'] } });
     await flush();
-    // The exclusion owns only the voice picker; the status-bar picker stays.
+    // The exclusion owns only the voice picker; the /model picker stays.
     expect(
       container.querySelector('[data-testid="model-select"]'),
     ).not.toBeNull();
@@ -47782,7 +47842,6 @@ describe('App session callbacks', () => {
       composerScopeKey: 'standalone',
       workspaceFeaturesEnabled: false,
     });
-    expect(testState.latestStatusBarHideSettings).toBe(true);
     mockWorkspaceActions.loadMcpStatus.mockClear();
     mockWorkspaceActions.loadPreflight.mockClear();
     mockWorkspaceActions.loadProviders.mockClear();
@@ -51955,7 +52014,7 @@ describe('App workflow history entry', () => {
     await flush();
 
     await act(async () => {
-      testState.latestStatusBarOnOpenTasks?.();
+      testState.latestTaskChipsOnSelectTask?.(unlinkedWorkflowTask);
       await Promise.resolve();
     });
     await flush();
@@ -51969,7 +52028,7 @@ describe('App workflow history entry', () => {
     await flush();
 
     await act(async () => {
-      testState.latestStatusBarOnOpenTasks?.();
+      testState.latestTaskChipsOnSelectTask?.(unlinkedWorkflowTask);
       await Promise.resolve();
     });
     await flush();
