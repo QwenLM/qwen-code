@@ -2910,6 +2910,13 @@ class ManagedAgentApiContractTest {
                 .filter(row -> "delivery-1".equals(row.path("id").asText()))
                 .findFirst().orElseThrow();
         assertThat(listed.path("state").asText()).isEqualTo("delivered");
+        // The in-flight row's state must be pinned too: a projection serving a
+        // constant "delivered" would otherwise survive on the terminal row alone.
+        JsonNode inflightRow = StreamSupport.stream(
+                deliveries.path("data").spliterator(), false)
+                .filter(row -> "delivery-2".equals(row.path("id").asText()))
+                .findFirst().orElseThrow();
+        assertThat(inflightRow.path("state").asText()).isEqualTo("sending");
         exchange(drift, "listAgentChannelDeliveries", 404,
                 get("/v1/agent-channels/{id}/deliveries", "missing")
                         .header(TENANT, channelTenant).principal(reader),
@@ -2939,6 +2946,7 @@ class ManagedAgentApiContractTest {
                 200, get("/v1/agent-channels/{id}/deliveries/{d}", "mail-1",
                         "delivery-2").header(TENANT, channelTenant)
                         .principal(reader), null));
+        assertThat(inflight.path("state").asText()).isEqualTo("sending");
         assertThat(inflight.path("segments").isArray()).isTrue();
         assertThat(inflight.path("segments")).hasSize(2);
         assertThat(inflight.path("segments").get(0).path("provider_receipt").asText())
