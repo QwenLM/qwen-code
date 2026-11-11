@@ -92,13 +92,13 @@ event-bus/  (new, packages/core/src/event-bus/)
 LlmClient → Turn → LlmChat, CoreToolScheduler (unchanged)
 ```
 
-The adapter is the compatibility boundary: it subscribes to the bus and invokes `AgentLoopHost` callbacks exactly as the procedural loop does today, in the same order; it converts a host callback that throws into the loop's error outcome, matching today's "throwing ends the loop". Surfaces never see the bus in this design. Exposing subscriptions to surfaces is a possible later step, not a goal here.
+The adapter is the compatibility boundary: it subscribes to the bus and invokes `AgentLoopHost` callbacks exactly as the procedural loop does today, in the same order; it converts a host callback that throws into the loop's error outcome, matching today's "throwing ends the loop". Callback **order** is preserved, not the exact tick: the first callback fires one bus-delivery hop after `runAgentLoop` returns rather than synchronously within the call, which no surface observes while the flag is off. Surfaces never see the bus in this design. Exposing subscriptions to surfaces is a possible later step, not a goal here.
 
 ### Identity and event mapping
 
 Preview routes by `queryId` and scopes rounds by a UUID `roundId`. Main's loop runs once per interaction with a `promptId` and a numeric round counter. The port keeps main's identities:
 
-- `runId`: generated at `runAgentLoop` entry; the routing key (one run = one preview "query"). `promptId` is attribution, carried on events, never a routing key — a drain turn may reuse a prompt id across runs.
+- `runId`: generated at `runAgentLoop` entry; the routing key (one run = one preview "query"). `promptId` is attribution, carried on events, never a routing key — a drain turn may reuse a prompt id across runs. It is **run-level**: set once from `first.promptId`, so continuation rounds keep the run's first `promptId` on events even when a host `nextRound` returns a different one (host callbacks report the round's `promptId`). Whether `promptId` should instead follow the round is a decision for the slice that exposes subscriptions.
 - `round`: the run's round number, assigned when Conversation publishes `llm.request`. Late events are dropped by the same `currentRound` check.
 
 | Bus event        | Payload (main types)                                   | Published by                     |
@@ -138,7 +138,7 @@ The bus (`LoopEventBus`) is ported essentially as-is (it depends only on a logge
 
 ### Cancellation
 
-The adapter owns the run's `AbortController` wiring exactly as today (`signal`, `toolSignal`). On abort it publishes `loop.cancelled`; Tool cancels the in-flight batch through the executor's signal; Conversation finalizes once Llm and Tool are quiet. The settlement cap from preview's `QueryListener` (10 s, bounded by the surface's deadline when it has one) guards the finalize wait so a stuck handler cannot hang the run.
+The adapter passes the run's `signal` and `toolSignal` through to `runModelRound`/`runToolBatch` exactly as today; Tool cancels the in-flight batch through the executor's signal, and Conversation finalizes once Llm and Tool are quiet. The run settles when `loop.finished` arrives. A published `loop.cancelled` event and a bounded settlement cap (preview's `QueryListener` uses 10 s) belong to the streaming slice, not this one — see the _planned_ note in the event table.
 
 ### Why not reuse an existing bus
 
@@ -146,7 +146,7 @@ The adapter owns the run's `AbortController` wiring exactly as today (`signal`, 
 - `AgentEventEmitter`: vocabulary and lifetime scoped to the subagent runtime.
 - acp-bridge `eventBus`: transport fan-out with replay rings and byte budgets; it sits above the loop, not inside it.
 
-None provides query routing + serial async delivery + failure events, which are the properties being ported. The new module is ~280 lines of primitives; the handlers are a re-expression of logic that already exists in `agent-loop.ts`, not new behavior.
+None provides query routing + serial async delivery + failure events, which are the properties being ported. The new module is ~300 lines of primitives; the handlers are a re-expression of logic that already exists in `agent-loop.ts`, not new behavior.
 
 ## Migration (PR slices)
 

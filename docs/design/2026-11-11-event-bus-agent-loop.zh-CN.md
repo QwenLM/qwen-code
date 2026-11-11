@@ -92,13 +92,13 @@ event-bus/（新增，packages/core/src/event-bus/）
 LlmClient → Turn → LlmChat、CoreToolScheduler（不变）
 ```
 
-适配器是兼容边界：它订阅总线，并完全按今天过程式循环的顺序调用 `AgentLoopHost` 回调；它把抛错的 host 回调转成循环的 error 结局，与今天「抛错即结束循环」一致。本设计中 surface 永远看不到总线。向 surface 暴露订阅是可能的后续步骤，不是这里的目标。
+适配器是兼容边界：它订阅总线，并完全按今天过程式循环的顺序调用 `AgentLoopHost` 回调；它把抛错的 host 回调转成循环的 error 结局，与今天「抛错即结束循环」一致。保持的是回调**顺序**而非精确 tick：首个回调在 `runAgentLoop` 返回后一个总线投递跳才触发，而非在调用内同步触发——标志关闭时没有 surface 能观察到这一点。本设计中 surface 永远看不到总线。向 surface 暴露订阅是可能的后续步骤，不是这里的目标。
 
 ### 身份与事件映射
 
 preview 按 `queryId` 路由、用 UUID `roundId` 标记轮次。main 的循环每次交互跑一次，带 `promptId` 与数字轮次计数。移植保留 main 的身份：
 
-- `runId`：在 `runAgentLoop` 入口生成；路由键（一个 run = preview 的一个「query」）。`promptId` 只是归属信息，随事件携带，绝不作路由键 —— drain 轮可能跨 run 复用同一 prompt id。
+- `runId`：在 `runAgentLoop` 入口生成；路由键（一个 run = preview 的一个「query」）。`promptId` 只是归属信息，随事件携带，绝不作路由键 —— drain 轮可能跨 run 复用同一 prompt id。它是 **run 级**的：取自 `first.promptId` 一次设定，因此即使 host 的 `nextRound` 返回不同的 promptId，续跑轮次的事件仍带 run 的首个 `promptId`（host 回调报告该轮的 `promptId`）。`promptId` 是否应改为跟随轮次，是暴露订阅那个切片要定的决策。
 - `round`：run 的轮次编号，由 Conversation 发布 `llm.request` 时赋值。迟到事件由同样的 `currentRound` 检查丢弃。
 
 | 总线事件         | 载荷（main 类型）                              | 发布者                          |
@@ -138,7 +138,7 @@ preview 按 `queryId` 路由、用 UUID `roundId` 标记轮次。main 的循环�
 
 ### 取消
 
-适配器完全按今天的方式拥有 run 的 `AbortController` 接线（`signal`、`toolSignal`）。中止时发布 `loop.cancelled`；Tool 通过执行器 signal 取消在飞批次；Conversation 在 Llm 与 Tool 安静后收尾一次。preview `QueryListener` 的收尾上限（10 秒，surface 有 deadline 时取其界）守护收尾等待，使卡死的 handler 无法挂住 run。
+适配器完全按今天的方式把 run 的 `signal` 与 `toolSignal` 透传给 `runModelRound`/`runToolBatch`；Tool 通过执行器 signal 取消在飞批次，Conversation 在 Llm 与 Tool 安静后收尾一次。run 在 `loop.finished` 到达时结算。发布 `loop.cancelled` 事件与有界收尾上限（preview `QueryListener` 用 10 秒）属于流式切片，而非本切片——见事件表的*规划中*注记。
 
 ### 为什么不复用现有总线
 
@@ -146,7 +146,7 @@ preview 按 `queryId` 路由、用 UUID `roundId` 标记轮次。main 的循环�
 - `AgentEventEmitter`：词汇与生命周期都限于 subagent 运行时。
 - acp-bridge `eventBus`：带 replay 环与字节预算的传输层 fan-out；它位于循环之上，不在循环之内。
 
-没有任何一个提供 query 路由 + 串行异步投递 + 失败事件，而这些正是被移植的性质。新模块约 280 行原语；handler 是对 `agent-loop.ts` 已有逻辑的重新表达，不是新行为。
+没有任何一个提供 query 路由 + 串行异步投递 + 失败事件，而这些正是被移植的性质。新模块约 300 行原语；handler 是对 `agent-loop.ts` 已有逻辑的重新表达，不是新行为。
 
 ## 迁移（PR 切片）
 

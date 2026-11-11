@@ -379,4 +379,66 @@ describe('runAgentLoop event-bus parity', () => {
     expect(busResult.reason).toBe('completed');
     expect(bus.log).toEqual(procedural.log);
   });
+
+  it('matches when a terminal stop and tool calls share a round (stop wins)', async () => {
+    const round = [
+      { type: LlmEventType.ToolCallRequest, value: call('c1') },
+      { type: LlmEventType.MaxSessionTurns },
+    ] as ServerLlmStreamEvent[];
+    const { proceduralResult, busResult, procedural, bus } = await bothPaths([
+      round,
+    ]);
+    expect(busResult).toEqual(proceduralResult);
+    expect(busResult.reason).toBe('max_session_turns');
+    expect(bus.log).toEqual(procedural.log);
+    expect(bus.log).not.toContain('tool:c1:executed');
+  });
+
+  it('passes a distinct toolSignal through to the executor', async () => {
+    const toolCall = {
+      type: LlmEventType.ToolCallRequest,
+      value: call('c1'),
+    } as ServerLlmStreamEvent;
+    const toolAbort = new AbortController();
+    toolAbort.abort();
+    const seen: AbortSignal[] = [];
+    const executor: AgentLoopToolExecutor = {
+      run: async (requests, signal, hooks) => {
+        seen.push(signal);
+        return requests.map((request) => {
+          hooks.beforeLaunch(request, []);
+          return {
+            request,
+            response: response(request),
+            status: 'success' as const,
+            recorded: true,
+          };
+        });
+      },
+    };
+    await runAgentLoop({
+      ...options([[toolCall], [content]], makeHost().host, {
+        toolSignal: toolAbort.signal,
+        executor,
+      }),
+      useEventBus: true,
+    });
+    expect(seen[0]).toBe(toolAbort.signal);
+  });
+
+  it('records into the caller-supplied duplicates bookkeeping', async () => {
+    const toolCall = {
+      type: LlmEventType.ToolCallRequest,
+      value: call('c1'),
+    } as ServerLlmStreamEvent;
+    const duplicates = {
+      handled: new Map<string, string>(),
+      responded: new Set<string>(),
+    };
+    await runAgentLoop({
+      ...options([[toolCall], [content]], makeHost().host, { duplicates }),
+      useEventBus: true,
+    });
+    expect(duplicates.handled.has('c1')).toBe(true);
+  });
 });
