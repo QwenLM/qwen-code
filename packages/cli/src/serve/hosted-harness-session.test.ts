@@ -8927,6 +8927,120 @@ describe('Hosted Harness no-tool session', () => {
     });
   });
 
+  it('settles a pending loop wakeup in the v2 lifecycle non-effects close', async () => {
+    const key = {
+      tenantId: 'tenant',
+      workspaceId: 'workspace',
+      sessionId: SESSION_ID,
+    };
+    const resources = LocalManagedSessionResourceStore.create({
+      runtimeBaseDir: state.root,
+      sessionKey: key,
+    });
+    const managed = await openManagedSession({
+      runtimeBaseDir: state.root,
+      transcriptPath: '',
+      sessionId: SESSION_ID,
+      sessionKey: key,
+      cwd: state.root,
+      version: 'hosted-harness/1',
+      workerId: BOOT_ID,
+      activationLeaseDurationMs: 60_000,
+      journalStore: new LocalJsonlManagedSessionJournalStore({
+        runtimeBaseDir: state.root,
+        sessionId: SESSION_ID,
+        transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+      }),
+      resourceStore: resources,
+      create: {
+        definitionRef: await resources.publish(
+          'managed-definition',
+          Buffer.from(
+            JSON.stringify({
+              engine: 'managed',
+              sessionId: SESSION_ID,
+              toolProfile: 'hosted-workspace-shell/1',
+              hookCatalog: hookPin,
+            }),
+          ),
+        ),
+        rootSnapshotRef: await resources.publish(
+          'managed-root',
+          Buffer.from(JSON.stringify({ cwd: state.root })),
+        ),
+        createdBy: 'hosted-harness',
+      },
+    });
+    const loopTurnId = 'loop:wakeup-v2-close-1';
+    try {
+      await managed.authority.submitInput(
+        {
+          operation: 'submitInput',
+          commandId: loopTurnId,
+          sessionKey: key,
+          contentDigest: 'a'.repeat(64),
+        },
+        {
+          inputId: loopTurnId,
+          turnId: loopTurnId,
+          source: 'loop',
+          contentRef: await managed.resources.publish(
+            'managed-input',
+            Buffer.from(JSON.stringify({ text: '/loop tick' }), 'utf8'),
+          ),
+          admissionRef: await managed.resources.publish(
+            'managed-admission',
+            Buffer.from('{}', 'utf8'),
+          ),
+          deadline: null,
+          wakeReason: 'input',
+          notBefore: Date.now() + 3_600_000,
+        },
+      );
+    } finally {
+      await managed.close().catch(() => undefined);
+    }
+    mockBrokerBroker();
+    const server = await app(true);
+    const authority = { operationId: 'v2-close-loop', claimGeneration: 1 };
+    const loaded = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({
+      managedSessionStore: store(),
+      toolProfile: 'hosted-workspace-shell/1',
+      lifecycleProtocolVersion: 2,
+      lifecycleAuthority: authority,
+    });
+    expect(loaded.status).toBe(200);
+    const cleanup = (request: supertest.Test) =>
+      headers(request).set('X-Qwen-Client-Id', loaded.body.clientId as string);
+    // The non-effects close phase must settle the parked loop wakeup; without
+    // LOOP_INPUT_SOURCE in that phase's source list it survives the close.
+    await cleanup(supertest(server).post(`/session/${SESSION_ID}/lifecycle`))
+      .send({
+        protocolVersion: 2,
+        phase: 'settle_resources',
+        kind: 'close',
+        toolProfile: 'hosted-workspace-shell/1',
+        sessionKey: key,
+        authority,
+      })
+      .expect(200);
+    const journal = await LocalJsonlManagedSessionJournalStore.read({
+      transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+      runtimeBaseDir: state.root,
+      sessionKey: key,
+    });
+    const settled = journal.events.filter(
+      (event) =>
+        event.kind === 'turn.settled' && event.payload['turnId'] === loopTurnId,
+    );
+    expect(settled).toHaveLength(1);
+    await cleanup(supertest(server).post(`/session/${SESSION_ID}/detach`))
+      .send({ authority })
+      .expect(204);
+  });
+
   it('delivers a due loop wakeup through the wake pump as an ordinary turn', async () => {
     const key = {
       tenantId: 'tenant',
