@@ -367,6 +367,13 @@ export async function tryReclaimStaleTeam(
   if (existing.leadPid !== process.pid && isPidAlive(existing.leadPid)) {
     return 'live-owner';
   }
+  // Checked before the byte-identity re-read below so no I/O sits between
+  // that guard and the by-name delete it protects.
+  try {
+    if (await hasUnreadLeaderMail(teamName)) return 'unread-mail';
+  } catch {
+    return 'unread-mail';
+  }
   // Generation safety (#10209): the delete below targets the team NAME,
   // not the generation inspected above. Two concurrent creators can
   // read the same stale config and both pass the liveness check; if
@@ -386,11 +393,6 @@ export async function tryReclaimStaleTeam(
     // ambiguous, and a by-name delete could hit a generation this
     // reclaim never inspected.
     return 'unverifiable';
-  }
-  try {
-    if (await hasUnreadLeaderMail(teamName)) return 'unread-mail';
-  } catch {
-    return 'unread-mail';
   }
   await deleteTeamDirs(teamName);
   return 'reclaimed';

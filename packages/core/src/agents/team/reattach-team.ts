@@ -121,8 +121,12 @@ export async function reattachTeamForSession(
     const lockedRaw = await fs.readFile(configPath, 'utf-8').catch(() => null);
     if (lockedRaw !== inspectedRaw) return null;
     // Preserve members on disk until cleanup succeeds so a failed takeover can retry.
+    // A member without an agentId owns no task we could match, and letting
+    // it throw here would leave the takeover failing on every resume.
     released = await Promise.all(
-      teamFile.members.map((m) => unassignTeammateTasks(teamName, m.agentId)),
+      teamFile.members
+        .filter((m) => typeof m.agentId === 'string')
+        .map((m) => unassignTeammateTasks(teamName, m.agentId)),
     );
     // A respawned teammate reuses the name, so it must not inherit mail that
     // was addressed to the one that died. The leader inbox is left intact.

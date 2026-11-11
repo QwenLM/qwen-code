@@ -229,6 +229,25 @@ describe('reattachTeamForSession', () => {
     expect(task).not.toHaveProperty('owner');
   });
 
+  it('skips a member without an agentId instead of failing the takeover', async () => {
+    const team = makeTeam();
+    team.members.push({ name: 'ghost' } as TeamFile['members'][number]);
+    await writeTeamFile('crew', team);
+    await createTask('crew', { subject: 's', description: 'd' });
+    await updateTask('crew', '1', { status: 'in_progress', owner: 'worker' });
+    const { config, state } = makeConfig();
+
+    expect(await reattachTeamForSession(config)).toEqual({
+      status: 'reattached',
+      teamName: 'crew',
+      deadMembers: ['worker', 'ghost'],
+      unassignedTaskCount: 1,
+    });
+    expect((await readTeamFile('crew'))!.members).toEqual([]);
+    expect((await listTasks('crew'))[0]).toMatchObject({ status: 'pending' });
+    expect(state.manager).toBeInstanceOf(TeamManager);
+  });
+
   it('takes over a team recorded with this process pid', async () => {
     await writeTeamFile('crew', makeTeam({ leadPid: process.pid }));
     const { config } = makeConfig();

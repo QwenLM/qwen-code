@@ -623,7 +623,8 @@ describe('file I/O', () => {
       await fs.writeFile(path.join(tasksDir, 'marker.json'), '{}');
 
       let readCount = 0;
-      __setReadFileHook(() => {
+      __setReadFileHook((file: unknown) => {
+        if (String(file) !== getTeamFilePath('flaky')) return undefined;
         readCount += 1;
         if (readCount === 2) {
           // The re-read before the delete fails with ENOENT.
@@ -646,6 +647,33 @@ describe('file I/O', () => {
       await expect(
         fs.access(getTeamFilePath('flaky')),
       ).resolves.toBeUndefined();
+    });
+
+    it('keeps a newer generation created while the leader inbox is read', async () => {
+      // The unread-mail check reads a file, so it must run before the
+      // byte-identity re-read: a concurrent creator that lands its new
+      // generation during that read is then caught by the re-read instead
+      // of being deleted by name.
+      await writeTeamFile('race', makeTeamFile({ leadPid: deadPid() }));
+      const leaderInbox = path.join(getInboxesDir('race'), 'leader.json');
+      __setReadFileHook((file: unknown) => {
+        if (String(file) !== leaderInbox) return undefined;
+        return (async () => {
+          await writeTeamFile(
+            'race',
+            makeTeamFile({ leadPid: process.ppid, description: 'newer' }),
+          );
+          throw Object.assign(new Error('ENOENT: no such file or directory'), {
+            code: 'ENOENT',
+          });
+        })();
+      });
+      try {
+        await expect(tryReclaimStaleTeam('race')).resolves.toBe('live-owner');
+      } finally {
+        __setReadFileHook(undefined);
+      }
+      expect((await readTeamFile('race'))?.description).toBe('newer');
     });
   });
 });
