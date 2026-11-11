@@ -11,6 +11,7 @@ import type {
   GenerateContentResponse,
   FunctionCall,
   FunctionDeclaration,
+  GenerateContentConfig,
   GenerateContentResponseUsageMetadata,
 } from '@google/genai';
 import { FinishReason } from './genai-compat.js';
@@ -113,6 +114,8 @@ export type ServerLlmRetryEvent = {
   /** When true, the retry is a continuation (recovery) rather than a fresh
    *  restart. The UI should keep accumulated text so the continuation appends. */
   isContinuation?: boolean;
+  /** The output-token limit the retry raised to after a truncated attempt. */
+  maxOutputTokensEscalated?: number;
 };
 
 export type ServerLlmModelFallbackEvent = {
@@ -749,6 +752,22 @@ function getDisplayContentParts(
 }
 
 // A turn manages the agentic loop turn within the server context.
+/** Options for one {@link Turn.run} a surface sends on its own `LlmChat`. */
+export interface TurnRunOptions {
+  /** Request fields the round sends, such as its tools. */
+  requestConfig?: Pick<GenerateContentConfig, 'tools' | 'maxOutputTokens'>;
+  /**
+   * Throw a request or stream failure as it came, instead of reporting it
+   * and yielding an `Error` event. A cancel still yields `UserCancelled`.
+   */
+  throwErrors?: boolean;
+  /**
+   * Every chunk's usage, including a chunk without a finish reason, which
+   * no event carries.
+   */
+  onUsageMetadata?: (usage: GenerateContentResponseUsageMetadata) => void;
+}
+
 export class Turn {
   readonly pendingToolCalls: ToolCallRequestInfo[] = [];
   private pendingCitations = new Set<string>();
@@ -775,6 +794,7 @@ export class Turn {
     req: PartListUnion,
     signal: AbortSignal,
     prepared?: LlmPreparedRequest,
+    runOptions?: TurnRunOptions,
   ): AsyncGenerator<ServerLlmStreamEvent> {
     try {
       // Note: This assumes `sendMessageStream` yields events like
@@ -816,6 +836,7 @@ export class Turn {
               message: req,
               config: {
                 abortSignal: signal,
+                ...runOptions?.requestConfig,
               },
             },
             this.prompt_id,
@@ -840,6 +861,12 @@ export class Turn {
             retryInfo: streamEvent.retryInfo,
             retryDiagnostics: streamEvent.retryDiagnostics,
             isContinuation: streamEvent.isContinuation,
+            ...(streamEvent.maxOutputTokensEscalated !== undefined
+              ? {
+                  maxOutputTokensEscalated:
+                    streamEvent.maxOutputTokensEscalated,
+                }
+              : {}),
           };
           continue; // Skip to the next event in the stream
         }
@@ -884,6 +911,8 @@ export class Turn {
         if (resp.responseId) {
           this.currentResponseId = resp.responseId;
         }
+        if (resp.usageMetadata)
+          runOptions?.onUsageMetadata?.(resp.usageMetadata);
 
         const thoughtText = getThoughtText(resp);
         const thoughtSummary = getThoughtSummary(resp, thoughtText);
@@ -963,6 +992,7 @@ export class Turn {
       }
     } catch (e) {
       if (e instanceof LlmRequestPreparationError) throw e;
+      if (runOptions?.throwErrors) throw e;
       if (signal.aborted) {
         yield { type: LlmEventType.UserCancelled };
         // Regular cancellation error, fail gracefully.

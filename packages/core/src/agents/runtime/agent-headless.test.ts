@@ -36,7 +36,7 @@ import {
   AuthType,
 } from '../../core/contentGenerator.js';
 import { LlmChat } from '../../core/llm-chat.js';
-import { LlmEventType } from '../../core/turn.js';
+import { LlmEventType, Turn } from '../../core/turn.js';
 import {
   getToolCallFingerprint,
   normalizeModelToolCallIds,
@@ -3354,6 +3354,230 @@ describe('subagent.ts', () => {
         expect(
           mockSendMessageStream.mock.calls[1][1].config.maxOutputTokens,
         ).toBe(65_536);
+      });
+    });
+
+    describe('on the shared agent loop (experimental.unifiedAgentLoop)', () => {
+      const EVENTS = [
+        AgentEventType.ROUND_START,
+        AgentEventType.STREAM_TEXT,
+        AgentEventType.ROUND_TEXT,
+        AgentEventType.ROUND_END,
+        AgentEventType.TOOL_CALL,
+        AgentEventType.TOOL_RESULT,
+        AgentEventType.USAGE_METADATA,
+        AgentEventType.FINISH,
+        AgentEventType.ERROR,
+      ] as const;
+      const VOLATILE = new Set([
+        'timestamp',
+        'runId',
+        'subagentId',
+        'durationMs',
+        'startTimeMs',
+        'totalDurationMs',
+        'startedAt',
+        'endedAt',
+        'executionDurationMs',
+        'executionId',
+      ]);
+      /** The agent's id, which each run draws anew, inside prompt ids. */
+      const AGENT_ID = /test-agent-[0-9a-f]+/g;
+      /** An event without the fields that differ between any two runs. */
+      const stable = (event: object) =>
+        JSON.parse(
+          JSON.stringify(event, (key, value) =>
+            VOLATILE.has(key) ? undefined : value,
+          ).replace(AGENT_ID, 'test-agent-<id>'),
+        );
+      type Outcome = {
+        requests: unknown[];
+        events: Array<[string, unknown]>;
+        terminateMode: AgentTerminateMode;
+        error?: string;
+        turns: number;
+      };
+      /**
+       * Runs `scenario` with the setting off and on: what the model received,
+       * the agent's events and how the run ended.
+       */
+      const onBothPaths = async (
+        scenario: (run: AbortController) => void,
+        options: AgentOptions = {},
+      ): Promise<Outcome[]> => {
+        const outcomes: Outcome[] = [];
+        try {
+          for (const shared of [false, true]) {
+            vi.stubEnv(
+              'QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP',
+              shared ? '1' : undefined,
+            );
+            mockSendMessageStream.mockReset();
+            const run = new AbortController();
+            scenario(run);
+            const { config } = await setupListFiles();
+            const emitter = new AgentEventEmitter();
+            const events: Array<[string, unknown]> = [];
+            for (const type of EVENTS) {
+              emitter.on(type, (event: object) =>
+                events.push([type, stable(event)]),
+              );
+            }
+            const turn = vi.spyOn(Turn.prototype, 'run');
+            const scope = await createAgent(config, {
+              tools: { tools: ['list_files'] },
+              ...options,
+              emitter,
+            });
+            let error: string | undefined;
+            await scope
+              .execute(new ContextState(), run.signal)
+              .catch((e: unknown) => {
+                error = e instanceof Error ? e.message : String(e);
+              });
+            expect(turn).toHaveBeenCalledTimes(
+              shared ? mockSendMessageStream.mock.calls.length : 0,
+            );
+            turn.mockRestore();
+            outcomes.push({
+              requests: mockSendMessageStream.mock.calls.map(
+                ([model, params, promptId]) =>
+                  stable({
+                    model,
+                    message: params.message,
+                    tools: params.config.tools,
+                    maxOutputTokens: params.config.maxOutputTokens,
+                    promptId,
+                  }),
+              ),
+              events,
+              terminateMode: scope.getTerminateMode(),
+              ...(error !== undefined ? { error } : {}),
+              turns: mockSendMessageStream.mock.calls.length,
+            });
+          }
+        } finally {
+          vi.unstubAllEnvs();
+        }
+        return outcomes;
+      };
+      const listFiles = (id: string) => call('list_files', { path: '.' }, id);
+      const answer = partsChunk(
+        [{ text: 'Thinking.', thought: true }, { text: 'Done.' }],
+        'STOP',
+      );
+
+      it('sends each round on a Turn with the same requests and events', async () => {
+        const [current, shared] = await onBothPaths(() =>
+          mockSendMessageStream
+            .mockImplementationOnce(async () =>
+              streamOf<object>(
+                partsChunk([{ text: 'Let me look.' }]),
+                callsChunk([listFiles('call_1')], {
+                  usageMetadata: { totalTokenCount: 7 },
+                }),
+              ),
+            )
+            .mockImplementation(async () => streamOf(answer)),
+        );
+        expect(shared.turns).toBe(2);
+        expect(shared).toEqual(current);
+      });
+
+      it('keeps the escalated output limit and drops a retried attempt as before', async () => {
+        const [current, shared] = await onBothPaths(() =>
+          mockSendMessageStream
+            .mockImplementationOnce(async () =>
+              streamOf<object>(
+                callsChunk([listFiles('call_stale')]),
+                { type: 'retry', maxOutputTokensEscalated: 65_536 },
+                callsChunk([listFiles('call_1')]),
+              ),
+            )
+            .mockImplementation(async () => streamOf(answer)),
+        );
+        expect(shared.requests[1]).toMatchObject({ maxOutputTokens: 65_536 });
+        expect(JSON.stringify(shared.requests[1])).not.toContain('call_stale');
+        expect(shared).toEqual(current);
+      });
+
+      it('ends the run with the failure the request threw', async () => {
+        const [current, shared] = await onBothPaths(() =>
+          mockSendMessageStream.mockImplementation(async () =>
+            (async function* () {
+              yield partsChunk([{ text: 'Partial' }]);
+              throw new Error('upstream exploded');
+            })(),
+          ),
+        );
+        expect(shared).toMatchObject({
+          terminateMode: AgentTerminateMode.ERROR,
+          error: 'upstream exploded',
+        });
+        expect(shared).toEqual(current);
+      });
+
+      it('stops the round at a loop the stream shows, and closes the stream', async () => {
+        const closed: boolean[] = [];
+        const [current, shared] = await onBothPaths(() => {
+          vi.spyOn(
+            LoopDetectionService.prototype,
+            'addAndCheckHeuristicLoops',
+          ).mockImplementation(
+            (event) =>
+              event.type === LlmEventType.Content && event.value === 'again',
+          );
+          mockSendMessageStream.mockImplementation(async () =>
+            (async function* () {
+              try {
+                yield partsChunk([{ text: 'again' }]);
+                yield callsChunk([listFiles('call_after_loop')]);
+              } finally {
+                closed.push(true);
+              }
+            })(),
+          );
+        });
+        expect(shared.terminateMode).toBe(AgentTerminateMode.LOOP_DETECTED);
+        expect(shared.turns).toBe(1);
+        expect(closed).toEqual([true, true]);
+        expect(shared).toEqual(current);
+      });
+
+      it('cancels the run when its signal aborts mid-stream', async () => {
+        const [current, shared] = await onBothPaths((run) =>
+          mockSendMessageStream.mockImplementation(async () =>
+            (async function* () {
+              yield partsChunk([{ text: 'Started.' }]);
+              // The parent cancels the run mid-stream.
+              run.abort();
+              yield partsChunk([{ text: 'Never seen.' }]);
+            })(),
+          ),
+        );
+        expect(shared.terminateMode).toBe(AgentTerminateMode.CANCELLED);
+        expect(shared).toEqual(current);
+      });
+
+      it('drops the calls of a model the fallback replaced (intended difference)', async () => {
+        const [current, shared] = await onBothPaths(() =>
+          mockSendMessageStream
+            .mockImplementationOnce(async () =>
+              streamOf<object>(
+                callsChunk([listFiles('call_failed_model')]),
+                {
+                  type: 'model_fallback',
+                  info: { fromModel: 'a', toModel: 'b' },
+                },
+                callsChunk([listFiles('call_1')]),
+              ),
+            )
+            .mockImplementation(async () => streamOf(answer)),
+        );
+        const sentIds = (outcome: Outcome) =>
+          JSON.stringify(outcome.requests[1]).match(/call_\w+/g);
+        expect(sentIds(current)).toEqual(['call_failed_model', 'call_1']);
+        expect(sentIds(shared)).toEqual(['call_1']);
       });
     });
   });

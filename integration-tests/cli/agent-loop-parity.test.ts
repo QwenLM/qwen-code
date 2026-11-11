@@ -12,7 +12,8 @@
  */
 
 import { spawn } from 'node:child_process';
-import { join } from 'node:path';
+import { existsSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+import { basename, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   CONTAINER_SANDBOX_NO_PROXY,
@@ -44,8 +45,21 @@ interface Scenario {
   approve?: boolean;
   /** The exit code both runs must end with; defaults to 0. */
   exitCode?: number;
-  /** The model's reply to a streaming request, from its message history. */
-  reply: (messages: JsonObject[], dir: string) => FakeOpenAIResponse;
+  /**
+   * The model's reply to a streaming request, from its message history.
+   * `attempt` counts the earlier requests with the same messages, so a
+   * retried request can get another reply.
+   */
+  reply: (
+    messages: JsonObject[],
+    dir: string,
+    attempt: number,
+  ) => FakeOpenAIResponse;
+  /**
+   * The model rounds the scenario's subagents send; with the setting on each
+   * goes out on the shared loop's round, which the debug log records.
+   */
+  subagentRounds?: number;
 }
 
 interface Run {
@@ -55,6 +69,64 @@ interface Run {
   stderr: string;
   /** The `tool_use_id` of each `can_use_tool` request, in order. */
   approvals: string[];
+  /** Subagent model rounds sent on the shared agent loop. */
+  sharedSubagentRounds: number;
+}
+
+/** The debug-log line of a subagent round on the shared agent loop. */
+const SHARED_SUBAGENT_ROUND =
+  /subagent \S+ round \d+ on the shared agent loop/g;
+
+/** The system prompt of the scenarios' subagent. */
+const SUBAGENT_MARKER = 'PARITY_SUBAGENT_PROMPT';
+
+/** Whether a request comes from the scenarios' subagent. */
+const fromSubagent = (messages: JsonObject[]) =>
+  messages.some(
+    (message) =>
+      message['role'] === 'system' &&
+      JSON.stringify(message['content']).includes(SUBAGENT_MARKER),
+  );
+
+/** A project subagent that may read files, with an optional turn limit. */
+function createSubagent(rig: TestRig, maxTurns?: number) {
+  rig.mkdir('.qwen/agents');
+  rig.createFile(
+    '.qwen/agents/parity-reader.md',
+    `---
+name: parity-reader
+description: Reads files for the agent loop parity suite
+${maxTurns !== undefined ? `maxTurns: ${maxTurns}\n` : ''}tools:
+  - read_file
+---
+${SUBAGENT_MARKER}
+`,
+  );
+}
+
+/** The main session's call of the parity subagent. */
+const runSubagent = (id: string) =>
+  fakeToolCall(
+    'agent',
+    {
+      description: 'Read the notes',
+      prompt: 'Read notes.txt and report what it says.',
+      subagent_type: 'parity-reader',
+      run_in_background: false,
+    },
+    id,
+  );
+
+function debugLog(runtimeDir: string): string {
+  const debugDir = join(runtimeDir, 'debug');
+  if (!existsSync(debugDir)) return '';
+  return (
+    readdirSync(debugDir, { recursive: true, withFileTypes: true })
+      // `latest` points at the session's own log.
+      .filter((entry) => entry.isFile() && basename(entry.name) !== 'latest')
+      .map((entry) => readFileSync(join(entry.parentPath, entry.name), 'utf8'))
+      .join('')
+  );
 }
 
 const toolResults = (messages: JsonObject[]) =>
@@ -179,13 +251,20 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
     });
     const dir = rig.testDir!;
     scenario.prepare?.(rig);
-    server = await startFakeOpenAIServer(
-      ({ body }) =>
-        body['stream'] === true
-          ? scenario.reply((body['messages'] ?? []) as JsonObject[], dir)
-          : { content: '{"selected_memories":[]}' },
-      fakeServerHostOptions(),
-    );
+    const attempts = new Map<string, number>();
+    server = await startFakeOpenAIServer(({ body }) => {
+      if (body['stream'] !== true)
+        return { content: '{"selected_memories":[]}' };
+      const messages = (body['messages'] ?? []) as JsonObject[];
+      const key = JSON.stringify(messages);
+      const attempt = attempts.get(key) ?? 0;
+      attempts.set(key, attempt + 1);
+      return scenario.reply(messages, dir, attempt);
+    }, fakeServerHostOptions());
+    // Outside the project, so the folder structure in the requests does not
+    // list the session's debug log.
+    const runtimeDir = `${dir}-runtime`;
+    rmSync(runtimeDir, { recursive: true, force: true });
     const args = [
       rig.bundlePath,
       '--no-chat-recording',
@@ -206,7 +285,14 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
     const child = spawn('node', args, {
       cwd: dir,
       stdio: 'pipe',
-      env: process.env,
+      env:
+        scenario.subagentRounds === undefined
+          ? process.env
+          : {
+              ...process.env,
+              QWEN_DEBUG_LOG_FILE: '1',
+              QWEN_RUNTIME_DIR: runtimeDir,
+            },
     });
     const messages = [...(scenario.messages ?? [])];
     const sendNext = () => {
@@ -266,6 +352,8 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
       frames: streamFrames(stdout, dir),
       stderr,
       approvals,
+      sharedSubagentRounds:
+        debugLog(runtimeDir).match(SHARED_SUBAGENT_ROUND)?.length ?? 0,
     };
   }
 
@@ -464,6 +552,67 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
             }
           : { content: 'Done.' },
     },
+    {
+      name: 'a subagent that reads a file',
+      prompt: 'Have the reader read the notes.',
+      prepare: (r) => {
+        createSubagent(r);
+        r.createFile('notes.txt', 'the notes\n');
+      },
+      subagentRounds: 2,
+      reply: (messages, dir) =>
+        fromSubagent(messages)
+          ? toolResults(messages) === 0
+            ? { toolCalls: [read(join(dir, 'notes.txt'), 'call_notes')] }
+            : { content: 'The notes say: the notes.' }
+          : toolResults(messages) === 0
+            ? { toolCalls: [runSubagent('call_agent')] }
+            : { content: 'Done.' },
+    },
+    {
+      name: "a subagent's stream that drops and is retried",
+      prompt: 'Have the reader answer.',
+      prepare: (r) => createSubagent(r),
+      subagentRounds: 1,
+      reply: (messages, _dir, attempt) =>
+        fromSubagent(messages)
+          ? attempt === 0
+            ? {
+                contentChunks: ['A reader ', 'answers.'],
+                disconnectAfterContentChunks: 1,
+              }
+            : { contentChunks: ['A reader ', 'answers.'] }
+          : toolResults(messages) === 0
+            ? { toolCalls: [runSubagent('call_agent')] }
+            : { content: 'Done.' },
+    },
+    {
+      name: 'a subagent stopped at its turn limit',
+      prompt: 'Have the reader read the notes.',
+      prepare: (r) => {
+        createSubagent(r, 1);
+        r.createFile('notes.txt', 'the notes\n');
+      },
+      subagentRounds: 1,
+      reply: (messages, dir) =>
+        fromSubagent(messages)
+          ? { toolCalls: [read(join(dir, 'notes.txt'), 'call_notes')] }
+          : toolResults(messages) === 0
+            ? { toolCalls: [runSubagent('call_agent')] }
+            : { content: 'Done.' },
+    },
+    {
+      name: 'a subagent whose model fails',
+      prompt: 'Have the reader answer.',
+      prepare: (r) => createSubagent(r),
+      subagentRounds: 1,
+      reply: (messages) =>
+        fromSubagent(messages)
+          ? { errorContent: 'upstream exploded' }
+          : toolResults(messages) === 0
+            ? { toolCalls: [runSubagent('call_agent')] }
+            : { content: 'Done.' },
+    },
   ];
 
   it.each(scenarios.map((scenario) => [scenario.name, scenario] as const))(
@@ -475,6 +624,10 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
       expect(shared.exitCode).toBe(current.exitCode);
       expect(shared.requests).toEqual(current.requests);
       expect(shared.frames).toEqual(current.frames);
+      // Only the run with the setting on sends its subagent rounds on the
+      // shared loop.
+      expect(current.sharedSubagentRounds).toBe(0);
+      expect(shared.sharedSubagentRounds).toBe(scenario.subagentRounds ?? 0);
     },
     120_000,
   );

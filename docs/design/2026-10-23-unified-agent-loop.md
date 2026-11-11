@@ -115,7 +115,7 @@ The loop is an async function. Every model event reaches the surface unchanged t
 3. The client's terminal events become stop reasons, so a surface can no longer drop them: `MaxSessionTurns`, `SessionTokenLimitExceeded`, `UserPromptSubmitBlocked`, `LoopDetected` and `Error`.
 4. When the round ends with no tool calls, the loop stops with `completed`. The Stop hook, steering and next-speaker continuations have already run inside `LlmClient`.
 
-The main-session round is `LlmClient.sendMessageStream`. AgentCore and speculation need a round over their own `LlmChat`. PR 5 adds that round on `Turn`, so chunk parsing exists only in `turn.ts`. The interface between the loop and its round appears in that PR, when it gets its second implementation.
+The main-session round is `LlmClient.sendMessageStream`. AgentCore and speculation need a round over their own `LlmChat`. PR 5a adds that round on `Turn`, so chunk parsing exists only in `turn.ts`, and with it the interface between the loop and its round, `ModelRoundSource`, now that the round has a second implementation.
 
 ### Tool batch
 
@@ -475,6 +475,31 @@ PR 4c covers the rest of the turn. The live turn already sends the round its bat
 
 The turn's code therefore does not change. PR 4c adds unit tests for these cases on the shared path; the fresh-turn and retry cases compare both paths, while the remaining cases check the shared path only. The parity suite already runs its retry scenarios and the scenario for input queued while a tool runs on OpenTUI.
 
+### AgentCore on the shared loop (PR 5)
+
+AgentCore's reasoning loop, `runReasoningLoop` in `agent-core.ts`, runs every subagent, background and forked agent, workflow agent and in-process teammate, under every surface. It sends each round on the agent's own `LlmChat` and parses the stream's chunks itself, runs the round's calls on a new `CoreToolScheduler`, adds the parent's messages after the results, waits for messages or asks for a final answer when a round calls no tools, and maps its stops to `terminateMode`. It moves in these steps:
+
+| Step | Content                                                                                                                                                                                                           |
+| ---- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 5a   | every model round on the loop's `runModelRound`, on a `Turn` over the agent's `LlmChat`; the agent keeps its tool step; subagent scenarios in the parity suite                                                    |
+| 5b   | a round's calls as one shared batch over the agent's scheduler, with its deferred approvals                                                                                                                       |
+| 5c   | the run on the loop: the parent's messages through the loop's next round, the loop reminder and the result-aware loop guard, the wait and the request for a final answer, and the stops mapped to `terminateMode` |
+| 5d   | default on, then remove the current loop                                                                                                                                                                          |
+
+PR 5a gives `runModelRound` a second kind of round. It takes the main session's `LlmClient` or a `ModelRoundSource`, and `turnModelRound(chat, model, options)` sends a round on a `Turn` over an agent's chat. The `Turn` gains what such a round sends and reads, each optional, so the main session's requests do not change: the round's request fields (its tools and an output limit a retry raised), the raised limit on its `Retry` event, each chunk's usage, including a chunk without a finish reason, and an option to throw a failed request as it came instead of reporting it and yielding an `Error` event. A surface's model-event callback may return a stop reason, which ends the round there and closes its stream.
+
+AgentCore maps the round's events as it maps its chunks today and keeps the raw function calls for its tool step. What moves:
+
+| AgentCore today                                                          | With the setting on                                                                               |
+| ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------- |
+| it sends each round on `LlmChat.sendMessageStream` and parses its chunks | `runModelRound` sends it on a `Turn`, and AgentCore maps the round's events                       |
+| a loop it detects in the stream breaks out of the stream                 | the event's callback returns `loop_detected`, which ends the round and closes the stream          |
+| a model fallback keeps the calls the failed model made                   | they are dropped, as on the other surfaces                                                        |
+| the round's start event goes out once the request is ready               | it goes out right before the round is sent, so a request that fails before it streams has one too |
+| a streamed text event per text part                                      | per chunk: its thought text, then its text                                                        |
+
+A failed request, a cancel and a retry wait cut off by the time limit end the run as today. The suite with the setting on counts each subagent round sent on the shared loop in the debug log; the line differs from the main session's, which the TUI suite counts.
+
 ## Migration
 
 | PR    | Content                                                                                                                                             |
@@ -501,11 +526,14 @@ The turn's code therefore does not change. PR 4c adds unit tests for these cases
 | 4b    | OpenTUI: a round's tool calls as one shared batch                                                                                                   |
 | 4c    | OpenTUI: verify the turn behavior already present after 4b, including steering input at a tool boundary and a retry                                 |
 | 4d    | OpenTUI: default on, then remove its current loop                                                                                                   |
-| 5     | AgentCore on a `Turn` round (subagents, background and forked agents, workflows)                                                                    |
+| 5a    | AgentCore: every model round on the loop's round, on a `Turn` over the agent's chat; the agent keeps its tool step                                  |
+| 5b    | AgentCore: a round's calls as one shared batch, with its deferred approvals                                                                         |
+| 5c    | AgentCore: the run on the loop, with the parent's messages through the next round; the stops mapped to `terminateMode`                              |
+| 5d    | AgentCore: default on, then remove its current loop                                                                                                 |
 | 6     | speculation                                                                                                                                         |
 | —     | Hosted Harness: separate evaluation                                                                                                                 |
 
-Each of PRs 5 and 6 is followed by its own default-on and removal steps.
+PR 6 is followed by its own default-on and removal steps.
 
 A surface counts as moved when it passes its parity suite with the setting on and its known differences are listed. Each surface then changes its default on its own, without waiting for the others. Its default changes when:
 
@@ -544,6 +572,13 @@ A difference fails the scenario unless it is listed with a linked issue.
 - `--max-session-turns` across two stream-json messages;
 - structured output with a sibling call;
 - a teammate message merged into a tool-result turn.
+
+**Subagent scenarios** (in the headless suite, from PR 5a), each through the `agent` tool, with the subagent's requests compared with the main session's in the order they were sent:
+
+- a subagent that reads a file;
+- a subagent whose stream drops and is retried;
+- a subagent stopped at its turn limit;
+- a subagent whose model fails.
 
 **ACP scenarios** (`integration-tests/cli/acp-agent-loop-parity.test.ts`):
 
@@ -649,6 +684,11 @@ The suites run in the integration job, the TUI suite on Ink; the OpenTUI interac
   - from PR 4b, completed tool calls count toward the session's tool calls, which the automatic skill review and memory recall read;
   - from PR 4b, a tool that ends the turn ends it, with the results in history.
 
+- With the setting on, AgentCore differs from today in these intended ways:
+  - from PR 5a, a model fallback drops the calls the failed model made, as on the other surfaces;
+  - from PR 5a, a round's start event goes out right before the round is sent, so a request that fails before it streams has one too;
+  - from PR 5a, a streamed text event carries a chunk's thought text or its text instead of one text part.
+
 - Later surfaces bring their own fixes: #15324 (ACP), #15326 (OpenTUI), #14114 and #12209 (ACP).
 
 - No setting, protocol field or file format is removed.
@@ -659,7 +699,7 @@ The suites run in the integration job, the TUI suite on Ink; the OpenTUI interac
 | ----------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | Whole-batch scheduling changes headless frame order or the exact `--max-tool-calls` count                   | ordered result streaming; `beforeToolLaunch`; parity scenarios at the budget edge                                                                                                                |
 | Moving ACP onto `LlmClient` adds behavior (caps, heuristics, reminders) and could run hooks twice           | ACP's own copies stay off the shared path; parity lists every added behavior; separate PR                                                                                                        |
-| AgentCore's deferred approvals must restore four async-local frames                                         | move the existing contract tests with the code; a real deferred-approval run in the TUI agent view (PR 5)                                                                                        |
+| AgentCore's deferred approvals must restore four async-local frames                                         | move the existing contract tests with the code; a real deferred-approval run in the TUI agent view (PR 5b)                                                                                       |
 | Two implementations coexist while the setting exists, and new loop-level behavior has to be wired into both | each surface switches its default and drops its current loop as soon as it is ready, instead of after every surface has moved; the current loops are not refactored meanwhile; parity runs in CI |
 | Large PRs touch core                                                                                        | each PR moves one surface; PR 1 is a feature PR behind an off-by-default setting                                                                                                                 |
 
