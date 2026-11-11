@@ -1,0 +1,37 @@
+name: 'Windows Team Test'
+
+on:
+  push:
+    branches:
+      - 'fix/issue-15738'
+  workflow_dispatch:
+
+permissions:
+  contents: 'read'
+
+jobs:
+  test_windows:
+    name: 'Team Tests (windows-latest, Node 22)'
+    runs-on: 'windows-latest'
+    timeout-minutes: 30
+    steps:
+      - name: 'Disable Git CRLF conversion'
+        run: 'git config --global core.autocrlf false'
+
+      - name: 'Checkout'
+        uses: 'actions/checkout@v4'
+
+      - name: 'Setup Node.js 22'
+        uses: 'actions/setup-node@v4'
+        with:
+          node-version: 22
+          cache: 'npm'
+
+      - name: 'Install dependencies'
+        run: 'npm ci'
+
+      - name: 'Build Core'
+        run: 'npm run build --workspace=@qwen-code/qwen-code-core'
+
+      - name: 'Run Agent Team Tests on Windows'
+        run: 'cd packages/core && ../../node_modules/.bin/vitest run --coverage.enabled=false src/agents/team'
