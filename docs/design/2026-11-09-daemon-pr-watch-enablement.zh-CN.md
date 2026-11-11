@@ -2,7 +2,7 @@
 
 [English](2026-11-09-daemon-pr-watch-enablement.md) | [简体中文](2026-11-09-daemon-pr-watch-enablement.zh-CN.md)
 
-状态：proposed（2026-11-09），部分已落地（#16732 与本增量）。本增量是 [PR state transitions from the daemon PR refresh](2026-11-04-daemon-pr-state-transitions.md)（下称「主设计」）中继 [投递 drain](2026-11-08-daemon-pr-watch-drain.md)（已合入 #16656）之后的增量，覆盖 drain 增量延后到启用的四项：共享 restore（§1）、resume 后 drain 钩子（§2）、lifecycle close 重排（§3）、daemon 级 deps 填充（§4）。**已落地：完整的 §3 与 §4 中的 host 枚举器（#16732），外加本增量的 §1 共享 restore。**§2、§4 的其余部分与 §5 仍在后面；下文各节均按此标注。**off 开关仍为 `false`，`sessionPrWatch` 设置仍不读取**——配置（§6）、channel 别名与打开开关（§7）仍属 PR B。任何构建都绝不能同时跑两个 poller。
+状态：proposed（2026-11-09），部分已落地（#16732 与本增量）。本增量是 [PR state transitions from the daemon PR refresh](2026-11-04-daemon-pr-state-transitions.md)（下称「主设计」）中继 [投递 drain](2026-11-08-daemon-pr-watch-drain.md)（已合入 #16656）之后的增量，覆盖 drain 增量延后到启用的四项：共享 restore（§1）、resume 后 drain 钩子（§2）、lifecycle close 重排（§3）、daemon 级 deps 填充（§4）。**已落地：完整的 §3 与 §4 中的 host 枚举器（#16732）；§1 共享 restore（#16810）；§5 listing 写入与 `listedKeys`。**§2 与 §4 的其余部分仍在后面，且两者一起落地——因为 §4 提供 §2 所需的消费者；下文各节均按此标注。**off 开关仍为 `false`，`sessionPrWatch` 设置仍不读取**——配置（§6）、channel 别名与打开开关（§7）仍属 PR B。任何构建都绝不能同时跑两个 poller。
 
 ## 问题
 
@@ -12,7 +12,7 @@ drain 已完整但不可达。`runPrWatchDrainTick` 把 restore、准入、regis
 - `wakeDormant: false` 会把投递推迟最多一个 refresh interval，**不会**永久搁浅条目：drain 在每个 tick 的观测之后运行、重新读取每个 watch 文件的 `pending` 列表，且只有 `isSessionLive` 为假时才进休眠分支——所以会话一旦 live，下一个 tick 就投递。缺的是即时性：没有任何东西在 resume 那一刻触发 drain，因此一条转换可能要为一个用户正在看的会话等满一个 interval（默认 5 分钟）。
 - 关停会与后继者重叠。没有任何东西停止 watch 或释放 owner 记录，因此后继 daemon 可能在前任的 restore 与准入仍在途时就 claim（主 §2）。
 
-另有两处缺口关乎正确性而非可达性：观测丢弃了绑定扫描的 `partial` 标志（其自身注释明写启用增量必须在任何负面决策前透传它），以及 slim listing 从不把 `state` 写进 watch 文件、也不提供 `listedKeys`，因此 listing 已返回的 closed PR 会永远留在 view 轮转里。
+另有两处缺口曾关乎正确性而非可达性，现均已在 §5 定案：观测丢弃的 `partial` 标志无需透传（它不做任何负面决策，加选项不会有任何读取方），而 slim listing 现在会把 `state` 写进 watch 文件并提供 `listedKeys`，因此 listing 已返回的 closed PR 会离开 view 轮转。该写入还会触发它所替代的那次 view 本会触发的 `state_change`。
 
 ## 现状
 
@@ -31,7 +31,7 @@ drain 已完整但不可达。`runPrWatchDrainTick` 把 restore、准入、regis
 - 给 drain 一个真实的 `wakeSession`，铸造并释放 client registration，并按 channel 的方式划分结果。
 - 在 resume 那一刻触发 drain，使 `wakeDormant: false` 的条目在会话变 live 时立即投递，而不是等到下一个 refresh tick。
 - 关停时停止 watch 并释放 owner 记录，且在途工作落定之后才释放。
-- 填充两个 deps 接缝：watch 目录与锁 registry、allowed hosts、准入、restore、自推账本，以及扫描的 `partial`。
+- 填充两个 deps 接缝：watch 目录与锁 registry、allowed hosts、准入、restore 与自推账本。扫描的 `partial` 无需透传进观测——见 §5。
 - 把 slim listing 的 `state` 写进 watch 文件并提供 `listedKeys`。
 - 保持开关关闭、设置不读：生产中零行为与零 API 量变化。
 
@@ -95,11 +95,17 @@ drain 已完整但不可达。`runPrWatchDrainTick` 把 restore、准入、regis
 - **自推账本**：从候选者的 clone（bridge live summary 的 `worktree.path`，否则绑定的 `workspaceCwd`）跑 `cloneWorktreesOf`，然后 `vouchedScanRoots`、`autofixPrPaths`、`readState`，仅在 `sameRepository` 与 `sessionId` 匹配时接受。untrusted primary 仅用坐标——其检出里不跑 git。任何拒绝意味着无账本、转换照常投递。
 - **actions**：不填充。`sessionPrWatch.actions` 属 PR B；drain 的空 map 归一化已把缺失的 map 当作通用 prompt。
 
-### 5. listing 写入、listedKeys 与 partial（尚未落地）
+### 5. listing 写入与 listedKeys（已落地）
 
 refresh 的 slim listing 已知每个被列出 PR 的 state。在同一门控下、且仅当 daemon 持有 owner 记录时，在该 PR 的 per-PR 锁内把 `state` 与 `observedAt` 写进其 watch 文件——与观测相同的原子写，无文件时静默初始化。把被列出的键收集为 `listedKeys` 传给观测，使 listing 已返回的 closed PR 离开 view 轮转（主 §1）。
 
-把绑定扫描的 `partial` 标志透传进观测选项。观测今天不做负面决策，但 drain 已经做，且该标志必须来自同一次扫描而不是重新计算。drain 调用方的 `coveragePartial`（#16656 新增）保留：它覆盖 `listAll()` 略过的 registry 条目，那是扫描自身标志看不到的。
+**`partial` 那一项已经满足，不需要写代码。** 本节早先的稿子要求把绑定扫描的 `partial` 透传进观测选项。读代码可知：drain 已经把每个 workspace 扫描自身的 `partial` OR 进它以调用方 `coveragePartial` 起头的那个标志，并已在两处负面决策上消费它——watch 文件删除守卫与 pending 丢弃守卫。而观测根本不做任何负面决策，因此在那里新增 `partial` 选项不会有任何读取方：那是死开关。所以观测 tick 里丢弃该标志是正确的现状，其注释应改为「要求已满足」而非「尚待完成」。调用方的 `coveragePartial`（#16656 新增）仍覆盖单个 workspace 扫描看不到的东西——`listAll()` 略过的 registry 条目。
+
+**tick 次序决定了键从哪来。** timer 先跑观测再跑 refresh，所以产出 `listedKeys` 的 listing 在消费它的观测**之后**运行。因此 refresh 返回它列出的键，timer 按 workspace 把它们带进下一个 tick 的观测。state 写入是即时的；只有「退出 view 轮转」滞后一个 tick，而这本就是轮转的工作间隔。两个机制互补而非冗余：存下的 `state` 让 `effectiveState` 无需花一次 view 就变成 closed 或 merged，而 `listedKeys` 区分「listing 覆盖到的 closed PR」与「没覆盖到的」——后者留在轮转里以捕捉 reopen。
+
+**listing 是跃迁的生产者，不只是 state 的记录者。** 写入 `state` 会让观测跳过那次本会检测到同一变更的 view，而该 view 是 `detectPrTransitions` 唯一的另一个调用方——也是 `pending` 唯一的生产者，而 drain 只投递 `pending`。所以「第一个观测者是 listing」的关闭或合并必须自己触发 `state_change`，否则它被记成既成事实、永不投递。因此该写入运行同一个检测器，并把先前的 `headSha` 与 `checks` 前向携带，使得只可能触发 `state_change`——不会有 `head_change`、`ci_failure` 或 `merge_conflict`。没有 `headSha` 的文件不算已建基线，静默初始化，与 view 路径完全一致。这不限于同 tick 的窄窗口：而是该 tick 观测未触及的每个 PR——view 上限、deadline 截断、view 失败、或已被别的 workspace 先 view 掉。
+
+**只有共享 scan 认定有绑定、且主机在允许集合内的 PR 才写文件。** binder 集合取共享绑定扫描自己的答案，而不是对它的再推导：该扫描排除归档、hidden-catalog 与不可读的会话，而 drain 会删除它没有列出的 watch 文件。近似它——例如直接枚举 active sidecar——会为漏掉的那扇排除门重新制造抖动，所以 refresh 直接调用该扫描。写入还施加观测的 `allowedHosts` 门控：drain 投递 `pending` 时自己不做任何主机检查，所以为「观测拒绝 view 的主机」写跃迁就会为它投递事件。`listedKeys` 仍报告 listing 的完整覆盖——观测只对自己扫到的绑定查键，因此它从不查的键是无害的。
 
 ## 涉及文件
 
@@ -118,10 +124,11 @@ refresh 的 slim listing 已知每个被列出 PR 的 state。在同一门控下
 | `packages/cli/src/serve/server/pr-watch-deps.ts`（新）           | 构建观测与 drain 的 deps：hosts、准入、restore 映射、账本                                                          |
 | `packages/cli/src/serve/run-qwen-serve.ts`                       | 经 late-bound getter 填充两个接缝；注册关停 drain                                                                  |
 | `packages/cli/src/serve/serve-app-lifecycle.ts`                  | 形状不变；新 drain 经既有 `addAppDrain` 注册                                                                       |
-| `packages/cli/src/serve/server/session-pr-refresh.ts`            | listing→watch 写入、`listedKeys`、`partial` 透传；`stopWatch` 与 tick 落定信号                                     |
+| `packages/cli/src/serve/server/pr-watch-observation.ts`          | 按 workspace 把 listing 的键带进轮转决策的 tick 选项（已落地）                                                     |
+| `packages/cli/src/serve/server/session-pr-refresh.ts`            | listing→watch 写入与 `listedKeys`（已落地）；`stopWatch` 与 tick 落定信号（#16732）。无需 `partial` 透传，见 §5    |
 | `docs/design/2026-11-09-daemon-pr-watch-enablement.md`（+zh-CN） | 本设计                                                                                                             |
 
-`session-restore.ts`、`routes/session.ts`、`worktree-ownership-op.ts` 与四个测试文件的行不属于 #16732——它们随 §1 在本增量落地。`pr-watch-deps.ts` 随 §4 的其余部分落地。另有两行是部分的：`session-pr-refresh.ts` 已落地 `stopWatch` 与 tick 落定信号，但 listing 写入、`listedKeys` 与 `partial` 透传尚未；`run-qwen-serve.ts` 已落地关停 drain 注册，但两个接缝尚未。
+`session-restore.ts`、`routes/session.ts`、`worktree-ownership-op.ts` 与四个测试文件的行不属于 #16732——它们随 §1 在本增量落地。`pr-watch-deps.ts` 随 §4 的其余部分落地。`session-pr-refresh.ts` 就 §5 而言已完整：`stopWatch` 与 tick 落定信号随 #16732 落地，listing 写入与 `listedKeys` 随本片落地，且不需要 `partial` 透传。`run-qwen-serve.ts` 仍是部分的——已落地关停 drain 注册，但两个接缝尚未。
 
 ## 关键设计决策
 

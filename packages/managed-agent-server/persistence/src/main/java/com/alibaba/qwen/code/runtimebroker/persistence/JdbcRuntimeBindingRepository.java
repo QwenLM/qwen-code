@@ -135,14 +135,6 @@ public final class JdbcRuntimeBindingRepository
         return sessionRelease.beginSessionRelease(sessions, executions, expected);
     }
 
-    static RuntimeBrokerException unverifiedWorkspaceHolder() {
-        return new RuntimeBrokerException(
-                409,
-                "workspace_close_identity_unverified",
-                "Original Workspace holder differs",
-                false);
-    }
-
     @Override
     public RuntimeBindingRecord recoverLost(RuntimeSessionRepository sessions,
             ToolExecutionRepository executions, RuntimeBindingRecord expected) {

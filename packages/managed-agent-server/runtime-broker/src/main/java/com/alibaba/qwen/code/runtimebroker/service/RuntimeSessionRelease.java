@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.runtimebroker.service;
 
+import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisioner;
@@ -13,41 +14,42 @@ import java.util.HashSet;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 
+import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.MAX_CAS_ATTEMPTS;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.conflict;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.failed;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.mapFailure;
+import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.notFound;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.safeStage;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.unavailable;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.unwrap;
 
 /**
- * The Session release arm of the Broker: the per-context release latch, the
- * background sweep decision and the transport release completion. Split out
- * of RuntimeBrokerService verbatim; the stages, lock order and refusal codes
- * are the ones the service ran inline.
+ * Session-release CAS transitions and the guarded release sweep, shared by
+ * the facade's routine release path and the drain cascade.
  */
 final class RuntimeSessionRelease {
-    private final RuntimeBrokerService service;
-    private final RuntimeSessionRepository sessionRepository;
     private final RuntimeBindingRepository bindingRepository;
-    private final RuntimeBindingRegistry bindingRegistry;
-    private final RuntimeProvisioner provisioner;
+    private final RuntimeSessionRepository sessionRepository;
     private final ToolExecutionRepository executionRepository;
-    private final RuntimeExecutionRecovery executionRecovery;
+    private final RuntimeProvisioner provisioner;
     private final RuntimeTransport transport;
+    private final RuntimeBindingRegistry bindingRegistry;
+    private final RuntimeExecutionRecovery executionRecovery;
 
-    RuntimeSessionRelease(RuntimeBrokerService service, RuntimeSessionRepository sessionRepository,
-            RuntimeBindingRepository bindingRepository, RuntimeBindingRegistry bindingRegistry,
-            RuntimeProvisioner provisioner, ToolExecutionRepository executionRepository,
-            RuntimeExecutionRecovery executionRecovery, RuntimeTransport transport) {
-        this.service = service;
-        this.sessionRepository = sessionRepository;
+    RuntimeSessionRelease(RuntimeBindingRepository bindingRepository,
+            RuntimeSessionRepository sessionRepository,
+            ToolExecutionRepository executionRepository,
+            RuntimeProvisioner provisioner,
+            RuntimeTransport transport,
+            RuntimeBindingRegistry bindingRegistry,
+            RuntimeExecutionRecovery executionRecovery) {
         this.bindingRepository = bindingRepository;
-        this.bindingRegistry = bindingRegistry;
-        this.provisioner = provisioner;
+        this.sessionRepository = sessionRepository;
         this.executionRepository = executionRepository;
-        this.executionRecovery = executionRecovery;
+        this.provisioner = provisioner;
         this.transport = transport;
+        this.bindingRegistry = bindingRegistry;
+        this.executionRecovery = executionRecovery;
     }
 
     CompletionStage<Boolean> releaseSession(
@@ -99,7 +101,7 @@ final class RuntimeSessionRelease {
         return attempt;
     }
 
-    CompletionStage<Boolean> releaseSessionAfterSweep(
+    private CompletionStage<Boolean> releaseSessionAfterSweep(
             SessionContext context, boolean drain) {
         boolean backgroundBusy;
         context.lock();
@@ -139,7 +141,7 @@ final class RuntimeSessionRelease {
                 "Runtime Session has an active background process"));
     }
 
-    CompletionStage<Boolean> completeSessionRelease(
+    private CompletionStage<Boolean> completeSessionRelease(
             SessionContext context) {
         CompletableFuture<Boolean> result;
         RuntimeSessionRecord releasing;
@@ -155,7 +157,7 @@ final class RuntimeSessionRelease {
                 throw conflict("runtime_session_busy",
                         "Runtime Session has an active operation");
             }
-            releasing = service.transitionSessionToReleasing(context);
+            releasing = transitionSessionToReleasing(context);
             if (releasing.getState()
                     == RuntimeSessionRecord.State.RELEASED) {
                 bindingRegistry.removeSession(context.session().getRuntimeSessionId());
@@ -178,7 +180,7 @@ final class RuntimeSessionRelease {
                         result.complete(false);
                     } else {
                         try {
-                            service.finishSessionRelease(releasing);
+                            finishSessionRelease(releasing);
                             bindingRegistry.removeSession(context.session()
                                     .getRuntimeSessionId());
                             result.complete(true);
@@ -191,9 +193,106 @@ final class RuntimeSessionRelease {
         return result;
     }
 
-    CompletionStage<Boolean> releaseUnusableSession(SessionContext context) {
+    private CompletionStage<Boolean> releaseUnusableSession(SessionContext context) {
         bindingRegistry.invalidateBinding(context.binding());
         return failed(unavailable("runtime_reconciliation_required",
                 "Runtime release requires durable proof that old writers stopped"));
+    }
+
+    RuntimeSessionRecord transitionSessionToReleasing(
+            SessionContext context) {
+        RuntimeSessionRecord current = sessionRepository.findById(
+                context.session().getScope(),
+                context.session().getRuntimeSessionId());
+        if (current == null) {
+            throw notFound("runtime_session_not_found",
+                    "Runtime Session was not found");
+        }
+        if (CsiFilesRetirementProfile.isProfile(current.getSession().getScope())) {
+            throw CsiFilesRetirementProfile.releaseUnavailable();
+        }
+        for (int attempt = 0; attempt < MAX_CAS_ATTEMPTS; attempt++) {
+            if (current.getState()
+                    == RuntimeSessionRecord.State.RELEASING) {
+                // A row already persisted as RELEASING can predate the
+                // guarded transition: an older peer's check-then-act let an
+                // admission in and its worker release then failed. Admission
+                // needs READY under the row lock, so nothing new can join
+                // now, but completing this release would free a worker that
+                // is still running a tool, so the retry is only idempotent
+                // once nothing active is left.
+                if (executionRepository.hasActiveByRuntimeSession(
+                        current.getBindingId(),
+                        current.getRuntimeGeneration(),
+                        current.getRuntimeSessionId())) {
+                    throw conflict("runtime_session_busy",
+                            "Runtime Session has an active operation");
+                }
+                return current;
+            }
+            if (current.getState()
+                    == RuntimeSessionRecord.State.RELEASED) {
+                return current;
+            }
+            if (current.getState() != RuntimeSessionRecord.State.READY
+                    && current.getState() != RuntimeSessionRecord.State.ACQUIRING) {
+                throw conflict("runtime_session_not_ready",
+                        "Runtime Session is not ready for release");
+            }
+            // The transition and the no-active-execution check commit in one
+            // transaction under the Session row lock that admission also
+            // takes, so a concurrent Broker process cannot admit into the
+            // gap between the check and the CAS.
+            RuntimeSessionRecord updated =
+                    bindingRepository.beginSessionRelease(sessionRepository,
+                            executionRepository, current);
+            if (updated != null) {
+                return updated;
+            }
+            current = sessionRepository.findById(
+                    context.session().getScope(),
+                    context.session().getRuntimeSessionId());
+            if (current == null) {
+                throw conflict("runtime_session_state_conflict",
+                        "Runtime Session changed while releasing");
+            }
+        }
+        throw conflict("runtime_session_state_conflict",
+                "Runtime Session changed while releasing");
+    }
+
+    void finishSessionRelease(RuntimeSessionRecord releasing) {
+        finishSessionRelease(releasing, null);
+    }
+
+    void finishSessionRelease(RuntimeSessionRecord releasing, RuntimeBindingRecord stopped) {
+        RuntimeSessionRecord current = releasing;
+        for (int attempt = 0; attempt < MAX_CAS_ATTEMPTS; attempt++) {
+            if (current.getState() == RuntimeSessionRecord.State.RELEASED) {
+                return;
+            }
+            RuntimeSessionRecord updated = stopped == null
+                    ? bindingRepository.completeSessionRelease(sessionRepository, current)
+                    : bindingRepository.completeStoppedSessionRelease(sessionRepository, executionRepository, current, stopped);
+            if (updated != null
+                    || current.getState()
+                            == RuntimeSessionRecord.State.RELEASED) {
+                return;
+            }
+            current = sessionRepository.findById(
+                    releasing.getSession().getScope(),
+                    releasing.getRuntimeSessionId());
+            if (current != null && current.getState()
+                    == RuntimeSessionRecord.State.RELEASED) {
+                return;
+            }
+            if (current == null || current.getState()
+                            != RuntimeSessionRecord.State.RELEASING) {
+                throw conflict("runtime_session_state_conflict",
+                        "Runtime Session changed after release");
+            }
+        }
+        throw conflict("runtime_session_state_conflict",
+                "Runtime Session changed after release");
     }
 }

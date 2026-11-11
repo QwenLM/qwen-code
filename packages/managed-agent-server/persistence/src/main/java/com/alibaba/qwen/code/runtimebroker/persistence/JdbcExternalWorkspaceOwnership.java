@@ -400,7 +400,7 @@ public final class JdbcExternalWorkspaceOwnership {
             RuntimeScope scope, String harnessSessionId, boolean cleanup) throws SQLException {
         if (!WorkspaceExecutionProfile.isExternalWorkspaceRequest(request)
                 || !request.getScope().equals(scope)) {
-            throw JdbcRuntimeBindingRepository.unverifiedWorkspaceHolder();
+            throw JdbcRepositorySupport.unverifiedWorkspaceHolder();
         }
         boolean shared = HarnessOwnership.sharesRuntimeSessions(request);
         JdbcRuntimeBindingRepository.requireHarnessAdmission(connection, scope, harnessSessionId,

@@ -17,7 +17,6 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBindingRegistry.BindingContext;
-import com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerService.BindingRenewal;
 
 import java.time.Clock;
 import java.time.Duration;
@@ -50,7 +49,7 @@ import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.u
  * {@link RuntimeBrokerService}: durable provisioning and attestation, the
  * bounded reconciliation loop, lost-binding cleanup, and the trusted
  * maintenance recovery path. Every step runs under this Broker's operation
- * claim, renewed by the service's {@code BindingRenewal}.
+ * claim, renewed by {@code BindingRenewal}.
  */
 final class RuntimeBindingProvisioning {
     private final RuntimeBindingRegistry bindingRegistry;

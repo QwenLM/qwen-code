@@ -479,11 +479,11 @@ class WorkspaceCsiSqlWorkerMySqlIT {
                         schema = connection.getCatalog();
                     }
                 }
-                // 45 = the 44 baseline tables plus flyway_schema_history; the
-                // PR's ma_session_principal ownership row table is the added
-                // baseline entry (V1__managed_schema.sql). MySQL leg runs in CI.
+                // 46 = the 45 baseline tables plus flyway_schema_history; the merged
+                // baseline carries both the PR's ma_session_principal ownership row
+                // and the base's ma_journal_pack. MySQL leg runs in CI.
                 assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = ?"
-                        + " AND table_type = 'BASE TABLE'", Integer.class, schema)).isEqualTo(45);
+                        + " AND table_type = 'BASE TABLE'", Integer.class, schema)).isEqualTo(46);
                 verify(provisioner).ensureResource(any(), any(), any());
                 verify(provisioner).provision(any(), any());
                 String evidence = System.getProperty("csi.acceptance.evidence");

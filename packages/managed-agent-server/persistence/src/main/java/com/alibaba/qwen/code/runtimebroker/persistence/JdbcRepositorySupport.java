@@ -5,6 +5,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeRequestKeys;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.StoreFailureException;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 
 import javax.sql.DataSource;
 
@@ -185,6 +186,14 @@ public final class JdbcRepositorySupport {
             }
         }
         statement.setString(index, value);
+    }
+
+    static RuntimeBrokerException unverifiedWorkspaceHolder() {
+        return new RuntimeBrokerException(
+                409,
+                "workspace_close_identity_unverified",
+                "Original Workspace holder differs",
+                false);
     }
 
     static StoreFailureException failure(SQLException exception) {

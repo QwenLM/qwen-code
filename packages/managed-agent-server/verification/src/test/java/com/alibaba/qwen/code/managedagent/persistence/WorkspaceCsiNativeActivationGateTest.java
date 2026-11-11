@@ -332,11 +332,11 @@ class WorkspaceCsiNativeActivationGateTest {
                     .map(row -> JSON.valueToTree(new TreeMap<>(row)).toString()).sorted().toList());
         }
         assertThat(rows).containsKeys("ma_delivery", "ma_session", "ma_session_head", "ma_request_receipt");
-        // 45 = the 44 baseline tables plus flyway_schema_history; the PR's
-        // ma_session_principal ownership row table is the added baseline
-        // entry (V1__managed_schema.sql), not a stray catalog artifact.
+        // 46 = the 45 baseline tables plus flyway_schema_history; the merged
+        // baseline carries both the PR's ma_session_principal ownership row and
+        // the base's ma_journal_pack, not stray catalog artifacts.
         assertThat(rows).containsKey("ma_session_principal");
-        assertThat(rows).hasSize(45);
+        assertThat(rows).hasSize(46);
         return rows;
     }
 

@@ -4,7 +4,9 @@ import com.alibaba.qwen.code.runtimebroker.BrokerValues;
 import com.alibaba.qwen.code.runtimebroker.HarnessSessionResolver;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
+import com.alibaba.qwen.code.runtimebroker.RuntimeDrainReceipt;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority;
+import com.alibaba.qwen.code.runtimebroker.RuntimeRecoveryEvidence;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
 import com.alibaba.qwen.code.runtimebroker.RuntimeToolMeasurements;
@@ -25,6 +27,8 @@ import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Supplier;
 
@@ -35,6 +39,21 @@ final class RuntimeBrokerSupport {
             "prepared", "executing", "cancel_requested", "settled",
             "unknown");
     static final int MAX_CAS_ATTEMPTS = 16;
+
+    /** Tool v3 publication dispatch: a payload digest and publication grant. */
+    static boolean isPublicationV3(Map<String, Object> reference) {
+        return "deferred_v3".equals(reference.get("dispatchMode"));
+    }
+
+    /** Tool v3 provider protocol: an input digest in the reference itself. */
+    static boolean isProtocolV3(Map<String, Object> reference) {
+        return Integer.valueOf(3).equals(reference.get("runtimeProtocol"));
+    }
+
+    /** Either v3 encoding; a reference carries at most one of the two. */
+    static boolean isV3Family(Map<String, Object> reference) {
+        return isProtocolV3(reference) || isPublicationV3(reference);
+    }
 
     static void requireSameSession(RuntimeSession actual,
             RuntimeSession requested) {
@@ -54,7 +73,7 @@ final class RuntimeBrokerSupport {
             ProviderRuntimeProtocol.reference(immutable, runtimeSessionId);
         } else {
             boolean measured = RuntimeToolMeasurements.selected(immutable);
-            boolean v3 = Integer.valueOf(3).equals(immutable.get("runtimeProtocol"));
+            boolean v3 = isProtocolV3(immutable);
             if (v3 && payloadDigest != null) {
                 throw invalid("runtime_reference_invalid", "Tool v3 publication modes conflict");
             }
@@ -289,6 +308,23 @@ final class RuntimeBrokerSupport {
                 });
     }
 
+    static ScheduledExecutorService newScheduler() {
+        return Executors.newSingleThreadScheduledExecutor(runnable -> {
+            Thread thread = new Thread(runnable,
+                    "qwen-runtime-broker-coordination");
+            thread.setDaemon(true);
+            return thread;
+        });
+    }
+
+    static Duration requireDuration(Duration duration,
+            String name) {
+        if (duration == null || duration.isZero() || duration.isNegative()) {
+            throw new IllegalArgumentException(name + " must be positive");
+        }
+        return duration;
+    }
+
     static void requireOpen(AtomicBoolean closed) {
         if (closed.get()) {
             throw new IllegalStateException("Runtime Broker is closed");
@@ -338,8 +374,7 @@ final class RuntimeBrokerSupport {
                 || !execution.isSettled() || !"not_started".equals(execution.getExecutionStatus())
                 || execution.getResult() == null || !execution.getResult().containsKey("capture")
                 || execution.getResult().get("capture") != null
-                || !(Integer.valueOf(3).equals(execution.getReference().get("runtimeProtocol"))
-                        || "deferred_v3".equals(execution.getReference().get("dispatchMode")))
+                || !isV3Family(execution.getReference())
                 || ProviderRuntimeProtocol.isReference(execution.getReference())) {
             return null;
         }
@@ -402,5 +437,35 @@ final class RuntimeBrokerSupport {
     static boolean isDrainClaimStateValid(RuntimeBindingRecord binding, boolean stoppedRecovery, boolean lostClaim) {
         return binding.getState() == RuntimeBindingRecord.State.DRAINING
                 || (stoppedRecovery || lostClaim) && binding.getState() == RuntimeBindingRecord.State.LOST;
+    }
+
+    /**
+     * A restart-fenced external-workspace binding may still own a live worker
+     * with one stale Session row. The drain marks it drain-requested, stops
+     * that worker for the persisted receipt and re-checks for unsettled rows
+     * before RELEASED, so refusing here would only fence the storage holder
+     * with no exit. Executions in flight still refuse: nothing can settle
+     * them without their worker.
+     */
+    static boolean isLiveWorkerStopRecoverable(RuntimeBindingRecord claimed, boolean lost,
+            RuntimeRecoveryEvidence absence, boolean activeExecutions) {
+        return lost && absence == null && claimed.getDrainReceipt() == null && !activeExecutions
+                && WorkspaceExecutionProfile.isExternalWorkspaceRequest(claimed.getRequest());
+    }
+
+    /**
+     * Verifies that a drain receipt matches the claimed binding's identity,
+     * including the external-workspace seed/lease/handle chain.
+     */
+    static void verifyDrainReceiptIdentity(RuntimeBindingRecord expected, RuntimeDrainReceipt receipt) {
+        if (receipt == null || !receipt.matches(expected)
+                || expected.getDrainReceipt() != null && !expected.getDrainReceipt().equals(receipt)
+                || RuntimeProviderKinds.EXTERNAL_WORKSPACE.equals(expected.getRequest().getProvisionerKind())
+                        && (!WorkspaceExecutionProfile.isExternalWorkspaceRequest(expected.getRequest())
+                                || expected.getResourceHandle() == null || expected.getProvisionSeed() == null
+                                || expected.getLease() == null || !expected.getProvisionSeed().matches(expected.getLease())
+                                || !expected.getResourceHandle().equals(receipt.resourceHandle()))) {
+            throw conflict("workspace_close_identity_unverified", "Original stop receipt differs");
+        }
     }
 }

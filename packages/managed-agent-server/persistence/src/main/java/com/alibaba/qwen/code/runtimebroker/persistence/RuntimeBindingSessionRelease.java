@@ -23,7 +23,7 @@ import static com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBinding
 import static com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository.lockPlacementDomain;
 import static com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository.requireHarnessAdmission;
 import static com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository.storageAliasKey;
-import static com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository.unverifiedWorkspaceHolder;
+import static com.alibaba.qwen.code.runtimebroker.persistence.JdbcRepositorySupport.unverifiedWorkspaceHolder;
 
 /**
  * The Session release/stop-lock arm of the binding repository: the physical

@@ -422,6 +422,12 @@ final class ManagedActivityDiagnosticProjection {
             var source = jdbc.queryForMap("SELECT record_bytes, record_digest FROM ma_session_journal_tx WHERE tenant_id = ?"
                     + " AND session_id = ? AND journal_revision = ?", tenant, session, transaction.revision());
             byte[] raw = (byte[]) source.get("record_bytes");
+            if (raw == null) {
+                JdbcJournalPacks packs = store.journalPacks();
+                raw = packs == null ? null : packs.resolveBytes(tenant, session,
+                        transaction.revision(), (String) source.get("record_digest"),
+                        transaction.bytes());
+            }
             require(raw != null, "Diagnostic recovery journal is missing.");
             require(raw.length == transaction.bytes() && DigestUtils.sha256Hex(raw).equals(source.get("record_digest")),
                     "Diagnostic recovery journal digest conflicts.");

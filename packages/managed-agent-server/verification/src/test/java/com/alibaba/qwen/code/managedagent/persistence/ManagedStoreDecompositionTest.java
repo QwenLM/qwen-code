@@ -167,20 +167,14 @@ class ManagedStoreDecompositionTest {
                 requireSessionAuthority/3:- requireSessionReadAuthority/3:- requireSessionReadAuthority/3:- ownsSession/3:-
                 """);
         assertEntries(JdbcManagedSessionStore.class, """
-                lockBounded/1:- requireCsiHistoricalCredential/5:- hasPristineInitialJournal/3::NOT_SUPPORTED:DEFAULT:true
-                publishAgentInstructions/4::REQUIRED:DEFAULT:false validateCsiTerminalBytes/1:- commandKeyHash/2:-
-                transactions/6::REQUIRED:DEFAULT:true journalCorrupt/0:- usesDataSource/1:- skipContended/2:- restore/4::REQUIRED:DEFAULT:true
-                readResource/5:- acquireWriter/5::NOT_SUPPORTED:DEFAULT:false acquireWriter/4::NOT_SUPPORTED:DEFAULT:false
-                renewWriter/5::REQUIRED:DEFAULT:false renewWriter/4::REQUIRED:DEFAULT:false sealWriter/4::REQUIRED:DEFAULT:false
-                sealWriter/5::REQUIRED:DEFAULT:false blockRecovery/4::REQUIRED:DEFAULT:false hasLiveWriter/2::REQUIRED:DEFAULT:false
-                toolResultLimit/1:- lockBoundedResult/1:- namedRootDeadlock/1:- lockCsiOriginal/2:- recentTransactions/7::REQUIRED:READ_COMMITTED:true
-                commandTransaction/7::REQUIRED:READ_COMMITTED:true authorizeOrdinary/4::REQUIRED:DEFAULT:false
-                authorizeLifecycle/5::REQUIRED:DEFAULT:false approvalSelection/4::REQUIRED:DEFAULT:false readSnapshotResource/5:-
-                readOwnerResource/5:- publishAgentSkills/4::REQUIRED:DEFAULT:false publishToolResult/5::REQUIRED:DEFAULT:false
-                publishToolResult/4::REQUIRED:DEFAULT:false lockPublicationWriter/6:- lockPublicationWriter/8:- lockSnapshotWriter/4:-
-                quiesceOwnership/4::REQUIRED:DEFAULT:false releaseOwnership/4::REQUIRED:DEFAULT:false preflightCsiTerminal/5:- commitCsiTerminal/5:-
-                requireCsiApplicationCredential/3:- publishInheritedExtensionResource/4::REQUIRED:DEFAULT:false commit/4::REQUIRED:DEFAULT:false
-                commit/5::REQUIRED:DEFAULT:false
+                lockBounded/1:- requireCsiHistoricalCredential/5:- hasPristineInitialJournal/3::NOT_SUPPORTED:DEFAULT:true publishAgentInstructions/4::REQUIRED:DEFAULT:false validateCsiTerminalBytes/1:- commandKeyHash/2:-
+                transactions/6::REQUIRED:DEFAULT:true journalCorrupt/0:- usesDataSource/1:- skipContended/2:- restore/4::REQUIRED:DEFAULT:true readResource/5:-
+                acquireWriter/5::NOT_SUPPORTED:DEFAULT:false acquireWriter/4::NOT_SUPPORTED:DEFAULT:false renewWriter/5::REQUIRED:DEFAULT:false renewWriter/4::REQUIRED:DEFAULT:false sealWriter/4::REQUIRED:DEFAULT:false sealWriter/5::REQUIRED:DEFAULT:false
+                blockRecovery/4::REQUIRED:DEFAULT:false hasLiveWriter/2::REQUIRED:DEFAULT:false toolResultLimit/1:- lockBoundedResult/1:- namedRootDeadlock/1:- lockCsiOriginal/2:-
+                recentTransactions/7::REQUIRED:READ_COMMITTED:true commandTransaction/7::REQUIRED:READ_COMMITTED:true authorizeOrdinary/4::REQUIRED:DEFAULT:false authorizeLifecycle/5::REQUIRED:DEFAULT:false approvalSelection/4::REQUIRED:DEFAULT:false readSnapshotResource/5:-
+                readOwnerResource/5:- publishAgentSkills/4::REQUIRED:DEFAULT:false publishToolResult/5::REQUIRED:DEFAULT:false publishToolResult/4::REQUIRED:DEFAULT:false lockPublicationWriter/6:- lockPublicationWriter/8:-
+                lockSnapshotWriter/4:- quiesceOwnership/4::REQUIRED:DEFAULT:false releaseOwnership/4::REQUIRED:DEFAULT:false preflightCsiTerminal/5:- commitCsiTerminal/5:- requireCsiApplicationCredential/3:-
+                publishInheritedExtensionResource/4::REQUIRED:DEFAULT:false commit/4::REQUIRED:DEFAULT:false commit/5::REQUIRED:DEFAULT:false journalPacks/0:-
                 """);
     }
 
