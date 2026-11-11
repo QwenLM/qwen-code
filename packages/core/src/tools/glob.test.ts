@@ -178,6 +178,31 @@ describe('GlobTool', () => {
       expect(result.returnDisplay).toBe('No files found');
     });
 
+    it('should match a real directory by name', async () => {
+      // `nodir: true` used to drop this: a "does the directory exist" probe
+      // answered "No files found", which the model reads as proof of absence.
+      expectFound(await run({ pattern: 'sub' }), 1, 'sub');
+    });
+
+    it('should match real and symlinked directories alike', async () => {
+      await fs.symlink(
+        path.join(tempRootDir, 'sub'),
+        path.join(tempRootDir, 'linked'),
+        'dir',
+      );
+
+      expectFound(await run({ pattern: 'l*' }), 1, 'linked');
+      expectFound(await run({ pattern: 's*' }), 1, 'sub');
+    });
+
+    it('gives the same answer for a directory reached by name and by path', async () => {
+      const byName = await run({ pattern: 'sub' });
+      const byPath = await run({ pattern: 'sub', path: '.' });
+
+      expect(byName.resultFilePaths).toEqual(byPath.resultFilePaths);
+      expect(byName.resultFilePaths).toEqual([path.join(tempRootDir, 'sub')]);
+    });
+
     it('should find files with special characters in the name', async () => {
       await put('file[1].txt', 'content');
       expectFound(await run({ pattern: 'file[1].txt' }), 1, 'file[1].txt');

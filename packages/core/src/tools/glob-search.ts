@@ -148,7 +148,11 @@ export async function searchGlobDirectory(
   const stream = globStream(effectivePattern, {
     cwd: searchDir,
     withFileTypes: true,
-    nodir: true,
+    // Directories are matches too: an agent asking whether a tool or package
+    // directory exists reads "No files found" as proof of absence. `nodir`
+    // dropped every real directory while a symlink to one survived, so the
+    // same probe answered differently depending on how the entry was stored.
+    nodir: false,
     stat: true,
     nocase: true,
     dot: true,
