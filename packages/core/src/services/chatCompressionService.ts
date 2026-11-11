@@ -43,6 +43,7 @@ import {
   composePostCompactHistory,
   countToolResponseImages,
   postProcessSummary,
+  POST_COMPACT_TOKEN_BUDGET,
   stripAnalysisBlock,
   type SubagentSnapshot,
 } from './postCompactAttachments.js';
@@ -1298,6 +1299,10 @@ export class ChatCompressionService {
           {
             workspaceRoot: config.getTargetDir(),
             signal,
+            fileTokenBudget: Math.min(
+              POST_COMPACT_TOKEN_BUDGET,
+              Math.floor(contextLimit / 4),
+            ),
             // A payload-overflow compaction (#10380) exists because the
             // serialized request exceeded the gateway's BYTE limit while
             // staying under the token threshold. Restoration re-embeds
@@ -1458,6 +1463,41 @@ export class ChatCompressionService {
                 `${estimatedNewVisibleTokenCount}).`,
             );
         }
+      }
+
+      if (
+        canCalculateNewTokenCount &&
+        extraHistory.length > 2 &&
+        newTokenCount >=
+          computeThresholds(contextLimit, config.getAutoCompactThreshold()).auto
+      ) {
+        const withoutRestoration = await composePostCompactHistory(
+          historyForCompose,
+          summary,
+          {
+            workspaceRoot: config.getTargetDir(),
+            signal,
+            maxFiles: 0,
+            maxImages: 0,
+            planModeActive: config.getApprovalMode?.() === ApprovalMode.PLAN,
+            runningSubagents: collectActiveSubagents(config),
+          },
+        );
+        // Remove only the restored-history delta, preserving the existing
+        // accounting for the summary and non-visible system/tool context.
+        newTokenCount = Math.max(
+          0,
+          newTokenCount +
+            estimateContentTokens(
+              withoutRestoration,
+              slimmingConfig.imageTokenEstimate,
+            ) -
+            estimateContentTokens(
+              extraHistory,
+              slimmingConfig.imageTokenEstimate,
+            ),
+        );
+        extraHistory = withoutRestoration;
       }
     }
 

@@ -378,19 +378,19 @@ export async function readFileSizeAdaptive(
  *  - One embed block per small file with full content.
  *  - Nothing for missing/binary files.
  *
- * Total embedded chars are capped at POST_COMPACT_TOKEN_BUDGET ×
- * CHARS_PER_TOKEN. Files that would push over the budget are downgraded
+ * Files that would exceed the token budget (50K by default) are downgraded
  * to references.
  */
 export async function buildFileRestorationBlocks(
   filePaths: string[],
   signal?: AbortSignal,
+  tokenBudget = POST_COMPACT_TOKEN_BUDGET,
 ): Promise<Content[]> {
   const references: string[] = [];
   const embeds: Array<{ path: string; content: string }> = [];
 
   let usedChars = 0;
-  const budgetChars = POST_COMPACT_TOKEN_BUDGET * CHARS_PER_TOKEN;
+  const budgetChars = tokenBudget * CHARS_PER_TOKEN;
 
   for (const filePath of filePaths) {
     if (signal?.aborted) break;
@@ -608,6 +608,8 @@ export interface ComposePostCompactOptions {
    * `QWEN_COMPACT_MAX_RECENT_FILES`).
    */
   maxFiles?: number;
+  /** Total token budget for embedded file contents. */
+  fileTokenBudget?: number;
   /**
    * Max recent images to restore. Defaults to
    * `POST_COMPACT_MAX_IMAGES_TO_RESTORE`. Configurable via
@@ -806,6 +808,7 @@ export async function composePostCompactHistory(
     workspaceRoot,
     signal,
     maxFiles = POST_COMPACT_MAX_FILES_TO_RESTORE,
+    fileTokenBudget = POST_COMPACT_TOKEN_BUDGET,
     maxImages = POST_COMPACT_MAX_IMAGES_TO_RESTORE,
     planModeActive,
     runningSubagents,
@@ -815,7 +818,11 @@ export async function composePostCompactHistory(
   const filePaths = extractRecentFilePaths(history, maxFiles).filter((p) =>
     isInsideWorkspace(p, workspaceRoot),
   );
-  const fileBlocks = await buildFileRestorationBlocks(filePaths, signal);
+  const fileBlocks = await buildFileRestorationBlocks(
+    filePaths,
+    signal,
+    fileTokenBudget,
+  );
 
   const images = extractRecentImages(history, maxImages);
   const imageBlock = buildImageRestorationBlock(images);
