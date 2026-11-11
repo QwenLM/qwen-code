@@ -4,15 +4,12 @@ import com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObje
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
-import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.ResultSetExtractor;
-import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.TransactionDefinition;
-import org.springframework.transaction.annotation.Transactional;
-import org.springframework.transaction.support.TransactionTemplate;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
@@ -33,35 +30,38 @@ import java.util.zip.GZIPOutputStream;
  * window; retirement retires packs and the sweeper collects their objects. SQL metadata
  * (digests, sequences) is never deleted, so the digest chain stays verifiable from SQL plus
  * pack bytes.
+ *
+ * <p>The OSS object build and PUT happen here, outside any SQL transaction. All transactional
+ * catalog/watermark writes are delegated to {@link JournalPackTransactions}, a separate bean whose
+ * programmatic commit boundary is immune to the self-invocation in {@link #sweep()}.
  */
 @Service
 public class JdbcJournalPacks {
+    private static final Logger LOG = LoggerFactory.getLogger(JdbcJournalPacks.class);
     private static final byte[] MAGIC = {'Q', 'J', 'P', 'K'};
     private final JdbcTemplate jdbc;
     private final ToolPublicationObjectStore objects;
     private final ManagedAgentSettings settings;
-    private final TransactionTemplate buildingTx;
-    private final TransactionTemplate publishTx;
+    private final JournalPackTransactions transactions;
 
     public JdbcJournalPacks(JdbcTemplate jdbc, ToolPublicationObjectStore objects,
             ManagedAgentSettings settings) {
+        this(jdbc, objects, settings, new JournalPackTransactions(jdbc, objects));
+    }
+
+    public JdbcJournalPacks(JdbcTemplate jdbc, ToolPublicationObjectStore objects,
+            ManagedAgentSettings settings, JournalPackTransactions transactions) {
         this.jdbc = jdbc;
         this.objects = objects;
         this.settings = settings;
-        DataSourceTransactionManager manager =
-                new DataSourceTransactionManager(jdbc.getDataSource());
-        // S1: the BUILDING catalog row commits on its own before the object PUT, so a
-        // build that rolls back or crashes still leaves a row collectOrphans can reclaim.
-        this.buildingTx = new TransactionTemplate(manager);
-        this.buildingTx.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
-        this.publishTx = new TransactionTemplate(manager);
+        this.transactions = transactions;
     }
 
     @org.springframework.beans.factory.annotation.Autowired
     public JdbcJournalPacks(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc,
             org.springframework.beans.factory.ObjectProvider<ToolPublicationObjectStore> objects,
-            ManagedAgentSettings settings) {
-        this(jdbc, objects.getIfAvailable(), settings);
+            ManagedAgentSettings settings, JournalPackTransactions transactions) {
+        this(jdbc, objects.getIfAvailable(), settings, transactions);
     }
 
     private ManagedAgentSettings.SessionResources config() {
@@ -144,7 +144,11 @@ public class JdbcJournalPacks {
                     while (rs.next()) {
                         long revision = rs.getLong("journal_revision");
                         byte[] bytes = rs.getBytes("record_bytes");
-                        if (revision != expected++ || bytes == null) {
+                        // Fail closed: never pack a record whose bytes do not match the SQL
+                        // length and digest, so a corrupt blob cannot be externalized.
+                        if (revision != expected++ || bytes == null
+                                || bytes.length != rs.getLong("byte_length")
+                                || !JournalStoreRows.sha256(bytes).equals(rs.getString("record_digest"))) {
                             return null;
                         }
                         byte[] chunk = gzip(bytes);
@@ -181,58 +185,24 @@ public class JdbcJournalPacks {
         String objectKey = config.getOssKeyPrefix() + "packs/" + scope + "/" + packId;
         long now = System.currentTimeMillis();
         String objectSha = JournalStoreRows.sha256(objectBytes);
-        buildingTx.executeWithoutResult(status -> jdbc.update("INSERT INTO ma_journal_pack"
-                        + " (pack_id, session_scope_key, tenant_id, workspace_id, session_id,"
-                        + " from_revision, through_revision, manifest_resource_key, object_key,"
-                        + " state, byte_length, sha256, gmt_create, gmt_modified) VALUES (?, ?, ?,"
-                        + " ?, ?, ?, ?, ?, ?, 'BUILDING', ?, ?, ?, ?)",
-                packId, scope, tenant, workspace, session, from, through, "", objectKey,
-                objectBytes.length, objectSha, now, now));
+        // S1: the BUILDING catalog row commits on its own before the object PUT, so a
+        // build that rolls back or crashes still leaves a row collectOrphans can reclaim.
+        transactions.insertBuilding(packId, scope, tenant, workspace, session, from, through,
+                objectKey, objectBytes.length, objectSha, now);
+        // The object build/PUT and read-back verification stay outside the SQL transaction.
         store().putIfAbsent(objectKey, objectBytes);
         byte[] readBack = readFully(store().open(objectKey, () -> {}));
         if (!JournalStoreRows.sha256(readBack).equals(objectSha)) {
             throw JournalStoreRows.conflict("managed_journal_pack_corrupt",
                     "The published pack object does not match its digest.");
         }
-        String manifestId = "manifest-" + packId;
         byte[] manifest = ("{\"packId\":\"" + packId + "\",\"fromRevision\":" + from
                 + ",\"throughRevision\":" + through + ",\"txCount\":" + built.txCount()
                 + ",\"uncompressedBytes\":" + built.uncompressedBytes() + ",\"compressedBytes\":"
                 + built.compressedBytes() + ",\"packSha256\":\"" + objectSha
                 + "\",\"indexSha256\":\"" + JournalStoreRows.sha256(built.indexBytes()) + "\"}")
                 .getBytes(StandardCharsets.UTF_8);
-        publishTx.executeWithoutResult(status -> {
-            jdbc.update("UPDATE ma_journal_pack SET state = 'VERIFIED', gmt_modified = ?"
-                    + " WHERE pack_id = ?", System.currentTimeMillis(), packId);
-            int published = jdbc.update("UPDATE ma_session_head SET packed_through_revision = ?,"
-                            + " gmt_modified = " + ManagedSchemaTime.SQL_NOW
-                            + " WHERE tenant_id = ? AND session_id = ? AND head_kind ="
-                            + " 'MANAGED_SESSION' AND state = 'ACTIVE' AND"
-                            + " COALESCE(compacted_through_revision, 0) = 0 AND"
-                            + " packed_through_revision = ? AND journal_revision >= ?",
-                    through, tenant, session, from - 1, through);
-            if (published != 1) {
-                throw JournalStoreRows.conflict("managed_journal_pack_conflict",
-                        "The head watermark moved while the pack was being built.");
-            }
-            jdbc.update("UPDATE ma_journal_pack SET state = 'PUBLISHED', manifest_resource_key = ?,"
-                            + " gmt_modified = ? WHERE pack_id = ?",
-                    ManagedSessionStore.resourceKey(scope, manifestId),
-                    System.currentTimeMillis(), packId);
-            jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id,"
-                            + " workspace_id, session_id, resource_id, kind, schema_version,"
-                            + " byte_length, sha256, storage_kind, inline_bytes, state, gmt_create)"
-                            + " VALUES (?, ?, ?, ?, ?, ?, 'managed-journal-pack-manifest', 1, ?, ?,"
-                            + " 'MYSQL_INLINE', ?, 'REFERENCED', ?)",
-                    ManagedSessionStore.resourceKey(scope, manifestId), scope, tenant, workspace,
-                    session, manifestId, manifest.length, JournalStoreRows.sha256(manifest),
-                    manifest, System.currentTimeMillis());
-            jdbc.update("INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key,"
-                            + " owner_revision, resource_key, tenant_id, workspace_id, session_id,"
-                            + " resource_id, gmt_create) VALUES (?, 'JOURNAL', ?, 1, ?, ?, ?, ?, ?, ?)",
-                    scope, packId, ManagedSessionStore.resourceKey(scope, manifestId), tenant,
-                    workspace, session, manifestId, System.currentTimeMillis());
-        });
+        transactions.publish(packId, scope, tenant, workspace, session, from, through, manifest);
     }
 
     /** Returns pack bytes for a covered revision, or null when the revision is SQL-hot. */
@@ -245,8 +215,8 @@ public class JdbcJournalPacks {
         String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
         List<Map<String, Object>> packs = jdbc.queryForList(
                 "SELECT pack_id, object_key, byte_length FROM ma_journal_pack WHERE"
-                        + " session_scope_key = ? AND state = 'PUBLISHED' AND from_revision <= ?"
-                        + " AND through_revision >= ? ORDER BY from_revision",
+                        + " session_scope_key = ? AND state IN ('PUBLISHED', 'EVICTED') AND"
+                        + " from_revision <= ? AND through_revision >= ? ORDER BY from_revision",
                 scope, revision, revision);
         if (packs.isEmpty()) {
             throw JournalStoreRows.conflict("managed_journal_pack_corrupt",
@@ -277,53 +247,20 @@ public class JdbcJournalPacks {
     }
 
     /** Deletes covered SQL blobs for packs past the grace window; idempotent and batched. */
-    @Transactional
     public int deleteCoveredBlobs() {
         ManagedAgentSettings.SessionResources config = config();
         if (!config.isDeletionEnabled()) {
             return 0;
         }
         long cutoff = System.currentTimeMillis() - config.getDeletionGrace().toMillis();
-        List<Map<String, Object>> packs = jdbc.queryForList(
-                "SELECT pack_id, session_scope_key, tenant_id, session_id, from_revision,"
-                        + " through_revision FROM ma_journal_pack WHERE state = 'PUBLISHED' AND"
-                        + " gmt_modified <= ? LIMIT 32",
-                cutoff);
-        int deleted = 0;
-        for (Map<String, Object> pack : packs) {
-            deleted += jdbc.update("UPDATE ma_session_journal_tx SET record_bytes = NULL WHERE"
-                            + " tenant_id = ? AND session_id = ? AND journal_revision BETWEEN ? AND ?"
-                            + " AND record_bytes IS NOT NULL",
-                    pack.get("tenant_id"), pack.get("session_id"), pack.get("from_revision"),
-                    pack.get("through_revision"));
-        }
-        return deleted;
+        return transactions.deleteCoveredBlobs(cutoff);
     }
 
     /** Collects retired and orphaned pack objects; never touches published live packs. */
-    @Transactional
     public int collectOrphans() {
         ManagedAgentSettings.SessionResources config = config();
         long cutoff = System.currentTimeMillis() - config.getDeletionGrace().toMillis();
-        List<Map<String, Object>> packs = jdbc.queryForList(
-                "SELECT pack_id, session_scope_key, object_key, manifest_resource_key FROM"
-                        + " ma_journal_pack WHERE state = 'RETIRED' OR (state = 'BUILDING' AND"
-                        + " gmt_modified <= ?) LIMIT 32",
-                cutoff);
-        ToolPublicationObjectStore store = store();
-        for (Map<String, Object> pack : packs) {
-            store.deleteIfPresent(text(pack.get("object_key")));
-            String scope = (String) pack.get("session_scope_key");
-            String manifestKey = (String) pack.get("manifest_resource_key");
-            if (manifestKey != null && !manifestKey.isEmpty()) {
-                jdbc.update("DELETE FROM ma_resource_ref WHERE session_scope_key = ? AND"
-                        + " resource_id = (SELECT resource_id FROM ma_resource WHERE"
-                        + " resource_key = ?)", scope, manifestKey);
-                jdbc.update("DELETE FROM ma_resource WHERE resource_key = ?", manifestKey);
-            }
-            jdbc.update("DELETE FROM ma_journal_pack WHERE pack_id = ?", pack.get("pack_id"));
-        }
-        return packs.size();
+        return transactions.collectOrphans(cutoff);
     }
 
     /** One sweeper pass: compact candidates, then grace deletion, then orphan collection. */
@@ -339,11 +276,13 @@ public class JdbcJournalPacks {
                             + " packed_through_revision < journal_revision LIMIT 16");
             for (Map<String, Object> candidate : candidates) {
                 try {
-                    compactOnce((String) candidate.get("tenant_id"),
-                            (String) candidate.get("workspace_id"),
-                            (String) candidate.get("session_id"));
+                    compactOnce(text(candidate.get("tenant_id")),
+                            text(candidate.get("workspace_id")),
+                            text(candidate.get("session_id")));
                 } catch (RuntimeException error) {
                     // A failed pack must never block other sessions; the next sweep retries.
+                    LOG.warn("Journal pack compaction failed for session {}; the next sweep"
+                            + " retries", candidate.get("session_id"), error);
                 }
             }
             deleteCoveredBlobs();

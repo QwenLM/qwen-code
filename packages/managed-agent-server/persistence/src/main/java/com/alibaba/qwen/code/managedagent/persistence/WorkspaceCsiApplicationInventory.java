@@ -541,10 +541,15 @@ final class WorkspaceCsiApplicationInventory {
 
     static Snapshot inspect(Connection target, JdbcCsiFilesRetirementGuard.Original original,
             WorkspaceCsiReservationStore.Retirement intent) throws SQLException {
+        return inspect(target, original, intent, null);
+    }
+
+    static Snapshot inspect(Connection target, JdbcCsiFilesRetirementGuard.Original original,
+            WorkspaceCsiReservationStore.Retirement intent, JdbcJournalPacks packs) throws SQLException {
         if (target == null || target.getAutoCommit() || original == null || intent == null) {
             throw new IllegalArgumentException("An original transaction and validated original intent are required");
         }
-        final Inspection inventory = new Inspection(target, original, intent);
+        final Inspection inventory = new Inspection(target, original, intent, packs);
         try {
             com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.validate(target);
         } catch (SQLException mismatch) {
@@ -558,6 +563,11 @@ final class WorkspaceCsiApplicationInventory {
 
     static List<Blocker> validateHistoricalBaseline(JdbcCsiFilesRetirementGuard.Original actual,
             WorkspaceCsiReservationStore.Retirement intent, Snapshot baseline) {
+        return validateHistoricalBaseline(actual, intent, baseline, null);
+    }
+
+    static List<Blocker> validateHistoricalBaseline(JdbcCsiFilesRetirementGuard.Original actual,
+            WorkspaceCsiReservationStore.Retirement intent, Snapshot baseline, JdbcJournalPacks packs) {
         requireEncoded(actual != null && actual.draining() && actual.generation() == 1 && intent != null
                 && baseline != null && baseline.blockers().isEmpty()
                 && actual.state() == com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord.State.DRAINING);
@@ -569,7 +579,7 @@ final class WorkspaceCsiApplicationInventory {
         WorkspaceCsiApplicationImage.expected(baseline, com.alibaba.qwen.code.runtimebroker.persistence.JdbcCsiApplicationRetirement.Stage.SETTLING,
                 null, null, null);
         // Only the saved-row validators run here; no discover, membership lookup or SQL is invoked.
-        final Inspection validation = new Inspection(null, actual, intent);
+        final Inspection validation = new Inspection(null, actual, intent, packs);
         var references = originalReferences(actual, intent, baseline);
         for (Row receipt : baseline.table("ma_request_receipt").rows()) {
             if (receipt.membership() == Membership.ORIGINAL && validation.rawSession(receipt)
@@ -1111,12 +1121,23 @@ final class WorkspaceCsiApplicationInventory {
         private final Set<String> chunkParts = new LinkedHashSet<>();
         private final Map<String, com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord> nativeMembers = new LinkedHashMap<>();
         private final FrozenOwnerReader frozenReader;
+        private JdbcJournalPacks packs;
         private int count;
         private long bytes;
         private boolean overflow;
 
         HistoricalScan(Connection connection, long started) throws SQLException {
             this(connection, started, null);
+        }
+
+        /** Supplies pack resolution for journal rows whose SQL blob was deleted after packing. */
+        HistoricalScan withJournalPacks(JdbcJournalPacks value) {
+            this.packs = value;
+            return this;
+        }
+
+        JdbcJournalPacks journalPacks() {
+            return packs;
         }
 
         HistoricalScan(Connection connection, long started, FrozenOwnerReader frozenReader) throws SQLException {
@@ -1265,7 +1286,7 @@ final class WorkspaceCsiApplicationInventory {
                         block(table, row, "extra_historical_reference");
                     }
                 } else if ("ma_session_journal_tx".equals(table)) {
-                    byte[] raw = payload(row, "record_bytes", "record_digest", 8 * 1024 * 1024);
+                    byte[] raw = journalPayload(row);
                     requireEncoded("identity".equals(row.text("record_encoding")));
                     var records = CsiNativeActivationProof.records(raw);
                     for (JsonNode record : records) {
@@ -1599,6 +1620,14 @@ final class WorkspaceCsiApplicationInventory {
                     && Objects.equals(row.number("byte_length"), (long) raw.length) && hash(raw).equals(row.text(digest)));
             return raw;
         }
+
+        private byte[] journalPayload(Row row) {
+            byte[] raw = WorkspaceCsiJournalPackReader.bytes(row, packs);
+            requireEncoded(raw != null && raw.length > 0 && raw.length <= 8 * 1024 * 1024
+                    && Objects.equals(row.number("byte_length"), (long) raw.length)
+                    && hash(raw).equals(row.text("record_digest")));
+            return raw;
+        }
     }
 
     private static int historyRemaining(long started) {
@@ -1865,6 +1894,7 @@ final class WorkspaceCsiApplicationInventory {
         private final Connection connection;
         private final JdbcCsiFilesRetirementGuard.Original original;
         private final WorkspaceCsiReservationStore.Retirement intent;
+        private final JdbcJournalPacks packs;
         private final String tenant;
         private final String workspace;
         private final String session;
@@ -1878,10 +1908,11 @@ final class WorkspaceCsiApplicationInventory {
         private boolean overflow;
 
         private Inspection(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
-                WorkspaceCsiReservationStore.Retirement intent) {
+                WorkspaceCsiReservationStore.Retirement intent, JdbcJournalPacks packs) {
             this.connection = connection;
             this.original = original;
             this.intent = intent;
+            this.packs = packs;
             var scope = original.request().getScope();
             tenant = scope.getTenantId();
             workspace = scope.getWorkspaceId();
@@ -2604,7 +2635,8 @@ final class WorkspaceCsiApplicationInventory {
             }
             if (table.equals("ma_session_journal_tx")) {
                 try {
-                    for (JsonNode record : com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof.records(row.binary("record_bytes"))) {
+                    for (JsonNode record : com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof.records(
+                            WorkspaceCsiJournalPackReader.bytes(row, packs))) {
                         seedJson(record);
                     }
                 } catch (RuntimeException exception) {
@@ -2885,10 +2917,13 @@ final class WorkspaceCsiApplicationInventory {
                         && row.number("writer_generation") != null && row.number("writer_generation") > 0
                         && row.text("writer_id") != null && row.text("lease_token_hash") != null
                         && row.text("writer_lease_until") != null && row.text("activation_id") != null);
-                case "ma_session_journal_tx" -> expect(table, row, rawNative(row)
-                        && "identity".equals(row.text("record_encoding")) && row.binary("record_bytes") != null
-                        && Objects.equals((long) row.binary("record_bytes").length, row.number("byte_length"))
-                        && hash(row.binary("record_bytes")).equals(row.text("record_digest")));
+                case "ma_session_journal_tx" -> {
+                    byte[] bytes = WorkspaceCsiJournalPackReader.bytes(row, packs);
+                    expect(table, row, rawNative(row)
+                            && "identity".equals(row.text("record_encoding")) && bytes != null
+                            && Objects.equals((long) bytes.length, row.number("byte_length"))
+                            && hash(bytes).equals(row.text("record_digest")));
+                }
                 case "ma_resource" -> expect(table, row, rawNative(row)
                         && ManagedSessionStore.resourceKey(ManagedSessionStore.sessionScopeKey(tenant, session), row.text("resource_id")).equals(row.text("resource_key"))
                         && row.cell("deletion_operation_key").isNull()

@@ -1,5 +1,7 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
@@ -10,15 +12,21 @@ import org.springframework.stereotype.Component;
  */
 @Component
 public class JournalCompactionCoordinator {
+    private static final Logger LOG = LoggerFactory.getLogger(JournalCompactionCoordinator.class);
     private final JdbcJournalPacks packs;
 
     public JournalCompactionCoordinator(JdbcJournalPacks packs) {
         this.packs = packs;
     }
 
-    @Scheduled(scheduler = "managedAgentScheduler",
+    @Scheduled(scheduler = "journalCompactionScheduler",
             fixedDelayString = "${qwen.managed-agent.session-resources.scan-delay:30s}")
     public void sweep() {
-        packs.sweep();
+        try {
+            packs.sweep();
+        } catch (RuntimeException error) {
+            // A failed sweep must not kill the scheduler; the next pass retries.
+            LOG.warn("Journal compaction sweep failed; the next scheduled pass retries", error);
+        }
     }
 }

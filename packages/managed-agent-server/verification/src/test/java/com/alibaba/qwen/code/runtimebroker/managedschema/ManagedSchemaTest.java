@@ -583,6 +583,27 @@ class ManagedSchemaTest {
         }
     }
 
+    // Every shipped receipt namespace must satisfy the length CHECK, including the
+    // RESOURCE_ALLOCATE namespace read back by WorkspaceCsiApplicationInventory.valueOf.
+    @Test
+    void theCurrentReceiptNamespaceCheckAdmitsEveryShippedNamespace() throws Exception {
+        DataSource migrated = source();
+        Flyway.configure()
+                .dataSource(migrated)
+                .locations(ManagedSchema.FLYWAY_LOCATION)
+                .load()
+                .migrate();
+        for (DataSource source : new DataSource[] {initialized(), migrated}) {
+            try (var connection = source.getConnection()) {
+                for (var namespace : ManagedSchemaContract.ReceiptNamespace.values()) {
+                    receipt(connection, namespace.name(), namespace.name());
+                }
+                assertThrows(SQLException.class,
+                        () -> receipt(connection, "unknown", "RESOURCE_ALLOCATE_EXTRA"));
+            }
+        }
+    }
+
     @Test
     void hookOnceRemainsUniqueWithoutDatabaseForeignKeys() throws Exception {
         DataSource source = initialized();

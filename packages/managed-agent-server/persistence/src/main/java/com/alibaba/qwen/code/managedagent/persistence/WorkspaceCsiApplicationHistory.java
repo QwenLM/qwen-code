@@ -77,7 +77,8 @@ final class WorkspaceCsiApplicationHistory {
                     && target.getTransactionIsolation() == Connection.TRANSACTION_REPEATABLE_READ
                     && DataSourceUtils.isConnectionTransactional(target, jdbc.getDataSource()));
             var connection = WorkspaceCsiApplicationStore.bounded(target, started);
-            var read = new WorkspaceCsiApplicationInventory.HistoricalScan(connection, started, this::readFrozenOwner);
+            var read = new WorkspaceCsiApplicationInventory.HistoricalScan(connection, started, this::readFrozenOwner)
+                    .withJournalPacks(nativeStore.journalPacks());
             var owner = WorkspaceCsiApplicationInventory.readHistoricalOwner(read, tenant, retirement);
             var binding = bindings.findByIdInReadOnlySnapshot(connection, owner.binding().text("binding_id"));
             require(binding != null && binding.getState() == RuntimeBindingRecord.State.DRAINING
@@ -455,7 +456,8 @@ final class WorkspaceCsiApplicationHistory {
         var savedBinding = WorkspaceCsiApplicationImage.sole(baseline, "ma_runtime_binding");
         var actual = new JdbcCsiFilesRetirementGuard.Original(binding.getRequest(), binding.getBindingId(), binding.getGeneration(),
                 binding.getState(), binding.isDrainRequested(), binding.getVersion(), savedBinding.number("first_activation_journal_revision"));
-        require(WorkspaceCsiApplicationInventory.validateHistoricalBaseline(actual, intent, baseline).isEmpty());
+        require(WorkspaceCsiApplicationInventory.validateHistoricalBaseline(actual, intent, baseline,
+                read.journalPacks()).isEmpty());
         var parent = WorkspaceCsiApplicationImage.sole(baseline, "ma_session");
         var context = new ContextBinding(parent.text("tenant_id"), parent.text("workspace_id"), parent.number("workspace_generation"),
                 parent.text("workspace_storage_id"), parent.text("cwd_relative"), parent.text("context_config_ref"), parent.number("context_revision"));

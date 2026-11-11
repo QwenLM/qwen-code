@@ -9,6 +9,8 @@ import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.lang.reflect.Proxy;
 import java.time.Duration;
@@ -113,6 +115,29 @@ class SessionOssStorageTest {
                 + " resource_id = ?", String.class,
                 "res-3".getBytes(java.nio.charset.StandardCharsets.UTF_8)))
                 .isEqualTo("digest_mismatch");
+    }
+
+    @Test
+    void finalizeQuarantineSurvivesASurroundingTransactionRollback() {
+        byte[] value = bytes(96 * 1024);
+        resources.allocate(TENANT, SESSION, request("res-quarantine", value));
+        byte[] wrong = bytes(96 * 1024);
+        wrong[1] = (byte) ~wrong[1];
+        resources.upload(TENANT, SESSION, "res-quarantine", wrong);
+        // The controller wraps finalize in a transaction that rolls back on the fail-closed
+        // throw; the quarantine must still persist because it commits REQUIRES_NEW.
+        TransactionTemplate outer =
+                new TransactionTemplate(new DataSourceTransactionManager(jdbc.getDataSource()));
+        assertThatThrownBy(() -> outer.executeWithoutResult(status ->
+                resources.finalize(TENANT, SESSION, "res-quarantine")))
+                .isInstanceOf(ManagedAgentException.class);
+        assertThat(jdbc.queryForObject("SELECT quarantine_reason FROM ma_resource WHERE"
+                + " resource_id = ?", String.class,
+                "res-quarantine".getBytes(java.nio.charset.StandardCharsets.UTF_8)))
+                .isEqualTo("digest_mismatch");
+        assertThat(jdbc.queryForObject("SELECT state FROM ma_resource WHERE resource_id = ?",
+                String.class, "res-quarantine".getBytes(java.nio.charset.StandardCharsets.UTF_8)))
+                .isEqualTo("ALLOCATED");
     }
 
     @Test

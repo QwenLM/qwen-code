@@ -8,8 +8,11 @@ import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
@@ -31,12 +34,24 @@ public class JdbcSessionResourceObjects {
     private final JdbcTemplate jdbc;
     private final ToolPublicationObjectStore objects;
     private final ManagedAgentSettings settings;
+    private final TransactionTemplate finalizeTx;
+    private final TransactionTemplate quarantineTx;
 
     public JdbcSessionResourceObjects(JdbcTemplate jdbc, ToolPublicationObjectStore objects,
             ManagedAgentSettings settings) {
         this.jdbc = jdbc;
         this.objects = objects;
         this.settings = settings;
+        DataSourceTransactionManager manager =
+                new DataSourceTransactionManager(jdbc.getDataSource());
+        // finalize runs in its own REQUIRES_NEW transaction so the row lock it takes is released
+        // before the quarantine write; the quarantine then commits in a second REQUIRES_NEW
+        // transaction that survives the fail-closed rollback of the finalize attempt (and of any
+        // surrounding controller transaction).
+        this.finalizeTx = new TransactionTemplate(manager);
+        this.finalizeTx.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+        this.quarantineTx = new TransactionTemplate(manager);
+        this.quarantineTx.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
     }
 
     @org.springframework.beans.factory.annotation.Autowired
@@ -159,36 +174,48 @@ public class JdbcSessionResourceObjects {
         store().putIfAbsent(text(row.get("object_key")), bytes);
     }
 
-    @Transactional
     public void finalize(String tenantId, String sessionId, String resourceId) {
         config();
-        Map<String, Object> row = lockAllocation(tenantId, sessionId, resourceId);
-        if ("PUBLISHED".equals(row.get("state")) || "REFERENCED".equals(row.get("state"))) {
-            return;
-        }
-        if (!"ALLOCATED".equals(row.get("state"))) {
-            throw JournalStoreRows.conflict("managed_session_resource_conflict",
-                    "The resource allocation is no longer finalizable.");
-        }
-        String objectKey = text(row.get("object_key"));
-        byte[] bytes;
-        try (InputStream stream = store().open(objectKey, () -> {})) {
-            bytes = stream.readAllBytes();
-        } catch (java.io.IOException error) {
-            throw new IllegalStateException("Session resource read failed", error);
-        }
         long now = System.currentTimeMillis();
-        if (bytes.length != ((Number) row.get("byte_length")).longValue()
-                || !JournalStoreRows.sha256(bytes).equals(row.get("sha256"))) {
-            jdbc.update("UPDATE ma_resource SET quarantine_reason = 'digest_mismatch',"
+        // The verify/publish attempt runs in its own REQUIRES_NEW transaction. On a digest
+        // mismatch it returns true and commits (it only read and locked the row), releasing the
+        // row lock so the quarantine write below cannot deadlock against it.
+        boolean mismatch = Boolean.TRUE.equals(finalizeTx.execute(status -> {
+            Map<String, Object> row = lockAllocation(tenantId, sessionId, resourceId);
+            if ("PUBLISHED".equals(row.get("state")) || "REFERENCED".equals(row.get("state"))) {
+                return false;
+            }
+            if (!"ALLOCATED".equals(row.get("state"))) {
+                throw JournalStoreRows.conflict("managed_session_resource_conflict",
+                        "The resource allocation is no longer finalizable.");
+            }
+            String objectKey = text(row.get("object_key"));
+            byte[] bytes;
+            try (InputStream stream = store().open(objectKey, () -> {})) {
+                bytes = stream.readAllBytes();
+            } catch (java.io.IOException error) {
+                throw new IllegalStateException("Session resource read failed", error);
+            }
+            if (bytes.length != ((Number) row.get("byte_length")).longValue()
+                    || !JournalStoreRows.sha256(bytes).equals(row.get("sha256"))) {
+                return true;
+            }
+            jdbc.update("UPDATE ma_resource SET state = 'PUBLISHED', last_verified_at = ?"
+                            + " WHERE session_scope_key = ? AND resource_id = ? AND state = 'ALLOCATED'",
+                    System.currentTimeMillis(),
+                    ManagedSessionStore.sessionScopeKey(tenantId, sessionId), resourceId);
+            return false;
+        }));
+        if (mismatch) {
+            // Persist the quarantine in a separate REQUIRES_NEW transaction so it survives the
+            // fail-closed throw below (and the rollback of any surrounding transaction).
+            quarantineTx.executeWithoutResult(status -> jdbc.update(
+                    "UPDATE ma_resource SET quarantine_reason = 'digest_mismatch',"
                             + " last_verified_at = ? WHERE session_scope_key = ? AND resource_id = ?",
-                    now, ManagedSessionStore.sessionScopeKey(tenantId, sessionId), resourceId);
+                    now, ManagedSessionStore.sessionScopeKey(tenantId, sessionId), resourceId));
             throw JournalStoreRows.conflict("managed_session_resource_conflict",
                     "The uploaded object does not match its allocated digest or length.");
         }
-        jdbc.update("UPDATE ma_resource SET state = 'PUBLISHED', last_verified_at = ?"
-                        + " WHERE session_scope_key = ? AND resource_id = ? AND state = 'ALLOCATED'",
-                now, ManagedSessionStore.sessionScopeKey(tenantId, sessionId), resourceId);
     }
 
     private static String text(Object value) {

@@ -295,7 +295,8 @@ public final class WorkspaceCsiApplicationStore {
                 WorkspaceOperations.key(WorkspaceOperations.Kind.CSI_RETIREMENT, tenant, retirement));
         require(operations.size() == 1);
         WorkspaceCsiReservationStore.Retirement intent = WorkspaceCsiReservationStore.decodeRetirement(operations.getFirst(), IDENTITY_JSON);
-        Snapshot inventory = WorkspaceCsiApplicationInventory.inspect(target, authority.original(), intent);
+        Snapshot inventory = WorkspaceCsiApplicationInventory.inspect(target, authority.original(), intent,
+                nativeStore.journalPacks());
         if (!inventory.blockers().isEmpty()) {
             throw new RuntimeBrokerException(409, "csi_application_inventory_blocked",
                     "The original CSI application inventory is incomplete or unsupported.", false);
@@ -362,7 +363,8 @@ public final class WorkspaceCsiApplicationStore {
     }
 
     private Snapshot inspect(Connection target, Locked locked) throws SQLException {
-        return WorkspaceCsiApplicationInventory.inspect(target, locked.authority().original(), locked.intent());
+        return WorkspaceCsiApplicationInventory.inspect(target, locked.authority().original(), locked.intent(),
+                nativeStore.journalPacks());
     }
 
     private static Map<String, Object> workerRequest(Locked locked, String action, String prepared, String frozen, String cut) {

@@ -1,9 +1,11 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.alibaba.qwen.managedprobes.PublicationProbeWiring;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.apache.commons.codec.digest.DigestUtils;
@@ -15,16 +17,22 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import java.lang.reflect.Proxy;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.Base64;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * C1 regression: once {@code compactOnce()} publishes a pack and
- * {@code deleteCoveredBlobs()} (grace zero) nulls the covered SQL blobs, every
- * full-journal scanner must still resolve its bytes from the pack instead of
- * failing on a null {@code record_bytes}. Before the fix the wake, lifecycle,
- * side-query, relay and projection readers NPE'd or threw on the deleted prefix.
+ * {@code deleteCoveredBlobs()} (grace zero) nulls the covered SQL blobs, the full-journal
+ * scanners must still resolve their bytes from the pack instead of failing on a null
+ * {@code record_bytes}. Before the fix these readers NPE'd or threw on the deleted prefix.
+ *
+ * <p>Covered readers: wake recovery, workspace lifecycle, side-query capture, child-result
+ * relay, original-authority recovery reads and the context-compaction backfill. The remaining
+ * pack-aware readers (tool-result source verification, admission replay and the activity
+ * diagnostic projection) resolve through the same {@code resolveBytes} path but need heavier
+ * operation/claim fixtures than this journal-only harness provides.
  */
 class JournalPackDeletionRegressionTest {
     private static final ObjectMapper JSON = new ObjectMapper();
@@ -34,6 +42,7 @@ class JournalPackDeletionRegressionTest {
 
     private JdbcTemplate jdbc;
     private JdbcJournalPacks packs;
+    private PublicationProbeWiring.InMemoryObjectStore objects;
     private long revision;
     private long sequence;
     private String previousDigest;
@@ -45,8 +54,7 @@ class JournalPackDeletionRegressionTest {
                 + ";MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1");
         ManagedSchema.initialize(source);
         jdbc = new ManagedSchemaJdbcTemplate(source);
-        PublicationProbeWiring.InMemoryObjectStore objects =
-                new PublicationProbeWiring.InMemoryObjectStore();
+        objects = new PublicationProbeWiring.InMemoryObjectStore();
         ManagedAgentSettings settings = (ManagedAgentSettings) Proxy.newProxyInstance(
                 getClass().getClassLoader(), new Class<?>[] {ManagedAgentSettings.class},
                 (proxy, method, args) -> method.getName().equals("getSessionResources")
@@ -169,5 +177,38 @@ class JournalPackDeletionRegressionTest {
         assertThat(packs.resolveBytes(TENANT, SESSION, 1, DigestUtils.sha256Hex(first),
                 first.length)).isEqualTo(first);
         assertThat(packs.deleteCoveredBlobs()).isZero();
+    }
+
+    @Test
+    void recoveryReaderResolvesDeletedBlobsFromThePack() {
+        append(event("input.accepted", "turn-1", "user"));
+        byte[] first = jdbc.queryForObject("SELECT record_bytes FROM ma_session_journal_tx WHERE"
+                + " journal_revision = 1", byte[].class);
+        compactAndDelete();
+        ObjectNode source = JSON.createObjectNode();
+        source.putObject("head").put("tenantId", TENANT).put("workspaceId", WORKSPACE)
+                .put("sessionId", SESSION).put("journalRevision", revision);
+        JsonNode transaction = new WorkspaceRecoveryReader(jdbc, objects).transaction(source, 1);
+        assertThat(transaction.path("recordBytesBase64").asText())
+                .isEqualTo(Base64.getEncoder().encodeToString(first));
+        assertThat(transaction.path("recordDigest").asText()).isEqualTo(DigestUtils.sha256Hex(first));
+    }
+
+    @Test
+    void backfillCompactionProjectionResolvesDeletedBlobsFromThePack() {
+        append(event("input.accepted", "turn-1", "user"));
+        append(event("turn.settled", "turn-1", null));
+        compactAndDelete();
+        // backfillCompactionProjection only touches jdbc, packs and storeRows; the other
+        // collaborators are unused on this path.
+        AgentStoreRows storeRows = new AgentStoreRows(null, jdbc, JSON);
+        AgentExecutionOperations operations = new AgentExecutionOperations(
+                null, null, null, null, storeRows, null, jdbc, null, null, false, packs);
+        String scope = ManagedSessionStore.sessionScopeKey(TENANT, SESSION);
+        operations.backfillCompactionProjection(TENANT, SESSION, scope, "compaction-key");
+        // With no context.compacted event the backfill still walks the deleted prefix and
+        // lands the empty compaction-state resource instead of failing on null bytes.
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource WHERE resource_id LIKE"
+                + " 'compaction-state:%'", Long.class)).isEqualTo(1);
     }
 }

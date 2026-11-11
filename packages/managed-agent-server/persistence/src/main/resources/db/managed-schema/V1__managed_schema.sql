@@ -288,7 +288,7 @@ CREATE TABLE ma_journal_pack (
     through_revision BIGINT UNSIGNED NOT NULL COMMENT 'Last journal revision covered by the pack.',
     manifest_resource_key CHAR(64) NOT NULL COMMENT 'Hashed identity of the pack manifest resource.',
     object_key VARBINARY(8192) NOT NULL COMMENT 'Object-store key of the immutable pack object.',
-    state VARCHAR(16) NOT NULL COMMENT 'Pack lifecycle: BUILDING, VERIFIED, PUBLISHED, or RETIRED.',
+    state VARCHAR(16) NOT NULL COMMENT 'Pack lifecycle: BUILDING, VERIFIED, PUBLISHED, EVICTED, or RETIRED.',
     byte_length BIGINT UNSIGNED NOT NULL COMMENT 'Compressed pack length in bytes.',
     sha256 CHAR(64) NOT NULL COMMENT 'SHA-256 digest of the complete pack object.',
     gmt_create BIGINT UNSIGNED NOT NULL COMMENT 'Record creation time in Unix epoch milliseconds.',
@@ -296,7 +296,7 @@ CREATE TABLE ma_journal_pack (
     CONSTRAINT uk_ma_journal_pack_scope_from UNIQUE (session_scope_key, from_revision),
     CONSTRAINT uk_ma_journal_pack_id UNIQUE (pack_id),
     CONSTRAINT ck_ma_journal_pack_range CHECK (from_revision >= 1 AND through_revision >= from_revision),
-    CONSTRAINT ck_ma_journal_pack_state CHECK ((CASE state WHEN 'BUILDING' THEN 8 WHEN 'VERIFIED' THEN 8 WHEN 'PUBLISHED' THEN 9 WHEN 'RETIRED' THEN 7 ELSE -1 END = CHAR_LENGTH(state))),
+    CONSTRAINT ck_ma_journal_pack_state CHECK ((CASE state WHEN 'BUILDING' THEN 8 WHEN 'VERIFIED' THEN 8 WHEN 'PUBLISHED' THEN 9 WHEN 'EVICTED' THEN 7 WHEN 'RETIRED' THEN 7 ELSE -1 END = CHAR_LENGTH(state))),
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Database-generated identity of this row.',
     CONSTRAINT pk_ma_journal_pack_id PRIMARY KEY (id)
 ) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT='Immutable journal pack catalog and lifecycle.';
@@ -684,7 +684,7 @@ CREATE TABLE ma_request_receipt (
     CONSTRAINT uk_ma_request_receipt_business_key UNIQUE (receipt_key),
     CONSTRAINT uk_ma_decision_slot UNIQUE (tenant_key, decision_scope_key),
     CONSTRAINT uk_ma_request UNIQUE (namespace, tenant_key, scope_key, idempotency_digest),
-    CONSTRAINT ck_ma_request_namespace CHECK ((CASE namespace WHEN 'SESSION_COMMAND' THEN 15 WHEN 'SESSION_CREATE_MODE' THEN 19 WHEN 'SESSION_CREATE_ACTOR' THEN 20 WHEN 'AGENT_DEFINITION' THEN 16 WHEN 'AUTOMATION' THEN 10 WHEN 'CHANNEL_INGRESS' THEN 15 WHEN 'ACTION_DECISION' THEN 15 WHEN 'WORKSPACE_CREATE' THEN 16 WHEN 'EXTERNAL_STORAGE' THEN 16 WHEN 'MEMORY' THEN 6 WHEN 'SIDE_QUERY' THEN 10 WHEN 'RESOURCE_ALLOCATE' THEN 16 ELSE -1 END = CHAR_LENGTH(namespace))),
+    CONSTRAINT ck_ma_request_namespace CHECK ((CASE namespace WHEN 'SESSION_COMMAND' THEN 15 WHEN 'SESSION_CREATE_MODE' THEN 19 WHEN 'SESSION_CREATE_ACTOR' THEN 20 WHEN 'AGENT_DEFINITION' THEN 16 WHEN 'AUTOMATION' THEN 10 WHEN 'CHANNEL_INGRESS' THEN 15 WHEN 'ACTION_DECISION' THEN 15 WHEN 'WORKSPACE_CREATE' THEN 16 WHEN 'EXTERNAL_STORAGE' THEN 16 WHEN 'MEMORY' THEN 6 WHEN 'SIDE_QUERY' THEN 10 WHEN 'RESOURCE_ALLOCATE' THEN 17 ELSE -1 END = CHAR_LENGTH(namespace))),
     CONSTRAINT ck_ma_request_scope CHECK ((CASE scope_kind WHEN 'TENANT' THEN 6 WHEN 'ACTOR' THEN 5 WHEN 'SESSION' THEN 7 WHEN 'CHANNEL' THEN 7 ELSE -1 END = CHAR_LENGTH(scope_kind))),
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Database-generated identity of this row.',
     CONSTRAINT pk_ma_request_receipt_id PRIMARY KEY (id),
