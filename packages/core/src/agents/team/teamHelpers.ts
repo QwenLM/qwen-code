@@ -302,6 +302,12 @@ export async function hasUnreadLeaderMail(teamName: string): Promise<boolean> {
   return messages.some((m) => !m.read);
 }
 
+export type ReclaimResult =
+  | 'reclaimed'
+  | 'live-owner'
+  | 'unverifiable'
+  | 'unread-mail';
+
 /**
  * Reclaim a stale team so its name can be reused.
  *
@@ -311,20 +317,22 @@ export async function hasUnreadLeaderMail(teamName: string): Promise<boolean> {
  * headless run, or a crash. A team is stale when its recorded
  * `leadPid` is no longer running — or IS this process (the caller can
  * only be creating a new team because it no longer has a manager for
- * the old one). Returns true after deleting the stale team's dirs.
+ * the old one). Returns `'reclaimed'` after deleting the stale team's dirs.
  *
  * Conservative on ambiguity: an unreadable/corrupt team file or a
- * pre-`leadPid` file can't prove its owner is gone, so it is left
- * for manual recovery. Likewise when the config changes between the
- * staleness check and the delete — that change means another creator
- * already reclaimed the name and created a new live generation, which
- * a by-name delete would destroy (#10209).
+ * pre-`leadPid` file can't prove its owner is gone, so it returns
+ * `'unverifiable'` and leaves the dirs for manual recovery. Likewise when
+ * the config changes between the staleness check and the delete — that
+ * change means another creator already reclaimed the name and created a
+ * new live generation, which a by-name delete would destroy (#10209).
  *
- * Also refuses when the leader inbox still holds unread teammate
- * reports: deleting would discard work the owning session never saw.
- * An unreadable inbox is treated the same way.
+ * Also refuses with `'unread-mail'` when the leader inbox still holds
+ * unread teammate reports (or cannot be read cleanly): deleting would
+ * discard work the owning session never saw.
  */
-export async function tryReclaimStaleTeam(teamName: string): Promise<boolean> {
+export async function tryReclaimStaleTeam(
+  teamName: string,
+): Promise<ReclaimResult> {
   const configPath = getTeamFilePath(teamName);
   let inspectedRaw: string;
   try {
@@ -335,9 +343,9 @@ export async function tryReclaimStaleTeam(teamName: string): Promise<boolean> {
       // a concurrent team_delete finished the job. The dirs may still
       // hold leftovers; clear them so the retried create starts clean.
       await deleteTeamDirs(teamName);
-      return true;
+      return 'reclaimed';
     }
-    return false;
+    return 'unverifiable';
   }
   let existing: TeamFile;
   try {
@@ -347,17 +355,17 @@ export async function tryReclaimStaleTeam(teamName: string): Promise<boolean> {
     // owner — treat it like a corrupt file and leave the dirs for
     // manual recovery.
     if (parsed === null || typeof parsed !== 'object') {
-      return false;
+      return 'unverifiable';
     }
     existing = parsed as TeamFile;
   } catch {
-    return false;
+    return 'unverifiable';
   }
   if (typeof existing.leadPid !== 'number' || existing.leadPid <= 0) {
-    return false;
+    return 'unverifiable';
   }
   if (existing.leadPid !== process.pid && isPidAlive(existing.leadPid)) {
-    return false;
+    return 'live-owner';
   }
   // Generation safety (#10209): the delete below targets the team NAME,
   // not the generation inspected above. Two concurrent creators can
@@ -371,21 +379,21 @@ export async function tryReclaimStaleTeam(teamName: string): Promise<boolean> {
   try {
     const currentRaw = await fs.readFile(configPath, 'utf-8');
     if (currentRaw !== inspectedRaw) {
-      return false;
+      return 'live-owner';
     }
   } catch {
     // The config vanished or became unreadable after the inspection —
     // ambiguous, and a by-name delete could hit a generation this
     // reclaim never inspected.
-    return false;
+    return 'unverifiable';
   }
   try {
-    if (await hasUnreadLeaderMail(teamName)) return false;
+    if (await hasUnreadLeaderMail(teamName)) return 'unread-mail';
   } catch {
-    return false;
+    return 'unread-mail';
   }
   await deleteTeamDirs(teamName);
-  return true;
+  return 'reclaimed';
 }
 
 /**

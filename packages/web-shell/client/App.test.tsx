@@ -4971,6 +4971,34 @@ describe('task activity key', () => {
     ).toBe(panelBefore);
   });
 
+  it('opens no panel for a teammate report', async () => {
+    const { container } = renderApp();
+    await flush();
+    await flush();
+    const panelBefore = container.querySelector(
+      'aside[aria-label="Right panel"]',
+    )?.textContent;
+
+    act(() =>
+      testState.backgroundDetails?.({
+        turnId: 'background-turn',
+        taskId: 'team:crew',
+        kind: 'teammate',
+        label: 'worker: done',
+        startedAt: 100,
+      }),
+    );
+    await flush();
+    await flush();
+
+    // A teammate report uses synthetic `team:<name>`, which has no entry in
+    // the task registry: opening a pending tab would never hydrate.
+    expect(mockWorkspace.client.sessionTasks).not.toHaveBeenCalled();
+    expect(
+      container.querySelector('aside[aria-label="Right panel"]')?.textContent,
+    ).toBe(panelBefore);
+  });
+
   it.each(['transcript', 'task snapshot'])(
     'loads background task details from %s when its pending panel first opens',
     async (source) => {

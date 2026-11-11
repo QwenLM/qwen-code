@@ -481,7 +481,7 @@ describe('file I/O', () => {
     it('reclaims a team whose lead process is dead', async () => {
       await writeTeamFile('stale', makeTeamFile({ leadPid: deadPid() }));
 
-      await expect(tryReclaimStaleTeam('stale')).resolves.toBe(true);
+      await expect(tryReclaimStaleTeam('stale')).resolves.toBe('reclaimed');
       expect(await readTeamFile('stale')).toBeUndefined();
     });
 
@@ -491,7 +491,7 @@ describe('file I/O', () => {
       // is stale by definition.
       await writeTeamFile('own', makeTeamFile({ leadPid: process.pid }));
 
-      await expect(tryReclaimStaleTeam('own')).resolves.toBe(true);
+      await expect(tryReclaimStaleTeam('own')).resolves.toBe('reclaimed');
       expect(await readTeamFile('own')).toBeUndefined();
     });
 
@@ -499,7 +499,7 @@ describe('file I/O', () => {
       // The test runner's parent process is alive for the duration.
       await writeTeamFile('live', makeTeamFile({ leadPid: process.ppid }));
 
-      await expect(tryReclaimStaleTeam('live')).resolves.toBe(false);
+      await expect(tryReclaimStaleTeam('live')).resolves.toBe('live-owner');
       expect(await readTeamFile('live')).toBeDefined();
     });
 
@@ -512,7 +512,7 @@ describe('file I/O', () => {
         read: false,
       });
 
-      await expect(tryReclaimStaleTeam('unread')).resolves.toBe(false);
+      await expect(tryReclaimStaleTeam('unread')).resolves.toBe('unread-mail');
       expect(await readTeamFile('unread')).toBeDefined();
     });
 
@@ -525,7 +525,7 @@ describe('file I/O', () => {
         read: true,
       });
 
-      await expect(tryReclaimStaleTeam('read')).resolves.toBe(true);
+      await expect(tryReclaimStaleTeam('read')).resolves.toBe('reclaimed');
     });
 
     it('does not reclaim when the leader inbox is unreadable', async () => {
@@ -536,14 +536,14 @@ describe('file I/O', () => {
         '{ torn',
       );
 
-      await expect(tryReclaimStaleTeam('badbox')).resolves.toBe(false);
+      await expect(tryReclaimStaleTeam('badbox')).resolves.toBe('unread-mail');
       expect(await readTeamFile('badbox')).toBeDefined();
     });
 
     it('does not reclaim a pre-leadPid team file', async () => {
       await writeTeamFile('legacy', makeTeamFile());
 
-      await expect(tryReclaimStaleTeam('legacy')).resolves.toBe(false);
+      await expect(tryReclaimStaleTeam('legacy')).resolves.toBe('unverifiable');
       expect(await readTeamFile('legacy')).toBeDefined();
     });
 
@@ -551,7 +551,7 @@ describe('file I/O', () => {
       const tasksDir = getTasksDir('ghost');
       await fs.mkdir(tasksDir, { recursive: true });
 
-      await expect(tryReclaimStaleTeam('ghost')).resolves.toBe(true);
+      await expect(tryReclaimStaleTeam('ghost')).resolves.toBe('reclaimed');
       await expect(fs.access(tasksDir)).rejects.toThrow();
     });
 
@@ -567,7 +567,9 @@ describe('file I/O', () => {
       });
       await writeTeamFile('other-user', makeTeamFile({ leadPid: 424242 }));
 
-      await expect(tryReclaimStaleTeam('other-user')).resolves.toBe(false);
+      await expect(tryReclaimStaleTeam('other-user')).resolves.toBe(
+        'live-owner',
+      );
       expect(await readTeamFile('other-user')).toBeDefined();
     });
 
@@ -583,7 +585,9 @@ describe('file I/O', () => {
       await fs.writeFile(path.join(tasksDir, 'marker.json'), '{}');
       await fs.writeFile(getTeamFilePath('nullcfg'), 'null');
 
-      await expect(tryReclaimStaleTeam('nullcfg')).resolves.toBe(false);
+      await expect(tryReclaimStaleTeam('nullcfg')).resolves.toBe(
+        'unverifiable',
+      );
       expect(await fs.readFile(getTeamFilePath('nullcfg'), 'utf-8')).toBe(
         'null',
       );
@@ -599,7 +603,9 @@ describe('file I/O', () => {
       await fs.writeFile(path.join(tasksDir, 'marker.json'), '{}');
       await fs.writeFile(getTeamFilePath('corrupt'), '{ "name": ');
 
-      await expect(tryReclaimStaleTeam('corrupt')).resolves.toBe(false);
+      await expect(tryReclaimStaleTeam('corrupt')).resolves.toBe(
+        'unverifiable',
+      );
       expect(await fs.readFile(getTeamFilePath('corrupt'), 'utf-8')).toBe(
         '{ "name": ',
       );
@@ -630,7 +636,9 @@ describe('file I/O', () => {
         return undefined;
       });
       try {
-        await expect(tryReclaimStaleTeam('flaky')).resolves.toBe(false);
+        await expect(tryReclaimStaleTeam('flaky')).resolves.toBe(
+          'unverifiable',
+        );
       } finally {
         __setReadFileHook(undefined);
       }

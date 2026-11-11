@@ -5,9 +5,11 @@
  */
 
 import * as fs from 'node:fs/promises';
+import lockfile from 'proper-lockfile';
 import type { Config } from '../../config/config.js';
 import { InProcessBackend } from '../backends/InProcessBackend.js';
 import { atomicWriteJSON } from '../../utils/atomicFileWrite.js';
+import { isNodeError } from '../../utils/errors.js';
 import { isPidAlive } from '../../utils/process-liveness.js';
 import { getTeamFilePath, listTeamNames } from './teamHelpers.js';
 import { unassignTeammateTasks } from './tasks.js';
@@ -95,11 +97,32 @@ export async function reattachTeamForSession(
     leadPid: process.pid,
     members: [],
   };
-  // Same generation safety as tryReclaimStaleTeam: only rewrite the exact
-  // config that was inspected, otherwise another process already took it.
+  // Same generation safety as tryReclaimStaleTeam, reinforced with an
+  // exclusive lock so concurrent resumers cannot both read the same stale
+  // bytes and both adopt leadership.
   const currentRaw = await fs.readFile(configPath, 'utf-8').catch(() => null);
   if (currentRaw !== inspectedRaw) return null;
-  await atomicWriteJSON(configPath, reattached);
+  let release: (() => Promise<void>) | undefined;
+  try {
+    release = await lockfile.lock(configPath, {
+      retries: 0,
+      stale: 5000,
+      realpath: false,
+      onCompromised: () => {},
+    });
+  } catch (err) {
+    if (isNodeError(err) && (err.code === 'ELOCKED' || err.code === 'ENOENT')) {
+      return null;
+    }
+    throw err;
+  }
+  try {
+    const lockedRaw = await fs.readFile(configPath, 'utf-8').catch(() => null);
+    if (lockedRaw !== inspectedRaw) return null;
+    await atomicWriteJSON(configPath, reattached);
+  } finally {
+    await release?.().catch(() => {});
+  }
 
   const released = await Promise.all(
     teamFile.members.map((m) => unassignTeammateTasks(teamName, m.agentId)),

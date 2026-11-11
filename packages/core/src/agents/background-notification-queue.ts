@@ -231,6 +231,7 @@ export class DroppedNotificationTally {
     let hasInspectableLoss = false;
     let hasCronLoss = false;
     let hasPeerLoss = false;
+    let hasTeammateLoss = false;
     for (const kind of Object.keys(
       GROUP_ORDER,
     ) as BackgroundNotificationKind[]) {
@@ -258,6 +259,7 @@ export class DroppedNotificationTally {
               kind !== 'cron' && kind !== 'peer' && kind !== 'teammate';
             hasCronLoss ||= kind === 'cron';
             hasPeerLoss ||= kind === 'peer';
+            hasTeammateLoss ||= kind === 'teammate';
           }
         }
       }
@@ -313,6 +315,11 @@ export class DroppedNotificationTally {
     if (hasPeerLoss) {
       summaryParts.push(
         'The cross-session messages were not delivered and will not be redelivered.',
+      );
+    }
+    if (hasTeammateLoss) {
+      summaryParts.push(
+        'The teammate reports were not delivered and are no longer in the leader inbox.',
       );
     }
     const summary = summaryParts.join(' ');

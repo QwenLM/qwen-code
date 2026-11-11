@@ -355,6 +355,9 @@ describe('DroppedNotificationTally', () => {
       'Dropped 1 background notification (queue full): 1 teammate report ' +
         '(team:crew).',
     );
+    expect(summary?.modelText).toContain(
+      'The teammate reports were not delivered and are no longer in the leader inbox.',
+    );
     expect(summary?.modelText).not.toContain('/tasks');
   });
 

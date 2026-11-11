@@ -238,4 +238,40 @@ describe('reattachTeamForSession', () => {
       teamName: 'beta',
     });
   });
+
+  it('backs off when a competing takeover wins on the guard read', async () => {
+    await writeTeamFile('crew', makeTeam());
+    let configReads = 0;
+    fsHooks.readFile = async (p) => {
+      if (p === getTeamFilePath('crew') && ++configReads === 2) {
+        await writeTeamFile(
+          'crew',
+          makeTeam({
+            leadPid: process.ppid,
+            members: [],
+            description: 'competitor',
+          }),
+        );
+      }
+    };
+    const { config, mocks } = makeConfig();
+
+    expect(await reattachTeamForSession(config)).toBeNull();
+    expect(mocks.setTeamManager).not.toHaveBeenCalled();
+    expect((await readTeamFile('crew'))!.description).toBe('competitor');
+  });
+
+  it('allows at most one winner when two resumers race concurrently', async () => {
+    await writeTeamFile('crew', makeTeam());
+    const first = makeConfig();
+    const second = makeConfig();
+
+    const results = await Promise.all([
+      reattachTeamForSession(first.config),
+      reattachTeamForSession(second.config),
+    ]);
+
+    expect(results.filter((r) => r?.status === 'reattached')).toHaveLength(1);
+    expect(results.filter((r) => r === null)).toHaveLength(1);
+  });
 });

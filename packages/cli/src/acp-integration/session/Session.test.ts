@@ -6435,8 +6435,14 @@ describe('Session', () => {
           let leaderCallback:
             | ((model: string, display: string) => void)
             | null = null;
+          const unread: Array<{
+            from: string;
+            text: string;
+            summary?: string;
+          }> = [];
           const manager = {
             polling: false,
+            unread,
             getTeamFile: () => ({
               name: options.teamName ?? 'crew',
               members: Array.from({ length: options.memberCount ?? 1 }),
@@ -6456,7 +6462,20 @@ describe('Session', () => {
               },
             ),
             isLeaderInboxPolling: () => manager.polling,
-            drainLeaderInbox: vi.fn().mockResolvedValue(undefined),
+            drainLeaderInbox: vi.fn(async () => {
+              if (!leaderCallback || unread.length === 0) return;
+              const batch = unread.splice(0);
+              const model = batch
+                .map(
+                  (m) =>
+                    `<teammate_message from="${m.from}">\n${m.text}\n</teammate_message>`,
+                )
+                .join('\n\n');
+              const display = batch
+                .map((m) => `**${m.from}**: ${m.summary ?? m.text}`)
+                .join('; ');
+              leaderCallback(model, display);
+            }),
             deliver: (model: string, display: string) =>
               leaderCallback?.(model, display),
             hasCallback: () => leaderCallback !== null,
@@ -6696,8 +6715,14 @@ describe('Session', () => {
           }
         });
 
-        it('binds a manager that already exists when the session is created', () => {
+        it('binds a manager that already exists when the session is created and drains after installing the sink', async () => {
           const manager = createFakeTeamManager({ memberCount: 0 });
+          manager.unread.push({
+            from: 'gone',
+            text: 'left unread',
+            summary: 'left unread',
+          });
+          const sends = automaticRounds(() => [text('noted'), finished()]);
           mockConfig.getTeamManager = vi.fn().mockReturnValue(manager);
           session.dispose();
           session = new Session(
@@ -6709,8 +6734,16 @@ describe('Session', () => {
 
           expect(manager.hasCallback()).toBe(true);
           // No members to poll: unread reports left by a previous leader
-          // are pulled in once.
+          // are pulled in once — and only work if setLeaderMessageCallback
+          // ran before drainLeaderInbox.
           expect(manager.drainLeaderInbox).toHaveBeenCalledTimes(1);
+          await vi.waitFor(() => expect(sends).toHaveLength(1));
+          expect(sends[0][3]).toMatchObject({
+            type: core.SendMessageType.Teammate,
+          });
+          expect(sends[0][0]).toContainEqual({
+            text: '<teammate_message from="gone">\nleft unread\n</teammate_message>',
+          });
         });
 
         it('does not drain a manager that already has members', () => {
@@ -6735,6 +6768,48 @@ describe('Session', () => {
           installTeamManager(null);
           expect(second.hasCallback()).toBe(false);
           expect(second.listenerCount()).toBe(0);
+        });
+
+        it('drops queued reports on a genuine manager swap while keeping them on same-manager rebind', async () => {
+          const manager = createFakeTeamManager();
+          let release!: () => void;
+          const gate = new Promise<void>((resolve) => {
+            release = resolve;
+          });
+          const sends = automaticRounds(
+            () => [text('noted'), finished()],
+            () => true,
+            (index) => (index === 0 ? gate : undefined),
+          );
+          installTeamManager(manager);
+          const agentCallback = mockBackgroundTaskRegistry
+            .setNotificationCallback.mock.calls[0][0] as (
+            display: string,
+            model: string,
+            meta: { agentId: string; status: string },
+          ) => void;
+          agentCallback('gate', 'GATE', {
+            agentId: 'gate',
+            status: 'completed',
+          });
+          await vi.waitFor(() => expect(sends).toHaveLength(1));
+
+          manager.deliver('STALE_REPORT', 'stale');
+          expect(holds('notification')).toContain('team:crew');
+
+          // Re-binding the same manager keeps queued reports.
+          installTeamManager(manager);
+          expect(holds('notification')).toContain('team:crew');
+
+          // Removing or swapping the manager (e.g. team_delete) drops them.
+          installTeamManager(null);
+          expect(holds('notification')).not.toContain('team:crew');
+
+          release();
+          await vi.waitFor(() =>
+            expect(session.collectActiveWorkHolds()).toEqual([]),
+          );
+          expect(sends).toHaveLength(1);
         });
 
         it('unsubscribes from the config and detaches the manager on dispose', () => {
@@ -6818,6 +6893,26 @@ describe('Session', () => {
           it('survives a respond() that rejects because the teammate ended', async () => {
             const manager = createFakeTeamManager();
             automaticRounds(() => [text('noted'), finished()]);
+            installTeamManager(manager);
+            const unhandled = vi.fn();
+            process.on('unhandledRejection', unhandled);
+            try {
+              manager.emit(
+                core.TeamEventType.TEAMMATE_APPROVAL_REQUEST,
+                approvalEvent(vi.fn().mockRejectedValue(new Error('gone'))),
+              );
+              await new Promise((resolve) => setTimeout(resolve, 20));
+              expect(unhandled).not.toHaveBeenCalled();
+            } finally {
+              process.off('unhandledRejection', unhandled);
+            }
+          });
+
+          it('survives a ProceedOnce respond() that rejects under YOLO', async () => {
+            mockConfig.getApprovalMode = vi
+              .fn()
+              .mockReturnValue(core.ApprovalMode.YOLO);
+            const manager = createFakeTeamManager();
             installTeamManager(manager);
             const unhandled = vi.fn();
             process.on('unhandledRejection', unhandled);

@@ -36,10 +36,11 @@ export function decideTeammateApprovalFallback(
 ): TeammateApprovalFallbackDecision {
   const confirmationDetails = event.confirmationDetails;
   const requiresExplicitHostApproval =
-    confirmationDetails?.type !== 'plan' &&
     confirmationDetails !== undefined &&
-    'hideAlwaysAllow' in confirmationDetails &&
-    confirmationDetails.hideAlwaysAllow === true;
+    (confirmationDetails.type === 'ask_user_question' ||
+      (confirmationDetails.type !== 'plan' &&
+        'hideAlwaysAllow' in confirmationDetails &&
+        confirmationDetails.hideAlwaysAllow === true));
   if (mode === ApprovalMode.YOLO && !requiresExplicitHostApproval) {
     return { action: 'proceed' };
   }

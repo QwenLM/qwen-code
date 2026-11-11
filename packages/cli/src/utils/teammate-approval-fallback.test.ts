@@ -54,6 +54,25 @@ describe('decideTeammateApprovalFallback', () => {
     });
   });
 
+  it('cancels an ask_user_question request even in YOLO', () => {
+    const decision = decideTeammateApprovalFallback(
+      {
+        ...base,
+        toolName: 'ask_user_question',
+        confirmationDetails: {
+          type: 'ask_user_question',
+          questions: [],
+        } as never,
+      },
+      ApprovalMode.YOLO,
+      host,
+    );
+    expect(decision).toMatchObject({
+      action: 'cancel',
+      reason: expect.stringContaining('cannot be bypassed by YOLO mode'),
+    });
+  });
+
   it('points an explicit-approval request outside YOLO at the host hint', () => {
     const decision = decideTeammateApprovalFallback(
       explicit,

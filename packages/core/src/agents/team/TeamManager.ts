@@ -1232,7 +1232,10 @@ export class TeamManager {
     const newMessages = await this.consumeLeaderInbox();
 
     if (newMessages.length === 0) {
-      if (terminated) {
+      // Stop only when the team was terminated both before and after the read:
+      // the pre-read snapshot covers write-then-exit, the re-check covers a
+      // teammate spawned during the read.
+      if (terminated && this.allTeammatesTerminated()) {
         this.stopLeaderInboxPolling();
         this.teamEventEmitter.emit(TeamEventType.ALL_TEAMMATES_TERMINATED, {
           timestamp: Date.now(),

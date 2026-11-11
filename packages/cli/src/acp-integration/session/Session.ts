@@ -13681,6 +13681,12 @@ export class Session implements SessionContext {
   #bindTeamManager(manager: TeamManager | null): void {
     const previous = this.#teamBoundManager;
     if (previous) this.#unbindTeamManager(previous);
+    if (previous && previous !== manager) {
+      const staleId = `team:${previous.getTeamFile().name}`;
+      this.notificationQueue = this.notificationQueue.filter(
+        (item) => !(item.kind === 'teammate' && item.taskId === staleId),
+      );
+    }
     this.#teamBoundManager = manager;
     if (previous || manager) this.#activeWorkChanged();
     if (!manager) return;

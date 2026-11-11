@@ -101,4 +101,31 @@ describe('TeamManager leader inbox polling', () => {
     expect(terminated).toHaveBeenCalledTimes(1);
     expect(h.teamManager.isLeaderInboxPolling()).toBe(false);
   });
+
+  it('keeps polling when a new teammate is spawned while consumeLeaderInbox is awaiting', async () => {
+    const h = await createHarness();
+    const worker = await h.spawnTeammate('worker');
+    expect(h.teamManager.isLeaderInboxPolling()).toBe(true);
+    worker.setStatus(AgentStatus.COMPLETED);
+
+    h.teamManager.setLeaderMessageCallback(() => {});
+    const terminated = vi.fn();
+    h.teamManager
+      .getEventEmitter()
+      .on(TeamEventType.ALL_TEAMMATES_TERMINATED, terminated);
+
+    const manager = h.teamManager as unknown as {
+      consumeLeaderInbox: () => Promise<unknown[]>;
+    };
+    const realConsume = manager.consumeLeaderInbox.bind(manager);
+    vi.spyOn(manager, 'consumeLeaderInbox').mockImplementationOnce(async () => {
+      const snapshot = await realConsume();
+      await h.spawnTeammate('worker2');
+      return snapshot;
+    });
+
+    await h.teamManager.drainLeaderInbox();
+    expect(h.teamManager.isLeaderInboxPolling()).toBe(true);
+    expect(terminated).not.toHaveBeenCalled();
+  });
 });
