@@ -16,6 +16,7 @@ export const PLATFORM_MARKS: Record<string, string> = {
   github: 'GH',
   gitlab: 'GL',
   email: 'E',
+  qq: 'QQ',
 };
 
 const SUPPORTED_CHANNEL_TYPES = new Set([
@@ -28,6 +29,7 @@ const SUPPORTED_CHANNEL_TYPES = new Set([
   'github',
   'gitlab',
   'email',
+  'qq',
 ]);
 
 export function isSupportedChannelType(
@@ -41,7 +43,8 @@ export function isSupportedChannelType(
   | 'feishu'
   | 'github'
   | 'gitlab'
-  | 'email' {
+  | 'email'
+  | 'qq' {
   return typeof type === 'string' && SUPPORTED_CHANNEL_TYPES.has(type);
 }
 

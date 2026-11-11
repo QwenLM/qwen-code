@@ -67,6 +67,8 @@ import { Spinner } from '../ui/spinner';
 import { Switch } from '../ui/switch';
 import styles from './ChannelEditorDialog.module.css';
 import { ChannelPairingRequests } from './ChannelPairingRequests';
+import { ChannelQrLogin } from './ChannelQrLogin';
+import type { DaemonChannelQrLoginActions } from '../../daemon/workspace/types';
 import { WeixinLoginPanel, type WeixinLoginApi } from './WeixinLoginPanel';
 import {
   buildChannelUpsertRequest,
@@ -286,6 +288,7 @@ export interface ChannelEditorDialogProps {
     request: DaemonChannelUpsertRequest,
   ) => Promise<unknown>;
   onReload: () => Promise<unknown>;
+  qrLoginActions?: DaemonChannelQrLoginActions;
   listPairingRequests: (
     name: string,
   ) => Promise<DaemonChannelPairingRequestsSnapshot>;
@@ -401,6 +404,7 @@ export function ChannelEditorDialog({
   onOpenChange,
   onSave,
   onReload,
+  qrLoginActions,
   listPairingRequests,
   approvePairingRequest,
   listPairingApprovals,
@@ -572,12 +576,21 @@ export function ChannelEditorDialog({
     if (code === 'outOfRange') {
       const numberField = field && field.kind === 'number' ? field : undefined;
       // Only name the bounds the descriptor actually declares: a field with a
-      // maximum and no exclusiveMinimum has no floor, and inventing "greater
-      // than 0" would state a constraint the validator does not enforce.
+      // maximum and no lower bound has no floor, and inventing "greater than
+      // 0" would state a constraint the validator does not enforce.
+      const exclusive = numberField?.exclusiveMinimum;
+      const inclusive = numberField?.minimum;
+      // Name whichever floor the validator actually enforces at the margin.
+      // On a tie the exclusive bound is stricter, since it also rejects equality.
+      const floorIsInclusive =
+        inclusive !== undefined &&
+        (exclusive === undefined || inclusive > exclusive);
       return t('channels.editor.validation.outOfRange', {
-        ...(numberField?.exclusiveMinimum !== undefined
-          ? { min: numberField.exclusiveMinimum }
-          : {}),
+        ...(floorIsInclusive
+          ? { minInclusive: inclusive }
+          : exclusive !== undefined
+            ? { min: exclusive }
+            : {}),
         ...(numberField?.maximum !== undefined
           ? { max: numberField.maximum }
           : {}),
@@ -1984,6 +1997,21 @@ export function ChannelEditorDialog({
                     </FieldShell>
                   ) : null}
                   {operatorsField ? renderField(operatorsField) : null}
+                  {descriptor.supportsQrLogin && instance && qrLoginActions ? (
+                    <ChannelQrLogin
+                      channelName={instance.name}
+                      actions={qrLoginActions}
+                      onBound={() => {
+                        // The draft was seeded from the pre-bind instance, so
+                        // saving it would submit the old empty credentials and
+                        // clear the binding just made. Close instead of leaving
+                        // a stale draft over a changed store.
+                        void onReload();
+                        onOpenChange(false);
+                      }}
+                    />
+                  ) : null}
+
                   {showPairing ? (
                     instance &&
                     ((!repositoryOnly &&
