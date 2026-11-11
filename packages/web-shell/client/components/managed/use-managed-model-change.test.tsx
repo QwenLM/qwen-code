@@ -7,6 +7,7 @@ import { JavaManagedAgentHttpError } from './java-managed-agent-client';
 import type {
   ManagedAgentProvider,
   ManagedAgentSessionSummary,
+  ManagedModelChangeResult,
   ManagedSessionModels,
 } from './managed-agent-provider';
 import { useManagedModelChange } from './use-managed-model-change';
@@ -39,7 +40,7 @@ const options: ManagedSessionModels = {
     { modelId: 'B', label: 'Model B' },
   ],
 };
-const result = {
+const result: ManagedModelChangeResult = {
   sessionId: 's1',
   modelSelection: { modelId: 'B', revision: 1 },
   replayed: false,
@@ -91,198 +92,249 @@ describe('useManagedModelChange', () => {
     vi.restoreAllMocks();
   });
 
-  it('persists before sending and keeps the lock until an acknowledged revision is read back', async () => {
-    const read = deferred<ManagedAgentSessionSummary>();
-    refresh.mockReturnValue(read.promise);
-    vi.mocked(provider.modelChange!.submit).mockImplementation(
-      async (_id, request, command) => {
-        expect(JSON.parse(sessionStorage.getItem(key)!)).toEqual({
-          sessionId: 's1',
-          ...request,
-          idempotencyKey: command.idempotencyKey,
-        });
-        return result;
-      },
-    );
+  it.each(['pending', 'failed'])(
+    'finishes on the successful receipt while the background summary read is %s',
+    async (read) => {
+      if (read === 'pending') refresh.mockReturnValue(new Promise(() => {}));
+      else refresh.mockRejectedValue(new TypeError('read failed'));
+      await render();
+      let succeeded: boolean | undefined;
+      await act(async () => {
+        succeeded = await current.submit('B');
+      });
+      expect(succeeded).toBe(true);
+      expect(current.selection).toEqual(result.modelSelection);
+      expect(current.blocked).toBe(false);
+      expect(current.isBlocked()).toBe(false);
+      expect(current.errorCode).toBeUndefined();
+      expect(provider.modelChange!.submit).toHaveBeenCalledOnce();
+      expect(refresh).toHaveBeenCalledOnce();
+      expect(sessionStorage.getItem(key)).toBeNull();
+    },
+  );
+
+  it('serializes in-flight writes without requiring storage or a second confirmation', async () => {
+    const receipt = deferred<ManagedModelChangeResult>();
+    vi.mocked(provider.modelChange!.submit).mockReturnValue(receipt.promise);
     await render();
-    let pending!: ReturnType<typeof current.submit>;
+    let write!: ReturnType<typeof current.submit>;
     await act(async () => {
-      pending = current.submit('B');
+      write = current.submit('B');
       expect(current.isBlocked()).toBe(true);
       void current.submit('A');
     });
     expect(current.blocked).toBe(true);
     expect(provider.modelChange!.submit).toHaveBeenCalledOnce();
+    expect(
+      vi.mocked(provider.modelChange!.submit).mock.calls[0][2].idempotencyKey,
+    ).toEqual(expect.any(String));
     await act(async () => {
-      read.resolve(changed);
-      await pending;
+      receipt.resolve(result);
+      await write;
     });
     expect(current.blocked).toBe(false);
-    expect(sessionStorage.getItem(key)).toBeNull();
+    expect(current.selection).toEqual(result.modelSelection);
   });
 
-  it('restores a lost ACK after refresh and retries the exact frozen request only on confirmation', async () => {
-    vi.mocked(provider.modelChange!.submit).mockRejectedValueOnce(
-      new TypeError('lost response'),
+  it('releases a timed-out write even when the provider ignores cancellation', async () => {
+    vi.mocked(provider.modelChange!.submit).mockReturnValue(
+      new Promise(() => {}),
     );
     await render();
-    await act(async () => {
-      await current.submit('B');
-    });
-    const saved: unknown = JSON.parse(sessionStorage.getItem(key)!);
-    expect(current.errorCode).toBe('unconfirmed');
-    await act(async () => root.unmount());
-    root = createRoot(document.createElement('div'));
-    await render();
-    expect(provider.modelChange!.submit).toHaveBeenCalledOnce();
-    expect(current.pending).toEqual(saved);
-    await act(async () => {
-      await current.confirm();
-    });
-    const calls = vi.mocked(provider.modelChange!.submit).mock.calls;
-    expect(calls[1][0]).toBe(calls[0][0]);
-    expect(calls[1][1]).toEqual(calls[0][1]);
-    expect(calls[1][2].idempotencyKey).toBe(calls[0][2].idempotencyKey);
-    expect(current.blocked).toBe(false);
-  });
-
-  it('reconciles an acknowledged write through the summary poll after a failed readback', async () => {
-    refresh.mockRejectedValueOnce(new TypeError('read failed'));
-    await render();
-    await act(async () => {
-      await current.submit('B');
-    });
-    expect(current.blocked).toBe(true);
-    expect(current.pending?.acknowledgedRevision).toBe(1);
-    await render(changed);
-    expect(current.blocked).toBe(false);
-    expect(current.errorCode).toBeUndefined();
-    expect(sessionStorage.getItem(key)).toBeNull();
-    expect(provider.modelChange!.submit).toHaveBeenCalledOnce();
-  });
-
-  it('restores the acknowledged revision on remount and confirms through reads only', async () => {
-    refresh.mockRejectedValueOnce(new TypeError('read failed'));
-    await render();
-    await act(async () => {
-      await current.submit('B');
-    });
-    await act(async () => root.unmount());
-    root = createRoot(document.createElement('div'));
-    await render();
-    expect(current.pending?.acknowledgedRevision).toBe(1);
-    await act(async () => {
-      await current.confirm();
-    });
-    expect(current.blocked).toBe(false);
-    expect(sessionStorage.getItem(key)).toBeNull();
-    expect(provider.modelChange!.submit).toHaveBeenCalledOnce();
-  });
-
-  it('does not infer a lost write response from a matching later model selection', async () => {
-    vi.mocked(provider.modelChange!.submit).mockRejectedValueOnce(
-      new TypeError('lost response'),
-    );
-    await render();
-    await act(async () => {
-      await current.submit('B');
-    });
-    const saved = sessionStorage.getItem(key);
-    await render(changed);
-    expect(current.blocked).toBe(true);
-    expect(sessionStorage.getItem(key)).toBe(saved);
-    expect(provider.modelChange!.submit).toHaveBeenCalledOnce();
-  });
-
-  it.each([
-    ['turn_active', false],
-    ['idempotency_conflict', true],
-  ])(
-    'classifies structured host rejection %s without depending on an error class',
-    async (code, blocked) => {
-      vi.mocked(provider.modelChange!.submit).mockRejectedValue({
-        kind: 'managed-model-rejected',
-        code,
-      });
-      await render();
+    vi.useFakeTimers();
+    try {
+      let write!: ReturnType<typeof current.submit>;
       await act(async () => {
-        await current.submit('B');
+        write = current.submit('B');
       });
-      expect(current.blocked).toBe(blocked);
-      expect(current.errorCode).toBe(blocked ? 'unconfirmed' : code);
+      expect(current.blocked).toBe(true);
+      let succeeded: boolean | undefined;
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(30_000);
+        succeeded = await write;
+      });
+      expect(succeeded).toBe(false);
+      expect(current.blocked).toBe(false);
+      expect(current.isBlocked()).toBe(false);
+      expect(current.errorCode).toBe('failed');
       expect(provider.modelChange!.submit).toHaveBeenCalledOnce();
-    },
-  );
+      // The released UI must not leave the abandoned write running.
+      expect(
+        vi.mocked(provider.modelChange!.submit).mock.calls[0][2].signal.aborted,
+      ).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not roll back a receipt under stale reads and uses its revision for the next choice', async () => {
+    const stale = { ...summary, modelSelection: { modelId: 'A', revision: 0 } };
+    refresh.mockResolvedValue(stale);
+    await render();
+    await act(async () => {
+      await current.submit('B');
+    });
+    await render(stale);
+    await act(async () => current.reloadOptions());
+    expect(current.selection).toEqual(result.modelSelection);
+    vi.mocked(provider.modelChange!.submit).mockResolvedValue({
+      sessionId: 's1',
+      modelSelection: { modelId: 'A', revision: 2 },
+      replayed: false,
+    });
+    await act(async () => {
+      await current.submit('A');
+    });
+    expect(provider.modelChange!.submit).toHaveBeenLastCalledWith(
+      's1',
+      { modelId: 'A', expectedRevision: 1 },
+      expect.anything(),
+    );
+    expect(current.selection).toEqual({ modelId: 'A', revision: 2 });
+  });
+
+  it('accepts a future model selection while a Turn is running', async () => {
+    await render({
+      ...summary,
+      phase: 'agent_running',
+      capabilities: { ...summary.capabilities, canSend: false },
+    });
+    await act(async () => {
+      await current.submit('B');
+    });
+    expect(provider.modelChange!.submit).toHaveBeenCalledOnce();
+    expect(current.selection).toEqual(result.modelSelection);
+    expect(current.blocked).toBe(false);
+  });
+
+  it('retains the highest catalog revision when summary refresh fails and later catalogs lag', async () => {
+    refresh.mockRejectedValue(new TypeError('read failed'));
+    await render();
+    await act(async () => {
+      await current.submit('B');
+    });
+    vi.mocked(provider.modelChange!.queryOptions).mockResolvedValue({
+      ...options,
+      modelSelection: { modelId: 'A', revision: 3 },
+    });
+    await act(async () => current.reloadOptions());
+    expect(current.selection).toEqual({ modelId: 'A', revision: 3 });
+    vi.mocked(provider.modelChange!.queryOptions).mockResolvedValue({
+      ...options,
+      modelSelection: { modelId: 'B', revision: 2 },
+    });
+    await act(async () => current.reloadOptions());
+    expect(current.selection).toEqual({ modelId: 'A', revision: 3 });
+    vi.mocked(provider.modelChange!.submit).mockResolvedValue({
+      sessionId: 's1',
+      modelSelection: { modelId: 'B', revision: 4 },
+      replayed: false,
+    });
+    await act(async () => {
+      await current.submit('B');
+    });
+    expect(provider.modelChange!.submit).toHaveBeenLastCalledWith(
+      's1',
+      { modelId: 'B', expectedRevision: 3 },
+      expect.anything(),
+    );
+    expect(current.selection).toEqual({ modelId: 'B', revision: 4 });
+  });
+
+  it('ignores retired pending state and still switches when browser storage is unavailable', async () => {
+    sessionStorage.setItem(
+      key,
+      JSON.stringify({
+        sessionId: 's1',
+        modelId: 'A',
+        expectedRevision: 0,
+        idempotencyKey: 'retired-request',
+      }),
+    );
+    vi.spyOn(Storage.prototype, 'removeItem').mockImplementation(() => {
+      throw new Error('unavailable');
+    });
+    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+      throw new Error('unavailable');
+    });
+    await render();
+    expect(current.blocked).toBe(false);
+    await act(async () => {
+      await current.submit('B');
+    });
+    expect(provider.modelChange!.submit).toHaveBeenCalledOnce();
+    expect(
+      vi.mocked(provider.modelChange!.submit).mock.calls[0][2].idempotencyKey,
+    ).not.toBe('retired-request');
+    expect(current.selection).toEqual(result.modelSelection);
+  });
 
   it.each([
-    'model_selection_conflict',
-    'turn_active',
-    'session_context_busy',
-    'unsupported_model',
-    'session_operation_forbidden',
+    { failure: new TypeError('lost response'), code: 'failed' },
+    {
+      failure: new JavaManagedAgentHttpError(
+        409,
+        'model_selection_conflict',
+        'stale revision',
+      ),
+      code: 'model_selection_conflict',
+    },
+    {
+      failure: new JavaManagedAgentHttpError(
+        409,
+        'session_context_busy',
+        'session busy',
+      ),
+      code: 'session_context_busy',
+    },
   ])(
-    'releases a definitively refused key and refreshes options without resubmission (%s)',
-    async (code) => {
-      vi.mocked(provider.modelChange!.submit).mockRejectedValue(
-        new JavaManagedAgentHttpError(409, code, code),
-      );
+    'releases a failed write without automatically replaying it ($code)',
+    async ({ failure, code }) => {
+      vi.mocked(provider.modelChange!.submit).mockRejectedValue(failure);
       await render();
       await act(async () => {
         await current.submit('B');
       });
       expect(current.blocked).toBe(false);
+      expect(current.isBlocked()).toBe(false);
       expect(current.errorCode).toBe(code);
-      expect(provider.modelChange!.submit).toHaveBeenCalledOnce();
-      expect(provider.modelChange!.queryOptions).toHaveBeenCalledTimes(2);
-      expect(refresh).toHaveBeenCalledOnce();
-    },
-  );
-
-  it.each([401, 404, 500, 409])(
-    'retains an uncertain key after authentication, availability or idempotency failures (%s)',
-    async (status) => {
-      vi.mocked(provider.modelChange!.submit).mockRejectedValue(
-        new JavaManagedAgentHttpError(
-          status,
-          'idempotency_conflict',
-          'uncertain',
-        ),
-      );
-      await render();
+      expect(sessionStorage.getItem(key)).toBeNull();
+      const retry = deferred<ManagedModelChangeResult>();
+      vi.mocked(provider.modelChange!.submit).mockReturnValue(retry.promise);
+      let retryWrite!: ReturnType<typeof current.submit>;
       await act(async () => {
-        await current.submit('B');
+        retryWrite = current.submit('B');
       });
+      // The banner goes away as the retry starts, not only when it succeeds.
+      expect(current.errorCode).toBeUndefined();
       expect(current.blocked).toBe(true);
-      expect(current.errorCode).toBe('unconfirmed');
-      expect(sessionStorage.getItem(key)).not.toBeNull();
+      await act(async () => {
+        retry.resolve(result);
+        await retryWrite;
+      });
+      expect(current.errorCode).toBeUndefined();
+      expect(current.selection).toEqual(result.modelSelection);
+      await render(changed);
+      expect(provider.modelChange!.submit).toHaveBeenCalledTimes(2);
     },
   );
 
-  it('keeps an acknowledged request frozen if the readback is stale or names the wrong model', async () => {
-    refresh.mockResolvedValue(summary);
+  it('retires a lost-response failure once a read reports a revision past the failed write', async () => {
+    refresh.mockResolvedValue({
+      ...summary,
+      modelSelection: { modelId: 'B', revision: 1 },
+    });
+    vi.mocked(provider.modelChange!.submit).mockRejectedValue(
+      new TypeError('lost response'),
+    );
     await render();
     await act(async () => {
       await current.submit('B');
     });
-    const saved = sessionStorage.getItem(key);
-    expect(current.blocked).toBe(true);
-    refresh.mockResolvedValue({
-      ...changed,
-      modelSelection: { modelId: 'A', revision: 1 },
-    });
-    await act(async () => {
-      await current.confirm();
-    });
-    expect(sessionStorage.getItem(key)).toBe(saved);
-    refresh.mockResolvedValue({
-      ...changed,
-      modelSelection: { modelId: 'A', revision: 2 },
-    });
-    await act(async () => {
-      await current.confirm();
-    });
-    expect(current.blocked).toBe(false);
-    expect(provider.modelChange!.submit).toHaveBeenCalledOnce();
+    expect(current.errorCode).toBe('failed');
+    await render({ ...summary, modelSelection: { modelId: 'B', revision: 1 } });
+    expect(current.selection).toEqual({ modelId: 'B', revision: 1 });
+    expect(current.errorCode).toBeUndefined();
   });
 
   it('ignores stale options from another Session and never changes its selection', async () => {
@@ -309,19 +361,69 @@ describe('useManagedModelChange', () => {
     expect(provider.modelChange!.submit).not.toHaveBeenCalled();
   });
 
-  it('does not submit when storage cannot retain the original operation', async () => {
-    await render();
-    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
-      throw new Error('unavailable');
+  it('refuses a write until the current Session catalog arrives after switching away and back', async () => {
+    let firstCalls = 0;
+    const otherSession = deferred<ManagedSessionModels>();
+    const returning = deferred<ManagedSessionModels>();
+    vi.mocked(provider.modelChange!.queryOptions).mockImplementation((id) => {
+      if (id !== 's1') return otherSession.promise;
+      firstCalls += 1;
+      return firstCalls === 1 ? Promise.resolve(options) : returning.promise;
     });
+    await render();
+    await render({ ...summary, sessionId: 's2' });
+    await render();
+    // The catalog from the earlier mount of s1 must not authorize a write now:
+    // its selection revision belongs to that window, not to this one.
     await act(async () => {
       await current.submit('B');
     });
     expect(provider.modelChange!.submit).not.toHaveBeenCalled();
-    expect(current.errorCode).toBe('storage_unavailable');
+    await act(async () => {
+      returning.resolve(options);
+    });
+    await act(async () => {
+      await current.submit('B');
+    });
+    expect(provider.modelChange!.submit).toHaveBeenCalledOnce();
   });
 
-  it('fails closed for missing capability, active Turns, unsupported options and arbitrary models', async () => {
+  it('rejects a mismatched receipt instead of claiming the requested model was selected', async () => {
+    refresh.mockResolvedValue(summary);
+    vi.mocked(provider.modelChange!.submit).mockResolvedValue({
+      ...result,
+      sessionId: 'another-session',
+    });
+    await render();
+    await act(async () => {
+      await current.submit('B');
+    });
+    expect(current.errorCode).toBe('failed');
+    expect(current.selection?.modelId).not.toBe('B');
+    expect(current.blocked).toBe(false);
+  });
+
+  it('ignores an old Session receipt after the user changes Session', async () => {
+    const receipt = deferred<ManagedModelChangeResult>();
+    vi.mocked(provider.modelChange!.submit).mockReturnValue(receipt.promise);
+    await render();
+    let write!: ReturnType<typeof current.submit>;
+    await act(async () => {
+      write = current.submit('B');
+    });
+    await render({ ...summary, sessionId: 's2' });
+    expect(
+      vi.mocked(provider.modelChange!.submit).mock.calls[0][2].signal.aborted,
+    ).toBe(true);
+    await act(async () => {
+      receipt.resolve(result);
+      await write;
+    });
+    expect(current.selection?.modelId).not.toBe('B');
+    expect(current.blocked).toBe(false);
+  });
+
+  it('does not fetch or submit without capability, visibility or a supported catalog choice', async () => {
     await render({
       ...summary,
       capabilities: { ...summary.capabilities, modelChange: undefined },
@@ -330,11 +432,13 @@ describe('useManagedModelChange', () => {
     await act(async () => {
       await current.submit('B');
     });
-    await render({ ...summary, phase: 'agent_running' });
+    await render(summary, false);
+    expect(provider.modelChange!.queryOptions).not.toHaveBeenCalled();
     await act(async () => {
       await current.submit('B');
     });
     await render();
+    const staleSubmit = current.submit;
     await act(async () => {
       await current.submit('arbitrary-route');
     });
@@ -346,68 +450,10 @@ describe('useManagedModelChange', () => {
     await act(async () => {
       await current.submit('B');
     });
-    expect(provider.modelChange!.submit).not.toHaveBeenCalled();
-  });
-
-  it('does not fetch or submit while hidden and can confirm a frozen receipt after capability withdrawal', async () => {
-    await render(summary, false);
-    expect(provider.modelChange!.queryOptions).not.toHaveBeenCalled();
+    await render({ ...summary, sessionId: 's2' });
     await act(async () => {
-      await current.submit('B');
+      await staleSubmit('B');
     });
     expect(provider.modelChange!.submit).not.toHaveBeenCalled();
-    sessionStorage.setItem(
-      key,
-      JSON.stringify({
-        sessionId: 's1',
-        modelId: 'B',
-        expectedRevision: 0,
-        idempotencyKey: 'original',
-      }),
-    );
-    await act(async () => root.unmount());
-    root = createRoot(document.createElement('div'));
-    await render({
-      ...summary,
-      capabilities: { ...summary.capabilities, modelChange: undefined },
-    });
-    await act(async () => {
-      await current.confirm();
-    });
-    expect(provider.modelChange!.submit).toHaveBeenCalledWith(
-      's1',
-      { modelId: 'B', expectedRevision: 0 },
-      expect.objectContaining({ idempotencyKey: 'original' }),
-    );
-    expect(current.pending).toBeUndefined();
-  });
-
-  it('confirms the original receipt after another Turn becomes active without admitting a new selection', async () => {
-    vi.mocked(provider.modelChange!.submit).mockRejectedValueOnce(
-      new TypeError('lost response'),
-    );
-    await render();
-    await act(async () => {
-      await current.submit('B');
-    });
-    const original = current.pending!;
-    await render({
-      ...summary,
-      phase: 'agent_running',
-      capabilities: {
-        ...summary.capabilities,
-        canSend: false,
-        modelChange: false,
-      },
-    });
-    await act(async () => {
-      await current.submit('A');
-      await current.confirm();
-    });
-    expect(provider.modelChange!.submit).toHaveBeenCalledTimes(2);
-    expect(
-      vi.mocked(provider.modelChange!.submit).mock.calls[1][2].idempotencyKey,
-    ).toBe(original.idempotencyKey);
-    expect(current.pending).toBeUndefined();
   });
 });

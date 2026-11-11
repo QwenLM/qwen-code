@@ -65,6 +65,20 @@ jobs:
           fi
           chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
 
+      # The heal above fixes permissions, not index state. A previous pool job
+      # can leave a sparse index behind, and checkout's clean/reset skip the
+      # sparse-excluded paths (they keep the skip-worktree bit). The
+      # `sparse-checkout disable` that follows then aborts on those leftovers
+      # with "not uptodate; will not remove from working tree" and leaves the
+      # tree half populated: run 43010833061 lost the sandbox:docker leg that
+      # way, with no .github/actions/self-hosted-node on disk. Dropping .git
+      # forces a fresh clone — the same reset ci.yml runs before every pool
+      # checkout.
+      - name: 'Recreate runner Git metadata'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          rm -rf -- "$GITHUB_WORKSPACE/.git"
+
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
 
@@ -291,6 +305,15 @@ jobs:
             fi
           fi
           chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
+
+      # Same reason as the build job above: a leftover sparse index makes
+      # checkout's clean/reset skip the excluded paths, and the
+      # `sparse-checkout disable` that follows aborts on them and leaves the
+      # tree without .github/, so every local action below fails to resolve.
+      - name: 'Recreate runner Git metadata'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          rm -rf -- "$GITHUB_WORKSPACE/.git"
 
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
