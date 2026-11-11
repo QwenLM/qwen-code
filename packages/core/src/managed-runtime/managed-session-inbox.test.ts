@@ -32,8 +32,9 @@ const limits = { maxPending: 10, maxPendingPerTenant: 5 };
 
 // Sister of the activation-store compaction budget (#15574): the 1024
 // serial fence writes are deterministic in count but not in wall time, and
-// the same fleet contention outlasted the flat 60s budget. Slow hosts get
-// double the ceiling; fast hosts keep the original budget.
+// the same fleet contention took all three attempts past the flat 60s
+// budget (run 42997545207). Slow hosts get double the ceiling; fast hosts
+// keep the original budget.
 const compactionTimeoutMs = isSlowTestHost() ? 120_000 : 60_000;
 
 function userMessage(

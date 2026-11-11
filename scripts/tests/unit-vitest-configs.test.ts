@@ -102,7 +102,8 @@ describe('unhandled-error exemption on the platform lanes', () => {
 // suite still runs, the artifact is just empty. Pin each reporter's output
 // to the package root so a relocated output fails here, not silently in CI,
 // and pin that every lane workspace reports at all: a suite without a junit
-// reporter stays invisible to the badge however red it runs (#16890).
+// reporter stays invisible to the badge however red it runs (on run
+// 42994647525 the badge counted only the three workspaces that reported).
 describe('JUnit report upload paths', () => {
   const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
   const junitConfigs = Object.entries(configs).filter(

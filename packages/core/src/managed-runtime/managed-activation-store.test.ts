@@ -25,9 +25,9 @@ import {
 import { MANAGED_JOURNAL_COMPACT_BYTES } from './managed-journal-snapshot.js';
 
 // The compaction test's 1024 serial renewals each await a journal write:
-// under fleet contention they outlasted the flat 60s budget three runs
-// running (#15574). Slow hosts get double the ceiling; fast hosts keep the
-// original budget, so a genuine hang still fails promptly.
+// under fleet contention they outlasted the flat 60s budget (#15574). Slow
+// hosts get double the ceiling; fast hosts keep the original budget, so a
+// genuine hang still fails promptly.
 const compactionTimeoutMs = isSlowTestHost() ? 120_000 : 60_000;
 
 // Journal fault injection for the persist tail-repair: a failed append whose

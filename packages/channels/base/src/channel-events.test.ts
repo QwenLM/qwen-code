@@ -398,14 +398,14 @@ describe('channel events journal', async () => {
     // the event-loop turns during the read: while an awaited read waits on
     // I/O the loop keeps ticking through idle turns, so on a contended host
     // a turn count measures the neighbors' load instead of the chunking
-    // (#16890 inverted this comparison three times running, once reporting
-    // 1701 turns for the tall read against a bound of 12691). The read count
-    // is fixed by the window and chunk sizes. Measure the same six journals
-    // short (one chunk each) and tall (a full 256 KiB window, chunked
-    // several times): a tall window takes four more reads per journal than
-    // a short one, so the tall read leads by 24 reads; the bound below keeps
-    // half of that lead as margin. Reading those windows synchronously, or
-    // each in a single piece, would erase the difference.
+    // (run 42994647525 inverted this comparison on all three attempts, once
+    // reporting 1701 turns for the tall read against a bound of 12691). The
+    // read count is fixed by the window and chunk sizes. Measure the same
+    // six journals short (one chunk each) and tall (a full 256 KiB window,
+    // chunked several times): a tall window takes four more reads per
+    // journal than a short one, so the tall read leads by 24 reads; the
+    // bound below keeps half of that lead as margin. Reading those windows
+    // synchronously, or each in a single piece, would erase the difference.
     const probePath = join(qwenHome, 'read-probe');
     writeFileSync(probePath, '');
     const probe = await open(probePath, 'r');
