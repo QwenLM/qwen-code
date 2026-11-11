@@ -1065,12 +1065,26 @@ export class McpClientManager {
    * are tracked in `this.pooledConnections` for `disconnectServer` /
    * `stop` to release cleanly.
    */
-  async discoverAllMcpTools(cliConfig: Config): Promise<void> {
+  async discoverAllMcpTools(
+    cliConfig: Config,
+    replayExisting = false,
+  ): Promise<void> {
     if (cliConfig.isTrustedFolder?.() === false) {
       return;
     }
     if (this.pool) {
-      return this.discoverAllMcpToolsViaPool(cliConfig);
+      // Explicit rediscovery can clear catalogs during an in-flight settings
+      // pass. Replay afterwards even when that pass found no metadata change.
+      const retained = replayExisting
+        ? new Map(this.pooledConnections)
+        : undefined;
+      await this.discoverAllMcpToolsViaPool(cliConfig);
+      for (const [name, connection] of retained ?? []) {
+        if (this.pooledConnections.get(name) === connection) {
+          connection.replaySnapshot();
+        }
+      }
+      return;
     }
     await this.stop();
 
@@ -1253,16 +1267,16 @@ export class McpClientManager {
     if (this.pool && !isSdkMcpServerConfig(serverConfig)) {
       const previous = this.pooledConnections.get(serverName);
       await this.discoverAllMcpToolsViaPool(cliConfig);
-      if (
-        reconnect &&
-        previous &&
-        this.pooledConnections.get(serverName) === previous
-      ) {
-        const [result] = await this.pool.restartByName(serverName, {
-          entryIndex: previous.entryIndex,
-        });
-        if (!result?.restarted) {
-          throw new Error(`Failed to reconnect MCP server '${serverName}'`);
+      if (previous && this.pooledConnections.get(serverName) === previous) {
+        if (reconnect) {
+          const [result] = await this.pool.restartByName(serverName, {
+            entryIndex: previous.entryIndex,
+          });
+          if (!result?.restarted) {
+            throw new Error(`Failed to reconnect MCP server '${serverName}'`);
+          }
+        } else {
+          previous.replaySnapshot();
         }
       }
       return;

@@ -130,6 +130,7 @@ function mkPool(acquire: unknown = vi.fn(), budget?: unknown) {
 function mkConn(name: string, extra: Rec = {}) {
   return {
     release: vi.fn(),
+    replaySnapshot: vi.fn(),
     on: vi.fn(),
     id: `${name}::abc`,
     serverName: name,
@@ -358,6 +359,42 @@ describe('McpClientManager', () => {
     // Critical inverse invariant: pool path must NOT also spawn its
     // own McpClient (would double-spawn one process per session).
     expect(McpClient).not.toHaveBeenCalled();
+  });
+
+  it('replays retained catalogs after a coalesced explicit rediscovery', async () => {
+    const serverConfig = { command: 'node' };
+    const servers: Record<string, typeof serverConfig> = { srv: serverConfig };
+    const first = mkConn('srv', {
+      transportId: connectionIdOf('srv', serverConfig),
+      updateConfig: vi.fn(),
+    });
+    const added = mkConn('added', {
+      transportId: connectionIdOf('added', serverConfig),
+    });
+    const pending = deferred();
+    const acquire = vi.fn().mockImplementation(async (name: string) => {
+      if (name === 'added') {
+        await pending.promise;
+        return added;
+      }
+      return first;
+    });
+    const { config, manager } = poolManager(() => servers, acquire);
+    await manager.discoverAllMcpTools(config);
+    await manager.discoverAllMcpTools(config);
+    expect(first.replaySnapshot).not.toHaveBeenCalled();
+
+    servers['added'] = serverConfig;
+    const reconciliation = manager.discoverAllMcpTools(config);
+    const rediscovery = manager.discoverAllMcpTools(config, true);
+    expect(first.replaySnapshot).not.toHaveBeenCalled();
+    pending.resolve();
+    await Promise.all([reconciliation, rediscovery]);
+
+    expect(first.replaySnapshot).toHaveBeenCalledOnce();
+    expect(added.replaySnapshot).not.toHaveBeenCalled();
+    expect(first.release).not.toHaveBeenCalled();
+    expect(acquire).toHaveBeenCalledTimes(2);
   });
 
   it('swallows BudgetExhaustedError from pool.acquire and logs at debug (F2 commit 6 W23)', async () => {
@@ -673,6 +710,7 @@ describe('McpClientManager', () => {
       const acquireSpy = vi.fn().mockResolvedValue({
         release: vi.fn(),
         updateConfig: vi.fn(),
+        replaySnapshot: vi.fn(),
         transportId: connectionIdOf('srv', serverConfig),
         on: vi.fn(),
         id: 'srv::abc',

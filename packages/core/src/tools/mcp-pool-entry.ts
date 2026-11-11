@@ -112,6 +112,8 @@ export interface PooledConnection {
   readonly resourcesSnapshot: readonly DiscoveredMCPResource[];
   /** Re-project per-session metadata against the current snapshots. */
   updateConfig(cfg: MCPServerConfig): void;
+  /** Restore this session's catalog without changing its metadata or transport. */
+  replaySnapshot(): void;
   on(event: 'event', listener: (e: PoolEvent) => void): this;
   off(event: 'event', listener: (e: PoolEvent) => void): this;
   /** Release this session's reference; pool starts drain when refs=0. */
@@ -658,6 +660,21 @@ export class PoolEntry {
       );
     }
     if (!view.updateConfig(cfg)) return;
+    this.replaySessionSnapshot(sessionId);
+  }
+
+  replaySessionSnapshot(sessionId: string): void {
+    if (this.isTerminated()) {
+      throw new Error(
+        `Cannot replay snapshot on PoolEntry ${this.id} in state ${this.state}`,
+      );
+    }
+    const view = this.subscribers.get(sessionId);
+    if (!view) {
+      throw new Error(
+        `Cannot replay snapshot for detached session ${sessionId} on PoolEntry ${this.id}`,
+      );
+    }
     if (this.state === 'active') {
       view.applyTools(this.toolsSnapshot);
       view.applyPrompts(this.promptsSnapshot);
@@ -1313,6 +1330,15 @@ class PooledConnectionImpl implements PooledConnection {
       );
     }
     this.entry.updateSessionConfig(this.sessionId, cfg);
+  }
+
+  replaySnapshot(): void {
+    if (this.released) {
+      throw new Error(
+        `Cannot replay snapshot on released MCP connection ${this.id}`,
+      );
+    }
+    this.entry.replaySessionSnapshot(this.sessionId);
   }
 
   on(event: 'event', listener: (e: PoolEvent) => void): this {
