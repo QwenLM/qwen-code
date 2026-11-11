@@ -94,9 +94,12 @@ Explicitly out of scope:
   verdict is still computed first.
 - The other eight gate files keep their existing behavior, including the two
   scope narrowings.
-- The `HELPER_TESTS` treadmill is not addressed: those lists are gate-defining,
-  so a base-side addition still stales a branch. Splitting them into their own
-  file would let a PR that only appends a suite narrow, and is a separate change.
+- The `HELPER_TESTS` treadmill is not addressed, and unlike the plumbing it is
+  not a false positive. Appending a suite adds work the lane must do; a branch
+  that lacks the entry never ran that suite, so its green really is weaker.
+  Moving the lists to their own file would only relocate the same verdict and
+  would not remove the rebase, so that is explicitly **not** proposed as a
+  follow-up.
 - The fail-open policy of `main()` is unchanged.
 
 ## Proposed solution
@@ -264,9 +267,12 @@ over-rejects, which is the safe direction.
 
 ## Open questions
 
-- Should the `HELPER_TESTS` lists move to their own file so that appending a
-  suite stops staling every in-flight PR? That is the remaining `ci.yml`
-  treadmill and is deliberately not attempted here.
+- The remaining `ci.yml` reds are the `HELPER_TESTS` additions, and they are
+  true positives: the branch really did skip a suite the base gate now runs.
+  The only honest remedies are to run the base's list rather than the branch's
+  (which means executing base-controlled code against a branch tree, a trust
+  decision this lane deliberately avoids), or to accept the rebase. Neither is
+  attempted here, and relocating the lists is not a remedy.
 - Should this lane become a required status check? The narrowing reduces false
   reds, which is a precondition for that, but the decision is separate and the
   step remains advisory today.
