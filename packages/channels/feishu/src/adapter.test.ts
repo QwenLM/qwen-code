@@ -1107,7 +1107,7 @@ describe('FeishuChannel', () => {
       pendingDownload.resolve(new Response(bytes));
       await vi.advanceTimersByTimeAsync(0);
       expect(dispatch).not.toHaveBeenCalled();
-      expect(readdirSync(directory, { recursive: true })).toHaveLength(1);
+      expect(readdirSync(join(directory, 'channel-files'))).toEqual([]);
     });
 
     it('cleans up after dispatch rejects without clearing another message dedup entry', async () => {
