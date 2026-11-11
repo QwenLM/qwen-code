@@ -39,6 +39,10 @@ export const MOD_METHODS = [
   'session.turns',
   'session.usage',
   'session.version',
+  'store.delete',
+  'store.get',
+  'store.keys',
+  'store.set',
   'turn.abort',
   'ui.invalidate',
   'ui.log',
@@ -61,6 +65,10 @@ export const MOD_EVENTS = [
   'session.turns',
   'session.usage',
   'session.version',
+  'store.delete',
+  'store.get',
+  'store.keys',
+  'store.set',
   'tool.call',
   'tool.check',
   'turn.abort',
@@ -71,10 +79,17 @@ export const MOD_EVENTS = [
   'ui.render',
 ] as const;
 // Events only some hosts raise: the load request names the sites a host
-// draws, and whether it raises `prompt.submit`.
+// draws, whether it raises `prompt.submit`, and whether it keeps a store.
+export const MOD_STORE_EVENTS: readonly ModEvent[] = [
+  'store.delete',
+  'store.get',
+  'store.keys',
+  'store.set',
+];
 export const MOD_HOST_EVENTS: readonly ModEvent[] = [
   'prompt.submit',
   'ui.render',
+  ...MOD_STORE_EVENTS,
 ];
 // `$` methods that read rather than dispatch, so no hook hears them.
 export const MOD_READS = ['ui.resolve'] as const;
@@ -404,12 +419,43 @@ export function validateInput(
       );
   } else if (event === 'model.complete') {
     validateModelInput(value);
+  } else if (MOD_STORE_EVENTS.includes(event)) {
+    validateStoreInput(event, value, original);
   } else if (event === 'ui.render') {
     validateRenderInput(value, original);
   } else if (!isDeepStrictEqual(value, original))
     throw new Error('Mod hook changed pinned event fields.');
   if (Buffer.byteLength(JSON.stringify(value)) > MOD_MAX_BYTES)
     throw new Error('Mod event is too large.');
+}
+
+// A store call names its key; a hook above may write another value, never
+// another key.
+function validateStoreInput(
+  event: ModEvent,
+  value: ModInput,
+  original: ModInput,
+): void {
+  const fields =
+    event === 'store.keys'
+      ? []
+      : event === 'store.set'
+        ? ['key', 'value']
+        : ['key'];
+  if (
+    !only(value, fields) ||
+    (event !== 'store.keys' && !text(value['key'])) ||
+    (event === 'store.set' && value['value'] === undefined)
+  )
+    throw new Error(
+      event === 'store.keys'
+        ? 'Mod store.keys takes no arguments.'
+        : event === 'store.set'
+          ? 'Mod store.set takes a string key and a JSON value.'
+          : `Mod ${event} takes a string key.`,
+    );
+  if (Object.keys(original).length && value['key'] !== original['key'])
+    throw new Error('Mod hook changed pinned event fields.');
 }
 
 // The envelope and each site's pinned props are pinned; the other props keep
@@ -586,6 +632,11 @@ const API_VALUES: Partial<Record<ModEvent, (value: unknown) => boolean>> = {
   'session.usage': validUsage,
   'session.version': (value) =>
     record(value) && typeof value['version'] === 'string',
+  'store.delete': (value) => value === undefined,
+  // Any JSON value, or undefined for a key never set.
+  'store.get': () => true,
+  'store.keys': (value) => Array.isArray(value) && value.every(text),
+  'store.set': (value) => value === undefined,
   'turn.abort': (value) => value === undefined,
   'ui.invalidate': (value) => value === undefined,
   'model.complete': validModelResult,

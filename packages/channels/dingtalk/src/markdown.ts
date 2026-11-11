@@ -1,3 +1,4 @@
+import { truncateUtf16Units } from '@qwen-code/channel-base';
 import { splitMarkdown } from '@qwen-code/channel-base/markdown-chunks';
 
 export const DINGTALK_CHUNK_LIMIT = 3800;
@@ -24,7 +25,7 @@ export function splitChunks(
 /** Extract a short title from the first line of markdown for the webhook payload. */
 export function extractTitle(text: string): string {
   const firstLine = text.split('\n')[0] || '';
-  const cleaned = firstLine.replace(/^[#*\s\->]+/, '').slice(0, 20);
+  const cleaned = truncateUtf16Units(firstLine.replace(/^[#*\s\->]+/, ''), 20);
   return cleaned || 'Reply';
 }
 

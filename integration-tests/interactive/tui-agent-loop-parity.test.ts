@@ -47,7 +47,15 @@ interface Scenario {
   /** The approval mode; YOLO by default. */
   approvalMode?: 'default';
   /** Answers each tool approval the prompt asks for, in order. */
-  approvals?: Array<'allow' | 'deny'>;
+  approvals?: Array<{
+    answer: 'allow' | 'deny';
+    /**
+     * Evidence the answer took effect, in place of watching the dialog
+     * close: a renderer that paints the close and the next approval's
+     * entrance in one frame never shows the gap between them.
+     */
+    settled?: (workspace: string) => boolean;
+  }>;
   /** Presses Esc once this text is on screen. */
   cancelOn?: string;
   /** Disconnects the first response once this text is visible. */
@@ -97,6 +105,11 @@ interface Scenario {
   recorded?: string;
   /** Text both runs' model requests must contain. */
   sent?: string;
+  /**
+   * An intended difference on OpenTUI, listed in the design doc: text only
+   * the run with the setting on sends, in place of comparing the runs.
+   */
+  openTuiSends?: string;
   /**
    * The model's reply to a streaming request, from its message history;
    * `index` counts this run's streaming requests, retries included.
@@ -148,10 +161,12 @@ async function until(
   check: () => boolean | Promise<boolean>,
   reason: string,
   timeout = 30_000,
+  context?: () => Promise<string>,
 ) {
   const deadline = Date.now() + timeout;
   while (!(await check())) {
-    if (Date.now() > deadline) throw new Error(reason);
+    if (Date.now() > deadline)
+      throw new Error(context ? `${reason}\n${await context()}` : reason);
     await sleep(100);
   }
 }
@@ -340,8 +355,6 @@ const hooks = (event: string, script: string) => ({
 const renderer = pickE2eRenderer();
 const describeTui = IS_CONTAINER_SANDBOX ? describe.skip : describe;
 const SUITE = `${renderer === 'ink' ? 'Ink' : 'OpenTUI'} TUI agent loop parity (experimental.unifiedAgentLoop)`;
-/** Ink runs its tool batches on the shared loop; OpenTUI does not yet. */
-const sharesToolBatches = renderer === 'ink';
 
 describeTui(SUITE, () => {
   let server: FakeOpenAIServer | undefined;
@@ -487,18 +500,25 @@ describeTui(SUITE, () => {
           firstChunkRead.resolve();
         }
       }
-      for (const answer of scenario.approvals ?? []) {
+      for (const { answer, settled } of scenario.approvals ?? []) {
         // The viewport, not the whole output, which still holds the
         // previous approval.
         await until(
           async () => (await session!.viewport()).includes(APPROVAL_PROMPT),
           'the approval opens',
+          30_000,
+          () => session!.viewport(),
         );
         await session.idle(500, 10_000);
         session.pressKey(answer === 'allow' ? '\r' : '\x1b');
         await until(
-          async () => !(await session!.viewport()).includes(APPROVAL_PROMPT),
+          settled
+            ? () => settled(workspace)
+            : async () =>
+                !(await session!.viewport()).includes(APPROVAL_PROMPT),
           'the approval closes',
+          30_000,
+          () => session!.viewport(),
         );
       }
       if (scenario.cancelOn) {
@@ -664,6 +684,8 @@ describeTui(SUITE, () => {
       // The second response repeats the first call's provider id and
       // arguments next to a fresh call, so the batch answers the replay.
       name: 'a replayed call next to a fresh one',
+      // OpenTUI's current path runs the replay again; the batch answers it.
+      openTuiSends: 'was already handled',
       requests: 3,
       rounds: 3,
       batches: 2,
@@ -690,7 +712,15 @@ describeTui(SUITE, () => {
       rounds: 2,
       batches: 2,
       approvalMode: 'default',
-      approvals: ['allow', 'deny'],
+      approvals: [
+        {
+          answer: 'allow',
+          settled: (dir) =>
+            existsSync(join(dir, 'a.txt')) &&
+            readFileSync(join(dir, 'a.txt'), 'utf8') === 'a body\n',
+        },
+        { answer: 'deny' },
+      ],
       prompts: ['Write a, then b.'],
       recorded: 'a body',
       reply: (messages, dir) =>
@@ -1082,7 +1112,7 @@ describeTui(SUITE, () => {
     expect(current.sharedRounds).toBe(0);
     expect(shared.sharedRounds).toBe(scenario.rounds);
     expect(current.sharedBatches).toBe(0);
-    expect(shared.sharedBatches).toBe(sharesToolBatches ? scenario.batches : 0);
+    expect(shared.sharedBatches).toBe(scenario.batches);
     for (const run of [current, shared]) {
       expect(run.requests).toHaveLength(scenario.requests);
       if (scenario.sideRequests !== undefined)
@@ -1093,6 +1123,13 @@ describeTui(SUITE, () => {
         expect(JSON.stringify(run.records)).toContain(scenario.recorded);
       if (scenario.sent)
         expect(JSON.stringify(run.requests)).toContain(scenario.sent);
+    }
+    if (renderer === 'opentui' && scenario.openTuiSends) {
+      expect(JSON.stringify(shared.requests)).toContain(scenario.openTuiSends);
+      expect(JSON.stringify(current.requests)).not.toContain(
+        scenario.openTuiSends,
+      );
+      return;
     }
     expect(shared.requests).toEqual(current.requests);
     expect(shared.sideRequests).toEqual(current.sideRequests);

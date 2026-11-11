@@ -45,6 +45,7 @@ export type AgentEvent =
   | 'tool_responses_finalized'
   | 'tool_output_update'
   | 'tool_waiting_approval'
+  | 'tool_approval_resolved'
   | 'usage_metadata'
   | 'retry_wait'
   | 'external_message'
@@ -64,6 +65,7 @@ export enum AgentEventType {
   TOOL_RESPONSES_FINALIZED = 'tool_responses_finalized',
   TOOL_OUTPUT_UPDATE = 'tool_output_update',
   TOOL_WAITING_APPROVAL = 'tool_waiting_approval',
+  TOOL_APPROVAL_RESOLVED = 'tool_approval_resolved',
   USAGE_METADATA = 'usage_metadata',
   /** Start/end of a retry-owned backoff sleep inside the round's request. */
   RETRY_WAIT = 'retry_wait',
@@ -201,6 +203,14 @@ export interface AgentApprovalRequestEvent {
   timestamp: number;
 }
 
+/** The active approval was retired, before the tool batch returns results. */
+export interface AgentApprovalResolvedEvent {
+  subagentId: string;
+  round: number;
+  callId: string;
+  timestamp: number;
+}
+
 export interface AgentExternalMessageEvent {
   subagentId: string;
   /** Source kind for observability; messages are parent send_message text. */
@@ -268,6 +278,7 @@ export interface AgentEventMap {
   [AgentEventType.TOOL_RESPONSES_FINALIZED]: AgentToolResponsesFinalizedEvent;
   [AgentEventType.TOOL_OUTPUT_UPDATE]: AgentToolOutputUpdateEvent;
   [AgentEventType.TOOL_WAITING_APPROVAL]: AgentApprovalRequestEvent;
+  [AgentEventType.TOOL_APPROVAL_RESOLVED]: AgentApprovalResolvedEvent;
   [AgentEventType.USAGE_METADATA]: AgentUsageEvent;
   [AgentEventType.RETRY_WAIT]: AgentRetryWaitEvent;
   [AgentEventType.EXTERNAL_MESSAGE]: AgentExternalMessageEvent;

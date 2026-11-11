@@ -5,6 +5,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import path from 'node:path';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import { OutputFormat } from '@qwen-code/qwen-code-core/output/types.js';
 import {
@@ -21,6 +22,8 @@ import {
   resolveModUnsupportedEvents,
 } from '@qwen-code/qwen-code-core/mods/options.js';
 import { ModRuntime } from '@qwen-code/qwen-code-core/mods/runtime.js';
+import { ModStore } from '@qwen-code/qwen-code-core/mods/store.js';
+import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 import {
   ENGINE_NODE,
   type ModBandInput,
@@ -234,6 +237,8 @@ export class ModSession implements ICommandLoader {
     startedAt: -Infinity,
     steadyUntil: 0,
   };
+  // Who hears the Mods adopt another session.
+  private readonly sessionListeners = new Set<() => void>();
   // The transcript rows the Mods draw, one render at a time in the queue.
   private readonly rows = new ModRows(
     (task) => {
@@ -453,6 +458,7 @@ export class ModSession implements ICommandLoader {
                 ? modelSignal
                 : AbortSignal.abort(),
             ),
+          new ModStore(path.join(Storage.getGlobalQwenDir(), 'mods', 'store')),
         );
         this.mods.push(
           ...ordered.map(({ extension }) => ({
@@ -579,6 +585,9 @@ export class ModSession implements ICommandLoader {
       this.sessionId = current;
       // Rows are the old session's transcript.
       this.rows.clear();
+      // A transcript that took the new session's id before this adoption
+      // offers its rows again now.
+      for (const listener of this.sessionListeners) listener();
       // The Mods' prompts and the turns they started belong to the old one.
       this.submitted.length = 0;
       this.modTurns = 0;
@@ -703,6 +712,17 @@ export class ModSession implements ICommandLoader {
       this.flushLogs();
     }
   }
+
+  /** The session whose transcript rows the Mods draw. */
+  get rowSession(): string {
+    return this.sessionId;
+  }
+
+  /** Hears each adoption of another session, after its rows were cleared. */
+  readonly subscribeSession = (listener: () => void): (() => void) => {
+    this.sessionListeners.add(listener);
+    return () => this.sessionListeners.delete(listener);
+  };
 
   /**
    * Shows a transcript row the Mods may draw, calling `listener` when what it
