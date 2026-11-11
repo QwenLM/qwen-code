@@ -343,7 +343,11 @@ import {
   pendingSessionInputs,
   type PendingSessionInput,
 } from './hosted-wake-intake.js';
-import { LOOP_INPUT_SOURCE } from './hosted-loop-session.js';
+import {
+  HostedLoopSession,
+  LOOP_INPUT_SOURCE,
+  type HostedLoopClassifier,
+} from './hosted-loop-session.js';
 import { ManagedHookActivationController } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-activation.js';
 import {
   parseHookExecution,
@@ -740,6 +744,12 @@ interface HostedSession {
   monitors?: HostedMonitorSession;
   /** H6: the Session's automation definitions and runs, on every profile. */
   automations?: HostedAutomationSession;
+  /** Self-paced /loop wakeups: the Session's single unfired loop input. */
+  loops?: HostedLoopSession;
+  /** The active turn's permission classifier, adapted for loop arming; the
+   * model turn refreshes it so a wakeup is vetted by the same classifier
+   * that vets the turn's other side-effectful tools. */
+  loopClassify?: HostedLoopClassifier;
   childAgents?: HostedChildAgentSession;
   /** H4d-b: the Session's messages along its lineage, beside its children. */
   messages?: HostedSessionMessageSession;
@@ -4167,6 +4177,9 @@ async function executeHostedTurn(
                   excludedPromptIds: unansweredPrompts(session),
                   classifierUserText: () =>
                     readHostedClassifierUserText(session),
+                  setLoopClassifier: (classify) => {
+                    session.loopClassify = classify;
+                  },
                   commitCompression: async (payload) => {
                     await session.managed.sink.write(
                       record(session, sessionId, 'system', null, {
@@ -6769,6 +6782,28 @@ export function registerHostedHarnessSessionRoutes(
           shellAvailable: () =>
             isHostedWorkspaceShellProfile(session.toolProfile),
           hooksConfigured: () => session.hooks !== undefined,
+        },
+      );
+      // Self-paced /loop: every hosted Session owns its wakeup funnel — a
+      // wakeup is a journal input the wake pump defers to its notBefore. The
+      // arm-time review rides the active turn's permission classifier; with
+      // none active the arm is refused rather than admitted unreviewed.
+      session.loops = new HostedLoopSession(
+        {
+          authority: managed.authority,
+          resources: managed.resources,
+          sink: managed.sink,
+        },
+        managed.authority.sessionHeader.sessionKey,
+        {
+          cwd: session.cwd,
+          classify: (input) =>
+            session.loopClassify
+              ? session.loopClassify(input)
+              : Promise.resolve({
+                  allowed: false,
+                  reason: 'No active permission classifier for loop arming.',
+                }),
         },
       );
       // H5b: every hosted Session owns its channel funnel — a channel input

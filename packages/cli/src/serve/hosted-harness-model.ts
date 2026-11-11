@@ -21,6 +21,8 @@ import { captureManagedContext } from '@qwen-code/qwen-code-core/managed-runtime
 
 import type { Content, Part } from '@google/genai';
 import { classifyAction } from '@qwen-code/qwen-code-core/permissions/classifier.js';
+import type { ClassifierResult } from '@qwen-code/qwen-code-core/permissions/classifier.js';
+import type { HostedLoopClassifier } from './hosted-loop-session.js';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   runWithRuntimeContentGenerator,
@@ -260,6 +262,9 @@ export async function runHostedHarnessTextTurn(input: {
   history: readonly ChatRecord[];
   excludedPromptIds?: ReadonlySet<string>;
   classifierUserText?: () => Promise<ReadonlyMap<string, string>>;
+  /** Publishes this turn's permission classifier, adapted for loop arming,
+   * to the Session; cleared when the turn ends. */
+  setLoopClassifier?: (classify: HostedLoopClassifier | undefined) => void;
   commitCompression?: (payload: ChatCompressionRecordPayload) => Promise<void>;
   prompt: string;
   attachmentParts?: readonly Part[];
@@ -781,7 +786,10 @@ async function runPreparedHostedHarnessTextTurn(
     }
     let originalUserText: Promise<ReadonlyMap<string, string>> | undefined;
     const classifierActions: Content[] = [];
-    input.toolTurn?.setPermissionClassifier?.(async (call, signal) => {
+    const permissionClassifier = async (
+      call: ToolCallRequestInfo,
+      signal: AbortSignal,
+    ): Promise<ClassifierResult> => {
       originalUserText ??=
         input.classifierUserText?.() ??
         Promise.resolve(new Map([[input.promptId, input.prompt]]));
@@ -846,6 +854,26 @@ async function runPreparedHostedHarnessTextTurn(
         ],
       });
       return result;
+    };
+    input.toolTurn?.setPermissionClassifier?.(permissionClassifier);
+    // Loop arming rides the same classifier: a wakeup is future model input,
+    // so it is vetted like the turn's other side-effectful tools. Fail closed
+    // when the classifier blocks or is unavailable.
+    input.setLoopClassifier?.(async ({ delaySeconds, prompt, reason }) => {
+      const result = await permissionClassifier(
+        {
+          callId: randomUUID(),
+          name: 'loop_wakeup',
+          args: { delaySeconds, prompt, reason },
+          isClientInitiated: false,
+          prompt_id: input.promptId,
+        },
+        input.signal,
+      );
+      return {
+        allowed: !result.shouldBlock && !result.unavailable,
+        reason: result.reason || null,
+      };
     });
     // Safe mode stays on; the Session's Workspace instructions arrive through
     // the context slot instead of the Harness host's filesystem. The loop below
