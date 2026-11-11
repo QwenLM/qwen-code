@@ -25382,6 +25382,9 @@ export function App({
               <div
                 className={[
                   styles.chatViewWrap,
+                  pendingToolApproval && mainView === 'chat'
+                    ? styles.chatViewWithApproval
+                    : undefined,
                   hasMobileComposerBottom
                     ? styles.chatViewWithMobileComposerBottom
                     : undefined,

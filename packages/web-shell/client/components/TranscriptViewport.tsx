@@ -457,10 +457,11 @@ export const TranscriptViewport = forwardRef<
       load(edge);
   };
 
+  // Approval centers global navigation against the outer chat wrap instead.
   return (
     <div
       ref={root}
-      className={`${styles.root} relative flex min-h-0 flex-1`}
+      className={`${styles.root} ${globalNavigation && props.pendingApproval ? 'static' : 'relative'} flex min-h-0 flex-1`}
       data-history-viewport={historical ? 'historical' : 'live'}
     >
       {!props.hideSessionTimeline &&

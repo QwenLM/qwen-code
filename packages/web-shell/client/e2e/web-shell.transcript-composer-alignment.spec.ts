@@ -3,6 +3,7 @@ import {
   assistantTextEvent,
   createWebShellDaemonScenario,
   installMockDaemon,
+  permissionRequestEvent,
   replayCompleteEvent,
   turnCompleteEvent,
   userTextEvent,
@@ -293,3 +294,67 @@ for (const navigation of [true, false]) {
     });
   });
 }
+
+test('global timeline stays centered with a permission request @smoke', async ({
+  page,
+  baseURL,
+}, testInfo) => {
+  await page.setViewportSize({ width: 1600, height: 900 });
+  const turnCount = 6;
+  const scenario = createWebShellDaemonScenario({
+    events: [
+      ...Array.from({ length: turnCount }, (_, index) => [
+        userTextEvent('What is the weather?', { id: index * 3 + 1 }),
+        assistantTextEvent(
+          index < turnCount - 1 ? 'Earlier forecast.' : 'Final forecast.',
+          { id: index * 3 + 2 },
+        ),
+        turnCompleteEvent(`prompt-alignment-${index}`, { id: index * 3 + 3 }),
+      ]).flat(),
+      permissionRequestEvent('timeline-permission', { id: turnCount * 3 + 1 }),
+    ],
+  });
+  scenario.capabilities.features.push('session_turn_navigation');
+  const daemon = await installMockDaemon(page, scenario, {
+    baseURL: String(testInfo.project.use.baseURL),
+  });
+  await page.route(`${baseURL}/**`, async (route) => {
+    const url = new URL(route.request().url());
+    if (!url.pathname.endsWith('/turn-index')) return route.fallback();
+    await route.fulfill({
+      json: {
+        v: 1,
+        sessionId: scenario.sessionId,
+        snapshot: 'mock-snapshot',
+        totalTurns: turnCount,
+        start: 0,
+        turns: Array.from({ length: turnCount }, (_, ordinal) => ({
+          ordinal,
+          turnId: `record-${ordinal}`,
+          kind: 'prompt',
+          label: 'What is the weather?',
+          detail: 'The weather report includes the weekly forecast.',
+        })),
+      },
+    });
+  });
+  await page.goto(
+    `/session/${encodeURIComponent(scenario.sessionId)}?theme=light`,
+  );
+  await expect(page.locator('[data-web-shell-root]')).toBeVisible();
+  const connection = await daemon.sse.waitForConnection(scenario.sessionId);
+  await daemon.sendEvent(
+    replayCompleteEvent({
+      sessionId: connection.sessionId,
+      replayedCount: scenario.events.length,
+    }),
+  );
+  await expect(page.getByText('Loading...')).toHaveCount(0);
+
+  const rail = page.locator('[data-global-turn-navigation]');
+  const approval = page.locator('[data-web-shell-permission-panel]');
+  const chatLayout = page.locator('[class*="chatViewWrap"]');
+  await expect(rail).toBeVisible();
+  await expect(approval).toBeVisible();
+  await expectTimelineVerticallyCentered(rail, chatLayout);
+});
