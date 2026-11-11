@@ -138,7 +138,7 @@ A **plain single click** on an http(s) OSC 8 hyperlink in the viewport opens it 
 
 Terminal support varies, and qwen-code cannot compensate for a terminal that never delivers mouse events:
 
-- **Apple Terminal.app** does not implement xterm mouse reporting at all, so none of the mouse interactions above reach qwen-code: dragging selects with Terminal.app's own selection, and copying and pasting stay native (`Cmd+C` / `Cmd+V`). Use `Ctrl+V` to paste through qwen-code instead — it runs the same image-first paste path as the in-app right-click, so clipboard images are attached as well as text.
+- **Apple Terminal.app** has **View > Allow Mouse Reporting**, but in our macOS testing its mouse reporting did not deliver the drag/right-click events OpenTUI needs. In that setup, dragging uses Terminal.app's own selection, and copy/paste stay native (`Cmd+C` / `Cmd+V`); use `Ctrl+V` to paste through qwen-code, which runs the same image-first path as the in-app right-click. If your Terminal version and settings do forward those events, the in-app selection, right-click clear, and right-click paste work as described above; otherwise keep using the native selection and `Ctrl+V`.
 - **iTerm2** forwards drags, so selection auto-copy works, but it opens its own context menu on right-click even while mouse reporting is on. Use the menu's **Paste** or `Ctrl+V` in place of the in-app right-click paste; the menu's Paste only carries text, while `Ctrl+V` also handles clipboard images.
 
 The in-app right-click paste requires a terminal that forwards right-click events to the application.

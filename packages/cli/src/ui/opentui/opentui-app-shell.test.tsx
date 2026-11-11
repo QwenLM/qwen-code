@@ -153,6 +153,8 @@ const mocks = vi.hoisted(() => {
     loadingProps: null as Record<string, unknown> | null,
     keyboardHandlers: [] as Array<(key: unknown) => void>,
     selectionText: null as string | null,
+    selectionContainer: null as Element | null,
+    selectionRenderables: null as Element[] | null,
     clearSelection: vi.fn(),
     exitInProgress: false,
     /** Runs while a dispatched command is still awaiting its outcome. */
@@ -225,10 +227,18 @@ vi.mock('@opentui/react', () => ({
     on: () => {},
     off: () => {},
     getSelectionContainer: () =>
-      mocks.state.selectionText ? document.querySelector('scrollbox') : null,
+      mocks.state.selectionText
+        ? (mocks.state.selectionContainer ??
+          document.querySelector('scrollbox'))
+        : null,
     getSelection: () =>
       mocks.state.selectionText
-        ? { getSelectedText: () => mocks.state.selectionText }
+        ? {
+            getSelectedText: () => mocks.state.selectionText,
+            selectedRenderables: mocks.state.selectionRenderables ?? [
+              document.querySelector('scrollbox')!,
+            ],
+          }
         : null,
     clearSelection: mocks.state.clearSelection,
   }),
@@ -556,6 +566,8 @@ describe('OpenTuiApp shell wiring', () => {
     mocks.state.loadingProps = null;
     mocks.state.keyboardHandlers.length = 0;
     mocks.state.selectionText = null;
+    mocks.state.selectionContainer = null;
+    mocks.state.selectionRenderables = null;
     mocks.state.clearSelection.mockClear();
     mocks.state.exitInProgress = false;
     mocks.state.onHandle = null;
@@ -4682,6 +4694,8 @@ describe('OpenTuiApp approval-mode cycling (F-2)', () => {
     mocks.state.hooksAddInfo = null;
     mocks.state.handleProjectHooksApprovalSelect.mockClear();
     mocks.state.selectionText = null;
+    mocks.state.selectionContainer = null;
+    mocks.state.selectionRenderables = null;
     mocks.state.clearSelection.mockClear();
   });
 
@@ -4830,6 +4844,50 @@ describe('OpenTuiApp approval-mode cycling (F-2)', () => {
     fireEvent.mouseDown(document.querySelector('scrollbox')!, { button: 2 });
     expect(mocks.state.clearSelection).toHaveBeenCalledTimes(1);
     expect(pasteClipboard).not.toHaveBeenCalled();
+  });
+
+  it('clears a cross-region selection when a selected renderable stays in the transcript', async () => {
+    const pasteClipboard = vi.fn();
+    renderApp({
+      composerHandle: {
+        current: {
+          getText: () => '',
+          setText: () => {},
+          pasteClipboard,
+        },
+      },
+    });
+    await settle();
+    const scrollbox = document.querySelector('scrollbox')!;
+    mocks.state.selectionText = 'selected text';
+    mocks.state.selectionContainer = document.body;
+    mocks.state.selectionRenderables = [scrollbox];
+
+    fireEvent.mouseDown(scrollbox, { button: 2 });
+    expect(mocks.state.clearSelection).toHaveBeenCalledTimes(1);
+    expect(pasteClipboard).not.toHaveBeenCalled();
+  });
+
+  it('pastes when every selected renderable is outside the transcript', async () => {
+    const pasteClipboard = vi.fn();
+    renderApp({
+      composerHandle: {
+        current: {
+          getText: () => '',
+          setText: () => {},
+          pasteClipboard,
+        },
+      },
+    });
+    await settle();
+    const footer = screen.getByText('footer');
+    mocks.state.selectionText = 'footer text';
+    mocks.state.selectionContainer = footer;
+    mocks.state.selectionRenderables = [footer];
+
+    fireEvent.mouseDown(footer, { button: 2 });
+    expect(pasteClipboard).toHaveBeenCalledTimes(1);
+    expect(mocks.state.clearSelection).not.toHaveBeenCalled();
   });
 
   it('pastes the clipboard on right-click outside the transcript', async () => {

@@ -762,11 +762,17 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
       ) {
         return;
       }
+      const selection = renderer.getSelection?.();
       const selectionContainer = renderer.getSelectionContainer?.();
+      const transcript = transcriptScrollRef.current;
+      const selectedInTranscript = (selection?.selectedRenderables ?? []).some(
+        (node) => transcript && isRenderableWithin(node, transcript),
+      );
       const hasSelection = Boolean(
-        selectionContainer &&
-          transcriptScrollRef.current &&
-          isRenderableWithin(selectionContainer, transcriptScrollRef.current),
+        transcript &&
+          (selectedInTranscript ||
+            (selectionContainer &&
+              isRenderableWithin(selectionContainer, transcript))),
       );
       handleTranscriptRightClick(event, {
         hasSelection,
