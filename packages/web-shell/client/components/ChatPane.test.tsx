@@ -1903,6 +1903,14 @@ describe('ChatPane', () => {
     });
     expect(latestChatEditorProps.currentModel).toBe('pane-model');
 
+    const initialScope = latestChatEditorProps.modelPickerScope;
+    messagesState = [
+      ...messagesState,
+      { id: 'm2', role: 'assistant', content: 'Streaming delta' },
+    ];
+    rerender({ workspaceCwd: '/pane-workspace' });
+    expect(latestChatEditorProps.modelPickerScope).toBe(initialScope);
+
     connectionState.sessionId = 'other-pane-session';
     rerender({ workspaceCwd: '/other-pane-workspace' });
     expect(latestChatEditorProps.modelPickerScope).toEqual({
