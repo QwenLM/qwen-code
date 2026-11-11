@@ -309,18 +309,18 @@ const runnerOn = (job, runner) => {
 it('gives the shared Linux test lane one ceiling on both pools', () => {
   // The unsharded suite outgrew 60 minutes on hosted runners: on 2026-10-17,
   // 17 of the 30 hosted runs that ended on their own were cancelled at 60.
-  // Each shard runs an eighth of it, beside one build of the tree.
+  // Each shard runs half of it, beside one build of the tree.
   for (const runner of [ECS_RUNNER, HOSTED_RUNNER, '']) {
     expect(timeoutMinutesOn('test_build', runner)).toBe(45);
     expect(timeoutMinutesOn('test', runner)).toBe(60);
   }
   expect(ci.jobs.test.strategy['fail-fast']).toBe(false);
-  expect(ci.jobs.test.strategy.matrix.shard).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+  expect(ci.jobs.test.strategy.matrix.shard).toEqual([1, 2]);
 });
 
 it('skips every build-consuming shard step when test_build failed', () => {
   // `!cancelled()` is true when a needed job fails, so without this term a
-  // failed build still starts all eight shards: each pays a full install and
+  // failed build still starts both shards: each pays a full install and
   // then dies at the missing artifact, and every shard reports artifact
   // plumbing as its failing step instead of the build that broke. The steps
   // are gated, not the job or the matrix: `test_ubuntu` compares
@@ -407,6 +407,12 @@ it('reports the required Linux check only when the build and every shard pass', 
   expect(run.env.UNIT_TEST_SHARD).toBe(
     `\${{ matrix.shard }}/${ci.jobs.test.strategy.matrix.shard.length}`,
   );
+  // The per-shard job names publish the same denominator to the check list,
+  // the developer docs and the autofix evidence lane. Derive it from the
+  // matrix so a retune cannot widen the matrix while the name stays behind.
+  expect(ci.jobs.test.name).toBe(
+    `Linux unit tests (shard \${{ matrix.shard }}/${ci.jobs.test.strategy.matrix.shard.length})`,
+  );
 });
 
 it('pins the build-to-shard artifact handoff on both ends', () => {
@@ -425,13 +431,13 @@ it('pins the build-to-shard artifact handoff on both ends', () => {
   expect(archive).not.toContain('git ls-files');
 
   // Four coupled literals tie the producer to the consumers. Renaming any one
-  // fails all eight shards at unpack after a full build, on the required
+  // fails both shards at unpack after a full build, on the required
   // check, so the name has to be pinned in one place.
   const name = built.get('Upload the built tree').with.name;
   expect(name).toBeTruthy();
   expect(shard.get('Download the built tree').with.name).toBe(name);
   expect(shard.get('Retry downloading the built tree').with.name).toBe(name);
-  // Both attempts have to outlast the slow tail, not the median: eight shards
+  // Both attempts have to outlast the slow tail, not the median: two shards
   // fetch this same artifact at once, the slowest completed one on main took
   // just under five minutes, and one exceeded the old five-minute cap on two
   // runs in a row, skipping the unpack entirely.
@@ -553,15 +559,18 @@ it('routes the browser smoke to ARM64 independently of the shared Linux test lan
   const smoke = ci.jobs.web_shell_e2e_smoke.steps.find(
     (step) => step.name === 'Run web-shell browser smoke',
   );
-  // Each of the four shards runs a quarter of the smoke at the hosted
+  // Each of the two shards runs half of the smoke at the hosted
   // worker count; the transcript gate runs once, on the first shard.
   expect(smoke.run).toMatch(
-    / -- --shard=\$\{\{ matrix\.shard \}\}\/4 --workers=2$/,
+    / -- --shard=\$\{\{ matrix\.shard \}\}\/2 --workers=2$/,
   );
-  expect(ci.jobs.web_shell_e2e_smoke.strategy.matrix.shard).toEqual([
-    1, 2, 3, 4,
-  ]);
+  expect(ci.jobs.web_shell_e2e_smoke.strategy.matrix.shard).toEqual([1, 2]);
   expect(ci.jobs.web_shell_e2e_smoke.strategy['fail-fast']).toBe(false);
+  // Same denominator contract as the unit lane: the per-shard name must
+  // track the matrix, not sit behind it on the next retune.
+  expect(ci.jobs.web_shell_e2e_smoke.name).toBe(
+    `web-shell E2E Smoke (shard \${{ matrix.shard }}/${ci.jobs.web_shell_e2e_smoke.strategy.matrix.shard.length})`,
+  );
   const result = ci.jobs.web_shell_e2e_smoke_result;
   expect(result.name).toBe('web-shell E2E Smoke (ubuntu-latest, Node 22.x)');
   expect(result.needs).toEqual([
@@ -596,11 +605,12 @@ it('routes the browser smoke to ARM64 independently of the shared Linux test lan
   expect(transcript.env.TMPDIR).toBe('${{ runner.temp }}');
   expect(transcript.if).toBe('${{ matrix.shard == 1 }}');
   // Slow hosted browser installs took over 23 min, so reserve time in the
-  // 60-minute job for transcript/smoke tests and artifact upload, while the
-  // install step itself stays bounded.
-  expect(timeoutMinutesOn('web_shell_e2e_smoke', ECS_RUNNER)).toBe(60);
-  expect(timeoutMinutesOn('web_shell_e2e_smoke', HOSTED_RUNNER)).toBe(60);
-  expect(timeoutMinutesOn('web_shell_e2e_smoke', '')).toBe(60);
+  // 75-minute job for transcript/smoke tests and artifact upload, while the
+  // install step itself stays bounded. Two shards run half the suite each,
+  // so the cap carries the headroom the four-way split had at 60.
+  expect(timeoutMinutesOn('web_shell_e2e_smoke', ECS_RUNNER)).toBe(75);
+  expect(timeoutMinutesOn('web_shell_e2e_smoke', HOSTED_RUNNER)).toBe(75);
+  expect(timeoutMinutesOn('web_shell_e2e_smoke', '')).toBe(75);
   const hostedInstall = ci.jobs.web_shell_e2e_smoke.steps.find(
     (step) => step.name === 'Install Playwright Chromium and WebKit (hosted)',
   );
@@ -1087,10 +1097,45 @@ describe('post-merge push lane', () => {
         '',
       );
     expect(lintBase).toBe(testRun);
+    // The lint prelude installs on docs_only as well as full so the Prettier
+    // lane can run there (#16872); test's prelude stays full-gated because a
+    // docs-only change runs no test payload. The `if` is the only field that
+    // diverges for these steps — pin the divergence exactly below and compare
+    // everything else here. Install dependencies already strips `if` in
+    // byName (its build guard differs too), so it is not in this list.
+    const PRELUDE_IF_DIVERGENCE = [
+      'Set up Node.js 22.x (hosted)',
+      'Cache pnpm store (hosted)',
+      'Use pre-installed Node.js (self-hosted)',
+      'Configure persistent npm cache (self-hosted)',
+      'Configure npm for rate limiting',
+      'Disk floor gate (self-hosted)',
+      'Report npm cache usage (self-hosted)',
+    ];
     for (const n of shared) {
       if (n === profileStep) continue;
+      if (PRELUDE_IF_DIVERGENCE.includes(n)) continue;
       expect(l.get(n), `step "${n}" drifted between the two jobs`).toBe(
         t.get(n),
+      );
+    }
+    for (const n of PRELUDE_IF_DIVERGENCE) {
+      const testStep = stepOf('test', n);
+      const lintStep = stepOf('lint_and_static', n);
+      const { if: _testIf, ...testRest } = testStep;
+      const { if: _lintIf, ...lintRest } = lintStep;
+      expect(canon(lintRest), `${n} drifted beyond its gate`).toEqual(
+        canon(testRest),
+      );
+      expect(
+        String(testStep.if),
+        `${n}: test prelude must stay full-gated`,
+      ).toContain("steps.ci_profile.outputs.ci_profile == 'full'");
+      expect(String(lintStep.if), `${n}: lint gate widened off contract`).toBe(
+        String(testStep.if).replace(
+          "steps.ci_profile.outputs.ci_profile == 'full'",
+          "(steps.ci_profile.outputs.ci_profile == 'full' || steps.ci_profile.outputs.ci_profile == 'docs_only')",
+        ),
       );
     }
     // The exemption above is only for the field that must differ: the shard
@@ -1100,6 +1145,14 @@ describe('post-merge push lane', () => {
     );
     expect(String(install('lint_and_static')?.if ?? '')).not.toContain(
       'needs.test_build',
+    );
+    // Positive pin on the widening this lane depends on: byName strips the
+    // install `if` (the build guard differs) and PRELUDE_IF_DIVERGENCE excludes
+    // Install, so without this assertion deleting the `|| docs_only` arm here
+    // would pass every suite while silently dropping the install that provides
+    // Prettier on docs_only (#16872).
+    expect(String(install('lint_and_static')?.if ?? '')).toBe(
+      "${{ needs.classify_pr.outputs.skip_ci != 'true' && (steps.ci_profile.outputs.ci_profile == 'full' || steps.ci_profile.outputs.ci_profile == 'docs_only') }}",
     );
     // Name-keyed maps are order-blind, and order is load-bearing here: the
     // `steps` context only exposes steps that have already run, and a
@@ -1566,13 +1619,22 @@ describe('post-merge push lane', () => {
     ).toEqual([...FULL_PAYLOAD].sort());
     // Whole literal, not the `ci_profile == 'full'` substring filtered above:
     // an appended `&&` clause still matches that substring while dropping the
-    // step from the unattended post-merge lane. All 15 gates are identical.
+    // step from the unattended post-merge lane. Fourteen gates are identical;
+    // Run Prettier also runs on docs_only, because the post-merge push lint
+    // checks every file with the lockfile's Prettier and a profile that skips
+    // this lane lets a formatting-only break merge green and redden main
+    // (#16872). Its widened gate still contains the `ci_profile == 'full'`
+    // substring, so it stays in FULL_PAYLOAD above; only the literal differs.
     const FULL_GATE =
       "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}";
+    const PRETTIER_GATE =
+      "${{ needs.classify_pr.outputs.skip_ci != 'true' && (steps.ci_profile.outputs.ci_profile == 'full' || steps.ci_profile.outputs.ci_profile == 'docs_only') }}";
     for (const n of FULL_PAYLOAD) {
       const step = stepByName.get(n);
       expect(testNames.has(n), `${n} leaked back into test`).toBe(false);
-      expect(String(step.if), `${n} gate drifted`).toBe(FULL_GATE);
+      expect(String(step.if), `${n} gate drifted`).toBe(
+        n === 'Run Prettier' ? PRETTIER_GATE : FULL_GATE,
+      );
       expect(
         String(step.run ?? ''),
         `${n} no longer runs its load-bearing command`,
@@ -1885,7 +1947,8 @@ describe('GitHub helper tests', () => {
 
   it('keeps the dependency-free fast lane off npm-package suites', () => {
     // The github_ci_only helper step runs before ANY dependency install (the
-    // setup-node and `npm ci` steps are gated on the full profile), so every
+    // setup-node and install steps are gated on the full and docs_only
+    // profiles, not github_ci_only), so every
     // suite it lists must import node: builtins only. These 11 suites import
     // the `yaml` npm package; letting the fast lane run the full list made an
     // ECS-updater-only fork PR fail closed with ERR_MODULE_NOT_FOUND on a

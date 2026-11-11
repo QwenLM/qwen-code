@@ -313,7 +313,7 @@ export type ChatRecordProvenance =
   | 'mod_prompt';
 
 export type RecordToolResultOptions = {
-  subtype?: 'code_mode_tool_result';
+  subtype?: 'code_mode_tool_result' | 'tool_loop_end';
 } & (
   | {
       goalContext?: GoalTurnPermit;
@@ -462,6 +462,7 @@ export interface ChatRecord {
     | 'goal_runtime'
     | 'goal_turn_end'
     | 'code_mode_tool_result'
+    | 'tool_loop_end'
     | 'realtime_message'
     | 'turn_result'
     | 'turn_attempt'

@@ -6,6 +6,7 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiRegistration;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
@@ -65,7 +66,7 @@ class WorkspaceCsiNativeActivationGateTest {
     private JdbcRuntimeBindingRepository bindings;
     private JdbcRuntimeSessionRepository sessions;
     private JdbcToolExecutionRepository executions;
-    private ManagedSessionStore journal;
+    private JdbcManagedSessionStore journal;
     private RuntimeProvisionRequest request;
     private RuntimeBindingRecord binding;
     private WorkspaceCsiReservationStore reservations;
@@ -100,14 +101,14 @@ class WorkspaceCsiNativeActivationGateTest {
                 CsiFilesRetirementProfile.CONFIG_REF, CsiFilesRetirementProfile.POLICY_REF);
         jdbc.update(
                 "INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
-                        + " VALUES ('tenant', 'workspace', ?, 'OPERATOR')", com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey("tenant", "actor"));
+                        + " VALUES ('tenant', 'workspace', ?, 'OPERATOR')", ManagedWorkspaceRegistry.actorKey("tenant", "actor"));
         var properties = new ManagedAgentProperties();
         properties.setAgentRevision("reviewed-agent/1");
         sessionId = com.alibaba.qwen.code.managedagent.persistence.PrivateCsiFixture.create(jdbc, manager, JSON, properties,
                 new com.alibaba.qwen.code.managedagent.contracts.workspace.PrivateCsiSession.Request(registration, "actor", "create", null, null,
                         new WorkspaceSelection("workspace", "."))).sessionId();
         var managed = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, JSON, Clock.systemUTC(), ignored -> {},
-                new ManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+                new JdbcManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         request = transaction.execute(status -> managed.requireCsiRequest(registration, sessionId));
         if (method.contains("LegacyProfile")) {
             var legacy = CsiFilesRetirementProfile.request(new com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding(
@@ -331,7 +332,7 @@ class WorkspaceCsiNativeActivationGateTest {
                     .map(row -> JSON.valueToTree(new TreeMap<>(row)).toString()).sorted().toList());
         }
         assertThat(rows).containsKeys("ma_delivery", "ma_session", "ma_session_head", "ma_request_receipt");
-        assertThat(rows).hasSize(41);
+        assertThat(rows).hasSize(44);
         return rows;
     }
 
@@ -808,7 +809,7 @@ class WorkspaceCsiNativeActivationGateTest {
             assertThat(commit(index).replayed()).isFalse();
         }
         assertThat(jdbc.queryForObject("SELECT storage_version FROM ma_session_head", Integer.class)).isEqualTo(3);
-        var diagnostics = new ManagedExtensionRecordStore(jdbc).findModelDiagnostics("tenant", sessionId);
+        var diagnostics = new JdbcManagedExtensionRecordStore(jdbc).findModelDiagnostics("tenant", sessionId);
         assertThat(diagnostics.statistics()).isNotNull();
         assertThat(diagnostics.statistics().at("/totals/requests/total").asInt()).isEqualTo(2);
         var before = allRows();
@@ -841,131 +842,6 @@ class WorkspaceCsiNativeActivationGateTest {
             return;
         }
         throw new AssertionError("The native producer must emit a diagnostics carrier");
-    }
-
-    @Test
-    void hostedTextConversationRetirementRetainsTheExactMainModelUsageProjection() throws Exception {
-        ready();
-        for (int index = 2; index < nativeFixture.path("commits").size() - 1; index++) {
-            commit(index);
-        }
-        var intent = retire();
-        var baseline = applicationInventory(intent);
-        modelContextReference(baseline, baseline.table("ma_session_record").rows(), baseline.table("ma_resource_ref").rows());
-        assertThat(baseline.blockers()).isEmpty();
-        assertThat(baseline.table("ma_session_record").rows()).hasSize(1);
-        var projection = baseline.table("ma_session_record").rows().getFirst();
-        assertThat(projection.text("domain")).isEqualTo("hosted_context_usage");
-        assertThat(projection.number("revision")).isGreaterThan(projection.number("first_sequence"));
-        var before = allRows();
-        var reference = modelContextReference(baseline, baseline.table("ma_session_record").rows(), baseline.table("ma_resource_ref").rows());
-        assertThat(reference).isNotNull();
-        assertThat(reference.text("resource_id")).isEqualTo(projection.text("record_resource_id"));
-        assertThat(reference.number("owner_revision")).isEqualTo(projection.number("revision"));
-        assertThat(reference.number("journal_revision")).isNull();
-        assertThat(applicationInventory(intent).bytes()).isEqualTo(baseline.bytes());
-        assertThat(allRows()).isEqualTo(before);
-    }
-
-    @Test
-    void hostedTextConversationActivityDiagnosticsRetireWithVerifiedDerivedRows() throws Exception {
-        ready();
-        for (int index = 2; index < nativeFixture.path("commits").size() - 1; index++) {
-            commit(index);
-        }
-        var head = journal.restore("tenant", "workspace", sessionId, token);
-        assertThat(head.storageVersion()).isEqualTo(4);
-        var intent = retire();
-        var baseline = applicationInventory(intent);
-        assertThat(baseline.blockers()).isEmpty();
-        assertThat(baseline.table("ma_session_record").rows().stream().map(row -> row.text("domain")))
-                .contains("hosted_activity_statistics");
-        var edges = CsiActivityDiagnosticProjection.references(baseline.table("ma_session_journal_tx").rows(),
-                baseline.table("ma_session_record").rows(), baseline.table("ma_resource").rows(),
-                baseline.table("ma_resource_ref").rows(), request, Long.MAX_VALUE);
-        assertThat(edges).hasSize(1);
-        var before = allRows();
-        assertThat(applicationInventory(intent).bytes()).isEqualTo(baseline.bytes());
-        assertThat(allRows()).isEqualTo(before);
-    }
-
-    @Test
-    void hostedTextConversationRetirementRefusesForgedUnknownAndStaleModelUsageProjection() throws Exception {
-        ready();
-        for (int index = 2; index < nativeFixture.path("commits").size() - 1; index++) {
-            commit(index);
-        }
-        var intent = retire();
-        var baseline = applicationInventory(intent);
-        modelContextReference(baseline, baseline.table("ma_session_record").rows(), baseline.table("ma_resource_ref").rows());
-        assertThat(baseline.blockers()).isEmpty();
-        var projected = baseline.table("ma_session_record").rows();
-        var references = baseline.table("ma_resource_ref").rows();
-        var derived = modelContextReference(baseline, projected, references);
-        for (var field : projected.getFirst().fields().entrySet()) {
-            var cell = field.getValue();
-            String value = cell.kind().integral() ? Long.toString(cell.isNull() ? 1 : cell.number() + 1)
-                    : cell.kind() == WorkspaceCsiApplicationInventory.Kind.CHAR ? "f".repeat(64) : "foreign";
-            var changed = changedRow("ma_session_record", projected.getFirst(), field.getKey(), value);
-            assertThatThrownBy(() -> modelContextReference(baseline, List.of(changed), references))
-                    .as("record.%s", field.getKey()).isInstanceOf(IllegalArgumentException.class);
-        }
-        for (var field : derived.fields().entrySet()) {
-            if (field.getKey().equals("gmt_create")) {
-                continue;
-            }
-            var cell = field.getValue();
-            String value = cell.kind().integral() ? Long.toString(cell.isNull() ? 1 : cell.number() + 1)
-                    : cell.kind() == WorkspaceCsiApplicationInventory.Kind.CHAR ? "f".repeat(64) : "foreign";
-            var changed = changedRow("ma_resource_ref", derived, field.getKey(), value);
-            var crossed = references.stream().map(row -> row == derived ? changed : row).toList();
-            assertThatThrownBy(() -> modelContextReference(baseline, projected, crossed))
-                    .as("reference.%s", field.getKey()).isInstanceOf(IllegalArgumentException.class);
-        }
-        var staleRecord = changedRow("ma_session_record", projected.getFirst(), "revision",
-                Long.toString(projected.getFirst().number("revision") - 1));
-        var staleRef = changedRow("ma_resource_ref", derived, "owner_revision", Long.toString(derived.number("owner_revision") - 1));
-        assertThatThrownBy(() -> modelContextReference(baseline, List.of(staleRecord),
-                references.stream().map(row -> row == derived ? staleRef : row).toList())).isInstanceOf(IllegalArgumentException.class);
-        for (long time : List.of(0L, WorkspaceCsiApplicationImage.sole(baseline, "ma_operation").number("settlement_deadline_ms") + 1)) {
-            var changed = changedRow("ma_resource_ref", derived, "gmt_create", Long.toString(time));
-            var crossed = references.stream().map(row -> row == derived ? changed : row).toList();
-            assertThatThrownBy(() -> modelContextReference(baseline, projected, crossed)).isInstanceOf(IllegalArgumentException.class);
-        }
-        assertThatThrownBy(() -> modelContextReference(baseline, List.of(), references)).isInstanceOf(IllegalArgumentException.class);
-        assertThatThrownBy(() -> modelContextReference(baseline, List.of(projected.getFirst(), projected.getFirst()), references))
-                .isInstanceOf(IllegalArgumentException.class);
-        var duplicated = new java.util.ArrayList<>(references);
-        duplicated.add(derived);
-        assertThatThrownBy(() -> modelContextReference(baseline, projected, duplicated)).isInstanceOf(IllegalArgumentException.class);
-        assertThatThrownBy(() -> modelContextReference(baseline, projected,
-                references.stream().filter(row -> row != derived).toList())).isInstanceOf(IllegalArgumentException.class);
-        assertThatThrownBy(() -> WorkspaceCsiApplicationInventory.modelContextReference(List.of(), projected,
-                baseline.table("ma_resource").rows(), references, request,
-                WorkspaceCsiApplicationImage.sole(baseline, "ma_operation").number("settlement_deadline_ms")))
-                .isInstanceOf(IllegalArgumentException.class);
-    }
-
-    private WorkspaceCsiApplicationInventory.Snapshot applicationInventory(WorkspaceCsiReservationStore.Retirement intent) {
-        return transaction.execute(status -> jdbc.execute((org.springframework.jdbc.core.ConnectionCallback<WorkspaceCsiApplicationInventory.Snapshot>) target -> {
-            var original = JdbcCsiFilesRetirementGuard.lockBindingControl(target, binding.getBindingId());
-            return WorkspaceCsiApplicationInventory.inspect(target, original, intent);
-        }));
-    }
-
-    private WorkspaceCsiApplicationInventory.Row modelContextReference(WorkspaceCsiApplicationInventory.Snapshot baseline,
-            List<WorkspaceCsiApplicationInventory.Row> projected, List<WorkspaceCsiApplicationInventory.Row> references) {
-        return WorkspaceCsiApplicationInventory.modelContextReference(baseline.table("ma_session_journal_tx").rows(), projected,
-                baseline.table("ma_resource").rows(), references, request,
-                WorkspaceCsiApplicationImage.sole(baseline, "ma_operation").number("settlement_deadline_ms"));
-    }
-
-    private static WorkspaceCsiApplicationInventory.Row changedRow(String table, WorkspaceCsiApplicationInventory.Row row,
-            String field, String value) {
-        var values = new java.util.LinkedHashMap<String, byte[]>();
-        row.fields().forEach((name, cell) -> values.put(name, cell.bytes()));
-        values.put(field, value.getBytes(java.nio.charset.StandardCharsets.UTF_8));
-        return WorkspaceCsiApplicationInventory.expectedRow(table, values, WorkspaceCsiApplicationInventory.Membership.ORIGINAL);
     }
 
     @Test

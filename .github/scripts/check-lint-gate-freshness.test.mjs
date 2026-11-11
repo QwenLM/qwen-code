@@ -248,7 +248,14 @@ const BASE_REF = 'main';
 const blob = (s) => createHash('sha1').update(s).digest('hex');
 
 function prettierFetch(
-  { basePi, headPi, baseScope = {}, headScope = {}, truncated = false },
+  {
+    basePi,
+    headPi,
+    baseScope = {},
+    headScope = {},
+    truncated = false,
+    baseRef = BASE_REF,
+  },
   calls = [],
 ) {
   const treeFor = (scope, pi) => ({
@@ -264,11 +271,11 @@ function prettierFetch(
     ],
   });
   const trees = {
-    [BASE_REF]: treeFor(baseScope, basePi),
+    [baseRef]: treeFor(baseScope, basePi),
     [HEAD_SHA]: treeFor(headScope, headPi),
   };
   const piText = {
-    [BASE_REF]: ignoreFile(basePi),
+    [baseRef]: ignoreFile(basePi),
     [HEAD_SHA]: ignoreFile(headPi),
   };
   return {
@@ -692,16 +699,58 @@ test('an ignore file added or removed on either side blocks the narrowing', asyn
   }
 });
 
-test('a truncated tree never narrows', async () => {
+test('a truncated tree never narrows, and says so', async () => {
+  // Same principle as the extraction miss: a silent false would stop the
+  // narrowing with nothing in the log to explain the stale verdict.
+  const logged = [];
+  const original = console.log;
+  let stale;
+  console.log = (m) => logged.push(String(m));
+  try {
+    stale = await findStaleGateFiles({
+      ...PRETTIER_OPTS,
+      ...prettierFetch({
+        basePi: ['node_modules', 'packages/live-host/'],
+        headPi: ['node_modules'],
+        truncated: true,
+      }),
+    });
+  } finally {
+    console.log = original;
+  }
+  assert.equal(stale.length, 1);
+  assert.ok(
+    logged.some(
+      (m) =>
+        m.includes('could not narrow .prettierignore') &&
+        m.includes('truncated'),
+    ),
+    'a truncated tree must annotate why the verdict was kept',
+  );
+});
+
+test('a base ref containing a slash is URI-encoded in the tree path', async () => {
+  // Without encodeURIComponent the request 404s for e.g. release/1.0, the
+  // narrowing throws into the fail-closed catch and the verdict is kept — a
+  // false red rather than a false green, but silent. Pin the encoded shape.
+  const calls = [];
   const stale = await findStaleGateFiles({
     ...PRETTIER_OPTS,
-    ...prettierFetch({
-      basePi: ['node_modules', 'packages/live-host/'],
-      headPi: ['node_modules'],
-      truncated: true,
-    }),
+    baseRef: 'release/1.0',
+    ...prettierFetch(
+      {
+        basePi: ['node_modules', 'packages/live-host/'],
+        headPi: ['node_modules'],
+        baseRef: 'release/1.0',
+      },
+      calls,
+    ),
   });
-  assert.equal(stale.length, 1);
+  assert.deepEqual(stale, []);
+  assert.ok(
+    calls.some((c) => c.includes('/git/trees/release%2F1.0?recursive=1')),
+    `expected an encoded tree ref, got ${JSON.stringify(calls)}`,
+  );
 });
 
 test('an extraction miss emits the warning, not a silent false', async () => {

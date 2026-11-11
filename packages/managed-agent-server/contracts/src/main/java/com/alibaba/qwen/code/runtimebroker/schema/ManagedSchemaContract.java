@@ -20,6 +20,7 @@ public final class ManagedSchemaContract {
                     "ma_session_record",
                     "ma_agent_definition",
                     "ma_extension_package",
+                    "ma_extension_source_import",
                     "ma_extension_settings",
                     "ma_extension_operation",
                     "ma_resource",
@@ -29,6 +30,7 @@ public final class ManagedSchemaContract {
                     "ma_request_receipt",
                     "ma_memory_store",
                     "ma_memory_entry",
+                    "ma_side_query",
                     "ma_operation",
                     "ma_operation_work",
                     "ma_workspace",
@@ -44,6 +46,7 @@ public final class ManagedSchemaContract {
                     "ma_channel_instance",
                     "ma_channel_binding",
                     "ma_delivery",
+                    "ma_channel_segment",
                     "ma_schedule",
                     "ma_schedule_occurrence");
 
@@ -91,7 +94,8 @@ public final class ManagedSchemaContract {
         ACTION_DECISION,
         WORKSPACE_CREATE,
         EXTERNAL_STORAGE,
-        MEMORY
+        MEMORY,
+        SIDE_QUERY
     }
 
     public enum ReceiptScope {
@@ -123,7 +127,8 @@ public final class ManagedSchemaContract {
         OPERATION,
         OPERATION_WORK,
         RECOVERY,
-        HOSTED_CLEANUP
+        HOSTED_CLEANUP,
+        SIDE_QUERY
     }
 
     public enum DeliveryKind {

@@ -127,6 +127,7 @@ import { getTeamMemoryShareabilityWarning } from '../memory/team-memory-git-stat
 import * as runtimeStatus from '../utils/runtimeStatus.js';
 import * as sessionRegistry from '../services/session-registry.js';
 import { QwenSubscriptionSession } from '../qwen/subscription-session.js';
+import { resolveModelConfig } from '../models/modelConfigResolver.js';
 
 /**
  * A settled registration for the shared record, the shape
@@ -1244,6 +1245,45 @@ describe('Server Config (config.ts)', () => {
         expect(
           QwenSubscriptionSession.prototype.getModels,
         ).toHaveBeenCalledTimes(1);
+      },
+    );
+
+    it.each([
+      { fallback: undefined, expected: 'qwen4' },
+      { fallback: 'removed-user-model', expected: 'qwen4' },
+      { fallback: 'qwen3.8-flash', expected: 'qwen3.8-flash' },
+    ])(
+      'initializes subscription model $expected with startup fallback $fallback',
+      async ({ fallback, expected }) => {
+        const { config: generationConfig, sources } = resolveModelConfig({
+          authType: AuthType.QWEN_SUBSCRIPTION,
+          settings: { model: 'qwen4' },
+          env: {},
+        });
+        const config = makeConfig({
+          authType: AuthType.QWEN_SUBSCRIPTION,
+          model: 'qwen4',
+          generationConfig,
+          generationConfigSources: sources,
+        });
+
+        await config.refreshAuth(
+          AuthType.QWEN_SUBSCRIPTION,
+          true,
+          fallback,
+          true,
+        );
+
+        expect(config.getContentGeneratorConfig()).toMatchObject({
+          authType: AuthType.QWEN_SUBSCRIPTION,
+          model: expected,
+        });
+        expect(
+          config
+            .getAvailableModelsForAuthType(AuthType.QWEN_SUBSCRIPTION)
+            .map(({ id }) => id),
+        ).toEqual(['qwen3.8-max', 'qwen3.8-flash']);
+        expect(config.getWarnings()).toEqual([]);
       },
     );
 
@@ -8424,6 +8464,31 @@ describe('Server Config (config.ts)', () => {
       expect(config.getFastModel()).toBe(expected);
     });
 
+    it.each([true, false])(
+      'rejects a stale fast endpoint in strict mode (same-id alternative: %s)',
+      (alternative) => {
+        const config = makeConfig({
+          authType: AuthType.USE_OPENAI,
+          model: 'main',
+          fastModel: 'openai:shared\0https://removed.example/v1',
+          modelProvidersConfig: {
+            openai: [
+              {
+                id: alternative ? 'shared' : 'other',
+                baseUrl: 'https://moved.example/v1',
+              },
+            ],
+          },
+        });
+        expect(() =>
+          config.getFastModel({ requirePinnedEndpoint: true }),
+        ).toThrow('no longer configured at the selected endpoint');
+        expect(config.getFastModel()).toBe(
+          alternative ? 'openai:shared' : undefined,
+        );
+      },
+    );
+
     const readAuxModel = (
       config: Config,
       key: 'fastModel' | 'compactionModel',
@@ -8744,105 +8809,21 @@ describe('Server Config (config.ts)', () => {
     );
   });
 
-  describe('the main-session policy and the auto-memory reference (#16291)', () => {
-    /** A session that can load skills: a skill manager and a Skill tool. */
-    const withSkillTool = (config: Config) => {
-      vi.spyOn(config, 'getSkillManager').mockReturnValue(
-        {} as unknown as ReturnType<Config['getSkillManager']>,
-      );
-      vi.spyOn(config, 'getToolRegistry').mockReturnValue({
-        getAllToolNames: () => ['skill'],
-        isPermissionDeferred: () => false,
-      } as unknown as ReturnType<Config['getToolRegistry']>);
-    };
+  // Every reader gets the same policy: the main session and a subagent's
+  // derived Config, whether or not that subagent may use the Skill tool.
+  it('sends the resident policy to the session and to a derived Config', async () => {
+    const config = makeConfig();
+    loadProjectRules();
 
-    it('sends the resident policy with a pointer when the skill can be loaded', async () => {
-      const config = makeConfig();
-      withSkillTool(config);
-      loadProjectRules();
+    await config.refreshHierarchicalMemory();
 
-      await config.refreshHierarchicalMemory();
-
-      const policy = config.getAutoMemoryPrompt();
-      expect(policy).toContain('# auto memory');
-      expect(policy).toContain('load the `auto-memory` skill');
-      expect(policy).not.toContain('<types>');
-    });
-
-    it('keeps the full policy when no skill can be loaded', async () => {
-      const config = makeConfig();
-      vi.spyOn(config, 'getSkillManager').mockReturnValue(null);
-      loadProjectRules();
-
-      await config.refreshHierarchicalMemory();
-
-      const policy = config.getAutoMemoryPrompt();
-      expect(policy).toContain('<types>');
-      expect(policy).not.toContain('auto-memory');
-    });
-
-    // The session-start refresh runs before the tool registry exists, so the
-    // route must be decided when the policy is read, not when it is built.
-    it('sends the full policy once the registry turns out to have no Skill tool', async () => {
-      const config = makeConfig();
-      vi.spyOn(config, 'getSkillManager').mockReturnValue(
-        {} as unknown as ReturnType<Config['getSkillManager']>,
-      );
-      const toolNames: string[] = [];
-      vi.spyOn(config, 'getToolRegistry').mockReturnValue({
-        getAllToolNames: () => toolNames,
-        isPermissionDeferred: () => false,
-      } as unknown as ReturnType<Config['getToolRegistry']>);
-      loadProjectRules();
-
-      await config.refreshHierarchicalMemory();
-
-      expect(config.getAutoMemoryPrompt()).toContain('<types>');
-      toolNames.push('skill');
-      expect(config.getAutoMemoryPrompt()).toContain(
-        'load the `auto-memory` skill',
-      );
-    });
-
-    it('gives a derived Config with no skill manager the full policy', async () => {
-      const config = makeConfig();
-      withSkillTool(config);
-      loadProjectRules();
-      await config.refreshHierarchicalMemory();
-
-      // As buildSubagentContextOverride does for a skill-denied agent (#12424).
-      const subagent = deriveConfig(config);
-      subagent.getSkillManager = () => null;
-
-      expect(config.getAutoMemoryPrompt()).toContain(
-        'load the `auto-memory` skill',
-      );
-      expect(subagent.getAutoMemoryPrompt()).toContain('<types>');
-      expect(subagent.getAutoMemoryPrompt()).not.toContain('auto-memory');
-    });
-
-    it('does not list the bundled auto-memory skill under structured recall', () => {
-      const config = makeConfig({ enableManagedAutoMemory: true });
-      Object.assign(config, { memoryRecallMode: 'structured' });
-
-      expect(
-        config.isSkillEnabled({ name: 'auto-memory', level: 'bundled' }),
-      ).toBe(false);
-    });
-
-    it.each([
-      [true, true],
-      [false, false],
-    ])(
-      'lists the bundled auto-memory skill only with managed auto-memory (enabled: %s)',
-      (enableManagedAutoMemory, listed) => {
-        const config = makeConfig({ enableManagedAutoMemory });
-
-        expect(
-          config.isSkillEnabled({ name: 'auto-memory', level: 'bundled' }),
-        ).toBe(listed);
-      },
-    );
+    const policy = config.getAutoMemoryPrompt();
+    expect(policy).toContain('## Types and where they go');
+    expect(policy).not.toContain('<types>');
+    expect(policy).not.toContain('load the `auto-memory` skill');
+    const subagent = deriveConfig(config);
+    subagent.getSkillManager = () => null;
+    expect(subagent.getAutoMemoryPrompt()).toBe(policy);
   });
 
   it('delivers each memory tier in the request catalog while keeping indexes out of the policy', async () => {

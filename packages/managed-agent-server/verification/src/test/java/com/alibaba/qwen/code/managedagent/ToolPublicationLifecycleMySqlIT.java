@@ -7,10 +7,10 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceLifecycleStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationAdmissionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationDataStore;
-import com.alibaba.qwen.code.managedagent.persistence.WorkspaceLifecycleStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -47,6 +47,7 @@ import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.COMMI
 import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.PUBLICATION_TOKEN;
 import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.WRITER_TOKEN;
 import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.digest;
+import static com.alibaba.qwen.code.managedagent.persistence.PublicationVerification.verified;
 import static org.assertj.core.api.Assertions.assertThat;
 
 class ToolPublicationLifecycleMySqlIT {
@@ -93,7 +94,7 @@ class ToolPublicationLifecycleMySqlIT {
             envelope.set("capture", JSON.createObjectNode().put("captureStatus", "unavailable")
                     .put("captureReason", "storage_failed").put("previewTruncated", false)
                     .put("deliveryStatus", "pending").putNull("manifest"));
-            data.finish(key, "pub-1", PUBLICATION_TOKEN, "finish", envelope.toString().getBytes(StandardCharsets.UTF_8));
+            verified(data).finish(key, "pub-1", PUBLICATION_TOKEN, "finish", envelope.toString().getBytes(StandardCharsets.UTF_8));
             var outcome = JSON.createObjectNode().put("schemaVersion", 1).put("decision", "blocked").putNull("manifestRef");
             outcome.set("envelope", envelope);
             var history = JSON.createObjectNode().put("messageId", "11111111-1111-4111-8111-111111111111")
@@ -123,9 +124,9 @@ class ToolPublicationLifecycleMySqlIT {
 
             var beans = new DefaultListableBeanFactory();
             beans.registerSingleton("bindings", journal.bindings);
-            var lifecycle = new WorkspaceLifecycleStore(jdbc, JSON, beans.getBeanProvider(RuntimeBindingRepository.class));
+            var lifecycle = new JdbcWorkspaceLifecycleStore(jdbc, JSON, beans.getBeanProvider(RuntimeBindingRepository.class));
             var agents = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, JSON, Clock.systemUTC(), ignored -> {},
-                    new ManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules(), null, lifecycle);
+                    new JdbcManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules(), null, lifecycle);
             jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation,"
                     + " storage_id, display_name, config_ref, policy_ref, state)"
                     + " VALUES ('tenant-1', 'neighbor', 1, 'storage', 'Neighbor', ?, ?, 'ACTIVE')",

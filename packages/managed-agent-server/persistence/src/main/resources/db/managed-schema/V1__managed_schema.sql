@@ -259,7 +259,6 @@ CREATE TABLE ma_session_journal_tx (
     record_digest CHAR(64) NOT NULL COMMENT 'Digest of the stored transaction bytes.',
     activation_lease_until BIGINT UNSIGNED COMMENT 'Latest activation lease expiry in Unix epoch milliseconds.',
     activation_renewal_seq BIGINT UNSIGNED COMMENT 'Monotonic activation lease renewal sequence.',
-    -- WorkspaceCsiApplicationImage.ACTIVATION_OPERATIONS mirrors this CASE, so keep the two in sync.
     is_activation_record TINYINT UNSIGNED GENERATED ALWAYS AS (CASE operation WHEN 'installActivation' THEN 1 WHEN 'renewActivation' THEN 1 ELSE 0 END)
         COMMENT 'Generated flag marking the transaction that carries an activation lease.',
     gmt_create BIGINT UNSIGNED NOT NULL COMMENT 'Record creation time in Unix epoch milliseconds.',
@@ -402,8 +401,8 @@ CREATE TABLE ma_session_record (
     prompt_id VARBINARY(512) COMMENT 'Stable prompt identity used for Harness submission and retry.',
     turn_id VARBINARY(512) COMMENT 'Turn identity within the Session.',
     options_json LONGTEXT COMMENT 'Serialized choices offered by a public approval Action.',
-    CONSTRAINT ck_ma_record_kind CHECK ((CASE record_kind WHEN 'DOMAIN' THEN 6 WHEN 'ACTION' THEN 6 ELSE -1 END = CHAR_LENGTH(record_kind))),
-    CONSTRAINT ck_ma_record_role CHECK ((record_kind = 'DOMAIN' AND workspace_id IS NOT NULL AND record_resource_id IS NOT NULL) OR (record_kind = 'ACTION' AND action_id IS NOT NULL AND action_version IS NOT NULL AND options_json IS NOT NULL)),
+    CONSTRAINT ck_ma_record_kind CHECK ((CASE record_kind WHEN 'DOMAIN' THEN 6 WHEN 'ACTION' THEN 6 WHEN 'CONVERSATION' THEN 12 ELSE -1 END = CHAR_LENGTH(record_kind))),
+    CONSTRAINT ck_ma_record_role CHECK ((record_kind = 'DOMAIN' AND workspace_id IS NOT NULL AND record_resource_id IS NOT NULL) OR (record_kind = 'ACTION' AND action_id IS NOT NULL AND action_version IS NOT NULL AND options_json IS NOT NULL) OR (record_kind = 'CONVERSATION' AND domain = 'side_query_conversation' AND options_json IS NOT NULL)),
     CONSTRAINT uk_ma_action_identity UNIQUE (session_scope_key, action_id),
     CONSTRAINT uk_ma_hook_once UNIQUE (session_scope_key, hook_once_key_hash),
     CONSTRAINT uk_ma_hook_occurrence UNIQUE (session_scope_key, hook_occurrence_hash, hook_ordinal),
@@ -494,7 +493,7 @@ CREATE TABLE ma_resource_ref (
     resource_id VARBINARY(2048) COMMENT 'Resource identity within the Session scope.',
     gmt_create BIGINT UNSIGNED NOT NULL COMMENT 'Record creation time in Unix epoch milliseconds.',
     CONSTRAINT uk_ma_resource_ref_business_key UNIQUE (session_scope_key, owner_kind, owner_key, owner_revision, resource_key),
-    CONSTRAINT ck_ma_ref_owner CHECK ((CASE owner_kind WHEN 'JOURNAL' THEN 7 WHEN 'NATIVE_SNAPSHOT' THEN 15 WHEN 'CAPTURE' THEN 7 WHEN 'ARTIFACT' THEN 8 WHEN 'MESSAGE' THEN 7 WHEN 'SESSION_RECORD' THEN 14 WHEN 'EVENT_STREAM' THEN 12 WHEN 'OPERATION' THEN 9 WHEN 'OPERATION_WORK' THEN 14 WHEN 'RECOVERY' THEN 8 WHEN 'HOSTED_CLEANUP' THEN 14 ELSE -1 END = CHAR_LENGTH(owner_kind))),
+    CONSTRAINT ck_ma_ref_owner CHECK ((CASE owner_kind WHEN 'JOURNAL' THEN 7 WHEN 'NATIVE_SNAPSHOT' THEN 15 WHEN 'CAPTURE' THEN 7 WHEN 'ARTIFACT' THEN 8 WHEN 'MESSAGE' THEN 7 WHEN 'SESSION_RECORD' THEN 14 WHEN 'EVENT_STREAM' THEN 12 WHEN 'OPERATION' THEN 9 WHEN 'OPERATION_WORK' THEN 14 WHEN 'RECOVERY' THEN 8 WHEN 'HOSTED_CLEANUP' THEN 14 WHEN 'SIDE_QUERY' THEN 10 ELSE -1 END = CHAR_LENGTH(owner_kind))),
     runtime_binding_key CHAR(64) COMMENT 'Runtime binding key required for HOSTED_CLEANUP references.',
     CONSTRAINT ck_ma_ref_binding CHECK ((owner_kind = 'HOSTED_CLEANUP' AND runtime_binding_key IS NOT NULL AND owner_revision > 0) OR (owner_kind <> 'HOSTED_CLEANUP' AND runtime_binding_key IS NULL)),
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Database-generated identity of this row.',
@@ -652,7 +651,7 @@ CREATE TABLE ma_request_receipt (
     CONSTRAINT uk_ma_request_receipt_business_key UNIQUE (receipt_key),
     CONSTRAINT uk_ma_decision_slot UNIQUE (tenant_key, decision_scope_key),
     CONSTRAINT uk_ma_request UNIQUE (namespace, tenant_key, scope_key, idempotency_digest),
-    CONSTRAINT ck_ma_request_namespace CHECK ((CASE namespace WHEN 'SESSION_COMMAND' THEN 15 WHEN 'SESSION_CREATE_MODE' THEN 19 WHEN 'SESSION_CREATE_ACTOR' THEN 20 WHEN 'AGENT_DEFINITION' THEN 16 WHEN 'AUTOMATION' THEN 10 WHEN 'CHANNEL_INGRESS' THEN 15 WHEN 'ACTION_DECISION' THEN 15 WHEN 'WORKSPACE_CREATE' THEN 16 WHEN 'EXTERNAL_STORAGE' THEN 16 WHEN 'MEMORY' THEN 6 ELSE -1 END = CHAR_LENGTH(namespace))),
+    CONSTRAINT ck_ma_request_namespace CHECK ((CASE namespace WHEN 'SESSION_COMMAND' THEN 15 WHEN 'SESSION_CREATE_MODE' THEN 19 WHEN 'SESSION_CREATE_ACTOR' THEN 20 WHEN 'AGENT_DEFINITION' THEN 16 WHEN 'AUTOMATION' THEN 10 WHEN 'CHANNEL_INGRESS' THEN 15 WHEN 'ACTION_DECISION' THEN 15 WHEN 'WORKSPACE_CREATE' THEN 16 WHEN 'EXTERNAL_STORAGE' THEN 16 WHEN 'MEMORY' THEN 6 WHEN 'SIDE_QUERY' THEN 10 ELSE -1 END = CHAR_LENGTH(namespace))),
     CONSTRAINT ck_ma_request_scope CHECK ((CASE scope_kind WHEN 'TENANT' THEN 6 WHEN 'ACTOR' THEN 5 WHEN 'SESSION' THEN 7 WHEN 'CHANNEL' THEN 7 ELSE -1 END = CHAR_LENGTH(scope_kind))),
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Database-generated identity of this row.',
     CONSTRAINT pk_ma_request_receipt_id PRIMARY KEY (id),
@@ -710,7 +709,6 @@ CREATE TABLE ma_operation (
     budget_exempt_attempt INT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Attempts excluded from the ordinary retry budget.',
     deadline BIGINT UNSIGNED COMMENT 'Operation deadline in Unix epoch milliseconds.',
     recovery_deadline BIGINT UNSIGNED COMMENT 'Recovery deadline in Unix epoch milliseconds.',
-    execution_mode VARCHAR(16) NOT NULL DEFAULT 'SYNC' COMMENT 'Synchronous or asynchronous execution mode.',
     verification_request_json LONGTEXT COMMENT 'Frozen request used for asynchronous output verification.',
     is_verification_ready TINYINT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Whether asynchronous verification can be attempted.',
     verification_next_at BIGINT UNSIGNED COMMENT 'Earliest verification attempt time in Unix epoch milliseconds.',
@@ -732,7 +730,6 @@ CREATE TABLE ma_operation (
     CONSTRAINT uk_ma_operation_public_request UNIQUE (scope_key, operation_kind, target_key, actor_digest, idempotency_digest),
     CONSTRAINT uk_ma_operation_request UNIQUE (scope_key, operation_kind, target_key, actor_key, idempotency_digest),
     CONSTRAINT ck_ma_operation_generation CHECK (claim_generation >= 0 AND attempt_count >= 0 AND payload_version > 0),
-    CONSTRAINT ck_ma_operation_mode CHECK ((CASE execution_mode WHEN 'SYNC' THEN 4 WHEN 'ASYNC' THEN 5 ELSE -1 END = CHAR_LENGTH(execution_mode))),
     CONSTRAINT ck_ma_operation_kind CHECK ((CASE operation_kind WHEN 'CLOSE' THEN 5 WHEN 'ARCHIVE' THEN 7 WHEN 'DELETE' THEN 6 WHEN 'UNARCHIVE' THEN 9 WHEN 'RENAME' THEN 6 WHEN 'CWD_CHANGE' THEN 10 WHEN 'CONTEXT_COMPRESSION' THEN 19 WHEN 'ACTION_RESPONSE' THEN 15 WHEN 'TASK_CANCEL' THEN 11 WHEN 'CHILD_SESSION_START' THEN 19 WHEN 'CHILD_SESSION_CLOSE' THEN 19 WHEN 'CHILD_WORKSPACE' THEN 15 WHEN 'SESSION_WORKTREE' THEN 16 WHEN 'OUTPUT_UPLOAD' THEN 13 WHEN 'OUTPUT_VERIFY' THEN 13 WHEN 'OUTPUT_FINISH' THEN 13 WHEN 'OBJECT_PUT' THEN 10 WHEN 'TOOL_RESULT_PROJECTION' THEN 22 WHEN 'SESSION_RESOURCE_GC' THEN 19 WHEN 'CAPTURE_GC' THEN 10 WHEN 'WORKSPACE_OPERATOR_RECOVERY' THEN 27 WHEN 'WORKSPACE_RECOVERY' THEN 18 WHEN 'STORAGE_MIGRATION' THEN 17 WHEN 'CSI_RETIREMENT' THEN 14 WHEN 'CHANNEL_INGRESS' THEN 15 WHEN 'WORKSPACE_CREATE' THEN 16 WHEN 'SUBMIT_INPUT' THEN 12 WHEN 'CANCEL' THEN 6 WHEN 'WORKSPACE_RETIREMENT' THEN 20 WHEN 'WORKSPACE_UPLOAD' THEN 16 ELSE -1 END = CHAR_LENGTH(operation_kind))),
     progress_format VARCHAR(64) COMMENT 'Format identifier for durable settlement progress.',
     progress_version BIGINT UNSIGNED COMMENT 'Monotonic version of the durable settlement progress.',
@@ -763,7 +760,7 @@ CREATE INDEX idx_ma_operation_storage ON ma_operation (storage_key, operation_ki
 
 CREATE INDEX idx_ma_operation_physical ON ma_operation (physical_key, operation_kind, state);
 
-CREATE INDEX idx_ma_operation_verification ON ma_operation (operation_kind, execution_mode, state, is_verification_ready, verification_next_at);
+CREATE INDEX idx_ma_operation_verification ON ma_operation (operation_kind, state, is_verification_ready, verification_next_at);
 
 CREATE INDEX idx_ma_operation_publication ON ma_operation (scope_key, publication_id, operation_kind, state);
 
@@ -859,6 +856,20 @@ CREATE TABLE ma_workspace_access (
     CONSTRAINT pk_ma_workspace_access_id PRIMARY KEY (id)
 ) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT='Per-actor Workspace grants with READER, OPERATOR, or OWNER access.';
 
+CREATE TABLE ma_extension_source_import (
+    import_key CHAR(64) NOT NULL COMMENT 'Scoped actor source import receipt identity.',
+    tenant_id VARBINARY(512) NOT NULL COMMENT 'Tenant identity used for isolation.',
+    workspace_id VARBINARY(512) NOT NULL COMMENT 'Workspace identity within the tenant.',
+    actor_key CHAR(64) NOT NULL COMMENT 'Hashed tenant and Actor identity.',
+    operation_id VARBINARY(128) NOT NULL COMMENT 'Actor-scoped import operation identity.',
+    request_digest CHAR(64) NOT NULL COMMENT 'Source reference and target request fingerprint.',
+    request_json LONGTEXT NOT NULL COMMENT 'Original exact source reference and target, without locations or credentials.',
+    gmt_create BIGINT UNSIGNED NOT NULL COMMENT 'Receipt creation time in Unix epoch milliseconds.',
+    CONSTRAINT uk_ma_extension_source_import_business_key UNIQUE (import_key),
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Database-generated identity of this row.',
+    CONSTRAINT pk_ma_extension_source_import_id PRIMARY KEY (id)
+) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT='Source import intents retained before external I/O, paired with publication operations when prepared.';
+
 CREATE TABLE ma_extension_package (
     package_key CHAR(64) NOT NULL COMMENT 'Hashed identity of the scoped extension package revision.',
     scope_key CHAR(64) NOT NULL COMMENT 'Hashed tenant and Workspace identity.',
@@ -868,6 +879,7 @@ CREATE TABLE ma_extension_package (
     package_revision BIGINT UNSIGNED NOT NULL COMMENT 'Immutable extension package revision.',
     package_digest CHAR(64) NOT NULL COMMENT 'Digest of the extension package content.',
     manifest_json LONGTEXT NOT NULL COMMENT 'Validated extension package manifest.',
+    source_json LONGTEXT NULL COMMENT 'External source identity, exact business revision and verified source digest, null for direct uploads.',
     byte_length BIGINT UNSIGNED NOT NULL COMMENT 'Total published package size in bytes.',
     state VARCHAR(16) NOT NULL COMMENT 'Package publication state: PREPARING or PUBLISHED.',
     gmt_create BIGINT UNSIGNED NOT NULL COMMENT 'Record creation time in Unix epoch milliseconds.',
@@ -1241,6 +1253,72 @@ CREATE INDEX idx_ma_delivery_channel ON ma_delivery (tenant_id, channel_id, clai
 
 CREATE INDEX idx_ma_delivery_session ON ma_delivery (source_scope_key, delivery_kind, consumption_state);
 
+CREATE TABLE ma_channel_segment (
+    delivery_key CHAR(64) NOT NULL COMMENT 'Parent ma_delivery.delivery_key of the CHANNEL delivery.',
+    tenant_id VARBINARY(512) NOT NULL COMMENT 'Tenant identity used for isolation.',
+    channel_id VARBINARY(512) NOT NULL COMMENT 'External channel instance identity within the tenant.',
+    segment_id VARBINARY(512) NOT NULL COMMENT 'Stable segment identity from the delivery record plan.',
+    segment_ordinal BIGINT UNSIGNED NOT NULL COMMENT 'Ordering position of the segment within the delivery.',
+    provider_receipt_json LONGTEXT COMMENT 'Write-once provider receipt for the segment, null until receipted.',
+    gmt_create BIGINT UNSIGNED NOT NULL COMMENT 'Record creation time in Unix epoch milliseconds.',
+    gmt_modified BIGINT UNSIGNED NOT NULL COMMENT 'Last record update time in Unix epoch milliseconds.',
+    CONSTRAINT uk_ma_channel_segment_identity UNIQUE (delivery_key, segment_id),
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Database-generated identity of this row.',
+    CONSTRAINT pk_ma_channel_segment_id PRIMARY KEY (id)
+) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT='Per-segment identities and write-once provider receipts of a channel delivery.';
+
+CREATE INDEX idx_ma_channel_segment_delivery ON ma_channel_segment (delivery_key, segment_ordinal);
+
+CREATE TABLE ma_side_query (
+    query_key CHAR(64) NOT NULL COMMENT 'Hashed tenant and query identity.',
+    query_id VARBINARY(512) NOT NULL COMMENT 'Public actor-private side query identity.',
+    tenant_id VARBINARY(512) NOT NULL COMMENT 'Tenant identity used for isolation.',
+    session_id VARBINARY(512) NOT NULL COMMENT 'Managed Session identity.',
+    session_scope_key CHAR(64) NOT NULL COMMENT 'Hashed tenant and Session identity.',
+    actor_id VARBINARY(2048) NOT NULL COMMENT 'Authenticated actor identity.',
+    actor_scope_key CHAR(64) NOT NULL COMMENT 'Hashed actor and Session identity.',
+    kind VARCHAR(16) NOT NULL COMMENT 'Query kind: btw or recap.',
+    trigger_kind VARCHAR(16) NOT NULL COMMENT 'Admission trigger: manual or automatic.',
+    question VARCHAR(4096) COMMENT 'Original private BTW question retained after input collection.',
+    state VARCHAR(16) NOT NULL COMMENT 'Durable preparation, execution or terminal state.',
+    active_slot CHAR(64) GENERATED ALWAYS AS (CASE state WHEN 'preparing' THEN actor_scope_key WHEN 'running' THEN actor_scope_key ELSE NULL END)
+        COMMENT 'Unique active actor and Session slot for each query kind.',
+    source_json LONGTEXT NOT NULL COMMENT 'Frozen journal prefix and conversation boundaries.',
+    private_history_json LONGTEXT NOT NULL COMMENT 'Frozen successful actor-private BTW pairs.',
+    model_config_digest VARCHAR(71) NOT NULL COMMENT 'Immutable explicit Session model configuration digest.',
+    processing_version VARCHAR(32) NOT NULL COMMENT 'Input projection and execution protocol version.',
+    input_resource_id VARBINARY(512) COMMENT 'Published frozen input manifest identity.',
+    input_digest CHAR(64) COMMENT 'Published frozen input digest.',
+    is_input_ready TINYINT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Whether the complete owned input closure was published.',
+    claim_instance_id VARBINARY(512) COMMENT 'Harness instance owning this query.',
+    claim_boot_id VARBINARY(512) COMMENT 'Harness boot identity fencing previous processes.',
+    claim_generation BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Monotonic query claim generation.',
+    claim_token_hash CHAR(64) COMMENT 'Hash of the query-scoped read and write credential.',
+    read_lease_id VARBINARY(512) COMMENT 'Non-renewing retirement lease protecting preparation.',
+    read_deadline_at BIGINT UNSIGNED NOT NULL COMMENT 'Fixed preparation deadline in Unix epoch milliseconds.',
+    deadline_at BIGINT UNSIGNED NOT NULL COMMENT 'Fixed overall deadline in Unix epoch milliseconds.',
+    result_revision BIGINT UNSIGNED NOT NULL DEFAULT 1 COMMENT 'Monotonic full-state snapshot revision.',
+    answer_text LONGTEXT COMMENT 'Visible answer or partial text retained after input collection.',
+    outcome VARCHAR(64) COMMENT 'Provider completion or interruption outcome.',
+    usage_json LONGTEXT COMMENT 'Safe provider usage accounting, absent when unknown.',
+    error_code VARCHAR(128) COMMENT 'Safe machine-readable failure reason.',
+    gmt_create BIGINT UNSIGNED NOT NULL COMMENT 'Record creation time in Unix epoch milliseconds.',
+    gmt_modified BIGINT UNSIGNED NOT NULL COMMENT 'Last snapshot update time in Unix epoch milliseconds.',
+    CONSTRAINT uk_ma_side_query_business_key UNIQUE (query_key),
+    CONSTRAINT uk_ma_side_query_active UNIQUE (active_slot, kind),
+    CONSTRAINT ck_ma_side_query_kind CHECK ((CASE kind WHEN 'btw' THEN 3 WHEN 'recap' THEN 5 ELSE -1 END = CHAR_LENGTH(kind))),
+    CONSTRAINT ck_ma_side_query_state CHECK ((CASE state WHEN 'preparing' THEN 9 WHEN 'running' THEN 7 WHEN 'completed' THEN 9 WHEN 'failed' THEN 6 WHEN 'cancelled' THEN 9 WHEN 'interrupted' THEN 11 ELSE -1 END = CHAR_LENGTH(state))),
+    CONSTRAINT ck_ma_side_query_trigger CHECK ((CASE trigger_kind WHEN 'manual' THEN 6 WHEN 'automatic' THEN 9 ELSE -1 END = CHAR_LENGTH(trigger_kind))),
+    CONSTRAINT ck_ma_side_query_boolean CHECK (is_input_ready >= 0 AND is_input_ready <= 1),
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Database-generated identity of this row.',
+    CONSTRAINT pk_ma_side_query_id PRIMARY KEY (id)
+) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT='Actor-private durable BTW and recap queries independent of main Turn operations.';
+
+CREATE INDEX idx_ma_side_query_actor_page ON ma_side_query (actor_scope_key, gmt_create, query_id);
+CREATE INDEX idx_ma_side_query_session ON ma_side_query (session_scope_key, state);
+CREATE INDEX idx_ma_side_query_deadline ON ma_side_query (state, deadline_at);
+CREATE INDEX idx_ma_side_query_instance ON ma_side_query (claim_instance_id, claim_boot_id, state);
+
 CREATE TABLE ma_schedule (
     tenant_id VARBINARY(512) NOT NULL COMMENT 'Tenant identity used for isolation.',
     schedule_id VARBINARY(512) NOT NULL COMMENT 'Automation schedule identity within the tenant.',
@@ -1403,6 +1481,7 @@ CREATE INDEX idx_ma_output_capture_seal_manifest_resource_key ON ma_output_captu
 CREATE INDEX idx_ma_event_stream_artifact_refs_resource_key ON ma_event_stream (artifact_refs_resource_key);
 
 CREATE INDEX idx_ma_extension_package_workspace ON ma_extension_package (tenant_id, workspace_id);
+CREATE INDEX idx_ma_extension_source_import_workspace ON ma_extension_source_import (tenant_id, workspace_id);
 
 CREATE INDEX idx_ma_extension_settings_workspace ON ma_extension_settings (tenant_id, workspace_id);
 
