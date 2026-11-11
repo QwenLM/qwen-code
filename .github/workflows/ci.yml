@@ -1325,6 +1325,16 @@ jobs:
             console.log("PROVISIONED actionlint + shellcheck into " + tempDir);
           '
 
+      - name: 'Initialize machine identity for SSH runtime tests'
+        if: "${{ needs.test_build.result == 'success' && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.os == 'Linux' }}"
+        timeout-minutes: 1
+        run: |-
+          if [ ! -s /etc/machine-id ]; then
+            privilege=()
+            if [ "$(id -u)" != '0' ]; then privilege=(sudo -n); fi
+            "${privilege[@]}" sh -c 'test -s /etc/machine-id || tr -d "-" < /proc/sys/kernel/random/boot_id > /etc/machine-id'
+          fi
+
       - name: 'Run tests and generate reports'
         id: 'unit_tests'
         if: "${{ needs.test_build.result == 'success' && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"

@@ -194,7 +194,7 @@ describe('no-AK integration CI wiring', () => {
     );
 
     expect(packageJson.scripts[INTEGRATION_TYPECHECK_SCRIPT]).toBe(
-      'tsc -p integration-tests/tsconfig.json --pretty false',
+      'cross-env NODE_OPTIONS="--max-old-space-size=6144" tsc -p integration-tests/tsconfig.json --pretty false',
     );
     expect(packageJson.scripts.typecheck).toContain(
       `npm run ${INTEGRATION_TYPECHECK_SCRIPT}`,

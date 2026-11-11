@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { EnvHttpProxyAgent } from 'undici';
 
 const setGlobalDispatcher = vi.hoisted(() => vi.fn());
@@ -16,7 +16,19 @@ vi.mock('undici', async (importOriginal) => ({
 
 beforeEach(() => {
   setGlobalDispatcher.mockReset();
+  for (const name of [
+    'HTTP_PROXY',
+    'http_proxy',
+    'HTTPS_PROXY',
+    'https_proxy',
+    'NO_PROXY',
+    'no_proxy',
+  ]) {
+    vi.stubEnv(name, undefined);
+  }
 });
+
+afterEach(() => vi.unstubAllEnvs());
 
 describe('installEnvironmentProxy', () => {
   it('installs an environment-aware HTTP dispatcher', async () => {
@@ -40,20 +52,14 @@ describe('installEnvironmentProxy', () => {
     );
   });
 
-  it('rejects a malformed proxy environment value via the real dispatcher', async () => {
-    const { installEnvironmentProxy } = await import('./proxy.js');
-    const previous = process.env['HTTP_PROXY'];
-    process.env['HTTP_PROXY'] = 'not a URL';
-    try {
+  it.each(['HTTP_PROXY', 'http_proxy'])(
+    'rejects a malformed %s value via the real dispatcher',
+    async (name) => {
+      const { installEnvironmentProxy } = await import('./proxy.js');
+      vi.stubEnv(name, 'not a URL');
       expect(() => installEnvironmentProxy()).toThrow(
         'Proxy environment configuration is invalid. Check HTTP_PROXY, HTTPS_PROXY, and NO_PROXY.',
       );
-    } finally {
-      if (previous === undefined) {
-        delete process.env['HTTP_PROXY'];
-      } else {
-        process.env['HTTP_PROXY'] = previous;
-      }
-    }
-  });
+    },
+  );
 });
