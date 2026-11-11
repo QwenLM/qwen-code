@@ -9,23 +9,27 @@ import type { DaemonChannelTypeDescriptor } from '@qwen-code/sdk/daemon';
 export const PLATFORM_MARKS: Record<string, string> = {
   dingtalk: 'D',
   dws: 'DWS',
+  weixin: 'WX',
   wecom: 'W',
   'wecom-callback': 'WC',
   feishu: 'F',
   github: 'GH',
   gitlab: 'GL',
   email: 'E',
+  qq: 'QQ',
 };
 
 const SUPPORTED_CHANNEL_TYPES = new Set([
   'dingtalk',
   'dws',
+  'weixin',
   'wecom',
   'wecom-callback',
   'feishu',
   'github',
   'gitlab',
   'email',
+  'qq',
 ]);
 
 export function isSupportedChannelType(
@@ -33,12 +37,14 @@ export function isSupportedChannelType(
 ): type is
   | 'dingtalk'
   | 'dws'
+  | 'weixin'
   | 'wecom'
   | 'wecom-callback'
   | 'feishu'
   | 'github'
   | 'gitlab'
-  | 'email' {
+  | 'email'
+  | 'qq' {
   return typeof type === 'string' && SUPPORTED_CHANNEL_TYPES.has(type);
 }
 
