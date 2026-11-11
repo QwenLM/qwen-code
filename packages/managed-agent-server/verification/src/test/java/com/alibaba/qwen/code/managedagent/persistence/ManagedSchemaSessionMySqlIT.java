@@ -42,7 +42,9 @@ public class ManagedSchemaSessionMySqlIT extends ManagedSchemaSessionStoreTest {
         String id = (String) session.get("session_id");
         tx.executeWithoutResult(
                 status -> {
-                    store.beginSessionRename(tenant, "load-rename", "digest", id, "renamed");
+                    // The shared fixture's Session records an ownership row, so
+                    // this mutation carries its owning actor.
+                    store.beginSessionRename(tenant, "load-rename", "digest", id, "renamed", "actor");
                     store.appendPublicEventIfAbsent(
                             tenant,
                             id,
