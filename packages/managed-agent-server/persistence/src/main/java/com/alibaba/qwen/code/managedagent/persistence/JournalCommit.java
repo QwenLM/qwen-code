@@ -483,7 +483,7 @@ final class JournalCommit {
         if (!org.springframework.jdbc.datasource.DataSourceUtils.isConnectionTransactional(
                 org.springframework.jdbc.datasource.DataSourceUtils.getTargetConnection(target), jdbc.getDataSource())
                 || bindings == null || !bindings.usesDataSource(jdbc.getDataSource())
-                || exactBody == null || exactBody.length == 0 || exactBody.length > 128 * 1024) {
+                || exactBody == null || exactBody.length == 0 || exactBody.length > com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof.TERMINAL_BODY_LIMIT) {
             throw JournalFencing.nativeReadConflict();
         }
         var original = authority.original();
@@ -511,7 +511,7 @@ final class JournalCommit {
             throw JournalFencing.nativeReadConflict();
         }
         var frozen = WorkspaceCsiApplicationJson.object(authority.frozenBytes(), WorkspaceCsiApplicationStore.FROZEN_LIMIT);
-        byte[] saved = WorkspaceCsiApplicationJson.base64(frozen.path("commitBodyBase64"), 128 * 1024);
+        byte[] saved = WorkspaceCsiApplicationJson.base64(frozen.path("commitBodyBase64"), com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof.TERMINAL_BODY_LIMIT);
         if (!java.util.Arrays.equals(saved, exactBody)
                 || !com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof.sha256(saved)
                         .equals(frozen.path("preparedCommitSha256").textValue())) {
@@ -554,7 +554,7 @@ final class JournalCommit {
     }
 
     static CommitTransactionRequest csiTerminalRequest(byte[] bytes) {
-        WorkspaceCsiApplicationJson.object(bytes, 128 * 1024);
+        WorkspaceCsiApplicationJson.object(bytes, com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof.TERMINAL_BODY_LIMIT);
         try {
             return JournalStoreRows.CSI_TERMINAL_JSON.readValue(bytes, CommitTransactionRequest.class);
         } catch (IOException malformed) {
