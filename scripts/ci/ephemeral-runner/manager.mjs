@@ -105,6 +105,8 @@ function validate(c) {
     !(c.ttlSeconds > 0) ||
     !Number.isFinite(c.shutdownGraceSeconds) ||
     !(c.shutdownGraceSeconds >= 0) ||
+    (c.drainTimeoutSeconds !== undefined &&
+      (!Number.isFinite(c.drainTimeoutSeconds) || c.drainTimeoutSeconds < 0)) ||
     !Number.isSafeInteger(c.minDiskBytes) ||
     c.minDiskBytes < 0 ||
     (c.stallAlertSeconds !== undefined &&
@@ -205,6 +207,20 @@ export function createManager(config, dependencies = {}) {
       const chunk = Math.min(1000, remaining);
       await wait(chunk);
       remaining -= chunk;
+    }
+  };
+  // Draining is a shutdown-only cost, so a five-second poll per slot is
+  // cheap. Two consecutive idle observations keep a runner that is about to
+  // receive a queued job from being killed in the gap between the check and
+  // the stop.
+  const drainPollMs = 5000;
+  const containerHasWorker = async (id) => {
+    try {
+      return /\bRunner\.Worker\b/.test(await run('docker', ['top', id]));
+    } catch {
+      // An unreadable process table is not proof of an idle runner. Keep
+      // waiting and let the drain deadline decide.
+      return true;
     }
   };
   function parseJson(text) {
@@ -863,8 +879,40 @@ export function createManager(config, dependencies = {}) {
           `slot ${slot}: started runner ${state.runnerName}, id ${state.runnerId}, container ${id}`,
         );
         let nextHealthCheck = Date.now() + config.ttlSeconds * 1000;
+        let nextDrainCheck = 0;
+        let idleSince;
+        let retireRefusalLogged;
+        let stoppedIdle = false;
+        let stoppedByExit = false;
         let exitCode;
         let waitWarningLogged = false;
+        // `docker top` observes processes, not the assignment queue, so an
+        // idle probe alone cannot prove GitHub will not hand this online
+        // runner a job in the gap before the container is removed. Deleting
+        // the registration is the server-side gate: only an accepted DELETE
+        // proves the runner is no longer assignable, and only then may the
+        // container stop. Busy (422) means a job may have just been
+        // assigned; 403/429 mean the answer is unknown. So does 404: GitHub
+        // hides resources the credential cannot see, so a revoked repo
+        // access looks exactly like a registration that is gone, and the
+        // registration may still be online taking jobs. Unconfirmed answers
+        // keep the container draining and retry, and the deadline still
+        // forces the shutdown. Cleanup keeps tolerating 404 after the
+        // container is stopped — that is a retry of a resource already given
+        // up, not this gate. Returns the refusal error, or undefined when
+        // GitHub accepted the deletion.
+        const retireRegistration = async () => {
+          try {
+            await gh([
+              '-X',
+              'DELETE',
+              `/repos/${config.repo}/actions/runners/${state.runnerId}`,
+            ]);
+            return undefined;
+          } catch (error) {
+            return error;
+          }
+        };
         const controller = new AbortController();
         const watch = () =>
           run('docker', ['wait', id], {
@@ -889,6 +937,7 @@ export function createManager(config, dependencies = {}) {
             if (result) {
               if (result.code !== undefined) {
                 exitCode = result.code;
+                stoppedByExit = true;
                 break;
               }
               // A failed wait client is not proof that the container exited.
@@ -905,12 +954,14 @@ export function createManager(config, dependencies = {}) {
                   exitCode = Number.isInteger(status.ExitCode)
                     ? status.ExitCode
                     : null;
+                  stoppedByExit = true;
                   break;
                 }
               } catch {
                 try {
                   if (!(await listContainers(slot)).includes(id)) {
                     exitCode = null;
+                    stoppedByExit = true;
                     break;
                   }
                 } catch {
@@ -948,10 +999,55 @@ export function createManager(config, dependencies = {}) {
                 );
               }
             }
+            if (
+              stopping &&
+              config.drainTimeoutSeconds > 0 &&
+              Date.now() >= nextDrainCheck
+            ) {
+              nextDrainCheck = Date.now() + drainPollMs;
+              if (await containerHasWorker(id)) idleSince = undefined;
+              else if (idleSince === undefined) idleSince = Date.now();
+              else if (Date.now() - idleSince >= drainPollMs) {
+                const refusal = await retireRegistration();
+                if (!refusal) {
+                  stoppedIdle = true;
+                  log(`slot ${slot}: idle; stopping the runner for shutdown`);
+                  break;
+                }
+                // A refused retirement is not proof the slot is free: a job
+                // could have been assigned after the probe. Start the idle
+                // window over so the next decision needs a fresh two-poll
+                // observation, and keep draining until the deadline.
+                idleSince = undefined;
+                const refusalKey = refusal.status ?? 'unknown';
+                if (refusalKey !== retireRefusalLogged) {
+                  retireRefusalLogged = refusalKey;
+                  log(
+                    `slot ${slot}: runner registration not retired${
+                      refusal.status ? ` (HTTP ${refusal.status})` : ''
+                    }; keeping the container and draining`,
+                  );
+                }
+                // Do not hammer the API at the poll cadence when GitHub is
+                // already rate-limiting this credential; reuse the same
+                // backoff ladder as the rest of the manager.
+                if (refusal.status === 403 || refusal.status === 429)
+                  nextDrainCheck = Date.now() + backoffDelay(1, true);
+              }
+            }
           }
         } finally {
           controller.abort();
         }
+        if (
+          stopping &&
+          config.drainTimeoutSeconds > 0 &&
+          !stoppedIdle &&
+          !stoppedByExit
+        )
+          log(
+            `slot ${slot}: drain window elapsed; stopping a runner with a job in flight`,
+          );
         if (exitCode !== undefined && exitCode !== 0) {
           earlyExit = true;
           log(
@@ -1084,7 +1180,15 @@ export function createManager(config, dependencies = {}) {
   }
   function stop() {
     stopping = true;
-    stopAt = Math.min(stopAt, Date.now() + config.shutdownGraceSeconds * 1000);
+    const drainMs = (config.drainTimeoutSeconds ?? 0) * 1000;
+    if (drainMs > 0)
+      log(
+        `draining up to ${Math.round((drainMs + config.shutdownGraceSeconds * 1000) / 1000)}s for in-flight jobs`,
+      );
+    stopAt = Math.min(
+      stopAt,
+      Date.now() + drainMs + config.shutdownGraceSeconds * 1000,
+    );
   }
   return { start, stop, cycle, cleanup };
 }

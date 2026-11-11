@@ -69,9 +69,9 @@ import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.COMMI
 import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.PUBLICATION_TOKEN;
 import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.WRITER_TOKEN;
 import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.digest;
+import static com.alibaba.qwen.code.managedagent.persistence.PublicationVerification.verified;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static com.alibaba.qwen.code.managedagent.persistence.PublicationVerification.verified;
 
 class ToolPublicationLockOrderMySqlIT {
     private static final ObjectMapper JSON = new ObjectMapper();
