@@ -69,7 +69,10 @@ function declaredWorkspaceDirs(repoRoot: string): string[] {
   const pkg = JSON.parse(
     readFileSync(join(repoRoot, 'package.json'), 'utf8'),
   ) as { workspaces?: string[] };
-  const patterns = new Set([...(pnpm.packages ?? []), ...(pkg.workspaces ?? [])]);
+  const patterns = new Set([
+    ...(pnpm.packages ?? []),
+    ...(pkg.workspaces ?? []),
+  ]);
   const dirs = new Set<string>();
   const excluded = new Set<string>();
   for (const pattern of patterns) {
@@ -261,7 +264,6 @@ describe('JUnit report upload paths', () => {
       ).toBe(false);
     }
   });
-
 });
 
 // Every workspace that `npm run test:ci --workspaces` runs lands on the same
