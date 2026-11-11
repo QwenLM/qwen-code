@@ -241,6 +241,13 @@ async function recordListedPrStates(
             );
             return;
           }
+          if (existing.kind === 'invalid') {
+            // Same reason the observation logs it: a lost baseline must stay
+            // distinguishable from a PR that simply had no transitions.
+            log(
+              `PR watch: invalid watch file ${existing.filePath}; listing write re-initialising it`,
+            );
+          }
           const base =
             existing.kind === 'state' ? existing.state : { pr: identity };
           writePrWatchStateSync(prWatch.watchDir, identity, {

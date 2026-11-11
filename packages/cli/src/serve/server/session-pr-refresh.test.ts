@@ -2111,6 +2111,40 @@ describe('refreshWorkspaceSessionPrStates', () => {
       }
     });
 
+    it('logs and re-initialises an invalid watch file', async () => {
+      await seedBinding();
+      const watchDir = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'pr-watch-listing-invalid-'),
+      );
+      await fsp.writeFile(
+        prWatchFilePath(watchDir, identity42),
+        'not json at all',
+        'utf8',
+      );
+      const logged: string[] = [];
+      fetchGitHubPullRequestsMock.mockResolvedValue({
+        kind: 'ok',
+        pullRequests: [pr(42, 'closed')],
+      });
+      try {
+        await refreshWorkspaceSessionPrStates(runtime, undefined, {
+          prWatch: {
+            watchDir,
+            locks: new PathMutexRegistry(),
+            log: (m) => logged.push(m),
+          },
+        });
+        const after = readPrWatchStateSync(watchDir, identity42);
+        expect(after.kind).toBe('state');
+        if (after.kind !== 'state') throw new Error('unreachable');
+        expect(after.state.state).toBe('closed');
+        // A lost baseline must not be silent on this path either.
+        expect(logged.some((m) => m.includes('invalid watch file'))).toBe(true);
+      } finally {
+        await removeTempTree(watchDir);
+      }
+    });
+
     it('leaves the result shape untouched without the watch seam', async () => {
       await seedBinding();
       fetchGitHubPullRequestsMock.mockResolvedValue({
