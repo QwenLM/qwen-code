@@ -45,3 +45,23 @@ export function getCustomProviderComposer(
 ): CustomProviderComposer | undefined {
   return composers.get(providerId);
 }
+
+/** Ids captured by a composer are owned by their provider, not the generic parser. */
+export function isComposedProviderId(providerId: string): boolean {
+  return composers.has(providerId);
+}
+
+/**
+ * Drops composer-owned entries from a raw `settings.providers` value so an
+ * account provider entry is never reported as an invalid Custom Provider.
+ */
+export function withoutComposedProviderSettings(value: unknown): unknown {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return value;
+  }
+  return Object.fromEntries(
+    Object.entries(value).filter(
+      ([providerId]) => !composers.has(providerId),
+    ),
+  );
+}

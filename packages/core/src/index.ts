@@ -205,6 +205,7 @@ export {
   createCustomModelProvidersFromSettingsTexts,
   customProviderConfigFromRuntime,
 } from './provider/impl/customModelProviderFactory.js';
+export { isComposedProviderId } from './provider/impl/customProviderComposers.js';
 
 export * from './client/index.js';
 export * from './client/pipeline/customOutboundPipeline.js';

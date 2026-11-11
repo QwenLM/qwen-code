@@ -5,6 +5,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { withoutComposedProviderSettings } from '../impl/customProviderComposers.js';
 import {
   createImplicitCustomProviderModel,
   parseCustomProviderSettings,
@@ -26,7 +27,9 @@ export class CustomProviderRegistry {
     settings: unknown,
     referencedModelKeys: readonly string[] = [],
   ): CustomProviderParseResult {
-    const parsed = parseCustomProviderSettings(settings);
+    const parsed = parseCustomProviderSettings(
+      withoutComposedProviderSettings(settings),
+    );
     const nextProviders = new Map<string, CustomProviderRuntime>();
     const nextModelToProvider = new Map<string, string>();
     for (const provider of parsed.providers) {

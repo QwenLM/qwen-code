@@ -5482,10 +5482,15 @@ export class Config implements AgentLoopContext {
 
     if (parsed.providers.length === 0) {
       this.clearCustomProviderProjection();
-      return this.publishCustomProvidersState({
-        status: 'invalid_configuration',
-        issues: parsed.issues,
-      });
+      // Only composer-owned entries (e.g. the Qwen account provider) mean
+      // there are no generic Custom Providers, not that configuration failed:
+      // reporting `invalid_configuration` would skip the manager refresh that
+      // composes those entries.
+      return this.publishCustomProvidersState(
+        parsed.issues.length === 0
+          ? { status: 'not_configured' }
+          : { status: 'invalid_configuration', issues: parsed.issues },
+      );
     }
 
     if (!allowed) {

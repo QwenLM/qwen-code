@@ -543,4 +543,50 @@ describe('AuthDialog custom provider flow', () => {
       view.unmount();
     }
   });
+
+  it('does not offer to remove the reserved Qwen account provider', async () => {
+    const config = {
+      isBrowserLaunchSuppressed: () => true,
+      getModelProviderManager: () => ({ listModels: async () => [] }),
+      getCustomProvidersState: () => ({
+        status: 'invalid_configuration',
+        issues: [
+          { providerId: 'qwen-subscription', message: 'reserved provider id' },
+        ],
+      }),
+    } as unknown as Config;
+    const settings = {
+      merged: {
+        security: { auth: {} },
+        providers: {
+          'qwen-subscription': {
+            protocol: 'openai',
+            baseUrl: 'https://api.qwen.ai/compatible-mode/v1',
+            apiKey: 'placeholder',
+            models: [{ model: 'qwen3.8-max' }],
+          },
+        },
+      },
+      setValue: vi.fn(() => true),
+    } as unknown as LoadedSettings;
+    const view = await renderWithProviders(
+      <AuthDialog
+        config={config}
+        settings={settings}
+        canClose
+        onClose={vi.fn()}
+        onDone={vi.fn()}
+      />,
+      { width: 120 },
+    );
+    await view.waitUntilReady();
+
+    try {
+      expect(view.lastFrame()).not.toContain(
+        'Remove invalid Custom Provider',
+      );
+    } finally {
+      view.unmount();
+    }
+  });
 });

@@ -8,6 +8,7 @@
 import { createEmptyLoadedSettings } from '../test-utils/config.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Config, type ConfigParameters } from './config.js';
+import { registerCustomProviderComposer } from '../provider/impl/customProviderComposers.js';
 import { synchronizeSessionModelProvider } from '../provider/session-model.js';
 import {
   mockListedModels,
@@ -141,6 +142,31 @@ describe('Custom Providers runtime access', () => {
     ).toEqual(['second/new-model']);
     await config.replaceCustomProviderSettings({});
     expect(config.getCustomProvidersState().status).toBe('not_configured');
+  });
+
+  it('treats composer-owned settings as not configured and still refreshes providers', async () => {
+    registerCustomProviderComposer('reserved', () => undefined);
+    try {
+      const config = makeConfig({
+        customProviderSettings: { reserved: { anything: true } },
+      });
+      const replaceSpy = vi.spyOn(
+        config.getModelProviderManager(),
+        'replaceCustomProviders',
+      );
+
+      await config.initializeCustomProviders();
+      expect(config.getCustomProvidersState()).toEqual({
+        status: 'not_configured',
+      });
+
+      await config.replaceCustomProviderSettings({
+        reserved: { anything: true },
+      });
+      expect(replaceSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      registerCustomProviderComposer('reserved', undefined);
+    }
   });
 
   it('keeps disabled runtimes inactive', async () => {

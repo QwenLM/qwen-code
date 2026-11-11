@@ -27,6 +27,7 @@ import {
   discoverProviderModels,
   getQwenSubscriptionAuthorizationUrl,
   getQwenSubscriptionPlansUrl,
+  isComposedProviderId,
   isGenerationModelId,
   isQoderAccountRegion,
   openBrowserSecurely,
@@ -280,6 +281,9 @@ function invalidUserCustomProviderIds(
   for (const issue of [...stateIssues, ...parsed.issues]) {
     const id = issue.providerId;
     if (id === '*' || !Object.hasOwn(providers, id)) continue;
+    // Reserved account entries are owned by their composer, not the generic
+    // Custom Provider configuration surface.
+    if (isComposedProviderId(id)) continue;
     if (
       overrides.some((file) =>
         Object.hasOwn(file.settings.providers ?? {}, id),

@@ -5,10 +5,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { registerCustomProviderComposer } from '../impl/customProviderComposers.js';
 import { CustomProviderRegistry } from './registry.js';
 
 describe('CustomProviderRegistry', () => {
+  afterEach(() => {
+    registerCustomProviderComposer('reserved', undefined);
+  });
   it('keeps secrets out of public projections', () => {
     const registry = new CustomProviderRegistry();
     registry.replace({
@@ -289,6 +293,26 @@ describe('CustomProviderRegistry', () => {
     expect(registry.getProviderForModel('gateway/main-model')?.apiKey).toBe(
       'rotated-secret',
     );
+  });
+
+  it('ignores settings owned by a registered composer', () => {
+    registerCustomProviderComposer('reserved', () => undefined);
+    const registry = new CustomProviderRegistry();
+
+    const parsed = registry.replace({
+      reserved: { anything: true },
+      gateway: {
+        baseUrl: 'https://models.example.com/v1',
+        apiKey: 'top-secret-api-key',
+        model: 'main-model',
+      },
+    });
+
+    expect(parsed.issues).toEqual([]);
+    expect(parsed.providers.map((provider) => provider.providerId)).toEqual([
+      'gateway',
+    ]);
+    expect(registry.isCustomProviderModel('reserved/anything')).toBe(false);
   });
 
   it('replaces state atomically and supports explicit clearing', () => {
