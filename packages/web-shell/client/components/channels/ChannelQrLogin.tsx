@@ -134,7 +134,17 @@ export function ChannelQrLogin({
       // really produces a new code, and so it does not consume a second slot.
       if (loginId) await actions.cancel(loginId);
       const result = await actions.start(channelName);
-      if (mounted.current) setView(result);
+      if (mounted.current) {
+        setView(result);
+      } else if (result.status === 'pending') {
+        // The login was created after the panel went away, so the unmount
+        // cleanup never saw its id and it would hold a slot and poll Tencent
+        // for its whole deadline with nobody watching — the same leak, in the
+        // window a user hits by pressing Scan and immediately closing the
+        // editor. Cancel is a no-op for a terminal entry, so this cannot undo
+        // a bind the daemon already committed.
+        void actions.cancel(result.loginId).catch(() => undefined);
+      }
     } catch (startError) {
       if (mounted.current) {
         setError(

@@ -330,17 +330,29 @@ describe('ChannelQrLogin unmount cleanup', () => {
     expect(a.cancel).not.toHaveBeenCalled();
   });
 
-  it('swallows a cancel rejection on unmount', async () => {
+  it('attaches a rejection handler to the unmount cancel', async () => {
     const calls: string[] = [];
+    let handlerAttached = false;
     const base = actions();
     // A plain function, not vi.fn: the mock wrapper neutralises the returned
-    // rejection, so only a native one can witness a missing catch here.
+    // rejection. The promise is real and really rejects, but its `catch` is
+    // instrumented so the cell owns its oracle — relying on the runner to fail
+    // on an unhandled rejection would be vacuous here, because this package
+    // ignores unhandled errors off Linux.
     const plain = {
       start: base.start,
       state: base.state,
       cancel: (id: string) => {
         calls.push(id);
-        return Promise.reject(new Error('daemon went away'));
+        const rejecting: Promise<DaemonChannelQrLoginView> = Promise.reject(
+          new Error('daemon went away'),
+        );
+        const realCatch = rejecting.catch.bind(rejecting);
+        rejecting.catch = ((onRejected: (reason: unknown) => unknown) => {
+          handlerAttached = true;
+          return realCatch(onRejected);
+        }) as typeof rejecting.catch;
+        return rejecting;
       },
     };
     await act(async () => {
@@ -357,11 +369,87 @@ describe('ChannelQrLogin unmount cleanup', () => {
     await click('Scan to bind');
     await unmount();
     expect(calls).toEqual(['login-1']);
-    // Nobody is left to show the failure to. Yield a real macrotask so the
-    // runtime's unhandled-rejection detection runs: without the cleanup's
-    // catch this rejects with no handler. CI (Linux) fails the run on that;
-    // the local macOS config ignores unhandled errors by design.
-    vi.useRealTimers();
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    // Nobody is left to show the failure to, so the cleanup must swallow it.
+    expect(handlerAttached).toBe(true);
+  });
+
+  it('cancels a login created after the panel unmounted', async () => {
+    // The POST is still in flight at unmount, so `view` is undefined and the
+    // cleanup sees no id. The creator is the only place that ever learns it.
+    let resolveStart!: (value: DaemonChannelQrLoginStartResult) => void;
+    const a = actions({
+      start: () =>
+        new Promise<DaemonChannelQrLoginStartResult>((resolve) => {
+          resolveStart = resolve;
+        }),
+    });
+    await render({ actions: a });
+    await click('Scan to bind');
+    await unmount();
+    expect(a.cancel).not.toHaveBeenCalled();
+    await act(async () => {
+      resolveStart(START);
+    });
+    expect(a.cancel).toHaveBeenCalledWith('login-1');
+  });
+
+  it('attaches a rejection handler to the late-arrival cancel', async () => {
+    let resolveStart!: (value: DaemonChannelQrLoginStartResult) => void;
+    let handlerAttached = false;
+    const base = actions({
+      start: () =>
+        new Promise<DaemonChannelQrLoginStartResult>((resolve) => {
+          resolveStart = resolve;
+        }),
+    });
+    const plain = {
+      start: base.start,
+      state: base.state,
+      cancel: () => {
+        const rejecting: Promise<DaemonChannelQrLoginView> = Promise.reject(
+          new Error('daemon went away'),
+        );
+        const realCatch = rejecting.catch.bind(rejecting);
+        rejecting.catch = ((onRejected: (reason: unknown) => unknown) => {
+          handlerAttached = true;
+          return realCatch(onRejected);
+        }) as typeof rejecting.catch;
+        return rejecting;
+      },
+    };
+    await act(async () => {
+      root.render(
+        <I18nProvider language="en">
+          <ChannelQrLogin
+            channelName="qq-bot"
+            actions={plain}
+            onBound={vi.fn()}
+          />
+        </I18nProvider>,
+      );
+    });
+    await click('Scan to bind');
+    await unmount();
+    await act(async () => {
+      resolveStart(START);
+    });
+    expect(handlerAttached).toBe(true);
+  });
+
+  it('does not cancel a late result that already succeeded', async () => {
+    let resolveStart!: (value: DaemonChannelQrLoginStartResult) => void;
+    const a = actions({
+      start: () =>
+        new Promise<DaemonChannelQrLoginStartResult>((resolve) => {
+          resolveStart = resolve;
+        }),
+    });
+    await render({ actions: a });
+    await click('Scan to bind');
+    await unmount();
+    await act(async () => {
+      resolveStart({ ...START, status: 'succeeded' });
+    });
+    expect(a.cancel).not.toHaveBeenCalled();
   });
 });
