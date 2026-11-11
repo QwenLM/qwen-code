@@ -31,12 +31,14 @@ this page in the same change.
 
 ## Variables
 
-| Variable                                 | Default | Used in                 | Controls                                                                                  |
-| ---------------------------------------- | ------- | ----------------------- | ----------------------------------------------------------------------------------------- |
-| `QWEN_CI_VITEST_RETRY`                   | `2`     | `ci.yml`                | Retry count for the main CI workspace and script test step                                |
-| `QWEN_RELEASE_VITEST_RETRY`              | `2`     | `release.yml`           | Retry count for the release workspace test shards                                         |
-| `QWEN_RELEASE_WORKSPACE_TIMEOUT_MINUTES` | `45`    | `release.yml`           | Job timeout of each release workspace test shard                                          |
-| `QWEN_CI_VITEST_MAX_WORKERS`             | `4`     | `ci.yml`, `release.yml` | Worker cap for main CI unit tests and release workspace/quality tests on reserved runners |
+| Variable                                 | Default | Used in                 | Controls                                                                                    |
+| ---------------------------------------- | ------- | ----------------------- | ------------------------------------------------------------------------------------------- |
+| `QWEN_CI_VITEST_RETRY`                   | `2`     | `ci.yml`                | Retry count for the main CI workspace and script test step                                  |
+| `QWEN_CI_RPC_RETRY`                      | `1`     | `ci.yml`                | Re-runs of an all-green workspace suite that failed only on Vitest's worker RPC timeout     |
+| `QWEN_CI_HOST_LOAD_MAX_RATIO`            | `2.0`   | `ci.yml`                | Load-per-CPU ceiling above which a self-hosted Linux host is refused before the unit suites |
+| `QWEN_RELEASE_VITEST_RETRY`              | `2`     | `release.yml`           | Retry count for the release workspace test shards                                           |
+| `QWEN_RELEASE_WORKSPACE_TIMEOUT_MINUTES` | `45`    | `release.yml`           | Job timeout of each release workspace test shard                                            |
+| `QWEN_CI_VITEST_MAX_WORKERS`             | `4`     | `ci.yml`, `release.yml` | Worker cap for main CI unit tests and release workspace/quality tests on reserved runners   |
 
 ### Retry counts
 
@@ -55,6 +57,78 @@ variables also accept the literal value `off`, which omits
 the `--retry` flag entirely instead of passing `--retry=0` (a command-line
 `--retry=0` outranks a workspace's own Vitest config and would disable a
 deliberate retry policy).
+
+### Worker RPC timeouts on a contended host
+
+`QWEN_CI_RPC_RETRY` is a different lever from `--retry`: it re-runs a whole
+workspace suite, and only when that suite's own report shows no failed test and
+Vitest's worker-to-main RPC budget (`Timeout calling "onTaskUpdate"`) was the
+only unhandled error. On this pool that shape is host contention rather than a
+regression — main runs 43018456551 and 43016357976 both went red with 902 of 902
+tests passing in `packages/channels/github`. The first attempt keeps npm's own
+batched call; only the workspaces npm names as failed are re-run, each alone.
+
+The release lane already grants this same pass on its own shards
+(`.github/scripts/run-release-workspace-tests.sh`), and the evidence rules are
+the ones `scripts/tests/release-workflow.test.js` pins there: the run must have
+reached a passing tally, it must not have been killed by a signal, and Vitest's
+own count of unhandled errors must equal how many carried the transport message
+exactly. A count, not the crash header — the header is producer-chosen, so any
+pattern over headers is incomplete. Both figures are sums over the whole report,
+so one attempt's green tally cannot cover a later attempt's crash.
+
+The Linux lanes deliberately keep unhandled errors fatal
+(`scripts/tests/unit-vitest-configs.test.ts`, #10438), so this does not ignore
+them: any failed test, any second unhandled error, or a process that died before
+reporting declines the retry. A stall that outlives both attempts still fails.
+Set `0` to make the first failure stand.
+
+### Host load admission
+
+`QWEN_CI_HOST_LOAD_MAX_RATIO` is the load-per-CPU ceiling of the
+`Host load gate (self-hosted)` step in the unit-test shards. The gate samples
+the five-minute load average from `/proc/loadavg` against `nproc`, waits up to
+six samples ten seconds apart, and admits the job as soon as one sample clears
+the ceiling. A host still above it fails the step before the suites start.
+
+The gate cannot move a job: GitHub has already placed it, and only a re-run
+lands it on another host. What it changes is when the job fails. The disk floor
+gate beside it admits on free bytes and inodes, which say nothing about CPU
+contention; on 2026-11-11 the hk1 pool ran 64-CPU hosts at load 53-98 with 28-140
+concurrent Vitest processes, and that occupancy is what expires the 60-second
+test budgets, the RPC budget above, and the test step's whole 45-minute budget.
+Refusing costs the install already spent and returns that budget, with a message
+that says to re-run instead of a test failure no branch authored.
+
+**The gate is a backstop, not a predictor.** The default `2.0` is calibrated
+against the five-minute load per CPU of the shards that failed on 2026-11-11 and
+of four shards that passed on the same pool in the same hour:
+
+| Shard | Host   | At entry | Median | Peak | Outcome                |
+| ----- | ------ | -------- | ------ | ---- | ---------------------- |
+| 2/2   | hk1-4  | 1.34     | 1.43   | 1.54 | worker RPC timeout     |
+| 2/2   | hk1-30 | 1.45     | 1.42   | 1.54 | worker RPC timeout     |
+| 2/2   | hk1-29 | 0.85     | 1.42   | 1.54 | 45-minute step timeout |
+| 1/2   | hk1-7  | 0.94     | 1.40   | 1.49 | passed                 |
+| 2/2   | hk5-27 | 1.03     | 1.03   | 1.19 | passed                 |
+| 1/2   | hk2-32 | 0.75     | 0.97   | 1.18 | passed                 |
+| 1/2   | hk3-28 | 0.48     | 0.67   | 0.87 | passed                 |
+
+The bands overlap. A host that passed reached 1.49, while a host that failed
+started at 0.85 — occupancy grew during the run, and only two of the three
+failing hosts were already contended when their suites began. No entry-time
+threshold separates them, so a ceiling tight enough to catch the contended two
+would also refuse hosts that demonstrably pass. `2.0` sits above every reading
+measured on a host that completed its suites: it refuses a host none of these
+samples survived, and leaves the RPC flake to the report-based retry above,
+where the evidence does exist. Tightening it should be expected to produce false
+refusals; raising it much further makes the gate inert.
+
+The ceiling is a ratio, not an absolute load, because the pool mixes host sizes.
+Set `off` to admit every host while the fleet is being resized. The gate runs
+only on self-hosted Linux; GitHub-hosted and macOS lanes are unaffected, and an
+unreadable CPU count or load average admits the job with a warning rather than
+blocking a lane.
 
 ### Workspace test timeout
 
