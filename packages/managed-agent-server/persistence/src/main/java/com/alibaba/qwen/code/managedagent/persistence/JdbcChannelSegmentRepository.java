@@ -55,9 +55,10 @@ public final class JdbcChannelSegmentRepository
             return;
         }
         long now = databaseNow();
-        // One batched INSERT IGNORE for the whole plan instead of a statement
-        // per segment: a re-claimed partial at the 64-segment bound paid ~64
-        // round trips before (#16818 B).
+        // One batched INSERT IGNORE for the whole plan: a single
+        // PreparedStatement + executeBatch instead of a per-segment statement
+        // construction at the 64-segment bound (#16818 B). Cutting wire round
+        // trips as well would need the driver's rewriteBatchedStatements.
         int[] inserted = jdbc.batchUpdate(
                 "INSERT IGNORE INTO ma_channel_segment (delivery_key,"
                         + " tenant_id, channel_id, segment_id, segment_ordinal,"
@@ -88,8 +89,8 @@ public final class JdbcChannelSegmentRepository
         // pre-existing row (insert ignored, count 0) needs the write-once
         // backfill. A driver that reports no per-row count (SUCCESS_NO_INFO)
         // also takes the guarded update, a no-op on a row already receipted.
-        // Batch the backfill like the insert: a re-claimed partial otherwise
-        // pays one no-op UPDATE round trip per receipted segment (#16818 B).
+        // Batch the backfill like the insert: one guarded UPDATE batch rather
+        // than a per-segment no-op UPDATE (#16818 B).
         List<SegmentLedger> backfill = new ArrayList<>();
         for (int index = 0; index < segments.size(); index++) {
             SegmentLedger segment = segments.get(index);

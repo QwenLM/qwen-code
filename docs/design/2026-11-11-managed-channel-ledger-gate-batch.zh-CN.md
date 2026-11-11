@@ -47,9 +47,11 @@
 （`AgentEventJournal` 的写法），并按逐行计数驱动写一次回填：插入刚创建的行（计数 1）
 已携带回执，故只有预先存在的行（计数 0，插入被忽略）需要带守卫的 `UPDATE`。报告
 无逐行计数（`SUCCESS_NO_INFO`，-2）的驱动回退到带守卫的更新——它对已回执行是空操作。
-回填与插入一样批量——对需要回填的行发一条带守卫的 `UPDATE` 批——故重认领的 partial
-不再为每个已回执分段付一条空操作语句往返。`provider_receipt_json IS NULL` 守卫不变，
-故重放或竞态的第二回执绝不覆盖已存回执。
+回填与插入一样批量——对需要回填的行发一条带守卫的 `UPDATE` 批。两个批都把计划收敛为
+每类语句一条 `PreparedStatement` 加一次 `executeBatch`，省去逐分段的 Java 侧语句构建。
+网络往返的进一步减少还需 Connector/J 的 `rewriteBatchedStatements`，本模块未开启，故
+服务端仍逐分段执行一条语句；开启该参数是独立的配置决策（见待决问题）。
+`provider_receipt_json IS NULL` 守卫不变，故重放或竞态的第二回执绝不覆盖已存回执。
 
 交付列表的 N+1 也批量：新增 `ChannelSegmentRepository.listByDelivery`，用一条
 `WHERE delivery_key IN (...)` 查询读取整页分段，按 deliveryId 分组（各按 ordinal
@@ -98,3 +100,6 @@
 
 1. 常见「缺回执 partial」仍付一次交付行查找加一次分段查询来判定门不适用；若该路径
    的扫描量增大，可考虑用更廉价的预检（如交付行上的回执计数）短路分段查询。
+2. 是否开启 Connector/J 的 `rewriteBatchedStatements`（经模块集中管理的驱动属性、
+   沿用既有运维覆盖门），使批量计划同时减少网络往返而非仅 Java 侧语句构建。这是
+   模块级驱动行为变更，需真实 MySQL 的前后测量，故刻意不在本切片内。

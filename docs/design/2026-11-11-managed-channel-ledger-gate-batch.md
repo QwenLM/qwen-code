@@ -62,9 +62,13 @@ created (count 1) already carries its receipt, so only a pre-existing row
 (count 0, insert ignored) needs the guarded `UPDATE`. A driver that reports no
 per-row count (`SUCCESS_NO_INFO`, -2) falls back to the guarded update, which is
 a no-op on a row already receipted. The backfill is batched like the insert —
-one guarded `UPDATE` batch for the rows that need it — so a re-claimed partial
-does not pay a no-op statement round trip per receipted segment. The
-`provider_receipt_json IS NULL` guard is unchanged, so a replay or a racing
+one guarded `UPDATE` batch for the rows that need it. Both batches collapse the
+plan to a single `PreparedStatement` and `executeBatch` per statement kind,
+removing the per-segment Java statement construction. Wire-level round-trip
+reduction additionally requires Connector/J `rewriteBatchedStatements`, which
+this module does not enable, so the server still executes one statement per
+segment; enabling that flag is a separate config decision (see open questions).
+The `provider_receipt_json IS NULL` guard is unchanged, so a replay or a racing
 second receipt never overwrites a stored receipt.
 
 The delivery-list N+1 is batched too: a new
@@ -133,3 +137,8 @@ single-delivery `list` read.
    segment query to decide the gate does not apply; if that sweep path grows,
    a cheaper pre-check (e.g. a receipt count on the delivery row) could
    short-circuit the segment query.
+2. Whether to enable Connector/J `rewriteBatchedStatements` (via the module's
+   centralised driver properties, behind the existing operator-override gate)
+   so the batched plan also cuts wire round trips, not just Java-side statement
+   construction. That is a module-wide driver behavior change and needs a
+   real-MySQL before/after measurement, so it is deliberately out of this slice.

@@ -483,6 +483,63 @@ class ManagedChannelServiceTest {
     }
 
     @Test
+    void listDeliveriesReadsThePageSegmentsInOneCall() {
+        InboundAdmission first = service.submitInbound(TENANT, channel,
+                event(1, "1700:110", "first"));
+        InboundAdmission second = service.submitInbound(TENANT, channel,
+                event(1, "1700:111", "second"));
+        String firstId = first.inputId() + ":reply";
+        String secondId = second.inputId() + ":reply";
+        plannedDelivery(first.sessionId(), firstId, first.routeId(), "one", 2);
+        plannedDelivery(second.sessionId(), secondId, second.routeId(), "two", 3);
+        service.claimDeliveries(TENANT, channel, 16);
+        // A counting wrapper over the real ledger: the page read must batch the
+        // segments in one listByDelivery call, never fall back to a per-row
+        // list. Reverting listDeliveries to per-row reads reds this case.
+        java.util.concurrent.atomic.AtomicInteger listCalls =
+                new java.util.concurrent.atomic.AtomicInteger();
+        java.util.concurrent.atomic.AtomicInteger batchCalls =
+                new java.util.concurrent.atomic.AtomicInteger();
+        ChannelSegmentRepository counting = new ChannelSegmentRepository() {
+            @Override
+            public void plan(String tenantId, String channelInstanceId,
+                    String deliveryId, List<SegmentLedger> segments) {
+                segmentLedger.plan(tenantId, channelInstanceId, deliveryId, segments);
+            }
+
+            @Override
+            public boolean receipt(String tenantId, String channelInstanceId,
+                    String deliveryId, int ordinal, String providerReceipt) {
+                return segmentLedger.receipt(tenantId, channelInstanceId,
+                        deliveryId, ordinal, providerReceipt);
+            }
+
+            @Override
+            public List<SegmentLedger> list(String tenantId,
+                    String channelInstanceId, String deliveryId) {
+                listCalls.incrementAndGet();
+                return segmentLedger.list(tenantId, channelInstanceId, deliveryId);
+            }
+
+            @Override
+            public Map<String, List<SegmentLedger>> listByDelivery(String tenantId,
+                    String channelInstanceId, List<String> deliveryIds) {
+                batchCalls.incrementAndGet();
+                return segmentLedger.listByDelivery(tenantId, channelInstanceId,
+                        deliveryIds);
+            }
+        };
+        ManagedChannelService countingService = new ManagedChannelService(
+                instances, new JdbcChannelRouteRepository(jdbc),
+                new JdbcChannelDeliveryRepository(jdbc), counting, sessions,
+                workspaces, harness, mapper, Duration.ofMinutes(10), clock::get);
+        assertThat(countingService.listDeliveries(TENANT, ACTOR, channel, null, 10)
+                .data()).hasSize(2);
+        assertThat(batchCalls.get()).isEqualTo(1);
+        assertThat(listCalls.get()).isZero();
+    }
+
+    @Test
     void reconcileConvergesEverySegmentReceiptAfterALostAnswer() {
         InboundAdmission admitted = service.submitInbound(TENANT, channel,
                 event(1, "1700:91", "please reply"));

@@ -114,6 +114,12 @@ class JdbcChannelSegmentRepositoryTest {
         assertThat(segments.list(tenant + "-other", channel, "d1")).isEmpty();
         assertThat(segments.list(tenant, channel + "-other", "d1")).isEmpty();
         assertThat(segments.list(tenant, channel, "d2")).isEmpty();
+        // The batched read is tenant/channel-scoped too: a foreign scope keeps
+        // the per-id entry but it must be empty, never another scope's rows.
+        assertThat(segments.listByDelivery(tenant + "-other", channel, List.of("d1"))
+                .get("d1")).isEmpty();
+        assertThat(segments.listByDelivery(tenant, channel + "-other", List.of("d1"))
+                .get("d1")).isEmpty();
         assertThat(segments.receipt(tenant + "-other", channel, "d1", 0, "x")).isFalse();
         assertThat(segments.list(tenant, channel, "d1").get(0).providerReceipt())
                 .isEqualTo("m0");
@@ -204,6 +210,29 @@ class JdbcChannelSegmentRepositoryTest {
         // The backfill is one guarded batch (the Collection overload), not a
         // per-row receiptOnce UPDATE per segment.
         org.mockito.Mockito.verify(spied, org.mockito.Mockito.times(1))
+                .batchUpdate(
+                        org.mockito.ArgumentMatchers.startsWith("UPDATE ma_channel_segment"),
+                        org.mockito.ArgumentMatchers.any(java.util.Collection.class),
+                        org.mockito.ArgumentMatchers.anyInt(),
+                        org.mockito.ArgumentMatchers.any(
+                                org.springframework.jdbc.core.ParameterizedPreparedStatementSetter.class));
+        assertThat(segments.list(tenant, channel, "d1"))
+                .extracting(SegmentLedger::providerReceipt)
+                .containsExactly("m0", "m1", "m2");
+    }
+
+    @Test
+    void aFreshPlanWithReceiptsNeedsNoBackfillBatch() {
+        // A first plan whose segments already carry receipts: every insert is
+        // fresh (count 1), so the count-driven backfill must issue no UPDATE
+        // batch at all. Turning the condition into `true` would pay a needless
+        // guarded UPDATE per row and red this case.
+        JdbcTemplate spied = org.mockito.Mockito.spy(jdbc);
+        new JdbcChannelSegmentRepository(spied).plan(tenant, channel, "d1",
+                java.util.stream.IntStream.range(0, 3)
+                        .mapToObj(i -> new SegmentLedger("d1:" + i, i, "m" + i))
+                        .toList());
+        org.mockito.Mockito.verify(spied, org.mockito.Mockito.never())
                 .batchUpdate(
                         org.mockito.ArgumentMatchers.startsWith("UPDATE ma_channel_segment"),
                         org.mockito.ArgumentMatchers.any(java.util.Collection.class),
