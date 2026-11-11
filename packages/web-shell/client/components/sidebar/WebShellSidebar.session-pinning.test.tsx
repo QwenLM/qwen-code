@@ -1165,7 +1165,7 @@ describe('WebShellSidebar pinned group members (issue #10391)', () => {
     // One pinned member plus five unpinned: the bucket exceeds the preview
     // limit (5), so the pinned row must keep its catalog position (pinned
     // sorts first) instead of being appended after every unpinned member,
-    // which would hide it behind "Show all".
+    // which would hide it behind the expand button.
     const unpinnedMembers = [1, 2, 3, 4, 5].map((index) =>
       makeSession(`unpinned-${index}`, {
         displayName: `Unpinned ${index}`,
@@ -1190,7 +1190,7 @@ describe('WebShellSidebar pinned group members (issue #10391)', () => {
     ).map((node) => node.textContent ?? '');
     expect(rows).toHaveLength(5);
     expect(rows[0]).toBe('Pinned member');
-    expect(group?.textContent).toContain('Show all');
+    expect(group?.textContent).toContain('Show 1 more');
 
     workspaceActions.listSessionGroups.mockResolvedValue(defaultGroupsCatalog);
   });

@@ -12,6 +12,7 @@ interface ModelIntent {
   modelId: string;
   expectedRevision: number;
   idempotencyKey: string;
+  acknowledgedRevision?: number;
 }
 
 function readIntent(
@@ -32,7 +33,15 @@ function readIntent(
       Number(value['expectedRevision']) < 0
     )
       return undefined;
-    return item as ModelIntent;
+    return {
+      ...(item as ModelIntent),
+      acknowledgedRevision:
+        Number.isSafeInteger(value['acknowledgedRevision']) &&
+        Number(value['acknowledgedRevision']) >
+          Number(value['expectedRevision'])
+          ? Number(value['acknowledgedRevision'])
+          : undefined,
+    };
   } catch {
     return undefined;
   }
@@ -46,6 +55,21 @@ function persist(key: string, intent?: ModelIntent): boolean {
   } catch {
     return false;
   }
+}
+
+function isConfirmed(
+  intent: ModelIntent,
+  summary: ManagedAgentSessionSummary | undefined,
+): boolean {
+  const selection = summary?.modelSelection;
+  return (
+    intent.acknowledgedRevision !== undefined &&
+    summary?.sessionId === intent.sessionId &&
+    selection !== undefined &&
+    (selection.revision > intent.acknowledgedRevision ||
+      (selection.revision === intent.acknowledgedRevision &&
+        selection.modelId === intent.modelId))
+  );
 }
 
 const DEFINITIVE_ERRORS = new Set([
@@ -142,6 +166,25 @@ export function useManagedModelChange(
     summary?.modelSelection?.revision,
   ]);
 
+  useEffect(() => {
+    const pending = pendingRef.current;
+    if (
+      !interactive ||
+      running.current ||
+      !pending ||
+      !isConfirmed(pending, summary)
+    )
+      return;
+    pendingRef.current = undefined;
+    const saved = persist(key);
+    setState((current) => ({
+      ...current,
+      pending: undefined,
+      errorCode: saved ? undefined : 'storage_unavailable',
+    }));
+    setOptionsRevision((value) => value + 1);
+  }, [key, interactive, summary, state.pending, state.busy]);
+
   async function run(intent: ModelIntent) {
     const owner = lifetime.current;
     const api = provider.modelChange;
@@ -161,7 +204,7 @@ export function useManagedModelChange(
     const stop = () => abort.abort();
     owner.signal.addEventListener('abort', stop, { once: true });
     const timer = setTimeout(stop, 30_000);
-    let accepted = false;
+    let accepted = intent.acknowledgedRevision !== undefined;
     const update = (pending?: ModelIntent, errorCode?: string) => {
       if (owner.signal.aborted) return;
       pendingRef.current = pending;
@@ -173,49 +216,58 @@ export function useManagedModelChange(
       }));
     };
     try {
-      const result = await api.submit(
-        intent.sessionId,
-        {
-          modelId: intent.modelId,
-          expectedRevision: intent.expectedRevision,
-        },
-        {
-          clientId,
-          signal: abort.signal,
-          idempotencyKey: intent.idempotencyKey,
-        },
-      );
-      accepted = true;
-      if (owner.signal.aborted) return;
-      if (
-        result.sessionId !== intent.sessionId ||
-        result.modelSelection.modelId !== intent.modelId ||
-        !Number.isSafeInteger(result.modelSelection.revision) ||
-        result.modelSelection.revision <= intent.expectedRevision
-      )
-        throw new Error('Model change identity mismatch');
+      if (!accepted) {
+        const result = await api.submit(
+          intent.sessionId,
+          {
+            modelId: intent.modelId,
+            expectedRevision: intent.expectedRevision,
+          },
+          {
+            clientId,
+            signal: abort.signal,
+            idempotencyKey: intent.idempotencyKey,
+          },
+        );
+        accepted = true;
+        if (owner.signal.aborted) return;
+        if (
+          result.sessionId !== intent.sessionId ||
+          result.modelSelection.modelId !== intent.modelId ||
+          !Number.isSafeInteger(result.modelSelection.revision) ||
+          result.modelSelection.revision <= intent.expectedRevision
+        )
+          throw new Error('Model change identity mismatch');
+        // 先保留已校验回执，后续回读失败只需核对状态，不再重发已成功的写请求。
+        intent = {
+          ...intent,
+          acknowledgedRevision: result.modelSelection.revision,
+        };
+        update(intent);
+      }
       const latest = await refreshRef.current(abort.signal);
       if (owner.signal.aborted) return;
-      const revision = latest?.modelSelection?.revision ?? 0;
-      if (
-        latest?.sessionId !== intent.sessionId ||
-        revision < result.modelSelection.revision ||
-        (revision === result.modelSelection.revision &&
-          latest.modelSelection?.modelId !== intent.modelId)
-      )
+      if (!isConfirmed(intent, latest))
         throw new Error('Model selection is not confirmed');
       update();
       setOptionsRevision((value) => value + 1);
       return true;
     } catch (failure) {
       if (owner.signal.aborted) return;
-      const definitive =
-        !accepted &&
+      const code =
         failure instanceof JavaManagedAgentHttpError &&
-        [400, 403, 409].includes(failure.status) &&
-        DEFINITIVE_ERRORS.has(failure.code);
-      if (definitive) {
-        update(undefined, failure.code);
+        [400, 403, 409].includes(failure.status)
+          ? failure.code
+          : failure &&
+              typeof failure === 'object' &&
+              'kind' in failure &&
+              failure.kind === 'managed-model-rejected' &&
+              'code' in failure &&
+              typeof failure.code === 'string'
+            ? failure.code
+            : undefined;
+      if (!accepted && code && DEFINITIVE_ERRORS.has(code)) {
+        update(undefined, code);
         setOptionsRevision((value) => value + 1);
         try {
           await refreshRef.current(abort.signal);
