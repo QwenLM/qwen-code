@@ -684,8 +684,8 @@ PR 6 之后同样跟随默认开启和删除旧 loop 两步。
   - 从 PR 4b 起，结束轮次的工具会结束轮次，结果写入 history。
 
 - 设置开启后，AgentCore 与现在有以下预期差异：
-  - 从 PR 5a 起，模型回退时丢弃失败模型发出的调用，与其他入口相同；
-  - 从 PR 5a 起，一个流式文本事件承载一个 chunk 的思考文本或正文，而不是一个文本 part。
+  - 从 PR 5a 起，模型回退时丢弃失败模型发出的调用，与其他入口相同（[#15327](https://github.com/QwenLM/qwen-code/issues/15327)）。
+  - 从 PR 5a 起，一个流式文本事件承载一个 chunk 的思考文本或正文（[#15327](https://github.com/QwenLM/qwen-code/issues/15327)）。
 
 - 之后迁移的入口会带来各自的修复：#15324（ACP）、#15326（OpenTUI）、#14114 与 #12209（ACP）。
 

@@ -757,8 +757,9 @@ export interface TurnRunOptions {
   /** Request fields the round sends, such as its tools. */
   requestConfig?: Pick<GenerateContentConfig, 'tools' | 'maxOutputTokens'>;
   /**
-   * Throw a request or stream failure as it came, instead of reporting it
-   * and yielding an `Error` event. A cancel still yields `UserCancelled`.
+   * Propagate request and stream errors unchanged, including rejections
+   * caused by cancellation. If a stream event arrives with an aborted signal,
+   * the turn yields `UserCancelled`.
    */
   throwErrors?: boolean;
   /** The stream is ready to iterate after send-time preparation. */

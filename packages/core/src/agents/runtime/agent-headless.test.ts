@@ -3281,100 +3281,116 @@ describe('subagent.ts', () => {
         expect(readResult!.success).toBe(true);
       });
 
-      it('should mark truncated subagent write_file calls as output-truncated errors', async () => {
-        const { config, toolConfig } = await setupWriteFile();
-        mockSendMessageStream.mockImplementation(async () =>
-          streamOf<object>(
-            writeCall('call_write', { file_path: '/tmp/truncated.txt' }),
-            partsChunk([], 'MAX_TOKENS'),
-            partsChunk([{ text: 'done' }]),
-          ),
-        );
-        const writeResult = await runWrite(config, toolConfig);
-
-        expect(writeResult.success).toBe(false);
-        expect(writeResult.error).toContain(
-          'truncated due to max_tokens limit',
-        );
-        expect(writeResult.error).toContain(
-          'rejected to prevent writing truncated content',
-        );
-        expect(writeResult.error).not.toContain(
-          "params must have required property 'content'",
-        );
-      });
-
-      it('should NOT reject write_file when truncated attempt is followed by successful retry', async () => {
-        const { config, toolConfig } = await setupWriteFile();
-        // First call: truncated (MAX_TOKENS). Retry resets state, second call:
-        // complete write_file. The scheduler should see wasOutputTruncated=false
-        // for the retried response and allow the tool to proceed. The second
-        // round's plain text ends the agent loop.
-        mockSendMessageStream
-          .mockImplementationOnce(async () =>
-            streamOf<object>(
-              // Truncated response with incomplete write_file args
-              writeCall('call_write_truncated', {
-                file_path: '/tmp/retry-test.txt',
-              }),
-              { type: 'retry' },
-              // After retry, complete response with all required args
-              writeCall('call_write_complete', {
-                file_path: '/tmp/retry-test.txt',
-                content: 'hello',
-              }),
-              partsChunk([], 'STOP'),
-            ),
-          )
-          .mockImplementation(async () =>
-            streamOf(partsChunk([{ text: 'done' }], 'STOP')),
-          );
-        const writeResult = await runWrite(config, toolConfig);
-
-        // After retry the wasOutputTruncated flag must have been cleared, so
-        // the call should NOT be rejected with a truncation error — even if
-        // execution fails for unrelated reasons (e.g. mock filesystem).
-        expect(writeResult.error).not.toContain(
-          'truncated due to max_tokens limit',
-        );
-        expect(writeResult.error).not.toContain(
-          'rejected to prevent writing truncated content',
-        );
-      });
-
-      it.each([
-        { retry: { type: 'retry' as const, isContinuation: true } },
-        { retry: { type: 'retry' as const } },
-      ])(
-        'forwards retry events to subagent loop detection',
-        async ({ retry }) => {
-          const loopSpy = vi
-            .spyOn(LoopDetectionService.prototype, 'addAndCheckHeuristicLoops')
-            .mockReturnValue(false);
-
-          const { config } = await createMockConfig();
-          mockSendMessageStream.mockResolvedValue(
-            streamOf<object>(
-              { ...retry },
-              partsChunk([{ text: 'done' }], 'STOP'),
-            ),
-          );
-          await runAgent(config, {
-            tools: { tools: [] },
-            emitter: new AgentEventEmitter(),
+      describe.each([false, true])(
+        'model rounds with unifiedAgentLoop=%s',
+        (shared) => {
+          beforeEach(() => {
+            vi.spyOn(
+              Config.prototype,
+              'isUnifiedAgentLoopEnabled',
+            ).mockReturnValue(shared);
           });
 
-          const retryArg = loopSpy.mock.calls.find(
-            ([event]) => event.type === LlmEventType.Retry,
-          )?.[0] as { type: LlmEventType; isContinuation?: boolean };
-          expect(retryArg).toEqual(
-            expect.objectContaining({ type: LlmEventType.Retry }),
+          it('should mark truncated subagent write_file calls as output-truncated errors', async () => {
+            const { config, toolConfig } = await setupWriteFile();
+            mockSendMessageStream.mockImplementation(async () =>
+              streamOf<object>(
+                writeCall('call_write', { file_path: '/tmp/truncated.txt' }),
+                partsChunk([], 'MAX_TOKENS'),
+                partsChunk([{ text: 'done' }]),
+              ),
+            );
+            const writeResult = await runWrite(config, toolConfig);
+
+            expect(writeResult.success).toBe(false);
+            expect(writeResult.error).toContain(
+              'truncated due to max_tokens limit',
+            );
+            expect(writeResult.error).toContain(
+              'rejected to prevent writing truncated content',
+            );
+            expect(writeResult.error).not.toContain(
+              "params must have required property 'content'",
+            );
+          });
+
+          it('clears the truncation flag when a retry replaces the attempt', async () => {
+            const { config, toolConfig } = await setupWriteFile();
+            // First call: truncated (MAX_TOKENS). Retry resets state, second call:
+            // complete write_file. The scheduler should see wasOutputTruncated=false
+            // for the retried response and allow the tool to proceed. The second
+            // round's plain text ends the agent loop.
+            mockSendMessageStream
+              .mockImplementationOnce(async () =>
+                streamOf<object>(
+                  // Truncated response with incomplete write_file args
+                  writeCall('call_write_truncated', {
+                    file_path: '/tmp/retry-test.txt',
+                  }),
+                  partsChunk([], 'MAX_TOKENS'),
+                  { type: 'retry' },
+                  // After retry, complete response with all required args
+                  writeCall('call_write_complete', {
+                    file_path: '/tmp/retry-test.txt',
+                    content: 'hello',
+                  }),
+                  partsChunk([], 'STOP'),
+                ),
+              )
+              .mockImplementation(async () =>
+                streamOf(partsChunk([{ text: 'done' }], 'STOP')),
+              );
+            const writeResult = await runWrite(config, toolConfig);
+
+            // After retry the wasOutputTruncated flag must have been cleared, so
+            // the call should NOT be rejected with a truncation error — even if
+            // execution fails for unrelated reasons (e.g. mock filesystem).
+            expect(writeResult.error).not.toContain(
+              'truncated due to max_tokens limit',
+            );
+            expect(writeResult.error).not.toContain(
+              'rejected to prevent writing truncated content',
+            );
+          });
+
+          it.each([
+            { retry: { type: 'retry' as const, isContinuation: true } },
+            { retry: { type: 'retry' as const } },
+          ])(
+            'forwards retry events to subagent loop detection',
+            async ({ retry }) => {
+              const loopSpy = vi
+                .spyOn(
+                  LoopDetectionService.prototype,
+                  'addAndCheckHeuristicLoops',
+                )
+                .mockReturnValue(false);
+
+              const { config } = await createMockConfig();
+              mockSendMessageStream.mockResolvedValue(
+                streamOf<object>(
+                  { ...retry },
+                  partsChunk([{ text: 'done' }], 'STOP'),
+                ),
+              );
+              await runAgent(config, {
+                tools: { tools: [] },
+                emitter: new AgentEventEmitter(),
+              });
+
+              const retryArg = loopSpy.mock.calls.find(
+                ([event]) => event.type === LlmEventType.Retry,
+              )?.[0] as { type: LlmEventType; isContinuation?: boolean };
+              expect(retryArg).toEqual(
+                expect.objectContaining({ type: LlmEventType.Retry }),
+              );
+              if ('isContinuation' in retry) {
+                expect(retryArg.isContinuation).toBe(true);
+              } else {
+                expect(retryArg).not.toHaveProperty('isContinuation');
+              }
+            },
           );
-          if ('isContinuation' in retry) {
-            expect(retryArg.isContinuation).toBe(true);
-          } else {
-            expect(retryArg).not.toHaveProperty('isContinuation');
-          }
         },
       );
 

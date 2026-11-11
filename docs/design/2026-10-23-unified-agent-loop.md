@@ -684,8 +684,8 @@ The suites run in the integration job, the TUI suite on Ink; the OpenTUI interac
   - from PR 4b, a tool that ends the turn ends it, with the results in history.
 
 - With the setting on, AgentCore differs from today in these intended ways:
-  - from PR 5a, a model fallback drops the calls the failed model made, as on the other surfaces;
-  - from PR 5a, a streamed text event carries a chunk's thought text or its text instead of one text part.
+  - from PR 5a, a model fallback drops the calls the failed model made, as on the other surfaces ([#15327](https://github.com/QwenLM/qwen-code/issues/15327)).
+  - from PR 5a, a streamed text event carries a chunk's thought text or its visible text ([#15327](https://github.com/QwenLM/qwen-code/issues/15327)).
 
 - Later surfaces bring their own fixes: #15324 (ACP), #15326 (OpenTUI), #14114 and #12209 (ACP).
 
