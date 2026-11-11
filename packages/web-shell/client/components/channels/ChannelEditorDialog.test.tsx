@@ -2896,6 +2896,42 @@ describe('ChannelEditorDialog', () => {
     expect(document.body.textContent).not.toContain('owner/repo');
   });
 
+  it('localizes the GitLab conflict remedy for zh-CN', async () => {
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'gitlab-bot',
+      config: {
+        type: 'gitlab',
+        groupPolicy: 'allowlist',
+        groups: {
+          'Group/Project': { senders: 'open' },
+          'group/project': { senders: 'allowlist', allowedUsers: ['alice'] },
+        },
+      },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    await renderDialog({
+      descriptor: GITLAB_CONFIGURED,
+      instance,
+      language: 'zh-CN',
+      onSave,
+    });
+
+    await act(async () => {
+      Array.from(document.querySelectorAll('button'))
+        .find((button) => button.textContent?.trim() === '保存')
+        ?.click();
+    });
+
+    expect(onSave).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain(
+      '同一个项目以不同大小写写了两次',
+    );
+    expect(document.body.textContent).not.toContain('owner/repo');
+  });
+
   it('asks a repository-only channel to save group pairing before showing approvals', async () => {
     // Channels saved by the previous editor carry the injected
     // privatePolicy: 'pairing'. That legacy value must not open the
