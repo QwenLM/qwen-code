@@ -52,4 +52,8 @@ describe('currentRound', () => {
       currentRound({ runId: 'r1', promptId: 'p', round: 1 }, undefined),
     ).toBeUndefined();
   });
+
+  it('matches round 0 rather than treating it as absent', () => {
+    expect(currentRound({ runId: 'r1', promptId: 'p', round: 0 }, 0)).toBe(0);
+  });
 });

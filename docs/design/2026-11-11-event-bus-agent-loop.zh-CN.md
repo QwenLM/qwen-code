@@ -18,24 +18,24 @@
 - **显式事件词汇。** 十个总线事件（`query.submitted/output/cancelled/finished`、`llm.request/tool_use/settled`、`tool.cancel/settled`、`handler.failed`）为每次迁移命名。过程式循环里同样的迁移隐含在控制流中，新增循环级行为必须穿过函数主体接线。
 - **投递保证。** 总线对同一订阅者同一 query 按发布顺序串行投递，不同 query 互不阻塞。监听器抛错会变成 `handler.failed` 事件，而不是未处理的 rejection。今天的回调除了「抛错即结束循环」外没有顺序与失败语义。
 - **写者所有权。** 每 query 的状态被切分：Conversation 拥有决策与上下文，Llm 拥有选择与模型结果，Tool 拥有派发批次。过程式循环让三个关注点共享可变局部变量。
-- **轮次作用域。** 每个事件携带 `round`；被放弃轮次的迟到事件由构造即丢弃（`currentRound`）。过程式循环靠临时检查处理（例如 `Retry`/`ModelFallback` 时丢弃已收集的调用）。
+- **轮次作用域。** 轮次作用域事件携带 `roundId`；被放弃轮次的迟到事件由构造即丢弃（`currentRound`）。过程式循环靠临时检查处理（例如 `Retry`/`ModelFallback` 时丢弃已收集的调用）。
 - **有界收尾。** 取消与消费者关闭在一个上限内收尾（preview 为 10 秒），而不是等待卡死的 handler。
 
 我们希望 main 的共享循环获得这些性质，同时不打断已在进行的收敛，也不引入第二个相互竞争的循环。
 
 ## 当前行为
 
-### main（在 `19f73eb7ec0a` 核实）
+### main（在 `da270e434957` 核实）
 
 | 关注点       | 位置                                                                                                                                               | 形态                                                                                                       |
 | ------------ | -------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
-| 共享循环     | `core/agent-loop.ts:194` `runAgentLoop`                                                                                                            | 过程式 `for`；停止原因 `AgentLoopStopReason`（`:41`）                                                      |
-| 模型轮       | `core/agent-loop.ts:256` `runModelRound`                                                                                                           | `LlmClient.sendMessageStream` 生成器；事件转发 `host.onModelEvent`；`Retry`/`ModelFallback` 丢弃已收集调用 |
-| 工具批       | `core/agent-loop.ts:324` `runToolBatch`                                                                                                            | 去重/replay → `host.selectCalls`/`beforeToolLaunch` → 执行器 → `finalizeToolResponses`                     |
-| 执行器接缝   | `core/agent-loop.ts:161` `AgentLoopToolExecutor`                                                                                                   | 可替换；默认包一个 `CoreToolScheduler`（`:564`）                                                           |
-| Surface 接缝 | `core/agent-loop.ts:106` `AgentLoopHost`                                                                                                           | 可选回调，不是订阅                                                                                         |
-| 模型事件     | `core/turn.ts:74` `LlmEventType`（22 种），`Turn.run`（`:764`）                                                                                    | 已是规范化事件流                                                                                           |
-| 现有总线     | `confirmation-bus/message-bus.ts:15` `MessageBus`；`agents/runtime/agent-events.ts:285` `AgentEventEmitter`；`packages/acp-bridge/src/eventBus.ts` | hooks 请求/响应；subagent 作用域事件；带 replay 的传输层 fan-out —— 都不是循环控制总线                     |
+| 共享循环     | `core/agent-loop.ts:200` `runAgentLoop`                                                                                                            | 过程式 `for`；停止原因 `AgentLoopStopReason`（`:40`）                                                      |
+| 模型轮       | `core/agent-loop.ts:262` `runModelRound`                                                                                                           | `LlmClient.sendMessageStream` 生成器；事件转发 `host.onModelEvent`；`Retry`/`ModelFallback` 丢弃已收集调用 |
+| 工具批       | `core/agent-loop.ts:351` `runToolBatch`                                                                                                            | 去重/replay → `host.selectCalls`/`beforeToolLaunch` → 执行器 → `finalizeToolResponses`                     |
+| 执行器接缝   | `core/agent-loop.ts:162` `AgentLoopToolExecutor`                                                                                                   | 可替换；默认包一个 `CoreToolScheduler`（`:613`）                                                           |
+| Surface 接缝 | `core/agent-loop.ts:110` `AgentLoopHost`                                                                                                           | 可选回调，不是订阅                                                                                         |
+| 模型事件     | `core/turn.ts:78` `LlmEventType`（22 种），`Turn`（`:752`）                                                                                        | 已是规范化事件流                                                                                           |
+| 现有总线     | `confirmation-bus/message-bus.ts:15` `MessageBus`；`agents/runtime/agent-events.ts:296` `AgentEventEmitter`；`packages/acp-bridge/src/eventBus.ts` | hooks 请求/响应；subagent 作用域事件；带 replay 的传输层 fan-out —— 都不是循环控制总线                     |
 
 各 surface：headless 跑 `runAgentLoop`（已合入，#15369）；ACP 用 `runModelRound` 加自己的工具步（#15509 评审中）；Ink TUI（`use-llm-stream.ts`）、OpenTUI、AgentCore、speculation 与 Hosted Harness 仍跑各自的循环，由 unified-agent-loop 迁移计划管辖。
 
