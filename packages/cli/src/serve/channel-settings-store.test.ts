@@ -132,6 +132,29 @@ describe('WorkspaceChannelSettingsStore', () => {
             maximum: 10,
           },
           {
+            key: 'inclusiveFloor',
+            label: 'Inclusive floor',
+            kind: 'number',
+            minimum: 0,
+            maximum: 10,
+          },
+          {
+            key: 'stricterFloor',
+            label: 'Stricter floor',
+            kind: 'number',
+            exclusiveMinimum: 0,
+            minimum: 5,
+            maximum: 10,
+          },
+          {
+            key: 'stricterExclusiveFloor',
+            label: 'Stricter exclusive floor',
+            kind: 'number',
+            exclusiveMinimum: 5,
+            minimum: 0,
+            maximum: 10,
+          },
+          {
             key: 'mode',
             label: 'Mode',
             kind: 'enum',
@@ -3354,6 +3377,69 @@ describe('WorkspaceChannelSettingsStore', () => {
       expect(next.channels['bounded']['retries']).toBe(4);
     });
 
+    it('tolerates re-sending a stored enum a narrowed option list excludes', async () => {
+      // A channel that narrows its own options (WeChat's group policy offers
+      // only `disabled`) must not strand an unrelated edit for an operator who
+      // configured a wider value in settings.json before the narrowing.
+      writeWorkspaceSettings(
+        JSON.stringify({
+          channels: {
+            bounded: {
+              ...baseConfig,
+              clientSecret: '$BOT_TOKEN',
+              mode: 'legacy',
+            },
+          },
+        }),
+      );
+      const store = new WorkspaceChannelSettingsStore(workspace);
+
+      const next = await store.upsert('bounded', {
+        expectedRevision: store.snapshot().revision,
+        config: { ...baseConfig, mode: 'legacy', retries: 4 } as never,
+        secrets: {},
+      });
+
+      expect(next.channels['bounded']['mode']).toBe('legacy');
+      expect(next.channels['bounded']['retries']).toBe(4);
+    });
+
+    it('still rejects an enum the operator changed to an unlisted value', async () => {
+      const store = new WorkspaceChannelSettingsStore(workspace);
+      await store.upsert('bounded', {
+        expectedRevision: store.snapshot().revision,
+        config: { ...baseConfig, mode: 'safe' } as never,
+        secrets: { clientSecret: { operation: 'replace', value: 'secret' } },
+      });
+
+      await expect(
+        store.upsert('bounded', {
+          expectedRevision: store.snapshot().revision,
+          config: { ...baseConfig, mode: 'legacy' } as never,
+          secrets: {},
+        }),
+      ).rejects.toMatchObject({ code: 'channel_settings_invalid_config' });
+    });
+
+    it('still rejects a non-string enum even when it is unchanged', async () => {
+      writeWorkspaceSettings(
+        JSON.stringify({
+          channels: {
+            bounded: { ...baseConfig, clientSecret: '$BOT_TOKEN', mode: 7 },
+          },
+        }),
+      );
+      const store = new WorkspaceChannelSettingsStore(workspace);
+
+      await expect(
+        store.upsert('bounded', {
+          expectedRevision: store.snapshot().revision,
+          config: { ...baseConfig, mode: 7 } as never,
+          secrets: {},
+        }),
+      ).rejects.toMatchObject({ code: 'channel_settings_invalid_config' });
+    });
+
     it('still rejects a number the operator changed to an invalid value', async () => {
       const store = new WorkspaceChannelSettingsStore(workspace);
       await store.upsert('bounded', {
@@ -3391,6 +3477,32 @@ describe('WorkspaceChannelSettingsStore', () => {
       expect(next.channels['bounded']['boundedSeconds']).toBe(10);
     });
 
+    it('enforces a declared inclusive minimum, admitting the bound itself', async () => {
+      // The daemon validates against the descriptor too, not just the editor.
+      // A field that moved from exclusiveMinimum: -1 to minimum: 0 would lose
+      // its floor here if this layer only knew the exclusive bound.
+      const store = new WorkspaceChannelSettingsStore(workspace);
+
+      for (const value of [-0.5, -1]) {
+        await expect(
+          store.upsert('bounded', {
+            expectedRevision: store.snapshot().revision,
+            config: { ...baseConfig, inclusiveFloor: value } as never,
+            secrets: {
+              clientSecret: { operation: 'replace', value: 'secret' },
+            },
+          }),
+        ).rejects.toMatchObject({ code: 'channel_settings_invalid_config' });
+      }
+
+      const next = await store.upsert('bounded', {
+        expectedRevision: store.snapshot().revision,
+        config: { ...baseConfig, inclusiveFloor: 0 } as never,
+        secrets: { clientSecret: { operation: 'replace', value: 'secret' } },
+      });
+      expect(next.channels['bounded']['inclusiveFloor']).toBe(0);
+    });
+
     it('tolerates re-sending a stored number above a newly declared maximum', async () => {
       // The minimum half alone would leave an operator storing 300000000
       // stranded on every unrelated edit once a ceiling is declared, which is
@@ -3416,6 +3528,140 @@ describe('WorkspaceChannelSettingsStore', () => {
 
       expect(next.channels['bounded']['boundedSeconds']).toBe(300);
       expect(next.channels['bounded']['retries']).toBe(4);
+    });
+
+    it('applies the stricter of two declared lower bounds', async () => {
+      // Both bounds may be declared, and the conjunction is what makes the
+      // stricter one win. An exclusive-wins precedence would keep both keys in
+      // use and start admitting 3 here, on the path that serves hand-edited
+      // settings files and daemon API clients.
+      const store = new WorkspaceChannelSettingsStore(workspace);
+
+      for (const value of [3, 0]) {
+        await expect(
+          store.upsert('bounded', {
+            expectedRevision: store.snapshot().revision,
+            config: { ...baseConfig, stricterFloor: value } as never,
+            secrets: {
+              clientSecret: { operation: 'replace', value: 'secret' },
+            },
+          }),
+        ).rejects.toMatchObject({ code: 'channel_settings_invalid_config' });
+      }
+
+      const next = await store.upsert('bounded', {
+        expectedRevision: store.snapshot().revision,
+        config: { ...baseConfig, stricterFloor: 5 } as never,
+        secrets: { clientSecret: { operation: 'replace', value: 'secret' } },
+      });
+      expect(next.channels['bounded']['stricterFloor']).toBe(5);
+
+      // The mirror shape: an inclusive-wins precedence would survive the case
+      // above and admit 5 here, where the exclusive bound is the stricter one.
+      await expect(
+        store.upsert('bounded', {
+          expectedRevision: store.snapshot().revision,
+          config: { ...baseConfig, stricterExclusiveFloor: 5 } as never,
+          secrets: { clientSecret: { operation: 'replace', value: 'secret' } },
+        }),
+      ).rejects.toMatchObject({ code: 'channel_settings_invalid_config' });
+
+      const mirrored = await store.upsert('bounded', {
+        expectedRevision: store.snapshot().revision,
+        config: { ...baseConfig, stricterExclusiveFloor: 6 } as never,
+        secrets: { clientSecret: { operation: 'replace', value: 'secret' } },
+      });
+      expect(mirrored.channels['bounded']['stricterExclusiveFloor']).toBe(6);
+    });
+
+    it('tolerates re-sending a stored number below a newly declared minimum', async () => {
+      // The forgiveness wraps the whole range, not just the exclusive bound and
+      // the ceiling. Without it an operator whose settings file predates the
+      // floor cannot edit that channel at all — the accept-then-fail mismatch
+      // this change removes, reintroduced on the daemon path.
+      // Descriptor layer only: this fixture plugin declares no validateConfig.
+      // A plugin that re-checks the field still refuses the save — see the
+      // plugin-hook case below.
+      writeWorkspaceSettings(
+        JSON.stringify({
+          channels: {
+            bounded: {
+              ...baseConfig,
+              clientSecret: '$BOT_TOKEN',
+              inclusiveFloor: -0.5,
+            },
+          },
+        }),
+      );
+      const store = new WorkspaceChannelSettingsStore(workspace);
+
+      const next = await store.upsert('bounded', {
+        expectedRevision: store.snapshot().revision,
+        config: { ...baseConfig, inclusiveFloor: -0.5, retries: 4 } as never,
+        secrets: {},
+      });
+      expect(next.channels['bounded']['inclusiveFloor']).toBe(-0.5);
+      expect(next.channels['bounded']['retries']).toBe(4);
+
+      await expect(
+        store.upsert('bounded', {
+          expectedRevision: store.snapshot().revision,
+          config: { ...baseConfig, inclusiveFloor: -0.2 } as never,
+          secrets: {},
+        }),
+      ).rejects.toMatchObject({ code: 'channel_settings_invalid_config' });
+    });
+
+    it('still refuses an unchanged below-floor value the plugin re-checks', async () => {
+      // The forgiveness above is descriptor-layer only. GitHub's validateConfig
+      // refuses a negative reserve unconditionally, so a hand-edited settings
+      // file holding one passes both forgiveness layers and fails at the hook.
+      // The plugin's own message, not the store's, is what proves the seam.
+      registerPlugin({
+        channelType: 'plugin-rechecks-floor',
+        displayName: 'Plugin rechecks floor',
+        management: {
+          fields: [
+            {
+              key: 'reserve',
+              label: 'Reserve',
+              kind: 'number',
+              minimum: 0,
+            },
+            { key: 'note', label: 'Note', kind: 'string' },
+          ],
+          validateConfig: (config: Record<string, unknown>) =>
+            typeof config['reserve'] === 'number' && config['reserve'] < 0
+              ? 'reserve must be a non-negative number.'
+              : undefined,
+        },
+        createChannel() {
+          throw new Error('not used');
+        },
+      } as unknown as ChannelPlugin);
+      writeWorkspaceSettings(
+        JSON.stringify({
+          channels: {
+            rechecked: { type: 'plugin-rechecks-floor', reserve: -0.5 },
+          },
+        }),
+      );
+      const store = new WorkspaceChannelSettingsStore(workspace);
+
+      await expect(
+        store.upsert('rechecked', {
+          expectedRevision: store.snapshot().revision,
+          config: {
+            type: 'plugin-rechecks-floor',
+            reserve: -0.5,
+            note: 'an unrelated edit',
+          } as never,
+          secrets: {},
+        }),
+      ).rejects.toMatchObject({
+        code: 'channel_settings_invalid_config',
+        message: 'reserve must be a non-negative number.',
+      });
     });
   });
 });

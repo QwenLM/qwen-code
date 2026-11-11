@@ -182,7 +182,7 @@ public class JdbcChildResultRelayStore
         try {
             execution = text == null ? null
                     : MAPPER.readTree(text).path("run").path("execution");
-        } catch (Exception error) {
+        } catch (java.io.IOException error) {
             throw new IllegalStateException("Child run " + childRunId
                     + "'s committed record is unreadable", error);
         }
@@ -220,7 +220,7 @@ public class JdbcChildResultRelayStore
         JsonNode body;
         try {
             body = text == null ? null : MAPPER.readTree(text);
-        } catch (Exception error) {
+        } catch (java.io.IOException error) {
             throw new IllegalStateException("Child run " + childRunId
                     + "'s committed record is unreadable", error);
         }

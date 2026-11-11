@@ -284,7 +284,9 @@ class ManagedSessionCreationSkillsTest {
         jdbc.update("UPDATE ma_request_receipt SET result_json = REPLACE(result_json, 'ORIGINAL_INSTRUCTIONS', 'TAMPERED')"
                 + " WHERE tenant_id = ? AND session_id = ?", tenant, session);
         assertThatThrownBy(() -> snapshots.effective(store.requireSession(tenant, session)))
-                .hasMessageContaining("snapshot is invalid");
+                .hasMessageContaining("snapshot is invalid")
+                .extracting(error -> ((com.alibaba.qwen.code.managedagent.exception.ManagedAgentException) error).getCode())
+                .isEqualTo("session_skills_conflict");
     }
 
     @Test
