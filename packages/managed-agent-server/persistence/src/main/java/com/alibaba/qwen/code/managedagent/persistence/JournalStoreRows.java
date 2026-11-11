@@ -10,7 +10,7 @@ import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
-import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.codec.digest.DigestUtils;
@@ -236,8 +236,8 @@ final class JournalStoreRows {
                 "SELECT " + ManagedSchemaProjection.SESSION_HEAD.columns() + " FROM ma_session_head WHERE tenant_key = ? AND harness_key = ? AND"
                         + " tenant_id = ? AND session_id = ? AND head_kind = 'MANAGED_SESSION' FOR UPDATE",
                 headMapper,
-                JdbcRuntimeBindingRepository.harnessDrainKey(tenantId),
-                JdbcRuntimeBindingRepository.harnessDrainKey(sessionId), tenantId, sessionId);
+                RuntimeAdmissionFences.harnessDrainKey(tenantId),
+                RuntimeAdmissionFences.harnessDrainKey(sessionId), tenantId, sessionId);
         ToolPublicationRetentionStore.requireLive(jdbc, tenantId, sessionId);
         return heads.isEmpty() ? null : heads.getFirst();
     }
@@ -269,8 +269,8 @@ final class JournalStoreRows {
                         "SELECT " + ManagedSchemaProjection.SESSION_HEAD.columns() + " FROM ma_session_head WHERE tenant_key = ? AND harness_key = ? AND"
                             + " tenant_id = ? AND session_id = ? AND head_kind = 'MANAGED_SESSION'",
                         headMapper,
-                        JdbcRuntimeBindingRepository.harnessDrainKey(tenantId),
-                        JdbcRuntimeBindingRepository.harnessDrainKey(sessionId),
+                        RuntimeAdmissionFences.harnessDrainKey(tenantId),
+                        RuntimeAdmissionFences.harnessDrainKey(sessionId),
                         tenantId,
                         sessionId);
         if (rows.isEmpty()) {

@@ -1498,11 +1498,24 @@ jobs:
         # 47232 with "Invalid character in entity name", while both runs'
         # tests had passed. The report is advisory (`fail-on-error: false`),
         # so a broken artifact must not turn a green suite red.
+        # List each workspace depth explicitly instead of excluding
+        # node_modules. Both actions take several patterns, but they compose
+        # them differently: upload-artifact hands the whole multiline input to
+        # `@actions/glob`, where `!**/node_modules/**` negates across the set,
+        # while this action splits `path` on commas and globs each segment on
+        # its own (`src/main.ts` -> `local-file-provider.ts`), so a bare
+        # negation has no positive set to subtract from and matches nothing.
+        # With `followSymbolicLinks` on by default, `packages/**` therefore
+        # counts every pnpm link copy of a workspace report — the badge
+        # multiplies. These four positive patterns cover the declared
+        # workspaces' report locations; the completeness meta-test derives
+        # that set from the workspace declarations and fails if a workspace
+        # is added or one of these patterns is dropped or widened
         continue-on-error: true
         uses: 'dorny/test-reporter@a43b3a5f7366b97d083190328d2c652e1a8b6aa2' # ratchet:dorny/test-reporter@v3
         with:
           name: 'Test Results (ubuntu-latest, Node 22.x, shard ${{ matrix.shard }})'
-          path: 'packages/*/junit.xml'
+          path: 'packages/*/junit.xml,packages/channels/*/junit.xml,packages/cua-driver/typescript/junit.xml,integrations/*/junit.xml'
           reporter: 'java-junit'
           fail-on-error: 'false'
 
@@ -1512,12 +1525,21 @@ jobs:
         # Advisory like the publisher above: a transient artifact-service
         # failure must not turn a green suite red. `always()` also fires on a
         # run cancelled mid-suite, so a partial report can be retained under
-        # the complete run's name.
+        # the complete run's name. The path keeps the publisher's
+        # reach across both workspace trees, so the raw evidence matches the
+        # badge set the publisher enumerates explicitly above. This action
+        # follows symlinks too, so it needs the node_modules exclusion; unlike
+        # the publisher, this one applies that exclusion across the whole
+        # pattern set. Newline-separated: this action reads `path` as
+        # multiline input.
         continue-on-error: true
         uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
         with:
           name: "${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'test-results-fork-22.x-ubuntu-latest' || 'test-results-22.x-ubuntu-latest' }}-shard-${{ matrix.shard }}"
-          path: 'packages/*/junit.xml'
+          path: |
+            packages/**/junit.xml
+            integrations/**/junit.xml
+            !**/node_modules/**
           if-no-files-found: 'ignore'
           retention-days: 7
 
@@ -2496,12 +2518,18 @@ jobs:
       - name: 'Install Playwright Chromium and WebKit (hosted)'
         if: "${{ runner.environment == 'github-hosted' }}"
         timeout-minutes: 30
+        # A github-hosted runner never runs the pool image, so this guard is
+        # inert here; it keeps every browser-install site one shape.
         run: |-
-          printf '%s\n' 'Acquire::http::Timeout "30";' 'Acquire::https::Timeout "30";' 'Acquire::Retries "2";' | sudo tee /etc/apt/apt.conf.d/99-qwen-ci-timeouts > /dev/null
-          node node_modules/playwright/cli.js install --with-deps chromium webkit
-          nested_cli='node_modules/@playwright/test/node_modules/playwright/cli.js'
-          if [ -f "${nested_cli}" ]; then
-            node "${nested_cli}" install chromium webkit
+          if [ -n "${PLAYWRIGHT_BROWSERS_PATH:-}" ]; then
+            echo 'browsers baked into the image, skipping install'
+          else
+            printf '%s\n' 'Acquire::http::Timeout "30";' 'Acquire::https::Timeout "30";' 'Acquire::Retries "2";' | sudo tee /etc/apt/apt.conf.d/99-qwen-ci-timeouts > /dev/null
+            node node_modules/playwright/cli.js install --with-deps chromium webkit
+            nested_cli='node_modules/@playwright/test/node_modules/playwright/cli.js'
+            if [ -f "${nested_cli}" ]; then
+              node "${nested_cli}" install chromium webkit
+            fi
           fi
 
       - name: 'Install Playwright Chromium and WebKit (self-hosted)'
@@ -2512,18 +2540,27 @@ jobs:
         # validation reports them missing, so each host installs them once and
         # later jobs skip apt. sudo -n fails fast instead of prompting, and the
         # lock timeout waits out another job's apt run on the same host.
+        #
+        # The disposable pool image bakes Chromium and its system libraries and
+        # sets PLAYWRIGHT_BROWSERS_PATH, but it does not bake WebKit. This job
+        # routes to the hosted lane or the persistent ARM64 fleet, never to that
+        # image, so the guard cannot drop WebKit here.
         timeout-minutes: 30
         run: |-
-          install_log="${RUNNER_TEMP}/playwright-install.log"
-          node node_modules/playwright/cli.js install chromium webkit 2>&1 | tee "${install_log}"
-          nested_cli='node_modules/@playwright/test/node_modules/playwright/cli.js'
-          if [ -f "${nested_cli}" ]; then
-            node "${nested_cli}" install chromium webkit 2>&1 | tee -a "${install_log}"
-          fi
-          if grep -q 'Host system is missing dependencies' "${install_log}"; then
-            apt_config="${RUNNER_TEMP}/apt-playwright.conf"
-            printf '%s\n' 'DPkg::Lock::Timeout "300";' 'Acquire::http::Timeout "30";' 'Acquire::https::Timeout "30";' 'Acquire::Retries "2";' > "${apt_config}"
-            sudo -n env APT_CONFIG="${apt_config}" "$(command -v node)" node_modules/playwright/cli.js install-deps chromium webkit
+          if [ -n "${PLAYWRIGHT_BROWSERS_PATH:-}" ]; then
+            echo 'browsers baked into the image, skipping install'
+          else
+            install_log="${RUNNER_TEMP}/playwright-install.log"
+            node node_modules/playwright/cli.js install chromium webkit 2>&1 | tee "${install_log}"
+            nested_cli='node_modules/@playwright/test/node_modules/playwright/cli.js'
+            if [ -f "${nested_cli}" ]; then
+              node "${nested_cli}" install chromium webkit 2>&1 | tee -a "${install_log}"
+            fi
+            if grep -q 'Host system is missing dependencies' "${install_log}"; then
+              apt_config="${RUNNER_TEMP}/apt-playwright.conf"
+              printf '%s\n' 'DPkg::Lock::Timeout "300";' 'Acquire::http::Timeout "30";' 'Acquire::https::Timeout "30";' 'Acquire::Retries "2";' > "${apt_config}"
+              sudo -n env APT_CONFIG="${apt_config}" "$(command -v node)" node_modules/playwright/cli.js install-deps chromium webkit
+            fi
           fi
 
       - name: 'Choose web-shell Playwright port'
@@ -3297,7 +3334,16 @@ jobs:
         run: |-
           mkdir -p "${QWEN_HOME}"
           if [ "${{ matrix.shard }}" = 1 ]; then
-            npm run typecheck:integration
+            # The typecheck has no heap cap of its own and died at Node's
+            # ~2 GB default inside an 8 GiB container. Via `env`, not the
+            # step's env block, whose zero-secrets contract requires every
+            # value but QWEN_HOME to be empty. Rationale and measurements:
+            # scripts/tests/no-ak-integration-ci.test.js.
+            typecheck_heap=()
+            case "${RUNNER_NAME:-}" in
+              ecs-qwen-*) typecheck_heap=('NODE_OPTIONS=--max-old-space-size=4096') ;;
+            esac
+            env "${typecheck_heap[@]}" npm run typecheck:integration
           fi
           npm run test:integration:no-ak:sandbox:none -- --shard=${{ matrix.shard }}/2
 

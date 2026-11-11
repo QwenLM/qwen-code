@@ -251,7 +251,15 @@ describe('raw JUnit report retention', () => {
     // on every full-profile lane inside a job holding `checks: write`, so a
     // relaxation to a mutable tag must not pass unnoticed.
     expect(upload.uses).toMatch(/^actions\/upload-artifact@[0-9a-f]{40}$/);
-    expect(upload.with.path).toBe('packages/*/junit.xml');
+    // `*` does not cross `/`, so a single-level pattern cannot reach a
+    // nested workspace's report (packages/channels/base/junit.xml); `**`
+    // keeps every depth. Both workspace trees report: the side lane runs
+    // integrations/* too. The globber follows symlinks, and pnpm links each
+    // workspace into its dependents' node_modules, so the exclusion keeps
+    // every report from being packed once per link.
+    expect(upload.with.path).toBe(
+      'packages/**/junit.xml\nintegrations/**/junit.xml\n!**/node_modules/**\n',
+    );
     expect(upload.with['retention-days']).toBe(7);
     expect(upload.with['if-no-files-found']).toBe('ignore');
   });
@@ -278,6 +286,16 @@ describe('raw JUnit report retention', () => {
     const unitTests = steps.find((step) => step.id === 'unit_tests');
     expect(publisher['continue-on-error']).toBe(true);
     expect(publisher.with['fail-on-error']).toBe('false');
+    // The badge reads the same reports as the artifact upload, but it cannot
+    // copy that step's pattern: this action splits `path` on commas and globs
+    // each segment on its own, so `!**/node_modules/**` is a no-op segment and
+    // every pnpm link copy counts. List each workspace depth explicitly
+    // instead (flat packages, packages/channels/*, the cua-driver tree and
+    // integrations/*); the scripts suite checks the set against the workspace
+    // declarations.
+    expect(publisher.with.path).toBe(
+      'packages/*/junit.xml,packages/channels/*/junit.xml,packages/cua-driver/typescript/junit.xml,integrations/*/junit.xml',
+    );
     expect(upload['continue-on-error']).toBe(true);
     expect(unitTests['continue-on-error']).not.toBe(true);
     expect(unitTests.run).toContain('exit "$RC"');
@@ -1231,6 +1249,17 @@ describe('post-merge push lane', () => {
     const fetchStep = (ci.jobs.lint_and_static.steps ?? []).find(
       (s) => s.name === 'Fetch incremental lint history',
     );
+    // Whole literal, not a `pull_request` substring: appending
+    // `&& ... != 'docs_only'` keeps that token in place while dropping the
+    // fetch on docs-only PRs, which run Prettier and so need the incremental
+    // history too. Benign next to the freshness guard — continue-on-error
+    // fails closed to a full scan — but it silently gives back the cost this
+    // step exists to remove (#16918). No profile arm, for the same reason the
+    // freshness guard carries none: every profile runs a lint lane, and on a
+    // skip_ci PR the profile output is empty rather than a profile name.
+    expect(String(fetchStep?.if)).toBe(
+      "${{ needs.classify_pr.outputs.skip_ci != 'true' && github.event_name == 'pull_request' }}",
+    );
     // Comments stripped: the rationale above the command names the flag too,
     // and a pin satisfied by prose would go green with the flag deleted.
     const fetchCode = String(fetchStep?.run)
@@ -1498,12 +1527,13 @@ describe('post-merge push lane', () => {
     // `docs_only`, or re-adding a copy to `test` all left every suite
     // green. A required check that silently stops running ESLint or the
     // lockfile audit still reports green on every PR; pin the payload by
-    // name, order and gate. Two members deliberately carry different gates
-    // and are asserted as such below — do not "normalise" them: the size
-    // gate must run on github_ci_only PRs (a PR touching only the
-    // whitelisted helper/workflow files is exactly the one most likely to
-    // breach the 500 KB workflow limit), and the helper-checks step IS the
-    // github_ci_only fast path.
+    // name, order and gate. Run Prettier is the payload's own divergence
+    // (PRETTIER_GATE below), and two steps outside the payload deliberately
+    // carry different gates and are asserted as such below — do not
+    // "normalise" them: the size gate must run on github_ci_only PRs (a PR
+    // touching only the whitelisted helper/workflow files is exactly the one
+    // most likely to breach the 500 KB workflow limit), and the helper-checks
+    // step IS the github_ci_only fast path.
     const FULL_PAYLOAD = [
       'Audit critical runtime dependencies',
       'Check lockfile',
