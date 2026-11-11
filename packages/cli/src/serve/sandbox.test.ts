@@ -238,6 +238,58 @@ describe('start_sandbox', () => {
     await expect(result).resolves.toBe(0);
   });
 
+  it('creates the container user home directory when matching host UID/GID', async () => {
+    // Regression (#16861): HOME is passed through below, but `useradd`
+    // without `-m` never creates it inside the container, so an in-container
+    // CLI crashed resolving HOME. The entrypoint must create the home dir.
+    vi.stubEnv('SANDBOX_SET_UID_GID', 'true');
+    vi.stubEnv('DEBUG_PORT', '');
+    vi.stubEnv('SANDBOX_PORTS', '');
+    vi.spyOn(fs, 'existsSync').mockReturnValue(true);
+    vi.spyOn(fs, 'realpathSync').mockImplementation((filePath) =>
+      String(filePath),
+    );
+    execSyncMock.mockImplementation((command: string) =>
+      Buffer.from(command === 'id -u' || command === 'id -g' ? '1001' : ''),
+    );
+
+    const imageCheck = Object.assign(new EventEmitter(), {
+      stdout: new EventEmitter(),
+    });
+    const child = new EventEmitter();
+    spawnMock
+      .mockImplementationOnce(() => {
+        queueMicrotask(() => {
+          imageCheck.stdout.emit('data', Buffer.from('image-id'));
+          imageCheck.emit('close', 0);
+        });
+        return imageCheck;
+      })
+      .mockReturnValueOnce(child);
+
+    const result = start_sandbox(
+      { command: 'docker', image: 'example.com/qwen-code:latest' },
+      [],
+      undefined,
+      [process.execPath, '/path/to/cli.js'],
+    );
+
+    await vi.waitFor(() => expect(spawnMock).toHaveBeenCalledTimes(2));
+    const args = spawnMock.mock.calls[1]?.[1] as string[];
+    const home = os.homedir();
+    const entrypoint = args.at(-1) ?? '';
+    expect(entrypoint).toContain(
+      `useradd -o -m -u 1001 -g 1001 -d ${home} -s /bin/bash qwen`,
+    );
+    // The HOME passthrough must stay: `su -p` would otherwise reset it to '/'.
+    const homeFlagIndex = args.indexOf(`HOME=${home}`);
+    expect(homeFlagIndex).toBeGreaterThan(0);
+    expect(args[homeFlagIndex - 1]).toBe('--env');
+
+    child.emit('close', 0);
+    await expect(result).resolves.toBe(0);
+  });
+
   it.each([
     'QWEN_CODE_WARNINGS_FILE',
     'QWEN_CODE_MCP_APPROVALS_PATH',
