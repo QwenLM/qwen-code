@@ -1880,7 +1880,19 @@ describe('ManagedSessionsPage', () => {
           { modelId: 'B', label: 'Published B' },
         ],
       })),
-      submit: vi.fn(),
+      submit: vi.fn(
+        async (
+          sessionId: string,
+          request: { modelId: string; expectedRevision: number },
+        ) => ({
+          sessionId,
+          modelSelection: {
+            modelId: request.modelId,
+            revision: request.expectedRevision + 1,
+          },
+          replayed: false,
+        }),
+      ),
     };
     mocks.client.getSession.mockImplementation(async () => current());
   }
@@ -2457,8 +2469,8 @@ describe('ManagedSessionsPage', () => {
     save.mockRestore();
   });
 
-  it('switches only after admission and readback, preserves the draft and blocks a same-frame send', async () => {
-    let session = switchableSession();
+  it('switches on the successful receipt despite stale readback, preserving the draft and blocking a same-frame send', async () => {
+    const session = switchableSession();
     modelApi(() => session);
     let acknowledge!: (value: {
       sessionId: string;
@@ -2487,11 +2499,6 @@ describe('ManagedSessionsPage', () => {
     expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
     expect(mocks.editorProps?.currentModel).toBe('A');
     expect(mocks.editorProps?.modelControlsDisabled).toBe(true);
-    session = {
-      ...session,
-      modelSelection: { modelId: 'B', revision: 1 },
-      modelContext: undefined,
-    };
     await act(async () => {
       acknowledge({
         sessionId: 's1',
@@ -2508,8 +2515,8 @@ describe('ManagedSessionsPage', () => {
     expect(mocks.editorProps?.modelControlsDisabled).toBe(false);
   });
 
-  it.each(['agent_running', 'cancelling'] as const)(
-    'locks model selection during a %s Turn including callback races',
+  it.each(['agent_running', 'tool_running'] as const)(
+    'allows selecting a future model during a %s Turn',
     async (phase) => {
       const session = switchableSession({
         phase,
@@ -2522,15 +2529,20 @@ describe('ManagedSessionsPage', () => {
       });
       modelApi(() => session);
       await render('s1');
-      expect(mocks.editorProps?.modelControlsDisabled).toBe(true);
+      expect(mocks.editorProps?.modelControlsDisabled).toBe(false);
       await act(async () => {
         mocks.editorProps?.onSelectModel?.('B');
       });
-      expect(provider.modelChange!.submit).not.toHaveBeenCalled();
+      expect(provider.modelChange!.submit).toHaveBeenCalledWith(
+        's1',
+        { modelId: 'B', expectedRevision: 0 },
+        expect.anything(),
+      );
+      expect(mocks.editorProps?.currentModel).toBe('B');
     },
   );
 
-  it('blocks a model change when a prompt is admitted in the same frame', async () => {
+  it('accepts a future model selection while a prompt admission is in flight', async () => {
     const session = switchableSession();
     modelApi(() => session);
     let admit!: (value: { sessionId: string; turnId: string }) => void;
@@ -2552,14 +2564,14 @@ describe('ManagedSessionsPage', () => {
       await flush();
     });
     expect(mocks.client.submitPrompt).toHaveBeenCalledOnce();
-    expect(provider.modelChange!.submit).not.toHaveBeenCalled();
+    expect(provider.modelChange!.submit).toHaveBeenCalledOnce();
     await act(async () => {
       admit({ sessionId: 's1', turnId: 'next' });
       await flush();
     });
   });
 
-  it('locks model selection while an approval or prompt admission is unconfirmed', async () => {
+  it('allows a future model selection while an existing tool approval is pending', async () => {
     const session = switchableSession();
     modelApi(() => session);
     provider.actions = {
@@ -2571,32 +2583,27 @@ describe('ManagedSessionsPage', () => {
       capabilities: { ...session.capabilities, actions: true },
     });
     await render('s1');
-    expect(mocks.editorProps?.modelControlsDisabled).toBe(true);
+    expect(mocks.editorProps?.modelControlsDisabled).toBe(false);
     await act(async () => {
       mocks.editorProps?.onSelectModel?.('B');
     });
-    expect(provider.modelChange!.submit).not.toHaveBeenCalled();
+    expect(provider.modelChange!.submit).toHaveBeenCalledOnce();
+    expect(mocks.editorProps?.currentModel).toBe('B');
   });
 
-  it('holds a lost switch response for exact-key confirmation and hides old usage under another selected model', async () => {
+  it('refreshes after a lost response without requiring confirmation or blocking the composer', async () => {
     let session = switchableSession({
       modelSelection: { modelId: 'B', revision: 1 },
     });
     modelApi(() => session);
-    vi.mocked(provider.modelChange!.submit)
-      .mockRejectedValueOnce(new TypeError('lost ACK'))
-      .mockImplementation(async () => {
-        session = {
-          ...session,
-          modelSelection: { modelId: 'A', revision: 2 },
-          modelContext: undefined,
-        };
-        return {
-          sessionId: 's1',
-          modelSelection: session.modelSelection!,
-          replayed: true,
-        };
-      });
+    vi.mocked(provider.modelChange!.submit).mockImplementation(async () => {
+      session = {
+        ...session,
+        modelSelection: { modelId: 'A', revision: 2 },
+        modelContext: undefined,
+      };
+      throw new TypeError('lost ACK');
+    });
     await render('s1');
     expect(mocks.editorProps?.currentModel).toBe('B');
     expect(mocks.editorProps?.contextUsageKnown).toBe(false);
@@ -2604,27 +2611,12 @@ describe('ManagedSessionsPage', () => {
       mocks.editorProps?.onSelectModel?.('A');
       await flush();
     });
-    expect(container.textContent).toContain(
+    expect(container.textContent).not.toContain(
       'The model change is not confirmed',
     );
-    expect(mocks.editorProps?.disabled).toBe(true);
-    session = {
-      ...session,
-      capabilities: { ...session.capabilities, modelChange: false },
-    };
-    await act(async () => root.unmount());
-    root = createRoot(container);
-    await render('s1');
-    const confirm = Array.from(container.querySelectorAll('button')).find(
-      (button) => button.textContent === 'Continue confirming',
-    )!;
-    await act(async () => {
-      confirm.click();
-      await flush();
-    });
-    const calls = vi.mocked(provider.modelChange!.submit).mock.calls;
-    expect(calls[1][1]).toEqual(calls[0][1]);
-    expect(calls[1][2].idempotencyKey).toBe(calls[0][2].idempotencyKey);
+    expect(container.textContent).not.toContain('Continue confirming');
+    expect(container.querySelector('[role="alert"]')).not.toBeNull();
+    expect(provider.modelChange!.submit).toHaveBeenCalledOnce();
     expect(mocks.editorProps?.currentModel).toBe('A');
     expect(mocks.editorProps?.contextUsageKnown).toBe(false);
     expect(mocks.editorProps?.disabled).toBe(false);

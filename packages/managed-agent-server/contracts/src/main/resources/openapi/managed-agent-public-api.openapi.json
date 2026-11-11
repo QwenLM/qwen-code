@@ -3878,7 +3878,7 @@
         "tags": ["WebShell"],
         "operationId": "changeWebShellSessionModel",
         "x-qwen-implementation-status": "implemented",
-        "description": "Change the model of an idle Workspace Session for later Turns. The actor-scoped idempotency key replays an earlier completed change before current admission checks; expectedRevision prevents overwriting a concurrent selection.",
+        "description": "Change the model selection of a Workspace Session for later Turns, including while a Turn or approval is active. Already admitted Turns keep their immutable model snapshot. Lifecycle, recovery and unsettled context changes remain guarded. The actor-scoped idempotency key replays an earlier completed change before current admission checks; expectedRevision prevents overwriting a concurrent selection.",
         "requestBody": {
           "required": true,
           "content": {
@@ -11928,7 +11928,7 @@
           },
           "modelChange": {
             "type": "boolean",
-            "description": "The caller may request an idle Session model change using the server model catalog. Missing means unsupported; authorization and revision admission still apply."
+            "description": "The caller may change the Session model selection for later Turns using the server model catalog, including while a Turn or approval is active. Missing means unsupported; authorization, recovery and revision admission still apply."
           },
           "approvalModeChange": {
             "type": "boolean",

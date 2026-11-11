@@ -233,11 +233,15 @@ class ManagedModelSelectionTest {
         var turn = transaction().execute(status -> store.insertTurnCommand(tenant, "SUBMIT_TURN", "turn-a",
                 "digest-a", session, input, SubmitHarnessTurn.computePayloadDigest(input)));
         String prompt = store.findTurn(tenant, session, turn.turnId()).orElseThrow().promptId();
-        assertCode(() -> change("actor", "blocked", "model-b", 1), "turn_active");
+        jdbc.update("UPDATE ma_turn SET status='RUNNING' WHERE tenant_id=? AND turn_id=?", tenant, turn.turnId());
+        assertThat(change("actor", "second", "model-b", 1).modelSelection())
+                .isEqualTo(new WebShellModelSelection("model-b", 2));
+        assertThat(store.findModelSelections(tenant, List.of(session)))
+                .containsEntry(session, new WebShellModelSelection("model-b", 2));
         assertThat(store.findTurnModelSelection(tenant, session, prompt))
                 .isEqualTo(new WebShellModelSelection("model-a", 1));
+        assertThat(store.findTurn(tenant, session, turn.turnId()).orElseThrow().status()).isEqualTo("RUNNING");
         jdbc.update("UPDATE ma_turn SET status='COMPLETED' WHERE tenant_id=? AND turn_id=?", tenant, turn.turnId());
-        change("actor", "second", "model-b", 1);
         assertThat(store(true).findTurnModelSelection(tenant, session, prompt))
                 .isEqualTo(new WebShellModelSelection("model-a", 1));
         var next = transaction().execute(status -> store.insertTurnCommand(tenant, "SUBMIT_TURN", "turn-b",
@@ -249,20 +253,27 @@ class ManagedModelSelectionTest {
                 "digest-a", session, input, SubmitHarnessTurn.computePayloadDigest(input))).replayed()).isTrue();
     }
 
+    @Test
+    void pendingApprovalDoesNotBlockFutureModelSelectionOrResolveTheAction() {
+        jdbc.update("INSERT INTO ma_session_record (session_scope_key,record_key,tenant_id,session_id,"
+                + "domain,record_id,revision,gmt_create,record_kind,state,action_id,action_version,options_json)"
+                + " VALUES (?,?,?,?,'action','action',1,1,'ACTION','requested','action',1,?)",
+                ManagedSessionStore.sessionScopeKey(tenant, session), "a".repeat(64), tenant, session,
+                "{\"expiresAt\":" + (System.currentTimeMillis() + 100_000) + "}");
+        assertThat(change("actor", "pending-approval", "model-a", 0).modelSelection())
+                .isEqualTo(new WebShellModelSelection("model-a", 1));
+        assertThat(jdbc.queryForObject("SELECT state FROM ma_session_record WHERE tenant_id=?"
+                + " AND session_id=? AND record_kind='ACTION'", String.class, tenant, session))
+                .isEqualTo("requested");
+    }
+
     @ParameterizedTest
-    @ValueSource(strings = {"reader", "stranger", "protocol", "model", "revision", "approval", "recovery", "turn-recovery", "cwd", "closed"})
+    @ValueSource(strings = {"reader", "stranger", "protocol", "model", "revision", "recovery", "turn-recovery", "cwd", "closed"})
     void refusesUnpublishedUnauthorizedOrBusyChangesWithoutAReceipt(String shape) {
         grant("reader", "READER");
         String actor = shape.equals("reader") ? "reader" : shape.equals("stranger") ? "stranger" : "actor";
         if (shape.equals("protocol")) {
             when(harness.supportsModelSelection()).thenReturn(false);
-        }
-        if (shape.equals("approval")) {
-            jdbc.update("INSERT INTO ma_session_record (session_scope_key,record_key,tenant_id,session_id,"
-                    + "domain,record_id,revision,gmt_create,record_kind,state,action_id,action_version,options_json)"
-                    + " VALUES (?,?,?,?,'action','action',1,1,'ACTION','requested','action',1,?)",
-                    ManagedSessionStore.sessionScopeKey(tenant, session), "a".repeat(64), tenant, session,
-                    "{\"expiresAt\":" + (System.currentTimeMillis() + 100_000) + "}");
         }
         if (shape.equals("recovery")) {
             transaction().execute(status -> com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc).acquireWriter(tenant, session,
@@ -288,7 +299,6 @@ class ManagedModelSelectionTest {
             case "protocol" -> "unsupported_feature";
             case "model" -> "unsupported_model";
             case "revision" -> "model_selection_conflict";
-            case "approval" -> "turn_active";
             case "closed" -> "session_state_conflict";
             default -> "session_context_busy";
         };
