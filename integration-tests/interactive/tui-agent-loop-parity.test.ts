@@ -181,6 +181,11 @@ function files(directory: string): string[] {
 const RANDOM_ID =
   /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g;
 
+// The startup context's date, in `formatDateForContext`'s format. Runs that
+// straddle midnight render it a day apart.
+const CONTEXT_DATE =
+  /\b(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday), (?:January|February|March|April|May|June|July|August|September|October|November|December) \d{1,2}, \d{4}\b/g;
+
 // Fields that differ between two runs of the same scenario.
 const VOLATILE_KEYS = new Set([
   'uuid',
@@ -241,6 +246,7 @@ function normalize(
         .split(scratch)
         .join('<SCRATCH>')
         .replace(RANDOM_ID, '<ID>')
+        .replace(CONTEXT_DATE, '<DATE>')
         // A shell command's result names its process group.
         .replace(/Process Group PGID: \d+/g, 'Process Group PGID: <PGID>'),
     ),
@@ -264,6 +270,37 @@ function normalize(
   };
   return strip(replaced);
 }
+
+describe('normalize', () => {
+  const startupContext = (today: string) => ({
+    messages: [
+      {
+        role: 'user',
+        content: [
+          {
+            text: `<system-reminder>\nThis is the Qwen Code. We are setting up the context for our chat.\nToday's date is ${today}.\n</system-reminder>`,
+          },
+        ],
+      },
+    ],
+  });
+
+  it('normalizes the date the startup context renders', () => {
+    expect(
+      normalize(
+        startupContext('Wednesday, November 11, 2026'),
+        '/workspace',
+        '/scratch',
+      ),
+    ).toEqual(
+      normalize(
+        startupContext('Thursday, November 12, 2026'),
+        '/workspace',
+        '/scratch',
+      ),
+    );
+  });
+});
 
 /**
  * Each request body as the client sent it, without the date reminder: every
