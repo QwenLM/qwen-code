@@ -28,6 +28,16 @@ import java.util.Optional;
 import java.util.UUID;
 
 final class AgentSessionCommands {
+    // The approval-snapshot columns copy from ma_session only for the profiles
+    // that support approval selection (WorkspaceToolProfiles.supportsApprovalSelection).
+    // Built from the vocabulary so a new public Shell revision cannot drift out
+    // of this set: a profile missing here records NULL approval/plan state on
+    // its turns, and findTurnApprovalSelection then refuses every submitTurn.
+    private static final String APPROVAL_SNAPSHOT_PROFILE_FILTER =
+            " AND workspace_id IS NOT NULL AND tool_profile IN ('"
+                    + WorkspaceToolProfiles.FILES + "','" + WorkspaceToolProfiles.FILES_V3
+                    + "','" + WorkspaceToolProfiles.SHELL + "','" + WorkspaceToolProfiles.SHELL_V3 + "')";
+
     private final AgentEventJournal eventJournal;
     private final AgentSessionPolicies sessionPolicies;
     private final AgentStoreRows storeRows;
@@ -952,23 +962,19 @@ final class AgentSessionCommands {
                         + " CASE WHEN model_id IS NULL THEN NULL ELSE model_revision END,"
                         + " CASE WHEN ((agent_id=? AND agent_definition_digest IS NULL)"
                         + " OR (agent_id<>? AND agent_definition_digest IS NOT NULL))"
-                        + " AND workspace_id IS NOT NULL AND tool_profile IN ('hosted-workspace-files/1',"
-                        + " 'hosted-workspace-shell/1','hosted-workspace-files/3')"
+                        + APPROVAL_SNAPSHOT_PROFILE_FILTER
                         + " THEN COALESCE(selected_approval_mode, approval_mode) ELSE NULL END,"
                         + " CASE WHEN ((agent_id=? AND agent_definition_digest IS NULL)"
                         + " OR (agent_id<>? AND agent_definition_digest IS NOT NULL))"
-                        + " AND workspace_id IS NOT NULL AND tool_profile IN ('hosted-workspace-files/1',"
-                        + " 'hosted-workspace-shell/1','hosted-workspace-files/3')"
+                        + APPROVAL_SNAPSHOT_PROFILE_FILTER
                         + " THEN approval_revision ELSE NULL END,"
                         + " CASE WHEN ((agent_id=? AND agent_definition_digest IS NULL)"
                         + " OR (agent_id<>? AND agent_definition_digest IS NOT NULL))"
-                        + " AND workspace_id IS NOT NULL AND tool_profile IN ('hosted-workspace-files/1',"
-                        + " 'hosted-workspace-shell/1','hosted-workspace-files/3')"
+                        + APPROVAL_SNAPSHOT_PROFILE_FILTER
                         + " THEN is_plan_enabled ELSE NULL END,"
                         + " CASE WHEN ((agent_id=? AND agent_definition_digest IS NULL)"
                         + " OR (agent_id<>? AND agent_definition_digest IS NOT NULL))"
-                        + " AND workspace_id IS NOT NULL AND tool_profile IN ('hosted-workspace-files/1',"
-                        + " 'hosted-workspace-shell/1','hosted-workspace-files/3')"
+                        + APPROVAL_SNAPSHOT_PROFILE_FILTER
                         + " THEN permission_rules_json ELSE NULL END"
                         + " FROM ma_session WHERE tenant_id = ? AND session_id = ?",
                 tenantId, sessionId, turnId, promptId, storeRows.writeJson(input),
