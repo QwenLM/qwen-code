@@ -1213,6 +1213,17 @@ describe('post-merge push lane', () => {
     const fetchStep = (ci.jobs.lint_and_static.steps ?? []).find(
       (s) => s.name === 'Fetch incremental lint history',
     );
+    // Whole literal, not a `pull_request` substring: appending
+    // `&& ... != 'docs_only'` keeps that token in place while dropping the
+    // fetch on docs-only PRs, which run Prettier and so need the incremental
+    // history too. Benign next to the freshness guard — continue-on-error
+    // fails closed to a full scan — but it silently gives back the cost this
+    // step exists to remove (#16918). No profile arm, for the same reason the
+    // freshness guard carries none: every profile runs a lint lane, and on a
+    // skip_ci PR the profile output is empty rather than a profile name.
+    expect(String(fetchStep?.if)).toBe(
+      "${{ needs.classify_pr.outputs.skip_ci != 'true' && github.event_name == 'pull_request' }}",
+    );
     // Comments stripped: the rationale above the command names the flag too,
     // and a pin satisfied by prose would go green with the flag deleted.
     const fetchCode = String(fetchStep?.run)
@@ -1480,12 +1491,13 @@ describe('post-merge push lane', () => {
     // `docs_only`, or re-adding a copy to `test` all left every suite
     // green. A required check that silently stops running ESLint or the
     // lockfile audit still reports green on every PR; pin the payload by
-    // name, order and gate. Two members deliberately carry different gates
-    // and are asserted as such below — do not "normalise" them: the size
-    // gate must run on github_ci_only PRs (a PR touching only the
-    // whitelisted helper/workflow files is exactly the one most likely to
-    // breach the 500 KB workflow limit), and the helper-checks step IS the
-    // github_ci_only fast path.
+    // name, order and gate. Run Prettier is the payload's own divergence
+    // (PRETTIER_GATE below), and two steps outside the payload deliberately
+    // carry different gates and are asserted as such below — do not
+    // "normalise" them: the size gate must run on github_ci_only PRs (a PR
+    // touching only the whitelisted helper/workflow files is exactly the one
+    // most likely to breach the 500 KB workflow limit), and the helper-checks
+    // step IS the github_ci_only fast path.
     const FULL_PAYLOAD = [
       'Audit critical runtime dependencies',
       'Check lockfile',
