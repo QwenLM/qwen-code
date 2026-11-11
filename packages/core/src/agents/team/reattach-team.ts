@@ -11,7 +11,7 @@ import { InProcessBackend } from '../backends/InProcessBackend.js';
 import { atomicWriteJSON } from '../../utils/atomicFileWrite.js';
 import { isNodeError } from '../../utils/errors.js';
 import { isPidAlive } from '../../utils/process-liveness.js';
-import { getTeamFilePath, listTeamNames } from './teamHelpers.js';
+import { getTeamFilePath, listTeamNames, sanitizeName } from './teamHelpers.js';
 import { unassignTeammateTasks } from './tasks.js';
 import { clearInbox } from './mailbox.js';
 import { TeamManager } from './TeamManager.js';
@@ -131,7 +131,13 @@ export async function reattachTeamForSession(
   // was addressed to the one that died. The leader inbox is left intact.
   await Promise.all(
     teamFile.members
-      .filter((m) => m.name && m.name !== LEADER_NAME)
+      .filter(
+        (m) =>
+          typeof m.name === 'string' &&
+          m.name.length > 0 &&
+          m.name !== LEADER_NAME &&
+          sanitizeName(m.name) === m.name,
+      )
       .map((m) => clearInbox(teamName, m.name)),
   );
 

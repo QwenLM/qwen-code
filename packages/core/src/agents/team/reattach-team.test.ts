@@ -274,4 +274,53 @@ describe('reattachTeamForSession', () => {
     expect(results.filter((r) => r?.status === 'reattached')).toHaveLength(1);
     expect(results.filter((r) => r === null)).toHaveLength(1);
   });
+
+  it('skips unsanitized or empty member names when clearing dead teammate inboxes', async () => {
+    const sentinel = path.join(tmp, 'settings.json');
+    await fs.writeFile(sentinel, '{"safe":true}');
+    await fs.mkdir(getInboxesDir('crew'), { recursive: true });
+    const workerInbox = path.join(getInboxesDir('crew'), 'worker.json');
+    const dotJsonSentinel = path.join(getInboxesDir('crew'), '.json');
+    await fs.writeFile(workerInbox, '[]');
+    await fs.writeFile(dotJsonSentinel, '{"dot":true}');
+    await writeTeamFile(
+      'crew',
+      makeTeam({
+        members: [
+          {
+            agentId: 'worker@crew',
+            name: 'worker',
+            joinedAt: 1,
+            cwd: '/tmp',
+            tmuxPaneId: '',
+            subscriptions: [],
+          },
+          {
+            agentId: 'bad@crew',
+            name: '../../../settings',
+            joinedAt: 2,
+            cwd: '/tmp',
+            tmuxPaneId: '',
+            subscriptions: [],
+          },
+          {
+            agentId: 'blank@crew',
+            name: '',
+            joinedAt: 3,
+            cwd: '/tmp',
+            tmuxPaneId: '',
+            subscriptions: [],
+          },
+        ],
+      }),
+    );
+    const { config } = makeConfig();
+
+    const result = await reattachTeamForSession(config);
+
+    expect(result?.status).toBe('reattached');
+    expect(await fs.readFile(sentinel, 'utf-8')).toBe('{"safe":true}');
+    expect(await fs.readFile(dotJsonSentinel, 'utf-8')).toBe('{"dot":true}');
+    await expect(fs.access(workerInbox)).rejects.toThrow();
+  });
 });
