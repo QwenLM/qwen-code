@@ -184,7 +184,8 @@ export interface SessionPrRefreshResult {
  * covered. The listing is an observation of every PR it returns, so its state
  * is recorded without spending a `gh pr view`; the returned keys are what lets
  * the observation drop a closed PR from the view rotation while keeping one the
- * listing did not cover.
+ * listing did not cover. Only PRs with an active binding get a file — the keys
+ * still cover the whole listing.
  *
  * Writes only while this daemon holds the owner record — a non-owner records
  * nothing, exactly as it views nothing — and each write takes the same per-PR
@@ -199,7 +200,7 @@ async function recordListedPrStates(
     state: 'open' | 'closed' | 'merged' | 'draft';
     url: string;
   }>,
-  prWatch: SessionPrRefreshOptions['prWatch'],
+  prWatch: NonNullable<SessionPrRefreshOptions['prWatch']>,
   boundKeys: ReadonlySet<string>,
   assertGenerationOpen: () => void,
   now: () => number,
@@ -222,7 +223,7 @@ async function recordListedPrStates(
     const state = pr.state === 'draft' ? 'open' : pr.state;
     rows.push({ identity, state });
   }
-  if (!prWatch || rows.length === 0) return keys;
+  if (rows.length === 0) return keys;
   const log = prWatch.log ?? (() => {});
   if (claimPrWatchOwnershipSync(prWatch.watchDir, log).kind === 'blocked') {
     return keys;
