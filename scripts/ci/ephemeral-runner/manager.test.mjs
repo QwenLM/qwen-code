@@ -129,6 +129,8 @@ async function fixture(t) {
       return JSON.stringify(runner ? [runner, ...extraRunners] : extraRunners);
     }
     if (args[0] === 'inspect') {
+      if (args.includes('{{json .State}}'))
+        return JSON.stringify({ Status: 'running', ExitCode: 0 });
       const entry = containers.get(args[args.length - 1]);
       return `${entry?.labels['qwen.instance'] ?? ''}\n`;
     }
@@ -511,18 +513,95 @@ test('a failed container start is cleaned up before another cycle', async (t) =>
   await manager.cycle(1);
 });
 
-test('watchdog removes a container that does not exit', async (t) => {
-  const f = await fixture(t);
-  f.config.ttlSeconds = 0.01;
-  const command = (program, args, options) =>
-    program === 'docker' && args[0] === 'wait'
-      ? new Promise(() => {})
-      : f.command(program, args, options);
-  await createManager(f.config, { command }).cycle(1);
-  assert.equal(
-    f.calls.filter((c) => c.program === 'docker' && c.args[0] === 'rm').length,
-    1,
-  );
+test('age checks retain healthy idle, busy and unreachable runners until the container exits', async (t) => {
+  for (const health of ['idle', 'busy', 'offline', 'unavailable']) {
+    await t.test(health, async (t) => {
+      const f = await fixture(t);
+      let now = 0;
+      let finish;
+      let registration;
+      let exited = false;
+      let checks = 0;
+      const alerts = [];
+      t.mock.method(console, 'log', (message) => {
+        if (message.includes('WATCHDOG ALERT')) alerts.push(message);
+      });
+      t.mock.method(Date, 'now', () => now);
+      const command = async (program, args, options) => {
+        if (program === 'docker' && args[0] === 'wait') {
+          assert.equal(options.timeout, 0);
+          return new Promise((resolve) => {
+            finish = resolve;
+          });
+        }
+        if (program === 'docker' && args[0] === 'rm')
+          assert.ok(
+            exited,
+            'age or health must never force-remove a live container',
+          );
+        if (
+          program === 'gh' &&
+          args.includes('/repos/owner/repo/actions/runners/1') &&
+          !args.includes('DELETE')
+        ) {
+          checks += 1;
+          if (health === 'unavailable') throw new Error('GitHub unavailable');
+          return JSON.stringify({
+            ...registration,
+            status: health === 'offline' ? 'offline' : 'online',
+            busy: health === 'busy',
+          });
+        }
+        const result = await f.command(program, args, options);
+        if (
+          program === 'gh' &&
+          args.includes('/repos/owner/repo/actions/runners/generate-jitconfig')
+        )
+          registration = JSON.parse(result).runner;
+        return result;
+      };
+      await createManager(f.config, {
+        command,
+        sleep: async (ms) => {
+          now += ms;
+          if (now >= 6000) {
+            exited = true;
+            finish('0\n');
+          }
+        },
+      }).cycle(1);
+      assert.equal(
+        checks,
+        1,
+        'health checks must be bounded, not run every second',
+      );
+      assert.equal(
+        alerts.length,
+        ['offline', 'unavailable'].includes(health) ? 1 : 0,
+      );
+      assert.equal(
+        f.calls.filter((c) => c.program === 'docker' && c.args[0] === 'rm')
+          .length,
+        1,
+      );
+    });
+  }
+});
+
+test('an unbounded command can be cancelled without leaving its client running', async () => {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 100);
+  try {
+    await assert.rejects(
+      runCommand(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+        timeout: 0,
+        signal: controller.signal,
+      }),
+      { name: 'AbortError' },
+    );
+  } finally {
+    clearTimeout(timer);
+  }
 });
 
 test('checks Docker root disk rather than the state directory', async (t) => {
@@ -1469,15 +1548,51 @@ test('does not penalize a fast successful container', async (t) => {
   assert.equal(result.earlyExit, false);
 });
 
-test('backs off when docker wait cannot determine container status', async (t) => {
+test('a failed wait client or unavailable Docker never proves that a container exited', async (t) => {
   const f = await fixture(t);
-  const command = (program, args, options) => {
-    if (program === 'docker' && args[0] === 'wait')
-      return Promise.reject(new Error('Docker disconnected'));
+  let waits = 0;
+  let exited = false;
+  let inspectFailed = false;
+  let listFailed = false;
+  const command = async (program, args, options) => {
+    if (program === 'docker' && args[0] === 'wait') {
+      waits += 1;
+      if (waits < 3) throw new Error('Docker disconnected');
+      exited = true;
+      return '0\n';
+    }
+    if (
+      program === 'docker' &&
+      args[0] === 'inspect' &&
+      args.includes('{{json .State}}') &&
+      !inspectFailed
+    ) {
+      inspectFailed = true;
+      throw new Error('Docker disconnected');
+    }
+    if (
+      program === 'docker' &&
+      args[0] === 'ps' &&
+      inspectFailed &&
+      !listFailed
+    ) {
+      listFailed = true;
+      throw new Error('Docker disconnected');
+    }
+    if (program === 'docker' && args[0] === 'rm')
+      assert.ok(
+        exited,
+        'a wait/inspect/list failure must not force-remove the container',
+      );
     return f.command(program, args, options);
   };
-  const result = await createManager(f.config, { command }).cycle(1);
-  assert.equal(result.earlyExit, true);
+  const result = await createManager(f.config, {
+    command,
+    sleep: async () => {},
+  }).cycle(1);
+  assert.equal(result.earlyExit, false);
+  assert.equal(waits, 3);
+  assert.ok(inspectFailed && listFailed);
 });
 
 test('starts through a symlink and reports invalid configuration', async (t) => {
