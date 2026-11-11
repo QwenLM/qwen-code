@@ -9,6 +9,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -140,8 +141,8 @@ public final class WorkspaceCsiCheckpointSnapshotStore {
         originalExecution(connection, runtime, intent, binding, terminal);
         Map<String, Object> head = one(connection,
                 "SELECT " + ManagedSchemaProjection.SESSION_HEAD.columns() + " FROM ma_session_head WHERE tenant_key = ? AND harness_key = ?",
-                JdbcRuntimeBindingRepository.harnessDrainKey(key.path("tenantId").asText()),
-                JdbcRuntimeBindingRepository.harnessDrainKey(key.path("sessionId").asText()));
+                RuntimeAdmissionFences.harnessDrainKey(key.path("tenantId").asText()),
+                RuntimeAdmissionFences.harnessDrainKey(key.path("sessionId").asText()));
         scope(head, key);
         require(List.of(1L, 2L, 3L, 4L).contains(number(head, "storage_version")) && "READY".equals(head.get("recovery_status"))
                 && Set.of("ACTIVE", "SEALED").contains(text(head, "state"))

@@ -10,6 +10,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.junit.jupiter.api.AfterEach;
@@ -151,7 +152,7 @@ class ManagedLockScopeConcurrencyMySqlIT {
             assertThat(jdbc.queryForObject("SELECT claim_lease_until FROM ma_session_head WHERE head_kind = 'HARNESS'"
                     + " AND tenant_id = 'tenant' AND harness_session_id = ?", Long.class, fixture.session)).isNull();
             JdbcRuntimeBindingRepository.lockPlacementDomain(readView, "tenant");
-            assertThatThrownBy(() -> JdbcRuntimeBindingRepository.requireHarnessAdmission(readView, fixture.scope(),
+            assertThatThrownBy(() -> RuntimeAdmissionFences.requireHarnessAdmission(readView, fixture.scope(),
                     fixture.session, authority))
                     .as("cleared " + action + " claim cannot be accepted from an old read view")
                     .isInstanceOfSatisfying(RuntimeBrokerException.class,
@@ -169,7 +170,7 @@ class ManagedLockScopeConcurrencyMySqlIT {
         try (Connection admission = database.source().getConnection(); var executor = Executors.newVirtualThreadPerTaskExecutor()) {
             admission.setAutoCommit(false);
             JdbcRuntimeBindingRepository.lockPlacementDomain(admission, "tenant");
-            JdbcRuntimeBindingRepository.requireHarnessAdmission(admission, fixture.scope(), fixture.session, authority);
+            RuntimeAdmissionFences.requireHarnessAdmission(admission, fixture.scope(), fixture.session, authority);
             Future<?> mutation = executor.submit(() -> fixture.transactions.executeWithoutResult(status -> {
                 if ("retry".equals(action)) {
                     fixture.store.retryOperation("tenant", fixture.session, operation.operationId(),
@@ -260,7 +261,7 @@ class ManagedLockScopeConcurrencyMySqlIT {
                     : "SELECT storage_key FROM ma_storage_owner WHERE storage_key = ? FOR UPDATE";
             try (var statement = blocker.prepareStatement(sql)) {
                 statement.setString(1, "alias".equals(domain)
-                        ? JdbcRuntimeBindingRepository.storageAliasKey(TENANT, "storage") : "d".repeat(64));
+                        ? RuntimeAdmissionFences.storageAliasKey(TENANT, "storage") : "d".repeat(64));
                 try (var rows = statement.executeQuery()) {
                     assertThat(rows.next()).isTrue();
                     assertThat(rows.next()).isFalse();
@@ -393,9 +394,9 @@ class ManagedLockScopeConcurrencyMySqlIT {
             jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key, tenant_id, storage_id, physical_key,"
                             + " storage_kind, registration_state, registration_revision, registration_json)"
                             + " VALUES (?, ?, ?, ?, ?, ?, 'LOCAL', 'REGISTERED', 1, '{}')",
-                    JdbcRuntimeBindingRepository.storageAliasKey(TENANT, alias),
-                    JdbcRuntimeBindingRepository.storageFenceKey(TENANT),
-                    JdbcRuntimeBindingRepository.storageFenceKey(alias), TENANT, alias, physical);
+                    RuntimeAdmissionFences.storageAliasKey(TENANT, alias),
+                    RuntimeAdmissionFences.storageFenceKey(TENANT),
+                    RuntimeAdmissionFences.storageFenceKey(alias), TENANT, alias, physical);
         }
         jdbc.update("INSERT INTO ma_storage_owner (storage_key, physical_key, storage_kind, tenant_id, storage_id, mount_state)"
                 + " VALUES (?, ?, 'LOCAL', ?, 'storage', 'READY')", physical, physical, TENANT);

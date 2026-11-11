@@ -249,6 +249,60 @@ const GITHUB_CONFIGURED: DaemonChannelTypeDescriptor = {
   ],
 };
 
+// GitLab mirrors GitHub's shape: it declares groupPolicy itself and receives
+// the injected privatePolicy/allowedUsers that its group-only adapter never
+// reads (GitlabAdapter builds every envelope with isGroup: true).
+const GITLAB_CONFIGURED: DaemonChannelTypeDescriptor = {
+  type: 'gitlab',
+  displayName: 'GitLab',
+  manageable: true,
+  fields: [
+    {
+      key: 'token',
+      label: 'Personal Access Token',
+      kind: 'secret',
+      envResolvable: true,
+    },
+    {
+      key: 'baseUrl',
+      label: 'Base URL',
+      kind: 'string',
+      envResolvable: true,
+    },
+    {
+      key: 'groupPolicy',
+      label: 'Group Policy',
+      kind: 'enum',
+      required: true,
+      default: 'open',
+      options: [
+        { value: 'open', label: 'Open' },
+        { value: 'allowlist', label: 'Allowlist' },
+        { value: 'pairing', label: 'Pairing' },
+        { value: 'disabled', label: 'Disabled' },
+      ],
+    },
+    {
+      key: 'privatePolicy',
+      label: 'Private Policy',
+      kind: 'enum',
+      required: true,
+      default: 'pairing',
+      options: [
+        { value: 'disabled', label: 'Disabled' },
+        { value: 'allowlist', label: 'Allowlist' },
+        { value: 'pairing', label: 'Pairing' },
+        { value: 'open', label: 'Open' },
+      ],
+    },
+    {
+      key: 'allowedUsers',
+      label: 'Allowed Users',
+      kind: 'string-list',
+    },
+  ],
+};
+
 const EXCLUSIVE_MINIMUM: DaemonChannelTypeDescriptor = {
   type: 'example',
   displayName: 'Example',
@@ -2717,6 +2771,324 @@ describe('ChannelEditorDialog', () => {
 
     expect(document.body.textContent).not.toContain('Direct message policy');
     expect(document.body.textContent).not.toContain('Allowed user IDs');
+  });
+
+  it('hides the direct-message policy for repository-only GitLab too', async () => {
+    // GitLab builds every envelope with isGroup: true, exactly like GitHub, so
+    // the injected private controls must be suppressed for it as well.
+    await renderDialog({ descriptor: GITLAB_CONFIGURED });
+
+    expect(document.body.textContent).not.toContain('Direct message policy');
+    expect(document.body.textContent).not.toContain('Allowed user IDs');
+    // The group axis stays editable: only the private axis is inert.
+    expect(document.body.textContent).toContain('Group Policy');
+  });
+
+  it('shows project-path copy and a row for a nested GitLab allowlist', async () => {
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'gitlab-bot',
+      config: {
+        type: 'gitlab',
+        groupPolicy: 'allowlist',
+        groups: { 'mygroup/subgroup/project': {} },
+      },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    await renderDialog({ descriptor: GITLAB_CONFIGURED, instance });
+
+    // The allowlist field uses GitLab project-path wording, not owner/repo.
+    const allowlist = fieldByLabel('Allowed projects');
+    expect(allowlist).not.toBeNull();
+    expect(allowlist?.getAttribute('placeholder')).toBe('group/project');
+    expect(descriptionOf(allowlist)).toContain('group/subgroup/project');
+    expect(document.body.textContent).not.toContain('owner/repo');
+    // The nested project path gets a per-repository override row.
+    expect(document.body.textContent).toContain('mygroup/subgroup/project');
+  });
+
+  it('localizes the GitLab allowlist copy for zh-CN', async () => {
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'gitlab-bot',
+      config: {
+        type: 'gitlab',
+        groupPolicy: 'allowlist',
+        groups: { 'mygroup/subgroup/project': {} },
+      },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    await renderDialog({
+      descriptor: GITLAB_CONFIGURED,
+      instance,
+      language: 'zh-CN',
+    });
+
+    const allowlist = fieldByLabel('允许的项目');
+    expect(allowlist).not.toBeNull();
+    expect(descriptionOf(allowlist)).toContain('项目路径');
+    expect(allowlist?.getAttribute('placeholder')).toBe('group/project');
+  });
+
+  it('localizes the GitLab speakers copy for zh-CN', async () => {
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'gitlab-bot',
+      config: {
+        type: 'gitlab',
+        groupPolicy: 'allowlist',
+        groups: {
+          'mygroup/subgroup/project': {
+            senders: 'allowlist',
+            allowedUsers: ['alice'],
+          },
+        },
+      },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    await renderDialog({
+      descriptor: GITLAB_CONFIGURED,
+      instance,
+      language: 'zh-CN',
+    });
+
+    expect(document.body.textContent).toContain('GitLab 用户名');
+    expect(document.body.textContent).not.toContain('GitHub 登录名');
+  });
+
+  it('localizes the GitLab project-path remedy for zh-CN', async () => {
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'gitlab-bot',
+      config: {
+        type: 'gitlab',
+        groupPolicy: 'allowlist',
+        groups: { 'mygroup/subgroup/project': {} },
+      },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    await renderDialog({
+      descriptor: GITLAB_CONFIGURED,
+      instance,
+      language: 'zh-CN',
+      onSave,
+    });
+
+    const allowlist = fieldByLabel('允许的项目') as HTMLInputElement;
+    await act(async () => {
+      setInputValue(allowlist, 'solo');
+    });
+    await act(async () => {
+      Array.from(document.querySelectorAll('button'))
+        .find((button) => button.textContent?.trim() === '保存')
+        ?.click();
+    });
+
+    expect(onSave).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain('项目需写成路径形式');
+    expect(document.body.textContent).not.toContain('owner/repo');
+  });
+
+  it('shows a project-path remedy for a malformed GitLab allowlist entry', async () => {
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'gitlab-bot',
+      config: {
+        type: 'gitlab',
+        groupPolicy: 'allowlist',
+        groups: { 'mygroup/subgroup/project': {} },
+      },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    await renderDialog({ descriptor: GITLAB_CONFIGURED, instance, onSave });
+
+    // Replace the valid path with a single segment and submit: the remedy must
+    // describe a project path, not GitHub's owner/repo.
+    const allowlist = fieldByLabel('Allowed projects') as HTMLInputElement;
+    await act(async () => {
+      setInputValue(allowlist, 'solo');
+    });
+    await act(async () => {
+      Array.from(document.querySelectorAll('button'))
+        .find((button) => button.textContent?.trim() === 'Save')
+        ?.click();
+    });
+
+    expect(onSave).not.toHaveBeenCalled();
+    // Assert the remedy sentence itself: the field description also contains
+    // "group/subgroup/project", so that substring alone would not distinguish
+    // a correct remedy from a wrong one.
+    expect(document.body.textContent).toContain('Enter each project as a path');
+    expect(document.body.textContent).not.toContain('owner/repo');
+  });
+
+  it('describes GitLab project speakers as GitLab usernames', async () => {
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'gitlab-bot',
+      config: {
+        type: 'gitlab',
+        groupPolicy: 'allowlist',
+        groups: {
+          'mygroup/subgroup/project': {
+            senders: 'allowlist',
+            allowedUsers: ['alice'],
+          },
+        },
+      },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    await renderDialog({ descriptor: GITLAB_CONFIGURED, instance });
+
+    expect(document.body.textContent).toContain('GitLab usernames');
+    expect(document.body.textContent).not.toContain('GitHub logins');
+  });
+
+  it('describes GitHub repository speakers as GitHub logins', async () => {
+    // The mirror direction: the speaker-copy selection must keep the GitHub
+    // wording for GitHub, not unconditionally render the GitLab copy.
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'github-bot',
+      config: {
+        type: 'github',
+        groupPolicy: 'allowlist',
+        groups: {
+          'acme/widgets': { senders: 'allowlist', allowedUsers: ['alice'] },
+        },
+      },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    await renderDialog({ descriptor: GITHUB_CONFIGURED, instance });
+
+    expect(document.body.textContent).toContain(
+      'GitHub logins allowed to start tasks in this repository',
+    );
+    expect(document.body.textContent).not.toContain('GitLab usernames');
+  });
+
+  it('describes an inherited GitLab speaker list with the inherited copy', async () => {
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'gitlab-bot',
+      config: {
+        type: 'gitlab',
+        groupPolicy: 'allowlist',
+        groups: {
+          '*': { senders: 'allowlist', allowedUsers: ['op'] },
+          'mygroup/subgroup/project': { senders: 'allowlist' },
+        },
+      },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    await renderDialog({ descriptor: GITLAB_CONFIGURED, instance });
+
+    expect(document.body.textContent).toContain(
+      'GitLab usernames allowed in this project',
+    );
+    expect(document.body.textContent).not.toContain('GitHub logins');
+  });
+
+  it('localizes the inherited GitLab speaker copy for zh-CN', async () => {
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'gitlab-bot',
+      config: {
+        type: 'gitlab',
+        groupPolicy: 'allowlist',
+        groups: {
+          '*': { senders: 'allowlist', allowedUsers: ['op'] },
+          'mygroup/subgroup/project': { senders: 'allowlist' },
+        },
+      },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    await renderDialog({
+      descriptor: GITLAB_CONFIGURED,
+      instance,
+      language: 'zh-CN',
+    });
+
+    expect(document.body.textContent).toContain(
+      '可以在该项目发言的 GitLab 用户名',
+    );
+    expect(document.body.textContent).not.toContain('GitHub 登录名');
+  });
+
+  it('shows a project-path conflict remedy for case-variant GitLab keys', async () => {
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'gitlab-bot',
+      config: {
+        type: 'gitlab',
+        groupPolicy: 'allowlist',
+        groups: {
+          'Group/Project': { senders: 'open' },
+          'group/project': { senders: 'allowlist', allowedUsers: ['alice'] },
+        },
+      },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    await renderDialog({ descriptor: GITLAB_CONFIGURED, instance, onSave });
+
+    await act(async () => {
+      Array.from(document.querySelectorAll('button'))
+        .find((button) => button.textContent?.trim() === 'Save')
+        ?.click();
+    });
+
+    expect(onSave).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain('lists one project twice');
+    expect(document.body.textContent).not.toContain('owner/repo');
+  });
+
+  it('localizes the GitLab conflict remedy for zh-CN', async () => {
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'gitlab-bot',
+      config: {
+        type: 'gitlab',
+        groupPolicy: 'allowlist',
+        groups: {
+          'Group/Project': { senders: 'open' },
+          'group/project': { senders: 'allowlist', allowedUsers: ['alice'] },
+        },
+      },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    await renderDialog({
+      descriptor: GITLAB_CONFIGURED,
+      instance,
+      language: 'zh-CN',
+      onSave,
+    });
+
+    await act(async () => {
+      Array.from(document.querySelectorAll('button'))
+        .find((button) => button.textContent?.trim() === '保存')
+        ?.click();
+    });
+
+    expect(onSave).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain(
+      '同一个项目以不同大小写写了两次',
+    );
+    expect(document.body.textContent).not.toContain('owner/repo');
   });
 
   it('asks a repository-only channel to save group pairing before showing approvals', async () => {
