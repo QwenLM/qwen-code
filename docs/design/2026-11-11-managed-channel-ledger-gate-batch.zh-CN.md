@@ -1,0 +1,91 @@
+# Managed Channel 台账对账前置门与分段批量计划
+
+[English](2026-11-11-managed-channel-ledger-gate-batch.md) | [简体中文](2026-11-11-managed-channel-ledger-gate-batch.zh-CN.md)
+
+状态：提议中。这是 [#16818](https://github.com/QwenLM/qwen-code/issues/16818)
+的健壮性/性能后续项（item A 与 B），在落地
+[多分段交付台账](2026-11-10-managed-channel-multi-segment-ledger.md)（#16797）
+及其[公开 segments 投影](2026-11-10-managed-channel-segments-projection.md)（#16807）
+时延期。它们细化对账读取路径与分段台账的语句数，不改动日记账记录契约、交付状态线
+或公开读取形状。
+
+## 问题
+
+地基遗留的两处开销：
+
+- **A — 对账器重复读取已完成的交付。** `reconcileClaim` 对每个过期认领都读取并
+  解析整条交付记录（LONGTEXT 资源体）并重规划其分段，包括它无法推进的认领。一条
+  认领租约已过期的 delivered 交付每 30s 扫描都被返回，付一次 LONGTEXT 读 + JSON
+  解析 + 逐分段语句却无有效功（#16797 R3-1）。
+- **B — 分段计划逐段一条语句。** `plan` 每段写一条 `INSERT IGNORE`，每个已回执段
+  再写一条回填 `UPDATE`，而 `claimOne` 对 `partial` 交付的每次认领轮询都重规划。
+  在 64 段契约上限下，重认领的 partial 付约 127 条语句（#16797 R3-2）。交付列表
+  读同样是 N+1：每行交付一次分段查询。
+
+## 决策
+
+### A. 按「全回执台账」给记录读取加前置门
+
+读取记录前，`reconcileClaim` 先检查台账是否已**列出每个分段行且回执非空**。若是，
+记录体已无可收敛——每段都被证明已接受，故交付即 delivered。门从台账自身的回执关闭
+滞后线（以末段回执 `stepLedger` 到 `delivered`），并完全跳过 LONGTEXT 读 + 解析 +
+重规划。以下情况保留读取：
+
+- 台账行缺失或分段行缺失（pre-ledger 认领仍需记录回填计划）；
+- 任何空回执（应答丢失的回执仍需收敛）。
+
+真正受益的是崩溃窗口：末段回执已落库但其到 `delivered` 的 `stepLedger` 失败——台账
+滞后于 `partial` 而每段都持有回执，扫描持续选中该 `partial` 线。从台账收敛即可关闭
+该线而**无需**记录读取；若仅按回执加门、只跳过读取，会把它搁死在 `partial`。收敛
+保持在结算路径之前：门在既有记录读取块之前运行；其后的结算路径不变。
+
+### B. 批量计划插入与列表读取
+
+`plan` 先校验整个计划，再对全部分段发一条 `jdbc.batchUpdate` 的 `INSERT IGNORE`
+（`AgentEventJournal` 的写法），并按逐行计数驱动写一次回填：插入刚创建的行（计数 1）
+已携带回执，故只有预先存在的行（计数 0，插入被忽略）需要带守卫的 `UPDATE`。报告
+无逐行计数（`SUCCESS_NO_INFO`，-2）的驱动回退到带守卫的更新——它对已回执行是空操作。
+`provider_receipt_json IS NULL` 守卫不变，故重放或竞态的第二回执绝不覆盖已存回执。
+
+交付列表的 N+1 也批量：新增 `ChannelSegmentRepository.listByDelivery`，用一条
+`WHERE delivery_key IN (...)` 查询读取整页分段，按 deliveryId 分组（各按 ordinal
+排序，每个被请求的 id 都保留条目——无分段时为空）。`listDeliveries` 一次读整页，
+不再每行一次分段查询。`getDelivery` 保留单交付的 `list` 读取。
+
+## 涉及文件
+
+- `control-plane/.../channel/ManagedChannelService.java` —— 对账前置门
+  （`convergeFullyReceiptedFromLedger`）与批量 `listDeliveries` 读取。
+- `persistence/.../JdbcChannelSegmentRepository.java` —— 批量 `plan` 与新增
+  `listByDelivery`。
+- `contracts/.../persistence/ChannelSegmentRepository.java` —— `listByDelivery`
+  边界方法。
+- `verification/.../channel/ManagedChannelServiceTest.java` —— 门的跳过见证
+  （对普通实例存储打 spy，验证全回执台账绝不触发记录读取，而滞后崩溃窗口线仍收敛到
+  delivered）与某段缺回执时保留读取的用例；`FailingSegments` 包装实现新边界方法。
+- `verification/.../persistence/JdbcChannelSegmentRepositoryTest.java` —— 64 段
+  批量、混合插入/回填空量、分组列表读取；MySQL 门禁在真实数据库重跑。
+- 本设计文档及其中文版。
+
+## 范围边界
+
+- 不改日记账记录契约、Harness 漏斗、可信适配器面、分段台账模式、交付状态线或公开
+  读取形状（`segments` 数组不变）。
+- 不升契约版本：公开 API 文档未触碰。
+- 门保持收敛结果不变：全回执线无论从记录还是从台账自身回执收敛，终态都是
+  `delivered`；门仅移除冗余读取。
+
+## 验证计划
+
+- 门的跳过由普通实例存储上的 Mockito spy 钉住：一条被强制回 `partial` 的全回执台账
+  （崩溃窗口）以末段回执收敛到 `delivered`，同时验证 `readResource` 绝不被调用；
+  移除门即转红（读取会运行）。一个伴生用例以空回执验证读取被保留。
+- 批量计划由既有回填/幂等用例加 64 段批量与混合批量（一预先存在行被回填、一新行携带
+  回执）钉住；回退计数驱动回填即转红回填用例。MySQL 门禁在真实数据库重跑。
+- 分组列表读取由多交付页（一交付为空）钉住按交付分组与 ordinal 顺序。
+- 改动模块 Checkstyle 通过；真实 MySQL 并发腿与完整 CI 套件仍为验证基线。
+
+## 待决问题
+
+1. 常见「缺回执 partial」仍付一次交付行查找加一次分段查询来判定门不适用；若该路径
+   的扫描量增大，可考虑用更廉价的预检（如交付行上的回执计数）短路分段查询。

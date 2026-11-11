@@ -550,6 +550,84 @@ class ManagedChannelServiceTest {
     }
 
     @Test
+    void reconcileSkipsTheRecordReadForAFullyReceiptedLedger() {
+        InboundAdmission admitted = service.submitInbound(TENANT, channel,
+                event(1, "1700:107", "please reply"));
+        String deliveryId = admitted.inputId() + ":reply";
+        plannedDelivery(admitted.sessionId(), deliveryId, admitted.routeId(),
+                "The build is green.", 3);
+        service.claimDeliveries(TENANT, channel, 16);
+        service.receipt(TENANT, channel, deliveryId,
+                new ReceiptRequest("accepted", 0, "<m0@example.com>", null));
+        service.receipt(TENANT, channel, deliveryId,
+                new ReceiptRequest("accepted", 1, "<m1@example.com>", null));
+        service.receipt(TENANT, channel, deliveryId,
+                new ReceiptRequest("accepted", 2, "<m2@example.com>", null));
+        // The crash window: every segment receipt landed but the line's last
+        // step to delivered failed, so the ledger lags at partial while every
+        // segment holds a receipt. The sweep still selects a partial line.
+        jdbc.update("UPDATE ma_delivery SET transport_state = 'partial'"
+                        + " WHERE tenant_id = ? AND delivery_id = ?",
+                TENANT, deliveryId);
+        assertThat(segmentLedger.list(TENANT, channel, deliveryId))
+                .extracting(SegmentLedger::providerReceipt)
+                .containsExactly("<m0@example.com>", "<m1@example.com>",
+                        "<m2@example.com>");
+        expire(deliveryId);
+        // A plain store, not the autowired CGLIB proxy, so Mockito can spy it.
+        JdbcChannelInstanceStore observing = org.mockito.Mockito.spy(
+                new JdbcChannelInstanceStore(jdbc));
+        ManagedChannelService observingService = new ManagedChannelService(
+                observing, new JdbcChannelRouteRepository(jdbc),
+                new JdbcChannelDeliveryRepository(jdbc), segmentLedger,
+                sessions, workspaces, harness, mapper, Duration.ofMinutes(10),
+                clock::get);
+        observingService.reconcile();
+        // The ledger already lists every segment with a receipt, so the
+        // reconciler converges the lagging line from the ledger's own receipts
+        // and never reads this delivery's record body. Removing the gate reds
+        // here: the LONGTEXT read would run on every sweep. Scoped to this
+        // session — the sweep also converges other tests' expired claims.
+        org.mockito.Mockito.verify(observing, org.mockito.Mockito.never())
+                .readResource(org.mockito.ArgumentMatchers.eq(TENANT),
+                        org.mockito.ArgumentMatchers.eq(admitted.sessionId()),
+                        org.mockito.ArgumentMatchers.anyString());
+        assertThat(service.ledger(TENANT, channel, deliveryId)).get()
+                .extracting(row -> row.state()).isEqualTo("delivered");
+        assertThat(service.ledger(TENANT, channel, deliveryId)).get()
+                .extracting(row -> row.providerReceipt())
+                .isEqualTo("<m2@example.com>");
+    }
+
+    @Test
+    void reconcileKeepsTheRecordReadWhenASegmentLacksAReceipt() {
+        InboundAdmission admitted = service.submitInbound(TENANT, channel,
+                event(1, "1700:108", "please reply"));
+        String deliveryId = admitted.inputId() + ":reply";
+        plannedDelivery(admitted.sessionId(), deliveryId, admitted.routeId(),
+                "The build is green.", 3);
+        service.claimDeliveries(TENANT, channel, 16);
+        service.receipt(TENANT, channel, deliveryId,
+                new ReceiptRequest("accepted", 0, "<m0@example.com>", null));
+        // A null receipt on segment 1 means the record still has something to
+        // converge, so the gate keeps the read.
+        mirrorSegmentReceipts(admitted.sessionId(), deliveryId, 1);
+        expire(deliveryId);
+        JdbcChannelInstanceStore observing = org.mockito.Mockito.spy(
+                new JdbcChannelInstanceStore(jdbc));
+        ManagedChannelService observingService = new ManagedChannelService(
+                observing, new JdbcChannelRouteRepository(jdbc),
+                new JdbcChannelDeliveryRepository(jdbc), segmentLedger,
+                sessions, workspaces, harness, mapper, Duration.ofMinutes(10),
+                clock::get);
+        observingService.reconcile();
+        org.mockito.Mockito.verify(observing, org.mockito.Mockito.atLeastOnce())
+                .readResource(org.mockito.ArgumentMatchers.eq(TENANT),
+                        org.mockito.ArgumentMatchers.eq(admitted.sessionId()),
+                        org.mockito.ArgumentMatchers.anyString());
+    }
+
+    @Test
     void aTerminalReceiptOnAPreLedgerClaimReplansTheSegmentRows() {
         InboundAdmission admitted = service.submitInbound(TENANT, channel,
                 event(1, "1700:101", "please reply"));
@@ -1666,6 +1744,12 @@ class ManagedChannelServiceTest {
         public List<SegmentLedger> list(String tenantId, String channelInstanceId,
                 String deliveryId) {
             return delegate.list(tenantId, channelInstanceId, deliveryId);
+        }
+
+        @Override
+        public Map<String, List<SegmentLedger>> listByDelivery(String tenantId,
+                String channelInstanceId, List<String> deliveryIds) {
+            return delegate.listByDelivery(tenantId, channelInstanceId, deliveryIds);
         }
     }
 }

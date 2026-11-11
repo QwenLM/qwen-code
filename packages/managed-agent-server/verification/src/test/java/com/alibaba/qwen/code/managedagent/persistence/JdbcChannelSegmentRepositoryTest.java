@@ -134,6 +134,59 @@ class JdbcChannelSegmentRepositoryTest {
     }
 
     @Test
+    void plansTheFullContractBoundAndReplanStaysIdempotent() {
+        List<SegmentLedger> plan = java.util.stream.IntStream.range(0, 64)
+                .mapToObj(i -> new SegmentLedger("d1:" + i, i, null))
+                .toList();
+        segments.plan(tenant, channel, "d1", plan);
+        assertThat(segments.list(tenant, channel, "d1"))
+                .extracting(SegmentLedger::ordinal)
+                .containsExactlyElementsOf(
+                        java.util.stream.IntStream.range(0, 64).boxed().toList());
+        // A re-claim replays the whole batch; no row duplicates.
+        segments.plan(tenant, channel, "d1", plan);
+        assertThat(count()).isEqualTo(64);
+    }
+
+    @Test
+    void aBatchBackfillsExistingRowsAndCarriesReceiptsOnNewOnes() {
+        segments.plan(tenant, channel, "d1",
+                List.of(new SegmentLedger("d1:0", 0, null)));
+        segments.receipt(tenant, channel, "d1", 0, "m0");
+        // One batch mixes a pre-existing row (insert ignored, backfill guarded
+        // by the per-row count) and a new row (the insert carries its receipt).
+        segments.plan(tenant, channel, "d1", List.of(
+                new SegmentLedger("d1:0", 0, "other"),
+                new SegmentLedger("d1:1", 1, "m1")));
+        assertThat(segments.list(tenant, channel, "d1"))
+                .extracting(SegmentLedger::providerReceipt)
+                .containsExactly("m0", "m1");
+        assertThat(count()).isEqualTo(2);
+    }
+
+    @Test
+    void listByDeliveryReadsTheWholePageGroupedByDelivery() {
+        segments.plan(tenant, channel, "d1", List.of(
+                new SegmentLedger("d1:1", 1, null),
+                new SegmentLedger("d1:0", 0, "m0")));
+        segments.plan(tenant, channel, "d3",
+                List.of(new SegmentLedger("d3:0", 0, null)));
+        var byDelivery = segments.listByDelivery(tenant, channel,
+                List.of("d1", "d2", "d3"));
+        assertThat(byDelivery.keySet()).containsExactly("d1", "d2", "d3");
+        assertThat(byDelivery.get("d1"))
+                .extracting(SegmentLedger::ordinal)
+                .containsExactly(0, 1);
+        assertThat(byDelivery.get("d1").get(0).providerReceipt()).isEqualTo("m0");
+        // A delivery with no segments keeps an empty entry, not a missing key.
+        assertThat(byDelivery.get("d2")).isEmpty();
+        assertThat(byDelivery.get("d3"))
+                .extracting(SegmentLedger::segmentId)
+                .containsExactly("d3:0");
+        assertThat(segments.listByDelivery(tenant, channel, List.of())).isEmpty();
+    }
+
+    @Test
     void refusesInvalidArguments() {
         assertThatThrownBy(() -> segments.plan(tenant, channel, "d1",
                 List.of(new SegmentLedger("d1:0", -1, null))))

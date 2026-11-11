@@ -418,24 +418,31 @@ public class ManagedChannelService {
         String deliveryId = claim.deliveryId();
         // Converge the ledger with the committed record first: a receipt
         // the answer was lost for still landed, and a claim_delivery commit
-        // the ledger never saw still moved the record to sending.
-        instances.findDeliveryRecord(tenantId, claim.sessionId(), deliveryId)
-                .ifPresent(record -> {
-                    String json = instances.readResource(tenantId,
-                            claim.sessionId(), record.recordResourceId());
-                    JsonNode tree = json == null ? null
-                            : readJson(json, "channel delivery record");
-                    if (tree != null) {
-                        planSegments(tenantId, channelId, deliveryId, tree);
-                    }
-                    String state = record.deliveryState();
-                    if (!"planned".equals(state)) {
-                        stepLedger(tenantId, channelId, deliveryId, state,
-                                "delivered".equals(state) && tree != null
-                                        ? lastSegmentReceipt(tree) : null,
-                                claim.claimGeneration());
-                    }
-                });
+        // the ledger never saw still moved the record to sending. A ledger
+        // that already lists every segment with a receipt has nothing left to
+        // read from the record, so converge it from its own receipts and skip
+        // the LONGTEXT read + parse + re-plan every sweep would otherwise pay
+        // (#16818 A).
+        if (!convergeFullyReceiptedFromLedger(tenantId, channelId, deliveryId,
+                claim.claimGeneration())) {
+            instances.findDeliveryRecord(tenantId, claim.sessionId(), deliveryId)
+                    .ifPresent(record -> {
+                        String json = instances.readResource(tenantId,
+                                claim.sessionId(), record.recordResourceId());
+                        JsonNode tree = json == null ? null
+                                : readJson(json, "channel delivery record");
+                        if (tree != null) {
+                            planSegments(tenantId, channelId, deliveryId, tree);
+                        }
+                        String state = record.deliveryState();
+                        if (!"planned".equals(state)) {
+                            stepLedger(tenantId, channelId, deliveryId, state,
+                                    "delivered".equals(state) && tree != null
+                                            ? lastSegmentReceipt(tree) : null,
+                                    claim.claimGeneration());
+                        }
+                    });
+        }
         Optional<ChannelDelivery> ledger = deliveries.find(tenantId,
                 channelId, deliveryId);
         if (ledger.isPresent() && "planned".equals(ledger.get().state())) {
@@ -468,6 +475,37 @@ public class ManagedChannelService {
                 claim.sessionId(), body);
         stepLedger(tenantId, channelId, deliveryId, deliveryState(result),
                 null, claim.claimGeneration());
+    }
+
+    /**
+     * When the ledger already lists every segment with a receipt, the record
+     * body has nothing left to converge: every segment is provably accepted,
+     * so the delivery is delivered. Close a lagging line from the ledger's own
+     * receipts and return true so the caller skips the record read. This is
+     * the crash window where the last receipt landed but its step to delivered
+     * failed — converging from the ledger closes it without the LONGTEXT read.
+     * A missing row or any null receipt returns false: the record still has
+     * something to converge, so the caller keeps the read. Convergence stays
+     * ahead of the settle path that follows.
+     */
+    private boolean convergeFullyReceiptedFromLedger(String tenantId,
+            String channelId, String deliveryId, Long claimGeneration) {
+        Optional<ChannelDelivery> ledger = deliveries.find(tenantId, channelId,
+                deliveryId);
+        if (ledger.isEmpty()) {
+            return false;
+        }
+        List<SegmentLedger> ledgerSegments = segments.list(tenantId, channelId,
+                deliveryId);
+        if (ledgerSegments.isEmpty() || ledgerSegments.stream()
+                .anyMatch(segment -> segment.providerReceipt() == null)) {
+            return false;
+        }
+        if (!"delivered".equals(ledger.get().state())) {
+            stepLedger(tenantId, channelId, deliveryId, "delivered",
+                    ledgerSegments.getLast().providerReceipt(), claimGeneration);
+        }
+        return true;
     }
 
     /** The last provider receipt the committed record holds, when any. */
@@ -529,9 +567,12 @@ public class ManagedChannelService {
         }
         DeliveryPage page = deliveries.listByChannel(tenantId, channelId,
                 decoded, limit);
+        Map<String, List<SegmentLedger>> segmentsByDelivery = segments
+                .listByDelivery(tenantId, channelId, page.deliveries().stream()
+                        .map(ChannelDelivery::deliveryId).toList());
         List<PublicChannelDelivery> data = page.deliveries().stream()
-                .map(row -> publicDelivery(row,
-                        segments.list(tenantId, channelId, row.deliveryId())))
+                .map(row -> publicDelivery(row, segmentsByDelivery.getOrDefault(
+                        row.deliveryId(), List.of())))
                 .toList();
         String next = null;
         if (page.hasMore() && !page.deliveries().isEmpty()) {

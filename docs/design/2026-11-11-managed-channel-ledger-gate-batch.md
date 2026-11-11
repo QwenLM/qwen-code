@@ -1,0 +1,122 @@
+# Managed Channel ledger reconcile gate and batched segment plan
+
+[English](2026-11-11-managed-channel-ledger-gate-batch.md) | [简体中文](2026-11-11-managed-channel-ledger-gate-batch.zh-CN.md)
+
+Status: proposed. These are the robustness/performance follow-ups (items A and
+B) of [#16818](https://github.com/QwenLM/qwen-code/issues/16818), deferred while
+landing the [multi-segment delivery ledger](2026-11-10-managed-channel-multi-segment-ledger.md)
+(#16797) and its [public segments projection](2026-11-10-managed-channel-segments-projection.md)
+(#16807). They refine the reconcile read path and the segment ledger's
+statement count without changing the journal record contract, the delivery
+state line, or the public read shape.
+
+## Problem
+
+Two costs the groundwork left behind:
+
+- **A — the reconciler re-reads completed deliveries.** `reconcileClaim` reads
+  and parses the whole delivery record (a LONGTEXT resource body) and re-plans
+  its segments for every expired claim, including claims it cannot advance. A
+  delivered delivery whose claim lease lapsed is returned on every 30s sweep,
+  paying a LONGTEXT read + JSON parse + per-segment statements for zero useful
+  work (#16797 R3-1).
+- **B — the segment plan is statement-per-segment.** `plan` writes one
+  `INSERT IGNORE` per segment plus one backfill `UPDATE` per already-receipted
+  segment, and `claimOne` re-plans on every claim poll of a `partial` delivery.
+  At the 64-segment contract bound a re-claimed partial pays ~127 statements
+  (#16797 R3-2). The delivery-list read is likewise an N+1: one segment query
+  per delivery row.
+
+## Decision
+
+### A. Gate the record read on a fully-receipted ledger
+
+Before reading the record, `reconcileClaim` checks whether the ledger already
+lists **every segment row with a non-null receipt**. When it does, the record
+body has nothing left to converge — every segment is provably accepted, so the
+delivery is delivered. The gate closes a lagging line from the ledger's own
+receipts (`stepLedger` to `delivered` with the last segment's receipt) and skips
+the LONGTEXT read + parse + re-plan entirely. The read is kept for:
+
+- a missing ledger row or missing segment rows (a pre-ledger claim still needs
+  the record to backfill the plan);
+- any null receipt (a lost-answer receipt still needs converging).
+
+The case this matters for is the crash window where the final segment receipt
+landed but its `stepLedger` to `delivered` failed: the ledger lags at `partial`
+while every segment holds a receipt, and the sweep keeps selecting that
+`partial` line. Converging from the ledger closes the line **without** the
+record read; gating on the receipts alone and merely skipping the read would
+strand it at `partial`. Convergence stays ahead of the settle path: the gate
+runs before the existing record-read block, and the settle path that follows is
+unchanged.
+
+### B. Batch the plan inserts and the list read
+
+`plan` validates the whole plan, then issues one `jdbc.batchUpdate`
+`INSERT IGNORE` for all segments (the pattern `AgentEventJournal` uses), and
+drives the write-once backfill from the per-row counts: a row the insert just
+created (count 1) already carries its receipt, so only a pre-existing row
+(count 0, insert ignored) needs the guarded `UPDATE`. A driver that reports no
+per-row count (`SUCCESS_NO_INFO`, -2) falls back to the guarded update, which is
+a no-op on a row already receipted. The `provider_receipt_json IS NULL` guard is
+unchanged, so a replay or a racing second receipt never overwrites a stored
+receipt.
+
+The delivery-list N+1 is batched too: a new
+`ChannelSegmentRepository.listByDelivery` reads the whole page's segments in one
+`WHERE delivery_key IN (...)` query, grouped by deliveryId (each ordered by
+ordinal, every requested id keeping an entry — empty when it holds no segments).
+`listDeliveries` reads the page once instead of a segment query per row.
+`getDelivery` keeps the single-delivery `list` read.
+
+## Files affected
+
+- `control-plane/.../channel/ManagedChannelService.java` — the reconcile gate
+  (`convergeFullyReceiptedFromLedger`) and the batched `listDeliveries` read.
+- `persistence/.../JdbcChannelSegmentRepository.java` — the batched `plan` and
+  the new `listByDelivery`.
+- `contracts/.../persistence/ChannelSegmentRepository.java` — the
+  `listByDelivery` boundary method.
+- `verification/.../channel/ManagedChannelServiceTest.java` — the gate's
+  skip witness (a spied instance store verifies the record read never runs for a
+  fully-receipted ledger, while the lagging crash-window line still converges to
+  delivered) and the keep-read case when a segment lacks a receipt; the
+  `FailingSegments` wrapper implements the new boundary method.
+- `verification/.../persistence/JdbcChannelSegmentRepositoryTest.java` — the
+  64-segment batch, the mixed insert/backfill batch, and the grouped list read;
+  the MySQL gate reruns them on a real database.
+- This design doc and its Chinese version.
+
+## Scope boundaries
+
+- No change to the journal record contract, the Harness funnel, the trusted
+  adapter surface, the segment ledger schema, the delivery state line, or the
+  public read shape (`segments` array unchanged).
+- No contract version bump: the public API document is untouched.
+- The gate preserves the convergence outcome: a fully-receipted line ends
+  `delivered` whether converged from the record or from the ledger's own
+  receipts; it only removes the redundant read.
+
+## Verification plan
+
+- The gate's skip is pinned by a Mockito spy on a plain instance store: a
+  fully-receipted ledger whose line is forced back to `partial` (the crash
+  window) converges to `delivered` with the last segment's receipt while
+  `readResource` is verified never called; removing the gate reds it (the read
+  would run). A companion case with a null receipt verifies the read is kept.
+- The batched plan is pinned by the existing backfill/idempotence cases plus a
+  64-segment batch and a mixed batch (one pre-existing row backfilled, one new
+  row carrying its receipt); reverting the count-driven backfill reds the
+  backfill case. The MySQL gate reruns these on a real database.
+- The grouped list read is pinned by a multi-delivery page (one delivery empty)
+  asserting per-delivery grouping and ordinal order.
+- Checkstyle passes on the changed modules; the real-MySQL concurrency leg and
+  full CI suites remain the verification baseline.
+
+## Open questions
+
+1. The common null-receipt `partial` still pays a delivery-row lookup plus a
+   segment query to decide the gate does not apply; if that sweep path grows,
+   a cheaper pre-check (e.g. a receipt count on the delivery row) could
+   short-circuit the segment query.
