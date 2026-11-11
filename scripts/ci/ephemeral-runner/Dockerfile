@@ -9,7 +9,7 @@ ARG PIP_INDEX_URL=https://pypi.org/simple
 
 # fonts-dejavu-core supplies the DejaVu faces: verify-capture resolves bold
 # through the host font stack, and the unit suite asserts a bold capture
-# differs from plain; without a font the two are byte-identical.
+# differs from plain; without a bold face the two rasterise identically.
 RUN sed -i "s|deb.debian.org|${DEBIAN_MIRROR}|g" /etc/apt/sources.list.d/debian.sources \
     && apt-get update -o Acquire::http::Timeout=30 \
     && apt-get install -y --no-install-recommends \
