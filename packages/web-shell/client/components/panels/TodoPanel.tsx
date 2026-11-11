@@ -133,7 +133,12 @@ export const TodoPanel = memo(function TodoPanel({
       </div>
 
       {total > 0 && (
-        <div className={styles.detail} role="tooltip">
+        <div
+          className={styles.detail}
+          role="tooltip"
+          onClick={onOpen ? () => onOpen() : undefined}
+          style={onOpen ? { cursor: 'pointer' } : undefined}
+        >
           {todos.map((todo, index) => (
             <div
               key={`${todo.id || index}:${todo.content}`}

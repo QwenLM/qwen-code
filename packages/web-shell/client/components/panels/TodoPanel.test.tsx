@@ -97,3 +97,38 @@ describe('TodoPanel bottom status items', () => {
     expect(container.querySelector('div[aria-label="Step 0 / 0"]')).toBeNull();
   });
 });
+
+describe('TodoPanel detail tooltip', () => {
+  it('opens the plan execution from the detail tooltip when onOpen is provided', () => {
+    const onOpen = vi.fn();
+    const container = render(
+      <TodoPanel
+        todos={[todo('1', 'in_progress'), todo('2', 'pending')]}
+        onOpen={onOpen}
+      />,
+    );
+
+    const tooltip = container.querySelector('[role="tooltip"]') as HTMLElement;
+    expect(tooltip).not.toBeNull();
+    act(() => tooltip.click());
+    expect(onOpen).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows a pointer affordance on the detail tooltip only when clickable', () => {
+    const container = render(
+      <TodoPanel todos={[todo('1', 'pending')]} onOpen={vi.fn()} />,
+    );
+
+    const tooltip = container.querySelector('[role="tooltip"]') as HTMLElement;
+    expect(tooltip.style.cursor).toBe('pointer');
+  });
+
+  it('keeps the detail tooltip inert when onOpen is not provided', () => {
+    const container = render(<TodoPanel todos={[todo('1', 'pending')]} />);
+
+    const tooltip = container.querySelector('[role="tooltip"]') as HTMLElement;
+    expect(tooltip).not.toBeNull();
+    expect(tooltip.style.cursor).toBe('');
+    act(() => tooltip.click());
+  });
+});
