@@ -40,6 +40,36 @@ final class ManagedSessionRetirementStore {
         if (!nativeSnapshots.isEmpty()) {
             return true;
         }
+        var sideRefs = jdbc.queryForList("SELECT owner_key,owner_revision,resource_key FROM ma_resource_ref"
+                + " WHERE session_scope_key=? AND owner_kind='SIDE_QUERY' ORDER BY owner_key,owner_revision,resource_key LIMIT ? FOR UPDATE",
+                scope, limit);
+        for (var row : sideRefs) {
+            jdbc.update("DELETE FROM ma_resource_ref WHERE session_scope_key=? AND owner_kind='SIDE_QUERY'"
+                            + " AND owner_key=? AND owner_revision=? AND resource_key=?", scope, row.get("owner_key"),
+                    row.get("owner_revision"), row.get("resource_key"));
+        }
+        if (!sideRefs.isEmpty()) {
+            return true;
+        }
+        var queries = jdbc.queryForList("SELECT query_key,read_lease_id FROM ma_side_query WHERE session_scope_key=?"
+                + " ORDER BY query_key LIMIT ? FOR UPDATE", scope, limit);
+        for (var row : queries) {
+            if (row.get("read_lease_id") != null) {
+                jdbc.update("DELETE FROM ma_read_lease WHERE lease_id=?", row.get("read_lease_id"));
+            }
+            jdbc.update("DELETE FROM ma_side_query WHERE session_scope_key=? AND query_key=?", scope, row.get("query_key"));
+        }
+        if (!queries.isEmpty()) {
+            return true;
+        }
+        var receipts = jdbc.queryForList("SELECT receipt_key FROM ma_request_receipt WHERE tenant_id=? AND session_id=?"
+                + " AND namespace='SIDE_QUERY' ORDER BY receipt_key LIMIT ? FOR UPDATE", tenant, session, limit);
+        for (var row : receipts) {
+            jdbc.update("DELETE FROM ma_request_receipt WHERE receipt_key=? AND namespace='SIDE_QUERY'", row.get("receipt_key"));
+        }
+        if (!receipts.isEmpty()) {
+            return true;
+        }
         var messages =
                 jdbc.queryForList(
                         "SELECT item_id FROM ma_message WHERE tenant_id = ? AND session_id = ?"
@@ -99,6 +129,11 @@ final class ManagedSessionRetirementStore {
                     revision);
         }
         if (!revisions.isEmpty()) {
+            jdbc.update(
+                    "UPDATE ma_journal_pack SET state = 'RETIRED', gmt_modified = "
+                            + ManagedSchemaTime.SQL_NOW
+                            + " WHERE session_scope_key = ? AND state <> 'RETIRED'",
+                    scope);
             jdbc.update(
                     "UPDATE ma_session_head SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", compacted_through_revision = GREATEST(compacted_through_revision, ?) WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ? AND state = 'DELETED'",
                     revisions.getLast(),

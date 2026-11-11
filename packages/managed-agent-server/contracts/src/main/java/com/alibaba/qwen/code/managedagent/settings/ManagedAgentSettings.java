@@ -16,6 +16,8 @@ public interface ManagedAgentSettings {
     public EventTransport getEventTransport();
     public SessionStore getSessionStore();
     public ToolPublication getToolPublication();
+    /** Null means session-resource OSS externalization and journal compaction are disabled. */
+    public default SessionResources getSessionResources() { return null; }
     public Artifacts getArtifacts();
     public ManagedExtensions getManagedExtensions();
     public Extensions getExtensions();
@@ -28,6 +30,7 @@ public interface ManagedAgentSettings {
     public List<? extends ModelOption> getModelCatalog();
     public default List<String> getModelConfigBaseUrls() { return List.of(); }
     public default boolean isMemoryEnabled() { return false; }
+    public default boolean isSideQueriesEnabled() { return false; }
     public interface ModelOption {
         public String getModelId();
         public String getLabel();
@@ -79,7 +82,6 @@ public interface ManagedAgentSettings {
         public boolean isAllowInsecureHttp();
     }
     public interface ToolPublication {
-        public boolean isAsyncVerificationEnabled();
         public int getVerificationConcurrency();
         public boolean isGcEnabled();
         public Duration getDeletionGrace();
@@ -97,6 +99,15 @@ public interface ManagedAgentSettings {
         public Duration getClaimTimeout();
         public Long getVerificationBytesPerSecond();
         public Duration getMaxVerificationTimeout();
+    }
+    public interface SessionResources {
+        public boolean isEnabled();
+        public String getOssKeyPrefix();
+        public boolean isPackJobEnabled();
+        public boolean isDeletionEnabled();
+        public long getPackTargetBytes();
+        public int getPackMaxTransactions();
+        public Duration getDeletionGrace();
     }
     public interface ManagedExtensions {
         public boolean isEnabled();
@@ -161,6 +172,10 @@ public interface ManagedAgentSettings {
         public String getWorkspaceCwd();
         public String getIsolationClass();
         public String getBoundSessionIsolationClass();
+        public default boolean isToolMeasurements() {
+            return false;
+        }
+
         public boolean isSessionCreateWarm();
         public List<? extends WorkspaceMount> getWorkspaceMounts();
         public String getWorkspaceCreationRoot();

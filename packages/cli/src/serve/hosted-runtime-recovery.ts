@@ -5,6 +5,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { recordManagedToolMeasurements } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-measurements.js';
 import { parseManagedConfigInstallRecord } from '@qwen-code/qwen-code-core/managed-runtime/managed-config-install.js';
 import { expandHostedExtensionCommand } from './hosted-extension-command.js';
 import { isDeepStrictEqual } from 'node:util';
@@ -580,6 +581,13 @@ export async function settleParkedTurnCancelled(input: {
         'managed-tool-outcome',
         outcomeBytes(item, parts),
       ));
+    await recordManagedToolMeasurements(
+      input.session,
+      item.executionCallId,
+      outcomeRef,
+      input.broker?.toolMeasurements(item.executionCallId),
+    );
+    input.broker?.releaseToolMeasurements(item.executionCallId);
     // The assistant's functionCall must meet its functionResponse in the next
     // turn's history, or providers reject the request as malformed.
     if (!journaled.has(item.functionCallId)) {
@@ -3043,6 +3051,13 @@ export async function recoverHostedRuntimeTurn(input: {
             'managed-tool-outcome',
             outcome,
           );
+          await recordManagedToolMeasurements(
+            session,
+            item.executionCallId,
+            outcomeRef,
+            broker.toolMeasurements(item.executionCallId),
+          );
+          broker.releaseToolMeasurements(item.executionCallId);
           if (!journaled.has(item.functionCallId)) {
             await writeRecoveryRecord(session, record);
           }

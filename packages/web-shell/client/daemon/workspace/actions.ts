@@ -313,6 +313,38 @@ export function createDaemonWorkspaceActions({
       return workspace.restartWorkspaceChannel(name);
     },
 
+    channelQrLogin: {
+      async start(name) {
+        const workspace = requireWorkspaceClient(
+          getClient,
+          getWorkspaceCwd,
+          'Start channel QR login failed',
+        );
+        return workspace.startWorkspaceChannelQrLogin(name);
+      },
+
+      async state(loginId) {
+        const workspace = requireWorkspaceClient(
+          getClient,
+          getWorkspaceCwd,
+          'Load channel QR login failed',
+        );
+        return withActionTimeout(
+          workspace.workspaceChannelQrLogin(loginId),
+          'Load channel QR login timed out',
+        );
+      },
+
+      async cancel(loginId) {
+        const workspace = requireWorkspaceClient(
+          getClient,
+          getWorkspaceCwd,
+          'Cancel channel QR login failed',
+        );
+        return workspace.cancelWorkspaceChannelQrLogin(loginId);
+      },
+    },
+
     channelPairing: {
       async list(name) {
         const workspace = requireWorkspaceClient(

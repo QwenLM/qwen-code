@@ -1385,6 +1385,108 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/agent/web-shell/v1/session-side-queries/create": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Actor-private durable side query. Generation requires deployment opt-in, explicit Session model_config, execution authority and side-query/1. Reads revalidate visibility and query ownership. */
+        post: operations["createWebShellSessionSideQuery"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/session-side-queries/list": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Actor-private durable side query. Generation requires deployment opt-in, explicit Session model_config, execution authority and side-query/1. Reads revalidate visibility and query ownership. */
+        post: operations["listWebShellSessionSideQuery"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/session-side-queries/context": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Actor-private durable side query. Generation requires deployment opt-in, explicit Session model_config, execution authority and side-query/1. Reads revalidate visibility and query ownership. */
+        post: operations["contextWebShellSessionSideQuery"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/session-side-queries/get": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Actor-private durable side query. Generation requires deployment opt-in, explicit Session model_config, execution authority and side-query/1. Reads revalidate visibility and query ownership. */
+        post: operations["getWebShellSessionSideQuery"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/session-side-queries/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Actor-private durable side query. Generation requires deployment opt-in, explicit Session model_config, execution authority and side-query/1. Reads revalidate visibility and query ownership. */
+        post: operations["cancelWebShellSessionSideQuery"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/session-side-queries/stream": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Actor-private durable side query. Generation requires deployment opt-in, explicit Session model_config, execution authority and side-query/1. Reads revalidate visibility and query ownership. */
+        post: operations["streamWebShellSessionSideQuery"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -1709,6 +1811,10 @@ export interface components {
              * @default false
              */
             diagnostics?: boolean;
+            /** @default false */
+            btw?: boolean;
+            /** @default false */
+            recap?: boolean;
         };
         WebShellSessionPage: {
             data: components["schemas"]["WebShellSession"][];
@@ -2624,6 +2730,7 @@ export interface components {
             revision: number;
             supported: boolean;
             availableServers: components["schemas"]["ManagedMcpPublishedServer"][];
+            /** @description The selected MCP server snapshot, including retained removed entries. Only non-removed entries count toward the 32-server live capacity, and the retained snapshot is capped at 96 total entries. */
             servers: components["schemas"]["ManagedMcpManagementServer"][];
             operation?: components["schemas"]["ManagedMcpManagementOperation"];
         };
@@ -2786,11 +2893,26 @@ export interface components {
             /** @description Exact source commit, resolved npm version, or imported content revision. Supplied together with sourceType. */
             sourceRevision?: string;
         };
+        ManagedExtensionSourceReference: {
+            providerId: string;
+            /** @enum {string} */
+            kind: "skill" | "extension";
+            resourceId: string;
+            /** @description Exact immutable business revision. Dynamic selectors must be resolved by the business entry point. */
+            revision: string;
+        };
+        ManagedExtensionSourceOrigin: {
+            reference: components["schemas"]["ManagedExtensionSourceReference"];
+            /** @description SHA-256 of the actual raw archive bytes, distinct from packageDigest. */
+            sourceDigest: string;
+            requestDigest: string;
+        };
         ManagedExtensionPackage: {
             pin: components["schemas"]["ManagedExtensionPackagePin"];
             manifest: components["schemas"]["ManagedExtensionPackageManifest"];
             /** Format: int64 */
             byteLength: number;
+            source?: components["schemas"]["ManagedExtensionSourceOrigin"];
         };
         ManagedExtensionPackageCatalog: {
             supported: boolean;
@@ -3223,6 +3345,7 @@ export interface components {
                 unavailable: number;
                 unknown: number;
             };
+            measurements?: components["schemas"]["ManagedActivityMeasurementTotals"];
         };
         ManagedActivityFile: {
             /** @enum {string} */
@@ -3267,6 +3390,7 @@ export interface components {
             conflictingEvidence?: boolean;
             taskState?: string;
             taskRuntimeState?: string | null;
+            measurements?: components["schemas"]["ManagedActivityMeasurement"];
         };
         ManagedActivityStatistics: {
             tools: components["schemas"]["ManagedActivityMetrics"];
@@ -3303,6 +3427,7 @@ export interface components {
                 write: components["schemas"]["ManagedActivityMetrics"];
                 edit: components["schemas"]["ManagedActivityMetrics"];
             };
+            measurementStartSequence?: string;
         };
         ManagedDiagnosticActivityStats: {
             /** @constant */
@@ -3380,6 +3505,7 @@ export interface components {
                 conflictingEvidence?: boolean;
                 taskState?: string;
                 taskRuntimeState?: string | null;
+                measurements?: components["schemas"]["ManagedActivityMeasurement"];
             }[];
             hasMore: boolean;
             nextCursor: string | null;
@@ -3426,6 +3552,7 @@ export interface components {
                 conflictingEvidence?: boolean;
                 taskState?: string;
                 taskRuntimeState?: string | null;
+                measurements?: components["schemas"]["ManagedActivityMeasurement"];
             }[];
             hasMore: boolean;
             nextCursor: string | null;
@@ -3558,6 +3685,110 @@ export interface components {
                 arch: "x64" | "arm64" | "any";
             };
             extensionId?: string;
+        };
+        ManagedActivityMeasurement: {
+            sourceSequence: string;
+            /** @enum {string} */
+            availability: "available" | "partial" | "unsupported";
+            executionDurationMs: string | null;
+            file: {
+                /** @enum {string} */
+                operation: "read" | "write" | "edit";
+                /** @enum {string} */
+                status: "measured" | "unchanged" | "unmeasured";
+                modelLinesAdded: string | null;
+                modelLinesRemoved: string | null;
+                appliedLinesAdded: string | null;
+                appliedLinesRemoved: string | null;
+            } | null;
+        };
+        ManagedActivityMeasurementTotals: {
+            /** @enum {string} */
+            availability: "available" | "partial" | "not_recorded" | "unsupported";
+            recorded: string;
+            unsupported: string;
+            executionDurationMs: string;
+            executionDurationSamples: string;
+            fileSamples: string;
+            modelDiffSamples: string;
+            appliedDiffSamples: string;
+            modelLinesAdded: string;
+            modelLinesRemoved: string;
+            appliedLinesAdded: string;
+            appliedLinesRemoved: string;
+            partial: string;
+        };
+        WebShellSideQueryPrefix: {
+            journalRevision: number;
+            committedSequence: number;
+            lastCommitDigest: string | null;
+            completedTurnSequence: number;
+            contentVersion: string;
+            completedUserTurnCount: number;
+            mainInputBoundary: number;
+        };
+        WebShellSideQuery: {
+            /** Format: uuid */
+            queryId: string;
+            /** Format: uuid */
+            sessionId: string;
+            /** @enum {unknown} */
+            kind: "btw" | "recap";
+            /** @enum {unknown} */
+            trigger: "manual" | "automatic";
+            question: string | null;
+            /** @enum {unknown} */
+            status: "preparing" | "running" | "completed" | "failed" | "cancelled" | "interrupted";
+            outcome: string | null;
+            source: components["schemas"]["WebShellSideQueryPrefix"];
+            resultRevision: number;
+            text: string | null;
+            usage: {
+                [key: string]: unknown;
+            } | null;
+            errorCode: string | null;
+            createdAt: number;
+            updatedAt: number;
+            deadlineAt: number;
+        };
+        WebShellSideQueryContext: {
+            actorScopeKey: string;
+            contentVersion: string | null;
+            completedUserTurnCount: number;
+            mainInputBoundary: number;
+            automaticEligible: boolean;
+            generationAvailable: boolean;
+            unavailableReason: string | null;
+            latestRecapContentVersion: string | null;
+            latestRecapUserTurnCount: number | null;
+        };
+        WebShellSideQueryPage: {
+            items: components["schemas"]["WebShellSideQuery"][];
+            nextCursor: string | null;
+        };
+        WebShellSideQueryCreateRequest: {
+            sessionId: string;
+            /** @enum {unknown} */
+            kind: "btw" | "recap";
+            /** @enum {unknown} */
+            trigger?: "manual" | "automatic";
+            question?: string;
+            expectedContentVersion?: string;
+            expectedMainInputBoundary?: number;
+            idempotencyKey: string;
+            requestId?: string;
+        };
+        WebShellSideQueryGetRequest: {
+            sessionId: string;
+            queryId: string;
+            afterRevision?: number;
+            requestId?: string;
+        };
+        WebShellSideQueryListRequest: {
+            sessionId: string;
+            cursor?: string;
+            limit?: number;
+            requestId?: string;
         };
     };
     responses: {
@@ -6405,6 +6636,181 @@ export interface operations {
             404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
             413: components["responses"]["PayloadTooLarge"];
+        };
+    };
+    createWebShellSessionSideQuery: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellSideQueryCreateRequest"];
+            };
+        };
+        responses: {
+            /** @description Current actor-private state. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellSideQuery"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    listWebShellSessionSideQuery: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellSideQueryListRequest"];
+            };
+        };
+        responses: {
+            /** @description Current actor-private state. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellSideQueryPage"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    contextWebShellSessionSideQuery: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellSessionRequest"];
+            };
+        };
+        responses: {
+            /** @description Current actor-private state. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellSideQueryContext"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    getWebShellSessionSideQuery: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellSideQueryGetRequest"];
+            };
+        };
+        responses: {
+            /** @description Current actor-private state. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellSideQuery"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    cancelWebShellSessionSideQuery: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellSideQueryGetRequest"];
+            };
+        };
+        responses: {
+            /** @description Current actor-private state. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellSideQuery"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    streamWebShellSessionSideQuery: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellSideQueryGetRequest"];
+            };
+        };
+        responses: {
+            /** @description Private full-state snapshots; an immediate SQL snapshot precedes one-second polling. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/event-stream": string;
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
         };
     };
 }

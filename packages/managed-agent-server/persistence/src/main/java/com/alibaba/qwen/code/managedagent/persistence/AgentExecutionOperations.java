@@ -50,6 +50,7 @@ final class AgentExecutionOperations {
     private final Clock clock;
     private final JdbcManagedWorkspaceRegistry workspaces;
     private final boolean workspaceFilesEnabled;
+    private final JdbcJournalPacks packs;
 
     AgentExecutionOperations(AgentEventJournal eventJournal,
             AgentLifecycleOperations lifecycleOperations,
@@ -60,7 +61,8 @@ final class AgentExecutionOperations {
             JdbcTemplate jdbc,
             Clock clock,
             JdbcManagedWorkspaceRegistry workspaces,
-            boolean workspaceFilesEnabled) {
+            boolean workspaceFilesEnabled,
+            JdbcJournalPacks packs) {
         this.eventJournal = eventJournal;
         this.lifecycleOperations = lifecycleOperations;
         this.sessionPolicies = sessionPolicies;
@@ -71,6 +73,7 @@ final class AgentExecutionOperations {
         this.clock = clock;
         this.workspaces = workspaces;
         this.workspaceFilesEnabled = workspaceFilesEnabled;
+        this.packs = packs;
     }
 
     // D7-2: RECOVERY_BLOCKED carries two meanings, decided by kind. For
@@ -245,6 +248,11 @@ final class AgentExecutionOperations {
             for (var row : page) {
                 byte[] bytes = (byte[]) row.get("record_bytes");
                 long revision = ((Number) row.get("journal_revision")).longValue();
+                if (bytes == null && packs != null) {
+                    bytes = packs.resolveBytes(tenantId, sessionId, revision,
+                            (String) row.get("record_digest"),
+                            ((Number) row.get("byte_length")).longValue());
+                }
                 if (revision != scanned + 1 || bytes == null
                         || bytes.length != ((Number) row.get("byte_length")).longValue()
                         || !DigestUtils.sha256Hex(bytes).equals(row.get("record_digest"))) {
@@ -325,8 +333,7 @@ final class AgentExecutionOperations {
                 + ManagedSchemaTime.SQL_NOW + ") ORDER BY available_at LIMIT ?", lifecycleOperations.operationTargetMapper, limit);
     }
 
-    Optional<OperationRecord> claimContextCompression(String tenantId, String sessionId,
-            String operationId, String owner, Duration duration) {
+    Optional<OperationRecord> claimContextCompression(String tenantId, String sessionId, String operationId, String owner, Duration duration) {
         storeRows.requireLegacyMutation(tenantId, sessionId);
         int changed = jdbc.update("UPDATE ma_operation SET state = 'RUNNING', delivery_state = 'LEASED',"
                 + " claim_owner = ?, claim_until = (" + ManagedSchemaTime.SQL_NOW + " + ?),"
@@ -365,8 +372,7 @@ final class AgentExecutionOperations {
                 + compressionClaim(), compressionArguments(operation, owner)) == 1;
     }
 
-    boolean settleContextCompression(OperationRecord operation, String owner,
-            String outcome, Long revision, String failureCode) {
+    boolean settleContextCompression(OperationRecord operation, String owner, String outcome, Long revision, String failureCode) {
         boolean failed = "failed".equals(outcome);
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("outcome", outcome);
@@ -393,8 +399,7 @@ final class AgentExecutionOperations {
                 + " AND admission_stage = 'JAVA_DURABLE'", args.toArray());
     }
 
-    void awaitContextCompression(OperationRecord operation, String owner,
-            boolean acceptanceKnown, String failureCode, long retryAt) {
+    void awaitContextCompression(OperationRecord operation, String owner, boolean acceptanceKnown, String failureCode, long retryAt) {
         List<Object> args = new ArrayList<>();
         args.add(acceptanceKnown && failureCode == null ? "RUNNING" : "RECOVERY_BLOCKED");
         args.add(acceptanceKnown ? "HARNESS_ACCEPTED" : "HARNESS_SUBMITTED");
@@ -700,8 +705,7 @@ final class AgentExecutionOperations {
                 storeRows.lifecycleDatabaseTime(), limit);
     }
 
-    boolean settleParkedOperation(ParkedOperation parked,
-            AcceptanceVerdict verdict, long retryAt) {
+    boolean settleParkedOperation(ParkedOperation parked, AcceptanceVerdict verdict, long retryAt) {
         storeRows.requireLegacyMutation(parked.tenantId(), parked.sessionId());
         long now = storeRows.lifecycleDatabaseTime();
         List<Object> arguments = new ArrayList<>();
@@ -758,8 +762,7 @@ final class AgentExecutionOperations {
      * between the two reads, as it could between two statements under READ
      * COMMITTED and turn an admitted input into a failed one.
      */
-    AcceptanceVerdict turnInputAcceptance(String tenantId,
-            String sessionId, String operationId) {
+    AcceptanceVerdict turnInputAcceptance(String tenantId, String sessionId, String operationId) {
         String turnId = jdbc.queryForList("SELECT target_id FROM ma_operation WHERE"
                         + " scope_key = ? AND operation_kind = 'SUBMIT_INPUT' AND operation_id = ?",
                 String.class, ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
@@ -794,8 +797,7 @@ final class AgentExecutionOperations {
      * digest it was admitted with, if any, and whether the journal is sealed
      * complete (no writer can still commit, compaction has not started).
      */
-    JournalEvidence journalEvidence(String tenantId, String sessionId,
-            String operation, String commandId) {
+    JournalEvidence journalEvidence(String tenantId, String sessionId, String operation, String commandId) {
         return jdbc.queryForObject("SELECT (SELECT content_digest"
                         + " FROM ma_session_journal_tx WHERE tenant_id = ? AND session_id = ?"
                         + " AND command_key_hash = ?) AS admitted_digest, (SELECT COUNT(*) FROM"
@@ -847,8 +849,7 @@ final class AgentExecutionOperations {
                 : AcceptanceVerdict.unknown());
     }
 
-    boolean settleParkedRename(ParkedOperation parked, AcceptanceVerdict verdict,
-            long retryAt) {
+    boolean settleParkedRename(ParkedOperation parked, AcceptanceVerdict verdict, long retryAt) {
         String tenantId = parked.tenantId();
         String sessionId = parked.sessionId();
         SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
@@ -880,9 +881,9 @@ final class AgentExecutionOperations {
                                     + " version = version + 1 WHERE tenant_id = ? AND session_id = ?",
                             title, now, tenantId, sessionId);
                     eventJournal.appendEvent(tenantId, sessionId, null,
-                            AgentSessionCommands.mutationEvent(SessionMutationKind.RENAME, "completed"),
+                            SessionMutationEvents.mutationEvent(SessionMutationKind.RENAME, "completed"),
                             Map.of("sessionId", sessionId, "metadata", Map.of("title", title)),
-                            false, AgentSessionCommands.mutationSource("RENAME_SESSION", key, "completed"), now);
+                            false, SessionMutationEvents.mutationSource("RENAME_SESSION", key, "completed"), now);
                 }
                 jdbc.update("UPDATE ma_request_receipt SET state = 'COMPLETED', gmt_modified = ?"
                                 + " WHERE receipt_key = ? AND namespace = 'SESSION_COMMAND'",
@@ -990,8 +991,7 @@ final class AgentExecutionOperations {
     // reachable by an out-of-band write past V53's CHECK) on the same
     // fail-closed workspace_unavailable verdict as a revocation, rather
     // than an IllegalArgumentException looping through the retry.
-    boolean initiatorKeepsOperate(SessionRecord session,
-            OperationRecord operation) {
+    boolean initiatorKeepsOperate(SessionRecord session, OperationRecord operation) {
         if (operation.actorKey() == null) {
             return true;
         }
