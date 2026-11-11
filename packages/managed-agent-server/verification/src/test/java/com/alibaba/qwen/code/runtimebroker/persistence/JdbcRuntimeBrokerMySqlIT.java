@@ -124,8 +124,8 @@ class JdbcRuntimeBrokerMySqlIT {
                 }
                 try (var insert = lock.prepareStatement("INSERT INTO ma_session_head"
                         + " (tenant_key, harness_key, tenant_id, harness_session_id, session_id, head_kind, phase, gmt_create, gmt_modified) VALUES (?, ?, ?, ?, ?, 'HARNESS', 'DRAINING', " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ")")) {
-                    insert.setString(1, JdbcRuntimeBindingRepository.harnessDrainKey(prefix));
-                    insert.setString(2, JdbcRuntimeBindingRepository.harnessDrainKey("harness"));
+                    insert.setString(1, RuntimeAdmissionFences.harnessDrainKey(prefix));
+                    insert.setString(2, RuntimeAdmissionFences.harnessDrainKey("harness"));
                     insert.setString(3, prefix);
                     insert.setString(4, "harness");
                     insert.setString(5, "harness");
