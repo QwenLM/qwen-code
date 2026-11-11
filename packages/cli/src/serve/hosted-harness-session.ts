@@ -8541,10 +8541,9 @@ export function registerHostedHarnessSessionRoutes(
                 throw cause;
               }
             }
-          // A Hook owner of its own is released here only on a delete; on a
-          // close Spring's drain after this phase releases it. One that shares
-          // the MCP broker is released with the MCP owner below.
-          await session.hooks?.close({ terminal: kind === 'delete' });
+          // Both public lifecycle operations end the Session. Ordinary detach
+          // keeps its deterministic owner re-acquirable through the default.
+          await session.hooks?.close({ terminal: true });
           await releaseLeaseNow(session);
           // Neither an unprovable drain nor a Session whose own settlement
           // already failed proved to the Runtime that anything stopped, so

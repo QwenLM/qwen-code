@@ -3042,6 +3042,7 @@ describe('Hosted Harness no-tool session', () => {
           })
           .expect(200);
       }
+      expect(release).toHaveBeenCalledExactlyOnceWith({ drain: true });
       expect(state.model).not.toHaveBeenCalled();
       await authorize(supertest(server).post(`/session/${SESSION_ID}/detach`))
         .send({ authority: { ...operation.authority, claimGeneration: 2 } })
@@ -10688,7 +10689,9 @@ describe('Hosted Harness no-tool session', () => {
         }),
     );
     expect((await receive('msg_running')).status).toBe(202);
-    await vi.waitFor(() => expect(state.model).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(state.model).toHaveBeenCalledTimes(1), {
+      timeout: settleTimeoutMs(),
+    });
     expect((await receive('msg_waiting')).status).toBe(202);
     const stop = () =>
       headers(
@@ -22932,19 +22935,15 @@ describe('Hosted Harness no-tool session', () => {
     },
   );
 
-  it('drains a held Runtime before the non-terminal Hook mount handback on a v2 close (R22-1)', async () => {
+  it('drains a held Runtime before terminal Hook owner release on a v2 close', async () => {
     const toolProfile = 'hosted-workspace-shell/1';
     const f = await recoveryFileSession(toolProfile);
     await f.submit();
     await f.idle();
     f.resident.monitorWake?.close();
     await f.owe();
-    // A Hook-configured turn shares this Runtime and leaves a live background
-    // Shell (its finish() skips the release). The Broker's release-mount guard
-    // refuses while that row is active, and only the drain proves it stopped,
-    // so a handback issued first parks the detach on recovery-required for as
-    // long as the process lives. Model that guard at the seam: releaseMount
-    // refuses until the drain has run.
+    // A Hook-configured turn leaves a background Shell on its shared owner.
+    // Cleanup debt must drain before the public lifecycle releases that owner.
     let backgroundLive = true;
     const order: string[] = [];
     vi.mocked(HostedWorkspaceBroker.prototype.release).mockImplementation(
@@ -22975,9 +22974,15 @@ describe('Hosted Harness no-tool session', () => {
       () => false,
       `extensions-components-${'e'.repeat(64)}`,
     );
-    // The Hook turn already acquired and holds the mount; the deterministic
-    // owner id keeps the close non-terminal (R13-1).
     vi.spyOn(hooks, 'mountHeld', 'get').mockReturnValue(true);
+    const originalClose = hooks.close.bind(hooks);
+    const closeHook = vi
+      .spyOn(hooks, 'close')
+      .mockImplementation(async (opts) => {
+        expect(backgroundLive).toBe(false);
+        order.push('owner-close');
+        await originalClose(opts);
+      });
     f.resident.hooks = hooks;
     await f
       .authorize(supertest(f.server).post(`/session/${SESSION_ID}/lifecycle`))
@@ -22990,9 +22995,9 @@ describe('Hosted Harness no-tool session', () => {
         authority: { operationId: 'close-drain-order', claimGeneration: 1 },
       })
       .expect(200);
-    // The 200 above is the witness: a handback issued before the drain refuses
-    // busy, and the route parks the detach on 503 instead of attaching.
-    expect(order).toContain('handback');
+    expect(closeHook).toHaveBeenCalledExactlyOnceWith({ terminal: true });
+    expect(order.indexOf('drain')).toBeLessThan(order.indexOf('owner-close'));
+    expect(order).not.toContain('handback');
   });
 
   it('drains a registered held Runtime with no cleanup debt on a v2 close (R24-1)', async () => {

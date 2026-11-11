@@ -201,14 +201,27 @@ describe('readSettingsSnapshot', () => {
     expect(describeTree()).toEqual(treeBefore);
   });
 
-  // The evaluation checks this first, through the same resolveHomeDirectory.
-  it('throws when the home directory cannot be resolved', () => {
+  // A missing home directory is a valid state (#16861): the snapshot falls
+  // back to the unresolved home path and still reads every layer. The
+  // managed-compatibility evaluation keeps its own throw-based check through
+  // the same resolveHomeDirectory, ahead of any snapshot read.
+  it('reads the layers when the home directory cannot be resolved', () => {
+    fs.writeFileSync(
+      userFile,
+      JSON.stringify({ $version: 4, ui: { theme: 'User Theme' } }),
+    );
+    fs.writeFileSync(
+      workspaceFile,
+      JSON.stringify({ $version: 4, ui: { hideTips: true } }),
+    );
     // Builtin named exports follow the module object only after a sync.
     const homedir = nodeOs.homedir;
     nodeOs.homedir = () => path.join(root, 'missing-home');
     syncBuiltinESMExports();
     try {
-      expect(() => read()).toThrow(/ENOENT/);
+      const settings = read();
+      expect(settings.merged.ui?.theme).toBe('User Theme');
+      expect(settings.merged.ui?.hideTips).toBe(true);
     } finally {
       nodeOs.homedir = homedir;
       syncBuiltinESMExports();
