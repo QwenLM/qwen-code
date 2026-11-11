@@ -1838,6 +1838,30 @@ describe('workspace-qualified core REST', () => {
     }
   });
 
+  it('rejects a user-scope enable that a workspace pattern still excludes', async () => {
+    const h = await makeHarness({ token: 'secret' });
+    // Only the workspace scope holds a pattern; a user-scope write must still
+    // refuse, because `mcp.excluded` concatenates across scopes.
+    await fsp.mkdir(path.join(h.primaryCwd, '.qwen'), { recursive: true });
+    await fsp.writeFile(
+      path.join(h.primaryCwd, '.qwen', 'settings.json'),
+      JSON.stringify({ mcp: { excluded: ['docs*'] } }),
+    );
+    try {
+      const response = await request(h.app)
+        .post('/workspace/config/mcp/docs/enable')
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .send({ scope: 'user' });
+
+      expect(response.status).toBe(409);
+      expect(response.body).toMatchObject({ code: 'mcp_excluded_by_pattern' });
+      expect(h.persistSetting).not.toHaveBeenCalled();
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
   it('lifts a wildcard exclusion from the scope being enabled', async () => {
     const h = await makeHarness({ token: 'secret' });
     try {

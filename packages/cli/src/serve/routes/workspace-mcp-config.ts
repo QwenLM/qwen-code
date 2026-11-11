@@ -332,27 +332,23 @@ function registerFor(
                 const existing =
                   settings.forScope(settingScope).settings.mcp?.excluded ?? [];
                 if (action === 'enable') {
-                  // A pattern in a higher-priority scope re-excludes the
-                  // server on the next recompute, so enabling here cannot
-                  // take effect. Report it instead of writing settings that
+                  // `mcp.excluded` concatenates across scopes, so a pattern
+                  // in any other scope re-excludes the server on the next
+                  // recompute. Report it instead of writing settings that
                   // would be undone (#14465).
                   const blockingScopes = [
                     SettingScope.SystemDefaults,
                     SettingScope.System,
                     SettingScope.User,
-                    ...(settingScope === SettingScope.Workspace
-                      ? [SettingScope.Workspace]
-                      : []),
-                  ];
+                    SettingScope.Workspace,
+                  ].filter((candidateScope) => candidateScope !== settingScope);
                   blocking = blockingScopes.flatMap((candidateScope) =>
-                    candidateScope === settingScope
-                      ? []
-                      : (
-                          settings.forScope(candidateScope).settings.mcp
-                            ?.excluded ?? []
-                        ).filter((pattern) =>
-                          matchesAnyServerPattern(serverName, [pattern]),
-                        ),
+                    (
+                      settings.forScope(candidateScope).settings.mcp?.excluded ??
+                      []
+                    ).filter((pattern) =>
+                      matchesAnyServerPattern(serverName, [pattern]),
+                    ),
                   );
                   if (blocking.length > 0) return;
                 }
