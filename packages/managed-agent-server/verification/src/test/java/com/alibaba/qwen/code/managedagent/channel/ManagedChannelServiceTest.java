@@ -716,6 +716,12 @@ class ManagedChannelServiceTest {
         service.claimDeliveries(TENANT, channel, 16);
         service.receipt(TENANT, channel, deliveryId,
                 new ReceiptRequest("accepted", 0, "<m0@example.com>", null));
+        // The partial revision mirrors the committed receipt into the record
+        // body — the data the reconciler rebuilds ledger receipts from. The
+        // record body is the only evidence here: deleting the projection's
+        // partial arm reds this assertion.
+        assertThat(recordSegmentReceipts(admitted.sessionId(), deliveryId))
+                .containsExactly("<m0@example.com>", null, null);
         // The adapter died mid-send and reports the rest unknown; the partial
         // delivery settles unknown.
         service.receipt(TENANT, channel, deliveryId,
@@ -737,8 +743,8 @@ class ManagedChannelServiceTest {
                 .containsExactly(null, null);
         // The resent chain's settle threshold is the carried count, not the
         // original chain's length: receipting both carried segments steps
-        // partial then delivered. Restoring countOf(deliveryId) here would
-        // leave the last answer partial and strand the chain.
+        // partial then delivered. A threshold reading the original chain's
+        // length would leave the last answer partial and strand the chain.
         assertThat(service.receipt(TENANT, channel, resent.deliveryId(),
                 new ReceiptRequest("accepted", 0, "<m1@example.com>", null))
                 .state()).isEqualTo("partial");
@@ -767,6 +773,26 @@ class ManagedChannelServiceTest {
         assertThat(resumed.deliveries().getFirst().segments())
                 .extracting(ClaimedSegment::ordinal)
                 .containsExactly(2);
+    }
+
+    @Test
+    void theSettleThresholdCountsMirrorCommittedReceipts() {
+        InboundAdmission admitted = service.submitInbound(TENANT, channel,
+                event(1, "1700:109", "please reply"));
+        String deliveryId = admitted.inputId() + ":reply";
+        plannedDelivery(admitted.sessionId(), deliveryId, admitted.routeId(),
+                "The build is green.", 3);
+        service.claimDeliveries(TENANT, channel, 16);
+        // Two receipts commit to the record while their answers are lost: only
+        // the mirror sees them, never a segment_receipt call.
+        mirrorSegmentReceipts(admitted.sessionId(), deliveryId, 2);
+        // The third receipt arrives through the service. The threshold counts
+        // the two mirror-committed receipts plus this one and answers
+        // delivered; a threshold reading the receipt-call log would only see
+        // ordinal 2 and answer partial, stranding a fully-receipted line.
+        assertThat(service.receipt(TENANT, channel, deliveryId,
+                new ReceiptRequest("accepted", 2, "<m2@example.com>", null))
+                .state()).isEqualTo("delivered");
     }
 
     @Test
@@ -809,10 +835,16 @@ class ManagedChannelServiceTest {
                 new ReceiptRequest("accepted", 2, "<m2@example.com>", null));
         assertThat(service.ledger(TENANT, channel, deliveryId)).get()
                 .extracting(row -> row.state()).isEqualTo("delivered");
-        // Nothing is unsent, so the funnel refuses the resend; the service
-        // translates the refusal instead of dereferencing an empty list.
+        // Nothing is unsent, so the funnel refuses the resend as a
+        // deterministic 409 conflict — not a retryable 5xx an adapter would
+        // retry forever — and the service translates it instead of
+        // dereferencing an empty list.
         assertThatThrownBy(() -> service.resend(TENANT, channel, deliveryId))
-                .isInstanceOf(ManagedAgentException.class);
+                .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
+                    assertThat(error.getStatus()).isEqualTo(409);
+                    assertThat(error.getCode())
+                            .isEqualTo("channel_operation_conflict");
+                });
         assertThat(segmentLedger.list(TENANT, channel, deliveryId + ":r1"))
                 .isEmpty();
     }
@@ -1479,7 +1511,6 @@ class ManagedChannelServiceTest {
         }
         writeDeliveryRecord(sessionId, deliveryId, routeId, segments.toString());
         harness.replies.put(deliveryId, text);
-        harness.segmentCounts.put(deliveryId, segmentCount);
         harness.chainSegments.put(deliveryId, chain);
     }
 
@@ -1671,9 +1702,6 @@ class ManagedChannelServiceTest {
                 "delivered", "unknown", "rejected", "cancelled");
         final List<Map<String, Object>> operations = new ArrayList<>();
         final Map<String, String> replies = new LinkedHashMap<>();
-        final Map<String, Integer> segmentCounts = new LinkedHashMap<>();
-        final Map<String, java.util.TreeSet<Integer>> receipted =
-                new LinkedHashMap<>();
         // Each chain's segments as the committed record holds them: ordinal,
         // segmentId and the provider id once receipted (null while unsent).
         // Both the receipt path and the record mirror keep this current, so
@@ -1801,8 +1829,6 @@ class ManagedChannelServiceTest {
                 }
                 case "segment_receipt" -> {
                     int ordinal = ((Number) body.get("ordinal")).intValue();
-                    receipted.computeIfAbsent(deliveryId,
-                            key -> new java.util.TreeSet<>()).add(ordinal);
                     // Keep the id the adapter reported, not one derived from
                     // the ordinal: the committed record carries this value.
                     Object reportedId = body.get("providerMessageId");
@@ -1810,8 +1836,16 @@ class ManagedChannelServiceTest {
                         setSegmentReceipt(deliveryId, ordinal,
                                 String.valueOf(reportedId));
                     }
-                    String state = receipted.get(deliveryId).size()
-                            >= countOf(deliveryId) ? "delivered" : "partial";
+                    // The threshold reads the same committed segment state the
+                    // claim filter and the delivery view read, not a log of
+                    // receipt calls, so a mirror-committed receipt counts too.
+                    // An absent chain is not "every segment receipted".
+                    List<Map<String, Object>> chain = chainSegments.getOrDefault(
+                            deliveryId, List.of());
+                    boolean complete = !chain.isEmpty() && chain.stream()
+                            .allMatch(segment ->
+                                    segment.get("providerMessageId") != null);
+                    String state = complete ? "delivered" : "partial";
                     deliveryStates.put(deliveryId, state);
                     projection.deliveryState(sessionId, deliveryId, state);
                     if (loseReceiptAnswerOnce) {
@@ -1861,18 +1895,17 @@ class ManagedChannelServiceTest {
                             carried.add(carry);
                         }
                         // The funnel refuses to resend a chain with nothing
-                        // unsent (channelDeliveryResendable). Answer the same
-                        // refusal so the service translates it, instead of
-                        // dereferencing an empty segment list.
+                        // unsent (channelDeliveryResendable) as a deterministic
+                        // 409 channel_operation_conflict, not a retryable
+                        // failure: an adapter must not retry a chain that can
+                        // never be resent. Answer the same shape so the service
+                        // translates it, instead of dereferencing an empty list.
                         if (carried.isEmpty()) {
-                            throw new com.alibaba.qwen.code.managedagent.harness.contracts.HarnessFailure(
-                                    "Channel delivery " + deliveryId + " is "
-                                            + deliveryStates.get(deliveryId)
-                                            + " and cannot be resent.");
+                            throw harnessError(409,
+                                    "{\"code\":\"channel_operation_conflict\"}");
                         }
                         deliveryStates.put(resent, "planned");
                         replies.put(resent, replies.get(deliveryId));
-                        segmentCounts.put(resent, carried.size());
                         chainSegments.put(resent, carried);
                         // Commit the resent chain's record so the claim sweep
                         // can hand it back, as the funnel's plan commit does.
@@ -1885,10 +1918,6 @@ class ManagedChannelServiceTest {
                 default -> throw new IllegalArgumentException(kind);
             }
             return answer;
-        }
-
-        private int countOf(String deliveryId) {
-            return segmentCounts.getOrDefault(deliveryId, 1);
         }
 
         private Map<String, Object> delivery(String deliveryId, String state) {
