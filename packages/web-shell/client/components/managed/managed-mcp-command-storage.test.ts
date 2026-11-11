@@ -90,6 +90,16 @@ it.each([
     ...attempt,
     command: {
       ...attempt.command,
+      server: {
+        ...attempt.command.server,
+        serverRevision: Number.MAX_SAFE_INTEGER,
+      },
+    },
+  },
+  {
+    ...attempt,
+    command: {
+      ...attempt.command,
       server: { ...attempt.command.server, definitionDigest: 'not-a-digest' },
     },
   },

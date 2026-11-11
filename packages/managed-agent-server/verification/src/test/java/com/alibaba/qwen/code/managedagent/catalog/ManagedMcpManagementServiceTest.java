@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent.catalog;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessFailure;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessHttpFailure;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.ManagedMcpManagementCommand;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.ManagedMcpServerPin;
@@ -101,8 +102,25 @@ class ManagedMcpManagementServiceTest {
         verify(harness, never()).manageMcp(anyString(), anyString(), any());
     }
 
+    @Test
+    void boundsTheHarnessReportedRevisionAtTheSharedCounterCeiling() {
+        var operation = "11111111-1111-4111-8111-111111111111";
+        assertThat(service.operation("tenant", "actor", "session", operation)
+                .path("revision").asLong()).isEqualTo(9_007_199_254_740_990L);
+        when(harness.mcpManagementOperation("tenant", "session", operation)).thenReturn(snapshot(9_007_199_254_740_991L));
+        assertThatThrownBy(() -> service.operation("tenant", "actor", "session", operation))
+                .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
+                    assertThat(error.getStatus()).isEqualTo(503);
+                    assertThat(error.getCode()).isEqualTo("managed_mcp_management_unavailable");
+                });
+    }
+
     private static Map<String, Object> snapshot() {
-        return Map.of("sessionId", "session", "revision", 0, "supported", true,
+        return snapshot(0L);
+    }
+
+    private static Map<String, Object> snapshot(long revision) {
+        return Map.of("sessionId", "session", "revision", revision, "supported", true,
                 "servers", List.of(), "availableServers", List.of());
     }
 }
