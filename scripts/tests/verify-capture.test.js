@@ -198,18 +198,76 @@ describe('verify-capture helper', () => {
   // apt command decides the pin. The check must be the last RUN so every
   // layer that can purge the package or delete the font is behind it; moved
   // earlier, a later cleanup could ship a fontless image green.
-  it('checks the bold face in the final image', () => {
+  it('checks the bold face, ffmpeg and Chromium in the final image', () => {
     const dockerfile = readFileSync(
       path.join(repoRoot, 'scripts/ci/ephemeral-runner/Dockerfile'),
       'utf8',
     );
-    const runs = dockerfile.split('\n').filter((line) => /^RUN\s/.test(line));
+    // Fold continuations first: the assertion is one RUN spread over lines,
+    // and reading it line by line would take its first line for the whole.
+    const runs = dockerfile
+      .replace(/\\\n\s*/g, ' ')
+      .split('\n')
+      .filter((line) => /^RUN\s/.test(line));
+    const last = runs.at(-1);
     expect(
-      runs.at(-1),
+      last,
       'the image build must assert the bold face after every layer that can change it',
-    ).toBe(
-      'RUN test -f /usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf',
+    ).toContain(
+      'test -f /usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf',
     );
+    // The same RUN carries the other two things a later layer could remove
+    // while the visuals job stays green until it runs: the GIF transcoder, and
+    // a Chromium per playwright the lockfile names. The count is against that
+    // list, not a fixed number, so a dependency bump cannot make it stale.
+    expect(last, 'the GIF transcoder must be asserted too').toContain(
+      'command -v ffmpeg',
+    );
+    expect(last).toContain('/opt/ci-playwright/versions');
+    expect(last).toContain('-name chrome');
+    expect(last, 'a launch, not just a file that exists').toContain(
+      '"${chrome}" --version',
+    );
+  });
+
+  // The image's build context is its own directory, so it cannot read the
+  // lockfile and the playwright list is written into the Dockerfile instead.
+  // This is the pin that keeps the two in step: every playwright the tree
+  // resolves picks its own browser revision, and one missing from the image is
+  // a ~110 MB download paid inside a job — the cost the pre-install exists to
+  // remove. A bump fails here, naming the version, rather than in a visuals job
+  // six minutes into a download.
+  it('pre-installs a browser for every playwright the tree resolves', () => {
+    const dockerfile = readFileSync(
+      path.join(repoRoot, 'scripts/ci/ephemeral-runner/Dockerfile'),
+      'utf8',
+    );
+    const declared = /^ARG PLAYWRIGHT_VERSIONS="([^"]+)"$/m.exec(dockerfile);
+    expect(
+      declared,
+      'the Dockerfile must declare its playwright list',
+    ).not.toBe(null);
+    const lockfile = readFileSync(
+      path.join(repoRoot, 'pnpm-lock.yaml'),
+      'utf8',
+    );
+    // Both package names resolve a browser: the tree carries `playwright` at
+    // the root and `playwright-core` under browser-use, and their revisions
+    // differ. Anchored on the snapshot keys, which are the resolved set.
+    const resolved = new Set();
+    for (const match of lockfile.matchAll(
+      /^ {2}(?:playwright|playwright-core)@(\d+\.\d+\.\d+):$/gm,
+    )) {
+      resolved.add(match[1]);
+    }
+    expect(
+      resolved.size,
+      'no playwright found in the lockfile',
+    ).toBeGreaterThan(0);
+    expect(
+      [...declared[1].split(/\s+/)].sort(),
+      'the image must bake a browser for every resolved playwright version',
+    ).toEqual([...resolved].sort());
   });
 
   // 256-colour and truecolor sequences produce getFgColor() values >= 16,
