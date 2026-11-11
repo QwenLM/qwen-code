@@ -1006,6 +1006,21 @@ it('rejects malformed or unpinned catalog requests', () => {
   ).toThrow();
 });
 
+it('admits the hook catalog revision up to the shared counter ceiling', () => {
+  expect(
+    parseHostedHookPin({
+      ...pin,
+      catalogRevision: Number.MAX_SAFE_INTEGER - 1,
+    }),
+  ).toMatchObject({ catalogRevision: Number.MAX_SAFE_INTEGER - 1 });
+  // The twin of the MCP pin: the shared AgentDefinitionExtensions bound admits
+  // at most 2^53-2, so admitting 2^53-1 here only defers the refusal to
+  // Session admission with an opaque 409.
+  expect(() =>
+    parseHostedHookPin({ ...pin, catalogRevision: Number.MAX_SAFE_INTEGER }),
+  ).toThrow();
+});
+
 it.each([
   {
     event: HookEventName.UserPromptSubmit,
