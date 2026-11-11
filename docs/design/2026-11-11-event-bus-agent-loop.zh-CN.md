@@ -109,12 +109,12 @@ preview 按 `queryId` 路由、用 UUID `roundId` 标记轮次。main 的循环�
 | `loop.finished`  | `{ result: AgentLoopResult }`                  | Conversation                        |
 | `llm.request`    | `{ round, send: AgentLoopRound }`              | Conversation                        |
 | `llm.tool_call`  | `{ call: ToolCallRequestInfo }`                | Llm，每个收集到的 `ToolCallRequest` |
-| `llm.settled`    | `{ round, stop, calls, discardedCalls }`       | Llm，轮结束时                       |
+| `llm.settled`    | `{ round, calls, terminal? }`                  | Llm，轮结束时                       |
 | `tool.cancel`    | `{ reason }`                                   | Conversation                        |
-| `tool.settled`   | `{ round, results: AgentLoopSettledCall[] }`   | Tool，批结束时                      |
+| `tool.settled`   | `{ round }`                                    | Tool，批结束时                      |
 | `handler.failed` | `{ source, round?, error }`                    | 总线，监听器失败时                  |
 
-`llm.settled` 携带该轮的终止分类（今天 `runModelRound` 做的 `STOP_EVENTS` 映射），使 Conversation 仍是把模型结局映射为 `AgentLoopStopReason` 的唯一位置。去重/replay 记账留在 Tool handler，使用现有 `toolCallIdUtils` 助手，位置与今天 `runToolBatch` 完全一致。
+`llm.settled` 携带该轮的终止分类（今天 `runModelRound` 做的 `STOP_EVENTS` 映射），使 Conversation 仍是把模型结局映射为 `AgentLoopStopReason` 的唯一位置。去重/replay 记账留在 Tool handler，使用现有 `toolCallIdUtils` 助手，位置与今天 `runToolBatch` 完全一致。事件载荷只携带路由与决策数据；完整的模型结果与工具批按所有权存于 run 状态的对应槽位，总线不重复承载它们。
 
 ### 状态与所有权
 
@@ -150,7 +150,7 @@ preview 按 `queryId` 路由、用 UUID `roundId` 标记轮次。main 的循环�
 每个切片保持 parity 套件绿，不改变任何 surface 默认。
 
 1. **PR 1 —— 原语。** `event-bus/{bus,events,state}.ts` + 单元测试（移植 preview 的 `bus.test.ts`；新增串行投递、跨 run 隔离、失败重发布、迟到轮次测试）。尚无消费方；零行为变化。本设计文档随此 PR 落地。`runtime.ts`（handler 接线）与 `handler-support.ts` 随 PR 2 的 handler 一起到来。
-2. **PR 2 —— 现有门控后的 handler。** 在 `experimental.unifiedAgentLoop` 下把 `runAgentLoop` 内部重新表达为 Conversation/Llm/Tool handler 加 host 适配器。`runModelRound`/`runToolBatch` 保留导出与签名（ACP #15509 依赖它们）。headless parity 套件与 ACP 轮测试是验收门；为每个停止原因新增 handler 级单元测试。
+2. **PR 2 —— opt-in 标志后的 handler。** 把 `runAgentLoop` 内部重新表达为 Conversation/Llm/Tool handler 加 host 适配器，由新增的 `AgentLoopOptions.useEventBus` 标志选择（默认关，因此在统一循环内过程式路径仍是默认，直到 parity 被证明）。`runModelRound`/`runToolBatch` 保留导出与签名（ACP #15509 依赖它们），并被 handler 原样复用。一个等价测试对脚本化场景同时跑两条路径，断言结果与 host 回调顺序完全一致；headless parity 套件与 ACP 轮测试是验收门。
 3. **PR 3 —— 流式派发评估（可选，独立门控）。** preview 在流仍在运行时执行 `tool_use` 块。main 在轮结束后跑批次，且审批按批排序；流式派发改变审批时机与输出交错。此切片先写下 parity 差异并取得明确决定；架构移植本身不依赖它。
 4. **后续 —— surface 收敛**继续在 unified-agent-loop 计划下进行（TUI、OpenTUI、AgentCore、speculation、Hosted）。总线让循环级挂接（hooks、Mods、保护、录制）成为单点，这正是该计划的既定目标；这里不排任何 surface 工作。
 

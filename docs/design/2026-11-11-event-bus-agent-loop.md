@@ -109,12 +109,12 @@ Preview routes by `queryId` and scopes rounds by a UUID `roundId`. Main's loop r
 | `loop.finished`  | `{ result: AgentLoopResult }`                          | Conversation                         |
 | `llm.request`    | `{ round, send: AgentLoopRound }`                      | Conversation                         |
 | `llm.tool_call`  | `{ call: ToolCallRequestInfo }`                        | Llm, per collected `ToolCallRequest` |
-| `llm.settled`    | `{ round, stop, calls, discardedCalls }`               | Llm, at round end                    |
+| `llm.settled`    | `{ round, calls, terminal? }`                          | Llm, at round end                    |
 | `tool.cancel`    | `{ reason }`                                           | Conversation                         |
-| `tool.settled`   | `{ round, results: AgentLoopSettledCall[] }`           | Tool, at batch end                   |
+| `tool.settled`   | `{ round }`                                            | Tool, at batch end                   |
 | `handler.failed` | `{ source, round?, error }`                            | bus, on listener failure             |
 
-`llm.settled` carries the round's terminal classification (the `STOP_EVENTS` mapping that `runModelRound` does today) so Conversation remains the only place that maps a model outcome to an `AgentLoopStopReason`. Duplicate/replay bookkeeping stays in the Tool handler, using the existing `toolCallIdUtils` helpers, exactly where `runToolBatch` does it today.
+`llm.settled` carries the round's terminal classification (the `STOP_EVENTS` mapping that `runModelRound` does today) so Conversation remains the only place that maps a model outcome to an `AgentLoopStopReason`. Duplicate/replay bookkeeping stays in the Tool handler, using the existing `toolCallIdUtils` helpers, exactly where `runToolBatch` does it today. Event payloads carry only routing and decision data; the full model result and tool batch live in the run state under their owner's slot, so the bus never duplicates them.
 
 ### State and ownership
 
@@ -150,7 +150,7 @@ None provides query routing + serial async delivery + failure events, which are 
 Each slice keeps the parity suites green and changes no surface default.
 
 1. **PR 1 — primitives.** `event-bus/{bus,events,state}.ts` + unit tests (port preview's `bus.test.ts`; add serial-delivery, cross-run isolation, failure-republication, late-round tests). Nothing consumes the module yet; zero behavior change. This design doc lands here. `runtime.ts` (handler wiring) and `handler-support.ts` arrive with the handlers in PR 2.
-2. **PR 2 — handlers behind the existing gate.** Re-express `runAgentLoop` internals as Conversation/Llm/Tool handlers plus the host adapter, under `experimental.unifiedAgentLoop`. `runModelRound`/`runToolBatch` keep their exports and signatures (ACP #15509 depends on them). The headless parity suite and the ACP round tests are the acceptance gate; add handler-level unit tests for every stop reason.
+2. **PR 2 — handlers behind an opt-in flag.** Re-express `runAgentLoop` internals as Conversation/Llm/Tool handlers plus the host adapter, selected by a new `AgentLoopOptions.useEventBus` flag (default off, so the procedural path stays the default within the unified loop until parity is proven). `runModelRound`/`runToolBatch` keep their exports and signatures (ACP #15509 depends on them) and are reused unchanged by the handlers. An equivalence test runs both paths over scripted scenarios and asserts identical results and host-callback order; the headless parity suite and the ACP round tests are the acceptance gate.
 3. **PR 3 — streaming dispatch evaluation (optional, separate gate).** Preview executes a `tool_use` block while the stream is still running. Main runs the batch after the round ends, and approvals are batch-ordered; streaming dispatch changes approval timing and output interleaving. This slice first writes down the parity differences and gets an explicit decision; it is not required for the architecture port.
 4. **Later — surface convergence** continues under the unified-agent-loop program (TUI, OpenTUI, AgentCore, speculation, Hosted). The bus makes loop-level attachments (hooks, Mods, protection, recording) single-place, which is that program's stated goal; no surface work is scheduled here.
 

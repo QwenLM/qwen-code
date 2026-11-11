@@ -7,7 +7,6 @@
 import type {
   AgentLoopResult,
   AgentLoopRound,
-  AgentLoopSettledCall,
   AgentLoopStopReason,
 } from '../core/agent-loop.js';
 import type {
@@ -22,15 +21,12 @@ export interface LlmSettledData {
   round: number;
   /** Tool calls the round collected, in request order. */
   calls: ToolCallRequestInfo[];
-  /** Calls dropped by a Retry/ModelFallback during the round. */
-  discardedCalls: ToolCallRequestInfo[];
   /** Present only when the round ended the loop with a terminal reason. */
   terminal?: AgentLoopStopReason;
 }
 
 export interface ToolSettledData {
   round: number;
-  results: AgentLoopSettledCall[];
 }
 
 /**
@@ -46,6 +42,7 @@ export interface LoopBusEventMap {
   'llm.request': { round: number; send: AgentLoopRound };
   'llm.tool_call': { call: ToolCallRequestInfo };
   'llm.settled': LlmSettledData;
+  'tool.request': { round: number; calls: ToolCallRequestInfo[] };
   'tool.cancel': { reason: string };
   'tool.settled': ToolSettledData;
   /** The only event carrying a native Error; serialize before crossing processes. */

@@ -37,9 +37,7 @@ describe('LoopEventBus', () => {
     bus.publish(
       createBusEvent('tool.cancel', base('r1'), { reason: 'refusal' }),
     );
-    bus.publish(
-      createBusEvent('tool.settled', base('r1'), { round: 1, results: [] }),
-    );
+    bus.publish(createBusEvent('tool.settled', base('r1'), { round: 1 }));
     await flush();
     expect(seen).toEqual(['start tool.cancel']);
     gate.resolve();
