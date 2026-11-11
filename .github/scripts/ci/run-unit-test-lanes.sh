@@ -160,16 +160,25 @@ run_lane_suites() {
   # npm prints one of these per workspace whose script exited non-zero, as
   # `npm error workspace @scope/name@1.2.3`. Strip the trailing version at the
   # LAST `@`, not the first: every workspace here is scoped, so the name itself
-  # starts with one. No such line means the failure was npm's own (a bad
-  # workspace list, a missing script), which no retry of a suite can fix.
+  # starts with one. Strip only a NUMERIC version: a workspace with no version
+  # is printed as `@scope/name`, and stripping at its last `@` would empty the
+  # name and quietly drop a real failure from the loop below. No such line
+  # means the failure was npm's own (a bad workspace list, a missing script),
+  # which no retry of a suite can fix.
   failed="$(grep -oE '^npm error workspace [^ ]+' "$log" |
-    awk '{ print $4 }' | sed 's/@[^@]*$//' | sort -u)"
+    awk '{ print $4 }' | sed 's/@[0-9][^@]*$//' | sort -u)"
   if [ -z "$failed" ]; then
     rm -f "$log"
     return "$rc"
   fi
   while IFS= read -r name; do
-    [ -n "$name" ] || continue
+    # An empty name cannot be matched to a report block, so nothing proves its
+    # failure was the transport. Keep the original failure instead of skipping
+    # the workspace the way a `continue` would.
+    if [ -z "$name" ]; then
+      rm -f "$log"
+      return "$rc"
+    fi
     # The block from this workspace's own header to the next workspace's
     # header: its build output, its report, and nothing belonging to a
     # neighbour. `index`, not a regex: every workspace here is scoped, so the
@@ -187,7 +196,12 @@ run_lane_suites() {
   echo "::warning::Every test passed but Vitest reported the worker RPC timeout as an unhandled error; re-running the affected workspace suites once."
   local status=0 attempt
   while IFS= read -r name; do
-    [ -n "$name" ] || continue
+    # Same fail-closed rule as the judging loop: a name that cannot be re-run
+    # leaves the original failure standing rather than silently skipping the
+    # workspace. `rc` is non-zero here, `status` may still be 0.
+    if [ -z "$name" ]; then
+      return "$rc"
+    fi
     npm run test:ci "--workspace=${name}" -- "${suite_args[@]}"
     attempt=$?
     if [ "$attempt" -ne 0 ] && [ "$status" -eq 0 ]; then

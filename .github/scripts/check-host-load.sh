@@ -76,7 +76,12 @@ if [ "$MAX_RATIO" = 'off' ] || [ "$WAIT_TRIES" = 'off' ]; then
   exit 0
 fi
 
-if ! [[ "$MAX_RATIO" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+# A positive number, or 'off'. The shape check alone is not enough: `0` and
+# `0.0` pass it, and `load < cpus * 0` is false for every host, so one typo in
+# the repo variable would refuse every self-hosted Linux unit lane. Reject it
+# here as the configuration error it is, before the first sample.
+if ! [[ "$MAX_RATIO" =~ ^[0-9]+(\.[0-9]+)?$ ]] ||
+  ! awk -v max="$MAX_RATIO" 'BEGIN { exit !(max > 0) }'; then
   echo "::error::HOST_LOAD_MAX_RATIO must be a positive number or 'off', got '${MAX_RATIO}'"
   exit 1
 fi
@@ -112,9 +117,15 @@ for ((try = 1; try <= WAIT_TRIES; try++)); do
   # awk, not bash arithmetic: the load average is fractional and the ceiling is
   # a ratio. The product is compared against the load so no rounding of the
   # ratio can move the boundary.
-  ratio="$(awk -v load="$load5" -v cpus="$cpus" 'BEGIN { printf "%.2f", load / cpus }')"
+  #
+  # `avg`, never `load`: gawk 5.x has a builtin `load()`, and `-v load=` is a
+  # fatal error there ("cannot use gawk builtin `load' as variable name"),
+  # while the BSD awk a developer machine runs has no such builtin — so this
+  # only breaks on the gawk hosts CI uses, where it empties the ratio and
+  # refuses every job.
+  ratio="$(awk -v avg="$load5" -v cpus="$cpus" 'BEGIN { printf "%.2f", avg / cpus }')"
   emit_sample
-  if awk -v load="$load5" -v cpus="$cpus" -v max="$MAX_RATIO" 'BEGIN { exit !(load < cpus * max) }'; then
+  if awk -v avg="$load5" -v cpus="$cpus" -v max="$MAX_RATIO" 'BEGIN { exit !(avg < cpus * max) }'; then
     exit 0
   fi
   if [ "$try" -lt "$WAIT_TRIES" ]; then

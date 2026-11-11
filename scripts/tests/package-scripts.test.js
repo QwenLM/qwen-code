@@ -1748,6 +1748,17 @@ describe('package scripts', () => {
               ' Test Files  1 failed | 1 passed (2)',
             ),
           ],
+          // A truncated or interleaved block can keep Vitest's own `FAIL ` row
+          // while dropping the `Tests N failed` / `Test Files N failed` line
+          // the other checks read. That leaves the FAIL guard as the only
+          // thing between this shape and a retry.
+          [
+            'a FAIL line without a failed count beside an all-green summary',
+            rpcReport('@qwen-code/web-shell').replace(
+              ' Test Files  2 passed (2)',
+              ' FAIL  src/example.test.ts > fails for real\n Test Files  2 passed (2)',
+            ),
+          ],
           [
             'a second unhandled error the RPC timeout cannot account for',
             rpcReport('@qwen-code/web-shell').replace(
@@ -1843,6 +1854,25 @@ describe('package scripts', () => {
         });
         expect(mixed.rc).toBe('1');
         expect(mixed.stdout).not.toContain('Every test passed');
+
+        // A workspace whose report never arrived must not borrow its
+        // neighbour's: the whole batch log holds the neighbour's all-green
+        // summary, and the retry is per workspace. Degrading the extraction
+        // from one workspace's block to the whole log would retry this one.
+        const missingBlock = run('no-retry-missing-block', {
+          report: [
+            '> @qwen-code/sdk@0.27.2 test:ci',
+            'FATAL ERROR: Ineffective mark-compacts near heap limit',
+            'npm error workspace @qwen-code/sdk@0.27.2',
+            '',
+            rpcReport('@qwen-code/web-shell'),
+          ].join('\n'),
+        });
+        expect(missingBlock.rc).toBe('1');
+        expect(missingBlock.stdout).not.toContain('Every test passed');
+        expect([...missingBlock.calls].sort()).toEqual(
+          [...passing.calls].sort(),
+        );
 
         // With nothing left beside the CLI and core suites, the step fails
         // rather than fall back to the root's test:ci, which reruns every

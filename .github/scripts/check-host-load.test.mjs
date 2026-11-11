@@ -262,4 +262,24 @@ describe('check-host-load', () => {
       assert.match(result.stdout, /must be a positive integer/);
     }
   });
+
+  it('rejects a zero ceiling instead of refusing every host', () => {
+    // `0` passes the number shape but makes `load < cpus * 0` false for every
+    // host, so a single typo in the repo variable would refuse every
+    // self-hosted Linux unit lane. It must fail as a configuration error
+    // before the first sample, not after six samples report a breach.
+    for (const ratio of ['0', '0.0', '00']) {
+      const result = runGate({ env: { HOST_LOAD_MAX_RATIO: ratio } });
+      assert.equal(result.status, 1, `${ratio}: ${result.stdout}`);
+      assert.match(
+        result.stdout,
+        /HOST_LOAD_MAX_RATIO must be a positive number or 'off'/,
+      );
+      assert.deepEqual(
+        samples(result.stdout),
+        [],
+        `${ratio}: sampled instead of rejecting the configuration`,
+      );
+    }
+  });
 });
