@@ -222,6 +222,18 @@ export class InteractiveModSession implements ICommandLoader {
       : this.session.watchRow(sessionId, input, listener);
   }
 
+  /** The session whose transcript rows the Mods draw. */
+  get rowSession(): string {
+    return this.session.rowSession;
+  }
+
+  /**
+   * Hears the Mods adopt another session. A transcript can take the new
+   * session's id before they do, so its rows ask again then.
+   */
+  readonly subscribeSession = (listener: () => void): (() => void) =>
+    this.session.subscribeSession(listener);
+
   /** The props a row draws with, when its hooks rewrote them. */
   rowProps(
     sessionId: string,

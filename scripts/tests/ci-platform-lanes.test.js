@@ -1097,10 +1097,45 @@ describe('post-merge push lane', () => {
         '',
       );
     expect(lintBase).toBe(testRun);
+    // The lint prelude installs on docs_only as well as full so the Prettier
+    // lane can run there (#16872); test's prelude stays full-gated because a
+    // docs-only change runs no test payload. The `if` is the only field that
+    // diverges for these steps — pin the divergence exactly below and compare
+    // everything else here. Install dependencies already strips `if` in
+    // byName (its build guard differs too), so it is not in this list.
+    const PRELUDE_IF_DIVERGENCE = [
+      'Set up Node.js 22.x (hosted)',
+      'Cache pnpm store (hosted)',
+      'Use pre-installed Node.js (self-hosted)',
+      'Configure persistent npm cache (self-hosted)',
+      'Configure npm for rate limiting',
+      'Disk floor gate (self-hosted)',
+      'Report npm cache usage (self-hosted)',
+    ];
     for (const n of shared) {
       if (n === profileStep) continue;
+      if (PRELUDE_IF_DIVERGENCE.includes(n)) continue;
       expect(l.get(n), `step "${n}" drifted between the two jobs`).toBe(
         t.get(n),
+      );
+    }
+    for (const n of PRELUDE_IF_DIVERGENCE) {
+      const testStep = stepOf('test', n);
+      const lintStep = stepOf('lint_and_static', n);
+      const { if: _testIf, ...testRest } = testStep;
+      const { if: _lintIf, ...lintRest } = lintStep;
+      expect(canon(lintRest), `${n} drifted beyond its gate`).toEqual(
+        canon(testRest),
+      );
+      expect(
+        String(testStep.if),
+        `${n}: test prelude must stay full-gated`,
+      ).toContain("steps.ci_profile.outputs.ci_profile == 'full'");
+      expect(String(lintStep.if), `${n}: lint gate widened off contract`).toBe(
+        String(testStep.if).replace(
+          "steps.ci_profile.outputs.ci_profile == 'full'",
+          "(steps.ci_profile.outputs.ci_profile == 'full' || steps.ci_profile.outputs.ci_profile == 'docs_only')",
+        ),
       );
     }
     // The exemption above is only for the field that must differ: the shard
@@ -1110,6 +1145,14 @@ describe('post-merge push lane', () => {
     );
     expect(String(install('lint_and_static')?.if ?? '')).not.toContain(
       'needs.test_build',
+    );
+    // Positive pin on the widening this lane depends on: byName strips the
+    // install `if` (the build guard differs) and PRELUDE_IF_DIVERGENCE excludes
+    // Install, so without this assertion deleting the `|| docs_only` arm here
+    // would pass every suite while silently dropping the install that provides
+    // Prettier on docs_only (#16872).
+    expect(String(install('lint_and_static')?.if ?? '')).toBe(
+      "${{ needs.classify_pr.outputs.skip_ci != 'true' && (steps.ci_profile.outputs.ci_profile == 'full' || steps.ci_profile.outputs.ci_profile == 'docs_only') }}",
     );
     // Name-keyed maps are order-blind, and order is load-bearing here: the
     // `steps` context only exposes steps that have already run, and a
@@ -1576,13 +1619,22 @@ describe('post-merge push lane', () => {
     ).toEqual([...FULL_PAYLOAD].sort());
     // Whole literal, not the `ci_profile == 'full'` substring filtered above:
     // an appended `&&` clause still matches that substring while dropping the
-    // step from the unattended post-merge lane. All 15 gates are identical.
+    // step from the unattended post-merge lane. Fourteen gates are identical;
+    // Run Prettier also runs on docs_only, because the post-merge push lint
+    // checks every file with the lockfile's Prettier and a profile that skips
+    // this lane lets a formatting-only break merge green and redden main
+    // (#16872). Its widened gate still contains the `ci_profile == 'full'`
+    // substring, so it stays in FULL_PAYLOAD above; only the literal differs.
     const FULL_GATE =
       "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}";
+    const PRETTIER_GATE =
+      "${{ needs.classify_pr.outputs.skip_ci != 'true' && (steps.ci_profile.outputs.ci_profile == 'full' || steps.ci_profile.outputs.ci_profile == 'docs_only') }}";
     for (const n of FULL_PAYLOAD) {
       const step = stepByName.get(n);
       expect(testNames.has(n), `${n} leaked back into test`).toBe(false);
-      expect(String(step.if), `${n} gate drifted`).toBe(FULL_GATE);
+      expect(String(step.if), `${n} gate drifted`).toBe(
+        n === 'Run Prettier' ? PRETTIER_GATE : FULL_GATE,
+      );
       expect(
         String(step.run ?? ''),
         `${n} no longer runs its load-bearing command`,
@@ -1895,7 +1947,8 @@ describe('GitHub helper tests', () => {
 
   it('keeps the dependency-free fast lane off npm-package suites', () => {
     // The github_ci_only helper step runs before ANY dependency install (the
-    // setup-node and `npm ci` steps are gated on the full profile), so every
+    // setup-node and install steps are gated on the full and docs_only
+    // profiles, not github_ci_only), so every
     // suite it lists must import node: builtins only. These 11 suites import
     // the `yaml` npm package; letting the fast lane run the full list made an
     // ECS-updater-only fork PR fail closed with ERR_MODULE_NOT_FOUND on a
