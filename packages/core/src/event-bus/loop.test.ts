@@ -291,4 +291,28 @@ describe('runAgentLoop event-bus parity', () => {
     await expect(procedural).rejects.toThrow('boom');
     await expect(bus).rejects.toThrow('boom');
   });
+
+  async function expectSameRejection(value: unknown): Promise<void> {
+    const rounds = [[content]];
+    const throwingHost = (): AgentLoopHost => ({
+      onModelEvent: () => {
+        throw value;
+      },
+    });
+    const procedural = runAgentLoop(options(rounds, throwingHost()));
+    const bus = runAgentLoop({
+      ...options(rounds, throwingHost()),
+      useEventBus: true,
+    });
+    await expect(procedural).rejects.toBe(value);
+    await expect(bus).rejects.toBe(value);
+  }
+
+  it('rejects with the original structured error value', async () => {
+    await expectSameRejection({ code: 'E_LIMIT', message: 'quota' });
+  });
+
+  it('rejects with a null-prototype value without hanging', async () => {
+    await expectSameRejection(Object.create(null));
+  });
 });

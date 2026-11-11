@@ -56,8 +56,10 @@ export async function runAgentLoopOnBus(
       if (event.type === 'loop.finished') {
         resolve(event.data.result);
       } else if (event.type === 'handler.failed') {
-        const error = event.data.error;
-        reject(error instanceof Error ? error : new Error(String(error)));
+        // Reject with the original value, as the procedural loop throws it.
+        // Wrapping it (e.g. new Error(String(error))) can itself throw for a
+        // null-prototype or non-stringifiable value and leave the run pending.
+        reject(event.data.error);
       }
     },
     { runId },
