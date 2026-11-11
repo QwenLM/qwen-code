@@ -3127,9 +3127,14 @@ describe('HTTP Managed Session store', () => {
       });
       expect(ref.byteLength).toBe(bytes.length);
       expect(server.commits).toHaveLength(0);
-      await expect(
-        stores.resourceStore.publish('ordinary', bytes),
-      ).rejects.toThrow('inline limit');
+      // Over-cap resources externalize over the OSS routes under the same
+      // writer grant instead of rejecting; the cold reads below prove the
+      // bytes landed server-side without a journal commit.
+      const ordinary = await stores.resourceStore.publish('ordinary', bytes);
+      expect(ordinary.byteLength).toBe(bytes.length);
+      expect((await stores.toolResultResources.read(ordinary)).byteLength).toBe(
+        bytes.length,
+      );
       const checkpoint = await stores.resourceStore.publish(
         'managed-checkpoint',
         Buffer.alloc(MANAGED_SESSION_LIMITS.maxEventBytes, 0x61),
@@ -3137,12 +3142,16 @@ describe('HTTP Managed Session store', () => {
       expect((await stores.resourceStore.read(checkpoint)).byteLength).toBe(
         MANAGED_SESSION_LIMITS.maxEventBytes,
       );
-      await expect(
-        stores.resourceStore.publish(
-          'managed-checkpoint',
-          Buffer.alloc(MANAGED_SESSION_LIMITS.maxEventBytes + 1),
-        ),
-      ).rejects.toThrow('kind=managed-checkpoint, bytes=1048577');
+      const oversizedCheckpoint = await stores.resourceStore.publish(
+        'managed-checkpoint',
+        Buffer.alloc(MANAGED_SESSION_LIMITS.maxEventBytes + 1),
+      );
+      expect(oversizedCheckpoint.byteLength).toBe(
+        MANAGED_SESSION_LIMITS.maxEventBytes + 1,
+      );
+      expect(
+        (await stores.toolResultResources.read(oversizedCheckpoint)).byteLength,
+      ).toBe(MANAGED_SESSION_LIMITS.maxEventBytes + 1);
       const attachment = await stores.resourceStore.publish(
         'managed-input',
         Buffer.alloc(7 * 1024 * 1024, 0x61),
@@ -3150,12 +3159,14 @@ describe('HTTP Managed Session store', () => {
       expect((await stores.resourceStore.read(attachment)).byteLength).toBe(
         7 * 1024 * 1024,
       );
-      await expect(
-        stores.resourceStore.publish(
-          'managed-input',
-          Buffer.alloc(8 * 1024 * 1024 + 1),
-        ),
-      ).rejects.toThrow('inline limit');
+      const oversizedInput = await stores.resourceStore.publish(
+        'managed-input',
+        Buffer.alloc(8 * 1024 * 1024 + 1),
+      );
+      expect(oversizedInput.byteLength).toBe(8 * 1024 * 1024 + 1);
+      expect(
+        (await stores.toolResultResources.read(oversizedInput)).byteLength,
+      ).toBe(8 * 1024 * 1024 + 1);
       const snapshot = await stores.resourceStore.publish(
         'hosted-model-request',
         Buffer.alloc(9 * 1024 * 1024, 0x61),
@@ -3163,12 +3174,15 @@ describe('HTTP Managed Session store', () => {
       expect((await stores.resourceStore.read(snapshot)).byteLength).toBe(
         9 * 1024 * 1024,
       );
-      await expect(
-        stores.resourceStore.publish(
-          'hosted-model-request',
-          Buffer.alloc(32 * 1024 * 1024 + 1),
-        ),
-      ).rejects.toThrow('inline limit');
+      const oversizedSnapshot = await stores.resourceStore.publish(
+        'hosted-model-request',
+        Buffer.alloc(32 * 1024 * 1024 + 1),
+      );
+      expect(oversizedSnapshot.byteLength).toBe(32 * 1024 * 1024 + 1);
+      expect(
+        (await stores.toolResultResources.read(oversizedSnapshot)).byteLength,
+      ).toBe(32 * 1024 * 1024 + 1);
+      expect(server.commits).toHaveLength(0);
       await expect(
         stores.toolResultResources.publish('ordinary', bytes),
       ).rejects.toThrow('Unsupported');
@@ -8686,21 +8700,218 @@ describe('HTTP Managed Session store', () => {
     await session.close();
   });
 
-  it('rejects resources that require the unimplemented OSS path', async () => {
+  it('externalizes resources that exceed the inline limit over the OSS routes', async () => {
+    const server = new FakeManagedSessionStore();
+    const routes: string[] = [];
     const stores = createHttpManagedSessionStores({
       baseUrl: 'http://127.0.0.1:8080',
       sessionKey: SESSION_KEY,
       writerId: 'harness-a',
       writerToken: TOKEN_A,
-      fetchFn: vi.fn<typeof fetch>(),
+      fetchFn: vi.fn<typeof fetch>(async (input, init) => {
+        const pathname = new URL(requestUrl(input)).pathname;
+        if (
+          pathname.endsWith('/resources:allocate') ||
+          pathname.endsWith(':upload') ||
+          pathname.endsWith(':finalize')
+        )
+          routes.push(pathname);
+        return server.fetch(input, init);
+      }),
     });
+    await stores.journalStore.open({ sessionKey: SESSION_KEY });
+    try {
+      const bytes = Buffer.alloc(64 * 1024 + 1, 0x5a);
+      const ref = await stores.resourceStore.publish('managed-context', bytes);
+      expect(ref.byteLength).toBe(bytes.byteLength);
+      expect(routes).toHaveLength(3);
+      expect(routes[0]!.endsWith('/resources:allocate')).toBe(true);
+      expect(routes[1]!.endsWith(`/resources/${ref.resourceId}:upload`)).toBe(
+        true,
+      );
+      expect(routes[2]!.endsWith(`/resources/${ref.resourceId}:finalize`)).toBe(
+        true,
+      );
+      await expect(stores.resourceStore.read(ref)).resolves.toEqual(bytes);
+      expect(server.commits).toHaveLength(0);
+    } finally {
+      await stores.close();
+    }
+  });
 
-    await expect(
-      stores.resourceStore.publish(
-        'managed-context',
-        Buffer.alloc(64 * 1024 + 1),
-      ),
-    ).rejects.toThrow(/OSS storage is not enabled/);
+  it('externalizes an oversized resource through allocate, upload and finalize in order', async () => {
+    const server = new FakeManagedSessionStore();
+    const requests: Array<{ url: string; body?: Record<string, unknown> }> = [];
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'http://127.0.0.1:8080',
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      fetchFn: vi.fn<typeof fetch>(async (input, init) => {
+        const pathname = new URL(requestUrl(input)).pathname;
+        if (
+          pathname.endsWith('/resources:allocate') ||
+          pathname.endsWith(':upload') ||
+          pathname.endsWith(':finalize')
+        )
+          requests.push({
+            url: requestUrl(input),
+            ...(init?.body === undefined
+              ? {}
+              : {
+                  body: JSON.parse(String(init.body)) as Record<
+                    string,
+                    unknown
+                  >,
+                }),
+          });
+        return server.fetch(input, init);
+      }),
+    });
+    await stores.journalStore.open({ sessionKey: SESSION_KEY });
+    try {
+      const bytes = Buffer.alloc(64 * 1024 + 1, 0x5a);
+      const ref = await stores.resourceStore.publish('managed-context', bytes);
+      expect(ref).toMatchObject({
+        kind: 'managed-context',
+        schemaVersion: 1,
+        byteLength: bytes.byteLength,
+        digest: createHash('sha256').update(bytes).digest('hex'),
+      });
+      expect(requests).toHaveLength(3);
+      const [allocate, upload, finalize] = requests;
+      expect(
+        new URL(allocate!.url).pathname.endsWith('/resources:allocate'),
+      ).toBe(true);
+      expect(allocate!.body).toEqual({
+        workspaceId: SESSION_KEY.workspaceId,
+        writerId: 'harness-a',
+        writerGeneration: 1,
+        resourceId: ref.resourceId,
+        kind: 'managed-context',
+        schemaVersion: 1,
+        byteLength: bytes.byteLength,
+        digest: ref.digest,
+      });
+      const uploadUrl = new URL(upload!.url);
+      expect(
+        uploadUrl.pathname.endsWith(`/resources/${ref.resourceId}:upload`),
+      ).toBe(true);
+      expect(Object.fromEntries(uploadUrl.searchParams)).toEqual({
+        workspaceId: SESSION_KEY.workspaceId,
+        writerId: 'harness-a',
+        writerGeneration: '1',
+      });
+      expect(upload!.body).toEqual({ bytesBase64: bytes.toString('base64') });
+      const finalizeUrl = new URL(finalize!.url);
+      expect(
+        finalizeUrl.pathname.endsWith(`/resources/${ref.resourceId}:finalize`),
+      ).toBe(true);
+      expect(Object.fromEntries(finalizeUrl.searchParams)).toEqual({
+        workspaceId: SESSION_KEY.workspaceId,
+        writerId: 'harness-a',
+        writerGeneration: '1',
+      });
+      expect(finalize!.body).toBeUndefined();
+      // The staged ref reads back locally, and a cold read proves the bytes
+      // landed server-side without a journal commit.
+      await expect(stores.resourceStore.read(ref)).resolves.toEqual(bytes);
+      await expect(stores.toolResultResources.read(ref)).resolves.toEqual(
+        bytes,
+      );
+      expect(server.commits).toHaveLength(0);
+    } finally {
+      await stores.close();
+    }
+  });
+
+  it.each(['allocate', 'upload', 'finalize'])(
+    'retries a transient %s failure while externalizing a resource',
+    async (stage) => {
+      const server = new FakeManagedSessionStore();
+      let failuresRemaining = 1;
+      let attempts = 0;
+      const stores = createHttpManagedSessionStores({
+        baseUrl: 'http://127.0.0.1:8080',
+        sessionKey: SESSION_KEY,
+        writerId: 'harness-a',
+        writerToken: TOKEN_A,
+        fetchFn: vi.fn<typeof fetch>(async (input, init) => {
+          const pathname = new URL(requestUrl(input)).pathname;
+          const hit =
+            stage === 'allocate'
+              ? pathname.endsWith('/resources:allocate')
+              : pathname.endsWith(`:${stage}`);
+          if (hit) {
+            attempts++;
+            if (failuresRemaining > 0) {
+              failuresRemaining--;
+              return jsonResponse(
+                {
+                  error: {
+                    code: 'store_unavailable',
+                    message: 'backend down',
+                  },
+                },
+                500,
+              );
+            }
+          }
+          return server.fetch(input, init);
+        }),
+      });
+      await stores.journalStore.open({ sessionKey: SESSION_KEY });
+      try {
+        const bytes = Buffer.alloc(64 * 1024 + 1, 0x77);
+        const ref = await stores.resourceStore.publish(
+          'managed-context',
+          bytes,
+        );
+        expect(attempts).toBe(2);
+        await expect(stores.toolResultResources.read(ref)).resolves.toEqual(
+          bytes,
+        );
+      } finally {
+        await stores.close();
+      }
+    },
+  );
+
+  it('surfaces a 400 invalid_request from the upload route without finalizing', async () => {
+    const server = new FakeManagedSessionStore();
+    const routes: string[] = [];
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'http://127.0.0.1:8080',
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      fetchFn: vi.fn<typeof fetch>(async (input, init) => {
+        const pathname = new URL(requestUrl(input)).pathname;
+        if (pathname.endsWith(':upload')) {
+          routes.push('upload');
+          // Strip the payload so the store's base64 bounds refuse it.
+          return server.fetch(input, { ...init, body: JSON.stringify({}) });
+        }
+        if (pathname.endsWith(':finalize')) routes.push('finalize');
+        return server.fetch(input, init);
+      }),
+    });
+    await stores.journalStore.open({ sessionKey: SESSION_KEY });
+    try {
+      await expect(
+        stores.resourceStore.publish(
+          'managed-context',
+          Buffer.alloc(64 * 1024 + 1, 0x5a),
+        ),
+      ).rejects.toMatchObject({
+        status: 400,
+        remoteCode: 'invalid_request',
+      } satisfies Partial<ManagedSessionStoreHttpError>);
+      // A 400 is terminal: one upload attempt, no finalize behind it.
+      expect(routes).toEqual(['upload']);
+    } finally {
+      await stores.close();
+    }
   });
 
   it('commits and reuses every part of a private outcome manifest after reopen', async () => {
@@ -8970,8 +9181,11 @@ class FakeManagedSessionStore {
         `/internal/managed-session-store/v1/sessions/${SESSION_KEY.sessionId}`
           .length,
     );
+    const resourceMutation =
+      suffix.startsWith('/resources/') &&
+      (suffix.endsWith(':upload') || suffix.endsWith(':finalize'));
     expect(headers.get('Accept')).toBe(
-      suffix.startsWith('/resources/')
+      suffix.startsWith('/resources/') && !resourceMutation
         ? 'application/octet-stream, application/json'
         : 'application/json',
     );
@@ -9213,6 +9427,96 @@ class FakeManagedSessionStore {
         ...this.receiptOverrides,
       });
     }
+    if (suffix === '/resources:allocate') {
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      if (!this.externalizeGrant(url, body))
+        return jsonResponse(
+          {
+            error: {
+              code: 'managed_session_writer_conflict',
+              message: 'The writer grant is stale or unavailable.',
+            },
+          },
+          409,
+        );
+      const resourceId = String(body['resourceId']);
+      this.resourceAllocations.set(resourceId, {
+        kind: String(body['kind']),
+        schemaVersion: Number(body['schemaVersion']),
+        byteLength: Number(body['byteLength']),
+        digest: String(body['digest']),
+      });
+      return jsonResponse({ resourceId });
+    }
+    if (suffix.startsWith('/resources/') && suffix.endsWith(':upload')) {
+      const resourceId = decodeURIComponent(
+        suffix.slice('/resources/'.length, -':upload'.length),
+      );
+      const allocation = this.resourceAllocations.get(resourceId);
+      if (allocation === undefined || !this.externalizeGrant(url))
+        return jsonResponse(
+          {
+            error: {
+              code: 'managed_session_resource_not_found',
+              message: 'Resource not found.',
+            },
+          },
+          404,
+        );
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      const encoded = body['bytesBase64'];
+      const bytes =
+        typeof encoded === 'string' && encoded.length > 0
+          ? Buffer.from(encoded, 'base64')
+          : undefined;
+      // The re-encode round trip rejects blank, padded or non-base64 bodies
+      // without a regex that could overflow on multi-megabyte payloads.
+      if (
+        bytes === undefined ||
+        bytes.toString('base64') !== encoded ||
+        bytes.byteLength !== allocation.byteLength ||
+        createHash('sha256').update(bytes).digest('hex') !== allocation.digest
+      )
+        return jsonResponse(
+          {
+            error: {
+              code: 'invalid_request',
+              message: 'bytesBase64 must carry the allocated resource bytes.',
+            },
+          },
+          400,
+        );
+      this.resourceUploads.set(resourceId, bytes);
+      return jsonResponse({ resourceId });
+    }
+    if (suffix.startsWith('/resources/') && suffix.endsWith(':finalize')) {
+      const resourceId = decodeURIComponent(
+        suffix.slice('/resources/'.length, -':finalize'.length),
+      );
+      const allocation = this.resourceAllocations.get(resourceId);
+      const bytes = this.resourceUploads.get(resourceId);
+      if (
+        allocation === undefined ||
+        bytes === undefined ||
+        !this.externalizeGrant(url)
+      )
+        return jsonResponse(
+          {
+            error: {
+              code: 'managed_session_resource_not_found',
+              message: 'Resource not found.',
+            },
+          },
+          404,
+        );
+      this.resources.set(resourceId, {
+        bytes,
+        kind: allocation.kind,
+        schemaVersion: allocation.schemaVersion,
+        digest: allocation.digest,
+      });
+      return jsonResponse({ resourceId });
+    }
     if (suffix.startsWith('/resources/')) {
       const resourceId = decodeURIComponent(suffix.slice('/resources/'.length));
       const resource = this.resources.get(resourceId);
@@ -9265,6 +9569,28 @@ class FakeManagedSessionStore {
       digest: string;
     }
   >();
+  private readonly resourceAllocations = new Map<
+    string,
+    {
+      kind: string;
+      schemaVersion: number;
+      byteLength: number;
+      digest: string;
+    }
+  >();
+  private readonly resourceUploads = new Map<string, Buffer<ArrayBuffer>>();
+
+  // The externalize routes carry the writer identity in the allocate body
+  // and in the upload/finalize query; both must match the live grant.
+  private externalizeGrant(url: URL, body?: Record<string, unknown>): boolean {
+    const identity = body ?? Object.fromEntries(url.searchParams);
+    return (
+      this.state === 'ACTIVE' &&
+      identity['workspaceId'] === SESSION_KEY.workspaceId &&
+      identity['writerId'] === this.writerId &&
+      Number(identity['writerGeneration']) === this.writerGeneration
+    );
+  }
 
   private grant(): Record<string, unknown> {
     return {
