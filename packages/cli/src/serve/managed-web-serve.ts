@@ -6,7 +6,9 @@
 
 import { readFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
-import { createServer } from 'node:http';
+import { createServer, request as httpRequest } from 'node:http';
+import type { IncomingMessage } from 'node:http';
+import type { Duplex } from 'node:stream';
 import { isAbsolute } from 'node:path';
 import express from 'express';
 import {
@@ -38,6 +40,78 @@ interface ManagedWebServeOptions {
   port: number;
   token?: string;
   allowOrigins?: string[];
+}
+
+const TERMINAL_UPGRADE_PATH =
+  /^\/api\/agent\/web-shell\/v1\/sessions\/[A-Za-z0-9._-]+\/terminal$/;
+
+const TERMINAL_REQUEST_HEADERS = [
+  'sec-websocket-key',
+  'sec-websocket-version',
+  'sec-websocket-protocol',
+  'sec-websocket-extensions',
+];
+const TERMINAL_RESPONSE_HEADERS = [
+  'sec-websocket-accept',
+  'sec-websocket-protocol',
+  'sec-websocket-extensions',
+];
+
+/**
+ * Relays the terminal WebSocket upgrade to the control plane. The browser
+ * cannot set the gateway's bearer on an upgrade, so the terminal carries a
+ * single-use ticket in the Sec-WebSocket-Protocol subprotocol instead; the
+ * gateway forwards only the WebSocket handshake headers (never cookies or
+ * authorization) and lets the control plane consume the ticket. Every other
+ * upgrade path stays refused.
+ */
+function forwardTerminalUpgrade(
+  java: URL,
+  req: IncomingMessage,
+  socket: Duplex,
+  head: Buffer,
+): void {
+  const headers: Record<string, string> = {
+    connection: 'Upgrade',
+    upgrade: 'websocket',
+  };
+  for (const name of TERMINAL_REQUEST_HEADERS) {
+    const value = req.headers[name];
+    if (typeof value === 'string') headers[name] = value;
+  }
+  const upstream = httpRequest(java, {
+    method: 'GET',
+    path: req.url,
+    headers,
+  });
+  upstream.on('upgrade', (upstreamRes, upstreamSocket, upstreamHead) => {
+    const lines = [
+      'HTTP/1.1 101 Switching Protocols',
+      'Upgrade: websocket',
+      'Connection: Upgrade',
+    ];
+    for (const name of TERMINAL_RESPONSE_HEADERS) {
+      const value = upstreamRes.headers[name];
+      if (typeof value === 'string') lines.push(`${name}: ${value}`);
+    }
+    socket.write(lines.join('\r\n') + '\r\n\r\n');
+    if (upstreamHead.length > 0) socket.write(upstreamHead);
+    if (head.length > 0) upstreamSocket.write(head);
+    upstreamSocket.on('error', () => socket.destroy());
+    upstreamSocket.pipe(socket);
+    socket.pipe(upstreamSocket);
+  });
+  upstream.on('response', (res) => {
+    socket.write(
+      `HTTP/1.1 ${res.statusCode ?? 502} ${res.statusMessage ?? ''}\r\n` +
+        'Connection: close\r\n\r\n',
+    );
+    res.resume();
+    socket.destroy();
+  });
+  upstream.on('error', () => socket.destroy());
+  socket.on('error', () => upstream.destroy());
+  upstream.end();
 }
 
 async function readConfig(file: string): Promise<ManagedWebConfig> {
@@ -165,7 +239,15 @@ export async function runManagedWebServe(
 
   const server = createServer(app);
   server.maxConnections = 256;
-  server.on('upgrade', (_request, socket) => socket.destroy());
+  const java = new URL(config.apiUrl);
+  server.on('upgrade', (request, socket, head) => {
+    const path = (request.url ?? '').split('?')[0] ?? '';
+    if (TERMINAL_UPGRADE_PATH.test(path)) {
+      forwardTerminalUpgrade(java, request, socket, head);
+    } else {
+      socket.destroy();
+    }
+  });
   await new Promise<void>((resolve, reject) => {
     server.once('error', reject);
     server.listen(options.port, options.hostname, () => {

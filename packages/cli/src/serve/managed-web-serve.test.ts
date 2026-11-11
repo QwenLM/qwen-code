@@ -276,6 +276,65 @@ describe('dedicated Managed Web gateway', () => {
     });
   });
 
+  it('forwards the terminal upgrade to the control plane with its ticket subprotocol', async () => {
+    let peerPath: string | undefined;
+    let peerProtocol: string | undefined;
+    let peerAuthorization: string | undefined;
+    let peerSocket: import('node:stream').Duplex | undefined;
+    peer.on('upgrade', (req, socket) => {
+      peerSocket = socket;
+      peerPath = req.url;
+      peerProtocol = req.headers['sec-websocket-protocol'];
+      peerAuthorization = req.headers['authorization'];
+      socket.write(
+        'HTTP/1.1 101 Switching Protocols\r\n' +
+          'Upgrade: websocket\r\n' +
+          'Connection: Upgrade\r\n' +
+          'Sec-WebSocket-Accept: test-accept\r\n' +
+          'Sec-WebSocket-Protocol: qwen-ws\r\n\r\n',
+      );
+      socket.on('data', (chunk) => socket.write(chunk));
+    });
+    await start();
+    const result = await new Promise<{
+      status: number;
+      protocol?: string;
+    }>((resolve, reject) => {
+      const upgrade = request(
+        `${gateway!.url}/api/agent/web-shell/v1/sessions/sess-1/terminal?terminalId=t1&replay=1`,
+        {
+          headers: {
+            Connection: 'Upgrade',
+            Upgrade: 'websocket',
+            'Sec-WebSocket-Key': 'dGhlIHNhbXBsZSBub25jZQ==',
+            'Sec-WebSocket-Version': '13',
+            'Sec-WebSocket-Protocol': 'qwen-ws, qwen-bearer.ticket-abc',
+            Authorization: `Bearer ${browserToken}`,
+          },
+        },
+      );
+      upgrade.on('upgrade', (res, socket) => {
+        socket.destroy();
+        resolve({
+          status: res.statusCode ?? 0,
+          protocol: res.headers['sec-websocket-protocol'],
+        });
+      });
+      upgrade.on('response', (res) => resolve({ status: res.statusCode ?? 0 }));
+      upgrade.on('error', reject);
+      upgrade.end();
+    });
+    expect(result.status).toBe(101);
+    expect(result.protocol).toBe('qwen-ws');
+    expect(peerPath).toBe(
+      '/api/agent/web-shell/v1/sessions/sess-1/terminal?terminalId=t1&replay=1',
+    );
+    expect(peerProtocol).toBe('qwen-ws, qwen-bearer.ticket-abc');
+    // The gateway bearer must not leak to the control-plane upgrade.
+    expect(peerAuthorization).toBeUndefined();
+    peerSocket?.destroy();
+  });
+
   it('fails before listening for invalid configuration or missing, weak, shared credentials', async () => {
     for (const token of [
       undefined,
