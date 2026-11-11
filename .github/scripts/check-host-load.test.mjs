@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
@@ -281,5 +281,88 @@ describe('check-host-load', () => {
         `${ratio}: sampled instead of rejecting the configuration`,
       );
     }
+  });
+
+  it('reads a zero-padded wait count as decimal', () => {
+    // `08` passes the shape check, but `for (( ))` reads a leading zero as
+    // octal, where 08 is invalid: the loop would take zero samples and the
+    // script would then die on the unbound `load5` under `set -u`, refusing
+    // every job on the runner with a raw bash error instead of the re-run
+    // annotation.
+    const result = runGate({
+      loadavg: '145.00 140.00 130.00 1/900 1\n',
+      env: {
+        HOST_LOAD_MAX_WAIT_TRIES: '08',
+        HOST_LOAD_WAIT_SECONDS: '1',
+        HOST_LOAD_MAX_RATIO: '1.0',
+      },
+    });
+    assert.equal(result.status, 1, result.stdout);
+    assert.equal(samples(result.stdout).length, 8, result.stdout);
+    assert.match(result.stdout, /after 8 samples/);
+    assert.doesNotMatch(result.stdout, /value too great for base/);
+    assert.doesNotMatch(result.stdout, /load5: unbound variable/);
+  });
+
+  it('keeps a custom ceiling and observes the exact boundary', () => {
+    // The ceiling is the operator's only tuning knob and the comparison is
+    // `<`, so an admitted host at 6.0, a refusal at 1.0, and the exact
+    // `cpus * max` point all have to be observed: hardcoding 2.0 or flipping
+    // `<` to `<=` otherwise stays invisible.
+    const loose = runGate({
+      loadavg: '300.00 300.00 300.00 1/900 1\n',
+      cpus: '64',
+      env: { HOST_LOAD_MAX_RATIO: '6.0', HOST_LOAD_MAX_WAIT_TRIES: '1' },
+    });
+    assert.equal(loose.status, 0, loose.stdout);
+    assert.match(samples(loose.stdout)[0], /max_ratio\[6\.0\]/);
+
+    const tight = runGate({
+      loadavg: '70.00 70.00 70.00 1/900 1\n',
+      cpus: '64',
+      env: { HOST_LOAD_MAX_RATIO: '1.0', HOST_LOAD_MAX_WAIT_TRIES: '1' },
+    });
+    assert.equal(tight.status, 1, tight.stdout);
+
+    // Exactly at the ceiling: 128.00 on 64 CPUs with 2.0. The comparison is
+    // `avg < cpus * max` to admit, so equality refuses.
+    const exact = runGate({
+      loadavg: '128.00 128.00 128.00 1/900 1\n',
+      cpus: '64',
+      env: { HOST_LOAD_MAX_WAIT_TRIES: '1', HOST_LOAD_MAX_RATIO: '2.0' },
+    });
+    assert.equal(exact.status, 1, exact.stdout);
+    assert.match(exact.stdout, /::error::Host load gate breached/);
+
+    const below = runGate({
+      loadavg: '127.99 127.99 127.99 1/900 1\n',
+      cpus: '64',
+      env: { HOST_LOAD_MAX_WAIT_TRIES: '1', HOST_LOAD_MAX_RATIO: '2.0' },
+    });
+    assert.equal(below.status, 0, below.stdout);
+  });
+
+  it('emits a breach the infrastructure classifier recognises', () => {
+    // A refusal is the one failure whose whole purpose is "re-run me", and
+    // qwen-autofix only re-runs a check whose annotation matches
+    // INFRA_FAILURE_SIGNATURES. Keep the two in lockstep.
+    const result = runGate({
+      loadavg: '145.00 140.00 130.00 1/900 1\n',
+      env: { HOST_LOAD_MAX_WAIT_TRIES: '1' },
+    });
+    assert.equal(result.status, 1, result.stdout);
+    const workflow = readFileSync(
+      fileURLToPath(new URL('../workflows/qwen-autofix.yml', import.meta.url)),
+      'utf8',
+    );
+    const signatures = /INFRA_FAILURE_SIGNATURES: '([^']*)'/.exec(
+      workflow,
+    )?.[1];
+    assert.ok(signatures, 'INFRA_FAILURE_SIGNATURES not found');
+    assert.match(result.stdout, /::error::Host load gate breached/);
+    assert.ok(
+      new RegExp(signatures, 'i').test(result.stdout),
+      'the breach annotation must match INFRA_FAILURE_SIGNATURES',
+    );
   });
 });

@@ -43,8 +43,11 @@ set -uo pipefail
 # fails the first time, and an RPC stall that outlives two whole runs still
 # fails.
 #
-# Set to 0 to disable, for an operator who wants the first failure to stand.
+# Set to 0 or off to disable, for an operator who wants the first failure to
+# stand. `off` is what the other levers in this test step use (VITEST_RETRY,
+# HOST_LOAD_MAX_RATIO), so both tokens are accepted and `0` keeps working.
 RPC_RETRY="${QWEN_CI_RPC_RETRY:-1}"
+case "$RPC_RETRY" in 0 | off) RPC_RETRY=0 ;; esac
 
 # The main lane's workspaces, the CLI suite and core.
 main_workspaces=('@qwen-code/qwen-code' '@qwen-code/qwen-code-core')
@@ -146,11 +149,12 @@ run_suite() {
 # holds every workspace's summary, so judging the whole log — or just its last
 # summary — would let one workspace's green report license another's retry.
 run_lane_suites() {
-  local log rc failed name block
+  local log rc failed name block block_rc
   log="$(mktemp "${TMPDIR:-/tmp}/unit-lane-suite.XXXXXX")" || {
     echo "::error::Could not create a suite log under ${TMPDIR:-/tmp}."
     return 1
   }
+  local started=$SECONDS
   npm run test:ci "$@" -- "${suite_args[@]}" 2>&1 | tee "$log"
   rc="${PIPESTATUS[0]}"
   if [ "$rc" -eq 0 ] || [ "$RPC_RETRY" = '0' ]; then
@@ -171,6 +175,7 @@ run_lane_suites() {
     rm -f "$log"
     return "$rc"
   fi
+  local retryable=() unproven=0
   while IFS= read -r name; do
     # An empty name cannot be matched to a report block, so nothing proves its
     # failure was the transport. Keep the original failure instead of skipping
@@ -187,27 +192,49 @@ run_lane_suites() {
       /^> .*@[^ ]+ test:ci$/ { inside = (index($0, "> " name "@") == 1) }
       inside { print }
     ' "$log")"
-    if ! rpc_only_failure_text "$rc" <<< "$block"; then
-      rm -f "$log"
-      return "$rc"
+    # npm exits with the LAST failing workspace's status, so the batch rc
+    # describes a different workspace than the block being judged. Read this
+    # workspace's own `npm error code N` out of its block; without one, fall
+    # back to the batch status (fail closed: a signal death is still >= 128).
+    block_rc="$(grep -oE '^npm error code [0-9]+' <<< "$block" | awk 'NR == 1 { print $4 }')"
+    [ -n "$block_rc" ] || block_rc="$rc"
+    if rpc_only_failure_text "$block_rc" <<< "$block"; then
+      retryable+=("$name")
+    else
+      # This workspace's failure is not the transport. Its failure stands, and
+      # nothing here re-runs it; the other workspaces are still judged on
+      # their own evidence rather than on the batch status.
+      unproven=1
     fi
   done <<< "$failed"
+  if [ "${#retryable[@]}" -eq 0 ]; then
+    rm -f "$log"
+    return "$rc"
+  fi
+  # A retry costs about what the first attempt cost. When the step has less
+  # than that left it would be killed by the step timeout, leaving a truncated
+  # run instead of the first attempt's report; keep the first failure.
+  if [ "${UNIT_LANE_BUDGET_SECONDS:-0}" -gt 0 ] &&
+    [ $((SECONDS - started)) -ge $((UNIT_LANE_BUDGET_SECONDS / 2)) ]; then
+    echo "::warning::Skipping the RPC re-run: ${SECONDS} s of the ${UNIT_LANE_BUDGET_SECONDS} s step budget used, too little left for another pass."
+    rm -f "$log"
+    return "$rc"
+  fi
   rm -f "$log"
   echo "::warning::Every test passed but Vitest reported the worker RPC timeout as an unhandled error; re-running the affected workspace suites once."
   local status=0 attempt
-  while IFS= read -r name; do
-    # Same fail-closed rule as the judging loop: a name that cannot be re-run
-    # leaves the original failure standing rather than silently skipping the
-    # workspace. `rc` is non-zero here, `status` may still be 0.
-    if [ -z "$name" ]; then
-      return "$rc"
-    fi
+  for name in "${retryable[@]}"; do
     npm run test:ci "--workspace=${name}" -- "${suite_args[@]}"
     attempt=$?
     if [ "$attempt" -ne 0 ] && [ "$status" -eq 0 ]; then
       status="$attempt"
     fi
-  done <<< "$failed"
+  done
+  # A workspace whose failure was not the transport was not re-run; its
+  # failure is the lane's verdict even when every retry passed.
+  if [ "$unproven" -eq 1 ] && [ "$status" -eq 0 ]; then
+    return "$rc"
+  fi
   return "$status"
 }
 
@@ -248,7 +275,17 @@ rpc_only_failure_text() {
   local reported timeouts
   reported="$(awk '/^[[:space:]]*Errors[[:space:]]+[0-9]+ errors?$/ { total += $2 } END { print total + 0 }' <<< "$text")"
   [ "$reported" -ge 1 ] || return 1
-  timeouts="$(grep -cE '\[vitest-worker\]: Timeout calling' <<< "$text" || true)"
+  # Only the block Vitest emits for unhandled errors counts. A test's console
+  # output is echoed at column 0 too, so a whole-text grep let a test that
+  # prints these words move the figure in both directions: it could license a
+  # retry for an unrelated unhandled error, or deny the retry a real transport
+  # report had earned.
+  timeouts="$(awk '
+    /Unhandled Errors/ { inside = 1; next }
+    inside && /^[[:space:]]*(Test Files|Tests|Errors)[[:space:]]/ { inside = 0 }
+    inside && /\[vitest-worker\]: Timeout calling/ { count++ }
+    END { print count + 0 }
+  ' <<< "$text")"
   [ "$timeouts" -eq "$reported" ]
 }
 

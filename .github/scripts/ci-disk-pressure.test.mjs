@@ -502,6 +502,13 @@ describe('ci.yml host load gate', () => {
     const names = testSteps.map((candidate) => candidate.name);
     const gate = names.indexOf('Host load gate (self-hosted)');
     assert.ok(gate > names.indexOf('Unpack the built tree'));
+    // The two provisioning steps are apt/network installs whose duration
+    // follows the contention this gate measures, so a sample taken above them
+    // can be minutes stale when the suites start.
+    assert.ok(
+      gate > names.indexOf('Provision linters for real-binary tests'),
+      'the load gate must sample after the tooling provisioning',
+    );
     assert.ok(gate < names.indexOf('Run tests and generate reports'));
   });
 

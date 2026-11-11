@@ -1235,23 +1235,6 @@ jobs:
             node --input-type=module -e 'import { copyOpenTuiAssets } from "./scripts/copy_bundle_assets.js"; copyOpenTuiAssets();'
           fi
 
-      # The disk floor above admits on bytes and inodes; this admits on CPU
-      # contention, as a backstop against a host no shard has survived rather
-      # than a predictor of the RPC flake — measured green and red bands
-      # overlap, and the calibration is in the script. It sits here, after the
-      # install and unpack, because that is the last point before the suites
-      # and the load that matters is the load they will run under; an
-      # install-time reading is minutes stale by then. Refusing costs the
-      # install already spent, and buys back the test step's whole 45-minute
-      # budget plus an honest "re-run me" instead of a test failure the branch
-      # did not author.
-      - name: 'Host load gate (self-hosted)'
-        if: "${{ needs.test_build.result == 'success' && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' && runner.os == 'Linux' }}"
-        timeout-minutes: 3
-        env:
-          HOST_LOAD_MAX_RATIO: "${{ vars.QWEN_CI_HOST_LOAD_MAX_RATIO || '2.0' }}"
-        run: 'bash .github/scripts/check-host-load.sh'
-
       - name: 'Report npm cache usage (self-hosted)'
         if: "${{ always() && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}"
         run: |-
@@ -1343,6 +1326,23 @@ jobs:
             console.log("PROVISIONED actionlint + shellcheck into " + tempDir);
           '
 
+      # The disk floor above admits on bytes and inodes; this admits on CPU
+      # contention, as a backstop against a host no shard has survived rather
+      # than a predictor of the RPC flake — measured green and red bands
+      # overlap, and the calibration is in the script. It runs immediately
+      # before the suites: the tmux/zip and linter provisioning steps above it
+      # are apt and network installs whose duration rises with the same
+      # contention, so a reading taken before them can be minutes stale by the
+      # time the suites start — the staleness that rules out an install-time
+      # reading. Both of those steps are continue-on-error, so refusing here
+      # costs only their install time.
+      - name: 'Host load gate (self-hosted)'
+        if: "${{ needs.test_build.result == 'success' && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' && runner.os == 'Linux' }}"
+        timeout-minutes: 3
+        env:
+          HOST_LOAD_MAX_RATIO: "${{ vars.QWEN_CI_HOST_LOAD_MAX_RATIO || '2.0' }}"
+        run: 'bash .github/scripts/check-host-load.sh'
+
       - name: 'Run tests and generate reports'
         id: 'unit_tests'
         if: "${{ needs.test_build.result == 'success' && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
@@ -1377,6 +1377,11 @@ jobs:
           # the lane script reads the report and re-runs only that shape. '0'
           # disables it without a PR.
           QWEN_CI_RPC_RETRY: "${{ vars.QWEN_CI_RPC_RETRY || '1' }}"
+          # The step's own cap above. The lane script skips an RPC re-run once
+          # the elapsed time leaves less than a second pass, so a retry that
+          # cannot finish stops replacing the first attempt's report with a
+          # truncated one.
+          UNIT_LANE_BUDGET_SECONDS: '2700'
           # Coverage is collected only on the post-merge main run: nothing
           # read the pull-request reports, and v8 instrumentation cost about
           # a fifth of the suite's wall time on every push. The vitest configs

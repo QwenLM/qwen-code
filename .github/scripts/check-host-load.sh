@@ -94,6 +94,13 @@ for override in "MAX_WAIT_TRIES:${WAIT_TRIES}" "WAIT_SECONDS:${WAIT_SECONDS}"; d
   fi
 done
 
+# The shape check above admits `08`, `09` and `010`, but `for (( ))` evaluates
+# its operands as bash arithmetic constants, where a leading zero means octal
+# and `08` is invalid: the loop would take zero samples and the script would
+# then die on the unbound `load5` under `set -u`. Decode once, here, so
+# validation and use agree (and `010` samples 10 times, not 8).
+WAIT_TRIES=$((10#$WAIT_TRIES))
+
 cpus="$(nproc 2>/dev/null || true)"
 case "$cpus" in '' | *[!0-9]*) cpus='' ;; esac
 if [ -z "$cpus" ] || [ "$cpus" -lt 1 ]; then

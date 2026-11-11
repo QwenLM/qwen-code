@@ -1480,6 +1480,7 @@ describe('package scripts', () => {
             reportRc = '1',
             reportOnce = true,
             rpcRetry = '',
+            budget = '',
           } = {},
         ) => {
           const calls = path.join(dir, `${name}.calls`);
@@ -1517,6 +1518,7 @@ describe('package scripts', () => {
               STUB_REPORT_ONCE: reportOnce ? '1' : '',
               STUB_REPORT_SAW: path.join(dir, `${name}.report-saw`),
               QWEN_CI_RPC_RETRY: rpcRetry,
+              UNIT_LANE_BUDGET_SECONDS: budget,
             },
           });
           // The replayed side log is removed once printed.
@@ -1719,6 +1721,104 @@ describe('package scripts', () => {
         expect(retryOff.rc).toBe('1');
         expect(retryOff.stdout).not.toContain('Every test passed');
         expect([...retryOff.calls].sort()).toEqual([...passing.calls].sort());
+
+        // `off` is the token the sibling levers in this step use
+        // (VITEST_RETRY, HOST_LOAD_MAX_RATIO); it must disable exactly like
+        // `0`, not fall through to "enabled" without a word.
+        const retryOffToken = run('rpc-retry-off-token', {
+          report: rpcReport('@qwen-code/web-shell'),
+          rpcRetry: 'off',
+        });
+        expect(retryOffToken.rc).toBe('1');
+        expect(retryOffToken.stdout).not.toContain('Every test passed');
+        expect([...retryOffToken.calls].sort()).toEqual(
+          [...passing.calls].sort(),
+        );
+
+        // A retry that cannot fit in what is left of the step would be killed
+        // by the step timeout, replacing the first attempt's report with a
+        // truncated one. Keep the first failure instead.
+        const noBudget = run('rpc-retry-budget', {
+          report: rpcReport('@qwen-code/web-shell'),
+          budget: '1',
+        });
+        expect(noBudget.rc).toBe('1');
+        expect(noBudget.stdout).toContain('Skipping the RPC re-run');
+        expect(
+          noBudget.calls.filter((call) => call.includes('web-shell')).length,
+        ).toBe(1);
+
+        // A workspace killed by a signal must not be retried on the strength
+        // of a later workspace's status: npm exits with the LAST failing
+        // workspace, so the batch status attributes the kill to the wrong
+        // one. Only the RPC-only workspace is re-run here.
+        const twoBlocks =
+          rpcReport('@qwen-code/web-shell').replace(
+            'npm error code 1',
+            'npm error code 137',
+          ) +
+          '\n' +
+          rpcReport('@qwen-code/sdk');
+        const perWorkspace = run('rpc-retry-per-workspace', {
+          report: twoBlocks,
+        });
+        expect(perWorkspace.rc, perWorkspace.stdout).toBe('1');
+        expect(perWorkspace.stdout).toContain('Every test passed');
+        expect(
+          perWorkspace.calls.filter((call) =>
+            call.includes('--workspace=@qwen-code/web-shell'),
+          ).length,
+        ).toBe(1);
+        expect(
+          perWorkspace.calls.filter((call) =>
+            call.includes('--workspace=@qwen-code/sdk'),
+          ).length,
+        ).toBe(2);
+
+        // Only Vitest's own unhandled-error block counts. A test's console
+        // output is echoed at column 0, so a whole-text grep would let a
+        // printed transport line license a retry for an unrelated error.
+        const printedTransport =
+          rpcReport('@qwen-code/web-shell').replace(
+            'Error: [vitest-worker]: Timeout calling "onTaskUpdate"',
+            'Error: TypeError: boom',
+          ) + '\n[vitest-worker]: Timeout calling "onTaskUpdate"';
+        const notRetriedPrinted = run('rpc-retry-printed', {
+          report: printedTransport,
+        });
+        expect(notRetriedPrinted.rc).toBe('1');
+        expect(notRetriedPrinted.stdout).not.toContain('Every test passed');
+
+        // The scripts lane (`run_suite`) gets the same retry and needs its own
+        // evidence: the workspace cases cannot reach it.
+        const scriptsRetried = run('rpc-retry-scripts', {
+          report: rpcReport('@qwen-code/qwen-code-scripts'),
+          reportMatch: 'test:scripts:unit',
+        });
+        expect(scriptsRetried.rc, scriptsRetried.stdout).toBe('0');
+        expect(scriptsRetried.stdout).toContain('Every test passed');
+        expect(
+          scriptsRetried.calls.filter((call) =>
+            call.includes('test:scripts:unit'),
+          ).length,
+        ).toBe(2);
+        const scriptsStuck = run('rpc-retry-scripts-stuck', {
+          report: rpcReport('@qwen-code/qwen-code-scripts'),
+          reportMatch: 'test:scripts:unit',
+          reportOnce: false,
+        });
+        expect(scriptsStuck.rc).toBe('1');
+        expect(scriptsStuck.stdout).toContain('Every test passed');
+        const scriptsOff = run('rpc-retry-scripts-off', {
+          report: rpcReport('@qwen-code/qwen-code-scripts'),
+          reportMatch: 'test:scripts:unit',
+          rpcRetry: '0',
+        });
+        expect(scriptsOff.rc).toBe('1');
+        expect(
+          scriptsOff.calls.filter((call) => call.includes('test:scripts:unit'))
+            .length,
+        ).toBe(1);
 
         // A stall that outlives both attempts still fails: the retry is one
         // re-run, not a loop that launders a permanent break into green.

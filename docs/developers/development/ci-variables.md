@@ -31,14 +31,14 @@ this page in the same change.
 
 ## Variables
 
-| Variable                                 | Default | Used in                 | Controls                                                                                    |
-| ---------------------------------------- | ------- | ----------------------- | ------------------------------------------------------------------------------------------- |
-| `QWEN_CI_VITEST_RETRY`                   | `2`     | `ci.yml`                | Retry count for the main CI workspace and script test step                                  |
-| `QWEN_CI_RPC_RETRY`                      | `1`     | `ci.yml`                | Re-runs of an all-green workspace suite that failed only on Vitest's worker RPC timeout     |
-| `QWEN_CI_HOST_LOAD_MAX_RATIO`            | `2.0`   | `ci.yml`                | Load-per-CPU ceiling above which a self-hosted Linux host is refused before the unit suites |
-| `QWEN_RELEASE_VITEST_RETRY`              | `2`     | `release.yml`           | Retry count for the release workspace test shards                                           |
-| `QWEN_RELEASE_WORKSPACE_TIMEOUT_MINUTES` | `45`    | `release.yml`           | Job timeout of each release workspace test shard                                            |
-| `QWEN_CI_VITEST_MAX_WORKERS`             | `4`     | `ci.yml`, `release.yml` | Worker cap for main CI unit tests and release workspace/quality tests on reserved runners   |
+| Variable                                 | Default | Used in                 | Controls                                                                                          |
+| ---------------------------------------- | ------- | ----------------------- | ------------------------------------------------------------------------------------------------- |
+| `QWEN_CI_VITEST_RETRY`                   | `2`     | `ci.yml`                | Retry count for the main CI workspace and script test step                                        |
+| `QWEN_CI_RPC_RETRY`                      | `1`     | `ci.yml`                | Re-runs of an all-green workspace suite that failed only on Vitest's worker RPC timeout           |
+| `QWEN_CI_HOST_LOAD_MAX_RATIO`            | `2.0`   | `ci.yml`                | Load-per-CPU ceiling at or above which a self-hosted Linux host is refused before the unit suites |
+| `QWEN_RELEASE_VITEST_RETRY`              | `2`     | `release.yml`           | Retry count for the release workspace test shards                                                 |
+| `QWEN_RELEASE_WORKSPACE_TIMEOUT_MINUTES` | `45`    | `release.yml`           | Job timeout of each release workspace test shard                                                  |
+| `QWEN_CI_VITEST_MAX_WORKERS`             | `4`     | `ci.yml`, `release.yml` | Worker cap for main CI unit tests and release workspace/quality tests on reserved runners         |
 
 ### Retry counts
 
@@ -89,7 +89,7 @@ Set `0` to make the first failure stand.
 `Host load gate (self-hosted)` step in the unit-test shards. The gate samples
 the five-minute load average from `/proc/loadavg` against `nproc`, waits up to
 six samples ten seconds apart, and admits the job as soon as one sample clears
-the ceiling. A host still above it fails the step before the suites start.
+the ceiling. A host still at or above it fails the step before the suites start.
 
 The gate cannot move a job: GitHub has already placed it, and only a re-run
 lands it on another host. What it changes is when the job fails. The disk floor
