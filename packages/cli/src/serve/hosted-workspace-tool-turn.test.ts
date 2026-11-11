@@ -96,6 +96,7 @@ import {
 } from './hosted-memory-session.js';
 import { readHostedApprovalContinuation } from './hosted-approval-continuation.js';
 import { writeHostedTodos } from './hosted-todo-session.js';
+import { HostedLoopSession } from './hosted-loop-session.js';
 import { HostedCsiToolTurn } from './hosted-csi-tool-turn.js';
 import * as hostedPlan from './hosted-plan-mode.js';
 import { isSlowTestHost } from '../test-utils/slow-test-host.js';
@@ -2026,7 +2027,7 @@ it.each([
   },
 );
 
-it('declares loop_wakeup on shell/2 but not on shell/1', async () => {
+it('declares loop_wakeup and the cron union on shell/3 but not on shell/1', async () => {
   const mk = (profile: string) =>
     new HostedWorkspaceToolTurn(
       { baseUrl: 'http://127.0.0.1:1', token: 'test' },
@@ -2040,14 +2041,88 @@ it('declares loop_wakeup on shell/2 but not on shell/1', async () => {
       undefined,
       { profile },
     );
-  const shell2 = await mk('hosted-workspace-shell/2').declarations(
-    new AbortController().signal,
-  );
-  expect(shell2.map((tool) => tool.name)).toContain('loop_wakeup');
-  const shell1 = await mk('hosted-workspace-shell/1').declarations(
-    new AbortController().signal,
-  );
-  expect(shell1.map((tool) => tool.name)).not.toContain('loop_wakeup');
+  const shell3 = (
+    await mk('hosted-workspace-shell/3').declarations(
+      new AbortController().signal,
+    )
+  ).map((tool) => tool.name);
+  expect(shell3).toContain('loop_wakeup');
+  expect(shell3).toContain('cron_list');
+  expect(shell3).toContain('cron_delete');
+  const shell1 = (
+    await mk('hosted-workspace-shell/1').declarations(
+      new AbortController().signal,
+    )
+  ).map((tool) => tool.name);
+  expect(shell1).not.toContain('loop_wakeup');
+  expect(shell1).not.toContain('cron_list');
+  expect(shell1).not.toContain('cron_delete');
+});
+
+it('cron_list and cron_delete drive the loop funnel end to end on shell/3', async () => {
+  const gateKey = 'QWEN_MANAGED_AGENT_LOOP_ENABLED';
+  const gateBefore = process.env[gateKey];
+  process.env[gateKey] = 'true';
+  try {
+    const wakeKick = vi.fn();
+    const loops = new HostedLoopSession(
+      {
+        authority: session.authority,
+        resources: session.resources,
+        sink: session.sink,
+      },
+      session.authority.sessionHeader.sessionKey,
+      { cwd: root, classify: async () => ({ allowed: true, reason: null }) },
+    );
+    turn = new HostedWorkspaceToolTurn(
+      { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+      session,
+      harness,
+      'prompt',
+      commit,
+      messageFitsInline,
+      undefined,
+      undefined,
+      undefined,
+      { profile: 'hosted-workspace-shell/3', loops, wakeKick },
+    );
+    await turn.declarations(new AbortController().signal);
+    const drive = async (name: string, args: Record<string, unknown>) => {
+      const call = { ...calls[0], callId: `call-${name}`, name, args };
+      const responses = await turn.execute(
+        [call],
+        [{ functionCall: { id: call.callId, name, args } }],
+        'model',
+        new AbortController().signal,
+      );
+      return responses[0].functionResponse?.response;
+    };
+    expect((await drive('cron_list', {}))?.['wakeups']).toEqual([]);
+    const arm = await drive('loop_wakeup', {
+      delaySeconds: 60,
+      prompt: '/loop check the deploy',
+    });
+    expect(arm?.['executionStatus']).toBe('success');
+    expect(wakeKick).toHaveBeenCalledTimes(1);
+    const id = arm?.['id'] as string;
+    const listed = (await drive('cron_list', {}))?.['wakeups'] as Array<{
+      id: string;
+      prompt: string;
+    }>;
+    expect(listed).toEqual([
+      { id, fireAt: arm?.['fireAt'], prompt: '/loop check the deploy' },
+    ]);
+    const del = await drive('cron_delete', { id });
+    expect(del?.['cancelled']).toBe(true);
+    expect(wakeKick).toHaveBeenCalledTimes(2);
+    expect((await drive('cron_list', {}))?.['wakeups']).toEqual([]);
+    // An unknown id answers not-cancelled rather than throwing.
+    const missing = await drive('cron_delete', { id: 'loop:does-not-exist' });
+    expect(missing?.['cancelled']).toBe(false);
+  } finally {
+    if (gateBefore === undefined) delete process.env[gateKey];
+    else process.env[gateKey] = gateBefore;
+  }
 });
 
 it.each([WORKSPACE_CAPABILITY_DIGEST, RESIDENT_WORKSPACE_CAPABILITY_DIGEST])(

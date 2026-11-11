@@ -421,10 +421,13 @@ The facts below are from this repository at `488845a4a81`.
    there — a model-driven cancel-then-arm restarts the 24 h budget only
    from an ordinary turn. Name the rule, and which reading it replaces,
    before implementation.
-2. **Profile revision numbers.** The `loop_wakeup` revisions follow the
-   [fixed-interval sibling](2026-11-10-managed-loop-schedule.md)'s cron
-   trio revisions, in landing order; confirm the assigned numbers
-   against the control plane's profile admission when the slice lands.
+2. **Profile revision numbers.** Landing first, this slice takes
+   `hosted-workspace-shell/3`, skipping the `shell/2` retired by the
+   unified Shell lifecycle (#15330); the
+   [fixed-interval sibling](2026-11-10-managed-loop-schedule.md) swaps to
+   the later revision per its landing-order note. The control plane's
+   canonical Shell admission must still be confirmed to recognize
+   `shell/3` when the slice lands.
 3. **Gate default timeline.** False until the acceptance evidence lands,
    then true by default like `qwen.managed-agent.automation.enabled`;
    confirm the enablement order with the deployment owners.

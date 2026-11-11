@@ -16,10 +16,11 @@ import type {
   ManagedSessionInputRequest,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
 import { MANAGED_AUTOMATION_LIMITS } from '@qwen-code/qwen-code-core/managed-runtime/managed-automation-operations.js';
-import type {
-  ManagedSessionDurableRef,
-  ManagedSessionEvent,
-  ManagedSessionKey,
+import {
+  assertManagedSessionDurableRef,
+  type ManagedSessionDurableRef,
+  type ManagedSessionEvent,
+  type ManagedSessionKey,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import { pendingSessionInputs } from './hosted-wake-intake.js';
 import { wakeHasPriorAttempt } from './hosted-monitor-wake.js';
@@ -78,6 +79,7 @@ export interface HostedLoopStore {
   };
   readonly resources: {
     publish(kind: string, bytes: Buffer): Promise<ManagedSessionDurableRef>;
+    read(ref: ManagedSessionDurableRef): Promise<Buffer>;
   };
   readonly sink: {
     project(): Promise<ChatRecord[]>;
@@ -148,6 +150,44 @@ export class HostedLoopSession {
    */
   cancel(id: string): Promise<boolean> {
     return this.serial(() => this.cancelUnserialized(id));
+  }
+
+  /**
+   * The pending unfired loop wakeups for the union cron_list surface: id,
+   * fire time, and the continuation prompt read from the input envelope.
+   * The fixed-interval sibling's cron jobs join this list when it lands.
+   */
+  list(): Promise<
+    Array<{ id: string; fireAt: number | null; prompt: string }>
+  > {
+    return this.serial(async () => {
+      const events = this.store.authority.eventsInSequenceRange(
+        1,
+        this.store.authority.committedSequence,
+      );
+      const projected = await this.store.sink.project();
+      const unfired = this.unfiredPending(projected, events);
+      if (unfired === undefined) return [];
+      let prompt = '';
+      if (unfired.contentRef !== undefined) {
+        try {
+          const ref = assertManagedSessionDurableRef(
+            unfired.contentRef,
+            'loop wakeup input',
+          );
+          const bytes = await this.store.resources.read(ref);
+          const body = JSON.parse(bytes.toString('utf8')) as {
+            text?: unknown;
+          };
+          if (typeof body.text === 'string') prompt = body.text;
+        } catch {
+          // A wakeup whose envelope cannot be read still lists by id and
+          // fire time; the prompt is display-only.
+          prompt = '';
+        }
+      }
+      return [{ id: unfired.turnId, fireAt: unfired.notBefore, prompt }];
+    });
   }
 
   private async armUnserialized(params: {

@@ -344,10 +344,11 @@ Managed Session 今天无法运行这条路径：
    firing loop turn 内总存在存活 loop，重置在那里无法触发——模型驱动的
    先取消再安排只能从普通 turn 重启 24 h 预算。在实现前钉住该规则，以及
    它取代哪种读法。
-2. **profile 修订版号。** `loop_wakeup` 的修订版按落地顺序取
-   [固定间隔姊妹设计](2026-11-10-managed-loop-schedule.zh-CN.md)的
-   cron 三件套修订版之后的一批；切片落地时与控制面的 profile 准入核对
-   确认分配的版号。
+2. **profile 修订版号。** 本切片先落地，取 `hosted-workspace-shell/3`，
+   跳过统一 Shell 生命周期（#15330）已退役的 `shell/2`；
+   [固定间隔姊妹设计](2026-11-10-managed-loop-schedule.zh-CN.md)按其
+   落地顺序说明互换到更后的一批修订。切片落地时仍需与控制面的规范
+   Shell 准入核对，确认识别 `shell/3`。
 3. **开关默认值时间线。** 验收证据落地前为 false，之后像
    `qwen.managed-agent.automation.enabled` 一样默认 true；与部署负责人
    确认启用顺序。

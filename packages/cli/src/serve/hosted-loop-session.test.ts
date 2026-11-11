@@ -322,3 +322,30 @@ describe('HostedLoopSession cancel', () => {
     });
   });
 });
+
+describe('HostedLoopSession list', () => {
+  it('lists the pending unfired wakeup with id, fire time, and prompt', async () => {
+    const harness = await createHarness();
+    await withLoop(harness, async (loops) => {
+      expect(await loops.list()).toEqual([]);
+      const arm = await loops.arm({
+        delaySeconds: 60,
+        prompt: '/loop check the deploy',
+      });
+      expect(await loops.list()).toEqual([
+        { id: arm.id, fireAt: arm.fireAt, prompt: '/loop check the deploy' },
+      ]);
+      expect(await loops.cancel(arm.id)).toBe(true);
+      expect(await loops.list()).toEqual([]);
+    });
+  });
+
+  it('does not list a wakeup whose turn already started', async () => {
+    const harness = await createHarness();
+    await withLoop(harness, async (loops) => {
+      const arm = await loops.arm({ delaySeconds: 60, prompt: 'one' });
+      harness.records.push({ daemonPromptId: arm.id } as ChatRecord);
+      expect(await loops.list()).toEqual([]);
+    });
+  });
+});

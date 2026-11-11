@@ -70,7 +70,7 @@ import {
 import {
   HOSTED_WORKSPACE_FILE_PROFILE,
   HOSTED_WORKSPACE_SHELL_PROFILE,
-  HOSTED_WORKSPACE_SHELL_PROFILE_V2,
+  HOSTED_WORKSPACE_SHELL_PROFILE_V3,
   HOSTED_WORKSPACE_FILE_PROFILE_V2,
   HOSTED_WORKSPACE_FILE_PROFILE_V3,
   HOSTED_WORKSPACE_READ_PROFILE,
@@ -822,6 +822,35 @@ export const HOSTED_LOOP_WAKEUP_TOOL: FunctionDeclaration = {
       },
     },
     required: ['delaySeconds', 'prompt'],
+    additionalProperties: false,
+  },
+};
+// The union cron list/cancel surface (decision 8), shared with the
+// fixed-interval sibling: this slice lists and cancels the pending loop
+// wakeup; the sibling's cron jobs join the same two tools when it lands.
+export const HOSTED_CRON_LIST_TOOL: FunctionDeclaration = {
+  name: 'cron_list',
+  description:
+    'List the pending loop wakeups scheduled via loop_wakeup (and, once available, cron jobs). Shows each wakeup’s id, fire time, and continuation prompt.',
+  parametersJsonSchema: {
+    type: 'object',
+    properties: {},
+    additionalProperties: false,
+  },
+};
+export const HOSTED_CRON_DELETE_TOOL: FunctionDeclaration = {
+  name: 'cron_delete',
+  description:
+    'Cancel a pending loop wakeup scheduled via loop_wakeup (or, once available, a cron job) by its id. A wakeup whose turn already started cannot be cancelled.',
+  parametersJsonSchema: {
+    type: 'object',
+    properties: {
+      id: {
+        type: 'string',
+        description: 'The id returned by loop_wakeup (loop:<wakeupId>).',
+      },
+    },
+    required: ['id'],
     additionalProperties: false,
   },
 };
@@ -1894,6 +1923,8 @@ interface HostedPreparedRequest {
   question?: boolean;
   todo?: boolean;
   loop?: boolean;
+  cronList?: boolean;
+  cronDelete?: boolean;
   memory?: boolean;
 }
 
@@ -1908,6 +1939,8 @@ function skipsRuntimeBroker(request: HostedPreparedRequest): boolean {
       request.skill ||
       request.todo ||
       request.loop ||
+      request.cronList ||
+      request.cronDelete ||
       request.memory ||
       request.workflow,
   );
@@ -2253,7 +2286,11 @@ export class HostedWorkspaceToolTurn {
   }
 
   private declaresLoopTool(): boolean {
-    return this.profile === HOSTED_WORKSPACE_SHELL_PROFILE_V2;
+    return this.profile === HOSTED_WORKSPACE_SHELL_PROFILE_V3;
+  }
+
+  private declaresCronTools(): boolean {
+    return this.profile === HOSTED_WORKSPACE_SHELL_PROFILE_V3;
   }
 
   private questionsAdmitted(): boolean {
@@ -2426,6 +2463,7 @@ export class HostedWorkspaceToolTurn {
     const skill = this.skills?.declaration();
     const todoTool = this.declaresTodoTool();
     const loopTool = this.declaresLoopTool();
+    const cronTools = this.declaresCronTools();
     this.advertised = [
       ...[
         ...(this.publication || this.shell
@@ -2434,6 +2472,7 @@ export class HostedWorkspaceToolTurn {
         ...(search ? [HOSTED_GLOB_TOOL] : []),
         ...(todoTool ? [HOSTED_TODO_WRITE_TOOL] : []),
         ...(loopTool ? [HOSTED_LOOP_WAKEUP_TOOL] : []),
+        ...(cronTools ? [HOSTED_CRON_LIST_TOOL, HOSTED_CRON_DELETE_TOOL] : []),
       ]
         .filter((tool) => tool.name !== 'monitor' || this.monitorsAdmitted())
         .map((declaration) => {
@@ -3386,6 +3425,8 @@ export class HostedWorkspaceToolTurn {
         (((call.name === 'skill' && this.skills !== undefined) ||
           (call.name === 'todo_write' && this.declaresTodoTool()) ||
           (call.name === 'loop_wakeup' && this.declaresLoopTool()) ||
+          (call.name === 'cron_list' && this.declaresCronTools()) ||
+          (call.name === 'cron_delete' && this.declaresCronTools()) ||
           (this.memory !== undefined && isHostedMemoryTool(call.name)) ||
           HOSTED_TEAM_TOOL_NAMES.includes(call.name) ||
           (call.name === 'exit_plan_mode' &&
@@ -4589,7 +4630,21 @@ export class HostedWorkspaceToolTurn {
           } else if (reason !== undefined && typeof reason !== 'string') {
             validationError = 'loop_wakeup reason must be a string.';
           }
-          input = { delaySeconds, prompt, reason };
+          // canonicalJson refuses undefined values, so an absent reason must
+          // be omitted, not carried as `reason: undefined`.
+          input = {
+            delaySeconds,
+            prompt,
+            ...(reason === undefined ? {} : { reason }),
+          };
+        } else if (call.name === 'cron_list') {
+          input = {};
+        } else if (call.name === 'cron_delete') {
+          const id = call.args['id'];
+          if (typeof id !== 'string' || !id.trim()) {
+            validationError = 'cron_delete requires a nonempty id.';
+          }
+          input = { id };
         } else if (call.name === 'monitor') {
           const args = call.args;
           const unsupportedKey = Object.keys(args).find(
@@ -5118,6 +5173,8 @@ export class HostedWorkspaceToolTurn {
           question: call.name === 'ask_user_question',
           todo: call.name === 'todo_write',
           loop: mcpInput === undefined && call.name === 'loop_wakeup',
+          cronList: mcpInput === undefined && call.name === 'cron_list',
+          cronDelete: mcpInput === undefined && call.name === 'cron_delete',
           memory: this.memory !== undefined && isHostedMemoryTool(call.name),
         };
       });
@@ -6247,6 +6304,72 @@ export class HostedWorkspaceToolTurn {
           if (!this.messageFitsInline('tool_result', converted, model))
             throw new Error(
               'Hosted loop wakeup result exceeds the inline Session Store limit.',
+            );
+          await this.commit('tool_result', converted, model);
+          responses.push(...converted);
+          continue;
+        }
+        if (request.cronList) {
+          const wakeups = await this.loops!.list();
+          const text =
+            wakeups.length === 0
+              ? 'No active cron jobs or loop wakeups.'
+              : wakeups
+                  .map(
+                    (wakeup) =>
+                      `${wakeup.id} — wakeup at ${
+                        wakeup.fireAt === null
+                          ? 'now'
+                          : new Date(wakeup.fireAt).toISOString()
+                      } (one-shot) [session-only]: ${wakeup.prompt}`,
+                  )
+                  .join('\n');
+          const converted = convertToFunctionResponse(
+            request.call.name,
+            request.call.callId,
+            [{ text }],
+          );
+          const response = converted[0]?.functionResponse;
+          if (!response) throw new Error('Hosted cron_list result is missing.');
+          response.response = {
+            ...response.response,
+            wakeups,
+            executionStatus: 'success',
+          };
+          if (!this.messageFitsInline('tool_result', converted, model))
+            throw new Error(
+              'Hosted cron_list result exceeds the inline Session Store limit.',
+            );
+          await this.commit('tool_result', converted, model);
+          responses.push(...converted);
+          continue;
+        }
+        if (request.cronDelete) {
+          const id = request.input['id'] as string;
+          const cancelled = await this.loops!.cancel(id);
+          this.wakeKick?.();
+          const converted = convertToFunctionResponse(
+            request.call.name,
+            request.call.callId,
+            [
+              {
+                text: cancelled
+                  ? `Cancelled ${id}.`
+                  : `No pending wakeup ${id} to cancel.`,
+              },
+            ],
+          );
+          const response = converted[0]?.functionResponse;
+          if (!response)
+            throw new Error('Hosted cron_delete result is missing.');
+          response.response = {
+            ...response.response,
+            cancelled,
+            executionStatus: 'success',
+          };
+          if (!this.messageFitsInline('tool_result', converted, model))
+            throw new Error(
+              'Hosted cron_delete result exceeds the inline Session Store limit.',
             );
           await this.commit('tool_result', converted, model);
           responses.push(...converted);
