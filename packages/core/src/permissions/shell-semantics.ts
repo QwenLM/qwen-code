@@ -39,6 +39,7 @@ import {
   stripShellWrapper,
 } from '../utils/shell-utils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { scanUgrepOptions } from '../utils/ugrep-options.js';
 import { splitCompoundCommandSegments } from './rule-parser.js';
 
 const shellSemanticsDebugLogger = createDebugLogger('SHELL_SEMANTICS');
@@ -1198,6 +1199,17 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
   // ── Grep / search commands ────────────────────────────────────────────────
 
   grep: (args, cwd) => {
+    const { saveConfigTarget } = scanUgrepOptions(args);
+    if (saveConfigTarget) {
+      if (saveConfigTarget !== '-') {
+        return [
+          {
+            virtualTool: 'write_file',
+            filePath: resolvePath(saveConfigTarget, cwd),
+          },
+        ];
+      }
+    }
     const hasPatternFlag = args.some(
       (a) =>
         a === '-e' || a === '-f' || a.startsWith('-e') || a.startsWith('-f'),
