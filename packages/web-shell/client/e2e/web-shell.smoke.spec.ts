@@ -1760,6 +1760,49 @@ test('keeps desktop history search reachable in a short window @smoke', async ({
   expect(daemon.promptRequests()).toHaveLength(0);
 });
 
+test('keeps the permission picker compact and marks full access as dangerous @smoke', async ({
+  page,
+}, testInfo) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  const scenario = createWebShellDaemonScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+  await gotoSession(page, scenario, daemon);
+
+  await page.locator('[data-web-shell-mode-button]').click();
+  const modeDropdown = page.locator(
+    '[data-web-shell-mode-popover][data-state="open"]',
+  );
+  await expect(modeDropdown).toBeVisible();
+  await expect(modeDropdown).toHaveCSS('width', '400px');
+
+  const labels = modeDropdown.locator('[class*="dropdownItemLabel"]');
+  const descriptions = modeDropdown.locator('[class*="dropdownItemDesc"]');
+  await expect(labels).toHaveCount(4);
+  await expect(descriptions).toHaveCount(4);
+  for (const text of [...(await labels.all()), ...(await descriptions.all())]) {
+    await expect(text).toHaveCSS('font-size', '13px');
+  }
+
+  const fullAccess = modeDropdown.getByRole('button', {
+    name: /Full Access \(yolo\)/,
+  });
+  const dangerColor = await modeDropdown.evaluate((element) => {
+    const probe = document.createElement('span');
+    probe.style.color = 'var(--destructive)';
+    element.append(probe);
+    const color = getComputedStyle(probe).color;
+    probe.remove();
+    return color;
+  });
+  for (const selector of [
+    '[class*="dropdownItemIcon"]',
+    '[class*="dropdownItemLabel"]',
+    '[class*="dropdownItemDesc"]',
+  ]) {
+    await expect(fullAccess.locator(selector)).toHaveCSS('color', dangerColor);
+  }
+});
+
 for (const viewportHeight of COMPOSER_VIEWPORT_HEIGHTS) {
   test(`grows long text to the responsive composer cap at ${viewportHeight}px @smoke`, async ({
     page,

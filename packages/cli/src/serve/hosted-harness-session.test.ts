@@ -685,6 +685,7 @@ async function mcpApp(
   unknownConfigure = false,
   serverIds = ['demo'],
   toolProfile = 'hosted-workspace-mcp/1',
+  extra: Record<string, unknown> = {},
 ) {
   const requests: ManagedMcpControl[] = [];
   const replies = new Map<string, ManagedMcpOperationView>();
@@ -763,6 +764,7 @@ async function mcpApp(
       serverRevision: 1,
       definitionDigest: 'a'.repeat(64),
     })),
+    ...extra,
   });
   expect(created.status).toBe(200);
   const authorize = (request: supertest.Test) =>
@@ -3136,6 +3138,10 @@ describe('Hosted Harness no-tool session', () => {
   });
 
   it('v2 MCP effects retain the owner until resources settle', async () => {
+    const closeResources = vi.spyOn(
+      HostedMcpSession.prototype,
+      'closeResources',
+    );
     const { server, authorize, requests } = await mcpApp();
     await authorize(
       supertest(server).post(`/session/${SESSION_ID}/mcp/operations`),
@@ -3164,8 +3170,9 @@ describe('Hosted Harness no-tool session', () => {
     expect(
       requests.filter((request) => request.kind === 'mcp-release'),
     ).toHaveLength(0);
-    // R14-1: kind:'close' is a detach — the owner hands its mount back through
-    // releaseMount but stays re-acquirable; only a delete terminally releases.
+    // The terminal release happens in settle_resources, the last phase; a
+    // reload of a closing Session carries a lifecycle authority, which sets
+    // mcpClosing, so no acquire follows it.
     vi.spyOn(HostedWorkspaceBroker.prototype, 'mountClaim').mockReturnValue(
       'v2-close-claim',
     );
@@ -3182,9 +3189,143 @@ describe('Hosted Harness no-tool session', () => {
     expect(
       requests.filter((request) => request.kind === 'mcp-release'),
     ).toHaveLength(1);
-    expect(releaseMount).toHaveBeenCalledWith('v2-close-claim');
-    expect(HostedWorkspaceBroker.prototype.release).not.toHaveBeenCalled();
+    // The MCP session's own owner is the one released, and every row it
+    // configured ends released, as the release fault gates require.
+    const mcp = closeResources.mock.contexts[0] as HostedMcpSession;
+    expect(
+      vi.mocked(HostedWorkspaceBroker.prototype.release).mock.contexts,
+    ).toContain(mcp.broker);
+    expect(releaseMount).not.toHaveBeenCalled();
+    const releaseStates = () =>
+      (Reflect.get(mcp, 'session') as ManagedSession).authority
+        .extensionRecordsInDomain('mcp_configuration')
+        .map(
+          (entry) => (entry.record as { releaseState?: string }).releaseState,
+        );
+    expect(releaseStates()).not.toHaveLength(0);
+    expect(releaseStates()).toEqual(releaseStates().map(() => 'released'));
+    // A retried settle_resources, as after a lost answer, finds every row
+    // released: it dispatches no second release and acquires nothing.
+    const acquire = vi.mocked(HostedWorkspaceBroker.prototype.acquire);
+    acquire.mockClear();
+    await authorize(supertest(server).post(`/session/${SESSION_ID}/lifecycle`))
+      .send({ ...operation, phase: 'settle_resources' })
+      .expect(200);
+    expect(
+      requests.filter((request) => request.kind === 'mcp-release'),
+    ).toHaveLength(1);
+    expect(acquire).not.toHaveBeenCalled();
+    expect(releaseStates()).toEqual(releaseStates().map(() => 'released'));
     expect(state.model).not.toHaveBeenCalled();
+    await authorize(supertest(server).post(`/session/${SESSION_ID}/detach`))
+      .send({ authority: operation.authority })
+      .expect(204);
+  });
+
+  it('releases the Hook owner it shares with MCP on a v2 close', async () => {
+    // With both an MCP server and a Hook catalog the Hook session borrows the
+    // MCP broker, so the MCP release on a close releases the owner the
+    // SessionEnd Hook ran on as well.
+    const catalog: ManagedHookCatalog = {
+      ...hookPin,
+      hooks: [HookEventName.SessionEnd, HookEventName.SessionDelete].map(
+        (eventName) => ({
+          hookId: eventName,
+          eventName,
+          sequential: false,
+          async: false,
+          failClosed: true,
+          onceKey: null,
+          config: { type: 'command' as const },
+        }),
+      ),
+    };
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
+    vi.spyOn(
+      HostedWorkspaceBroker.prototype,
+      'authorizeLifecycle',
+    ).mockResolvedValue();
+    const hookRequests: ManagedHookControl[] = [];
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'hookControl').mockImplementation(
+      async (operation) => {
+        hookRequests.push(operation);
+        if (operation.kind === 'hook-catalog')
+          return {
+            operationId: operation.operationId,
+            state: 'settled',
+            catalog: { ...catalog, ...operation.pin },
+          };
+        return {
+          operationId: operation.operationId,
+          state: 'settled',
+          result: { success: true, outcome: 'success', duration: 0 },
+        };
+      },
+    );
+    const closeResources = vi.spyOn(
+      HostedMcpSession.prototype,
+      'closeResources',
+    );
+    const hookClose = vi.spyOn(HostedHookSession.prototype, 'close');
+    const { server, authorize, requests } = await mcpApp(
+      false,
+      ['demo'],
+      'hosted-workspace-mcp/1',
+      { hookCatalog: hookPin, approvalMode: 'yolo' },
+    );
+    await authorize(
+      supertest(server).post(`/session/${SESSION_ID}/mcp/operations`),
+    )
+      .send({
+        operationId: randomUUID(),
+        serverId: 'demo',
+        request: { kind: 'resource_read', uri: 'memory://note' },
+      })
+      .expect(202);
+    const operation = {
+      protocolVersion: 2,
+      kind: 'close',
+      toolProfile: 'hosted-workspace-mcp/1',
+      sessionKey: {
+        tenantId: 'tenant',
+        workspaceId: 'workspace',
+        sessionId: SESSION_ID,
+      },
+      authority: { operationId: 'v2-shared', claimGeneration: 1 },
+    };
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'mountClaim').mockReturnValue(
+      'v2-close-claim',
+    );
+    const releaseMount = vi
+      .spyOn(HostedWorkspaceBroker.prototype, 'releaseMount')
+      .mockResolvedValue();
+    for (const phase of ['effects', 'prepare_resources', 'settle_resources']) {
+      await authorize(
+        supertest(server).post(`/session/${SESSION_ID}/lifecycle`),
+      )
+        .send({ ...operation, phase })
+        .expect(200);
+    }
+    expect(
+      hookRequests.filter((request) => request.kind === 'hook-execute'),
+    ).not.toHaveLength(0);
+    const mcp = closeResources.mock.contexts[0] as HostedMcpSession;
+    const hooks = hookClose.mock.contexts[0] as HostedHookSession;
+    expect(hooks.broker).toBe(mcp.broker);
+    expect(
+      requests.filter((request) => request.kind === 'mcp-release'),
+    ).toHaveLength(1);
+    expect(
+      vi.mocked(HostedWorkspaceBroker.prototype.release).mock.contexts,
+    ).toContain(mcp.broker);
+    expect(releaseMount).not.toHaveBeenCalled();
+    const releaseStates = (
+      Reflect.get(mcp, 'session') as ManagedSession
+    ).authority
+      .extensionRecordsInDomain('mcp_configuration')
+      .map((entry) => (entry.record as { releaseState?: string }).releaseState);
+    expect(releaseStates).not.toHaveLength(0);
+    expect(releaseStates).toEqual(releaseStates.map(() => 'released'));
     await authorize(supertest(server).post(`/session/${SESSION_ID}/detach`))
       .send({ authority: operation.authority })
       .expect(204);

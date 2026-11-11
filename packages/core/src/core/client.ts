@@ -1279,8 +1279,10 @@ export class LlmClient {
    * no-clone rationale as {@link getHistoryFunctionResponseIds}. See
    * `LlmChat.getHistoryToolCallFingerprints` for the implementation.
    */
-  getHistoryToolCallFingerprints(): Map<string, string> {
-    return this.getChat().getHistoryToolCallFingerprints();
+  getHistoryToolCallFingerprints(
+    onlyCallIds?: ReadonlySet<string>,
+  ): Map<string, string> {
+    return this.getChat().getHistoryToolCallFingerprints(onlyCallIds);
   }
 
   /**

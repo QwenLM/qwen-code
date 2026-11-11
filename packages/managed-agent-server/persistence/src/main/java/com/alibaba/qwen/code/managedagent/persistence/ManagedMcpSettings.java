@@ -57,16 +57,22 @@ public final class ManagedMcpSettings {
             check(command.get("serverId").equals(command.path("server").get("serverId")), "MCP server identity conflicts");
         }
         JsonNode servers = body.get("servers");
-        check(servers.isArray() && servers.size() <= 32, "Invalid MCP settings servers");
+        check(servers.isArray() && servers.size() <= ManagedExtensionRecords.MAX_MCP_SELECTION_ENTRIES,
+                "Invalid MCP settings servers");
         Set<String> ids = new HashSet<>();
         int enabled = 0;
+        int selected = 0;
         for (JsonNode server : servers) {
             pin(server, true);
             check(ids.add(server.get("serverId").textValue()), "Duplicate MCP server");
+            if (!"removed".equals(server.get("state").textValue())) {
+                selected++;
+            }
             if ("enabled".equals(server.get("state").textValue())) {
                 enabled++;
             }
         }
+        check(selected <= 32, "MCP selection capacity exceeded");
         check(enabled <= 16, "MCP connection quota exceeded");
     }
 
@@ -77,7 +83,9 @@ public final class ManagedMcpSettings {
         check(pin.path("serverId").isTextual() && pin.path("serverId").asText().matches("[A-Za-z0-9._:-]{1,128}")
                 && pin.path("definitionDigest").isTextual() && pin.path("definitionDigest").asText().matches("[a-f0-9]{64}"),
                 "Invalid MCP server pin");
-        ManagedExtensionRecords.count(pin.get("serverRevision"), 1, MAX_REVISION, "MCP server revision");
+        // count() clamps to MAX_COUNT (MAX_REVISION - 1); passing the effective
+        // bound keeps the rejection message truthful with what is enforced.
+        ManagedExtensionRecords.count(pin.get("serverRevision"), 1, MAX_REVISION - 1, "MCP server revision");
         check(!state || Set.of("enabled", "disabled", "removed").contains(pin.path("state").asText()), "Invalid MCP server state");
     }
 

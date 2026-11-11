@@ -9,8 +9,10 @@ import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
+import { Semaphore } from 'async-mutex';
 import { resolveBundleDir } from '../utils/bundlePaths.js';
 import { ToolNames } from '../tools/tool-names.js';
+import type { ModStore } from './store.js';
 import type { AnyDeclarativeTool } from '../tools/tools.js';
 import {
   ModBudget,
@@ -89,6 +91,12 @@ function workerEntry(): URL | string {
 
 export class ModRuntime {
   private readonly worker: Worker;
+  // The $.store calls the host is answering.
+  private readonly storeCalls = new Map<
+    number,
+    { controller: AbortController; task: Promise<void> }
+  >();
+  private readonly storeReadSlots = new Semaphore(4);
   private failure?: Error;
   private pending?: (reply: ModReply) => void;
   private commands: Array<ModCommand & { plugin: string }> = [];
@@ -115,6 +123,7 @@ export class ModRuntime {
     refresh: () => void;
     // `$.model.complete` calls the host is running for the root.
     models: Map<number, AbortController>;
+    storeAbort: AbortController;
   };
   private tool?: {
     next: ModToolNext;
@@ -140,6 +149,7 @@ export class ModRuntime {
     private readonly renderHost?: ModRenderHost,
     private readonly queuePrompt?: ModPromptQueue,
     private readonly completeModel?: ModModelHost,
+    private readonly store?: ModStore,
   ) {
     this.worker = new Worker(workerEntry(), {
       stdout: true,
@@ -156,6 +166,7 @@ export class ModRuntime {
         for (const id of reply.ids) {
           this.tool?.operations.get(id)?.controller.abort();
           root.models.get(id)?.abort();
+          this.storeCalls.get(id)?.controller.abort();
         }
       } else if (reply.type === 'model-complete') this.answerModel(reply, root);
       else if (reply.type === 'check-result')
@@ -164,7 +175,17 @@ export class ModRuntime {
         this.answerTurnAbort(reply, root.id);
       else if (reply.type === 'prompt-queue')
         this.answerPromptQueue(reply, root.id);
-      else if (reply.type === 'invalidate') {
+      else if (reply.type === 'store') {
+        const remainingMs = reply.deadline - performance.now();
+        if (remainingMs <= 0) return;
+        const controller = new AbortController();
+        const signals = [root.storeAbort.signal, controller.signal];
+        if (Number.isFinite(remainingMs))
+          signals.push(AbortSignal.timeout(Math.ceil(remainingMs)));
+        const task = this.answerStore(reply, root.id, AbortSignal.any(signals));
+        this.storeCalls.set(reply.id, { controller, task });
+        void task.finally(() => this.storeCalls.delete(reply.id));
+      } else if (reply.type === 'invalidate') {
         if (reply.event !== 'ui.render' || this.failure) return;
         if (this.early) this.early.add(reply.plugin);
         else if (
@@ -236,6 +257,8 @@ export class ModRuntime {
     queuePrompt?: ModPromptQueue,
     // Runs `$.model.complete`; absent, the host runs no model calls.
     completeModel?: ModModelHost,
+    // Where each plugin's `$.store` is kept; absent, the host keeps none.
+    store?: ModStore,
   ): Promise<ModRuntime> {
     if (
       plugins.length > 32 ||
@@ -266,6 +289,7 @@ export class ModRuntime {
       render,
       queuePrompt,
       completeModel,
+      store,
     );
     try {
       const result = await runtime.request(
@@ -279,6 +303,7 @@ export class ModRuntime {
           prompts,
           submits: queuePrompt !== undefined,
           models: completeModel !== undefined,
+          stores: store !== undefined,
         },
         signal,
         60_000,
@@ -785,6 +810,61 @@ export class ModRuntime {
     this.post({ type: 'prompt-queue-result', id: reply.id, refused }, root);
   }
 
+  private async answerStore(
+    reply: Extract<ModReply, { type: 'store' }>,
+    root: number,
+    signal: AbortSignal,
+  ): Promise<void> {
+    const { operation } = reply;
+    let value: unknown;
+    let error: string | undefined;
+    try {
+      signal.throwIfAborted();
+      const store = this.store;
+      if (!store) throw new Error('This host keeps no Mod store.');
+      if (
+        operation.method === 'store.get' ||
+        operation.method === 'store.keys'
+      ) {
+        value = await this.storeReadSlots.runExclusive(() => {
+          signal.throwIfAborted();
+          return operation.method === 'store.get'
+            ? store.get(operation.plugin, operation.key)
+            : store.keys(operation.plugin);
+        });
+      } else if (operation.method === 'store.set')
+        await store.set(
+          operation.plugin,
+          operation.key,
+          operation.value,
+          signal,
+        );
+      else await store.delete(operation.plugin, operation.key, signal);
+    } catch (caught) {
+      error = (caught instanceof Error ? caught.message : String(caught)).slice(
+        0,
+        4000,
+      );
+    }
+    if (signal.aborted) return;
+    try {
+      this.post({ type: 'store-result', id: reply.id, value, error }, root);
+    } catch (caught) {
+      // A value too large to hand back fails the call, not the session.
+      this.post(
+        {
+          type: 'store-result',
+          id: reply.id,
+          error: (caught instanceof Error
+            ? caught.message
+            : String(caught)
+          ).slice(0, 4000),
+        },
+        root,
+      );
+    }
+  }
+
   async end(
     sessionId: string,
     reason: 'clear' | 'resume' | 'other',
@@ -800,16 +880,19 @@ export class ModRuntime {
   async dispose(): Promise<void> {
     this.fail(new Error('Mod runtime is closed.'));
     await this.worker.terminate();
-    await Promise.allSettled(
-      [...(this.tool?.operations.values() ?? [])].map(
+    await Promise.allSettled([
+      ...[...(this.tool?.operations.values() ?? [])].map(
         (operation) => operation.task,
       ),
-    );
+      // Let a store update that acquired its lock finish before closing.
+      ...[...this.storeCalls.values()].map(({ task }) => task),
+    ]);
   }
 
   private fail(error: Error): void {
     this.failure ??= error;
     this.tool?.controller.abort();
+    this.root?.storeAbort.abort();
     this.pending?.({ type: 'error', message: this.failure.message });
   }
 
@@ -846,6 +929,7 @@ export class ModRuntime {
       revision: 0,
       phase: 0,
       models: new Map(),
+      storeAbort: new AbortController(),
       refresh: () => {
         if (aborted || this.root !== root) return;
         const lending =
@@ -863,12 +947,19 @@ export class ModRuntime {
         if (!budget.lending) timer = setTimeout(stop, budget.remainingMs);
       },
     };
+    // Roots run sequentially, so only this root can have queued reads.
+    root.storeAbort.signal.addEventListener(
+      'abort',
+      () => this.storeReadSlots.cancel(),
+      { once: true },
+    );
     this.root = root;
     const onAbort = () => {
       aborted = true;
       Atomics.store(this.cancelled, 0, 1);
       this.tool?.controller.abort();
       for (const model of root.models.values()) model.abort();
+      root.storeAbort.abort();
       if (timer) clearTimeout(timer);
       cancelTimer = setTimeout(stop, 250);
     };
@@ -899,6 +990,7 @@ export class ModRuntime {
       });
     } finally {
       this.root = undefined;
+      root.storeAbort.abort();
       for (const model of root.models.values()) model.abort();
       root.models.clear();
       if (timer) clearTimeout(timer);
