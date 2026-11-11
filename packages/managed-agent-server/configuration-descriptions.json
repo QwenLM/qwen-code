@@ -741,13 +741,13 @@
       "zh": "Session worktree 任务两次运行之间的间隔；每次运行继续未完成的单 Session Git worktree 步骤，并使 worktree 未能准备好的 Session 的初始 Turn 失败。接受 `1s` 这类时长；不带单位的数字按毫秒计。",
       "type": "duration"
     },
+    "qwen.managed-agent.side-queries-enabled": {
+      "en": "Enables new actor-private BTW and recap generation for ACTIVE Sessions with explicit model_config, execution authority, the Session Store and a Harness advertising side-query/1. Defaults off. Disabling admission preserves authorized result reads and accepted work. Catalog/default-model Sessions are unsupported in this version.",
+      "zh": "为具备显式 model_config、执行权限、Session Store 以及声明 side-query/1 的 Harness 的 ACTIVE Session 开启新的 actor 私有 BTW 与 recap 生成。默认关闭。关闭新请求受理后仍保留已授权结果读取和已受理任务。此版本不支持模型目录或默认模型 Session。"
+    },
     "qwen.managed-agent.tool-publication.active-captures": {
       "en": "How many tool output captures one tenant may have open at the same time; a further reservation is refused until one finishes. Required when `qwen.managed-agent.tool-publication.enabled` is true; must be at least 1 (startup refusal).",
       "zh": "单个租户可同时处于打开状态的工具输出捕获数量；达到上限后新的预留会被拒绝，直到有捕获结束。`qwen.managed-agent.tool-publication.enabled` 为 true 时必填，且至少为 `1`（否则启动时拒绝）。"
-    },
-    "qwen.managed-agent.tool-publication.async-verification-enabled": {
-      "en": "Whether clients may ask for asynchronous verification of publication operations with the `X-Qwen-Tool-Publication-Async: 1` header, receiving HTTP 202 and polling for the outcome; otherwise every operation verifies synchronously. Turning it off stops new asynchronous admissions while already accepted operations still drain.",
-      "zh": "是否允许客户端通过 `X-Qwen-Tool-Publication-Async: 1` 请求头为发布操作申请异步校验（先返回 HTTP 202，再轮询结果）；关闭时所有操作均同步校验。关闭后不再接纳新的异步操作，已接纳的操作仍会继续校验完毕。"
     },
     "qwen.managed-agent.tool-publication.claim-timeout": {
       "en": "How long a server's claim on an in-progress publication operation lasts; the holder renews it every third of this period, and a retry can take the operation over only after the claim lapses. Required when tool publication is enabled; must be positive and shorter than `qwen.managed-agent.tool-publication.operation-timeout` (startup refusal). A bare number is seconds.",
@@ -810,8 +810,8 @@
       "zh": "校验吞吐量下限（字节/秒）：校验期限为 `qwen.managed-agent.tool-publication.operation-timeout` 加上每校验这么多字节增加的一秒，且不得超过 `qwen.managed-agent.tool-publication.max-verification-timeout`。启用工具发布时必填，且至少为 `1`（否则启动时拒绝）。"
     },
     "qwen.managed-agent.tool-publication.verification-concurrency": {
-      "en": "How many background threads verify asynchronously admitted publication operations. The verifier keeps running when `qwen.managed-agent.tool-publication.async-verification-enabled` is turned off, so accepted operations drain. Must be at least 1 (startup refusal when tool publication is enabled).",
-      "zh": "对已异步接纳的发布操作进行校验的后台线程数。关闭 `qwen.managed-agent.tool-publication.async-verification-enabled` 后校验器仍会运行，以便处理完已接纳的操作。至少为 `1`（启用工具发布时，否则启动时拒绝）。"
+      "en": "How many background threads verify accepted publication operations. Every producer operation returns HTTP 202 once its inputs are stored and is verified by these threads; clients poll for the outcome. Must be at least 1 (startup refusal when tool publication is enabled).",
+      "zh": "对已接纳的发布操作进行校验的后台线程数。每个生产者操作在其输入保存后即返回 HTTP 202，由这些线程完成校验，客户端轮询结果。至少为 `1`（启用工具发布时，否则启动时拒绝）。"
     },
     "qwen.managed-agent.trusted-actor-header": {
       "en": "The name of a request header (for example `X-Qwen-Actor-Id`) whose value is trusted as the caller's actor ID, together with `X-Qwen-Tenant-Id`, when no upstream principal is present. Used only in open authentication mode; combining it with signed mode is refused at startup. In open mode, `qwen.managed-agent.runtime-broker.local-directory-import-enabled` requires it. Never set it where untrusted clients can reach the server. Empty disables it.",

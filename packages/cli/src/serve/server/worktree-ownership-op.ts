@@ -26,7 +26,7 @@
  * others. The daemon-side containment checks compare these paths with
  * `fs.realpathSync` of the worktree roots and must keep the same rule. The
  * restore derives the key in `ownershipLockKeyForWorktree`
- * (`routes/session.ts`) and later compares it with the `realTarget` its
+ * (`server/session-restore.ts`) and later compares it with the `realTarget` its
  * validation resolves; the orphan cleanup uses `canonicalPath`
  * (`worktree-orphan-cleanup.ts`); both fall back to the raw path when it does
  * not resolve. The reset route locks the `realTarget` from

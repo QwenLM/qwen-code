@@ -59,6 +59,8 @@ import java.util.concurrent.TimeUnit;
 final class WorkspaceCsiApplicationInventory {
     static final int MAX_ROWS = 4096;
     static final int MAX_BYTES = 32 * 1024 * 1024;
+    private static final java.util.regex.Pattern LOOKUP_FIELD =
+            java.util.regex.Pattern.compile("(\\w+)\\s*=\\s*\\?");
     private static final ObjectMapper JSON = new ObjectMapper()
             .enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
             .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
@@ -81,6 +83,9 @@ final class WorkspaceCsiApplicationInventory {
                     "tenant_id:VARBINARY,channel_id:VARBINARY,platform:VARCHAR,account_id:VARBINARY,"
                     + "account_generation:BIGINT,state:VARCHAR,actor_id:VARBINARY,workspace_id:VARBINARY,"
                     + "cwd_relative:VARCHAR,policy_json:LONGTEXT,gmt_create:BIGINT,gmt_modified:BIGINT"),
+            declaration("ma_channel_segment", "delivery_key,segment_id",
+                    "delivery_key:CHAR,tenant_id:VARBINARY,channel_id:VARBINARY,segment_id:VARBINARY,"
+                    + "segment_ordinal:BIGINT,provider_receipt_json:LONGTEXT,gmt_create:BIGINT,gmt_modified:BIGINT"),
             declaration("ma_delivery", "delivery_key",
                     "delivery_key:CHAR,delivery_kind:VARCHAR,tenant_id:VARBINARY,channel_id:VARBINARY,"
                     + "delivery_id:VARBINARY,source_session_id:VARBINARY,target_session_id:VARBINARY,source_scope_key:CHAR,"
@@ -129,7 +134,7 @@ final class WorkspaceCsiApplicationInventory {
                     + "state:VARCHAR,phase:VARCHAR,admission_stage:VARCHAR,delivery_state:VARCHAR,"
                     + "session_status_before:VARCHAR,receipt_id:VARBINARY,claim_owner:VARBINARY,claim_generation:BIGINT,"
                     + "claim_until:BIGINT,available_at:BIGINT,attempt_count:INT,budget_exempt_attempt:INT,deadline:BIGINT,"
-                    + "recovery_deadline:BIGINT,execution_mode:VARCHAR,verification_request_json:LONGTEXT,"
+                    + "recovery_deadline:BIGINT,verification_request_json:LONGTEXT,"
                     + "is_verification_ready:BOOLEAN,verification_next_at:BIGINT,publication_id:VARBINARY,"
                     + "publication_command_id:VARBINARY,slot_key:VARBINARY,execution_key:CHAR,item_id:VARBINARY,"
                     + "policy_version:VARBINARY,failure_status:INT,failure_code:VARCHAR,gmt_create:BIGINT,gmt_modified:BIGINT,"
@@ -221,6 +226,13 @@ final class WorkspaceCsiApplicationInventory {
                     + "session_id:VARBINARY,slot:BIGINT,trigger_kind:VARCHAR,outcome:VARCHAR,reason:VARCHAR,"
                     + "definition_revision:BIGINT,fence:BIGINT,attempts:INT,next_retry_at:BIGINT,last_error:VARCHAR,"
                     + "gmt_create:BIGINT,gmt_modified:BIGINT"),
+            declaration("ma_side_query", "query_key",
+                    "query_key:CHAR,query_id:VARBINARY,tenant_id:VARBINARY,session_id:VARBINARY,session_scope_key:CHAR,"
+                    + "actor_id:VARBINARY,actor_scope_key:CHAR,kind:VARCHAR,trigger_kind:VARCHAR,question:VARCHAR,state:VARCHAR,"
+                    + "active_slot:CHAR,source_json:LONGTEXT,private_history_json:LONGTEXT,model_config_digest:VARCHAR,processing_version:VARCHAR,"
+                    + "input_resource_id:VARBINARY,input_digest:CHAR,is_input_ready:TINYINT,claim_instance_id:VARBINARY,claim_boot_id:VARBINARY,"
+                    + "claim_generation:BIGINT,claim_token_hash:CHAR,read_lease_id:VARBINARY,read_deadline_at:BIGINT,deadline_at:BIGINT,"
+                    + "result_revision:BIGINT,answer_text:LONGTEXT,outcome:VARCHAR,usage_json:LONGTEXT,error_code:VARCHAR,gmt_create:BIGINT,gmt_modified:BIGINT"),
             declaration("ma_session", "tenant_id,session_id",
                     "tenant_id:VARBINARY,session_id:VARBINARY,agent_id:VARBINARY,title:VARCHAR,status:VARCHAR,"
                     + "harness_boot_id:VARBINARY,harness_event_epoch:VARBINARY,harness_last_event_id:BIGINT,"
@@ -2019,7 +2031,7 @@ final class WorkspaceCsiApplicationInventory {
                 case "ma_session" -> query(table, "tenant_id=T&session_id=sessions", "runtime_request_key=requests",
                         "tenant_id=T&parent_session_id=sessions", "tenant_id=T&root_session_id=sessions");
                 case "ma_session_head" -> query(table, "tenant_key=BT&harness_key=BS", "tenant_id=T&session_id=sessions");
-                case "ma_public_event", "ma_turn", "ma_session_record", "ma_user_message",
+                case "ma_public_event", "ma_turn", "ma_session_record", "ma_side_query", "ma_user_message",
                         "ma_user_message_command", "ma_user_message_queue" ->
                         query(table, "tenant_id=T&session_id=sessions");
                 case "ma_event_stream" -> query(table, "tenant_id=T&session_id=sessions", "artifact_refs_resource_key=resourceKeys");
@@ -2047,7 +2059,8 @@ final class WorkspaceCsiApplicationInventory {
                 case "ma_schedule", "ma_schedule_occurrence" -> query(table, "tenant_id=T&session_id=sessions", "schedule_id=schedules");
                 case "ma_channel_binding" -> query(table, "tenant_id=T&session_id=sessions");
                 case "ma_operation", "ma_operation_work", "ma_request_receipt", "ma_delivery",
-                        "ma_artifact", "ma_runtime_binding", "ma_tool_execution", "ma_output_capture" ->
+                        "ma_channel_segment", "ma_artifact", "ma_runtime_binding", "ma_tool_execution",
+                        "ma_output_capture" ->
                         new Query("1 = 1", List.of());
                 default -> throw new IllegalStateException("Undeclared inventory table");
             };
@@ -2511,14 +2524,10 @@ final class WorkspaceCsiApplicationInventory {
             try (var statement = connection.prepareStatement("SELECT t.* FROM " + table + " t WHERE " + predicate
                     + " ORDER BY " + String.join(",", declaration.keys()) + " LIMIT 2 FOR UPDATE")) {
                 statement.setQueryTimeout(10);
+                var fields = LOOKUP_FIELD.matcher(predicate);
                 for (int index = 0; index < parameters.length; index++) {
-                    var fields = java.util.regex.Pattern.compile("(\\w+)\\s*=\\s*\\?").matcher(predicate);
-                    String field = null;
-                    for (int at = 0; at <= index; at++) {
-                        requireEncoded(fields.find());
-                        field = fields.group(1);
-                    }
-                    String name = field;
+                    requireEncoded(fields.find());
+                    String name = fields.group(1);
                     var column = declaration.columns().stream().filter(value -> value.name().equals(name)).findFirst().orElseThrow();
                     historicalParameter(statement, index + 1, new Cell(column.kind(), utf8(parameters[index])));
                 }

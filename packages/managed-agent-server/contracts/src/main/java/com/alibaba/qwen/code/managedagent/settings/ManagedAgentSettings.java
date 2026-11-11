@@ -28,6 +28,7 @@ public interface ManagedAgentSettings {
     public List<? extends ModelOption> getModelCatalog();
     public default List<String> getModelConfigBaseUrls() { return List.of(); }
     public default boolean isMemoryEnabled() { return false; }
+    public default boolean isSideQueriesEnabled() { return false; }
     public interface ModelOption {
         public String getModelId();
         public String getLabel();
@@ -79,7 +80,6 @@ public interface ManagedAgentSettings {
         public boolean isAllowInsecureHttp();
     }
     public interface ToolPublication {
-        public boolean isAsyncVerificationEnabled();
         public int getVerificationConcurrency();
         public boolean isGcEnabled();
         public Duration getDeletionGrace();

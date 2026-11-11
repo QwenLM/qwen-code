@@ -2,6 +2,13 @@ package com.alibaba.qwen.code.runtimebroker.managedschema;
 
 /** Explicit columns for Managed SQL readers; independent of live database metadata. */
 public enum ManagedSchemaProjection {
+    SIDE_QUERY(
+            "query_key, query_id, tenant_id, session_id, session_scope_key, actor_id, actor_scope_key, "
+                    + "kind, trigger_kind, question, state, active_slot, source_json, private_history_json, "
+                    + "model_config_digest, processing_version, input_resource_id, input_digest, is_input_ready, "
+                    + "claim_instance_id, claim_boot_id, claim_generation, claim_token_hash, read_lease_id, "
+                    + "read_deadline_at, deadline_at, result_revision, answer_text, outcome, usage_json, error_code, "
+                    + "gmt_create, gmt_modified"),
     ARTIFACT(
             "artifact_id, result_id, scope_key, descriptor_json, publication_id, binding_json, "
                     + "manifest_ref_json, stream_id, creation_sequence"),
@@ -38,7 +45,7 @@ public enum ManagedSchemaProjection {
                     + "payload_version, request_json, result_json, state, phase, admission_stage, "
                     + "delivery_state, session_status_before, receipt_id, claim_owner, claim_generation, "
                     + "claim_until, available_at, attempt_count, budget_exempt_attempt, deadline, "
-                    + "recovery_deadline, execution_mode, verification_request_json, is_verification_ready, "
+                    + "recovery_deadline, verification_request_json, is_verification_ready, "
                     + "verification_next_at, publication_id, publication_command_id, slot_key, "
                     + "execution_key, item_id, policy_version, failure_status, failure_code, gmt_create, "
                     + "gmt_modified, completed_at, progress_format, progress_version, progress_stage, "
