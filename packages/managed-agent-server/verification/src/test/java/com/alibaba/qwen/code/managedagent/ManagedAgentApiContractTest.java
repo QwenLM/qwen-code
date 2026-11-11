@@ -485,6 +485,29 @@ class ManagedAgentApiContractTest {
     }
 
     @Test
+    void managedMcpSnapshotCountsOnlyLiveServersAgainstCapacity() {
+        ObjectNode withRetainedRemoval = mcpManagementSnapshot(32, 1);
+        assertThat(CONTRACT.validate(
+                "/components/schemas/ManagedMcpManagementSnapshot",
+                withRetainedRemoval)).isEmpty();
+
+        // 16 enabled + 17 disabled = 33 live: exercises the disabled arm of
+        // the live-only predicate, which a narrow "enabled"-only `contains`
+        // enum would let through while the implementation rejects it.
+        ObjectNode tooManyLive = mcpManagementSnapshot(33, 0);
+        assertThat(CONTRACT.validate(
+                "/components/schemas/ManagedMcpManagementSnapshot",
+                tooManyLive)).isNotEmpty();
+
+        assertThat(CONTRACT.validate(
+                "/components/schemas/ManagedMcpManagementSnapshot",
+                mcpManagementSnapshot(32, 64))).isEmpty();
+        assertThat(CONTRACT.validate(
+                "/components/schemas/ManagedMcpManagementSnapshot",
+                mcpManagementSnapshot(32, 65))).isNotEmpty();
+    }
+
+    @Test
     void theCreateRequestRequiresACatchUpLimitOnlyWhenBounded() throws Exception {
         ObjectNode create = (ObjectNode) json("""
                 {"session_id":"s","goal":"g","cron":"0 2 * * *",
@@ -3856,6 +3879,25 @@ class ManagedAgentApiContractTest {
 
     private JsonNode json(String content) throws IOException {
         return objectMapper.readTree(content);
+    }
+
+    private ObjectNode mcpManagementSnapshot(int live, int removed) {
+        ObjectNode snapshot = objectMapper.createObjectNode()
+                .put("sessionId", "mcp-contract-session")
+                .put("revision", 1)
+                .put("supported", true);
+        snapshot.putArray("availableServers");
+        var servers = snapshot.putArray("servers");
+        for (int index = 0; index < live + removed; index++) {
+            servers.addObject()
+                    .put("serverId", "server-" + index)
+                    .put("serverRevision", 1)
+                    .put("definitionDigest", "a".repeat(64))
+                    .put("state", index < live
+                            ? (index < 16 ? "enabled" : "disabled")
+                            : "removed");
+        }
+        return snapshot;
     }
 
     private String errorCode(String content) {

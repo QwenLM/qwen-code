@@ -20,17 +20,21 @@ const sleep = (ms) =>
 export function command(
   program,
   args,
-  { env = process.env, input, timeout = 30000, binary = false } = {},
+  { env = process.env, input, timeout = 30000, binary = false, signal } = {},
 ) {
   return new Promise((resolveCommand, reject) => {
     const child = spawn(program, args, {
       env,
       stdio: ['pipe', 'pipe', 'pipe'],
+      signal,
     });
     const output = [];
     let outputSize = 0;
     let stderr = '';
-    const timer = setTimeout(() => child.kill('SIGKILL'), timeout);
+    const timer =
+      timeout > 0
+        ? setTimeout(() => child.kill('SIGKILL'), timeout)
+        : undefined;
     child.stdout.on('data', (chunk) => {
       outputSize += chunk.length;
       if (outputSize > 4 * 1024 * 1024) child.kill('SIGKILL');
@@ -858,27 +862,95 @@ export function createManager(config, dependencies = {}) {
         log(
           `slot ${slot}: started runner ${state.runnerName}, id ${state.runnerId}, container ${id}`,
         );
-        const deadline = Date.now() + config.ttlSeconds * 1000;
+        let nextHealthCheck = Date.now() + config.ttlSeconds * 1000;
         let exitCode;
-        const watching = run('docker', ['wait', id], {
-          timeout: (config.ttlSeconds + 10) * 1000,
-        }).then(
-          (output) => {
-            const status = output.trim();
-            exitCode =
-              /^\d+$/.test(status) && Number(status) <= 255
-                ? Number(status)
-                : null;
-            return true;
-          },
-          () => {
-            exitCode = null;
-            return true;
-          },
-        );
-        while (Date.now() < Math.min(deadline, stopAt)) {
-          if (await Promise.race([watching, wait(1000).then(() => false)]))
-            break;
+        let waitWarningLogged = false;
+        const controller = new AbortController();
+        const watch = () =>
+          run('docker', ['wait', id], {
+            timeout: 0,
+            signal: controller.signal,
+          }).then(
+            (output) => {
+              const status = output.trim();
+              return /^\d+$/.test(status) && Number(status) <= 255
+                ? { code: Number(status) }
+                : {};
+            },
+            () => ({}),
+          );
+        let watching = watch();
+        try {
+          while (Date.now() < stopAt) {
+            const result = await Promise.race([
+              watching,
+              wait(1000).then(() => null),
+            ]);
+            if (result) {
+              if (result.code !== undefined) {
+                exitCode = result.code;
+                break;
+              }
+              // A failed wait client is not proof that the container exited.
+              try {
+                const status = parseJson(
+                  await run('docker', [
+                    'inspect',
+                    '--format',
+                    '{{json .State}}',
+                    id,
+                  ]),
+                );
+                if (status.Status === 'exited' || status.Status === 'dead') {
+                  exitCode = Number.isInteger(status.ExitCode)
+                    ? status.ExitCode
+                    : null;
+                  break;
+                }
+              } catch {
+                try {
+                  if (!(await listContainers(slot)).includes(id)) {
+                    exitCode = null;
+                    break;
+                  }
+                } catch {
+                  // Docker being unavailable is not proof of container exit.
+                }
+              }
+              if (!waitWarningLogged) {
+                log(
+                  `WATCHDOG ALERT slot ${slot}: container exit unconfirmed; keeping it and retrying`,
+                );
+                waitWarningLogged = true;
+              }
+              await wait(1000);
+              watching = watch();
+            }
+            if (Date.now() >= nextHealthCheck) {
+              nextHealthCheck = Date.now() + 300000;
+              try {
+                const runner = parseJson(
+                  await gh([
+                    `/repos/${config.repo}/actions/runners/${state.runnerId}`,
+                  ]),
+                );
+                if (
+                  runner.id !== state.runnerId ||
+                  runner.name !== state.runnerName ||
+                  runner.status !== 'online'
+                )
+                  throw new Error(
+                    'runner identity or online status unconfirmed',
+                  );
+              } catch {
+                log(
+                  `WATCHDOG ALERT slot ${slot}: runner health unconfirmed; container retained for inspection`,
+                );
+              }
+            }
+          }
+        } finally {
+          controller.abort();
         }
         if (exitCode !== undefined && exitCode !== 0) {
           earlyExit = true;
