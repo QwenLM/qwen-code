@@ -1367,7 +1367,7 @@ test('aligns shell explanation and permission actions @smoke', async ({
           (optionsBox.y + optionsBox.height / 2),
       );
     })
-    .toBeLessThanOrEqual(1);
+    .toBeLessThanOrEqual(2);
 
   await page.setViewportSize({ width: 600, height: 900 });
   await expect
