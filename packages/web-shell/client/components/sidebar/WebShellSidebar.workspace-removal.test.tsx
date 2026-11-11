@@ -6477,6 +6477,64 @@ describe('WebShellSidebar session list notices', () => {
     expect(expandButton()?.textContent).toBe('Show 10 more');
   });
 
+  it('resets the flat preview when the session source switches', async () => {
+    const channelCapabilities = {
+      ...capabilities,
+      features: [...capabilities.features, 'channel_management'],
+    };
+    connection.capabilities = channelCapabilities;
+    workspace.capabilities = channelCapabilities;
+    setChannelCatalog();
+    active.sessions = Array.from({ length: 16 }, (_, index) => ({
+      sessionId: `session-${index + 1}`,
+      displayName: `Preview session ${index + 1}`,
+      workspaceCwd: '/tmp/project',
+      sourceType: 'default',
+    }));
+    active.data = active.sessions;
+    const channelSessions: DaemonSessionSummary[] = [
+      {
+        sessionId: 'ding-one-session',
+        displayName: 'DingTalk one',
+        workspaceCwd: '/tmp/project',
+        sourceType: 'channel',
+        sourceId: 'ding-one',
+      },
+    ];
+    useSessions.mockImplementation(
+      (options?: { archiveState?: string; sourceType?: string }) => {
+        if (options?.archiveState === 'archived') {
+          return { ...archived, data: archived.sessions };
+        }
+        if (options?.sourceType === 'channel') {
+          return {
+            ...active,
+            sessions: channelSessions,
+            data: channelSessions,
+          };
+        }
+        return { ...active, sessions: active.sessions, data: active.sessions };
+      },
+    );
+
+    renderSidebar();
+    await ensureWorkspaceExpanded('project');
+    const expandButton = () =>
+      Array.from(container.querySelectorAll<HTMLButtonElement>('button')).find(
+        (button) => /^Show \d+ more$/.test(button.textContent ?? ''),
+      );
+    expect(container.textContent).toContain('Preview session 5');
+    act(() => click(expandButton()!));
+    expect(container.textContent).toContain('Preview session 15');
+
+    await switchSessionSource('Channels');
+    await switchSessionSource('Tasks');
+
+    expect(container.textContent).toContain('Preview session 5');
+    expect(container.textContent).not.toContain('Preview session 6');
+    expect(expandButton()?.textContent).toBe('Show 10 more');
+  });
+
   it('keeps an edited session visible when the preview order changes', async () => {
     active.sessions = Array.from({ length: 6 }, (_, index) => ({
       sessionId: `session-${index + 1}`,

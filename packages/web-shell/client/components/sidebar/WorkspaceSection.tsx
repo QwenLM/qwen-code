@@ -861,10 +861,10 @@ export function WorkspaceSection({
     sessions,
   ]);
   // Same rule the sidebar applies to its own catalog: an open rename keeps
-  // its row mounted when a refresh reorders other sessions ahead of it. The
-  // flat list measures against its live visible count; group sections keep the
-  // fixed preview bound because their expansion count lives inside
-  // SessionGroupSection.
+  // its row mounted when a refresh reorders other sessions ahead of it. Group
+  // sections keep the fixed preview bound here because their expansion count
+  // lives inside SessionGroupSection; the flat list measures its live visible
+  // count in rendered-row space via editingRowBeyondBound below.
   const revealsEditingSession = (
     items: readonly DaemonSessionSummary[],
     bound: number,
@@ -935,10 +935,18 @@ export function WorkspaceSection({
         expanded: false,
       }))
     : sessionTree.buildRows(visibleSessions);
+  // Measure the edited row in the rendered tree-row sequence (the one actually
+  // sliced), not the raw catalog: collapsed parents hide their children, so a
+  // raw-array index diverges from the rendered row count.
+  const editingRowBeyondBound =
+    editingSessionId !== undefined &&
+    directTreeRows.findIndex(
+      (row) => row.session.sessionId === editingSessionId,
+    ) >= visibleSessionCount;
   const directSessions =
     searchActive ||
     !limitSessions ||
-    revealsEditingSession(visibleSessions, visibleSessionCount) ||
+    editingRowBeyondBound ||
     directTreeRows.length <= visibleSessionCount
       ? directTreeRows
       : directTreeRows.slice(0, visibleSessionCount);
@@ -1328,10 +1336,7 @@ export function WorkspaceSection({
                 })}
                 {limitSessions &&
                   !searchActive &&
-                  !revealsEditingSession(
-                    visibleSessions,
-                    visibleSessionCount,
-                  ) &&
+                  !editingRowBeyondBound &&
                   directTreeRows.length > visibleSessionCount && (
                     <button
                       type="button"

@@ -6300,10 +6300,10 @@ export function WebShellSidebar({
   const body = useMemo(() => {
     // Rename only has to reveal the edited row. Expanding the whole catalog —
     // or even the whole section — mounted hundreds of rows exactly when the
-    // rename editor opened, which is what made typing lag. The flat list
-    // measures against its live visible count so renaming an already-visible
-    // row does not mount everything; group sections keep the fixed preview
-    // bound because their own expansion count lives inside SessionGroupSection.
+    // rename editor opened, which is what made typing lag. Group sections keep
+    // the fixed preview bound here because their own expansion count lives
+    // inside SessionGroupSection; the flat list measures its live visible count
+    // in rendered-row space inside renderFlatSessions.
     const editingSessionBeyondPreview = (
       items: readonly DaemonSessionSummary[],
       bound: number,
@@ -6314,13 +6314,18 @@ export function WebShellSidebar({
         (session) => getIdentityForSession(session) === editingSessionIdentity,
       ) >= bound;
     const renderFlatSessions = () => {
-      const unlimited =
-        Boolean(searchQuery.trim()) ||
-        editingSessionBeyondPreview(
-          filteredSessions,
-          projectSessionVisibleCount,
-        );
       const treeRows = sessionTree.buildRows(filteredSessions);
+      // Measure the edited row in the rendered tree-row sequence (the one
+      // actually sliced), not the raw catalog: collapsed parents hide their
+      // children, so a raw-array index diverges from the rendered row count.
+      const editingRowBeyondBound =
+        !pinnedSectionHostsEditing &&
+        editingSessionIdentity !== null &&
+        treeRows.findIndex(
+          (row) =>
+            getIdentityForSession(row.session) === editingSessionIdentity,
+        ) >= projectSessionVisibleCount;
+      const unlimited = Boolean(searchQuery.trim()) || editingRowBeyondBound;
       const previewLimited =
         !unlimited && treeRows.length > projectSessionVisibleCount;
       const displayedRows = previewLimited

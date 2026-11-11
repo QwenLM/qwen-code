@@ -285,13 +285,15 @@ export function StandaloneRecents({
         pageSize: PAGE_SIZE,
       });
       if (loadGenerationRef.current !== generation) return;
-      setSessions((current) =>
-        appendUnique(current, withoutChildren(page.sessions)),
+      const appended = withoutChildren(page.sessions);
+      setSessions((current) => appendUnique(current, appended));
+      // A fetched page must stay visible in full: reveal the already-loaded
+      // catalog plus the appended page, rather than adding the page length to
+      // a count that may still trail the catalog (e.g. the five-row preview).
+      setVisibleCount(
+        (count) =>
+          Math.max(count, sessionsRef.current.length) + appended.length,
       );
-      // A fetched page must stay visible: advance the preview by the page
-      // length (not the shared expand step) so appending rows does not re-arm
-      // the preview gate and hide the page the user just asked for.
-      setVisibleCount((count) => count + page.sessions.length);
       setCursor(page.nextCursor);
       setLoadError(undefined);
     } catch (error) {

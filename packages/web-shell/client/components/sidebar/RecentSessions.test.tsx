@@ -36,6 +36,7 @@ async function render(
   currentSessionId = 'standalone',
   refreshPaused = false,
   renderSessionOverride?: (entry: RecentSessionEntry) => ReactNode,
+  sortBy?: 'updatedAt' | 'lastUserPromptAt',
 ) {
   const client = (stableClient ??= {
     listWorkspaceSessionsPage,
@@ -63,6 +64,7 @@ async function render(
         currentSessionId={currentSessionId}
         refreshKey={0}
         refreshPaused={refreshPaused}
+        sortBy={sortBy}
         renderSession={
           renderSessionOverride ??
           ((entry) => (
@@ -341,6 +343,27 @@ describe('recent sessions', () => {
     const header = container.querySelector<HTMLButtonElement>('button')!;
     await click(header);
     await click(header);
+    expect(buttons()).toHaveLength(5);
+    expect(expand()).toBeDefined();
+  });
+
+  it('resets the expansion when the sort changes', async () => {
+    vi.useFakeTimers();
+    listStandaloneSessionsPage.mockResolvedValue({
+      sessions: Array.from({ length: 25 }, (_, i) =>
+        session(`chat-${i}`, `2026-10-${String(i + 1).padStart(2, '0')}`, {
+          sourceType: 'standalone',
+        }),
+      ),
+    });
+    await render();
+    const expand = () =>
+      [...container.querySelectorAll<HTMLButtonElement>('button')].find(
+        (button) => button.textContent === 'sidebar.showMoreSessions',
+      );
+    await click(expand()!);
+    expect(buttons()).toHaveLength(15);
+    await render('standalone', false, undefined, 'lastUserPromptAt');
     expect(buttons()).toHaveLength(5);
     expect(expand()).toBeDefined();
   });

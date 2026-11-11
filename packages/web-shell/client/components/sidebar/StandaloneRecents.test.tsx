@@ -597,8 +597,10 @@ describe('StandaloneRecents', () => {
     );
     expect(loadMore).toBeDefined();
     await act(async () => loadMore!.click());
-    // The fetched page renders even though the preview was never exhausted.
+    // The whole fetched page renders even though the preview was never
+    // exhausted — not just its first rows inside a trailing count window.
     expect(container.textContent).toContain('Page2 chat 0');
+    expect(container.textContent).toContain('Page2 chat 49');
   });
 
   it('keeps a fetched page fully visible once the preview is exhausted', async () => {
@@ -647,6 +649,31 @@ describe('StandaloneRecents', () => {
     expect(container.textContent).toContain('Chat 15');
     expect(container.textContent).not.toContain('Chat 16');
     await render({ sortBy: 'lastUserPromptAt' });
+    expect(container.textContent).toContain('Chat 5');
+    expect(container.textContent).not.toContain('Chat 6');
+    expect(showMore()).toBeDefined();
+  });
+
+  it('resets the expansion when the group collapses', async () => {
+    list.mockResolvedValue({
+      sessions: Array.from({ length: 16 }, (_, index) =>
+        summary(`session-${index + 1}`, `Chat ${index + 1}`),
+      ),
+    });
+    await render();
+    const showMore = () =>
+      Array.from(container.querySelectorAll('button')).find(
+        (button) => button.textContent === 'sidebar.showMoreSessions',
+      );
+    await act(async () => showMore()?.click());
+    expect(container.textContent).toContain('Chat 15');
+    const toggle = () =>
+      container.querySelector<HTMLButtonElement>(
+        '[data-testid="standalone-active-group"] > div > button',
+      )!;
+    await act(async () => toggle().click());
+    expect(container.textContent).not.toContain('Chat 1');
+    await act(async () => toggle().click());
     expect(container.textContent).toContain('Chat 5');
     expect(container.textContent).not.toContain('Chat 6');
     expect(showMore()).toBeDefined();
