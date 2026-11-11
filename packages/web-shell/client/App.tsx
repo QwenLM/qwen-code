@@ -24750,6 +24750,7 @@ export function App({
                         }
                         initialFocusRef={panelHeadingRef}
                         clientId={connection.clientId}
+                        sessionWorkspaceCwd={connection.workspaceCwd}
                       />
                     ) : activePanel === 'channel-events' ? (
                       <ChannelEventsPage
