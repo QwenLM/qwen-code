@@ -188,6 +188,12 @@ issue 交给人工分诊而不是 autofix：一条过期的临时报告只需关
   `HostedMonitorRunFaultGatesIT` 的 fg8f 时序断言也会间歇失败。如果现在就设为必需，
   门禁会因噪声卡住大量 Java PR。在 #14361 解决前保持为非必需；期间
   **Re-run failed jobs** 是逃生口。
+  2026-11-11 重新实测，比上面的数字更差：在真正启动了两条 Hosted 泳道的 65 次已完成
+  `sdk-java.yml` 运行中，49 次至少有一条失败（75%），最近 22 次里有 18 次（82%）。
+  两条泳道各自独立失败 —— process-fault 26 次、failover 26 次 —— 65 次中只有 6 次
+  整体全绿。拒绝原因也换了形态：现在是 Runtime Broker 回
+  `409 managed_runtime_identity_conflict`，而最初报告里是 Store 回
+  `400 invalid_request`，但以同样方式冻结 turn。
 - **approve 时机。** 全量在首个 approve 时启动，合入最多要在其后等约两小时。reviewer
   可以更早 approve；approve 后的 push 会作废它并重新开始。
 - **分类漂移。** push 运行和 approve 运行各自对自己的 merge commit 分类；两次之间 base
@@ -201,6 +207,27 @@ issue 交给人工分诊而不是 autofix：一条过期的临时报告只需关
 2. 观察全量运行，直到 #14361 修复、通过率稳定。
 3. 维护者把 `Managed Agent gate` 加入 main 的必需检查（若重新启用 merge queue，也加到
    那里）。
+
+第 2 步有一个值得记下来的度量陷阱，因为有两个看起来很令人安心的序列其实完全没有度量
+Hosted 泳道：
+
+- 本 workflow 自己的 `pull_request_review` 运行大多选出 tier `none`。它最近 13 次成功
+  **全部**跑的是 `SDK Java (none)` —— 一行 Java 都没跑，因为那些 head 没有碰到范围内
+  的路径。这里的连续全绿对全量 tier 毫无说明力。
+- 本 workflow 在 main 上的失败可能来自无关步骤。它最近 7 次 main 失败**全部**是
+  `Run Managed Agent Server Checkstyle` —— 一条未使用 import，已由 `da270e434` 修掉
+  —— 此后本 workflow 在 main 上转绿，而 Hosted 泳道仍以上述比率失败。
+
+只有真正启动了 `Hosted process fault gates` 与 `Hosted failover E2E` 的运行才度量第 2
+步，所以在读通过率之前，先按这两个 job 是否存在来筛选，并排除 cancelled 运行。main 的
+必需检查位于 ruleset `main`，而不是旧的 branch protection；在那里添加名字时不得扰动它
+「两个 approve」与「push 后作废」这两条规则。
+
+第 3 步只需要那一个名字。计算出来的名字是刻意设计，不是需要先修的缺陷：碰了这些路径的
+PR 会显示 `Managed Agent gate` 为 expected，直到它首个 approve 的全量运行报出该名字，
+而 ruleset 本来就要求两个 approve，所以「等这个 approve」正是强制手段而不是死锁。若把
+`Managed Agent fast tier` 也加进去，反过来会卡住每一个不碰这些路径、因而从不报告该名字
+的 PR。
 
 ## 验证
 

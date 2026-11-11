@@ -230,6 +230,13 @@ jobs, and move Java 17 to nightly only.
   `HostedMonitorRunFaultGatesIT` fails intermittently. Required today, the
   gate would block a large share of Java PRs on noise. Keep it advisory until
   #14361 is resolved; **Re-run failed jobs** is the escape hatch meanwhile.
+  Re-measured on 2026-11-11 and worse than the figure above: of the 65 completed
+  `sdk-java.yml` runs that actually started the two Hosted lanes, 49 failed at
+  least one of them (75%), and 18 of the last 22 did (82%). The lanes fail
+  independently — 26 process-fault, 26 failover — and only 6 of the 65 runs were
+  green end to end. The refusal has also changed shape: the Runtime Broker now
+  answers `409 managed_runtime_identity_conflict` where the original report had
+  the Store answering `400 invalid_request`, freezing the turn the same way.
 - **Approval timing.** The full suite starts at the first approval, so merge
   waits up to about two hours after it. Reviewers can approve earlier; a push
   after approval dismisses it and restarts the cycle.
@@ -246,6 +253,31 @@ jobs, and move Java 17 to nightly only.
 2. Watch the full runs until #14361 is fixed and the pass rate is stable.
 3. A maintainer adds `Managed Agent gate` to main's required checks (and to
    the merge queue if it is enabled again).
+
+Step 2 has a measurement trap worth recording, because two reassuring series
+do not measure the Hosted lanes at all:
+
+- This workflow's own `pull_request_review` runs mostly select tier `none`.
+  All 13 of its recent successes ran `SDK Java (none)` — no Java at all,
+  because those heads did not touch the scoped paths. A green streak here says
+  nothing about the full tier.
+- This workflow's main failures can be an unrelated step. All 7 of its recent
+  main failures were `Run Managed Agent Server Checkstyle` — one unused import,
+  fixed by `da270e434` — after which main went green on this workflow while the
+  Hosted lanes kept failing at the rate above.
+
+Only runs that actually started `Hosted process fault gates` and `Hosted
+failover E2E` measure step 2, so filter on the presence of those two jobs and
+exclude cancelled runs before reading a pass rate. Main's required checks live
+in ruleset `main`, not in legacy branch protection, and adding the name there
+must not disturb its two-approval and dismiss-on-push rules.
+
+Only step 3's single name is needed. The computed name is deliberate, not a
+defect to fix first: a touched PR shows `Managed Agent gate` as expected until
+its first approval's full run reports it, and the ruleset already requires two
+approvals, so waiting for that approval is the enforcement rather than a
+deadlock. Adding `Managed Agent fast tier` as well would instead block every PR
+that does not touch these paths, which never reports that name.
 
 ## Validation
 
