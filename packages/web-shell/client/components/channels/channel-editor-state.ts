@@ -653,8 +653,23 @@ export function validateChannelEditorDraft(
     String(draft.values['groupPolicy'] ?? '') === 'allowlist'
   ) {
     const pattern = repositoryIdPattern(descriptor.type);
+    // A stored entry the runtime already tolerates must not block an unrelated
+    // edit (same convention as the number-field branch above). Admitting a
+    // channel to this set subjects its pre-existing allowlist to a shape check
+    // it was never validated against; only entries the operator typed or
+    // changed are held to the shape. The draft lower-cases repository ids, so
+    // compare against the stored keys case-insensitively.
+    const storedGroups = instance?.config['groups'];
+    const storedIds = new Set(
+      (isRecord(storedGroups) ? Object.keys(storedGroups) : [])
+        .filter((id) => id !== '*')
+        .map((id) => id.toLowerCase()),
+    );
     if (
-      splitList(draft.allowedGroupIds).some((groupId) => !pattern.test(groupId))
+      splitList(draft.allowedGroupIds).some(
+        (groupId) =>
+          !pattern.test(groupId) && !storedIds.has(groupId.toLowerCase()),
+      )
     ) {
       errors['allowedGroupIds'] = 'invalidRepoId';
     }
@@ -1046,13 +1061,16 @@ export function buildChannelUpsertRequest(
     assignField(config, field, draft.values[field.key]);
   }
   if (
-    repositoryOnly &&
+    descriptor.type === 'github' &&
     isRepoFilterActive(config['repoFilterMode']) &&
     Array.isArray(config['repoFilter'])
   ) {
     // Same canonicalization the validator applied, so pasted URLs reach the
     // daemon as owner/repo. Gated on the active mode: a parked list stays
-    // exactly as stored on an unrelated save.
+    // exactly as stored on an unrelated save. Gated on GitHub (not the wider
+    // repository-only set) to match the validator: another repository-only
+    // channel may carry a preserved repoFilter it does not manage, and
+    // rewriting it here would make the daemon reject every save.
     const normalized = normalizeRepositoryFilterInput(
       config['repoFilter']
         .filter((entry): entry is string => typeof entry === 'string')

@@ -5126,6 +5126,8 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
     'Enter each project as a path, for example group/subgroup/project.',
   'channels.editor.validation.conflictingRepoAliases':
     'This channel lists one repository twice with different settings, spelled differently (for example Owner/repo and owner/repo). Remove one of the entries from settings.json before saving.',
+  'channels.editor.validation.conflictingProjectAliases':
+    'This channel lists one project twice with different settings, spelled differently (for example Group/Project and group/project). Remove one of the entries from settings.json before saving.',
   'channels.editor.validation.invalidGroupEntry': (v) =>
     `This channel stores a group entry that is not an object: ${v?.repositories ?? ''}. The daemon refuses every save while it is there, and the form has no row for it. Fix or remove that entry in settings.json, then reload the channel.`,
   'channels.editor.validation.invalidOption':
@@ -9941,6 +9943,8 @@ const ZH: Messages = {
     '项目需写成路径形式，例如 group/subgroup/project。',
   'channels.editor.validation.conflictingRepoAliases':
     '该渠道把同一个仓库以不同大小写写了两次且设置不同（例如 Owner/repo 与 owner/repo）。请先在 settings.json 里删掉其中一条再保存。',
+  'channels.editor.validation.conflictingProjectAliases':
+    '该渠道把同一个项目以不同大小写写了两次且设置不同（例如 Group/Project 与 group/project）。请先在 settings.json 里删掉其中一条再保存。',
   'channels.editor.validation.invalidGroupEntry': (v) =>
     `该渠道把以下群组条目存成了非对象：${v?.repositories ?? ''}。只要它还在，daemon 就会拒绝每次保存，而表单里没有对应的行。请在 settings.json 里修正或删除该条目，然后重新加载渠道。`,
   'channels.editor.validation.invalidOption': '请移除不在允许列表中的值。',

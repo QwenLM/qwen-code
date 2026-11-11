@@ -1620,6 +1620,50 @@ describe('WorkspaceChannelSettingsStore', () => {
     ).rejects.toMatchObject({ code: 'channel_settings_invalid_config' });
   });
 
+  it('follows a re-cased group key for the unchanged-value tolerance', async () => {
+    // A repository-only editor lower-cases group keys on save. The unchanged
+    // legacy value must keep its tolerance across the case rewrite, mirroring
+    // GroupGate's exact-then-normalized lookup.
+    writeWorkspaceSettings(`{
+  "$version": 4,
+  "channels": { "bot": {
+    "type": "management-validation-test",
+    "clientId": "client-id",
+    "clientSecret": "existing-secret",
+    "groups": {
+      "Owner/Repo": { "groupHistoryLimit": "50" }
+    }
+  } }
+}\n`);
+    const store = new WorkspaceChannelSettingsStore(workspace);
+
+    const next = await store.upsert('bot', {
+      expectedRevision: store.snapshot().revision,
+      config: {
+        type: 'management-validation-test',
+        clientId: 'updated-id',
+        groups: { 'owner/repo': { groupHistoryLimit: '50' } },
+      },
+      secrets: { clientSecret: { operation: 'preserve' } },
+    });
+    expect(next.channels['bot']).toMatchObject({
+      clientId: 'updated-id',
+      groups: { 'owner/repo': { groupHistoryLimit: '50' } },
+    });
+
+    await expect(
+      store.upsert('bot', {
+        expectedRevision: next.revision,
+        config: {
+          type: 'management-validation-test',
+          clientId: 'updated-id',
+          groups: { 'owner/repo': { groupHistoryLimit: '60' } },
+        },
+        secrets: { clientSecret: { operation: 'preserve' } },
+      }),
+    ).rejects.toMatchObject({ code: 'channel_settings_invalid_config' });
+  });
+
   it('rejects reserved keys inside unchanged known group fields', async () => {
     writeWorkspaceSettings(`{
   "$version": 4,

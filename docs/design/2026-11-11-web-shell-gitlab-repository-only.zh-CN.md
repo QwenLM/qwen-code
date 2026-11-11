@@ -68,11 +68,24 @@ gitlab.com 上存在混合大小写项目（例如 `CalcProgrammer1/OpenRGB`，�
 ### GitHub 独有字段对 GitLab 保持惰性
 
 GitHub URL 缩短（`normalizeRepositoryFilterInput`、`GITHUB_REPOSITORY_URL_RE`、
-`GITHUB_RESERVED_URL_PATHS`）只作用于 `repoFilter`，按
-`isRepoFilterActive(config['repoFilterMode'])` 门控。`repoFilter` 校验块按
-`descriptor.type === 'github'` 门控。GitLab 既不声明 `repoFilter`/`repoFilterMode`
-也不声明 `useLocalGh`，故这些 GitHub 专属路径对它永不触发。`githubEventWebUrl`
-已按 type 门控到 `github`。
+`GITHUB_RESERVED_URL_PATHS`）只作用于 `repoFilter`。`repoFilter` 校验块与保存路径
+归一化都按 `descriptor.type === 'github'` 门控——而非更宽的仅仓库集合。保存路径
+的门禁即便在 GitLab 不声明 `repoFilter` 字段时也有意义：请求 config 从存量 config
+播种，故 GitLab 渠道可能携带一个被保留、不受管理的 `repoFilterMode`/`repoFilter`，
+daemon 仅在其逐字节未变时才容忍。保存时归一化它会让 daemon 拒绝该渠道此后的每次
+保存。GitLab 也不声明 `useLocalGh`。`githubEventWebUrl` 已按 type 门控到 `github`。
+
+### 存量条目不得阻塞无关编辑
+
+把 GitLab 纳入仅仓库集合，会使其既有允许列表被套上从未通过的形状校验，并把其存量
+群组键改写大小写。两处容忍确保无关编辑（例如轮换 token）不会被操作者从未动过的
+条目卡住：
+
+- 编辑器形状校验跳过已存在于存量 groups 的条目（大小写不敏感比对，因为 draft 把
+  仓库 id 小写化），与数字字段分支对存量值既有的约定一致。
+- daemon store 的“未变值容忍”跟随群组键的大小写改写：精确键缺失时回退到对上一条目
+  的大小写不敏感匹配，镜像 `GroupGate.groupConfigFor` 的先精确后归一顺序，精确拼写
+  始终优先。
 
 ### 仓库 UX 文案曾是 GitHub 措辞
 
@@ -128,33 +141,47 @@ GitLab 仓库文案，及其测试。
 （`group[/subgroup…]/project`），每段匹配 `[A-Za-z0-9_.-]+`。`repoFilter` 校验
 保持严格 GitHub 正则，因为该块仅 GitHub。`repositoryAllowlistIds` 增加通道类型
 参数，从 `buildChannelUpsertRequest` 经 `removeGroupAllowlistMembership`、以及从
-对话框穿线而来。
+对话框穿线而来。允许列表形状校验容忍已存在于存量 groups 的条目（大小写不敏感），
+故接入 GitLab 不会让无关编辑被先于形状校验存在的存量条目卡住。
 
 ### 谓词
 
 `channel-platform.ts`：`REPOSITORY_ONLY_CHANNEL_TYPES` 变为
 `new Set(['github', 'gitlab'])`。
 
+### 守护保留键与大小写改写条目
+
+`channel-editor-state.ts`：保存路径的 `repoFilter` 归一化按
+`descriptor.type === 'github'` 门控（与校验块一致），故 GitLab 渠道上被保留、不受
+管理的 `repoFilter` 永不被改写。
+`packages/cli/src/serve/channel-settings-store.ts`：`groups` 的“未变值容忍”在精确键
+缺失时回退到对上一条目的大小写不敏感匹配，故保存时改写群组键大小写不会丢掉对未变
+legacy 嵌套值的容忍。精确拼写始终优先。
+
 ### GitLab 仓库文案
 
 `ChannelEditorDialog.tsx` 按 `descriptor.type` 为允许列表字段
 （`channels.editor.field.gitlab.allowedRepos`）、允许列表校验修复指示
-（`channels.editor.validation.invalidProjectPath`）、每项目发言人描述
+（`channels.editor.validation.invalidProjectPath`）、大小写变体冲突修复指示
+（`channels.editor.validation.conflictingProjectAliases`）、每项目发言人描述
 （`channels.editor.field.gitlab.repositorySpeakers.description`/`.inherited`）
 选用 GitLab 变体。`i18n.tsx` 两语各新增这些键：“Allowed projects”/“允许的项目”、
 项目路径描述与 `group/project` 占位符、“Enter each project as a path, for example
-group/subgroup/project.”、以及“GitLab usernames…”。通用的发言人标签与占位符保持
-共享。
+group/subgroup/project.”、项目路径冲突修复指示、以及“GitLab usernames…”。通用的
+发言人标签与占位符保持共享。
 
 ### 测试
 
 - 谓词：GitLab 是仅仓库；可私聊平台不是。
-- 适配器：混合大小写项目路径经 lowercase `chatId` 解析其发言人允许列表（恒等归一器
-  下实测为红）。
+- 适配器：混合大小写项目路径经 lowercase `chatId` 解析其发言人允许列表与其允许列表
+  准入（恒等归一器下实测为红）。
 - 对话框：GitLab 隐藏私聊控件；允许列表两语显示项目路径文案；畸形条目显示项目路径
-  修复指示；发言人描述写“GitLab usernames”。
-- 编辑器状态：嵌套 GitLab 路径可校验并保存；畸形条目被拒；GitHub 仍拒绝多段 id；
-  保存时丢弃私聊残留。
+  修复指示；大小写变体键显示项目路径冲突修复指示；发言人描述与继承文案两语写
+  “GitLab usernames”。
+- 编辑器状态：嵌套 GitLab 路径可校验并保存；新输入的畸形条目被拒，而先于形状校验
+  存在的存量条目被容忍；存量混合大小写项目在再保存后保留其发言人策略；被保留的
+  `repoFilter` 原样往返；GitHub 仍拒绝多段 id；保存时丢弃私聊残留。
+- daemon store：大小写改写的群组键对 legacy 嵌套值保留“未变值容忍”，改值仍被拒。
 
 ## 关键设计决策
 
@@ -164,7 +191,8 @@ group/subgroup/project.”、以及“GitLab usernames…”。通用的发言�
 | 通道感知段数，而非通用放宽正则                      | 通用 2+ 段正则会让 GitHub 接受永不匹配仓库的多斜杠 id，丢失拼写错误检测。GitHub 保持严格形状。                                                                      |
 | 保留共享 lowercase 别名模型                         | 适配器归一化大小写后，大小写变体对两平台都是同一项目，故共享模型正确；通道感知的编辑器归一化增加复杂度而无收益。                                                    |
 | 仅点名平台的文案通道感知                            | 其余仓库字符串用通用“repository”措辞，对 GitLab 项目可接受；复制它们是投机性的。                                                                                    |
-| `repoFilter`/URL 缩短/`useLocalGh` 保持 GitHub 独有 | GitLab 不声明这些字段；其路径对它永不触发。                                                                                                                         |
+| `repoFilter`/URL 缩短/`useLocalGh` 保持 GitHub 独有 | GitLab 不声明这些字段。保存路径 `repoFilter` 归一化显式按 GitHub 门控，因为请求 config 从存量播种，被保留、不受管理的 `repoFilter` 不得被改写。                     |
+| 接入时容忍存量条目                                  | 形状校验跳过存量条目、store 的“未变值容忍”跟随大小写改写的键，故接入 GitLab 不会让无关编辑被操作者从未动过的条目卡住。                                              |
 
 ## 约束
 
@@ -190,7 +218,8 @@ group/subgroup/project.”、以及“GitLab usernames…”。通用的发言�
 
 1. 定向 vitest 套件：`packages/web-shell` channels 目录（`channel-platform`、
    `channel-editor-state`、`ChannelEditorDialog`、`channel-editor-parity`、
-   `ChannelsManagerPage`）与 `packages/channels/gitlab`（`GitlabAdapter`）。
+   `ChannelsManagerPage`）、`packages/channels/gitlab`（`GitlabAdapter`）、以及
+   `packages/cli`（`channel-settings-store`）。
 2. 仓库门禁：`tsc --noEmit`（web-shell 与 gitlab）、改动文件的 ESLint 与 Prettier。
    完整 web-shell `vite build` 在本检出被既有的缺失 `browserify` 依赖阻断（在
    `package.json` 声明但本地 `node_modules` 缺失）；与改动相关的 `tsconfig.lib.json`
@@ -204,13 +233,17 @@ group/subgroup/project.”、以及“GitLab usernames…”。通用的发言�
 1. GitLab 呈现为仅仓库；编辑器不为它渲染 `privatePolicy` 或 `allowedUsers`
    控件，群组轴保持可编辑。
 2. GitLab 允许列表条目 `group/subgroup/project` 可校验并保存；其每仓库行渲染。
-3. 混合大小写 GitLab 项目路径在运行时准入，并在再保存后存活。
-4. 畸形 GitLab 条目（如单段）被拒，并给出项目路径修复指示。
+3. 混合大小写 GitLab 项目路径在运行时准入，并在再保存后存活、其每项目发言人策略
+   保持完整。
+4. 新输入的畸形 GitLab 条目（如单段）被拒并给出项目路径修复指示，而先于形状校验
+   存在的存量条目不阻塞无关编辑。
 5. GitHub 仍拒绝多段 id，如 `owner/repo/extra`。
-6. GitLab 允许列表字段、校验修复指示、发言人描述在两语下显示 GitLab 项目措辞，
-   而非 `owner/repo` / “GitHub logins”。
-7. 保存 GitLab 渠道不写 `privatePolicy`/`allowedUsers`。
-8. 其余七个已接入平台行为不变。
+6. GitLab 允许列表字段、校验修复指示、冲突修复指示、发言人描述/继承文案在两语下
+   显示 GitLab 项目措辞，而非 `owner/repo` / “GitHub logins”。
+7. 保存 GitLab 渠道不写 `privatePolicy`/`allowedUsers`，且被保留、不受管理的
+   `repoFilter` 逐字节不变。
+8. 大小写改写的群组键对 legacy 嵌套值保留 daemon 的“未变值容忍”；改值仍被拒。
+9. 其余七个已接入平台行为不变。
 
 ## 遗留问题
 

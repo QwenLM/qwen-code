@@ -548,7 +548,11 @@ export function ChannelEditorDialog({
     if (code === 'repoFilterRequired')
       return t('channels.editor.validation.repoFilterRequired');
     if (code === 'conflictingRepoAliases')
-      return t('channels.editor.validation.conflictingRepoAliases');
+      return t(
+        descriptor.type === 'gitlab'
+          ? 'channels.editor.validation.conflictingProjectAliases'
+          : 'channels.editor.validation.conflictingRepoAliases',
+      );
     if (code === 'invalidOption')
       return t('channels.editor.validation.invalidOption');
     if (code === 'requiresBoundDelivery')

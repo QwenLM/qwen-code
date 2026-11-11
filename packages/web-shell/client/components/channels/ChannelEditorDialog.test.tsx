@@ -2817,6 +2817,85 @@ describe('ChannelEditorDialog', () => {
     expect(document.body.textContent).not.toContain('GitHub logins');
   });
 
+  it('describes an inherited GitLab speaker list with the inherited copy', async () => {
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'gitlab-bot',
+      config: {
+        type: 'gitlab',
+        groupPolicy: 'allowlist',
+        groups: {
+          '*': { senders: 'allowlist', allowedUsers: ['op'] },
+          'mygroup/subgroup/project': { senders: 'allowlist' },
+        },
+      },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    await renderDialog({ descriptor: GITLAB_CONFIGURED, instance });
+
+    expect(document.body.textContent).toContain(
+      'GitLab usernames allowed in this project',
+    );
+    expect(document.body.textContent).not.toContain('GitHub logins');
+  });
+
+  it('localizes the inherited GitLab speaker copy for zh-CN', async () => {
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'gitlab-bot',
+      config: {
+        type: 'gitlab',
+        groupPolicy: 'allowlist',
+        groups: {
+          '*': { senders: 'allowlist', allowedUsers: ['op'] },
+          'mygroup/subgroup/project': { senders: 'allowlist' },
+        },
+      },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    await renderDialog({
+      descriptor: GITLAB_CONFIGURED,
+      instance,
+      language: 'zh-CN',
+    });
+
+    expect(document.body.textContent).toContain(
+      '可以在该项目发言的 GitLab 用户名',
+    );
+    expect(document.body.textContent).not.toContain('GitHub 登录名');
+  });
+
+  it('shows a project-path conflict remedy for case-variant GitLab keys', async () => {
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'gitlab-bot',
+      config: {
+        type: 'gitlab',
+        groupPolicy: 'allowlist',
+        groups: {
+          'Group/Project': { senders: 'open' },
+          'group/project': { senders: 'allowlist', allowedUsers: ['alice'] },
+        },
+      },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    await renderDialog({ descriptor: GITLAB_CONFIGURED, instance, onSave });
+
+    await act(async () => {
+      Array.from(document.querySelectorAll('button'))
+        .find((button) => button.textContent?.trim() === 'Save')
+        ?.click();
+    });
+
+    expect(onSave).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain('lists one project twice');
+    expect(document.body.textContent).not.toContain('owner/repo');
+  });
+
   it('asks a repository-only channel to save group pairing before showing approvals', async () => {
     // Channels saved by the previous editor carry the injected
     // privatePolicy: 'pairing'. That legacy value must not open the

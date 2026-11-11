@@ -82,11 +82,29 @@ restriction silently falls back to the open default.
 
 The GitHub URL shortening (`normalizeRepositoryFilterInput`,
 `GITHUB_REPOSITORY_URL_RE`, `GITHUB_RESERVED_URL_PATHS`) is applied only to
-`repoFilter`, gated on `isRepoFilterActive(config['repoFilterMode'])`. The
-`repoFilter` validation block is gated on `descriptor.type === 'github'`. GitLab
-declares neither `repoFilter`/`repoFilterMode` nor `useLocalGh`, so these
-GitHub-specific paths never trigger for it. `githubEventWebUrl` is already
-type-gated to `github`.
+`repoFilter`. Both the `repoFilter` validation block and the save-path
+canonicalization are gated on `descriptor.type === 'github'` — not on the wider
+repository-only set. The save-path gate matters even though GitLab declares no
+`repoFilter` field: the request config is seeded from the stored config, so a
+GitLab channel may carry a preserved, unmanaged `repoFilterMode`/`repoFilter`
+that the daemon tolerates only while byte-identical. Canonicalizing it on save
+would make the daemon reject every subsequent save of that channel. GitLab also
+declares no `useLocalGh`. `githubEventWebUrl` is already type-gated to `github`.
+
+### Pre-existing entries must not block unrelated edits
+
+Admitting GitLab to the repository-only set subjects its pre-existing allowlist
+to a shape check it was never validated against, and re-cases its stored group
+keys. Two tolerances keep an unrelated edit (for example a token rotation) from
+being stranded on entries the operator never touched:
+
+- The editor's shape check skips entries that are present in the stored groups
+  (compared case-insensitively, since the draft lower-cases repository ids), the
+  same convention the number-field branch already uses for stored values.
+- The daemon store's unchanged-value tolerance follows a group entry across a
+  case rewrite: when the exact key is absent it falls back to a case-insensitive
+  match of the previous entry, mirroring `GroupGate.groupConfigFor`'s
+  exact-then-normalized order, with the exact spelling always winning.
 
 ### The repository UX copy was GitHub-worded
 
@@ -154,36 +172,56 @@ segments (`owner/repo`); GitLab accepts two or more
 `repoFilter` validation keeps the strict GitHub regex because that block is
 GitHub-only. `repositoryAllowlistIds` gains a channel-type parameter, threaded
 from `buildChannelUpsertRequest` through `removeGroupAllowlistMembership` and from
-the dialog.
+the dialog. The allowlist shape check tolerates entries already present in the
+stored groups (case-insensitively), so admitting GitLab does not strand an
+unrelated edit on a pre-existing entry that predates the shape check.
 
 ### Predicate
 
 `channel-platform.ts`: `REPOSITORY_ONLY_CHANNEL_TYPES` becomes
 `new Set(['github', 'gitlab'])`.
 
+### Guarding preserved keys and re-cased entries
+
+`channel-editor-state.ts`: the save-path `repoFilter` canonicalization is gated
+on `descriptor.type === 'github'` (matching the validator), so a preserved,
+unmanaged `repoFilter` on a GitLab channel is never rewritten.
+`packages/cli/src/serve/channel-settings-store.ts`: the `groups` unchanged-value
+tolerance falls back to a case-insensitive match of the previous entry when the
+exact key is absent, so re-casing a group key on save does not drop the tolerance
+for an unchanged legacy nested value. The exact spelling always wins.
+
 ### GitLab repository copy
 
 `ChannelEditorDialog.tsx` selects GitLab variants by `descriptor.type` for the
 allowlist field (`channels.editor.field.gitlab.allowedRepos`), the allowlist
-validation remedy (`channels.editor.validation.invalidProjectPath`), and the
-per-project speakers description
+validation remedy (`channels.editor.validation.invalidProjectPath`), the
+case-variant conflict remedy
+(`channels.editor.validation.conflictingProjectAliases`), and the per-project
+speakers description
 (`channels.editor.field.gitlab.repositorySpeakers.description`/`.inherited`).
 `i18n.tsx` adds those keys in both locales: "Allowed projects" / "允许的项目",
 project-path description and `group/project` placeholder, "Enter each project as
-a path, for example group/subgroup/project.", and "GitLab usernames…". The
-generic speakers label and placeholder stay shared.
+a path, for example group/subgroup/project.", a project-path conflict remedy,
+and "GitLab usernames…". The generic speakers label and placeholder stay shared.
 
 ### Tests
 
 - Predicate: GitLab is repository-only; direct-capable platforms are not.
-- Adapter: a mixed-case project path resolves its sender allowlist through a
-  lower-case `chatId` (measured red with an identity normalizer).
+- Adapter: a mixed-case project path resolves its sender allowlist and its
+  allowlist admission through a lower-case `chatId` (measured red with an
+  identity normalizer).
 - Dialog: GitLab hides the direct-message controls; the allowlist shows
   project-path copy in both locales; a malformed entry shows the project-path
-  remedy; the speakers description says "GitLab usernames".
-- Editor state: a nested GitLab path validates and saves; a malformed entry is
-  rejected; GitHub still rejects a multi-segment id; the private-access residue
-  is dropped on save.
+  remedy; case-variant keys show the project-path conflict remedy; the speakers
+  description and inherited copy say "GitLab usernames" in both locales.
+- Editor state: a nested GitLab path validates and saves; a newly typed malformed
+  entry is rejected while a stored pre-shape entry is tolerated; a stored
+  mixed-case project keeps its sender policy across a re-save; a preserved
+  `repoFilter` round-trips unchanged; GitHub still rejects a multi-segment id;
+  the private-access residue is dropped on save.
+- Daemon store: a re-cased group key keeps the unchanged-value tolerance for a
+  legacy nested value, and a changed value is still refused.
 
 ## Key design decisions
 
@@ -193,7 +231,8 @@ generic speakers label and placeholder stay shared.
 | Channel-aware segment count, not a universal relaxed regex | A universal 2+-segment regex would let GitHub accept multi-slash ids that can never match a repository, losing typo detection. GitHub keeps its strict shape.                                                                                                   |
 | Keep the shared lower-case alias model                     | With the adapter normalizing case, case variants are one project for both platforms, so the shared model is correct; channel-aware editor normalization would add complexity with no benefit.                                                                   |
 | Only the platform-naming copy becomes channel-aware        | The remaining repository strings use generic "repository" wording acceptable for a GitLab project; duplicating them would be speculative.                                                                                                                       |
-| Leave `repoFilter`/URL shortening/`useLocalGh` GitHub-only | GitLab declares none of these fields; their paths never trigger for it.                                                                                                                                                                                         |
+| Leave `repoFilter`/URL shortening/`useLocalGh` GitHub-only | GitLab declares none of these fields. The save-path `repoFilter` canonicalization is explicitly GitHub-gated because the request config is seeded from storage, so a preserved unmanaged `repoFilter` must not be rewritten.                                    |
+| Tolerate pre-existing entries across admission             | The shape check skips stored entries and the store's unchanged-value tolerance follows a re-cased key, so admitting GitLab does not strand an unrelated edit on entries the operator never touched.                                                             |
 
 ## Constraints
 
@@ -221,8 +260,9 @@ generic speakers label and placeholder stay shared.
 
 1. Targeted vitest suites: `packages/web-shell` channels directory
    (`channel-platform`, `channel-editor-state`, `ChannelEditorDialog`,
-   `channel-editor-parity`, `ChannelsManagerPage`) and
-   `packages/channels/gitlab` (`GitlabAdapter`).
+   `channel-editor-parity`, `ChannelsManagerPage`),
+   `packages/channels/gitlab` (`GitlabAdapter`), and `packages/cli`
+   (`channel-settings-store`).
 2. Repository gates: `tsc --noEmit` (web-shell and gitlab), ESLint and Prettier on
    the changed files. The full web-shell `vite build` is blocked in this checkout
    by a pre-existing missing `browserify` dependency (declared in `package.json`
@@ -240,14 +280,20 @@ generic speakers label and placeholder stay shared.
    `allowedUsers` control for it, and the group axis stays editable.
 2. A GitLab allowlist entry `group/subgroup/project` validates and saves; the
    per-repository row renders for it.
-3. A mixed-case GitLab project path admits at runtime and survives a re-save.
-4. A malformed GitLab entry (e.g. a single segment) is rejected with a
-   project-path remedy.
+3. A mixed-case GitLab project path admits at runtime and survives a re-save
+   with its per-project sender policy intact.
+4. A newly typed malformed GitLab entry (e.g. a single segment) is rejected with
+   a project-path remedy, while a stored entry that predates the shape check does
+   not block an unrelated edit.
 5. GitHub still rejects a multi-segment id such as `owner/repo/extra`.
-6. The GitLab allowlist field, validation remedy, and speakers description show
-   GitLab project wording in both locales, not `owner/repo` / "GitHub logins".
-7. Saving a GitLab channel writes no `privatePolicy`/`allowedUsers`.
-8. The seven other admitted platforms behave unchanged.
+6. The GitLab allowlist field, validation remedy, conflict remedy, and speakers
+   description/inherited copy show GitLab project wording in both locales, not
+   `owner/repo` / "GitHub logins".
+7. Saving a GitLab channel writes no `privatePolicy`/`allowedUsers`, and leaves a
+   preserved unmanaged `repoFilter` byte-identical.
+8. A re-cased group key keeps the daemon's unchanged-value tolerance for a legacy
+   nested value; a changed value is still refused.
+9. The seven other admitted platforms behave unchanged.
 
 ## Open questions
 
