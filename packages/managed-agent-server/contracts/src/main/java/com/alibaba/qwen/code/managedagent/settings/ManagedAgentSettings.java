@@ -89,7 +89,6 @@ public interface ManagedAgentSettings {
         public String getRelayUrl();
     }
     public interface ToolPublication {
-        public boolean isAsyncVerificationEnabled();
         public int getVerificationConcurrency();
         public boolean isGcEnabled();
         public Duration getDeletionGrace();

@@ -339,7 +339,6 @@ SSH Runtime 节点：服务端通过 SSH 访问的主机，用户可以在这些
 | 属性 | 环境变量 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- | --- |
 | `active-captures` | — | 整数 | — | 单个租户可同时处于打开状态的工具输出捕获数量；达到上限后新的预留会被拒绝，直到有捕获结束。`qwen.managed-agent.tool-publication.enabled` 为 true 时必填，且至少为 `1`（否则启动时拒绝）。 |
-| `async-verification-enabled` | `QWEN_MANAGED_AGENT_TOOL_PUBLICATION_ASYNC_VERIFICATION_ENABLED` | 布尔 | `false` | 是否允许客户端通过 `X-Qwen-Tool-Publication-Async: 1` 请求头为发布操作申请异步校验（先返回 HTTP 202，再轮询结果）；关闭时所有操作均同步校验。关闭后不再接纳新的异步操作，已接纳的操作仍会继续校验完毕。 |
 | `claim-timeout` | — | 时长 | — | 服务端对进行中的发布操作持有认领的时长；持有者每隔该时长的三分之一续期一次，认领失效后重试请求才能接管该操作。启用工具发布时必填，必须为正且短于 `qwen.managed-agent.tool-publication.operation-timeout`（否则启动时拒绝）。不带单位的数字按秒解析。 |
 | `deletion-grace` | `QWEN_MANAGED_AGENT_TOOL_PUBLICATION_DELETION_GRACE` | 时长 | `24h` | 已退役 Session 的工具输出和 Session 资源在可被垃圾回收删除之前的保留时长。仅在开启 `qwen.managed-agent.tool-publication.gc-enabled` 时生效；周期性的保留情况日志采样也使用该值。不得为负（启用工具发布时，否则启动时拒绝）。不带单位的数字按秒解析。 |
 | `enabled` | `QWEN_MANAGED_AGENT_TOOL_PUBLICATION_ENABLED` | 布尔 | `false` | 服务端是否接受工具输出发布：Hosted Shell 执行通过内部 `/internal/managed-tool-publications` API 将输出流式写入对象存储（未注册自定义存储 bean 时为阿里云 OSS）。必须同时设置本组的服务 URL、容量和期限，以及 OSS endpoint、region 和 bucket，否则启动时拒绝。内部接口不在回环地址上时还需要 `qwen.managed-agent.session-store.binding-key`，除非 `qwen.managed-agent.auth.allow-insecure-bind` 为 true。 |
@@ -355,4 +354,4 @@ SSH Runtime 节点：服务端通过 SSH 访问的主机，用户可以在这些
 | `session-bytes` | — | 整数 | — | 单个 Session 所有捕获合计可预留的工具输出字节数；每次预留按其捕获大小加上固定的 `4784128` 字节开销计算。超出该值的预留会被拒绝。启用工具发布时必填，且至少为 `1`（否则启动时拒绝）。 |
 | `tenant-bytes` | — | 整数 | — | 单个租户在其所有 Session 的捕获中合计可预留的工具输出字节数；每次预留按其捕获大小加上固定的 `4784128` 字节开销计算。超出该值的预留会被拒绝。启用工具发布时必填，且至少为 `1`（否则启动时拒绝）。 |
 | `verification-bytes-per-second` | — | 整数 | — | 校验吞吐量下限（字节/秒）：校验期限为 `qwen.managed-agent.tool-publication.operation-timeout` 加上每校验这么多字节增加的一秒，且不得超过 `qwen.managed-agent.tool-publication.max-verification-timeout`。启用工具发布时必填，且至少为 `1`（否则启动时拒绝）。 |
-| `verification-concurrency` | `QWEN_MANAGED_AGENT_TOOL_PUBLICATION_VERIFICATION_CONCURRENCY` | 整数 | `2` | 对已异步接纳的发布操作进行校验的后台线程数。关闭 `qwen.managed-agent.tool-publication.async-verification-enabled` 后校验器仍会运行，以便处理完已接纳的操作。至少为 `1`（启用工具发布时，否则启动时拒绝）。 |
+| `verification-concurrency` | `QWEN_MANAGED_AGENT_TOOL_PUBLICATION_VERIFICATION_CONCURRENCY` | 整数 | `2` | 对已接纳的发布操作进行校验的后台线程数。每个生产者操作在其输入保存后即返回 HTTP 202，由这些线程完成校验，客户端轮询结果。至少为 `1`（启用工具发布时，否则启动时拒绝）。 |

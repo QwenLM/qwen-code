@@ -277,29 +277,23 @@ revalidation window: [English](../../docs/design/2026-10-02-managed-agent-query-
 
 ## Asynchronous tool publication verification
 
-Enable `qwen.managed-agent.tool-publication.async-verification-enabled`
-(default `false`) to use asynchronous admission. `verification-concurrency`
-defaults to `2` and controls the dedicated verifier pool, independently of
-retention and GC.
+Every producer operation (segment, resource, seal, prefix and finish) is
+admitted asynchronously. The server stores the inputs, returns HTTP 202 with
+`state: PENDING`, and a dedicated verifier pool reads back, scans and installs
+the result; `verification-concurrency` (default `2`) sizes that pool,
+independently of retention and GC. Clients poll the operation status until it
+is `SUCCEEDED`. `FAILED` carries only a safe `error: {status, code}` and must
+be handled as a terminal error, outside network retry handling. The adapter
+keeps awaiting verified success before completing publish, seal, prefix, or
+finish.
 
-Clients that support asynchronous verification send
-`X-Qwen-Tool-Publication-Async: 1` and poll the operation status after HTTP 202.
-Synchronous responses remain supported when asynchronous verification is
-disabled or the request does not opt in. A mode is saved
-when each operation is created, so retries do not change it. `FAILED` carries
-only a safe `error: {status, code}` and must be handled as a terminal error,
-outside network retry handling. The adapter keeps awaiting verified success
-before completing publish, seal, prefix, or finish.
+Historical success replay returns the prior receipt; actual reads and final
+integrity checks still validate current storage bytes.
 
-For rollback, disable new async admission and leave the verifier and head
-authorization running until accepted work drains. Do not downgrade the server
-while pending async operations still need verification. Historical async
-success replay returns the prior receipt; actual reads and final integrity
-checks still validate current storage bytes.
-
-Design and client migration contract:
-[English](../../docs/design/2026-10-07-managed-tool-publication-async-verification.md) |
-[简体中文](../../docs/design/2026-10-07-managed-tool-publication-async-verification.zh-CN.md).
+Design: [English](../../docs/design/2026-10-07-managed-tool-publication-async-verification.md) |
+[简体中文](../../docs/design/2026-10-07-managed-tool-publication-async-verification.zh-CN.md);
+single verification mode: [English](../../docs/design/2026-11-10-managed-tool-publication-single-verification-mode.md) |
+[简体中文](../../docs/design/2026-11-10-managed-tool-publication-single-verification-mode.zh-CN.md).
 
 ## Experimental reference distribution
 

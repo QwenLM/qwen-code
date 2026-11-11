@@ -88,8 +88,8 @@ final class WorkspaceCsiApplicationInventory {
                     + "segment_ordinal:BIGINT,provider_receipt_json:LONGTEXT,gmt_create:BIGINT,gmt_modified:BIGINT"),
             declaration("ma_client_files_binding", "session_scope_key",
                     "session_scope_key:CHAR,tenant_id:VARBINARY,session_id:VARBINARY,actor_id:VARBINARY,"
-                    + "generation:BIGINT,state:VARCHAR,server_id:VARCHAR,token_hash:CHAR,expires_at:BIGINT,"
-                    + "gmt_create:BIGINT,gmt_modified:BIGINT"),
+                    + "generation:BIGINT,state:VARCHAR,server_id:VARCHAR,token_hash:CHAR,connection_id:VARCHAR,"
+                    + "expires_at:BIGINT,gmt_create:BIGINT,gmt_modified:BIGINT"),
             declaration("ma_client_files_request", "request_key",
                     "request_key:CHAR,session_scope_key:CHAR,tenant_id:VARBINARY,session_id:VARBINARY,"
                     + "binding_generation:BIGINT,request_id:VARCHAR,payload_json:LONGTEXT,state:VARCHAR,"
@@ -142,7 +142,7 @@ final class WorkspaceCsiApplicationInventory {
                     + "state:VARCHAR,phase:VARCHAR,admission_stage:VARCHAR,delivery_state:VARCHAR,"
                     + "session_status_before:VARCHAR,receipt_id:VARBINARY,claim_owner:VARBINARY,claim_generation:BIGINT,"
                     + "claim_until:BIGINT,available_at:BIGINT,attempt_count:INT,budget_exempt_attempt:INT,deadline:BIGINT,"
-                    + "recovery_deadline:BIGINT,execution_mode:VARCHAR,verification_request_json:LONGTEXT,"
+                    + "recovery_deadline:BIGINT,verification_request_json:LONGTEXT,"
                     + "is_verification_ready:BOOLEAN,verification_next_at:BIGINT,publication_id:VARBINARY,"
                     + "publication_command_id:VARBINARY,slot_key:VARBINARY,execution_key:CHAR,item_id:VARBINARY,"
                     + "policy_version:VARBINARY,failure_status:INT,failure_code:VARCHAR,gmt_create:BIGINT,gmt_modified:BIGINT,"
