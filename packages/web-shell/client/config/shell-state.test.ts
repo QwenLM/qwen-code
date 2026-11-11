@@ -316,7 +316,7 @@ describe('desktop shell state', () => {
     ).toBe('launch-nonce');
   });
 
-  it('records the pre-write cache value as the base, not the value written', async () => {
+  it('records the last value native accepted as the base, not a rejected one', async () => {
     let native = '["https://a.example"]';
     let rejectWrites = false;
     const invoke = vi.fn(
@@ -333,20 +333,25 @@ describe('desktop shell state', () => {
 
     const first = await import('./shell-state');
     await first.hydrateShellState();
-    // The first write lands natively; the second is rejected.
+    // The first write lands natively; the two after it are rejected.
     first.writeShellState(
       'qwen-remote-connections',
       '["https://a.example","https://b.example"]',
     );
+    await Promise.resolve();
     rejectWrites = true;
     first.writeShellState(
       'qwen-remote-connections',
       '["https://a.example","https://b.example","https://c.example"]',
     );
+    first.writeShellState(
+      'qwen-remote-connections',
+      '["https://a.example","https://b.example","https://c.example","https://d.example"]',
+    );
     await Promise.resolve();
 
-    // The base is what the cache held before the rejected write — the value
-    // that landed natively — not the rejected value itself.
+    // The base is the value the shell accepted, not either rejected value the
+    // optimistic cache holds.
     expect(
       window.localStorage.getItem(
         'qwen-shell-mirror-base:qwen-remote-connections',
@@ -354,12 +359,73 @@ describe('desktop shell state', () => {
     ).toBe('["https://a.example","https://b.example"]');
 
     // The next launch reuses the origin: only the first write landed, so the
-    // mirror is the only surviving copy of the second and must be adopted.
+    // mirror is the only surviving copy of the two rejected ones and must be
+    // adopted and re-pushed in full.
     vi.resetModules();
     window.history.replaceState(null, '', '/#token=secret&shell=launch-two');
     const secondInvoke = vi.fn(
       async (command: string): Promise<unknown> =>
         command === 'shell_state_read' ? native : undefined,
+    );
+    installDesktop(secondInvoke);
+
+    const second = await import('./shell-state');
+    await second.hydrateShellState();
+
+    const full =
+      '["https://a.example","https://b.example","https://c.example","https://d.example"]';
+    expect(second.readShellState('qwen-remote-connections')).toBe(full);
+    expect(secondInvoke).toHaveBeenCalledWith('shell_state_write', {
+      key: 'qwen-remote-connections',
+      value: full,
+      nonce: 'launch-two',
+    });
+  });
+
+  it('keeps an earlier launch base when this launch cannot read the native value', async () => {
+    // An earlier launch recorded the base of the mirror; this launch's read for
+    // that key fails, so the native value is unknown here.
+    seedMirror(
+      'qwen-remote-connections',
+      '["https://a.example","https://b.example"]',
+      'earlier-launch',
+      '["https://a.example"]',
+    );
+    const invoke = vi.fn(
+      async (command: string, args?: Record<string, unknown>) => {
+        if (command !== 'shell_state_read') throw new Error('write rejected');
+        if (args?.['key'] === 'qwen-remote-connections') {
+          throw new Error('ipc unavailable');
+        }
+        return null;
+      },
+    );
+    installDesktop(invoke);
+
+    const first = await import('./shell-state');
+    await first.hydrateShellState();
+    first.writeShellState(
+      'qwen-remote-connections',
+      '["https://a.example","https://b.example","https://c.example"]',
+    );
+    await Promise.resolve();
+
+    // Without a native value the base cannot be recomputed, so the record the
+    // earlier launch left must survive the rejected write: clearing it would
+    // turn the mirror into an unadoptable legacy copy.
+    expect(
+      window.localStorage.getItem(
+        'qwen-shell-mirror-base:qwen-remote-connections',
+      ),
+    ).toBe('["https://a.example"]');
+
+    // A later launch whose native value still equals that base adopts the
+    // mirror rather than deleting it.
+    vi.resetModules();
+    window.history.replaceState(null, '', '/#token=secret&shell=launch-three');
+    const secondInvoke = vi.fn(
+      async (command: string): Promise<unknown> =>
+        command === 'shell_state_read' ? '["https://a.example"]' : undefined,
     );
     installDesktop(secondInvoke);
 
@@ -372,7 +438,7 @@ describe('desktop shell state', () => {
     expect(secondInvoke).toHaveBeenCalledWith('shell_state_write', {
       key: 'qwen-remote-connections',
       value: '["https://a.example","https://b.example","https://c.example"]',
-      nonce: 'launch-two',
+      nonce: 'launch-three',
     });
   });
 

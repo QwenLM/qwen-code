@@ -30,11 +30,12 @@ function mirrorStampKey(key: string): string {
 }
 
 /**
- * Records, per catalog, the native value the mirror was derived from: what
- * the cache held immediately before the write. A foreign-stamped mirror whose
- * base still equals the native value is the only surviving copy of a write
- * the shell never stored; one whose base no longer matches has been superseded.
- * Like the stamp, this lives in localStorage — the native value is capped at
+ * Records, per catalog, the native value the mirror was derived from: the value
+ * last confirmed to be in the native store, which only a hydration read or a
+ * resolved write advances. A foreign-stamped mirror whose base still equals the
+ * native value is the only surviving copy of a write the shell never stored;
+ * one whose base no longer matches has been superseded. Like the stamp, this
+ * lives in localStorage — the native value is capped at
  * SHELL_STATE_MAX_VALUE_BYTES and its key allowlist admits no metadata key.
  */
 const SHELL_MIRROR_BASE_PREFIX = 'qwen-shell-mirror-base';
@@ -44,6 +45,15 @@ function mirrorBaseKey(key: string): string {
 }
 
 const cache = new Map<string, string | null>();
+/**
+ * The value last known to be in the native store, per catalog. `cache` is
+ * optimistic — a write advances it before the IPC call settles — so it cannot
+ * say what the shell accepted; this map takes its value from a hydration read
+ * and advances only when a `shell_state_write` resolves. A key absent here was
+ * never read successfully this launch, so its recorded base stays as the
+ * previous launch left it.
+ */
+const nativeValues = new Map<string, string | null>();
 let hydration: Promise<void> | undefined;
 let shellNonce: string | undefined;
 
@@ -85,10 +95,20 @@ function readLocal(key: string): string | null {
   }
 }
 
-function writeLocal(key: string, value: string, base: string | null): void {
+/**
+ * Writes the mirror and its metadata. `base` is the native value to record;
+ * `undefined` means this launch never learned it, so the existing record is
+ * left alone rather than turned into a no-base mirror.
+ */
+function writeLocal(
+  key: string,
+  value: string,
+  base: string | null | undefined,
+): void {
   try {
     window.localStorage.setItem(key, value);
     window.localStorage.setItem(mirrorStampKey(key), readShellNonce());
+    if (base === undefined) return;
     if (base === null) {
       window.localStorage.removeItem(mirrorBaseKey(key));
     } else {
@@ -142,8 +162,7 @@ export function readShellState(key: ShellStateKey): string | null {
 }
 
 export function writeShellState(key: ShellStateKey, value: string): void {
-  const base = cache.get(key);
-  writeLocal(key, value, typeof base === 'string' ? base : null);
+  writeLocal(key, value, nativeValues.get(key));
   const invoke = invokeDesktop();
   if (!invoke) return;
   cache.set(key, value);
@@ -151,13 +170,19 @@ export function writeShellState(key: ShellStateKey, value: string): void {
     key,
     value,
     nonce: readShellNonce(),
-  }).catch(() => {
-    // The in-memory copy keeps this session usable, and the mirror below is
-    // re-pushed at the next same-origin hydration while the native catalog
-    // still matches the base the mirror records: a launch on a fresh loopback
-    // origin loses a write the shell never stored, and a native write that
-    // landed since supersedes it.
-  });
+  })
+    .then(() => {
+      // Native accepted this value, whatever the mirror holds now: the next
+      // write's base is what the shell stored, not what the page displays.
+      nativeValues.set(key, value);
+    })
+    .catch(() => {
+      // The in-memory copy keeps this session usable, and the mirror below is
+      // re-pushed at the next same-origin hydration while the native catalog
+      // still matches the base the mirror records: a launch on a fresh loopback
+      // origin loses a write the shell never stored, and a native write that
+      // landed since supersedes it.
+    });
 }
 
 /**
@@ -181,6 +206,7 @@ async function hydrateDesktop(): Promise<void> {
           key,
           nonce: readShellNonce(),
         });
+        nativeValues.set(key, typeof native === 'string' ? native : null);
         const local = readLocal(key);
         if (local !== null && local !== native) {
           // A copy this launch wrote is newer than the native value: a write
@@ -208,6 +234,8 @@ async function hydrateDesktop(): Promise<void> {
             nonce: readShellNonce(),
           });
           cache.set(key, local);
+          // The re-push landed, so native now holds the mirror's value.
+          nativeValues.set(key, local);
           removeLocal(key);
           return;
         }
