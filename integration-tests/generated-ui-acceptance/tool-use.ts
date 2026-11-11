@@ -6,6 +6,37 @@
 
 import { SHOW_TOOL, messageText, type RecordedRequest } from './harness.js';
 
+function isViewError(content: unknown): boolean {
+  const text = messageText(content);
+  const marker = ' with response: ';
+  // The OpenAI converter flattens the tool result. The MCP error wrapper still
+  // carries the original isError flag and content in its serialized response.
+  if (
+    !text.startsWith(
+      "MCP tool 'generated_ui_show' reported tool error for function call: ",
+    )
+  ) {
+    return false;
+  }
+  const start = text.indexOf(`${marker}[{"functionResponse":`);
+  if (start === -1) return false;
+
+  try {
+    const parts = JSON.parse(text.slice(start + marker.length)) as Array<{
+      functionResponse?: {
+        response?: { error?: { isError?: boolean; content?: unknown } };
+      };
+    }>;
+    const error = parts[0]?.functionResponse?.response?.error;
+    return (
+      error?.isError === true &&
+      messageText(error.content).startsWith('VIEW_ERROR: ')
+    );
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Whether the model called `generated_ui_show`, and how many of those calls
  * came back as `VIEW_ERROR`, across every recorded main request. A case may
@@ -31,7 +62,7 @@ export function toolUse(main: RecordedRequest[]): {
       if (
         message.role === 'tool' &&
         showIds.has(message.tool_call_id) &&
-        messageText(message.content).includes('VIEW_ERROR')
+        isViewError(message.content)
       ) {
         rejected.add(message.tool_call_id);
       }

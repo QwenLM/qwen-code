@@ -24,8 +24,9 @@ export const BILL_SPLITTER_PROMPT = [
   '',
   CONTRACT_PREAMBLE,
   'Inputs: subtotal (CNY), people, discount (CNY), service-rate (percent).',
-  "Outputs: total (the total amount), shares (a container with one element per person, each showing that person's amount),",
-  'chart (the allocation chart), error (validation message, empty when valid).',
+  'Render total as visible text containing a single amount, with an optional currency marker. Put calculations and any other numbers outside that element.',
+  'Use one direct child of shares per person in order. Each child displays one amount with two decimal places and may include a currency marker and an integer person label. Put any other numbers outside these children.',
+  'Use chart for the allocation chart and error for the validation message, which is empty when valid.',
   'Buttons: reset, copy.',
 ].join('\n');
 
@@ -48,7 +49,8 @@ export const ACTIVITY_FORM_PROMPT = [
   '',
   CONTRACT_PREAMBLE,
   'Inputs: activity (select with values hiking, bowling, escape-room), date (text, YYYY-MM-DD), participants, budget (CNY per person), notes (textarea).',
-  'In the first reply after submission, base your advice on all five fields. Include the date as YYYY-MM-DD, express the budget as CNY <amount> per person, and quote the submitted notes as entered.',
+  'Make the first nonblank line of the first reply after submission exactly Participants: <count>, using decimal digits for the submitted positive integer. Give the recommendation on the following lines.',
+  'Base the advice on all five fields. Include the date as YYYY-MM-DD, express the budget as CNY <amount> per person, and quote the submitted notes as entered.',
 ].join('\n');
 
 export const COMPARATOR_PROMPT = [
@@ -58,7 +60,7 @@ export const COMPARATOR_PROMPT = [
   '',
   CONTRACT_PREAMBLE,
   'Inputs: seats; billing radios billing-monthly and billing-annual; plan radios plan-basic, plan-pro and plan-team.',
-  'Outputs for each plan P in basic, pro, team: P-monthly (monthly equivalent) and P-payment (actual payment per billing period).',
+  'For each plan P in basic, pro, team, use P-monthly for the monthly equivalent and P-payment for the actual payment per billing period. Render one amount as visible text in each element. Currency and billing-period labels are allowed, with any other numbers displayed elsewhere.',
   'Button: export.',
 ].join('\n');
 
@@ -67,9 +69,9 @@ export const COMPARATOR_SUPPORT_PROMPT = [
   '加一个导出当前结果为 CSV 的功能。',
   '',
   CONTRACT_PREAMBLE,
-  'Keep the earlier IDs, add support (checkbox, checked) and keep the export button.',
+  'Keep the earlier IDs and amount formats. Add support (checkbox, checked) and keep the export button.',
   'Export CSV with header plan,payment. Use basic, pro or team as the plan key and the current actual payment in CNY, including the selected plan.',
 ].join('\n');
 
 export const COMPARATOR_RESET_PROMPT =
-  '把对比器恢复成你第一次给我的初始设置，不加技术支持。保持同样的元素 ID，保留导出功能。';
+  '把对比器恢复成你第一次给我的初始设置，不加技术支持。保持同样的元素 ID 和金额格式，保留导出功能。';

@@ -30,6 +30,7 @@ import {
   type Plan,
 } from './fixtures.js';
 import {
+  SHOW_TOOL,
   clickWhenStill,
   messageText,
   setValue,
@@ -40,6 +41,7 @@ import {
   waitForStill,
   type AcceptanceEnv,
   type Card,
+  type ChatMessage,
 } from './harness.js';
 import {
   formatCents,
@@ -475,11 +477,12 @@ export async function runChecklist(
   const { view } = card;
 
   const emptyText = await text(view, 'empty');
+  const emptyVisible = await view.locator('#empty').first().isVisible();
   checks.expect(
     'empty-state',
     'case 2',
-    emptyText.length > 0,
-    'no empty-state message before items exist',
+    emptyVisible && emptyText.length > 0,
+    'no visible empty-state message before items exist',
   );
 
   const added = await checks.guard('add', 'case 2', async () => {
@@ -1013,11 +1016,8 @@ export async function runActivityForm(
       );
     }
     const body = reply.normalize('NFKC').replace(/[*_`]/g, '');
-    const participants = FORM_VALUES.participants;
-    const participantCount = new RegExp(
-      `(?:\\b${participants}\\s*[-–]?\\s*(?:people|persons?|participants?|attendees?)\\b|(?<!\\d)${participants}\\s*(?:人|位|个|名)|(?:\\b(?:participants?|attendees?)|人数)\\s*[:：为是]?\\s*${participants}(?!\\d|\\.\\d))`,
-      'i',
-    );
+    const [firstLine] = body.trimStart().split(/\r?\n/, 1);
+    const count = /^Participants:[ \t]*(\d+)[ \t]*$/i.exec(firstLine)?.[1];
     const date = new RegExp(`(?<!\\d)${FORM_VALUES.date}(?!\\d)`);
     const budget = new RegExp(
       `\\bCNY\\s*${FORM_VALUES.budget}(?:\\.0+)?\\s*(?:each\\b|per\\s+person\\b|/\\s*人)`,
@@ -1026,7 +1026,7 @@ export async function runActivityForm(
     const matched = {
       activity: /escape[\s-]*room|密室/i.test(body),
       date: date.test(body),
-      participants: participantCount.test(body),
+      participants: Number(count) === Number(FORM_VALUES.participants),
       budget: budget.test(body),
       notes: body.toLowerCase().includes(FORM_VALUES.notes),
     };
@@ -1048,6 +1048,7 @@ async function selectComparator(
   inputs: { seats: number; billing: string; plan: string },
 ) {
   await setValue(view, 'seats', String(inputs.seats));
+  await view.locator('#seats').blur();
   await checkBox(view, `billing-${inputs.billing}`);
   await checkBox(view, `plan-${inputs.plan}`);
   await view.page().waitForTimeout(500);
@@ -1116,72 +1117,54 @@ async function comparatorCardId(view: Frame): Promise<string | null> {
   }
 }
 
-const COMPARATOR_FIELDS = [
-  '#seats',
-  '#support',
-  'input[id^="billing-"]',
-  'input[id^="plan-"]',
-  ...PLANS.flatMap((plan) => [`#${plan}-monthly`, `#${plan}-payment`]),
-].join(', ');
-
-async function comparatorCards(page: Page) {
-  const views = page.frames().filter((frame) => frame.name() === 'view');
-  const cards = await Promise.all(
-    views.map(async (view) => {
-      try {
-        // Parked frames have no transcript tool row and cannot establish card identity.
-        const id = await comparatorCardId(view);
-        if (!id) return undefined;
-        const fields = await view
-          .locator(COMPARATOR_FIELDS)
-          .evaluateAll((nodes) =>
-            nodes
-              .map((node) =>
-                node instanceof HTMLInputElement
-                  ? [node.id, node.value, node.checked]
-                  : [node.id, node.textContent?.trim()],
-              )
-              .sort(([a], [b]) => String(a).localeCompare(String(b))),
-          );
-        return {
-          view,
-          id,
-          state: fields.length ? JSON.stringify(fields) : null,
-        };
-      } catch {
-        // A transcript row can detach while its iframe is being read.
-        return undefined;
-      }
-    }),
+function generatedUiCallIds(messages: ChatMessage[]) {
+  const calls = messages.flatMap((message) => message.tool_calls ?? []);
+  return new Set(
+    calls.flatMap((call) =>
+      call.id && call.function?.name === SHOW_TOOL ? [call.id] : [],
+    ),
   );
-  return cards.filter((card) => card !== undefined);
 }
 
 async function followUpComparator(env: AcceptanceEnv, prompt: string) {
-  const before = new Map(
-    (await comparatorCards(env.page)).map(({ id, state }) => [id, state]),
+  const requests = env.mainRequests();
+  const requestMark = requests.length;
+  const previousIds = generatedUiCallIds(
+    requests.flatMap((request) => request.messages),
   );
   await env.send(prompt);
   await env.waitForIdle();
-  const changed = await settle(
-    async () =>
-      (await comparatorCards(env.page)).findLast(({ id, state }) => {
-        const previous = before.get(id);
-        return (
-          previous === undefined ||
-          (previous !== null && state !== null && previous !== state)
-        );
-      }),
+  const followUpMessages = env
+    .mainRequests()
+    .slice(requestMark)
+    .flatMap(({ messages }) => {
+      const user = messages.findLastIndex((message) => message.role === 'user');
+      return user === -1 ? [] : messages.slice(user + 1);
+    });
+  const freshIds = generatedUiCallIds(followUpMessages);
+  for (const id of previousIds) freshIds.delete(id);
+  if (!freshIds.size)
+    throw new Error('follow-up made no Generated UI tool call');
+  const card = await settle(
+    async () => {
+      const views = env.page
+        .frames()
+        .filter((frame) => frame.name() === 'view');
+      for (const view of views.reverse()) {
+        const id = await comparatorCardId(view).catch(() => null);
+        if (id && freshIds.has(id)) return { view, id };
+      }
+      return undefined;
+    },
     (card) => card !== undefined,
     Math.min(env.cardTimeoutMs, 5_000),
   );
-  if (!changed)
-    throw new Error('follow-up produced no new or revised comparator card');
-  await changed.view
+  if (!card) throw new Error('no card rendered for the follow-up tool call');
+  await card.view
     .locator('body *:visible')
     .first()
     .waitFor({ timeout: env.cardTimeoutMs });
-  return changed;
+  return card;
 }
 
 function csvPayment(csv: string, plan: Plan): number | undefined {
@@ -1214,7 +1197,6 @@ export async function runComparator(
   await env.startSession(prompts.initial);
   const first = await env.waitForCard(0);
   await env.waitForIdle();
-  const firstId = await comparatorCardId(first.view).catch(() => null);
   // A view without a contract control still reports every check: the reads
   // degrade to null and the checks that need them fail with the reason.
   const initialSeats = await first.view
@@ -1289,11 +1271,12 @@ export async function runComparator(
         .locator('#support')
         .isChecked()
         .catch(() => false);
+      const reusedView = updated.view === first.view;
       return checks.expect(
         'extends-existing-card',
         'R5',
-        updated.id === firstId && support,
-        `after the follow-up: initial card=${firstId}, updated card=${updated.id}, support=${support}`,
+        reusedView && support,
+        `follow-up call=${updated.id}, reused original view=${reusedView}, support=${support}`,
       );
     },
     [
@@ -1310,7 +1293,30 @@ export async function runComparator(
       );
       return false;
     }
-    const exportButton = second.view.locator('#export');
+    const { view } = second;
+    const inputs = {
+      ...COMPARATOR_SCENARIO,
+      seats: COMPARATOR_SCENARIO.seats + 1,
+    };
+    const expected = comparatorPayment(COMPARATOR_SELECTED_PLAN, inputs);
+    await setValue(view, 'seats', String(inputs.seats));
+    await view.locator('#seats').blur();
+    const payment = await settle(
+      async () =>
+        parseSingleAmount(
+          await text(view, `${COMPARATOR_SELECTED_PLAN}-payment`),
+        ),
+      (value) => value === expected,
+    );
+    if (payment !== expected) {
+      return checks.add(
+        'exports-current-csv',
+        'case 4 / R5',
+        'not-applicable',
+        `could not prepare the ${inputs.seats}-seat payment before exporting`,
+      );
+    }
+    const exportButton = view.locator('#export');
     await exportButton.scrollIntoViewIfNeeded({ timeout: 10_000 });
     await waitForStill(exportButton);
     const download = env.page
@@ -1332,8 +1338,7 @@ export async function runComparator(
     return checks.expect(
       'exports-current-csv',
       'case 4 / R5',
-      csvPayment(csv, COMPARATOR_SELECTED_PLAN) ===
-        comparatorPayment(COMPARATOR_SELECTED_PLAN, COMPARATOR_SCENARIO),
+      csvPayment(csv, COMPARATOR_SELECTED_PLAN) === expected,
       `CSV did not contain the current payment for ${COMPARATOR_SELECTED_PLAN}: ${csv.slice(0, 120)}`,
     );
   });

@@ -80,7 +80,7 @@ export async function activityFormReplay(
       setTimeout(resolve, SUBMISSION_REPLY_DELAY_MS),
     );
     return {
-      content: `Plan: ${inputs['activity']?.value} on ${inputs['date']?.value} for ${inputs['participants']?.value} people at CNY ${inputs['budget']?.value} each (${inputs['notes']?.value}).`,
+      content: `Participants: ${inputs['participants']?.value}\nPlan: ${inputs['activity']?.value} on ${inputs['date']?.value} at CNY ${inputs['budget']?.value} per person. Notes: "${inputs['notes']?.value}".`,
     };
   }
   return { content: 'Noted.' };

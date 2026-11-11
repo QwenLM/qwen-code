@@ -17,13 +17,13 @@ The issue states results without inputs. `fixtures.ts` chooses inputs so that th
 
 The cases also check behavior across edits and follow-ups.
 
-- **Checklist.** Undo restores the original list after a rename. The harness then reapplies the rename and exercises persistence of item text, checked state and undo history after reload and reopen, plus isolation from a new conversation.
-- **Activity form.** Edits start no model request. One explicit submission starts exactly one user turn and sends every field. The first reply uses the activity, date, participant count, per-person budget and notes. The harness holds the submit button for 150 ms to let the host finish applying the field that loses focus.
-- **Comparator.** The harness looks for a new transcript card or changed comparator state after each follow-up. A revision must keep the original tool-call ID. The CSV check reads the selected plan's payment from the `plan,payment` columns and starts the download timeout after the export button has stopped moving.
+- **Checklist.** The empty-state message is visible before adding the first item. Undo restores the original list after a rename. The harness then reapplies the rename and exercises persistence of item text, checked state and undo history after reload and reopen, plus isolation from a new conversation.
+- **Activity form.** Edits start no model request. One explicit submission starts exactly one user turn and sends every field. The first reply starts with `Participants: <count>` and uses the activity, date, per-person budget and notes in its recommendation. The harness holds the submit button for 150 ms to let the host finish applying the field that loses focus.
+- **Comparator.** The harness joins each follow-up's new Generated UI calls to their transcript cards. An in-place update reuses the original view frame. Before downloading, the harness changes the seat count again and checks the selected plan's new payment in the `plan,payment` columns. The download timeout starts after the export button has stopped moving.
 
 Other controls are clicked once they have held their position for 1.2 s. A card moves for a second or two after it changes (it grows while the transcript stays pinned to the bottom, and the composer updates when the view's values reach the model context), and a click during that motion lands where the target was and is lost.
 
-Amounts are read from the text a view renders. Commas (ASCII or full-width) and no-break spaces group thousands, a plain space does not (`Person 1 137.84` is a label and an amount), and percentages are ignored. A share row may also hold a label or a total; its share is the first amount written with a fraction.
+The amount nodes contain one visible money value each. A share row may also hold an integer person label, as in `Person 1 137.84`. Other amounts and breakdowns go outside those nodes. The parser accepts currency labels, comma grouping and no-break spaces.
 
 The bill reset check verifies all input values, allocations and the chart against their defaults. Chart comparison uses normalized markup and canvas pixels so regenerated element IDs (including ARIA references and `<style>` selectors) and iframe scrolling do not count as a changed chart, while a chart drawn only on a canvas still counts as changing.
 

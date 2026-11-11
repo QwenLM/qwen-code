@@ -14,6 +14,7 @@ import {
   runComparator,
 } from './cases.js';
 import {
+  SHOW_TOOL,
   waitForCardOn,
   type AcceptanceEnv,
   type ChatMessage,
@@ -74,56 +75,23 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
       {
         submissions: 1,
         batched: false,
-        answer: '**12** people should try the escape room.' + formDetails,
+        answer:
+          'Participants: 12\nFor a group of 12, try the escape room.' +
+          formDetails,
       },
       {
         submissions: 1,
         batched: false,
-        answer: 'A 12-person team should try the escape room.' + formDetails,
+        answer: '\n**Participants: 12**\n建议体验密室逃脱。' + formDetails,
       },
-      {
+      ...['8', '112', '-12', '12.5'].map((count) => ({
         submissions: 1,
         batched: false,
-        answer: '建议 12 人一起体验密室逃脱。' + formDetails,
-      },
-      {
-        submissions: 1,
-        batched: false,
-        answer: '人数：12，建议密室逃脱。' + formDetails,
-      },
-      {
-        submissions: 1,
-        batched: false,
-        answer: '共12个人一起体验密室逃脱。' + formDetails,
-      },
-      {
-        submissions: 1,
-        batched: false,
-        answer: '建议 12 名同事参加密室逃脱。' + formDetails,
-      },
-      {
-        submissions: 1,
-        batched: false,
-        answer: 'Participants: 12. Activity: escape room.' + formDetails,
-      },
-      {
-        submissions: 1,
-        batched: false,
-        answer: 'For 8 people, choose an escape room.' + formDetails,
+        answer:
+          `Participants: ${count}\nFor a group of 12, try the escape room.` +
+          formDetails,
         answerUsesValues: false,
-      },
-      {
-        submissions: 1,
-        batched: false,
-        answer: 'For 112 people, choose an escape room.' + formDetails,
-        answerUsesValues: false,
-      },
-      {
-        submissions: 1,
-        batched: false,
-        answer: 'Participants: 12.5. Activity: escape room.' + formDetails,
-        answerUsesValues: false,
-      },
+      })),
       ...[
         formDetails.replace('2026-12-05', '2026-12-19'),
         formDetails.replace('180 per person', '999 per person (CNY 180 total)'),
@@ -131,7 +99,7 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
       ].map((details) => ({
         submissions: 1,
         batched: false,
-        answer: 'For 12 people, choose an escape room.' + details,
+        answer: 'Participants: 12\nChoose an escape room.' + details,
         answerUsesValues: false,
       })),
     ])(
@@ -140,7 +108,7 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
         submissions,
         batched,
         additionalUserTurn = false,
-        answer = '12 people should try the escape room.' + formDetails,
+        answer = 'Participants: 12\nTry the escape room.' + formDetails,
         answerUsesValues = true,
       }) => {
         const page = await browser.newPage();
@@ -422,6 +390,7 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
       'inert-add',
       'no-edit',
       'inert-edit',
+      'hidden-empty',
     ] as const)(
       'checks checklist progress and undo persistence: %s',
       async (mode) => {
@@ -431,7 +400,7 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
         try {
           const html = `
             <input id="new-item"><select id="filter"><option value="all">All</option><option value="open">Open</option><option value="done">Done</option></select>
-            <button id="add">Add</button><button id="undo">Undo</button><p id="empty">Empty</p><ul id="items"></ul>
+            <button id="add">Add</button><button id="undo">Undo</button><p id="empty" ${mode === 'hidden-empty' ? 'style="display:none"' : ''}>Empty</p><ul id="items"></ul>
             <script>
               const key = 'checklist-' + new URL(location.href).searchParams.get('session');
               const saved = JSON.parse(localStorage.getItem(key) || 'null');
@@ -545,6 +514,9 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
           const results = await runChecklist(env, 'checklist');
           const status = (id: string) =>
             results.find((check) => check.id === `checklist.${id}`)?.status;
+          expect(status('empty-state')).toBe(
+            mode === 'hidden-empty' ? 'fail' : 'pass',
+          );
           // The same ids in every mode: unreached checks are not-applicable.
           expect(results.map((check) => check.id).sort()).toEqual(
             [
@@ -607,7 +579,9 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
       { mode: 'in-place', resetFault: 'none', initialPlan: 'basic' },
       { mode: 'new-card', resetFault: 'none', initialPlan: 'basic' },
       { mode: 'replace-card', resetFault: 'none', initialPlan: 'basic' },
+      { mode: 'parked-reset', resetFault: 'none', initialPlan: 'basic' },
       { mode: 'in-place', resetFault: 'none', initialPlan: 'pro' },
+      { mode: 'in-place', resetFault: 'none', initialPlan: 'team' },
       { mode: 'in-place', resetFault: 'billing', initialPlan: 'basic' },
       { mode: 'in-place', resetFault: 'plan', initialPlan: 'basic' },
       { mode: 'in-place', resetFault: 'amounts', initialPlan: 'basic' },
@@ -624,27 +598,29 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
         mode: 'in-place',
         resetFault: 'none',
         initialPlan: 'basic',
+        exportMode: 'stale-value',
+      },
+      {
+        mode: 'in-place',
+        resetFault: 'none',
+        initialPlan: 'basic',
         exportMode: 'moving-button',
       },
     ])(
       'observes $mode comparator updates (reset=$resetFault, initialPlan=$initialPlan, export=$exportMode)',
       async ({ mode, resetFault, initialPlan, exportMode }) => {
-        const initialAnnual = initialPlan === 'pro';
+        const initialAnnual = initialPlan === 'pro' || initialPlan === 'team';
         const page = await browser.newPage();
         page.setDefaultTimeout(1_000);
         try {
           vi.spyOn(page, 'waitForTimeout').mockResolvedValue();
-          const csv =
-            exportMode === 'wrong-plan'
-              ? 'plan,payment\npro,14227.20\nteam,0\n'
-              : '"plan","payment"\r\n"team","14,227.2"\r\n';
           const html = `
             <input id="seats" value="6">
             <input type="radio" name="billing" id="billing-monthly" ${initialAnnual ? '' : 'checked'}>
             <input type="radio" name="billing" id="billing-annual" ${initialAnnual ? 'checked' : ''}>
             <input type="radio" name="plan" id="plan-basic" ${initialPlan === 'basic' ? 'checked' : ''}>
             <input type="radio" name="plan" id="plan-pro" ${initialPlan === 'pro' ? 'checked' : ''}>
-            <input type="radio" name="plan" id="plan-team">
+            <input type="radio" name="plan" id="plan-team" ${initialPlan === 'team' ? 'checked' : ''}>
             <input id="support" type="checkbox"><button id="export">Export</button>
             <span id="basic-monthly"></span><span id="basic-payment"></span>
             <span id="pro-monthly"></span><span id="pro-payment"></span>
@@ -660,11 +636,16 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
                   document.getElementById(plan + '-payment').textContent = (monthly * (annual ? 12 : 1)).toFixed(2);
                 }
               }
-              document.addEventListener('input', render);
               document.addEventListener('change', render);
               document.getElementById('export').onclick = () => {
+                const mode = ${JSON.stringify(exportMode)};
+                const payment = document.getElementById('team-payment').textContent;
+                const grouped = Number(payment).toLocaleString('en-US', { maximumFractionDigits: 2 });
+                const rows = mode === 'wrong-plan'
+                  ? ['plan,payment', 'pro,' + payment, 'team,0']
+                  : ['"plan","payment"', '"team","' + (mode === 'stale-value' ? '14,227.20' : grouped) + '"'];
                 const link = document.createElement('a');
-                link.href = URL.createObjectURL(new Blob([${JSON.stringify(csv)}], { type: 'text/csv' }));
+                link.href = URL.createObjectURL(new Blob([rows.join(String.fromCharCode(13, 10))], { type: 'text/csv' }));
                 link.download = 'comparator.csv';
                 link.click();
               };
@@ -675,22 +656,81 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
           const initialPayment = await view
             .locator('#team-payment')
             .textContent();
+          const messages: ChatMessage[] = [];
+          const requests: RecordedRequest[] = [];
+          const toolCall = (id: string): ChatMessage => ({
+            role: 'assistant',
+            tool_calls: [{ id, function: { name: SHOW_TOOL } }],
+          });
+          const recordRequest = (prompt: string, id?: string) => {
+            messages.push({ role: 'user', content: prompt });
+            if (id) messages.push(toolCall(id));
+            requests.push({
+              messages: [...messages],
+              tools: [SHOW_TOOL],
+              main: true,
+              lastUserText: '',
+            });
+          };
+          recordRequest('initial', 'call-1');
+          const parked =
+            mode === 'parked-reset'
+              ? await newView(page, html, 'call-parked')
+              : undefined;
+          if (parked) {
+            await page
+              .locator('[data-transcript-tool-call-id="call-parked"]')
+              .evaluate((row) => {
+                row.removeAttribute('data-transcript-tool-call-id');
+                row.setAttribute('data-test-parked-card', '');
+                row.setAttribute('hidden', '');
+              });
+          }
           const env = {
             page,
             cardTimeoutMs: 100,
             startSession: async () => {},
             waitForCard: (index: number) => waitForCardOn(page, index, 100),
             waitForIdle: async () => {},
+            mainRequests: () => requests,
             send: async (prompt: string) => {
               const reset = prompt === 'reset';
+              if (reset && parked) {
+                await page
+                  .locator('[data-test-parked-card]')
+                  .evaluate((row) => {
+                    row.setAttribute(
+                      'data-transcript-tool-call-id',
+                      'call-parked',
+                    );
+                    row.removeAttribute('hidden');
+                  });
+                view = parked;
+                // A transcript snapshot can contain an old call that was not
+                // present in previous recorded requests.
+                messages.push(toolCall('call-parked'));
+                recordRequest(prompt);
+                return;
+              }
               if (mode === 'replace-card') {
                 await page
                   .locator('[data-transcript-tool-call-id]')
                   .last()
                   .evaluate((row) => row.remove());
               }
-              if (mode !== 'in-place') {
-                view = await newView(page, html, `call-${++cardCount}`);
+              const id = `call-${++cardCount}`;
+              recordRequest(prompt, id);
+              if (mode === 'in-place') {
+                await page
+                  .locator('[data-transcript-tool-call-id]')
+                  .last()
+                  .evaluate(
+                    (row, callId) =>
+                      row.setAttribute('data-transcript-tool-call-id', callId),
+                    id,
+                  );
+              } else {
+                view = await newView(page, html, id);
               }
               await view.evaluate(
                 ({
@@ -725,7 +765,7 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
                       ) as HTMLInputElement
                     ).checked = true;
                   if (!reset || resetFault !== 'amounts')
-                    document.dispatchEvent(new Event('input'));
+                    document.dispatchEvent(new Event('change'));
                   if (!reset && exportMode === 'moving-button') {
                     document
                       .getElementById('export')!
@@ -762,7 +802,7 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
           ).toEqual(expectedPlan ? [`plan-${expectedPlan}`] : []);
           expect(await view.locator('#team-payment').textContent()).toBe(
             resetFault === 'amounts'
-              ? '14227.20'
+              ? '15321.60'
               : resetFault === 'billing'
                 ? '5702.40'
                 : initialPayment,
@@ -774,9 +814,13 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
             'comparator.extends-existing-card':
               mode === 'in-place' ? 'pass' : 'fail',
             'comparator.exports-current-csv':
-              exportMode === 'wrong-plan' ? 'fail' : 'pass',
+              exportMode === 'wrong-plan' || exportMode === 'stale-value'
+                ? 'fail'
+                : 'pass',
             'comparator.reset-via-follow-up':
-              resetFault === 'none' ? 'pass' : 'fail',
+              resetFault === 'none' && mode !== 'parked-reset'
+                ? 'pass'
+                : 'fail',
           });
         } finally {
           await page.close();
@@ -810,6 +854,7 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
             startSession: async () => {},
             waitForCard: async () => ({ view, app: page.mainFrame() }),
             waitForIdle: async () => {},
+            mainRequests: () => [],
             send: async () => {},
           } as unknown as AcceptanceEnv;
           const exported = vi.spyOn(page, 'waitForEvent');
