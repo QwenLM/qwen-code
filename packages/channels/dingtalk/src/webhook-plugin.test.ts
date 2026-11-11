@@ -105,8 +105,9 @@ describe('DingTalk webhook plugin', () => {
           registerBridgeEvents ? 1 : 0,
         );
         await channel.connect();
+        const { type, id } = webhookPlugin.defaultDeliveryTarget!;
         await channel.deliverProactive(
-          { channelName: 'factory-robot', type: 'chat', id: 'default' },
+          { channelName: 'factory-robot', type, id },
           'Factory delivery',
         );
         expect(fetchMock).toHaveBeenCalledOnce();

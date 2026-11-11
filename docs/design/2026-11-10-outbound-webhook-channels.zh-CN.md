@@ -31,6 +31,10 @@ Worker 已在适配器 connect 成功后标记 connected，不要求持有 socke
 defaultDeliveryTarget 元数据。后者描述 user/chat 目标 ID 和可选显示名称，
 不包含凭证。发布前验证元数据；既有插件不填写新字段时保持原有行为。
 
+目录校验检查元数据结构、长度，并拒绝 `scheme://` 形式的 ID；它不是通用凭证
+检测器。插件作者必须确保公开的 ID 和 label 不含凭证。除此之外，ID 保留既有
+user/chat 不透明字符串语义，不引入仅允许 ASCII 字符的语法。
+
 新 dingtalk-webhook 插件声明 outboundOnly 为 true，固定目标为 chat/default。
 一个具名 Channel 绑定一个配置 endpoint；更换 URL 会改变通过该 Channel
 进行的后续投递目的地。
@@ -62,6 +66,12 @@ secret 类型的 signingSecret，复用现有环境变量引用及凭证编辑�
 启用签名时按钉钉文档算法生成新的毫秒时间戳和 HMAC-SHA256 签名，不缓存已签名
 URL。传输错误、无效响应、非成功 HTTP 状态及非零业务码均按 #7521 以有界、脱敏
 原因拒绝。错误不得暴露凭证 URL、签名、密钥或消息正文，不进行隐式重试。
+
+HTTP 408、425、429 和 5xx 按包内共享的钉钉策略分类为 transient。业务响应按
+官方[自定义机器人错误码表](https://open.dingtalk.com/document/development/custom-robots-send-group-messages)，
+将系统繁忙 `-1` 和限流 `410100` 分类为 transient；其他业务码保持 permanent，
+除非有该 endpoint 的证据支持不同分类。通用传输失败无法确定投递是否已被接受，
+因此脱敏错误保留这种不确定性。
 
 Connect 验证本地配置并初始化发送资源，不发送消息或建立长连接。
 Connected 表示本地已就绪，不代表远端凭证已验证。请求具有有界超时；disconnect

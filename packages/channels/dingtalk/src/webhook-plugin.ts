@@ -6,6 +6,7 @@
 
 import type { ChannelPlugin } from '@qwen-code/channel-base';
 import {
+  DINGTALK_WEBHOOK_DELIVERY_TARGET_ID,
   DingtalkWebhookChannel,
   parseDingtalkWebhookConfig,
 } from './DingtalkWebhookChannel.js';
@@ -18,7 +19,7 @@ export const webhookPlugin: ChannelPlugin = {
   outboundOnly: true,
   defaultDeliveryTarget: {
     type: 'chat',
-    id: 'default',
+    id: DINGTALK_WEBHOOK_DELIVERY_TARGET_ID,
     label: 'Configured group',
   },
   management: {
