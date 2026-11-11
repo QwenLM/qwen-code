@@ -13627,6 +13627,11 @@ export class Session implements SessionContext {
   #enqueueTeamRuntimeNotice(modelText: string, displayText: string): void {
     if (this.disposed) return;
     this.pendingExternalAgentContext.push(modelText);
+    // The notice no longer wakes the leader on its own (it is not a peer
+    // report), but if the queue has pending work the drain's turn will splice
+    // the parked text into the model request. Kick it so a queued item does
+    // not wait for a user turn that may never come.
+    void this.#drainNotificationQueue();
     this.config
       .getChatRecordingService()
       ?.recordNotification([{ text: modelText }], displayText);

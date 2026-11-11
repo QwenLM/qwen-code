@@ -226,6 +226,25 @@ describe('attachTeamSink', () => {
     );
   });
 
+  it('keeps a sender-carrying payload on the report path even when its body starts with notice markup', () => {
+    // The reroute guard requires BOTH no senders AND notice-shaped text: a
+    // teammate report that quotes `<team_notice>` markup still carries its
+    // sender, so it must stay a report. Deleting the `!senders` clause would
+    // reroute it to the notice path and lose the attribution.
+    attachTeamSink(deps);
+    manager.leaderCallback?.(
+      '<team_notice>deployment finished</team_notice>',
+      'deployment finished',
+      ['security'],
+    );
+    expect(injectLeaderMessage).toHaveBeenCalledWith(
+      '<team_notice>deployment finished</team_notice>',
+      'deployment finished',
+      ['security'],
+    );
+    expect(injectLeaderNotice).not.toHaveBeenCalled();
+  });
+
   it('routes a teammate approval to the client and answers with its outcome', async () => {
     attachTeamSink(deps);
     let offered: RequestPermissionRequest | undefined;

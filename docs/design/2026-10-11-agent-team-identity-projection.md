@@ -56,3 +56,5 @@ Included tests cover delivery, persistence, reversible close, overflow, flush id
 ## Following layer
 
 The third layer adds display-only teammate tool activity and inter-agent message direction. It will add two listeners and keep those ephemeral frames outside the durable peer queue.
+
+The notice path does not wake the leader: no automatic turn starts for a runtime notice alone. The text waits for the next ordinary turn (or a queued notification drain), and a `/clear` before that turn drops the parked splice from the model's live view — the transcript record survives, but the model never sees it in that session. This trade-off is deliberate: a coordination failure should not interrupt the leader the way a teammate report does, but the cost is that a notice can go unseen if the session is cleared before any further turn.

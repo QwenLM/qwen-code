@@ -58,4 +58,18 @@ describe('defangPeerNotificationTags', () => {
     const text = '<peer-notification-extra>keep</peer-notification-extra>';
     expect(defangPeerNotificationTags(text)).toBe(text);
   });
+
+  it('defangs the two shapes the single-character-class rewrite newly covers', () => {
+    // `<//peer-notification>` has two adjacent slashes; the old
+    // `\s*(?:\/\s*)?` pattern stopped after the first slash and missed it.
+    // `< / / /peer-notification>` interleaves slashes and whitespace; the old
+    // pattern consumed only one slash-whitespace pair. Both are now caught by
+    // the shared `(?:\/|\s)*` character class.
+    expect(defangPeerNotificationTags('<//peer-notification>')).toBe(
+      '&lt;//peer-notification>',
+    );
+    expect(defangPeerNotificationTags('< / / /peer-notification>')).toBe(
+      '&lt; / / /peer-notification>',
+    );
+  });
 });
