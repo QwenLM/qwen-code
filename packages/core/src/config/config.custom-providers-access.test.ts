@@ -8,7 +8,6 @@
 import { createEmptyLoadedSettings } from '../test-utils/config.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Config, type ConfigParameters } from './config.js';
-import { registerCustomProviderComposer } from '../provider/impl/customProviderComposers.js';
 import { synchronizeSessionModelProvider } from '../provider/session-model.js';
 import {
   mockListedModels,
@@ -144,29 +143,25 @@ describe('Custom Providers runtime access', () => {
     expect(config.getCustomProvidersState().status).toBe('not_configured');
   });
 
-  it('treats composer-owned settings as not configured and still refreshes providers', async () => {
-    registerCustomProviderComposer('reserved', () => undefined);
-    try {
-      const config = makeConfig({
-        customProviderSettings: { reserved: { anything: true } },
-      });
-      const replaceSpy = vi.spyOn(
-        config.getModelProviderManager(),
-        'replaceCustomProviders',
-      );
+  it('treats account-owned settings as not configured and still refreshes providers', async () => {
+    const subscriptionEntry = {
+      'qwen-subscription': { anything: true },
+    };
+    const config = makeConfig({
+      customProviderSettings: subscriptionEntry,
+    });
+    const replaceSpy = vi.spyOn(
+      config.getModelProviderManager(),
+      'replaceCustomProviders',
+    );
 
-      await config.initializeCustomProviders();
-      expect(config.getCustomProvidersState()).toEqual({
-        status: 'not_configured',
-      });
+    await config.initializeCustomProviders();
+    expect(config.getCustomProvidersState()).toEqual({
+      status: 'not_configured',
+    });
 
-      await config.replaceCustomProviderSettings({
-        reserved: { anything: true },
-      });
-      expect(replaceSpy).toHaveBeenCalledTimes(1);
-    } finally {
-      registerCustomProviderComposer('reserved', undefined);
-    }
+    await config.replaceCustomProviderSettings(subscriptionEntry);
+    expect(replaceSpy).toHaveBeenCalledTimes(1);
   });
 
   it('keeps disabled runtimes inactive', async () => {
@@ -228,6 +223,29 @@ describe('Custom Providers runtime access', () => {
     await synchronizeSessionModelProvider(config);
     expect(setMainModel).toHaveBeenCalledWith(
       expect.objectContaining({ key: params.model, source: 'qoder' }),
+      false,
+    );
+  });
+
+  it('anchors a model owned by a non-custom account provider', async () => {
+    const config = makeConfig();
+    const key = 'qwen-subscription/qwen3.8-max';
+    mockListedModels([
+      testListedModel(key, {
+        source: 'custom',
+        provider: 'qwen-subscription',
+      }),
+    ]);
+    const setMainModel = vi.spyOn(
+      config.getModelProviderManager(),
+      'setMainModel',
+    );
+    config.getModelProviderManager().setMainModelKey(key);
+
+    await synchronizeSessionModelProvider(config);
+
+    expect(setMainModel).toHaveBeenCalledWith(
+      expect.objectContaining({ key, source: 'qwen-subscription' }),
       false,
     );
   });

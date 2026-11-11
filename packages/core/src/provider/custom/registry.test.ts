@@ -5,14 +5,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { afterEach, describe, expect, it, vi } from 'vitest';
-import { registerCustomProviderComposer } from '../impl/customProviderComposers.js';
+import { describe, expect, it, vi } from 'vitest';
 import { CustomProviderRegistry } from './registry.js';
 
 describe('CustomProviderRegistry', () => {
-  afterEach(() => {
-    registerCustomProviderComposer('reserved', undefined);
-  });
   it('keeps secrets out of public projections', () => {
     const registry = new CustomProviderRegistry();
     registry.replace({
@@ -295,12 +291,15 @@ describe('CustomProviderRegistry', () => {
     );
   });
 
-  it('ignores settings owned by a registered composer', () => {
-    registerCustomProviderComposer('reserved', () => undefined);
+  it('ignores account-owned provider entries in settings', () => {
     const registry = new CustomProviderRegistry();
 
     const parsed = registry.replace({
-      reserved: { anything: true },
+      'qwen-subscription': {
+        baseUrl: 'https://api.qwen.ai/compatible-mode/v1',
+        apiKey: 'placeholder',
+        models: [{ model: 'qwen3.8-max' }],
+      },
       gateway: {
         baseUrl: 'https://models.example.com/v1',
         apiKey: 'top-secret-api-key',
@@ -312,7 +311,9 @@ describe('CustomProviderRegistry', () => {
     expect(parsed.providers.map((provider) => provider.providerId)).toEqual([
       'gateway',
     ]);
-    expect(registry.isCustomProviderModel('reserved/anything')).toBe(false);
+    expect(
+      registry.isCustomProviderModel('qwen-subscription/qwen3.8-max'),
+    ).toBe(false);
   });
 
   it('replaces state atomically and supports explicit clearing', () => {

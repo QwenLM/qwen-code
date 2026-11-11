@@ -145,7 +145,8 @@ function createLogoutCommand(deps: AuthPluginDeps): SlashCommand {
 /**
  * Qwen membership logout: only the active subscription connection is touched.
  * Credentials are removed so the account's models stop being listed; the
- * current model selection is left untouched, matching Qwen Code.
+ * current model selection is left untouched, matching Qwen Code. Any legacy
+ * `providers` entry is cleaned up as well.
  */
 async function logoutSubscription(
   context: CommandContext,

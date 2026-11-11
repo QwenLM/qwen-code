@@ -28,14 +28,13 @@ export {
 } from './oauth-client.js';
 export { QwenSubscriptionSession } from './session.js';
 export {
-  buildQwenSubscriptionProviderEntry,
   orderSubscriptionModels,
   qwenSubscriptionModel,
   qwenSubscriptionModelKey,
   selectQwenSubscriptionModel,
 } from './models.js';
 export {
-  composeQwenSubscriptionProvider,
+  QwenSubscriptionProvider,
   QwenSubscriptionProviderConfig,
-  registerQwenSubscriptionProviderComposer,
+  type CreateQwenSubscriptionProviderOptions,
 } from './provider.js';

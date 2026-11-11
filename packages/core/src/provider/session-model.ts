@@ -11,6 +11,7 @@ import { ModelNotFoundError } from '../utils/httpErrors.js';
 import type { ModelConfig } from './model/model.js';
 import type { ModelSelection } from './model/modelSelection.js';
 import type { ModelProviderManager } from './impl/modelProviderManager.js';
+import { QODER_PROVIDER_ID } from './modelProvider.js';
 
 /** 将业务边界的模型 key 兑换为覆盖选择；不切换主模型，也不读取会话偏好。 */
 export async function resolveModelSelectionOverride(
@@ -78,7 +79,7 @@ export async function synchronizeSessionModelProvider(
   const listed = models.find((entry) => entry.key === key);
   const owner = config.isConfiguredCustomProviderModelKey(key, listed)
     ? key.slice(0, key.indexOf('/'))
-    : 'qoder';
+    : (listed?.source ?? QODER_PROVIDER_ID);
   const model = models.find(
     (entry) => entry.key === key && entry.source === owner,
   );

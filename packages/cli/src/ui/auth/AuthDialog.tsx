@@ -22,14 +22,13 @@ import {
   QwenSubscriptionOAuthError,
   QwenSubscriptionSession,
   buildProviderSettingsEntry,
-  buildQwenSubscriptionProviderEntry,
   createQoderClient,
   discoverProviderModels,
   getQwenSubscriptionAuthorizationUrl,
   getQwenSubscriptionPlansUrl,
-  isComposedProviderId,
   isGenerationModelId,
   isQoderAccountRegion,
+  isReservedProviderId,
   openBrowserSecurely,
   parseCustomProviderSettings,
   resolveQoderAccountRegion,
@@ -51,6 +50,7 @@ import {
   type RadioSelectItem,
 } from '../components/shared/RadioButtonSelect.js';
 import { createQoderProviders } from '../../auth/qoderProviders.js';
+import { createQwenSubscriptionProvider } from '../../auth/subscriptionProviders.js';
 import { InputField } from '../components/shared/InputField.js';
 import { Link } from '../components/shared/Link.js';
 import { useSearchBuffer } from '../hooks/useSearchBuffer.js';
@@ -268,6 +268,7 @@ function invalidUserCustomProviderIds(
   settings: LoadedSettings,
 ): string[] {
   const providers = settings.merged?.providers ?? {};
+  const userProviders = settings.user?.settings?.providers ?? {};
   const state = config.getCustomProvidersState?.();
   const stateIssues = state && 'issues' in state ? (state.issues ?? []) : [];
   const parsed = parseCustomProviderSettings(
@@ -277,20 +278,32 @@ function invalidUserCustomProviderIds(
     settings.flag,
     ...(settings.isTrusted ? [settings.project, settings.local] : []),
   ].filter((file) => file !== undefined);
+  const isOverridden = (id: string): boolean =>
+    overrides.some((file) =>
+      Object.hasOwn(file.settings.providers ?? {}, id),
+    );
   const ids = new Set<string>();
   for (const issue of [...stateIssues, ...parsed.issues]) {
     const id = issue.providerId;
-    if (id === '*' || !Object.hasOwn(providers, id)) continue;
-    // Reserved account entries are owned by their composer, not the generic
-    // Custom Provider configuration surface.
-    if (isComposedProviderId(id)) continue;
     if (
-      overrides.some((file) =>
-        Object.hasOwn(file.settings.providers ?? {}, id),
-      )
+      id === '*' ||
+      isReservedProviderId(id) ||
+      !Object.hasOwn(providers, id) ||
+      isOverridden(id)
     )
       continue;
     ids.add(id);
+  }
+  // Account providers never live in settings anymore. Any entry still there
+  // is a legacy leftover the user may remove from this dialog.
+  for (const id of Object.keys(userProviders)) {
+    if (
+      isReservedProviderId(id) &&
+      Object.hasOwn(providers, id) &&
+      !isOverridden(id)
+    ) {
+      ids.add(id);
+    }
   }
   return [...ids];
 }
@@ -352,9 +365,12 @@ export function AuthDialog({
           ...invalidProviderIds.map((id) => ({
             key: `${REMOVE_INVALID_PREFIX}${id}`,
             value: `${REMOVE_INVALID_PREFIX}${id}` as const,
-            label: `Remove invalid Custom Provider: ${id}`,
-            sublabel:
-              'Its settings are ignored by the model catalog until removed.',
+            label: isReservedProviderId(id)
+              ? `Remove legacy account entry: ${id}`
+              : `Remove invalid Custom Provider: ${id}`,
+            sublabel: isReservedProviderId(id)
+              ? 'Safe to remove. Your Qwen login and model list are stored in your account credentials.'
+              : 'Its settings are ignored by the model catalog until removed.',
           })),
         ]
       : MAIN_ITEMS;
@@ -409,13 +425,24 @@ export function AuthDialog({
   }
 
   if (page.kind === 'remove-invalid') {
+    const isLegacyAccount = isReservedProviderId(page.providerId);
     return (
       <Frame
-        title="Remove Invalid Custom Provider"
+        title={
+          isLegacyAccount
+            ? 'Remove Legacy Account Entry'
+            : 'Remove Invalid Custom Provider'
+        }
         error={mainError}
         footer={MENU_HINT}
       >
         <Text>{page.providerId}</Text>
+        {isLegacyAccount ? (
+          <Text color={theme.text.secondary}>
+            Removing this settings entry does not sign you out; your Qwen
+            credentials stay in place.
+          </Text>
+        ) : null}
         <RadioButtonSelect
           showNumbers={false}
           items={[
@@ -434,7 +461,11 @@ export function AuthDialog({
                 page.providerId,
               ])
             ) {
-              setMainError('Could not remove the invalid custom provider.');
+              setMainError(
+                isLegacyAccount
+                  ? 'Could not remove the legacy account entry.'
+                  : 'Could not remove the invalid custom provider.',
+              );
               setPage({ kind: 'main' });
               return;
             }
@@ -2149,22 +2180,26 @@ function QwenAccountLogin({
       signal.throwIfAborted();
       const modelId = selectQwenSubscriptionModel(models);
       if (!modelId) throw new QwenSubscriptionOAuthError('models_unavailable');
-      const entry = buildQwenSubscriptionProviderEntry(models);
-      const savedProvider = settings.setValue(
-        SettingScope.User,
-        ['providers', entry.providerId],
-        entry.value,
-      );
       const savedAuthType = settings.setValue(
         SettingScope.User,
         'security.auth.selectedType',
         AuthType.QWEN_SUBSCRIPTION,
       );
-      if (!savedProvider || !savedAuthType) {
+      if (!savedAuthType) {
         throw new Error(
           'Could not write Qwen account settings to settings.json.',
         );
       }
+      // The catalog lives with the account credentials, not in settings.
+      const manager = config.getModelProviderManager();
+      await manager.registerAccountProvider(
+        createQwenSubscriptionProvider(
+          config.getSettingsService(),
+          config.getModelTransportManager(),
+          session,
+        ),
+      );
+      signal.throwIfAborted();
       patch({
         phase: 'success',
         email: info.email,

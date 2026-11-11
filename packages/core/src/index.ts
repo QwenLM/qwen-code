@@ -205,7 +205,6 @@ export {
   createCustomModelProvidersFromSettingsTexts,
   customProviderConfigFromRuntime,
 } from './provider/impl/customModelProviderFactory.js';
-export { isComposedProviderId } from './provider/impl/customProviderComposers.js';
 
 export * from './client/index.js';
 export * from './client/pipeline/customOutboundPipeline.js';
@@ -835,7 +834,9 @@ export {
   REMOVED_GENERATION_FIELDS,
   REMOVED_PROVIDER_MODEL_FIELDS,
   REMOVED_MODEL_GENERATION_FIELDS,
+  RESERVED_PROVIDER_IDS,
   getRemovedCustomProviderFieldMessage,
+  isReservedProviderId,
   parseCustomProviderSettings,
 } from './provider/custom/parser.js';
 

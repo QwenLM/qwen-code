@@ -96,6 +96,26 @@ export function getRemovedCustomProviderFieldMessage(field: string): string {
   return 'Generation parameters must be configured under model.preferences[provider/model].';
 }
 
+/** Provider ids owned by account-backed providers, never by user settings. */
+export const RESERVED_PROVIDER_IDS: ReadonlySet<string> = new Set([
+  'qoder',
+  'qwen-subscription',
+]);
+
+export function isReservedProviderId(providerId: string): boolean {
+  return RESERVED_PROVIDER_IDS.has(providerId);
+}
+
+/** Drops account-owned ids so the generic parser never reports them. */
+export function withoutReservedProviderSettings(value: unknown): unknown {
+  if (!isRecord(value)) return value;
+  return Object.fromEntries(
+    Object.entries(value).filter(
+      ([providerId]) => !isReservedProviderId(providerId),
+    ),
+  );
+}
+
 export function parseCustomProviderSettings(
   value: unknown,
 ): CustomProviderParseResult {
@@ -137,8 +157,7 @@ function parseProvider(
   };
 
   if (
-    providerId === 'qoder' ||
-    providerId === 'qwen-subscription' ||
+    isReservedProviderId(providerId) ||
     !PROVIDER_ID_PATTERN.test(providerId)
   ) {
     issue(

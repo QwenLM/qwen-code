@@ -9,13 +9,10 @@ import {
   DEFAULT_CUSTOM_PROVIDER_CONTEXT_WINDOW,
   DEFAULT_CUSTOM_PROVIDER_MAX_OUTPUT_TOKENS,
 } from '../../provider/custom/builtins.js';
-import type { ProviderSettingsEntry } from '../../provider/presets/types.js';
 import type { Model } from '../../provider/model/model.js';
 import {
-  QWEN_SUBSCRIPTION_BASE_URL,
   QWEN_SUBSCRIPTION_MODEL,
   QWEN_SUBSCRIPTION_PROVIDER_ID,
-  QWEN_SUBSCRIPTION_TOKEN_PLACEHOLDER,
 } from './oauth-config.js';
 
 interface SubscriptionModelSpec {
@@ -63,36 +60,6 @@ export function selectQwenSubscriptionModel(
   return models.includes(QWEN_SUBSCRIPTION_MODEL)
     ? QWEN_SUBSCRIPTION_MODEL
     : models[0];
-}
-
-/**
- * One `settings.providers` entry for the membership account. The stored key is
- * a placeholder: requests read the rotating token from the credential file.
- */
-export function buildQwenSubscriptionProviderEntry(
-  models: readonly string[],
-): ProviderSettingsEntry {
-  const ordered = orderSubscriptionModels(models);
-  return {
-    providerId: QWEN_SUBSCRIPTION_PROVIDER_ID,
-    value: {
-      protocol: 'openai',
-      baseUrl: QWEN_SUBSCRIPTION_BASE_URL,
-      apiKey: QWEN_SUBSCRIPTION_TOKEN_PLACEHOLDER,
-      displayName: 'Qwen Account',
-      models: ordered.map((id) => {
-        const known = KNOWN_MODELS.find((model) => model.id === id);
-        return {
-          model: id,
-          ...(known?.displayName ? { displayName: known.displayName } : {}),
-          ...(known?.contextWindow
-            ? { contextWindow: known.contextWindow }
-            : {}),
-          ...(known?.vision ? { capabilities: { vision: true } } : {}),
-        };
-      }),
-    },
-  };
 }
 
 export function qwenSubscriptionModelKey(modelId: string): string {

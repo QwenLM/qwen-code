@@ -82,6 +82,7 @@ import {
 import {
   CustomProviderRegistry,
   formatCustomProviderConfigurationWarnings,
+  isReservedProviderId,
   type CustomProviderModelDescriptor,
   type CustomProvidersState,
   type CustomProvidersInactiveReason,
@@ -5346,7 +5347,10 @@ export class Config implements AgentLoopContext {
 
   hasCustomProviderSettings(): boolean {
     const settings = this.getCustomProviderSettingsRecord();
-    return settings !== undefined && Object.keys(settings).length > 0;
+    return (
+      settings !== undefined &&
+      Object.keys(settings).some((providerId) => !isReservedProviderId(providerId))
+    );
   }
 
   getCustomProviderManager(): CustomProviderManager {
@@ -5581,6 +5585,7 @@ export class Config implements AgentLoopContext {
     const separator = modelKey.indexOf('/');
     if (separator <= 0) return false;
     const providerId = modelKey.slice(0, separator);
+    if (isReservedProviderId(providerId)) return false;
     return Object.prototype.hasOwnProperty.call(settings, providerId);
   }
 

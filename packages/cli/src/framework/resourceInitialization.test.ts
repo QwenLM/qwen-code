@@ -19,11 +19,16 @@ import {
   createQoderProviders,
   isQoderAccountConfigured,
 } from '../auth/qoderProviders.js';
+import { createQwenSubscriptionProviders } from '../auth/subscriptionProviders.js';
 
 vi.mock('../auth/qoderProviders.js', () => ({
   createQoderProviders: vi.fn(() => [{ providerId: 'qoder' }]),
   isQoderAccountConfigured: vi.fn(() => false),
   resolveConfiguredQoderRegion: vi.fn(() => 'global'),
+}));
+
+vi.mock('../auth/subscriptionProviders.js', () => ({
+  createQwenSubscriptionProviders: vi.fn(() => []),
 }));
 
 const settings = {
@@ -34,6 +39,8 @@ const transports = {} as ModelTransportManager;
 describe('createPublicProviders', () => {
   beforeEach(() => {
     vi.mocked(createQoderProviders).mockClear();
+    vi.mocked(createQwenSubscriptionProviders).mockClear();
+    vi.mocked(createQwenSubscriptionProviders).mockReturnValue([]);
     vi.mocked(isQoderAccountConfigured).mockReset().mockReturnValue(false);
     setDefaultAuthType(CoreAuthType.QODER_BROWSER);
   });
@@ -73,6 +80,22 @@ describe('createPublicProviders', () => {
 
     expect(createQoderProviders).toHaveBeenCalledTimes(1);
     expect(providers.map((provider) => provider.providerId)).toContain('qoder');
+  });
+
+  it('adds the Qwen subscription provider when the account is signed in', () => {
+    vi.mocked(createQwenSubscriptionProviders).mockReturnValue([
+      { providerId: 'qwen-subscription' } as never,
+    ]);
+
+    const providers = createPublicProviders(settings, transports);
+
+    expect(createQwenSubscriptionProviders).toHaveBeenCalledWith(
+      settings,
+      transports,
+    );
+    expect(providers.map((provider) => provider.providerId)).toContain(
+      'qwen-subscription',
+    );
   });
 
   it('keeps the built-in default when no type is selected', () => {

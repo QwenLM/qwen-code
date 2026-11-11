@@ -13,7 +13,10 @@ import {
   providerIdForPreset,
   type Config,
 } from '@qwen-code/core';
-import type { LoadedSettings } from '../../config/settings.js';
+import {
+  SettingScope,
+  type LoadedSettings,
+} from '../../config/settings.js';
 import { renderWithProviders } from '../../test-utils/render.js';
 import { AuthDialog } from './AuthDialog.js';
 import { figures } from '../utils/figures.js';
@@ -544,7 +547,15 @@ describe('AuthDialog custom provider flow', () => {
     }
   });
 
-  it('does not offer to remove the reserved Qwen account provider', async () => {
+  it('offers to remove the legacy Qwen account entry', async () => {
+    const legacyProviders = {
+      'qwen-subscription': {
+        protocol: 'openai',
+        baseUrl: 'https://api.qwen.ai/compatible-mode/v1',
+        apiKey: 'placeholder',
+        models: [{ model: 'qwen3.8-max' }],
+      },
+    };
     const config = {
       isBrowserLaunchSuppressed: () => true,
       getModelProviderManager: () => ({ listModels: async () => [] }),
@@ -554,20 +565,20 @@ describe('AuthDialog custom provider flow', () => {
           { providerId: 'qwen-subscription', message: 'reserved provider id' },
         ],
       }),
+      reloadModelConfigFromDisk: vi.fn(async () => {}),
     } as unknown as Config;
     const settings = {
       merged: {
         security: { auth: {} },
-        providers: {
-          'qwen-subscription': {
-            protocol: 'openai',
-            baseUrl: 'https://api.qwen.ai/compatible-mode/v1',
-            apiKey: 'placeholder',
-            models: [{ model: 'qwen3.8-max' }],
-          },
-        },
+        providers: legacyProviders,
       },
+      user: { settings: { providers: legacyProviders } },
+      flag: { settings: {} },
+      project: { settings: {} },
+      local: { settings: {} },
+      isTrusted: true,
       setValue: vi.fn(() => true),
+      deleteValue: vi.fn(() => true),
     } as unknown as LoadedSettings;
     const view = await renderWithProviders(
       <AuthDialog
@@ -582,9 +593,22 @@ describe('AuthDialog custom provider flow', () => {
     await view.waitUntilReady();
 
     try {
-      expect(view.lastFrame()).not.toContain(
-        'Remove invalid Custom Provider',
+      expect(view.lastFrame()).toContain(
+        'Remove legacy account entry: qwen-subscription',
       );
+      // Main menu → last item (the legacy entry).
+      for (let i = 0; i < 6; i++) await press(view, '\u001b[B');
+      await press(view, '\r');
+      expect(view.lastFrame()).toContain('Remove Legacy Account Entry');
+      expect(view.lastFrame()).toContain('does not sign you out');
+
+      await press(view, '\u001b[B');
+      await press(view, '\r');
+      expect(settings.deleteValue).toHaveBeenCalledWith(
+        SettingScope.User,
+        ['providers', 'qwen-subscription'],
+      );
+      expect(settings.setValue).not.toHaveBeenCalled();
     } finally {
       view.unmount();
     }

@@ -5,7 +5,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import type { Config } from '@qwen-code/core';
 import { SettingScope, type LoadedSettings } from '../../config/settings.js';
@@ -19,11 +19,18 @@ const subscription = vi.hoisted(() => ({
   signOut: vi.fn(async () => {}),
 }));
 const createSession = vi.hoisted(() => vi.fn(() => subscription));
+const createSubscriptionProvider = vi.hoisted(() =>
+  vi.fn(() => ({ providerId: 'qwen-subscription' })),
+);
 
 vi.mock('@qwen-code/core', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@qwen-code/core')>();
   return { ...actual, QwenSubscriptionSession: createSession };
 });
+
+vi.mock('../../auth/subscriptionProviders.js', () => ({
+  createQwenSubscriptionProvider: createSubscriptionProvider,
+}));
 
 async function press(
   view: {
@@ -46,12 +53,18 @@ async function flush(ms = 200): Promise<void> {
 }
 
 function createConfig(): Config {
+  const manager = {
+    listModels: async () => [],
+    registerAccountProvider: vi.fn(async () => {}),
+  };
   return {
     isBrowserLaunchSuppressed: () => true,
     reloadModelConfigFromDisk: vi.fn(async () => {}),
     getCustomProvidersState: vi.fn(async () => ({})),
     setModel: vi.fn(async () => true),
-    getModelProviderManager: () => ({ listModels: async () => [] }),
+    getSettingsService: vi.fn(() => ({})),
+    getModelTransportManager: vi.fn(() => ({})),
+    getModelProviderManager: () => manager,
   } as unknown as Config;
 }
 
@@ -63,6 +76,10 @@ function createSettings(): LoadedSettings {
 }
 
 describe('AuthDialog Qwen account', () => {
+  beforeEach(() => {
+    createSubscriptionProvider.mockClear();
+  });
+
   it('signs in, activates the model and reports the account', async () => {
     let approve: (() => void) | undefined;
     subscription.signIn.mockImplementation(
@@ -123,19 +140,22 @@ describe('AuthDialog Qwen account', () => {
 
       expect(settings.setValue).toHaveBeenCalledWith(
         SettingScope.User,
-        ['providers', 'qwen-subscription'],
-        expect.objectContaining({
-          protocol: 'openai',
-          baseUrl: 'https://api.qwen.ai/compatible-mode/v1',
-          apiKey: 'QWEN_SUBSCRIPTION_DYNAMIC_TOKEN',
-          models: expect.any(Array),
-        }),
-      );
-      expect(settings.setValue).toHaveBeenCalledWith(
-        SettingScope.User,
         'security.auth.selectedType',
         'qwen-subscription',
       );
+      expect(settings.setValue).not.toHaveBeenCalledWith(
+        SettingScope.User,
+        ['providers', 'qwen-subscription'],
+        expect.anything(),
+      );
+      expect(createSubscriptionProvider).toHaveBeenCalledOnce();
+      expect(
+        (
+          config.getModelProviderManager() as unknown as {
+            registerAccountProvider: ReturnType<typeof vi.fn>;
+          }
+        ).registerAccountProvider,
+      ).toHaveBeenCalledWith({ providerId: 'qwen-subscription' });
 
       await press(view, '\r');
       expect(onDone).toHaveBeenCalledWith({
