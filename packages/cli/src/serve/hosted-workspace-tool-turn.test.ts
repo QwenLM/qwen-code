@@ -2244,14 +2244,18 @@ it('an auto-mode arm is classified once by the funnel, not the approval path', a
   const gateBefore = process.env[gateKey];
   process.env[gateKey] = 'true';
   try {
-    const approvalClassifier = vi.fn(async () => ({
-      shouldBlock: false,
-      unavailable: false,
-      reason: '',
-      model: 'classifier',
-      stage: 'fast',
-      durationMs: 0,
-    }));
+    const approvalClassifier = vi.fn(
+      async (): Promise<
+        import('@qwen-code/qwen-code-core/permissions/classifier.js').ClassifierResult
+      > => ({
+        shouldBlock: false,
+        unavailable: false,
+        reason: '',
+        model: 'classifier',
+        stage: 'fast',
+        durationMs: 0,
+      }),
+    );
     const funnelClassify = vi.fn(async () => ({ allowed: true, reason: null }));
     const loops = new HostedLoopSession(
       {

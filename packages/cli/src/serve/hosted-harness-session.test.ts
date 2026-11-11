@@ -297,6 +297,11 @@ const state = vi.hoisted(() => ({
       modelConfig?: import('./hosted-model-config.js').HostedModelConfigReader;
       memory?: import('./hosted-memory-session.js').HostedMemorySession;
       recallUserInput?: boolean;
+      setLoopClassifier?: (
+        classify:
+          | import('./hosted-loop-session.js').HostedLoopClassifier
+          | undefined,
+      ) => void;
     }) => ({
       text: 'hello back',
       model: 'test-model',
@@ -9092,9 +9097,9 @@ describe('Hosted Harness no-tool session', () => {
           callId: 'call-successor-arm',
           args: { delaySeconds: 60, prompt: '/loop next tick' },
           isClientInitiated: false,
-          prompt_id: input.promptId,
+          prompt_id: input.promptId ?? '',
         };
-        await input.toolTurn.execute(
+        await input.toolTurn!.execute(
           [call],
           [
             {
