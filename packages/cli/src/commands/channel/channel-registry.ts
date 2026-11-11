@@ -244,6 +244,17 @@ function assertManagementField(
       );
     }
   }
+  const minimum = (field as { minimum?: unknown }).minimum;
+  if (minimum !== undefined) {
+    if (field.kind !== 'number') {
+      throw new Error(
+        `Channel field "${path}" can only declare minimum on number fields.`,
+      );
+    }
+    if (typeof minimum !== 'number' || !Number.isFinite(minimum)) {
+      throw new Error(`Channel field "${path}" must declare a finite minimum.`);
+    }
+  }
   const maximum = (field as { maximum?: unknown }).maximum;
   if (maximum !== undefined) {
     if (field.kind !== 'number') {
@@ -255,8 +266,9 @@ function assertManagementField(
       throw new Error(`Channel field "${path}" must declare a finite maximum.`);
     }
     if (
-      field.exclusiveMinimum !== undefined &&
-      maximum <= field.exclusiveMinimum
+      (field.exclusiveMinimum !== undefined &&
+        maximum <= field.exclusiveMinimum) ||
+      (field.minimum !== undefined && maximum < field.minimum)
     ) {
       throw new Error(
         `Channel field "${path}" declares a maximum that leaves no valid value.`,

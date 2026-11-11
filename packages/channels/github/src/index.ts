@@ -211,11 +211,11 @@ export const plugin: ChannelPlugin = {
         key: 'prWatchBudgetReserve',
         label: 'PR Watch Budget Reserve',
         kind: 'number',
-        exclusiveMinimum: -1,
+        minimum: 0,
         maximum: MAX_PR_WATCH_BUDGET_RESERVE,
         default: String(DEFAULT_PR_WATCH_BUDGET_RESERVE),
         description:
-          'REST requests held back for the interactive notification lane (requires Deliver To PR-Bound Sessions and PR Watch Events). When the last known remaining budget is at or below this, the PR state watch is skipped for that poll — and stopped mid-pass if a pass spends down to it — so a human mention is not starved by background polling; detection resumes once the budget recovers or its window resets. The default (200) is ~4% of a 5000/hour PAT budget. Set 0 to disable the gate. Leave empty for the default.',
+          'REST requests held back for the interactive notification lane (requires Deliver To PR-Bound Sessions; the gate covers the comment watch too, so PR Watch Events are not required). When the last known remaining budget is at or below this, the PR state watch is skipped for that poll — and stopped mid-pass if a pass spends down to it — so a human mention is not starved by background polling; detection resumes once the budget recovers or its window resets. The default (200) is ~4% of a 5000/hour PAT budget. Set 0 to disable the gate. Leave empty for the default.',
       },
       {
         key: 'boundSessionActions',
