@@ -116,7 +116,16 @@ export function createPrWatchDeps(sources: PrWatchDepsSources): PrWatchDeps {
     allowedHosts.add(host);
   }
   for (const baseUrl of sources.hostedChannelBaseUrls()) {
-    allowedHosts.add(normalizeWatchHost(resolveGithubWebOrigin(baseUrl)));
+    // resolveGithubWebOrigin returns a web ORIGIN ("https://host"), not a bare
+    // host, and normalizeWatchHost does not strip the scheme. The watch identity
+    // carries a bare hostname with no port, so take hostname — not host.
+    let hostname: string;
+    try {
+      hostname = new URL(resolveGithubWebOrigin(baseUrl)).hostname;
+    } catch {
+      continue;
+    }
+    allowedHosts.add(normalizeWatchHost(hostname));
   }
 
   const resolveRuntime = (workspaceCwd: string): WorkspaceRuntime | undefined =>

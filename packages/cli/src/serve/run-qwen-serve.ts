@@ -7636,13 +7636,47 @@ async function runQwenServeImpl(
       void import('./server/session-pr-refresh.js')
         .then(async (mod) => {
           if (refreshGeneration !== sessionPrRefreshGeneration) return;
-          // Built once, asynchronously: the allowed set needs the hosted
-          // channels' configs, whose loader is async. Until it resolves the
-          // getters return undefined and the watch stays inert — the same
-          // degradation as a failed chunk load.
+          // The module and the channel-config loader are async and loaded
+          // once; the deps are rebuilt whenever the hosted channels change.
+          // Building them only once would freeze the allowed set before the
+          // channels commit at listen — this load usually wins that race — and
+          // would never pick up a channel added later.
           let prWatchDeps:
             | import('./server/pr-watch-deps.js').PrWatchDeps
             | undefined;
+          let prWatchHostsSignature: string | undefined;
+          let prWatchSources:
+            | Omit<
+                import('./server/pr-watch-deps.js').PrWatchDepsSources,
+                'hostedChannelBaseUrls'
+              >
+            | undefined;
+          let createPrWatchDeps:
+            | typeof import('./server/pr-watch-deps.js').createPrWatchDeps
+            | undefined;
+          let readHostedChannelBaseUrls: (() => readonly unknown[]) | undefined;
+          const resolvePrWatchDeps = () => {
+            if (
+              !createPrWatchDeps ||
+              !prWatchSources ||
+              !readHostedChannelBaseUrls
+            ) {
+              return undefined;
+            }
+            const urls = readHostedChannelBaseUrls();
+            const signature = urls.map((url) => String(url)).join('|');
+            // One build shared by both getters: two builds would hand the
+            // observation and the drain different lock registries.
+            if (prWatchDeps && signature === prWatchHostsSignature) {
+              return prWatchDeps;
+            }
+            prWatchHostsSignature = signature;
+            prWatchDeps = createPrWatchDeps({
+              ...prWatchSources,
+              hostedChannelBaseUrls: () => urls,
+            });
+            return prWatchDeps;
+          };
           void (async () => {
             try {
               const [depsMod, webhookRuntime] = await Promise.all([
@@ -7650,7 +7684,8 @@ async function runQwenServeImpl(
                 loadChannelWebhookConfigRuntime(),
               ]);
               if (refreshGeneration !== sessionPrRefreshGeneration) return;
-              prWatchDeps = depsMod.createPrWatchDeps({
+              createPrWatchDeps = depsMod.createPrWatchDeps;
+              prWatchSources = {
                 workspaceRegistry,
                 archiveCoordinator: () =>
                   (
@@ -7687,32 +7722,32 @@ async function runQwenServeImpl(
                     isCancelled: () => false,
                   });
                 },
-                // Only the groups the channel grouping already attributed to a
-                // trusted workspace, so an untrusted workspace's settings never
-                // widen the allowed set.
-                hostedChannelBaseUrls: () => {
-                  const urls: unknown[] = [];
-                  for (const group of channelWorkspaceGroups ?? []) {
-                    let merged: Record<string, unknown>;
-                    try {
-                      merged = webhookRuntime.loadChannelsConfig(
-                        group.workspaceCwd,
-                      );
-                    } catch {
-                      continue;
-                    }
-                    for (const entry of Object.values(merged)) {
-                      if (!entry || typeof entry !== 'object') continue;
-                      const config = entry as Record<string, unknown>;
-                      if (config['type'] !== 'github') continue;
-                      urls.push(config['baseUrl']);
-                    }
-                  }
-                  return urls;
-                },
                 daemonLog,
                 log: (message) => daemonLog.warn(message),
-              });
+              };
+              // Only the groups the channel grouping already attributed to a
+              // trusted workspace, so an untrusted workspace's settings never
+              // widen the allowed set.
+              readHostedChannelBaseUrls = () => {
+                const urls: unknown[] = [];
+                for (const group of channelWorkspaceGroups ?? []) {
+                  let merged: Record<string, unknown>;
+                  try {
+                    merged = webhookRuntime.loadChannelsConfig(
+                      group.workspaceCwd,
+                    );
+                  } catch {
+                    continue;
+                  }
+                  for (const entry of Object.values(merged)) {
+                    if (!entry || typeof entry !== 'object') continue;
+                    const config = entry as Record<string, unknown>;
+                    if (config['type'] !== 'github') continue;
+                    urls.push(config['baseUrl']);
+                  }
+                }
+                return urls;
+              };
             } catch (error) {
               daemonLog.warn(
                 `PR watch deps unavailable: ${
@@ -7732,8 +7767,8 @@ async function runQwenServeImpl(
                   sessionArchiveCoordinator?: SessionArchiveCoordinator;
                 }
               ).sessionArchiveCoordinator,
-            getPrWatchDeps: () => prWatchDeps?.watch,
-            getPrDrainDeps: () => prWatchDeps?.drain,
+            getPrWatchDeps: () => resolvePrWatchDeps()?.watch,
+            getPrDrainDeps: () => resolvePrWatchDeps()?.drain,
           });
           const handle = sessionPrRefreshTimer;
           stopPrWatchOnShutdown = handle ? () => handle.stopWatch() : undefined;

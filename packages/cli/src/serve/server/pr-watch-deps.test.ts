@@ -121,12 +121,15 @@ describe('createPrWatchDeps', () => {
 
   it('always allows github.com and adds the gh hosts and hosted origins', () => {
     readGhConfiguredHostsMock.mockReturnValue(new Set(['ghe.example.com']));
-    const { watch } = build({
-      hosted: ['https://ghe.channel.example.com/api'],
-    });
-    expect(watch.allowedHosts.has('github.com')).toBe(true);
-    expect(watch.allowedHosts.has('ghe.example.com')).toBe(true);
-    expect(watch.allowedHosts.size).toBeGreaterThanOrEqual(3);
+    const { watch } = build({ hosted: ['https://api.acme.ghe.com'] });
+    // The bare hostname, not the origin URL: the watch identity carries no
+    // scheme and no port, so an origin-shaped entry would never match.
+    expect(watch.allowedHosts.has('https://acme.ghe.com')).toBe(false);
+    expect([...watch.allowedHosts].sort()).toEqual([
+      'acme.ghe.com',
+      'ghe.example.com',
+      'github.com',
+    ]);
   });
 
   it('shares one watch directory and lock registry between both seams', () => {
