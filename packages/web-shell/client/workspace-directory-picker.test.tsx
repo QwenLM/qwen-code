@@ -152,7 +152,6 @@ vi.mock('@xterm/xterm', () => ({ Terminal: class {} }));
 vi.mock('./components/TranscriptViewport', () => ({
   TranscriptViewport: () => null,
 }));
-vi.mock('./components/StatusBar', () => ({ StatusBar: () => null }));
 vi.mock('./components/WelcomeHeader', () => ({ WelcomeHeader: () => null }));
 vi.mock('./components/sidebar/WebShellSidebar', async (importOriginal) => ({
   ...(await importOriginal<

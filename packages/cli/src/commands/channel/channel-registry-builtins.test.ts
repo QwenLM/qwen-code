@@ -71,18 +71,21 @@ describe('built-in channel registry', () => {
       type: 'dingtalk',
       displayName: 'DingTalk',
       manageable: false,
+      supportsQrLogin: false,
       fields: [],
     });
     expect(catalog.map((entry) => entry.type)).toContain('gitlab');
     expect(
       catalog.filter((entry) => entry.manageable).map((entry) => entry.type),
     ).toEqual([
+      'weixin',
       'dingtalk-webhook',
       'dws',
       'email',
       'wecom',
       'wecom-callback',
       'feishu',
+      'qq',
       'github',
       'gitlab',
     ]);

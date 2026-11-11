@@ -45,6 +45,7 @@ public final class ManagedSchemaContract {
                     "ma_channel_instance",
                     "ma_channel_binding",
                     "ma_delivery",
+                    "ma_channel_segment",
                     "ma_schedule",
                     "ma_schedule_occurrence");
 
