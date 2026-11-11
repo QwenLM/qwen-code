@@ -130,6 +130,8 @@ class TerminalRelayHandlerTest {
         when(broker.admitTerminalHold("session-a", "term-1"))
                 .thenReturn(CompletableFuture.completedFuture(
                         new TerminalHoldAdmission(hold("terminal-attach:term-1:process"), false)));
+        when(broker.abandonTerminalHold(anyString(), anyString(), anyString()))
+                .thenReturn(CompletableFuture.completedFuture(null));
         TerminalRelayHandler handler = new TerminalRelayHandler(broker, client);
         WebSocketSession session = session();
 
