@@ -1497,10 +1497,10 @@ jobs:
         # negation has no positive set to subtract from and matches nothing.
         # With `followSymbolicLinks` on by default, `packages/**` therefore
         # counts every pnpm link copy of a workspace report — the badge
-        # multiplies. These four positive patterns are exactly the lane
-        # workspaces' report locations and nothing else; the completeness
-        # meta-test derives the set from the workspace configs and fails if a
-        # workspace is added or one of these patterns is dropped or widened
+        # multiplies. These four positive patterns cover the declared
+        # workspaces' report locations; the completeness meta-test derives
+        # that set from the workspace declarations and fails if a workspace
+        # is added or one of these patterns is dropped or widened
         continue-on-error: true
         uses: 'dorny/test-reporter@a43b3a5f7366b97d083190328d2c652e1a8b6aa2' # ratchet:dorny/test-reporter@v3
         with:
