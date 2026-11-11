@@ -401,7 +401,7 @@ Things to know about this endpoint:
 
 - **Pin `contextWindowSize`.** The dotted publisher prefix is not stripped by the built-in model lookup, so an entry without it gets the generic defaults.
 - **No `GET /models`.** Model discovery is not available; list the models you want explicitly.
-- **GPT-5 and o-series on Chat Completions need `max_completion_tokens`.** Those families reject `max_tokens`. Until that key is chosen automatically, either use the Responses wire as above or add `"samplingParams": { "max_completion_tokens": 32000 }` to the entry's `generationConfig`.
+- **GPT-5 and o-series on Chat Completions take `max_completion_tokens`.** Those families reject `max_tokens`, so the output budget is sent as `max_completion_tokens` for them automatically, including a "Max output tokens" value set in provider setup. A hand-written `samplingParams.max_tokens` is still sent verbatim and is rejected by these models; spell it `max_completion_tokens` instead.
 - **gpt-5.6 and GPT-6 families with tools: use the Responses wire.** On Chat Completions these models refuse function tools unless `reasoning_effort` is `none`, and some of them (for example `gpt-6-astra`) do not accept `none` at all. On Responses they work without any extra configuration.
 - **gpt-oss stays on Chat Completions.** Its Responses route rejects function tools.
 - **Error bodies arrive compressed.** A rejected request can show as `400 status code (no body)`; the message is readable with `Accept-Encoding: identity` in a direct call.
