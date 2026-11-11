@@ -251,7 +251,15 @@ describe('raw JUnit report retention', () => {
     // on every full-profile lane inside a job holding `checks: write`, so a
     // relaxation to a mutable tag must not pass unnoticed.
     expect(upload.uses).toMatch(/^actions\/upload-artifact@[0-9a-f]{40}$/);
-    expect(upload.with.path).toBe('packages/*/junit.xml');
+    // `*` does not cross `/`, so a single-level pattern cannot reach a
+    // nested workspace's report (packages/channels/base/junit.xml); `**`
+    // keeps every depth. Both workspace trees report: the side lane runs
+    // integrations/* too. The globber follows symlinks, and pnpm links each
+    // workspace into its dependents' node_modules, so the exclusion keeps
+    // every report from being packed once per link.
+    expect(upload.with.path).toBe(
+      'packages/**/junit.xml\nintegrations/**/junit.xml\n!**/node_modules/**\n',
+    );
     expect(upload.with['retention-days']).toBe(7);
     expect(upload.with['if-no-files-found']).toBe('ignore');
   });
@@ -278,6 +286,12 @@ describe('raw JUnit report retention', () => {
     const unitTests = steps.find((step) => step.id === 'unit_tests');
     expect(publisher['continue-on-error']).toBe(true);
     expect(publisher.with['fail-on-error']).toBe('false');
+    // The badge reads the same reports as the artifact upload, so it needs
+    // the same nested-workspace reach and the same node_modules exclusion
+    // (see the path pin above). This action splits `path` on commas.
+    expect(publisher.with.path).toBe(
+      'packages/**/junit.xml,integrations/**/junit.xml,!**/node_modules/**',
+    );
     expect(upload['continue-on-error']).toBe(true);
     expect(unitTests['continue-on-error']).not.toBe(true);
     expect(unitTests.run).toContain('exit "$RC"');

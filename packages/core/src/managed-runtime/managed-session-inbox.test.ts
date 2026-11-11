@@ -16,6 +16,7 @@ import {
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { isSlowTestHost } from '../test-utils/slow-test-host.js';
 import type { ManagedActivationFence } from './managed-activation-store.js';
 import {
   FileManagedSessionInbox,
@@ -28,6 +29,12 @@ import { MANAGED_SESSION_LIMITS } from './managed-session-records.js';
 import { MANAGED_JOURNAL_COMPACT_BYTES } from './managed-journal-snapshot.js';
 
 const limits = { maxPending: 10, maxPendingPerTenant: 5 };
+
+// Sister of the activation-store compaction budget (#15574): the 1024
+// serial fence writes are deterministic in count but not in wall time, and
+// the same fleet contention outlasted the flat 60s budget. Slow hosts get
+// double the ceiling; fast hosts keep the original budget.
+const compactionTimeoutMs = isSlowTestHost() ? 120_000 : 60_000;
 
 function userMessage(
   messageId: string,
@@ -219,42 +226,46 @@ describe('FileManagedSessionInbox', () => {
     ).rejects.toThrow('messageId must be no larger than 512');
   });
 
-  it('compacts repeated processing fences and restores only the current fence', async () => {
-    const inbox = await openInbox();
-    const input = userMessage('long-lived');
-    await inbox.admit(input, limits);
-    await inbox.markActivationReady(input);
-    for (let epoch = 1; epoch <= 1024; epoch++) {
-      await inbox.beginProcessing(
-        input,
-        activationFence(input.messageId, epoch),
+  it(
+    'compacts repeated processing fences and restores only the current fence',
+    async () => {
+      const inbox = await openInbox();
+      const input = userMessage('long-lived');
+      await inbox.admit(input, limits);
+      await inbox.markActivationReady(input);
+      for (let epoch = 1; epoch <= 1024; epoch++) {
+        await inbox.beginProcessing(
+          input,
+          activationFence(input.messageId, epoch),
+        );
+      }
+      const contents = await readFile(filePath, 'utf8');
+      const lines = contents.trimEnd().split('\n');
+      expect(JSON.parse(lines[0])).toMatchObject({
+        v: 2,
+        type: 'inbox.snapshot',
+      });
+      expect(Buffer.byteLength(contents)).toBeLessThan(
+        MANAGED_JOURNAL_COMPACT_BYTES + Buffer.byteLength(lines[0]) + 512,
       );
-    }
-    const contents = await readFile(filePath, 'utf8');
-    const lines = contents.trimEnd().split('\n');
-    expect(JSON.parse(lines[0])).toMatchObject({
-      v: 2,
-      type: 'inbox.snapshot',
-    });
-    expect(Buffer.byteLength(contents)).toBeLessThan(
-      MANAGED_JOURNAL_COMPACT_BYTES + Buffer.byteLength(lines[0]) + 512,
-    );
-    const reopened = await openInbox();
-    expect(reopened.listAll()).toEqual(inbox.listAll());
-    await expect(
-      reopened.finish(
+      const reopened = await openInbox();
+      expect(reopened.listAll()).toEqual(inbox.listAll());
+      await expect(
+        reopened.finish(
+          input,
+          activationFence(input.messageId, 1023),
+          'completed',
+        ),
+      ).rejects.toBeInstanceOf(ManagedSessionMessageStaleFenceError);
+      await reopened.finish(
         input,
-        activationFence(input.messageId, 1023),
+        activationFence(input.messageId, 1024),
         'completed',
-      ),
-    ).rejects.toBeInstanceOf(ManagedSessionMessageStaleFenceError);
-    await reopened.finish(
-      input,
-      activationFence(input.messageId, 1024),
-      'completed',
-    );
-    expect((await openInbox()).get(input)?.state).toBe('finished');
-  }, 60_000);
+      );
+      expect((await openInbox()).get(input)?.state).toBe('finished');
+    },
+    compactionTimeoutMs,
+  );
 
   it('preserves completed, cancelled, processing, and pending message replay across snapshots', async () => {
     const inbox = await openInbox();

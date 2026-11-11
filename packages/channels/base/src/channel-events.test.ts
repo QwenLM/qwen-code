@@ -14,6 +14,7 @@ import {
   utimesSync,
   writeFileSync,
 } from 'node:fs';
+import { open } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -391,14 +392,27 @@ describe('channel events journal', async () => {
   });
 
   it('yields to the event loop once per chunk, not once per file', async () => {
-    // The daemon must be able to serve sessions between chunks, so the turns a
-    // read takes have to grow with the bytes read, not just with the file
-    // count. Measure the same six journals short (one chunk each) and tall (a
-    // full 256 KiB window, chunked several times). Every awaited read costs at
-    // least one turn and a tall window takes four more reads per journal than a
-    // short one, so the tall read leads by 24 turns at minimum; the bound below
-    // leaves room for scheduling noise. Reading those windows synchronously
-    // would erase the difference.
+    // The daemon must be able to serve sessions between chunks, so the
+    // awaited reads a journal takes have to grow with the bytes read, not
+    // just with the file count. Count the chunk reads themselves rather than
+    // the event-loop turns during the read: while an awaited read waits on
+    // I/O the loop keeps ticking through idle turns, so on a contended host
+    // a turn count measures the neighbors' load instead of the chunking
+    // (#16890 inverted this comparison three times running, once reporting
+    // 1701 turns for the tall read against a bound of 12691). The read count
+    // is fixed by the window and chunk sizes. Measure the same six journals
+    // short (one chunk each) and tall (a full 256 KiB window, chunked
+    // several times): a tall window takes four more reads per journal than
+    // a short one, so the tall read leads by 24 reads; the bound below keeps
+    // half of that lead as margin. Reading those windows synchronously, or
+    // each in a single piece, would erase the difference.
+    const probePath = join(qwenHome, 'read-probe');
+    writeFileSync(probePath, '');
+    const probe = await open(probePath, 'r');
+    const prototype = Object.getPrototypeOf(probe) as typeof probe;
+    await probe.close();
+    const readSpy = vi.spyOn(prototype, 'read');
+
     const measure = async (repeat: number): Promise<number> => {
       rmSync(channelEventScopeDir(cwd), { recursive: true, force: true });
       for (let index = 0; index < 6; index += 1) {
@@ -414,25 +428,22 @@ describe('channel events journal', async () => {
         mkdirSync(dirname(path), { recursive: true });
         writeFileSync(path, `${line}\n`.repeat(repeat));
       }
-      let turns = 0;
-      let reading = true;
-      const tick = (): void => {
-        turns += 1;
-        if (reading) setImmediate(tick);
-      };
-      setImmediate(tick);
+      readSpy.mockClear();
       const { events } = await readChannelEvents({
         scopeDirs: [channelEventScopeDir(cwd)],
         limit: 500,
       });
-      reading = false;
       expect(events.length).toBeGreaterThan(0);
-      return turns;
+      return readSpy.mock.calls.length;
     };
 
-    const short = await measure(4);
-    const tall = await measure(400);
-    expect(tall).toBeGreaterThan(short + 12);
+    try {
+      const short = await measure(4);
+      const tall = await measure(400);
+      expect(tall).toBeGreaterThan(short + 12);
+    } finally {
+      readSpy.mockRestore();
+    }
   });
 
   it('keeps every complete record when the window starts on a line boundary', async () => {

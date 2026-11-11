@@ -49,6 +49,7 @@ type ExemptionConfig = {
   test?: {
     dangerouslyIgnoreUnhandledErrors?: boolean;
     outputFile?: { junit?: string };
+    reporters?: (string | [string, unknown])[];
     testTimeout?: number;
     pool?: 'threads' | 'forks' | 'vmThreads';
     poolOptions?: { threads?: { maxThreads?: number } };
@@ -95,6 +96,13 @@ describe('unhandled-error exemption on the platform lanes', () => {
   }
 });
 
+// The unit-test job's report steps collect `packages/**/junit.xml` and
+// `integrations/**/junit.xml` (ci.yml) relative to the repo root, and
+// `if-no-files-found: ignore` turns a wrong path into a silent no-op: the
+// suite still runs, the artifact is just empty. Pin each reporter's output
+// to the package root so a relocated output fails here, not silently in CI,
+// and pin that every lane workspace reports at all: a suite without a junit
+// reporter stays invisible to the badge however red it runs (#16890).
 describe('JUnit report upload paths', () => {
   const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
   const junitConfigs = Object.entries(configs).filter(
@@ -102,7 +110,7 @@ describe('JUnit report upload paths', () => {
   );
 
   it.each(junitConfigs)(
-    '%s writes inside the package upload glob',
+    '%s writes its report at the package root',
     (name, config) => {
       expect(
         resolve(
@@ -114,6 +122,33 @@ describe('JUnit report upload paths', () => {
       ).toBe(resolve(repoRoot, name, 'junit.xml'));
     },
   );
+
+  it('every lane workspace beside scripts/tests emits a badge-visible report', async () => {
+    // configModules is cross-checked below to cover every test:ci workspace,
+    // so a new lane workspace cannot join without a report. scripts/tests is
+    // the documented exception: its report would land outside both globs,
+    // and extending the badge to the scripts suite is a separate decision.
+    for (const [name, load] of Object.entries(configModules)) {
+      if (name === 'scripts/tests') continue;
+      const config = (await load()).default;
+      const test = config.test ?? {};
+      expect(name).toMatch(/^(packages|integrations)\//);
+      const junit = test.outputFile?.junit;
+      expect(junit, `${name} emits no JUnit report`).toBeTruthy();
+      expect(
+        resolve(repoRoot, name, config.root ?? '.', junit!),
+        `${name} writes its report outside its own root`,
+      ).toBe(resolve(repoRoot, name, 'junit.xml'));
+      const reporters = test.reporters ?? ['default'];
+      expect(
+        reporters.some(
+          (reporter) =>
+            (Array.isArray(reporter) ? reporter[0] : reporter) === 'junit',
+        ),
+        `${name} does not enable the junit reporter`,
+      ).toBe(true);
+    }
+  });
 });
 
 // Every workspace that `npm run test:ci --workspaces` runs lands on the same

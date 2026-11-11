@@ -1726,7 +1726,11 @@ describe('hosted-session-command-session funnel (H4e-b3)', () => {
       ),
     ).toBeUndefined();
     expect(lead.commands.command(commandId)?.direction).toBe('inbound');
-  });
+    // The budget count is deterministic, but the 64 serial send/handover/
+    // accept round trips each await the store's write chain: under fleet
+    // contention they outlasted the ECS lane's 60s per-test ceiling three
+    // times running (#16890). Only the wall-clock allowance grows here.
+  }, 120_000);
 
   it('counts only member messages toward the member in-flight sub-cap (R1-6)', async () => {
     const lead = await leadWithMembers(['alice']);
