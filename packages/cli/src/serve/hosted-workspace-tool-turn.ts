@@ -880,6 +880,7 @@ export const HOSTED_INPUT_PREVIEW_TOOLS: readonly string[] = [
   'edit',
   'run_shell_command',
   'todo_write',
+  'loop_wakeup',
   ...HOSTED_MEMORY_TOOLS,
   'agent',
   'send_message',

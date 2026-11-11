@@ -63,6 +63,7 @@ import {
   HOSTED_WORKSPACE_SHELL_TOOLS,
   HOSTED_INPUT_PREVIEW_TOOLS,
   HOSTED_TODO_WRITE_TOOL,
+  HOSTED_LOOP_WAKEUP_TOOL,
   HOSTED_MEMBER_PLAN_TOOL,
   HOSTED_SEND_MESSAGE_TO_CHILD_TOOL,
   HOSTED_SEND_MESSAGE_TO_PARENT_TOOL,
@@ -6111,6 +6112,7 @@ it('admits exactly the declared native tools to the version 3 input preview', ()
     'edit',
     'run_shell_command',
     'todo_write',
+    'loop_wakeup',
     ...HOSTED_MEMORY_TOOLS,
     'agent',
     'send_message',
@@ -6125,6 +6127,7 @@ it('admits exactly the declared native tools to the version 3 input preview', ()
   const declared = [
     ...HOSTED_WORKSPACE_SHELL_TOOLS.map((tool) => tool.name),
     HOSTED_TODO_WRITE_TOOL.name,
+    HOSTED_LOOP_WAKEUP_TOOL.name,
     ...HOSTED_MEMORY_TOOLS,
     HOSTED_AGENT_TOOL.name,
     HOSTED_SEND_MESSAGE_TO_CHILD_TOOL.name,
