@@ -136,10 +136,8 @@ final class RuntimeBindingProvisioning {
                 }
                 return reconcileBinding(record);
             }
-            BindingContext context = new BindingContext(record,
-                    live.lease());
-            CompletableFuture<BindingContext> confirmed =
-                    new CompletableFuture<>();
+            BindingContext context = new BindingContext(record, live.lease());
+            CompletableFuture<BindingContext> confirmed = new CompletableFuture<>();
             safeStage(() -> provisioner.confirm(request, live.lease()))
                     .whenComplete((ignored, error) -> {
                         if (error == null) {
@@ -187,11 +185,9 @@ final class RuntimeBindingProvisioning {
         if (RuntimeBrokerSupport.shouldReconcileExternalWorkspace(request, record)) {
             return reconcileBinding(record);
         }
-        CompletableFuture<BindingContext> created =
-                new CompletableFuture<>();
+        CompletableFuture<BindingContext> created = new CompletableFuture<>();
         CompletableFuture<BindingContext> existing =
-                bindingRegistry.reserveBinding(record.getBindingId(),
-                        created);
+                bindingRegistry.reserveBinding(record.getBindingId(), created);
         if (existing != null) {
             return existing;
         }
