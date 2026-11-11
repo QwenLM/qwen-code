@@ -1016,4 +1016,23 @@ describe('contextAwareTruncateThreshold', () => {
       CONTEXT_AWARE_MIN_CHARS,
     );
   });
+
+  it('does not floor a small window on a brand-new turn (R1-4)', () => {
+    // A 4k window is smaller than the 8192-token reply reserve. On a turn with
+    // nothing used, the reserve alone would drive remaining below zero; the
+    // guard must return the configured threshold, not the 1000-char floor, so a
+    // small-window session is not crippled from its first tool call.
+    const cfg = (windowSize?: number) =>
+      ({
+        getContentGeneratorConfig: () =>
+          windowSize === undefined ? {} : { contextWindowSize: windowSize },
+      }) as unknown as Config;
+    uiTelemetryService.setLastPromptTokenCount(0);
+    expect(contextAwareTruncateThreshold(cfg(4096), 25_000)).toBe(25_000);
+    // Once the conversation actually fills the window, the floor applies.
+    uiTelemetryService.setLastPromptTokenCount(4000);
+    expect(contextAwareTruncateThreshold(cfg(4096), 25_000)).toBe(
+      CONTEXT_AWARE_MIN_CHARS,
+    );
+  });
 });

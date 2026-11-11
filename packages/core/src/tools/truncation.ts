@@ -139,7 +139,15 @@ export function contextAwareTruncateThreshold(
   const usedTokens = uiTelemetryService.getLastPromptTokenCount();
   const remainingTokens = windowSize - usedTokens - reservedOutputTokens;
   if (remainingTokens <= 0) {
-    return CONTEXT_AWARE_MIN_CHARS;
+    // Floor only when the conversation itself has consumed the window down to
+    // the reserve. A window that is merely smaller than the reply reserve (a
+    // 4k window, an 8192-token reserve) must not floor every tool result to the
+    // 1000-char minimum from the first turn with nothing used — that is the
+    // opposite of "normal turns are never affected".
+    if (usedTokens > 0) {
+      return CONTEXT_AWARE_MIN_CHARS;
+    }
+    return configuredThresholdChars;
   }
   const remainingChars = remainingTokens * CHARS_PER_TOKEN;
   if (remainingChars >= configuredThresholdChars) {
