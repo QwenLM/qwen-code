@@ -203,7 +203,13 @@ check_docker_data_root_floor "${DISK_FLOOR_DOCKER_POST_MIN_FREE_KB:-}" pre-vites
 # scripts/tests/release-workflow.test.js binds this budget to the job's
 # `timeout-minutes`, so retuning either must update both.
 DOCKER_TEST_STEP_BUDGET_SECONDS=6600
-DOCKER_TEST_INTERACTIVE_RESERVE_SECONDS=1260
+# A retry admitted after a fast failure still spends the suite's own length,
+# so the gate charges the larger of the failed attempt and the suite's
+# expected duration. Measured failures: `cli` 1685s and 2317s, `interactive`
+# ~21 minutes in the passing release job. Over-refusing a retry whose first
+# attempt hung is the safe direction; admitting one that cannot fit is not.
+DOCKER_TEST_CLI_EXPECTED_SECONDS=2400
+DOCKER_TEST_INTERACTIVE_EXPECTED_SECONDS=1260
 run_docker_test_suite() {
   QWEN_SANDBOX=docker npx vitest run --root ./integration-tests "$1" 9>&-
 }
@@ -216,27 +222,33 @@ for suite in cli interactive; do
   now_epoch="$(date +%s)"
   attempt_seconds=$(( now_epoch - attempt_start_epoch ))
   elapsed_seconds=$(( now_epoch - release_step_start_epoch ))
-  # The retry spends the attempt's duration again, so it is admitted only
-  # when the time already spent in this step plus that repeat plus the suites
-  # still to run fit the step's share of `timeout-minutes: 120`: the step
-  # starts ~8 minutes into the job, so 110 minutes leaves margin, and
-  # `interactive` — which follows `cli` and measured ~21 minutes in the
-  # passing release job — has to run after a `cli` retry.
+  # The retry is admitted only when the time already spent in this step plus
+  # its charge plus the suites still to run fit the step's share of
+  # `timeout-minutes: 120`: the step starts ~8 minutes into the job, so 110
+  # minutes leaves margin, and `interactive` — which follows `cli` — has to
+  # run after a `cli` retry.
+  expected_suite_seconds="$DOCKER_TEST_CLI_EXPECTED_SECONDS"
   remaining_suite_seconds=0
   if [ "$suite" = 'cli' ]; then
-    remaining_suite_seconds="$DOCKER_TEST_INTERACTIVE_RESERVE_SECONDS"
+    remaining_suite_seconds="$DOCKER_TEST_INTERACTIVE_EXPECTED_SECONDS"
+  else
+    expected_suite_seconds="$DOCKER_TEST_INTERACTIVE_EXPECTED_SECONDS"
   fi
-  if (( elapsed_seconds + attempt_seconds + remaining_suite_seconds > DOCKER_TEST_STEP_BUDGET_SECONDS )); then
+  retry_seconds="$attempt_seconds"
+  if [ "$expected_suite_seconds" -gt "$retry_seconds" ]; then
+    retry_seconds="$expected_suite_seconds"
+  fi
+  if (( elapsed_seconds + retry_seconds + remaining_suite_seconds > DOCKER_TEST_STEP_BUDGET_SECONDS )); then
     reserve_detail=''
     if [ "$remaining_suite_seconds" -gt 0 ]; then
       reserve_detail=", ${remaining_suite_seconds}s reserved for the remaining suite"
     fi
-    echo "::error::Docker integration tests (${suite}) failed after ${attempt_seconds}s (${elapsed_seconds}s of the ${DOCKER_TEST_STEP_BUDGET_SECONDS}s step budget already spent${reserve_detail}); a retry would overrun the 120-minute job timeout"
+    echo "::error::Docker integration tests (${suite}) failed after ${attempt_seconds}s (${elapsed_seconds}s of the ${DOCKER_TEST_STEP_BUDGET_SECONDS}s step budget already spent, ${retry_seconds}s charged for the retry${reserve_detail}); a retry would overrun the 120-minute job timeout"
     exit 1
   fi
-  echo "::warning::Docker integration tests (${suite}) failed after ${attempt_seconds}s; retrying once"
   cleanup_release_containers
   check_docker_data_root_floor "${DISK_FLOOR_DOCKER_POST_MIN_FREE_KB:-}" pre-retry
+  echo "::warning::Docker integration tests (${suite}) failed after ${attempt_seconds}s; retrying once"
   if ! run_docker_test_suite "$suite"; then
     echo "::error::Docker integration tests (${suite}) failed again after a retry"
     exit 1

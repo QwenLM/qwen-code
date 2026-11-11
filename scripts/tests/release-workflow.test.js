@@ -2630,6 +2630,7 @@ describe('release workflow', () => {
     suiteFailures = 0,
     failSuite = 'cli',
     suiteSeconds = 0,
+    retrySuiteSeconds = suiteSeconds,
     preLoopSeconds = 0,
     postGateFailAt = 2,
     dockerPsFails = false,
@@ -2718,22 +2719,22 @@ fi`,
     stub(
       'npx',
       `printf 'npx %s\\n' "$*" >> "$CALLS_LOG"
+suite=cli
+case "$*" in
+  *" interactive") suite=interactive ;;
+esac
+attempts_file="$CALLS_LOG.npx-\${suite}-attempts"
+attempts=0
+if [ -f "$attempts_file" ]; then attempts=$(cat "$attempts_file"); fi
+attempts=$((attempts + 1))
+printf '%s' "$attempts" > "$attempts_file"
+seconds=\${STUB_SUITE_SECONDS:-0}
+if [ "$attempts" -gt 1 ]; then seconds=\${RETRY_SUITE_SECONDS:-$seconds}; fi
 offset=0
 if [ -f "$CALLS_LOG.clock" ]; then offset=$(cat "$CALLS_LOG.clock"); fi
-printf '%s' "$(( offset + \${STUB_SUITE_SECONDS:-0} ))" > "$CALLS_LOG.clock"
-if [ "$SUITE_FAILURES" -gt 0 ]; then
-  case "$*" in
-    *" $FAIL_SUITE")
-      count_file="$CALLS_LOG.npx-failures"
-      count=0
-      if [ -f "$count_file" ]; then count=$(cat "$count_file"); fi
-      count=$((count + 1))
-      printf '%s' "$count" > "$count_file"
-      if [ "$count" -le "$SUITE_FAILURES" ]; then
-        exit 1
-      fi
-      ;;
-  esac
+printf '%s' "$(( offset + seconds ))" > "$CALLS_LOG.clock"
+if [ "\${SUITE_FAILURES:-0}" -gt 0 ] && [ "$suite" = "$FAIL_SUITE" ] && [ "$attempts" -le "$SUITE_FAILURES" ]; then
+  exit 1
 fi`,
     );
     // Deterministic stand-in for the probe's range reads so the suite stays
@@ -2790,6 +2791,7 @@ esac`,
         FAIL_SUITE: failSuite,
         STUB_DATE_START: '1000000',
         STUB_SUITE_SECONDS: String(suiteSeconds),
+        RETRY_SUITE_SECONDS: String(retrySuiteSeconds),
         BUILD_SECONDS: String(preLoopSeconds),
         POST_GATE_FAIL_AT: String(postGateFailAt),
         DOCKER_PS_FAILS: dockerPsFails ? '1' : '0',
@@ -2828,7 +2830,16 @@ esac`,
         encoding: 'utf8',
         env,
       });
-      return { result, calls: readFileSync(callsLog, 'utf8'), dockerRoot };
+      const clockPath = `${callsLog}.clock`;
+      const modelledSeconds = existsSync(clockPath)
+        ? Number(readFileSync(clockPath, 'utf8'))
+        : 0;
+      return {
+        result,
+        calls: readFileSync(callsLog, 'utf8'),
+        dockerRoot,
+        modelledSeconds,
+      };
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }
@@ -3048,7 +3059,7 @@ esac`,
       });
       expect(result.status).not.toBe(0);
       expect(result.stdout).toContain(
-        'failed after 3001s (5001s of the 6600s step budget already spent, 1260s reserved for the remaining suite)',
+        'failed after 3001s (5001s of the 6600s step budget already spent, 3001s charged for the retry, 1260s reserved for the remaining suite)',
       );
       expect(result.stdout).toContain(
         'would overrun the 120-minute job timeout',
@@ -3075,6 +3086,64 @@ esac`,
   );
 
   it.skipIf(process.platform === 'win32')(
+    'refuses a retry that only fits if it fails as fast as the first attempt',
+    () => {
+      // 5000s of pre-suite work plus a 120s cli failure leaves room only for
+      // a retry that fails just as fast. A recovering retry spends the
+      // suite's own ~40 minutes, so the gate must refuse it.
+      const { result, calls } = runDockerIntegrationScript({
+        suiteFailures: 1,
+        suiteSeconds: 120,
+        retrySuiteSeconds: 2400,
+        preLoopSeconds: 5000,
+      });
+      expect(result.status).not.toBe(0);
+      expect(result.stdout).toContain(
+        'failed after 120s (5120s of the 6600s step budget already spent, 2400s charged for the retry, 1260s reserved for the remaining suite)',
+      );
+      expect(result.stdout).toContain(
+        'would overrun the 120-minute job timeout',
+      );
+      expect(result.stdout).not.toContain('retrying once');
+      expect(
+        calls
+          .trim()
+          .split('\n')
+          .filter(
+            (line) => line.startsWith('npx vitest') && line.endsWith(' cli'),
+          ),
+      ).toHaveLength(1);
+      expect(calls).not.toContain(
+        'npx vitest run --root ./integration-tests interactive',
+      );
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'admits a recovering retry and models it at its full length',
+    () => {
+      const { result, calls, modelledSeconds } = runDockerIntegrationScript({
+        suiteFailures: 1,
+        suiteSeconds: 120,
+        retrySuiteSeconds: 1272,
+        preLoopSeconds: 472,
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout).toContain('failed after 120s; retrying once');
+      // pre-suite 472s + failed cli 120s + the 1272s retry + interactive 120s.
+      expect(modelledSeconds).toBe(1984);
+      expect(
+        calls
+          .trim()
+          .split('\n')
+          .filter(
+            (line) => line.startsWith('npx vitest') && line.endsWith(' cli'),
+          ),
+      ).toHaveLength(2);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
     'refuses an interactive retry when the step has no room left for it',
     () => {
       // cli's 2400s plus the interactive attempt's 2400s already fill 4800s
@@ -3087,7 +3156,7 @@ esac`,
       });
       expect(result.status).not.toBe(0);
       expect(result.stdout).toContain(
-        'failed after 2400s (4800s of the 6600s step budget already spent)',
+        'failed after 2400s (4800s of the 6600s step budget already spent, 2400s charged for the retry)',
       );
       expect(result.stdout).toContain(
         'would overrun the 120-minute job timeout',
@@ -3162,6 +3231,7 @@ esac`,
       });
       expect(result.status).not.toBe(0);
       expect(result.stdout).toContain('failed at the pre-retry checkpoint');
+      expect(result.stdout).not.toContain('retrying once');
       expect(
         calls
           .trim()
