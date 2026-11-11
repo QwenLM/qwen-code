@@ -4,8 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { createHash } from 'node:crypto';
-import type { Stats } from 'node:fs';
+import { createHash, randomUUID } from 'node:crypto';
+import { constants, type Stats } from 'node:fs';
 import {
   chmod,
   copyFile,
@@ -18,6 +18,7 @@ import {
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { diffLines, structuredPatch, type Hunk } from 'diff';
 import { Storage } from '../config/storage.js';
+import { renameWithRetry } from '../utils/atomicFileWrite.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { MAX_DIFF_SIZE_BYTES } from '../utils/gitDiff.js';
 import {
@@ -277,15 +278,16 @@ function resolveBackupPath(backupFileName: string, sessionId: string): string {
 async function safeCopyFile(
   src: string,
   dst: string,
+  mode = 0,
 ): Promise<'ok' | 'src-missing'> {
   try {
-    await copyFile(src, dst);
+    await copyFile(src, dst, mode);
     return 'ok';
   } catch (e: unknown) {
     if (!isENOENT(e)) throw e;
     if (!(await pathExists(src))) return 'src-missing';
     await mkdir(dirname(dst), { recursive: true });
-    await copyFile(src, dst);
+    await copyFile(src, dst, mode);
     return 'ok';
   }
 }
@@ -308,12 +310,37 @@ async function createBackup(
     throw e;
   }
 
-  const result = await safeCopyFile(filePath, backupPath);
-  if (result === 'src-missing') {
-    return { backupFileName: null, version, backupTime: new Date() };
+  // Publish only complete backups: a crash mid-copy must never leave a
+  // truncated blob at the final path, which later reads would treat as a
+  // valid checkpoint. The temporary suffix is unique per call because
+  // concurrent captures share the deterministic final path (see trackEdit);
+  // a shared name would collide on COPYFILE_EXCL and let one call's failure
+  // cleanup delete another's in-progress copy.
+  const temporaryPath = `${backupPath}.${randomUUID()}.tmp`;
+  try {
+    const result = await safeCopyFile(
+      filePath,
+      temporaryPath,
+      constants.COPYFILE_EXCL,
+    );
+    if (result === 'src-missing') {
+      return { backupFileName: null, version, backupTime: new Date() };
+    }
+    await chmod(temporaryPath, srcStats.mode);
+    // Same publication step as atomicWriteFile / mods store: transient
+    // EPERM/EACCES (Windows concurrent access, AV scans) retry with backoff;
+    // any other error rethrows into the caller's failed-entry semantics.
+    await renameWithRetry(temporaryPath, backupPath, 3, 50);
+  } catch (e: unknown) {
+    await unlink(temporaryPath).catch((cleanupError: unknown) => {
+      if (!isENOENT(cleanupError)) {
+        debugLogger.warn(
+          `FileHistory: failed to remove incomplete backup ${temporaryPath}: ${cleanupError}`,
+        );
+      }
+    });
+    throw e;
   }
-
-  await chmod(backupPath, srcStats.mode);
 
   return { backupFileName, version, backupTime: new Date() };
 }
