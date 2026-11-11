@@ -176,13 +176,21 @@ test('ci.yml wires the check into lint_and_static before the lint lanes', () => 
   // docs-only PRs — a lane that still runs Prettier, but against the branch's
   // older .prettierrc/lint.js, which is the post-merge class this check exists
   // to catch (#16872, #16918). No profile arm: every profile runs a lint lane,
-  // and on a skip_ci PR `Use trusted CI profile` is itself skipped, so a
-  // profile comparison would read '' and take this step off the no-op-pass
-  // lanes the required check depends on.
+  // docs_only included, so keying this gate on the profile could only narrow
+  // it — the hole this pin closes. On a skip_ci PR `Use trusted CI profile`
+  // is skipped, so the output is '' rather than a profile name.
   assert.equal(
     stepBlock.match(/^ {8}if: "(.*)"$/m)?.[1],
     "${{ needs.classify_pr.outputs.skip_ci != 'true' && github.event_name == 'pull_request' }}",
     'freshness gate drifted',
+  );
+  // The gate must stay fatal: `continue-on-error` would leave the literal
+  // above intact while the freshness check stops blocking the required
+  // check (#16918).
+  assert.equal(
+    stepBlock.match(/^ {8}continue-on-error:/m),
+    null,
+    'freshness gate must stay fatal',
   );
   assert.ok(
     stepBlock.includes('node .github/scripts/check-lint-gate-freshness.mjs'),
