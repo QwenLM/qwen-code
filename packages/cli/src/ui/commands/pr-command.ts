@@ -6,11 +6,14 @@
 
 import {
   isValidSessionPrUrl,
-  readSessionPrs,
+  readSessionPrsDetailed,
   upsertSessionPrs,
   type SessionPrState,
 } from '@qwen-code/qwen-code-core/services/session-pr-service.js';
-import { fetchPullRequestByReference } from '@qwen-code/qwen-code-core/utils/github-prs.js';
+import {
+  fetchPullRequestByReference,
+  pullRequestViewUrl,
+} from '@qwen-code/qwen-code-core/utils/github-prs.js';
 import { GitWorktreeService } from '@qwen-code/qwen-code-core/services/gitWorktreeService.js';
 import { t } from '../../i18n/index.js';
 import { CommandKind, type SlashCommand } from './types.js';
@@ -69,27 +72,37 @@ export const prCommand: SlashCommand = {
 
     if (!input) {
       const archiveState = await resolveArchiveState(sessionService, sessionId);
-      let prs: Awaited<ReturnType<typeof readSessionPrs>> = null;
+      const usage = t('Usage: /pr <number | url>');
+      // A failed or corrupt read is not an authoritative "no bindings":
+      // collapsing it into the empty-list message would tell the user
+      // their bindings were never recorded.
+      const unreadable = {
+        type: 'message',
+        messageType: 'error',
+        content: `${t('Could not read the PR bindings for this session.')}\n${usage}`,
+      } as const;
       try {
-        prs = await readSessionPrs(
+        const result = await readSessionPrsDetailed(
           sessionService.getPrSessionPathForArchiveState(
             sessionId,
             archiveState,
           ),
         );
+        if (result.status === 'invalid') return unreadable;
+        const content =
+          result.status === 'ok' && result.prs.length > 0
+            ? `${t('Bound PRs: {{list}}', {
+                list: result.prs
+                  .map(
+                    (pr) => `#${pr.number}${pr.state ? ` (${pr.state})` : ''}`,
+                  )
+                  .join(', '),
+              })}\n${usage}`
+            : `${t('No PRs bound to this session.')}\n${usage}`;
+        return { type: 'message', messageType: 'info', content };
       } catch {
-        prs = null;
+        return unreadable;
       }
-      const usage = t('Usage: /pr <number | url>');
-      const content =
-        prs && prs.length > 0
-          ? `${t('Bound PRs: {{list}}', {
-              list: prs
-                .map((pr) => `#${pr.number}${pr.state ? ` (${pr.state})` : ''}`)
-                .join(', '),
-            })}\n${usage}`
-          : `${t('No PRs bound to this session.')}\n${usage}`;
-      return { type: 'message', messageType: 'info', content };
     }
 
     let number: number;
@@ -114,18 +127,33 @@ export const prCommand: SlashCommand = {
       inputUrl ?? String(number),
     );
     let binding: { number: number; url: string; state?: SessionPrState };
-    if (resolved) {
-      binding = resolved;
+    if (resolved.status === 'pr') {
+      binding = {
+        number: resolved.number,
+        url: resolved.url,
+        state: resolved.state,
+      };
     } else if (inputUrl && isValidSessionPrUrl(inputUrl)) {
-      binding = { number, url: inputUrl };
+      // Store the canonical /pull/<N> spelling so a later re-bind of the
+      // same PR matches the same sidecar key (a /files or query spelling
+      // would otherwise replace the entry as "another PR").
+      binding = { number, url: pullRequestViewUrl(inputUrl) ?? inputUrl };
     } else {
+      // Environmental failures (gh missing, timeout) get their own message:
+      // advising a PR-specific remedy for them sends the user hunting for
+      // an access problem that does not exist.
       return {
         type: 'message',
         messageType: 'error',
-        content: t(
-          'Could not resolve PR #{{number}} via gh. Pass the full PR URL instead.',
-          { number: String(number) },
-        ),
+        content:
+          resolved.reason === 'failed'
+            ? t(
+                'Could not resolve PR #{{number}} via gh. Pass the full PR URL instead.',
+                { number: String(number) },
+              )
+            : t(
+                'GitHub CLI (gh) is unavailable or timed out. Pass the full PR URL to bind without it.',
+              ),
       };
     }
 
@@ -142,10 +170,16 @@ export const prCommand: SlashCommand = {
         { ...binding, source: 'create' },
       ]);
       if (applied.added.includes(binding.number)) {
-        sessionService.emitSessionPrBound(sessionId, {
-          number: binding.number,
-          url: binding.url,
-        });
+        try {
+          sessionService.emitSessionPrBound(sessionId, {
+            number: binding.number,
+            url: binding.url,
+          });
+        } catch {
+          // Best-effort notification: the binding is already persisted; a
+          // catalog-mark failure must not read as a bind failure (mirrors
+          // the shell binder). The next catalog refresh picks it up.
+        }
         return {
           type: 'message',
           messageType: 'info',

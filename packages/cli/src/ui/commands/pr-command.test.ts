@@ -9,33 +9,36 @@ import { prCommand } from './pr-command.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
 
 const mocks = vi.hoisted(() => ({
-  readSessionPrs: vi.fn(),
+  readSessionPrsDetailed: vi.fn(),
   upsertSessionPrs: vi.fn(),
   isValidSessionPrUrl: vi.fn(),
   fetchPullRequestByReference: vi.fn(),
+  pullRequestViewUrl: vi.fn(),
 }));
 
 vi.mock('@qwen-code/qwen-code-core/services/session-pr-service.js', () => ({
-  readSessionPrs: mocks.readSessionPrs,
+  readSessionPrsDetailed: mocks.readSessionPrsDetailed,
   upsertSessionPrs: mocks.upsertSessionPrs,
   isValidSessionPrUrl: mocks.isValidSessionPrUrl,
 }));
 
 vi.mock('@qwen-code/qwen-code-core/utils/github-prs.js', () => ({
   fetchPullRequestByReference: mocks.fetchPullRequestByReference,
+  pullRequestViewUrl: mocks.pullRequestViewUrl,
 }));
 
 const SESSION_ID = 'sess-pr-1';
 const PR_PATH = `/tmp/chats/${SESSION_ID}.active.pr.json`;
+const ARCHIVED_PR_PATH = `/tmp/chats/${SESSION_ID}.archived.pr.json`;
 
 function createContext() {
   const sessionService = {
+    // Echo the id so a regression deriving the path from another session
+    // is visible to the toHaveBeenCalledWith assertions.
     getPrSessionPathForArchiveState: vi
       .fn()
-      .mockImplementation((_id: string, state: string) =>
-        state === 'active'
-          ? PR_PATH
-          : `/tmp/chats/${SESSION_ID}.archived.pr.json`,
+      .mockImplementation(
+        (id: string, state: string) => `/tmp/chats/${id}.${state}.pr.json`,
       ),
     getSessionLocation: vi.fn().mockResolvedValue('active'),
     emitSessionPrBound: vi.fn(),
@@ -60,7 +63,7 @@ const RESOLVED = {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  mocks.readSessionPrs.mockResolvedValue(null);
+  mocks.readSessionPrsDetailed.mockResolvedValue({ status: 'absent' });
   mocks.upsertSessionPrs.mockImplementation(
     async (
       _path: string,
@@ -78,7 +81,14 @@ beforeEach(() => {
   mocks.isValidSessionPrUrl.mockImplementation((url: string) =>
     /^https?:\/\//i.test(url),
   );
-  mocks.fetchPullRequestByReference.mockResolvedValue(RESOLVED);
+  mocks.fetchPullRequestByReference.mockResolvedValue({
+    status: 'pr',
+    ...RESOLVED,
+  });
+  mocks.pullRequestViewUrl.mockImplementation((url: string) => {
+    const match = /^(https?:\/\/[^/]+\/[^/]+\/[^/]+\/pull\/\d+)/i.exec(url);
+    return match ? match[1] : undefined;
+  });
 });
 
 describe('prCommand', () => {
@@ -113,15 +123,18 @@ describe('prCommand', () => {
   });
 
   it('lists bound PRs when no argument', async () => {
-    mocks.readSessionPrs.mockResolvedValue([
-      { ...RESOLVED, createdAt: 'x' },
-      {
-        number: 42,
-        url: 'https://github.com/o/r/pull/42',
-        state: 'merged',
-        createdAt: 'y',
-      },
-    ]);
+    mocks.readSessionPrsDetailed.mockResolvedValue({
+      status: 'ok',
+      prs: [
+        { ...RESOLVED, createdAt: 'x' },
+        {
+          number: 42,
+          url: 'https://github.com/o/r/pull/42',
+          state: 'merged',
+          createdAt: 'y',
+        },
+      ],
+    });
     const { context } = createContext();
     const result = await prCommand.action?.(context, '  ');
     const content = (result as { content: string }).content;
@@ -156,6 +169,10 @@ describe('prCommand', () => {
     expect(mocks.fetchPullRequestByReference).toHaveBeenCalledWith(
       '/repo',
       '16865',
+    );
+    expect(sessionService.getPrSessionPathForArchiveState).toHaveBeenCalledWith(
+      SESSION_ID,
+      'active',
     );
     expect(mocks.upsertSessionPrs).toHaveBeenCalledWith(PR_PATH, [
       { ...RESOLVED, source: 'create' },
@@ -197,19 +214,43 @@ describe('prCommand', () => {
   });
 
   it('degrades to the user URL without state when gh fails on a URL', async () => {
-    mocks.fetchPullRequestByReference.mockResolvedValue(undefined);
+    mocks.fetchPullRequestByReference.mockResolvedValue({
+      status: 'error',
+      reason: 'failed',
+    });
     const { context, sessionService } = createContext();
     const input = 'https://github.example.com/o/r/pull/5';
     const result = await prCommand.action?.(context, input);
     expect(mocks.upsertSessionPrs).toHaveBeenCalledWith(PR_PATH, [
       { number: 5, url: input, source: 'create' },
     ]);
-    expect(sessionService.emitSessionPrBound).toHaveBeenCalled();
+    expect(sessionService.emitSessionPrBound).toHaveBeenCalledWith(SESSION_ID, {
+      number: 5,
+      url: input,
+    });
     expect((result as { messageType: string }).messageType).toBe('info');
   });
 
+  it('normalizes a degraded /files URL to the canonical sidecar key', async () => {
+    mocks.fetchPullRequestByReference.mockResolvedValue({
+      status: 'error',
+      reason: 'failed',
+    });
+    const { context } = createContext();
+    await prCommand.action?.(
+      context,
+      'https://github.com/o/r/pull/5/files?x=1',
+    );
+    expect(mocks.upsertSessionPrs).toHaveBeenCalledWith(PR_PATH, [
+      { number: 5, url: 'https://github.com/o/r/pull/5', source: 'create' },
+    ]);
+  });
+
   it('errors when gh fails on a bare number', async () => {
-    mocks.fetchPullRequestByReference.mockResolvedValue(undefined);
+    mocks.fetchPullRequestByReference.mockResolvedValue({
+      status: 'error',
+      reason: 'failed',
+    });
     const { context } = createContext();
     const result = await prCommand.action?.(context, '999999999');
     expect(result).toEqual({
@@ -218,6 +259,23 @@ describe('prCommand', () => {
       content: expect.stringContaining('full PR URL'),
     });
     expect(mocks.upsertSessionPrs).not.toHaveBeenCalled();
+  });
+
+  it('names the cause when gh is unavailable or timed out', async () => {
+    for (const reason of ['unavailable', 'timeout'] as const) {
+      mocks.fetchPullRequestByReference.mockResolvedValue({
+        status: 'error',
+        reason,
+      });
+      const { context } = createContext();
+      const result = await prCommand.action?.(context, '16865');
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'error',
+        content: expect.stringContaining('unavailable or timed out'),
+      });
+      expect(mocks.upsertSessionPrs).not.toHaveBeenCalled();
+    }
   });
 
   it('reports already-bound without notifying', async () => {
@@ -241,10 +299,41 @@ describe('prCommand', () => {
     const { context, sessionService } = createContext();
     sessionService.getSessionLocation.mockResolvedValue('archived');
     await prCommand.action?.(context, '16865');
-    expect(mocks.upsertSessionPrs).toHaveBeenCalledWith(
-      `/tmp/chats/${SESSION_ID}.archived.pr.json`,
-      [{ ...RESOLVED, source: 'create' }],
+    expect(sessionService.getPrSessionPathForArchiveState).toHaveBeenCalledWith(
+      SESSION_ID,
+      'archived',
     );
+    expect(mocks.upsertSessionPrs).toHaveBeenCalledWith(ARCHIVED_PR_PATH, [
+      { ...RESOLVED, source: 'create' },
+    ]);
+  });
+
+  it('re-resolves the archive location after the gh round trip', async () => {
+    // The ordering the source comment insists on: a session archived while
+    // gh is in flight must land on the archived sidecar, not the active one
+    // read before the round trip.
+    const { context, sessionService } = createContext();
+    mocks.fetchPullRequestByReference.mockImplementation(async () => {
+      sessionService.getSessionLocation.mockResolvedValue('archived');
+      return { status: 'pr', ...RESOLVED };
+    });
+    await prCommand.action?.(context, '16865');
+    expect(mocks.upsertSessionPrs).toHaveBeenCalledWith(ARCHIVED_PR_PATH, [
+      { ...RESOLVED, source: 'create' },
+    ]);
+  });
+
+  it('reports success even when the catalog notification throws', async () => {
+    const { context, sessionService } = createContext();
+    sessionService.emitSessionPrBound.mockImplementation(() => {
+      throw new Error('catalog disposed');
+    });
+    const result = await prCommand.action?.(context, '16865');
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: expect.stringContaining('Bound PR #16865'),
+    });
   });
 
   it('surfaces a persistence failure as an error message', async () => {
@@ -280,19 +369,33 @@ describe('prCommand', () => {
     expect((result as { messageType: string }).messageType).toBe('info');
   });
 
-  it('shows usage when the sidecar read fails in list mode', async () => {
-    mocks.readSessionPrs.mockRejectedValue(new Error('EACCES'));
+  it('reports a read failure in list mode instead of an empty list', async () => {
+    mocks.readSessionPrsDetailed.mockRejectedValue(new Error('EACCES'));
     const { context } = createContext();
     const result = await prCommand.action?.(context, '');
     expect(result).toEqual({
       type: 'message',
-      messageType: 'info',
-      content: expect.stringContaining('No PRs bound to this session.'),
+      messageType: 'error',
+      content: expect.stringContaining('Could not read the PR bindings'),
+    });
+  });
+
+  it('reports a corrupt sidecar in list mode instead of an empty list', async () => {
+    mocks.readSessionPrsDetailed.mockResolvedValue({ status: 'invalid' });
+    const { context } = createContext();
+    const result = await prCommand.action?.(context, '');
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'error',
+      content: expect.stringContaining('Could not read the PR bindings'),
     });
   });
 
   it('errors when a degraded URL fails the url shape guard', async () => {
-    mocks.fetchPullRequestByReference.mockResolvedValue(undefined);
+    mocks.fetchPullRequestByReference.mockResolvedValue({
+      status: 'error',
+      reason: 'failed',
+    });
     mocks.isValidSessionPrUrl.mockReturnValue(false);
     const { context } = createContext();
     const result = await prCommand.action?.(
@@ -310,8 +413,10 @@ describe('prCommand', () => {
   it('lists archived bindings when the session is archived', async () => {
     const { context, sessionService } = createContext();
     sessionService.getSessionLocation.mockResolvedValue('archived');
-    mocks.readSessionPrs.mockImplementation(async (path: string) =>
-      path.includes('.archived.') ? [{ ...RESOLVED, createdAt: 'x' }] : null,
+    mocks.readSessionPrsDetailed.mockImplementation(async (path: string) =>
+      path.includes('.archived.')
+        ? { status: 'ok', prs: [{ ...RESOLVED, createdAt: 'x' }] }
+        : { status: 'absent' },
     );
     const result = await prCommand.action?.(context, '');
     expect((result as { content: string }).content).toContain('#16865 (open)');

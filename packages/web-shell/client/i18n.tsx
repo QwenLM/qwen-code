@@ -849,6 +849,8 @@ const EN: Messages = {
   'sessionsOverview.bindPrListFailed':
     'Could not load the PR list. Paste the full PR URL instead.',
   'sessionsOverview.bindPrFailed': 'Bind PR failed',
+  'sessionsOverview.bindPrUnavailable':
+    'This workspace is not a git repository, so PR numbers cannot be looked up. Paste the full PR URL instead.',
   'workspace.paneLabel': (v) => `Workspace: ${v?.name ?? ''}`,
   'about.auth': 'Auth',
   'about.baseUrl': 'Base URL',
@@ -2993,6 +2995,7 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'local.effort': 'Set reasoning effort for capable models',
   'local.export': 'Export the current session history to a file',
   'local.forget': 'Remove matching entries from managed auto-memory',
+  'local.pr': 'Bind a GitHub pull request to this session',
   'local.hooks': 'Manage Qwen Code hooks',
   'local.importConfig': 'Import MCP servers from Claude configs',
   'local.init': 'Analyze the project and create a QWEN.md file',
@@ -5957,6 +5960,8 @@ const ZH: Messages = {
     `PR #${v?.number ?? ''} 不在开放 PR 列表中。请改用其完整 URL。`,
   'sessionsOverview.bindPrListFailed': '无法加载 PR 列表。请改用完整 PR URL。',
   'sessionsOverview.bindPrFailed': '绑定 PR 失败',
+  'sessionsOverview.bindPrUnavailable':
+    '当前工作区不是 git 仓库，无法按编号查询 PR。请改用完整 PR URL。',
   'workspace.paneLabel': (v) => `工作区：${v?.name ?? ''}`,
   // Tool display names (chat-stream badge labels). Keyed by `toolName.<wire>`;
   // a wire name with no entry here falls back to the English display name via
@@ -8018,6 +8023,7 @@ const ZH: Messages = {
   'local.effort': '设置推理模型的思考强度',
   'local.export': '将当前会话历史导出到文件',
   'local.forget': '从托管的自动记忆中移除匹配的条目',
+  'local.pr': '将 GitHub 拉取请求绑定到本会话',
   'local.hooks': '管理 Qwen Code 钩子',
   'local.importConfig': '从 Claude 配置导入 MCP 服务器',
   'local.init': '分析项目并创建 QWEN.md 文件',

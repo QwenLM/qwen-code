@@ -768,6 +768,10 @@ export default {
   'Failed to bind PR #{{number}}.': 'PR #{{number}} のバインドに失敗しました。',
   'Failed to bind PR #{{number}}: {{message}}':
     'PR #{{number}} のバインドに失敗しました: {{message}}',
+  'Could not read the PR bindings for this session.':
+    'このセッションの PR バインドを読み取れませんでした。',
+  'GitHub CLI (gh) is unavailable or timed out. Pass the full PR URL to bind without it.':
+    'GitHub CLI (gh) が利用できないかタイムアウトしました。完全な PR URL を指定してバインドしてください。',
   'Consolidate managed auto-memory topic files.':
     'マネージド自動メモリトピックファイルを統合する。',
   'No MCP servers configured.': 'MCP servers が設定されていません',

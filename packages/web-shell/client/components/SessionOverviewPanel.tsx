@@ -1156,9 +1156,11 @@ function SessionOverviewPanelInner({
     setBindPrTarget(card);
   }, []);
 
-  // Supplementary PR registration — same three-branch routing as
-  // saveRename: the current session binds through its own session actions,
-  // other sessions through the owning workspace's metadata route.
+  // Supplementary PR registration — mirrors saveRename's workspace routing
+  // (current session → own session actions; other sessions → the owning
+  // workspace's metadata route; cwd-less cards → the global route). Unlike
+  // saveRename there is no standalone branch: a standalone card's gate
+  // (canRenameCard) disables the button, so the dialog never opens for one.
   const submitBindPr = useCallback(
     (pr: BindSessionPrPayload) => {
       const card = bindPrTarget;

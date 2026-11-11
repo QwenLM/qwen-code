@@ -1006,6 +1006,10 @@ export default {
   'Failed to bind PR #{{number}}.': 'Falha ao vincular o PR #{{number}}.',
   'Failed to bind PR #{{number}}: {{message}}':
     'Falha ao vincular o PR #{{number}}: {{message}}',
+  'Could not read the PR bindings for this session.':
+    'Não foi possível ler as vinculações de PR desta sessão.',
+  'GitHub CLI (gh) is unavailable or timed out. Pass the full PR URL to bind without it.':
+    'O GitHub CLI (gh) está indisponível ou excedeu o tempo limite. Informe a URL completa do PR para vincular sem ele.',
   'Consolidate managed auto-memory topic files.':
     'Consolidar arquivos de tópicos de memória automática gerenciada.',
   'Could not retrieve tool registry.':

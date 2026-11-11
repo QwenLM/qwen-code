@@ -1425,6 +1425,7 @@ describe('fetchPullRequestByReference', () => {
     );
 
     expect(await fetchPullRequestByReference(tmp.repo(), '77')).toEqual({
+      status: 'pr',
       number: 77,
       url: 'https://github.com/o/r/pull/77',
       state: 'open',
@@ -1442,17 +1443,35 @@ describe('fetchPullRequestByReference', () => {
     ]);
 
     expect(await fetchPullRequestByReference(tmp.repo(), url)).toEqual({
+      status: 'pr',
       number: 5,
       url,
       state: 'merged',
     });
   });
 
-  it('returns undefined when gh fails', async () => {
+  it('classifies a gh lookup failure as failed', async () => {
     mockExecError('could not resolve to a PullRequest');
-    expect(
-      await fetchPullRequestByReference(tmp.repo(), '999999999'),
-    ).toBeUndefined();
+    expect(await fetchPullRequestByReference(tmp.repo(), '999999999')).toEqual({
+      status: 'error',
+      reason: 'failed',
+    });
+  });
+
+  it('classifies a missing gh binary as unavailable', async () => {
+    mockExecError('spawn gh ENOENT', { code: 'ENOENT' });
+    expect(await fetchPullRequestByReference(tmp.repo(), '77')).toEqual({
+      status: 'error',
+      reason: 'unavailable',
+    });
+  });
+
+  it('classifies a killed gh child as timeout', async () => {
+    mockExecError('timed out', { killed: true });
+    expect(await fetchPullRequestByReference(tmp.repo(), '77')).toEqual({
+      status: 'error',
+      reason: 'timeout',
+    });
   });
 
   it('fails closed on an unrecognizable state', async () => {
@@ -1461,12 +1480,18 @@ describe('fetchPullRequestByReference', () => {
       url: 'https://github.com/o/r/pull/77',
       state: 'SOMETHING_NEW',
     });
-    expect(await fetchPullRequestByReference(tmp.repo(), '77')).toBeUndefined();
+    expect(await fetchPullRequestByReference(tmp.repo(), '77')).toEqual({
+      status: 'error',
+      reason: 'failed',
+    });
   });
 
   it('fails closed on unparseable output', async () => {
     mockStdout('not json');
-    expect(await fetchPullRequestByReference(tmp.repo(), '77')).toBeUndefined();
+    expect(await fetchPullRequestByReference(tmp.repo(), '77')).toEqual({
+      status: 'error',
+      reason: 'failed',
+    });
   });
 
   it('still spawns gh outside a git repository (a URL names its own repo)', async () => {
@@ -1481,6 +1506,7 @@ describe('fetchPullRequestByReference', () => {
         'https://github.com/o/r/pull/5',
       ),
     ).toEqual({
+      status: 'pr',
       number: 5,
       url: 'https://github.com/o/r/pull/5',
       state: 'closed',

@@ -1008,7 +1008,7 @@ export default {
   'Invalid PR reference. Usage: /pr <number | url>':
     'Недопустимая ссылка на PR. Использование: /pr <номер | url>',
   'Could not resolve PR #{{number}} via gh. Pass the full PR URL instead.':
-    'Не удалось разрешить PR #{{number}} через gh. Укажите полный URL PR.',
+    'Не удалось определить PR #{{number}} через gh. Укажите полный URL PR.',
   'Bound PR #{{number}} to this session.':
     'PR #{{number}} привязан к этой сессии.',
   'PR #{{number}} is already bound to this session.':
@@ -1016,6 +1016,10 @@ export default {
   'Failed to bind PR #{{number}}.': 'Не удалось привязать PR #{{number}}.',
   'Failed to bind PR #{{number}}: {{message}}':
     'Не удалось привязать PR #{{number}}: {{message}}',
+  'Could not read the PR bindings for this session.':
+    'Не удалось прочитать привязки PR этой сессии.',
+  'GitHub CLI (gh) is unavailable or timed out. Pass the full PR URL to bind without it.':
+    'GitHub CLI (gh) недоступен или превысил время ожидания. Укажите полный URL PR для привязки без него.',
   'Consolidate managed auto-memory topic files.':
     'Консолидировать файлы тем управляемой автопамяти.',
   'Could not retrieve tool registry.':

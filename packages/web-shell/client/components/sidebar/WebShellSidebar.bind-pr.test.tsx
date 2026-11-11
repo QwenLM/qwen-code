@@ -39,6 +39,10 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
     sidebarSessionPage(mocks, options),
 }));
 
+const { refreshWorkspace } = vi.hoisted(() => ({
+  refreshWorkspace: vi.fn(),
+}));
+
 vi.mock('../../session-catalog/session-catalog-hooks', () => ({
   useWebShellSessions: (options?: {
     enabled?: boolean;
@@ -48,7 +52,7 @@ vi.mock('../../session-catalog/session-catalog-hooks', () => ({
   useSessionCatalogController: () => ({
     refreshQueries: refreshSessionCatalogQueries,
     invalidateWorkspace: vi.fn(),
-    refreshWorkspace: vi.fn(),
+    refreshWorkspace,
     renamed: vi.fn(),
     toggleSessionPinned: vi.fn(),
   }),
@@ -74,7 +78,13 @@ const metadataCapabilities = {
 let root: Root;
 let container: HTMLDivElement;
 
-function renderSidebar(): void {
+function renderSidebar(
+  props: {
+    sessionActions?: React.ComponentProps<
+      typeof WebShellSidebar
+    >['sessionActions'];
+  } = {},
+): void {
   act(() => {
     root.render(
       <I18nProvider language="en">
@@ -90,6 +100,7 @@ function renderSidebar(): void {
           onNewSession={() => false}
           onLoadSession={loadSession}
           onError={() => {}}
+          sessionActions={props.sessionActions}
         />
       </I18nProvider>,
     );
@@ -119,6 +130,7 @@ beforeEach(() => {
   mocks.actions.bindSessionPr.mockResolvedValue({ prs: [] });
   workspace.client.updateSessionMetadata.mockClear();
   workspace.client.workspaceByCwd.mockClear();
+  refreshWorkspace.mockClear();
 });
 
 afterEach(() => {
@@ -195,6 +207,7 @@ describe('WebShellSidebar bind PR', () => {
       number: 16865,
       url: PR_URL,
     });
+    expect(refreshWorkspace).toHaveBeenCalledWith('/tmp/project');
     expect(document.querySelector('input[aria-label="Bind PR"]')).toBeNull();
   });
 
@@ -215,6 +228,7 @@ describe('WebShellSidebar bind PR', () => {
       pr: { number: 16865, url: PR_URL },
     });
     expect(mocks.actions.bindSessionPr).not.toHaveBeenCalled();
+    expect(refreshWorkspace).toHaveBeenCalledWith('/tmp/project');
   });
 
   it('keeps the dialog open with an error when the bind fails', async () => {
@@ -236,6 +250,26 @@ describe('WebShellSidebar bind PR', () => {
     expect(document.querySelector('[role="alert"]')?.textContent).toContain(
       'Bind PR failed',
     );
+    // The submitting flag must reset so the dialog can still be dismissed.
+    const cancel = Array.from(
+      document.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((button) => button.textContent?.trim() === 'cancel');
+    expect(cancel).not.toBeUndefined();
+    act(() => click(cancel!));
+    await flushSidebar();
+    expect(document.querySelector('input[aria-label="Bind PR"]')).toBeNull();
+  });
+
+  it('hides Bind PR when the host items exclude it', async () => {
+    connection.sessionId = 's1';
+    active.sessions = [makeSession('s1')];
+    active.data = active.sessions;
+    renderSidebar({ sessionActions: { items: ['rename', 'delete', 'pin'] } });
+    await flushSidebar();
+
+    const menu = await openSessionMenu();
+    expect(menuItem(menu, 'Rename')).not.toBeUndefined();
+    expect(menuItem(menu, 'Bind PR')).toBeUndefined();
   });
 
   it('hides Bind PR when the session cannot be renamed', async () => {
@@ -247,10 +281,10 @@ describe('WebShellSidebar bind PR', () => {
     renderSidebar();
     await flushSidebar();
 
-    expect(
-      Array.from(
-        document.querySelectorAll<HTMLElement>('[role="menuitem"]'),
-      ).some((item) => item.textContent?.trim() === 'Bind PR'),
-    ).toBe(false);
+    // Open the menu so the assertion reads rendered items, not the empty
+    // DOM Radix leaves behind while the menu is closed.
+    const menu = await openSessionMenu();
+    expect(menuItem(menu, 'Delete')).not.toBeUndefined();
+    expect(menuItem(menu, 'Bind PR')).toBeUndefined();
   });
 });

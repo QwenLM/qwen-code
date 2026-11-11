@@ -88,7 +88,7 @@ async function openBindDialog(page: Page, rowName: string) {
   return input;
 }
 
-test('binds a URL to the current session and refreshes the badge', async ({
+test('binds a URL to the current session and refreshes the badge @smoke', async ({
   page,
 }) => {
   const input = await openBindDialog(page, 'Current fixture');
@@ -111,7 +111,7 @@ test('binds a URL to the current session and refreshes the badge', async ({
   await expect(row.getByText('#16865')).toBeVisible();
 });
 
-test('resolves a typed number through the workspace PR list', async ({
+test('resolves a typed number through the workspace PR list @smoke', async ({
   page,
 }) => {
   const input = await openBindDialog(page, 'Current fixture');
@@ -125,7 +125,7 @@ test('resolves a typed number through the workspace PR list', async ({
   });
 });
 
-test('asks for the URL when the number is not in the open list', async ({
+test('asks for the URL when the number is not in the open list @smoke', async ({
   page,
 }) => {
   const input = await openBindDialog(page, 'Current fixture');
@@ -136,7 +136,7 @@ test('asks for the URL when the number is not in the open list', async ({
   expect(metadataPatches()).toHaveLength(0);
 });
 
-test('rejects invalid input without a PATCH', async ({ page }) => {
+test('rejects invalid input without a PATCH @smoke', async ({ page }) => {
   const input = await openBindDialog(page, 'Current fixture');
   await input.fill('not-a-pr');
   await page.getByRole('button', { name: 'Bind', exact: true }).click();
@@ -144,7 +144,7 @@ test('rejects invalid input without a PATCH', async ({ page }) => {
   expect(metadataPatches()).toHaveLength(0);
 });
 
-test('binds another session through the workspace-scoped route', async ({
+test('binds another session through the workspace-scoped route @smoke', async ({
   page,
 }) => {
   const input = await openBindDialog(page, 'Other fixture');

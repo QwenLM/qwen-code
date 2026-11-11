@@ -12,13 +12,13 @@ import { I18nProvider } from '../../i18n';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
-const { workspaceGitHubPullRequests, workspaceClient } = vi.hoisted(() => {
-  const workspaceGitHubPullRequests = vi.fn();
-  const workspaceClient = {
-    workspaceByCwd: () => ({ workspaceGitHubPullRequests }),
-  };
-  return { workspaceGitHubPullRequests, workspaceClient };
-});
+const { workspaceGitHubPullRequests, workspaceByCwd, workspaceClient } =
+  vi.hoisted(() => {
+    const workspaceGitHubPullRequests = vi.fn();
+    const workspaceByCwd = vi.fn(() => ({ workspaceGitHubPullRequests }));
+    const workspaceClient = { workspaceByCwd };
+    return { workspaceGitHubPullRequests, workspaceByCwd, workspaceClient };
+  });
 
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', async (importOriginal) => {
   const actual =
@@ -40,18 +40,20 @@ const OPEN_PR = {
   state: 'open',
 };
 
+const LIST_RESPONSE = {
+  v: 1,
+  workspaceCwd: '/repo',
+  available: true,
+  pullRequests: [OPEN_PR],
+};
+
 describe('BindSessionPrDialog', () => {
   let root: Root;
   let container: HTMLDivElement;
 
   beforeEach(() => {
     vi.clearAllMocks();
-    workspaceGitHubPullRequests.mockResolvedValue({
-      v: 1,
-      workspaceCwd: '/repo',
-      available: true,
-      pullRequests: [OPEN_PR],
-    });
+    workspaceGitHubPullRequests.mockResolvedValue(LIST_RESPONSE);
     container = document.createElement('div');
     document.body.appendChild(container);
     root = createRoot(container);
@@ -62,14 +64,16 @@ describe('BindSessionPrDialog', () => {
     container.remove();
   });
 
-  async function render(props: { busy?: boolean; error?: string } = {}) {
+  async function render(
+    props: { busy?: boolean; error?: string; workspaceCwd?: string } = {},
+  ) {
     const onSubmit = vi.fn();
     const onClose = vi.fn();
     await act(async () => {
       root.render(
         <I18nProvider language="en">
           <BindSessionPrDialog
-            workspaceCwd="/repo"
+            workspaceCwd={props.workspaceCwd ?? '/repo'}
             busy={props.busy ?? false}
             error={props.error}
             onSubmit={onSubmit}
@@ -115,19 +119,33 @@ describe('BindSessionPrDialog', () => {
     expect(workspaceGitHubPullRequests).not.toHaveBeenCalled();
   });
 
-  it('parses a URL with a subpath and query', async () => {
+  it('normalizes a URL with a subpath and query to the canonical key', async () => {
     const { onSubmit } = await render();
-    const url = 'https://github.com/QwenLM/qwen-code/pull/16865/files?x=1';
-    await type(url);
+    await type('https://github.com/QwenLM/qwen-code/pull/16865/files?x=1');
     await submit();
-    expect(onSubmit).toHaveBeenCalledWith({ number: 16865, url });
+    expect(onSubmit).toHaveBeenCalledWith({
+      number: 16865,
+      url: 'https://github.com/QwenLM/qwen-code/pull/16865',
+    });
   });
 
-  it('resolves a bare number through the open PR list', async () => {
+  it('resolves a bare number against the calling workspace', async () => {
     const { onSubmit } = await render();
     await type('16865');
     await submit();
+    expect(workspaceByCwd).toHaveBeenCalledWith('/repo');
     expect(workspaceGitHubPullRequests).toHaveBeenCalledOnce();
+    expect(onSubmit).toHaveBeenCalledWith({
+      number: 16865,
+      url: OPEN_PR.url,
+      state: 'open',
+    });
+  });
+
+  it('accepts the #N shorthand like the CLI does', async () => {
+    const { onSubmit } = await render();
+    await type('#16865');
+    await submit();
     expect(onSubmit).toHaveBeenCalledWith({
       number: 16865,
       url: OPEN_PR.url,
@@ -147,9 +165,7 @@ describe('BindSessionPrDialog', () => {
 
   it('binds a draft PR by number, recording it as open', async () => {
     workspaceGitHubPullRequests.mockResolvedValue({
-      v: 1,
-      workspaceCwd: '/repo',
-      available: true,
+      ...LIST_RESPONSE,
       pullRequests: [{ ...OPEN_PR, state: 'draft' }],
     });
     const { onSubmit } = await render();
@@ -183,6 +199,32 @@ describe('BindSessionPrDialog', () => {
     );
   });
 
+  it('reports a non-git workspace as unavailable, not as a missing number', async () => {
+    workspaceGitHubPullRequests.mockResolvedValue({
+      ...LIST_RESPONSE,
+      available: false,
+      pullRequests: [],
+    });
+    const { onSubmit } = await render();
+    await type('42');
+    await submit();
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain(
+      'not a git repository',
+    );
+  });
+
+  it('skips list resolution entirely for a cwd-less legacy session', async () => {
+    const { onSubmit } = await render({ workspaceCwd: '' });
+    await type('16865');
+    await submit();
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(workspaceByCwd).not.toHaveBeenCalled();
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain(
+      'full PR URL',
+    );
+  });
+
   it('rejects invalid input without fetching', async () => {
     const { onSubmit } = await render();
     await type('not-a-pr');
@@ -200,13 +242,84 @@ describe('BindSessionPrDialog', () => {
     expect(document.querySelector('[role="alert"]')).not.toBeNull();
   });
 
-  it('shows the daemon error and blocks submission while busy', async () => {
+  it('shows the daemon error and blocks a typed submission while busy', async () => {
     const { onSubmit } = await render({ busy: true, error: 'daemon says no' });
+    await type('https://github.com/QwenLM/qwen-code/pull/16865');
     expect(input().disabled).toBe(true);
     expect(document.querySelector('[role="alert"]')?.textContent).toBe(
       'daemon says no',
     );
     await submit();
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it('prefers a fresh local validation error over the stale host error', async () => {
+    await render({ error: 'daemon says no' });
+    await type('not-a-pr');
+    await submit();
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain(
+      'Enter a PR number or a full PR URL.',
+    );
+  });
+
+  it('clears the local error when the input changes', async () => {
+    await render();
+    await type('42');
+    await submit();
+    expect(document.querySelector('[role="alert"]')).not.toBeNull();
+    await type('https://github.com/QwenLM/qwen-code/pull/16865');
+    expect(document.querySelector('[role="alert"]')).toBeNull();
+  });
+
+  it('issues one fetch and one submit for a double submit while resolving', async () => {
+    let resolveList!: (value: typeof LIST_RESPONSE) => void;
+    workspaceGitHubPullRequests.mockReturnValue(
+      new Promise<typeof LIST_RESPONSE>((resolve) => {
+        resolveList = resolve;
+      }),
+    );
+    const { onSubmit } = await render();
+    await type('16865');
+    await submit();
+    // The form guard must absorb the second submit while the list is in
+    // flight (the cache is still empty at this point).
+    await submit();
+    await act(async () => {
+      resolveList(LIST_RESPONSE);
+    });
+    expect(workspaceGitHubPullRequests).toHaveBeenCalledOnce();
+    expect(onSubmit).toHaveBeenCalledOnce();
+  });
+
+  it('does not submit an in-flight resolution after the parent unmounts the dialog', async () => {
+    let resolveList!: (value: typeof LIST_RESPONSE) => void;
+    workspaceGitHubPullRequests.mockReturnValue(
+      new Promise<typeof LIST_RESPONSE>((resolve) => {
+        resolveList = resolve;
+      }),
+    );
+    const onSubmit = vi.fn();
+    await act(async () => {
+      root.render(
+        <I18nProvider language="en">
+          <BindSessionPrDialog
+            workspaceCwd="/repo"
+            busy={false}
+            onSubmit={onSubmit}
+            onClose={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+    await type('16865');
+    await submit();
+    // The parent unmounts the dialog while the list request is in flight.
+    await act(async () => {
+      root.render(<I18nProvider language="en">{null}</I18nProvider>);
+    });
+    await act(async () => {
+      resolveList(LIST_RESPONSE);
+    });
     expect(onSubmit).not.toHaveBeenCalled();
   });
 

@@ -1448,6 +1448,10 @@ export default {
   'Failed to bind PR #{{number}}.': 'Failed to bind PR #{{number}}.',
   'Failed to bind PR #{{number}}: {{message}}':
     'Failed to bind PR #{{number}}: {{message}}',
+  'Could not read the PR bindings for this session.':
+    'Could not read the PR bindings for this session.',
+  'GitHub CLI (gh) is unavailable or timed out. Pass the full PR URL to bind without it.':
+    'GitHub CLI (gh) is unavailable or timed out. Pass the full PR URL to bind without it.',
   'Consolidate managed auto-memory topic files.':
     'Consolidate managed auto-memory topic files.',
   'Import MCP servers from Claude configs':

@@ -2157,6 +2157,10 @@ export default {
   'Failed to bind PR #{{number}}.': 'Échec de la liaison de la PR #{{number}}.',
   'Failed to bind PR #{{number}}: {{message}}':
     'Échec de la liaison de la PR #{{number}} : {{message}}',
+  'Could not read the PR bindings for this session.':
+    'Impossible de lire les liaisons PR de cette session.',
+  'GitHub CLI (gh) is unavailable or timed out. Pass the full PR URL to bind without it.':
+    'GitHub CLI (gh) est indisponible ou a expiré. Indiquez l’URL complète de la PR pour lier sans lui.',
   'Consolidate managed auto-memory topic files.':
     'Consolider les fichiers de sujets de mémoire automatique gérée.',
   'Press c to copy the authorization URL to your clipboard.':

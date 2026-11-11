@@ -1051,6 +1051,10 @@ export default {
   'Failed to bind PR #{{number}}.': 'No s’ha pogut vincular el PR #{{number}}.',
   'Failed to bind PR #{{number}}: {{message}}':
     'No s’ha pogut vincular el PR #{{number}}: {{message}}',
+  'Could not read the PR bindings for this session.':
+    'No s’han pogut llegir els vincles de PR d’aquesta sessió.',
+  'GitHub CLI (gh) is unavailable or timed out. Pass the full PR URL to bind without it.':
+    'GitHub CLI (gh) no està disponible o ha excedit el temps d’espera. Indiqueu l’URL complet del PR per vincular sense ell.',
   'Consolidate managed auto-memory topic files.':
     'Consolida els fitxers de temes de memòria automàtica gestionada.',
   'Open MCP management dialog': 'Obre el diàleg de gestió MCP',

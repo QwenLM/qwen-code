@@ -1083,18 +1083,29 @@ export function fetchCurrentBranchPullRequest(
 }
 
 /**
+ * The outcome of resolving an explicitly named PR for manual binding:
+ * either the gh-resolved snapshot, or a failure with a coarse reason.
+ * `unavailable` (gh binary missing) and `timeout` are environmental — the
+ * caller should name the cause instead of advising a PR-specific remedy;
+ * `failed` covers every other gh failure (auth, rate limit, unknown PR,
+ * unparseable output), which gh's stderr does not reliably distinguish.
+ */
+export type PullRequestReferenceResolution =
+  | { status: 'pr'; number: number; url: string; state: SessionPrState }
+  | { status: 'error'; reason: 'unavailable' | 'timeout' | 'failed' };
+
+/**
  * Resolves an explicitly named PR (a number or a full PR URL) through gh,
  * for manual session binding. Unlike {@link fetchCurrentBranchPullRequest}
  * this is not an attribution gate: the caller already holds user intent
- * naming the PR, and gh only supplies the canonical url/state. `undefined`
- * means gh could not answer (unavailable, unknown PR, unparseable output);
- * a caller holding a full URL may then bind that URL without a state and
+ * naming the PR, and gh only supplies the canonical url/state. On failure
+ * a caller holding a full URL may still bind that URL without a state and
  * let the refresh sweep resolve it later.
  */
 export function fetchPullRequestByReference(
   cwd: string,
   reference: string,
-): Promise<{ number: number; url: string; state: SessionPrState } | undefined> {
+): Promise<PullRequestReferenceResolution> {
   const childEnv = ghEnv();
   // A URL names its own repo, but a bare number needs the checkout's repo
   // context; outside a repo gh still runs (and fails) in the given cwd.
@@ -1113,7 +1124,13 @@ export function fetchPullRequestByReference(
       },
       (error, stdout) => {
         if (error) {
-          resolve(undefined);
+          const reason =
+            (error as NodeJS.ErrnoException).code === 'ENOENT'
+              ? 'unavailable'
+              : (error as { killed?: unknown }).killed === true
+                ? 'timeout'
+                : 'failed';
+          resolve({ status: 'error', reason });
           return;
         }
         try {
@@ -1128,11 +1145,11 @@ export function fetchPullRequestByReference(
             typeof parsed.number === 'number' &&
               typeof parsed.url === 'string' &&
               (state === 'open' || state === 'merged' || state === 'closed')
-              ? { number: parsed.number, url: parsed.url, state }
-              : undefined,
+              ? { status: 'pr', number: parsed.number, url: parsed.url, state }
+              : { status: 'error', reason: 'failed' },
           );
         } catch {
-          resolve(undefined);
+          resolve({ status: 'error', reason: 'failed' });
         }
       },
     );

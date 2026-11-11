@@ -1379,6 +1379,10 @@ export default {
   'Failed to bind PR #{{number}}.': '绑定 PR #{{number}} 失败。',
   'Failed to bind PR #{{number}}: {{message}}':
     '绑定 PR #{{number}} 失败：{{message}}',
+  'Could not read the PR bindings for this session.':
+    '无法读取本会话的 PR 绑定。',
+  'GitHub CLI (gh) is unavailable or timed out. Pass the full PR URL to bind without it.':
+    'GitHub CLI (gh) 不可用或超时。请改用完整 PR URL 直接绑定。',
   'Consolidate managed auto-memory topic files.': '整理托管自动记忆主题文件',
   'Import MCP servers from Claude configs': '从 Claude 配置导入 MCP 服务器',
   'Open MCP management dialog': '打开 MCP 管理对话框',

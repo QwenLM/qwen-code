@@ -2202,13 +2202,26 @@ async function handleDaemonRoute(
   }
   const sessionMetadataMatch =
     path.match(/^\/session\/([^/]+)\/metadata\/?$/) ??
-    path.match(/^\/workspaces\/[^/]+\/session\/([^/]+)\/metadata\/?$/);
+    path.match(/^\/workspaces\/([^/]+)\/session\/([^/]+)\/metadata\/?$/);
   if (method === 'PATCH' && sessionMetadataMatch) {
-    const sessionId = decodeURIComponent(sessionMetadataMatch[1]);
+    // The workspace-scoped route resolves the session INSIDE the named
+    // workspace; mirror that ownership rule so a wrong-workspace write
+    // fails here like it does in production.
+    const workspaceSegment =
+      sessionMetadataMatch[2] !== undefined
+        ? decodeRouteSegment(sessionMetadataMatch[1])
+        : undefined;
+    const sessionId = decodeURIComponent(
+      sessionMetadataMatch[2] ?? sessionMetadataMatch[1],
+    );
     const index = scenario.sessions.findIndex(
       (session) => session.sessionId === sessionId,
     );
-    if (index < 0) {
+    if (
+      index < 0 ||
+      (workspaceSegment !== undefined &&
+        scenario.sessions[index].workspaceCwd !== workspaceSegment)
+    ) {
       await json(
         route,
         {

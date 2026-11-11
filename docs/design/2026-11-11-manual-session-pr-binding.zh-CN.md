@@ -74,8 +74,10 @@ Shell 里的用户够不着这条路径，实践中总要提醒 agent 去跑。
 
 行为：
 
-1. **无参数**——读会话 sidecar（`readSessionPrs`），列出已绑定 PR（号 +
-   state），附用法行。TUI 此外没有查看绑定的手段，这一步提供验证入口。
+1. **无参数**——读会话 sidecar（`readSessionPrsDetailed`），列出已绑定 PR
+   （号 + state），附用法行。TUI 此外没有查看绑定的手段，这一步提供验证入
+   口。读取失败或 sidecar 损坏报专门的错误消息——不等同于权威的「没有绑
+   定」。
 2. **参数解析**——接受裸号（`[1-9]\d{0,8}`，与 backfill 的界一致）、`#N`、
    完整 PR URL。`#N` 与 URL 形态复用 `GitWorktreeService.parsePRReference`；
    其余形状是用法错误。
@@ -85,21 +87,28 @@ Shell 里的用户够不着这条路径，实践中总要提醒 agent 去跑。
    `resolveGhBinary`、`ghEnv` 与既有超时。
    - gh 解析成功 → 绑定 gh 的 `{number, url, state}`（gh 是规范来源，对带
      `/files` 子路径、query、enterprise host 的 URL 亦然）。
-   - gh 失败且输入是完整 URL → 绑定 `{number, url}`、不带 state；daemon 刷
-     新定时器随后补 state。URL 须过 `isValidSessionPrUrl`。
-   - gh 失败且输入是裸号 → 报错并要求给完整 PR URL（不从 remote 合成 URL）。
-4. **落盘**——与 shell post-hook 完全一致：best-effort `getSessionLocation`
-   → `getPrSessionPathForArchiveState` →
+   - gh 失败且输入是完整 URL → 绑定 `{number, url}`、不带 state，并经
+     `pullRequestViewUrl` 规范化为 `/pull/<N>` 拼写，使后续重绑命中同一
+     sidecar 键。URL 须过 `isValidSessionPrUrl`。同仓库 URL 的 state 由
+     daemon 刷新定时器随后补齐（见「约束与风险」）。
+   - gh 失败且输入是裸号 → 报错。helper 对失败分类（gh 二进制缺失为
+     `unavailable`、子进程被杀为 `timeout`、其余为 `failed`）；环境性失败
+     用专门的消息，而非 PR 层面的补救建议。
+4. **落盘**——与 shell post-hook 一致：best-effort `getSessionLocation`
+   （在 gh 往返之后重新解析）→ `getPrSessionPathForArchiveState` →
    `upsertSessionPrs([{number, url, state?, source: 'create'}])` → 号是新增
-   时 `emitSessionPrBound`。ACP 宿主已把该回调接到
+   时 `emitSessionPrBound`。通知在自己的 catch 里 best-effort：绑定已落盘，
+   catalog 标记失败不得读作绑定失败。ACP 宿主已把该回调接到
    `qwen/notify/session/pr-binding`，daemon 据此标记 session catalog，
    live-state 客户端 ~2s 内 refetch 到 badge——与自动创建绑定完全相同。
 5. **结果消息**——成功（`Bound PR #N to this session.`）、已绑定（同 URL
-   保持位置与 `createdAt`，报告为已绑定）、解析/用法错误。
+   保持位置与 `createdAt`；显式 gh 解析的 state 原地修复无 state 条目）、
+   解析/用法错误。
 
-`source: 'create'` 与既有手动 REST/ACP 路径的盖章一致；`upsertSessionPrs`
-绝不降级更强的已持久化 provenance（`worktree`），约定绑定在手动重绑后仍存
-活。
+`source: 'create'` 与既有手动 REST/ACP 路径的盖章一致；同一编号且同一规范
+URL 下，`upsertSessionPrs` 绝不降级更强的已持久化 provenance（`worktree`），
+约定绑定在手动重绑后仍存活。（同一编号但不同规范 URL 是另一个 PR，整体替
+换条目——即文档化的按 PR 替换语义。）
 
 i18n：描述与全部用户可见字符串进全部 9 个内置 locale；`zh` 与 `zh-TW` 是
 strict-parity locale，其测试套件对任何未翻译的内置命令描述都会失败。
@@ -109,20 +118,31 @@ strict-parity locale，其测试套件对任何未翻译的内置命令描述都
 新组件
 `packages/web-shell/client/components/dialogs/BindSessionPrDialog.tsx`，
 仿 `SessionRenameDialog`（`DialogShell size="sm"` + `Input` + 错误行 +
-Cancel/Bind）。输入框接受 PR 号或 URL：
+Cancel/Bind）。输入框接受 PR 号、`#N` 或 URL：
 
 - **URL**——客户端解析 `/pull/<N>`，校验 http(s)，提交 `{number, url}`、不
-  带 state（刷新定时器负责解析）。
-- **号**——经既有 `workspaceGitHubPullRequests()` SDK 调用拉 workspace PR
-  列表（`GitHubPrsContent` 的 fetch 模式），按号匹配 →
+  带 state，并规范化为 `/pull/<N>` 拼写（同仓库 URL 由刷新定时器解析）。
+- **号 / #N**——经既有 `workspaceGitHubPullRequests()` SDK 调用拉 workspace
+  PR 列表（`GitHubPrsContent` 的 fetch 模式），按号匹配 →
   `{number, url, state: 'open'}`。列表只含 open/draft PR；号不在列表时报错
-  并要求给完整 URL（merged/closed PR 走 URL 绑定）。
+  并要求给完整 URL（merged/closed PR 走 URL 绑定）。非 git 工作区
+  （`available: false`）与无 cwd 的 legacy 会话都会得到「请粘贴 URL」消
+  息，不做虚假查询。
+
+对话框守护进行中的解析：每个 await 之后检查存活性 ref，防止被父组件卸载的
+对话框提交用户已取消的绑定；`dismissible={!resolving}` 在列表请求期间禁止
+关闭。解析中的双击由 pending 标志吸收（一次请求、一次写入）。本地校验错误
+优先于宿主传入的过期 daemon 错误，并在输入变更时清除。
+
+对话框相对 `/pr` 的不冗余价值在于绑定用户当前不在其中的会话：命令只能绑
+「本会话」，对话框可绑总览面板或侧栏的任意行。
 
 入口：`SessionOverviewPanel` actions 列 Rename 旁加一个 `GitPullRequestIcon`
 ghost 按钮，用与 Rename 相同的 `canRenameCard` 能力门控（元数据变更）；
 侧栏会话下拉菜单（`WebShellSidebar`）加一个 Bind PR 项，用 `showRename`
-门控，standalone 会话隐藏（其元数据路由只接受 `displayName`）。
-`bindPrTarget` / `bindPrCandidate` state 从两个面驱动同一个对话框。
+加宿主 `sessionActionItems` 白名单（`bindPr` 项）门控，standalone 会话隐藏
+（其元数据路由只接受 `displayName`）。`bindPrTarget` / `bindPrCandidate`
+state 从两个面驱动同一个对话框。
 
 提交路由仿 `saveRename` 的三分支：
 
@@ -139,7 +159,10 @@ pr-only 的 `session_metadata_updated` 事件，其 mapper 语义保持不动）
 走面板的 `setActionError` 行。
 
 i18n：`client/i18n.tsx` 的 EN 与 ZH 两份字典各加 `sessionsOverview.bindPr*`
-键。
+键。命令还注册进 Web Shell 的两张内置命令表——`BUILT_IN_COMMANDS`
+（HelpDialog，使 `/pr` 列在「内置」而非「自定义」下）与
+`BUILTIN_COMMAND_DESCRIPTION_KEYS`（localCommands，`local.pr`，使斜杠菜单
+描述跟随 UI 语言而非 daemon 进程语言）。
 
 ## 关键设计决策
 
@@ -148,11 +171,12 @@ i18n：`client/i18n.tsx` 的 EN 与 ZH 两份字典各加 `sessionsOverview.bind
 - **命令复用 shell post-hook 的写入路径。** 子进程本就带跨进程锁与 catalog
   通知直写 sidecar；命令照做即继承全部机制，无需 daemon 参与。
 - **手动绑定里 `gh` 只解析、不做闸门。** `gh` 查询失败时降级到用户给的 URL
-  而非拒绝绑定；刷新定时器随后修 state。裸号无法降级（没有 URL 可绑），所
-  以报错。原样持久化的 URL（含 `/pull/N/files` 一类子路径）由 sweep 的补偿
-  层兜底：`session-pr-refresh` 按 `samePullRequest`（容忍子路径/query）匹配
-  后，把抓到的快照改写到条目自己的 URL 下再交给 sidecar 的规范门，因此状态
-  解析不依赖绑定 URL 的规范化。
+  而非拒绝绑定；同仓库 URL 的 state 由刷新定时器随后修复。裸号无法降级
+  （没有 URL 可绑），所以按失败分类报错。两个手动写入点都把存储 URL 规范化
+  为 `/pull/<N>` 拼写，使重绑命中同一 sidecar 键；其他写入方（REST PATCH、
+  Git 对话框）原样持久化的条目仍由 sweep 的补偿层兜底：`session-pr-refresh`
+  按 `samePullRequest`（容忍子路径/query）匹配后，把抓到的快照改写到条目自
+  己的 URL 下再交给 sidecar 的规范门。
 - **不伪造 state。** URL 绑定省略 `state` 而非猜 `open`；只有列表匹配
   （open/draft）才盖 `open`。
 - **对话框而非行内输入。** 绑定需要解析步骤（号 → URL）与错误展示面；总览
@@ -160,13 +184,13 @@ i18n：`client/i18n.tsx` 的 EN 与 ZH 两份字典各加 `sessionsOverview.bind
 
 ## 影响文件
 
-| 层        | 文件                                                                                                                                                                                                                                |
-| --------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| core      | `utils/github-prs.ts`（新增 `fetchPullRequestByReference`）                                                                                                                                                                         |
-| CLI 命令  | `ui/commands/pr-command.ts`（新增）、`services/BuiltinCommandLoader.ts`                                                                                                                                                             |
-| CLI i18n  | `i18n/locales/*.js`（9 个文件）                                                                                                                                                                                                     |
-| Web Shell | `components/dialogs/BindSessionPrDialog.tsx`（新增）、`components/SessionOverviewPanel.tsx`、`components/sidebar/WebShellSidebar.tsx`、`daemon/session/actions.ts`、`daemon/session/types.ts`、`i18n.tsx`、`test/sidebarHarness.ts` |
-| 测试      | 上述各处的 collocated 单测                                                                                                                                                                                                          |
+| 层        | 文件                                                                                                                                                                                                                                                                                                   |
+| --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| core      | `utils/github-prs.ts`（新增 `fetchPullRequestByReference`）、`services/session-pr-service.ts`（同 URL state 修复）                                                                                                                                                                                     |
+| CLI 命令  | `ui/commands/pr-command.ts`（新增）、`services/BuiltinCommandLoader.ts`、`ui/opentui/commands-registry.ts`（OpenTUI parity 路由——注册表门控双向断言与 loader 的集合相等）                                                                                                                              |
+| CLI i18n  | `i18n/locales/*.js`（9 个文件）、`i18n/mustTranslateKeys.ts`（命令字符串）                                                                                                                                                                                                                             |
+| Web Shell | `components/dialogs/BindSessionPrDialog.tsx`（新增）、`components/SessionOverviewPanel.tsx`、`components/sidebar/WebShellSidebar.tsx`、`components/dialogs/HelpDialog.tsx`、`constants/localCommands.ts`、`daemon/session/actions.ts`、`daemon/session/types.ts`、`i18n.tsx`、`test/sidebarHarness.ts` |
+| 测试      | 上述各处的 collocated 单测                                                                                                                                                                                                                                                                             |
 
 ## 约束与风险
 
@@ -178,6 +202,18 @@ i18n：`client/i18n.tsx` 的 EN 与 ZH 两份字典各加 `sessionsOverview.bind
   陈旧或缺失时降级到 URL 输入路径。
 - locale parity 测试钉住命令描述；漏翻会在 CI 失败，而不是在 zh/zh-TW 里
   发布英文兜底。
+- **没有解绑路径。** 打错的手动绑定（如想输 `#413` 却输了 `/pr 431`）会产
+  生一条持久、且被刷新扫描持续刷新的错误归属，任何界面都无法清除；恢复手段
+  是手改 `<chatsDir>/<sessionId>.pr.json`。这是原始绑定设计的无清除语义，
+  现在可被自由输入触达——清除路径（`--clear` 或可空 `pr`）是刻意的后续范
+  围，不在本次改动内。
+- **刷新定时器只修复同仓库 URL。** `session-pr-refresh` 跳过仓库不属于本
+  工作区的绑定（`isForeign`），因此跨仓库 URL 的无 state 绑定会一直无
+  state；badge 仍正常渲染与链接。
+- **两个写入方的重绑语义有意不同。** `/pr`（`upsertSessionPrs`）同 URL 重
+  绑保持位置与 `createdAt`；对话框/REST 路径（`upsertSessionPr`）刷新
+  `createdAt` 并把条目移到队尾——即 Git 对话框已在用的既有元数据路由语义。
+  下方验收标准把「保持位置」的保证限定于 `/pr`。
 
 ## 验证计划
 
@@ -187,16 +223,22 @@ i18n：`client/i18n.tsx` 的 EN 与 ZH 两份字典各加 `sessionsOverview.bind
   刷新），沿用既有 jsdom + act 风格。
 - E2E：本地 bundle 在临时 git 仓库里用真实 `gh` 跑 headless `/pr`；隔离
   daemon 会话经 `/pr` prompt 绑定并回读 sidecar 与会话列表；Playwright 用
-  mock daemon 驱动对话框。
+  mock daemon 驱动对话框（已提交，带 `@smoke` 标签）。
 - 先在全局安装的 CLI 上跑基线 dry-run：那里 `/pr` 是未知命令，确认本特性
   填补的缺口。
+- 验证记录（2026-11-11，本地）：上述 headless 与 daemon E2E 已用真实 gh 对
+  本地 bundle 手动跑通（headless 8/8 格，含降级与错误路径；daemon 6/6 格，
+  含 catalog 传播与幂等重绑）；Playwright spec 在 chromium 跑 5/5。维护者
+  的独立 A/B 装置另对 merge-base 对照验证了真实 sidecar 的中央主张（87/87
+  断言、8/8 变异被杀）。日志：`.qwen/e2e-tests/manual-session-pr-binding.md`。
 
 ## 验收标准
 
 - TUI、headless、daemon 三种模式下，`/pr <N>`、`/pr #N`、`/pr <url>` 都把
   PR 绑到当前会话；sidecar 条目带 `source: 'create'`，gh 可解析时带 state。
 - 无参 `/pr` 列出会话已绑定的 PR。
-- 重绑同一 PR 报告已绑定，不移动位置、不刷新 `createdAt`。
+- 经 `/pr` 重绑同一 PR 报告已绑定，不移动位置、不刷新 `createdAt`（对话
+  框/REST 路径保持既有元数据路由语义；见「约束与风险」）。
 - Web Shell 总览面板能把 PR 绑到当前会话与其他会话；catalog 刷新后 badge
   出现；不在 open 列表的号与非法输入产生可操作的错误。
 - `npm run build`、`npm run typecheck`、聚焦单测套件（含 i18n parity 套件）

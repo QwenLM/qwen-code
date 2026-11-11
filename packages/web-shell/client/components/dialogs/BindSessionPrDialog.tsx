@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useWorkspace } from '@qwen-code/web-shell/daemon-react-sdk';
 import type { DaemonGitHubPullRequestList } from '@qwen-code/sdk/daemon';
 import { useI18n } from '../../i18n';
@@ -30,16 +30,19 @@ interface BindSessionPrDialogProps {
 // Same shape GitWorktreeService.parsePRReference accepts on the CLI side:
 // any host, optional subpath/query/fragment after /pull/<N>. The number
 // bound mirrors the CLI's bare-number pattern so an over-long number cannot
-// parse into an unsafe integer.
+// parse into an unsafe integer. Group 1 captures the canonical
+// /pull/<N> prefix so a /files or query spelling stores the same sidecar
+// key as a later canonical re-bind (mirrors pullRequestViewUrl).
 const PR_URL_PATTERN =
-  /^https?:\/\/[^/]+\/[^/]+\/[^/]+\/pull\/([1-9]\d{0,8})(?:\/[^?#]*)?(?:[?#].*)?$/i;
+  /^(https?:\/\/[^/]+\/[^/]+\/[^/]+\/pull\/([1-9]\d{0,8}))(?:\/[^?#]*)?(?:[?#].*)?$/i;
 const BARE_NUMBER_PATTERN = /^[1-9]\d{0,8}$/;
 
 /**
  * Supplementary PR registration: binds an existing PR the automatic paths
- * missed. A URL binds as-is (the daemon's refresh sweep resolves its state);
- * a bare number resolves through the workspace's open-PR list, so a number
- * outside that list (merged/closed or beyond the list cap) asks for the URL.
+ * missed. A URL binds normalized to its canonical /pull/<N> spelling (the
+ * daemon's refresh sweep resolves its state); a bare number or #N resolves
+ * through the workspace's open-PR list, so a number outside that list
+ * (merged/closed or beyond the list cap) asks for the URL.
  */
 export function BindSessionPrDialog({
   workspaceCwd,
@@ -56,14 +59,24 @@ export function BindSessionPrDialog({
   const [prList, setPrList] = useState<DaemonGitHubPullRequestList | null>(
     null,
   );
+  // A cancelled dialog must not submit the in-flight resolution: the
+  // parent's guard reads a closure-captured target and runs unconditionally,
+  // so the liveness check lives here, after every await.
+  const aliveRef = useRef(true);
+  useEffect(() => {
+    aliveRef.current = true;
+    return () => {
+      aliveRef.current = false;
+    };
+  }, []);
 
   const submit = async () => {
-    const input = value.trim();
+    const input = value.trim().replace(/^#/, '');
     setLocalError(undefined);
 
     const urlMatch = PR_URL_PATTERN.exec(input);
-    if (urlMatch?.[1]) {
-      onSubmit({ number: Number(urlMatch[1]), url: input });
+    if (urlMatch?.[1] && urlMatch[2]) {
+      onSubmit({ number: Number(urlMatch[2]), url: urlMatch[1] });
       return;
     }
 
@@ -75,18 +88,32 @@ export function BindSessionPrDialog({
 
     let list = prList;
     if (!list) {
+      // A cwd-less legacy session has no workspace PR list to resolve
+      // against; asking for the URL beats a request no route resolves.
+      if (!workspaceCwd) {
+        setLocalError(t('sessionsOverview.bindPrListFailed'));
+        return;
+      }
       setResolving(true);
       try {
         list = await client
           .workspaceByCwd(workspaceCwd)
           .workspaceGitHubPullRequests();
+        if (!aliveRef.current) return;
         setPrList(list);
       } catch {
-        setLocalError(t('sessionsOverview.bindPrListFailed'));
+        if (aliveRef.current) {
+          setLocalError(t('sessionsOverview.bindPrListFailed'));
+        }
         return;
       } finally {
-        setResolving(false);
+        if (aliveRef.current) setResolving(false);
       }
+    }
+    if (!aliveRef.current) return;
+    if (!list.available) {
+      setLocalError(t('sessionsOverview.bindPrUnavailable'));
+      return;
     }
     const match = list.pullRequests.find((pr) => pr.number === number);
     if (!match) {
@@ -99,13 +126,17 @@ export function BindSessionPrDialog({
     onSubmit({ number: match.number, url: match.url, state: 'open' });
   };
 
-  const shownError = error ?? localError;
+  // A fresh local validation message outranks the host's stale daemon
+  // error; editing clears the local one so it never describes input the
+  // user already replaced.
+  const shownError = localError ?? error;
   const disabled = busy || resolving || !value.trim();
 
   return (
     <DialogShell
       title={t('sessionsOverview.bindPr')}
       size="sm"
+      dismissible={!resolving}
       onClose={onClose}
     >
       <form
@@ -122,7 +153,10 @@ export function BindSessionPrDialog({
           maxLength={2048}
           value={value}
           disabled={busy || resolving}
-          onChange={(event) => setValue(event.target.value)}
+          onChange={(event) => {
+            setValue(event.target.value);
+            if (localError) setLocalError(undefined);
+          }}
           onKeyDown={(event) => {
             if (
               event.key === 'Enter' &&
@@ -139,7 +173,12 @@ export function BindSessionPrDialog({
           </p>
         )}
         <div className="flex justify-end gap-2">
-          <Button type="button" variant="outline" onClick={onClose}>
+          <Button
+            type="button"
+            variant="outline"
+            disabled={resolving}
+            onClick={onClose}
+          >
             {t('common.cancel')}
           </Button>
           <Button type="submit" disabled={disabled}>

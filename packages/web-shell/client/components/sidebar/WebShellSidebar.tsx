@@ -427,6 +427,7 @@ export const DEFAULT_PRIMARY_NAV_ITEMS: readonly WebShellSidebarPrimaryNavItem[]
 export type WebShellSidebarSessionActionItem =
   | 'details'
   | 'rename'
+  | 'bindPr'
   | 'group'
   | 'export'
   | 'delete'
@@ -460,7 +461,17 @@ export interface WebShellSidebarSessionActionsOptions {
 }
 
 export const DEFAULT_SESSION_ACTION_ITEMS: readonly WebShellSidebarSessionActionItem[] =
-  ['details', 'rename', 'group', 'export', 'delete', 'pin', 'archive', 'split'];
+  [
+    'details',
+    'rename',
+    'bindPr',
+    'group',
+    'export',
+    'delete',
+    'pin',
+    'archive',
+    'split',
+  ];
 
 const DEFAULT_INLINE_ACTION_ITEMS: readonly WebShellSidebarSessionInlineActionItem[] =
   ['pin'];
@@ -3992,9 +4003,11 @@ export function WebShellSidebar({
     setBindPrCandidate(session);
   }, []);
 
-  // Supplementary PR registration — same routing as saveRename: the current
-  // session binds through its own session actions, other sessions through
-  // the owning workspace's metadata route.
+  // Supplementary PR registration — mirrors saveRename's workspace routing
+  // (current session → own session actions; other sessions → the owning
+  // workspace's metadata route; cwd-less rows → the global route). Unlike
+  // saveRename there is no standalone branch: standalone rows never show
+  // the item, since their metadata route only accepts displayName.
   const submitBindPr = useCallback(
     (pr: BindSessionPrPayload) => {
       const session = bindPrCandidate;
@@ -5765,10 +5778,11 @@ export function WebShellSidebar({
       const showRename = standalone
         ? sessionActionItems.has('rename')
         : canRenameSession(session);
-      // PR binding shares rename's metadata-mutation gate; standalone
-      // sessions are excluded because their metadata route only accepts
-      // displayName.
-      const showBindPr = !standalone && showRename;
+      // PR binding shares rename's metadata-mutation gate and the host's
+      // items whitelist; standalone sessions are excluded because their
+      // metadata route only accepts displayName.
+      const showBindPr =
+        !standalone && showRename && sessionActionItems.has('bindPr');
       const activeExportScope = getActiveExportScope(session);
       const showExport = standalone
         ? sessionActionItems.has('export')
