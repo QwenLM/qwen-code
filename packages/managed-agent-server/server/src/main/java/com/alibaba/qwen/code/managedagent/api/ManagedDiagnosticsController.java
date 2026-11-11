@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.managedagent.catalog.ManagedSessionResourcesService
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellActivityQueryRequest;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellDiagnosticTraceRequest;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellSessionRequest;
+import com.alibaba.qwen.code.managedagent.model.SessionPrincipal;
 import com.alibaba.qwen.code.managedagent.model.TenantContext;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentTraceService;
 import com.alibaba.qwen.code.managedagent.session.ManagedSessionActivityService;
@@ -36,7 +37,11 @@ public class ManagedDiagnosticsController {
 
     @GetMapping("/v1/agents/sessions/{sessionId}/context-usage")
     public ResponseEntity<JsonNode> context(TenantContext tenant, @PathVariable String sessionId) {
-        return noStore(diagnostics.context(tenant.tenantId(), tenant.requireActorId(), sessionId));
+        SessionPrincipal principal = tenant.subjectPrincipal();
+        return noStore(principal == null
+                ? diagnostics.context(tenant.tenantId(),
+                        tenant.requireActorId(), sessionId)
+                : diagnostics.context(principal, sessionId));
     }
 
     @PostMapping("/api/agent/web-shell/v1/session-context-usage/query")
@@ -47,7 +52,11 @@ public class ManagedDiagnosticsController {
 
     @GetMapping("/v1/agents/sessions/{sessionId}/stats")
     public ResponseEntity<JsonNode> statistics(TenantContext tenant, @PathVariable String sessionId) {
-        return noStore(diagnostics.statistics(tenant.tenantId(), tenant.requireActorId(), sessionId));
+        SessionPrincipal principal = tenant.subjectPrincipal();
+        return noStore(principal == null
+                ? diagnostics.statistics(tenant.tenantId(),
+                        tenant.requireActorId(), sessionId)
+                : diagnostics.statistics(principal, sessionId));
     }
 
     @PostMapping("/api/agent/web-shell/v1/session-stats/query")
@@ -58,7 +67,11 @@ public class ManagedDiagnosticsController {
 
     @GetMapping("/v1/agents/sessions/{sessionId}/resources")
     public ResponseEntity<JsonNode> resources(TenantContext tenant, @PathVariable String sessionId) {
-        return noStore(resources.get(tenant.tenantId(), tenant.requireActorId(), sessionId));
+        SessionPrincipal principal = tenant.subjectPrincipal();
+        return noStore(principal == null
+                ? resources.get(tenant.tenantId(), tenant.requireActorId(),
+                        sessionId)
+                : resources.get(principal, sessionId));
     }
 
     @PostMapping("/api/agent/web-shell/v1/session-resources/query")
@@ -71,7 +84,11 @@ public class ManagedDiagnosticsController {
     public ResponseEntity<JsonNode> traces(TenantContext tenant, @PathVariable String sessionId,
             @RequestParam(required = false) String cursor,
             @RequestParam(defaultValue = "20") int limit) {
-        return noStore(traces.list(tenant.tenantId(), tenant.requireActorId(), sessionId, cursor, limit));
+        SessionPrincipal principal = tenant.subjectPrincipal();
+        return noStore(principal == null
+                ? traces.list(tenant.tenantId(), tenant.requireActorId(),
+                        sessionId, cursor, limit)
+                : traces.list(principal, sessionId, cursor, limit));
     }
 
     @PostMapping("/api/agent/web-shell/v1/session-agent-trace/query")
@@ -82,7 +99,11 @@ public class ManagedDiagnosticsController {
 
     @GetMapping("/v1/agents/sessions/{sessionId}/activity-stats")
     public ResponseEntity<JsonNode> activityStatistics(TenantContext tenant, @PathVariable String sessionId) {
-        return noStore(activity.statistics(tenant.tenantId(), tenant.requireActorId(), sessionId));
+        SessionPrincipal principal = tenant.subjectPrincipal();
+        return noStore(principal == null
+                ? activity.statistics(tenant.tenantId(),
+                        tenant.requireActorId(), sessionId)
+                : activity.statistics(principal, sessionId));
     }
 
     @PostMapping("/api/agent/web-shell/v1/session-activity-stats/query")
@@ -94,7 +115,11 @@ public class ManagedDiagnosticsController {
     public ResponseEntity<JsonNode> activity(TenantContext tenant, @PathVariable String sessionId,
             @RequestParam String kind, @RequestParam(required = false) String cursor,
             @RequestParam(defaultValue = "50") int limit) {
-        return noStore(activity.list(tenant.tenantId(), tenant.requireActorId(), sessionId, kind, cursor, limit));
+        SessionPrincipal principal = tenant.subjectPrincipal();
+        return noStore(principal == null
+                ? activity.list(tenant.tenantId(), tenant.requireActorId(),
+                        sessionId, kind, cursor, limit)
+                : activity.list(principal, sessionId, kind, cursor, limit));
     }
 
     @PostMapping("/api/agent/web-shell/v1/session-activity/query")

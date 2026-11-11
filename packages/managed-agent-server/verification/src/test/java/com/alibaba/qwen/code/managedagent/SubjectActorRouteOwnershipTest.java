@@ -17,11 +17,13 @@ import org.springframework.http.MediaType;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.ResultActions;
+import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
 
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.function.Supplier;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
@@ -211,6 +213,70 @@ class SubjectActorRouteOwnershipTest {
                                 "idempotencyKey",
                                 UUID.randomUUID().toString()))))
                 .andExpect(status().isAccepted());
+    }
+
+    @Test
+    void aSubjectBearingCallerReachesEverySessionScopedSurface()
+            throws Exception {
+        String tenant = tenant();
+        AuthenticatedTenantActor alice = actor(tenant, "alice", "biz-alice");
+        AuthenticatedTenantActor bob = actor(tenant, "bob", "biz-bob");
+        String session = createPublic(tenant, alice);
+        String skills = mapper.writeValueAsString(
+                Map.of("sessionId", session));
+
+        // The user-message queue feature is off in this fixture: reaching its
+        // 409 unsupported_feature is the proof that the ownership gate passed,
+        // where R3-5 used to answer 404 before the route ran.
+        List<Surface> surfaces = List.of(
+                new Surface("user-messages query",
+                        () -> get("/v1/agents/sessions/{id}/user-messages",
+                                session), 409),
+                new Surface("user-messages command",
+                        () -> post("/v1/agents/sessions/{id}/user-messages",
+                                session)
+                                .header("Idempotency-Key",
+                                        UUID.randomUUID().toString())
+                                .contentType(MediaType.APPLICATION_JSON)
+                                .content("{\"action\":\"submit\","
+                                        + "\"input\":[{\"type\":\"text\","
+                                        + "\"text\":\"hello\"}]}"), 409),
+                new Surface("hook-catalog",
+                        () -> get("/v1/agents/sessions/{id}/hook-catalog",
+                                session), 200),
+                new Surface("mcp-catalog",
+                        () -> get("/v1/agents/sessions/{id}/mcp-catalog",
+                                session), 200),
+                new Surface("mcp-management",
+                        () -> get("/v1/agents/sessions/{id}/mcp-management",
+                                session), 200),
+                new Surface("extensions",
+                        () -> get("/v1/agents/sessions/{id}/extensions",
+                                session), 200),
+                new Surface("context-usage",
+                        () -> get("/v1/agents/sessions/{id}/context-usage",
+                                session), 200),
+                new Surface("session-stats",
+                        () -> get("/v1/agents/sessions/{id}/stats", session),
+                        200),
+                new Surface("session-skills",
+                        () -> post("/api/agent/web-shell/v1"
+                                + "/session-skills/query")
+                                .contentType(MediaType.APPLICATION_JSON)
+                                .content(skills), 200));
+
+        for (Surface surface : surfaces) {
+            mvc.perform(surface.request().get().header(TENANT, tenant)
+                            .principal(alice))
+                    .andExpect(status().is(surface.expected()));
+            mvc.perform(surface.request().get().header(TENANT, tenant)
+                            .principal(bob))
+                    .andExpect(status().isNotFound());
+        }
+    }
+
+    private record Surface(String name,
+            Supplier<MockHttpServletRequestBuilder> request, int expected) {
     }
 
     private String createPublic(String tenant, AuthenticatedTenantActor actor)

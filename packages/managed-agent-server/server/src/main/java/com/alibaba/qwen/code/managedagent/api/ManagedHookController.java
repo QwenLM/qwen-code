@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.api;
 
 import com.alibaba.qwen.code.managedagent.catalog.ManagedHookCatalogService;
+import com.alibaba.qwen.code.managedagent.model.SessionPrincipal;
 import com.alibaba.qwen.code.managedagent.model.TenantContext;
 import com.fasterxml.jackson.databind.JsonNode;
 import org.springframework.http.CacheControl;
@@ -19,7 +20,11 @@ public class ManagedHookController {
 
     @GetMapping("/v1/agents/sessions/{sessionId}/hook-catalog")
     public ResponseEntity<JsonNode> get(TenantContext tenant, @PathVariable String sessionId) {
+        SessionPrincipal principal = tenant.subjectPrincipal();
         return ResponseEntity.ok().cacheControl(CacheControl.noStore())
-                .body(service.get(tenant.tenantId(), tenant.actorId(), sessionId));
+                .body(principal == null
+                        ? service.get(tenant.tenantId(), tenant.actorId(),
+                                sessionId)
+                        : service.get(principal, sessionId));
     }
 }

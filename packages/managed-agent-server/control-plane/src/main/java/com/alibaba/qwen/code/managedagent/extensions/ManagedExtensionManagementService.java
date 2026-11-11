@@ -102,6 +102,14 @@ public class ManagedExtensionManagementService {
         return query(tenant, actor, sessionId, applyOperationId(tenant, actor, sessionId, key));
     }
 
+    public JsonNode lookup(SessionPrincipal principal, String sessionId,
+            String key) {
+        ManagedAgentService.validateIdempotencyKey(key);
+        return query(principal, sessionId,
+                applyOperationId(principal.tenantId(), principal.userId(),
+                        principal, sessionId, key));
+    }
+
     private JsonNode withSelfService(ObjectNode result, String tenant, String actor, SessionRecord session, boolean supported) {
         boolean enabled = supported && packages.selfServiceSupported();
         result.putObject("selfService").put("supported", enabled).put("canApply", enabled && store.canApplyExtensions(session)

@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.api;
 
 import com.alibaba.qwen.code.managedagent.extensions.ManagedExtensionManagementService;
+import com.alibaba.qwen.code.managedagent.model.SessionPrincipal;
 import com.alibaba.qwen.code.managedagent.model.TenantContext;
 import com.fasterxml.jackson.databind.JsonNode;
 import jakarta.validation.Valid;
@@ -25,20 +26,30 @@ public class ManagedExtensionManagementController {
 
     @GetMapping(BASE)
     public ResponseEntity<JsonNode> query(TenantContext tenant, @PathVariable String sessionId) {
-        return noStore(service.query(tenant.tenantId(), tenant.requireActorId(), sessionId, null));
+        SessionPrincipal principal = tenant.subjectPrincipal();
+        return noStore(principal == null
+                ? service.query(tenant.tenantId(), tenant.requireActorId(),
+                        sessionId, null)
+                : service.query(principal, sessionId, null));
     }
 
     @PostMapping(BASE)
     public ResponseEntity<JsonNode> submit(TenantContext tenant, @PathVariable String sessionId,
             @RequestHeader("Idempotency-Key") String key, @RequestBody JsonNode command) {
-        return noStore(service.submit(tenant.tenantId(), tenant.requireActorId(), sessionId, key,
-                command));
+        SessionPrincipal principal = tenant.subjectPrincipal();
+        return noStore(principal == null
+                ? service.submit(tenant.tenantId(), tenant.requireActorId(),
+                        sessionId, key, command)
+                : service.submit(principal, sessionId, key, command));
     }
 
     @GetMapping(BASE + "/operations/{operationId}")
     public ResponseEntity<JsonNode> operation(TenantContext tenant, @PathVariable String sessionId, @PathVariable String operationId) {
-        return noStore(service.query(tenant.tenantId(), tenant.requireActorId(), sessionId,
-                operationId));
+        SessionPrincipal principal = tenant.subjectPrincipal();
+        return noStore(principal == null
+                ? service.query(tenant.tenantId(), tenant.requireActorId(),
+                        sessionId, operationId)
+                : service.query(principal, sessionId, operationId));
     }
 
     public record Lookup(@NotBlank String idempotencyKey) { }
@@ -46,19 +57,30 @@ public class ManagedExtensionManagementController {
     @PostMapping(BASE + "/operations/lookup")
     public ResponseEntity<JsonNode> lookup(TenantContext tenant, @PathVariable String sessionId,
             @Valid @RequestBody Lookup request) {
-        return noStore(service.lookup(tenant.tenantId(), tenant.requireActorId(), sessionId, request.idempotencyKey()));
+        SessionPrincipal principal = tenant.subjectPrincipal();
+        return noStore(principal == null
+                ? service.lookup(tenant.tenantId(), tenant.requireActorId(),
+                        sessionId, request.idempotencyKey())
+                : service.lookup(principal, sessionId,
+                        request.idempotencyKey()));
     }
 
     @PostMapping(BASE + "/operations/{operationId}/continue")
     public ResponseEntity<JsonNode> resume(TenantContext tenant, @PathVariable String sessionId, @PathVariable String operationId) {
-        return noStore(service.resume(tenant.tenantId(), tenant.requireActorId(), sessionId,
-                operationId, false));
+        SessionPrincipal principal = tenant.subjectPrincipal();
+        return noStore(principal == null
+                ? service.resume(tenant.tenantId(), tenant.requireActorId(),
+                        sessionId, operationId, false)
+                : service.resume(principal, sessionId, operationId, false));
     }
 
     @PostMapping(BASE + "/operations/{operationId}/recover-previous")
     public ResponseEntity<JsonNode> recover(TenantContext tenant, @PathVariable String sessionId, @PathVariable String operationId) {
-        return noStore(service.resume(tenant.tenantId(), tenant.requireActorId(), sessionId,
-                operationId, true));
+        SessionPrincipal principal = tenant.subjectPrincipal();
+        return noStore(principal == null
+                ? service.resume(tenant.tenantId(), tenant.requireActorId(),
+                        sessionId, operationId, true)
+                : service.resume(principal, sessionId, operationId, true));
     }
 
     public record WebQuery(@NotBlank String sessionId, String operationId) { }
@@ -67,31 +89,53 @@ public class ManagedExtensionManagementController {
 
     @PostMapping(WEB + "/operations/lookup")
     public ResponseEntity<JsonNode> webLookup(TenantContext tenant, @Valid @RequestBody WebLookup request) {
-        return noStore(service.lookup(tenant.tenantId(), tenant.requireActorId(), request.sessionId(), request.idempotencyKey()));
+        SessionPrincipal principal = tenant.subjectPrincipal();
+        return noStore(principal == null
+                ? service.lookup(tenant.tenantId(), tenant.requireActorId(),
+                        request.sessionId(), request.idempotencyKey())
+                : service.lookup(principal, request.sessionId(),
+                        request.idempotencyKey()));
     }
 
     @PostMapping(WEB + "/query")
     public ResponseEntity<JsonNode> webQuery(TenantContext tenant, @Valid @RequestBody WebQuery request) {
-        return noStore(service.query(tenant.tenantId(), tenant.requireActorId(),
-                request.sessionId(), request.operationId()));
+        SessionPrincipal principal = tenant.subjectPrincipal();
+        return noStore(principal == null
+                ? service.query(tenant.tenantId(), tenant.requireActorId(),
+                        request.sessionId(), request.operationId())
+                : service.query(principal, request.sessionId(),
+                        request.operationId()));
     }
 
     @PostMapping(WEB + "/submit")
     public ResponseEntity<JsonNode> webSubmit(TenantContext tenant, @Valid @RequestBody WebSubmit request) {
-        return noStore(service.submit(tenant.tenantId(), tenant.requireActorId(),
-                request.sessionId(), request.idempotencyKey(), request.command()));
+        SessionPrincipal principal = tenant.subjectPrincipal();
+        return noStore(principal == null
+                ? service.submit(tenant.tenantId(), tenant.requireActorId(),
+                        request.sessionId(), request.idempotencyKey(),
+                        request.command())
+                : service.submit(principal, request.sessionId(),
+                        request.idempotencyKey(), request.command()));
     }
 
     @PostMapping(WEB + "/continue")
     public ResponseEntity<JsonNode> webResume(TenantContext tenant, @Valid @RequestBody WebQuery request) {
-        return noStore(service.resume(tenant.tenantId(), tenant.requireActorId(),
-                request.sessionId(), request.operationId(), false));
+        SessionPrincipal principal = tenant.subjectPrincipal();
+        return noStore(principal == null
+                ? service.resume(tenant.tenantId(), tenant.requireActorId(),
+                        request.sessionId(), request.operationId(), false)
+                : service.resume(principal, request.sessionId(),
+                        request.operationId(), false));
     }
 
     @PostMapping(WEB + "/recover-previous")
     public ResponseEntity<JsonNode> webRecover(TenantContext tenant, @Valid @RequestBody WebQuery request) {
-        return noStore(service.resume(tenant.tenantId(), tenant.requireActorId(),
-                request.sessionId(), request.operationId(), true));
+        SessionPrincipal principal = tenant.subjectPrincipal();
+        return noStore(principal == null
+                ? service.resume(tenant.tenantId(), tenant.requireActorId(),
+                        request.sessionId(), request.operationId(), true)
+                : service.resume(principal, request.sessionId(),
+                        request.operationId(), true));
     }
 
     private static ResponseEntity<JsonNode> noStore(JsonNode value) { return ResponseEntity.ok().cacheControl(CacheControl.noStore()).body(value); }
