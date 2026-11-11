@@ -68,9 +68,11 @@
  * plumbing name to exist in it, so a renamed step cannot leave a stale entry
  * silently excluding nothing.
  *
- * Fail-open on API errors: with no required status checks this step is
- * advisory by convention (red means do not merge), and a GitHub API
- * brownout must not hold every PR hostage. The warning stays in the log.
+ * Fail-open on API errors: `Lint & Static` is a required status check in main's
+ * ruleset, so a red here blocks the merge rather than annotating it. That
+ * sharpens the cost of over-rejection but not the policy: a GitHub API brownout
+ * must not hold every PR hostage, so API failures still fail open and the
+ * warning stays in the log.
  *
  * Cost: two API calls per gate file (latest base-side commit, then a
  * containment compare), plus the narrowing's own reads only for a gate file

@@ -243,17 +243,19 @@ over-rejects, which is the safe direction.
   they do not belong to the `Lint & Static` lane, so a branch's green on that lane
   never depended on them.
 - **Accepted residual risk:** `Checkout` and `Verify checkout includes expected
-head commit` stay outside the slice. One base-side `ref:` edit silences the check
-  and changes what is linted: pointing the checkout at a merge ref makes the
-  verification step pass, because it only asks whether the expected head is an
-  ancestor and a merge ref contains it, so the lane stays green while lint runs on
-  the merge tree. That tree is a superset of the branch tree, so bad code cannot
-  escape it; the widening costs attribution — base-side problems get charged to the
-  branch — on an advisory lane whose post-merge push lint is the backstop. A
-  `fetch-depth:` edit is invisible here too and does not move the linted tree: a
-  depth too short to resolve the incremental merge base makes `lint-scope.js` fall
-  back to `full: true`, a wider run. Editing that verification step's body removes
-  the guard but leaves the tree untouched.
+head commit` stay outside the slice. A `ref:` edit on its own is caught: the
+  checkout is `fetch-depth: 1`, so a ref that is not the expected head leaves that
+  commit out of the shallow clone and the verification step fails closed. What is
+  invisible here is the pair — `ref:` pointed at a merge ref _and_ a `fetch-depth:`
+  deep enough to contain the expected head: the guard then passes while lint runs
+  on the merge tree. That tree contains the branch, so bad code cannot escape; the
+  cost is attribution, and `Lint & Static` is a required check, so the lane is not
+  advisory. A `fetch-depth:` edit on `Checkout` does not move the linted tree: the
+  incremental scope's depth is owned by `Fetch incremental lint history`, which
+  stays in the slice, and `lint-scope.js` falls back to `full: true` — a wider
+  run — only when that step cannot resolve the merge base within its depth
+  ceiling. Editing the verification step's body removes the guard without touching
+  the tree.
 - **Accepted residual risk:** `classify_pr`'s `Checkout trusted CI classifier` is
   in the same class — the checkout is excluded while the step that actually
   selects the profile is kept.
@@ -313,6 +315,7 @@ head commit` stay outside the slice. One base-side `ref:` edit silences the chec
   (which means executing base-controlled code against a branch tree, a trust
   decision this lane deliberately avoids), or to accept the rebase. Neither is
   attempted here, and relocating the lists is not a remedy.
-- Should this lane become a required status check? The narrowing reduces false
-  reds, which is a precondition for that, but the decision is separate and the
-  step remains advisory today.
+- This lane is already a required status check on `main`: the `main` ruleset's
+  required contexts include `Lint & Static (ubuntu-latest, Node 22.x)`. A false
+  red therefore blocks merges rather than merely annotating them, which is why
+  the narrowing matters.

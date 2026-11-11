@@ -133,7 +133,7 @@ merge base 取自该检查**已经做过**的包含比较，因此 narrowing 不
 - **本 PR 合入会要求所有在途 PR rebase 一次。** 该检查以整文件包含判定监听自身文件，所以这次修改本身就是一次 base 侧闸门改动——与它引入时造成的那一次性波及相同。
 - **锚点漂移。** 破坏行锚点的重排版会让 narrowing 失效。它 fail-closed 并输出告警，且测试读取真实文件，因此漂移会先在这里变红。
 - 切片只覆盖 `Lint & Static` lane 的闸门。`test_build` 自带两个静态检查（`check-serve-fast-path-bundle.js`、`check:core-subpath-exports`）；整文件包含时，它们 base 侧的改动曾受覆盖，本次收窄后**不再覆盖**。这是**接受的净缩减**：它们不属于 `Lint & Static` lane，分支在那条 lane 上的绿本来就不依赖它们。
-- **接受的残余风险：** `Checkout` 与 `Verify checkout includes expected head commit` 在切片之外。只改 base 侧的 `ref:` 一处就能让本检查失声，同时改变被 lint 的对象：把 checkout 指向 merge ref 后校验步骤仍通过，因为它只判断期望 head 是否为祖先，而 merge ref 天然包含它，于是 lane 保持绿、lint 却跑在合并树上。合并树是分支树的超集，坏代码不会因此逃逸；变宽的代价是归因——base 侧的问题会被算到分支头上——而这条 lane 是 advisory，合入后 push 触发的 lint 是兜底。`fetch-depth:` 的改动同样不可见，但它挪不动被 lint 的树：深度不足以致无法解析增量 merge base 时，`lint-scope.js` 回退到 `full: true`，即更宽的全量检查。改那条校验步骤的正文会移除守卫，但不改变被检查的树。
+- **接受的残余风险：** `Checkout` 与 `Verify checkout includes expected head commit` 在切片之外。单改 `ref:` 会被抓住：checkout 是 `fetch-depth: 1`，若 ref 指向的不是期望的 head，那个 commit 就不在浅克隆里，校验步骤会 fail-closed 变红。真正不可见的是**成对**改动——`ref:` 指向 merge ref 且 `fetch-depth:` 深到足以包含期望 head：此时守卫通过，lint 却跑在合并树上。合并树包含分支，坏代码不会因此逃逸；代价是归因，而 `Lint & Static` 是 required check，这条 lane 并非 advisory。单独改 `fetch-depth:` 并不会移动被 lint 的树：增量范围的深度由切片内的 `Fetch incremental lint history` 负责，只有它在深度上限内仍无法解析 merge base 时，`lint-scope.js` 才回退到 `full: true`（更宽，不是更窄）。改校验步骤的正文会移除守卫，但不改变被检查的树。
 - **接受的残余风险：** `classify_pr` 的 `Checkout trusted CI classifier` 属同一类——checkout 被排除，而真正选择 profile 的步骤保留在切片内。
 - **接受的残余风险：** job 级的 `runs-on` 与 `timeout-minutes` 被丢弃。routing 可以经 self-hosted Node action 间接改变 linter 的运行时；收紧 timeout 会在合入后打红 `main`，而不是打红分支。
 - **接受的残余风险：** `.github/actions/**` 不在 `GATE_FILES` 中。保留步骤对本地 action 的引用在切片内，但 action 的实现不在，因此 base 侧对该实现的改动对本检查不可见——这是本 PR 之前就存在的缺口，留待 follow-up。
@@ -158,4 +158,4 @@ merge base 取自该检查**已经做过**的包含比较，因此 narrowing 不
 ## 待决问题
 
 - `ci.yml` 剩余的失败来自 `HELPER_TESTS` 新增，而它们是真阳性：分支确实跳过了 base 闸门现在会运行的一个套件。唯一诚实的补救是运行 base 的清单而非分支的清单（这意味着在分支的树上执行 base 可控的代码，是这条 lane 刻意回避的信任决定），或者接受这次 rebase。两者本次都未尝试，而移动清单位置不是补救办法。
-- 这条 lane 是否应成为 required status check？narrowing 降低了误报，是这件事的前提，但该决定是独立的，且该步骤今天仍是劝告性质。
+- 这条 lane 在 `main` 上已经是 required status check：`main` ruleset 的 required contexts 含 `Lint & Static (ubuntu-latest, Node 22.x)`。因此一次误红会挡住合并，而不只是留个注解——这正是 narrowing 的价值所在。
