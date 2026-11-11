@@ -1472,7 +1472,7 @@ function ManagedSessionsContent({
     onSelectSession(undefined, draft.workspaceId);
   }
   const modelContext = currentSummary?.modelContext;
-  const selectedModel = currentSummary?.modelSelection?.modelId;
+  const selectedModel = modelChange.selection?.modelId;
   const displayedModel =
     hostSessionOnly && !modelChange.supported
       ? ''
@@ -2725,29 +2725,17 @@ function ManagedSessionsContent({
                   !interactive ||
                   !modelChange.supported ||
                   !modelChange.options?.supported ||
-                  modelChange.optionsLoading ||
                   modelChange.busy ||
                   approvalChange.busy ||
                   modelChange.blocked ||
                   approvalChange.blocked ||
-                  compression.blocked ||
-                  busy ||
-                  Boolean(active) ||
-                  Boolean(pendingApproval) ||
-                  Boolean(pending) ||
-                  modelChange.options.modelSelection.revision !==
-                    (currentSummary?.modelSelection?.revision ?? 0)
+                  compression.blocked
                 }
                 onSelectModel={
                   modelChange.supported
                     ? (modelId) => {
                         if (
                           !interactive ||
-                          busy ||
-                          encoding.current ||
-                          pendingRef.current ||
-                          active ||
-                          pendingApproval ||
                           approvalChange.isBlocked() ||
                           compression.isBlocked()
                         )
@@ -2956,7 +2944,6 @@ function ManagedSessionsContent({
               )}
               {interactive &&
                 (modelChange.busy ||
-                  modelChange.blocked ||
                   modelChange.optionsLoading ||
                   modelChange.optionsError) && (
                   <div
@@ -2967,27 +2954,11 @@ function ManagedSessionsContent({
                       {t(
                         modelChange.busy
                           ? 'managed.model.changing'
-                          : modelChange.blocked
-                            ? 'managed.model.unconfirmed'
-                            : modelChange.optionsLoading
-                              ? 'managed.model.loading'
-                              : 'managed.model.optionsError',
+                          : modelChange.optionsLoading
+                            ? 'managed.model.loading'
+                            : 'managed.model.optionsError',
                       )}
                     </span>
-                    {modelChange.pending && (
-                      <span>{modelChange.pending.modelId}</span>
-                    )}
-                    {modelChange.blocked && (
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        disabled={modelChange.busy || !provider.modelChange}
-                        onClick={() => void modelChange.confirm()}
-                      >
-                        {t('managed.model.confirm')}
-                      </Button>
-                    )}
                     {modelChange.optionsError && !modelChange.blocked && (
                       <Button
                         type="button"
@@ -3000,23 +2971,19 @@ function ManagedSessionsContent({
                     )}
                   </div>
                 )}
-              {interactive &&
-                modelChange.errorCode &&
-                modelChange.errorCode !== 'unconfirmed' && (
-                  <p className="text-xs text-destructive" role="alert">
-                    {t(
-                      modelChange.errorCode === 'storage_unavailable'
-                        ? 'managed.model.storage'
-                        : modelChange.errorCode === 'model_selection_conflict'
-                          ? 'managed.model.conflict'
-                          : ['turn_active', 'session_context_busy'].includes(
-                                modelChange.errorCode,
-                              )
-                            ? 'managed.model.busy'
-                            : 'managed.model.failed',
-                    )}
-                  </p>
-                )}
+              {interactive && modelChange.errorCode && (
+                <p className="text-xs text-destructive" role="alert">
+                  {t(
+                    modelChange.errorCode === 'model_selection_conflict'
+                      ? 'managed.model.conflict'
+                      : ['turn_active', 'session_context_busy'].includes(
+                            modelChange.errorCode,
+                          )
+                        ? 'managed.model.busy'
+                        : 'managed.model.failed',
+                  )}
+                </p>
+              )}
               {interactive &&
                 approvalChange.options?.permissionRulesSupported && (
                   <ManagedPermissionRulesDialog
