@@ -320,10 +320,10 @@ public class ManagedAgentPropertiesTest {
         }
         // The walk must not pass vacuously: extracting a group out of
         // the properties class empties it and the millisecond
-        // exceptions would go unchecked. 38 is the current field
+        // exceptions would go unchecked. 39 is the current field
         // inventory — update it in the same change that adds or
         // removes a Duration field.
-        assertThat(visited).containsAll(MILLIS_BINDINGS).hasSize(38);
+        assertThat(visited).containsAll(MILLIS_BINDINGS).hasSize(39);
     }
 
     @Test
@@ -664,6 +664,7 @@ public class ManagedAgentPropertiesTest {
                 "events.replay-floor-interval",
                 "message-relay.scan-delay",
                 "runtime-broker.retention.scan-delay",
+                "session-resources.scan-delay",
                 "session-worktree.scan-delay",
                 "wake-recovery.scan-delay");
         var placeholderOnly = new java.util.TreeSet<String>();

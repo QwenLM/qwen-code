@@ -71,7 +71,8 @@ class ManagedSchemaTest {
             Map.entry("ma_schedule_occurrence", List.of("tenant_id", "schedule_id", "occurrence_key")),
             Map.entry("ma_session_worktree", List.of("tenant_id", "session_id")),
             Map.entry("ma_client_files_binding", List.of("session_scope_key")),
-            Map.entry("ma_client_files_request", List.of("request_key")));
+            Map.entry("ma_client_files_request", List.of("request_key")),
+            Map.entry("ma_journal_pack", List.of("session_scope_key", "from_revision")));
 
     @Test
     void generatesRowIdentitiesWithoutWeakeningBusinessUniqueness() throws Exception {
@@ -585,6 +586,27 @@ class ManagedSchemaTest {
         }
     }
 
+    // Every shipped receipt namespace must satisfy the length CHECK, including the
+    // RESOURCE_ALLOCATE namespace used by session resource allocation.
+    @Test
+    void theCurrentReceiptNamespaceCheckAdmitsEveryShippedNamespace() throws Exception {
+        DataSource migrated = source();
+        Flyway.configure()
+                .dataSource(migrated)
+                .locations(ManagedSchema.FLYWAY_LOCATION)
+                .load()
+                .migrate();
+        for (DataSource source : new DataSource[] {initialized(), migrated}) {
+            try (var connection = source.getConnection()) {
+                for (var namespace : ManagedSchemaContract.ReceiptNamespace.values()) {
+                    receipt(connection, namespace.name(), namespace.name());
+                }
+                assertThrows(SQLException.class,
+                        () -> receipt(connection, "unknown", "RESOURCE_ALLOCATE_EXTRA"));
+            }
+        }
+    }
+
     @Test
     void hookOnceRemainsUniqueWithoutDatabaseForeignKeys() throws Exception {
         DataSource source = initialized();
@@ -658,7 +680,7 @@ class ManagedSchemaTest {
         Set<String> originalTargets = new java.util.HashSet<>(ManagedSchemaContract.TABLES);
         originalTargets.removeAll(Set.of("ma_extension_package", "ma_extension_settings", "ma_extension_operation", "ma_extension_source_import",
                 "ma_session_worktree", "ma_memory_store", "ma_memory_entry", "ma_side_query",
-                "ma_client_files_binding", "ma_client_files_request", "ma_channel_segment"));
+                "ma_client_files_binding", "ma_client_files_request", "ma_journal_pack", "ma_channel_segment"));
         assertEquals(
                 originalTargets,
                 inventory.values().stream()

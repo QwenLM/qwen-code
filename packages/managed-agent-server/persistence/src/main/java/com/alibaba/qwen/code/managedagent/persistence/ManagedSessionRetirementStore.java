@@ -147,6 +147,11 @@ final class ManagedSessionRetirementStore {
         }
         if (!revisions.isEmpty()) {
             jdbc.update(
+                    "UPDATE ma_journal_pack SET state = 'RETIRED', gmt_modified = "
+                            + ManagedSchemaTime.SQL_NOW
+                            + " WHERE session_scope_key = ? AND state <> 'RETIRED'",
+                    scope);
+            jdbc.update(
                     "UPDATE ma_session_head SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", compacted_through_revision = GREATEST(compacted_through_revision, ?) WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ? AND state = 'DELETED'",
                     revisions.getLast(),
                     JdbcRuntimeBindingRepository.harnessDrainKey(tenant),

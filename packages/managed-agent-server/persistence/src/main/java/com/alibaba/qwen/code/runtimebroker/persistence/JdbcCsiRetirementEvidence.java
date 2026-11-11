@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.runtimebroker.persistence;
 
+import com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiApplicationJson;
 import com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
@@ -10,7 +11,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.sql.Connection;
 import java.sql.SQLException;
-import java.util.Base64;
 import java.util.List;
 import java.util.function.Function;
 
@@ -22,6 +22,7 @@ import java.util.function.Function;
 public final class JdbcCsiRetirementEvidence {
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final int FROZEN_LIMIT = 32 * 1024 * 1024;
+    private static final int BODY_LIMIT = 128 * 1024;
 
     private JdbcCsiRetirementEvidence() {
     }
@@ -71,11 +72,15 @@ public final class JdbcCsiRetirementEvidence {
                 sealedBindingVersion);
     }
 
-    private static JsonNode frozenCommit(byte[] frozenBytes) {
+    /**
+     * The prepared commit body is bounded by {@link #BODY_LIMIT}, not by the short-text helper's
+     * 4096-character cap: its base64 reaches roughly 175 KB, so a short-text read would refuse every
+     * retirement whose body exceeds 3072 bytes and strand it after FROZEN.
+     */
+    static JsonNode frozenCommit(byte[] frozenBytes) {
         JsonNode frozen = JSON.valueToTree(ManagedCsiFilesProtocol.parse(frozenBytes, FROZEN_LIMIT));
-        byte[] body = Base64.getDecoder().decode(CsiNativeActivationProof.text(frozen, "commitBodyBase64"));
-        require(Base64.getEncoder().encodeToString(body).equals(frozen.path("commitBodyBase64").textValue())
-                && CsiNativeActivationProof.sha256(body).equals(frozen.path("preparedCommitSha256").textValue()));
+        byte[] body = WorkspaceCsiApplicationJson.base64(frozen.path("commitBodyBase64"), BODY_LIMIT);
+        require(CsiNativeActivationProof.sha256(body).equals(frozen.path("preparedCommitSha256").textValue()));
         return CsiNativeActivationProof.readObject(body);
     }
 
