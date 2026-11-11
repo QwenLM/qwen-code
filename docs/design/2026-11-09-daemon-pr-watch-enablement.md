@@ -103,6 +103,8 @@ The refresh's slim listing already knows each listed PR's state. Under the same 
 
 **Tick ordering decides where the keys come from.** The timer runs the observation before the refresh, so the listing that produces `listedKeys` runs _after_ the observation that consumes them. The refresh therefore returns the keys it listed, and the timer carries them per workspace into the next tick's observation. The state write is immediate; only the exit from the view rotation lags one tick, which is the same interval the rotation already works on. The two mechanisms are complementary, not redundant: the stored `state` lets `effectiveState` become closed or merged without spending a view, while `listedKeys` distinguishes a closed PR the listing covered from one it did not — the latter stays in rotation to catch a reopen.
 
+**Only PRs with an active binding get a file.** The listing covers every PR the refresh tracks, including ones bound only to an archived session, but the watch subsystem's binder set comes from the shared bindings scan, which enumerates active sidecars and excludes archived ones. A file for a PR no watch consumer considers bound would be undone by the drain: it deletes unbound watch files on a complete scan, so once section 4 provisions its deps the same files would be created and deleted every tick, with a deletion log line each time. `listedKeys` still reports the listing's full coverage — the observation consults a key only for the bindings it scanned itself, so a key it never looks up is harmless.
+
 ## Files affected
 
 | File                                                            | Change                                                                                                                                                          |
@@ -120,6 +122,7 @@ The refresh's slim listing already knows each listed PR's state. Under the same 
 | `packages/cli/src/serve/server/pr-watch-deps.ts` (new)          | build the observation and drain deps: hosts, admission, restore mapping, ledger                                                                                 |
 | `packages/cli/src/serve/run-qwen-serve.ts`                      | populate both seams via late-bound getters; register the shutdown drain                                                                                         |
 | `packages/cli/src/serve/serve-app-lifecycle.ts`                 | no shape change; the new drain registers through the existing `addAppDrain`                                                                                     |
+| `packages/cli/src/serve/server/pr-watch-observation.ts`         | the tick option that carries the listing's keys per workspace into the rotation decision (landed)                                                               |
 | `packages/cli/src/serve/server/session-pr-refresh.ts`           | listing→watch write and `listedKeys` (landed); `stopWatch` and the tick settle signal (#16732). No `partial` threading — see §5                                 |
 | `docs/design/2026-11-09-daemon-pr-watch-enablement.md` (+zh-CN) | this design                                                                                                                                                     |
 

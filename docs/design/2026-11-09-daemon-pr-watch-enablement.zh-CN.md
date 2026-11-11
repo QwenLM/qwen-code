@@ -103,6 +103,8 @@ refresh 的 slim listing 已知每个被列出 PR 的 state。在同一门控下
 
 **tick 次序决定了键从哪来。** timer 先跑观测再跑 refresh，所以产出 `listedKeys` 的 listing 在消费它的观测**之后**运行。因此 refresh 返回它列出的键，timer 按 workspace 把它们带进下一个 tick 的观测。state 写入是即时的；只有「退出 view 轮转」滞后一个 tick，而这本就是轮转的工作间隔。两个机制互补而非冗余：存下的 `state` 让 `effectiveState` 无需花一次 view 就变成 closed 或 merged，而 `listedKeys` 区分「listing 覆盖到的 closed PR」与「没覆盖到的」——后者留在轮转里以捕捉 reopen。
 
+**只有具备 active 绑定的 PR 才写文件。** listing 覆盖 refresh 跟踪的每个 PR，包括只绑在归档会话上的那些，但 watch 子系统的 binder 集合来自共享的绑定扫描，它只枚举 active sidecar 并排除归档会话。为「没有任何 watch 消费者认为其有绑定」的 PR 建文件会被 drain 撤销：它在覆盖完整的扫描上删除无绑定的 watch 文件，所以一旦 §4 填上它的 deps，同一批文件就会每 tick 建了又删，还各带一行删除日志。`listedKeys` 仍报告 listing 的完整覆盖——观测只对自己扫到的绑定查键，因此它从不查的键是无害的。
+
 ## 涉及文件
 
 | 文件                                                             | 改动                                                                                                               |
@@ -120,6 +122,7 @@ refresh 的 slim listing 已知每个被列出 PR 的 state。在同一门控下
 | `packages/cli/src/serve/server/pr-watch-deps.ts`（新）           | 构建观测与 drain 的 deps：hosts、准入、restore 映射、账本                                                          |
 | `packages/cli/src/serve/run-qwen-serve.ts`                       | 经 late-bound getter 填充两个接缝；注册关停 drain                                                                  |
 | `packages/cli/src/serve/serve-app-lifecycle.ts`                  | 形状不变；新 drain 经既有 `addAppDrain` 注册                                                                       |
+| `packages/cli/src/serve/server/pr-watch-observation.ts`          | 按 workspace 把 listing 的键带进轮转决策的 tick 选项（已落地）                                                     |
 | `packages/cli/src/serve/server/session-pr-refresh.ts`            | listing→watch 写入与 `listedKeys`（已落地）；`stopWatch` 与 tick 落定信号（#16732）。无需 `partial` 透传，见 §5    |
 | `docs/design/2026-11-09-daemon-pr-watch-enablement.md`（+zh-CN） | 本设计                                                                                                             |
 

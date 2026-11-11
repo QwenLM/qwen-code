@@ -200,6 +200,7 @@ async function recordListedPrStates(
     url: string;
   }>,
   prWatch: SessionPrRefreshOptions['prWatch'],
+  boundKeys: ReadonlySet<string>,
   assertGenerationOpen: () => void,
   now: () => number,
 ): Promise<Set<string>> {
@@ -211,7 +212,12 @@ async function recordListedPrStates(
   for (const pr of listed) {
     const identity = prWatchIdentityFromUrl(pr.url);
     if (!identity) continue;
-    keys.add(prWatchFileKey(identity));
+    const key = prWatchFileKey(identity);
+    keys.add(key);
+    // Only bound PRs get a watch file. The drain deletes unbound ones on a
+    // complete scan, so writing them would create and delete the same files
+    // every tick — and log a deletion for each.
+    if (!boundKeys.has(key)) continue;
     // The watch snapshot has no 'draft' variant — a draft is still open.
     const state = pr.state === 'draft' ? 'open' : pr.state;
     rows.push({ identity, state });
@@ -292,6 +298,9 @@ export async function refreshWorkspaceSessionPrStates(
   const assertGenerationOpen = (): void =>
     runtime.generationGuard?.assertOpen();
   const sessionService = createWorkspaceRuntimeSessionService(runtime);
+  // Every active binding's PR identity, not just the ones needing a refresh:
+  // a merged binding is terminal for the sweep but still owns its watch file.
+  const boundKeys = new Set<string>();
   const pendingNumbers: Array<{
     sessionId: string;
     prPath: string;
@@ -332,6 +341,16 @@ export async function refreshWorkspaceSessionPrStates(
       }
       if (!prs) continue;
       scanned += 1;
+      // Active only: the watch subsystem's binders come from
+      // scanWorkspaceBindings, which excludes archived sessions. To the drain
+      // an archived-only binding is unbound, so its file would be deleted
+      // again on the next complete scan.
+      if (archiveState === 'active') {
+        for (const entry of prs) {
+          const identity = prWatchIdentityFromUrl(entry.url);
+          if (identity) boundKeys.add(prWatchFileKey(identity));
+        }
+      }
       const pending = prs.filter(
         // Only merged is terminal: closed PRs can be reopened, so they
         // keep participating in the sweep.
@@ -477,6 +496,7 @@ export async function refreshWorkspaceSessionPrStates(
           listedKeys = await recordListedPrStates(
             result.pullRequests,
             options.prWatch,
+            boundKeys,
             assertGenerationOpen,
             options.now ?? Date.now,
           );

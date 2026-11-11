@@ -1934,21 +1934,23 @@ describe('refreshWorkspaceSessionPrStates', () => {
       number: 42,
     } as const;
 
-    async function seedBinding(): Promise<void> {
+    async function seedBinding(...numbers: number[]): Promise<void> {
       await seedSession(SESSION_A);
       const prPath = sessionService.getPrSessionPathForArchiveState(
         SESSION_A,
         'active',
       );
-      await upsertSessionPr(prPath, {
-        number: 42,
-        url: 'https://github.com/o/r/pull/42',
-        state: 'open',
-      });
+      for (const number of numbers.length > 0 ? numbers : [42]) {
+        await upsertSessionPr(prPath, {
+          number,
+          url: `https://github.com/o/r/pull/${number}`,
+          state: 'open',
+        });
+      }
     }
 
     it('records each listed state and returns the keys it covered', async () => {
-      await seedBinding();
+      await seedBinding(42, 43, 44);
       const watchDir = await fsp.mkdtemp(
         path.join(os.tmpdir(), 'pr-watch-listing-'),
       );
@@ -2008,6 +2010,14 @@ describe('refreshWorkspaceSessionPrStates', () => {
         state: 'open',
         headSha: 'b'.repeat(40),
         delivered: ['ci_failure@old'],
+        pending: [
+          {
+            type: 'ci_failure',
+            key: 'ci_failure@queued',
+            summary: 'CI failed',
+            detectedAt: '2026-11-09T00:00:00.000Z',
+          },
+        ],
       });
       fetchGitHubPullRequestsMock.mockResolvedValue({
         kind: 'ok',
@@ -2024,6 +2034,16 @@ describe('refreshWorkspaceSessionPrStates', () => {
         // The listing observes state only; the view's own fields survive.
         expect(after.state.headSha).toBe('b'.repeat(40));
         expect(after.state.delivered).toEqual(['ci_failure@old']);
+        // The undelivered queue is the field whose loss would silently drop
+        // a notification, so it is pinned separately from the view's own.
+        expect(after.state.pending).toEqual([
+          {
+            type: 'ci_failure',
+            key: 'ci_failure@queued',
+            summary: 'CI failed',
+            detectedAt: '2026-11-09T00:00:00.000Z',
+          },
+        ]);
       } finally {
         await removeTempTree(watchDir);
       }
@@ -2140,6 +2160,74 @@ describe('refreshWorkspaceSessionPrStates', () => {
         expect(after.state.state).toBe('closed');
         // A lost baseline must not be silent on this path either.
         expect(logged.some((m) => m.includes('invalid watch file'))).toBe(true);
+      } finally {
+        await removeTempTree(watchDir);
+      }
+    });
+
+    it('does not create a watch file for a listed PR with no binding', async () => {
+      await seedBinding(42);
+      const watchDir = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'pr-watch-listing-unbound-'),
+      );
+      fetchGitHubPullRequestsMock.mockResolvedValue({
+        kind: 'ok',
+        pullRequests: [pr(42, 'closed'), pr(43, 'closed')],
+      });
+      try {
+        const result = await refreshWorkspaceSessionPrStates(
+          runtime,
+          undefined,
+          { prWatch: { watchDir, locks: new PathMutexRegistry() } },
+        );
+        // The key is still reported — it describes what the listing covered.
+        expect(result.listedKeys).toEqual(
+          new Set(['github.com/o/r#42', 'github.com/o/r#43']),
+        );
+        expect(readPrWatchStateSync(watchDir, identity42).kind).toBe('state');
+        // But the unbound one gets no file: the drain deletes unbound files on
+        // a complete scan, so writing it would churn every tick.
+        expect(
+          readPrWatchStateSync(watchDir, { ...identity42, number: 43 }).kind,
+        ).toBe('absent');
+      } finally {
+        await removeTempTree(watchDir);
+      }
+    });
+
+    it('does not create a watch file for a PR bound only to an archived session', async () => {
+      await seedBinding(42);
+      await seedArchivedSession(SESSION_B);
+      await upsertSessionPr(
+        sessionService.getPrSessionPathForArchiveState(SESSION_B, 'archived'),
+        {
+          number: 43,
+          url: 'https://github.com/o/r/pull/43',
+          state: 'open',
+        },
+      );
+      const watchDir = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'pr-watch-listing-archived-'),
+      );
+      fetchGitHubPullRequestsMock.mockResolvedValue({
+        kind: 'ok',
+        pullRequests: [pr(42, 'closed'), pr(43, 'closed')],
+      });
+      try {
+        const result = await refreshWorkspaceSessionPrStates(
+          runtime,
+          undefined,
+          { prWatch: { watchDir, locks: new PathMutexRegistry() } },
+        );
+        expect(result.listedKeys).toEqual(
+          new Set(['github.com/o/r#42', 'github.com/o/r#43']),
+        );
+        expect(readPrWatchStateSync(watchDir, identity42).kind).toBe('state');
+        // The binder scan the observation and drain share excludes archived
+        // sessions, so this PR is unbound to them despite having a sidecar.
+        expect(
+          readPrWatchStateSync(watchDir, { ...identity42, number: 43 }).kind,
+        ).toBe('absent');
       } finally {
         await removeTempTree(watchDir);
       }
