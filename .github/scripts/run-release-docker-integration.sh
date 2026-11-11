@@ -5,7 +5,10 @@ set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/apt-mirror-probe.sh"
 
 cleanup_release_containers() {
-  container_ids="$(timeout 30 docker ps -aq --filter "label=org.qwen-code.ci.owner=${RELEASE_CONTAINER_OWNER}" 2>/dev/null)" || container_ids=''
+  if ! container_ids="$(timeout 30 docker ps -aq --filter "label=org.qwen-code.ci.owner=${RELEASE_CONTAINER_OWNER}" 2>/dev/null)"; then
+    echo "::warning::failed to list release containers for ${RELEASE_CONTAINER_OWNER}; they cannot be removed"
+    container_ids=''
+  fi
   if [ -n "$container_ids" ]; then
     printf '%s\n' "$container_ids" | xargs -r timeout 60 docker rm -f > /dev/null 2>&1 || echo "::warning::failed to remove release containers for ${RELEASE_CONTAINER_OWNER}"
   fi
@@ -24,8 +27,9 @@ fi
 trap cleanup_release_containers EXIT
 trap 'exit 1' INT TERM
 
-# The test retry below budgets against the whole 120-minute job, so capture
-# the epoch at the start of the step rather than just before vitest.
+# The test retry below reserves time inside the 120-minute job, so capture
+# the epoch at the start of the step: the image build and the gates above
+# spend that budget too.
 release_step_start_epoch="$(date +%s)"
 
 sandbox_revision="$(git rev-parse HEAD)"
@@ -188,30 +192,43 @@ check_docker_data_root_floor "${DISK_FLOOR_DOCKER_POST_MIN_FREE_KB:-}"
 # The package.json docker test scripts each rebuild the sandbox image. Run
 # vitest directly here so this job reuses the image built above.
 #
-# One bounded retry per suite absorbs the shared-host pressure class that
-# killed the nightly Docker lane twice in a row (#16769, #16861): the same SHA's
-# Docker E2E leg passed while this lane failed at ~39 minutes, and the
-# sandbox:none E2E leg retries the same class (#10355). The E2E Docker leg
-# cannot retry because its 60-minute job cannot fit two attempts; this job
-# has 120 minutes and leaves ~64 minutes after a 50-minute first attempt.
-# A deterministic failure fails both attempts and stays red. Remove this
-# attempt's containers first so a leaked one cannot poison the retry.
-DOCKER_TEST_RETRY_BUDGET_SECONDS=3000
+# One retry per suite, for a failure that vitest's own per-test retries did
+# not absorb. It cannot rescue a deterministic failure — the second attempt
+# fails the same way — so a repeated failure stays red. Reclaim this attempt's
+# containers first so a leaked one cannot poison the retry, and re-sample the
+# disk floor: the failed attempt's container layers are not all reclaimed by
+# the cleanup, so a retry must not start below the floor the first attempt
+# was admitted on.
+DOCKER_TEST_STEP_BUDGET_SECONDS=6600
+DOCKER_TEST_INTERACTIVE_RESERVE_SECONDS=1260
 run_docker_test_suite() {
   QWEN_SANDBOX=docker npx vitest run --root ./integration-tests "$1" 9>&-
 }
 
 for suite in cli interactive; do
+  attempt_start_epoch="$(date +%s)"
   if run_docker_test_suite "$suite"; then
     continue
   fi
-  elapsed=$(( $(date +%s) - release_step_start_epoch ))
-  if (( elapsed > DOCKER_TEST_RETRY_BUDGET_SECONDS )); then
-    echo "::error::Docker integration tests (${suite}) failed after ${elapsed}s of the 7200s job budget; not enough left for a retry"
+  now_epoch="$(date +%s)"
+  attempt_seconds=$(( now_epoch - attempt_start_epoch ))
+  # The retry spends the attempt's duration again, so it is admitted only
+  # when the time already spent in this step plus that repeat plus the suites
+  # still to run fit the step's share of `timeout-minutes: 120`: the step
+  # starts ~8 minutes into the job, so 110 minutes leaves margin, and
+  # `interactive` — which follows `cli` and measured ~21 minutes in the
+  # passing release job — has to run after a `cli` retry.
+  remaining_suite_seconds=0
+  if [ "$suite" = 'cli' ]; then
+    remaining_suite_seconds="$DOCKER_TEST_INTERACTIVE_RESERVE_SECONDS"
+  fi
+  if (( now_epoch - release_step_start_epoch + attempt_seconds + remaining_suite_seconds > DOCKER_TEST_STEP_BUDGET_SECONDS )); then
+    echo "::error::Docker integration tests (${suite}) failed after ${attempt_seconds}s; a retry plus the remaining suite would overrun the 120-minute job timeout"
     exit 1
   fi
-  echo "::warning::Docker integration tests (${suite}) failed after ${elapsed}s; retrying once (transient shared-host pressure class)"
-  cleanup_release_containers || echo "::warning::failed to remove release containers before retrying ${suite}"
+  echo "::warning::Docker integration tests (${suite}) failed after ${attempt_seconds}s; retrying once"
+  cleanup_release_containers
+  check_docker_data_root_floor "${DISK_FLOOR_DOCKER_POST_MIN_FREE_KB:-}"
   if ! run_docker_test_suite "$suite"; then
     echo "::error::Docker integration tests (${suite}) failed again after a retry"
     exit 1

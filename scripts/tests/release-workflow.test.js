@@ -2613,7 +2613,8 @@ describe('release workflow', () => {
     buildFails = false,
     suiteFailures = 0,
     failSuite = 'cli',
-    stepElapsedSeconds = 0,
+    suiteSeconds = 0,
+    dockerPsFails = false,
     aptDefaultRate,
     aptAliyunRate,
     aptTunaRate,
@@ -2634,24 +2635,24 @@ describe('release workflow', () => {
       writeFileSync(join(bin, name), `#!/bin/sh\n${body}\n`, { mode: 0o755 });
     stub('git', 'echo 0123456789abcdef0123456789abcdef01234567');
     stub('node', 'echo ghcr.io/qwenlm/qwen-code:0.0.0-test');
+    // Virtual clock: each stubbed vitest run advances it by
+    // STUB_SUITE_SECONDS so a case can model an attempt's duration without
+    // wall-clock waits.
     stub(
       'date',
-      `count_file="$CALLS_LOG.date-count"
-count=0
-if [ -f "$count_file" ]; then count=$(cat "$count_file"); fi
-count=$((count + 1))
-printf '%s' "$count" > "$count_file"
-if [ "$count" -le 1 ]; then
-  echo "\${STUB_DATE_START:-1000000}"
-else
-  echo "\${STUB_DATE_NOW:-1000000}"
-fi`,
+      `offset=0
+if [ -f "$CALLS_LOG.clock" ]; then offset=$(cat "$CALLS_LOG.clock"); fi
+echo $(( \${STUB_DATE_START:-1000000} + offset ))`,
     );
     stub('timeout', 'shift; exec "$@"');
     stub('flock', `printf 'flock %s\\n' "$*" >> "$CALLS_LOG"`);
     stub(
       'docker',
       `printf 'docker %s\\n' "$*" >> "$CALLS_LOG"
+if [ "$1" = 'ps' ] && [ "$DOCKER_PS_FAILS" = '1' ]; then
+  echo 'ERROR: cannot connect to the Docker daemon' >&2
+  exit 1
+fi
 if [ "$1" = 'image' ] && [ "$2" = 'inspect' ]; then
   if [ "$3" = '--format' ]; then
     echo sha256:fakeimageid
@@ -2696,6 +2697,9 @@ fi`,
     stub(
       'npx',
       `printf 'npx %s\\n' "$*" >> "$CALLS_LOG"
+offset=0
+if [ -f "$CALLS_LOG.clock" ]; then offset=$(cat "$CALLS_LOG.clock"); fi
+printf '%s' "$(( offset + \${STUB_SUITE_SECONDS:-0} ))" > "$CALLS_LOG.clock"
 if [ "$SUITE_FAILURES" -gt 0 ]; then
   case "$*" in
     *" $FAIL_SUITE")
@@ -2764,7 +2768,8 @@ esac`,
         SUITE_FAILURES: String(suiteFailures),
         FAIL_SUITE: failSuite,
         STUB_DATE_START: '1000000',
-        STUB_DATE_NOW: String(1000000 + stepElapsedSeconds),
+        STUB_SUITE_SECONDS: String(suiteSeconds),
+        DOCKER_PS_FAILS: dockerPsFails ? '1' : '0',
         CURL_DEFAULT_RATE: String(aptDefaultRate ?? 10000),
         CURL_ALIYUN_RATE: String(aptAliyunRate ?? 5000000),
         CURL_TUNA_RATE: String(aptTunaRate ?? 0),
@@ -2956,14 +2961,61 @@ esac`,
   );
 
   it.skipIf(process.platform === 'win32')(
-    'does not retry a failed Docker suite after the retry budget is spent',
+    'retries a suite that fails late in the step when the retry fits the job',
+    () => {
+      // interactive always runs after cli, so its attempt starts well into
+      // the step. The gate must measure this attempt, not cli's time too.
+      const { result, calls } = runDockerIntegrationScript({
+        suiteFailures: 1,
+        failSuite: 'interactive',
+        suiteSeconds: 2000,
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout).toContain('failed after 2000s; retrying once');
+      expect(
+        calls
+          .trim()
+          .split('\n')
+          .filter(
+            (line) =>
+              line.startsWith('npx vitest') && line.endsWith(' interactive'),
+          ),
+      ).toHaveLength(2);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'retries the motivating 38-minute cli failure',
     () => {
       const { result, calls } = runDockerIntegrationScript({
         suiteFailures: 1,
-        stepElapsedSeconds: 4000,
+        suiteSeconds: 2317,
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(
+        calls
+          .trim()
+          .split('\n')
+          .filter(
+            (line) => line.startsWith('npx vitest') && line.endsWith(' cli'),
+          ),
+      ).toHaveLength(2);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a retry that plus the remaining suite would overrun the job',
+    () => {
+      // 2 * 3001s for cli plus the ~21-minute interactive reserve is past
+      // the step's 6600s share of the 120-minute job.
+      const { result, calls } = runDockerIntegrationScript({
+        suiteFailures: 1,
+        suiteSeconds: 3001,
       });
       expect(result.status).not.toBe(0);
-      expect(result.stdout).toContain('not enough left for a retry');
+      expect(result.stdout).toContain(
+        'would overrun the 120-minute job timeout',
+      );
       expect(
         calls
           .trim()
@@ -2975,6 +3027,53 @@ esac`,
       expect(calls).not.toContain(
         'npx vitest run --root ./integration-tests interactive',
       );
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    're-samples the post-build disk floor before retrying a suite',
+    () => {
+      const { result, calls, dockerRoot } = runDockerIntegrationScript({
+        runnerEnvironment: 'self-hosted',
+        suiteFailures: 1,
+        dockerPostFloorKb: '3145728',
+      });
+      expect(result.status, result.stderr).toBe(0);
+      const lines = calls.trim().split('\n');
+      const cliRuns = lines
+        .map((line, index) =>
+          line.startsWith('npx vitest') && line.endsWith(' cli') ? index : -1,
+        )
+        .filter((index) => index >= 0);
+      expect(cliRuns).toHaveLength(2);
+      const postGates = lines
+        .map((line, index) =>
+          line === `disk-floor ${dockerRoot} floor=3145728 inodes=unset`
+            ? index
+            : -1,
+        )
+        .filter((index) => index >= 0);
+      // The pre-build sample charges the build floor; the pre-vitest and
+      // pre-retry samples charge the POST knob.
+      expect(postGates).toHaveLength(2);
+      expect(postGates[0]).toBeLessThan(cliRuns[0]);
+      expect(postGates[1]).toBeGreaterThan(cliRuns[0]);
+      expect(postGates[1]).toBeLessThan(cliRuns[1]);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'warns when the pre-retry container listing fails',
+    () => {
+      const { result } = runDockerIntegrationScript({
+        suiteFailures: 1,
+        dockerPsFails: true,
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout).toContain(
+        'failed to list release containers for test-owner',
+      );
+      expect(result.stdout).toContain('failed after 0s; retrying once');
     },
   );
 
