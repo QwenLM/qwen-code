@@ -13,6 +13,7 @@ import {
   type AgentLoopHost,
 } from '../core/agent-loop.js';
 import { SendMessageType } from '../core/client.js';
+import { LoopEventBus } from './bus.js';
 import {
   LlmEventType,
   type ServerLlmStreamEvent,
@@ -440,5 +441,27 @@ describe('runAgentLoop event-bus parity', () => {
       useEventBus: true,
     });
     expect(duplicates.handled.has('c1')).toBe(true);
+  });
+
+  it('proves the bus path runs by its event sequence, and the flag-off run publishes nothing', async () => {
+    const spy = vi.spyOn(LoopEventBus.prototype, 'publish');
+    try {
+      await runAgentLoop({
+        ...options([[content]], makeHost().host),
+        useEventBus: true,
+      });
+      // The declared sequence for a no-tool round; deleting the dispatch turns this red.
+      expect(spy.mock.calls.map((call) => call[0].type)).toEqual([
+        'loop.started',
+        'llm.request',
+        'llm.settled',
+        'loop.finished',
+      ]);
+      spy.mockClear();
+      await runAgentLoop(options([[content]], makeHost().host));
+      expect(spy).not.toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+    }
   });
 });

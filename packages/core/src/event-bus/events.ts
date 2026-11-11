@@ -4,11 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type {
-  AgentLoopResult,
-  AgentLoopRound,
-  AgentLoopStopReason,
-} from '../core/agent-loop.js';
+import type { AgentLoopResult, AgentLoopRound } from '../core/agent-loop.js';
 import type {
   ServerLlmStreamEvent,
   ToolCallRequestInfo,
@@ -19,10 +15,6 @@ export type HandlerName = 'conversation' | 'llm' | 'tool' | 'loop';
 
 export interface LlmSettledData {
   round: number;
-  /** Tool calls the round collected, in request order. */
-  calls: ToolCallRequestInfo[];
-  /** Present only when the round ended the loop with a terminal reason. */
-  terminal?: AgentLoopStopReason;
 }
 
 export interface ToolSettledData {

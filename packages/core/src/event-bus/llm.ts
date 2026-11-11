@@ -57,12 +57,6 @@ export class LlmHandler {
     // A late round (the run already moved on or finished) writes nothing.
     if (this.store.get(state.runId) !== state || state.round !== round) return;
     state.model = { turn, calls, stop };
-    publishFor(
-      this.bus,
-      state,
-      'llm.settled',
-      { round, calls, ...(stop ? { terminal: stop } : {}) },
-      round,
-    );
+    publishFor(this.bus, state, 'llm.settled', { round }, round);
   }
 }

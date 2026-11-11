@@ -92,7 +92,7 @@ event-bus/  (new, packages/core/src/event-bus/)
 LlmClient → Turn → LlmChat, CoreToolScheduler (unchanged)
 ```
 
-The adapter is the compatibility boundary: it subscribes to the bus and invokes `AgentLoopHost` callbacks exactly as the procedural loop does today, in the same order; it converts a host callback that throws into the loop's error outcome, matching today's "throwing ends the loop". Callback **order** is preserved, not the exact tick: the first callback fires one bus-delivery hop after `runAgentLoop` returns rather than synchronously within the call, which no surface observes while the flag is off. Surfaces never see the bus in this design. Exposing subscriptions to surfaces is a possible later step, not a goal here.
+The adapter is the compatibility boundary: it owns run-state creation and subscribes only for `loop.finished`/`handler.failed`. The **handlers** fire `AgentLoopHost` callbacks in the procedural order — Conversation fires the boundary callbacks (`onRoundStart`/`onRoundEnd`/`nextRound`), Llm and Tool drive the rest through `runModelRound`/`runToolBatch` — converting a host callback that throws into the loop's error outcome, matching today's "throwing ends the loop". Callback **order** is preserved, not the exact tick: the first callback fires one bus-delivery hop after `runAgentLoop` returns rather than synchronously within the call, which no surface observes while the flag is off. Surfaces never see the bus in this design. Exposing subscriptions to surfaces is a possible later step, not a goal here.
 
 ### Identity and event mapping
 
@@ -109,7 +109,7 @@ Preview routes by `queryId` and scopes rounds by a UUID `roundId`. Main's loop r
 | `loop.finished`  | `{ result: AgentLoopResult }`          | Conversation                     |
 | `llm.request`    | `{ round, send: AgentLoopRound }`      | Conversation                     |
 | `llm.tool_call`  | `{ call: ToolCallRequestInfo }`        | planned (streaming slice)        |
-| `llm.settled`    | `{ round, calls, terminal? }`          | Llm, at round end                |
+| `llm.settled`    | `{ round }`                            | Llm, at round end                |
 | `tool.request`   | `{ round, calls }`                     | Conversation, after `onRoundEnd` |
 | `tool.cancel`    | `{ reason }`                           | planned (streaming slice)        |
 | `tool.settled`   | `{ round }`                            | Tool, at batch end               |
@@ -134,11 +134,11 @@ The store rejects a second create for the same `runId`, and `currentRound(state,
 The bus (`LoopEventBus`) is ported essentially as-is (it depends only on a logger): serial chains per `(subscriber, runId)`, cross-run isolation, `handler.failed` republication, and an `eventId` identifier that consumers can dedup on — the bus itself does not deduplicate, so two publishes with the same id are both delivered. Two adaptations:
 
 - The logger becomes main's `debugLogger` convention (main has no `runLogger`).
-- `handler.failed` from a **host callback** (invoked by the adapter) ends the run with the error outcome, preserving today's semantics; `handler.failed` from an internal handler is a bug and ends the run the same way, with the source named in the error.
+- On `handler.failed` (including from a **host callback**) the adapter rejects with the **original thrown value**, preserving today's "throwing ends the loop". The `source` field lives only on the event payload (for logging); the adapter discards it when rejecting, so it never reaches the caller.
 
 ### Cancellation
 
-The adapter passes the run's `signal` and `toolSignal` through to `runModelRound`/`runToolBatch` exactly as today; Tool cancels the in-flight batch through the executor's signal, and Conversation finalizes once Llm and Tool are quiet. The run settles when `loop.finished` arrives. A published `loop.cancelled` event and a bounded settlement cap (preview's `QueryListener` uses 10 s) belong to the streaming slice, not this one — see the _planned_ note in the event table.
+The handlers read the run's `signal` and `toolSignal` and pass them to `runModelRound`/`runToolBatch` exactly as today; Tool cancels the in-flight batch through the executor's signal, and Conversation finalizes once Llm and Tool are quiet. The run settles when `loop.finished` arrives. A published `loop.cancelled` event and a bounded settlement cap (preview's `QueryListener` uses 10 s) belong to the streaming slice, not this one — see the _planned_ note in the event table.
 
 ### Why not reuse an existing bus
 
@@ -168,12 +168,12 @@ Each slice keeps the parity suites green and changes no surface default.
 - PR 1 (primitives): the bus/state/events module lands with unit tests, no runtime consumer, and zero behaviour change (the loop path is unchanged while nothing consumes it); `tsc --build`, ESLint and Prettier are clean.
 - PR 2 (handlers, opt-in): the equivalence suite proves identical results and ordered callback logs between the bus and procedural paths across the scripted scenarios, and the existing agent-loop tests stay green; the flag defaults off so no surface's behaviour changes; `tsc --build`, ESLint and Prettier are clean.
 - Each slice lands its implementation and its tests in the same PR, and the bilingual design doc stays synchronized (structure, decisions, constraints, and this acceptance-criteria section).
-- Real headless scenarios (single turn, tool loop, retry, cancellation) produce parity between the procedural and bus paths with the flag on and off, with the bus path confirmed by an execution marker rather than assumed.
+- Real headless scenarios (single turn, tool loop, retry, cancellation) produce parity between the procedural and bus paths with the flag on and off, with the bus path confirmed by an execution marker rather than assumed. (Belongs to a later slice: no surface enables the flag in this PR.)
 
 ## Risks and open questions
 
 - **Callback order is a contract.** Surfaces depend on the exact order of `onModelEvent`/`onToolResult`/output callbacks. The adapter must preserve it; the parity suites are the check, and PR 2 adds an explicit order test.
-- **`runModelRound`/`runToolBatch` are public seams.** ACP's in-flight PR uses them directly; PR 2 keeps them as the handlers' inner implementations rather than deleting them.
+- **`runModelRound`/`runToolBatch` are public seams.** ACP's merged round step (#15509) calls them directly; PR 2 keeps them as the handlers' inner implementations rather than deleting them.
 - **Round identity.** Numeric rounds are simpler than preview's UUIDs and match main's logs; if a future surface needs globally unique round ids, the event payload can carry both without a routing change.
 - **Streaming dispatch** remains an open product decision (latency win vs approval/ordering semantics); Phase 3 exists to force that decision explicitly rather than smuggling it in.
 - **Throwaway risk.** The 1.0 line may eventually replace main wholesale; this port is justified only as long as main's unified-loop program continues. It reuses main's types and contracts precisely so the work is not preview-specific.

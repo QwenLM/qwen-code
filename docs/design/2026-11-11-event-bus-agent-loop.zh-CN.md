@@ -92,7 +92,7 @@ event-bus/（新增，packages/core/src/event-bus/）
 LlmClient → Turn → LlmChat、CoreToolScheduler（不变）
 ```
 
-适配器是兼容边界：它订阅总线，并完全按今天过程式循环的顺序调用 `AgentLoopHost` 回调；它把抛错的 host 回调转成循环的 error 结局，与今天「抛错即结束循环」一致。保持的是回调**顺序**而非精确 tick：首个回调在 `runAgentLoop` 返回后一个总线投递跳才触发，而非在调用内同步触发——标志关闭时没有 surface 能观察到这一点。本设计中 surface 永远看不到总线。向 surface 暴露订阅是可能的后续步骤，不是这里的目标。
+适配器是兼容边界：它负责创建 run 状态，并只订阅 `loop.finished`/`handler.failed`。**由 handler** 按过程式顺序 firing `AgentLoopHost` 回调——Conversation firing 边界回调（`onRoundStart`/`onRoundEnd`/`nextRound`），Llm 与 Tool 通过 `runModelRound`/`runToolBatch` 驱动其余回调——并把抛错的 host 回调转成循环的 error 结局，与今天「抛错即结束循环」一致。保持的是回调**顺序**而非精确 tick：首个回调在 `runAgentLoop` 返回后一个总线投递跳才触发，而非在调用内同步触发——标志关闭时没有 surface 能观察到这一点。本设计中 surface 永远看不到总线。向 surface 暴露订阅是可能的后续步骤，不是这里的目标。
 
 ### 身份与事件映射
 
@@ -109,7 +109,7 @@ preview 按 `queryId` 路由、用 UUID `roundId` 标记轮次。main 的循环�
 | `loop.finished`  | `{ result: AgentLoopResult }`          | Conversation                    |
 | `llm.request`    | `{ round, send: AgentLoopRound }`      | Conversation                    |
 | `llm.tool_call`  | `{ call: ToolCallRequestInfo }`        | 规划中（流式切片）              |
-| `llm.settled`    | `{ round, calls, terminal? }`          | Llm，轮结束时                   |
+| `llm.settled`    | `{ round }`                            | Llm，轮结束时                   |
 | `tool.request`   | `{ round, calls }`                     | Conversation，`onRoundEnd` 之后 |
 | `tool.cancel`    | `{ reason }`                           | 规划中（流式切片）              |
 | `tool.settled`   | `{ round }`                            | Tool，批结束时                  |
@@ -134,11 +134,11 @@ preview 按 `queryId` 路由、用 UUID `roundId` 标记轮次。main 的循环�
 总线（`LoopEventBus`）基本原样移植（只依赖一个 logger）：按 `(订阅者, runId)` 串行链、跨 run 隔离、`handler.failed` 重发布，以及供消费方去重的 `eventId` 标识 —— 总线本身不去重，相同 id 的两次发布都会投递。两处适配：
 
 - logger 换成 main 的 `debugLogger` 约定（main 没有 `runLogger`）。
-- 来自 **host 回调**（由适配器调用）的 `handler.failed` 以 error 结局结束 run，保持今天语义；来自内部 handler 的 `handler.failed` 属于 bug，同样结束 run，并在错误中点名来源。
+- 在 `handler.failed`（含来自 **host 回调**）时，适配器以**原始抛值**拒绝，保持今天「抛错即结束循环」的语义；`source` 字段仅存在于事件载荷中（供日志），适配器拒绝时丢弃它，不会传给调用方。
 
 ### 取消
 
-适配器完全按今天的方式把 run 的 `signal` 与 `toolSignal` 透传给 `runModelRound`/`runToolBatch`；Tool 通过执行器 signal 取消在飞批次，Conversation 在 Llm 与 Tool 安静后收尾一次。run 在 `loop.finished` 到达时结算。发布 `loop.cancelled` 事件与有界收尾上限（preview `QueryListener` 用 10 秒）属于流式切片，而非本切片——见事件表的*规划中*注记。
+handler 按今天的方式读取 run 的 `signal` 与 `toolSignal` 并传给 `runModelRound`/`runToolBatch`；Tool 通过执行器 signal 取消在飞批次，Conversation 在 Llm 与 Tool 安静后收尾一次。run 在 `loop.finished` 到达时结算。发布 `loop.cancelled` 事件与有界收尾上限（preview `QueryListener` 用 10 秒）属于流式切片，而非本切片——见事件表的*规划中*注记。
 
 ### 为什么不复用现有总线
 
@@ -168,12 +168,12 @@ preview 按 `queryId` 路由、用 UUID `roundId` 标记轮次。main 的循环�
 - PR 1（原语）：bus/state/events 模块带单测落地、无运行时消费方、零行为变化（在无消费方时循环路径不变）；`tsc --build`、ESLint、Prettier 干净。
 - PR 2（handler，opt-in）：等价套件证明总线与过程式两条路径在脚本化场景下结果与有序回调日志完全一致，且既有 agent-loop 测试保持全绿；标志默认关，任何 surface 行为不变；`tsc --build`、ESLint、Prettier 干净。
 - 每个切片都把它的实现与测试放进同一个 PR，且双语设计文档保持同步（结构、决策、约束与本验收标准节）。
-- 真实 headless 场景（单轮、工具循环、重试、取消）在标志开/关下两路径 parity 成立，且总线路径由执行标记确认而非假设。
+- 真实 headless 场景（单轮、工具循环、重试、取消）在标志开/关下两路径 parity 成立，且总线路径由执行标记确认而非假设。（归属后续切片：本 PR 没有 surface 开启该标志。）
 
 ## 风险与未决问题
 
 - **回调顺序是契约。** surface 依赖 `onModelEvent`/`onToolResult`/输出回调的精确顺序。适配器必须保持；parity 套件是检查，PR 2 另加显式顺序测试。
-- **`runModelRound`/`runToolBatch` 是公共接缝。** ACP 在飞 PR 直接使用它们；PR 2 把它们保留为 handler 的内部实现，而不是删除。
+- **`runModelRound`/`runToolBatch` 是公共接缝。** ACP 已合入的轮次步（#15509）直接调用它们；PR 2 把它们保留为 handler 的内部实现，而不是删除。
 - **轮次身份。** 数字轮次比 preview 的 UUID 简单且与 main 日志一致；若未来 surface 需要全局唯一轮次 id，事件载荷可同时携带两者而不改路由。
 - **流式派发**仍是未决产品决策（时延收益 vs 审批/顺序语义）；Phase 3 的存在就是把这个决策显式化，而不是夹带进来。
 - **重复劳动风险。** 1.0 线最终可能整体替换 main；只要 main 的统一循环计划继续，本移植就是正当的。它复用 main 的类型与契约，正是为了让工作不绑定 preview。
