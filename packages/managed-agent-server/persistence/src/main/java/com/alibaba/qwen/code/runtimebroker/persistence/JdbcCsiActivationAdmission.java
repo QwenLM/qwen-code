@@ -624,8 +624,8 @@ public final class JdbcCsiActivationAdmission {
         try (PreparedStatement statement = read.statement(connection,
                 "SELECT latest_checkpoint_resource_id, harness_session_id FROM ma_session_head"
                         + " WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ? AND head_kind = 'MANAGED_SESSION'")) {
-            statement.setString(1, JdbcRuntimeBindingRepository.harnessDrainKey(original.request().getScope().getTenantId()));
-            statement.setString(2, JdbcRuntimeBindingRepository.harnessDrainKey(original.request().getIsolationKey()));
+            statement.setString(1, RuntimeAdmissionFences.harnessDrainKey(original.request().getScope().getTenantId()));
+            statement.setString(2, RuntimeAdmissionFences.harnessDrainKey(original.request().getIsolationKey()));
             JdbcRepositorySupport.setIdentity(statement, 3, original.request().getScope().getTenantId());
             JdbcRepositorySupport.setIdentity(statement, 4, original.request().getIsolationKey());
             try (ResultSet row = statement.executeQuery()) {
@@ -657,7 +657,7 @@ public final class JdbcCsiActivationAdmission {
         require(predecessorRevision > 1 && predecessorRevision < MAX_HISTORY);
         var predecessor = activeHistoryThrough(connection, original, predecessorRevision, predecessorSequence,
                 CsiNativeActivationProof.text(metadata, "previousCommitDigest"), CsiNativeActivationProof.text(metadata, "writerId"), read);
-        byte[] raw = com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiApplicationJson.base64(metadata.get("recordBytesBase64"), 128 * 1024);
+        byte[] raw = com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiApplicationJson.base64(metadata.get("recordBytesBase64"), CsiNativeActivationProof.TERMINAL_RECORD_LIMIT);
         CsiNativeActivationProof.TerminalProof proof;
         try (var statement = read.statement(connection,
                 "SELECT * FROM ma_session_journal_tx WHERE tenant_id = ? AND session_id = ?"
@@ -689,8 +689,8 @@ public final class JdbcCsiActivationAdmission {
         requireNoJournalTail(connection, original, predecessorRevision + 1, read);
         try (var statement = read.statement(connection,
                 "SELECT * FROM ma_session_head WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ? AND head_kind = 'MANAGED_SESSION'")) {
-            statement.setString(1, JdbcRuntimeBindingRepository.harnessDrainKey(original.request().getScope().getTenantId()));
-            statement.setString(2, JdbcRuntimeBindingRepository.harnessDrainKey(original.request().getIsolationKey()));
+            statement.setString(1, RuntimeAdmissionFences.harnessDrainKey(original.request().getScope().getTenantId()));
+            statement.setString(2, RuntimeAdmissionFences.harnessDrainKey(original.request().getIsolationKey()));
             JdbcRepositorySupport.setIdentity(statement, 3, original.request().getScope().getTenantId());
             JdbcRepositorySupport.setIdentity(statement, 4, original.request().getIsolationKey());
             try (var row = statement.executeQuery()) {
