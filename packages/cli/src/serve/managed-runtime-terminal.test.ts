@@ -277,6 +277,41 @@ describe('ManagedRuntimeTerminals control', () => {
     registry.dispose();
   });
 
+  it('keeps the hold for status and cancels creation for terminate mid-create', async () => {
+    await start();
+    const internals = terminals as unknown as {
+      registry: WebTerminalRegistry;
+      owners: Map<string, string>;
+    };
+    // The upgrade admits ownership before the asynchronous create completes.
+    internals.owners.set('pending-1', 'session-a');
+    const pending = internals.registry.create({
+      terminalId: 'pending-1',
+      workspaceCwd: WORKSPACE_CWD,
+      env: process.env,
+    });
+    // Admitted but not yet registered: a missing snapshot here is not a proven
+    // exit. Status must keep the hold, not settle it under a pending shell.
+    expect(internals.registry.isCreating('pending-1')).toBe(true);
+    expect(
+      terminals!.control(op('terminal-status', 'pending-1', 'session-a')),
+    ).toEqual({ operationId: 'pending-1', state: 'unknown' });
+    // Terminate cancels the pending creation so the shell can never start
+    // after the hold is discharged, and answers the release receipt.
+    expect(
+      terminals!.control(op('terminal-terminate', 'pending-1', 'session-a')),
+    ).toEqual({
+      operationId: 'pending-1',
+      state: 'exited',
+      evidence: { exitCode: TERMINAL_RELEASE_EXIT_CODE, exitSignal: null },
+    });
+    await expect(pending).resolves.toMatchObject({
+      error: 'Web terminal creation cancelled',
+    });
+    expect(internals.registry.readSnapshot('pending-1')).toBeUndefined();
+    expect(internals.registry.isCreating('pending-1')).toBe(false);
+  });
+
   it('answers unknown for a terminal it never admitted', async () => {
     await start();
     expect(

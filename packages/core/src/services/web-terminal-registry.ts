@@ -656,6 +656,14 @@ export class WebTerminalRegistry {
     };
   }
 
+  /**
+   * Whether a terminal is mid-creation: admitted by the caller but not yet
+   * registered. A missing snapshot during this window is not a proven exit.
+   */
+  isCreating(terminalId: string): boolean {
+    return this.creating.has(terminalId);
+  }
+
   /** Read buffered output and exit state when a browser tab reconnects. */
   readSnapshot(terminalId: string): WebTerminalSnapshot | undefined {
     const session = this.sessions.get(terminalId);

@@ -322,6 +322,21 @@ export class ManagedRuntimeTerminals {
         evidence: { exitCode: snapshot.exitCode, exitSignal: null },
       };
     }
+    // Ownership is recorded before the asynchronous create completes, so a
+    // missing snapshot here can still be a terminal mid-creation — not a
+    // proven exit. Status keeps the hold; termination cancels the pending
+    // creation so the shell can never start after the hold is discharged.
+    if (this.registry.isCreating(terminalId)) {
+      if (operation.kind === 'terminal-status') {
+        return { operationId: terminalId, state: 'unknown' };
+      }
+      this.registry.release(terminalId, this.workspaceCwd);
+      return {
+        operationId: terminalId,
+        state: 'exited',
+        evidence: { exitCode: TERMINAL_RELEASE_EXIT_CODE, exitSignal: null },
+      };
+    }
     if (owner !== undefined && !snapshot) {
       return {
         operationId: terminalId,
