@@ -344,6 +344,10 @@ describe('ManagedClientFilesBridge', () => {
     expect(b.getState()).toMatchObject({ phase: 'failed' });
     expect(handled).toEqual([]);
     expect(p.responses).toEqual([]);
+    // The poll-time identity fence must refuse the hijacked binding before any
+    // downlink opens; the reply-time check alone would also land on `failed`
+    // with empty lists, so only the stream count separates the two paths.
+    expect(p.streamOpens).toBe(0);
   });
 
   it('disconnect during a pending register ends stopped, not failed', async () => {

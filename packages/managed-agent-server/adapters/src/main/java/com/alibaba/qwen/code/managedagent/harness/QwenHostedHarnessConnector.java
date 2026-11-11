@@ -725,7 +725,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
 
     @Override
     public boolean supportsClientFiles() {
-        return sessionStore.isEnabled();
+        return sessionStore.isEnabled() && feature(HarnessFeature.CLIENT_FILES);
     }
 
     @Override

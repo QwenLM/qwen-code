@@ -9650,9 +9650,6 @@
           "404": {
             "$ref": "#/components/responses/NotFound"
           },
-          "409": {
-            "$ref": "#/components/responses/Conflict"
-          },
           "503": {
             "$ref": "#/components/responses/Unavailable"
           }
@@ -23262,7 +23259,7 @@
       "WebShellClientFilesRespondRequest": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["sessionId", "generation", "rpcRequestId"],
+        "required": ["sessionId", "generation", "connectionId", "rpcRequestId"],
         "properties": {
           "sessionId": {
             "type": "string"
@@ -23270,6 +23267,11 @@
           "generation": {
             "type": "integer",
             "minimum": 1
+          },
+          "connectionId": {
+            "type": "string",
+            "maxLength": 64,
+            "description": "The settling client's owned registration identity; a response omitting it or naming another tab's binding is refused, so a second client of the same actor cannot answer this registration's queued requests."
           },
           "rpcRequestId": {
             "type": "string",

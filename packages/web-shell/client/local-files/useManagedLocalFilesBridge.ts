@@ -39,7 +39,6 @@ export interface UseManagedLocalFilesBridgeOptions {
   /** The Managed WebShell API base, e.g. `/api/agent/web-shell/v1`. */
   baseUrl: string;
   fetch: ManagedFetch;
-  headers?: () => Record<string, string>;
   /** Injected for tests; defaults to the live window. */
   win?: Window;
   idb?: IDBFactory;
@@ -72,12 +71,16 @@ export function useManagedLocalFilesBridge(
   connect: () => Promise<void>;
   disconnect: () => Promise<void>;
 } {
-  const { sessionId, baseUrl, fetch, headers } = options;
+  const { sessionId, baseUrl, fetch } = options;
   const win =
     options.win ?? (typeof window !== 'undefined' ? window : undefined);
   const [status, setStatus] = useState<LocalFilesStatus>(IDLE);
   const handleRef = useRef<FileSystemDirectoryHandle | undefined>(undefined);
   const bridgeRef = useRef<ManagedClientFilesBridge | undefined>(undefined);
+  // The live bridge's status unsubscribe: a superseded bridge's late `stopped`
+  // (emitted after its awaited unregister) must not overwrite the new bridge's
+  // status, so the listener is detached before the bridge is replaced/torn down.
+  const unsubscribeRef = useRef<(() => void) | undefined>(undefined);
   const storeRef = useRef<DirectoryHandleStore | undefined>(undefined);
   // Bumped on teardown/session change/disconnect so a connect() parked on the
   // native picker does not save a grant and register a bridge after the view
@@ -123,6 +126,8 @@ export function useManagedLocalFilesBridge(
   useEffect(() => {
     return () => {
       generationRef.current += 1;
+      unsubscribeRef.current?.();
+      unsubscribeRef.current = undefined;
       void bridgeRef.current?.disconnect();
       bridgeRef.current = undefined;
     };
@@ -130,6 +135,8 @@ export function useManagedLocalFilesBridge(
 
   const disconnect = useCallback(async () => {
     generationRef.current += 1;
+    unsubscribeRef.current?.();
+    unsubscribeRef.current = undefined;
     await bridgeRef.current?.disconnect();
     bridgeRef.current = undefined;
     // Release the grant so a wrong directory can be undone: Disconnect then
@@ -149,8 +156,15 @@ export function useManagedLocalFilesBridge(
       const bridge = bridgeRef.current;
       // Clear the ref so a later Connect cannot call disconnect() a second
       // time on the already-disconnected bridge (an identity-less teardown).
+      unsubscribeRef.current?.();
+      unsubscribeRef.current = undefined;
       bridgeRef.current = undefined;
       void bridge?.disconnect();
+      // The listener is detached, so the bridge's late `stopped` no longer
+      // drives the panel; settle the status here like disconnect() does.
+      setStatus((current) =>
+        current.phase === 'unavailable' ? current : IDLE,
+      );
     };
     win.addEventListener('pagehide', onPageHide);
     return () => win.removeEventListener('pagehide', onPageHide);
@@ -185,11 +199,16 @@ export function useManagedLocalFilesBridge(
       sessionId,
       server,
       fetch,
-      headers,
     });
+    // Detach the previous bridge's listener before tearing it down: its
+    // disconnect() awaits the unregister POST and only then emits `stopped`,
+    // which would otherwise land after the new bridge's `connecting`/`connected`
+    // and overwrite the live panel status with a stale idle.
+    unsubscribeRef.current?.();
+    unsubscribeRef.current = undefined;
     bridgeRef.current?.disconnect();
     bridgeRef.current = bridge;
-    bridge.onState((state) => {
+    unsubscribeRef.current = bridge.onState((state) => {
       setStatus({
         phase: phaseOf(state, true),
         blocker: null,
@@ -199,7 +218,7 @@ export function useManagedLocalFilesBridge(
       });
     });
     await bridge.connect();
-  }, [win, blocker, sessionId, baseUrl, fetch, headers]);
+  }, [win, blocker, sessionId, baseUrl, fetch]);
 
   if (blocker !== null && status.phase !== 'unavailable') {
     return {

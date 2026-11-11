@@ -43,7 +43,9 @@ import type { ManagedFetch } from './managed-client-files-bridge.js';
 const peerFetch = ((url: string, init?: RequestInit) =>
   nodeFetch(url, init)) as unknown as ManagedFetch;
 
-function startPeer(): Promise<{ server: Server; baseUrl: string }> {
+function startPeer(
+  unregisterGate?: Promise<void>,
+): Promise<{ server: Server; baseUrl: string }> {
   // Like the real control plane: register blocks on the discovery the
   // browser drain answers; the stream pushes tools/list on open.
   let binding:
@@ -105,6 +107,7 @@ function startPeer(): Promise<{ server: Server; baseUrl: string }> {
         return;
       }
       if (path.endsWith('/client-files/unregister')) {
+        if (unregisterGate) await unregisterGate;
         if (binding) binding.state = 'closed';
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ registered: false }));
@@ -215,6 +218,43 @@ describe('useManagedLocalFilesBridge', () => {
     });
     await waitFor(() => expect(result.current.status.phase).toBe('connected'));
     expect(vi.mocked(pickDirectoryHandle)).toHaveBeenCalledTimes(2);
+    await act(async () => {
+      await result.current.disconnect();
+    });
+  });
+
+  it('a superseded bridge’s late stopped does not overwrite the live status', async () => {
+    let releaseUnregister!: () => void;
+    const unregisterGate = new Promise<void>((resolve) => {
+      releaseUnregister = resolve;
+    });
+    const peer = await startPeer(unregisterGate);
+    servers.push(peer.server);
+    const fakeWin = {
+      location: { origin: 'http://localhost' },
+    } as unknown as Window;
+    const { result } = renderHook(() =>
+      useManagedLocalFilesBridge({
+        sessionId: 'session-1',
+        baseUrl: peer.baseUrl,
+        fetch: peerFetch,
+        win: fakeWin,
+      }),
+    );
+    act(() => {
+      void result.current.connect();
+    });
+    await waitFor(() => expect(result.current.status.phase).toBe('connected'));
+    // Retry while the old bridge's unregister is held: its disconnect() emits
+    // `stopped` only after that awaited POST, which must not clobber the new
+    // bridge's status once the retry reaches connected.
+    act(() => {
+      void result.current.connect();
+    });
+    await waitFor(() => expect(result.current.status.phase).toBe('connected'));
+    releaseUnregister();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(result.current.status.phase).toBe('connected');
     await act(async () => {
       await result.current.disconnect();
     });

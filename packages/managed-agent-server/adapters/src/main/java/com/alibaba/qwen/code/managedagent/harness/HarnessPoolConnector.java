@@ -466,9 +466,7 @@ public class HarnessPoolConnector implements HarnessConnector {
     public boolean supportsRuntimeSkillImport() { return feature(HarnessFeature.RUNTIME_SKILL_IMPORT); }
 
     @Override
-    public boolean supportsClientFiles() {
-        return accepting.stream().anyMatch(member -> member.connector.supportsClientFiles());
-    }
+    public boolean supportsClientFiles() { return feature(HarnessFeature.CLIENT_FILES); }
 
     @Override
     public Map<String, Object> clientFilesOperation(String tenantId, String sessionId, Map<String, Object> body) {

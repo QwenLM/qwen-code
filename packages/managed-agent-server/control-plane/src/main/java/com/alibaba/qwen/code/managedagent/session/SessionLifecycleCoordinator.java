@@ -168,8 +168,11 @@ public class SessionLifecycleCoordinator {
         try {
             clientFilesRelay.ifAvailable(relay ->
                     relay.closeForSession(operation.tenantId(), operation.sessionId()));
-        } catch (RuntimeException ignored) {
-            // best-effort teardown
+        } catch (RuntimeException failure) {
+            // Best-effort: a relay failure must not wedge the lifecycle, but it
+            // must be diagnosable — the binding then lingers until binding-ttl.
+            LOG.warn("Client files binding teardown failed tenant={} session={}",
+                    operation.tenantId(), operation.sessionId(), failure);
         }
     }
 
@@ -833,10 +836,13 @@ public class SessionLifecycleCoordinator {
                 lifecycle.verifyResources(operation);
             }
             harness.detachLifecycle(operation);
-            closeClientFilesBinding(operation);
             if (sessionStore.hasLiveWriter(operation.tenantId(), operation.sessionId())) {
                 throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_writer_active");
             }
+            // Only tear the binding down once the detach is actually proceeding:
+            // a live writer means the Session was not detached, and closing the
+            // registration here would destroy a live client-files binding.
+            closeClientFilesBinding(operation);
             runtimeWarmer.closeWorkspace(operation.tenantId(), operation.sessionId()).toCompletableFuture().join();
             return true;
         }
@@ -858,7 +864,6 @@ public class SessionLifecycleCoordinator {
                 // this attempt is not "the settle never happened".
                 harnessSettled.set(true);
                 harnessConfirmed = holder != null && holder.equals(answered);
-                closeClientFilesBinding(operation);
             } else if (holder != null && !bound) {
                 throw new IllegalStateException(
                         "The Hosted Harness is required to close the Session");
@@ -871,6 +876,11 @@ public class SessionLifecycleCoordinator {
                 throw new IllegalStateException(
                         "A Harness still holds the Session's journal writer");
             }
+            // A harness that merely answered the close (possibly another
+            // server's) does not prove the Session closed; only tear the binding
+            // down once the live-writer gate confirms the close is proceeding,
+            // so a refused close cannot destroy a live client-files registration.
+            closeClientFilesBinding(operation);
         }
         if (bound) {
             runtimeWarmer.closeWorkspace(operation.tenantId(), operation.sessionId()).toCompletableFuture().join();

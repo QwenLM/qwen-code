@@ -42,8 +42,8 @@ public final class ClientFilesModels {
 
     public record StreamRequest(String sessionId, long generation, String connectionId) {}
 
-    public record RespondRequest(String sessionId, long generation, String rpcRequestId,
-            String responseJson, String errorCode) {}
+    public record RespondRequest(String sessionId, long generation, String connectionId,
+            String rpcRequestId, String responseJson, String errorCode) {}
 
     private ClientFilesModels() {}
 }

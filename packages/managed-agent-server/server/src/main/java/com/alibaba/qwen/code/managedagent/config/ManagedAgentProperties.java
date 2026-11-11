@@ -733,7 +733,9 @@ public class ManagedAgentProperties
         private Duration requestTtl = Duration.ofSeconds(25);
         @DurationUnit(ChronoUnit.SECONDS)
         private Duration bindingTtl = Duration.ofHours(8);
-        private int maxPayloadBytes = 60 * 1024;
+        // A literal (not 60 * 1024) so the configuration-metadata processor
+        // carries the default into the generated reference page.
+        private int maxPayloadBytes = 61440;
         private String relayUrl = "";
     }
 

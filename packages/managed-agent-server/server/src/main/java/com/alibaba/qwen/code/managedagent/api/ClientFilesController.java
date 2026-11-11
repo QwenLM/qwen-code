@@ -128,7 +128,8 @@ public class ClientFilesController {
     public ResponseEntity<Map<String, Boolean>> respond(TenantContext tenant,
             @RequestBody RespondRequest request) {
         service.respond(tenant.tenantId(), tenant.requireActorId(), request.sessionId(),
-                request.generation(), request.rpcRequestId(), request.responseJson(), request.errorCode());
+                request.generation(), request.connectionId(), request.rpcRequestId(),
+                request.responseJson(), request.errorCode());
         return noStore(Map.of("settled", true));
     }
 

@@ -13967,7 +13967,11 @@ describe('client files tool execution', () => {
     expect(responses[0].functionResponse?.response?.['output']).toBe(
       'file content',
     );
-    expect(invoke).toHaveBeenCalledWith(browserTool, { path: 'a.txt' });
+    expect(invoke).toHaveBeenCalledWith(
+      browserTool,
+      { path: 'a.txt' },
+      expect.any(AbortSignal),
+    );
     expect(broker.prepare).not.toHaveBeenCalled();
     expect(broker.execute).not.toHaveBeenCalled();
     // A client-files-only batch takes no Workspace mount it never uses. (The
@@ -13979,6 +13983,31 @@ describe('client files tool execution', () => {
     );
     await turn.consumeResults();
     await turn.finish();
+  });
+
+  it('does not journal a tool_result when the Turn is cancelled mid-call', async () => {
+    let release!: (value: unknown) => void;
+    const gate = new Promise<unknown>((resolve) => {
+      release = resolve;
+    });
+    const invoke = vi.fn(() => gate);
+    turn = clientFilesTurn(clientFilesSession(invoke));
+    const controller = new AbortController();
+    const running = turn.execute(
+      [clientFilesCall],
+      clientFilesParts,
+      'model',
+      controller.signal,
+    );
+    // Park the browser call, cancel the Turn, then let the late answer land:
+    // the cancellation must propagate, not be journalled as a bogus failure.
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalled());
+    controller.abort();
+    release({ content: [{ type: 'text', text: 'late answer' }] });
+    await running.catch(() => {});
+    expect(
+      (await session.sink.project()).map((record) => record.type),
+    ).not.toContain('tool_result');
   });
 
   it('converts a relay call failure into a tool error without failing the Turn', async () => {

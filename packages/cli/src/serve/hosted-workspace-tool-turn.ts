@@ -2344,6 +2344,19 @@ export class HostedWorkspaceToolTurn {
     );
   }
 
+  // The client-files declarations plus the revoked-name bookkeeping, decided in
+  // one place so every profile branch that advertises tools stays consistent
+  // with a registration the harness already admitted.
+  private clientFilesDeclarations(): FunctionDeclaration[] {
+    const tools = this.clientFiles?.tools() ?? [];
+    this.clientFilesDeclaredNames = new Set(
+      tools
+        .map((tool) => tool.name)
+        .filter((name): name is string => Boolean(name)),
+    );
+    return tools;
+  }
+
   async declarations(signal: AbortSignal): Promise<FunctionDeclaration[]> {
     signal.throwIfAborted();
     await this.memory?.ready();
@@ -2393,6 +2406,9 @@ export class HostedWorkspaceToolTurn {
       );
       if (this.memory) this.advertised.push(...hostedMemoryDeclarations());
       if (this.publicPlanMode) this.advertised.push(HOSTED_PUBLIC_PLAN_TOOL);
+      // A registration the harness admitted must reach the model on this
+      // profile too, or the panel reports connected for tools never handed out.
+      this.advertised.push(...this.clientFilesDeclarations());
       return this.planning
         ? this.advertised.filter(
             (tool) =>
@@ -2407,6 +2423,7 @@ export class HostedWorkspaceToolTurn {
     // Session has; the refusal of every other call rests on this alone.
     if (isHostedWorkspaceReadProfile(this.profile)) {
       this.advertised = [...HOSTED_WORKSPACE_READ_TOOLS];
+      this.advertised.push(...this.clientFilesDeclarations());
       return this.advertised;
     }
     if (this.mcp) await waitForTurn(this.mcp.refresh(signal), signal);
@@ -2416,11 +2433,7 @@ export class HostedWorkspaceToolTurn {
     const memberCommands = await this.memberCommandsDeclared();
     const skill = this.skills?.declaration();
     const todoTool = this.declaresTodoTool();
-    this.clientFilesDeclaredNames = new Set(
-      (this.clientFiles?.tools() ?? [])
-        .map((tool) => tool.name)
-        .filter((name): name is string => Boolean(name)),
-    );
+    const clientFilesTools = this.clientFilesDeclarations();
     this.advertised = [
       ...[
         ...(this.publication || this.shell
@@ -2457,7 +2470,7 @@ export class HostedWorkspaceToolTurn {
         }),
       ...(this.memory ? hostedMemoryDeclarations() : []),
       ...(this.mcp?.tools() ?? []),
-      ...(this.clientFiles?.tools() ?? []),
+      ...clientFilesTools,
       ...(skill ? [skill] : []),
       // H4b: the Agent tool joins the declaration set only on a
       // Shell-laned Session whose own child orchestrator exists (never in
@@ -7513,8 +7526,19 @@ export class HostedWorkspaceToolTurn {
           (!extensionAgent?.tools || extensionAgent.tools.includes(name)) &&
           !extensionAgent?.disallowedTools?.includes(name),
       );
+    // Client-files tool names are generation-scoped and vanish with the
+    // registration (a reconnect, an unregister or a harness restart). Keep them
+    // out of the durable launch pin — they are re-derived from the live catalog
+    // on every drive — so the strict snapshot comparison fingerprints only the
+    // stable tool set and an ephemeral name cannot trigger a false recovery.
+    const ephemeralToolNames = new Set(
+      (this.clientFiles?.tools() ?? []).map((tool) => tool.name),
+    );
     const descriptor = extensionAgent
-      ? { ...extensionAgent.descriptor, toolNames: allowed }
+      ? {
+          ...extensionAgent.descriptor,
+          toolNames: allowed.filter((name) => !ephemeralToolNames.has(name)),
+        }
       : undefined;
     const publicLaunch = this.publicChildren
       ? ((await children.publicLaunchSnapshot(childRunId)) ??
@@ -9891,10 +9915,15 @@ export class HostedWorkspaceToolTurn {
         const result = (await this.clientFiles!.invoke(
           tool,
           request.input,
+          signal,
         )) as {
           content?: unknown[];
           isError?: boolean;
         };
+        // A cancellation that landed while the browser round trip was in flight
+        // must not be journalled as a tool result: re-check after the await and
+        // let the abort propagate instead of committing a bogus failure.
+        signal.throwIfAborted();
         const converted = clientFilesResultParts(result);
         parts = result.isError
           ? convertToFunctionErrorResponse(
@@ -9909,6 +9938,7 @@ export class HostedWorkspaceToolTurn {
               converted,
             );
       } catch (cause) {
+        if (signal.aborted) throw cause;
         parts = convertToFunctionErrorResponse(
           request.call.name,
           request.call.callId,

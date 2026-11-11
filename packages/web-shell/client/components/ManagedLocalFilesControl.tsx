@@ -4,8 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useEffect, useState } from 'react';
-import { createPortal } from 'react-dom';
+import { useState } from 'react';
 import { FolderOpenIcon } from 'lucide-react';
 import { useI18n } from '../i18n';
 import { useManagedLocalFilesBridge } from '../local-files/useManagedLocalFilesBridge';
@@ -22,7 +21,6 @@ export interface ManagedLocalFilesControlProps {
   provider: ManagedAgentProvider;
   sessionId: string | undefined;
   triggerClassName: string;
-  portalContainer?: HTMLElement | null;
 }
 
 /**
@@ -35,13 +33,9 @@ export function ManagedLocalFilesControl({
   provider,
   sessionId,
   triggerClassName,
-  portalContainer,
 }: ManagedLocalFilesControlProps) {
   const { t } = useI18n();
   const [open, setOpen] = useState(false);
-  useEffect(() => {
-    if (portalContainer === null) setOpen(false);
-  }, [portalContainer]);
 
   const transport = provider.clientFiles?.transport();
   const unavailableFetch = (async () =>
@@ -95,8 +89,5 @@ export function ManagedLocalFilesControl({
     </Popover>
   );
 
-  if (portalContainer) {
-    return createPortal(control, portalContainer);
-  }
   return control;
 }

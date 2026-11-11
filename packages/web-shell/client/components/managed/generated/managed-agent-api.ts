@@ -3887,6 +3887,8 @@ export interface components {
         WebShellClientFilesRespondRequest: {
             sessionId: string;
             generation: number;
+            /** @description The settling client's owned registration identity; a response omitting it or naming another tab's binding is refused, so a second client of the same actor cannot answer this registration's queued requests. */
+            connectionId: string;
             /** @description The JSON-RPC request identity being settled; distinct from the HTTP request id echo field. */
             rpcRequestId: string;
             responseJson?: string;
@@ -6797,7 +6799,6 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
-            409: components["responses"]["Conflict"];
             503: components["responses"]["Unavailable"];
         };
     };

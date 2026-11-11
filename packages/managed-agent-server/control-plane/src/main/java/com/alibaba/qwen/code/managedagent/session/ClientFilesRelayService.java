@@ -121,9 +121,6 @@ public class ClientFilesRelayService {
         long expiresAt = now + settings.getClientFiles().getBindingTtl().toMillis();
         Binding binding = relay.register(tenant, session, actor, SERVER_ID,
                 DigestUtils.sha256Hex(token), expiresAt, now, connectionId);
-        if (previous != null && previous.active() && previous.generation() != binding.generation()) {
-            relay.failQueued(tenant, session, previous.generation(), ClientFilesModels.ERROR_OFFLINE, now);
-        }
         int toolCount;
         try {
             Map<String, Object> registered = harness.clientFilesOperation(tenant, session, Map.of(
@@ -146,6 +143,13 @@ public class ClientFilesRelayService {
                         System.currentTimeMillis());
             }
             throw error(503, "client_files_relay_unavailable");
+        }
+        // Fail the previous generation's queue only once the harness has
+        // installed the new one. Doing it before the dispatch would destroy the
+        // in-flight calls of the registration that keeps serving when the
+        // dispatch is refused (e.g. hosted_turn_active) and then restored.
+        if (previous != null && previous.active() && previous.generation() != binding.generation()) {
+            relay.failQueued(tenant, session, previous.generation(), ClientFilesModels.ERROR_OFFLINE, now);
         }
         return new Registration(binding.serverId(), binding.generation(), token, binding.expiresAt(),
                 toolCount, binding.connectionId());
@@ -273,11 +277,21 @@ public class ClientFilesRelayService {
     }
 
     public void respond(String tenant, String actor, String session, long generation,
-            String requestId, String responseJson, String errorCode) {
+            String connectionId, String requestId, String responseJson, String errorCode) {
         requireEnabled();
         requireSessionId(session);
         Binding binding = requireDeliveryAuthority(tenant, actor, session, generation);
+        // The settle path carries the same identity fence as the downlink: a
+        // second client of the same actor must not answer this registration's
+        // queued requests. Required beside (not instead of) the generation
+        // fence, which reconnect and rotation still depend on.
+        if (connectionId == null || !connectionId.equals(binding.connectionId())) {
+            throw error(409, "client_files_generation_conflict");
+        }
         if (requestId == null || requestId.isBlank() || requestId.length() > 128) {
+            throw error(400, "client_files_invalid");
+        }
+        if (errorCode != null && errorCode.length() > 128) {
             throw error(400, "client_files_invalid");
         }
         boolean answer = responseJson != null;
@@ -429,9 +443,16 @@ public class ClientFilesRelayService {
         relay.closeExpiredBindings(now, 64);
         // Drop settled rows past a retention cutoff that exceeds request-ttl, so
         // answered rows stay readable until waiters settle but the bounded queue
-        // does not grow for the life of a long-lived Session.
+        // does not grow for the life of a long-lived Session. Drain the backlog
+        // like the expiry sweep: a single bounded delete per tick would let a
+        // fast browser's answered rows (each up to max-payload-bytes) accumulate
+        // without bound, and the delete is not session-scoped.
         long retention = settings.getClientFiles().getRequestTtl().toMillis() + 60_000;
-        relay.deleteSettledBefore(now - retention, 256);
+        for (int batch = 0; batch < 16; batch++) {
+            if (relay.deleteSettledBefore(now - retention, 256) < 256) {
+                break;
+            }
+        }
     }
 
     private void enqueue(Binding binding, String requestId, String body, long now) {

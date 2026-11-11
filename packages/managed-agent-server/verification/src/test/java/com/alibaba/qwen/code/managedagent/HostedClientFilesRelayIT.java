@@ -148,18 +148,21 @@ class HostedClientFilesRelayIT {
         var refusing = startRegister(refused);
         awaitBinding(refused, 1);
         Drain offline = startDrain(refused, 1, true);
+        // Join the drain BEFORE waiting on register so it answers the discovery
+        // refusal while register is still pending. Joining only after register
+        // settles would let the queued initialize expire at the request-TTL and
+        // prove nothing about a refused tools/list.
+        var offlineDraining = beginAsync(offline);
         HttpResponse<String> unavailable = refusing.get(60,
                 java.util.concurrent.TimeUnit.SECONDS);
-        try {
-            offline.begin();
-        } catch (java.util.concurrent.TimeoutException noEvents) {
-            // An empty queue never commits SSE headers; the refusal is
-            // already proven by the 503 below.
-        }
         assertThat(unavailable.statusCode()).isEqualTo(503);
         assertThat(json.readTree(unavailable.body()).at("/error/code").asText())
                 .isEqualTo("client_files_relay_unavailable");
+        // The browser actually refused tools/list during the pending register,
+        // so a regression treating a refusal as an empty catalog turns this red.
+        assertThat(offline.refusedMethods).contains("tools/list");
         offline.stop();
+        offlineDraining.cancel(true);
 
         System.out.println("CLIENT_FILES_RELAY_EVIDENCE tenant=" + tenant
                 + " registrationLoop=true generationRotate=true"
@@ -545,6 +548,7 @@ class HostedClientFilesRelayIT {
         private final String session;
         private final long generation;
         private final boolean refuseList;
+        private final List<String> refusedMethods = new CopyOnWriteArrayList<>();
         private final AtomicBoolean open = new AtomicBoolean(true);
         private InputStream body;
         private java.util.concurrent.CompletableFuture<HttpResponse<InputStream>> stream;
@@ -595,6 +599,7 @@ class HostedClientFilesRelayIT {
                 String id = payload.path("id").asText();
                 Object result;
                 if (refuseList && "tools/list".equals(method)) {
+                    refusedMethods.add(method);
                     result = Map.of("error", Map.of("code", -32000,
                             "message", "client_files_offline"));
                 } else if ("initialize".equals(method)) {
@@ -620,6 +625,7 @@ class HostedClientFilesRelayIT {
                 webShell("POST", "/responses", Map.of(
                         "sessionId", session,
                         "generation", generation,
+                        "connectionId", "conn-it",
                         "rpcRequestId", id,
                         "responseJson", json.writeValueAsString(response)), 200);
             } catch (Exception failure) {

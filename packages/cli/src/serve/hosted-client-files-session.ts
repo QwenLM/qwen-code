@@ -186,6 +186,7 @@ export class HostedClientFilesSession {
   async invoke(
     tool: HostedClientFilesTool,
     args: Record<string, unknown>,
+    signal?: AbortSignal,
   ): Promise<unknown> {
     const client = this.client;
     if (!client || !this.active)
@@ -193,7 +194,7 @@ export class HostedClientFilesSession {
     const result = await client.callTool(
       { name: tool.name, arguments: args },
       undefined,
-      { timeout: CLIENT_FILES_REQUEST_TIMEOUT_MS },
+      { timeout: CLIENT_FILES_REQUEST_TIMEOUT_MS, signal },
     );
     const bytes = Buffer.byteLength(JSON.stringify(result), 'utf8');
     if (bytes > CLIENT_FILES_MAX_RESULT_BYTES)

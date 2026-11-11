@@ -38,8 +38,6 @@ export interface ManagedClientFilesOptions {
   sessionId: string;
   server: LocalFilesRpcServer;
   fetch: ManagedFetch;
-  /** Auth headers the Managed provider attaches to every control-plane call. */
-  headers?: () => Record<string, string>;
 }
 
 export type ManagedClientFilesState =
@@ -84,11 +82,11 @@ export class ManagedClientFilesBridge {
     for (const listener of this.listeners) listener(state);
   }
 
+  // Auth is resolved per call inside the injected fetch (the Managed
+  // transport), so the bridge only sets the content type itself; a captured
+  // header here would override the provider's refreshed Authorization.
   private headers(json: boolean): Record<string, string> {
-    return {
-      ...(this.options.headers?.() ?? {}),
-      ...(json ? { 'Content-Type': 'application/json' } : {}),
-    };
+    return json ? { 'Content-Type': 'application/json' } : {};
   }
 
   private url(path: string): string {
@@ -107,7 +105,7 @@ export class ManagedClientFilesBridge {
     const connectionId = crypto.randomUUID();
     this.connectionId = connectionId;
     let registerFailed = false;
-    let bindingCreated = false;
+    let registerIssued = false;
     try {
       // register blocks on the Harness discovery that this drain must
       // answer, and the stream route requires the binding that register
@@ -135,12 +133,15 @@ export class ManagedClientFilesBridge {
         });
       // The binding poll may settle before anyone awaits registering.
       registering.catch(() => {});
+      // The server creates the binding as soon as register lands, so any later
+      // failure (even inside the binding poll) must release it, not only a
+      // failure after the poll succeeded.
+      registerIssued = true;
       const generation = await this.waitForBinding(
         abort.signal,
         registering,
         connectionId,
       );
-      bindingCreated = true;
       this.running = true;
       // Handle the drain rejection at creation: register can take up to its
       // discovery timeout, and a fast stream refusal must not surface as an
@@ -190,11 +191,12 @@ export class ManagedClientFilesBridge {
         this.setState({ phase: 'stopped' });
         return;
       }
-      // A failure after the binding was created must close the registration
-      // this client created, so the control plane does not hold an active
-      // registration nobody drains until the binding TTL. The identity fence
-      // makes this a no-op if another tab already replaced the binding.
-      if (bindingCreated) {
+      // Any failure after register was issued must close the registration this
+      // client created — including a failure inside the binding poll — so the
+      // control plane does not hold an active registration nobody drains until
+      // the binding TTL. The identity fence makes this a no-op if another tab
+      // already replaced the binding, and a missing binding 404s (ignored).
+      if (registerIssued) {
         abort.abort();
         this.connectionId = undefined;
         await this.unregisterOwned(connectionId);
@@ -361,7 +363,8 @@ export class ManagedClientFilesBridge {
             const frame = buffer.slice(0, boundary);
             buffer = buffer.slice(boundary + 2);
             const data = sseData(frame);
-            if (data !== undefined) await this.answer(data, signal, generation);
+            if (data !== undefined)
+              await this.answer(data, signal, generation, connectionId);
           }
         }
       } finally {
@@ -390,6 +393,7 @@ export class ManagedClientFilesBridge {
     data: string,
     signal: AbortSignal,
     generation: number,
+    connectionId: string,
   ): Promise<void> {
     let payload: { requestId?: string; payloadJson?: string };
     try {
@@ -420,6 +424,7 @@ export class ManagedClientFilesBridge {
       body: JSON.stringify({
         sessionId: this.options.sessionId,
         generation,
+        connectionId,
         rpcRequestId: payload.requestId,
         ...(response !== undefined
           ? { responseJson: JSON.stringify(response) }

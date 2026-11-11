@@ -146,6 +146,26 @@ class ClientFilesRelayServiceTest {
     }
 
     @Test
+    void refusedReRegisterKeepsTheInFlightCallsAnswerable() throws Exception {
+        Registration first = service.register(tenant, ACTOR, session, CONNECTION);
+        CompletableFuture<String> call =
+                service.mcp(tenant, session, first.token(), request("1"));
+        awaitQueue(first.generation(), 1);
+        when(harness.clientFilesOperation(anyString(), anyString(), any()))
+                .thenThrow(new UnsupportedOperationException("hosted_turn_active"));
+        assertThatThrownBy(() -> service.register(tenant, ACTOR, session, CONNECTION))
+                .hasFieldOrPropertyWithValue("code", "client_files_relay_unavailable");
+        // The registration that keeps serving must not have its in-flight queue
+        // failed by the refused attempt: the row stays queued and the browser's
+        // answer still settles the Runtime call.
+        assertThat(jdbc.queryForObject("SELECT state FROM ma_client_files_request WHERE request_id='1'",
+                String.class)).isEqualTo("queued");
+        service.respond(tenant, ACTOR, session, first.generation(), CONNECTION, "1",
+                "{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"result\":{\"ok\":true}}", null);
+        assertThat(call.get(5, TimeUnit.SECONDS)).contains("\"ok\":true");
+    }
+
+    @Test
     void streamClosedTearsDownTheBindingAndQueue() throws Exception {
         Registration registration = service.register(tenant, ACTOR, session, CONNECTION);
         mcpInBackground(registration.token(), request("1"));
@@ -204,7 +224,7 @@ class ClientFilesRelayServiceTest {
                 service.mcp(tenant, session, registration.token(), request("7"));
         List<QueuedRequest> drained = awaitQueue(registration.generation(), 1);
         assertThat(drained.get(0).requestId()).isEqualTo("7");
-        service.respond(tenant, ACTOR, session, registration.generation(), "7",
+        service.respond(tenant, ACTOR, session, registration.generation(), CONNECTION, "7",
                 "{\"jsonrpc\":\"2.0\",\"id\":\"7\",\"result\":{\"tools\":[]}}", null);
         assertThat(call.get(5, TimeUnit.SECONDS)).contains("\"tools\":[]");
     }
@@ -223,7 +243,7 @@ class ClientFilesRelayServiceTest {
         CompletableFuture<String> call =
                 service.mcp(tenant, session, registration.token(), request("3"));
         awaitQueue(registration.generation(), 1);
-        service.respond(tenant, ACTOR, session, registration.generation(), "3",
+        service.respond(tenant, ACTOR, session, registration.generation(), CONNECTION, "3",
                 "{\"jsonrpc\":\"2.0\",\"id\":\"3\",\"result\":{\"v\":1}}", null);
         String first = call.get(5, TimeUnit.SECONDS);
         assertThat(service.mcp(tenant, session, registration.token(), request("3"))
@@ -237,7 +257,7 @@ class ClientFilesRelayServiceTest {
                 service.mcpSession(session, registration.token(), request("5"));
         List<QueuedRequest> drained = awaitQueue(registration.generation(), 1);
         assertThat(drained.get(0).requestId()).isEqualTo("5");
-        service.respond(tenant, ACTOR, session, registration.generation(), "5",
+        service.respond(tenant, ACTOR, session, registration.generation(), CONNECTION, "5",
                 "{\"jsonrpc\":\"2.0\",\"id\":\"5\",\"result\":{\"ok\":true}}", null);
         assertThat(call.get(5, TimeUnit.SECONDS)).contains("\"ok\":true");
         assertThatThrownBy(() -> service.mcpSession("missing", registration.token(), request("6")))
@@ -257,16 +277,49 @@ class ClientFilesRelayServiceTest {
     void respondValidatesShapeOwnershipAndGeneration() {
         Registration registration = service.register(tenant, ACTOR, session, CONNECTION);
         long generation = registration.generation();
-        assertThatThrownBy(() -> service.respond(tenant, ACTOR, session, generation, "1", "{}", "boom"))
+        assertThatThrownBy(() -> service.respond(tenant, ACTOR, session, generation, CONNECTION, "1", "{}", "boom"))
                 .hasFieldOrPropertyWithValue("code", "client_files_invalid");
-        assertThatThrownBy(() -> service.respond(tenant, ACTOR, session, generation, "1", null, null))
+        assertThatThrownBy(() -> service.respond(tenant, ACTOR, session, generation, CONNECTION, "1", null, null))
                 .hasFieldOrPropertyWithValue("code", "client_files_invalid");
-        assertThatThrownBy(() -> service.respond(tenant, ACTOR, session, generation, "missing", "{}", null))
+        assertThatThrownBy(() -> service.respond(tenant, ACTOR, session, generation, CONNECTION, "missing", "{}", null))
                 .hasFieldOrPropertyWithValue("code", "client_files_request_not_found");
-        assertThatThrownBy(() -> service.respond(tenant, "other-actor", session, generation, "1", "{}", null))
+        assertThatThrownBy(() -> service.respond(tenant, "other-actor", session, generation, CONNECTION, "1", "{}", null))
                 .hasFieldOrPropertyWithValue("code", "client_files_not_found");
-        assertThatThrownBy(() -> service.respond(tenant, ACTOR, session, generation + 1, "1", "{}", null))
+        assertThatThrownBy(() -> service.respond(tenant, ACTOR, session, generation + 1, CONNECTION, "1", "{}", null))
                 .hasFieldOrPropertyWithValue("code", "client_files_generation_conflict");
+    }
+
+    @Test
+    void respondRequiresTheOwnedConnectionIdentity() throws Exception {
+        Registration registration = service.register(tenant, ACTOR, session, CONNECTION);
+        long generation = registration.generation();
+        CompletableFuture<String> call =
+                service.mcp(tenant, session, registration.token(), request("1"));
+        awaitQueue(generation, 1);
+        // A second client of the same actor knows the generation (status hands
+        // it out) but not this registration's identity: an omitted or foreign
+        // connectionId must be refused, and the waiter must stay unsettled.
+        assertThatThrownBy(() -> service.respond(tenant, ACTOR, session, generation, null,
+                "1", "{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"result\":{}}", null))
+                .hasFieldOrPropertyWithValue("code", "client_files_generation_conflict");
+        assertThatThrownBy(() -> service.respond(tenant, ACTOR, session, generation, "other-tab",
+                "1", "{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"result\":{}}", null))
+                .hasFieldOrPropertyWithValue("code", "client_files_generation_conflict");
+        assertThat(jdbc.queryForObject("SELECT state FROM ma_client_files_request WHERE request_id='1'",
+                String.class)).isEqualTo("queued");
+        assertThat(call.isDone()).isFalse();
+        // The owning connection still settles it.
+        service.respond(tenant, ACTOR, session, generation, CONNECTION, "1",
+                "{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"result\":{\"ok\":true}}", null);
+        assertThat(call.get(5, TimeUnit.SECONDS)).contains("\"ok\":true");
+    }
+
+    @Test
+    void respondRefusesAnOversizeErrorCode() {
+        Registration registration = service.register(tenant, ACTOR, session, CONNECTION);
+        assertThatThrownBy(() -> service.respond(tenant, ACTOR, session, registration.generation(),
+                CONNECTION, "1", null, "x".repeat(129)))
+                .hasFieldOrPropertyWithValue("code", "client_files_invalid");
     }
 
     @Test
@@ -316,7 +369,7 @@ class ClientFilesRelayServiceTest {
         awaitQueue(registration.generation(), 1);
         when(workspaces.accessOf(anyString(), anyString(), anyString())).thenReturn(WorkspaceAccess.READER);
         assertThatThrownBy(() -> service.respond(tenant, ACTOR, session, registration.generation(),
-                "1", "{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"result\":{}}", null))
+                CONNECTION, "1", "{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"result\":{}}", null))
                 .hasFieldOrPropertyWithValue("code", "client_files_execution_forbidden");
         assertThat(jdbc.queryForObject("SELECT state FROM ma_client_files_request WHERE request_id='1'",
                 String.class)).isEqualTo("failed");
@@ -341,6 +394,22 @@ class ClientFilesRelayServiceTest {
         awaitQueue(registration.generation(), 1);
         assertThatThrownBy(() -> service.mcp(tenant, session, registration.token(), request("2")))
                 .hasFieldOrPropertyWithValue("code", "client_files_queue_full");
+    }
+
+    @Test
+    void retentionSweepDrainsTheSettledBacklogInOneTick() {
+        Registration registration = service.register(tenant, ACTOR, session, CONNECTION);
+        // Seed more settled rows than a single bounded delete (256) can clear,
+        // all older than the retention cutoff (request-ttl + 60s).
+        long old = System.currentTimeMillis() - 120_000;
+        for (int i = 0; i < 300; i++) {
+            store.enqueue(tenant, session, registration.generation(), "r" + i, "{}",
+                    old + 1_000, old);
+            store.answer(tenant, session, registration.generation(), "r" + i, "{}", old);
+        }
+        service.expireRequests();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_client_files_request", Integer.class))
+                .isZero();
     }
 
     private void mcpInBackground(String token, String body) {

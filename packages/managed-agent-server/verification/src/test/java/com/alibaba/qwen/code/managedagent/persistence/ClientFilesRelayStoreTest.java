@@ -210,10 +210,30 @@ class ClientFilesRelayStoreTest {
         tx(() -> store.register(tenant, session, actor, "local-files", "a".repeat(64), 9_000L, 1_000L, "conn"));
         tx(() -> store.enqueue(tenant, session, 1L, "req-1", "{}", 9_000L, 1_000L));
         tx(() -> store.register(tenant, "session-2", actor, "local-files", "b".repeat(64), 9_000L, 1_000L, "conn"));
+        // The surviving scope has its own in-flight request, so the request-table
+        // delete must be scope-fenced too — an unscoped delete would destroy it
+        // while a zero-count assertion could not tell the difference.
+        tx(() -> store.enqueue(tenant, "session-2", 1L, "req-2", "{}", 9_000L, 1_000L));
         tx(() -> store.deleteSession(tenant, session));
         assertThat(tx(() -> store.find(tenant, session))).isNull();
         assertThat(tx(() -> store.find(tenant, "session-2"))).isNotNull();
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_client_files_request", Integer.class)).isZero();
+        assertThat(jdbc.queryForObject("SELECT request_id FROM ma_client_files_request", String.class))
+                .isEqualTo("req-2");
+    }
+
+    @Test
+    void requestKeyIsGenerationScopedSoRestartedIdsDoNotCollide() {
+        tx(() -> store.register(tenant, session, actor, "local-files", "a".repeat(64), 9_000L, 1_000L, "conn"));
+        tx(() -> store.enqueue(tenant, session, 1L, "0", "{\"gen\":1}", 9_000L, 1_000L));
+        tx(() -> store.register(tenant, session, actor, "local-files", "b".repeat(64), 19_000L, 2_000L, "conn"));
+        // A re-registered Harness restarts its JSON-RPC ids: "0" must land in a
+        // new row, not attach to the previous generation's row, and a read by
+        // generation must return that generation's payload.
+        tx(() -> store.enqueue(tenant, session, 2L, "0", "{\"gen\":2}", 19_000L, 2_000L));
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_client_files_request WHERE request_id='0'",
+                Integer.class)).isEqualTo(2);
+        assertThat(tx(() -> store.request(tenant, session, 2L, "0")).payloadJson()).isEqualTo("{\"gen\":2}");
+        assertThat(tx(() -> store.request(tenant, session, 1L, "0")).payloadJson()).isEqualTo("{\"gen\":1}");
     }
 
     @Test
