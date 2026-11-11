@@ -206,7 +206,7 @@ class TerminalRelayHandlerTest {
         });
         Attached attached = attach(worker);
         byte[] first = new byte[4096];
-        byte[] second = new byte[] { 7 };
+        byte[] second = new byte[] {7};
 
         attached.handler.handleBinaryMessage(attached.browser, new BinaryMessage(first));
         attached.handler.handleBinaryMessage(attached.browser, new BinaryMessage(second));
