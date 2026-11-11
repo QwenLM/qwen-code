@@ -47,6 +47,42 @@ describe('OllamaOpenAICompatibleProvider', () => {
       ).toBe(true);
     });
 
+    it('matches a private LAN peer or the container alias on the default port', () => {
+      expect(
+        OllamaOpenAICompatibleProvider.isOllamaProvider(
+          createConfig('http://192.168.1.50:11434/v1'),
+        ),
+      ).toBe(true);
+      expect(
+        OllamaOpenAICompatibleProvider.isOllamaProvider(
+          createConfig('http://10.0.0.5:11434/v1'),
+        ),
+      ).toBe(true);
+      expect(
+        OllamaOpenAICompatibleProvider.isOllamaProvider(
+          createConfig('http://172.16.0.9:11434/v1'),
+        ),
+      ).toBe(true);
+      expect(
+        OllamaOpenAICompatibleProvider.isOllamaProvider(
+          createConfig('http://host.docker.internal:11434/v1'),
+        ),
+      ).toBe(true);
+    });
+
+    it('does not treat a public host on the default port as Ollama', () => {
+      expect(
+        OllamaOpenAICompatibleProvider.isOllamaProvider(
+          createConfig('http://192.168.1.50:8000/v1'),
+        ),
+      ).toBe(false);
+      expect(
+        OllamaOpenAICompatibleProvider.isOllamaProvider(
+          createConfig('https://api.openai.com:11434/v1'),
+        ),
+      ).toBe(false);
+    });
+
     it('matches a host named ollama on any port', () => {
       expect(
         OllamaOpenAICompatibleProvider.isOllamaProvider(
@@ -99,6 +135,36 @@ describe('OllamaOpenAICompatibleProvider', () => {
     );
 
     expect(provider).toBeInstanceOf(OllamaOpenAICompatibleProvider);
+  });
+
+  it('wins the ladder over the DeepSeek model-name fallback on a local endpoint', () => {
+    // A localhost:11434 endpoint serving a deepseek model must reach the Ollama
+    // provider so the empty-schema injection runs; otherwise the broad
+    // isDeepSeekProvider (which matches the model name on any hostname) claims
+    // it and zero-argument tools go out without `parameters`.
+    const provider = determineProvider(
+      {
+        model: 'deepseek-r1:8b',
+        apiKey: 'ollama',
+        baseUrl: 'http://localhost:11434/v1',
+      } as ContentGeneratorConfig,
+      mockCliConfig,
+    );
+
+    expect(provider).toBeInstanceOf(OllamaOpenAICompatibleProvider);
+  });
+
+  it('still routes a real DeepSeek hostname to its own provider', () => {
+    const provider = determineProvider(
+      {
+        model: 'deepseek-r1:8b',
+        apiKey: 'x',
+        baseUrl: 'https://api.deepseek.com/v1',
+      } as ContentGeneratorConfig,
+      mockCliConfig,
+    );
+
+    expect(provider).not.toBeInstanceOf(OllamaOpenAICompatibleProvider);
   });
 
   describe('buildRequest', () => {
@@ -161,6 +227,22 @@ describe('OllamaOpenAICompatibleProvider', () => {
           },
         },
       ]);
+    });
+
+    it('leaves a tool-less request with no tools to inject', () => {
+      const provider = new OllamaOpenAICompatibleProvider(
+        createConfig('http://localhost:11434/v1'),
+        mockCliConfig,
+      );
+      const result = provider.buildRequest(
+        {
+          model: 'qwen3:4b',
+          messages: [{ role: 'user', content: 'Hello' }],
+        } as OpenAI.Chat.ChatCompletionCreateParams,
+        'prompt-id',
+      );
+
+      expect(result.tools).toBeUndefined();
     });
 
     it('passes a tool with a declared schema through unchanged', () => {
