@@ -104,8 +104,10 @@ it('warns, and still succeeds, when the daemon could not save the connection', a
   expect(code).toBe(0);
   expect(out.join('\n')).toContain('Joined https://hub.example:4170');
   expect(out.join('\n')).not.toContain('reconnects after restarts');
+  // No `recorded`, as from an older daemon: unknown, so no rerun advice —
+  // a released daemon would abort the live connection and refuse the rerun.
   expect(err).toEqual([
-    'Warning: the daemon could not save this connection, so it will not reconnect after a restart or a workspace reload: Lock file is already being held. Run the same command again to save it.',
+    'Warning: the daemon could not save this connection, so it will not reconnect after a restart or a workspace reload: Lock file is already being held',
   ]);
 });
 
@@ -122,7 +124,7 @@ it('says "no detail" when the daemon gives no reason for the failed save', async
   );
 
   expect(err).toEqual([
-    'Warning: the daemon could not save this connection, so it will not reconnect after a restart or a workspace reload: no detail. Run the same command again to save it.',
+    'Warning: the daemon could not save this connection, so it will not reconnect after a restart or a workspace reload: no detail',
   ]);
 });
 
@@ -148,6 +150,30 @@ it('does not advise a rerun when the credential did not record the join', async 
   expect(code).toBe(0);
   expect(err).toEqual([
     'Warning: the daemon could not save this connection, so it will not reconnect after a restart or a workspace reload: ENOSPC: no space left on device',
+  ]);
+});
+
+it('advises a rerun when the daemon says the credential recorded the join', async () => {
+  const { value, err } = deps({
+    fetch: vi.fn(async () =>
+      Response.json({
+        connected: true,
+        saved: false,
+        recorded: true,
+        saveError: 'Lock file is already being held',
+      }),
+    ) as unknown as typeof fetch,
+  });
+
+  const code = await runAgentsJoin(
+    { link: 'https://hub.example:4170/join/ws_1', 'allow-http': false },
+    value,
+  );
+
+  // The same command again keeps the connection and retries the save.
+  expect(code).toBe(0);
+  expect(err).toEqual([
+    'Warning: the daemon could not save this connection, so it will not reconnect after a restart or a workspace reload: Lock file is already being held. Run the same command again to save it.',
   ]);
 });
 

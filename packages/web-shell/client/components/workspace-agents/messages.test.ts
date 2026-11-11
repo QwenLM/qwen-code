@@ -59,3 +59,40 @@ describe('collaboration messages', () => {
     expect(dictionary).not.toMatch(/^ {2}'agents\.description'/m);
   });
 });
+
+describe('the unsaved-join notice', () => {
+  const en = COLLAB_MESSAGES_EN['collab.runtime.notSavedHere'];
+  const zh = COLLAB_MESSAGES_ZH['collab.runtime.notSavedHere'];
+
+  it('advises a rerun only when the credential recorded the join', () => {
+    // An older daemon sends no `recorded`: absent means unknown, and the
+    // rerun it would be advised to make can be refused.
+    const cases = [
+      [undefined, '', ''],
+      ['false', '', ''],
+      [
+        'true',
+        ' Run the same join command again to save it.',
+        '再运行一次同样的加入命令即可保存。',
+      ],
+    ] as const;
+    for (const [recorded, remedyEn, remedyZh] of cases) {
+      expect(
+        typeof en === 'function' ? en({ error: 'disk full', recorded }) : en,
+      ).toBe(
+        `This computer joined, but could not save the connection, so it will not reconnect after a restart or a workspace reload: disk full.${remedyEn}`,
+      );
+      expect(
+        typeof zh === 'function' ? zh({ error: 'disk full', recorded }) : zh,
+      ).toBe(
+        `这台电脑已加入，但没能保存这次连接，重启或重新加载工作区后不会自动重连：disk full。${remedyZh}`,
+      );
+    }
+  });
+
+  it('renders the empty-error fallback without a dangling colon', () => {
+    expect(typeof en === 'function' ? en({}) : en).toBe(
+      'This computer joined, but could not save the connection, so it will not reconnect after a restart or a workspace reload.',
+    );
+  });
+});

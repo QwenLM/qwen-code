@@ -26,7 +26,8 @@ afterEach(() => {
 });
 
 const NOT_SAVED_HERE =
-  'This computer joined, but could not save the connection, so it will not reconnect after a restart or a workspace reload: disk full. Run the same join command again to save it.';
+  'This computer joined, but could not save the connection, so it will not reconnect after a restart or a workspace reload: disk full.';
+const NOT_SAVED_HERE_WITH_REMEDY = `${NOT_SAVED_HERE} Run the same join command again to save it.`;
 const NOT_SAVED_THERE =
   'That computer connected, but could not save the connection, so it will not reconnect after a restart or a workspace reload: disk full';
 
@@ -190,7 +191,7 @@ it('renders the unsaved notice with a period when a join reports no save error',
   await submit('join-coordinator');
 
   expect(notSavedNotice()).toBe(
-    'This computer joined, but could not save the connection, so it will not reconnect after a restart or a workspace reload. Run the same join command again to save it.',
+    'This computer joined, but could not save the connection, so it will not reconnect after a restart or a workspace reload.',
   );
 });
 
@@ -198,19 +199,21 @@ it.each([
   [
     'the credential recorded the join',
     { saveError: 'disk full', recorded: true },
-    NOT_SAVED_HERE,
+    NOT_SAVED_HERE_WITH_REMEDY,
   ],
+  // Silence means unknown, not recorded: an older daemon cannot honour the
+  // rerun, so the notice drops the remedy.
   ['an older daemon answered', { saveError: 'disk full' }, NOT_SAVED_HERE],
   [
     'the credential did not record the join',
     { saveError: 'disk full', recorded: false },
-    'This computer joined, but could not save the connection, so it will not reconnect after a restart or a workspace reload: disk full.',
+    NOT_SAVED_HERE,
   ],
 ] as const)(
   'gates the unsaved notice’s rerun advice on whether %s',
   async (_label, outcome, notice) => {
-    // A rerun of a join the credential did not record would be refused, so
-    // the notice must not advise one.
+    // Only an explicit `recorded: true` earns the advice: a rerun of a join
+    // the credential did not record, or of an unknown one, can be refused.
     await renderDialog({ onJoinCoordinator: vi.fn(async () => outcome) });
     await chooseTab('Join a coordinator');
     await type('joinLink', 'https://hub.example:4170/join/ws_1');

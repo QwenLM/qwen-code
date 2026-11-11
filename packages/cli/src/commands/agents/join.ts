@@ -260,9 +260,11 @@ export async function runAgentsJoin(
     return 1;
   }
   // An older daemon sends neither `saved` (it always claimed the save) nor
-  // `recorded`; without the latter, the warning keeps its remedy wording.
+  // `recorded`. Absent means unknown, not recorded: a released daemon aborts
+  // the live connection on a token-bearing rerun and then refuses the spent
+  // token, so only an explicit `recorded: true` earns the advice.
   const saved = result.saved !== false;
-  const recorded = result.recorded !== false;
+  const recorded = result.recorded === true;
   deps.out(
     `Joined ${target.serverUrl} as a runtime for workspace ${target.workspaceId}${
       result.providers?.length
@@ -272,9 +274,10 @@ export async function runAgentsJoin(
   );
   // Still a successful join: it is connected, and only the reconnect after a
   // restart is lost. The same command again keeps the connection and retries
-  // the save, so the warning points at that — but only when the credential
-  // records this join's token; a re-join whose record write failed would be
-  // refused on rerun, and the advice must not send the operator into it.
+  // the save, so the warning points at that — but only on `recorded: true`.
+  // A re-join whose record write failed, or a daemon that cannot say (an
+  // older one), can see the rerun refused, and the advice must not send the
+  // operator into it.
   if (!saved) {
     deps.err(
       `Warning: the daemon could not save this connection, so it will not reconnect after a restart or a workspace reload: ${result.saveError || 'no detail'}${recorded ? '. Run the same command again to save it.' : ''}`,

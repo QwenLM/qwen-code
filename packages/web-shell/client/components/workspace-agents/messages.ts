@@ -252,7 +252,7 @@ export const COLLAB_MESSAGES_EN: Record<string, CollabMessage> = {
   'collab.runtime.joinConnected': (v) =>
     `This computer joined ${v?.server} as a runtime.`,
   'collab.runtime.notSavedHere': (v) =>
-    `This computer joined, but could not save the connection, so it will not reconnect after a restart or a workspace reload${v?.error ? `: ${v.error}` : ''}.${v?.recorded === 'false' ? '' : ' Run the same join command again to save it.'}`,
+    `This computer joined, but could not save the connection, so it will not reconnect after a restart or a workspace reload${v?.error ? `: ${v.error}` : ''}.${v?.recorded === 'true' ? ' Run the same join command again to save it.' : ''}`,
   'collab.runtime.notSavedThere': (v) =>
     `That computer connected, but could not save the connection, so it will not reconnect after a restart or a workspace reload${v?.error ? `: ${v.error}` : '.'}`,
   'collab.runtime.joinTimedOut': (v) =>
@@ -486,7 +486,7 @@ export const COLLAB_MESSAGES_ZH: Record<string, CollabMessage> = {
   'collab.runtime.joinConnected': (v) =>
     `这台电脑已作为 Runtime 加入 ${v?.server}。`,
   'collab.runtime.notSavedHere': (v) =>
-    `这台电脑已加入，但没能保存这次连接，重启或重新加载工作区后不会自动重连${v?.error ? `：${v.error}` : ''}。${v?.recorded === 'false' ? '' : '再运行一次同样的加入命令即可保存。'}`,
+    `这台电脑已加入，但没能保存这次连接，重启或重新加载工作区后不会自动重连${v?.error ? `：${v.error}` : ''}。${v?.recorded === 'true' ? '再运行一次同样的加入命令即可保存。' : ''}`,
   'collab.runtime.notSavedThere': (v) =>
     `那台电脑已连接，但没能保存这次连接，重启或重新加载工作区后不会自动重连${v?.error ? `：${v.error}` : '。'}`,
   'collab.runtime.joinTimedOut': (v) =>

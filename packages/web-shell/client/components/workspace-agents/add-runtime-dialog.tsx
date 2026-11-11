@@ -265,12 +265,13 @@ function CommandLine({ text }: { text: string }) {
 /**
  * A join that went through, as the dialog sees it: whether the computer that
  * joined saved the connection. A `saveError` means it will not reconnect
- * after a restart or a workspace reload. `recorded: false` means the
- * credential did not record this join's token, so a rerun of it would be
- * refused and the notice must not advise one. `workspaceCwd`, from a remote
- * connect: the workspace the remote answered from, which its runtime
- * reports too. `false` is a connect that failed and was already reported
- * elsewhere; a failed join throws instead.
+ * after a restart or a workspace reload. The notice advises a rerun only on
+ * `recorded: true`: the credential then records this join's token, so the
+ * same join again goes on. Absent means unknown (an older daemon), and
+ * `recorded: false` means the rerun can be refused; neither earns the
+ * advice. `workspaceCwd`, from a remote connect: the workspace the remote
+ * answered from, which its runtime reports too. `false` is a connect that
+ * failed and was already reported elsewhere; a failed join throws instead.
  */
 export type RuntimeJoinOutcome =
   | false
@@ -279,7 +280,9 @@ export type RuntimeJoinOutcome =
 /**
  * Reads a `hosts/connect` answer, which `hosts/remote-connect` passes on. An
  * older daemon sends no `saved` field; it always claimed the save. Nor
- * `recorded`; without it, the notice keeps its remedy wording.
+ * `recorded`; absent means unknown, not recorded, and the notice then drops
+ * the remedy: a released daemon aborts the live connection on a token-bearing
+ * rerun and refuses the spent token.
  */
 export function joinOutcome(answer: unknown): {
   saveError?: string;
@@ -293,11 +296,10 @@ export function joinOutcome(answer: unknown): {
     return {};
   }
   const detail = (answer as { saveError?: unknown }).saveError;
+  const recorded = (answer as { recorded?: unknown }).recorded;
   return {
     saveError: typeof detail === 'string' ? detail : '',
-    ...((answer as { recorded?: unknown }).recorded === false
-      ? { recorded: false }
-      : {}),
+    ...(typeof recorded === 'boolean' ? { recorded } : {}),
   };
 }
 
@@ -608,7 +610,7 @@ export function AddRuntimeDialog({
         setKeptTokenLink(undefined);
         if (outcome.saveError !== undefined) {
           const here = outcome.saveError;
-          const hereRecorded = outcome.recorded !== false;
+          const hereRecorded = outcome.recorded === true;
           setNotSaved((current) => ({ ...current, here, hereRecorded }));
         }
       }
