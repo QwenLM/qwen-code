@@ -32,8 +32,10 @@ service/IT suites):
 
 - 7 hybrid files already contain JDBC twins of their InMemory tests; only the
   InMemory methods/parameter arms need removal.
-- 1 file (`HostedExecutionTransportProbeTest`) is fully covered by the H2
-  `HostedWorkspaceToolTurnIT` probe scenarios.
+- 1 file (`HostedExecutionTransportProbeTest`) only self-tests the
+  `HostedCancellationProbe` and status-reply gate helpers. Their real consumers
+  are the MySQL-only FG6d and FG6a cases of `HostedWorkspaceToolTurnIT`, which
+  run in the `hosted-harness-mysql` profile.
 - 4 files are already JDBC/H2-backed and pass InMemory repositories only as
   empty-shell arguments; a drop-in JDBC swap loses no coverage.
 - ~27 files need real migration of fixture construction or gap scenarios,
@@ -178,6 +180,14 @@ Known limitations:
   under heavy CI load.
 - The two `MySqlIT` consumers were swapped to JDBC but run only in the CI
   MySQL profile (no local MySQL instance).
+- Deleting `HostedExecutionTransportProbeTest` moves the probe helpers'
+  coverage from the unit suite to the CI Hosted MySQL job, which runs on the
+  full tier only. The deleted assertion that closing the probe restores the
+  original transport on both the dispatch and cancellation paths, so it stops
+  counting, has no direct replacement; the IT only closes the probe during
+  cleanup.
+- Dated design records that describe the in-memory repositories as they
+  existed at the time are left unchanged as history.
 
 ## Open questions
 

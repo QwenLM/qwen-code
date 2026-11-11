@@ -28,8 +28,10 @@ InMemory 类纯粹作为测试 fixture 存在：`verification` 模块中 42 个�
 
 - 7 个混合文件已包含其 InMemory 测试的 JDBC 孪生用例，只需删除 InMemory
   方法/参数臂。
-- 1 个文件（`HostedExecutionTransportProbeTest`）已被 H2 的
-  `HostedWorkspaceToolTurnIT` 探针场景完全覆盖。
+- 1 个文件（`HostedExecutionTransportProbeTest`）只自测
+  `HostedCancellationProbe` 与 status-reply 门控这两个测试辅助。它们真正的
+  使用方是 `HostedWorkspaceToolTurnIT` 中仅限 MySQL 的 FG6d 与 FG6a 用例，
+  在 `hosted-harness-mysql` profile 中运行。
 - 4 个文件本身已是 JDBC/H2 后端，InMemory 仓储只作为空壳参数传入；直接替换为
   JDBC 不损失任何覆盖。
 - 约 27 个文件需要真正迁移 fixture 构造或缺口场景，大头是
@@ -153,6 +155,11 @@ DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE` 加 `ManagedSchema.initialize`，
   余量保持其存活，CI 重负载下有轻微 flaky 风险。
 - 两个 `MySqlIT` 消费文件已换成 JDBC，但只在 CI MySQL profile 运行（本地无
   MySQL 实例）。
+- 删除 `HostedExecutionTransportProbeTest` 后，探针辅助的覆盖从单元测试套件
+  移到 CI 的 Hosted MySQL job，而该 job 只在 full 档运行。被删的"关闭探针后
+  派发与取消两条路径都恢复原 transport、因而不再计数"断言没有直接替代；IT
+  只在清理阶段关闭探针。
+- 描述当时内存仓储状况的带日期设计记录作为历史保留，不做修改。
 
 ## 待解决问题
 
