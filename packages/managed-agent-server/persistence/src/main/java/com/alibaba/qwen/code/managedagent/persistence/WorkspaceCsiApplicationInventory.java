@@ -111,6 +111,10 @@ final class WorkspaceCsiApplicationInventory {
             declaration("ma_extension_settings", "settings_key",
                     "settings_key:CHAR,scope_key:CHAR,tenant_id:VARBINARY,workspace_id:VARBINARY,extension_id:VARBINARY,"
                     + "settings_revision:BIGINT,encryption_key_id:VARBINARY,encrypted_values:LONGTEXT,configured_keys_json:LONGTEXT,gmt_create:BIGINT"),
+            declaration("ma_journal_pack", "session_scope_key,from_revision",
+                    "pack_id:VARBINARY,session_scope_key:CHAR,tenant_id:VARBINARY,workspace_id:VARBINARY,"
+                    + "session_id:VARBINARY,from_revision:BIGINT,through_revision:BIGINT,manifest_resource_key:CHAR,"
+                    + "object_key:VARBINARY,state:VARCHAR,byte_length:BIGINT,sha256:CHAR,gmt_create:BIGINT,gmt_modified:BIGINT"),
             declaration("ma_memory_entry", "entry_key",
                     "entry_key:CHAR,tenant_id:VARBINARY,memory_store_id:VARBINARY,memory_id:VARBINARY,"
                     + "is_deleted:TINYINT,gmt_create:BIGINT,gmt_modified:BIGINT"),
@@ -2055,6 +2059,7 @@ final class WorkspaceCsiApplicationInventory {
                         "scope_key=Bscope&runtime_session_id=runtime");
                 case "ma_tenant_guard" -> query(table, "tenant_key=BT", "tenant_id=T");
                 case "ma_session_journal_tx" -> query(table, "tenant_id=T&session_id=sessions");
+                case "ma_journal_pack" -> query(table, "session_scope_key=J", "tenant_id=T&session_id=sessions");
                 case "ma_resource" -> query(table, "session_scope_key=J", "tenant_id=T&session_id=sessions");
                 case "ma_resource_ref" -> query(table, "session_scope_key=J", "tenant_id=T&session_id=sessions", "resource_key=resourceKeys");
                 case "ma_read_lease" -> query(table, "tenant_key=RT&session_key=RS", "lease_id=reads");

@@ -40,14 +40,15 @@ final class AgentStoreRows {
                 throw new IllegalStateException("Session stream is unavailable.");
             }
             return readSession(result, new StreamCounters(result.getLong("list_last_sequence"),
-                    result.getLong("list_floor_sequence")));
+                    result.getLong("list_floor_sequence"), optionalLong(result, "list_last_activity")));
         };
         this.sessionListMapper = (result, row) ->
                         readSession(
                                 result,
                                 new StreamCounters(
                                         result.getLong("list_last_sequence"),
-                                        result.getLong("list_floor_sequence")));
+                                        result.getLong("list_floor_sequence"),
+                                        optionalLong(result, "list_last_activity")));
         this.turnSummaryMapper = (result, row) ->
                         new TurnSummary(
                                 result.getString("session_id"),
@@ -124,7 +125,7 @@ final class AgentStoreRows {
                 result.getString("tool_profile"),
                 result.getString("agent_definition_digest"), result.getInt("public_child_agents_version"),
                 result.getString("model_config_digest"), result.getString("memory_store_id"), result.getBoolean("owner_only"),
-                result.getString("preview"), optionalLong(result, "list_last_activity"));
+                result.getString("preview"), counters.lastActivity());
     }
 
     private static Long optionalLong(java.sql.ResultSet result, String column)
@@ -226,11 +227,12 @@ final class AgentStoreRows {
                         // H2 can retain pre-wait outer-join values after locking the Session.
                         // Read its stream only after acquiring that lock.
                         List<StreamCounters> streams = jdbc.query(
-                                "SELECT last_sequence, replay_floor_sequence FROM ma_event_stream"
+                                "SELECT last_sequence, replay_floor_sequence, gmt_modified FROM ma_event_stream"
                                         + " WHERE tenant_id = ? AND session_id = ? AND stream_kind ="
                                         + " 'SESSION' AND stream_id = X'' FOR UPDATE",
                                 (stream, index) -> new StreamCounters(stream.getLong("last_sequence"),
-                                        stream.getLong("replay_floor_sequence")),
+                                        stream.getLong("replay_floor_sequence"),
+                                        nullableLong(stream, "gmt_modified")),
                                 tenantId, sessionId);
                         if (streams.isEmpty()) {
                             throw new IllegalStateException("Session stream is unavailable.");
@@ -366,7 +368,7 @@ final class AgentStoreRows {
                 .replace("-", "");
     }
 
-    record StreamCounters(long lastSequence, long floorSequence) {}
+    record StreamCounters(long lastSequence, long floorSequence, Long lastActivity) {}
 
     static String placeholders(int count) {
         return String.join(", ", Collections.nCopies(count, "?"));

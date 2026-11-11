@@ -2151,10 +2151,12 @@ class ToolPublicationStoreTest {
         // A damaged write zeroed a revision's byte_length between the
         // intent's and the head must refuse the evidence with
         // the journal-corruption fault (500), not a client request fault.
+        byte[] zeroed = new byte[0];
         jdbc.update(
-                "UPDATE ma_session_journal_tx SET byte_length = 0 WHERE tenant_id ="
-                        + " X'74656e616e742d31' AND session_id = X'73657373696f6e2d31' AND"
-                        + " journal_revision = 3");
+                "UPDATE ma_session_journal_tx SET record_bytes = ?, byte_length = 0, record_digest = ?"
+                        + " WHERE tenant_id = X'74656e616e742d31' AND session_id = X'73657373696f6e2d31' AND"
+                        + " journal_revision = 3",
+                zeroed, ExtensionRecordJournal.sha256(zeroed));
         assertThatThrownBy(() -> store.apply(request("renew"), WRITER_TOKEN, PUBLICATION_TOKEN))
                 .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
                     assertThat(error.getCode())

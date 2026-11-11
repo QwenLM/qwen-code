@@ -578,7 +578,7 @@ public class ManagedSideQueryStore implements ManagedSideQueries {
             throw error(409, "side_query_history_unavailable");
         }
         return SideQueryConversation.capture(jdbc, tenant, session, ((Number) head.get("journal_revision")).longValue(),
-                ((Number) head.get("committed_sequence")).longValue(), (String) head.get("last_commit_digest"));
+                ((Number) head.get("committed_sequence")).longValue(), (String) head.get("last_commit_digest"), packs);
     }
 
     private void verifyPrefix(String tenant, String session, Prefix prefix) {

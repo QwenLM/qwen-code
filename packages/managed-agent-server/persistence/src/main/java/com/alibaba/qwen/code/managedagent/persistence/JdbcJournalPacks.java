@@ -7,8 +7,12 @@ import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.core.ResultSetExtractor;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
@@ -36,12 +40,21 @@ public class JdbcJournalPacks {
     private final JdbcTemplate jdbc;
     private final ToolPublicationObjectStore objects;
     private final ManagedAgentSettings settings;
+    private final TransactionTemplate buildingTx;
+    private final TransactionTemplate publishTx;
 
     public JdbcJournalPacks(JdbcTemplate jdbc, ToolPublicationObjectStore objects,
             ManagedAgentSettings settings) {
         this.jdbc = jdbc;
         this.objects = objects;
         this.settings = settings;
+        DataSourceTransactionManager manager =
+                new DataSourceTransactionManager(jdbc.getDataSource());
+        // S1: the BUILDING catalog row commits on its own before the object PUT, so a
+        // build that rolls back or crashes still leaves a row collectOrphans can reclaim.
+        this.buildingTx = new TransactionTemplate(manager);
+        this.buildingTx.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+        this.publishTx = new TransactionTemplate(manager);
     }
 
     @org.springframework.beans.factory.annotation.Autowired
@@ -69,7 +82,6 @@ public class JdbcJournalPacks {
     }
 
     /** Builds, verifies and atomically publishes one pack; returns false when nothing to do. */
-    @Transactional
     public boolean compactOnce(String tenant, String workspace, String session) {
         ManagedAgentSettings.SessionResources config = config();
         String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
@@ -84,98 +96,143 @@ public class JdbcJournalPacks {
         if (through < from) {
             return false;
         }
-        List<Map<String, Object>> rows = jdbc.queryForList(
-                "SELECT journal_revision, record_bytes, record_digest FROM ma_session_journal_tx"
-                        + " WHERE tenant_id = ? AND session_id = ? AND journal_revision BETWEEN ?"
-                        + " AND ? ORDER BY journal_revision",
-                tenant, session, from, through);
-        if (rows.size() != through - from + 1) {
-            return false;
+        long target = config.getPackTargetBytes();
+        // S2: pre-estimate the uncompressed prefix and shrink the range so the build never
+        // loads more than ~target bytes into memory. A single transaction (<= 8 MiB) always
+        // fits the default target, so the shrink always leaves a packable, progressing range.
+        while (through > from && estimateBytes(tenant, session, from, through) > target) {
+            through = from + (through - from) / 2;
         }
-        ByteArrayOutputStream payload = new ByteArrayOutputStream();
-        StringBuilder index = new StringBuilder("{\"entries\":[");
-        long uncompressedBytes = 0;
-        for (Map<String, Object> row : rows) {
-            byte[] bytes = (byte[]) row.get("record_bytes");
-            if (bytes == null) {
+        Built built;
+        for (;;) {
+            built = buildPack(tenant, session, from, through);
+            if (built == null) {
                 return false;
             }
-            byte[] chunk = gzip(bytes);
-            long revision = ((Number) row.get("journal_revision")).longValue();
-            if (index.length() > "{\"entries\":[".length()) {
-                index.append(',');
+            if (built.objectBytes().length <= target || through == from) {
+                break;
             }
-            index.append("{\"r\":").append(revision).append(",\"o\":").append(payload.size())
-                    .append(",\"l\":").append(chunk.length).append('}');
-            payload.writeBytes(chunk);
-            uncompressedBytes += bytes.length;
+            through--;
         }
-        index.append("]}");
-        byte[] compressed = payload.toByteArray();
-        if (compressed.length > config.getPackTargetBytes()) {
-            return false;
-        }
-        byte[] indexBytes = index.toString().getBytes(StandardCharsets.UTF_8);
-        ByteArrayOutputStream object = new ByteArrayOutputStream();
-        object.writeBytes(compressed);
-        object.writeBytes(indexBytes);
-        object.writeBytes(ByteBuffer.allocate(8).putLong(indexBytes.length).array());
-        object.writeBytes(MAGIC);
-        byte[] objectBytes = object.toByteArray();
+        publishPack(config, scope, tenant, workspace, session, from, through, built);
+        return true;
+    }
+
+    private long estimateBytes(String tenant, String session, long from, long through) {
+        Long sum = jdbc.queryForObject("SELECT COALESCE(SUM(byte_length), 0) FROM"
+                        + " ma_session_journal_tx WHERE tenant_id = ? AND session_id = ? AND"
+                        + " journal_revision BETWEEN ? AND ?",
+                Long.class, tenant, session, from, through);
+        return sum == null ? 0 : sum;
+    }
+
+    private record Built(byte[] objectBytes, byte[] indexBytes, long compressedBytes,
+            long uncompressedBytes, long txCount) {
+    }
+
+    /** Streams the range, compressing each transaction incrementally into a bounded buffer. */
+    private Built buildPack(String tenant, String session, long from, long through) {
+        return jdbc.query("SELECT journal_revision, record_bytes, record_digest, byte_length FROM"
+                        + " ma_session_journal_tx WHERE tenant_id = ? AND session_id = ? AND"
+                        + " journal_revision BETWEEN ? AND ? ORDER BY journal_revision",
+                (ResultSetExtractor<Built>) rs -> {
+                    ByteArrayOutputStream payload = new ByteArrayOutputStream();
+                    StringBuilder index = new StringBuilder("{\"entries\":[");
+                    long uncompressed = 0;
+                    long count = 0;
+                    long expected = from;
+                    while (rs.next()) {
+                        long revision = rs.getLong("journal_revision");
+                        byte[] bytes = rs.getBytes("record_bytes");
+                        if (revision != expected++ || bytes == null) {
+                            return null;
+                        }
+                        byte[] chunk = gzip(bytes);
+                        if (index.length() > "{\"entries\":[".length()) {
+                            index.append(',');
+                        }
+                        index.append("{\"r\":").append(revision).append(",\"o\":")
+                                .append(payload.size()).append(",\"l\":").append(chunk.length)
+                                .append('}');
+                        payload.writeBytes(chunk);
+                        uncompressed += bytes.length;
+                        count++;
+                    }
+                    if (count != through - from + 1) {
+                        return null;
+                    }
+                    index.append("]}");
+                    byte[] compressed = payload.toByteArray();
+                    byte[] indexBytes = index.toString().getBytes(StandardCharsets.UTF_8);
+                    ByteArrayOutputStream object = new ByteArrayOutputStream();
+                    object.writeBytes(compressed);
+                    object.writeBytes(indexBytes);
+                    object.writeBytes(ByteBuffer.allocate(8).putLong(indexBytes.length).array());
+                    object.writeBytes(MAGIC);
+                    return new Built(object.toByteArray(), indexBytes, compressed.length,
+                            uncompressed, count);
+                }, tenant, session, from, through);
+    }
+
+    private void publishPack(ManagedAgentSettings.SessionResources config, String scope,
+            String tenant, String workspace, String session, long from, long through, Built built) {
+        byte[] objectBytes = built.objectBytes();
         String packId = "pack-" + UUID.randomUUID();
         String objectKey = config.getOssKeyPrefix() + "packs/" + scope + "/" + packId;
         long now = System.currentTimeMillis();
-        jdbc.update("INSERT INTO ma_journal_pack (pack_id, session_scope_key, tenant_id,"
-                        + " workspace_id, session_id, from_revision, through_revision,"
-                        + " manifest_resource_key, object_key, state, byte_length, sha256,"
-                        + " gmt_create, gmt_modified) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?,"
-                        + " 'BUILDING', ?, ?, ?, ?)",
+        String objectSha = JournalStoreRows.sha256(objectBytes);
+        buildingTx.executeWithoutResult(status -> jdbc.update("INSERT INTO ma_journal_pack"
+                        + " (pack_id, session_scope_key, tenant_id, workspace_id, session_id,"
+                        + " from_revision, through_revision, manifest_resource_key, object_key,"
+                        + " state, byte_length, sha256, gmt_create, gmt_modified) VALUES (?, ?, ?,"
+                        + " ?, ?, ?, ?, ?, ?, 'BUILDING', ?, ?, ?, ?)",
                 packId, scope, tenant, workspace, session, from, through, "", objectKey,
-                objectBytes.length, JournalStoreRows.sha256(objectBytes), now, now);
+                objectBytes.length, objectSha, now, now));
         store().putIfAbsent(objectKey, objectBytes);
         byte[] readBack = readFully(store().open(objectKey, () -> {}));
-        if (!JournalStoreRows.sha256(readBack).equals(JournalStoreRows.sha256(objectBytes))) {
+        if (!JournalStoreRows.sha256(readBack).equals(objectSha)) {
             throw JournalStoreRows.conflict("managed_journal_pack_corrupt",
                     "The published pack object does not match its digest.");
         }
-        jdbc.update("UPDATE ma_journal_pack SET state = 'VERIFIED', gmt_modified = ?"
-                + " WHERE pack_id = ?", System.currentTimeMillis(), packId);
         String manifestId = "manifest-" + packId;
         byte[] manifest = ("{\"packId\":\"" + packId + "\",\"fromRevision\":" + from
-                + ",\"throughRevision\":" + through + ",\"txCount\":" + rows.size()
-                + ",\"uncompressedBytes\":" + uncompressedBytes + ",\"compressedBytes\":"
-                + compressed.length + ",\"packSha256\":\"" + JournalStoreRows.sha256(objectBytes)
-                + "\",\"indexSha256\":\"" + JournalStoreRows.sha256(indexBytes) + "\"}")
+                + ",\"throughRevision\":" + through + ",\"txCount\":" + built.txCount()
+                + ",\"uncompressedBytes\":" + built.uncompressedBytes() + ",\"compressedBytes\":"
+                + built.compressedBytes() + ",\"packSha256\":\"" + objectSha
+                + "\",\"indexSha256\":\"" + JournalStoreRows.sha256(built.indexBytes()) + "\"}")
                 .getBytes(StandardCharsets.UTF_8);
-        int published = jdbc.update("UPDATE ma_session_head SET packed_through_revision = ?,"
-                        + " gmt_modified = " + ManagedSchemaTime.SQL_NOW
-                        + " WHERE tenant_id = ? AND session_id = ? AND head_kind ="
-                        + " 'MANAGED_SESSION' AND state = 'ACTIVE' AND"
-                        + " COALESCE(compacted_through_revision, 0) = 0 AND"
-                        + " packed_through_revision = ? AND journal_revision >= ?",
-                through, tenant, session, from - 1, through);
-        if (published != 1) {
-            throw JournalStoreRows.conflict("managed_journal_pack_conflict",
-                    "The head watermark moved while the pack was being built.");
-        }
-        jdbc.update("UPDATE ma_journal_pack SET state = 'PUBLISHED', manifest_resource_key = ?,"
-                        + " gmt_modified = ? WHERE pack_id = ?",
-                ManagedSessionStore.resourceKey(scope, manifestId),
-                System.currentTimeMillis(), packId);
-        jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id,"
-                        + " workspace_id, session_id, resource_id, kind, schema_version,"
-                        + " byte_length, sha256, storage_kind, inline_bytes, state, gmt_create)"
-                        + " VALUES (?, ?, ?, ?, ?, ?, 'managed-journal-pack-manifest', 1, ?, ?,"
-                        + " 'MYSQL_INLINE', ?, 'REFERENCED', ?)",
-                ManagedSessionStore.resourceKey(scope, manifestId), scope, tenant, workspace,
-                session, manifestId, manifest.length, JournalStoreRows.sha256(manifest), manifest,
-                System.currentTimeMillis());
-        jdbc.update("INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key,"
-                        + " owner_revision, resource_key, tenant_id, workspace_id, session_id,"
-                        + " resource_id, gmt_create) VALUES (?, 'JOURNAL', ?, 1, ?, ?, ?, ?, ?, ?)",
-                scope, packId, ManagedSessionStore.resourceKey(scope, manifestId), tenant,
-                workspace, session, manifestId, System.currentTimeMillis());
-        return true;
+        publishTx.executeWithoutResult(status -> {
+            jdbc.update("UPDATE ma_journal_pack SET state = 'VERIFIED', gmt_modified = ?"
+                    + " WHERE pack_id = ?", System.currentTimeMillis(), packId);
+            int published = jdbc.update("UPDATE ma_session_head SET packed_through_revision = ?,"
+                            + " gmt_modified = " + ManagedSchemaTime.SQL_NOW
+                            + " WHERE tenant_id = ? AND session_id = ? AND head_kind ="
+                            + " 'MANAGED_SESSION' AND state = 'ACTIVE' AND"
+                            + " COALESCE(compacted_through_revision, 0) = 0 AND"
+                            + " packed_through_revision = ? AND journal_revision >= ?",
+                    through, tenant, session, from - 1, through);
+            if (published != 1) {
+                throw JournalStoreRows.conflict("managed_journal_pack_conflict",
+                        "The head watermark moved while the pack was being built.");
+            }
+            jdbc.update("UPDATE ma_journal_pack SET state = 'PUBLISHED', manifest_resource_key = ?,"
+                            + " gmt_modified = ? WHERE pack_id = ?",
+                    ManagedSessionStore.resourceKey(scope, manifestId),
+                    System.currentTimeMillis(), packId);
+            jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id,"
+                            + " workspace_id, session_id, resource_id, kind, schema_version,"
+                            + " byte_length, sha256, storage_kind, inline_bytes, state, gmt_create)"
+                            + " VALUES (?, ?, ?, ?, ?, ?, 'managed-journal-pack-manifest', 1, ?, ?,"
+                            + " 'MYSQL_INLINE', ?, 'REFERENCED', ?)",
+                    ManagedSessionStore.resourceKey(scope, manifestId), scope, tenant, workspace,
+                    session, manifestId, manifest.length, JournalStoreRows.sha256(manifest),
+                    manifest, System.currentTimeMillis());
+            jdbc.update("INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key,"
+                            + " owner_revision, resource_key, tenant_id, workspace_id, session_id,"
+                            + " resource_id, gmt_create) VALUES (?, 'JOURNAL', ?, 1, ?, ?, ?, ?, ?, ?)",
+                    scope, packId, ManagedSessionStore.resourceKey(scope, manifestId), tenant,
+                    workspace, session, manifestId, System.currentTimeMillis());
+        });
     }
 
     /** Returns pack bytes for a covered revision, or null when the revision is SQL-hot. */

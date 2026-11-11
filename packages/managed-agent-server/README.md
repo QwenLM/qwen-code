@@ -1314,7 +1314,8 @@ warns. Cadences bound through `@Scheduled` placeholders —
 `artifacts.projection-interval`, `channels.scan-delay`,
 `child-relay.scan-delay`, `child-workspace.scan-delay`,
 `dispatch.scan-delay`, `events.replay-floor-interval`,
-`message-relay.scan-delay`, `session-worktree.scan-delay` and
+`message-relay.scan-delay`, `session-resources.scan-delay`,
+`session-worktree.scan-delay` and
 `wake-recovery.scan-delay` — also read a bare number as milliseconds,
 and the startup warning cannot see them, so always write the suffix
 there.

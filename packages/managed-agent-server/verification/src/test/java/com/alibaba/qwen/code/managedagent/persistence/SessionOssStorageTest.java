@@ -1,8 +1,8 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
-import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
 import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
 import com.alibaba.qwen.managedprobes.PublicationProbeWiring;
 import org.flywaydb.core.Flyway;
 import org.h2.jdbcx.JdbcDataSource;
@@ -182,5 +182,4 @@ class SessionOssStorageTest {
         assertThatThrownBy(() -> packs.resolveBytes(TENANT, SESSION, 1, "0".repeat(64),
                 value.length)).isInstanceOf(ManagedAgentException.class);
     }
-
 }
