@@ -1083,6 +1083,63 @@ export function fetchCurrentBranchPullRequest(
 }
 
 /**
+ * Resolves an explicitly named PR (a number or a full PR URL) through gh,
+ * for manual session binding. Unlike {@link fetchCurrentBranchPullRequest}
+ * this is not an attribution gate: the caller already holds user intent
+ * naming the PR, and gh only supplies the canonical url/state. `undefined`
+ * means gh could not answer (unavailable, unknown PR, unparseable output);
+ * a caller holding a full URL may then bind that URL without a state and
+ * let the refresh sweep resolve it later.
+ */
+export function fetchPullRequestByReference(
+  cwd: string,
+  reference: string,
+): Promise<{ number: number; url: string; state: SessionPrState } | undefined> {
+  const childEnv = ghEnv();
+  // A URL names its own repo, but a bare number needs the checkout's repo
+  // context; outside a repo gh still runs (and fails) in the given cwd.
+  const runDir = findGitRoot(cwd) ?? cwd;
+  return new Promise((resolve) => {
+    execFile(
+      resolveGhBinary(childEnv, runDir),
+      ['pr', 'view', reference, '--json', 'number,url,state'],
+      {
+        cwd: runDir,
+        timeout: GH_TIMEOUT_MS,
+        maxBuffer: GH_MAX_BUFFER,
+        windowsHide: true,
+        encoding: 'utf8',
+        env: childEnv,
+      },
+      (error, stdout) => {
+        if (error) {
+          resolve(undefined);
+          return;
+        }
+        try {
+          const parsed = JSON.parse(stdout) as {
+            number?: number;
+            url?: string;
+            state?: string;
+          };
+          // gh reports OPEN/MERGED/CLOSED; anything else fails closed.
+          const state = parsed.state?.toLowerCase();
+          resolve(
+            typeof parsed.number === 'number' &&
+              typeof parsed.url === 'string' &&
+              (state === 'open' || state === 'merged' || state === 'closed')
+              ? { number: parsed.number, url: parsed.url, state }
+              : undefined,
+          );
+        } catch {
+          resolve(undefined);
+        }
+      },
+    );
+  });
+}
+
+/**
  * The checked-out branch name of the repo containing `cwd` (undefined
  * outside a repo, on a detached HEAD, or when git fails). Pins branch
  * identity across the `gh pr create` attribution window: the post-run gh

@@ -51,6 +51,7 @@ import {
   fetchCurrentBranchPullRequest,
   fetchGitHubPullRequests,
   fetchGitHubPullRequestView,
+  fetchPullRequestByReference,
   fetchRemoteWebUrl,
   normalizeRemoteToWebUrl,
   parseGhPrList,
@@ -1407,6 +1408,84 @@ describe('fetchCurrentBranchPullRequest', () => {
       status: 'error',
     });
     expect(mockExecFile).not.toHaveBeenCalled();
+  });
+});
+
+describe('fetchPullRequestByReference', () => {
+  const tmp = useTmpDir('github-prs-by-ref-');
+
+  it('resolves a bare number through gh pr view', async () => {
+    mockGhSuccess(
+      {
+        number: 77,
+        url: 'https://github.com/o/r/pull/77',
+        state: 'OPEN',
+      },
+      ['pr', 'view', '77', '--json', 'number,url,state'],
+    );
+
+    expect(await fetchPullRequestByReference(tmp.repo(), '77')).toEqual({
+      number: 77,
+      url: 'https://github.com/o/r/pull/77',
+      state: 'open',
+    });
+  });
+
+  it('passes a URL reference through unchanged', async () => {
+    const url = 'https://github.example.com/o/r/pull/5';
+    mockGhSuccess({ number: 5, url, state: 'MERGED' }, [
+      'pr',
+      'view',
+      url,
+      '--json',
+      'number,url,state',
+    ]);
+
+    expect(await fetchPullRequestByReference(tmp.repo(), url)).toEqual({
+      number: 5,
+      url,
+      state: 'merged',
+    });
+  });
+
+  it('returns undefined when gh fails', async () => {
+    mockExecError('could not resolve to a PullRequest');
+    expect(
+      await fetchPullRequestByReference(tmp.repo(), '999999999'),
+    ).toBeUndefined();
+  });
+
+  it('fails closed on an unrecognizable state', async () => {
+    mockGhSuccess({
+      number: 77,
+      url: 'https://github.com/o/r/pull/77',
+      state: 'SOMETHING_NEW',
+    });
+    expect(await fetchPullRequestByReference(tmp.repo(), '77')).toBeUndefined();
+  });
+
+  it('fails closed on unparseable output', async () => {
+    mockStdout('not json');
+    expect(await fetchPullRequestByReference(tmp.repo(), '77')).toBeUndefined();
+  });
+
+  it('still spawns gh outside a git repository (a URL names its own repo)', async () => {
+    mockGhSuccess({
+      number: 5,
+      url: 'https://github.com/o/r/pull/5',
+      state: 'CLOSED',
+    });
+    expect(
+      await fetchPullRequestByReference(
+        tmp.dir,
+        'https://github.com/o/r/pull/5',
+      ),
+    ).toEqual({
+      number: 5,
+      url: 'https://github.com/o/r/pull/5',
+      state: 'closed',
+    });
+    expect(mockExecFile.mock.calls[0]?.[2]).toMatchObject({ cwd: tmp.dir });
   });
 });
 
