@@ -100,6 +100,7 @@ export function hasHostedExternalFilesExcludedOptions(
       'publicChildExtensionAgent',
       'lineage',
       'captureBytes',
+      'memoryStoreId',
     ].some((key) => value?.[key] !== undefined) ||
     value?.['childWorkspaces'] === true ||
     value?.['childSnapshots'] === true ||
