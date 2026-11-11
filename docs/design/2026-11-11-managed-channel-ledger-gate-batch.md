@@ -29,40 +29,41 @@ Two costs the groundwork left behind:
 
 ## Decision
 
-### A. Gate the record read on the record's delivered line and a fully-receipted ledger
+### A. Gate the record read on a provably complete, fully-receipted ledger
 
-Before reading the record body, `reconcileClaim` looks up the record's delivery
-line (`findDeliveryRecord`, a point query on `ma_session_record` that does not
-touch the resource body) and skips the LONGTEXT read only when that line already
-says `delivered` **and** the ledger lists every segment row with a non-null
-receipt. The record-state condition is load-bearing: the plan write is not
-transactional (the batched `INSERT IGNORE` commits per statement), so an
-interrupted write can leave a receipted _prefix_ — the ledger's row set alone is
-not proof of completeness. Without the record confirming `delivered`, a
-truncated prefix must fall through to the record-read block, whose `planSegments`
-re-creates the missing rows instead of closing the line on a short chain. When
-both conditions hold, the gate closes a lagging line from the ledger's own
-receipts (`stepLedger` to `delivered` with the last segment's receipt) and skips
-the read + parse + re-plan entirely. The read is kept for:
+Before reading the record body, `reconcileClaim` checks whether the segment
+ledger already holds the **entire immutable plan** with every segment receipted.
+The plan's size is persisted with the delivery (`ma_delivery.segment_count`, set
+when the delivery row is created), so the gate can prove completeness from the
+ledger alone: it skips the LONGTEXT read only when the ledger holds exactly
+`segment_count` rows and every one carries a non-null receipt. The completeness
+proof is load-bearing: the plan write is not transactional (the batched `INSERT
+IGNORE` commits per statement) and every row it commits is seeded with the
+record's receipt, so an interrupted write can leave a receipted _prefix_ — under
+a record of any state, including `delivered`. The rows the ledger happens to hold
+are not proof the plan is whole; a short ledger must fall through to the
+record-read block, whose `planSegments` re-creates the missing tail instead of
+closing the line on a truncated chain. When the ledger is provably complete and
+fully receipted, the gate closes a lagging line from the ledger's own receipts
+(`stepLedger` to `delivered` with the last segment's receipt) and skips the read +
+parse + re-plan entirely. The read is kept for:
 
-- a record line that is not `delivered` (a receipted prefix still needs its
-  missing rows re-planned);
+- a ledger shorter than the persisted plan count (a truncated plan still needs
+  its missing rows re-planned, whatever the record's state);
 - a missing ledger row or missing segment rows (a pre-ledger claim still needs
   the record to backfill the plan);
 - any null receipt (a lost-answer receipt still needs converging).
 
 The case this matters for is the crash window where the final segment receipt
-landed but the ledger's `stepLedger` to `delivered` failed: the record is already
-`delivered`, the ledger lags at `partial` while every segment holds a receipt,
-and the sweep keeps selecting that `partial` line. Converging from the ledger
-closes the line **without** the record read; gating on the receipts alone and
-merely skipping the read would strand it at `partial`. Convergence stays ahead
-of the settle path: the gate runs before the existing record-read block, and the
-settle path that follows is unchanged. The delivery row and the record line are
-each loaded once and threaded through the gate and the record-read block;
-whenever a step occurs its returned row is adopted, so the gate adds no extra
-delivery point SELECT on the common sweep path (the record-line point query
-replaces, and is reused by, the one the record-read block already made).
+landed but the ledger's `stepLedger` to `delivered` failed: the ledger holds the
+whole plan with every segment receipted but lags at `partial`, and the sweep
+keeps selecting that `partial` line. Converging from the ledger closes the line
+**without** the record read; gating on the receipts alone and merely skipping the
+read would strand it at `partial`. Convergence stays ahead of the settle path:
+the gate runs before the existing record-read block, and the settle path that
+follows is unchanged. The delivery row is loaded once and threaded through the
+gate and the record-read block; whenever a step occurs its returned row is
+adopted, so the gate adds no extra point SELECT on the common sweep path.
 
 ### B. Batch the plan inserts and the list read
 
@@ -94,7 +95,14 @@ single-delivery `list` read.
 ## Files affected
 
 - `control-plane/.../channel/ManagedChannelService.java` — the reconcile gate
-  (`convergeFullyReceiptedFromLedger`) and the batched `listDeliveries` read.
+  (`convergeFullyReceiptedFromLedger`, gated on the persisted plan count) and the
+  batched `listDeliveries` read; the claim/resend paths persist the plan size.
+- `persistence/.../db/managed-schema/V1__managed_schema.sql` — the
+  `ma_delivery.segment_count` column holding the immutable plan size.
+- `contracts/.../persistence/ChannelDeliveryRepository.java` — the
+  `segmentCount` field on `ChannelDelivery`.
+- `persistence/.../JdbcChannelDeliveryRepository.java` — reads and writes
+  `segment_count` with the delivery row.
 - `persistence/.../JdbcChannelSegmentRepository.java` — the batched `plan` and
   the new `listByDelivery`.
 - `contracts/.../persistence/ChannelSegmentRepository.java` — the
@@ -128,11 +136,12 @@ single-delivery `list` read.
   removing the gate reds it (the read would run), and forwarding a null receipt
   reds the receipt assertion (the fixture clears the column so the gate's write
   is load-bearing, not a preset value surviving `COALESCE`). A companion case
-  with a null receipt verifies the read is kept. A truncated-prefix case (three
-  segments planned, two receipted, the tail ledger row deleted, the record still
-  `partial`) verifies the read is kept and `planSegments` re-creates the missing
-  row instead of closing `delivered` on a short ledger; removing the gate's
-  record-state condition reds it.
+  with a null receipt verifies the read is kept. Two truncated-prefix cases (three
+  segments planned, the tail ledger row deleted so only a receipted prefix
+  remains — one with the record still `partial`, one with the record already
+  `delivered`) verify the read is kept and `planSegments` re-creates the missing
+  row, closing on the plan's last receipt rather than the prefix's; removing the
+  gate's plan-count completeness check reds both.
 - The batched plan is pinned by the existing backfill/idempotence cases plus a
   64-segment batch and a mixed batch whose pre-existing null-receipt row sits at
   a batch position different from its ordinal, so skipping count-0 rows or

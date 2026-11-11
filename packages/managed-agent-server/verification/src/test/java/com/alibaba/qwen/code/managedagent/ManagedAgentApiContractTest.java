@@ -2862,7 +2862,7 @@ class ManagedAgentApiContractTest {
                 List.of("sha256:" + "b".repeat(64)), 1000, 1000));
         var deliveryRepository = new com.alibaba.qwen.code.managedagent.persistence.JdbcChannelDeliveryRepository(jdbc);
         deliveryRepository.findOrCreate(new com.alibaba.qwen.code.managedagent.contracts.persistence.ChannelDeliveryRepository.ChannelDelivery(
-                channelTenant, "mail-1", "delivery-1", "delivery-1:0", 0, "planned", null, 1000, 1000));
+                channelTenant, "mail-1", "delivery-1", "delivery-1:0", 0, "planned", null, 1000, 1000, 1));
         deliveryRepository.transition(channelTenant, "mail-1", "delivery-1", "planned", "sending", null);
         deliveryRepository.transition(channelTenant, "mail-1", "delivery-1", "sending", "delivered", "<m1@example.com>");
         var segmentRepository = new com.alibaba.qwen.code.managedagent.persistence.JdbcChannelSegmentRepository(jdbc);

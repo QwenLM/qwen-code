@@ -34,7 +34,6 @@ import com.alibaba.qwen.code.managedagent.repository.ChannelInstanceStore;
 import com.alibaba.qwen.code.managedagent.repository.ChannelInstanceStore.ChannelBinding;
 import com.alibaba.qwen.code.managedagent.repository.ChannelInstanceStore.ChannelClaim;
 import com.alibaba.qwen.code.managedagent.repository.ChannelInstanceStore.ChannelInstance;
-import com.alibaba.qwen.code.managedagent.repository.ChannelInstanceStore.DeliveryRecordState;
 import com.alibaba.qwen.code.managedagent.repository.ChannelInstanceStore.InstanceCursor;
 import com.alibaba.qwen.code.managedagent.repository.ChannelInstanceStore.InstancePage;
 import com.alibaba.qwen.code.managedagent.repository.ChannelInstanceStore.PendingDelivery;
@@ -378,7 +377,7 @@ public class ManagedChannelService {
                 tenantId, channelId, resentId,
                 String.valueOf(first.get("segmentId")),
                 ((Number) first.get("ordinal")).intValue(), "planned", null,
-                0, 0));
+                0, 0, plan.size()));
         instances.claim(tenantId, channelId, resentId, claim.sessionId());
         return new ResendResponse(resentId, deliveryId, true,
                 view(row, claim.sessionId()));
@@ -420,41 +419,39 @@ public class ManagedChannelService {
         // Converge the ledger with the committed record first: a receipt
         // the answer was lost for still landed, and a claim_delivery commit
         // the ledger never saw still moved the record to sending. When the
-        // record's line already says delivered and the ledger lists every
-        // segment receipted, converge the ledger from its own receipts and skip
-        // the LONGTEXT read + parse + re-plan every sweep would otherwise pay
-        // (#16818 A); a receipted prefix whose record is not delivered keeps the
-        // read so planSegments heals the missing rows (R5-1). The delivery row
-        // is loaded once and threaded through; whenever a step occurs its
-        // returned row is adopted so the state acted on below stays fresh
-        // without a second point SELECT.
+        // ledger already holds the entire immutable plan with every segment
+        // receipted, converge it from its own receipts and skip the LONGTEXT
+        // read + parse + re-plan every sweep would otherwise pay (#16818 A). A
+        // truncated plan — even one whose present rows are all receipted, under
+        // a record of any state — keeps the read so planSegments heals the
+        // missing tail (R5-1). The delivery row is loaded once and threaded
+        // through; whenever a step occurs its returned row is adopted so the
+        // state acted on below stays fresh without a second point SELECT.
         Optional<ChannelDelivery> ledger = deliveries.find(tenantId,
                 channelId, deliveryId);
-        // The record's delivery line is a point query on ma_session_record and
-        // does not read the resource body; the gate may skip the LONGTEXT read
-        // only when that line already says delivered (R5-1).
-        var record = instances.findDeliveryRecord(tenantId,
-                claim.sessionId(), deliveryId);
         Optional<ChannelDelivery> converged = convergeFullyReceiptedFromLedger(
-                ledger, record, tenantId, channelId, deliveryId,
-                claim.claimGeneration());
+                ledger, tenantId, channelId, deliveryId, claim.claimGeneration());
         if (converged.isPresent()) {
             ledger = converged;
-        } else if (record.isPresent()) {
-            String json = instances.readResource(tenantId,
-                    claim.sessionId(), record.get().recordResourceId());
-            JsonNode tree = json == null ? null
-                    : readJson(json, "channel delivery record");
-            if (tree != null) {
-                planSegments(tenantId, channelId, deliveryId, tree);
-            }
-            String state = record.get().deliveryState();
-            if (!"planned".equals(state)) {
-                ledger = Optional.of(stepLedger(tenantId, channelId,
-                        deliveryId, state,
-                        "delivered".equals(state) && tree != null
-                                ? lastSegmentReceipt(tree) : null,
-                        claim.claimGeneration()));
+        } else {
+            var record = instances.findDeliveryRecord(tenantId,
+                    claim.sessionId(), deliveryId);
+            if (record.isPresent()) {
+                String json = instances.readResource(tenantId,
+                        claim.sessionId(), record.get().recordResourceId());
+                JsonNode tree = json == null ? null
+                        : readJson(json, "channel delivery record");
+                if (tree != null) {
+                    planSegments(tenantId, channelId, deliveryId, tree);
+                }
+                String state = record.get().deliveryState();
+                if (!"planned".equals(state)) {
+                    ledger = Optional.of(stepLedger(tenantId, channelId,
+                            deliveryId, state,
+                            "delivered".equals(state) && tree != null
+                                    ? lastSegmentReceipt(tree) : null,
+                            claim.claimGeneration()));
+                }
             }
         }
         if (ledger.isPresent() && "planned".equals(ledger.get().state())) {
@@ -490,32 +487,35 @@ public class ManagedChannelService {
     }
 
     /**
-     * When the record's own delivery line already says delivered and the ledger
-     * lists every segment with a receipt, the record body has nothing left to
-     * converge: close a lagging line from the ledger's own receipts and return
-     * the fresh row so the caller skips the LONGTEXT read. This is the crash
-     * window where the last receipt landed but the ledger's step to delivered
-     * failed. The record-state condition is load-bearing (R5-1): plan is not
-     * transactional, so an interrupted write can leave a receipted PREFIX, and
-     * the ledger's row set alone is not proof of completeness — unless the
-     * record says delivered the caller keeps the read, whose planSegments heals
-     * the missing rows instead of closing the line on a truncated chain. A
-     * missing ledger row or any null receipt also returns empty. The caller
-     * passes the row and record it already loaded, so the gate adds no extra
-     * point SELECT. Convergence stays ahead of the settle path.
+     * When the ledger holds the entire immutable segment plan with every
+     * segment receipted, the record body has nothing left to converge: close a
+     * lagging line from the ledger's own receipts and return the fresh row so
+     * the caller skips the LONGTEXT read. This is the crash window where the
+     * last receipt landed but the ledger's step to delivered failed. The
+     * completeness proof is load-bearing (R5-1): plan is not transactional, so
+     * an interrupted write can leave a receipted PREFIX — under a record of any
+     * state, including delivered — and the rows the ledger happens to hold are
+     * not proof the plan is whole. The plan's size is immutable and persisted
+     * with the delivery, so only a ledger holding exactly that many rows may
+     * skip; a short ledger keeps the read, whose planSegments heals the missing
+     * tail instead of closing the line on a truncated chain. A missing ledger
+     * row or any null receipt also returns empty. The caller passes the row it
+     * already loaded, so the gate adds no extra point SELECT. Convergence stays
+     * ahead of the settle path.
      */
     private Optional<ChannelDelivery> convergeFullyReceiptedFromLedger(
-            Optional<ChannelDelivery> ledger,
-            Optional<DeliveryRecordState> record, String tenantId,
+            Optional<ChannelDelivery> ledger, String tenantId,
             String channelId, String deliveryId, Long claimGeneration) {
-        if (ledger.isEmpty() || record.isEmpty()
-                || !"delivered".equals(record.get().deliveryState())) {
+        if (ledger.isEmpty()) {
             return Optional.empty();
         }
         List<SegmentLedger> ledgerSegments = segments.list(tenantId, channelId,
                 deliveryId);
         if (ledgerSegments.isEmpty() || ledgerSegments.stream()
                 .anyMatch(segment -> segment.providerReceipt() == null)) {
+            return Optional.empty();
+        }
+        if (ledgerSegments.size() != ledger.get().segmentCount()) {
             return Optional.empty();
         }
         if (!"delivered".equals(ledger.get().state())) {
@@ -677,11 +677,13 @@ public class ManagedChannelService {
         planSegments(tenantId, channelId, pending.deliveryId(), record);
         // The delivery-level identity is the record's first segment, stable
         // across a resumed partial: naming the first unsent segment here
-        // would make findOrCreate reject the row the first claim wrote.
+        // would make findOrCreate reject the row the first claim wrote. The
+        // plan's size is persisted so the reconcile gate can prove the ledger
+        // complete rather than trusting the rows it happens to hold (R5-1).
         ChannelDelivery ledger = deliveries.findOrCreate(new ChannelDelivery(
                 tenantId, channelId, pending.deliveryId(),
                 firstSegmentId, firstOrdinal, "planned", null,
-                0, 0));
+                0, 0, record.required("segments").size()));
         Optional<ChannelClaim> existing = instances.findClaim(tenantId,
                 channelId, pending.deliveryId());
         ChannelClaim observed = existing.isEmpty()

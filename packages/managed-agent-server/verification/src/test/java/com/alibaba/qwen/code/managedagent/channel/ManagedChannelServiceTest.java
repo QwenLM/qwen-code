@@ -739,9 +739,10 @@ class ManagedChannelServiceTest {
                 sessions, workspaces, harness, mapper, Duration.ofMinutes(10),
                 clock::get);
         observingService.reconcile();
-        // The record is partial, so the gate keeps the read and planSegments
-        // re-creates the missing row. Removing the gate's record-state
-        // condition reds here: the prefix would close delivered with 2 rows.
+        // The ledger holds only a prefix of the immutable 3-segment plan, so
+        // the gate keeps the read and planSegments re-creates the missing row.
+        // Removing the gate's completeness check reds here: the prefix would
+        // close delivered with 2 rows.
         org.mockito.Mockito.verify(observing, org.mockito.Mockito.atLeastOnce())
                 .readResource(org.mockito.ArgumentMatchers.eq(TENANT),
                         org.mockito.ArgumentMatchers.eq(admitted.sessionId()),
@@ -752,6 +753,59 @@ class ManagedChannelServiceTest {
                         deliveryId + ":2");
         assertThat(service.ledger(TENANT, channel, deliveryId)).get()
                 .extracting(row -> row.state()).isNotEqualTo("delivered");
+    }
+
+    @Test
+    void reconcileHealsATruncatedPrefixEvenUnderADeliveredRecord() {
+        InboundAdmission admitted = service.submitInbound(TENANT, channel,
+                event(1, "1700:115", "please reply"));
+        String deliveryId = admitted.inputId() + ":reply";
+        plannedDelivery(admitted.sessionId(), deliveryId, admitted.routeId(),
+                "The build is green.", 3);
+        service.claimDeliveries(TENANT, channel, 16);
+        service.receipt(TENANT, channel, deliveryId,
+                new ReceiptRequest("accepted", 0, "<m0@example.com>", null));
+        service.receipt(TENANT, channel, deliveryId,
+                new ReceiptRequest("accepted", 1, "<m1@example.com>", null));
+        service.receipt(TENANT, channel, deliveryId,
+                new ReceiptRequest("accepted", 2, "<m2@example.com>", null));
+        // The record already says delivered, but an interrupted plan left only
+        // a receipted prefix in the ledger and the line lags. The rows the
+        // ledger happens to hold are not proof the plan is whole (R5-1).
+        jdbc.update("UPDATE ma_delivery SET transport_state = 'partial',"
+                        + " provider_receipt_json = NULL"
+                        + " WHERE tenant_id = ? AND delivery_id = ?",
+                TENANT, deliveryId);
+        jdbc.update("DELETE FROM ma_channel_segment WHERE tenant_id = ?"
+                        + " AND channel_id = ? AND segment_ordinal = 2",
+                TENANT, channel);
+        assertThat(segmentLedger.list(TENANT, channel, deliveryId)).hasSize(2);
+        expire(deliveryId);
+        JdbcChannelInstanceStore observing = org.mockito.Mockito.spy(
+                new JdbcChannelInstanceStore(jdbc));
+        ManagedChannelService observingService = new ManagedChannelService(
+                observing, new JdbcChannelRouteRepository(jdbc),
+                new JdbcChannelDeliveryRepository(jdbc), segmentLedger,
+                sessions, workspaces, harness, mapper, Duration.ofMinutes(10),
+                clock::get);
+        observingService.reconcile();
+        // The short ledger keeps the read; planSegments re-creates the tail and
+        // the line closes on the plan's last receipt, not the prefix's.
+        // Removing the gate's completeness check reds here: the prefix would
+        // close delivered with 2 rows and <m1@example.com>, read never run.
+        org.mockito.Mockito.verify(observing, org.mockito.Mockito.atLeastOnce())
+                .readResource(org.mockito.ArgumentMatchers.eq(TENANT),
+                        org.mockito.ArgumentMatchers.eq(admitted.sessionId()),
+                        org.mockito.ArgumentMatchers.anyString());
+        assertThat(segmentLedger.list(TENANT, channel, deliveryId))
+                .extracting(SegmentLedger::segmentId)
+                .containsExactly(deliveryId + ":0", deliveryId + ":1",
+                        deliveryId + ":2");
+        assertThat(service.ledger(TENANT, channel, deliveryId)).get()
+                .extracting(row -> row.state()).isEqualTo("delivered");
+        assertThat(service.ledger(TENANT, channel, deliveryId)).get()
+                .extracting(row -> row.providerReceipt())
+                .isEqualTo("<m2@example.com>");
     }
 
     @Test
@@ -794,7 +848,7 @@ class ManagedChannelServiceTest {
                 "The build is green.", 2);
         new JdbcChannelDeliveryRepository(jdbc).findOrCreate(
                 new ChannelDeliveryRepository.ChannelDelivery(TENANT, channel,
-                        deliveryId, "other:0", 0, "planned", null, 0, 0));
+                        deliveryId, "other:0", 0, "planned", null, 0, 0, 1));
         segmentLedger.plan(TENANT, channel, deliveryId,
                 List.of(new SegmentLedger("other:0", 0, null)));
         // The claim sweep must refuse the conflicting record before planning,
@@ -1045,7 +1099,7 @@ class ManagedChannelServiceTest {
         String resentId = deliveryId + ":r1";
         new JdbcChannelDeliveryRepository(jdbc).findOrCreate(
                 new ChannelDeliveryRepository.ChannelDelivery(TENANT, channel,
-                        resentId, resentId + ":0", 5, "planned", null, 0, 0));
+                        resentId, resentId + ":0", 5, "planned", null, 0, 0, 1));
         assertThatThrownBy(() -> service.resend(TENANT, channel, deliveryId))
                 .isInstanceOf(IllegalStateException.class);
         // The guard must reject on the ordinal before planning: findOrCreate
@@ -1066,7 +1120,7 @@ class ManagedChannelServiceTest {
         String resentId = deliveryId + ":r1";
         new JdbcChannelDeliveryRepository(jdbc).findOrCreate(
                 new ChannelDeliveryRepository.ChannelDelivery(TENANT, channel,
-                        resentId, "other:0", 0, "planned", null, 0, 0));
+                        resentId, "other:0", 0, "planned", null, 0, 0, 1));
         segmentLedger.plan(TENANT, channel, resentId,
                 List.of(new SegmentLedger("other:0", 0, null)));
         assertThatThrownBy(() -> service.resend(TENANT, channel, deliveryId))
@@ -1418,7 +1472,7 @@ class ManagedChannelServiceTest {
                     admitted.routeId(), "Done.");
             repo.findOrCreate(new ChannelDeliveryRepository.ChannelDelivery(
                     TENANT, channel, deliveryId, deliveryId + ":0", 0,
-                    "planned", null, 0, 0));
+                    "planned", null, 0, 0, 1));
             instances.claim(TENANT, channel, deliveryId, admitted.sessionId());
             stalled.add(deliveryId);
         }

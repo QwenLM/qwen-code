@@ -24,27 +24,28 @@
 
 ## 决策
 
-### A. 按「记录已 delivered＋全回执台账」给记录读取加前置门
+### A. 按「可证完整＋全回执台账」给记录读取加前置门
 
-读取记录体前，`reconcileClaim` 先查记录的交付线（`findDeliveryRecord`，对
-`ma_session_record` 的点查，不触碰资源体），仅当该线已为 `delivered` **且**台账列出
-每个分段行且回执非空时才跳过 LONGTEXT 读。记录态条件是承重的：计划写入无事务（批量
-`INSERT IGNORE` 逐条提交），中途打断会留下**带回收前缀**——台账的行集本身不足以证明
-完整。记录未确认 `delivered` 时，截断前缀必须落入记录读取块，由其 `planSegments`
-补齐缺失行，而不是在短链上关闭交付线。两条件同时满足时，门从台账自身的回执关闭滞后线
-（以末段回执 `stepLedger` 到 `delivered`），并完全跳过读 + 解析 + 重规划。以下情况
-保留读取：
+读取记录体前，`reconcileClaim` 检查分段台账是否已持有**整个不可变计划**且每段回执
+非空。计划段数随交付持久化（`ma_delivery.segment_count`，在交付行创建时写入），故门
+仅凭台账即可证明完整：仅当台账恰好持有 `segment_count` 行且每行回执非空时才跳过
+LONGTEXT 读。完整性证明是承重的：计划写入无事务（批量 `INSERT IGNORE` 逐条提交），
+且其写入的每行都从记录带上回执，故中途打断会留下**带回收前缀**——无论记录处于何态
+（包括 `delivered`）。台账恰好持有的行集不足以证明计划完整；短台账必须落入记录读取块，
+由其 `planSegments` 补齐缺失尾部，而不是在截断链上关闭交付线。台账可证完整且全回执时，
+门从台账自身的回执关闭滞后线（以末段回执 `stepLedger` 到 `delivered`），并完全跳过
+读 + 解析 + 重规划。以下情况保留读取：
 
-- 记录线非 `delivered`（带回收前缀仍需补齐缺失行）；
+- 台账行数少于持久化的计划段数（截断计划仍需补齐缺失行，无论记录何态）；
 - 台账行缺失或分段行缺失（pre-ledger 认领仍需记录回填计划）；
 - 任何空回执（应答丢失的回执仍需收敛）。
 
-真正受益的是崩溃窗口：末段回执已落库但台账到 `delivered` 的 `stepLedger` 失败——记录
-已 `delivered`，台账滞后于 `partial` 而每段都持有回执，扫描持续选中该 `partial` 线。
-从台账收敛即可关闭该线而**无需**记录读取；若仅按回执加门、只跳过读取，会把它搁死在
+真正受益的是崩溃窗口：末段回执已落库但台账到 `delivered` 的 `stepLedger` 失败——台账
+持有整个计划、每段回执非空，却滞后于 `partial`，扫描持续选中该 `partial` 线。从台账
+收敛即可关闭该线而**无需**记录读取；若仅按回执加门、只跳过读取，会把它搁死在
 `partial`。收敛保持在结算路径之前：门在既有记录读取块之前运行；其后的结算路径不变。
-交付行与记录线各只加载一次并贯穿门与记录读取块；凡发生状态推进即采用其返回的行，故门
-在常见扫描路径上不增加额外的交付点查（记录线点查取代并被记录读取块复用）。
+交付行只加载一次并贯穿门与记录读取块；凡发生状态推进即采用其返回的行，故门在常见扫描
+路径上不增加额外的点查。
 
 ### B. 批量计划插入与列表读取
 
@@ -67,7 +68,14 @@
 ## 涉及文件
 
 - `control-plane/.../channel/ManagedChannelService.java` —— 对账前置门
-  （`convergeFullyReceiptedFromLedger`）与批量 `listDeliveries` 读取。
+  （`convergeFullyReceiptedFromLedger`，按持久化计划段数加门）与批量
+  `listDeliveries` 读取；认领/重发路径持久化计划段数。
+- `persistence/.../db/managed-schema/V1__managed_schema.sql` ——
+  `ma_delivery.segment_count` 列，持有不可变计划段数。
+- `contracts/.../persistence/ChannelDeliveryRepository.java` ——
+  `ChannelDelivery` 的 `segmentCount` 字段。
+- `persistence/.../JdbcChannelDeliveryRepository.java` —— 随交付行读写
+  `segment_count`。
 - `persistence/.../JdbcChannelSegmentRepository.java` —— 批量 `plan` 与新增
   `listByDelivery`。
 - `contracts/.../persistence/ChannelSegmentRepository.java` —— `listByDelivery`
@@ -93,9 +101,9 @@
   回执的全回执台账（崩溃窗口）以末段回执收敛到 `delivered`，同时验证 `readResource`
   绝不被调用；移除门即转红（读取会运行），转发空回执亦转红回执断言（fixture 清空该列，
   使门的写入承重，而非预置值经 `COALESCE` 存活）。一个伴生用例以空回执验证读取被保留。
-  一个截断前缀用例（规划 3 段、2 段带回收、删除尾部台账行、记录仍 `partial`）验证读取
-  被保留且 `planSegments` 补齐缺失行，而非以短台账关闭 `delivered`；移除门的记录态
-  条件即转红。
+  两个截断前缀用例（规划 3 段、删除尾部台账行只余带回收前缀——其一记录仍 `partial`、
+  其一记录已 `delivered`）验证读取被保留且 `planSegments` 补齐缺失行、以计划末段回执
+  而非前缀回执关闭；移除门的计划段数完整性检查两者均转红。
 - 批量计划由既有回填/幂等用例加 64 段批量与混合批量钉住：混合批中预先存在的缺回执行
   所在批次位与其 ordinal 不同，故跳过计数 0 行或按 ordinal 取计数下标都会转红。一个
   打桩插入批返回 `SUCCESS_NO_INFO` 的用例钉住无逐行计数回退。回填亦批量，故重认领发
