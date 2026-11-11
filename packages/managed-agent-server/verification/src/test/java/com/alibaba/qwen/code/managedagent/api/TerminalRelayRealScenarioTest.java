@@ -255,8 +255,11 @@ class TerminalRelayRealScenarioTest {
                     .as("relay opened a real worker connection; browser closes=%s", closes)
                     .isTrue();
             // The durable hold was really admitted before the worker opened.
+            // The ledger key folds in the harness Session (hashed).
+            String terminalKey = org.apache.commons.codec.digest.DigestUtils
+                    .sha256Hex("session-a:term-real");
             ToolExecutionRecord hold = executionRepository
-                    .findByExecutionCallId("terminal-attach:term-real:process");
+                    .findByExecutionCallId("terminal-attach:" + terminalKey + ":process");
             assertThat(hold).isNotNull();
             assertThat(hold.getState()).isEqualTo(ToolExecutionRecord.State.PREPARED);
 

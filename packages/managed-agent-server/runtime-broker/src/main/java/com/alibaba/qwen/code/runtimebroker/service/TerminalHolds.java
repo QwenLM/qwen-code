@@ -16,6 +16,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -70,13 +71,16 @@ final class TerminalHolds {
         String terminal = BrokerValues.requirePathSafe(
                 BrokerValues.requireId(terminalId, "terminalId"), "terminalId");
         // A terminal owns a deterministic Runtime Session of its own, so the
-        // relay never has to resolve one. The deterministic process id is the
-        // cross-Session guard (a terminal id is only unique within a Session);
-        // the active hold is found through the Runtime Session so a reconnect
-        // reuses it, while a re-create after settlement admits a fresh hold
-        // instead of handing back a settled one that no longer protects a PTY.
-        String runtime = "terminal-" + terminal;
-        String baseInvocationId = "terminal-attach:" + terminal;
+        // relay never has to resolve one. A terminal id is only unique within
+        // its Session, but these derived ids are deployment-global ledger keys,
+        // so they must fold in the harness Session too — hashed to stay
+        // path-safe and within the id bound. The active hold is found through
+        // the Runtime Session so a reconnect reuses it, while a re-create after
+        // settlement admits a fresh hold instead of handing back a settled one
+        // that no longer protects a PTY.
+        String terminalKey = DigestUtils.sha256Hex(harness + ":" + terminal);
+        String runtime = "terminal-" + terminalKey;
+        String baseInvocationId = "terminal-attach:" + terminalKey;
         String baseProcessId = baseInvocationId + ":process";
         return mapStoreFailure(safeStage(() -> {
             ToolExecutionRecord base = executionRepository.findByExecutionCallId(baseProcessId);
@@ -106,11 +110,18 @@ final class TerminalHolds {
                                     : baseInvocationId + ":" + UUID.randomUUID();
                             String processId = invocationId + ":process";
                             String digest = "sha256:" + DigestUtils.sha256Hex(terminal);
+                            // The attach invocation carries the hold dispatch
+                            // mode too: it is settled through the never-dispatched
+                            // path and has no tool-result projection, so the
+                            // lifecycle verifier must recognize it as a hold row
+                            // or closing a Session that ever opened a terminal
+                            // would be refused as unsettled.
                             Map<String, Object> reference = Map.of(
                                     "sessionId", runtime,
                                     "promptId", harness,
                                     "callId", terminal,
-                                    "argsDigest", digest);
+                                    "argsDigest", digest,
+                                    "dispatchMode", ManagedHoldFamily.TERMINAL.dispatchMode());
                             ToolExecutionRecord candidate = ToolExecutionRecord.prepared(
                                     invocationId, invocationId,
                                     context.binding().getBindingId(),
@@ -171,10 +182,11 @@ final class TerminalHolds {
         String terminal = BrokerValues.requirePathSafe(
                 BrokerValues.requireId(terminalId, "terminalId"), "terminalId");
         String callId = BrokerValues.requireId(executionCallId, "executionCallId");
-        String runtime = "terminal-" + terminal;
+        String runtime = "terminal-" + DigestUtils.sha256Hex(harness + ":" + terminal);
         return mapStoreFailure(safeStage(() -> broker.acquire(harness, runtime, "bootstrap", null, null)
                 .thenCompose(ignored -> bindingRegistry.requireReadySession(harness, runtime))
-                .thenApply(context -> {
+                .thenCompose(context -> {
+                    ToolExecutionRecord settled;
                     context.lock();
                     try {
                         bindingRegistry.requireReadySessionRecord(context);
@@ -185,7 +197,7 @@ final class TerminalHolds {
                         // may be settled by this failed attempt.
                         if (active == null
                                 || !active.getExecutionCallId().equals(callId)) {
-                            return null;
+                            return CompletableFuture.completedFuture(null);
                         }
                         requireTerminalHoldOwner(active, harness, runtime);
                         // The attach never produced a PTY, so there is no exit
@@ -195,11 +207,28 @@ final class TerminalHolds {
                         result.put("executionStatus", "success");
                         result.put("responseParts", List.of());
                         result.put("capture", null);
-                        return executionRepository.settlePrepared(
+                        settled = executionRepository.settlePrepared(
                                 active, result, clock.instant());
                     } finally {
                         context.unlock();
                     }
-                })));
+                    // The terminal's dedicated Runtime Session has no other
+                    // work once its hold settles; release it so per-terminal
+                    // sessions do not accumulate for the life of the Runtime.
+                    return broker.release(harness, runtime)
+                            .thenApply(ignored -> settled);
+                }))).exceptionally(error -> {
+                    // A follow-up abandon after the session was released is a
+                    // no-op: there is no active hold left to discharge.
+                    Throwable cause = error.getCause() != null ? error.getCause() : error;
+                    if (cause instanceof com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException brokerError
+                            && "runtime_session_not_acquirable".equals(brokerError.getCode())) {
+                        return null;
+                    }
+                    if (cause instanceof RuntimeException runtimeError) {
+                        throw runtimeError;
+                    }
+                    throw new java.util.concurrent.CompletionException(cause);
+                });
     }
 }

@@ -34,6 +34,7 @@ import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryRuntimeBindingRep
 import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryRuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.provisioning.staticruntime.StaticRuntimeProvisioner;
+import org.apache.commons.codec.digest.DigestUtils;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Proxy;
@@ -75,6 +76,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class RuntimeBrokerServiceTest {
     private static final String MOUNT_CLAIM = "claim";
+    // The broker folds the harness Session into terminal-derived ledger keys.
+    private static final String TERMINAL_KEY =
+            DigestUtils.sha256Hex("harness:term-1");
     private static final String PROVIDER_SESSION = "550e8400-e29b-41d4-a716-446655440302";
     private static final Instant START = Instant.parse(
             "2026-09-22T00:00:00Z");
@@ -2032,14 +2036,20 @@ class RuntimeBrokerServiceTest {
                     "harness", "term-1"));
             assertTrue(admission.created());
             ToolExecutionRecord hold = admission.hold();
-            assertEquals("terminal-attach:term-1:process", hold.getExecutionCallId());
+            assertEquals("terminal-attach:" + TERMINAL_KEY + ":process", hold.getExecutionCallId());
             assertEquals("web_terminal_process", hold.getReference().get("dispatchMode"));
-            assertEquals("terminal-attach:term-1", hold.getReference().get("processOf"));
-            assertEquals("terminal-term-1", hold.getRuntimeSessionId());
+            assertEquals("terminal-attach:" + TERMINAL_KEY, hold.getReference().get("processOf"));
+            assertEquals("terminal-" + TERMINAL_KEY, hold.getRuntimeSessionId());
             assertEquals(ToolExecutionRecord.State.PREPARED, hold.getState());
             // The attach invocation settles through the never-dispatched path.
-            awaitExecution(fixture.executionRepository, "terminal-attach:term-1",
+            awaitExecution(fixture.executionRepository, "terminal-attach:" + TERMINAL_KEY,
                     ToolExecutionRecord.State.SETTLED);
+            // The attach row carries the hold dispatch mode so the lifecycle
+            // verifier treats it as a hold, not an unsettled tool-result
+            // resource that would block closing the Session.
+            assertEquals("web_terminal_process", fixture.executionRepository
+                    .findByExecutionCallId("terminal-attach:" + TERMINAL_KEY)
+                    .getReference().get("dispatchMode"));
             // Re-admitting the same terminal (a reconnect) reuses the same hold
             // and reports created=false, so a failed reconnect cannot abandon it.
             TerminalHoldAdmission reconnect = join(fixture.service.admitTerminalHold(
@@ -2048,7 +2058,7 @@ class RuntimeBrokerServiceTest {
             assertEquals(hold.getExecutionCallId(), reconnect.hold().getExecutionCallId());
             // The hold keeps the terminal's Runtime Session against a routine release.
             assertEquals("runtime_session_held",
-                    failure(fixture.service.release("harness", "terminal-term-1")).getCode());
+                    failure(fixture.service.release("harness", "terminal-" + TERMINAL_KEY)).getCode());
             // The worker's exit evidence settles the hold, then release succeeds.
             Map<String, Object> exited = new LinkedHashMap<>();
             exited.put("operationId", "term-1");
@@ -2056,20 +2066,29 @@ class RuntimeBrokerServiceTest {
             exited.put("evidence", Map.of("exitCode", 0));
             fixture.transport.controlResult = CompletableFuture.completedFuture(exited);
             ToolExecutionRecord settled = join(fixture.service.observeBackgroundProcess(
-                    "harness", "terminal-term-1", "terminal-attach:term-1"));
+                    "harness", "terminal-" + TERMINAL_KEY, "terminal-attach:" + TERMINAL_KEY));
             assertEquals(ToolExecutionRecord.State.SETTLED, settled.getState());
             assertEquals("exited", settled.getResult().get("state"));
-            assertTrue(join(fixture.service.release("harness", "terminal-term-1")));
+            assertTrue(join(fixture.service.release("harness", "terminal-" + TERMINAL_KEY)));
         }
     }
 
     @Test
-    void terminalHoldIsScopedToItsSession() throws Exception {
+    void terminalHoldKeysAreScopedPerHarnessSession() throws Exception {
         try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
-            join(fixture.service.admitTerminalHold("harness", "term-1"));
-            assertEquals("runtime_terminal_hold_conflict",
-                    failure(fixture.service.admitTerminalHold(
-                            "harness-b", "term-1")).getCode());
+            ToolExecutionRecord a = join(fixture.service.admitTerminalHold(
+                    "harness", "term-1")).hold();
+            // A terminal id is only unique within its Session; the same id in
+            // another Session must admit its own hold, not collide on the
+            // deployment-global ledger keys.
+            TerminalHoldAdmission bAdmission = join(fixture.service.admitTerminalHold(
+                    "harness-b", "term-1"));
+            assertTrue(bAdmission.created());
+            ToolExecutionRecord b = bAdmission.hold();
+            org.junit.jupiter.api.Assertions.assertNotEquals(
+                    a.getExecutionCallId(), b.getExecutionCallId());
+            org.junit.jupiter.api.Assertions.assertNotEquals(
+                    a.getRuntimeSessionId(), b.getRuntimeSessionId());
         }
     }
 
@@ -2078,14 +2097,14 @@ class RuntimeBrokerServiceTest {
         try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
             ToolExecutionRecord first = join(fixture.service.admitTerminalHold(
                     "harness", "term-1")).hold();
-            assertEquals("terminal-attach:term-1:process", first.getExecutionCallId());
+            assertEquals("terminal-attach:" + TERMINAL_KEY + ":process", first.getExecutionCallId());
             Map<String, Object> exited = new LinkedHashMap<>();
             exited.put("operationId", "term-1");
             exited.put("state", "exited");
             exited.put("evidence", Map.of("exitCode", 0));
             fixture.transport.controlResult = CompletableFuture.completedFuture(exited);
             ToolExecutionRecord settled = join(fixture.service.observeBackgroundProcess(
-                    "harness", "terminal-term-1", "terminal-attach:term-1"));
+                    "harness", "terminal-" + TERMINAL_KEY, "terminal-attach:" + TERMINAL_KEY));
             assertEquals(ToolExecutionRecord.State.SETTLED, settled.getState());
             // A reconnect after settlement must admit a fresh ACTIVE hold: the
             // settled one no longer protects a re-created PTY, so handing it
@@ -2097,7 +2116,7 @@ class RuntimeBrokerServiceTest {
             org.junit.jupiter.api.Assertions.assertNotEquals(
                     first.getExecutionCallId(), recreated.getExecutionCallId());
             assertEquals(ToolExecutionRecord.State.PREPARED, recreated.getState());
-            assertEquals("terminal-term-1", recreated.getRuntimeSessionId());
+            assertEquals("terminal-" + TERMINAL_KEY, recreated.getRuntimeSessionId());
             // A further reconnect reuses the fresh hold instead of leaking another.
             TerminalHoldAdmission again = join(fixture.service.admitTerminalHold(
                     "harness", "term-1"));
@@ -2114,11 +2133,11 @@ class RuntimeBrokerServiceTest {
             ToolExecutionRecord hold = admission.hold();
             assertEquals(ToolExecutionRecord.State.PREPARED, hold.getState());
             assertEquals("runtime_session_held",
-                    failure(fixture.service.release("harness", "terminal-term-1")).getCode());
+                    failure(fixture.service.release("harness", "terminal-" + TERMINAL_KEY)).getCode());
             // A failed concurrent attach names a different hold: it must not
             // discharge this one, which still protects the pending PTY.
             assertNull(join(fixture.service.abandonTerminalHold(
-                    "harness", "term-1", "terminal-attach:term-1:other")));
+                    "harness", "term-1", "terminal-attach:" + TERMINAL_KEY + ":other")));
             assertEquals(ToolExecutionRecord.State.PREPARED,
                     fixture.executionRepository.findByExecutionCallId(
                             hold.getExecutionCallId()).getState());
@@ -2127,10 +2146,14 @@ class RuntimeBrokerServiceTest {
             ToolExecutionRecord abandoned = join(fixture.service.abandonTerminalHold(
                     "harness", "term-1", hold.getExecutionCallId()));
             assertEquals(ToolExecutionRecord.State.SETTLED, abandoned.getState());
+            // The terminal's dedicated Runtime Session is released with the
+            // hold, not left READY to accumulate for the life of the Runtime.
+            assertEquals(RuntimeSessionRecord.State.RELEASED, fixture.sessionRepository
+                    .findById(WORKSPACE_SCOPE, "terminal-" + TERMINAL_KEY).getState());
             // Abandoning again is a no-op: no active hold remains.
             assertNull(join(fixture.service.abandonTerminalHold(
                     "harness", "term-1", hold.getExecutionCallId())));
-            assertTrue(join(fixture.service.release("harness", "terminal-term-1")));
+            assertTrue(join(fixture.service.release("harness", "terminal-" + TERMINAL_KEY)));
         }
     }
 
@@ -2149,14 +2172,14 @@ class RuntimeBrokerServiceTest {
                                     : Map.of("operationId", "term-1",
                                             "state", "running"));
             ToolExecutionRecord stopped = join(fixture.service.stopBackgroundProcess(
-                    "tenant", "harness", "terminal-attach:term-1"));
+                    "tenant", "harness", "terminal-attach:" + TERMINAL_KEY));
             assertEquals(ToolExecutionRecord.State.SETTLED, stopped.getState());
             assertEquals(java.util.List.of("terminal-status", "terminal-terminate"),
                     fixture.transport.controls.stream()
                             .map(operation -> operation.get("kind")).toList());
             assertEquals("term-1", fixture.transport.controls.get(1)
                     .get("targetOperationId"));
-            assertTrue(join(fixture.service.release("harness", "terminal-term-1")));
+            assertTrue(join(fixture.service.release("harness", "terminal-" + TERMINAL_KEY)));
         }
     }
 
