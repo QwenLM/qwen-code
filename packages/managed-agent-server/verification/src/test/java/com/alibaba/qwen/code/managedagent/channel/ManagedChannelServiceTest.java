@@ -693,16 +693,38 @@ class ManagedChannelServiceTest {
         new JdbcChannelDeliveryRepository(jdbc).findOrCreate(
                 new ChannelDeliveryRepository.ChannelDelivery(TENANT, channel,
                         resentId, resentId + ":0", 5, "planned", null, 0, 0));
-        assertThatThrownBy(() -> service.resend(TENANT, channel, deliveryId))
-                .isInstanceOf(ManagedAgentException.class)
-                .satisfies(e -> {
-                    assertThat(((ManagedAgentException) e).getStatus()).isEqualTo(409);
-                    assertThat(((ManagedAgentException) e).getCode())
-                            .isEqualTo("channel_delivery_conflict");
-                });
+        ch.qos.logback.classic.Logger serviceLog =
+                (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory
+                        .getLogger(ManagedChannelService.class);
+        ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent>
+                logged = new ch.qos.logback.core.read.ListAppender<>();
+        logged.start();
+        serviceLog.addAppender(logged);
+        try {
+            assertThatThrownBy(() -> service.resend(TENANT, channel, deliveryId))
+                    .isInstanceOf(ManagedAgentException.class)
+                    .satisfies(e -> {
+                        assertThat(((ManagedAgentException) e).getStatus()).isEqualTo(409);
+                        assertThat(((ManagedAgentException) e).getCode())
+                                .isEqualTo("channel_delivery_conflict");
+                    });
+        } finally {
+            serviceLog.detachAppender(logged);
+            logged.stop();
+        }
         // The guard must reject on the ordinal before planning: findOrCreate
         // would also reject, but only after orphan segment rows were written.
         assertThat(segmentLedger.list(TENANT, channel, resentId)).isEmpty();
+        // An ordinal-only divergence keeps the segment ids identical, so the
+        // conflict WARN must carry both ordinals to say what diverged.
+        assertThat(logged.list).anySatisfy(event -> {
+            assertThat(event.getLevel())
+                    .isEqualTo(ch.qos.logback.classic.Level.WARN);
+            assertThat(event.getFormattedMessage())
+                    .contains("channel resend identity conflict")
+                    .contains("storedOrdinal=5")
+                    .contains("resentOrdinal=0");
+        });
     }
 
     @Test

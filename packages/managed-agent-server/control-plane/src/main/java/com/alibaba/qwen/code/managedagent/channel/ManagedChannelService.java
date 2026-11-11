@@ -362,12 +362,16 @@ public class ManagedChannelService {
                 // A matching-chain replay converges by design, so reaching
                 // here is a real Harness/ledger divergence. Name the
                 // identities only — never the request body (see
-                // ApiExceptionHandler.logInternalRefusal).
+                // ApiExceptionHandler.logInternalRefusal). Both ordinals are
+                // logged: an ordinal-only divergence keeps the segment ids
+                // identical, so the ids alone would not say what diverged.
                 LOG.warn("channel resend identity conflict tenant={}"
                         + " channel={} delivery={} resent={} storedSegment={}"
-                        + " resentSegment={}", tenantId, channelId, deliveryId,
-                        resentId, existing.segmentId(),
-                        String.valueOf(first.get("segmentId")));
+                        + " storedOrdinal={} resentSegment={} resentOrdinal={}",
+                        tenantId, channelId, deliveryId, resentId,
+                        existing.segmentId(), existing.ordinal(),
+                        String.valueOf(first.get("segmentId")),
+                        ((Number) first.get("ordinal")).intValue());
                 throw new ManagedAgentException(409, "channel_delivery_conflict",
                         "The resent delivery id already belongs to another segment.");
             }
