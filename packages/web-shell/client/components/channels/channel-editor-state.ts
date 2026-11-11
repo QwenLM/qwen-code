@@ -949,9 +949,9 @@ function assignGroupSenders(
 function removeGroupAllowlistMembership(
   config: Record<string, unknown>,
   instance: DaemonChannelInstanceSnapshot | undefined,
+  type: unknown,
   overrides?: Record<string, ChannelGroupOverrideDraft>,
   allowedGroupIds = '',
-  type: unknown = undefined,
 ): void {
   const previous = instance?.config['groups'];
   const previousGroups = isRecord(previous) ? previous : {};
@@ -1111,9 +1111,9 @@ export function buildChannelUpsertRequest(
       removeGroupAllowlistMembership(
         config,
         instance,
+        descriptor.type,
         repositoryOnly ? draft.groupOverrides : undefined,
         draft.allowedGroupIds,
-        descriptor.type,
       );
     }
     assignGroupSenders(config, draft);

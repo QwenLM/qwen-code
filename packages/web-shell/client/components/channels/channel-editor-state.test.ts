@@ -1535,6 +1535,28 @@ describe('Repository-only channel access config', () => {
     });
   });
 
+  it('still rejects a typed "*" on a channel that stores the wildcard default', () => {
+    // The stored-entry tolerance must not exempt the '*' wildcard: it is not a
+    // project id, and assignGroups skips it, so tolerating it would report a
+    // successful save that admits nothing. The storedIds filter excludes '*'.
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'release-bot',
+      config: {
+        type: 'gitlab',
+        groupPolicy: 'allowlist',
+        groups: { '*': { senders: 'open' }, 'mygroup/project': {} },
+      },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    const draft = createChannelEditorDraft(GITLAB, instance);
+    draft.allowedGroupIds = '*';
+    expect(validateChannelEditorDraft(GITLAB, draft, [], instance)).toEqual({
+      allowedGroupIds: 'invalidRepoId',
+    });
+  });
+
   it('keeps a stored mixed-case GitLab project and its sender policy across a re-save', () => {
     const instance: DaemonChannelInstanceSnapshot = {
       name: 'release-bot',
