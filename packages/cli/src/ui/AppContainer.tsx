@@ -268,6 +268,7 @@ import { useHooksDialog } from './hooks/useHooksDialog.js';
 import { useStatsDialog } from './hooks/useStatsDialog.js';
 import { useMemoryDialog } from './hooks/useMemoryDialog.js';
 import { useAttentionNotifications } from './hooks/useAttentionNotifications.js';
+import { getPendingBackgroundApprovals } from './components/background-view/BackgroundTasksPill.js';
 import { buildTerminalNotification } from './hooks/useTerminalNotification.js';
 import { useContextualTips } from './hooks/useContextualTips.js';
 import { getTipHistory } from '../services/tips/index.js';
@@ -871,7 +872,7 @@ export const AppContainer = (props: AppContainerProps) => {
     () => props.extensionRefreshState ?? new ExtensionRefreshState(),
     [props.extensionRefreshState],
   );
-  const historyManager = useHistory();
+  const historyManager = useHistory(config.getSessionId());
   const addHistoryItem = historyManager.addItem;
   useEffect(
     () =>
@@ -1106,8 +1107,8 @@ export const AppContainer = (props: AppContainerProps) => {
   // exactly that).
   const { loadHistory: rawLoadHistory } = historyManager;
   const loadHistoryWithLatchReconciliation = useCallback(
-    (newHistory: HistoryItem[]) => {
-      rawLoadHistory(newHistory);
+    (newHistory: HistoryItem[], ...owner: [sessionId?: string]) => {
+      rawLoadHistory(newHistory, ...owner);
       contextFilesAnnouncedRef.current = newHistory.some(
         isContextFilesAnnouncement,
       );
@@ -1258,7 +1259,7 @@ export const AppContainer = (props: AppContainerProps) => {
           collapseOnResume,
           collapsePreviewCount,
         );
-        loadHistoryWithLatchReconciliation(historyItems);
+        loadHistoryWithLatchReconciliation(historyItems, config.getSessionId());
 
         // Seed past identities already claimed by the resumed transcript.
         seedPromptCount(
@@ -1270,9 +1271,16 @@ export const AppContainer = (props: AppContainerProps) => {
       }
 
       // Restore the transcript before Mod diagnostics, without making input
-      // or Mod startup wait for asynchronous session recovery.
+      // or Mod startup wait for asynchronous session recovery. Reply rows are
+      // offered only where the viewport can draw a committed row again; the
+      // terminal scrollback cannot.
       void getInteractiveModSession(config)
-        ?.initialize(['AbovePrompt'], { prompts: true, runsPrompts: true })
+        ?.initialize(
+          useTerminalBuffer
+            ? ['AbovePrompt', 'AssistantMessage']
+            : ['AbovePrompt'],
+          { prompts: true, runsPrompts: true },
+        )
         .catch(() => {});
 
       if (resumedSessionData) {
@@ -4866,6 +4874,10 @@ export const AppContainer = (props: AppContainerProps) => {
       )
     : currentLoadingPhrase;
 
+  const backgroundApprovals = useMemo(
+    () => getPendingBackgroundApprovals(bgTaskEntries),
+    [bgTaskEntries],
+  );
   useAttentionNotifications({
     isFocused,
     streamingState,
@@ -4874,6 +4886,7 @@ export const AppContainer = (props: AppContainerProps) => {
     config,
     terminal,
     pendingToolCalls,
+    backgroundApprovals,
   });
 
   // Program status (OSC 7501) for terminal tabs and agent inboxes

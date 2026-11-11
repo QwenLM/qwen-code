@@ -5,6 +5,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import path from 'node:path';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import { OutputFormat } from '@qwen-code/qwen-code-core/output/types.js';
 import {
@@ -21,8 +22,11 @@ import {
   resolveModUnsupportedEvents,
 } from '@qwen-code/qwen-code-core/mods/options.js';
 import { ModRuntime } from '@qwen-code/qwen-code-core/mods/runtime.js';
+import { ModStore } from '@qwen-code/qwen-code-core/mods/store.js';
+import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 import {
   ENGINE_NODE,
+  type ModBandInput,
   type ModRenderElement,
   type ModRenderInput,
   type ModRenderSite,
@@ -72,6 +76,7 @@ import { registerCleanup } from '../utils/cleanup.js';
 import { flushOutput } from '../utils/flush-output.js';
 import { projectJsonStringToByteBudget } from '../utils/json-string-byte-projection.js';
 import { completeModModel, modModelUsage } from './mod-model.js';
+import { ModRows } from './mod-rows.js';
 import type { JsonOutputAdapterInterface } from '../nonInteractive/io/BaseJsonOutputAdapter.js';
 
 const logger = createDebugLogger('MODS');
@@ -88,6 +93,7 @@ const RENDER_SETTLE_MS = 150;
 const RENDER_LIVE_MS = 34;
 const RENDER_STEADY_MS = 100;
 const RENDER_SLOW_MS = 1_000;
+const ROW_RENDER_TIMEOUT_MS = 30_000;
 
 export interface ModTerminalHost {
   surface: 'terminal';
@@ -216,7 +222,7 @@ export class ModSession implements ICommandLoader {
   // The band's renders: the host's latest input, keyed as Claude Code keys
   // it, and the one render that may wait in the queue or run.
   private readonly band: {
-    input?: ModRenderInput;
+    input?: ModBandInput;
     key?: string;
     size?: string;
     settle?: ReturnType<typeof setTimeout>;
@@ -231,6 +237,15 @@ export class ModSession implements ICommandLoader {
     startedAt: -Infinity,
     steadyUntil: 0,
   };
+  // The transcript rows the Mods draw, one render at a time in the queue.
+  private readonly rows = new ModRows(
+    (task) => {
+      this.toolQueue = this.toolQueue
+        .then(task)
+        .catch((error) => logger.debug(`Mod ui.render: ${String(error)}`));
+    },
+    (input) => this.renderRow(input),
+  );
   private unregisterCleanup: () => void;
 
   constructor(
@@ -424,7 +439,7 @@ export class ModSession implements ICommandLoader {
           () => this.facts(),
           (turnId) => this.abortTurn(turnId),
           sites.length
-            ? { sites, invalidate: () => this.requestRender() }
+            ? { sites, invalidate: (plugin) => this.invalidateRenders(plugin) }
             : undefined,
           this.terminal ? this.terminal.prompts?.() === true : true,
           // A terminal runs a Mod's own prompts only once it says so.
@@ -441,6 +456,7 @@ export class ModSession implements ICommandLoader {
                 ? modelSignal
                 : AbortSignal.abort(),
             ),
+          new ModStore(path.join(Storage.getGlobalQwenDir(), 'mods', 'store')),
         );
         this.mods.push(
           ...ordered.map(({ extension }) => ({
@@ -543,6 +559,7 @@ export class ModSession implements ICommandLoader {
     if (!this.closing && this.sessionId === this.config.getSessionId()) {
       this.toolGeneration = new AbortController();
       this.requestRender();
+      this.refreshRows();
     }
   }
 
@@ -553,8 +570,10 @@ export class ModSession implements ICommandLoader {
   async syncSession(reason: 'clear' | 'resume'): Promise<void> {
     const current = this.config.getSessionId();
     if (current === this.sessionId) {
-      if (this.toolGeneration.signal.aborted)
+      if (this.toolGeneration.signal.aborted) {
         this.toolGeneration = new AbortController();
+        this.refreshRows();
+      }
       return;
     }
     this.invalidateTools();
@@ -562,6 +581,8 @@ export class ModSession implements ICommandLoader {
       if (current === this.sessionId || this.closing) return;
       await this.end(reason);
       this.sessionId = current;
+      // Rows are the old session's transcript.
+      this.rows.clear();
       // The Mods' prompts and the turns they started belong to the old one.
       this.submitted.length = 0;
       this.modTurns = 0;
@@ -588,7 +609,7 @@ export class ModSession implements ICommandLoader {
    * Reports the band's input. A change of its key renders, after a change of
    * width or of `maxRows` has settled; a change of height alone does not.
    */
-  setRenderInput(input: ModRenderInput): void {
+  setRenderInput(input: ModBandInput): void {
     const band = this.band;
     const key = [
       input.viewport?.columns,
@@ -621,7 +642,7 @@ export class ModSession implements ICommandLoader {
       !this.sites.includes(band.input.component) ||
       band.settle ||
       band.wait ||
-      !this.runtime?.renderHooks.length ||
+      !this.runtime?.renderHooksFor('AbovePrompt').length ||
       band.state === 'waiting'
     )
       return;
@@ -651,8 +672,8 @@ export class ModSession implements ICommandLoader {
   private async render(): Promise<void> {
     const band = this.band;
     const runtime = this.runtime!;
-    const owner =
-      runtime.renderHooks.length === 1 ? runtime.renderHooks[0] : 'hooks';
+    const hooks = runtime.renderHooksFor('AbovePrompt');
+    const owner = hooks.length === 1 ? hooks[0] : 'hooks';
     band.state = 'running';
     band.startedAt = Date.now();
     const signal = AbortSignal.any([
@@ -683,6 +704,84 @@ export class ModSession implements ICommandLoader {
         band.again = false;
         this.requestRender();
       }
+      this.flushLogs();
+    }
+  }
+
+  /**
+   * Shows a transcript row the Mods may draw, calling `listener` when what it
+   * draws changes. Returns the release, or undefined where no hook hears the
+   * row's site or the row is too large to hand to the Mods.
+   */
+  watchRow(
+    sessionId: string,
+    input: ModRenderInput,
+    listener: () => void,
+  ): (() => void) | undefined {
+    if (
+      this.closing ||
+      sessionId !== this.sessionId ||
+      !this.sites.includes(input.component) ||
+      !this.runtime?.renderHooksFor(input.component).length ||
+      Buffer.byteLength(JSON.stringify(input)) > MOD_MAX_BYTES / 2
+    )
+      return undefined;
+    return this.rows.watch(input, listener);
+  }
+
+  /** The props a row draws with once its hooks answered, if they rewrote it. */
+  rowProps(
+    sessionId: string,
+    input: ModRenderInput,
+  ): ModRenderInput['props'] | undefined {
+    return sessionId === this.sessionId ? this.rows.get(input) : undefined;
+  }
+
+  // Rows answered while dispatches were cancelled render again.
+  private refreshRows(): void {
+    for (const site of this.sites)
+      if (site !== 'AbovePrompt') this.rows.invalidate(site);
+  }
+
+  private invalidateRenders(plugin: string): void {
+    const runtime = this.runtime;
+    if (!runtime) return;
+    for (const site of this.sites) {
+      if (!runtime.renderHooksFor(site).includes(plugin)) continue;
+      if (site === 'AbovePrompt') this.requestRender();
+      else this.rows.invalidate(site);
+    }
+  }
+
+  // A row's answer: the props its hooks rewrote, or none to draw its own.
+  private async renderRow(
+    input: ModRenderInput,
+  ): Promise<ModRenderInput['props'] | undefined> {
+    const runtime = this.runtime;
+    const generation = this.toolGeneration.signal;
+    if (
+      !runtime ||
+      this.closing ||
+      generation.aborted ||
+      this.sessionId !== this.config.getSessionId() ||
+      !this.allowed() ||
+      !this.active()
+    )
+      return undefined;
+    const signal = AbortSignal.any([
+      this.lifetime.signal,
+      generation,
+      // Provider I/O pauses the runtime's dispatch clock.
+      AbortSignal.timeout(ROW_RENDER_TIMEOUT_MS),
+    ]);
+    try {
+      const { props, notes } = await runtime.render(input, signal);
+      signal.throwIfAborted();
+      for (const note of notes) logger.debug(note);
+      return !props || stableJson(props) === stableJson(input.props)
+        ? undefined
+        : props;
+    } finally {
       this.flushLogs();
     }
   }

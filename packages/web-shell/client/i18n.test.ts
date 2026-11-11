@@ -19,6 +19,44 @@ const FOLLOWUP_SETTING_KEYS = [
   'settings.description.ui.enableFollowupSuggestions',
 ] as const;
 
+// The panel's localization cases compare rendered text against the same
+// translator lookup the component performs, so a missing zh entry falls back
+// to EN on both sides and they stay green. Parity has to be asserted here,
+// key by key, including the strings no panel case renders.
+const WEIXIN_LOGIN_KEYS = [
+  'title',
+  'description',
+  'loggedIn',
+  'loggedOut',
+  'login',
+  'relogin',
+  'logout',
+  'refresh',
+  'waiting',
+  'preparing',
+  'scanned',
+  'ready',
+  'expired',
+  'error',
+  'credentialsError',
+  'unsupported',
+  'restartHint',
+  'userId',
+  'savedAt',
+  'qrAlt',
+  'openUrl',
+].map((suffix) => `channels.weixin.${suffix}`);
+
+// The editor labels live in a different namespace, so the prefix above does
+// not reach them. A missing zh `.description` falls back to the plugin's
+// hardcoded English sentence rather than to a raw key, which is the silent
+// degradation this table exists to catch.
+const WEIXIN_EDITOR_KEYS = [
+  'channels.editor.field.weixin.groupPolicy',
+  'channels.editor.field.weixin.groupPolicy.description',
+  'channels.editor.field.weixin.groupPolicy.option.disabled',
+];
+
 const BROWSER_NOTIFICATION_KEYS = [
   'label',
   'description',
@@ -95,6 +133,46 @@ describe('web-shell i18n catalog', () => {
     expect(zh('scheduledTasks.delivery.perRun')).toContain(
       '每次新会话不支持频道投递',
     );
+  });
+
+  it('keeps the channel range message spacing in both locales', () => {
+    const en = getTranslator('en');
+    const zh = getTranslator('zh-CN');
+    const key = 'channels.editor.validation.outOfRange';
+
+    // The exclusive-floor shapes predate the inclusive bound. Folding the
+    // lower clause into one variable moved a space inside the interpolation
+    // and silently changed these two existing zh strings; pin them verbatim.
+    expect(zh(key, { min: 0, max: 86_400_000 })).toBe(
+      '请输入大于 0 且不超过 86400000 的数字。',
+    );
+    expect(zh(key, { min: 0 })).toBe('请输入大于 0 的数字。');
+    expect(zh(key, { max: 4 })).toBe('请输入不超过 4 的数字。');
+    expect(en(key, { min: 0, max: 86_400_000 })).toBe(
+      'Enter a number greater than 0 and at most 86400000.',
+    );
+
+    // The inclusive floor is worded differently but padded the same way.
+    expect(zh(key, { minInclusive: 0, max: 5000 })).toBe(
+      '请输入不小于 0 且不超过 5000 的数字。',
+    );
+    expect(zh(key, { minInclusive: 0 })).toBe('请输入不小于 0 的数字。');
+    expect(en(key, { minInclusive: 0, max: 5000 })).toBe(
+      'Enter a number at least 0 and at most 5000.',
+    );
+  });
+
+  it('keeps every WeChat login translation in both locales', () => {
+    const en = getTranslator('en');
+    const zh = getTranslator('zh-CN');
+    for (const key of [...WEIXIN_LOGIN_KEYS, ...WEIXIN_EDITOR_KEYS]) {
+      const vars = { id: 'wx-user-1', time: '2026-11-09 10:00' };
+      expect(en(key, vars)).not.toBe(key);
+      expect(zh(key, vars)).not.toBe(key);
+      // zh against en, not zh against the key: the translator falls back to
+      // EN per key, so a deleted zh entry would otherwise pass both checks.
+      expect(zh(key, vars)).not.toBe(en(key, vars));
+    }
   });
 
   it('keeps every browser notification translation in both locales', () => {

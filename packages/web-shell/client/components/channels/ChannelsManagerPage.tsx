@@ -91,6 +91,14 @@ import {
 import { Switch } from '../ui/switch';
 import { workspaceLabel } from '../../utils/workspace';
 import { ChannelEditorDialog } from './ChannelEditorDialog';
+import type { WeixinLoginApi } from './WeixinLoginPanel';
+import {
+  cancelWeixinLoginFlow,
+  getWeixinAccountStatus,
+  getWeixinLoginFlow,
+  revokeWeixinLogin,
+  startWeixinLogin,
+} from './weixin-auth-api';
 import styles from './ChannelsManagerPage.module.css';
 import {
   isChannelPlatformAvailable,
@@ -142,6 +150,22 @@ export function ChannelsManagerPage({
 }: ChannelsManagerPageProps) {
   const { t } = useI18n();
   const workspace = useWorkspace();
+  // WeChat login is process-global, so it uses the root client rather than the
+  // workspace-scoped one the channel management calls go through.
+  const weixinLogin = useMemo<WeixinLoginApi>(() => {
+    const target = {
+      baseUrl: workspace.baseUrl,
+      token: workspace.token,
+      client: workspace.client,
+    };
+    return {
+      status: () => getWeixinAccountStatus(target),
+      start: () => startWeixinLogin(target),
+      poll: (id) => getWeixinLoginFlow(target, id),
+      cancel: (id) => cancelWeixinLoginFlow(target, id),
+      revoke: () => revokeWeixinLogin(target),
+    };
+  }, [workspace.baseUrl, workspace.token, workspace.client]);
   const supportsManagement =
     workspace.capabilities?.features.includes('channel_management') === true;
   const bearerConfigured = Boolean(workspace.token);
@@ -210,6 +234,7 @@ export function ChannelsManagerPage({
     stop,
     restart,
     pairing,
+    qrLogin,
   } = useChannels({
     autoLoad: supportsManagement,
     enabled: supportsManagement,
@@ -924,10 +949,12 @@ export function ChannelsManagerPage({
           }}
           onSave={saveChannel}
           onReload={reload}
+          qrLoginActions={qrLogin}
           listPairingRequests={pairing.list}
           approvePairingRequest={pairing.approve}
           listPairingApprovals={pairing.approvals}
           revokePairingApproval={pairing.revoke}
+          weixinLogin={weixinLogin}
         />
       ) : null}
 

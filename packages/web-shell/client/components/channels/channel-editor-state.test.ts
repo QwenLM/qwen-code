@@ -940,6 +940,113 @@ describe('Channel editor state', () => {
     expect(validateChannelEditorDraft(descriptor, valid, [])).toEqual({});
   });
 
+  it('rejects values below an inclusive minimum but admits the bound itself', () => {
+    // The gap this closes: a field whose real floor is 0 could only say
+    // exclusiveMinimum: -1, which admits (-1, 0). The editor accepted -0.5 and
+    // the adapter refused it at save, so the operator learned the constraint
+    // only after pressing Save.
+    const descriptor: DaemonChannelTypeDescriptor = {
+      type: 'example',
+      displayName: 'Example',
+      manageable: true,
+      fields: [
+        {
+          key: 'reserve',
+          label: 'Reserve',
+          kind: 'number',
+          minimum: 0,
+          maximum: 5000,
+        },
+      ],
+    };
+
+    for (const value of ['-0.5', '-1', '-0.0001']) {
+      const draft = createChannelEditorDraft(descriptor);
+      draft.name = 'example';
+      draft.values.reserve = value;
+      expect(validateChannelEditorDraft(descriptor, draft, [])).toEqual({
+        reserve: 'outOfRange',
+      });
+    }
+
+    // 0 is the point of the inclusive bound — it disables the gate.
+    for (const value of ['0', '200', '200.5', '5000']) {
+      const draft = createChannelEditorDraft(descriptor);
+      draft.name = 'example';
+      draft.values.reserve = value;
+      expect(validateChannelEditorDraft(descriptor, draft, [])).toEqual({});
+    }
+  });
+
+  it('applies the stricter floor when both lower bounds are declared', () => {
+    const descriptor: DaemonChannelTypeDescriptor = {
+      type: 'example',
+      displayName: 'Example',
+      manageable: true,
+      fields: [
+        {
+          key: 'reserve',
+          label: 'Reserve',
+          kind: 'number',
+          exclusiveMinimum: 0,
+          minimum: -1,
+        },
+      ],
+    };
+
+    // exclusiveMinimum: 0 is stricter than minimum: -1, so 0 stays refused.
+    const draft = createChannelEditorDraft(descriptor);
+    draft.name = 'example';
+    draft.values.reserve = '0';
+    expect(validateChannelEditorDraft(descriptor, draft, [])).toEqual({
+      reserve: 'outOfRange',
+    });
+
+    const valid = createChannelEditorDraft(descriptor);
+    valid.name = 'example';
+    valid.values.reserve = '1';
+    expect(validateChannelEditorDraft(descriptor, valid, [])).toEqual({});
+  });
+
+  it('does not strand an edit over a stored value below a newly declared floor', () => {
+    // The store forgives an unchanged stored number for the whole range, so the
+    // editor has to forgive the inclusive bound too. Otherwise a channel whose
+    // settings file predates the floor cannot be edited at all.
+    const descriptor: DaemonChannelTypeDescriptor = {
+      type: 'example',
+      displayName: 'Example',
+      manageable: true,
+      fields: [
+        {
+          key: 'reserve',
+          label: 'Reserve',
+          kind: 'number',
+          minimum: 0,
+          maximum: 5000,
+        },
+      ],
+    };
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'example',
+      config: { type: 'example', reserve: -0.5 },
+      secrets: {},
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    const draft = createChannelEditorDraft(descriptor, instance);
+    draft.name = 'example';
+    expect(draft.values.reserve).toBe('-0.5');
+
+    expect(validateChannelEditorDraft(descriptor, draft, [], instance)).toEqual(
+      {},
+    );
+
+    draft.values.reserve = '-0.2';
+    expect(validateChannelEditorDraft(descriptor, draft, [], instance)).toEqual(
+      { reserve: 'outOfRange' },
+    );
+  });
+
   it('treats a whitespace-only number draft as empty instead of invalid', () => {
     const descriptor: DaemonChannelTypeDescriptor = {
       type: 'example',
@@ -1089,6 +1196,51 @@ describe('GitHub watch events require bound delivery', () => {
     expect(
       validateChannelEditorDraft(BOUND, draftWithEvents('typo_event'), []),
     ).toEqual({ prWatchEvents: 'invalidOption' });
+  });
+});
+
+describe('GitHub requireBoundWatch requires bound delivery', () => {
+  const BOUND: DaemonChannelTypeDescriptor = {
+    ...GITHUB,
+    fields: [
+      ...GITHUB.fields,
+      {
+        key: 'deliverToBoundSessions',
+        label: 'Deliver To PR-Bound Sessions',
+        kind: 'boolean',
+      },
+      {
+        key: 'requireBoundWatch',
+        label: 'Require Active Watch For Review/Verify Sessions',
+        kind: 'boolean',
+      },
+    ],
+  };
+
+  function draftWithGate(on: boolean): ChannelEditorDraft {
+    const draft = createChannelEditorDraft(BOUND);
+    draft.name = 'my-bot';
+    draft.values.useLocalGh = true;
+    draft.values.requireBoundWatch = on;
+    return draft;
+  }
+
+  it('refuses the gate while bound delivery is off', () => {
+    expect(validateChannelEditorDraft(BOUND, draftWithGate(true), [])).toEqual({
+      requireBoundWatch: 'requiresBoundDeliveryForWatchGate',
+    });
+  });
+
+  it('allows the gate once bound delivery is on', () => {
+    const draft = draftWithGate(true);
+    draft.values.deliverToBoundSessions = true;
+    expect(validateChannelEditorDraft(BOUND, draft, [])).toEqual({});
+  });
+
+  it('leaves the gate off alone with delivery off', () => {
+    expect(validateChannelEditorDraft(BOUND, draftWithGate(false), [])).toEqual(
+      {},
+    );
   });
 });
 
@@ -1532,6 +1684,237 @@ describe('Repository-only channel access config', () => {
         secrets: { token: { operation: 'clear' } },
       }),
     );
+  });
+});
+
+/**
+ * Email's descriptor as the daemon ships it. The plugin declares its own
+ * `privatePolicy` without `pairing`, so the registry injects `groupPolicy` and
+ * the other shared access fields but no private policy. The parity suite drives
+ * the real plugin; this fixture keeps the projection cases readable.
+ */
+const EMAIL: DaemonChannelTypeDescriptor = {
+  type: 'email',
+  displayName: 'Email',
+  manageable: true,
+  fields: [
+    {
+      key: 'address',
+      label: 'Mailbox Address',
+      kind: 'string',
+      required: true,
+    },
+    {
+      key: 'imapHost',
+      label: 'IMAP Host',
+      kind: 'string',
+      required: true,
+    },
+    {
+      key: 'imapPassword',
+      label: 'IMAP Password',
+      kind: 'secret',
+      required: true,
+    },
+    {
+      key: 'smtpPassword',
+      label: 'SMTP Password',
+      kind: 'secret',
+      required: true,
+    },
+    {
+      key: 'proactiveRecipients',
+      label: 'Proactive Recipients',
+      kind: 'string-list',
+    },
+    {
+      key: 'privatePolicy',
+      label: 'Private Policy',
+      kind: 'enum',
+      required: true,
+      default: 'allowlist',
+      options: [
+        { value: 'disabled', label: 'Disabled' },
+        { value: 'allowlist', label: 'Allowlist' },
+        { value: 'open', label: 'Open' },
+      ],
+    },
+    {
+      key: 'groupPolicy',
+      label: 'Group Policy',
+      kind: 'enum',
+      required: true,
+      default: 'disabled',
+      options: [
+        { value: 'disabled', label: 'Disabled' },
+        { value: 'pairing', label: 'Pairing' },
+        { value: 'allowlist', label: 'Allowlist' },
+        { value: 'open', label: 'Open' },
+      ],
+    },
+    {
+      key: 'allowedUsers',
+      label: 'Allowed Users',
+      kind: 'string-list',
+    },
+    {
+      key: 'operators',
+      label: 'Session Operators',
+      kind: 'string-list',
+    },
+  ],
+};
+
+describe('Private-only channel access config', () => {
+  function emailDraft(): ChannelEditorDraft {
+    const draft = createChannelEditorDraft(EMAIL);
+    draft.name = 'agent-mail';
+    draft.values.address = 'agent@example.com';
+    draft.values.imapHost = 'imap.example.com';
+    draft.secrets.imapPassword = { operation: 'replace', value: 'imap-secret' };
+    draft.secrets.smtpPassword = { operation: 'replace', value: 'smtp-secret' };
+    return draft;
+  }
+
+  function emailInstance(
+    config: Record<string, unknown>,
+  ): DaemonChannelInstanceSnapshot {
+    return {
+      name: 'agent-mail',
+      config: {
+        type: 'email',
+        address: 'agent@example.com',
+        imapHost: 'imap.example.com',
+        privatePolicy: 'allowlist',
+        ...config,
+      },
+      secrets: {
+        imapPassword: { present: true, source: 'environment' },
+        smtpPassword: { present: true, source: 'environment' },
+      },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+  }
+
+  it('does not persist the injected group policy', () => {
+    const request = buildChannelUpsertRequest(EMAIL, emailDraft(), 'rev-1');
+    expect(request.config).not.toHaveProperty('groupPolicy');
+    expect(request.config).not.toHaveProperty('groups');
+    expect(request.config['privatePolicy']).toBe('allowlist');
+  });
+
+  it('takes the plugin private policy, never the shared pairing default', () => {
+    const draft = createChannelEditorDraft(EMAIL);
+    expect(draft.values['privatePolicy']).toBe('allowlist');
+    // '' selects the descriptor-declared enum instead of the four-card radio
+    // group, which is the only place `pairing` is offered.
+    expect(draft.privatePolicy).toBe('');
+    expect(draft.values).not.toHaveProperty('groupPolicy');
+  });
+
+  it('does not ask for the group policy it never renders', () => {
+    expect(validateChannelEditorDraft(EMAIL, emailDraft(), [])).toEqual({});
+  });
+
+  it('does not flag a required group policy the draft deliberately omits', () => {
+    // Pins the validator's private-only skip: with a blank groupPolicy value
+    // present, the required-check would otherwise report 'required' for a
+    // control the editor never renders. Without the skip this goes red.
+    const draft = emailDraft();
+    draft.values['groupPolicy'] = '';
+    expect(
+      validateChannelEditorDraft(EMAIL, draft, [])['groupPolicy'],
+    ).toBeUndefined();
+  });
+
+  it('leaves a non-record stored group entry untouched on save', () => {
+    // Pins the save-path private-only guard: without it, assignGroups() would
+    // rebuild groups and coerce a non-record entry to {}, rewriting stored
+    // data the editor does not model. Email has no invalidGroupEntry backstop.
+    const instance = emailInstance({
+      groupPolicy: 'allowlist',
+      groups: { g1: 'not-a-record' },
+    });
+    const draft = createChannelEditorDraft(EMAIL, instance);
+    const request = buildChannelUpsertRequest(EMAIL, draft, 'rev-9', instance);
+    expect(request.config['groups']).toEqual({ g1: 'not-a-record' });
+  });
+
+  it('preserves a stored group policy and groups on an unrelated save', () => {
+    // Skipping the field in the draft but not in the save would let
+    // assignField() read an absent key as empty and delete both.
+    const instance = emailInstance({
+      groupPolicy: 'allowlist',
+      groups: { 'legacy-group': { senders: 'open' } },
+    });
+    const draft = createChannelEditorDraft(EMAIL, instance);
+    draft.values.address = 'renamed@example.com';
+
+    const request = buildChannelUpsertRequest(EMAIL, draft, 'rev-2', instance);
+    expect(request.config['groupPolicy']).toBe('allowlist');
+    expect(request.config['groups']).toEqual({
+      'legacy-group': { senders: 'open' },
+    });
+    expect(request.config['address']).toBe('renamed@example.com');
+  });
+
+  it('preserves a stored pairing group policy without validating against it', () => {
+    const instance = emailInstance({
+      groupPolicy: 'pairing',
+      groups: { '*': { senders: 'allowlist', allowedUsers: ['alice'] } },
+    });
+    const draft = createChannelEditorDraft(EMAIL, instance);
+
+    expect(validateChannelEditorDraft(EMAIL, draft, [], instance)).toEqual({});
+    const request = buildChannelUpsertRequest(EMAIL, draft, 'rev-3', instance);
+    expect(request.config['groupPolicy']).toBe('pairing');
+    expect(request.config['groups']).toEqual({
+      '*': { senders: 'allowlist', allowedUsers: ['alice'] },
+    });
+  });
+
+  it('keeps both password secrets preserved on an existing channel', () => {
+    const instance = emailInstance({});
+    const draft = createChannelEditorDraft(EMAIL, instance);
+
+    expect(
+      buildChannelUpsertRequest(EMAIL, draft, 'rev-4', instance).secrets,
+    ).toEqual({
+      imapPassword: { operation: 'preserve' },
+      smtpPassword: { operation: 'preserve' },
+    });
+  });
+
+  it('round-trips proactive recipients through the comma-separated input', () => {
+    const draft = emailDraft();
+    draft.values.proactiveRecipients = 'a@x.com, b@x.com';
+
+    const request = buildChannelUpsertRequest(EMAIL, draft, 'rev-5');
+    expect(request.config['proactiveRecipients']).toEqual([
+      'a@x.com',
+      'b@x.com',
+    ]);
+
+    const reopened = createChannelEditorDraft(
+      EMAIL,
+      emailInstance({ proactiveRecipients: ['a@x.com', 'b@x.com'] }),
+    );
+    expect(reopened.values['proactiveRecipients']).toBe('a@x.com, b@x.com');
+  });
+
+  it('still writes the group policy for a group-capable sibling', () => {
+    const draft = createChannelEditorDraft(DINGTALK_WITH_ACCESS);
+    draft.name = 'release-bot';
+    draft.values.clientId = 'id';
+    draft.secrets.clientSecret = { operation: 'replace', value: 'secret' };
+
+    const request = buildChannelUpsertRequest(
+      DINGTALK_WITH_ACCESS,
+      draft,
+      'rev-6',
+    );
+    expect(request.config['groupPolicy']).toBe('disabled');
   });
 });
 

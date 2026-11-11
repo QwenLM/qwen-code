@@ -273,6 +273,8 @@ class ManagedAgentApiContractTest {
                             List.of("PublicChannelRoute")),
                     entry(ApiModels.PublicChannelDelivery.class,
                             List.of("PublicChannelDelivery")),
+                    entry(ApiModels.PublicChannelDeliverySegment.class,
+                            List.of("PublicChannelDeliverySegment")),
                     entry(PublicEvent.class, List.of("PublicEvent")),
                     entry(SessionResyncRequired.class,
                             List.of("SessionResyncRequired")),
@@ -476,6 +478,29 @@ class ManagedAgentApiContractTest {
         run.put("state", "bogus");
         assertThat(CONTRACT.validate("/components/schemas/PublicAutomationRun", run))
                 .isNotEmpty();
+    }
+
+    @Test
+    void managedMcpSnapshotCountsOnlyLiveServersAgainstCapacity() {
+        ObjectNode withRetainedRemoval = mcpManagementSnapshot(32, 1);
+        assertThat(CONTRACT.validate(
+                "/components/schemas/ManagedMcpManagementSnapshot",
+                withRetainedRemoval)).isEmpty();
+
+        // 16 enabled + 17 disabled = 33 live: exercises the disabled arm of
+        // the live-only predicate, which a narrow "enabled"-only `contains`
+        // enum would let through while the implementation rejects it.
+        ObjectNode tooManyLive = mcpManagementSnapshot(33, 0);
+        assertThat(CONTRACT.validate(
+                "/components/schemas/ManagedMcpManagementSnapshot",
+                tooManyLive)).isNotEmpty();
+
+        assertThat(CONTRACT.validate(
+                "/components/schemas/ManagedMcpManagementSnapshot",
+                mcpManagementSnapshot(32, 64))).isEmpty();
+        assertThat(CONTRACT.validate(
+                "/components/schemas/ManagedMcpManagementSnapshot",
+                mcpManagementSnapshot(32, 65))).isNotEmpty();
     }
 
     @Test
@@ -2840,6 +2865,10 @@ class ManagedAgentApiContractTest {
                 channelTenant, "mail-1", "delivery-1", "delivery-1:0", 0, "planned", null, 1000, 1000));
         deliveryRepository.transition(channelTenant, "mail-1", "delivery-1", "planned", "sending", null);
         deliveryRepository.transition(channelTenant, "mail-1", "delivery-1", "sending", "delivered", "<m1@example.com>");
+        var segmentRepository = new com.alibaba.qwen.code.managedagent.persistence.JdbcChannelSegmentRepository(jdbc);
+        segmentRepository.plan(channelTenant, "mail-1", "delivery-1",
+                List.of(new com.alibaba.qwen.code.managedagent.contracts.persistence.ChannelSegmentRepository.SegmentLedger("delivery-1:0", 0, null)));
+        segmentRepository.receipt(channelTenant, "mail-1", "delivery-1", 0, "<m1@example.com>");
         JsonNode channels = json(exchange(drift, "listAgentChannels", 200,
                 get("/v1/agent-channels").header(TENANT, channelTenant)
                         .principal(reader).param("limit", "10"), null));
@@ -2881,6 +2910,11 @@ class ManagedAgentApiContractTest {
                         "delivery-1").header(TENANT, channelTenant)
                         .principal(reader), null));
         assertThat(delivery.path("provider_receipt").asText())
+                .isEqualTo("<m1@example.com>");
+        assertThat(delivery.path("segments")).hasSize(1);
+        assertThat(delivery.path("segments").get(0).path("segment_id").asText())
+                .isEqualTo("delivery-1:0");
+        assertThat(delivery.path("segments").get(0).path("provider_receipt").asText())
                 .isEqualTo("<m1@example.com>");
         exchange(drift, "getAgentChannelDelivery", 404,
                 get("/v1/agent-channels/{id}/deliveries/{d}", "mail-1",
@@ -3841,6 +3875,25 @@ class ManagedAgentApiContractTest {
 
     private JsonNode json(String content) throws IOException {
         return objectMapper.readTree(content);
+    }
+
+    private ObjectNode mcpManagementSnapshot(int live, int removed) {
+        ObjectNode snapshot = objectMapper.createObjectNode()
+                .put("sessionId", "mcp-contract-session")
+                .put("revision", 1)
+                .put("supported", true);
+        snapshot.putArray("availableServers");
+        var servers = snapshot.putArray("servers");
+        for (int index = 0; index < live + removed; index++) {
+            servers.addObject()
+                    .put("serverId", "server-" + index)
+                    .put("serverRevision", 1)
+                    .put("definitionDigest", "a".repeat(64))
+                    .put("state", index < live
+                            ? (index < 16 ? "enabled" : "disabled")
+                            : "removed");
+        }
+        return snapshot;
     }
 
     private String errorCode(String content) {
