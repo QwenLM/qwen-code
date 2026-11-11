@@ -335,6 +335,63 @@ describe('dedicated Managed Web gateway', () => {
     peerSocket?.destroy();
   });
 
+  it('shutdown destroys an attached terminal instead of hanging', async () => {
+    let peerSocket: import('node:stream').Duplex | undefined;
+    peer.on('upgrade', (_req, socket) => {
+      peerSocket = socket;
+      socket.write(
+        'HTTP/1.1 101 Switching Protocols\r\n' +
+          'Upgrade: websocket\r\n' +
+          'Connection: Upgrade\r\n' +
+          'Sec-WebSocket-Accept: test-accept\r\n' +
+          'Sec-WebSocket-Protocol: qwen-ws\r\n\r\n',
+      );
+      socket.on('data', (chunk) => socket.write(chunk));
+    });
+    await start();
+    const clientSocket = await new Promise<import('node:stream').Duplex>(
+      (resolve, reject) => {
+        const upgrade = request(
+          `${gateway!.url}/api/agent/web-shell/v1/sessions/sess-1/terminal?terminalId=t1&replay=1`,
+          {
+            headers: {
+              Connection: 'Upgrade',
+              Upgrade: 'websocket',
+              'Sec-WebSocket-Key': 'dGhlIHNhbXBsZSBub25jZQ==',
+              'Sec-WebSocket-Version': '13',
+              'Sec-WebSocket-Protocol': 'qwen-ws, qwen-bearer.ticket-abc',
+              Authorization: `Bearer ${browserToken}`,
+            },
+          },
+        );
+        upgrade.on('upgrade', (_res, socket) => resolve(socket));
+        upgrade.on('response', (res) =>
+          reject(new Error(`upgrade refused: ${res.statusCode}`)),
+        );
+        upgrade.on('error', reject);
+        upgrade.end();
+      },
+    );
+    const clientClosed = new Promise<void>((resolve) =>
+      clientSocket.once('close', () => resolve()),
+    );
+    const timeout = (message: string) =>
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error(message)), 5_000).unref(),
+      );
+    // An attached, idle terminal is an upgraded socket closeAllConnections()
+    // does not reach; shutdown must destroy it rather than wait on it.
+    await Promise.race([
+      gateway!.close(),
+      timeout('gateway close hung with a terminal attached'),
+    ]);
+    await Promise.race([
+      clientClosed,
+      timeout('terminal socket survived gateway shutdown'),
+    ]);
+    peerSocket?.destroy();
+  });
+
   it('fails before listening for invalid configuration or missing, weak, shared credentials', async () => {
     for (const token of [
       undefined,

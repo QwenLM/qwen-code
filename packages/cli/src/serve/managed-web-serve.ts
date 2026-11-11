@@ -70,7 +70,12 @@ function forwardTerminalUpgrade(
   req: IncomingMessage,
   socket: Duplex,
   head: Buffer,
+  tracked: Set<Duplex>,
 ): void {
+  // Track both ends (including the in-flight upgrade) so gateway shutdown can
+  // destroy them; closeAllConnections() does not reach upgraded sockets.
+  tracked.add(socket);
+  socket.once('close', () => tracked.delete(socket));
   const headers: Record<string, string> = {
     connection: 'Upgrade',
     upgrade: 'websocket',
@@ -85,6 +90,8 @@ function forwardTerminalUpgrade(
     headers,
   });
   upstream.on('upgrade', (upstreamRes, upstreamSocket, upstreamHead) => {
+    tracked.add(upstreamSocket);
+    upstreamSocket.once('close', () => tracked.delete(upstreamSocket));
     const lines = [
       'HTTP/1.1 101 Switching Protocols',
       'Upgrade: websocket',
@@ -240,10 +247,11 @@ export async function runManagedWebServe(
   const server = createServer(app);
   server.maxConnections = 256;
   const java = new URL(config.apiUrl);
+  const upgradedSockets = new Set<Duplex>();
   server.on('upgrade', (request, socket, head) => {
     const path = (request.url ?? '').split('?')[0] ?? '';
     if (TERMINAL_UPGRADE_PATH.test(path)) {
-      forwardTerminalUpgrade(java, request, socket, head);
+      forwardTerminalUpgrade(java, request, socket, head, upgradedSockets);
     } else {
       socket.destroy();
     }
@@ -274,6 +282,10 @@ export async function runManagedWebServe(
         else resolve();
       });
       server.closeAllConnections();
+      // Upgraded terminal sockets are not covered by closeAllConnections();
+      // destroy them so a connected terminal cannot block shutdown.
+      for (const socket of upgradedSockets) socket.destroy();
+      upgradedSockets.clear();
     });
     return closing;
   };
