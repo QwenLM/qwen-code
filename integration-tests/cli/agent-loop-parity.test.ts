@@ -26,6 +26,7 @@ import {
   type FakeOpenAIResponse,
   type FakeOpenAIServer,
 } from '../fake-openai-server.js';
+import { CONTEXT_DATE, contextDate, startupContext } from '../prompt-date.js';
 
 type JsonObject = Record<string, unknown>;
 
@@ -67,9 +68,18 @@ function normalize(value: unknown, dir: string): unknown {
   return JSON.parse(
     JSON.stringify(value ?? null)
       .split(dir)
-      .join('<DIR>'),
+      .join('<DIR>')
+      .replace(CONTEXT_DATE, '<DATE>'),
   );
 }
+
+describe('normalize', () => {
+  it('normalizes the date the startup context renders', () => {
+    expect(normalize(startupContext(contextDate(5)), '/workspace')).toEqual(
+      normalize(startupContext(contextDate(6)), '/workspace'),
+    );
+  });
+});
 
 function modelRequests(server: FakeOpenAIServer, dir: string): unknown[] {
   return server.requests

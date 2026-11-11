@@ -38,6 +38,14 @@ import {
 } from '../fake-openai-server.js';
 import { ACP_HOME_PREFIX, removeScratchDir } from '../scratch-dir.js';
 import { approveProjectHooks } from '../project-hook-approval.js';
+import {
+  CONTEXT_DATE,
+  contextDate,
+  isDateReminder,
+  startupContext,
+  userTurns,
+  withoutDateReminder,
+} from '../prompt-date.js';
 
 // The agent trusts a client that presents the capability it was started with.
 const PRIVATE_ACP_CAPABILITY_ENV = 'QWEN_CODE_PRIVATE_ACP_CAPABILITY';
@@ -142,29 +150,8 @@ const VOLATILE_KEYS = new Set([
 const CONTINUATION_PROMPT_ID =
   /(########\d+)_(?:stop_hook|todo_stop_guard)_\d+/g;
 
-const DATE_REMINDER =
-  /^<system-reminder>\n(?:Today's date is |The date has changed since earlier in this conversation\. )/;
-
 const toolResults = (messages: JsonObject[]) =>
   messages.filter((message) => message['role'] === 'tool').length;
-
-const userTurns = (messages: JsonObject[]) =>
-  messages.filter(
-    (message) =>
-      message['role'] === 'user' &&
-      !JSON.stringify(message['content']).includes('<system-reminder>'),
-  ).length;
-
-const isDateReminder = (part: unknown) =>
-  typeof (part as JsonObject)?.['text'] === 'string' &&
-  DATE_REMINDER.test((part as JsonObject)['text'] as string);
-
-/** Removes the date reminder the client adds when the date changed. */
-function withoutDateReminder(content: unknown): unknown {
-  return Array.isArray(content)
-    ? content.filter((part) => !isDateReminder(part))
-    : content;
-}
 
 function normalize(value: unknown, dir: string, sessionId = ''): unknown {
   let text = JSON.stringify(value ?? null)
@@ -177,7 +164,8 @@ function normalize(value: unknown, dir: string, sessionId = ''): unknown {
       .replace(RANDOM_ID, '<ID>')
       .replace(BACKGROUND_TASK_ID, 'bg_<ID>')
       .replace(PROCESS_ID, '$1<PID>')
-      .replace(RUN_HOME, '<HOME>'),
+      .replace(RUN_HOME, '<HOME>')
+      .replace(CONTEXT_DATE, '<DATE>'),
   );
   const strip = (node: unknown): unknown => {
     if (Array.isArray(node)) return node.map(strip);
@@ -192,6 +180,14 @@ function normalize(value: unknown, dir: string, sessionId = ''): unknown {
   };
   return strip(replaced);
 }
+
+describe('normalize', () => {
+  it('normalizes the date the startup context renders', () => {
+    expect(normalize(startupContext(contextDate(5)), '/workspace')).toEqual(
+      normalize(startupContext(contextDate(6)), '/workspace'),
+    );
+  });
+});
 
 const streamingMessages = (server: FakeOpenAIServer) =>
   server.requests

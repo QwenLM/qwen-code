@@ -32,6 +32,13 @@ import {
   type FakeOpenAIResponse,
   type FakeOpenAIServer,
 } from '../fake-openai-server.js';
+import {
+  CONTEXT_DATE,
+  contextDate,
+  isDateReminder,
+  startupContext,
+  userTurns,
+} from '../prompt-date.js';
 import { pickE2eRenderer } from '../renderer-matrix.js';
 import { IS_CONTAINER_SANDBOX } from '../test-helper.js';
 import { InteractiveSession } from './interactive-session.js';
@@ -181,11 +188,6 @@ function files(directory: string): string[] {
 const RANDOM_ID =
   /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g;
 
-// The startup context's date, in `formatDateForContext`'s format. Runs that
-// straddle midnight render it a day apart.
-const CONTEXT_DATE =
-  /\b(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday), (?:January|February|March|April|May|June|July|August|September|October|November|December) \d{1,2}, \d{4}\b/g;
-
 // Fields that differ between two runs of the same scenario.
 const VOLATILE_KEYS = new Set([
   'uuid',
@@ -210,22 +212,8 @@ const VOLATILE_KEYS = new Set([
 // Timings, such as the telemetry recorded with each response.
 const TIMING_KEY = /(_ms|Ms)$/;
 
-const DATE_REMINDER =
-  /^<system-reminder>\n(?:Today's date is |The date has changed since earlier in this conversation\. )/;
-
 const toolResults = (messages: JsonObject[]) =>
   messages.filter((message) => message['role'] === 'tool').length;
-
-const userTurns = (messages: JsonObject[]) =>
-  messages.filter(
-    (message) =>
-      message['role'] === 'user' &&
-      !JSON.stringify(message['content']).includes('<system-reminder>'),
-  ).length;
-
-const isDateReminder = (part: unknown) =>
-  typeof (part as JsonObject)?.['text'] === 'string' &&
-  DATE_REMINDER.test((part as JsonObject)['text'] as string);
 
 /**
  * `dir` is the workspace; `scratch`, which holds it, is the run's home;
@@ -272,32 +260,11 @@ function normalize(
 }
 
 describe('normalize', () => {
-  const startupContext = (today: string) => ({
-    messages: [
-      {
-        role: 'user',
-        content: [
-          {
-            text: `<system-reminder>\nThis is the Qwen Code. We are setting up the context for our chat.\nToday's date is ${today}.\n</system-reminder>`,
-          },
-        ],
-      },
-    ],
-  });
-
   it('normalizes the date the startup context renders', () => {
     expect(
-      normalize(
-        startupContext('Wednesday, November 11, 2026'),
-        '/workspace',
-        '/scratch',
-      ),
+      normalize(startupContext(contextDate(5)), '/workspace', '/scratch'),
     ).toEqual(
-      normalize(
-        startupContext('Thursday, November 12, 2026'),
-        '/workspace',
-        '/scratch',
-      ),
+      normalize(startupContext(contextDate(6)), '/workspace', '/scratch'),
     );
   });
 });
