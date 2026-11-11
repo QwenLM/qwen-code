@@ -71,13 +71,17 @@ WebShell types produces no channel change; no WebShell consumer is affected.
   `segments` property, the `PublicChannelDeliverySegment` schema, and the
   version bump.
 - `control-plane/.../channel/ManagedChannelService.java` — the public read
-  path builds the array from the segment ledger.
+  path builds the array from the segment ledger; `resend` refuses a resent id
+  whose stored chain diverges from the answer (first-segment check plus a
+  full-chain comparison that tolerates a partly materialized prefix).
 - `verification/.../ManagedAgentApiContractTest.java` — the new record's
   schema mapping and the channel fixture's segment rows.
 - `verification/.../ChannelContractTest.java` — the new schema in the
   partial-schema gate.
 - `verification/.../channel/ManagedChannelServiceTest.java` — public read
-  assertions over a multi-segment delivery.
+  assertions over a multi-segment delivery, and the resend chain-guard cases
+  (head/ordinal/later-segment divergence refused, prefix and receipted replay
+  converge).
 - This design doc and its Chinese version.
 
 ## Scope boundaries
@@ -95,6 +99,12 @@ WebShell types produces no channel change; no WebShell consumer is affected.
   segment rows so the served `segments` array satisfies `minItems: 1`.
 - A multi-segment service case asserts `getDelivery` and `listDeliveries`
   expose every segment with its own receipt.
+- The resend chain guard is pinned by service cases: a stored chain diverging
+  at the head, the ordinal, or a later segment is refused with
+  `409 channel_delivery_conflict` (the WARN names the diverging position and
+  both segment identities); a stored chain that is only a prefix of the plan,
+  and a replay of a partly receipted chain, both converge. Each refusal and
+  convergence case reds when the corresponding guard behaviour is removed.
 - Checkstyle passes on the changed modules; the WebShell type regeneration
   produces no drift.
 

@@ -28,10 +28,10 @@ channel 路由标签是 `Public Resources` 而非 `WebShell`，故 WebShell 类�
 
 - `contracts/.../model/ApiModels.java` —— `PublicChannelDelivery` 的 `segments` 与新记录 `PublicChannelDeliverySegment`。
 - `contracts/.../openapi/managed-agent-public-api.openapi.json` —— `segments` 属性、`PublicChannelDeliverySegment` 模式与版本升级。
-- `control-plane/.../channel/ManagedChannelService.java` —— 公开读路径从分段台账构建数组。
+- `control-plane/.../channel/ManagedChannelService.java` —— 公开读路径从分段台账构建数组；`resend` 拒绝存储链与应答分歧的 resent id（首段检查＋容忍部分落库前缀的完整链比对）。
 - `verification/.../ManagedAgentApiContractTest.java` —— 新记录的模式映射与 channel 夹具的分段行。
 - `verification/.../ChannelContractTest.java` —— partial 模式门中的新模式。
-- `verification/.../channel/ManagedChannelServiceTest.java` —— 多分段交付的公开读断言。
+- `verification/.../channel/ManagedChannelServiceTest.java` —— 多分段交付的公开读断言，及 resend 链守卫用例（首段/仅 ordinal/后续段分歧被拒，前缀与带回执重放收敛）。
 - 本设计文档与其中文版本。
 
 ## 范围边界
@@ -44,6 +44,7 @@ channel 路由标签是 `Public Resources` 而非 `WebShell`，故 WebShell 类�
 
 - 记录↔模式契约门与路由响应契约门在记录与模式同步后通过；channel 夹具种入分段行，使 served 的 `segments` 数组满足 `minItems: 1`。
 - 一个多分段服务用例断言 `getDelivery` 与 `listDeliveries` 暴露每个分段及其各自回执。
+- resend 链守卫由服务用例钉住：存储链在首段、仅 ordinal、或后续段分歧时以 `409 channel_delivery_conflict` 拒绝（WARN 记录分歧位置与两侧分段身份）；存储链仅为计划前缀、以及带回执链的重放，均收敛。各拒绝/收敛用例在移除对应守卫行为时转红。
 - 改动模块 Checkstyle 通过；WebShell 类型再生无漂移。
 
 ## 未决问题

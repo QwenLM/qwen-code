@@ -980,18 +980,119 @@ class ManagedChannelServiceTest {
         segmentLedger.plan(TENANT, channel, resentId, List.of(
                 new SegmentLedger(deliveryId + ":0", 0, null),
                 new SegmentLedger("other:1", 1, null)));
-        assertThatThrownBy(() -> service.resend(TENANT, channel, deliveryId))
-                .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
-                    assertThat(error.getStatus()).isEqualTo(409);
-                    assertThat(error.getCode())
-                            .isEqualTo("channel_delivery_conflict");
-                });
+        ch.qos.logback.classic.Logger serviceLog =
+                (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory
+                        .getLogger(ManagedChannelService.class);
+        ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent>
+                logged = new ch.qos.logback.core.read.ListAppender<>();
+        logged.start();
+        serviceLog.addAppender(logged);
+        try {
+            assertThatThrownBy(() -> service.resend(TENANT, channel, deliveryId))
+                    .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
+                        assertThat(error.getStatus()).isEqualTo(409);
+                        assertThat(error.getCode())
+                                .isEqualTo("channel_delivery_conflict");
+                        assertThat(error.getMessage())
+                                .isEqualTo("The resent delivery id already names a"
+                                        + " different stored chain.");
+                    });
+        } finally {
+            serviceLog.detachAppender(logged);
+            logged.stop();
+        }
         // The divergent segment was refused, not spliced: the stored chain is
         // intact and the answer's second segment was never planned.
         assertThat(segmentLedger.list(TENANT, channel, resentId))
                 .extracting(SegmentLedger::segmentId)
                 .containsExactly(deliveryId + ":0", "other:1");
         assertThat(instances.findClaim(TENANT, channel, resentId)).isEmpty();
+        // The WARN names the diverging position and both segment identities —
+        // the counts alone would be equal here and say nothing.
+        assertThat(logged.list).anySatisfy(event -> {
+            assertThat(event.getLevel())
+                    .isEqualTo(ch.qos.logback.classic.Level.WARN);
+            assertThat(event.getFormattedMessage())
+                    .contains("channel resend chain conflict")
+                    .contains("delivery=" + deliveryId + " resent=" + resentId)
+                    .contains("position=1")
+                    .contains("storedSegment=other:1")
+                    .contains("resentSegment=" + deliveryId + ":1");
+        });
+    }
+
+    @Test
+    void aResendWhoseStoredChainIsAPrefixConverges() {
+        InboundAdmission admitted = service.submitInbound(TENANT, channel,
+                event(1, "1700:113", "please reply"));
+        String deliveryId = admitted.inputId() + ":reply";
+        plannedDelivery(admitted.sessionId(), deliveryId, admitted.routeId(),
+                "The build is green.", 2);
+        service.claimDeliveries(TENANT, channel, 16);
+        // A partly materialized chain is a valid transient: plan() inserts row
+        // by row and the claim sweep may have written segment 0 of the resent
+        // record before resend() reads the guard. The stored prefix must
+        // converge (the plan completes it), not be refused as a divergence.
+        String resentId = deliveryId + ":r1";
+        new JdbcChannelDeliveryRepository(jdbc).findOrCreate(
+                new ChannelDeliveryRepository.ChannelDelivery(TENANT, channel,
+                        resentId, deliveryId + ":0", 0, "planned", null, 0, 0));
+        segmentLedger.plan(TENANT, channel, resentId,
+                List.of(new SegmentLedger(deliveryId + ":0", 0, null)));
+        ResendResponse resent = service.resend(TENANT, channel, deliveryId);
+        assertThat(resent.deliveryId()).isEqualTo(resentId);
+        assertThat(segmentLedger.list(TENANT, channel, resentId))
+                .extracting(SegmentLedger::segmentId)
+                .containsExactly(deliveryId + ":0", deliveryId + ":1");
+    }
+
+    @Test
+    void aResendWhoseStoredChainIsLongerThanThePlanIsRejected() {
+        InboundAdmission admitted = service.submitInbound(TENANT, channel,
+                event(1, "1700:115", "please reply"));
+        String deliveryId = admitted.inputId() + ":reply";
+        plannedDelivery(admitted.sessionId(), deliveryId, admitted.routeId(),
+                "The build is green.", 2);
+        service.claimDeliveries(TENANT, channel, 16);
+        // The stored chain has an extra segment beyond the plan: a divergence,
+        // refused as 409 — not an index past the plan's end.
+        String resentId = deliveryId + ":r1";
+        new JdbcChannelDeliveryRepository(jdbc).findOrCreate(
+                new ChannelDeliveryRepository.ChannelDelivery(TENANT, channel,
+                        resentId, deliveryId + ":0", 0, "planned", null, 0, 0));
+        segmentLedger.plan(TENANT, channel, resentId, List.of(
+                new SegmentLedger(deliveryId + ":0", 0, null),
+                new SegmentLedger(deliveryId + ":1", 1, null),
+                new SegmentLedger("extra:2", 2, null)));
+        assertThatThrownBy(() -> service.resend(TENANT, channel, deliveryId))
+                .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
+                    assertThat(error.getStatus()).isEqualTo(409);
+                    assertThat(error.getCode())
+                            .isEqualTo("channel_delivery_conflict");
+                });
+        assertThat(segmentLedger.list(TENANT, channel, resentId))
+                .extracting(SegmentLedger::segmentId)
+                .containsExactly(deliveryId + ":0", deliveryId + ":1", "extra:2");
+    }
+
+    @Test
+    void aReplayOfAPartlyReceiptedChainConverges() {
+        InboundAdmission admitted = service.submitInbound(TENANT, channel,
+                event(1, "1700:114", "please reply"));
+        String deliveryId = admitted.inputId() + ":reply";
+        plannedDelivery(admitted.sessionId(), deliveryId, admitted.routeId(),
+                "The build is green.", 2);
+        service.claimDeliveries(TENANT, channel, 16);
+        ResendResponse resent = service.resend(TENANT, channel, deliveryId);
+        // The stored chain gains a receipt; the replayed resend carries none.
+        // The chain comparison ignores receipts, so the replay converges.
+        service.receipt(TENANT, channel, resent.deliveryId(),
+                new ReceiptRequest("accepted", 0, "<m0@example.com>", null));
+        ResendResponse replayed = service.resend(TENANT, channel, deliveryId);
+        assertThat(replayed.deliveryId()).isEqualTo(resent.deliveryId());
+        assertThat(segmentLedger.list(TENANT, channel, resent.deliveryId()))
+                .extracting(SegmentLedger::providerReceipt)
+                .containsExactly("<m0@example.com>", null);
     }
 
     @Test

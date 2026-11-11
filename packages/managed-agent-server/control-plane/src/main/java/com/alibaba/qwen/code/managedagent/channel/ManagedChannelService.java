@@ -391,13 +391,29 @@ public class ManagedChannelService {
         // not on ordinal) would splice the divergent segment in beside the old
         // one — a mixed chain with two rows at one ordinal. Compare the full
         // (segmentId, ordinal) chain before planning so any divergence is
-        // refused rather than spliced (review 5853133846).
+        // refused rather than spliced (review 5853133846). A stored chain that
+        // is only a PREFIX of the plan is a valid transient — plan() inserts
+        // row by row and the claim sweep may have materialized segment 0
+        // already — so it converges instead of conflicting (review 5855558143).
         List<SegmentLedger> stored = segments.list(tenantId, channelId, resentId);
-        if (!stored.isEmpty() && !sameSegmentChain(stored, plan)) {
+        int divergence = stored.isEmpty() ? -1 : firstChainDivergence(stored, plan);
+        if (divergence >= 0) {
+            SegmentLedger storedSegment = divergence < stored.size()
+                    ? stored.get(divergence) : null;
+            SegmentLedger resentSegment = divergence < plan.size()
+                    ? plan.get(divergence) : null;
+            // Name the diverging position and both segment identities — the
+            // counts alone are equal in an equal-length divergence and say
+            // nothing. Identities only, never the request body.
             LOG.warn("channel resend chain conflict tenant={} channel={}"
-                    + " delivery={} resent={} storedCount={} resentCount={}",
-                    tenantId, channelId, deliveryId, resentId,
-                    stored.size(), plan.size());
+                    + " delivery={} resent={} position={}"
+                    + " storedSegment={} storedOrdinal={}"
+                    + " resentSegment={} resentOrdinal={}",
+                    tenantId, channelId, deliveryId, resentId, divergence,
+                    storedSegment == null ? null : storedSegment.segmentId(),
+                    storedSegment == null ? null : storedSegment.ordinal(),
+                    resentSegment == null ? null : resentSegment.segmentId(),
+                    resentSegment == null ? null : resentSegment.ordinal());
             throw new ManagedAgentException(409, "channel_delivery_conflict",
                     "The resent delivery id already names a different stored chain.");
         }
@@ -412,23 +428,27 @@ public class ManagedChannelService {
                 view(row, claim.sessionId()));
     }
 
-    /** Whether two segment lists name the same (segmentId, ordinal) chain.
-     * Both are ordered by ordinal; receipts are ignored — a replayed resend
-     * carries none while the stored chain may already hold some. */
-    private static boolean sameSegmentChain(List<SegmentLedger> stored,
+    /** The first position where the stored chain and the resent plan disagree,
+     * or -1 when the stored chain is a compatible prefix of the plan — equal,
+     * or shorter with every stored segment matching (a partly materialized
+     * chain the plan will complete). Both are ordered by ordinal; receipts are
+     * ignored — a replayed resend carries none while the stored chain may
+     * already hold some. A stored chain longer than the plan diverges at the
+     * plan's end, so the caller never indexes past the plan. */
+    private static int firstChainDivergence(List<SegmentLedger> stored,
             List<SegmentLedger> resent) {
-        if (stored.size() != resent.size()) {
-            return false;
+        if (stored.size() > resent.size()) {
+            return resent.size();
         }
         for (int index = 0; index < stored.size(); index++) {
             SegmentLedger left = stored.get(index);
             SegmentLedger right = resent.get(index);
             if (left.ordinal() != right.ordinal()
                     || !left.segmentId().equals(right.segmentId())) {
-                return false;
+                return index;
             }
         }
-        return true;
+        return -1;
     }
 
     /**
