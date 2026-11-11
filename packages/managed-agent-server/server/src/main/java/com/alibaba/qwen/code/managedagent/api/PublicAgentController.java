@@ -17,6 +17,7 @@ import com.alibaba.qwen.code.managedagent.model.ApiModels.RecoveryRecheckRequest
 import com.alibaba.qwen.code.managedagent.model.ApiModels.SessionEventRequest;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.SessionRecovery;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.UpdateSessionRequest;
+import com.alibaba.qwen.code.managedagent.model.SessionPrincipal;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.model.TenantContext;
 import com.alibaba.qwen.code.managedagent.session.ContextCompressionService;
@@ -102,6 +103,10 @@ public class PublicAgentController {
         if (selection == null && worktree != null) {
             throw new ManagedAgentException(400, "unsupported_feature", "Session worktrees require a bound Workspace.");
         }
+        // Resolve the recorded identity before the commit so a construction
+        // error can never strand a Session the create just persisted; the
+        // trusted boundary already rejected an unrepresentable subject.
+        SessionPrincipal principal = tenant.subjectPrincipal();
         CommandAdmission admission = selection == null
                 ? service.createSession(tenant.requirePrincipal(),
                         idempotencyKey, request.agentId(),
@@ -112,8 +117,10 @@ public class PublicAgentController {
                         request.agentId(), request.agentRevision(), null, request.metadata(), request.input(),
                         selection, null, null, request.skills(), null, request.extensionPins(), worktree,
                         com.alibaba.qwen.code.managedagent.model.SessionModelConfig.parse(request.modelConfig()), request.memoryStoreId());
-        PublicSession session = service.getPublicSession(tenant.tenantId(),
-                tenant.actorId(), admission.sessionId());
+        PublicSession session = principal == null
+                ? service.getPublicSession(tenant.tenantId(),
+                        tenant.actorId(), admission.sessionId())
+                : service.getPublicSession(principal, admission.sessionId());
         return ResponseEntity.status(HttpStatus.ACCEPTED)
                 .header("X-Qwen-Idempotent-Replay",
                         Boolean.toString(admission.replayed()))
@@ -126,30 +133,45 @@ public class PublicAgentController {
             @RequestParam(defaultValue = "20") int limit,
             @RequestParam(name = "archive_state", required = false) String archiveState,
             @RequestParam(name = "title_query", required = false) String titleQuery) {
-        return service.listPublicSessions(tenant.tenantId(), tenant.actorId(),
-                cursor, limit, archiveState, titleQuery);
+        SessionPrincipal principal = tenant.subjectPrincipal();
+        return principal == null
+                ? service.listPublicSessions(tenant.tenantId(),
+                        tenant.actorId(), cursor, limit, archiveState,
+                        titleQuery)
+                : service.listPublicSessions(principal, cursor, limit,
+                        archiveState, titleQuery);
     }
 
     @GetMapping("/{sessionId}")
     public PublicSession get(TenantContext tenant,
             @PathVariable String sessionId) {
-        return service.getPublicSession(tenant.tenantId(),
-                tenant.actorId(), sessionId);
+        SessionPrincipal principal = tenant.subjectPrincipal();
+        return principal == null
+                ? service.getPublicSession(tenant.tenantId(),
+                        tenant.actorId(), sessionId)
+                : service.getPublicSession(principal, sessionId);
     }
 
     @GetMapping("/{sessionId}/recovery")
     public ResponseEntity<SessionRecovery> recovery(TenantContext tenant,
             @PathVariable String sessionId) {
+        SessionPrincipal principal = tenant.subjectPrincipal();
         return ResponseEntity.ok().cacheControl(org.springframework.http.CacheControl.noStore())
-                .body(recovery.query(tenant.tenantId(), tenant.actorId(), sessionId));
+                .body(principal == null
+                        ? recovery.query(tenant.tenantId(),
+                                tenant.actorId(), sessionId)
+                        : recovery.query(principal, sessionId));
     }
 
     @PostMapping("/{sessionId}/recovery/recheck")
     public ResponseEntity<SessionRecovery> recheckRecovery(TenantContext tenant,
             @PathVariable String sessionId,
             @Valid @RequestBody RecoveryRecheckRequest request) {
-        return ResponseEntity.accepted().body(recovery.recheck(tenant.tenantId(),
-                tenant.actorId(), sessionId, request.turnId()));
+        SessionPrincipal principal = tenant.subjectPrincipal();
+        return ResponseEntity.accepted().body(principal == null
+                ? recovery.recheck(tenant.tenantId(), tenant.actorId(),
+                        sessionId, request.turnId())
+                : recovery.recheck(principal, sessionId, request.turnId()));
     }
 
     @PatchMapping("/{sessionId}")
@@ -157,8 +179,12 @@ public class PublicAgentController {
             @PathVariable String sessionId,
             @RequestHeader("Idempotency-Key") String idempotencyKey,
             @Valid @RequestBody UpdateSessionRequest request) {
-        return mutation(service.renameSession(tenant.tenantId(), tenant.actorId(),
-                idempotencyKey, sessionId, request.title()));
+        SessionPrincipal principal = tenant.subjectPrincipal();
+        return mutation(principal == null
+                ? service.renameSession(tenant.tenantId(), tenant.actorId(),
+                        idempotencyKey, sessionId, request.title())
+                : service.renameSession(principal, idempotencyKey, sessionId,
+                        request.title()));
     }
 
     @PostMapping("/{sessionId}/close")
@@ -181,8 +207,12 @@ public class PublicAgentController {
     public ResponseEntity<PublicSession> unarchive(TenantContext tenant,
             @PathVariable String sessionId,
             @RequestHeader("Idempotency-Key") String idempotencyKey) {
-        return mutation(service.unarchiveSession(tenant.tenantId(), tenant.actorId(),
-                idempotencyKey, sessionId));
+        SessionPrincipal principal = tenant.subjectPrincipal();
+        return mutation(principal == null
+                ? service.unarchiveSession(tenant.tenantId(),
+                        tenant.actorId(), idempotencyKey, sessionId)
+                : service.unarchiveSession(principal, idempotencyKey,
+                        sessionId));
     }
 
     @DeleteMapping("/{sessionId}")
@@ -197,8 +227,12 @@ public class PublicAgentController {
     public Object getOperation(TenantContext tenant,
             @PathVariable String sessionId,
             @PathVariable String operationId) {
-        return lifecycle.getPublicOperation(tenant.tenantId(),
-                tenant.actorId(), sessionId, operationId);
+        SessionPrincipal principal = tenant.subjectPrincipal();
+        return principal == null
+                ? lifecycle.getPublicOperation(tenant.tenantId(),
+                        tenant.actorId(), sessionId, operationId)
+                : lifecycle.getPublicOperation(principal, sessionId,
+                        operationId);
     }
 
     @PostMapping("/{sessionId}/compress")
@@ -206,8 +240,14 @@ public class PublicAgentController {
             TenantContext tenant, @PathVariable String sessionId,
             @RequestHeader("Idempotency-Key") String idempotencyKey,
             @Valid @RequestBody CompressSessionRequest request) {
-        return ResponseEntity.accepted().body(compressions.admitPublic(tenant.tenantId(),
-                tenant.actorId(), sessionId, idempotencyKey, request.expectedCompactionRevision()));
+        SessionPrincipal principal = tenant.subjectPrincipal();
+        return ResponseEntity.accepted().body(principal == null
+                ? compressions.admitPublic(tenant.tenantId(),
+                        tenant.actorId(), sessionId, idempotencyKey,
+                        request.expectedCompactionRevision())
+                : compressions.admitPublic(principal, sessionId,
+                        idempotencyKey,
+                        request.expectedCompactionRevision()));
     }
 
     @PostMapping("/{sessionId}/events")
@@ -215,18 +255,25 @@ public class PublicAgentController {
             @PathVariable String sessionId,
             @RequestHeader("Idempotency-Key") String idempotencyKey,
             @Valid @RequestBody SessionEventRequest request) {
+        SessionPrincipal principal = tenant.subjectPrincipal();
         CommandAdmission admission;
         if ("agent.session.input.message".equals(request.type())) {
-            admission = service.submitTurn(tenant.tenantId(), tenant.actorId(),
-                    idempotencyKey, sessionId, request.input());
+            admission = principal == null
+                    ? service.submitTurn(tenant.tenantId(), tenant.actorId(),
+                            idempotencyKey, sessionId, request.input())
+                    : service.submitTurn(principal, idempotencyKey, sessionId,
+                            request.input());
         } else if ("agent.session.cancel".equals(request.type())) {
             if (request.turnId() == null || request.turnId().isBlank()) {
                 throw new ManagedAgentException(400,
                         "turn_id_required",
                         "Cancellation requires turn_id.");
             }
-            admission = service.cancelTurn(tenant.tenantId(), tenant.actorId(),
-                    idempotencyKey, sessionId, request.turnId());
+            admission = principal == null
+                    ? service.cancelTurn(tenant.tenantId(), tenant.actorId(),
+                            idempotencyKey, sessionId, request.turnId())
+                    : service.cancelTurn(principal, idempotencyKey, sessionId,
+                            request.turnId());
         } else {
             throw new ManagedAgentException(400,
                     "unsupported_event",
@@ -250,12 +297,17 @@ public class PublicAgentController {
         long cursor = parseSequence(lastEventId, after);
         boolean wantsStream = stream || (accept != null
                 && accept.contains(MediaType.TEXT_EVENT_STREAM_VALUE));
+        SessionPrincipal principal = tenant.subjectPrincipal();
         if (wantsStream) {
-            return streams.publicStream(tenant.tenantId(), tenant.actorId(),
-                    sessionId, cursor);
+            return principal == null
+                    ? streams.publicStream(tenant.tenantId(),
+                            tenant.actorId(), sessionId, cursor)
+                    : streams.publicStream(principal, sessionId, cursor);
         }
-        return service.publicEvents(tenant.tenantId(), tenant.actorId(),
-                sessionId, cursor, limit);
+        return principal == null
+                ? service.publicEvents(tenant.tenantId(), tenant.actorId(),
+                        sessionId, cursor, limit)
+                : service.publicEvents(principal, sessionId, cursor, limit);
     }
 
     @GetMapping("/{sessionId}/items")
@@ -277,7 +329,12 @@ public class PublicAgentController {
         } else if (cursor == null) {
             cursor = after;
         }
-        return service.listPublicItems(tenant.tenantId(), tenant.actorId(), sessionId, cursor, sequence, limit);
+        SessionPrincipal principal = tenant.subjectPrincipal();
+        return principal == null
+                ? service.listPublicItems(tenant.tenantId(), tenant.actorId(),
+                        sessionId, cursor, sequence, limit)
+                : service.listPublicItems(principal, sessionId, cursor,
+                        sequence, limit);
     }
 
     @GetMapping("/{sessionId}/turns")
@@ -285,15 +342,22 @@ public class PublicAgentController {
             @PathVariable String sessionId,
             @RequestParam(required = false) String cursor,
             @RequestParam(defaultValue = "20") int limit) {
-        return service.listPublicTurns(tenant.tenantId(), tenant.actorId(),
-                sessionId, cursor, limit);
+        SessionPrincipal principal = tenant.subjectPrincipal();
+        return principal == null
+                ? service.listPublicTurns(tenant.tenantId(),
+                        tenant.actorId(), sessionId, cursor, limit)
+                : service.listPublicTurns(principal, sessionId, cursor,
+                        limit);
     }
 
     @GetMapping("/{sessionId}/turns/{turnId}")
     public PublicTurn turn(TenantContext tenant,
             @PathVariable String sessionId, @PathVariable String turnId) {
-        return service.getPublicTurn(tenant.tenantId(), tenant.actorId(),
-                sessionId, turnId);
+        SessionPrincipal principal = tenant.subjectPrincipal();
+        return principal == null
+                ? service.getPublicTurn(tenant.tenantId(), tenant.actorId(),
+                        sessionId, turnId)
+                : service.getPublicTurn(principal, sessionId, turnId);
     }
 
     @GetMapping("/{sessionId}/tasks")
@@ -301,15 +365,21 @@ public class PublicAgentController {
             @PathVariable String sessionId,
             @RequestParam(required = false) String cursor,
             @RequestParam(defaultValue = "20") int limit) {
-        return tasks.listPublicTasks(tenant.tenantId(), tenant.actorId(),
-                sessionId, cursor, limit);
+        SessionPrincipal principal = tenant.subjectPrincipal();
+        return principal == null
+                ? tasks.listPublicTasks(tenant.tenantId(), tenant.actorId(),
+                        sessionId, cursor, limit)
+                : tasks.listPublicTasks(principal, sessionId, cursor, limit);
     }
 
     @GetMapping("/{sessionId}/tasks/{taskId}")
     public PublicTask task(TenantContext tenant,
             @PathVariable String sessionId, @PathVariable String taskId) {
-        return tasks.getPublicTask(tenant.tenantId(), tenant.actorId(),
-                sessionId, taskId);
+        SessionPrincipal principal = tenant.subjectPrincipal();
+        return principal == null
+                ? tasks.getPublicTask(tenant.tenantId(), tenant.actorId(),
+                        sessionId, taskId)
+                : tasks.getPublicTask(principal, sessionId, taskId);
     }
 
     @GetMapping("/{sessionId}/tasks/{taskId}/events")
@@ -317,8 +387,12 @@ public class PublicAgentController {
             @PathVariable String sessionId, @PathVariable String taskId,
             @RequestParam(required = false) String after,
             @RequestParam(defaultValue = "20") int limit) {
-        return tasks.listPublicTaskEvents(tenant.tenantId(), tenant.actorId(),
-                sessionId, taskId, after, limit);
+        SessionPrincipal principal = tenant.subjectPrincipal();
+        return principal == null
+                ? tasks.listPublicTaskEvents(tenant.tenantId(),
+                        tenant.actorId(), sessionId, taskId, after, limit)
+                : tasks.listPublicTaskEvents(principal, sessionId, taskId,
+                        after, limit);
     }
 
     @PostMapping("/{sessionId}/tasks/{taskId}/cancel")
@@ -326,9 +400,12 @@ public class PublicAgentController {
             TenantContext tenant, @PathVariable String sessionId,
             @PathVariable String taskId,
             @RequestHeader("Idempotency-Key") String idempotencyKey) {
-        return ResponseEntity.accepted().body(taskCancels.cancelPublic(
-                tenant.tenantId(), tenant.actorId(), idempotencyKey,
-                sessionId, taskId));
+        SessionPrincipal principal = tenant.subjectPrincipal();
+        return ResponseEntity.accepted().body(principal == null
+                ? taskCancels.cancelPublic(tenant.tenantId(),
+                        tenant.actorId(), idempotencyKey, sessionId, taskId)
+                : taskCancels.cancelPublic(principal, idempotencyKey,
+                        sessionId, taskId));
     }
 
     private static long parseSequence(String header, long fallback) {
@@ -350,9 +427,12 @@ public class PublicAgentController {
     private ResponseEntity<PublicCommandOperation> operation(
             TenantContext tenant, String idempotencyKey, String sessionId,
             OperationKind kind) {
-        return ResponseEntity.accepted().body(lifecycle.admitPublic(
-                tenant.tenantId(), tenant.actorId(), idempotencyKey,
-                sessionId, kind));
+        SessionPrincipal principal = tenant.subjectPrincipal();
+        return ResponseEntity.accepted().body(principal == null
+                ? lifecycle.admitPublic(tenant.tenantId(), tenant.actorId(),
+                        idempotencyKey, sessionId, kind)
+                : lifecycle.admitPublic(principal, idempotencyKey, sessionId,
+                        kind));
     }
 
     private static ResponseEntity<PublicSession> mutation(
