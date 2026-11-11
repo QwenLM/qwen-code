@@ -1441,10 +1441,10 @@ export default {
     'Invalid PR reference. Usage: /pr <number | url>',
   'Could not resolve PR #{{number}} via gh. Pass the full PR URL instead.':
     'Could not resolve PR #{{number}} via gh. Pass the full PR URL instead.',
-  'Bound PR #{{number}} to this session.':
-    'Bound PR #{{number}} to this session.',
-  'PR #{{number}} is already bound to this session.':
-    'PR #{{number}} is already bound to this session.',
+  'Bound PR #{{number}} to this session: {{url}}':
+    'Bound PR #{{number}} to this session: {{url}}',
+  'PR #{{number}} is already bound to this session: {{url}}':
+    'PR #{{number}} is already bound to this session: {{url}}',
   'Failed to bind PR #{{number}}.': 'Failed to bind PR #{{number}}.',
   'Failed to bind PR #{{number}}: {{message}}':
     'Failed to bind PR #{{number}}: {{message}}',

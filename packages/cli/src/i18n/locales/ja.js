@@ -761,10 +761,10 @@ export default {
     '無効な PR 参照です。使用法: /pr <番号 | url>',
   'Could not resolve PR #{{number}} via gh. Pass the full PR URL instead.':
     'gh で PR #{{number}} を解決できませんでした。完全な PR URL を指定してください。',
-  'Bound PR #{{number}} to this session.':
-    'PR #{{number}} をこのセッションにバインドしました。',
-  'PR #{{number}} is already bound to this session.':
-    'PR #{{number}} はすでにこのセッションにバインドされています。',
+  'Bound PR #{{number}} to this session: {{url}}':
+    'PR #{{number}} をこのセッションにバインドしました：{{url}}',
+  'PR #{{number}} is already bound to this session: {{url}}':
+    'PR #{{number}} はすでにこのセッションにバインドされています：{{url}}',
   'Failed to bind PR #{{number}}.': 'PR #{{number}} のバインドに失敗しました。',
   'Failed to bind PR #{{number}}: {{message}}':
     'PR #{{number}} のバインドに失敗しました: {{message}}',

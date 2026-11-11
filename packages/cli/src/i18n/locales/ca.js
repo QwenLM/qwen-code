@@ -1044,10 +1044,10 @@ export default {
     'Referència de PR no vàlida. Ús: /pr <número | url>',
   'Could not resolve PR #{{number}} via gh. Pass the full PR URL instead.':
     'No s’ha pogut resoldre el PR #{{number}} mitjançant gh. Indiqueu l’URL complet del PR.',
-  'Bound PR #{{number}} to this session.':
-    'PR #{{number}} vinculat a aquesta sessió.',
-  'PR #{{number}} is already bound to this session.':
-    'El PR #{{number}} ja està vinculat a aquesta sessió.',
+  'Bound PR #{{number}} to this session: {{url}}':
+    'PR #{{number}} vinculat a aquesta sessió: {{url}}',
+  'PR #{{number}} is already bound to this session: {{url}}':
+    'El PR #{{number}} ja està vinculat a aquesta sessió: {{url}}',
   'Failed to bind PR #{{number}}.': 'No s’ha pogut vincular el PR #{{number}}.',
   'Failed to bind PR #{{number}}: {{message}}':
     'No s’ha pogut vincular el PR #{{number}}: {{message}}',

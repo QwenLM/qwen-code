@@ -1158,9 +1158,12 @@ function SessionOverviewPanelInner({
 
   // Supplementary PR registration — mirrors saveRename's workspace routing
   // (current session → own session actions; other sessions → the owning
-  // workspace's metadata route; cwd-less cards → the global route). Unlike
-  // saveRename there is no standalone branch: a standalone card's gate
-  // (canRenameCard) disables the button, so the dialog never opens for one.
+  // workspace's metadata route; cwd-less cards → the global route). Standalone
+  // cards are excluded by the button gate (openSessionContext), not by
+  // canRenameCard — which is true for them — since their metadata route only
+  // accepts displayName.
+  const bindPrTargetRef = useRef(bindPrTarget);
+  bindPrTargetRef.current = bindPrTarget;
   const submitBindPr = useCallback(
     (pr: BindSessionPrPayload) => {
       const card = bindPrTarget;
@@ -1180,7 +1183,11 @@ function SessionOverviewPanelInner({
               pr,
             });
           }
-          setBindPrTarget(null);
+          // A late completion must not close a dialog the user has since
+          // opened for another card.
+          if (bindPrTargetRef.current === card) {
+            setBindPrTarget(null);
+          }
           if (ownerCwd) {
             sessionCatalogController.refreshWorkspace(ownerCwd);
           }
@@ -1189,11 +1196,17 @@ function SessionOverviewPanelInner({
           if (ownerCwd) {
             sessionCatalogController.refreshWorkspace(ownerCwd);
           }
-          setBindPrError(
+          const message =
             err instanceof Error
               ? `${t('sessionsOverview.bindPrFailed')}: ${err.message}`
-              : t('sessionsOverview.bindPrFailed'),
-          );
+              : t('sessionsOverview.bindPrFailed');
+          // Surface the failure on the still-open dialog, or on the panel's
+          // error row if the user already dismissed it.
+          if (bindPrTargetRef.current === card) {
+            setBindPrError(message);
+          } else {
+            setActionError(message);
+          }
         }
       });
     },
@@ -1698,24 +1711,25 @@ function SessionOverviewPanelInner({
                   <PenLineIcon className="size-4" />
                 </Button>
               )}
-              {(isCurrentCard(card) || sessionMetadataEnabled) && (
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon-xs"
-                  className="shrink-0 text-muted-foreground hover:text-foreground"
-                  disabled={batchBusy || busy || !canRename}
-                  onClick={() => startBindPr(card)}
-                  aria-label={t('sessionsOverview.bindPr')}
-                  title={
-                    canRename
-                      ? t('sessionsOverview.bindPr')
-                      : t('sessionsOverview.actionUnavailable')
-                  }
-                >
-                  <GitPullRequestIcon className="size-4" />
-                </Button>
-              )}
+              {(isCurrentCard(card) || sessionMetadataEnabled) &&
+                !openSessionContext(card) && (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon-xs"
+                    className="shrink-0 text-muted-foreground hover:text-foreground"
+                    disabled={batchBusy || busy || !canRename}
+                    onClick={() => startBindPr(card)}
+                    aria-label={t('sessionsOverview.bindPr')}
+                    title={
+                      canRename
+                        ? t('sessionsOverview.bindPr')
+                        : t('sessionsOverview.actionUnavailable')
+                    }
+                  >
+                    <GitPullRequestIcon className="size-4" />
+                  </Button>
+                )}
               {(canExportSessions || canExportWorkspaceSessions) && (
                 <Button
                   type="button"
@@ -2287,7 +2301,7 @@ function SessionOverviewPanelInner({
 
       {bindPrTarget && (
         <BindSessionPrDialog
-          workspaceCwd={bindPrTarget.workspaceCwd || primaryCwd || ''}
+          workspaceCwd={bindPrTarget.workspaceCwd ?? ''}
           busy={busyIds.has(getSessionIdentity(bindPrTarget))}
           error={bindPrError}
           onSubmit={submitBindPr}

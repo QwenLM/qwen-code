@@ -1474,6 +1474,24 @@ describe('fetchPullRequestByReference', () => {
     });
   });
 
+  it('classifies a missing working directory as failed without spawning gh', async () => {
+    // A missing cwd spawns the same ENOENT as a missing binary; the
+    // pre-check keeps 'unavailable' meaning "gh is not installed".
+    mockGhSuccess({
+      number: 77,
+      url: 'https://github.com/o/r/pull/77',
+      state: 'OPEN',
+    });
+    // Outside any repository so findGitRoot cannot resolve the missing cwd
+    // up to an existing parent repo.
+    const missing = path.join(os.tmpdir(), 'github-prs-by-ref-missing-cwd');
+    expect(await fetchPullRequestByReference(missing, '77')).toEqual({
+      status: 'error',
+      reason: 'failed',
+    });
+    expect(mockExecFile).not.toHaveBeenCalled();
+  });
+
   it('fails closed on an unrecognizable state', async () => {
     mockGhSuccess({
       number: 77,

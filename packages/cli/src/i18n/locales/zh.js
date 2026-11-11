@@ -1373,9 +1373,10 @@ export default {
     '无效的 PR 引用。用法：/pr <编号 | url>',
   'Could not resolve PR #{{number}} via gh. Pass the full PR URL instead.':
     '无法通过 gh 解析 PR #{{number}}。请改用完整 PR URL。',
-  'Bound PR #{{number}} to this session.': '已将 PR #{{number}} 绑定到本会话。',
-  'PR #{{number}} is already bound to this session.':
-    'PR #{{number}} 已绑定到本会话。',
+  'Bound PR #{{number}} to this session: {{url}}':
+    '已将 PR #{{number}} 绑定到本会话：{{url}}',
+  'PR #{{number}} is already bound to this session: {{url}}':
+    'PR #{{number}} 已绑定到本会话：{{url}}',
   'Failed to bind PR #{{number}}.': '绑定 PR #{{number}} 失败。',
   'Failed to bind PR #{{number}}: {{message}}':
     '绑定 PR #{{number}} 失败：{{message}}',

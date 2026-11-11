@@ -234,12 +234,46 @@ describe('BindSessionPrDialog', () => {
     expect(document.querySelector('[role="alert"]')).not.toBeNull();
   });
 
-  it('rejects a URL whose number exceeds the bound', async () => {
+  it('rejects a URL whose number is not a safe integer', async () => {
     const { onSubmit } = await render();
-    await type('https://github.com/o/r/pull/1234567890');
+    await type('https://github.com/o/r/pull/99999999999999999999');
     await submit();
     expect(onSubmit).not.toHaveBeenCalled();
     expect(document.querySelector('[role="alert"]')).not.toBeNull();
+  });
+
+  it('strips URL credentials from the submitted payload', async () => {
+    const { onSubmit } = await render();
+    await type(
+      'https://x-access-token:ghs_abc123@github.com/QwenLM/qwen-code/pull/16865',
+    );
+    await submit();
+    expect(onSubmit).toHaveBeenCalledWith({
+      number: 16865,
+      url: 'https://github.com/QwenLM/qwen-code/pull/16865',
+    });
+  });
+
+  it('rejects an uppercase /PULL/ spelling like the core canonicalizer', async () => {
+    const { onSubmit } = await render();
+    await type('https://github.com/QwenLM/qwen-code/PULL/16865');
+    await submit();
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(workspaceGitHubPullRequests).not.toHaveBeenCalled();
+    expect(document.querySelector('[role="alert"]')).not.toBeNull();
+  });
+
+  it('surfaces install guidance when the daemon reports gh unavailable', async () => {
+    workspaceGitHubPullRequests.mockRejectedValue({
+      body: { code: 'github_cli_unavailable' },
+    });
+    const { onSubmit } = await render();
+    await type('16865');
+    await submit();
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain(
+      'gh auth login',
+    );
   });
 
   it('shows the daemon error and blocks a typed submission while busy', async () => {
@@ -321,6 +355,41 @@ describe('BindSessionPrDialog', () => {
       resolveList(LIST_RESPONSE);
     });
     expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it('keeps the dialog dismissible while the list resolves', async () => {
+    let resolveList!: (value: typeof LIST_RESPONSE) => void;
+    workspaceGitHubPullRequests.mockReturnValue(
+      new Promise<typeof LIST_RESPONSE>((resolve) => {
+        resolveList = resolve;
+      }),
+    );
+    const { onClose } = await render();
+    await type('16865');
+    await submit();
+    // No modal trap: Cancel stays enabled during a slow list fetch.
+    const cancel = Array.from(
+      document.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((button) => button.textContent?.trim() === 'cancel');
+    expect(cancel).not.toBeUndefined();
+    expect(cancel!.disabled).toBe(false);
+    act(() => cancel!.click());
+    expect(onClose).toHaveBeenCalled();
+    await act(async () => {
+      resolveList(LIST_RESPONSE);
+    });
+  });
+
+  it('marks the form busy and keeps Cancel enabled during the bind write', async () => {
+    const { onClose } = await render({ busy: true });
+    await type('https://github.com/QwenLM/qwen-code/pull/16865');
+    expect(input().form!.getAttribute('aria-busy')).toBe('true');
+    const cancel = Array.from(
+      document.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((button) => button.textContent?.trim() === 'cancel');
+    expect(cancel!.disabled).toBe(false);
+    act(() => cancel!.click());
+    expect(onClose).toHaveBeenCalled();
   });
 
   it('does not submit an IME confirmation Enter', async () => {

@@ -124,7 +124,10 @@ export const prCommand: SlashCommand = {
 
     const resolved = await fetchPullRequestByReference(
       config.getTargetDir(),
-      inputUrl ?? String(number),
+      // Hand gh the rebuilt canonical URL, not the raw input: a /files,
+      // query, or credential-bearing spelling must not reach the child
+      // argv or its logs.
+      inputUrl ? (pullRequestViewUrl(inputUrl) ?? inputUrl) : String(number),
     );
     let binding: { number: number; url: string; state?: SessionPrState };
     if (resolved.status === 'pr') {
@@ -180,11 +183,15 @@ export const prCommand: SlashCommand = {
           // catalog-mark failure must not read as a bind failure (mirrors
           // the shell binder). The next catalog refresh picks it up.
         }
+        // The URL is part of the message: a bare number resolves in the
+        // session's target-directory repository, so printing only the
+        // number would hide a wrong-repository bind (there is no unbind).
         return {
           type: 'message',
           messageType: 'info',
-          content: t('Bound PR #{{number}} to this session.', {
+          content: t('Bound PR #{{number}} to this session: {{url}}', {
             number: String(binding.number),
+            url: binding.url,
           }),
         };
       }
@@ -192,9 +199,13 @@ export const prCommand: SlashCommand = {
         return {
           type: 'message',
           messageType: 'info',
-          content: t('PR #{{number}} is already bound to this session.', {
-            number: String(binding.number),
-          }),
+          content: t(
+            'PR #{{number}} is already bound to this session: {{url}}',
+            {
+              number: String(binding.number),
+              url: binding.url,
+            },
+          ),
         };
       }
       return {

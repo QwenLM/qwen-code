@@ -2150,10 +2150,10 @@ export default {
     'Référence de PR invalide. Utilisation : /pr <numéro | url>',
   'Could not resolve PR #{{number}} via gh. Pass the full PR URL instead.':
     'Impossible de résoudre la PR #{{number}} via gh. Indiquez l’URL complète de la PR.',
-  'Bound PR #{{number}} to this session.':
-    'PR #{{number}} liée à cette session.',
-  'PR #{{number}} is already bound to this session.':
-    'La PR #{{number}} est déjà liée à cette session.',
+  'Bound PR #{{number}} to this session: {{url}}':
+    'PR #{{number}} liée à cette session : {{url}}',
+  'PR #{{number}} is already bound to this session: {{url}}':
+    'La PR #{{number}} est déjà liée à cette session : {{url}}',
   'Failed to bind PR #{{number}}.': 'Échec de la liaison de la PR #{{number}}.',
   'Failed to bind PR #{{number}}: {{message}}':
     'Échec de la liaison de la PR #{{number}} : {{message}}',

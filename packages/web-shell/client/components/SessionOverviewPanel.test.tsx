@@ -3856,6 +3856,118 @@ describe('SessionOverviewPanel', () => {
     );
   });
 
+  it('hides Bind PR on a non-current card when metadata mutation is unavailable', async () => {
+    connectionState.sessionId = 'someone-else';
+    connectionState.capabilities = { features: [], workspaceCwd: '/w' };
+    sessionsState.sessions = [session('s1', { displayName: 'One' })];
+    render();
+    await flushAsync();
+    const row = rows().find((tr) => tr.textContent?.includes('One'))!;
+    expect(rowActionButton(row, 'Bind PR')).toBeNull();
+  });
+
+  it('refuses number resolution for a cwd-less legacy card', async () => {
+    connectionState.sessionId = 'current';
+    connectionState.workspaceCwd = '';
+    connectionState.capabilities = {
+      features: ['workspace_session_metadata'],
+      workspaceCwd: '',
+    };
+    sessionsState.sessions = [
+      session('legacy', { workspaceCwd: '', displayName: 'Legacy' }),
+    ];
+    const prList = vi.fn(async () => ({
+      v: 1,
+      workspaceCwd: '',
+      available: true,
+      pullRequests: [],
+    }));
+    workspaceClient.workspaceByCwd.mockImplementation((cwd: string) => ({
+      listWorkspaceSessionsPage: vi.fn(async () => ({
+        sessions: otherWorkspaceSessions[cwd] ?? [],
+      })),
+      updateSessionMetadata: vi.fn(async () => ({})),
+      workspaceGitHubPullRequests: prList,
+    }));
+    render();
+    act(() => click(rowActionButton(rows()[0]!, 'Bind PR')));
+    const input = document.querySelector(
+      'input[aria-label="Bind PR"]',
+    ) as HTMLInputElement;
+    act(() => setInputValue(input, '42'));
+    act(() =>
+      input
+        .closest('form')!
+        .dispatchEvent(
+          new Event('submit', { bubbles: true, cancelable: true }),
+        ),
+    );
+    await flushAsync();
+    // The card's own (empty) cwd is passed to the dialog, so it refuses the
+    // lookup and asks for the URL instead of resolving against a workspace.
+    expect(prList).not.toHaveBeenCalled();
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain(
+      'full PR URL',
+    );
+  });
+
+  it('does not close another card dialog when a bind completes late', async () => {
+    connectionState.sessionId = 's1';
+    connectionState.capabilities = {
+      features: ['workspace_session_metadata'],
+      workspaceCwd: '/w',
+    };
+    sessionsState.sessions = [
+      session('s1', { displayName: 'One' }),
+      session('s2', { displayName: 'Two' }),
+    ];
+    let resolveBind!: (value: { prs: never[] }) => void;
+    workspaceActions.bindSessionPr.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveBind = resolve;
+        }),
+    );
+    render();
+    await flushAsync();
+    const one = rows().find((tr) => tr.textContent?.includes('One'))!;
+    act(() => click(rowActionButton(one, 'Bind PR')));
+    const input = document.querySelector(
+      'input[aria-label="Bind PR"]',
+    ) as HTMLInputElement;
+    act(() =>
+      setInputValue(input, 'https://github.com/QwenLM/qwen-code/pull/1'),
+    );
+    act(() =>
+      input
+        .closest('form')!
+        .dispatchEvent(
+          new Event('submit', { bubbles: true, cancelable: true }),
+        ),
+    );
+    await flushAsync();
+    // Dismiss One's dialog while its bind is still in flight, then open Two's.
+    const cancel = Array.from(
+      document.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((button) => button.textContent?.trim() === 'cancel');
+    act(() => click(cancel!));
+    await flushAsync();
+    const two = rows().find((tr) => tr.textContent?.includes('Two'))!;
+    act(() => click(rowActionButton(two, 'Bind PR')));
+    await flushAsync();
+    expect(
+      document.querySelector('input[aria-label="Bind PR"]'),
+    ).not.toBeNull();
+    // One's bind now completes; it must not close Two's dialog.
+    await act(async () => {
+      resolveBind({ prs: [] });
+    });
+    await flushAsync();
+    expect(
+      document.querySelector('input[aria-label="Bind PR"]'),
+    ).not.toBeNull();
+  });
+
   it('exports a session as an html download', async () => {
     connectionState.capabilities = {
       features: ['session_export'],
@@ -4646,6 +4758,28 @@ describe('SessionOverviewPanel standalone sessions', () => {
       expect(call.value.exportSession).not.toHaveBeenCalled();
     }
     expect(anchorClick).toHaveBeenCalled();
+  });
+
+  it('does not offer Bind PR on a standalone card', async () => {
+    useConversationsRuntimeCapabilities();
+    standalonePages = [
+      {
+        sessions: [
+          standaloneSession('st1', {
+            workspaceCwd: '/conv',
+            displayName: 'Solo',
+            updatedAt: '2026-07-06T11:00:00.000Z',
+          }),
+        ],
+      },
+    ];
+    render();
+    await flushAsync();
+    const row = rows().find((tr) => tr.textContent?.includes('Solo'))!;
+    // Rename is available on the standalone card, but Bind PR is not: the
+    // standalone metadata route only accepts displayName.
+    expect(rowActionButton(row, 'Rename')).not.toBeNull();
+    expect(rowActionButton(row, 'Bind PR')).toBeNull();
   });
 
   it('routes standalone archive through the standalone client route', async () => {

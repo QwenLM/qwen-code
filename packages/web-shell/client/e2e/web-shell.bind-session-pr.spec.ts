@@ -158,3 +158,63 @@ test('binds another session through the workspace-scoped route @smoke', async ({
   );
   expect(patches[0].body).toMatchObject({ pr: { number: 16865, url: prUrl } });
 });
+
+// The mock's workspace-ownership guard must reject a bind addressed through
+// a workspace the session does not belong to, mirroring production's
+// workspace_mismatch. Driven with a raw PATCH because the UI always addresses
+// a session through its own workspace.
+test('rejects a bind routed through the wrong workspace @smoke', async ({
+  page,
+}) => {
+  const result = await page.evaluate(async () => {
+    const res = await fetch(
+      `/workspaces/${encodeURIComponent('/tmp/not-the-session-workspace')}/session/bind-current/metadata`,
+      {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          pr: {
+            number: 16865,
+            url: 'https://github.com/example/repo/pull/16865',
+          },
+        }),
+      },
+    );
+    return { status: res.status, body: await res.json() };
+  });
+  expect(result.status).toBe(400);
+  expect(result.body.code).toBe('workspace_mismatch');
+  const session = daemon.scenario.sessions.find(
+    (s) => s.sessionId === 'bind-current',
+  );
+  expect(session?.prs ?? []).toHaveLength(0);
+});
+
+test('rejects a bind whose workspace segment cannot be decoded @smoke', async ({
+  page,
+}) => {
+  // %E0%A4%A is an invalid UTF-8 percent-sequence: decodeURIComponent throws,
+  // and the guard must fail closed rather than treat it as an unscoped route.
+  const result = await page.evaluate(async () => {
+    const res = await fetch(
+      '/workspaces/%E0%A4%A/session/bind-current/metadata',
+      {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          pr: {
+            number: 16865,
+            url: 'https://github.com/example/repo/pull/16865',
+          },
+        }),
+      },
+    );
+    return { status: res.status, body: await res.json() };
+  });
+  expect(result.status).toBe(400);
+  expect(result.body.code).toBe('workspace_mismatch');
+  const session = daemon.scenario.sessions.find(
+    (s) => s.sessionId === 'bind-current',
+  );
+  expect(session?.prs ?? []).toHaveLength(0);
+});

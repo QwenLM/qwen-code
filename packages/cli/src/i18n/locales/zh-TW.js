@@ -1286,9 +1286,10 @@ export default {
     '無效的 PR 引用。用法：/pr <編號 | url>',
   'Could not resolve PR #{{number}} via gh. Pass the full PR URL instead.':
     '無法透過 gh 解析 PR #{{number}}。請改用完整 PR URL。',
-  'Bound PR #{{number}} to this session.': '已將 PR #{{number}} 綁定到本會話。',
-  'PR #{{number}} is already bound to this session.':
-    'PR #{{number}} 已綁定到本會話。',
+  'Bound PR #{{number}} to this session: {{url}}':
+    '已將 PR #{{number}} 綁定到本會話：{{url}}',
+  'PR #{{number}} is already bound to this session: {{url}}':
+    'PR #{{number}} 已綁定到本會話：{{url}}',
   'Failed to bind PR #{{number}}.': '綁定 PR #{{number}} 失敗。',
   'Failed to bind PR #{{number}}: {{message}}':
     '綁定 PR #{{number}} 失敗：{{message}}',

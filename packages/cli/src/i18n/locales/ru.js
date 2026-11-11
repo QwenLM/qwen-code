@@ -1009,10 +1009,10 @@ export default {
     'Недопустимая ссылка на PR. Использование: /pr <номер | url>',
   'Could not resolve PR #{{number}} via gh. Pass the full PR URL instead.':
     'Не удалось определить PR #{{number}} через gh. Укажите полный URL PR.',
-  'Bound PR #{{number}} to this session.':
-    'PR #{{number}} привязан к этой сессии.',
-  'PR #{{number}} is already bound to this session.':
-    'PR #{{number}} уже привязан к этой сессии.',
+  'Bound PR #{{number}} to this session: {{url}}':
+    'PR #{{number}} привязан к этой сессии: {{url}}',
+  'PR #{{number}} is already bound to this session: {{url}}':
+    'PR #{{number}} уже привязан к этой сессии: {{url}}',
   'Failed to bind PR #{{number}}.': 'Не удалось привязать PR #{{number}}.',
   'Failed to bind PR #{{number}}: {{message}}':
     'Не удалось привязать PR #{{number}}: {{message}}',

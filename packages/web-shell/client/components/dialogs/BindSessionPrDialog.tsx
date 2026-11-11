@@ -27,15 +27,51 @@ interface BindSessionPrDialogProps {
   onClose: () => void;
 }
 
-// Same shape GitWorktreeService.parsePRReference accepts on the CLI side:
-// any host, optional subpath/query/fragment after /pull/<N>. The number
-// bound mirrors the CLI's bare-number pattern so an over-long number cannot
-// parse into an unsafe integer. Group 1 captures the canonical
-// /pull/<N> prefix so a /files or query spelling stores the same sidecar
-// key as a later canonical re-bind (mirrors pullRequestViewUrl).
-const PR_URL_PATTERN =
-  /^(https?:\/\/[^/]+\/[^/]+\/[^/]+\/pull\/([1-9]\d{0,8}))(?:\/[^?#]*)?(?:[?#].*)?$/i;
+// Mirrors the core pullRequestViewUrl rules without importing it (that
+// module pulls node:fs into the client bundle): http(s), a [\w.-] owner/repo,
+// lowercase /pull/<n>, optional subpath or .diff/.patch suffix. Rebuilding
+// from the parsed URL drops userinfo (credentials) and query/fragment, and
+// /PULL/ fails closed to the invalid-input message like every other core
+// canonicalizer. The safe-integer check keeps an over-long number out.
+const PR_URL_PATH =
+  /^\/([\w.-]+)\/([\w.-]+)\/pull\/(\d+)(?:\/|\.diff$|\.patch$|$)/;
 const BARE_NUMBER_PATTERN = /^[1-9]\d{0,8}$/;
+
+function canonicalPrUrl(
+  input: string,
+): { number: number; url: string } | undefined {
+  let parsed: URL;
+  try {
+    parsed = new URL(input);
+  } catch {
+    return undefined;
+  }
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+    return undefined;
+  }
+  const match = PR_URL_PATH.exec(parsed.pathname);
+  const number = match ? Number(match[3]) : Number.NaN;
+  if (!match || !Number.isSafeInteger(number) || number < 1) return undefined;
+  const [, owner, repo] = match;
+  return {
+    number,
+    url: `${parsed.protocol}//${parsed.host}/${owner}/${repo}/pull/${number}`,
+  };
+}
+
+// The daemon answers a missing/unauthenticated gh with this code; surface the
+// install guidance instead of "paste the URL" (a URL bind would persist a
+// state the refresh sweep can never resolve without gh). Mirrors the
+// module-private errorCode() in GitHubPrsDialog.tsx.
+function daemonErrorCode(error: unknown): unknown {
+  const body =
+    error && typeof error === 'object'
+      ? (error as { body?: unknown }).body
+      : undefined;
+  return body && typeof body === 'object'
+    ? (body as { code?: unknown }).code
+    : undefined;
+}
 
 /**
  * Supplementary PR registration: binds an existing PR the automatic paths
@@ -74,9 +110,9 @@ export function BindSessionPrDialog({
     const input = value.trim().replace(/^#/, '');
     setLocalError(undefined);
 
-    const urlMatch = PR_URL_PATTERN.exec(input);
-    if (urlMatch?.[1] && urlMatch[2]) {
-      onSubmit({ number: Number(urlMatch[2]), url: urlMatch[1] });
+    const canonical = canonicalPrUrl(input);
+    if (canonical) {
+      onSubmit(canonical);
       return;
     }
 
@@ -101,9 +137,13 @@ export function BindSessionPrDialog({
           .workspaceGitHubPullRequests();
         if (!aliveRef.current) return;
         setPrList(list);
-      } catch {
+      } catch (err) {
         if (aliveRef.current) {
-          setLocalError(t('sessionsOverview.bindPrListFailed'));
+          setLocalError(
+            daemonErrorCode(err) === 'github_cli_unavailable'
+              ? t('githubPrs.cliUnavailable')
+              : t('sessionsOverview.bindPrListFailed'),
+          );
         }
         return;
       } finally {
@@ -132,15 +172,18 @@ export function BindSessionPrDialog({
   const shownError = localError ?? error;
   const disabled = busy || resolving || !value.trim();
 
+  // Both phases stay dismissible: the aliveRef guard already prevents a
+  // closed dialog from submitting, so trapping the user behind a slow list
+  // fetch would be strictly worse. aria-busy conveys the in-flight state.
   return (
     <DialogShell
       title={t('sessionsOverview.bindPr')}
       size="sm"
-      dismissible={!resolving}
       onClose={onClose}
     >
       <form
         className="flex flex-col gap-4"
+        aria-busy={busy || resolving}
         onSubmit={(event) => {
           event.preventDefault();
           if (!disabled) void submit();
@@ -173,12 +216,7 @@ export function BindSessionPrDialog({
           </p>
         )}
         <div className="flex justify-end gap-2">
-          <Button
-            type="button"
-            variant="outline"
-            disabled={resolving}
-            onClick={onClose}
-          >
+          <Button type="button" variant="outline" onClick={onClose}>
             {t('common.cancel')}
           </Button>
           <Button type="submit" disabled={disabled}>

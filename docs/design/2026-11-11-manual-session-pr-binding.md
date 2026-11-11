@@ -68,7 +68,11 @@ itself (TUI + Web Shell) and in the Web Shell session overview.
   command's `gh` resolution and the dialog's PR list are GitHub-specific.
 - No repo-identity gate on manual binding: the user names the PR, so `gh` is
   used to resolve the canonical URL/state, not to prove attribution (unlike
-  the shell post-hook, which must prove the session created the PR).
+  the shell post-hook, which must prove the session created the PR). This
+  holds fully for the URL form, which names its own repository; a bare number
+  is resolved in the session's target-directory repository, so the success
+  and already-bound messages print the resolved URL to make a
+  wrong-repository bind visible (there is no unbind path).
 
 ## Proposed solution
 
@@ -117,10 +121,12 @@ Behavior:
    already wires that callback to `qwen/notify/session/pr-binding`, so the
    daemon marks the session catalog and live-state clients refetch the
    badge (~2s), identical to the automatic create binding.
-5. **Result messages** — success (`Bound PR #N to this session.`),
-   already-bound (same URL keeps position and `createdAt`; an explicit
-   gh-resolved state repairs a stateless entry in place), or a
-   resolution/usage error.
+5. **Result messages** — success (`Bound PR #N to this session: <url>`),
+   already-bound (`PR #N is already bound to this session: <url>`; same URL
+   keeps position and `createdAt`; an explicit gh-resolved state repairs a
+   stateless entry in place), or a resolution/usage error. Both carry the
+   resolved URL so a bare number that landed in the wrong repository is
+   visible to the user.
 
 `source: 'create'` matches what the existing manual REST/ACP paths stamp;
 `upsertSessionPrs` never downgrades a stronger persisted provenance
@@ -236,6 +242,12 @@ language instead of the daemon's process language).
 - The command runs `gh` in the session's target directory; in a checkout
   whose origin gh cannot resolve, number resolution fails and the user
   must paste the URL. This is the documented degradation, not a bug.
+- A bare number can also resolve _successfully_ against the wrong
+  repository: the target-directory checkout may not be where the work
+  happened (the internal-`cd` case this feature exists for). The bind is
+  then same-repository from the refresh sweep's point of view and stays
+  fresh. The success/already-bound messages therefore print the resolved
+  URL so the user can notice; there is no unbind path (below).
 - The sidecar cap (10) and provenance eviction apply unchanged; a manual
   bind can evict a weaker `review` entry, exactly like a REST PATCH today.
 - The dialog's number lookup depends on the workspace PR list cache

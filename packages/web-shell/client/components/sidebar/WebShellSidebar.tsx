@@ -2849,9 +2849,10 @@ export function WebShellSidebar({
     getIdentityForSession,
     workspace.client,
   ]);
-  const canRenameSession = useCallback(
+  // The metadata-mutation capability, independent of any one menu item, so
+  // Bind PR can gate on its own `bindPr` key rather than riding on `rename`.
+  const canMutateSessionMetadata = useCallback(
     (session: DaemonSessionSummary) => {
-      if (!sessionActionItems.has('rename')) return false;
       const scope = resolveSessionWorkspaceScope(session);
       if (isCurrentSession(session) && isMutableSessionScope(scope)) {
         return true;
@@ -2866,9 +2867,13 @@ export function WebShellSidebar({
       isCurrentSession,
       isMutableSessionScope,
       resolveSessionWorkspaceScope,
-      sessionActionItems,
       workspaceSessionMetadataEnabled,
     ],
+  );
+  const canRenameSession = useCallback(
+    (session: DaemonSessionSummary) =>
+      sessionActionItems.has('rename') && canMutateSessionMetadata(session),
+    [canMutateSessionMetadata, sessionActionItems],
   );
   const canShowDeleteSession = useCallback(
     (session: DaemonSessionSummary) =>
@@ -4009,8 +4014,11 @@ export function WebShellSidebar({
   // Supplementary PR registration — mirrors saveRename's workspace routing
   // (current session → own session actions; other sessions → the owning
   // workspace's metadata route; cwd-less rows → the global route). Unlike
-  // saveRename there is no standalone branch: standalone rows never show
-  // the item, since their metadata route only accepts displayName.
+  // saveRename there is no standalone branch: standalone rows (including
+  // recents rows) never show the item, since their metadata route only
+  // accepts displayName.
+  const bindPrCandidateRef = useRef(bindPrCandidate);
+  bindPrCandidateRef.current = bindPrCandidate;
   const submitBindPr = useCallback(
     (pr: BindSessionPrPayload) => {
       const session = bindPrCandidate;
@@ -4028,18 +4036,26 @@ export function WebShellSidebar({
           : workspace.client.updateSessionMetadata(sessionId, { pr });
       bind
         .then(() => {
-          setBindPrCandidate(null);
+          // A late completion must not close a dialog the user has since
+          // opened for another session.
+          if (bindPrCandidateRef.current === session) {
+            setBindPrCandidate(null);
+          }
           if (workspaceCwd) {
             sessionCatalogController.refreshWorkspace(workspaceCwd);
           }
           bumpWorkspaceReload();
         })
         .catch((err: unknown) => {
-          setBindPrError(
-            err instanceof Error
-              ? `${t('sessionsOverview.bindPrFailed')}: ${err.message}`
-              : t('sessionsOverview.bindPrFailed'),
-          );
+          // Only surface the error on the still-open dialog; if the user
+          // dismissed it mid-write the failure is dropped (they cancelled).
+          if (bindPrCandidateRef.current === session) {
+            setBindPrError(
+              err instanceof Error
+                ? `${t('sessionsOverview.bindPrFailed')}: ${err.message}`
+                : t('sessionsOverview.bindPrFailed'),
+            );
+          }
           if (workspaceCwd) {
             sessionCatalogController.refreshWorkspace(workspaceCwd);
           }
@@ -5781,11 +5797,15 @@ export function WebShellSidebar({
       const showRename = standalone
         ? sessionActionItems.has('rename')
         : canRenameSession(session);
-      // PR binding shares rename's metadata-mutation gate and the host's
-      // items whitelist; standalone sessions are excluded because their
-      // metadata route only accepts displayName.
+      // PR binding gates on the metadata-mutation capability and its own
+      // `bindPr` item (not rename's); standalone sessions — including recents
+      // rows, where the `standalone` adapter param is undefined — are excluded
+      // because their metadata route only accepts displayName.
       const showBindPr =
-        !standalone && showRename && sessionActionItems.has('bindPr');
+        !standalone &&
+        !recent?.isStandalone &&
+        sessionActionItems.has('bindPr') &&
+        canMutateSessionMetadata(session);
       const activeExportScope = getActiveExportScope(session);
       const showExport = standalone
         ? sessionActionItems.has('export')
@@ -6298,6 +6318,7 @@ export function WebShellSidebar({
       canShowDeleteSession,
       canOrganizeSession,
       canRenameSession,
+      canMutateSessionMetadata,
       canUnarchiveSession,
       canMutateSessionArchive,
       canOpenSplitView,
@@ -7489,9 +7510,7 @@ export function WebShellSidebar({
             busy={bindPrSubmitting}
             error={bindPrError}
             onSubmit={submitBindPr}
-            onClose={() => {
-              if (!bindPrSubmitting) setBindPrCandidate(null);
-            }}
+            onClose={() => setBindPrCandidate(null)}
           />
         )}
         {workspaceRenameCandidate && (

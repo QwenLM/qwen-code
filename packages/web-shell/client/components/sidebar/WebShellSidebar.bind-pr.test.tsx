@@ -211,7 +211,7 @@ describe('WebShellSidebar bind PR', () => {
     expect(document.querySelector('input[aria-label="Bind PR"]')).toBeNull();
   });
 
-  it('binds another session through the workspace metadata route', async () => {
+  it('binds another session through the workspace metadata route, not the global or current-session route', async () => {
     connection.sessionId = 'current';
     active.sessions = [makeSession('s1')];
     active.data = active.sessions;
@@ -223,12 +223,30 @@ describe('WebShellSidebar bind PR', () => {
     await flushSidebar();
     await typeAndSubmit(PR_URL);
 
+    // The bind must go through the session's workspace-scoped client: not
+    // the current-session action and not the global (unscoped) route.
+    expect(workspace.client.workspaceByCwd).toHaveBeenCalledWith(
+      '/tmp/project',
+    );
     const scoped = workspace.client.workspaceByCwd.mock.results.at(-1)!.value;
     expect(scoped.updateSessionMetadata).toHaveBeenCalledWith('s1', {
       pr: { number: 16865, url: PR_URL },
     });
     expect(mocks.actions.bindSessionPr).not.toHaveBeenCalled();
+    expect(workspace.client.updateSessionMetadata).not.toHaveBeenCalled();
     expect(refreshWorkspace).toHaveBeenCalledWith('/tmp/project');
+  });
+
+  it('shows Bind PR when the host enables it without rename', async () => {
+    connection.sessionId = 's1';
+    active.sessions = [makeSession('s1')];
+    active.data = active.sessions;
+    renderSidebar({ sessionActions: { items: ['bindPr', 'delete', 'pin'] } });
+    await flushSidebar();
+
+    const menu = await openSessionMenu();
+    expect(menuItem(menu, 'Bind PR')).not.toBeUndefined();
+    expect(menuItem(menu, 'Rename')).toBeUndefined();
   });
 
   it('keeps the dialog open with an error when the bind fails', async () => {

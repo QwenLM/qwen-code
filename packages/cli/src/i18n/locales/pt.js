@@ -999,10 +999,10 @@ export default {
     'Referência de PR inválida. Uso: /pr <número | url>',
   'Could not resolve PR #{{number}} via gh. Pass the full PR URL instead.':
     'Não foi possível resolver o PR #{{number}} via gh. Informe a URL completa do PR.',
-  'Bound PR #{{number}} to this session.':
-    'PR #{{number}} vinculado a esta sessão.',
-  'PR #{{number}} is already bound to this session.':
-    'O PR #{{number}} já está vinculado a esta sessão.',
+  'Bound PR #{{number}} to this session: {{url}}':
+    'PR #{{number}} vinculado a esta sessão: {{url}}',
+  'PR #{{number}} is already bound to this session: {{url}}':
+    'O PR #{{number}} já está vinculado a esta sessão: {{url}}',
   'Failed to bind PR #{{number}}.': 'Falha ao vincular o PR #{{number}}.',
   'Failed to bind PR #{{number}}: {{message}}':
     'Falha ao vincular o PR #{{number}}: {{message}}',

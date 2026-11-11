@@ -1088,7 +1088,8 @@ export function fetchCurrentBranchPullRequest(
  * `unavailable` (gh binary missing) and `timeout` are environmental — the
  * caller should name the cause instead of advising a PR-specific remedy;
  * `failed` covers every other gh failure (auth, rate limit, unknown PR,
- * unparseable output), which gh's stderr does not reliably distinguish.
+ * unparseable output, a missing session working directory), which gh's
+ * stderr does not reliably distinguish.
  */
 export type PullRequestReferenceResolution =
   | { status: 'pr'; number: number; url: string; state: SessionPrState }
@@ -1110,6 +1111,11 @@ export function fetchPullRequestByReference(
   // A URL names its own repo, but a bare number needs the checkout's repo
   // context; outside a repo gh still runs (and fails) in the given cwd.
   const runDir = findGitRoot(cwd) ?? cwd;
+  // A missing cwd spawns the same ENOENT as a missing gh binary; classify
+  // it as 'failed' so 'unavailable' keeps meaning "gh is not installed".
+  if (viewWorkingDirectoryProblem(runDir)) {
+    return Promise.resolve({ status: 'error', reason: 'failed' });
+  }
   return new Promise((resolve) => {
     execFile(
       resolveGhBinary(childEnv, runDir),

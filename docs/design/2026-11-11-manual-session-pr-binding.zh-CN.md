@@ -59,7 +59,9 @@ Shell 里的用户够不着这条路径，实践中总要提醒 agent 去跑。
 - 仅 GitHub。Aone workspace 沿用既有 REST/backfill 路径；命令的 `gh` 解析
   与对话框的 PR 列表都是 GitHub 专用。
 - 手动绑定不做仓库身份闸门：PR 由用户指名，`gh` 只用于解析规范 URL/state，
-  不用来证明归因（不同于 shell post-hook 必须证明会话创建了该 PR）。
+  不用来证明归因（不同于 shell post-hook 必须证明会话创建了该 PR）。这对
+  URL 形态完全成立——URL 自带仓库；裸编号则在会话目标目录的仓库里解析，因
+  此成功与已绑定消息会打印解析出的 URL，让「绑错仓库」可见（没有解绑路径）。
 
 ## 方案
 
@@ -101,9 +103,10 @@ Shell 里的用户够不着这条路径，实践中总要提醒 agent 去跑。
    catalog 标记失败不得读作绑定失败。ACP 宿主已把该回调接到
    `qwen/notify/session/pr-binding`，daemon 据此标记 session catalog，
    live-state 客户端 ~2s 内 refetch 到 badge——与自动创建绑定完全相同。
-5. **结果消息**——成功（`Bound PR #N to this session.`）、已绑定（同 URL
-   保持位置与 `createdAt`；显式 gh 解析的 state 原地修复无 state 条目）、
-   解析/用法错误。
+5. **结果消息**——成功（`Bound PR #N to this session: <url>`）、已绑定
+   （`PR #N is already bound to this session: <url>`；同 URL 保持位置与
+   `createdAt`；显式 gh 解析的 state 原地修复无 state 条目）、解析/用法错
+   误。两者都带解析出的 URL，让落在错误仓库的裸编号绑定对用户可见。
 
 `source: 'create'` 与既有手动 REST/ACP 路径的盖章一致；同一编号且同一规范
 URL 下，`upsertSessionPrs` 绝不降级更强的已持久化 provenance（`worktree`），
@@ -196,6 +199,10 @@ i18n：`client/i18n.tsx` 的 EN 与 ZH 两份字典各加 `sessionsOverview.bind
 
 - 命令在会话目标目录里跑 `gh`；origin 无法被 gh 解析的检出里，裸号解析会
   失败，用户须粘贴 URL。这是文档化的降级，不是缺陷。
+- 裸编号也可能「成功」解析到错误的仓库：目标目录的检出未必是工作发生的地
+  方（正是本特性要解决的内部 `cd` 场景）。此时绑定在刷新扫描看来是「同仓
+  库」的，会持续保鲜。因此成功/已绑定消息打印解析出的 URL 供用户察觉；没有
+  解绑路径（见下）。
 - sidecar 上限（10）与 provenance 驱逐规则不变；手动绑定可能挤掉较弱的
   `review` 条目——与今天的 REST PATCH 完全一致。
 - 对话框的号匹配依赖 workspace PR 列表缓存（仅 open/draft、有上限）；条目

@@ -85,9 +85,27 @@ beforeEach(() => {
     status: 'pr',
     ...RESOLVED,
   });
+  // Faithful mirror of the core pullRequestViewUrl (new URL + the
+  // case-sensitive /pull/<n> path rule): strips userinfo and subpaths, and
+  // returns undefined for shapes like /PULL/5 or an encoded owner, so the
+  // command's `?? inputUrl` fallback is reachable here as it is in production.
   mocks.pullRequestViewUrl.mockImplementation((url: string) => {
-    const match = /^(https?:\/\/[^/]+\/[^/]+\/[^/]+\/pull\/\d+)/i.exec(url);
-    return match ? match[1] : undefined;
+    let parsed: URL;
+    try {
+      parsed = new URL(url);
+    } catch {
+      return undefined;
+    }
+    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+      return undefined;
+    }
+    const match =
+      /^\/([\w.-]+)\/([\w.-]+)\/pull\/(\d+)(?:\/|\.diff$|\.patch$|$)/.exec(
+        parsed.pathname,
+      );
+    const number = match ? Number(match[3]) : Number.NaN;
+    if (!match || !Number.isSafeInteger(number) || number < 1) return undefined;
+    return `${parsed.protocol}//${parsed.host}/${match[1]}/${match[2]}/pull/${number}`;
   });
 });
 
@@ -181,11 +199,13 @@ describe('prCommand', () => {
       number: RESOLVED.number,
       url: RESOLVED.url,
     });
-    expect(result).toEqual({
-      type: 'message',
-      messageType: 'info',
-      content: expect.stringContaining('#16865'),
-    });
+    expect(result?.type).toBe('message');
+    expect((result as { messageType: string }).messageType).toBe('info');
+    // The resolved URL must be visible: a bare number resolves in the
+    // target-directory repository, and a wrong-repo bind has no unbind path.
+    const content = (result as { content: string }).content;
+    expect(content).toContain('#16865');
+    expect(content).toContain(RESOLVED.url);
   });
 
   it('binds the #N shorthand', async () => {
@@ -200,17 +220,29 @@ describe('prCommand', () => {
     ]);
   });
 
-  it('binds a URL form using gh canonicalization', async () => {
+  it('hands gh the canonical URL, not the raw /files spelling', async () => {
     const { context } = createContext();
     const input = 'https://github.com/QwenLM/qwen-code/pull/16865/files';
     await prCommand.action?.(context, input);
     expect(mocks.fetchPullRequestByReference).toHaveBeenCalledWith(
       '/repo',
-      input,
+      'https://github.com/QwenLM/qwen-code/pull/16865',
     );
     expect(mocks.upsertSessionPrs).toHaveBeenCalledWith(PR_PATH, [
       { ...RESOLVED, source: 'create' },
     ]);
+  });
+
+  it('strips URL credentials before handing the reference to gh', async () => {
+    const { context } = createContext();
+    await prCommand.action?.(
+      context,
+      'https://x-access-token:ghs_abc123@github.com/QwenLM/qwen-code/pull/16865',
+    );
+    expect(mocks.fetchPullRequestByReference).toHaveBeenCalledWith(
+      '/repo',
+      'https://github.com/QwenLM/qwen-code/pull/16865',
+    );
   });
 
   it('degrades to the user URL without state when gh fails on a URL', async () => {
@@ -244,6 +276,23 @@ describe('prCommand', () => {
     expect(mocks.upsertSessionPrs).toHaveBeenCalledWith(PR_PATH, [
       { number: 5, url: 'https://github.com/o/r/pull/5', source: 'create' },
     ]);
+  });
+
+  it('keeps the original URL when canonicalization returns nothing', async () => {
+    // /PULL/5 is accepted by parsePRReference but rejected by the canonical
+    // helper, so the `?? inputUrl` fallback is load-bearing: without it the
+    // binding would carry url: undefined and the upsert would decline it.
+    mocks.fetchPullRequestByReference.mockResolvedValue({
+      status: 'error',
+      reason: 'failed',
+    });
+    const { context } = createContext();
+    const input = 'https://github.com/o/r/PULL/5';
+    const result = await prCommand.action?.(context, input);
+    expect(mocks.upsertSessionPrs).toHaveBeenCalledWith(PR_PATH, [
+      { number: 5, url: input, source: 'create' },
+    ]);
+    expect((result as { messageType: string }).messageType).toBe('info');
   });
 
   it('errors when gh fails on a bare number', async () => {
@@ -287,11 +336,11 @@ describe('prCommand', () => {
     });
     const { context, sessionService } = createContext();
     const result = await prCommand.action?.(context, '16865');
-    expect(result).toEqual({
-      type: 'message',
-      messageType: 'info',
-      content: expect.stringContaining('already bound'),
-    });
+    expect(result?.type).toBe('message');
+    expect((result as { messageType: string }).messageType).toBe('info');
+    const content = (result as { content: string }).content;
+    expect(content).toContain('already bound');
+    expect(content).toContain(RESOLVED.url);
     expect(sessionService.emitSessionPrBound).not.toHaveBeenCalled();
   });
 

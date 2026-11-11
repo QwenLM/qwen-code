@@ -994,10 +994,10 @@ export default {
     'Ungültiger PR-Verweis. Verwendung: /pr <Nummer | url>',
   'Could not resolve PR #{{number}} via gh. Pass the full PR URL instead.':
     'PR #{{number}} konnte über gh nicht aufgelöst werden. Geben Sie stattdessen die vollständige PR-URL an.',
-  'Bound PR #{{number}} to this session.':
-    'PR #{{number}} wurde an diese Sitzung gebunden.',
-  'PR #{{number}} is already bound to this session.':
-    'PR #{{number}} ist bereits an diese Sitzung gebunden.',
+  'Bound PR #{{number}} to this session: {{url}}':
+    'PR #{{number}} wurde an diese Sitzung gebunden: {{url}}',
+  'PR #{{number}} is already bound to this session: {{url}}':
+    'PR #{{number}} ist bereits an diese Sitzung gebunden: {{url}}',
   'Failed to bind PR #{{number}}.':
     'PR #{{number}} konnte nicht gebunden werden.',
   'Failed to bind PR #{{number}}: {{message}}':

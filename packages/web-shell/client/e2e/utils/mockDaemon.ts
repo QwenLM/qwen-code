@@ -2236,29 +2236,45 @@ async function handleDaemonRoute(
   if (method === 'PATCH' && sessionMetadataMatch) {
     // The workspace-scoped route resolves the session INSIDE the named
     // workspace; mirror that ownership rule so a wrong-workspace write
-    // fails here like it does in production.
-    const workspaceSegment =
-      sessionMetadataMatch[2] !== undefined
-        ? decodeRouteSegment(sessionMetadataMatch[1])
-        : undefined;
-    const sessionId = decodeURIComponent(
+    // fails here like it does in production. A workspace segment that
+    // cannot be decoded fails closed (workspace_mismatch), not as an
+    // unscoped route.
+    const isWorkspaceRoute = sessionMetadataMatch[2] !== undefined;
+    const workspaceSegment = isWorkspaceRoute
+      ? decodeRouteSegment(sessionMetadataMatch[1])
+      : undefined;
+    const sessionId = decodeRouteSegment(
       sessionMetadataMatch[2] ?? sessionMetadataMatch[1],
     );
-    const index = scenario.sessions.findIndex(
-      (session) => session.sessionId === sessionId,
-    );
+    const index =
+      sessionId === undefined
+        ? -1
+        : scenario.sessions.findIndex(
+            (session) => session.sessionId === sessionId,
+          );
+    if (index < 0) {
+      await json(
+        route,
+        {
+          code: 'session_not_found',
+          message: `Session ${sessionId ?? ''} was not found.`,
+        },
+        404,
+      );
+      return;
+    }
     if (
-      index < 0 ||
-      (workspaceSegment !== undefined &&
+      isWorkspaceRoute &&
+      (workspaceSegment === undefined ||
         scenario.sessions[index].workspaceCwd !== workspaceSegment)
     ) {
       await json(
         route,
         {
-          code: 'session_not_found',
-          message: `Session ${sessionId} was not found.`,
+          code: 'workspace_mismatch',
+          message: `Session ${sessionId} does not belong to the named workspace.`,
         },
-        404,
+        400,
       );
       return;
     }
