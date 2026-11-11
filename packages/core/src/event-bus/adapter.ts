@@ -5,6 +5,12 @@
  */
 
 import { randomUUID } from 'node:crypto';
+// Runtime cycle: agent-loop.ts imports runAgentLoopOnBus from this module, and
+// this module (plus llm.ts/tool.ts) imports values back from agent-loop.ts. It
+// is safe only because every cross-module use sits inside a function body, so
+// ESM live bindings resolve lazily after both modules evaluate. Keep it that
+// way — no module-scope use of an agent-loop value here, or the cycle becomes a
+// TDZ error. (import/no-cycle is not configured to guard this.)
 import {
   createSchedulerExecutor,
   type AgentLoopOptions,

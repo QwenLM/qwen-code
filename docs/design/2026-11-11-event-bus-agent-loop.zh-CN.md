@@ -101,18 +101,21 @@ preview 按 `queryId` 路由、用 UUID `roundId` 标记轮次。main 的循环�
 - `runId`：在 `runAgentLoop` 入口生成；路由键（一个 run = preview 的一个「query」）。`promptId` 只是归属信息，随事件携带，绝不作路由键 —— drain 轮可能跨 run 复用同一 prompt id。
 - `round`：run 的轮次编号，由 Conversation 发布 `llm.request` 时赋值。迟到事件由同样的 `currentRound` 检查丢弃。
 
-| 总线事件         | 载荷（main 类型）                              | 发布者                              |
-| ---------------- | ---------------------------------------------- | ----------------------------------- |
-| `loop.started`   | `{ promptId }`                                 | 适配器，状态创建后                  |
-| `loop.output`    | `{ event: ServerLlmStreamEvent }` / 工具输出块 | Llm、Tool                           |
-| `loop.cancelled` | `{ reason }`                                   | 适配器，signal 中止时               |
-| `loop.finished`  | `{ result: AgentLoopResult }`                  | Conversation                        |
-| `llm.request`    | `{ round, send: AgentLoopRound }`              | Conversation                        |
-| `llm.tool_call`  | `{ call: ToolCallRequestInfo }`                | Llm，每个收集到的 `ToolCallRequest` |
-| `llm.settled`    | `{ round, calls, terminal? }`                  | Llm，轮结束时                       |
-| `tool.cancel`    | `{ reason }`                                   | Conversation                        |
-| `tool.settled`   | `{ round }`                                    | Tool，批结束时                      |
-| `handler.failed` | `{ source, eventType, round?, error }`         | 总线，监听器失败时                  |
+| 总线事件         | 载荷（main 类型）                              | 发布者                          |
+| ---------------- | ---------------------------------------------- | ------------------------------- |
+| `loop.started`   | `{ promptId }`                                 | 适配器，状态创建后              |
+| `loop.output`    | `{ event: ServerLlmStreamEvent }` / 工具输出块 | 规划中（流式切片）              |
+| `loop.cancelled` | `{ reason }`                                   | 规划中（流式切片）              |
+| `loop.finished`  | `{ result: AgentLoopResult }`                  | Conversation                    |
+| `llm.request`    | `{ round, send: AgentLoopRound }`              | Conversation                    |
+| `llm.tool_call`  | `{ call: ToolCallRequestInfo }`                | 规划中（流式切片）              |
+| `llm.settled`    | `{ round, calls, terminal? }`                  | Llm，轮结束时                   |
+| `tool.request`   | `{ round, calls }`                             | Conversation，`onRoundEnd` 之后 |
+| `tool.cancel`    | `{ reason }`                                   | 规划中（流式切片）              |
+| `tool.settled`   | `{ round }`                                    | Tool，批结束时                  |
+| `handler.failed` | `{ source, eventType, round?, error }`         | 总线，监听器失败时              |
+
+标记*规划中*的事件已在词汇表中，但本切片不发射；它们随流式派发到来。今天的取消经 signal 流入 `runModelRound`/`runToolBatch`，而非总线事件。
 
 `llm.settled` 携带该轮的终止分类（今天 `runModelRound` 做的 `STOP_EVENTS` 映射），使 Conversation 仍是把模型结局映射为 `AgentLoopStopReason` 的唯一位置。去重/replay 记账留在 Tool handler，使用现有 `toolCallIdUtils` 助手，位置与今天 `runToolBatch` 完全一致。事件载荷只携带路由与决策数据；完整的模型结果与工具批按所有权存于 run 状态的对应槽位，总线不重复承载它们。
 
@@ -120,9 +123,9 @@ preview 按 `queryId` 路由、用 UUID `roundId` 标记轮次。main 的循环�
 
 每 run 一个状态对象，由适配器创建、run 收尾时删除：
 
-- **Conversation** 写：当前轮、续跑决策、待决停止原因。
-- **Llm** 写：该轮收集的调用、`Retry`/`ModelFallback` 时丢弃的调用、轮结局。
-- **Tool** 写：批次工作状态与其已收尾结果。
+- **Conversation** 写：当前轮、续跑决策、最终结果。
+- **Llm** 写：该轮的 model 槽位 —— 收集的调用、turn、以及任何终止停止原因。
+- **Tool** 写：该轮已收尾的工具批。
 
 状态库拒绝同一 `runId` 的二次创建；`currentRound(state, round)` 对迟到事件返回 undefined —— 与 preview 让被放弃轮次无害化的构造相同。
 

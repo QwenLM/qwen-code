@@ -101,18 +101,21 @@ Preview routes by `queryId` and scopes rounds by a UUID `roundId`. Main's loop r
 - `runId`: generated at `runAgentLoop` entry; the routing key (one run = one preview "query"). `promptId` is attribution, carried on events, never a routing key — a drain turn may reuse a prompt id across runs.
 - `round`: the run's round number, assigned when Conversation publishes `llm.request`. Late events are dropped by the same `currentRound` check.
 
-| Bus event        | Payload (main types)                                   | Published by                         |
-| ---------------- | ------------------------------------------------------ | ------------------------------------ |
-| `loop.started`   | `{ promptId }`                                         | adapter, after state creation        |
-| `loop.output`    | `{ event: ServerLlmStreamEvent }` / tool output chunks | Llm, Tool                            |
-| `loop.cancelled` | `{ reason }`                                           | adapter, on signal abort             |
-| `loop.finished`  | `{ result: AgentLoopResult }`                          | Conversation                         |
-| `llm.request`    | `{ round, send: AgentLoopRound }`                      | Conversation                         |
-| `llm.tool_call`  | `{ call: ToolCallRequestInfo }`                        | Llm, per collected `ToolCallRequest` |
-| `llm.settled`    | `{ round, calls, terminal? }`                          | Llm, at round end                    |
-| `tool.cancel`    | `{ reason }`                                           | Conversation                         |
-| `tool.settled`   | `{ round }`                                            | Tool, at batch end                   |
-| `handler.failed` | `{ source, eventType, round?, error }`                 | bus, on listener failure             |
+| Bus event        | Payload (main types)                                   | Published by                     |
+| ---------------- | ------------------------------------------------------ | -------------------------------- |
+| `loop.started`   | `{ promptId }`                                         | adapter, after state creation    |
+| `loop.output`    | `{ event: ServerLlmStreamEvent }` / tool output chunks | planned (streaming slice)        |
+| `loop.cancelled` | `{ reason }`                                           | planned (streaming slice)        |
+| `loop.finished`  | `{ result: AgentLoopResult }`                          | Conversation                     |
+| `llm.request`    | `{ round, send: AgentLoopRound }`                      | Conversation                     |
+| `llm.tool_call`  | `{ call: ToolCallRequestInfo }`                        | planned (streaming slice)        |
+| `llm.settled`    | `{ round, calls, terminal? }`                          | Llm, at round end                |
+| `tool.request`   | `{ round, calls }`                                     | Conversation, after `onRoundEnd` |
+| `tool.cancel`    | `{ reason }`                                           | planned (streaming slice)        |
+| `tool.settled`   | `{ round }`                                            | Tool, at batch end               |
+| `handler.failed` | `{ source, eventType, round?, error }`                 | bus, on listener failure         |
+
+Events marked _planned_ are in the vocabulary but not emitted by this slice; they arrive with streaming dispatch. Cancellation today flows through the signal into `runModelRound`/`runToolBatch`, not through a bus event.
 
 `llm.settled` carries the round's terminal classification (the `STOP_EVENTS` mapping that `runModelRound` does today) so Conversation remains the only place that maps a model outcome to an `AgentLoopStopReason`. Duplicate/replay bookkeeping stays in the Tool handler, using the existing `toolCallIdUtils` helpers, exactly where `runToolBatch` does it today. Event payloads carry only routing and decision data; the full model result and tool batch live in the run state under their owner's slot, so the bus never duplicates them.
 
@@ -120,9 +123,9 @@ Preview routes by `queryId` and scopes rounds by a UUID `roundId`. Main's loop r
 
 One state object per run, created by the adapter, deleted when the run settles:
 
-- **Conversation** writes: current round, continuation decision, the pending stop reason.
-- **Llm** writes: the round's collected calls, discarded calls on `Retry`/`ModelFallback`, the round outcome.
-- **Tool** writes: the batch's working state and its settled results.
+- **Conversation** writes: the current round, the continuation decision, and the final result.
+- **Llm** writes: the round's model slot — the collected calls, the turn, and any terminal stop reason.
+- **Tool** writes: the round's settled tool batch.
 
 The store rejects a second create for the same `runId`, and `currentRound(state, round)` returns undefined for a late event — the same construction preview uses to make abandoned rounds harmless.
 

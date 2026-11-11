@@ -111,7 +111,10 @@ interface HostFixture {
   log: string[];
 }
 
-function makeHost(endOnResult = false): HostFixture {
+function makeHost(
+  endOnResult = false,
+  nextRound?: AgentLoopHost['nextRound'],
+): HostFixture {
   const log: string[] = [];
   const host: AgentLoopHost = {
     onRoundStart: (round, promptId) => log.push(`start:${round}:${promptId}`),
@@ -123,6 +126,7 @@ function makeHost(endOnResult = false): HostFixture {
       log.push(`tool:${result.request.callId}:${result.origin}`);
       return endOnResult;
     },
+    ...(nextRound ? { nextRound } : {}),
   };
   return { host, log };
 }
@@ -314,5 +318,65 @@ describe('runAgentLoop event-bus parity', () => {
 
   it('rejects with a null-prototype value without hanging', async () => {
     await expectSameRejection(Object.create(null));
+  });
+
+  it('matches when the host supplies the next round', async () => {
+    const toolCall = {
+      type: LlmEventType.ToolCallRequest,
+      value: call('c1'),
+    } as ServerLlmStreamEvent;
+    const rounds = [[toolCall], [content]];
+    const nextRound: AgentLoopHost['nextRound'] = () => ({
+      parts: 'custom',
+      promptId: 'custom-prompt',
+      options: { type: SendMessageType.ToolResult },
+    });
+    const procedural = makeHost(false, nextRound);
+    const bus = makeHost(false, nextRound);
+    const proceduralResult = await runAgentLoop(
+      options(rounds, procedural.host),
+    );
+    const busResult = await runAgentLoop({
+      ...options(rounds, bus.host),
+      useEventBus: true,
+    });
+    expect(busResult).toEqual(proceduralResult);
+    expect(bus.log).toEqual(procedural.log);
+    expect(bus.log).toContain('start:1:custom-prompt');
+  });
+
+  it('matches on a batch with multiple tool calls', async () => {
+    const tc1 = {
+      type: LlmEventType.ToolCallRequest,
+      value: call('c1'),
+    } as ServerLlmStreamEvent;
+    const tc2 = {
+      type: LlmEventType.ToolCallRequest,
+      value: call('c2'),
+    } as ServerLlmStreamEvent;
+    const { proceduralResult, busResult, procedural, bus } = await bothPaths([
+      [tc1, tc2],
+      [content],
+    ]);
+    expect(busResult).toEqual(proceduralResult);
+    expect(busResult.reason).toBe('completed');
+    expect(bus.log).toEqual(procedural.log);
+    expect(bus.log).toContain('tool:c1:executed');
+    expect(bus.log).toContain('tool:c2:executed');
+  });
+
+  it('matches with the default executor and duplicates when no tools run', async () => {
+    const rounds = [[content]];
+    const procedural = makeHost();
+    const bus = makeHost();
+    const proceduralOptions = options(rounds, procedural.host);
+    delete proceduralOptions.executor;
+    const busOptions = { ...options(rounds, bus.host), useEventBus: true };
+    delete busOptions.executor;
+    const proceduralResult = await runAgentLoop(proceduralOptions);
+    const busResult = await runAgentLoop(busOptions);
+    expect(busResult).toEqual(proceduralResult);
+    expect(busResult.reason).toBe('completed');
+    expect(bus.log).toEqual(procedural.log);
   });
 });
