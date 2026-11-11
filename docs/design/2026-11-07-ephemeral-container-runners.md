@@ -304,6 +304,27 @@ paid this when its ceiling became an expression. Keeping the hosted bound
 visible would need the gate to understand routed expressions, which is its own
 change.
 
+The first-stage acceptance item above ("the first complete pooled render still
+needs acceptance") is now closed for duration, and still open for font metrics.
+Two complete pooled captures finished under the 90-minute ceiling on the
+2026-11-11 image: run 43005736229 in 74m44s and run 42987806994 in 84m13s, both
+with a successful after render, merge-base render and composite. The margin is
+thin — about 15 minutes on the slower run — and most of it is downloads
+(Chromium 22m, two cold installs 12m30s and 11m). A slower archive or mirror can
+still exhaust the ceiling; that is the same egress exposure recorded above, not
+a new one. Font metrics remain unaccepted: no human has compared the pooled
+screenshots against the hosted baseline, and the best-effort apt step can still
+degrade to fallback fonts while the job stays green.
+
+Capacity is asymmetric under saturation and this change widens it: the pool now
+serves same-repository PRs alongside fork jobs that have no hosted fallback.
+GitHub queues by arrival order without priority, so a burst of same-repo PRs can
+delay a fork PR that cannot be routed anywhere else. Accepted for the current
+fixed capacity, with two levers: `MAINTAINER_ECS_RUNNER_DISABLED=true` returns
+the same-repo lanes to hosted and frees the pool for forks, and capacity is a
+manual configuration change. Queue-depth observation and any priority scheme
+stay with #16514.
+
 The pool label is `ecs-qwen-ephemeral`; the initial deployment registered ten
 ARM64 runners, and the 2026-11-08 live query showed 22 online slot
 registrations on hz4.
