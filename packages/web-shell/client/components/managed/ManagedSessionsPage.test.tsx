@@ -2591,19 +2591,14 @@ describe('ManagedSessionsPage', () => {
     expect(mocks.editorProps?.currentModel).toBe('B');
   });
 
-  it('refreshes after a lost response without requiring confirmation or blocking the composer', async () => {
+  it('shows the failure message and retires it once a read proves the write landed', async () => {
     let session = switchableSession({
       modelSelection: { modelId: 'B', revision: 1 },
     });
     modelApi(() => session);
-    vi.mocked(provider.modelChange!.submit).mockImplementation(async () => {
-      session = {
-        ...session,
-        modelSelection: { modelId: 'A', revision: 2 },
-        modelContext: undefined,
-      };
-      throw new TypeError('lost ACK');
-    });
+    vi.mocked(provider.modelChange!.submit).mockRejectedValueOnce(
+      new TypeError('rejected'),
+    );
     await render('s1');
     expect(mocks.editorProps?.currentModel).toBe('B');
     expect(mocks.editorProps?.contextUsageKnown).toBe(false);
@@ -2611,12 +2606,26 @@ describe('ManagedSessionsPage', () => {
       mocks.editorProps?.onSelectModel?.('A');
       await flush();
     });
-    expect(container.textContent).not.toContain(
-      'The model change is not confirmed',
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe(
+      'Could not change the model. Check the current selection and try again.',
     );
-    expect(container.textContent).not.toContain('Continue confirming');
-    expect(container.querySelector('[role="alert"]')).not.toBeNull();
-    expect(provider.modelChange!.submit).toHaveBeenCalledOnce();
+    expect(mocks.editorProps?.currentModel).toBe('B');
+    // The server commits A while the response is lost; the refresh proves it,
+    // so the failure alert must not keep contradicting the switched model.
+    vi.mocked(provider.modelChange!.submit).mockImplementationOnce(async () => {
+      session = {
+        ...session,
+        modelSelection: { modelId: 'A', revision: 2 },
+        modelContext: undefined,
+      };
+      throw new TypeError('lost ACK');
+    });
+    await act(async () => {
+      mocks.editorProps?.onSelectModel?.('A');
+      await flush();
+    });
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    expect(provider.modelChange!.submit).toHaveBeenCalledTimes(2);
     expect(mocks.editorProps?.currentModel).toBe('A');
     expect(mocks.editorProps?.contextUsageKnown).toBe(false);
     expect(mocks.editorProps?.disabled).toBe(false);

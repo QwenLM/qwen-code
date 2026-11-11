@@ -158,18 +158,23 @@ describe('useManagedModelChange', () => {
       expect(current.isBlocked()).toBe(false);
       expect(current.errorCode).toBe('failed');
       expect(provider.modelChange!.submit).toHaveBeenCalledOnce();
+      // The released UI must not leave the abandoned write running.
+      expect(
+        vi.mocked(provider.modelChange!.submit).mock.calls[0][2].signal.aborted,
+      ).toBe(true);
     } finally {
       vi.useRealTimers();
     }
   });
 
   it('does not roll back a receipt under stale reads and uses its revision for the next choice', async () => {
-    refresh.mockResolvedValue(summary);
+    const stale = { ...summary, modelSelection: { modelId: 'A', revision: 0 } };
+    refresh.mockResolvedValue(stale);
     await render();
     await act(async () => {
       await current.submit('B');
     });
-    await render(summary);
+    await render(stale);
     await act(async () => current.reloadOptions());
     expect(current.selection).toEqual(result.modelSelection);
     vi.mocked(provider.modelChange!.submit).mockResolvedValue({
@@ -275,8 +280,12 @@ describe('useManagedModelChange', () => {
       code: 'model_selection_conflict',
     },
     {
-      failure: { kind: 'managed-model-rejected', code: 'turn_active' },
-      code: 'failed',
+      failure: new JavaManagedAgentHttpError(
+        409,
+        'session_context_busy',
+        'session busy',
+      ),
+      code: 'session_context_busy',
     },
   ])(
     'releases a failed write without automatically replaying it ($code)',
@@ -290,10 +299,94 @@ describe('useManagedModelChange', () => {
       expect(current.isBlocked()).toBe(false);
       expect(current.errorCode).toBe(code);
       expect(sessionStorage.getItem(key)).toBeNull();
+      const retry = deferred<ManagedModelChangeResult>();
+      vi.mocked(provider.modelChange!.submit).mockReturnValue(retry.promise);
+      let retryWrite!: ReturnType<typeof current.submit>;
+      await act(async () => {
+        retryWrite = current.submit('B');
+      });
+      // The banner goes away as the retry starts, not only when it succeeds.
+      expect(current.errorCode).toBeUndefined();
+      expect(current.blocked).toBe(true);
+      await act(async () => {
+        retry.resolve(result);
+        await retryWrite;
+      });
+      expect(current.errorCode).toBeUndefined();
+      expect(current.selection).toEqual(result.modelSelection);
       await render(changed);
-      expect(provider.modelChange!.submit).toHaveBeenCalledOnce();
+      expect(provider.modelChange!.submit).toHaveBeenCalledTimes(2);
     },
   );
+
+  it('retires a lost-response failure once a read reports a revision past the failed write', async () => {
+    refresh.mockResolvedValue({
+      ...summary,
+      modelSelection: { modelId: 'B', revision: 1 },
+    });
+    vi.mocked(provider.modelChange!.submit).mockRejectedValue(
+      new TypeError('lost response'),
+    );
+    await render();
+    await act(async () => {
+      await current.submit('B');
+    });
+    expect(current.errorCode).toBe('failed');
+    await render({ ...summary, modelSelection: { modelId: 'B', revision: 1 } });
+    expect(current.selection).toEqual({ modelId: 'B', revision: 1 });
+    expect(current.errorCode).toBeUndefined();
+  });
+
+  it('ignores stale options from another Session and never changes its selection', async () => {
+    const first = deferred<ManagedSessionModels>();
+    vi.mocked(provider.modelChange!.queryOptions).mockImplementation((id) =>
+      id === 's1'
+        ? first.promise
+        : Promise.resolve({
+            ...options,
+            models: [{ modelId: 'new', label: 'New' }],
+          }),
+    );
+    await render();
+    expect(current.optionsLoading).toBe(true);
+    const staleSubmit = current.submit;
+    await render({ ...summary, sessionId: 's2' });
+    await act(async () => {
+      first.resolve(options);
+    });
+    expect(current.options?.models).toEqual([{ modelId: 'new', label: 'New' }]);
+    await act(async () => {
+      await staleSubmit('new');
+    });
+    expect(provider.modelChange!.submit).not.toHaveBeenCalled();
+  });
+
+  it('refuses a write until the current Session catalog arrives after switching away and back', async () => {
+    let firstCalls = 0;
+    const otherSession = deferred<ManagedSessionModels>();
+    const returning = deferred<ManagedSessionModels>();
+    vi.mocked(provider.modelChange!.queryOptions).mockImplementation((id) => {
+      if (id !== 's1') return otherSession.promise;
+      firstCalls += 1;
+      return firstCalls === 1 ? Promise.resolve(options) : returning.promise;
+    });
+    await render();
+    await render({ ...summary, sessionId: 's2' });
+    await render();
+    // The catalog from the earlier mount of s1 must not authorize a write now:
+    // its selection revision belongs to that window, not to this one.
+    await act(async () => {
+      await current.submit('B');
+    });
+    expect(provider.modelChange!.submit).not.toHaveBeenCalled();
+    await act(async () => {
+      returning.resolve(options);
+    });
+    await act(async () => {
+      await current.submit('B');
+    });
+    expect(provider.modelChange!.submit).toHaveBeenCalledOnce();
+  });
 
   it('rejects a mismatched receipt instead of claiming the requested model was selected', async () => {
     refresh.mockResolvedValue(summary);
@@ -319,6 +412,9 @@ describe('useManagedModelChange', () => {
       write = current.submit('B');
     });
     await render({ ...summary, sessionId: 's2' });
+    expect(
+      vi.mocked(provider.modelChange!.submit).mock.calls[0][2].signal.aborted,
+    ).toBe(true);
     await act(async () => {
       receipt.resolve(result);
       await write;

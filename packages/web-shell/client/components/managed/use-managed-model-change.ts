@@ -44,6 +44,10 @@ export function useManagedModelChange(
   const [optionsRevision, setOptionsRevision] = useState(0);
   const running = useRef(false);
   const lifetime = useRef<AbortController | undefined>(undefined);
+  // The revision the failed write expected. A later read proving the Session
+  // moved past it proves the write landed (or was superseded), so the failure
+  // alert must not keep claiming the change did not happen.
+  const failedRevision = useRef<number | undefined>(undefined);
   const summaryRef = useRef(summary);
   summaryRef.current = summary?.sessionId === sessionId ? summary : undefined;
   const refreshRef = useRef(refreshSummary);
@@ -72,14 +76,24 @@ export function useManagedModelChange(
     ),
   );
   selectionRef.current = { key, value: selection };
+  const selectionRevision = selection?.revision ?? 0;
   const supported =
     summaryRef.current?.capabilities.modelChange === true &&
     Boolean(provider.modelChange);
 
   useEffect(() => {
+    const failed = failedRevision.current;
+    if (visible.errorCode === undefined || failed === undefined) return;
+    if (selectionRevision <= failed) return;
+    failedRevision.current = undefined;
+    setState((previous) => ({ ...previous, errorCode: undefined }));
+  }, [selectionRevision, visible.errorCode]);
+
+  useEffect(() => {
     const abort = new AbortController();
     lifetime.current = abort;
     running.current = false;
+    failedRevision.current = undefined;
     setState({ key, busy: false });
     // 旧版待确认记录不再阻塞模型设置；存储不可用也不影响正常切换。
     try {
@@ -157,6 +171,7 @@ export function useManagedModelChange(
     )
       return;
     running.current = true;
+    failedRevision.current = undefined;
     setState((previous) => ({
       ...previous,
       busy: true,
@@ -200,6 +215,9 @@ export function useManagedModelChange(
       return true;
     } catch (failure) {
       if (owner.signal.aborted) return;
+      // A read that later reports a revision past this one retires the alert:
+      // the write landed even though its response never arrived.
+      failedRevision.current = expectedRevision;
       setState((previous) => ({
         ...previous,
         errorCode:
