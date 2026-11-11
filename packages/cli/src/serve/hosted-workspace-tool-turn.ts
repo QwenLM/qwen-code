@@ -881,6 +881,8 @@ export const HOSTED_INPUT_PREVIEW_TOOLS: readonly string[] = [
   'run_shell_command',
   'todo_write',
   'loop_wakeup',
+  'cron_list',
+  'cron_delete',
   ...HOSTED_MEMORY_TOOLS,
   'agent',
   'send_message',
@@ -5285,7 +5287,13 @@ export class HostedWorkspaceToolTurn {
       this.hooks ||
       this.mcp ||
       requests.some(
-        (request) => !request.skill && !request.todo && !request.memory,
+        (request) =>
+          !request.skill &&
+          !request.todo &&
+          !request.memory &&
+          !request.loop &&
+          !request.cronList &&
+          !request.cronDelete,
       )
     )
       await waitForTurn(this.warmed, signal);
@@ -5309,7 +5317,10 @@ export class HostedWorkspaceToolTurn {
           request.command !== true &&
           !request.skill &&
           !request.todo &&
-          !request.memory,
+          !request.memory &&
+          !request.loop &&
+          !request.cronList &&
+          !request.cronDelete,
       )
     ) {
       // Acquisition may have taken effect even when its reply is lost.
@@ -6330,7 +6341,7 @@ export class HostedWorkspaceToolTurn {
                         wakeup.fireAt === null
                           ? 'now'
                           : new Date(wakeup.fireAt).toISOString()
-                      } (one-shot) [session-only]: ${wakeup.prompt}`,
+                      } (one-shot) [durable]: ${wakeup.prompt}`,
                   )
                   .join('\n');
           const converted = convertToFunctionResponse(

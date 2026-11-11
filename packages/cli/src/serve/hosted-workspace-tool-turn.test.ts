@@ -64,6 +64,8 @@ import {
   HOSTED_INPUT_PREVIEW_TOOLS,
   HOSTED_TODO_WRITE_TOOL,
   HOSTED_LOOP_WAKEUP_TOOL,
+  HOSTED_CRON_LIST_TOOL,
+  HOSTED_CRON_DELETE_TOOL,
   HOSTED_MEMBER_PLAN_TOOL,
   HOSTED_SEND_MESSAGE_TO_CHILD_TOOL,
   HOSTED_SEND_MESSAGE_TO_PARENT_TOOL,
@@ -2159,6 +2161,23 @@ it('cron_list and cron_delete drive the loop funnel end to end on shell/3', asyn
     expect(listed).toEqual([
       { id, fireAt: arm?.['fireAt'], prompt: '/loop check the deploy' },
     ]);
+    // A committed journal wakeup is durable, not session-only; the rendered
+    // line must agree with loop_wakeup's survives-a-restart description.
+    const listCall = {
+      ...calls[0],
+      callId: 'call-cron-list-text',
+      name: 'cron_list',
+      args: {},
+    };
+    const listResponses = await turn.execute(
+      [listCall],
+      [{ functionCall: { id: listCall.callId, name: 'cron_list', args: {} } }],
+      'model',
+      new AbortController().signal,
+    );
+    const rendered = JSON.stringify(listResponses[0].functionResponse);
+    expect(rendered).toContain('[durable]');
+    expect(rendered).not.toContain('session-only');
     const del = await drive('cron_delete', { id });
     expect(del?.['cancelled']).toBe(true);
     expect(wakeKick).toHaveBeenCalledTimes(2);
@@ -2166,6 +2185,54 @@ it('cron_list and cron_delete drive the loop funnel end to end on shell/3', asyn
     // An unknown id answers not-cancelled rather than throwing.
     const missing = await drive('cron_delete', { id: 'loop:does-not-exist' });
     expect(missing?.['cancelled']).toBe(false);
+  } finally {
+    if (gateBefore === undefined) delete process.env[gateKey];
+    else process.env[gateKey] = gateBefore;
+  }
+});
+
+it('a lone loop_wakeup batch acquires no Runtime mount', async () => {
+  const gateKey = 'QWEN_MANAGED_AGENT_LOOP_ENABLED';
+  const gateBefore = process.env[gateKey];
+  process.env[gateKey] = 'true';
+  try {
+    const loops = new HostedLoopSession(
+      {
+        authority: session.authority,
+        resources: session.resources,
+        sink: session.sink,
+      },
+      session.authority.sessionHeader.sessionKey,
+      { cwd: root, classify: async () => ({ allowed: true, reason: null }) },
+    );
+    turn = new HostedWorkspaceToolTurn(
+      { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+      session,
+      harness,
+      'prompt',
+      commit,
+      messageFitsInline,
+      undefined,
+      undefined,
+      undefined,
+      { profile: 'hosted-workspace-shell/3', loops, wakeKick: () => {} },
+    );
+    await turn.declarations(new AbortController().signal);
+    const call = {
+      ...calls[0],
+      callId: 'call-lone-loop',
+      name: 'loop_wakeup',
+      args: { delaySeconds: 60, prompt: '/loop tick' },
+    };
+    await turn.execute(
+      [call],
+      [{ functionCall: { id: call.callId, name: call.name, args: call.args } }],
+      'model',
+      new AbortController().signal,
+    );
+    // The arm only appends to the journal; it must not reserve a Runtime or
+    // take a mount a child could need.
+    expect(broker.acquire).not.toHaveBeenCalled();
   } finally {
     if (gateBefore === undefined) delete process.env[gateKey];
     else process.env[gateKey] = gateBefore;
@@ -6113,6 +6180,8 @@ it('admits exactly the declared native tools to the version 3 input preview', ()
     'run_shell_command',
     'todo_write',
     'loop_wakeup',
+    'cron_list',
+    'cron_delete',
     ...HOSTED_MEMORY_TOOLS,
     'agent',
     'send_message',
@@ -6128,6 +6197,8 @@ it('admits exactly the declared native tools to the version 3 input preview', ()
     ...HOSTED_WORKSPACE_SHELL_TOOLS.map((tool) => tool.name),
     HOSTED_TODO_WRITE_TOOL.name,
     HOSTED_LOOP_WAKEUP_TOOL.name,
+    HOSTED_CRON_LIST_TOOL.name,
+    HOSTED_CRON_DELETE_TOOL.name,
     ...HOSTED_MEMORY_TOOLS,
     HOSTED_AGENT_TOOL.name,
     HOSTED_SEND_MESSAGE_TO_CHILD_TOOL.name,
