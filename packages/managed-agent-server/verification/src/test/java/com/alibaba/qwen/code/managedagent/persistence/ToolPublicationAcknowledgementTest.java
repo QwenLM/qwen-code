@@ -99,6 +99,16 @@ class ToolPublicationAcknowledgementTest {
         manager = new DataSourceTransactionManager(source);
         var objects = new HashMap<String, byte[]>();
         ToolPublicationObjectStore bucket = new ToolPublicationObjectStore() {
+            @Override
+            public InputStream openRange(String key, long offset, long length, Runnable guard) {
+                guard.run();
+                try (InputStream full = open(key)) {
+                    byte[] bytes = full.readAllBytes();
+                    return new java.io.ByteArrayInputStream(bytes, (int) offset, (int) length);
+                } catch (java.io.IOException error) {
+                    throw new IllegalStateException(error);
+                }
+            }
             public void putIfAbsent(String key, byte[] value) {
                 assertThat(TransactionSynchronizationManager.isActualTransactionActive()).isFalse();
                 objects.putIfAbsent(key, value.clone());

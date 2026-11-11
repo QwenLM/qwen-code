@@ -54,6 +54,7 @@ final class JournalStoreRows {
                         result.getLong("activation_epoch"),
                         result.getString("latest_checkpoint_resource_id"),
                         result.getLong("compacted_through_revision"),
+                        result.getLong("packed_through_revision"),
                         result.getString("recovery_status"),
                         result.getString("recovery_detail_code"),
                         result.getString("activation_id"),
@@ -474,6 +475,15 @@ final class JournalStoreRows {
             }
             return;
         }
+        if ("OSS_OBJECT".equals(resource.storageKind())) {
+            if (!("PUBLISHED".equals(resource.state()) || "REFERENCED".equals(resource.state()))
+                    || resource.bytes() != null || resource.objectKey() == null
+                    || resource.objectVersionId() != null || resource.encryptionKeyId() != null
+                    || resource.captureState() != null) {
+                throw resourceCorrupt();
+            }
+            return;
+        }
         if (!"MYSQL_INLINE".equals(resource.storageKind())
                 || !("REFERENCED".equals(resource.state())
                     || "PUBLISHED".equals(resource.state()) && resource.schemaVersion() == 1
@@ -681,7 +691,7 @@ final class JournalStoreRows {
             long journalRevision, long committedSequence,
             String lastCommitDigest, long activationEpoch,
             String latestCheckpointResourceId,
-            long compactedThroughRevision, String recoveryStatus,
+            long compactedThroughRevision, long packedThroughRevision, String recoveryStatus,
             String recoveryDetailCode, String activationId,
             String activationPhase, Long activationEventEpoch,
             Long activationExpiresAt, Long activationHeadRevision) {
@@ -696,6 +706,16 @@ final class JournalStoreRows {
             long activationEpoch, String latestCheckpointResourceId,
             String recordEncoding, byte[] recordBytes, long byteLength,
             String recordDigest) {
+    }
+
+    TransactionRow withRecordBytes(TransactionRow row, byte[] bytes) {
+        return new TransactionRow(row.workspaceId(), row.journalRevision(), row.transactionId(),
+                row.operation(), row.commandId(), row.contentDigest(), row.firstSequence(),
+                row.lastSequence(), row.eventCount(), row.eventsDigest(),
+                row.previousCommitDigest(), row.commitDigest(), row.writerGeneration(),
+                row.writerId(), row.writerTokenHash(), row.activationEpoch(),
+                row.latestCheckpointResourceId(), row.recordEncoding(), bytes, row.byteLength(),
+                row.recordDigest());
     }
 
     record ResourceRow(String tenantId, String workspaceId,
