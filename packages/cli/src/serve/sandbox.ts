@@ -919,8 +919,9 @@ export async function start_sandbox(
     const setupUserCommands = [
       // Use -f with groupadd to avoid errors if the group already exists.
       `groupadd -f -g ${gid} ${username}`,
-      // Create user only if it doesn't exist. Use -o for non-unique UID.
-      `id -u ${username} &>/dev/null || useradd -o -u ${uid} -g ${gid} -d ${homeDir} -s /bin/bash ${username}`,
+      // Create user only if it doesn't exist. Use -o for non-unique UID and
+      // -m so the passed-through HOME exists inside the container.
+      `id -u ${username} &>/dev/null || useradd -o -m -u ${uid} -g ${gid} -d ${homeDir} -s /bin/bash ${username}`,
     ].join(' && ');
 
     const originalCommand = finalEntrypoint[2];

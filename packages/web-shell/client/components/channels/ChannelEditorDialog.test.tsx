@@ -4476,6 +4476,43 @@ describe('ChannelEditorDialog WeChat login', () => {
     // Descriptor labels are English, so a missing i18n key would surface them.
     expect(labels.some((text) => text.includes('Group Policy'))).toBe(false);
   });
+
+  it.each(['en', 'zh-CN'] as const)(
+    'tells the operator the allowlist is optional and wants a platform id in %s',
+    async (language) => {
+      // The shared copy says "stable user IDs", which reads as a WeChat handle
+      // and yields a silently inert entry. The platform override must say the
+      // field can stay empty, name the pairing block, and show the id shape.
+      await renderDialog({
+        descriptor: WEIXIN,
+        weixinLogin: loginApi(),
+        language,
+      });
+
+      const text = document.body.textContent ?? '';
+      if (language === 'zh-CN') {
+        expect(text).toContain('预先放行的用户（可留空）');
+        expect(text).toContain('建议留空');
+        expect(text).toContain('待处理的配对请求');
+        expect(text).toContain('填微信号或昵称不会生效');
+      } else {
+        expect(text).toContain('Pre-approved users (optional)');
+        expect(text).toContain('Leave empty');
+        expect(text).toContain('Pending requests');
+        expect(text).toContain('A WeChat name or handle does not match');
+      }
+      // Both locales show the id shape, and neither falls back to the shared
+      // wording that caused the confusion.
+      expect(text).toContain('oAbCd…@im.wechat');
+      expect(text).not.toContain('Comma-separated stable user IDs');
+      expect(text).not.toContain('用英文逗号分隔稳定用户 ID');
+
+      const input = inputByLabel(
+        language === 'zh-CN' ? '预先放行的用户' : 'Pre-approved users',
+      );
+      expect(input?.getAttribute('placeholder')).toBe('oAbCd…@im.wechat');
+    },
+  );
 });
 
 /**
