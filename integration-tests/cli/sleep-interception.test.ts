@@ -6,6 +6,7 @@
 
 import { describe, it, expect, afterEach } from 'vitest';
 import {
+  getCapturedToolCallStringArg,
   TestRig,
   printDebugInfo,
   validateModelOutput,
@@ -20,47 +21,11 @@ describe('sleep-interception', () => {
     }
   });
 
-  // Mirrors the optionality of the parsed telemetry these come from: a
-  // malformed record yields `undefined` rather than a crash. The predicates
-  // below only match an explicit `success` boolean.
-  type ShellCall = {
-    args?: string;
-    success?: boolean;
-    error?: string;
-  };
-
-  /**
-   * Poll telemetry for a run_shell_command call matching the predicate.
-   * The model's narration is unreliable (it may retry, paraphrase, or skip
-   * the scripted reply), so assertions key off the recorded tool calls —
-   * blocked calls are logged too, with success: false and the block
-   * message in the error attribute.
-   */
-  const waitForShellCall = (predicate: (call: ShellCall) => boolean) =>
-    rig.poll(
-      () =>
-        rig
-          .readToolLogs()
-          .some(
-            (log) =>
-              log.toolRequest.name === 'run_shell_command' &&
-              predicate(log.toolRequest),
-          ),
-      rig.getDefaultTimeout(),
-      100,
-    );
-
-  const shellCalls = (): ShellCall[] =>
-    rig
-      .readToolLogs()
-      .filter((log) => log.toolRequest.name === 'run_shell_command')
-      .map((log) => log.toolRequest);
-
   it('should block sleep >= 2s and mention Monitor in guidance', async () => {
     rig = new TestRig();
     await rig.setup('sleep-blocked');
 
-    const result = await rig.run(
+    const capture = await rig.runWithToolCapture(
       'Use the run_shell_command tool to run this exact command in the ' +
         'foreground: sleep 5. You must actually call run_shell_command — ' +
         'do not predict the outcome without calling the tool, do not set ' +
@@ -68,31 +33,29 @@ describe('sleep-interception', () => {
         'the command was blocked, say "BLOCKED". If it executed ' +
         'successfully, say "SUCCESS".',
     );
-
-    const foundBlockedCall = await waitForShellCall(
-      (call) => !!call.args?.includes('sleep 5') && call.success === false,
+    const result = capture.result;
+    const shellCalls = capture.toolCalls.filter(
+      (call) => call.name === 'run_shell_command',
     );
 
-    if (!foundBlockedCall) {
+    const blockedCall = shellCalls.find(
+      (call) =>
+        getCapturedToolCallStringArg(call, 'command') === 'sleep 5' &&
+        call.success === false,
+    );
+
+    if (!blockedCall) {
       printDebugInfo(rig, result, {
-        'Shell calls': JSON.stringify(shellCalls()),
+        'Captured shell calls': JSON.stringify(shellCalls),
       });
     }
 
     expect(
-      foundBlockedCall,
+      blockedCall,
       'Expected a blocked (success: false) run_shell_command call for sleep 5',
-    ).toBeTruthy();
+    ).toBeDefined();
 
-    // The block guidance must point the model at the Monitor tool. The
-    // error attribute is only available from file-based telemetry; the
-    // podman stdout fallback leaves it undefined.
-    const blockedCall = shellCalls().find(
-      (call) => !!call.args?.includes('sleep 5') && call.success === false,
-    );
-    if (blockedCall?.error !== undefined) {
-      expect(blockedCall.error).toContain('Monitor');
-    }
+    expect(blockedCall?.error).toContain('Monitor');
 
     // Narration is best-effort: warns instead of failing if the model
     // phrases the block differently.
@@ -103,26 +66,30 @@ describe('sleep-interception', () => {
     rig = new TestRig();
     await rig.setup('sleep-allowed');
 
-    const result = await rig.run(
+    const capture = await rig.runWithToolCapture(
       'Use the run_shell_command tool to run this exact command: sleep 1. ' +
         'You must actually call run_shell_command with that command — do ' +
         'not skip it. After it completes, say "DONE".',
     );
+    const result = capture.result;
 
-    const foundSuccessfulCall = await waitForShellCall(
-      (call) => !!call.args?.includes('sleep 1') && call.success === true,
+    const successfulCall = capture.toolCalls.find(
+      (call) =>
+        call.name === 'run_shell_command' &&
+        getCapturedToolCallStringArg(call, 'command') === 'sleep 1' &&
+        call.success === true,
     );
 
-    if (!foundSuccessfulCall) {
+    if (!successfulCall) {
       printDebugInfo(rig, result, {
-        'Shell calls': JSON.stringify(shellCalls()),
+        'Captured tool calls': JSON.stringify(capture.toolCalls),
       });
     }
 
     expect(
-      foundSuccessfulCall,
+      successfulCall,
       'Expected a successful run_shell_command call for sleep 1',
-    ).toBeTruthy();
+    ).toBeDefined();
 
     validateModelOutput(result, 'done', 'sleep allowed');
   });
@@ -131,7 +98,7 @@ describe('sleep-interception', () => {
     rig = new TestRig();
     await rig.setup('sleep-intentional-retry');
 
-    const result = await rig.run(
+    const capture = await rig.runWithToolCapture(
       'Use the run_shell_command tool to run this exact command in the ' +
         'foreground: sleep 5. You must actually call run_shell_command — ' +
         'do not predict the outcome without calling the tool. When that ' +
@@ -139,24 +106,28 @@ describe('sleep-interception', () => {
         'command: sleep 2 # intentional-sleep: wait for MCP rate limit ' +
         'reset. Then say "DONE".',
     );
+    const result = capture.result;
 
     // The escape hatch worked iff a call carrying the intentional-sleep
     // comment completed successfully.
-    const foundIntentionalCall = await waitForShellCall(
+    const intentionalCall = capture.toolCalls.find(
       (call) =>
-        !!call.args?.includes('intentional-sleep') && call.success === true,
+        call.name === 'run_shell_command' &&
+        getCapturedToolCallStringArg(call, 'command') ===
+          'sleep 2 # intentional-sleep: wait for MCP rate limit reset' &&
+        call.success === true,
     );
 
-    if (!foundIntentionalCall) {
+    if (!intentionalCall) {
       printDebugInfo(rig, result, {
-        'Shell calls': JSON.stringify(shellCalls()),
+        'Captured tool calls': JSON.stringify(capture.toolCalls),
       });
     }
 
     expect(
-      foundIntentionalCall,
+      intentionalCall,
       'Expected a successful run_shell_command call with an intentional-sleep comment',
-    ).toBeTruthy();
+    ).toBeDefined();
 
     validateModelOutput(result, 'done', 'sleep intentional retry');
   });
@@ -169,7 +140,7 @@ describe('sleep-interception', () => {
     rig = new TestRig();
     await rig.setup('sleep-blocked-trailing-comment');
 
-    const result = await rig.run(
+    const capture = await rig.runWithToolCapture(
       'Use the run_shell_command tool to run this exact command in the ' +
         'foreground: sleep 5 # wait for db. You must actually call ' +
         'run_shell_command — do not predict the outcome without calling ' +
@@ -177,21 +148,26 @@ describe('sleep-interception', () => {
         'command. If the tool reports the command was blocked, say ' +
         '"BLOCKED". If it executed successfully, say "SUCCESS".',
     );
+    const result = capture.result;
 
-    const foundBlockedCall = await waitForShellCall(
-      (call) => !!call.args?.includes('sleep 5') && call.success === false,
+    const blockedCall = capture.toolCalls.find(
+      (call) =>
+        call.name === 'run_shell_command' &&
+        getCapturedToolCallStringArg(call, 'command') ===
+          'sleep 5 # wait for db' &&
+        call.success === false,
     );
 
-    if (!foundBlockedCall) {
+    if (!blockedCall) {
       printDebugInfo(rig, result, {
-        'Shell calls': JSON.stringify(shellCalls()),
+        'Captured tool calls': JSON.stringify(capture.toolCalls),
       });
     }
 
     expect(
-      foundBlockedCall,
+      blockedCall,
       'Expected a blocked (success: false) run_shell_command call for sleep 5 with trailing comment',
-    ).toBeTruthy();
+    ).toBeDefined();
 
     validateModelOutput(
       result,
