@@ -9017,7 +9017,51 @@ describe('Hosted Harness no-tool session', () => {
             event.payload['turnId'] === loopTurnId,
         );
         expect(settled).toHaveLength(1);
-        expect(settled[0]!.payload['outcome']).not.toBe('cancelled');
+        expect(settled[0]!.payload['outcome']).toBe('completed');
+      },
+      { timeout: settleTimeoutMs(), interval: 50 },
+    );
+    expect(state.model).toHaveBeenCalled();
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`));
+  });
+
+  it('defers a future loop wakeup and delivers it once due', async () => {
+    const loopTurnId = 'loop:wakeup-compaction';
+    await prewriteLoopWakeupInput(Date.now() + 600);
+    mockBrokerBroker();
+    state.model.mockReset();
+    state.model.mockResolvedValue({ text: 'stub reply', model: 'stub-model' });
+    const server = await app(true);
+    const loaded = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({ managedSessionStore: store() });
+    expect(loaded.status).toBe(200);
+    const readSettled = async () => {
+      const journal = await LocalJsonlManagedSessionJournalStore.read({
+        transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+        runtimeBaseDir: state.root,
+        sessionKey: {
+          tenantId: 'tenant',
+          workspaceId: 'workspace',
+          sessionId: SESSION_ID,
+        },
+      });
+      return journal.events.filter(
+        (event) =>
+          event.kind === 'turn.settled' &&
+          event.payload['turnId'] === loopTurnId,
+      );
+    };
+    // Not yet due: the pump must park it on the deferral timer, not fire it
+    // early. Removing the next()->deferUntil wiring strands it and the wait
+    // below times out.
+    expect(await readSettled()).toHaveLength(0);
+    expect(state.model).not.toHaveBeenCalled();
+    await vi.waitFor(
+      async () => {
+        const settled = await readSettled();
+        expect(settled).toHaveLength(1);
+        expect(settled[0]!.payload['outcome']).toBe('completed');
       },
       { timeout: settleTimeoutMs(), interval: 50 },
     );

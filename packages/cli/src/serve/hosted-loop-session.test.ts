@@ -349,3 +349,39 @@ describe('HostedLoopSession list', () => {
     });
   });
 });
+
+describe('HostedLoopSession concurrency and restart', () => {
+  it('serializes concurrent arms to a single pending wakeup', async () => {
+    const harness = await createHarness();
+    await withLoop(harness, async (loops, authority) => {
+      const [a, b] = await Promise.all([
+        loops.arm({ delaySeconds: 60, prompt: 'one' }),
+        loops.arm({ delaySeconds: 60, prompt: 'two' }),
+      ]);
+      // Without the serial() gate both arms read the same empty state and
+      // commit two pending wakeups; serialized, one replaces the other.
+      expect(loopPending(authority)).toHaveLength(1);
+      expect(
+        [a.replacedId, b.replacedId].filter((id) => id !== null),
+      ).toHaveLength(1);
+    });
+  });
+
+  it('keeps the 24h chain anchor across a journal reopen', async () => {
+    const harness = await createHarness();
+    let anchor = 0;
+    await withLoop(harness, async (loops) => {
+      await loops.arm({ delaySeconds: 60, prompt: 'one' });
+      anchor = harness.now;
+    });
+    // A fresh authority reopens the same journal: the anchor must come from
+    // the first committed loop input, not reset to the reopen time.
+    harness.now = anchor + LOOP_CHAIN_MAX_AGE_MS + 5_000;
+    await withLoop(harness, async (loops, authority) => {
+      await expect(
+        loops.arm({ delaySeconds: 60, prompt: 'two' }),
+      ).rejects.toBeInstanceOf(LoopWakeupError);
+      expect(loopPending(authority)).toHaveLength(0);
+    });
+  });
+});
