@@ -47,19 +47,20 @@ interface Scenario {
   exitCode?: number;
   /**
    * The model's reply to a streaming request, from its message history.
-   * `attempt` counts the earlier requests with the same messages, so a
-   * retried request can get another reply.
+   * `subagentRequest` is the one-based request number for the subagent,
+   * including continuations.
    */
   reply: (
     messages: JsonObject[],
     dir: string,
-    attempt: number,
+    subagentRequest: number | undefined,
   ) => FakeOpenAIResponse;
   /**
    * The model rounds the scenario's subagents send; with the setting on each
    * goes out on the shared loop's round, which the debug log records.
    */
   subagentRounds?: number;
+  subagentRecovery?: { requests: number; answer: string };
 }
 
 interface Run {
@@ -71,6 +72,7 @@ interface Run {
   approvals: string[];
   /** Subagent model rounds sent on the shared agent loop. */
   sharedSubagentRounds: number;
+  subagentRequests: number;
 }
 
 /** The debug-log line of a subagent round on the shared agent loop. */
@@ -251,15 +253,15 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
     });
     const dir = rig.testDir!;
     scenario.prepare?.(rig);
-    const attempts = new Map<string, number>();
+    let subagentRequests = 0;
     server = await startFakeOpenAIServer(({ body }) => {
       if (body['stream'] !== true)
         return { content: '{"selected_memories":[]}' };
       const messages = (body['messages'] ?? []) as JsonObject[];
-      const key = JSON.stringify(messages);
-      const attempt = attempts.get(key) ?? 0;
-      attempts.set(key, attempt + 1);
-      return scenario.reply(messages, dir, attempt);
+      const subagentRequest = fromSubagent(messages)
+        ? ++subagentRequests
+        : undefined;
+      return scenario.reply(messages, dir, subagentRequest);
     }, fakeServerHostOptions());
     // Outside the project, so the folder structure in the requests does not
     // list the session's debug log.
@@ -352,6 +354,7 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
       frames: streamFrames(stdout, dir),
       stderr,
       approvals,
+      subagentRequests,
       sharedSubagentRounds:
         debugLog(runtimeDir).match(SHARED_SUBAGENT_ROUND)?.length ?? 0,
     };
@@ -574,9 +577,10 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
       prompt: 'Have the reader answer.',
       prepare: (r) => createSubagent(r),
       subagentRounds: 1,
-      reply: (messages, _dir, attempt) =>
-        fromSubagent(messages)
-          ? attempt === 0
+      subagentRecovery: { requests: 2, answer: 'A reader answers.' },
+      reply: (messages, _dir, subagentRequest) =>
+        subagentRequest !== undefined
+          ? subagentRequest === 1
             ? {
                 contentChunks: ['A reader ', 'answers.'],
                 disconnectAfterContentChunks: 1,
@@ -628,6 +632,23 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
       // shared loop.
       expect(current.sharedSubagentRounds).toBe(0);
       expect(shared.sharedSubagentRounds).toBe(scenario.subagentRounds ?? 0);
+      const recovery = scenario.subagentRecovery;
+      if (recovery) {
+        for (const run of [current, shared]) {
+          expect(run.subagentRequests).toBe(recovery.requests);
+          expect(run.frames).toContainEqual({
+            type: 'user',
+            content: expect.arrayContaining([
+              expect.objectContaining({
+                type: 'tool_result',
+                tool_use_id: 'call_agent',
+                is_error: false,
+                content: expect.stringContaining(recovery.answer),
+              }),
+            ]),
+          });
+        }
+      }
     },
     120_000,
   );

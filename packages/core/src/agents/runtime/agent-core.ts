@@ -1745,6 +1745,15 @@ export class AgentCore {
       thoughtText: '',
       wasOutputTruncated: false,
     };
+    const emitText = (text: string, thought: boolean) =>
+      this.eventEmitter?.emit(AgentEventType.STREAM_TEXT, {
+        subagentId: this.subagentId,
+        runId,
+        round,
+        text,
+        thought,
+        timestamp: Date.now(),
+      });
     const turnRound = turnModelRound(
       params.chat,
       this.modelConfig.model ||
@@ -1757,8 +1766,27 @@ export class AgentCore {
         },
         // A failed request ends the run as it does on the current round.
         throwErrors: true,
-        onUsageMetadata: (usage) => {
-          result.usageMetadata = usage;
+        onStreamReady: () => {
+          this.eventEmitter?.emit(AgentEventType.ROUND_START, {
+            subagentId: this.subagentId,
+            round,
+            promptId,
+            timestamp: Date.now(),
+          });
+        },
+        onChunk: ({ text, thoughtText, responseId, usageMetadata }) => {
+          params.onModelAccepted();
+          if (responseId) result.responseId = responseId;
+          if (usageMetadata) result.usageMetadata = usageMetadata;
+          // A loop stop on Thought can close the stream before Content.
+          if (thoughtText) {
+            result.thoughtText += thoughtText;
+            emitText(thoughtText, true);
+          }
+          if (text) {
+            result.text += text;
+            emitText(text, false);
+          }
         },
       },
     );
@@ -1774,17 +1802,10 @@ export class AgentCore {
       .debug(
         `[AgentCore] subagent ${this.subagentId} round ${round} on the shared agent loop (prompt ${promptId})`,
       );
-    this.eventEmitter?.emit(AgentEventType.ROUND_START, {
-      subagentId: this.subagentId,
-      round,
-      promptId,
-      timestamp: Date.now(),
-    } as AgentRoundEvent);
 
     // callIds already fed to the loop guard this attempt, as on the current
     // round: a provider may stream one call id twice.
     const streamedCallIds = new Set<string>();
-    let accepted = false;
     const resetAttempt = () => {
       result.functionCalls = [];
       streamedCallIds.clear();
@@ -1794,16 +1815,6 @@ export class AgentCore {
       result.responseId = undefined;
       result.wasOutputTruncated = false;
     };
-    const emitText = (text: string, thought: boolean) =>
-      this.eventEmitter?.emit(AgentEventType.STREAM_TEXT, {
-        subagentId: this.subagentId,
-        runId,
-        round,
-        text,
-        thought,
-        timestamp: Date.now(),
-      });
-
     const { stop } = await runModelRound(
       source,
       {
@@ -1845,23 +1856,7 @@ export class AgentCore {
                     `tokens ${event.value?.originalTokenCount} -> ${event.value?.newTokenCount}`,
                 );
               return;
-            case LlmEventType.UserCancelled:
-              return;
-            default:
-              break;
-          }
-          // A model event: the model accepted the request.
-          if (!accepted) {
-            accepted = true;
-            params.onModelAccepted();
-          }
-          switch (event.type) {
-            case LlmEventType.Thought: {
-              const text = event.text ?? '';
-              if (text) {
-                result.thoughtText += text;
-                emitText(text, true);
-              }
+            case LlmEventType.Thought:
               if (
                 checkSubagentLoop({
                   type: LlmEventType.Thought,
@@ -1870,12 +1865,9 @@ export class AgentCore {
               )
                 return 'loop_detected';
               return;
-            }
-            case LlmEventType.Content: {
-              if (!event.value) return;
-              result.text += event.value;
-              emitText(event.value, false);
+            case LlmEventType.Content:
               if (
+                event.value &&
                 checkSubagentLoop({
                   type: LlmEventType.Content,
                   value: event.value,
@@ -1883,7 +1875,6 @@ export class AgentCore {
               )
                 return 'loop_detected';
               return;
-            }
             case LlmEventType.ToolCallRequest: {
               const fc = event.functionCall ?? {
                 id: event.value.callId,
@@ -1891,9 +1882,6 @@ export class AgentCore {
                 args: event.value.args,
               };
               result.functionCalls.push(fc);
-              if (event.value.response_id) {
-                result.responseId = event.value.response_id;
-              }
               const toolName = String(fc.name);
               if (fc.id) {
                 if (streamedCallIds.has(fc.id)) return;

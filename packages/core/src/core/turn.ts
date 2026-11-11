@@ -761,11 +761,15 @@ export interface TurnRunOptions {
    * and yielding an `Error` event. A cancel still yields `UserCancelled`.
    */
   throwErrors?: boolean;
-  /**
-   * Every chunk's usage, including a chunk without a finish reason, which
-   * no event carries.
-   */
-  onUsageMetadata?: (usage: GenerateContentResponseUsageMetadata) => void;
+  /** The stream is ready to iterate after send-time preparation. */
+  onStreamReady?: () => void;
+  /** Each chunk's parsed text and metadata, before yielding its events. */
+  onChunk?: (chunk: {
+    text: string;
+    thoughtText: string;
+    responseId?: string;
+    usageMetadata?: GenerateContentResponseUsageMetadata;
+  }) => void;
 }
 
 export class Turn {
@@ -844,6 +848,7 @@ export class Turn {
             sendOptions,
           );
 
+      runOptions?.onStreamReady?.();
       for await (const streamEvent of responseStream) {
         if (signal?.aborted) {
           yield { type: LlmEventType.UserCancelled };
@@ -911,11 +916,15 @@ export class Turn {
         if (resp.responseId) {
           this.currentResponseId = resp.responseId;
         }
-        if (resp.usageMetadata)
-          runOptions?.onUsageMetadata?.(resp.usageMetadata);
-
         const thoughtText = getThoughtText(resp);
         const thoughtSummary = getThoughtSummary(resp, thoughtText);
+        const text = getResponseText(resp) ?? '';
+        runOptions?.onChunk?.({
+          text,
+          thoughtText,
+          responseId: resp.responseId,
+          usageMetadata: resp.usageMetadata,
+        });
         if (thoughtSummary) {
           yield {
             type: LlmEventType.Thought,
@@ -924,7 +933,6 @@ export class Turn {
           };
         }
 
-        const text = getResponseText(resp) ?? '';
         const displayParts = getDisplayContentParts(resp);
         const hasImage = displayParts.some((part) => 'inlineData' in part);
         if (text || hasImage) {

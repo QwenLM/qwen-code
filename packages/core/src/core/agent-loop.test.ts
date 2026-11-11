@@ -976,7 +976,8 @@ describe('runModelRound on a round source', () => {
 
   it("sends the round on a Turn over the agent's chat, with its request fields", async () => {
     const call = { id: 'call-1', name: 'read_file', args: { path: 'a' } };
-    const usage: unknown[] = [];
+    const onStreamReady = vi.fn();
+    const onChunk = vi.fn();
     const chat = {
       sendMessageStream: vi.fn(async () =>
         (async function* () {
@@ -984,6 +985,7 @@ describe('runModelRound on a round source', () => {
             type: 'chunk',
             value: {
               functionCalls: [call],
+              responseId: 'response-1',
               usageMetadata: { totalTokenCount: 3 },
             },
           };
@@ -998,7 +1000,8 @@ describe('runModelRound on a round source', () => {
     const result = await runModelRound(
       turnModelRound(chat, 'agent-model', {
         requestConfig: { tools, maxOutputTokens: 4_096 },
-        onUsageMetadata: (value) => usage.push(value),
+        onStreamReady,
+        onChunk,
       }),
       round,
       new AbortController().signal,
@@ -1032,7 +1035,14 @@ describe('runModelRound on a round source', () => {
     expect(
       events.find((event) => event.type === LlmEventType.ToolCallRequest),
     ).toMatchObject({ functionCall: call });
-    expect(usage).toEqual([{ totalTokenCount: 3 }]);
+    expect(onStreamReady).toHaveBeenCalledOnce();
+    expect(onChunk).toHaveBeenCalledTimes(2);
+    expect(onChunk).toHaveBeenNthCalledWith(1, {
+      text: '',
+      thoughtText: '',
+      responseId: 'response-1',
+      usageMetadata: { totalTokenCount: 3 },
+    });
   });
 
   it('throws a failed request as it came when asked to', async () => {

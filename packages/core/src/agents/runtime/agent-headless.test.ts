@@ -37,6 +37,7 @@ import {
 } from '../../core/contentGenerator.js';
 import { LlmChat } from '../../core/llm-chat.js';
 import { LlmEventType, Turn } from '../../core/turn.js';
+import { CoreToolScheduler } from '../../core/coreToolScheduler.js';
 import {
   getToolCallFingerprint,
   normalizeModelToolCallIds,
@@ -64,7 +65,11 @@ import type {
 import { AgentTerminateMode } from './agent-types.js';
 import type { AgentCore } from './agent-core.js';
 import { beginRetryWait } from '../../utils/retry-wait.js';
-import { DEFAULT_STALL_MS, runStallResilient } from './workflow-stall.js';
+import {
+  attachStallWatchdog,
+  DEFAULT_STALL_MS,
+  runStallResilient,
+} from './workflow-stall.js';
 import {
   isWorkflowAgentFailedError,
   WorkflowAgentFailedError,
@@ -2710,6 +2715,50 @@ describe('subagent.ts', () => {
           return { result, attempts: () => attempts };
         };
 
+        it.each([false, true])(
+          'renews the stall window after preparing a follow-up stream (shared=%s)',
+          async (shared) => {
+            const { scope, emitter } = await createScope({ max_turns: 3 });
+            vi.stubEnv(
+              'QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP',
+              shared ? '1' : undefined,
+            );
+            const controller = new AbortController();
+            vi.useFakeTimers();
+            const watchdog = attachStallWatchdog(emitter, controller, 350);
+            try {
+              let startPreparation!: () => void;
+              const preparing = new Promise<void>((resolve) => {
+                startPreparation = resolve;
+              });
+              mockSendMessageStream
+                .mockResolvedValueOnce(
+                  streamOf(callsChunk([call('missing_tool', {}, 'call_1')])),
+                )
+                .mockImplementation(async () => {
+                  startPreparation();
+                  await new Promise((resolve) => setTimeout(resolve, 220));
+                  return (async function* () {
+                    await new Promise((resolve) => setTimeout(resolve, 220));
+                    yield doneChunk;
+                  })();
+                });
+              const run = scope.execute(new ContextState(), controller.signal);
+              await Promise.race([preparing, run]);
+              await vi.advanceTimersByTimeAsync(440);
+              await run;
+              expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+              expect(watchdog.stalled()).toBe(false);
+              expect(scope.getTerminateMode()).toBe(AgentTerminateMode.GOAL);
+              expect(scope.getFinalText()).toBe('Done.');
+            } finally {
+              watchdog.dispose();
+              vi.useRealTimers();
+              vi.unstubAllEnvs();
+            }
+          },
+        );
+
         it('keeps a backoff longer than stallMs on one attempt', async () => {
           vi.useFakeTimers();
           try {
@@ -3501,6 +3550,42 @@ describe('subagent.ts', () => {
         expect(shared).toEqual(current);
       });
 
+      it.each([
+        {
+          description: 'a later chunk supplies the ID',
+          chunks: [
+            callsChunk([listFiles('call_1')]),
+            { type: 'chunk', value: { responseId: 'response-1' } },
+          ],
+          responseId: 'response-1',
+        },
+        {
+          description: 'the retried attempt has no ID',
+          chunks: [
+            { type: 'chunk', value: { responseId: 'discarded-response' } },
+            { type: 'retry' },
+            callsChunk([listFiles('call_1')]),
+          ],
+          responseId: undefined,
+        },
+      ])(
+        'correlates tool requests when $description',
+        async ({ chunks, responseId }) => {
+          const schedule = vi.spyOn(CoreToolScheduler.prototype, 'schedule');
+          await onBothPaths(() =>
+            mockSendMessageStream
+              .mockImplementationOnce(async () => streamOf<object>(...chunks))
+              .mockImplementation(async () => streamOf(answer)),
+          );
+          expect(schedule).toHaveBeenCalledTimes(2);
+          for (const [requests] of schedule.mock.calls) {
+            expect(requests).toMatchObject([
+              { callId: 'call_1', response_id: responseId },
+            ]);
+          }
+        },
+      );
+
       it('ends the run with the failure the request threw', async () => {
         const [current, shared] = await onBothPaths(() =>
           mockSendMessageStream.mockImplementation(async () =>
@@ -3541,6 +3626,36 @@ describe('subagent.ts', () => {
         expect(shared.terminateMode).toBe(AgentTerminateMode.LOOP_DETECTED);
         expect(shared.turns).toBe(1);
         expect(closed).toEqual([true, true]);
+        expect(shared).toEqual(current);
+      });
+
+      it('streams the visible text already received when a thought trips the loop guard', async () => {
+        const thought = {
+          text: 'I need to check the workspace.',
+          thought: true,
+        };
+        const [current, shared] = await onBothPaths(() =>
+          mockSendMessageStream.mockImplementation(async () =>
+            streamOf(
+              partsChunk([thought]),
+              partsChunk([thought]),
+              partsChunk([thought, { text: 'Here is the answer.' }]),
+              partsChunk([{ text: 'Never seen.' }]),
+            ),
+          ),
+        );
+        expect(shared.terminateMode).toBe(AgentTerminateMode.LOOP_DETECTED);
+        expect(shared.events).toContainEqual([
+          AgentEventType.STREAM_TEXT,
+          expect.objectContaining({
+            text: 'Here is the answer.',
+            thought: false,
+          }),
+        ]);
+        expect(shared.events).not.toContainEqual([
+          AgentEventType.STREAM_TEXT,
+          expect.objectContaining({ text: 'Never seen.' }),
+        ]);
         expect(shared).toEqual(current);
       });
 

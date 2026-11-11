@@ -486,19 +486,18 @@ AgentCore's reasoning loop, `runReasoningLoop` in `agent-core.ts`, runs every su
 | 5c   | the run on the loop: the parent's messages through the loop's next round, the loop reminder and the result-aware loop guard, the wait and the request for a final answer, and the stops mapped to `terminateMode` |
 | 5d   | default on, then remove the current loop                                                                                                                                                                          |
 
-PR 5a gives `runModelRound` a second kind of round. It takes the main session's `LlmClient` or a `ModelRoundSource`, and `turnModelRound(chat, model, options)` sends a round on a `Turn` over an agent's chat. The `Turn` gains what such a round sends and reads, each optional, so the main session's requests do not change: the round's request fields (its tools and an output limit a retry raised), the raised limit on its `Retry` event, each chunk's usage, including a chunk without a finish reason, and an option to throw a failed request as it came instead of reporting it and yielding an `Error` event. A surface's model-event callback may return a stop reason, which ends the round there and closes its stream.
+PR 5a gives `runModelRound` a second kind of round. It takes the main session's `LlmClient` or a `ModelRoundSource`, and `turnModelRound(chat, model, options)` sends a round on a `Turn` over an agent's chat. The `Turn` accepts optional request fields for tools and the output limit, reports when the stream is ready, and provides each chunk's text, response ID and usage before yielding its events. A `Retry` event can carry a raised output limit. The agent can ask the `Turn` to propagate request errors unchanged. A surface's model-event callback may return a stop reason, which ends the round there and closes its stream.
 
 AgentCore maps the round's events as it maps its chunks today and keeps the raw function calls for its tool step. What moves:
 
-| AgentCore today                                                          | With the setting on                                                                               |
-| ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------- |
-| it sends each round on `LlmChat.sendMessageStream` and parses its chunks | `runModelRound` sends it on a `Turn`, and AgentCore maps the round's events                       |
-| a loop it detects in the stream breaks out of the stream                 | the event's callback returns `loop_detected`, which ends the round and closes the stream          |
-| a model fallback keeps the calls the failed model made                   | they are dropped, as on the other surfaces                                                        |
-| the round's start event goes out once the request is ready               | it goes out right before the round is sent, so a request that fails before it streams has one too |
-| a streamed text event per text part                                      | per chunk: its thought text, then its text                                                        |
+| AgentCore today                                                          | With the setting on                                                                      |
+| ------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------- |
+| it sends each round on `LlmChat.sendMessageStream` and parses its chunks | `runModelRound` sends it on a `Turn`, and AgentCore maps the round's events              |
+| a loop it detects in the stream breaks out of the stream                 | the event's callback returns `loop_detected`, which ends the round and closes the stream |
+| a model fallback keeps the calls the failed model made                   | they are dropped, as on the other surfaces                                               |
+| a streamed text event per text part                                      | per chunk: its thought text, then its text                                               |
 
-A failed request, a cancel and a retry wait cut off by the time limit end the run as today. The suite with the setting on counts each subagent round sent on the shared loop in the debug log; the line differs from the main session's, which the TUI suite counts.
+Both paths emit `ROUND_START` after stream preparation so the workflow watchdog gives the model response a fresh stall window. The agent emits text from the entire received chunk before its loop checks and tracks response IDs per attempt. A failed request, a cancel and a retry wait cut off by the time limit end the run as today. The suite with the setting on counts each subagent round sent on the shared loop in the debug log. The TUI suite counts main-session rounds using a separate log entry.
 
 ## Migration
 
@@ -576,7 +575,7 @@ A difference fails the scenario unless it is listed with a linked issue.
 **Subagent scenarios** (in the headless suite, from PR 5a), each through the `agent` tool, with the subagent's requests compared with the main session's in the order they were sent:
 
 - a subagent that reads a file;
-- a subagent whose stream drops and is retried;
+- a subagent that recovers after one disconnect. The test checks for two requests and the recovered answer in the parent tool result.
 - a subagent stopped at its turn limit;
 - a subagent whose model fails.
 
@@ -686,7 +685,6 @@ The suites run in the integration job, the TUI suite on Ink; the OpenTUI interac
 
 - With the setting on, AgentCore differs from today in these intended ways:
   - from PR 5a, a model fallback drops the calls the failed model made, as on the other surfaces;
-  - from PR 5a, a round's start event goes out right before the round is sent, so a request that fails before it streams has one too;
   - from PR 5a, a streamed text event carries a chunk's thought text or its text instead of one text part.
 
 - Later surfaces bring their own fixes: #15324 (ACP), #15326 (OpenTUI), #14114 and #12209 (ACP).
