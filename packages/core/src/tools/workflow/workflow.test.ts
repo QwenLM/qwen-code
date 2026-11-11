@@ -64,6 +64,14 @@ function fakeConfig(): Config {
 type Dispatch = WorkflowToolOptions['dispatch'];
 /** Config fields that silence the one-time usage banner. */
 const QUIET = { getSkipWorkflowUsageWarning: () => true };
+/** An ACP session (`--acp`) with its workflow controls on. */
+const ACP = {
+  isInteractive: () => false,
+  getExperimentalZedIntegration: () => true,
+  isWorkflowsEnabled: () => true,
+  getBareMode: () => false,
+  isTrustedFolder: () => true,
+};
 const unused = async () => 'unused';
 const replyOk = async () => 'ok';
 const tagged = async (prompt: string) => `T:${prompt}`;
@@ -939,10 +947,7 @@ await agent('scan package.json')
       }),
     ).toThrow(/completion channel/i);
 
-    const acpWithoutChannel = configWithRegistry({
-      isInteractive: () => false,
-      getExperimentalZedIntegration: () => true,
-    });
+    const acpWithoutChannel = configWithRegistry(ACP);
     expect(() =>
       new WorkflowTool(acpWithoutChannel.config).build(background),
     ).toThrow(/completion channel/i);
@@ -953,21 +958,27 @@ await agent('scan package.json')
     });
   });
 
-  // An ACP session turns its workflow controls off in bare mode and in an
-  // untrusted folder; a background run there could not be seen or stopped.
-  it.each([
-    [{}, true],
-    [{ getBareMode: () => true }, false],
-    [{ getFolderTrustFeature: () => true, getFolderTrust: () => false }, false],
-    [{ getFolderTrustFeature: () => true, getFolderTrust: () => true }, true],
+  // An ACP session turns its workflow controls off when workflows are
+  // disabled (also by a settings reload mid-session), in bare mode, and in an
+  // untrusted workspace; a background run there could not be seen or
+  // stopped. Trust is the resolved decision, not the folder-trust feature
+  // toggle, and a host that cannot answer one of these counts as off.
+  it.each<[string, Record<string, unknown>, boolean]>([
+    ['controls on', {}, true],
+    ['workflows disabled', { isWorkflowsEnabled: () => false }, false],
+    ['bare mode', { getBareMode: () => true }, false],
+    ['untrusted workspace', { isTrustedFolder: () => false }, false],
+    [
+      'untrusted workspace, folder-trust toggle on',
+      { getFolderTrust: () => true, isTrustedFolder: () => false },
+      false,
+    ],
+    ['no workflows answer', { isWorkflowsEnabled: undefined }, false],
+    ['no trust answer', { isTrustedFolder: undefined }, false],
   ])(
-    'gates ACP background runs on the workflow controls: %j',
-    (extra, allowed) => {
-      const { config, registry } = configWithRegistry({
-        isInteractive: () => false,
-        getExperimentalZedIntegration: () => true,
-        ...extra,
-      });
+    'gates ACP background runs on the workflow controls: %s',
+    (_label, extra, allowed) => {
+      const { config, registry } = configWithRegistry({ ...ACP, ...extra });
       registry.setCompletionCallback(vi.fn());
       const build = () =>
         new WorkflowTool(config).build({
@@ -986,11 +997,7 @@ await agent('scan package.json')
   // as non-interactive; its session registers the completion channel that
   // turns a settled run into a notification turn.
   it('runs a model-requested background workflow in an ACP session and reports it once', async () => {
-    const { config, registry } = configWithRegistry({
-      isInteractive: () => false,
-      getExperimentalZedIntegration: () => true,
-      ...QUIET,
-    });
+    const { config, registry } = configWithRegistry({ ...ACP, ...QUIET });
     const completion = vi.fn();
     registry.setCompletionCallback(completion);
     let resolveDispatch: ((value: string) => void) | undefined;

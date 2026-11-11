@@ -163,26 +163,30 @@ export type WorkflowRunSettlement =
  * the run's completion into the session's notification queue; a headless
  * run has nothing to deliver it to, so it stays in the foreground.
  *
- * An ACP session also needs its workflow controls, which it turns off in
- * bare mode and in an untrusted folder (the same conditions as the ACP
- * agent's `canUseWorkflowControls`): without them a client could neither
- * see nor stop a background run.
+ * An ACP session also needs its workflow controls: workflows still
+ * enabled (a settings reload can turn them off without unregistering this
+ * tool), not bare mode, and a trusted workspace. Without them the client
+ * hides a session's workflow runs and refuses to cancel them, so a
+ * background run could be neither seen nor stopped. Trust is the resolved
+ * workspace decision (`isTrustedFolder`), the one the serve layer applies
+ * to the tasks view and cancel; a mock or host that cannot answer counts
+ * as off.
  */
 export function hostSupportsBackgroundWorkflows(
   config: Pick<
     Config,
     | 'isInteractive'
     | 'getExperimentalZedIntegration'
+    | 'isWorkflowsEnabled'
     | 'getBareMode'
-    | 'getFolderTrustFeature'
-    | 'getFolderTrust'
+    | 'isTrustedFolder'
   >,
 ): boolean {
   if (config.getExperimentalZedIntegration?.() === true) {
     return (
+      config.isWorkflowsEnabled?.() === true &&
       config.getBareMode?.() !== true &&
-      (config.getFolderTrustFeature?.() !== true ||
-        config.getFolderTrust?.() === true)
+      config.isTrustedFolder?.() === true
     );
   }
   return config.isInteractive?.() === true;

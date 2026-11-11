@@ -19,8 +19,9 @@ model for a long workflow run and let it call the Workflow tool with
 - When the run settles, exactly one workflow notification turn starts and the
   model answers from the run's result.
 - A headless run (`qwen -p`) still rejects `run_in_background: true`. So does
-  an ACP session whose workflow controls are off (bare mode or an untrusted
-  folder), or one without a completion channel.
+  an ACP session whose workflow controls are off (workflows disabled, also
+  by a settings reload mid-session; bare mode; or an untrusted workspace, as
+  resolved by `isTrustedFolder`), or one without a completion channel.
 - A call without `run_in_background` behaves exactly as before: the tool waits
   for the run and returns its result inline.
 

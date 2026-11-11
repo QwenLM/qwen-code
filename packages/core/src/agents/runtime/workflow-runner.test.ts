@@ -1086,6 +1086,8 @@ describe('WorkflowRunner', () => {
       Object.assign(config, {
         isInteractive: () => interactive,
         getExperimentalZedIntegration: () => zed,
+        isWorkflowsEnabled: () => true,
+        isTrustedFolder: () => true,
       });
 
       const handle = await runSettled(config, {
