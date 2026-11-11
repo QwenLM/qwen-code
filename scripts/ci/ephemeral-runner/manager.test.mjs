@@ -588,6 +588,90 @@ test('age checks retain healthy idle, busy and unreachable runners until the con
   }
 });
 
+test('monitoring a pending wait keeps subscriptions bounded through exit and shutdown', async (t) => {
+  for (const outcome of ['exit', 'shutdown']) {
+    await t.test(outcome, async (t) => {
+      const f = await fixture(t);
+      let now = 0;
+      let ticks = 0;
+      let subscriptions = 0;
+      let waits = 0;
+      let finish;
+      let signal;
+      let terminal = false;
+      let manager;
+      t.mock.method(Date, 'now', () => now);
+      const command = (program, args, options) => {
+        if (program === 'docker' && args[0] === 'wait') {
+          waits += 1;
+          signal = options.signal;
+          const pending = new Promise((resolveWait, rejectWait) => {
+            finish = resolveWait;
+            signal.addEventListener('abort', () =>
+              rejectWait(new Error('wait cancelled')),
+            );
+          });
+          const then = pending.then.bind(pending);
+          pending.then = (...handlers) => {
+            const normalized = then(...handlers);
+            const subscribe = normalized.then.bind(normalized);
+            normalized.then = (...reactions) => {
+              subscriptions += 1;
+              return subscribe(...reactions);
+            };
+            return normalized;
+          };
+          return pending;
+        }
+        if (
+          program === 'gh' &&
+          args.includes('/repos/owner/repo/actions/runners/1') &&
+          !args.includes('DELETE')
+        )
+          return Promise.resolve(
+            JSON.stringify({ ...f.runnerList()[0], status: 'online' }),
+          );
+        if (program === 'docker' && args[0] === 'rm')
+          assert.ok(terminal, 'monitor ticks must retain the live container');
+        return f.command(program, args, options);
+      };
+      manager = createManager(f.config, {
+        command,
+        sleep: async (ms) => {
+          now += ms;
+          ticks += 1;
+          if (ticks === 64) {
+            terminal = true;
+            if (outcome === 'exit') finish('0\n');
+            else manager.stop();
+          }
+          assert.ok(ticks <= 66, 'container exit or shutdown was not observed');
+        },
+      });
+      const result = await manager.cycle(1);
+      t.diagnostic(
+        `${ticks} monitor ticks retained ${subscriptions} subscriptions`,
+      );
+      assert.equal(result.earlyExit, false);
+      assert.equal(waits, 1);
+      assert.equal(
+        signal.aborted,
+        true,
+        'monitor completion cancels the client',
+      );
+      assert.equal(
+        f.calls.filter((c) => c.program === 'docker' && c.args[0] === 'rm')
+          .length,
+        1,
+      );
+      assert.ok(
+        subscriptions <= 1,
+        `${ticks} monitor ticks attached ${subscriptions} reactions to one pending wait`,
+      );
+    });
+  }
+});
+
 test('an unbounded command can be cancelled without leaving its client running', async () => {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 100);
@@ -1593,6 +1677,161 @@ test('a failed wait client or unavailable Docker never proves that a container e
   assert.equal(result.earlyExit, false);
   assert.equal(waits, 3);
   assert.ok(inspectFailed && listFailed);
+});
+
+test('Docker observation retries back off with jitter and reset after successful observation', async (t) => {
+  for (const [recovery, jitter] of [
+    ['inspect', 0],
+    ['inspect', 0.999999],
+    ['list', 0],
+    ['list', 0.999999],
+  ]) {
+    await t.test(`${recovery} recovery, jitter ${jitter}`, async (t) => {
+      const f = await fixture(t);
+      const observations = [];
+      const attempts = [];
+      let now = 0;
+      let waits = 0;
+      let exited = false;
+      t.mock.method(Date, 'now', () => now);
+      t.mock.method(Math, 'random', () => jitter);
+      const command = (program, args, options) => {
+        if (program === 'docker' && args[0] === 'wait') {
+          waits += 1;
+          attempts.push(now);
+          observations.push({ attempt: waits, command: 'wait', at: now });
+          if (waits < 11)
+            return Promise.reject(new Error('Docker disconnected'));
+          exited = true;
+          return Promise.resolve('0\n');
+        }
+        if (
+          program === 'docker' &&
+          args[0] === 'inspect' &&
+          args.includes('{{json .State}}')
+        ) {
+          observations.push({ attempt: waits, command: 'inspect', at: now });
+          if (waits !== 9 || recovery !== 'inspect')
+            return Promise.reject(new Error('Docker disconnected'));
+        }
+        if (program === 'docker' && args[0] === 'ps' && waits > 0 && !exited) {
+          observations.push({ attempt: waits, command: 'ps', at: now });
+          if (waits !== 9 || recovery !== 'list')
+            return Promise.reject(new Error('Docker disconnected'));
+        }
+        if (program === 'docker' && args[0] === 'rm')
+          assert.ok(
+            exited,
+            'Docker observation failures must retain the container',
+          );
+        return f.command(program, args, options);
+      };
+      const result = await createManager(f.config, {
+        command,
+        sleep: async (ms) => {
+          now += ms;
+          assert.ok(now < 600_000, 'Docker observation retries did not finish');
+        },
+      }).cycle(1);
+      const gaps = attempts.slice(1).map((at, i) => at - attempts[i]);
+      t.diagnostic(JSON.stringify({ recovery, jitter, observations, gaps }));
+      assert.equal(result.earlyExit, false);
+      assert.equal(waits, 11);
+      assert.equal(
+        observations.filter((c) => c.command === 'inspect').length,
+        10,
+      );
+      assert.equal(
+        observations.filter((c) => c.command === 'ps').length,
+        recovery === 'inspect' ? 9 : 10,
+      );
+      for (const [index, ceiling] of [
+        1000, 2000, 4000, 8000, 16_000, 32_000, 60_000, 60_000,
+      ].entries()) {
+        const delay = jitter === 0 ? ceiling / 2 : ceiling;
+        assert.ok(
+          gaps[index] >= delay && gaps[index] <= delay + 1000,
+          `retry ${index + 1} at jitter ${jitter}: ${gaps[index]}ms, expected ${delay}ms plus at most one poll`,
+        );
+      }
+      assert.ok(
+        gaps[8] >= 1000 && gaps[8] <= 2000,
+        'a successful observation restores normal cadence',
+      );
+      const resetDelay = jitter === 0 ? 500 : 1000;
+      assert.ok(
+        gaps[9] >= resetDelay && gaps[9] <= resetDelay + 1000,
+        `a new outage must restart the backoff, got ${gaps[9]}ms`,
+      );
+    });
+  }
+});
+
+test('stop interrupts Docker observation backoff without starting another wait client', async (t) => {
+  const f = await fixture(t);
+  let now = 0;
+  let waits = 0;
+  let observationFailed = false;
+  let stoppedAt;
+  let signal;
+  let manager;
+  const sleeps = [];
+  t.mock.method(Date, 'now', () => now);
+  t.mock.method(Math, 'random', () => 0.999999);
+  const command = (program, args, options) => {
+    if (program === 'docker' && args[0] === 'wait') {
+      waits += 1;
+      signal = options.signal;
+      return Promise.reject(new Error('Docker disconnected'));
+    }
+    if (
+      program === 'docker' &&
+      args[0] === 'inspect' &&
+      args.includes('{{json .State}}')
+    )
+      return Promise.reject(new Error('Docker disconnected'));
+    if (
+      program === 'docker' &&
+      args[0] === 'ps' &&
+      waits > 0 &&
+      stoppedAt === undefined
+    ) {
+      observationFailed = true;
+      return Promise.reject(new Error('Docker disconnected'));
+    }
+    if (program === 'docker' && args[0] === 'rm')
+      assert.notEqual(
+        stoppedAt,
+        undefined,
+        'Docker failures must retain the container',
+      );
+    return f.command(program, args, options);
+  };
+  manager = createManager(f.config, {
+    command,
+    sleep: async (ms) => {
+      sleeps.push(ms);
+      if (observationFailed && stoppedAt === undefined) {
+        stoppedAt = now;
+        manager.stop();
+      }
+      now += ms;
+    },
+  });
+  await manager.cycle(1);
+  t.diagnostic(JSON.stringify({ waits, stoppedAt, finishedAt: now, sleeps }));
+  assert.notEqual(
+    stoppedAt,
+    undefined,
+    'the test must reach observation backoff',
+  );
+  assert.ok(now - stoppedAt <= 1000, 'shutdown must interrupt a long backoff');
+  assert.ok(
+    sleeps.every((ms) => ms <= 1000),
+    'backoff must use interruptible slices',
+  );
+  assert.equal(signal.aborted, true);
+  assert.equal(waits, 1, 'shutdown must not start another wait client');
 });
 
 test('starts through a symlink and reports invalid configuration', async (t) => {

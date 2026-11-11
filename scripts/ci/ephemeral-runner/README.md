@@ -158,8 +158,13 @@ and keeps the container. Job runtime limits belong to the workflow's
 
 Only a confirmed container exit triggers normal replacement. A failed
 `docker wait` client is checked against Docker state and retried rather than
-being treated as a job exit. The wait client has no age timeout and is cancelled
-when monitoring ends. A stuck runner that cannot honor a GitHub cancellation
+being treated as a job exit. If both state inspection and listing fail, retries
+use equal-jitter exponential backoff with a 1 s ceiling doubling to 60 s (each
+delay is between half and all of its ceiling). A successful Docker observation
+resets this backoff and restores the normal 1 s retry cadence. Backoff stays
+interruptible during shutdown. Each wait client is observed once, so healthy
+idle monitoring retains bounded state. The wait client has no age timeout and
+is cancelled when monitoring ends. A stuck runner that cannot honor a GitHub cancellation
 requires operator inspection and targeted recovery; an offline registration is
 not proof that killing its container is safe. This deliberately trades automatic
 age-based reclamation for avoiding interruption of live jobs.
