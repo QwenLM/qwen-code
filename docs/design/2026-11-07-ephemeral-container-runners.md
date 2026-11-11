@@ -279,8 +279,8 @@ that variable, so their escape path remains a workflow selector change on
 Both lanes deliberately keep their pnpm store restore on the hosted arm only.
 A pool slot is a fresh container with no store, so every pooled run pays a cold
 install: the Managed Host lane measured 2m45s install plus 4m07s of builds
-(6m52s total, job 130475867804), against the two cold installs the capture lane
-measured at 22m18s. That is what the 90-minute ceilings buy, and it is accepted
+(6m52s total, job 130475867804), against the capture lane's 22m18s
+head install. That is what the 90-minute ceilings buy, and it is accepted
 here rather than optimized: restoring the GitHub Actions cache on this pool
 means reaching the cache service through the slot's egress proxy, and saving
 from a container that dies with its job is upload cost with no return. Pool

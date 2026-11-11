@@ -179,7 +179,7 @@ HTTP 403/429 时 30 秒到 300 秒），重试次数不再对应固定时长。�
 剩余 14.6 GB、已用 89% 的槽位，几分钟后 pnpm 即 ENOSPC），渲染钉住
 `--workers=2`（不钉的话会按宿主核数在 4 CPU 容器里起 Chromium，实测把
 runner 进程本身饿到失联），超时按路由取池上 90 分钟 / 托管 45 分钟
-（实测两次冷装 22 分 18 秒、36 分 48 秒时 Chromium 仍在下载），并在
+（实测单次 head 安装 22 分 18 秒、36 分 48 秒时 Chromium 仍在下载），并在
 运行时尽力安装 DejaVu 字体基线和 ffmpeg——apt 出口与 Debian 归档仍是硬性前提
 （前面的 `playwright install --with-deps` 步骤依赖同一归档）；best-effort 仅
 覆盖这一步自身额外字体/ffmpeg 安装失败的情况，降级为回退字体和仅 .webm
