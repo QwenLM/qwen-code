@@ -34,4 +34,8 @@ DataAgent 适配器留在业务仓，仅依赖 Managed contracts。复用 Skill 
 
 验证自定义 Bean 退让、重复 Provider、严格引用、流清理、不可变存储、同 Key 冲突、并发导入和未知写入；所有新使用/读取路径的来源权限；更新、撤权和进程替换后的固定版本；来源故障期间的原操作重放；CSI 来源恢复。执行 API/SurfaceRegistry、嵌入契约、真实 MySQL 并发/恢复和 Hosted 执行。遵守模块共享十分钟本地 Java 预算，完整 CI 和真实 DataAgent 部署验收分别记录。本设计不声明已经部署。
 
-本地证据包括定向 Java/API 测试、真实 MySQL 8.4 导入并发和 CSI 来源往返、自定义存储 Spring 退让，以及 Boot 3.5.3 来源导入/Session 准入。DataAgent 独立 `managed-extension-sources / pinned-versions` 集合需要候选部署和自有历史 Skill/脚本、专家套件测试资源，当前未在部署环境执行。来源撤权、Provider 故障、进程替换和执行包损坏的部署故障矩阵仍待单独执行。既有 daemon/Muster 旅程不能证明 Managed 验收。较早 DataAgent 候选曾记录 ACP 协议 IT 失败，原失败报告继续保留。当前内网宿主候选已通过完整本地门禁（3,222 项单测、墙钟 20.123 秒、聚合行覆盖率 86.93%）、Boot 3.5.3 嵌入装配及 320 项一次性 MySQL 8.4.11 测试。这些检查不代表部署或 Hosted 执行验收通过。
+本地证据包括定向 Java/API 测试、真实 MySQL 8.4 导入并发和 CSI 来源往返，以及自定义存储 Spring 退让。公共代码候选 `d4ff4fe8e8a3af915df1f70a78e6cef334e53218` 的 12 项必需 CI job 全部通过，包括 MySQL、Hosted 进程故障与故障转移。
+
+使用 `.1-SNAPSHOT` 的较早 DataAgent 内网宿主候选已通过完整本地门禁（3,222 项单测、墙钟 20.123 秒、聚合行覆盖率 86.93%）、来源/存储 Bean 嵌入装配及 320 项一次性 MySQL 8.4.11 测试。宿主使用 Boot 3.5.3，原生 SDK 使用 Boot 3.5.16。私有集成 `.5-SNAPSHOT` 的 CI `88414906` 在 6,870 项原生测试零失败/错误、24 项跳过后，最终 verification Checkstyle 失败，未进入 MySQL 门禁。四处测试 import 修正已冻结到 `.6-SNAPSHOT`，仍须通过完整 CI。更新后的宿主必须用该同源已验证输入替换 contracts、server 和 Java SDK，并重跑完整宿主/MySQL 门禁，包括嵌入 Boot 兼容性。原失败报告继续保留，打包或部分测试通过不能抵消失败。
+
+DataAgent 独立 `managed-extension-sources / pinned-versions` 集合需要候选部署和自有历史 Skill/脚本资源，当前未在部署环境执行。专家套件执行、来源撤权、Provider 故障、进程替换、执行包损坏恢复、CSI 恢复及临时文件清理仍待部署场景验收。既有 daemon/Muster 旅程不能证明 Managed 验收。这些检查不代表部署或业务 Hosted 执行验收通过。
