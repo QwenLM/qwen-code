@@ -2046,17 +2046,63 @@ it('declares loop_wakeup and the cron union on shell/3 but not on shell/1', asyn
       new AbortController().signal,
     )
   ).map((tool) => tool.name);
-  expect(shell3).toContain('loop_wakeup');
-  expect(shell3).toContain('cron_list');
-  expect(shell3).toContain('cron_delete');
   const shell1 = (
     await mk('hosted-workspace-shell/1').declarations(
       new AbortController().signal,
     )
   ).map((tool) => tool.name);
+  // The revision is its /1 counterpart plus the loop surface — nothing the
+  // twin declares (todo_write, glob, the file tools) may be dropped.
+  expect([...shell3].sort()).toEqual(
+    [...shell1, 'loop_wakeup', 'cron_list', 'cron_delete'].sort(),
+  );
+  expect(shell3).toContain('todo_write');
   expect(shell1).not.toContain('loop_wakeup');
   expect(shell1).not.toContain('cron_list');
   expect(shell1).not.toContain('cron_delete');
+});
+
+it('admits public Plan mode on the loop Shell revision shell/3', async () => {
+  const mk = (profile: string) =>
+    new HostedWorkspaceToolTurn(
+      { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+      session,
+      harness,
+      'prompt',
+      commit,
+      messageFitsInline,
+      undefined,
+      undefined,
+      undefined,
+      { profile, publicPlanMode: true },
+    );
+  expect(() => mk('hosted-workspace-shell/3')).not.toThrow();
+  expect(() => mk('hosted-workspace-shell/1')).not.toThrow();
+});
+
+it('admits ask_user_question on the loop Shell revision shell/3', async () => {
+  const mk = (profile: string) =>
+    new HostedWorkspaceToolTurn(
+      { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+      session,
+      harness,
+      'prompt',
+      commit,
+      messageFitsInline,
+      undefined,
+      undefined,
+      { settings: { mode: 'default', timeoutMs: 60_000 }, waiters },
+      { profile },
+    );
+  for (const profile of [
+    'hosted-workspace-shell/1',
+    'hosted-workspace-shell/3',
+  ]) {
+    const names = (
+      await mk(profile).declarations(new AbortController().signal)
+    ).map((tool) => tool.name);
+    expect(names).toContain('ask_user_question');
+  }
 });
 
 it('cron_list and cron_delete drive the loop funnel end to end on shell/3', async () => {

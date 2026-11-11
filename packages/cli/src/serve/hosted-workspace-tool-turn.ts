@@ -2226,9 +2226,11 @@ export class HostedWorkspaceToolTurn {
         this.mcp ||
         this.memberPlanMode ||
         this.childDepth !== 0 ||
-        !['hosted-workspace-files/1', 'hosted-workspace-shell/1'].includes(
-          this.profile ?? '',
-        ))
+        ![
+          'hosted-workspace-files/1',
+          'hosted-workspace-shell/1',
+          'hosted-workspace-shell/3',
+        ].includes(this.profile ?? ''))
     )
       throw new Error('Public Plan mode is unavailable for this Session.');
     this.publication =
@@ -2275,13 +2277,18 @@ export class HostedWorkspaceToolTurn {
   }
 
   private get fileBackupsEnabled(): boolean {
-    return !this.mcp || this.profile === 'hosted-workspace-shell/1';
+    return (
+      !this.mcp ||
+      this.profile === HOSTED_WORKSPACE_SHELL_PROFILE ||
+      this.profile === HOSTED_WORKSPACE_SHELL_PROFILE_V3
+    );
   }
 
   private declaresTodoTool(): boolean {
     return (
       this.profile === HOSTED_WORKSPACE_FILE_PROFILE_V3 ||
-      this.profile === HOSTED_WORKSPACE_SHELL_PROFILE
+      this.profile === HOSTED_WORKSPACE_SHELL_PROFILE ||
+      this.profile === HOSTED_WORKSPACE_SHELL_PROFILE_V3
     );
   }
 
@@ -2310,6 +2317,7 @@ export class HostedWorkspaceToolTurn {
         HOSTED_WORKSPACE_FILE_PROFILE_V2,
         HOSTED_WORKSPACE_FILE_PROFILE_V3,
         HOSTED_WORKSPACE_SHELL_PROFILE,
+        HOSTED_WORKSPACE_SHELL_PROFILE_V3,
       ].includes(this.profile ?? HOSTED_WORKSPACE_FILE_PROFILE)
     );
   }
