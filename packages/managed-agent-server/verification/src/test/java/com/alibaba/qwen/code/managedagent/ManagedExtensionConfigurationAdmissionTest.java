@@ -82,6 +82,7 @@ class ManagedExtensionConfigurationAdmissionTest {
         String operation = UUID.randomUUID().toString();
         ObjectNode content = ManagedConfigInstallContractTest.record(ManagedConfigInstallContractTest.content("nullable_preparing"), 1);
         assertBusy(() -> transaction(() -> sessions.requireExtensionManagement("tenant", "actor", parent, operation, true)));
+        assertThatCode(() -> transaction(() -> sessions.requireExtensionManagement("tenant", "actor", parent, operation, false))).doesNotThrowAnyException();
         assertBusy(() -> transaction(() -> {
             sessions.requireConfigurationCommit("tenant", workspace, parent, content);
             return null;
