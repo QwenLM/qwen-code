@@ -889,14 +889,18 @@ export function createManager(config, dependencies = {}) {
         // `docker top` observes processes, not the assignment queue, so an
         // idle probe alone cannot prove GitHub will not hand this online
         // runner a job in the gap before the container is removed. Deleting
-        // the registration is the server-side gate: once GitHub accepts the
-        // DELETE the runner is no longer assignable, and only then may the
+        // the registration is the server-side gate: only an accepted DELETE
+        // proves the runner is no longer assignable, and only then may the
         // container stop. Busy (422) means a job may have just been
-        // assigned; 403/429 mean the answer is unknown — both keep the
-        // container draining and retry, and the deadline still forces the
-        // shutdown. A 404 means the registration is already gone, which is
-        // the same closed gate. Returns the refusal error, or undefined when
-        // the registration is retired.
+        // assigned; 403/429 mean the answer is unknown. So does 404: GitHub
+        // hides resources the credential cannot see, so a revoked repo
+        // access looks exactly like a registration that is gone, and the
+        // registration may still be online taking jobs. Unconfirmed answers
+        // keep the container draining and retry, and the deadline still
+        // forces the shutdown. Cleanup keeps tolerating 404 after the
+        // container is stopped — that is a retry of a resource already given
+        // up, not this gate. Returns the refusal error, or undefined when
+        // GitHub accepted the deletion.
         const retireRegistration = async () => {
           try {
             await gh([
@@ -906,7 +910,6 @@ export function createManager(config, dependencies = {}) {
             ]);
             return undefined;
           } catch (error) {
-            if (error.status === 404) return undefined;
             return error;
           }
         };

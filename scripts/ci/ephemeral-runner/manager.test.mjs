@@ -2475,64 +2475,69 @@ test('drain stops an idle runner instead of waiting out the window', async (t) =
 test('drain keeps draining when GitHub refuses the registration retirement', async (t) => {
   const { f, clock } = await drainHarness(t);
   f.config.drainTimeoutSeconds = 600;
-  // A busy answer means GitHub may have just assigned the job the idle probe
-  // could not see yet.
-  f.setRejectFirstDelete(422);
-  const jobStartsAt = clock.now + 10_000;
-  const jobEndsAt = clock.now + 20_000;
-  let workerSeen = false;
-  let removedBeforeWorker = 0;
-  let releaseWait;
-  let manager;
-  const command = (program, args, options) => {
-    if (program === 'docker' && args[0] === 'start') manager.stop();
-    if (program === 'docker' && args[0] === 'wait')
-      return new Promise((resolveWait) => {
-        releaseWait = () => resolveWait('0\n');
-      });
-    if (program === 'docker' && args[0] === 'top') {
-      if (clock.now < jobStartsAt) return '';
-      workerSeen = true;
-      return 'Runner.Worker\n';
-    }
-    if (program === 'docker' && args[0] === 'rm' && !workerSeen)
-      removedBeforeWorker += 1;
-    return f.command(program, args, options);
-  };
-  manager = createManager(f.config, {
-    command,
-    sleep: async (ms) => {
-      clock.now += ms;
-      if (clock.now >= jobEndsAt) releaseWait?.();
-    },
-  });
-  await manager.start();
-  assert.equal(
-    workerSeen,
-    true,
-    'the job assigned after the refusal must keep running',
-  );
-  assert.equal(
-    removedBeforeWorker,
-    0,
-    'a refused retirement must not remove the container before the job runs',
-  );
-  assert.equal(
-    f.calls.filter((c) => c.program === 'docker' && c.args[0] === 'rm').length,
-    1,
-    'the container must be removed exactly once, after the job exits',
-  );
-  assert.equal(
-    f.calls.filter((c) => c.program === 'gh' && c.args.includes('DELETE'))
-      .length,
-    2,
-    'one refused retirement gate, then the cleanup delete',
-  );
-  assert.deepEqual(
-    f.runnerList(),
-    [],
-    'the registration must end up deleted after the job exits',
-  );
+  // 422 (busy) and 404 (hidden resource) are the same decision: neither
+  // confirms the gate, so the container must keep draining and the job that
+  // may already be assigned must still run and exit on its own.
+  for (const status of [422, 404]) {
+    f.setRejectFirstDelete(status);
+    const callStart = f.calls.length;
+    const jobStartsAt = clock.now + 10_000;
+    const jobEndsAt = clock.now + 20_000;
+    let workerSeen = false;
+    let removedBeforeWorker = 0;
+    let releaseWait;
+    let manager;
+    const command = (program, args, options) => {
+      if (program === 'docker' && args[0] === 'start') manager.stop();
+      if (program === 'docker' && args[0] === 'wait')
+        return new Promise((resolveWait) => {
+          releaseWait = () => resolveWait('0\n');
+        });
+      if (program === 'docker' && args[0] === 'top') {
+        if (clock.now < jobStartsAt) return '';
+        workerSeen = true;
+        return 'Runner.Worker\n';
+      }
+      if (program === 'docker' && args[0] === 'rm' && !workerSeen)
+        removedBeforeWorker += 1;
+      return f.command(program, args, options);
+    };
+    manager = createManager(f.config, {
+      command,
+      sleep: async (ms) => {
+        clock.now += ms;
+        if (clock.now >= jobEndsAt) releaseWait?.();
+      },
+    });
+    await manager.start();
+    const calls = f.calls.slice(callStart);
+    assert.equal(
+      workerSeen,
+      true,
+      `the job assigned after a ${status} refusal must keep running`,
+    );
+    assert.equal(
+      removedBeforeWorker,
+      0,
+      `a ${status} refusal must not remove the container before the job runs`,
+    );
+    assert.equal(
+      calls.filter((c) => c.program === 'docker' && c.args[0] === 'rm').length,
+      1,
+      `a ${status} refusal must still remove the container exactly once, after the job exits`,
+    );
+    assert.equal(
+      calls.filter((c) => c.program === 'gh' && c.args.includes('DELETE'))
+        .length,
+      2,
+      `a ${status} refusal must be retried by cleanup after the job exits`,
+    );
+    assert.deepEqual(
+      f.runnerList(),
+      [],
+      `the registration must end up deleted after the ${status} episode`,
+    );
+  }
 });
 
 test('drain retires the registration before removing the container', async (t) => {
