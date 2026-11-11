@@ -11281,7 +11281,9 @@ describe('Hosted Harness no-tool session', () => {
         }),
     );
     expect((await receive('msg_running')).status).toBe(202);
-    await vi.waitFor(() => expect(state.model).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(state.model).toHaveBeenCalledTimes(1), {
+      timeout: settleTimeoutMs(),
+    });
     expect((await receive('msg_waiting')).status).toBe(202);
     const stop = () =>
       headers(

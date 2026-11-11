@@ -710,7 +710,6 @@ CREATE TABLE ma_operation (
     budget_exempt_attempt INT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Attempts excluded from the ordinary retry budget.',
     deadline BIGINT UNSIGNED COMMENT 'Operation deadline in Unix epoch milliseconds.',
     recovery_deadline BIGINT UNSIGNED COMMENT 'Recovery deadline in Unix epoch milliseconds.',
-    execution_mode VARCHAR(16) NOT NULL DEFAULT 'SYNC' COMMENT 'Synchronous or asynchronous execution mode.',
     verification_request_json LONGTEXT COMMENT 'Frozen request used for asynchronous output verification.',
     is_verification_ready TINYINT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Whether asynchronous verification can be attempted.',
     verification_next_at BIGINT UNSIGNED COMMENT 'Earliest verification attempt time in Unix epoch milliseconds.',
@@ -732,7 +731,6 @@ CREATE TABLE ma_operation (
     CONSTRAINT uk_ma_operation_public_request UNIQUE (scope_key, operation_kind, target_key, actor_digest, idempotency_digest),
     CONSTRAINT uk_ma_operation_request UNIQUE (scope_key, operation_kind, target_key, actor_key, idempotency_digest),
     CONSTRAINT ck_ma_operation_generation CHECK (claim_generation >= 0 AND attempt_count >= 0 AND payload_version > 0),
-    CONSTRAINT ck_ma_operation_mode CHECK ((CASE execution_mode WHEN 'SYNC' THEN 4 WHEN 'ASYNC' THEN 5 ELSE -1 END = CHAR_LENGTH(execution_mode))),
     CONSTRAINT ck_ma_operation_kind CHECK ((CASE operation_kind WHEN 'CLOSE' THEN 5 WHEN 'ARCHIVE' THEN 7 WHEN 'DELETE' THEN 6 WHEN 'UNARCHIVE' THEN 9 WHEN 'RENAME' THEN 6 WHEN 'CWD_CHANGE' THEN 10 WHEN 'CONTEXT_COMPRESSION' THEN 19 WHEN 'ACTION_RESPONSE' THEN 15 WHEN 'TASK_CANCEL' THEN 11 WHEN 'CHILD_SESSION_START' THEN 19 WHEN 'CHILD_SESSION_CLOSE' THEN 19 WHEN 'CHILD_WORKSPACE' THEN 15 WHEN 'SESSION_WORKTREE' THEN 16 WHEN 'OUTPUT_UPLOAD' THEN 13 WHEN 'OUTPUT_VERIFY' THEN 13 WHEN 'OUTPUT_FINISH' THEN 13 WHEN 'OBJECT_PUT' THEN 10 WHEN 'TOOL_RESULT_PROJECTION' THEN 22 WHEN 'SESSION_RESOURCE_GC' THEN 19 WHEN 'CAPTURE_GC' THEN 10 WHEN 'WORKSPACE_OPERATOR_RECOVERY' THEN 27 WHEN 'WORKSPACE_RECOVERY' THEN 18 WHEN 'STORAGE_MIGRATION' THEN 17 WHEN 'CSI_RETIREMENT' THEN 14 WHEN 'CHANNEL_INGRESS' THEN 15 WHEN 'WORKSPACE_CREATE' THEN 16 WHEN 'SUBMIT_INPUT' THEN 12 WHEN 'CANCEL' THEN 6 WHEN 'WORKSPACE_RETIREMENT' THEN 20 WHEN 'WORKSPACE_UPLOAD' THEN 16 ELSE -1 END = CHAR_LENGTH(operation_kind))),
     progress_format VARCHAR(64) COMMENT 'Format identifier for durable settlement progress.',
     progress_version BIGINT UNSIGNED COMMENT 'Monotonic version of the durable settlement progress.',
@@ -763,7 +761,7 @@ CREATE INDEX idx_ma_operation_storage ON ma_operation (storage_key, operation_ki
 
 CREATE INDEX idx_ma_operation_physical ON ma_operation (physical_key, operation_kind, state);
 
-CREATE INDEX idx_ma_operation_verification ON ma_operation (operation_kind, execution_mode, state, is_verification_ready, verification_next_at);
+CREATE INDEX idx_ma_operation_verification ON ma_operation (operation_kind, state, is_verification_ready, verification_next_at);
 
 CREATE INDEX idx_ma_operation_publication ON ma_operation (scope_key, publication_id, operation_kind, state);
 
