@@ -68,6 +68,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static com.alibaba.qwen.code.managedagent.persistence.PublicationVerification.verified;
 
 /**
  * Witness for #13800: an externally held tenant guard row must not wedge
@@ -530,7 +531,7 @@ class ManagedSessionGuardConvoyIT {
             assertThat(completesWhileHeld(() -> journal.store.verifyDispatch(execution, "pub-1",
                     PublicationJournalFixture.PUBLICATION_TOKEN)).path("publicationId").asText())
                     .isEqualTo("pub-1");
-            completesWhileHeld(() -> data.finish(key, "pub-1", PublicationJournalFixture.PUBLICATION_TOKEN,
+            completesWhileHeld(() -> verified(data).finish(key, "pub-1", PublicationJournalFixture.PUBLICATION_TOKEN,
                     "finish", envelope.toString().getBytes(StandardCharsets.UTF_8)));
         } finally {
             manager.rollback(hold);
