@@ -38,7 +38,7 @@ describe('decideTeammateApprovalFallback', () => {
     expect(decision).toEqual({
       action: 'cancel',
       reason:
-        'Auto-cancelling tool run_shell_command requested by teammate "worker": current approval mode (default) cannot prompt in test mode. ALLOW_HINT',
+        'Auto-cancelling tool run_shell_command requested by teammate "worker": this session does not provide a teammate approval route in test mode with the current approval mode (default). ALLOW_HINT',
     });
   });
 

@@ -49,6 +49,6 @@ export function decideTeammateApprovalFallback(
     ? mode === ApprovalMode.YOLO
       ? `${prefix} this request requires an explicit interactive approval surface and cannot be bypassed by YOLO mode.`
       : `${prefix} this request requires an explicit interactive approval surface, which is unavailable in ${host.surface} with the current approval mode (${mode}). ${host.explicitApprovalHint}`
-    : `${prefix} current approval mode (${mode}) cannot prompt in ${host.surface}. ${host.allowHint}`;
+    : `${prefix} this session does not provide a teammate approval route in ${host.surface} with the current approval mode (${mode}). ${host.allowHint}`;
   return { action: 'cancel', reason };
 }

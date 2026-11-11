@@ -116,30 +116,31 @@ export async function reattachTeamForSession(
     }
     throw err;
   }
+  let released: number[];
   try {
     const lockedRaw = await fs.readFile(configPath, 'utf-8').catch(() => null);
     if (lockedRaw !== inspectedRaw) return null;
+    // Preserve members on disk until cleanup succeeds so a failed takeover can retry.
+    released = await Promise.all(
+      teamFile.members.map((m) => unassignTeammateTasks(teamName, m.agentId)),
+    );
+    // A respawned teammate reuses the name, so it must not inherit mail that
+    // was addressed to the one that died. The leader inbox is left intact.
+    await Promise.all(
+      teamFile.members
+        .filter(
+          (m) =>
+            typeof m.name === 'string' &&
+            m.name.length > 0 &&
+            m.name !== LEADER_NAME &&
+            sanitizeName(m.name) === m.name,
+        )
+        .map((m) => clearInbox(teamName, m.name)),
+    );
     await atomicWriteJSON(configPath, reattached);
   } finally {
     await release?.().catch(() => {});
   }
-
-  const released = await Promise.all(
-    teamFile.members.map((m) => unassignTeammateTasks(teamName, m.agentId)),
-  );
-  // A respawned teammate reuses the name, so it must not inherit mail that
-  // was addressed to the one that died. The leader inbox is left intact.
-  await Promise.all(
-    teamFile.members
-      .filter(
-        (m) =>
-          typeof m.name === 'string' &&
-          m.name.length > 0 &&
-          m.name !== LEADER_NAME &&
-          sanitizeName(m.name) === m.name,
-      )
-      .map((m) => clearInbox(teamName, m.name)),
-  );
 
   const backend = new InProcessBackend(config);
   await backend.init();

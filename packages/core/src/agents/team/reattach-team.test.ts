@@ -16,6 +16,7 @@ import { TeamManager } from './TeamManager.js';
 import {
   getTeamFilePath,
   getInboxesDir,
+  getTasksDir,
   readTeamFile,
   writeTeamFile,
 } from './teamHelpers.js';
@@ -195,6 +196,37 @@ describe('reattachTeamForSession', () => {
     });
     expect(JSON.parse(await fs.readFile(inbox, 'utf-8'))).toEqual(unread);
     await expect(fs.access(workerInbox)).rejects.toThrow();
+  });
+
+  it('preserves dead members for retry when task cleanup fails', async () => {
+    const team = makeTeam();
+    await writeTeamFile('crew', team);
+    await createTask('crew', { subject: 's', description: 'd' });
+    await updateTask('crew', '1', { status: 'in_progress', owner: 'worker' });
+    const tasksDir = getTasksDir('crew');
+    await fs.rename(tasksDir, `${tasksDir}-unavailable`);
+    await fs.writeFile(tasksDir, 'unavailable');
+    const { config, mocks } = makeConfig();
+
+    await expect(reattachTeamForSession(config)).rejects.toMatchObject({
+      code: 'ENOTDIR',
+    });
+    expect(await readTeamFile('crew')).toEqual(team);
+    expect(mocks.setTeamManager).not.toHaveBeenCalled();
+
+    await fs.unlink(tasksDir);
+    await fs.rename(`${tasksDir}-unavailable`, tasksDir);
+
+    expect(await reattachTeamForSession(config)).toEqual({
+      status: 'reattached',
+      teamName: 'crew',
+      deadMembers: ['worker'],
+      unassignedTaskCount: 1,
+    });
+    expect((await readTeamFile('crew'))!.members).toEqual([]);
+    const [task] = await listTasks('crew');
+    expect(task).toMatchObject({ status: 'pending' });
+    expect(task).not.toHaveProperty('owner');
   });
 
   it('takes over a team recorded with this process pid', async () => {

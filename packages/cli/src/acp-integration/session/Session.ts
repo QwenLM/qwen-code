@@ -2094,7 +2094,7 @@ class BackgroundTurnAdmissionTimeoutError extends Error {
 const ACP_TEAMMATE_APPROVAL_COPY: TeammateApprovalHostCopy = {
   surface: 'an ACP session',
   explicitApprovalHint:
-    'The connected client cannot show a teammate approval request.',
+    'This session does not provide a teammate approval route.',
   allowHint: 'Switch the session to YOLO mode to allow teammate tool calls.',
 };
 
