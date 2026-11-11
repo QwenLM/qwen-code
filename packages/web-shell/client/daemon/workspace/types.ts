@@ -271,9 +271,17 @@ export interface DaemonChannelObservedContacts {
 }
 
 export interface DaemonChannelQrLoginActions {
-  start(name: string): Promise<DaemonChannelQrLoginStartResult>;
-  state(loginId: string): Promise<DaemonChannelQrLoginView>;
-  cancel(loginId: string): Promise<DaemonChannelQrLoginView>;
+  /**
+   * `clientId` attributes the login to this browser tab. Without it the daemon
+   * treats every id-less caller as the same client, so it reattaches a peer's
+   * login and lets any of them cancel it.
+   */
+  start(
+    name: string,
+    clientId?: string,
+  ): Promise<DaemonChannelQrLoginStartResult>;
+  state(loginId: string, clientId?: string): Promise<DaemonChannelQrLoginView>;
+  cancel(loginId: string, clientId?: string): Promise<DaemonChannelQrLoginView>;
 }
 
 export interface DaemonChannelPairingActions {

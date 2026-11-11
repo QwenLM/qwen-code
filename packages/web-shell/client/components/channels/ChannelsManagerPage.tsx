@@ -102,6 +102,8 @@ import {
 interface ChannelsManagerPageProps {
   onClose?: () => void;
   initialFocusRef?: Ref<HTMLHeadingElement>;
+  /** This tab's daemon-registered client id, for QR-login attribution. */
+  clientId?: string;
 }
 
 type ChannelAction = 'start' | 'stop' | 'restart' | 'startup';
@@ -140,6 +142,7 @@ function badgeVariant(
 export function ChannelsManagerPage({
   onClose,
   initialFocusRef,
+  clientId,
 }: ChannelsManagerPageProps) {
   const { t } = useI18n();
   const workspace = useWorkspace();
@@ -230,6 +233,7 @@ export function ChannelsManagerPage({
     autoLoad: supportsManagement,
     enabled: supportsManagement,
     workspaceCwd: activeWorkspaceCwd,
+    clientId,
   });
   const canManage =
     supportsManagement &&

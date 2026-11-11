@@ -24659,6 +24659,7 @@ export function App({
                             : returnToChat
                         }
                         initialFocusRef={panelHeadingRef}
+                        clientId={connection.clientId}
                       />
                     ) : activePanel === 'channel-events' ? (
                       <ChannelEventsPage

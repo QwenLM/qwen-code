@@ -24,6 +24,9 @@ const { actions, client, context, qualifiedWorkspace } = vi.hoisted(() => {
     approveWorkspaceChannelPairing: vi.fn(),
     workspaceChannelPairingApprovals: vi.fn(),
     revokeWorkspaceChannelPairingApproval: vi.fn(),
+    startWorkspaceChannelQrLogin: vi.fn(),
+    workspaceChannelQrLogin: vi.fn(),
+    cancelWorkspaceChannelQrLogin: vi.fn(),
   };
   const client = {
     workspaceByCwd: vi.fn(() => qualifiedWorkspace),
@@ -42,6 +45,11 @@ const { actions, client, context, qualifiedWorkspace } = vi.hoisted(() => {
         approve: vi.fn(),
         approvals: vi.fn(),
         revoke: vi.fn(),
+      },
+      channelQrLogin: {
+        start: vi.fn(),
+        state: vi.fn(),
+        cancel: vi.fn(),
       },
     },
     context: {
@@ -126,6 +134,12 @@ describe('useDaemonChannels', () => {
       qualifiedWorkspace.approveWorkspaceChannelPairing,
       qualifiedWorkspace.workspaceChannelPairingApprovals,
       qualifiedWorkspace.revokeWorkspaceChannelPairingApproval,
+      qualifiedWorkspace.startWorkspaceChannelQrLogin,
+      qualifiedWorkspace.workspaceChannelQrLogin,
+      qualifiedWorkspace.cancelWorkspaceChannelQrLogin,
+      actions.channelQrLogin.start,
+      actions.channelQrLogin.state,
+      actions.channelQrLogin.cancel,
     ]) {
       action.mockReset();
     }
@@ -398,5 +412,86 @@ describe('useDaemonChannels', () => {
       approval,
     );
     expect(actions.loadChannels).not.toHaveBeenCalled();
+  });
+
+  it('attributes QR-login calls to this tab on the workspace client', async () => {
+    // Without the client id the daemon treats every tab as one client, so a
+    // peer tab reattaches this login and may cancel it.
+    let result: ReturnType<typeof useDaemonChannels> | undefined;
+
+    function TestComponent() {
+      result = useDaemonChannels({
+        workspaceCwd: '/workspace-b',
+        clientId: 'tab-a',
+      });
+      return null;
+    }
+
+    await act(async () => root.render((<TestComponent />) as ReactNode));
+
+    await act(async () => {
+      await result?.qrLogin.start('bot');
+      await result?.qrLogin.state('login-1');
+      await result?.qrLogin.cancel('login-1');
+    });
+
+    expect(
+      qualifiedWorkspace.startWorkspaceChannelQrLogin,
+    ).toHaveBeenCalledWith('bot', { clientId: 'tab-a' });
+    expect(qualifiedWorkspace.workspaceChannelQrLogin).toHaveBeenCalledWith(
+      'login-1',
+      { clientId: 'tab-a' },
+    );
+    expect(
+      qualifiedWorkspace.cancelWorkspaceChannelQrLogin,
+    ).toHaveBeenCalledWith('login-1', { clientId: 'tab-a' });
+  });
+
+  it('attributes QR-login calls on the provider-workspace fallback', async () => {
+    let result: ReturnType<typeof useDaemonChannels> | undefined;
+
+    function TestComponent() {
+      result = useDaemonChannels({ clientId: 'tab-a' });
+      return null;
+    }
+
+    await act(async () => root.render((<TestComponent />) as ReactNode));
+
+    await act(async () => {
+      await result?.qrLogin.start('bot');
+      await result?.qrLogin.state('login-1');
+      await result?.qrLogin.cancel('login-1');
+    });
+
+    expect(actions.channelQrLogin.start).toHaveBeenCalledWith('bot', 'tab-a');
+    expect(actions.channelQrLogin.state).toHaveBeenCalledWith(
+      'login-1',
+      'tab-a',
+    );
+    expect(actions.channelQrLogin.cancel).toHaveBeenCalledWith(
+      'login-1',
+      'tab-a',
+    );
+  });
+
+  it('sends no client id when none is attached', async () => {
+    // An invented id would be rejected by the daemon's known-client gate, so
+    // the absence of one must stay an absence rather than become a guess.
+    let result: ReturnType<typeof useDaemonChannels> | undefined;
+
+    function TestComponent() {
+      result = useDaemonChannels({ workspaceCwd: '/workspace-b' });
+      return null;
+    }
+
+    await act(async () => root.render((<TestComponent />) as ReactNode));
+
+    await act(async () => {
+      await result?.qrLogin.start('bot');
+    });
+
+    expect(
+      qualifiedWorkspace.startWorkspaceChannelQrLogin,
+    ).toHaveBeenCalledWith('bot', { clientId: undefined });
   });
 });
