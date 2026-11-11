@@ -2017,16 +2017,19 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
             throw new ManagedAgentException(409, "session_operation_active",
                     "The Session is not active.");
         }
-        var worktree = store.findSessionWorktree(tenantId, sessionId);
-        if (!Boolean.TRUE.equals(foregroundShell(session, worktree))) {
-            throw new ManagedAgentException(409, "workspace_unavailable",
-                    "The Session does not admit a terminal.");
-        }
+        // Authorization before capability, like every other OPERATOR surface:
+        // a caller below the grant learns the role refusal, not whether the
+        // Session happens to carry a Shell.
         if (session.workspace() != null && !workspaces.accessOf(session.tenantId(),
                 actorId, session.workspace().getWorkspaceId())
                 .atLeast(WorkspaceAccess.OPERATOR)) {
             throw new ManagedAgentException(403, "session_operation_forbidden",
                     "Only a Workspace operator may open a terminal.");
+        }
+        var worktree = store.findSessionWorktree(tenantId, sessionId);
+        if (!Boolean.TRUE.equals(foregroundShell(session, worktree))) {
+            throw new ManagedAgentException(409, "workspace_unavailable",
+                    "The Session does not admit a terminal.");
         }
         return session;
     }

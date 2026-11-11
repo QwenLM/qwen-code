@@ -11434,6 +11434,35 @@
           }
         }
       },
+      "WebShellTerminalTicketRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["sessionId", "terminalId"],
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._-]{1,256}$"
+          },
+          "terminalId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._-]{1,256}$"
+          }
+        }
+      },
+      "WebShellTerminalTicket": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["ticket", "expiresInSeconds"],
+        "properties": {
+          "ticket": {
+            "type": "string"
+          },
+          "expiresInSeconds": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
       "WebShellTranscriptRequest": {
         "type": "object",
         "additionalProperties": false,
