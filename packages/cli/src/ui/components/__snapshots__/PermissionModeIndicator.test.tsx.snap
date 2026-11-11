@@ -1,0 +1,36 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`PermissionModeIndicator > renders correctly for acceptEdits mode 1`] = `
+"Accept Edits Shift+Tab to YOLO
+"
+`;
+
+exports[`PermissionModeIndicator > renders correctly for acceptEdits mode with plan enabled 1`] = `
+"Accept Edits Shift+Tab to YOLO
+"
+`;
+
+exports[`PermissionModeIndicator > renders correctly for bypassPermissions mode 1`] = `
+"YOLO Shift+Tab to Auto Mode
+"
+`;
+
+exports[`PermissionModeIndicator > renders correctly for default mode 1`] = `
+"Default Shift+Tab to Accept Edits
+"
+`;
+
+exports[`PermissionModeIndicator > renders correctly for default mode with plan enabled 1`] = `
+"Default Shift+Tab to Accept Edits
+"
+`;
+
+exports[`PermissionModeIndicator > renders correctly for plan mode 1`] = `
+"Default Shift+Tab to Accept Edits
+"
+`;
+
+exports[`PermissionModeIndicator > shows why cycling is unavailable and updates after this session is trusted 1`] = `
+"Default Trust the project folder to change modes
+"
+`;

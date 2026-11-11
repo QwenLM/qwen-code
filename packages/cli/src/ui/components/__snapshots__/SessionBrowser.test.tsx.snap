@@ -1,0 +1,142 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`SessionBrowser component > P1 bilingual layout matrix > matches the 'en' session layout at 60 columns 1`] = `
+" Chat
+────────────────────────────────────────────────────────────
+ Chat Sessions (1, current worktree)    sorted by date desc
+
+ ❯ Raw session title
+   30m · 7 messages
+
+ ▼
+
+ Ctrl+A show all projects · Space preview · ↑↓ navigate ·
+ Enter select · / search · ? for shortcuts · Esc close
+"
+`;
+
+exports[`SessionBrowser component > P1 bilingual layout matrix > matches the 'en' session layout at 80 columns 1`] = `
+" Chat
+────────────────────────────────────────────────────────────────────────────────
+ Chat Sessions (1, current worktree)                        sorted by date desc
+
+ ❯ Raw session title
+   30m · 7 messages
+
+ ▼
+
+ Ctrl+A show all projects · Space preview · ↑↓ navigate · Enter select · /
+ search · ? for shortcuts · Esc close
+"
+`;
+
+exports[`SessionBrowser component > P1 bilingual layout matrix > matches the 'en' session layout at 120 columns 1`] = `
+" Chat
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ Chat Sessions (1, current worktree)                                                                sorted by date desc
+
+ ❯ Raw session title
+   30m · 7 messages
+
+ ▼
+
+ Ctrl+A show all projects · Space preview · ↑↓ navigate · Enter select · / search · ? for shortcuts · Esc close
+"
+`;
+
+exports[`SessionBrowser component > P1 bilingual layout matrix > matches the 'zh-CN' session layout at 60 columns 1`] = `
+" 会话
+────────────────────────────────────────────────────────────
+ 会话（1，当前工作树）                       按日期降序排列
+
+ ❯ Raw session title
+   30分钟 · 7 条消息
+
+ ▼
+
+ Ctrl+A 所有项目 · Space 预览 · ↑/↓ 导航 · Enter 选择 · /
+ 搜索 · ? 快捷键 · Esc 关闭
+"
+`;
+
+exports[`SessionBrowser component > P1 bilingual layout matrix > matches the 'zh-CN' session layout at 80 columns 1`] = `
+" 会话
+────────────────────────────────────────────────────────────────────────────────
+ 会话（1，当前工作树）                                           按日期降序排列
+
+ ❯ Raw session title
+   30分钟 · 7 条消息
+
+ ▼
+
+ Ctrl+A 所有项目 · Space 预览 · ↑/↓ 导航 · Enter 选择 · / 搜索 · ? 快捷键 · Esc
+ 关闭
+"
+`;
+
+exports[`SessionBrowser component > P1 bilingual layout matrix > matches the 'zh-CN' session layout at 120 columns 1`] = `
+" 会话
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ 会话（1，当前工作树）                                                                                   按日期降序排列
+
+ ❯ Raw session title
+   30分钟 · 7 条消息
+
+ ▼
+
+ Ctrl+A 所有项目 · Space 预览 · ↑/↓ 导航 · Enter 选择 · / 搜索 · ? 快捷键 · Esc 关闭
+"
+`;
+
+exports[`SessionBrowser component > enters search mode, filters sessions, and renders match snippets 1`] = `
+" Chat
+────────────────────────────────────────────────────────────────────────────────────────────────────
+ Chat Sessions (1, current worktree, filtered)                                  sorted by date desc
+ ──────────────────────────────────────────────────────────────────────────────────────────────────
+  Search: query (Esc cancel search)
+ ──────────────────────────────────────────────────────────────────────────────────────────────────
+
+ ❯ Query is here and another query.
+   10mo · 1 message
+   You:    Query is here a… (+1 more)
+  
+ ▼
+
+ ↑↓ navigate · Enter select · Esc cancel search
+"
+`;
+
+exports[`SessionBrowser component > renders resumable sessions and filters the current session 1`] = `
+" Chat
+────────────────────────────────────────────────────────────────────────────────────────────────────
+ Chat Sessions (1, current worktree)                                            sorted by date desc
+
+ ❯ First conversation about cats
+   10mo · 2 messages
+
+ ▼
+
+ Ctrl+A show all projects · Space preview · ↑↓ navigate · Enter select · / search · ? for shortcuts
+ · Esc close
+"
+`;
+
+exports[`SessionBrowser component > shows an error state when loading sessions fails 1`] = `
+" Chat
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  Error: storage failure
+  Press q to exit
+
+ Ctrl+A show all projects · Esc close
+"
+`;
+
+exports[`SessionBrowser component > shows empty state when no sessions exist 1`] = `
+" Chat
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  No auto-saved conversations found.
+  Press q to exit
+
+ Ctrl+A show all projects · Esc close
+"
+`;

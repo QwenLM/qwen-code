@@ -1,0 +1,53 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`ShortcutsHelp > renders correctly in 'narrow' mode on 'linux' 1`] = `
+"────────────────────────────────────────
+ Shortcuts See /help for more
+ ! shell mode
+ @ select file or folder
+ Double Esc clear & rewind
+ Ctrl+Y YOLO mode
+ Shift+Tab cycle mode
+ Alt+V paste images
+ Alt+M raw markdown mode
+ Ctrl+R reverse-search history
+ Ctrl+X open external editor
+ /btw side question
+"
+`;
+
+exports[`ShortcutsHelp > renders correctly in 'narrow' mode on 'mac' 1`] = `
+"────────────────────────────────────────
+ Shortcuts See /help for more
+ ! shell mode
+ @ select file or folder
+ Double Esc clear & rewind
+ Ctrl+Y YOLO mode
+ Shift+Tab cycle mode
+ Option+V paste images
+ Option+M raw markdown mode
+ Ctrl+R reverse-search history
+ Ctrl+X open external editor
+ /btw side question
+"
+`;
+
+exports[`ShortcutsHelp > renders correctly in 'wide' mode on 'linux' 1`] = `
+"────────────────────────────────────────────────────────────────────────────────────────────────────
+ Shortcuts See /help for more
+ ! shell mode                    Alt+V paste images              Alt+M raw markdown mode
+ @ select file or folder         Shift+Tab cycle mode            Ctrl+R reverse-search history
+ Double Esc clear & rewind       Ctrl+X open external editor     Ctrl+Y YOLO mode
+ /btw side question
+"
+`;
+
+exports[`ShortcutsHelp > renders correctly in 'wide' mode on 'mac' 1`] = `
+"────────────────────────────────────────────────────────────────────────────────────────────────────
+ Shortcuts See /help for more
+ ! shell mode                    Option+V paste images           Option+M raw markdown mode
+ @ select file or folder         Shift+Tab cycle mode            Ctrl+R reverse-search history
+ Double Esc clear & rewind       Ctrl+X open external editor     Ctrl+Y YOLO mode
+ /btw side question
+"
+`;

@@ -1,0 +1,145 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`Initial Theme Selection > should default to a dark theme when terminal background is dark and no theme is set 1`] = `
+" Theme ·  Select  >  Apply
+────────────────────────────────────────────────────────────────────────────────
+ > Select Theme                                Preview
+  ❯  1. Default Dark (Matches terminal)        ┌──────────────────────────────────────────────────┐
+     2. ANSI Dark                              │                                                  │
+     3. Atom One Dark                          │ 1 # function                                     │
+     4. Ayu Dark                               │ 2 def fibonacci(n):                              │
+     5. Dracula Dark                           │ 3     a, b = 0, 1                                │
+     6. GitHub Dark                            │ 4     for _ in range(n):                         │
+     7. Holiday Dark                           │ 5         a, b = b, a + b                        │
+     8. Shades Of Purple Dark                  │ 6     return a                                   │
+     9. Solarized Dark                         │                                                  │
+    10. Tokyo Night Dark                       │  1  def greet(name):                             │
+    11. Default Light                          │  2 -    print("Hello, " + name)                  │
+  ▼ 12. ANSI Light                             │  2 +    print(f"Hello, {name}!")                 │
+                                               │  3      return name                              │
+                                               │                                                  │
+                                               └──────────────────────────────────────────────────┘
+
+ Tab/←→ switch · Esc back
+"
+`;
+
+exports[`Initial Theme Selection > should default to a light theme when terminal background is light and no theme is set 1`] = `
+" Theme ·  Select  >  Apply
+────────────────────────────────────────────────────────────────────────────────
+ > Select Theme                                Preview
+  ❯  1. Default Light                          ┌──────────────────────────────────────────────────┐
+     2. ANSI Light                             │                                                  │
+     3. Ayu Light                              │ 1 # function                                     │
+     4. GitHub Light                           │ 2 def fibonacci(n):                              │
+     5. Google Code Light                      │ 3     a, b = 0, 1                                │
+     6. Solarized Light                        │ 4     for _ in range(n):                         │
+     7. Xcode Light                            │ 5         a, b = b, a + b                        │
+     8. Default Dark (Incompatible)            │ 6     return a                                   │
+     9. ANSI Dark (Incompatible)               │                                                  │
+    10. Atom One Dark (Incompatible)           │  1  def greet(name):                             │
+    11. Ayu Dark (Incompatible)                │  2 -    print("Hello, " + name)                  │
+  ▼ 12. Dracula Dark (Incompatible)            │  2 +    print(f"Hello, {name}!")                 │
+                                               │  3      return name                              │
+                                               │                                                  │
+                                               └──────────────────────────────────────────────────┘
+
+ Tab/←→ switch · Esc back
+"
+`;
+
+exports[`Initial Theme Selection > should use the theme from settings even if terminal background suggests a different theme type 1`] = `
+" Theme ·  Select  >  Apply
+────────────────────────────────────────────────────────────────────────────────
+ > Select Theme                                Preview
+  ❯  1. Default Dark (Matches terminal)        ┌──────────────────────────────────────────────────┐
+     2. ANSI Dark                              │                                                  │
+     3. Atom One Dark                          │ 1 # function                                     │
+     4. Ayu Dark                               │ 2 def fibonacci(n):                              │
+     5. Dracula Dark                           │ 3     a, b = 0, 1                                │
+     6. GitHub Dark                            │ 4     for _ in range(n):                         │
+     7. Holiday Dark                           │ 5         a, b = b, a + b                        │
+     8. Shades Of Purple Dark                  │ 6     return a                                   │
+     9. Solarized Dark                         │                                                  │
+    10. Tokyo Night Dark                       │  1  def greet(name):                             │
+    11. Default Light                          │  2 -    print("Hello, " + name)                  │
+  ▼ 12. ANSI Light                             │  2 +    print(f"Hello, {name}!")                 │
+                                               │  3      return name                              │
+                                               │                                                  │
+                                               └──────────────────────────────────────────────────┘
+
+ Tab/←→ switch · Esc back
+"
+`;
+
+exports[`ThemeDialog Snapshots > should render correctly in scope selector mode 1`] = `
+" Theme ·  Select  >  Apply
+────────────────────────────────────────────────────────────────────────────────
+ > Apply To                                           
+  ❯ 1. User Settings                                                                               
+    2. Project Settings                                                                            
+                                                                                                   
+ Tab/←→ switch · Esc back                                                                          
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+"
+`;
+
+exports[`ThemeDialog Snapshots > should render correctly in theme selection mode (isDevelopment: false) 1`] = `
+" Theme ·  Select  >  Apply
+────────────────────────────────────────────────────────────────────────────────
+ > Select Theme                                Preview
+     1. Default Dark                           ┌──────────────────────────────────────────────────┐
+  ❯  2. ANSI Dark (Matches terminal)           │                                                  │
+     3. Atom One Dark                          │ 1 # function                                     │
+     4. Ayu Dark                               │ 2 def fibonacci(n):                              │
+     5. Dracula Dark                           │ 3     a, b = 0, 1                                │
+     6. GitHub Dark                            │ 4     for _ in range(n):                         │
+     7. Holiday Dark                           │ 5         a, b = b, a + b                        │
+     8. Shades Of Purple Dark                  │ 6     return a                                   │
+     9. Solarized Dark                         │                                                  │
+    10. Tokyo Night Dark                       │  1  def greet(name):                             │
+    11. Default Light                          │  2 -    print("Hello, " + name)                  │
+  ▼ 12. ANSI Light                             │  2 +    print(f"Hello, {name}!")                 │
+                                               │  3      return name                              │
+                                               │                                                  │
+                                               └──────────────────────────────────────────────────┘
+
+ Tab/←→ switch · Esc back
+"
+`;
+
+exports[`ThemeDialog Snapshots > should render correctly in theme selection mode (isDevelopment: true) 1`] = `
+" Theme ·  Select  >  Apply
+────────────────────────────────────────────────────────────────────────────────
+ > Select Theme                                Preview
+     1. Default Dark                           ┌──────────────────────────────────────────────────┐
+  ❯  2. ANSI Dark (Matches terminal)           │                                                  │
+     3. Atom One Dark                          │ 1 # function                                     │
+     4. Ayu Dark                               │ 2 def fibonacci(n):                              │
+     5. Dracula Dark                           │ 3     a, b = 0, 1                                │
+     6. GitHub Dark                            │ 4     for _ in range(n):                         │
+     7. Holiday Dark                           │ 5         a, b = b, a + b                        │
+     8. Shades Of Purple Dark                  │ 6     return a                                   │
+     9. Solarized Dark                         │                                                  │
+    10. Tokyo Night Dark                       │  1  def greet(name):                             │
+    11. Default Light                          │  2 -    print("Hello, " + name)                  │
+  ▼ 12. ANSI Light                             │  2 +    print(f"Hello, {name}!")                 │
+                                               │  3      return name                              │
+                                               │                                                  │
+                                               └──────────────────────────────────────────────────┘
+
+ Tab/←→ switch · Esc back
+"
+`;

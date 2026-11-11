@@ -1,0 +1,38 @@
+[
+  {
+    "name": "awilix-async-container-initialization / call_4c22f38abf25424ba07bed91",
+    "code": "const [container, resolvers, errors, awilix] = await Promise.all([\n  tools.Read({file_path: \"/app/src/container.ts\"}),\n  tools.Read({file_path: \"/app/src/resolvers.ts\"}),\n  tools.Read({file_path: \"/app/src/errors.ts\"}),\n  tools.Read({file_path: \"/app/src/awilix.ts\"})\n]);\nconsole.log(\"=== container.ts (\" + container.totalLines + \" lines) ===\");\nconsole.log(container.content);\nconsole.log(\"\\n=== errors.ts ===\");\nconsole.log(errors.content);\nmemo.set(\"resolvers\", resolvers.content);\nmemo.set(\"awilix\", awilix.content);\nconsole.log(\"\\n=== resolvers.ts (\" + resolvers.totalLines + \" lines) === (stored)\");\nconsole.log(\"=== awilix.ts (\" + awilix.totalLines + \" lines) === (stored)\");"
+  },
+  {
+    "name": "awilix-async-container-initialization / call_0fc7ea212ecf40a6a40ecbe8",
+    "code": "const [c1, c2, resolvers, awilix] = await Promise.all([\n  tools.Read({file_path: \"/app/src/container.ts\", offset: 250, limit: 260}),\n  tools.Read({file_path: \"/app/src/container.ts\", offset: 510, limit: 220}),\n  tools.Read({file_path: \"/app/src/resolvers.ts\"}),\n  tools.Read({file_path: \"/app/src/awilix.ts\"})\n]);\nconsole.log(\"=== container.ts 250-509 ===\");\nconsole.log(c1.content);\nconsole.log(\"=== container.ts 510-724 ===\");\nconsole.log(c2.content);\nconsole.log(\"=== awilix.ts ===\");\nconsole.log(awilix.content);\nmemo.set(\"resolvers\", resolvers.content);"
+  },
+  {
+    "name": "kombu-virtual-queue-dead-lettering / call_b75edeb159cc4f6fbe8fdb25",
+    "code": "const base = await tools.Read({file_path: \"kombu/transport/virtual/base.py\"});\ntext(\"LINES=\" + base.totalLines + \" COMPLETE=\" + base.complete);\nmemo.set(\"base_len\", base.totalLines);"
+  },
+  {
+    "name": "awilix-async-container-initialization / call_ede2af72fc87456ebcdf9801",
+    "code": "const r1 = await tools.Read({ file_path: \"src/container.ts\" });\nmemo.set(\"container.ts\", r1.content);\nconsole.log(\"container.ts lines:\", r1.totalLines);\nconst r2 = await tools.Read({ file_path: \"src/resolvers.ts\" });\nmemo.set(\"resolvers.ts\", r2.content);\nconsole.log(\"resolvers.ts lines:\", r2.totalLines);\nconst r3 = await tools.Read({ file_path: \"src/errors.ts\" });\nmemo.set(\"errors.ts\", r3.content);\nconsole.log(\"errors.ts lines:\", r3.totalLines);"
+  },
+  {
+    "name": "fastapi-implicit-head-options / call_fbdf8c1a08a6459dad885b28 (using Promise.all)",
+    "code": "const [r1, r2] = await Promise.all([\n  tools.Read({ file_path: \"/app/fastapi/routing.py\", offset: 940, limit: 75 }),\n  tools.Read({ file_path: \"/app/fastapi/routing.py\", offset: 1028, limit: 290 }),\n]);\nmemo.set(\"apiroute_tail\", r1.content);\nmemo.set(\"apirouter_init\", r2.content);\ntext(\"=== APIRoute 940-1015 ===\\n\" + r1.content);\ntext(\"\\n=== APIRouter.__init__ 1028-1318 ===\\n\" + r2.content);"
+  },
+  {
+    "name": "go-git-worktree-merge-conflicts / call_a399ee1bca6b430db2ad8001",
+    "code": "const [wt, wc, opts] = await Promise.all([\n  tools.Read({ file_path: \"/app/worktree.go\" }),\n  tools.Read({ file_path: \"/app/worktree_commit.go\" }),\n  tools.Read({ file_path: \"/app/options.go\" }),\n]);\nconsole.log(\"=== worktree.go lines:\", wt.totalLines);\nconsole.log(wt.content);\nconsole.log(\"=== worktree_commit.go lines:\", wc.totalLines);\nconsole.log(wc.content);\nmemo.set(\"wt_head\", wt.content.slice(0,500));"
+  },
+  {
+    "name": "mnamer-daemon-watch-lifecycle / call_394e24686b1242be85efdab7",
+    "code": "const [daemon, tests, index] = await Promise.all([\n  tools.Grep({ pattern: \"daemon\", path: \"/app\", output_mode: \"files_with_matches\", \"-i\": true }),\n  tools.Bash({ command: \"find /app/tests -type f | sort && echo '---README---' && sed -n '1,120p' /app/README.md\", description: \"List tests and README\" }),\n  tools.Read({ file_path: \"/app/mnamer/__init__.py\" })\n]);\nmemo.set(\"daemon_hits\", daemon.filenames);\nconsole.log(\"DAEMON HITS:\", JSON.stringify(daemon.filenames));\nconsole.log(\"\\nTESTS/README:\\n\" + tests.output);\nconsole.log(\"\\n__init__:\\n\" + index.content);"
+  },
+  {
+    "name": "oxvg-structural-selector-preservation / call_af94fe5dee2643ee84cde2f0",
+    "code": "const f = await tools.Read({file_path: \"/app/crates/oxvg_optimiser/src/jobs/collapse_groups.rs\"});\nconst c = f.content;\nconst instaCount = (c.match(/insta::assert_snapshot!/g)||[]).length;\nconst eqCount = (c.match(/assert_eq!/g)||[]).length;\ntext(`insta blocks: ${instaCount}, assert_eq blocks: ${eqCount}`);\nconst inputs = [];\nconst re = /Some\\(\\s*r#\"([\\s\\S]*?)\"#\\s*\\)/g; let m;\nwhile ((m = re.exec(c)) !== null) inputs.push(m[1]);\ntext(\"total Some(r#) inputs: \" + inputs.length);\nconst existing = inputs.slice(0, instaCount);\nmemo.set(\"existing\", existing);\ntext(JSON.stringify(existing.map((s,i)=>i+1+\": \"+s.slice(0,40).replace(/\\n/g,\"\\\\n\"))));"
+  },
+  {
+    "name": "termenv-preserve-ansi-resets / call_d4a1409021844f23972d8cfd",
+    "code": "await tools.Read({file_path: \"/app/ansi/ansi.go\", limit: 5});\nmemo.set(\"ansi_src\", true);\ntext(\"read ok\");"
+  }
+]

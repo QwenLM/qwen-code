@@ -1,0 +1,137 @@
+# Worktree config
+worktree.json
+
+# Git worktrees created by superpowers using-git-worktrees workflow
+.worktrees/
+
+# API keys and secrets
+.env
+.env~
+.env.*
+!.env.example
+.env.local
+.env.*.local
+
+# Product configuration and private local data
+**/.qwen*/
+!/.qwen/
+.qwen/*
+!.qwen/config.yaml
+!.qwen/commands/
+!.qwen/skills/
+!.qwen/settings.json
+**/.qoder*/
+
+# Note: .gemini-clipboard/ is NOT in gitignore so Gemini can access pasted images
+
+# Dependency directory
+node_modules
+bower_components
+
+# Editors
+.idea
+*.iml
+
+# OS metadata
+.DS_Store
+Thumbs.db
+
+# TypeScript build info files
+*.tsbuildinfo
+
+# Ignore built ts files
+dist
+dist-bun
+dist-release
+dist-worker-runtime-*
+
+# Ignore compiled JS from TypeScript (keep original JS in scripts/, etc.)
+*.js.map
+*.d.ts
+evals/**/*.js
+integration-tests/**/*.js
+packages/cli/src/**/*.js
+packages/core/src/**/*.js
+packages/vscode-ide-companion/src/**/*.js
+
+# Ignore compiled test snapshots
+**/__snapshots__/*.test.js.snap
+**/__snapshots__/*.snap.svg
+
+# Docker folder to help skip auth refreshes
+.docker
+.docker-release-artifacts
+
+bundle
+
+# Test report files
+junit.xml
+coverage/
+packages/*/coverage/
+.bin-shim/
+
+# Generated files
+packages/cli/src/generated/
+packages/core/src/generated/
+.integration-tests/
+packages/vscode-ide-companion/*.vsix
+packages/cli/download-ripgrep*/
+packages/cli/e2e/*
+!packages/cli/src/ink/types.d.ts
+!packages/cli/vendor-types/**/*.d.ts
+!packages/ink-shim/index.d.ts
+
+# GHA credentials
+gha-creds-*.json
+
+# Log files
+patch_output.log
+gemini-debug.log
+
+.genkit
+.gemini-clipboard/
+evals/logs/
+
+temp_agents/
+
+# Agent
+/.claude/*
+!/.claude/skills/
+!/.claude/validation/
+/.codex/*
+!/.codex/skills/
+/.claude/validation/webshell/
+/.claude/validation/runs
+.validation
+PLAN.md
+credentials.json
+
+# npm pack output
+*.tgz
+
+# Bun build artifacts
+*.bun-build
+*.back
+
+# Bench results (local evaluation output)
+evals/bench/results/
+bench/render/baselines/
+
+# Cloned open-source references (not vendored into product)
+third_party/terminal-bench/
+
+
+
+# RM 控制面协议参考，随上游实现变动；本地维护，不随仓库分发。
+docs/refactor/RM_PROTOCOL.md
+
+# Staging dir for the global-command packaging script.
+.pkg-*/
+
+# Local workspace artifacts that must never be committed
+工作记录/
+bin-*/
+packages/cli/vitest.local-no-build.config.ts
+*.tmp-check.json
+
+temp/

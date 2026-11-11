@@ -1,0 +1,54 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`CodeMode tool header and source > renders a returned exec with a running script as a neutral receipt 1`] = `
+" ▫ CodeMode · Execute script · Script still running · 1 tool call
+   └  ▫ Grep
+
+     Output
+     partial output
+"
+`;
+
+exports[`CodeMode tool header and source > renders a returned wait with a running script as a neutral receipt 1`] = `
+" ▫ CodeMode · Wait for script · Script still running · 1 tool call
+   └  ▫ Grep
+
+     Output
+     partial output
+"
+`;
+
+exports[`CodeMode tool header and source > shows live child progress before exec returns 1`] = `
+" ▫ CodeMode · Execute script · Running · 1 tool call
+   └  ▫ Grep('TODO' within ./)
+     Ctrl+O to expand script
+"
+`;
+
+exports[`CodeMode tool header and source > shows source and child payload only when expanded (fold=1) 1`] = `
+" ▪ CodeMode · Execute script · Completed · 1 tool call
+   └  ▪ Grep('TODO' within ./)
+        └ Found 1 match (Ctrl+O to expand)
+
+     Output
+     script output
+     Ctrl+O to expand script
+"
+`;
+
+exports[`CodeMode tool header and source > shows source and child payload only when expanded (fold=2) 1`] = `
+" ▪ CodeMode · Execute script · Completed · 1 tool call
+   └  ▪ Grep('TODO' within ./)
+        └ Found 1 match
+
+          src/file.ts:1:TODO
+
+
+     Output
+     script output
+
+     JavaScript
+     const result = await tools.Grep({pattern: "TODO"});
+     text(result.content);
+"
+`;

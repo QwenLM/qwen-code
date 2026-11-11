@@ -1,0 +1,52 @@
+Qwen Code
+Copyright 2026 Qwen Team.
+Licensed under the Apache License, Version 2.0 (the "License");
+see the LICENSE file in the root of this repository.
+
+================================================================================
+About this project
+================================================================================
+Qwen Code is an independently developed project by the Qwen Team. It draws
+inspiration from other command-line AI coding tools such as Google Gemini CLI
+(Copyright 2025 Google LLC, licensed under the Apache License, Version 2.0).
+Files newly added or modified by the Qwen Team carry a "Copyright 2026 Qwen
+Team" line.
+
+================================================================================
+Third-party components
+================================================================================
+This product contains third-party components under other open source
+licenses. This section summarizes those components and their licenses. The
+complete list of dependency licenses, including full license texts, is generated
+at release time (see the THIRD-PARTY-LICENSES file).
+
+--------------------------------------------------------------------------------
+Vendored in this repository (component level)
+--------------------------------------------------------------------------------
+third_party/get-ripgrep
+  Based on @lvce-editor/ripgrep
+  Copyright (c) 2023 Lvce Editor
+  Licensed under the MIT License
+  Full text: third_party/get-ripgrep/LICENSE
+
+packages/cli/src/ink
+  Vendored fork of @jrichman/ink v6.6.7, ported to TypeScript with
+  modifications by the Qwen Team.
+  Copyright (c) Vadym Demedes <vadimdemedes@hey.com> (github.com/vadimdemedes)
+  Licensed under the MIT License
+  Full text: packages/cli/src/ink/LICENSE
+
+--------------------------------------------------------------------------------
+Notable runtime dependencies
+--------------------------------------------------------------------------------
+sharp
+  Licensed under the Apache License, Version 2.0.
+  Prebuilt native binaries bundle libvips, licensed under LGPL-3.0-or-later.
+
+jszip
+  Dual-licensed under MIT OR GPL-3.0-or-later.
+  This project elects the MIT License.
+
+spdx-exceptions
+  Licensed under the Creative Commons Attribution 3.0 Unported License
+  (CC-BY-3.0).

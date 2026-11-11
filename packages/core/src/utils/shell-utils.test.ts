@@ -1,0 +1,827 @@
+/**
+ * @license
+ * Copyright 2025 Google LLC
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import {
+  expect,
+  describe,
+  it,
+  beforeEach,
+  beforeAll,
+  vi,
+  afterEach,
+} from 'vitest';
+import {
+  escapeShellArg,
+  getCommandName,
+  getCommandRoots,
+  getShellConfiguration,
+  initializeShellParsers,
+  parseCommandDetails,
+  splitCommands,
+  stripShellWrapper,
+  normalizeCommand,
+  hasRedirection,
+  resolveExecutable,
+  resolveBashPath,
+  resolveUnixCommandShell,
+  _resetShellResolutionCacheForTests,
+} from './shell-utils.js';
+import path from 'node:path';
+
+const mockPlatform = vi.hoisted(() => vi.fn());
+const mockHomedir = vi.hoisted(() => vi.fn());
+const mockTotalmem = vi.hoisted(() => vi.fn(() => 16 * 1024 * 1024 * 1024));
+vi.mock('os', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('os')>();
+  return {
+    ...actual,
+    default: {
+      ...actual,
+      platform: mockPlatform,
+      homedir: mockHomedir,
+      totalmem: mockTotalmem,
+    },
+    platform: mockPlatform,
+    homedir: mockHomedir,
+    totalmem: mockTotalmem,
+  };
+});
+
+const mockAccess = vi.hoisted(() => vi.fn());
+const mockStatSync = vi.hoisted(() => vi.fn());
+const mockAccessSync = vi.hoisted(() => vi.fn());
+vi.mock('node:fs', () => ({
+  default: {
+    promises: {
+      access: mockAccess,
+    },
+    statSync: mockStatSync,
+    accessSync: mockAccessSync,
+    constants: { X_OK: 1 },
+  },
+  promises: {
+    access: mockAccess,
+  },
+  statSync: mockStatSync,
+  accessSync: mockAccessSync,
+  constants: { X_OK: 1 },
+}));
+
+const mockSpawnSync = vi.hoisted(() => vi.fn());
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>();
+  return {
+    ...actual,
+    spawnSync: mockSpawnSync,
+    spawn: vi.fn(),
+  };
+});
+
+const mockQuote = vi.hoisted(() => vi.fn());
+vi.mock('shell-quote', () => ({
+  quote: mockQuote,
+}));
+
+const mockRunLogger = vi.hoisted(() => ({
+  error: vi.fn(),
+  debug: vi.fn(),
+  log: vi.fn(),
+  warn: vi.fn(),
+}));
+vi.mock('./runLogger.js', () => ({
+  runLogger: mockRunLogger,
+}));
+
+const isWindowsRuntime = process.platform === 'win32';
+const describeWindowsOnly = isWindowsRuntime ? describe : describe.skip;
+const describeUnixOnly = isWindowsRuntime ? describe.skip : describe;
+
+/**
+ * Configure the fs mocks so that only `executablePaths` exist as executable
+ * regular files; every other path throws ENOENT from statSync.
+ */
+function stubBashLookup(executablePaths: string[]): void {
+  const set = new Set(executablePaths);
+  mockStatSync.mockImplementation((p: string) => {
+    if (set.has(p)) return { isFile: () => true };
+    throw new Error('ENOENT');
+  });
+  mockAccessSync.mockReturnValue(undefined);
+}
+
+beforeAll(async () => {
+  mockPlatform.mockReturnValue('linux');
+  await initializeShellParsers();
+});
+
+beforeEach(() => {
+  mockPlatform.mockReturnValue('linux');
+  mockQuote.mockImplementation((args: string[]) =>
+    args.map((arg) => `'${arg}'`).join(' '),
+  );
+  mockSpawnSync.mockReturnValue({
+    stdout: Buffer.from(''),
+    stderr: Buffer.from(''),
+    status: 0,
+    error: undefined,
+  });
+});
+
+afterEach(() => {
+  vi.clearAllMocks();
+});
+
+const mockPowerShellResult = (
+  commands: Array<{ name: string; text: string }>,
+  hasRedirection: boolean,
+) => {
+  mockSpawnSync.mockReturnValue({
+    stdout: Buffer.from(
+      JSON.stringify({
+        success: true,
+        commands,
+        hasRedirection,
+      }),
+    ),
+    stderr: Buffer.from(''),
+    status: 0,
+    error: undefined,
+  });
+};
+
+describe('normalizeCommand', () => {
+  it('should lowercase the command', () => {
+    expect(normalizeCommand('NPM')).toBe('npm');
+  });
+
+  it('should remove .exe extension', () => {
+    expect(normalizeCommand('node.exe')).toBe('node');
+  });
+
+  it('should handle absolute paths', () => {
+    expect(normalizeCommand('/usr/bin/npm')).toBe('npm');
+    expect(normalizeCommand('C:\\Program Files\\nodejs\\node.exe')).toBe(
+      'node',
+    );
+  });
+});
+
+describe('getCommandRoots', () => {
+  it('uses Bash grammar explicitly on Windows without spawning PowerShell', () => {
+    const originalComSpec = process.env['ComSpec'];
+    mockPlatform.mockReturnValue('win32');
+    process.env['ComSpec'] = 'powershell.exe';
+
+    try {
+      expect(getCommandRoots('echo hello && git status', 'bash')).toEqual([
+        'echo',
+        'git',
+      ]);
+      expect(splitCommands('echo hello && git status', 'bash')).toEqual([
+        'echo hello',
+        'git status',
+      ]);
+      expect(mockSpawnSync).not.toHaveBeenCalled();
+    } finally {
+      if (originalComSpec === undefined) {
+        delete process.env['ComSpec'];
+      } else {
+        process.env['ComSpec'] = originalComSpec;
+      }
+    }
+  });
+
+  it('should return a single command', () => {
+    expect(getCommandRoots('ls -l')).toEqual(['ls']);
+  });
+
+  it('should handle paths and return the full path', () => {
+    expect(getCommandRoots('/usr/local/bin/node script.js')).toEqual([
+      '/usr/local/bin/node',
+    ]);
+  });
+
+  it('should return an empty array for an empty string', () => {
+    expect(getCommandRoots('')).toEqual([]);
+  });
+
+  it('should handle a mix of operators', () => {
+    const result = getCommandRoots('a;b|c&&d||e&f');
+    expect(result).toEqual(['a', 'b', 'c', 'd', 'e', 'f']);
+  });
+
+  it('should correctly parse a chained command with quotes', () => {
+    const result = getCommandRoots('echo "hello" && git commit -m "feat"');
+    expect(result).toEqual(['echo', 'git']);
+  });
+
+  it('should include nested command substitutions', () => {
+    const result = getCommandRoots('echo $(badCommand --danger)');
+    expect(result).toEqual(['echo', 'badCommand']);
+  });
+
+  it('should include process substitutions', () => {
+    const result = getCommandRoots('diff <(ls) <(ls -a)');
+    expect(result).toEqual(['diff', 'ls', 'ls']);
+  });
+
+  it('should include backtick substitutions', () => {
+    const result = getCommandRoots('echo `badCommand --danger`');
+    expect(result).toEqual(['echo', 'badCommand']);
+  });
+
+  it('should treat parameter expansions with prompt transformations as unsafe', () => {
+    const roots = getCommandRoots(
+      'echo "${var1=aa\\140 env| ls -l\\140}${var1@P}"',
+    );
+    expect(roots).toEqual([]);
+  });
+
+  it('should not return roots for prompt transformation expansions', () => {
+    const roots = getCommandRoots('echo ${foo@P}');
+    expect(roots).toEqual([]);
+  });
+
+  it('should include nested command substitutions in redirected statements', () => {
+    const result = getCommandRoots('echo $(cat secret) > output.txt');
+    expect(result).toEqual(['echo', 'cat']);
+  });
+
+  it('should correctly identify input redirection with explicit file descriptor', () => {
+    const result = parseCommandDetails('ls 2< input.txt');
+    const redirection = result?.details.find((d) =>
+      d.name.startsWith('redirection'),
+    );
+    expect(redirection?.name).toBe('redirection (<)');
+  });
+
+  it('should filter out all redirections from getCommandRoots', () => {
+    expect(getCommandRoots('cat < input.txt')).toEqual(['cat']);
+    expect(getCommandRoots('ls 2> error.log')).toEqual(['ls']);
+    expect(getCommandRoots('exec 3<&0')).toEqual(['exec']);
+  });
+
+  it('should handle parser initialization failures gracefully', async () => {
+    // Reset modules to clear singleton state
+    vi.resetModules();
+
+    // Mock fileUtils to fail Wasm loading
+    vi.doMock('./fileUtils.js', () => ({
+      loadWasmBinary: vi.fn().mockRejectedValue(new Error('Wasm load failed')),
+    }));
+
+    // Re-import shell-utils with mocked dependencies
+    const shellUtils = await import('./shell-utils.js');
+
+    // Should catch the error and not throw
+    await expect(shellUtils.initializeShellParsers()).resolves.not.toThrow();
+
+    // Fallback: splitting commands depends on parser, so if parser fails, it returns empty
+    const roots = shellUtils.getCommandRoots('ls -la');
+    expect(roots).toEqual([]);
+  });
+
+  it('should handle bash parser timeouts', () => {
+    const nowSpy = vi.spyOn(performance, 'now');
+    // Mock performance.now() to trigger timeout:
+    // First two calls cover diagnostics start and parser deadline. The third
+    // and later calls happen inside progressCallback and exceed the deadline.
+    nowSpy.mockReturnValueOnce(0).mockReturnValueOnce(0).mockReturnValue(2000);
+
+    // Use a very complex command to ensure progressCallback is triggered at least once
+    const complexCommand =
+      'ls -la && ' + Array(100).fill('echo "hello"').join(' && ');
+    const roots = getCommandRoots(complexCommand);
+    expect(roots).toEqual([]);
+    expect(nowSpy).toHaveBeenCalled();
+
+    expect(mockRunLogger.error).toHaveBeenCalledWith(
+      'Bash command parsing timed out for command:',
+      complexCommand,
+    );
+
+    nowSpy.mockRestore();
+  });
+});
+
+describe('hasRedirection', () => {
+  it('should detect output redirection', () => {
+    expect(hasRedirection('echo hello > world')).toBe(true);
+  });
+
+  it('should detect input redirection', () => {
+    expect(hasRedirection('cat < input')).toBe(true);
+  });
+
+  it('should detect redirection with explicit file descriptor', () => {
+    expect(hasRedirection('ls 2> error.log')).toBe(true);
+    expect(hasRedirection('exec 3<&0')).toBe(true);
+  });
+
+  it('should detect append redirection', () => {
+    expect(hasRedirection('echo hello >> world')).toBe(true);
+  });
+
+  it('should detect heredoc', () => {
+    expect(hasRedirection('cat <<EOF\nhello\nEOF')).toBe(true);
+  });
+
+  it('should detect herestring', () => {
+    expect(hasRedirection('cat <<< "hello"')).toBe(true);
+  });
+
+  it('should return false for simple commands', () => {
+    expect(hasRedirection('ls -la')).toBe(false);
+  });
+
+  it('should return false for pipes (pipes are not redirections in this context)', () => {
+    // Note: pipes are often handled separately by splitCommands, but checking here confirms they don't trigger "redirection" flag if we don't want them to.
+    // However, the current implementation checks for 'redirected_statement' nodes.
+    // A pipe is a 'pipeline' node.
+    expect(hasRedirection('echo hello | cat')).toBe(false);
+  });
+
+  it('should return false when redirection characters are inside quotes in bash', () => {
+    mockPlatform.mockReturnValue('linux');
+    expect(hasRedirection('echo "a > b"')).toBe(false);
+  });
+});
+
+describeWindowsOnly('PowerShell integration', () => {
+  const originalComSpec = process.env['ComSpec'];
+
+  beforeEach(() => {
+    mockPlatform.mockReturnValue('win32');
+    const systemRoot = process.env['SystemRoot'] || 'C:\\\\Windows';
+    process.env['ComSpec'] =
+      `${systemRoot}\\\\System32\\\\WindowsPowerShell\\\\v1.0\\\\powershell.exe`;
+  });
+
+  afterEach(() => {
+    if (originalComSpec === undefined) {
+      delete process.env['ComSpec'];
+    } else {
+      process.env['ComSpec'] = originalComSpec;
+    }
+  });
+
+  it('should return command roots using PowerShell AST output', () => {
+    mockPowerShellResult(
+      [
+        { name: 'Get-ChildItem', text: 'Get-ChildItem' },
+        { name: 'Select-Object', text: 'Select-Object Name' },
+      ],
+      false,
+    );
+
+    const roots = getCommandRoots('Get-ChildItem | Select-Object Name');
+    expect(roots.length).toBeGreaterThan(0);
+    expect(roots).toContain('Get-ChildItem');
+  });
+});
+
+describe('splitCommands', () => {
+  it('should split chained commands', () => {
+    expect(splitCommands('ls -l && git status')).toEqual([
+      'ls -l',
+      'git status',
+    ]);
+  });
+
+  it('should filter out redirection tokens but keep command parts', () => {
+    // Standard redirection
+    expect(splitCommands('echo "hello" > file.txt')).toEqual(['echo "hello"']);
+    expect(splitCommands('printf "test" >> log.txt')).toEqual([
+      'printf "test"',
+    ]);
+    expect(splitCommands('cat < input.txt')).toEqual(['cat']);
+
+    // Heredoc/Herestring
+    expect(splitCommands('cat << EOF\nhello\nEOF')).toEqual(['cat']);
+    // Note: The Tree-sitter bash parser includes the herestring in the main
+    // command node's text, unlike standard redirections which are siblings.
+    expect(splitCommands('grep "foo" <<< "foobar"')).toEqual([
+      'grep "foo" <<< "foobar"',
+    ]);
+  });
+
+  it('should extract nested commands from process substitution while filtering the redirection operator', () => {
+    // This is the key security test: we want cat to be checked, but not the > >(...) wrapper part
+    const parts = splitCommands('echo "foo" > >(cat)');
+    expect(parts).toContain('echo "foo"');
+    expect(parts).toContain('cat');
+    expect(parts.some((p) => p.includes('>'))).toBe(false);
+  });
+});
+
+describe('stripShellWrapper', () => {
+  it('should strip sh -c with quotes', () => {
+    expect(stripShellWrapper('sh -c "ls -l"')).toEqual('ls -l');
+  });
+
+  it('should strip bash -c with extra whitespace', () => {
+    expect(stripShellWrapper('  bash  -c  "ls -l"  ')).toEqual('ls -l');
+  });
+
+  it('should strip zsh -c without quotes', () => {
+    expect(stripShellWrapper('zsh -c ls -l')).toEqual('ls -l');
+  });
+
+  it.each([
+    'cmd.exe /c "dir"',
+    'cmd.exe /c dir /w',
+    'powershell -Command "Get-ChildItem"',
+    'powershell.exe -Command "Get-ChildItem"',
+    'powershell.exe -NoProfile -Command "Get-ChildItem"',
+    'pwsh -Command "Get-ChildItem"',
+    'pwsh.exe -Command "Get-ChildItem"',
+    'pwsh -NoProfile -Command "Get-ChildItem"',
+    '  powershell.exe -Command "Get-ChildItem"  ',
+    'POWERSHELL.EXE -Command "Get-ChildItem"',
+  ])('should preserve non-bash wrapper: %s', (input) => {
+    expect(stripShellWrapper(input)).toEqual(input.trim());
+  });
+
+  it('should not strip anything if no wrapper is present', () => {
+    expect(stripShellWrapper('ls -l')).toEqual('ls -l');
+  });
+});
+
+describe('getCommandName', () => {
+  it('should preserve powershell wrapper as the command name', async () => {
+    await expect(
+      getCommandName('powershell.exe', ['-Command', '"Get-ChildItem"']),
+    ).resolves.toEqual('powershell.exe');
+  });
+});
+
+describe('escapeShellArg', () => {
+  describe('POSIX (bash)', () => {
+    it('should use shell-quote for escaping', () => {
+      mockQuote.mockReturnValueOnce("'escaped value'");
+      const result = escapeShellArg('raw value', 'bash');
+      expect(mockQuote).toHaveBeenCalledWith(['raw value']);
+      expect(result).toBe("'escaped value'");
+    });
+
+    it('should handle empty strings', () => {
+      const result = escapeShellArg('', 'bash');
+      expect(result).toBe('');
+      expect(mockQuote).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('Windows', () => {
+    describe('when shell is cmd.exe', () => {
+      it('should wrap simple arguments in double quotes', () => {
+        const result = escapeShellArg('search term', 'cmd');
+        expect(result).toBe('"search term"');
+      });
+
+      it('should escape internal double quotes by doubling them', () => {
+        const result = escapeShellArg('He said "Hello"', 'cmd');
+        expect(result).toBe('"He said ""Hello"""');
+      });
+
+      it('should handle empty strings', () => {
+        const result = escapeShellArg('', 'cmd');
+        expect(result).toBe('');
+      });
+    });
+
+    describe('when shell is PowerShell', () => {
+      it('should wrap simple arguments in single quotes', () => {
+        const result = escapeShellArg('search term', 'powershell');
+        expect(result).toBe("'search term'");
+      });
+
+      it('should escape internal single quotes by doubling them', () => {
+        const result = escapeShellArg("It's a test", 'powershell');
+        expect(result).toBe("'It''s a test'");
+      });
+
+      it('should handle double quotes without escaping them', () => {
+        const result = escapeShellArg('He said "Hello"', 'powershell');
+        expect(result).toBe('\'He said "Hello"\'');
+      });
+
+      it('should handle empty strings', () => {
+        const result = escapeShellArg('', 'powershell');
+        expect(result).toBe('');
+      });
+    });
+  });
+});
+
+describe('getShellConfiguration', () => {
+  const originalEnv = { ...process.env };
+
+  beforeEach(() => {
+    _resetShellResolutionCacheForTests();
+    mockStatSync.mockReset();
+    mockAccessSync.mockReset();
+  });
+
+  afterEach(() => {
+    process.env = originalEnv;
+  });
+
+  describeUnixOnly('on Unix', () => {
+    it('should return resolved bash path on Linux', () => {
+      mockPlatform.mockReturnValue('linux');
+      process.env['PATH'] = '/usr/bin:/bin';
+      stubBashLookup(['/usr/bin/bash']);
+
+      const config = getShellConfiguration();
+      expect(config.executable).toBe('/usr/bin/bash');
+      expect(config.argsPrefix).toEqual(['-c']);
+      expect(config.shell).toBe('bash');
+    });
+
+    it('should return resolved bash path on macOS (darwin)', () => {
+      mockPlatform.mockReturnValue('darwin');
+      process.env['PATH'] = '/bin:/usr/bin';
+      stubBashLookup(['/bin/bash']);
+
+      const config = getShellConfiguration();
+      expect(config.executable).toBe('/bin/bash');
+      expect(config.argsPrefix).toEqual(['-c']);
+      expect(config.shell).toBe('bash');
+    });
+
+    it('should fall back to /bin/sh when bash is not found on Unix', () => {
+      mockPlatform.mockReturnValue('linux');
+      process.env['PATH'] = '/usr/bin:/bin';
+      mockStatSync.mockImplementation(() => {
+        throw new Error('ENOENT');
+      });
+
+      const config = getShellConfiguration();
+      expect(config.executable).toBe('/bin/sh');
+      expect(config.argsPrefix).toEqual(['-c']);
+      expect(config.shell).toBe('bash');
+      expect(mockRunLogger.warn).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('on Windows', () => {
+    beforeEach(() => {
+      mockPlatform.mockReturnValue('win32');
+    });
+
+    it('should return PowerShell configuration by default', () => {
+      delete process.env['ComSpec'];
+      const config = getShellConfiguration();
+      expect(config.executable).toBe('powershell.exe');
+      expect(config.argsPrefix).toEqual(['-NoProfile', '-Command']);
+      expect(config.shell).toBe('powershell');
+    });
+
+    it('should ignore ComSpec when pointing to cmd.exe', () => {
+      const cmdPath = 'C:\\WINDOWS\\system32\\cmd.exe';
+      process.env['ComSpec'] = cmdPath;
+      const config = getShellConfiguration();
+      expect(config.executable).toBe('powershell.exe');
+      expect(config.argsPrefix).toEqual(['-NoProfile', '-Command']);
+      expect(config.shell).toBe('powershell');
+    });
+
+    it('should return PowerShell configuration if ComSpec points to powershell.exe', () => {
+      const psPath =
+        'C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';
+      process.env['ComSpec'] = psPath;
+      const config = getShellConfiguration();
+      expect(config.executable).toBe(psPath);
+      expect(config.argsPrefix).toEqual(['-NoProfile', '-Command']);
+      expect(config.shell).toBe('powershell');
+    });
+
+    it('should return PowerShell configuration if ComSpec points to pwsh.exe', () => {
+      const pwshPath = 'C:\\Program Files\\PowerShell\\7\\pwsh.exe';
+      process.env['ComSpec'] = pwshPath;
+      const config = getShellConfiguration();
+      expect(config.executable).toBe(pwshPath);
+      expect(config.argsPrefix).toEqual(['-NoProfile', '-Command']);
+      expect(config.shell).toBe('powershell');
+    });
+
+    it('should be case-insensitive when checking ComSpec', () => {
+      process.env['ComSpec'] = 'C:\\Path\\To\\POWERSHELL.EXE';
+      const config = getShellConfiguration();
+      expect(config.executable).toBe('C:\\Path\\To\\POWERSHELL.EXE');
+      expect(config.argsPrefix).toEqual(['-NoProfile', '-Command']);
+      expect(config.shell).toBe('powershell');
+    });
+  });
+});
+
+describeUnixOnly('resolveBashPath', () => {
+  const originalEnv = { ...process.env };
+
+  beforeEach(() => {
+    _resetShellResolutionCacheForTests();
+    mockStatSync.mockReset();
+    mockAccessSync.mockReset();
+  });
+
+  afterEach(() => {
+    process.env = originalEnv;
+  });
+
+  it('returns the absolute path of the first executable bash in PATH', () => {
+    process.env['PATH'] = '/usr/local/bin:/usr/bin:/bin';
+    stubBashLookup(['/usr/bin/bash']);
+
+    expect(resolveBashPath()).toBe('/usr/bin/bash');
+  });
+
+  it('skips relative PATH entries', () => {
+    process.env['PATH'] = '.:relative/bin:/usr/bin';
+    stubBashLookup(['/usr/bin/bash']);
+
+    expect(resolveBashPath()).toBe('/usr/bin/bash');
+    // Relative entries must never be stat'd.
+    expect(mockStatSync).not.toHaveBeenCalledWith('bash');
+    expect(mockStatSync).not.toHaveBeenCalledWith('relative/bin/bash');
+  });
+
+  it('skips candidates that are not regular files', () => {
+    process.env['PATH'] = '/opt/bin:/usr/bin';
+    mockStatSync.mockImplementation((p: string) => {
+      if (p === '/opt/bin/bash') return { isFile: () => false };
+      if (p === '/usr/bin/bash') return { isFile: () => true };
+      throw new Error('ENOENT');
+    });
+    mockAccessSync.mockReturnValue(undefined);
+
+    expect(resolveBashPath()).toBe('/usr/bin/bash');
+  });
+
+  it('skips candidates that are not executable by the current user', () => {
+    process.env['PATH'] = '/opt/bin:/usr/bin';
+    mockStatSync.mockImplementation((p: string) =>
+      p === '/opt/bin/bash' || p === '/usr/bin/bash'
+        ? { isFile: () => true }
+        : (() => {
+            throw new Error('ENOENT');
+          })(),
+    );
+    mockAccessSync.mockImplementation((p: string) => {
+      if (p === '/opt/bin/bash') throw new Error('EACCES');
+    });
+
+    expect(resolveBashPath()).toBe('/usr/bin/bash');
+  });
+
+  it('returns null when bash is not found in PATH', () => {
+    process.env['PATH'] = '/usr/bin:/bin';
+    mockStatSync.mockImplementation(() => {
+      throw new Error('ENOENT');
+    });
+
+    expect(resolveBashPath()).toBeNull();
+  });
+
+  it('memoizes the result across calls', () => {
+    process.env['PATH'] = '/usr/bin';
+    stubBashLookup(['/usr/bin/bash']);
+
+    expect(resolveBashPath()).toBe('/usr/bin/bash');
+    const callsAfterFirst = mockStatSync.mock.calls.length;
+    expect(resolveBashPath()).toBe('/usr/bin/bash');
+    expect(mockStatSync.mock.calls.length).toBe(callsAfterFirst);
+  });
+});
+
+describeUnixOnly('resolveUnixCommandShell', () => {
+  const originalEnv = { ...process.env };
+
+  beforeEach(() => {
+    _resetShellResolutionCacheForTests();
+    mockStatSync.mockReset();
+    mockAccessSync.mockReset();
+  });
+
+  afterEach(() => {
+    process.env = originalEnv;
+  });
+
+  it('returns the resolved bash path when bash is available', () => {
+    process.env['PATH'] = '/usr/bin';
+    stubBashLookup(['/usr/bin/bash']);
+
+    expect(resolveUnixCommandShell()).toBe('/usr/bin/bash');
+    expect(mockRunLogger.warn).not.toHaveBeenCalled();
+  });
+
+  it('falls back to /bin/sh and warns exactly once when bash is missing', () => {
+    process.env['PATH'] = '/usr/bin';
+    mockStatSync.mockImplementation(() => {
+      throw new Error('ENOENT');
+    });
+
+    expect(resolveUnixCommandShell()).toBe('/bin/sh');
+    expect(resolveUnixCommandShell()).toBe('/bin/sh');
+    expect(mockRunLogger.warn).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('hasRedirection (PowerShell via mock)', () => {
+  beforeEach(() => {
+    mockPlatform.mockReturnValue('win32');
+    process.env['ComSpec'] = 'powershell.exe';
+  });
+
+  it('should return true when PowerShell parser detects redirection', () => {
+    mockPowerShellResult([{ name: 'echo', text: 'echo hello' }], true);
+    expect(hasRedirection('echo hello > file.txt')).toBe(true);
+  });
+
+  it('should return false when PowerShell parser does not detect redirection', () => {
+    mockPowerShellResult([{ name: 'echo', text: 'echo hello' }], false);
+    expect(hasRedirection('echo hello')).toBe(false);
+  });
+
+  it('should return false when quoted redirection chars are used but not actual redirection', () => {
+    mockPowerShellResult(
+      [{ name: 'echo', text: 'echo "-> arrow"' }],
+      false, // Parser says NO redirection
+    );
+    expect(hasRedirection('echo "-> arrow"')).toBe(false);
+  });
+
+  it('should fallback to regex if parsing fails (simulating safety)', () => {
+    mockSpawnSync.mockReturnValue({
+      stdout: Buffer.from('invalid json'),
+      status: 0,
+    });
+    // Fallback regex sees '>' in arrow
+    expect(hasRedirection('echo "-> arrow"')).toBe(true);
+  });
+});
+
+describe('resolveExecutable', () => {
+  const originalEnv = process.env;
+
+  beforeEach(() => {
+    process.env = { ...originalEnv };
+    mockAccess.mockReset();
+  });
+
+  afterEach(() => {
+    process.env = originalEnv;
+  });
+
+  it('should return the absolute path if it exists and is executable', async () => {
+    const absPath = path.resolve('/usr/bin/git');
+    mockAccess.mockResolvedValue(undefined); // success
+    expect(await resolveExecutable(absPath)).toBe(absPath);
+    expect(mockAccess).toHaveBeenCalledWith(absPath, 1);
+  });
+
+  it('should return undefined for absolute path if it does not exist', async () => {
+    const absPath = path.resolve('/usr/bin/nonexistent');
+    mockAccess.mockRejectedValue(new Error('ENOENT'));
+    expect(await resolveExecutable(absPath)).toBeUndefined();
+  });
+
+  it('should resolve executable in PATH', async () => {
+    const binDir = path.resolve('/bin');
+    const usrBinDir = path.resolve('/usr/bin');
+    process.env['PATH'] = `${binDir}${path.delimiter}${usrBinDir}`;
+    mockPlatform.mockReturnValue('linux');
+
+    const targetPath = path.join(usrBinDir, 'ls');
+    mockAccess.mockImplementation(async (p: string) => {
+      if (p === targetPath) return undefined;
+      throw new Error('ENOENT');
+    });
+
+    expect(await resolveExecutable('ls')).toBe(targetPath);
+  });
+
+  it('should try extensions on Windows', async () => {
+    const sys32 = path.resolve('C:\\Windows\\System32');
+    process.env['PATH'] = sys32;
+    mockPlatform.mockReturnValue('win32');
+    mockAccess.mockImplementation(async (p: string) => {
+      // Use includes because on Windows path separators might differ
+      if (p.includes('cmd.exe')) return undefined;
+      throw new Error('ENOENT');
+    });
+
+    expect(await resolveExecutable('cmd')).toContain('cmd.exe');
+  });
+
+  it('should return undefined if not found in PATH', async () => {
+    process.env['PATH'] = path.resolve('/bin');
+    mockPlatform.mockReturnValue('linux');
+    mockAccess.mockRejectedValue(new Error('ENOENT'));
+
+    expect(await resolveExecutable('unknown')).toBeUndefined();
+  });
+});

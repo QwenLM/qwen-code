@@ -1,0 +1,11 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`StatusDisplay > renders ContextSummaryDisplay by default 1`] = `
+"Mock Context Summary Display (Skills: 2, Shells: 0)
+"
+`;
+
+exports[`StatusDisplay > renders system md indicator if env var is set 1`] = `
+"|⌐■_■|
+"
+`;

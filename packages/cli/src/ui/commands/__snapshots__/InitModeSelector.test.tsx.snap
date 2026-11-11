@@ -1,0 +1,29 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`InitModeSelector > shows AGENTS.md in the heading and Quick description 1`] = `
+" Init
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ How would you like to set up AGENTS.md?
+
+  ❯ 1. Quick
+       Automatically analyze the codebase and generate AGENTS.md — no questions asked.
+    2. Interactive
+       Interactive setup with interview, plus optional skills and hooks.
+
+ Enter select · Esc back
+"
+`;
+
+exports[`InitModeSelector > shows CUSTOM.md in the heading and Quick description 1`] = `
+" Init
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ How would you like to set up CUSTOM.md?
+
+  ❯ 1. Quick
+       Automatically analyze the codebase and generate CUSTOM.md — no questions asked.
+    2. Interactive
+       Interactive setup with interview, plus optional skills and hooks.
+
+ Enter select · Esc back
+"
+`;

@@ -1,0 +1,119 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`LocalCustomModelForm > edits Anthropic modes while preserving advanced beta configuration 1`] = `
+"────────────────────────────────────────────────────────────────────────────────────────────────────
+ Edit custom model
+ Anthropic · Messages
+
+ Model ID: model (fixed; add a new entry to change it)
+  ❯ Base URL *          https://gateway.example/v1
+    Name                Coding
+    API Key             ••••••••
+
+    Model capabilities...
+
+    Review and save
+ * Required
+
+ ↑↓ navigate · Enter edit / continue · Esc back
+"
+`;
+
+exports[`LocalCustomModelForm > edits Anthropic modes while preserving advanced beta configuration 3`] = `
+"────────────────────────────────────────────────────────────────────────────────────────────────────
+ Model capabilities
+ Anthropic · Messages
+
+  ❯ Context capacity    256,000
+    Max output          8,192
+    Vision              Off
+    Thinking controls   low
+
+    Done
+ Enter the provider context capacity in tokens. Leave blank to use the 128K default budget.
+
+ ↑↓ navigate · Enter edit / continue · Esc back
+"
+`;
+
+exports[`LocalCustomModelForm > edits Anthropic modes while preserving advanced beta configuration 5`] = `
+"────────────────────────────────────────────────────────────────────────────────────────────────────
+ Thinking controls
+ Anthropic · Messages
+
+  ❯ Supported modes     enabled
+    Effort levels       low
+
+    Done
+
+ ↑↓ navigate · Enter edit / continue · Esc back
+"
+`;
+
+exports[`LocalCustomModelForm > edits openai capabilities, preserves an unchanged key, and reviews before updating 1`] = `
+"────────────────────────────────────────────────────────────────────────────────────────────────────
+ Thinking controls
+ OpenAI · Chat Completions
+
+  ❯ Effort levels       —
+    
+    Done
+
+ ↑↓ navigate · Enter edit / continue · Esc back
+"
+`;
+
+exports[`LocalCustomModelForm > edits openai capabilities, preserves an unchanged key, and reviews before updating 3`] = `
+"────────────────────────────────────────────────────────────────────────────────────────────────────
+ Review custom model
+
+
+   Name              Coding
+   Model ID          model
+   API               OpenAI · Chat Completions
+   Base URL          https://gateway.example/v1
+   Context Window    256,000 tokens
+   Max output        8192
+   Thinking controls low / high
+   Image input       Supported
+
+ Connection has not been tested.
+  ❯ Save model
+
+ Enter save · Esc back
+"
+`;
+
+exports[`LocalCustomModelForm > edits openai-responses capabilities, preserves an unchanged key, and reviews before updating 1`] = `
+"────────────────────────────────────────────────────────────────────────────────────────────────────
+ Thinking controls
+ OpenAI · Responses
+
+  ❯ Effort levels       —
+    
+    Done
+
+ ↑↓ navigate · Enter edit / continue · Esc back
+"
+`;
+
+exports[`LocalCustomModelForm > edits openai-responses capabilities, preserves an unchanged key, and reviews before updating 3`] = `
+"────────────────────────────────────────────────────────────────────────────────────────────────────
+ Review custom model
+
+
+   Name              Coding
+   Model ID          model
+   API               OpenAI · Responses
+   Base URL          https://gateway.example/v1
+   Context Window    256,000 tokens
+   Max output        8192
+   Thinking controls low / high
+   Image input       Supported
+
+ Connection has not been tested.
+  ❯ Save model
+
+ Enter save · Esc back
+"
+`;

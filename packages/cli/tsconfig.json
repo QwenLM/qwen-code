@@ -1,0 +1,57 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "jsx": "react-jsx",
+    "lib": ["DOM", "DOM.Iterable", "ES2023"],
+    "types": ["node", "vitest/globals"],
+    "paths": {
+      "@qwen-code/core/test-utils": ["../core/src/test-utils/index.ts"],
+      "@qwen-code/core": ["../core/index.ts"],
+      "@qwen-code/resource": ["../resource/index.ts"],
+      "ink": ["./src/ink/index.ts"],
+      "react-reconciler": ["./vendor-types/react-reconciler/index.d.ts"],
+      "react-reconciler/constants.js": [
+        "./vendor-types/react-reconciler/constants.js.d.ts"
+      ],
+      "bidi-js": ["./vendor-types/bidi-js/index.d.ts"],
+      "stack-utils": ["./vendor-types/stack-utils/index.d.ts"],
+      "wrap-ansi": ["./vendor-types/wrap-ansi/index.d.ts"],
+      "@qwen-code/core/plugin-management": ["../core/plugin-management.ts"],
+      "@qwen-code/core/sessions": ["../core/sessions.ts"]
+    }
+  },
+  "include": [
+    "index.ts",
+    "release-notes.ts",
+    "installation-host.ts",
+    "installation.ts",
+    "framework.ts",
+    "daemon-host.ts",
+    "worker.ts",
+    "thread-manager.ts",
+    "ui.ts",
+    "acp.ts",
+    "headless.ts",
+    "session-startup.ts",
+    "plugin-commands.ts",
+    "plugin-management.ts",
+    "command-runtime.ts",
+    "bin.ts",
+    "src/**/*.ts",
+    "src/**/*.tsx",
+    "src/**/*.d.ts",
+    "vendor-types/**/*.d.ts",
+    "src/**/*.json",
+    "./package.json"
+  ],
+  "exclude": ["node_modules", "dist", "src/patches/yoga-layout-lazy.ts"],
+  "references": [
+    {
+      "path": "../core"
+    },
+    {
+      "path": "../resource"
+    }
+  ]
+}

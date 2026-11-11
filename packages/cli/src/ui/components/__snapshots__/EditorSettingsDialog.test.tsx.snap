@@ -1,0 +1,14 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`EditorSettingsDialog > renders correctly with tab-based scope selection 1`] = `
+"Editor ·  User   Workspace
+────────────────────────────────────────────────────────────────────────────────
+  ❯ 1. VS Code                                 Editor Preference
+    2. Vim
+                                               These editors are currently supported.
+
+                                               Your preferred editor is: VS Code.
+
+ Tab/←→ switch · ↑↓ navigate · Enter select · Esc close
+"
+`;

@@ -1,0 +1,26 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`InputPrompt next-action lifecycle > previews in gray, accepts with Tab, and submits only after editing and Enter 1`] = `
+"vim:disabled
+────────────────────────────────────────────────────────────────────────────────────────────────────
+ > Review the diff
+────────────────────────────────────────────────────────────────────────────────────────────────────
+"
+`;
+
+exports[`InputPrompt next-action lifecycle > previews in gray, accepts with Tab, and submits only after editing and Enter 3`] = `
+"vim:disabled
+────────────────────────────────────────────────────────────────────────────────────────────────────
+ > Review the diff
+────────────────────────────────────────────────────────────────────────────────────────────────────
+"
+`;
+
+exports[`InputPrompt next-action lifecycle > wraps a Chinese preview with an emoji inside a narrow input frame 1`] = `
+"vim:disabled
+────────────────────────────────────────
+ > 🔍检查本次修改的输入框逻辑，并补充主
+   动推荐确认后编辑和发送的测试
+────────────────────────────────────────
+"
+`;

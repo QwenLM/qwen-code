@@ -1,0 +1,64 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`CustomModelWizard > saves anthropic locally with a masked key and without selecting it 1`] = `
+"────────────────────────────────────────────────────────────────────────────────────────────────────
+ Review custom model
+
+   
+   Name              My coding model
+   Model ID          vendor/model
+   API               Anthropic · Messages
+   Base URL          https://gateway.example/v1
+   Context Window    128K (default budget)
+   Max output        32000
+   Thinking controls —
+   Supported modes   —
+   Image input       Not declared
+
+ Connection has not been tested.
+  ❯ Save model
+
+ Enter save · Esc back
+"
+`;
+
+exports[`CustomModelWizard > saves openai locally with a masked key and without selecting it 1`] = `
+"────────────────────────────────────────────────────────────────────────────────────────────────────
+ Review custom model
+
+   
+   Model ID          vendor/model
+   API               OpenAI · Chat Completions
+   Base URL          https://gateway.example/v1
+   Context Window    128K (default budget)
+   Max output        32000
+   Thinking controls —
+   Image input       Not declared
+  
+ Connection has not been tested.
+  ❯ Save model
+
+ Enter save · Esc back
+"
+`;
+
+exports[`CustomModelWizard > saves openai-responses locally with a masked key and without selecting it 1`] = `
+"────────────────────────────────────────────────────────────────────────────────────────────────────
+ Review custom model
+
+
+   Name              vendor/model
+   Model ID          vendor/model
+   API               OpenAI · Responses
+   Base URL          https://gateway.example/v1
+   Context Window    128K (default budget)
+   Max output        32000
+   Thinking controls —
+   Image input       Not declared
+
+ Connection has not been tested.
+  ❯ Save model
+
+ Enter save · Esc back
+"
+`;

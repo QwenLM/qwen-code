@@ -1,0 +1,392 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`AskUserDialog > Type something input > renders the multi-select custom response inside its selected option 1`] = `
+" Asking User ·  ☐ Features  >  Submit
+────────────────────────────────────────────────────────────────────────────────────────────────────
+ Which features?
+
+   1. [ ] TypeScript
+   2. [ ] ESLint
+ ❯ 3. [ ] Type something
+     Submit
+
+ ──────────────────────────────────────────────────────────────────────────────────────────────────
+   4. Chat about this
+
+ Ctrl+Enter select · Ctrl+X edit response · Esc cancel
+"
+`;
+
+exports[`AskUserDialog > Type something input > uses the shared input field and default placeholder 1`] = `
+" Asking User
+────────────────────────────────────────────────────────────────────────────────
+ Select your preferred language:
+
+   1. TypeScript
+ ❯ 2. JavaScript
+   3. Type something.
+
+ ──────────────────────────────────────────────────────────────────────────────
+   4. Chat about this
+
+ ↑↓ navigate · Enter select · Esc cancel
+"
+`;
+
+exports[`AskUserDialog > caps previews using terminal rows and clears overflow when focus changes 1`] = `
+" Asking User
+────────────────────────────────────────────────────────────────────────────────────────────────────
+ Which layout should we use?
+
+ ❯ 1. Long                         ┌──────────────────────────────────────────┐
+   2. Short                        │  preview line 01                         │
+                                   │  preview line 02                         │
+                                   │  preview line 03                         │
+                                   │  preview line 04                         │
+                                   │  preview line 05                         │
+                                   │  preview line 06                         │
+                                   │  preview line 07                         │
+                                   │  preview line 08                         │
+                                   ├─── ✂ ──── 22 lines hidden ───────────────┤
+                                   └──────────────────────────────────────────┘
+
+                                   Notes: press N to add notes
+
+ ──────────────────────────────────────────────────────────────────────────────────────────────────
+   Chat about this
+
+ ↑↓ navigate · Enter select · N add notes · Esc cancel
+"
+`;
+
+exports[`AskUserDialog > edits the ordinary custom response in the preferred editor (multi=false) 1`] = `
+" Asking User
+────────────────────────────────────────────────────────────────────────────────────────────────────
+ Which authentication method should we use?
+
+   1. OAuth 2.0
+      Industry standard, supports SSO
+   2. JWT tokens
+      Stateless, good for APIs
+ ❯ 3. Edited response
+
+ ──────────────────────────────────────────────────────────────────────────────────────────────────
+   4. Chat about this
+
+ Enter submit · Ctrl+X edit response · Esc cancel
+"
+`;
+
+exports[`AskUserDialog > edits the ordinary custom response in the preferred editor (multi=true) 1`] = `
+" Asking User ·  ☒ Auth  >  Submit
+────────────────────────────────────────────────────────────────────────────────────────────────────
+ Which authentication method should we use?
+
+   1. [ ] OAuth 2.0
+        Industry standard, supports SSO
+   2. [ ] JWT tokens
+        Stateless, good for APIs
+ ❯ 3. [✓] Edited response
+     Submit
+
+ ──────────────────────────────────────────────────────────────────────────────────────────────────
+   4. Chat about this
+
+ Ctrl+Enter select · Ctrl+X edit response · Esc cancel
+"
+`;
+
+exports[`AskUserDialog > excludes an unconfirmed single-select draft from Review and submission 1`] = `
+" Asking User ·  ☐ Auth  >  ☒ Second  >  Submit
+────────────────────────────────────────────────────────────────────────────────────────────────────
+ Review your answers:
+
+  ● You have not answered all questions
+
+  Second?
+    → OAuth 2.0
+  
+
+ Ready to submit your answers?
+
+ ❯ Submit answers
+   Cancel
+
+ Tab/←→ switch · Enter select · Esc cancel
+"
+`;
+
+exports[`AskUserDialog > hides progress header for single question 1`] = `
+" Asking User
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ Which authentication method should we use?
+
+ ❯ 1. OAuth 2.0
+      Industry standard, supports SSO
+   2. JWT tokens
+      Stateless, good for APIs
+   3. Type something.
+
+ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+   4. Chat about this
+
+ ↑↓ navigate · Enter select · Esc cancel
+"
+`;
+
+exports[`AskUserDialog > keeps a single-select draft unchecked across tabs until Enter confirms it 1`] = `
+" Asking User ·  ☐ Auth  >  ☐ Second  >  Submit
+────────────────────────────────────────────────────────────────────────────────────────────────────
+ Which authentication method should we use?
+
+   1. OAuth 2.0
+      Industry standard, supports SSO
+   2. JWT tokens
+      Stateless, good for APIs
+ ❯ 3. Unconfirmed draft
+
+ ──────────────────────────────────────────────────────────────────────────────────────────────────
+   4. Chat about this
+
+ Enter submit · Ctrl+X edit response · Esc cancel
+"
+`;
+
+exports[`AskUserDialog > keeps long descriptions out of the preview list at 50 columns 1`] = `
+" Asking User
+──────────────────────────────────────────────────
+ 选择优化方向？
+
+ ❯ 1.固定               ┌───────────────────────┐
+     shape（推荐）      │  GPU busy < 1%        │
+   2. 先做 spike        └───────────────────────┘
+
+                        Notes:press N to add
+                              notes
+
+ ────────────────────────────────────────────────
+   Chat about this
+
+ ↑↓ navigate · Enter select · N add notes · Esc
+ cancel
+"
+`;
+
+exports[`AskUserDialog > keeps long descriptions out of the preview list at 80 columns 1`] = `
+" Asking User
+────────────────────────────────────────────────────────────────────────────────
+ 选择优化方向？
+
+ ❯ 1. 固定 shape（推荐）           ┌──────────────────────────────────────────┐
+   2. 先做 spike                   │  GPU busy < 1%                           │
+                                   └──────────────────────────────────────────┘
+
+                                   Notes: press N to add notes
+
+ ──────────────────────────────────────────────────────────────────────────────
+   Chat about this
+
+ ↑↓ navigate · Enter select · N add notes · Esc cancel
+"
+`;
+
+exports[`AskUserDialog > keeps long descriptions out of the preview list at 300 columns 1`] = `
+" Asking User
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ 选择优化方向？
+
+ ❯ 1. 固定 shape（推荐）           ┌──────────────────────────────────────────┐
+   2. 先做 spike                   │  GPU busy < 1%                           │
+                                   └──────────────────────────────────────────┘
+
+                                   Notes: press N to add notes
+
+ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+   Chat about this
+
+ ↑↓ navigate · Enter select · N add notes · Esc cancel
+"
+`;
+
+exports[`AskUserDialog > keeps preview Chat focus separate, blocks digits, and allows parent tab navigation 1`] = `
+" Asking User ·  ☐ Layout  >  ☐ Second  >  Submit
+────────────────────────────────────────────────────────────────────────────────────────────────────
+ Which layout should we use?
+
+   1. Comfortable                  ┌──────────────────────────────────────────┐
+ ❯ 2. Compact                      │ Compact                                  │
+                                   │  [content]                               │
+                                   └──────────────────────────────────────────┘
+
+                                   Notes: press N to add notes
+
+ ──────────────────────────────────────────────────────────────────────────────────────────────────
+ ❯ Chat about this
+
+ Tab/←→ navigate · Enter select · N add notes · Esc cancel
+"
+`;
+
+exports[`AskUserDialog > marks answered question tabs while leaving unanswered tabs unchecked 1`] = `
+" Asking User ·  ☒ Layout  >  ☐ Second  >  Submit
+────────────────────────────────────────────────────────────────────────────────────────────────────
+ Second question?
+
+ ❯ 1. Comfortable                  ┌──────────────────────────────────────────┐
+   2. Compact                      │ Comfortable                              │
+                                   │  [  content  ]                           │
+                                   └──────────────────────────────────────────┘
+
+                                   Notes: press N to add notes
+
+ ──────────────────────────────────────────────────────────────────────────────────────────────────
+   Chat about this
+
+ Tab/←→ navigate · Enter select · N add notes · Esc cancel
+"
+`;
+
+exports[`AskUserDialog > renders a side-by-side markdown preview without an Other option 1`] = `
+" Asking User
+────────────────────────────────────────────────────────────────────────────────────────────────────
+ Which layout should we use?
+
+ ❯ 1. Comfortable                  ┌──────────────────────────────────────────┐
+   2. Compact                      │ Comfortable                              │
+                                   │  [  content  ]                           │
+                                   └──────────────────────────────────────────┘
+
+                                   Notes: press N to add notes
+
+ ──────────────────────────────────────────────────────────────────────────────────────────────────
+   Chat about this
+
+ ↑↓ navigate · Enter select · N add notes · Esc cancel
+"
+`;
+
+exports[`AskUserDialog > renders question and options 1`] = `
+" Asking User
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ Which authentication method should we use?
+
+ ❯ 1. OAuth 2.0
+      Industry standard, supports SSO
+   2. JWT tokens
+      Stateless, good for APIs
+   3. Type something.
+
+ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+   4. Chat about this
+
+ ↑↓ navigate · Enter select · Esc cancel
+"
+`;
+
+exports[`AskUserDialog > returns from ordinary Chat to the custom input and sends clarification (multi=false) 1`] = `
+" Asking User
+────────────────────────────────────────────────────────────────────────────────────────────────────
+ Which authentication method should we use?
+
+   1. OAuth 2.0
+      Industry standard, supports SSO
+   2. JWT tokens
+      Stateless, good for APIs
+   3. Type something.
+
+ ──────────────────────────────────────────────────────────────────────────────────────────────────
+ ❯ 4. Chat about this
+
+ ↑↓ navigate · Enter select · Esc cancel
+"
+`;
+
+exports[`AskUserDialog > returns from ordinary Chat to the custom input and sends clarification (multi=true) 1`] = `
+" Asking User ·  ☐ Auth  >  Submit
+────────────────────────────────────────────────────────────────────────────────────────────────────
+ Which authentication method should we use?
+
+   1. [ ] OAuth 2.0
+        Industry standard, supports SSO
+   2. [ ] JWT tokens
+        Stateless, good for APIs
+   3. [ ] Type something
+     Submit
+
+ ──────────────────────────────────────────────────────────────────────────────────────────────────
+ ❯ 4. Chat about this
+
+ ↑↓ navigate · Enter select · Esc cancel
+"
+`;
+
+exports[`AskUserDialog > shows Review tab in progress header for multiple questions 1`] = `
+" Asking User ·  ☐ Framework  >  ☐ Styling  >  Submit
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ Which framework?
+
+ ❯ 1. React
+      Component library
+   2. Vue
+      Progressive framework
+   3. Type something.
+
+ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+   4. Chat about this
+
+ Tab/←→ navigate · Enter select · Esc cancel
+"
+`;
+
+exports[`AskUserDialog > shows keyboard hints 1`] = `
+" Asking User
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ Which authentication method should we use?
+
+ ❯ 1. OAuth 2.0
+      Industry standard, supports SSO
+   2. JWT tokens
+      Stateless, good for APIs
+   3. Type something.
+
+ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+   4. Chat about this
+
+ ↑↓ navigate · Enter select · Esc cancel
+"
+`;
+
+exports[`AskUserDialog > shows progress header for multiple questions 1`] = `
+" Asking User ·  ☐ Database  >  ☐ ORM  >  Submit
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ Which database should we use?
+
+ ❯ 1. PostgreSQL
+      Relational database
+   2. MongoDB
+      Document database
+   3. Type something.
+
+ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+   4. Chat about this
+
+ Tab/←→ navigate · Enter select · Esc cancel
+"
+`;
+
+exports[`AskUserDialog > shows warning for unanswered questions on Review tab 1`] = `
+" Asking User ·  ☐ License  >  ☐ README  >  Submit
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ Review your answers:
+
+  ● You have not answered all questions
+
+
+ Ready to submit your answers?
+
+ ❯ Submit answers
+   Cancel
+
+ Tab/←→ switch · Enter select · Esc cancel
+"
+`;

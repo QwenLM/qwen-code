@@ -1,0 +1,18 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`FolderTrustDialog > shows the original project being trusted while cwd is a worktree 1`] = `
+"
+ Do you trust the files in this folder?
+────────────────────────────────────────────────────────────────────────────────────────────────────
+ Please confirm this is your own project or from a trusted source. Once trusted, Qwen Code can
+ read, modify, and execute files here, and will load local configurations (commands, hooks, MCP
+ servers, agents, skills, settings).
+
+ /home/user/project
+
+  ❯ 1. Trust folder
+    2. Don't trust and exit
+
+ ↑/↓ navigate · Enter select · Esc back
+"
+`;

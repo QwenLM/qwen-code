@@ -1,0 +1,15 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`SubagentHistoryMessage > renders transcript-backed subagent history 1`] = `
+"🤖 explore Trace (4 messages)
+
+  👤 List files in the project root
+  🤖 Checking the directory
+  ▪ Glob('*')
+    └ Found 10 matching file(s)
+
+      src/a.ts
+
+  🤖 Done listing files.
+"
+`;

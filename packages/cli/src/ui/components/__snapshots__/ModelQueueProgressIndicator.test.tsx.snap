@@ -1,0 +1,15 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`<ModelQueueProgressIndicator /> > keeps all three rows with compact labels on narrow terminals 1`] = `
+"⠋ Model queued (4m 33s)
+  █████████████████░░░░░░░░░░░░░ moving
+  estimated wait 1min
+"
+`;
+
+exports[`<ModelQueueProgressIndicator /> > renders the complete queued phase as three terminal rows 1`] = `
+"⠋ Model request queued (esc to cancel, 4m 33s)
+  ███████████████████████████░░░░░░░░░░░░░░░░░░░░░ moving
+  estimated wait 1min
+"
+`;

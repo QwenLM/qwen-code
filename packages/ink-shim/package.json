@@ -1,0 +1,12 @@
+{
+  "name": "ink",
+  "version": "7.0.0-gmn.0",
+  "description": "Local shim re-export Ink",
+  "type": "module",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "scripts": {
+    "build": "echo 'ink-shim: nothing to build'"
+  },
+  "private": true
+}

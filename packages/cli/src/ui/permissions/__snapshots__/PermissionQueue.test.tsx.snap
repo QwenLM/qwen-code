@@ -1,0 +1,23 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`PermissionQueue > shows the classifier fallback notice in en 1`] = `
+"
+ Permission Required
+────────────────────────────────────────────────────────────────────────────────────────────────────
+ Automatic safety checks are temporarily unavailable. This action needs your approval.
+
+ Tool: Bash
+ Command: echo test
+"
+`;
+
+exports[`PermissionQueue > shows the classifier fallback notice in zh-CN 1`] = `
+"
+ Permission Required
+────────────────────────────────────────────────────────────────────────────────────────────────────
+ 自动安全检查暂时不可用，本次操作需要你确认。
+
+ Tool: Bash
+ Command: echo test
+"
+`;

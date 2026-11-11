@@ -1,0 +1,26 @@
+diff --git a/node_modules/chokidar/node_modules/readdirp/esm/index.js b/node_modules/chokidar/node_modules/readdirp/esm/index.js
+index ae8ca78..b6e1034 100644
+--- a/node_modules/chokidar/node_modules/readdirp/esm/index.js
++++ b/node_modules/chokidar/node_modules/readdirp/esm/index.js
+@@ -19,7 +19,7 @@ const defaultOptions = {
+ };
+ Object.freeze(defaultOptions);
+ const RECURSIVE_ERROR_CODE = 'READDIRP_RECURSIVE_ERROR';
+-const NORMAL_FLOW_ERRORS = new Set(['ENOENT', 'EPERM', 'EACCES', 'ELOOP', RECURSIVE_ERROR_CODE]);
++const NORMAL_FLOW_ERRORS = new Set(['ENOENT', 'ENOTDIR', 'EPERM', 'EACCES', 'ELOOP', RECURSIVE_ERROR_CODE]);
+ const ALL_TYPES = [
+     EntryTypes.DIR_TYPE,
+     EntryTypes.EVERYTHING_TYPE,
+diff --git a/node_modules/chokidar/node_modules/readdirp/index.js b/node_modules/chokidar/node_modules/readdirp/index.js
+index 0e08e13..6bd9d60 100644
+--- a/node_modules/chokidar/node_modules/readdirp/index.js
++++ b/node_modules/chokidar/node_modules/readdirp/index.js
+@@ -24,7 +24,7 @@ const defaultOptions = {
+ };
+ Object.freeze(defaultOptions);
+ const RECURSIVE_ERROR_CODE = 'READDIRP_RECURSIVE_ERROR';
+-const NORMAL_FLOW_ERRORS = new Set(['ENOENT', 'EPERM', 'EACCES', 'ELOOP', RECURSIVE_ERROR_CODE]);
++const NORMAL_FLOW_ERRORS = new Set(['ENOENT', 'ENOTDIR', 'EPERM', 'EACCES', 'ELOOP', RECURSIVE_ERROR_CODE]);
+ const ALL_TYPES = [
+     exports.EntryTypes.DIR_TYPE,
+     exports.EntryTypes.EVERYTHING_TYPE,

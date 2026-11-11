@@ -1,0 +1,20 @@
+/**
+ * @license
+ * Copyright 2025 Google LLC
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { render } from '../../test-utils/render.js';
+import { UpdateNotification } from './UpdateNotification.js';
+import { describe, it, expect } from 'vitest';
+
+describe('UpdateNotification', () => {
+  it('renders message', async () => {
+    const { lastFrame, unmount } = await render(
+      <UpdateNotification message="Update available!" />,
+    );
+    expect(lastFrame()).toContain('Update available!');
+    unmount();
+  });
+});

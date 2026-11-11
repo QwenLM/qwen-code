@@ -1,0 +1,119 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`clamps both tab endpoints and reviews full answered questions only 1`] = `
+" Asking User ·  ☒ Implementation  >  ☐ Second  >  Submit
+────────────────────────────────────────────────────────────────────────────────────────────────────
+ Review your answers:
+
+  ● You have not answered all questions
+
+  Which implementation should we choose?
+    → Alpha, Beta
+
+
+ Ready to submit your answers?
+
+ ❯ Submit answers
+   Cancel
+
+ Tab/←→ switch · Enter select · Esc cancel
+"
+`;
+
+exports[`keeps confirmed selection distinct from focus when revisiting a question 1`] = `
+" Asking User ·  ☒ Implementation  >  ☐ Second  >  Submit
+────────────────────────────────────────────────────────────────────────────────────────────────────
+ Which implementation should we choose?
+
+ ❯ 1. Alpha, Beta
+   2. Gamma ✓
+   3. Type something.
+
+ ──────────────────────────────────────────────────────────────────────────────────────────────────
+   4. Chat about this
+
+ Tab/←→ navigate · Enter select · Esc cancel
+"
+`;
+
+exports[`keeps long choice lists navigable with scroll indicators (alternate=false) 1`] = `
+" Asking User
+──────────────────────────────────────────────────
+ Which implementation should we choose?
+
+ ↑ 4. Choice 4
+   5. Choice 5
+ ❯ 6. Choice 6
+   7. Type something.
+
+ ────────────────────────────────────────────────
+   8. Chat about this
+
+ ↑↓ navigate · Enter select · Esc cancel
+"
+`;
+
+exports[`keeps long choice lists navigable with scroll indicators (alternate=true) 1`] = `
+" Asking User
+──────────────────────────────────────────────────
+ Which implementation should we choose?
+
+ ↑ 4. Choice 4
+   5. Choice 5
+ ❯ 6. Choice 6
+   7. Type something.
+
+ ────────────────────────────────────────────────
+   8. Chat about this
+
+ ↑↓ navigate · Enter select · Esc cancel
+"
+`;
+
+exports[`retains multi-select identities across tabs and supports number and space toggles 1`] = `
+" Asking User ·  ☐ Implementation  >  ☐ Second  >  Submit
+────────────────────────────────────────────────────────────────────────────────────────────────────
+ Which implementation should we choose?
+
+ ❯ 1. [ ] Alpha, Beta
+   2. [ ] Gamma
+   3. [ ] Type something
+     Next
+
+ ──────────────────────────────────────────────────────────────────────────────────────────────────
+   4. Chat about this
+
+ Tab/←→ navigate · Enter select · Esc cancel
+"
+`;
+
+exports[`shows the saved custom response without a second pointer while Chat is focused 1`] = `
+" Asking User
+────────────────────────────────────────────────────────────────────────────────────────────────────
+ Which implementation should we choose?
+
+   1. Alpha, Beta
+   2. Gamma
+   3. Discuss this
+
+ ──────────────────────────────────────────────────────────────────────────────────────────────────
+ ❯ 4. Chat about this
+
+ ↑↓ navigate · Enter select · Esc cancel
+"
+`;
+
+exports[`uses terminal rows to bound choices when no body height is supplied 1`] = `
+" Asking User
+────────────────────────────────────────────────────────────────────────────────
+ Which implementation should we choose?
+
+ ❯ 1. Choice 1
+ ↓ 2. Choice 2
+
+ ──────────────────────────────────────────────────────────────────────────────
+   8. Chat about this
+
+ ↑↓ navigate · Enter select · Esc cancel
+"
+`;

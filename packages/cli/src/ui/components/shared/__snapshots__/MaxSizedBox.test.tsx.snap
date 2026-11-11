@@ -1,0 +1,83 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`<MaxSizedBox /> > clips content via Yoga maxHeight and shows indicator from bottom 1`] = `
+"Visible content
+... last 21 lines hidden (Ctrl+O to show) ...
+"
+`;
+
+exports[`<MaxSizedBox /> > clips content via Yoga maxHeight and shows indicator from top 1`] = `
+"... first 21 lines hidden (Ctrl+O to show) ...
+Visible content
+"
+`;
+
+exports[`<MaxSizedBox /> > does not leak content after hidden indicator with bottom overflow 1`] = `
+"Plan
+
+- Step 1: Do something important
+- Step 2: Do something important
+... last 16 lines hidden (Ctrl+O to show) ...
+"
+`;
+
+exports[`<MaxSizedBox /> > does not show indicator when additionalHiddenLinesCount is 0 1`] = `
+"Line 1
+Line 2
+"
+`;
+
+exports[`<MaxSizedBox /> > does not truncate when maxHeight is undefined 1`] = `
+"Line 1
+Line 2
+"
+`;
+
+exports[`<MaxSizedBox /> > handles React.Fragment as a child 1`] = `
+"Line 1 from Fragment
+Line 2 from Fragment
+Line 3 direct child
+"
+`;
+
+exports[`<MaxSizedBox /> > renders children without truncation when they fit 1`] = `
+"Hello, World!
+"
+`;
+
+exports[`<MaxSizedBox /> > shows hidden indicator at the end when overflowDirection is bottom 1`] = `
+"Line 1
+... last 2 lines hidden (Ctrl+O to show) ...
+"
+`;
+
+exports[`<MaxSizedBox /> > shows hidden indicator when additionalHiddenLinesCount is provided (top overflow) 1`] = `
+"... first 2 lines hidden (Ctrl+O to show) ...
+Line 1
+"
+`;
+
+exports[`<MaxSizedBox /> > shows plural "lines" when more than one line is hidden 1`] = `
+"... first 2 lines hidden (Ctrl+O to show) ...
+Line 1
+"
+`;
+
+exports[`<MaxSizedBox /> > shows singular "line" when exactly one line is hidden 1`] = `
+"... first 1 line hidden (Ctrl+O to show) ...
+Line 1
+"
+`;
+
+exports[`<MaxSizedBox /> > uses additionalHiddenLinesCount directly for the indicator 1`] = `
+"... first 5 lines hidden (Ctrl+O to show) ...
+Line 1
+"
+`;
+
+exports[`<MaxSizedBox /> > wraps text that exceeds maxWidth 1`] = `
+"This is a
+long line
+of text
+"
+`;

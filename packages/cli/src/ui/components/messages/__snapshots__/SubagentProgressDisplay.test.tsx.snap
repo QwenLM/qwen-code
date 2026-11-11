@@ -1,0 +1,54 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`<SubagentProgressDisplay /> > renders "Request cancelled." as a quiet activity row 1`] = `
+"◎  TestAgent · Running...
+└ Request cancelled.
+"
+`;
+
+exports[`<SubagentProgressDisplay /> > renders cancelled state correctly 1`] = `
+"-  TestAgent · User cancelled.
+"
+`;
+
+exports[`<SubagentProgressDisplay /> > renders correctly with command fallback 1`] = `
+"◎  TestAgent · Running...
+ ▫ Bash echo hello
+"
+`;
+
+exports[`<SubagentProgressDisplay /> > renders correctly with description in args 1`] = `
+"◎  TestAgent · Running...
+ ▫ Bash Say hello
+"
+`;
+
+exports[`<SubagentProgressDisplay /> > renders correctly with displayName and description from item 1`] = `
+"◎  TestAgent · Running...
+ ▫ RunShellCommand Executing echo hello
+"
+`;
+
+exports[`<SubagentProgressDisplay /> > renders correctly with file_path 1`] = `
+"◎  TestAgent · Running...
+ ▪ Write /tmp/test.txt
+"
+`;
+
+exports[`<SubagentProgressDisplay /> > renders error tool status correctly 1`] = `
+"◎  TestAgent · Running...
+ x Bash echo hello
+"
+`;
+
+exports[`<SubagentProgressDisplay /> > renders thought bubbles correctly 1`] = `
+"◎  TestAgent · Running...
+└ Thinking about life
+"
+`;
+
+exports[`<SubagentProgressDisplay /> > truncates long args 1`] = `
+"◎  TestAgent · Running...
+ ▫ Bash This is a very long description that should definitely be truncated because it exceeds the …
+"
+`;

@@ -1,0 +1,11 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`ToolConfirmationMessage Redirection > should display redirection warning for redirected commands 1`] = `
+"Allow this command to run? Redirection detected.
+
+ ❯ 1. Allow once
+   2. Always allow "echo, redirection (>)" for future sessions
+   3. Reject and type something
+   4. No
+"
+`;

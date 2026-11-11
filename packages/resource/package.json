@@ -1,0 +1,40 @@
+{
+  "name": "@qwen-code/resource",
+  "version": "1.0.0",
+  "description": "Qwen Code file-based configuration resource layer",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "./index.ts",
+  "exports": {
+    ".": {
+      "types": "./index.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "node ../../scripts/build_package.js",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:ci": "vitest run",
+    "posttest": "npm run build"
+  },
+  "dependencies": {
+    "chokidar": "^4.0.3",
+    "comment-json": "^4.2.5",
+    "js-yaml": "^4.1.1",
+    "proper-lockfile": "^4.1.2",
+    "strip-json-comments": "^3.1.1",
+    "zod": "^3.25.76",
+    "dotenv": "^17.1.0",
+    "@google/genai": "1.30.0"
+  },
+  "devDependencies": {
+    "@types/js-yaml": "^4.0.9"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

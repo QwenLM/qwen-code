@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="560" height="156" viewBox="0 0 560 156">
+  <style>
+    text { font-family: Consolas, "Courier New", monospace; font-size: 14px; dominant-baseline: text-before-edge; white-space: pre; }
+  </style>
+  <rect width="560" height="156" fill="#000000" />
+  <g transform="translate(10, 10)">
+    <text x="9" y="36" fill="#333333" textLength="522" lengthAdjust="spacingAndGlyphs">╭────────────────────────────────────────────────────────╮</text>
+    <text x="9" y="53" fill="#333333" textLength="9" lengthAdjust="spacingAndGlyphs">│</text>
+    <text x="27" y="53" fill="#957cad" textLength="18" lengthAdjust="spacingAndGlyphs" font-weight="bold">&gt;_</text>
+    <text x="54" y="53" fill="#957cad" textLength="36" lengthAdjust="spacingAndGlyphs" font-weight="bold">Qwen</text>
+    <text x="99" y="53" fill="#957cad" textLength="36" lengthAdjust="spacingAndGlyphs" font-weight="bold">Code</text>
+    <text x="135" y="53" fill="#95958f" textLength="81" lengthAdjust="spacingAndGlyphs"> (v2.0.0)</text>
+    <text x="522" y="53" fill="#333333" textLength="9" lengthAdjust="spacingAndGlyphs">│</text>
+    <text x="9" y="70" fill="#333333" textLength="9" lengthAdjust="spacingAndGlyphs">│</text>
+    <text x="522" y="70" fill="#333333" textLength="9" lengthAdjust="spacingAndGlyphs">│</text>
+    <text x="9" y="87" fill="#333333" textLength="9" lengthAdjust="spacingAndGlyphs">│</text>
+    <text x="27" y="87" fill="#95958f" textLength="135" lengthAdjust="spacingAndGlyphs">Qwen-code-model</text>
+    <text x="171" y="87" fill="#95958f" textLength="63" lengthAdjust="spacingAndGlyphs">(/model</text>
+    <text x="243" y="87" fill="#95958f" textLength="18" lengthAdjust="spacingAndGlyphs">to</text>
+    <text x="270" y="87" fill="#95958f" textLength="63" lengthAdjust="spacingAndGlyphs">change)</text>
+    <text x="522" y="87" fill="#333333" textLength="9" lengthAdjust="spacingAndGlyphs">│</text>
+    <text x="9" y="104" fill="#333333" textLength="9" lengthAdjust="spacingAndGlyphs">│</text>
+    <text x="27" y="104" fill="#95958f" textLength="90" lengthAdjust="spacingAndGlyphs">/项目/包含</text>
+    <text x="126" y="104" fill="#95958f" textLength="126" lengthAdjust="spacingAndGlyphs">空格的工作目录</text>
+    <text x="522" y="104" fill="#333333" textLength="9" lengthAdjust="spacingAndGlyphs">│</text>
+    <text x="9" y="121" fill="#333333" textLength="522" lengthAdjust="spacingAndGlyphs">╰────────────────────────────────────────────────────────╯</text>
+  </g>
+</svg>

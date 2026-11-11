@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="200" height="122" viewBox="0 0 200 122">
+  <style>
+    text { font-family: Consolas, "Courier New", monospace; font-size: 14px; dominant-baseline: text-before-edge; white-space: pre; }
+  </style>
+  <rect width="200" height="122" fill="#000000" />
+  <g transform="translate(10, 10)">
+    <text x="9" y="36" fill="#957cad" textLength="18" lengthAdjust="spacingAndGlyphs" font-weight="bold">&gt;_</text>
+    <text x="36" y="36" fill="#957cad" textLength="36" lengthAdjust="spacingAndGlyphs" font-weight="bold">Qwen</text>
+    <text x="81" y="36" fill="#957cad" textLength="36" lengthAdjust="spacingAndGlyphs" font-weight="bold">Code</text>
+    <text x="117" y="36" fill="#95958f" textLength="54" lengthAdjust="spacingAndGlyphs"> (v2.…</text>
+    <text x="9" y="70" fill="#95958f" textLength="135" lengthAdjust="spacingAndGlyphs">Qwen-code-model</text>
+    <text x="153" y="70" fill="#95958f" textLength="18" lengthAdjust="spacingAndGlyphs">(…</text>
+    <text x="9" y="87" fill="#95958f" textLength="90" lengthAdjust="spacingAndGlyphs">/项目/包含</text>
+    <text x="108" y="87" fill="#95958f" textLength="63" lengthAdjust="spacingAndGlyphs">空格的…</text>
+  </g>
+</svg>

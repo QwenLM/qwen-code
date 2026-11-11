@@ -1,0 +1,20 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`CodeModeDisplayView > keeps Bash output visible alongside a nonzero exit notice without forcing expansion 1`] = `
+" ▪ Bash(grep missing file (Bash exited with code 1))
+   └ command output retained
+"
+`;
+
+exports[`CodeModeDisplayView > renders each child as its own tool row followed by the script summary 1`] = `
+" ▪ Read(/repo/src/a.ts)
+   └ Read 12 lines
+ ▫ Grep('TODO' within ./)
+ x Bash(npm test)
+   └ Permission denied by rule Bash
+
+Output
+error: 3 tool calls
+partial output
+"
+`;

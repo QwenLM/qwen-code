@@ -1,0 +1,14 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`<TranscriptHistoryView /> > shows CodeMode child arguments as results arrive in a running agent transcript 1`] = `
+"
+ ▪ CodeMode · Execute script · Completed · 3 tool calls
+   └  ▪ Read(/repo/a.ts · lines 2-4)
+      ▪ Bash(Count lines)
+      ▪ query (demo MCP Server)({"query":"long…"} [arguments truncated])
+
+     Output
+     done
+     Ctrl+O to expand script
+"
+`;

@@ -1,0 +1,32 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`QwenCodeWelcomeHeader through AppHeader > renders the Qwen brand at 20 columns 1`] = `
+"
+ >_ Qwen Code (v2.…
+
+ Qwen-code-model (…
+ /项目/包含 空格的…
+"
+`;
+
+exports[`QwenCodeWelcomeHeader through AppHeader > renders the Qwen brand at 60 columns 1`] = `
+"
+ ╭────────────────────────────────────────────────────────╮
+ │ >_ Qwen Code (v2.0.0)                                  │
+ │                                                        │
+ │ Qwen-code-model (/model to change)                     │
+ │ /项目/包含 空格的工作目录                              │
+ ╰────────────────────────────────────────────────────────╯
+"
+`;
+
+exports[`QwenCodeWelcomeHeader through AppHeader > renders the Qwen brand at 120 columns 1`] = `
+"
+  ▄▄▄▄▄▄  ▄▄     ▄▄ ▄▄▄▄▄▄▄ ▄▄▄    ▄▄   ╭──────────────────────────────────────────────────────────╮
+ ██╔═══██╗██║    ██║██╔════╝████╗  ██║  │ >_ Qwen Code (v2.0.0)                                    │
+ ██║   ██║██║ █╗ ██║█████╗  ██╔██╗ ██║  │                                                          │
+ ██║▄▄ ██║██║███╗██║██╔══╝  ██║╚██╗██║  │ Qwen-code-model (/model to change)                       │
+ ╚██████╔╝╚███╔███╔╝███████╗██║ ╚████║  │ /项目/包含 空格的工作目录                                │
+  ╚══▀▀═╝  ╚══╝╚══╝ ╚══════╝╚═╝  ╚═══╝  ╰──────────────────────────────────────────────────────────╯
+"
+`;

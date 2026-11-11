@@ -1,0 +1,20 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`selection emphasis > preserves the existing success color when the theme has no selection palette 1`] = `
+"Describe the agent you want to create:
+"
+`;
+
+exports[`selection emphasis > renders blue-purple prompts and inline icons in Qwen Dark 1`] = `
+"[+] Add custom model...
+Describe the agent you want to create:
+Selected: ▦ 1M · ✦ Low (Default)
+"
+`;
+
+exports[`selection emphasis > renders blue-purple prompts and inline icons in Qwen Light 1`] = `
+"[+] Add custom model...
+Describe the agent you want to create:
+Selected: ▦ 1M · ✦ Low (Default)
+"
+`;

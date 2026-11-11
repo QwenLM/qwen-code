@@ -1,0 +1,812 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["typescript", "react", "import", "vitest"],
+  "categories": {
+    "correctness": "off",
+    "suspicious": "off",
+    "pedantic": "off",
+    "perf": "off",
+    "style": "off",
+    "restriction": "off",
+    "nursery": "off"
+  },
+  "jsPlugins": [
+    {
+      "name": "eslint-js",
+      "specifier": "oxlint-plugin-eslint"
+    },
+    {
+      "name": "import-js",
+      "specifier": "eslint-plugin-import"
+    }
+  ],
+  "env": {
+    "node": true,
+    "es2021": true
+  },
+  "ignorePatterns": [
+    "**/node_modules/**",
+    "packages/**/dist/**",
+    "bundle/**",
+    "package/bundle/**",
+    ".integration-tests/**",
+    "dist/**",
+    "evals/**",
+    "packages/core/src/test-utils/test-rig.ts",
+    "packages/core/src/test-utils/test-mcp-server.ts",
+    "**/.qwen*/**",
+    "**/.qoder*/**",
+    "**/*.d.ts",
+    "packages/cli/examples/**/*.js",
+    "packages/sdk/examples/**/*.js",
+    "packages/sdk/src/**/*.js",
+    ".claude/**/*",
+    "packages/cli/src/ink/**",
+    "packages/cli/src/debug-*.mjs",
+    "scripts/templates/**"
+  ],
+  "rules": {
+    "constructor-super": [2],
+    "for-direction": [2],
+    "getter-return": [
+      2,
+      {
+        "allowImplicit": false
+      }
+    ],
+    "no-async-promise-executor": [2],
+    "no-case-declarations": [2],
+    "no-class-assign": [2],
+    "no-compare-neg-zero": [2],
+    "no-cond-assign": [2, "except-parens"],
+    "no-const-assign": [2],
+    "no-constant-binary-expression": [2],
+    "no-constant-condition": [
+      2,
+      {
+        "checkLoops": "allExceptWhileTrue"
+      }
+    ],
+    "no-control-regex": [2],
+    "no-debugger": [2],
+    "no-delete-var": [2],
+    "eslint-js/no-dupe-args": [2],
+    "no-dupe-class-members": [2],
+    "no-dupe-else-if": [2],
+    "no-dupe-keys": [2],
+    "no-duplicate-case": [2],
+    "no-empty": [
+      2,
+      {
+        "allowEmptyCatch": false
+      }
+    ],
+    "no-empty-character-class": [2],
+    "no-empty-pattern": [
+      2,
+      {
+        "allowObjectPatternsAsParameters": false
+      }
+    ],
+    "no-empty-static-block": [2],
+    "no-ex-assign": [2],
+    "no-extra-boolean-cast": [2, {}],
+    "no-fallthrough": [
+      2,
+      {
+        "allowEmptyCase": false,
+        "reportUnusedFallthroughComment": false
+      }
+    ],
+    "no-func-assign": [2],
+    "no-global-assign": [
+      2,
+      {
+        "exceptions": []
+      }
+    ],
+    "no-import-assign": [2],
+    "no-invalid-regexp": [2, {}],
+    "no-irregular-whitespace": [
+      2,
+      {
+        "skipComments": false,
+        "skipJSXText": false,
+        "skipRegExps": false,
+        "skipStrings": true,
+        "skipTemplates": false
+      }
+    ],
+    "no-loss-of-precision": [2],
+    "no-misleading-character-class": [2],
+    "no-new-native-nonconstructor": [2],
+    "no-nonoctal-decimal-escape": [2],
+    "no-obj-calls": [2],
+    "eslint-js/no-octal": [2],
+    "no-prototype-builtins": [2],
+    "no-redeclare": [
+      2,
+      {
+        "builtinGlobals": true
+      }
+    ],
+    "no-regex-spaces": [2],
+    "no-self-assign": [
+      2,
+      {
+        "props": true
+      }
+    ],
+    "no-setter-return": [2],
+    "no-shadow-restricted-names": [
+      2,
+      {
+        "reportGlobalThis": false
+      }
+    ],
+    "no-sparse-arrays": [2],
+    "no-this-before-super": [2],
+    "no-undef": [
+      2,
+      {
+        "typeof": false
+      }
+    ],
+    "no-unreachable": [2],
+    "no-unsafe-finally": [2],
+    "no-unsafe-negation": [
+      2,
+      {
+        "enforceForOrderingRelations": false
+      }
+    ],
+    "no-unsafe-optional-chaining": "off",
+    "no-unused-labels": [2],
+    "no-unused-private-class-members": [2],
+    "no-useless-backreference": [2],
+    "no-useless-catch": [2],
+    "no-useless-escape": [
+      2,
+      {
+        "allowRegexCharacters": []
+      }
+    ],
+    "no-with": [2],
+    "require-yield": [2],
+    "use-isnan": [
+      2,
+      {
+        "enforceForIndexOf": false,
+        "enforceForSwitchCase": true
+      }
+    ],
+    "valid-typeof": [
+      2,
+      {
+        "requireStringLiterals": false
+      }
+    ],
+    "@typescript-eslint/ban-ts-comment": [2],
+    "@typescript-eslint/no-array-constructor": [2],
+    "@typescript-eslint/no-duplicate-enum-values": [2],
+    "@typescript-eslint/no-empty-object-type": [2],
+    "@typescript-eslint/no-explicit-any": [2],
+    "@typescript-eslint/no-extra-non-null-assertion": [2],
+    "@typescript-eslint/no-misused-new": [2],
+    "@typescript-eslint/no-namespace": [2],
+    "@typescript-eslint/no-non-null-asserted-optional-chain": [2],
+    "@typescript-eslint/no-require-imports": [2],
+    "@typescript-eslint/no-this-alias": [2],
+    "@typescript-eslint/no-unnecessary-type-constraint": [2],
+    "@typescript-eslint/no-unsafe-declaration-merging": [2],
+    "@typescript-eslint/no-unsafe-function-type": [2],
+    "@typescript-eslint/no-unused-expressions": [
+      2,
+      {
+        "allowShortCircuit": false,
+        "allowTaggedTemplates": false,
+        "allowTernary": false
+      }
+    ],
+    "@typescript-eslint/no-unused-vars": [
+      2,
+      {
+        "argsIgnorePattern": "^_",
+        "varsIgnorePattern": "^_",
+        "caughtErrors": "all"
+      }
+    ],
+    "@typescript-eslint/no-wrapper-object-types": [2],
+    "@typescript-eslint/prefer-as-const": [2],
+    "@typescript-eslint/prefer-namespace-keyword": [2],
+    "@typescript-eslint/triple-slash-reference": [2],
+    "react-hooks/rules-of-hooks": [2],
+    "react-hooks/exhaustive-deps": [1],
+    "react/display-name": [2],
+    "react/jsx-key": [2],
+    "react/jsx-no-comment-textnodes": [2],
+    "react/jsx-no-duplicate-props": [2],
+    "react/jsx-no-target-blank": [2],
+    "react/jsx-no-undef": [2],
+    "react/no-children-prop": [2],
+    "react/no-danger-with-children": [2],
+    "react/no-direct-mutation-state": [2],
+    "react/no-find-dom-node": [2],
+    "react/no-is-mounted": [2],
+    "react/no-render-return-value": [2],
+    "react/no-string-refs": [2],
+    "react/no-unescaped-entities": [2],
+    "react/no-unknown-property": [2],
+    "react/require-render-return": [2],
+    "import-js/enforce-node-protocol-usage": [2, "always"],
+    "import/export": "off",
+    "import/no-named-as-default": "off",
+    "import/no-duplicates": "off"
+  },
+  "overrides": [
+    {
+      "files": ["**/*.ts", "**/*.tsx", "**/*.mts", "**/*.cts"],
+      "rules": {
+        "no-undef": "off"
+      }
+    },
+    {
+      "files": ["packages/*/src/**/*.ts", "packages/*/src/**/*.tsx"],
+      "rules": {
+        "no-var": [2],
+        "prefer-const": [
+          2,
+          {
+            "destructuring": "all",
+            "ignoreReadBeforeAssign": false
+          }
+        ],
+        "prefer-rest-params": [2],
+        "prefer-spread": [2],
+        "@typescript-eslint/no-namespace": [
+          2,
+          {
+            "allowDeclarations": true
+          }
+        ],
+        "@typescript-eslint/no-unused-expressions": [
+          2,
+          {
+            "allowShortCircuit": true,
+            "allowTaggedTemplates": false,
+            "allowTernary": true
+          }
+        ],
+        "import/namespace": [2],
+        "import/default": [2],
+        "import/no-named-as-default-member": [1],
+        "import/no-default-export": [1],
+        "@typescript-eslint/array-type": [
+          2,
+          {
+            "default": "array-simple"
+          }
+        ],
+        "arrow-body-style": [2, "as-needed"],
+        "eqeqeq": [
+          2,
+          "always",
+          {
+            "null": "ignore"
+          }
+        ],
+        "@typescript-eslint/consistent-type-assertions": [
+          2,
+          {
+            "assertionStyle": "as"
+          }
+        ],
+        "@typescript-eslint/explicit-member-accessibility": [
+          2,
+          {
+            "accessibility": "no-public"
+          }
+        ],
+        "@typescript-eslint/no-inferrable-types": [
+          2,
+          {
+            "ignoreParameters": true,
+            "ignoreProperties": true
+          }
+        ],
+        "@typescript-eslint/consistent-type-imports": [
+          2,
+          {
+            "disallowTypeAnnotations": false
+          }
+        ],
+        "import-js/no-relative-packages": [2],
+        "eslint-js/no-restricted-syntax": [
+          "error",
+          {
+            "selector": "CallExpression[callee.name=\"require\"]",
+            "message": "Avoid using require(). Use ES6 imports instead."
+          },
+          {
+            "selector": "ThrowStatement > Literal:not([value=/^\\w+Error:/])",
+            "message": "Do not throw string literals or non-Error objects. Throw new Error(\"...\") instead."
+          },
+          {
+            "selector": "UnaryExpression[operator=\"typeof\"] > MemberExpression[computed=true][property.type=\"Literal\"]",
+            "message": "Do not use typeof to check object properties. Define a TypeScript interface and a type guard function instead."
+          },
+          {
+            "selector": "CatchClause > Identifier[name=/^_/]",
+            "message": "Do not use underscored identifiers in catch blocks. If the error is unused, use \"catch {}\". If it is used, remove the underscore."
+          }
+        ],
+        "object-shorthand": [2],
+        "one-var": [2, "never"],
+        "prefer-arrow-callback": [
+          2,
+          {
+            "allowNamedFunctions": false,
+            "allowUnboundThis": true
+          }
+        ],
+        "radix": [2, "always"],
+        "no-console": [2, {}],
+        "default-case": [2, {}],
+        "no-restricted-imports": [
+          "error",
+          {
+            "paths": [
+              {
+                "name": "node:os",
+                "importNames": ["homedir", "tmpdir"],
+                "message": "Please use the helpers from @qwen-code/core instead of node:os homedir()/tmpdir() to ensure strict environment isolation."
+              },
+              {
+                "name": "os",
+                "importNames": ["homedir", "tmpdir"],
+                "message": "Please use the helpers from @qwen-code/core instead of os homedir()/tmpdir() to ensure strict environment isolation."
+              }
+            ]
+          }
+        ],
+        "constructor-super": "off",
+        "getter-return": "off",
+        "no-class-assign": "off",
+        "no-const-assign": "off",
+        "eslint-js/no-dupe-args": "off",
+        "no-dupe-class-members": "off",
+        "no-dupe-keys": "off",
+        "no-func-assign": "off",
+        "no-import-assign": "off",
+        "no-new-native-nonconstructor": "off",
+        "no-obj-calls": "off",
+        "no-redeclare": "off",
+        "no-setter-return": "off",
+        "no-this-before-super": "off",
+        "no-undef": "off",
+        "no-unreachable": "off",
+        "no-unsafe-negation": "off",
+        "no-with": "off"
+      }
+    },
+    {
+      "files": ["packages/*/src/**/*.ts", "packages/*/src/**/*.tsx"],
+      "excludeFiles": [
+        "**/*.test.ts",
+        "**/*.test.tsx",
+        "packages/*/src/test-utils/**"
+      ],
+      "rules": {
+        "eslint-js/no-restricted-syntax": [
+          "error",
+          {
+            "selector": "CallExpression[callee.name=\"require\"]",
+            "message": "Avoid using require(). Use ES6 imports instead."
+          },
+          {
+            "selector": "ThrowStatement > Literal:not([value=/^\\w+Error:/])",
+            "message": "Do not throw string literals or non-Error objects. Throw new Error(\"...\") instead."
+          },
+          {
+            "selector": "UnaryExpression[operator=\"typeof\"] > MemberExpression[computed=true][property.type=\"Literal\"]",
+            "message": "Do not use typeof to check object properties. Define a TypeScript interface and a type guard function instead."
+          },
+          {
+            "selector": "CatchClause > Identifier[name=/^_/]",
+            "message": "Do not use underscored identifiers in catch blocks. If the error is unused, use \"catch {}\". If it is used, remove the underscore."
+          },
+          {
+            "selector": "CallExpression[callee.object.name=\"Object\"][callee.property.name=\"create\"]",
+            "message": "Avoid using Object.create() in product code. Use object spread {...obj}, explicit class instantiation, structuredClone(), or copy constructors instead."
+          },
+          {
+            "selector": "Identifier[name=\"Reflect\"]",
+            "message": "Avoid using Reflect namespace in product code. Do not use reflection to make copies. Instead, use explicit object copying or cloning (structuredClone() for values, new instance/clone function for classes)."
+          }
+        ]
+      }
+    },
+    {
+      "files": ["packages/core/src/**/*.ts", "packages/core/src/**/*.tsx"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "paths": [
+              {
+                "name": "@qwen-code/core",
+                "message": "Please use relative imports within the @qwen-code/core package."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "files": ["packages/core/src/*.ts", "packages/core/src/*.tsx"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "paths": [
+              {
+                "name": "@qwen-code/core",
+                "message": "Please use relative imports within the @qwen-code/core package."
+              }
+            ],
+            "patterns": [
+              {
+                "group": ["./index.js", "../index.js"],
+                "message": "Import from the defining module instead of the core barrel (index.ts), which loads most of the package."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "files": ["packages/core/src/*/*.ts", "packages/core/src/*/*.tsx"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "paths": [
+              {
+                "name": "@qwen-code/core",
+                "message": "Please use relative imports within the @qwen-code/core package."
+              }
+            ],
+            "patterns": [
+              {
+                "group": ["../index.js", "../../index.js"],
+                "message": "Import from the defining module instead of the core barrel (index.ts), which loads most of the package."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "files": [
+        "packages/core/src/{tools,config,prompts,core,agents,attachments,experiments}/*.ts"
+      ],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "paths": [
+              {
+                "name": "@qwen-code/core",
+                "message": "Please use relative imports within the @qwen-code/core package."
+              }
+            ],
+            "patterns": [
+              {
+                "group": ["../index.js", "../../index.js"],
+                "message": "Import from the defining module instead of the core barrel (index.ts), which loads most of the package."
+              },
+              {
+                "group": [
+                  "../codemode/runtime.js",
+                  "../codemode/scope.js",
+                  "../codemode/host.js",
+                  "../codemode/result.js",
+                  "./code-mode.js",
+                  "../tools/code-mode.js"
+                ],
+                "message": "CodeMode runtime modules load only when the feature is used: import settings/description/types statically and the rest with import()."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "files": ["packages/core/src/scheduler/*.ts"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "paths": [
+              {
+                "name": "@qwen-code/core",
+                "message": "Please use relative imports within the @qwen-code/core package."
+              }
+            ],
+            "patterns": [
+              {
+                "group": ["../index.js", "../../index.js"],
+                "message": "Import from the defining module instead of the core barrel (index.ts), which loads most of the package."
+              },
+              {
+                "group": ["../codemode/*"],
+                "message": "The scheduler is infrastructure for CodeMode; codemode/ depends on scheduler/, never the reverse."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "files": [
+        "packages/core/src/codemode/worker.ts",
+        "packages/core/src/codemode/prelude.ts"
+      ],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "paths": [
+              {
+                "name": "@qwen-code/core",
+                "message": "Please use relative imports within the @qwen-code/core package."
+              }
+            ],
+            "patterns": [
+              {
+                "group": ["../index.js", "../../index.js"],
+                "message": "Import from the defining module instead of the core barrel (index.ts), which loads most of the package."
+              },
+              {
+                "group": ["../**", "./[!pt]*", "./p[!r]*", "./t[!y]*"],
+                "message": "The sandbox guest may only depend on codemode/types.ts and the prelude."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "files": ["packages/core/src/tools/code-mode.ts"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "paths": [
+              {
+                "name": "@qwen-code/core",
+                "message": "Please use relative imports within the @qwen-code/core package."
+              }
+            ],
+            "patterns": [
+              {
+                "group": ["../index.js", "../../index.js"],
+                "message": "Import from the defining module instead of the core barrel (index.ts), which loads most of the package."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "files": ["packages/core/src/*/*/*.ts", "packages/core/src/*/*/*.tsx"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "paths": [
+              {
+                "name": "@qwen-code/core",
+                "message": "Please use relative imports within the @qwen-code/core package."
+              }
+            ],
+            "patterns": [
+              {
+                "group": ["../../index.js", "../../../index.js"],
+                "message": "Import from the defining module instead of the core barrel (index.ts), which loads most of the package."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "files": [
+        "packages/core/src/*/*/*/*.ts",
+        "packages/core/src/*/*/*/*.tsx"
+      ],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "paths": [
+              {
+                "name": "@qwen-code/core",
+                "message": "Please use relative imports within the @qwen-code/core package."
+              }
+            ],
+            "patterns": [
+              {
+                "group": ["../../../index.js", "../../../../index.js"],
+                "message": "Import from the defining module instead of the core barrel (index.ts), which loads most of the package."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "files": [
+        "packages/core/src/*/*/*/*/*.ts",
+        "packages/core/src/*/*/*/*/*.tsx"
+      ],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "paths": [
+              {
+                "name": "@qwen-code/core",
+                "message": "Please use relative imports within the @qwen-code/core package."
+              }
+            ],
+            "patterns": [
+              {
+                "group": ["../../../../index.js", "../../../../../index.js"],
+                "message": "Import from the defining module instead of the core barrel (index.ts), which loads most of the package."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "files": ["packages/cli/src/**/*.ts", "packages/cli/src/**/*.tsx"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "paths": [
+              {
+                "name": "@qwen-code/qwen-code",
+                "message": "Please use relative imports within the @qwen-code/qwen-code package."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "files": ["packages/*/src/**/*.test.ts", "packages/*/src/**/*.test.tsx"],
+      "rules": {
+        "eslint-js/no-restricted-syntax": [
+          "error",
+          {
+            "selector": "CallExpression[callee.name=\"require\"]",
+            "message": "Avoid using require(). Use ES6 imports instead."
+          },
+          {
+            "selector": "ThrowStatement > Literal:not([value=/^\\w+Error:/])",
+            "message": "Do not throw string literals or non-Error objects. Throw new Error(\"...\") instead."
+          },
+          {
+            "selector": "UnaryExpression[operator=\"typeof\"] > MemberExpression[computed=true][property.type=\"Literal\"]",
+            "message": "Do not use typeof to check object properties. Define a TypeScript interface and a type guard function instead."
+          },
+          {
+            "selector": "CatchClause > Identifier[name=/^_/]",
+            "message": "Do not use underscored identifiers in catch blocks. If the error is unused, use \"catch {}\". If it is used, remove the underscore."
+          }
+        ],
+        "vitest/no-identical-title": [2],
+        "vitest/no-import-node-test": [2],
+        "vitest/prefer-called-exactly-once-with": [2],
+        "vitest/require-local-test-context-for-concurrent-snapshots": [2],
+        "vitest/valid-describe-callback": [2],
+        "vitest/valid-expect": [2],
+        "vitest/valid-title": [2],
+        "no-restricted-imports": "off",
+        "vitest/expect-expect": "off",
+        "vitest/no-commented-out-tests": "off"
+      }
+    },
+    {
+      "files": ["packages/core/src/utils/paths.ts"],
+      "rules": {
+        "no-restricted-imports": "off"
+      }
+    },
+    {
+      "files": [
+        "scripts/**/*.js",
+        "packages/*/scripts/**/*.js",
+        "esbuild.config.js",
+        "packages/core/scripts/**/*.{js,mjs}",
+        "integration-tests/**/*.js"
+      ],
+      "rules": {
+        "no-restricted-imports": "off",
+        "eslint-js/no-restricted-syntax": "off",
+        "@typescript-eslint/no-unused-vars": [
+          "error",
+          {
+            "argsIgnorePattern": "^_",
+            "varsIgnorePattern": "^_",
+            "caughtErrors": "all"
+          }
+        ],
+        "@typescript-eslint/no-require-imports": "off"
+      }
+    },
+    {
+      "files": ["**/*.cjs"],
+      "rules": {
+        "eslint-js/no-restricted-syntax": "off",
+        "no-console": "off",
+        "no-empty": "off",
+        "no-redeclare": "off",
+        "@typescript-eslint/no-require-imports": "off",
+        "@typescript-eslint/no-unused-vars": [
+          "error",
+          {
+            "argsIgnorePattern": "^_",
+            "varsIgnorePattern": "^_",
+            "caughtErrors": "all"
+          }
+        ]
+      }
+    },
+    {
+      "files": ["packages/cli/src/commands/extensions/examples/**/*.js"],
+      "env": {
+        "node": true,
+        "es2021": true
+      },
+      "rules": {}
+    },
+    {
+      "files": ["packages/*/src/**/*.ts", "packages/*/src/**/*.tsx"],
+      "rules": {
+        "typescript/no-floating-promises": "error",
+        "typescript/await-thenable": "error",
+        "typescript/return-await": ["error", "in-try-catch"],
+        "typescript/no-misused-spread": "error",
+        "typescript/no-unnecessary-type-assertion": "off"
+      }
+    },
+    {
+      "files": ["packages/*/src/**/*.ts", "packages/*/src/**/*.tsx"],
+      "excludeFiles": [
+        "**/*.test.ts",
+        "**/*.test.tsx",
+        "packages/*/src/test-utils/**"
+      ],
+      "rules": {
+        "typescript/no-unsafe-return": "error"
+      }
+    },
+    {
+      "files": [
+        "packages/cli/src/commands/mcp/*.ts",
+        "packages/cli/src/commands/plugins/*.ts",
+        "packages/cli/src/commands/skills/*.ts",
+        "packages/cli/src/commands/external.ts",
+        "packages/cli/src/config/config.ts"
+      ],
+      "excludeFiles": ["**/*.test.ts", "**/*.test.tsx"],
+      "rules": {
+        "typescript/no-unsafe-return": "off"
+      }
+    }
+  ]
+}
