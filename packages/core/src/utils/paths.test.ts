@@ -35,6 +35,7 @@ import {
   realpathNearestExistingAsync,
   _resetValidatePathCacheForTest,
 } from './paths.js';
+import * as shellUtils from './shell-utils.js';
 import type { Config } from '../config/config.js';
 
 const { sep } = path;
@@ -247,21 +248,34 @@ describe('toWindowsPath', () => {
 });
 
 describe('normalizeFilePath', () => {
+  let shellSpy: ReturnType<typeof vi.spyOn>;
+
   beforeEach(() => {
     vi.restoreAllMocks();
+    // The MSYS conversion is gated on the configured shell, so drive the tests
+    // through the module export rather than os.platform.
+    shellSpy = vi
+      .spyOn(shellUtils, 'getShellConfiguration')
+      .mockReturnValue({ shell: 'bash' });
   });
   afterEach(() => {
     vi.restoreAllMocks();
   });
 
-  it('unescapes on Unix and converts on Windows', () => {
-    vi.spyOn(os, 'platform').mockReturnValue('linux');
-    expect(normalizeFilePath('/tmp/a\\ b.txt')).toBe('/tmp/a b.txt');
-
+  it('converts an MSYS /tmp path under a bash session', () => {
     vi.spyOn(os, 'platform').mockReturnValue('win32');
-    expect(normalizeFilePath('/tmp/a.txt')).toBe(
-      path.join(os.tmpdir(), 'a.txt'),
+    vi.spyOn(os, 'tmpdir').mockReturnValue('C:\\Temp');
+    expect(normalizeFilePath('/tmp/report.json')).toBe(
+      path.join('C:\\Temp', 'report.json'),
     );
+  });
+
+  it('leaves an MSYS /tmp path alone under cmd.exe or PowerShell', () => {
+    // Those shells treat /tmp as the drive-rooted path, so converting it would
+    // retarget the file to %TEMP% and read or write the wrong place.
+    shellSpy.mockReturnValue({ shell: 'cmd' });
+    vi.spyOn(os, 'platform').mockReturnValue('win32');
+    expect(normalizeFilePath('/tmp/report.json')).toBe('/tmp/report.json');
   });
 });
 

@@ -10,6 +10,7 @@ import os from 'node:os';
 import * as crypto from 'node:crypto';
 import type { Config } from '../config/config.js';
 import { isNodeError } from './errors.js';
+import { getShellConfiguration } from './shell-utils.js';
 
 export const QWEN_DIR = '.qwen';
 export const GOOGLE_ACCOUNTS_FILENAME = 'google_accounts.json';
@@ -388,9 +389,19 @@ export function toWindowsPath(filePath: string): string {
  * Normalization applied by the file tools to every incoming path: shell
  * unescaping, then the MSYS-to-Windows conversion, so a path that came from
  * a shell command resolves to the place the shell actually wrote it.
+ *
+ * The MSYS-to-Windows conversion is shell-conditional, not platform-conditional:
+ * it retargets `/tmp` and `/c/...` to their Windows meaning, which is correct
+ * only under a bash/MSYS session. Under cmd.exe or PowerShell those spellings
+ * mean the drive-rooted path, so converting them would silently read or write
+ * the wrong file. Unescaping shell specials is always safe, so it stays applied
+ * regardless of shell.
  */
 export function normalizeFilePath(filePath: string): string {
-  return toWindowsPath(unescapePath(filePath));
+  const unescaped = unescapePath(filePath);
+  return getShellConfiguration().shell === 'bash'
+    ? toWindowsPath(unescaped)
+    : unescaped;
 }
 
 /**
