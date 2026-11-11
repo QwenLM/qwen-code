@@ -38,6 +38,18 @@ export const LOOP_PROMPT_MAX_CHARS = 10000;
 /** The local wakeup chain budget (WAKEUP_CHAIN_MAX_AGE_MS). */
 export const LOOP_CHAIN_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
+/**
+ * The deployment gate (decision 8), `qwen.managed-agent.loop.enabled`. It
+ * gates arming only and defaults off until the acceptance evidence lands:
+ * an already-armed wakeup still fires and stays listable/cancellable, since
+ * the pump delivers journal inputs regardless of the tool surface.
+ */
+export function isHostedLoopArmingEnabled(
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  return env['QWEN_MANAGED_AGENT_LOOP_ENABLED'] === 'true';
+}
+
 /** The arm-time classifier review (decision 9): scheduling future model
  * input is side-effectful, so the continuation is vetted before it is
  * admitted, and the verdict rides the arm's admission resource. */
@@ -143,6 +155,11 @@ export class HostedLoopSession {
     prompt: string;
     reason?: string;
   }): Promise<LoopWakeupArm> {
+    if (!isHostedLoopArmingEnabled()) {
+      throw new LoopWakeupError(
+        'Loop wakeups are disabled on this deployment (qwen.managed-agent.loop.enabled).',
+      );
+    }
     const prompt = params.prompt.trim();
     if (prompt.length === 0) {
       throw new LoopWakeupError('Loop wakeup prompt must not be empty.');

@@ -8,7 +8,7 @@ import { LocalJsonlManagedSessionJournalStore } from '@qwen-code/qwen-code-core/
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
 import { SessionWriterLease } from '@qwen-code/qwen-code-core/services/session-writer-lease.js';
 import { LocalManagedSessionAuthority } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
@@ -22,8 +22,8 @@ import {
   type HostedLoopClassifier,
 } from './hosted-loop-session.js';
 
-// The self-paced loop funnel drives the real journal with no enablement
-// mock: the gate lives at the tool surface, not here. See
+// The self-paced loop funnel drives the real journal. The deployment gate
+// gates arming, so these arming-semantics tests run with it on. See
 // docs/design/2026-11-10-managed-loop-wakeup.md.
 const sessionId = '550e8400-e29b-41d4-a716-446655440000';
 const sessionKey = {
@@ -33,8 +33,17 @@ const sessionKey = {
 };
 
 const temporaryDirectories = new Set<string>();
+const gateKey = 'QWEN_MANAGED_AGENT_LOOP_ENABLED';
+let gateBefore: string | undefined;
+
+beforeEach(() => {
+  gateBefore = process.env[gateKey];
+  process.env[gateKey] = 'true';
+});
 
 afterEach(async () => {
+  if (gateBefore === undefined) delete process.env[gateKey];
+  else process.env[gateKey] = gateBefore;
   for (const directory of temporaryDirectories) {
     await fs.rm(directory, { recursive: true, force: true });
   }
@@ -131,6 +140,17 @@ function loopPending(authority: LocalManagedSessionAuthority) {
 }
 
 describe('HostedLoopSession arm', () => {
+  it('refuses to arm when the deployment gate is off', async () => {
+    process.env[gateKey] = 'false';
+    const harness = await createHarness();
+    await withLoop(harness, async (loops, authority) => {
+      await expect(
+        loops.arm({ delaySeconds: 60, prompt: '/loop tick' }),
+      ).rejects.toBeInstanceOf(LoopWakeupError);
+      expect(loopPending(authority)).toHaveLength(0);
+    });
+  });
+
   it('clamps the delay and commits a loop input due at notBefore', async () => {
     const harness = await createHarness();
     await withLoop(harness, async (loops, authority) => {
