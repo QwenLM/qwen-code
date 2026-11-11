@@ -1783,6 +1783,49 @@ describe('Session', () => {
       session.dispose();
     });
 
+    it('delivers a report that arrives inside the sealed window when the close rolls back', async () => {
+      // R4-1: the flush only remembers the items already in the queue. A peer
+      // report delivered after the flush is cold-stored and never queued, so
+      // the rollback un-seals the session but has nothing to re-drain and the
+      // report stays invisible to the model.
+      const manager = makeFakeTeamManager();
+      session.dispose();
+      vi.mocked(mockConfig.isAgentTeamEnabled).mockReturnValue(true);
+      vi.mocked(mockConfig.getTeamManager).mockReturnValue(manager as never);
+      session = new Session(
+        'test-session-id',
+        mockConfig,
+        mockClient,
+        mockSettings,
+      );
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      const releaseClose = session.beginClose();
+      vi.mocked(mockChatRecordingService.recordNotification).mockClear();
+      session.flushPendingPeerNotifications();
+      manager.leaderCallback?.(
+        'report inside the window',
+        'report inside the window',
+        ['security'],
+      );
+      expect(mockChatRecordingService.recordNotification).toHaveBeenCalledTimes(
+        1,
+      );
+      releaseClose();
+      const sendMessageStream = vi.mocked(mockChat.sendMessageStream);
+      await vi.waitFor(() => expect(sendMessageStream).toHaveBeenCalled());
+      const prompted = sendMessageStream.mock.calls
+        .map((call) =>
+          ((call[1] as { message?: Array<{ text?: string }> }).message ?? [])
+            .map((part) => part.text ?? '')
+            .join('\n'),
+        )
+        .join('\n');
+      expect(prompted).toContain('report inside the window');
+      session.dispose();
+    });
+
     it('still records a non-peer completion that arrives inside the sealed window', async () => {
       // The seal is about peer reports. `#landUndrainedPeerNotifications` skips
       // every other kind, so routing an agent/shell/monitor/workflow/cron

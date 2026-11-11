@@ -14085,7 +14085,16 @@ export class Session implements SessionContext {
     // this branch would lose its transcript record, its display frame and its
     // dropped tally at once.
     if (this.peerNotificationsSealed && item.kind === 'peer') {
+      // A report that arrives after the pre-close flush was not in the queue
+      // that flush remembered, so the rollback cannot re-drain it. Remember it
+      // and queue it too: the cold copy lands now, and a rolled-back close
+      // clears its mark and delivers it warm. The queue admission limit still
+      // applies; at the cap the cold copy is the only record, as before.
+      this.#peerItemsLandedByFlush.add(item);
       this.#landUndrainedPeerNotifications([item]);
+      if (this.notificationQueue.length < MAX_BACKGROUND_NOTIFICATION_QUEUE) {
+        this.notificationQueue.push(item);
+      }
       return;
     }
     while (this.notificationQueue.length >= MAX_BACKGROUND_NOTIFICATION_QUEUE) {
