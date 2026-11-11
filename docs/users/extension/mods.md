@@ -1138,6 +1138,8 @@ time spent waiting for a model call. Ink can split long replies into several
 blocks as they stream. In both terminals, `isFirstOfReply` is `true` on the
 opening block and `false` on continuation blocks.
 
+OpenTUI offers completed rows whose text contains non-whitespace characters.
+
 In Ink, a Mermaid or LaTeX block in a rewritten row shows the original block's
 `/copy mermaid N` or `/copy latex N` hint if it has one exact source match in the
 original row. New, changed, or ambiguous blocks omit the hint.

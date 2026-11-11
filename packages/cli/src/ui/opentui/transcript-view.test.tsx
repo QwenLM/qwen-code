@@ -1056,6 +1056,55 @@ describe('OpenTuiTranscriptView', () => {
     }
   });
 
+  const inlineImage = { mimeType: 'image/png', data: 'aGVsbG8=' };
+  const caption = '  Image caption\n';
+
+  it.each<[string, OpenTuiStreamEvent[]]>([
+    [
+      'live',
+      [
+        { type: 'image', ...inlineImage },
+        { type: 'text', delta: '\n' },
+        { type: 'image', ...inlineImage },
+        { type: 'text', delta: caption },
+        { type: 'done' },
+      ],
+    ],
+    [
+      'replayed',
+      projectHistoryToStreamEvents(
+        [
+          { id: 1, type: 'gemini', text: '', images: [inlineImage] },
+          { id: 2, type: 'gemini_content', text: '\n' },
+          { id: 3, type: 'gemini_content', text: '', images: [inlineImage] },
+          { id: 4, type: 'gemini_content', text: caption },
+        ],
+        {},
+      ),
+    ],
+  ])('skips blank image separators in %s replies', (_mode, events) => {
+    const items = events.reduce<readonly LiveHistoryItem[]>(foldLiveEvent, []);
+    const modRow = vi
+      .spyOn(modRowHooks, 'useModRow')
+      .mockReturnValue(undefined);
+    try {
+      render(
+        <OpenTuiTranscriptView
+          items={items}
+          modRows={{ config: {} as Config, sessionId: 'session-1' }}
+        />,
+      );
+      const inputs = modRow.mock.calls
+        .map(([, , input]) => input)
+        .filter((input) => input !== undefined);
+      expect(inputs.map((input) => input.props)).toEqual([
+        { text: caption, isFirstOfReply: false },
+      ]);
+    } finally {
+      modRow.mockRestore();
+    }
+  });
+
   it('remounts the assistant row when the stamp setting flips (#170)', () => {
     // `output.showTimestamps` is dialog-settable and needs no restart, so an
     // already-mounted row switches shape mid-session. The two shapes differ,

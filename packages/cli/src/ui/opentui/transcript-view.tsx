@@ -844,11 +844,11 @@ function AssistantRow({
   modRows?: TranscriptViewProps['modRows'];
 }) {
   const meta = assistantMessageMeta();
-  // A complete block is offered to the Mods, which may rewrite the text it
-  // shows; the item keeps its own.
+  // The Mods can rewrite how a complete, nonblank block is drawn. The item
+  // keeps its original text.
   const modInput = useMemo<ModAssistantMessageInput | undefined>(
     () =>
-      modRows && !streaming
+      modRows && !streaming && text.trim().length > 0
         ? {
             surface: 'terminal',
             component: 'AssistantMessage',

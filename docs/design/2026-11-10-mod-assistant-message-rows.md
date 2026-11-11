@@ -61,7 +61,7 @@ A row whose input is larger than half a Mod payload is not raised, rather than h
 
 ### OpenTUI
 
-OpenTUI folds consecutive text chunks into one assistant item. An image or thought can split a reply's text across several items. Replay keeps each `gemini` and `gemini_content` history item separate. Each completed text item has its own row and uses its item id as `requestId`. The opening `gemini` block has `isFirstOfReply: true`, and `gemini_content` continuation blocks have `isFirstOfReply: false`.
+OpenTUI folds consecutive text chunks into one assistant item. An image or thought can split a reply's text across several items. Replay keeps each `gemini` and `gemini_content` history item separate. Each completed text item has its own row. OpenTUI offers rows containing non-whitespace characters to Mods and uses the item id as `requestId`. The opening `gemini` block has `isFirstOfReply: true`, and `gemini_content` continuation blocks have `isFirstOfReply: false`.
 
 The OpenTUI transcript is a retained view that mounts only the items near the viewport, so a mounted row is a shown row, as in Ink's virtualized viewport, and any mounted row draws again when its text changes. It does so in both screen modes, so OpenTUI always offers the site. A row's height is measured on each frame, so a rewrite that changes it moves the rows below. The session preview and the quit screen reuse the transcript view and do not offer rows.
 
@@ -84,7 +84,7 @@ Core runtime tests with the real QuickJS worker:
 - A hook that awaits `$.model.complete`, answered by another Mod, rewrites the row.
 - A dispatch abandoned while its hook awaits a model call settles, cancels the host call, and the next dispatch runs.
 
-CLI tests cover serialization, skipping a row hidden while it waits, remounts, invalidation, the render deadline, session ownership and Ink's source-copy hints. The OpenTUI tests check the first-block flag for live and replayed replies. The PTY test runs in both terminals. It exercises `/branch`, checking that the inherited rows are drawn again for the branch's session, and `/clear`, checking which session receives each row.
+CLI tests cover serialization, skipping a row hidden while it waits, remounts, invalidation, the render deadline, session ownership and Ink's source-copy hints. The OpenTUI tests check the first-block flag and skipping whitespace-only rows for live and replayed replies. The PTY test runs in both terminals. It exercises `/branch`, checking that the inherited rows are drawn again for the branch's session, and `/clear`, checking which session receives each row.
 
 Acceptance: in the Ink terminal with the virtualized viewport and in the OpenTUI terminal, a Mod that rewrites each reply block shows the rewritten text once the block is complete, and the original before; `/copy` still copies the original.
 
