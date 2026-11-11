@@ -20,6 +20,7 @@ const debugLogger = createDebugLogger('GLOB');
 export interface GlobPath {
   fullpath(): string;
   mtimeMs?: number;
+  isDirectory?: () => boolean;
 }
 
 export interface GlobDirectorySearch {
@@ -140,8 +141,14 @@ export async function searchGlobDirectory(
 
   const isAllowedByFileFilters = (entry: GlobPath): boolean => {
     const relativePath = path.relative(projectRoot, entry.fullpath());
+    // Same trailing '/' as isTraversalIgnored: a directory-only rule such as
+    // `builddir/` does not match the bare path, and this filter is the one a
+    // fail-open prune falls back on.
+    const ignorePath = entry.isDirectory?.()
+      ? relativePath + '/'
+      : relativePath;
     return (
-      fileService.filterFiles([relativePath], fileFilteringOptions).length > 0
+      fileService.filterFiles([ignorePath], fileFilteringOptions).length > 0
     );
   };
 

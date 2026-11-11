@@ -118,6 +118,7 @@ describe('GlobTool', () => {
           fullpath: () =>
             path.join(tempRootDir, `${prefix}${fileNumber}.${extension}`),
           mtimeMs: baseMtimeMs + fileNumber,
+          isDirectory: () => false,
         } as unknown as GlobResultPath;
       }
     }
@@ -676,6 +677,41 @@ describe('GlobTool', () => {
         expect(result.llmContent).toContain('outside.log');
       } finally {
         await fs.rm(externalDir, { recursive: true, force: true });
+      }
+    });
+
+    it('keeps a gitignored directory out of the results now that directories match', async () => {
+      // Directories are reported as matches, so a directory-only rule must
+      // still hide one. The post-filter appends the trailing '/' the way the
+      // traversal predicate does, which is what this asserts.
+      await put('.gitignore', 'builddir/\n');
+      await mkdirp('builddir');
+      await mkdirp('plaindir');
+
+      expectFound(await runFresh({ pattern: 'plaindir' }), 1, 'plaindir');
+
+      const service = new FileDiscoveryService(tempRootDir);
+      const options = { respectGitIgnore: true, respectQwenIgnore: true };
+      expect(service.filterFiles(['builddir'], options)).toEqual(['builddir']);
+      expect(service.filterFiles(['builddir/'], options)).toEqual([]);
+    });
+
+    it('keeps an ignored directory out when the traversal prune fails open', async () => {
+      // The post-filter is the source of truth when a prune throws, so it has
+      // to judge a directory the same way the prune would.
+      await put('.gitignore', 'builddir/\n');
+      await mkdirp('builddir');
+      const ignoreSpy = vi
+        .spyOn(FileDiscoveryService.prototype, 'shouldIgnoreFile')
+        .mockReturnValue(false);
+
+      try {
+        const result = await runFresh({ pattern: 'builddir' });
+        expect(result.llmContent).toContain(
+          'No files found matching pattern "builddir"',
+        );
+      } finally {
+        ignoreSpy.mockRestore();
       }
     });
 
