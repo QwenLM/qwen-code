@@ -1172,6 +1172,217 @@ describe('ToolApproval accessibility', () => {
     );
   });
 
+  it('renders the plan as markdown in the exit-plan approval', () => {
+    // The exit_plan_mode schema tells the model the plan "Supports markdown",
+    // so the approval panel must render it instead of showing literal "##".
+    const plan =
+      '## Plan\n\n1. Add the endpoint\n2. Wire up the tests\n\n- **Verify** with `npm test`';
+    render(undefined, {
+      ...planRequest,
+      content: [{ type: 'text', text: plan }],
+    });
+
+    expect(container!.querySelector('h2')?.textContent).toBe('Plan');
+    const items = Array.from(container!.querySelectorAll('li')).map(
+      (li) => li.textContent,
+    );
+    expect(items).toEqual([
+      'Add the endpoint',
+      'Wire up the tests',
+      'Verify with npm test',
+    ]);
+    // The raw-text <pre> is gone; the rendered plan keeps a plain-text
+    // equivalent for the alertdialog's aria-describedby (raw text as title).
+    expect(container!.querySelector('pre')).toBeNull();
+    const panel = container!.querySelector('[role="alertdialog"]')!;
+    const describedBy = panel.getAttribute('aria-describedby')!;
+    expect(
+      describedBy
+        .split(' ')
+        .map((id) => document.getElementById(id)?.textContent ?? '')
+        .some((text) => text.includes('Add the endpoint')),
+    ).toBe(true);
+    expect(
+      container!.querySelector('[class*="planContent"]')?.getAttribute('title'),
+    ).toBe(plan);
+  });
+
+  it('renders the plan inert: links as labels, images as alt text', () => {
+    // The approval dialog is a render-only surface: a link or image in the
+    // model's plan must not fire navigation or a network request, even for
+    // a "safe" external URL.
+    const plan = [
+      '## Plan',
+      '',
+      '- See [the docs](https://example.com/docs)',
+      '- See [trick](javascript:alert(1))',
+      '- ![](http://example.com/track.png)',
+      '- ![diagram](http://example.com/diagram.png)',
+    ].join('\n');
+    render(undefined, {
+      ...planRequest,
+      content: [{ type: 'text', text: plan }],
+    });
+
+    const planPanel = container!.querySelector('[class*="planContent"]')!;
+    expect(planPanel).toBeTruthy();
+    // No live anchors at all — inert rendering replaces every link with a
+    // non-interactive label.
+    expect(planPanel.querySelector('a')).toBeNull();
+    expect(planPanel.textContent).toContain('the docs');
+    expect(planPanel.textContent).toContain('trick');
+    // Images are dropped in favour of their alt text (empty alt = nothing).
+    expect(planPanel.querySelector('img')).toBeNull();
+    expect(planPanel.textContent).toContain('diagram');
+  });
+
+  it('keeps raw HTML inert in the plan markdown', () => {
+    const plan =
+      '## Plan\n\n<script>window.__planPwned = true</script>\n\n- [x] **Step** done';
+    render(undefined, {
+      ...planRequest,
+      content: [{ type: 'text', text: plan }],
+    });
+
+    expect(container!.querySelector('script')).toBeNull();
+    expect((window as { __planPwned?: boolean }).__planPwned).toBeUndefined();
+    // The markdown around the raw HTML still renders.
+    expect(container!.textContent).toContain('Step');
+  });
+
+  it('neutralises bidi and C0 controls in the plan markdown', () => {
+    const plan = '## Plan\u202e\n\n- Ship \u001b[31mstep\u001b[0m one';
+    render(undefined, {
+      ...planRequest,
+      content: [{ type: 'text', text: plan }],
+    });
+
+    const planPanel = container!.querySelector('[class*="planContent"]')!;
+    const rendered = planPanel.textContent!;
+    // The rendered text and the tooltip must not re-introduce raw controls.
+    for (const control of ['\u202e', '\u001b']) {
+      expect(rendered).not.toContain(control);
+      expect(planPanel.getAttribute('title')).not.toContain(control);
+    }
+    expect(rendered).toContain('Ship');
+  });
+
+  it('exempts the plan subtree from approval shortcuts', () => {
+    // Digits and arrows stay with focusable widgets inside the plan (the
+    // footnote trigger) while Escape still rejects: the same split the diff
+    // rows use. A blanket data-approval-shortcuts-ignore would swallow
+    // Escape too; the portaled footnote card opts out separately.
+    render(undefined, planRequest);
+    const planPanel = container!.querySelector('[class*="planContent"]')!;
+    expect(planPanel.hasAttribute('data-plan-interactive')).toBe(true);
+    expect(planPanel.hasAttribute('data-approval-shortcuts-ignore')).toBe(
+      false,
+    );
+  });
+
+  it('renders the plan footnote card inert: no live links or images', () => {
+    // The card portals out of the markdown tree, so it must read the inert
+    // context itself: a model-supplied footnote href or image URL must not
+    // become a live anchor or an img src in the approval dialog.
+    const plan = [
+      '## Plan',
+      '',
+      'Use the approach[^docs] for the rollout.',
+      '',
+      '[^docs]: [The approach docs](https://example.com/docs) Rollout details. ![Figure](https://example.com/figure.png)',
+    ].join('\n');
+    render(undefined, {
+      ...planRequest,
+      content: [{ type: 'text', text: plan }],
+    });
+    const trigger = container!.querySelector<HTMLButtonElement>(
+      '[data-web-shell-footnote-trigger]',
+    )!;
+    expect(trigger).toBeTruthy();
+    act(() => trigger.click());
+    const card = document.body.querySelector('[data-web-shell-footnote-card]')!;
+    expect(card).toBeTruthy();
+    expect(card.querySelector('a[href]')).toBeNull();
+    expect(card.querySelector('img')).toBeNull();
+    // The note's title still renders, as plain text.
+    expect(card.textContent).toContain('The approach docs');
+  });
+
+  it('keeps a mermaid fence inert in the plan: source visible, no diagram', () => {
+    // Mermaid's image shape assigns img.src from the diagram source before
+    // any sanitization, so the diagram must not mount from a model-supplied
+    // fence — the source stays visible as the text being approved.
+    const plan = ['## Plan', '', '```mermaid', 'graph TD; A-->B;', '```'].join(
+      '\n',
+    );
+    render(undefined, {
+      ...planRequest,
+      content: [{ type: 'text', text: plan }],
+    });
+    const planPanel = container!.querySelector('[class*="planContent"]')!;
+    expect(planPanel.textContent).toContain('graph TD; A-->B;');
+    expect(planPanel.querySelector('[class*="mermaid"]')).toBeNull();
+    expect(planPanel.querySelector('img')).toBeNull();
+  });
+
+  it('keeps plan-widget keys local while Escape still rejects', () => {
+    // The footnote trigger is a focusable widget inside the plan's
+    // data-plan-interactive container: digits and arrows must not move the
+    // approval selection, while Escape still rejects.
+    const plan = [
+      '## Plan',
+      '',
+      'Use the approach[^docs].',
+      '',
+      '[^docs]: Details.',
+    ].join('\n');
+    render(undefined, {
+      ...planRequest,
+      content: [{ type: 'text', text: plan }],
+    });
+    const trigger = container!.querySelector<HTMLButtonElement>(
+      '[data-web-shell-footnote-trigger]',
+    )!;
+    const opts = optionButtons();
+    const tabIndexBefore = opts.map((option) => option.tabIndex);
+    trigger.focus();
+    pressKey(trigger, '1');
+    expect(onConfirm).not.toHaveBeenCalled();
+    expect(opts.map((option) => option.tabIndex)).toEqual(tabIndexBefore);
+    pressKey(trigger, 'Escape');
+    expect(onConfirm).toHaveBeenCalledExactlyOnceWith('req-plan', 'reject');
+  });
+
+  it('keeps an open plan footnote card out of the approval shortcuts', () => {
+    // The card portals out of the plan container, so the container's
+    // data-plan-interactive does not cover it; the card carries its own
+    // data-approval-shortcuts-ignore (inert only), and Escape there must not
+    // reject the approval either.
+    const plan = [
+      '## Plan',
+      '',
+      'Use the approach[^docs].',
+      '',
+      '[^docs]: Details.',
+    ].join('\n');
+    render(undefined, {
+      ...planRequest,
+      content: [{ type: 'text', text: plan }],
+    });
+    act(() => {
+      container!
+        .querySelector<HTMLButtonElement>('[data-web-shell-footnote-trigger]')
+        .click();
+    });
+    const card = document.body.querySelector('[data-web-shell-footnote-card]')!;
+    expect(card).toBeTruthy();
+    expect(card.hasAttribute('data-approval-shortcuts-ignore')).toBe(true);
+    pressKey(card, 'Escape');
+    expect(onConfirm).not.toHaveBeenCalled();
+    pressKey(card, '1');
+    expect(onConfirm).not.toHaveBeenCalled();
+  });
+
   it('shows a dependency-free Plan Mode workflow as a list', () => {
     render(undefined, planRequest, [
       { id: 'review', content: 'Review the change', status: 'pending' },

@@ -95,6 +95,7 @@ import {
   getCoreSystemPrompt,
   getCustomSystemPrompt,
   getPlanModeSystemReminder,
+  isTodoWriteToolAvailable,
   resolveInteractionMode,
   resolveMainSessionOutputStyle,
 } from './prompts.js';
@@ -5137,6 +5138,8 @@ export class LlmClient {
             getPlanModeSystemReminder(
               shouldUsePlanOnlyReminderInSubagentContext() ||
                 this.config.getSdkMode(),
+              this.config.isSessionWorkflowTodoContextActive?.() === true,
+              isTodoWriteToolAvailable(this.config),
             ),
           );
         }

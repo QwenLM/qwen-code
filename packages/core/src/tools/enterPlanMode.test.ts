@@ -7,6 +7,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { EnterPlanModeTool } from './enterPlanMode.js';
 import { ApprovalMode, type Config } from '../config/config.js';
+import { ToolNames } from './tool-names.js';
 import { runWithAgentContext } from '../agents/runtime/agent-context.js';
 import { runWithTeammateIdentity } from '../agents/team/identity.js';
 import { getPlanModeSystemReminder } from '../core/prompts.js';
@@ -33,6 +34,11 @@ describe('EnterPlanModeTool', () => {
       getExperimentalZedIntegration: vi.fn(() => false),
       getInputFormat: vi.fn(() => undefined),
       getSdkMode: vi.fn(() => false),
+      isSessionWorkflowTodoContextActive: vi.fn(() => false),
+      isTodoWriteEnabled: vi.fn(() => false),
+      getToolRegistry: vi.fn(() => ({
+        getAllToolNames: () => [ToolNames.TODO_WRITE],
+      })),
     } as unknown as Config;
 
     tool = new EnterPlanModeTool(mockConfig);
@@ -224,6 +230,46 @@ describe('EnterPlanModeTool', () => {
       expect(result.llmContent).toContain('Present your plan directly');
       expect(result.llmContent).not.toContain(
         'by calling the exit_plan_mode tool',
+      );
+    });
+
+    it('passes the session workflow and todo_write gates through to the reminder', async () => {
+      (
+        mockConfig.isSessionWorkflowTodoContextActive as ReturnType<
+          typeof vi.fn
+        >
+      ).mockReturnValue(true);
+      (
+        mockConfig.isTodoWriteEnabled as ReturnType<typeof vi.fn>
+      ).mockReturnValue(true);
+      const invocation = tool.build({});
+      const result = await invocation.execute(new AbortController().signal);
+
+      expect(result.llmContent).toBe(
+        getPlanModeSystemReminder(false, true, true),
+      );
+    });
+
+    it('omits the todo recipe when todo_write is not in the registry', async () => {
+      // A core-tools allowlist or deny rule can remove the tool while the
+      // opt-in flag stays on; the reminder must not name a tool the model
+      // cannot invoke.
+      (
+        mockConfig.isSessionWorkflowTodoContextActive as ReturnType<
+          typeof vi.fn
+        >
+      ).mockReturnValue(true);
+      (
+        mockConfig.isTodoWriteEnabled as ReturnType<typeof vi.fn>
+      ).mockReturnValue(true);
+      (mockConfig.getToolRegistry as ReturnType<typeof vi.fn>).mockReturnValue({
+        getAllToolNames: () => [ToolNames.READ_FILE],
+      });
+      const invocation = tool.build({});
+      const result = await invocation.execute(new AbortController().signal);
+
+      expect(result.llmContent).toBe(
+        getPlanModeSystemReminder(false, true, false),
       );
     });
 
