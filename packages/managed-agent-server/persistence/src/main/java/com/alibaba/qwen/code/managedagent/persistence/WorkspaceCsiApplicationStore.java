@@ -14,6 +14,7 @@ import com.alibaba.qwen.code.runtimebroker.persistence.JdbcCsiApplicationRetirem
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcCsiRetirementEvidence;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.alibaba.qwen.code.runtimebroker.transport.CsiFileFinalizeProtocol;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -366,8 +367,8 @@ public final class WorkspaceCsiApplicationStore {
         String session = authority.original().request().getIsolationKey();
         try (PreparedStatement statement = target.prepareStatement("SELECT lease_token_hash FROM ma_session_head"
                 + " WHERE head_kind = 'MANAGED_SESSION' AND tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ?")) {
-            statement.setString(1, JdbcRuntimeBindingRepository.harnessDrainKey(tenant));
-            statement.setString(2, JdbcRuntimeBindingRepository.harnessDrainKey(session));
+            statement.setString(1, RuntimeAdmissionFences.harnessDrainKey(tenant));
+            statement.setString(2, RuntimeAdmissionFences.harnessDrainKey(session));
             statement.setBytes(3, ManagedSchemaKeys.identity(tenant));
             statement.setBytes(4, ManagedSchemaKeys.identity(session));
             try (var row = statement.executeQuery()) {
