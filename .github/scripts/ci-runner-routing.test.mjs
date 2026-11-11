@@ -1101,24 +1101,28 @@ describe('credential-free jobs on the disposable pool', () => {
         );
       }
     }
-    assert.deepEqual(
-      evalRunsOn(runsOn, {
-        eventName: 'pull_request',
-        ecsDisabled: false,
-        sameRepo: true,
-      }),
-      EPHEMERAL,
-      'managed-host PR builds ride the disposable pool',
-    );
-    assert.deepEqual(
-      evalRunsOn(runsOn, {
-        eventName: 'pull_request',
-        ecsDisabled: true,
-        sameRepo: true,
-      }),
-      JSON.parse(HOSTED),
-      'kill-switch must revert managed-host PR builds to hosted',
-    );
+    // The selector carries no sameRepo term: same-repository and fork PRs are
+    // both PR events, so pin both arms instead of only the same-repo one.
+    for (const sameRepo of [true, false]) {
+      assert.deepEqual(
+        evalRunsOn(runsOn, {
+          eventName: 'pull_request',
+          ecsDisabled: false,
+          sameRepo,
+        }),
+        EPHEMERAL,
+        `managed-host PR builds ride the disposable pool sameRepo=${sameRepo}`,
+      );
+      assert.deepEqual(
+        evalRunsOn(runsOn, {
+          eventName: 'pull_request',
+          ecsDisabled: true,
+          sameRepo,
+        }),
+        JSON.parse(HOSTED),
+        `kill-switch must revert managed-host PR builds to hosted sameRepo=${sameRepo}`,
+      );
+    }
   });
 });
 

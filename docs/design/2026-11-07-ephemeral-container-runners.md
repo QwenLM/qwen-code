@@ -235,7 +235,7 @@ the shared 2 GiB default passed a slot with 14.6 GB free on an 89%-used
 filesystem and pnpm died on ENOSPC minutes later), renders with pinned
 `--workers=2` (an unpinned run sizes Chromium from the host's cores inside
 the 4-CPU container and starved the runner process itself), carries a
-routed 90-minute pool ceiling against the hosted 45 (two cold installs
+routed 90-minute pool ceiling against the hosted 45 (a head install
 measured 22m18s plus a Chromium download past 36m48s), and installs the
 DejaVu font baseline plus ffmpeg
 best-effort at runtime — apt egress and the Debian archive stay hard
@@ -305,14 +305,21 @@ visible would need the gate to understand routed expressions, which is its own
 change.
 
 The first-stage acceptance item above ("the first complete pooled render still
-needs acceptance") is now closed for duration, and still open for font metrics.
-Two complete pooled captures finished under the 90-minute ceiling on the
-2026-11-11 image: run 43005736229 in 74m44s and run 42987806994 in 84m13s, both
-with a successful after render, merge-base render and composite. The margin is
-thin — about 15 minutes on the slower run — and most of it is downloads
-(Chromium 22m, two cold installs 12m30s and 11m). A slower archive or mirror can
-still exhaust the ceiling; that is the same egress exposure recorded above, not
-a new one. Font metrics remain unaccepted: no human has compared the pooled
+needs acceptance") is now closed for duration on two complete runs, and still
+open for font metrics. Two complete pooled captures finished under the
+90-minute ceiling on the 2026-11-11 image: run 43005736229 in 74m44s and run
+42987806994 in 84m13s, both with a successful after render, merge-base render
+and composite. The margin is thin — 15m16s on the faster run, 5m47s on the
+slower one — and most of it is downloads (Chromium 22m, plus that run's two
+cold installs, 12m30s and 11m on the faster run and 14m33s and 13m51s on the
+slower one). A slower archive or mirror can still exhaust the ceiling, and on
+the merged head it did: run 43027483078 (job 130545811798,
+`ecs-qwen-hz5-ephemeral-09`) spent 17m27s on installs and 60m49s downloading
+Chromium, began its capture tests 83m31s into the job, and was cancelled at
+90m21s with 76 of 104 captures done, so its merge-base render and composite
+never ran. That is the same egress exposure recorded above, not a new one; the
+disposition is to re-run the capture whenever a green same-repository run is
+needed, which costs a slot, and the lane is not a required check. Font metrics remain unaccepted: no human has compared the pooled
 screenshots against the hosted baseline, and the best-effort apt step can still
 degrade to fallback fonts while the job stays green.
 
