@@ -40,7 +40,7 @@ planned, so a refused resend leaves no orphan segment rows; a replayed resend
 under a matching id converges instead of conflicting. The first-segment check
 is backed by a full-chain comparison: a stored chain that diverges from the
 resent plan at any segment is refused — otherwise INSERT IGNORE (unique on
-segment_id, not ordinal) would splice the two chains into one delivery with
+`segment_id`, not ordinal) would splice the two chains into one delivery with
 two rows at a single ordinal. A stored chain that is only a matching _prefix_
 of the plan is a valid partly materialized transient and converges (the plan
 completes it). The refusal is made durable at the claim import site as well:

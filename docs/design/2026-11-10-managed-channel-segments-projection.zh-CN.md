@@ -12,7 +12,7 @@
 
 在 `PublicChannelDelivery` 上以增量方式暴露 `segments` 数组，保留既有单数字段。每个条目是一个 `PublicChannelDeliverySegment`，含 `segment_id`、`ordinal` 与可选的 `provider_receipt`。该数组是按 ordinal 有序的权威逐段视图；单一 `segment_id` 与 `ordinal` 继续命名第一个分段，`provider_receipt` 继续是交付的代表回执，因此既有消费者不被破坏。
 
-采用增量而非替换单数字段：资源仍是 `partial`，但保留单数字段避免破坏性形状变更，让消费者按自己的节奏迁移到 `segments`。数组必填且非空（`minItems: 1`、`maxItems: 64`），与记录契约的 1–64 分段计划一致；交付行可见前其分段必已规划。若 resend 铸出的 id 已对应一个首分段不同（id 或 ordinal）的存储交付，会在规划任何分段之前被拒绝，因此被拒的 resend 不留孤儿分段行；匹配 id 的重放 resend 则收敛而非冲突。首段检查之外还有完整链比对：存储链与 resend 计划在任一分段分歧即被拒——否则 INSERT IGNORE（唯一键在 segment_id、不在 ordinal）会把两条链拼进同一交付，出现单个 ordinal 两行。存储链仅为计划的匹配**前缀**时是合法的部分落库瞬态，予以收敛（由计划补全）。拒绝还在领取导入处做成持久：漏斗在 resend 守卫运行前已把 resent 记录提交为 planned，而领取清扫从日记账发现待处理工作，故 `claimOne` 施加同一完整链比对，并把冲突记录落定出待处理集合，而非每轮清扫反复重导入。
+采用增量而非替换单数字段：资源仍是 `partial`，但保留单数字段避免破坏性形状变更，让消费者按自己的节奏迁移到 `segments`。数组必填且非空（`minItems: 1`、`maxItems: 64`），与记录契约的 1–64 分段计划一致；交付行可见前其分段必已规划。若 resend 铸出的 id 已对应一个首分段不同（id 或 ordinal）的存储交付，会在规划任何分段之前被拒绝，因此被拒的 resend 不留孤儿分段行；匹配 id 的重放 resend 则收敛而非冲突。首段检查之外还有完整链比对：存储链与 resend 计划在任一分段分歧即被拒——否则 INSERT IGNORE（唯一键在 `segment_id`、不在 ordinal）会把两条链拼进同一交付，出现单个 ordinal 两行。存储链仅为计划的匹配**前缀**时是合法的部分落库瞬态，予以收敛（由计划补全）。拒绝还在领取导入处做成持久：漏斗在 resend 守卫运行前已把 resent 记录提交为 planned，而领取清扫从日记账发现待处理工作，故 `claimOne` 施加同一完整链比对，并把冲突记录落定出待处理集合，而非每轮清扫反复重导入。
 
 契约版本从 1.108.0 升到 1.109.0。Java 记录与 OpenAPI 模式同步变更，由记录↔模式契约门强制；channel 路由门保持三条路由与模式为 `partial`。
 
