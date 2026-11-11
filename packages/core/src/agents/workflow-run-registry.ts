@@ -323,6 +323,8 @@ export type WorkflowEvent = WorkflowEventPayload & { id: string };
 export interface WorkflowTask extends TaskBase<WorkflowStatus> {
   /** Turn that registered this workflow run. */
   sourceTurnId?: string;
+  /** Live daemon client that originated the workflow's prompt, when known. */
+  sourceOriginatorClientId?: string;
   sourceRef?: WorkflowSourceRef;
   workflowCalls?: WorkflowCallTrace[];
   workflowCallsTruncated?: boolean;
@@ -915,8 +917,14 @@ export class WorkflowRunRegistry {
     entry.notified = false;
     entry.isBackgrounded = registration.isBackgrounded ?? false;
     entry.todoWorkChainId ??= todoWorkChainContext.getStore();
-    entry.sourceTurnId ??=
-      getInvocationContext()?.promptId ?? promptIdContext.getStore();
+    const invocation = getInvocationContext();
+    entry.sourceTurnId ??= invocation?.promptId ?? promptIdContext.getStore();
+    if (
+      invocation?.originatorClientId &&
+      invocation.promptId === entry.sourceTurnId
+    ) {
+      entry.sourceOriginatorClientId = invocation.originatorClientId;
+    }
     entry.currentPhase = null;
     entry.phases = [];
     entry.phaseVisits = [];

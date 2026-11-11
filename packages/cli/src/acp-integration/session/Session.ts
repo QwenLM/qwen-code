@@ -3107,7 +3107,7 @@ export class Session implements SessionContext {
     this.config
       .getWorkflowRunRegistry?.()
       .setApprovalRequestCallback((entry, approval, rawArgs, signal) =>
-        this.#requestWorkflowApproval(entry.runId, approval, rawArgs, signal),
+        this.#requestWorkflowApproval(entry, approval, rawArgs, signal),
       );
   }
 
@@ -3704,7 +3704,7 @@ export class Session implements SessionContext {
   }
 
   async #requestWorkflowApproval(
-    runId: string,
+    { runId, isBackgrounded, sourceOriginatorClientId }: WorkflowTask,
     approval: WorkflowApproval,
     rawArgs: Record<string, unknown>,
     approvalSignal: AbortSignal,
@@ -3748,6 +3748,9 @@ export class Session implements SessionContext {
     const params: RequestPermissionRequest = {
       sessionId: this.sessionId,
       options: permissionOptions,
+      ...(isBackgrounded && sourceOriginatorClientId
+        ? { _meta: { workflowOriginatorClientId: sourceOriginatorClientId } }
+        : {}),
       toolCall: {
         toolCallId: externalToolCallId,
         status: 'pending',
@@ -3756,7 +3759,11 @@ export class Session implements SessionContext {
         locations,
         kind,
         rawInput: rawArgs,
-        _meta: { toolName: approval.name, workflowApproval: true },
+        _meta: {
+          toolName: approval.name,
+          workflowApproval: true,
+          ...(isBackgrounded ? { backgroundWorkflowApproval: true } : {}),
+        },
       },
     };
     const signal = AbortSignal.any([
@@ -3779,8 +3786,7 @@ export class Session implements SessionContext {
         undefined,
       );
       await this.#finishWorkflowApprovalToolCall(
-        approval,
-        externalToolCallId,
+        params.toolCall,
         resolved && outcome === ToolConfirmationOutcome.ProceedOnce,
       );
     } catch (error) {
@@ -3790,28 +3796,22 @@ export class Session implements SessionContext {
         approval.approvalId,
         ToolConfirmationOutcome.Cancel,
       );
-      await this.#finishWorkflowApprovalToolCall(
-        approval,
-        externalToolCallId,
-        false,
-      );
+      await this.#finishWorkflowApprovalToolCall(params.toolCall, false);
     }
   }
 
   async #finishWorkflowApprovalToolCall(
-    approval: WorkflowApproval,
-    externalToolCallId: string,
+    toolCall: RequestPermissionRequest['toolCall'],
     success: boolean,
   ): Promise<void> {
     try {
       await this.sendUpdate({
         sessionUpdate: 'tool_call_update',
-        toolCallId: externalToolCallId,
+        toolCallId: toolCall.toolCallId,
         status: success ? 'completed' : 'failed',
         content: [],
         _meta: {
-          toolName: approval.name,
-          workflowApproval: true,
+          ...toolCall._meta,
           approvalOutcome: success ? 'approved' : 'denied',
         },
       });
@@ -10738,7 +10738,8 @@ export class Session implements SessionContext {
     if (
       execution?.active &&
       execution.sessionId === this.sessionId &&
-      update._meta?.['source'] !== 'background_task_completed'
+      update._meta?.['source'] !== 'background_task_completed' &&
+      update._meta?.['backgroundWorkflowApproval'] !== true
     ) {
       update = {
         ...update,
@@ -15006,6 +15007,9 @@ export class Session implements SessionContext {
   #withBackgroundPermission(
     params: RequestPermissionRequest,
   ): RequestPermissionRequest {
+    if (params.toolCall._meta?.['backgroundWorkflowApproval'] === true) {
+      return params;
+    }
     const execution = backgroundTurnContext.getStore();
     return execution?.active && execution.sessionId === this.sessionId
       ? {

@@ -3377,6 +3377,52 @@ describe('ChannelBase', () => {
       await active.finish();
     });
 
+    it('relays a detached workflow approval independently of a later prompt', async () => {
+      const ch = createChannel();
+      ch.permissionPresentationResult = { kind: 'presented' };
+      const active = await startActiveSession(ch);
+      try {
+        emitPermission(active.sessionId, 'req-foreground');
+        await vi.waitFor(() =>
+          expect(ch.permissionPresentations).toHaveLength(1),
+        );
+        await ch.dispatchPermissionRequest({
+          requestId: 'req-workflow',
+          sessionId: active.sessionId,
+          request: {
+            sessionId: active.sessionId,
+            toolCall: {
+              toolCallId: 'workflow-tool',
+              kind: 'edit',
+              title: 'Workflow edit',
+              _meta: {
+                workflowApproval: true,
+                backgroundWorkflowApproval: true,
+              },
+            },
+            options: [
+              { optionId: 'proceed_once', kind: 'allow_once', name: 'Allow' },
+            ],
+          },
+        });
+        expect(ch.permissionPresentations).toHaveLength(1);
+        expect(ch.sent.at(-1)?.text).toContain('Action: Workflow edit');
+        const foreground = ch.permissionPresentations[0]!;
+        await expect(
+          ch.cancelRunForTest(active.sessionId, foreground.runId),
+        ).resolves.toBe(true);
+        await expect(foreground.respond('allow_once')).resolves.toBe(false);
+
+        await ch.handleInbound(envelope({ text: '/approve req-workflow' }));
+        expect(respondToPermissionMock()).toHaveBeenCalledExactlyOnceWith(
+          'req-workflow',
+          { outcome: { outcome: 'selected', optionId: 'proceed_once' } },
+        );
+      } finally {
+        await active.finish();
+      }
+    });
+
     it('requires card-presented questions to be submitted or denied', async () => {
       const ch = createChannel();
       ch.userInputPresentationResult = { kind: 'presented' };
@@ -5985,6 +6031,39 @@ describe('ChannelBase', () => {
             }
           ).isNamedSessionBusy('s-1'),
         ).toBe(false);
+      } finally {
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    });
+
+    it('drops a detached approval resolved during named task lookup', async () => {
+      const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
+      const ch = createChannel({ multiSession: true }, { stateDir });
+      try {
+        await ch.handleInbound(envelope({ text: '/session new review' }));
+        ch.sent = [];
+        const dispatch = ch.dispatchPermissionRequest({
+          requestId: 'req-settled',
+          sessionId: 's-1',
+          request: {
+            toolCall: {
+              title: 'Workflow edit',
+              _meta: {
+                workflowApproval: true,
+                backgroundWorkflowApproval: true,
+              },
+            },
+            options: [
+              { optionId: 'once', kind: 'allow_once', name: 'Allow once' },
+            ],
+          },
+        });
+        ch.dispatchPermissionResolved({
+          requestId: 'req-settled',
+          outcome: { outcome: 'cancelled' },
+        });
+        await dispatch;
+        expect(ch.sent).toEqual([]);
       } finally {
         rmSync(stateDir, { recursive: true, force: true });
       }

@@ -294,6 +294,7 @@ interface MediatorPending {
   readonly requestId: string;
   readonly sessionId: string;
   readonly promptId: string | undefined;
+  readonly workflowApprovalToolCallId: string | undefined;
   /** Captured at request issue time so live-reload of the daemon
    * policy doesn't change the rules under in-flight requests. */
   readonly policy: PermissionPolicy;
@@ -432,6 +433,7 @@ export class MultiClientPermissionMediator implements PermissionMediator {
         requestId: record.requestId,
         sessionId: record.sessionId,
         promptId: record.promptId,
+        workflowApprovalToolCallId: record.workflowApprovalToolCallId,
         policy,
         originatorClientId: record.originatorClientId,
         allowedOptionIds: record.allowedOptionIds,
@@ -644,10 +646,37 @@ export class MultiClientPermissionMediator implements PermissionMediator {
   }
 
   forgetSession(sessionId: string): void {
+    this.cancelPending(sessionId, () => true, 'session_closed');
+  }
+
+  cancelForPrompt(sessionId: string, promptId: string | undefined): void {
+    this.cancelPending(
+      sessionId,
+      (pending) =>
+        pending.workflowApprovalToolCallId === undefined &&
+        pending.promptId === promptId,
+      'agent_cancelled',
+    );
+  }
+
+  cancelWorkflowApproval(sessionId: string, toolCallId: string): void {
+    this.cancelPending(
+      sessionId,
+      (pending) => pending.workflowApprovalToolCallId === toolCallId,
+      'agent_cancelled',
+    );
+  }
+
+  private cancelPending(
+    sessionId: string,
+    matches: (pending: MediatorPending) => boolean,
+    reason: 'session_closed' | 'agent_cancelled',
+  ): void {
     // Snapshot the keys to avoid mutating the Map during iteration.
     const requestIds: string[] = [];
     for (const [id, pending] of this.pending) {
-      if (pending.sessionId === sessionId) requestIds.push(id);
+      if (pending.sessionId === sessionId && matches(pending))
+        requestIds.push(id);
     }
     for (const id of requestIds) {
       // Defensive — JS is single-threaded so today this re-lookup
@@ -660,35 +689,11 @@ export class MultiClientPermissionMediator implements PermissionMediator {
       if (!pending) continue;
       this.resolveEntry(
         pending,
-        { kind: 'cancelled', reason: 'session_closed' },
-        { type: 'session-closed' },
-        undefined,
-      );
-    }
-  }
-
-  /**
-   * Per-turn sibling of `forgetSession`: resolves every pending request
-   * whose `(sessionId, promptId)` matches as agent-cancelled. A background
-   * notification turn can end (or be aborted) while its approval is still
-   * outstanding; the bridge attributes those requests to the turn's id, so
-   * finishing the turn cancels exactly them and leaves a concurrently live
-   * user prompt's requests pending.
-   */
-  cancelForPrompt(sessionId: string, promptId: string): void {
-    // Snapshot the keys to avoid mutating the Map during iteration.
-    const requestIds: string[] = [];
-    for (const [id, pending] of this.pending) {
-      if (pending.sessionId === sessionId && pending.promptId === promptId)
-        requestIds.push(id);
-    }
-    for (const id of requestIds) {
-      const pending = this.pending.get(id);
-      if (!pending) continue;
-      this.resolveEntry(
-        pending,
-        { kind: 'cancelled', reason: 'agent_cancelled' },
-        { type: 'agent-cancelled' },
+        { kind: 'cancelled', reason },
+        {
+          type:
+            reason === 'session_closed' ? 'session-closed' : 'agent-cancelled',
+        },
         undefined,
       );
     }
@@ -1219,6 +1224,9 @@ export class MultiClientPermissionMediator implements PermissionMediator {
       requestId: pending.requestId,
       sessionId: pending.sessionId,
       ...(pending.promptId ? { promptId: pending.promptId } : {}),
+      ...(pending.workflowApprovalToolCallId
+        ? { workflowApprovalToolCallId: pending.workflowApprovalToolCallId }
+        : {}),
       originatorClientId: pending.originatorClientId,
       allowedOptionIds: pending.allowedOptionIds,
       issuedAtMs: pending.issuedAtMs,

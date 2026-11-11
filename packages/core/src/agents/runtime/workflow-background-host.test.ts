@@ -6,6 +6,7 @@
 
 import { describe, expect, it } from 'vitest';
 import { Config, type ConfigParameters } from '../../config/config.js';
+import { WorkflowTool } from '../../tools/workflow/workflow.js';
 import { hostSupportsBackgroundWorkflows } from './workflow-runner.js';
 
 // A real `Config`, parameterised the way the CLI builds an `--acp` child:
@@ -41,5 +42,18 @@ describe('hostSupportsBackgroundWorkflows on a real ACP Config', () => {
     expect(hostSupportsBackgroundWorkflows(config)).toBe(true);
     config.setWorkflowsEnabled(false);
     expect(hostSupportsBackgroundWorkflows(config)).toBe(false);
+  });
+
+  it('requires a foreground run in a Qwen Session Agent', () => {
+    const config = acpConfig();
+    config.setSessionSource('agent');
+    config.markSessionAgentSession();
+    config.getWorkflowRunRegistry().setCompletionCallback(() => {});
+    const tool = new WorkflowTool(config);
+
+    expect(() => tool.build({ script: 'return 1' })).not.toThrow();
+    expect(() =>
+      tool.build({ script: 'return 1', run_in_background: true }),
+    ).toThrow(/Qwen Session Agents must run workflows in the foreground/);
   });
 });

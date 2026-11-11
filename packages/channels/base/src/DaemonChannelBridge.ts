@@ -4,6 +4,7 @@ import type {
   RequestPermissionResponse,
 } from '@agentclientprotocol/sdk';
 import {
+  BACKGROUND_WORKFLOW_APPROVAL_META_KEY,
   CHANNEL_PROMPT_AUTHORIZATION_META_KEY,
   CHANNEL_PROMPT_DISPLAY_TEXT_META_KEY,
   CHANNEL_PROMPT_META_KEY,
@@ -1271,6 +1272,12 @@ export class DaemonChannelBridge
         const explicitKind = getString(update['kind']);
         const meta = isRecord(update['_meta']) ? update['_meta'] : undefined;
         if (
+          type === 'tool_call_update' &&
+          meta?.[BACKGROUND_WORKFLOW_APPROVAL_META_KEY] === true
+        ) {
+          break;
+        }
+        if (
           !explicitKind &&
           toolCallId &&
           getString(update['status']) === 'in_progress' &&
@@ -1360,7 +1367,9 @@ export class DaemonChannelBridge
     }
     const requestId = data['requestId'];
     this.requestToSession.set(requestId, sessionId);
-    this.emitResponseBoundary(sessionId);
+    if (data.toolCall._meta?.[BACKGROUND_WORKFLOW_APPROVAL_META_KEY] !== true) {
+      this.emitResponseBoundary(sessionId);
+    }
     this.emit('permissionRequest', {
       requestId,
       sessionId,

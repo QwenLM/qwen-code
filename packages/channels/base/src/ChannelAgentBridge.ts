@@ -20,6 +20,8 @@ export const CHANNEL_TASK_RESULT_META_KEY = 'qwen.channel.taskResult';
 export const CHANNEL_TASK_RESULT_PARTIAL_META_KEY =
   'qwen.channel.taskResultPartial';
 export const CHANNEL_TASK_OUTPUT_META_KEY = 'qwen.channel.taskOutput';
+export const BACKGROUND_WORKFLOW_APPROVAL_META_KEY =
+  'backgroundWorkflowApproval';
 
 export class ChannelPromptCancelledError extends Error {
   constructor() {

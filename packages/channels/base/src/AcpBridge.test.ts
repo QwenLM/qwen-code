@@ -2377,6 +2377,48 @@ describe('AcpBridge', () => {
     await expect(second).resolves.toEqual(response);
   });
 
+  it('keeps a detached workflow approval through prompt cancellation until its tool update', async () => {
+    const bridge = new AcpBridge({ cliEntryPath: '/tmp/qwen', cwd: '/tmp' });
+    const permissionResolved = vi.fn();
+    const responseBoundary = vi.fn();
+    bridge.on('permissionResolved', permissionResolved);
+    bridge.on('responseBoundary', responseBoundary);
+
+    await bridge.start();
+    const foreground = requestPermission('session-1', 'tool-1');
+    const workflow = child.clients[0]!.requestPermission({
+      sessionId: 'session-1',
+      toolCall: {
+        toolCallId: 'workflow-tool',
+        kind: 'shell',
+        title: 'Workflow tool',
+        _meta: { workflowApproval: true, backgroundWorkflowApproval: true },
+      },
+      options: [{ optionId: 'cancel', name: 'Deny' }],
+    });
+    expect(responseBoundary).toHaveBeenCalledTimes(1);
+
+    await bridge.cancelSession('session-1');
+    await expect(foreground).resolves.toEqual({
+      outcome: { outcome: 'cancelled' },
+    });
+    expect(permissionResolved).toHaveBeenCalledTimes(1);
+
+    child.clients[0]!.sessionUpdate({
+      sessionId: 'session-1',
+      update: {
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'workflow-tool',
+        status: 'failed',
+        _meta: { workflowApproval: true, backgroundWorkflowApproval: true },
+      },
+    });
+    await expect(workflow).resolves.toEqual({
+      outcome: { outcome: 'cancelled' },
+    });
+    expect(permissionResolved).toHaveBeenCalledTimes(2);
+  });
+
   it('resolves pending permissions as cancelled after the response timeout', async () => {
     const bridge = new AcpBridge({
       cliEntryPath: '/tmp/qwen',

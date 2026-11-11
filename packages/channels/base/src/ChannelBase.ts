@@ -79,7 +79,10 @@ import type {
   SessionDiedEvent,
   ToolCallEvent,
 } from './ChannelAgentBridge.js';
-import { ChannelPromptCancelledError } from './ChannelAgentBridge.js';
+import {
+  BACKGROUND_WORKFLOW_APPROVAL_META_KEY,
+  ChannelPromptCancelledError,
+} from './ChannelAgentBridge.js';
 import type { ChannelLoop, ChannelLoopInput } from './ChannelLoopStore.js';
 import { ChannelLoopSkippedError } from './ChannelLoopScheduler.js';
 import {
@@ -601,6 +604,8 @@ export abstract class ChannelBase {
   };
   private readonly pendingPermissions = new Map<string, PendingPermission>();
   private readonly pendingPermissionsByChat = new Map<string, string[]>();
+  // A workflow may settle its approval while the named-task lookup awaits.
+  private readonly preparingWorkflowApprovals = new Set<string>();
   private readonly channelLoopToolHandler = {
     canHandle: (sessionId: string) =>
       this.router.getTarget(sessionId)?.channelName === this.name,
@@ -910,6 +915,9 @@ export abstract class ChannelBase {
   async dispatchPermissionRequest(
     event: PermissionRequestEvent,
   ): Promise<void> {
+    const backgroundWorkflow =
+      event.request.toolCall._meta?.[BACKGROUND_WORKFLOW_APPROVAL_META_KEY] ===
+      true;
     const target = this.permissionTargetForEvent(event);
     if (!target) {
       try {
@@ -927,11 +935,15 @@ export abstract class ChannelBase {
     let taskName: string | undefined;
     if (this.namedSessions) {
       let presentation: NamedSessionTaskReference | undefined;
+      if (backgroundWorkflow) {
+        this.preparingWorkflowApprovals.add(event.requestId);
+      }
       try {
         presentation = await this.namedSessions.resolvePresentation(
           event.sessionId,
         );
       } catch (err) {
+        this.preparingWorkflowApprovals.delete(event.requestId);
         try {
           await this.bridge.respondToPermission?.(event.requestId, {
             outcome: { outcome: 'cancelled' },
@@ -942,6 +954,12 @@ export abstract class ChannelBase {
           );
         }
         throw err;
+      }
+      if (
+        backgroundWorkflow &&
+        !this.preparingWorkflowApprovals.delete(event.requestId)
+      ) {
+        return;
       }
       const currentTarget = this.permissionTargetForEvent(event);
       const currentPresentation = this.namedSessions.presentation(
@@ -969,7 +987,9 @@ export abstract class ChannelBase {
         }
         return;
       }
-      const active = this.activePrompts.get(event.sessionId);
+      const active = backgroundWorkflow
+        ? undefined
+        : this.activePrompts.get(event.sessionId);
       sourceLabel = active
         ? active.sourceLabel
         : this.createSourceLabel(presentation, target);
@@ -991,7 +1011,9 @@ export abstract class ChannelBase {
     const pending: PendingPermission = {
       requestId: event.requestId,
       sessionId: event.sessionId,
-      runId: this.activePrompts.get(event.sessionId)?.runId,
+      runId: backgroundWorkflow
+        ? undefined
+        : this.activePrompts.get(event.sessionId)?.runId,
       target,
       request: event.request,
       ...(sourceLabel ? { sourceLabel } : {}),
@@ -1004,13 +1026,15 @@ export abstract class ChannelBase {
     requestIds.push(event.requestId);
     this.pendingPermissionsByChat.set(chatKey, requestIds);
     try {
-      const presentation = this.tryPresentUserInput(pending);
-      if (presentation && (await presentation)) {
-        return;
-      }
-      const permissionPresentation = this.tryPresentPermission(pending);
-      if (permissionPresentation && (await permissionPresentation)) {
-        return;
+      if (!backgroundWorkflow) {
+        const presentation = this.tryPresentUserInput(pending);
+        if (presentation && (await presentation)) {
+          return;
+        }
+        const permissionPresentation = this.tryPresentPermission(pending);
+        if (permissionPresentation && (await permissionPresentation)) {
+          return;
+        }
       }
       const text = this.formatPermissionRequest(pending);
       if (
@@ -1388,7 +1412,11 @@ export abstract class ChannelBase {
       return undefined;
     }
     const active = this.activePrompts.get(event.sessionId);
-    if (!active) {
+    if (
+      !active ||
+      event.request.toolCall._meta?.[BACKGROUND_WORKFLOW_APPROVAL_META_KEY] ===
+        true
+    ) {
       return routeTarget;
     }
     const target: SessionTarget = {
@@ -1408,6 +1436,7 @@ export abstract class ChannelBase {
   }
 
   dispatchPermissionResolved(event: PermissionResolvedEvent): void {
+    this.preparingWorkflowApprovals.delete(event.requestId);
     const pending = this.pendingPermissions.get(event.requestId);
     if (!pending) {
       return;
@@ -2937,7 +2966,9 @@ export abstract class ChannelBase {
         }
         active.cancelled = true;
         this.dropCollectBuffer(sessionId);
-        this.removePendingPermissionsForSession(sessionId, 'run_cancelled');
+        this.removePendingPermissionsForSession(sessionId, 'run_cancelled', {
+          preserveBackgroundWorkflows: reason !== 'clear',
+        });
         this.emitTaskCancellation(active, sessionId, reason);
         return true;
       });
@@ -3326,9 +3357,17 @@ export abstract class ChannelBase {
   private removePendingPermissionsForSession(
     sessionId: string,
     reason: UserInputSettlementReason = 'cancelled',
+    options?: { preserveBackgroundWorkflows: boolean },
   ): void {
     const requestIds = Array.from(this.pendingPermissions)
-      .filter(([, pending]) => pending.sessionId === sessionId)
+      .filter(
+        ([, pending]) =>
+          pending.sessionId === sessionId &&
+          (!options?.preserveBackgroundWorkflows ||
+            pending.request.toolCall._meta?.[
+              BACKGROUND_WORKFLOW_APPROVAL_META_KEY
+            ] !== true),
+      )
       .map(([requestId]) => requestId);
     for (const requestId of requestIds) {
       this.removePendingPermission(requestId, reason);
@@ -3336,6 +3375,7 @@ export abstract class ChannelBase {
   }
 
   private clearPendingPermissions(): void {
+    this.preparingWorkflowApprovals.clear();
     for (const requestId of Array.from(this.pendingPermissions.keys())) {
       this.removePendingPermission(requestId, 'cancelled');
     }
@@ -7392,6 +7432,7 @@ export abstract class ChannelBase {
               this.removePendingPermissionsForSession(
                 sessionId,
                 'run_cancelled',
+                { preserveBackgroundWorkflows: true },
               );
             }
             // Diagnostic watchdog: if the predecessor turn is STILL the active prompt

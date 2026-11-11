@@ -163,6 +163,9 @@ export type WorkflowRunSettlement =
  * the run's completion into the session's notification queue; a headless
  * run has nothing to deliver it to, so it stays in the foreground.
  *
+ * The Qwen Session Agent adapter only reads the original prompt, so
+ * it cannot deliver a detached workflow's completion.
+ *
  * An ACP session also needs its workflow controls: workflows still
  * enabled (a settings reload can turn them off without unregistering this
  * tool), not bare mode, and a trusted workspace. Without them the client
@@ -177,6 +180,7 @@ export function hostSupportsBackgroundWorkflows(
     Config,
     | 'isInteractive'
     | 'getExperimentalZedIntegration'
+    | 'isSessionAgentSession'
     | 'isWorkflowsEnabled'
     | 'getBareMode'
     | 'isTrustedFolder'
@@ -184,6 +188,7 @@ export function hostSupportsBackgroundWorkflows(
 ): boolean {
   if (config.getExperimentalZedIntegration?.() === true) {
     return (
+      config.isSessionAgentSession?.() !== true &&
       config.isWorkflowsEnabled?.() === true &&
       config.getBareMode?.() !== true &&
       config.isTrustedFolder?.() === true

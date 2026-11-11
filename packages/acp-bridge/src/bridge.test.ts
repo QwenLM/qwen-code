@@ -24772,12 +24772,14 @@ describe('createAcpSessionBridge', () => {
     /** Spin up a bridge with a hand-driven channel; returns the bridge,
      *  session, and a function the test uses to call `requestPermission`
      *  from the agent side. */
-    async function setupForPermission(opts: Partial<BridgeOptions> = {}) {
+    async function setupForPermission(
+      opts: Partial<BridgeOptions> = {},
+      fakeAgent = new FakeAgent(),
+    ) {
       let capturedConn: AgentSideConnection | undefined;
       const handles: Array<{ killed: boolean }> = [];
       const factory: ChannelFactory = async () => {
         const { clientStream, agentStream } = createInMemoryChannel();
-        const fakeAgent = new FakeAgent();
         // The agent side gets an AgentSideConnection; that exposes a
         // ClientSideConnection-equivalent on its `agent` callback. We need
         // to drive `requestPermission` from the agent direction — for that
@@ -25796,6 +25798,97 @@ describe('createAcpSessionBridge', () => {
 
       subAbort.abort();
       await bridge.shutdown();
+    });
+
+    it('keeps a detached workflow approval when a later prompt is cancelled', async () => {
+      const started = deferred<void>();
+      const finished = deferred<PromptResponse>();
+      const { bridge, session, conn } = await setupForPermission(
+        { permissionPolicy: 'designated' },
+        new FakeAgent({
+          promptImpl: () => {
+            started.resolve();
+            return finished.promise;
+          },
+          cancelImpl: () => finished.resolve({ stopReason: 'cancelled' }),
+        }),
+      );
+      const { sessionId, clientId } = session;
+      const signal = new AbortController();
+      try {
+        const events = bridge.subscribeEvents(sessionId, {
+          signal: signal.signal,
+        });
+        const followUp = bridge.sendPrompt(
+          sessionId,
+          { sessionId, prompt: [{ type: 'text', text: 'Follow-up' }] },
+          undefined,
+          { promptId: 'follow-up' },
+        );
+        void followUp.catch(() => {});
+        await started.promise;
+
+        const options = [
+          { optionId: 'allow', name: 'Allow', kind: 'allow_once' as const },
+        ];
+        const foreground = conn.requestPermission({
+          sessionId,
+          toolCall: { toolCallId: 'foreground', title: 'Foreground tool' },
+          options,
+        });
+        const workflowToolCallId = `workflow:${sessionId}:wf_1:wfap_1`;
+        const workflowMeta = {
+          workflowApproval: true,
+          backgroundWorkflowApproval: true,
+        };
+        const detached = conn.requestPermission({
+          sessionId,
+          _meta: { workflowOriginatorClientId: clientId },
+          toolCall: {
+            toolCallId: workflowToolCallId,
+            title: 'Workflow tool',
+            _meta: workflowMeta,
+          },
+          options,
+        });
+        const requests: BridgeEvent[] = [];
+        for await (const event of events) {
+          if (event.type !== 'permission_request') continue;
+          requests.push(event);
+          if (requests.length === 2) break;
+        }
+        expect(requests[0]?.promptId).toBe('follow-up');
+        expect(requests[1]?.promptId).toBeUndefined();
+        expect(requests[1]?.originatorClientId).toBe(clientId);
+
+        await bridge.cancelSession(sessionId);
+        await expect(foreground).resolves.toMatchObject({
+          outcome: { outcome: 'cancelled' },
+        });
+        await followUp;
+        expect(bridge.pendingPermissionCount).toBe(1);
+        expect(
+          bridge.getSessionSummary(sessionId)?.pendingInteractionCount,
+        ).toBe(1);
+
+        await conn.sessionUpdate({
+          sessionId,
+          update: {
+            sessionUpdate: 'tool_call_update',
+            toolCallId: workflowToolCallId,
+            status: 'failed',
+            _meta: workflowMeta,
+          },
+        });
+        await expect(detached).resolves.toMatchObject({
+          outcome: { outcome: 'cancelled' },
+        });
+        expect(bridge.pendingPermissionCount).toBe(0);
+      } finally {
+        signal.abort();
+        finished.resolve({ stopReason: 'end_turn' });
+        await bridge.shutdown();
+      }
     });
 
     it('shutdown resolves outstanding permissions as cancelled', async () => {

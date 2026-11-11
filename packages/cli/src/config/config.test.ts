@@ -5979,6 +5979,65 @@ describe('loadCliConfig folderTrust', () => {
     const config = await loadCliConfig(settings, argv, undefined, []);
     expect(config.getFolderTrust()).toBe(false);
   });
+
+  it.each([undefined, false])(
+    'uses the ACP session workspace trust when launch-directory IDE trust is %s',
+    async (ideTrust) => {
+      process.argv = ['node', 'script.js', '--acp'];
+      const argv = await parseArguments();
+      const sessionCwd = path.join(process.cwd(), 'other-workspace');
+      vi.mocked(isWorkspaceTrusted).mockImplementation(
+        (_settings, _trustConfig, workspacePath) => ({
+          isTrusted: workspacePath === sessionCwd,
+          source: 'file',
+        }),
+      );
+      vi.spyOn(ServerConfig.ideContextStore, 'get').mockReturnValue({
+        workspaceState: { isTrusted: ideTrust },
+      });
+
+      const config = await loadCliConfig(
+        { security: { folderTrust: { enabled: true } } },
+        argv,
+        sessionCwd,
+        [],
+      );
+
+      expect(config.isTrustedFolder()).toBe(true);
+      expect(config.isExplicitlyTrustedFolder()).toBe(true);
+    },
+  );
+
+  it('does not turn implicit trust into explicit trust for a foreign ACP workspace', async () => {
+    process.argv = ['node', 'script.js', '--acp'];
+    const argv = await parseArguments();
+    const sessionCwd = path.join(process.cwd(), 'other-workspace');
+    vi.spyOn(ServerConfig.ideContextStore, 'get').mockReturnValue({
+      workspaceState: { isTrusted: true },
+    });
+
+    const config = await loadCliConfig(
+      { hooks: { Stop: [{ hooks: [{ type: 'command', command: 'x' }] }] } },
+      argv,
+      sessionCwd,
+      [],
+    );
+
+    expect(config.isTrustedFolder()).toBe(true);
+    expect(config.isExplicitlyTrustedFolder()).toBe(false);
+    expect(config.isProjectHooksPendingApproval()).toBe(true);
+  });
+
+  it('honors live IDE trust for an ACP session in the process workspace', async () => {
+    process.argv = ['node', 'script.js', '--acp'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig({}, argv, process.cwd(), []);
+    vi.spyOn(ServerConfig.ideContextStore, 'get').mockReturnValue({
+      workspaceState: { isTrusted: false },
+    });
+
+    expect(config.isTrustedFolder()).toBe(false);
+  });
 });
 
 describe('loadCliConfig allowPrivateNetworkHooks', () => {

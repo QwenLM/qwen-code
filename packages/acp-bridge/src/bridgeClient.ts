@@ -883,7 +883,7 @@ export class BridgeClient implements Client {
      */
     private readonly mediator: Pick<
       PermissionMediator,
-      'request' | 'cancelForPrompt'
+      'request' | 'cancelForPrompt' | 'cancelWorkflowApproval'
     >,
     /**
      * Bd1yh: wall-clock ms before `requestPermission` resolves as cancelled
@@ -1039,15 +1039,6 @@ export class BridgeClient implements Client {
       return { outcome: { outcome: 'cancelled' } };
     }
 
-    const explicitBackgroundTurn = parseBackgroundNotificationTurn(
-      params._meta?.['backgroundTurn'],
-    );
-    if (
-      explicitBackgroundTurn &&
-      entry.backgroundTurn?.turnId !== explicitBackgroundTurn.turnId
-    ) {
-      return { outcome: { outcome: 'cancelled' } };
-    }
     const appCallId =
       typeof params._meta?.['mcpAppCallId'] === 'string'
         ? params._meta['mcpAppCallId']
@@ -1057,20 +1048,44 @@ export class BridgeClient implements Client {
       : undefined;
     if (
       appCallId &&
-      (!appClientId || appCallId !== params.toolCall.toolCallId)
+      (!appClientId || appCallId !== params.toolCall?.toolCallId)
     ) {
       return { outcome: { outcome: 'cancelled' } };
     }
-    const backgroundTurn = appClientId
+    const backgroundWorkflowApproval =
+      !appClientId &&
+      params.toolCall?._meta?.['workflowApproval'] === true &&
+      params.toolCall._meta?.['backgroundWorkflowApproval'] === true;
+    const explicitBackgroundTurn = backgroundWorkflowApproval
       ? undefined
-      : (explicitBackgroundTurn ??
-        (entry.promptActive ? undefined : entry.backgroundTurn));
-    const permissionPromptId = appClientId
-      ? undefined
-      : (backgroundTurn?.turnId ?? entry.activePromptId);
-    const permissionOriginator =
+      : parseBackgroundNotificationTurn(params._meta?.['backgroundTurn']);
+    if (
+      explicitBackgroundTurn &&
+      entry.backgroundTurn?.turnId !== explicitBackgroundTurn.turnId
+    ) {
+      return { outcome: { outcome: 'cancelled' } };
+    }
+    const usesPrompt = !appClientId && !backgroundWorkflowApproval;
+    const backgroundTurn = usesPrompt
+      ? (explicitBackgroundTurn ??
+        (entry.promptActive ? undefined : entry.backgroundTurn))
+      : undefined;
+    const permissionPromptId = usesPrompt
+      ? (backgroundTurn?.turnId ?? entry.activePromptId)
+      : undefined;
+    let permissionOriginator =
       appClientId ??
-      (backgroundTurn ? undefined : entry.activePromptOriginatorClientId);
+      (usesPrompt && !backgroundTurn
+        ? entry.activePromptOriginatorClientId
+        : undefined);
+    const workflowOriginatorClientId =
+      params._meta?.['workflowOriginatorClientId'];
+    if (
+      backgroundWorkflowApproval &&
+      typeof workflowOriginatorClientId === 'string'
+    ) {
+      permissionOriginator = workflowOriginatorClientId;
+    }
     // Reserve model permission capacity within the existing session cap.
     if (
       appClientId &&
@@ -1135,10 +1150,7 @@ export class BridgeClient implements Client {
     });
     if (!published) return { outcome: { outcome: 'cancelled' } };
 
-    // Cap-index add happens AFTER publish-success so a publish-fail
-    // path doesn't need to roll back. The mediator's
-    // `forgetSession` is the only thing that drains this index (via
-    // the bridge's `cancelPendingForSession`).
+    // Index only published requests and remove them when the mediator settles.
     let interaction: BridgePendingInteraction | undefined;
     try {
       interaction = pendingInteractionFromRequest(requestId, {
@@ -1160,6 +1172,9 @@ export class BridgeClient implements Client {
         requestId,
         sessionId: entry.sessionId,
         promptId: appClientId ? appCallId : permissionPromptId,
+        ...(backgroundWorkflowApproval
+          ? { workflowApprovalToolCallId: params.toolCall.toolCallId }
+          : {}),
         originatorClientId: permissionOriginator,
         allowedOptionIds,
         issuedAtMs: Date.now(),
@@ -1198,6 +1213,15 @@ export class BridgeClient implements Client {
     ) {
       entry.restoreState.configOptions = params.update.configOptions;
     }
+    const update = params.update;
+    if (
+      entry &&
+      update.sessionUpdate === 'tool_call_update' &&
+      update._meta?.['backgroundWorkflowApproval'] === true &&
+      (update.status === 'completed' || update.status === 'failed')
+    ) {
+      this.mediator.cancelWorkflowApproval(entry.sessionId, update.toolCallId);
+    }
     const prepared = this.prepareSessionUpdateFrames(params, entry);
     for (const frame of prepared.frames) {
       events.publish(frame);
@@ -1229,17 +1253,20 @@ export class BridgeClient implements Client {
     entry?: BridgeClientSessionEntry,
   ): PreparedSessionUpdateFrames {
     const executionMeta = params.update._meta;
-    const taskCompleted =
-      executionMeta?.['source'] === 'background_task_completed';
-    const backgroundTurn = parseBackgroundNotificationTurn(
-      executionMeta?.['backgroundTurn'],
-    );
-    const promptId = taskCompleted
+    const backgroundWorkflowApproval =
+      executionMeta?.['backgroundWorkflowApproval'] === true;
+    const outsideTurn =
+      executionMeta?.['source'] === 'background_task_completed' ||
+      backgroundWorkflowApproval;
+    const backgroundTurn = backgroundWorkflowApproval
+      ? undefined
+      : parseBackgroundNotificationTurn(executionMeta?.['backgroundTurn']);
+    const promptId = outsideTurn
       ? undefined
       : (backgroundTurn?.turnId ?? entry?.activePromptId);
     const turn = {
       ...(promptId ? { promptId } : {}),
-      ...(!taskCompleted &&
+      ...(!outsideTurn &&
       !backgroundTurn &&
       (entry?.promptActive || !entry?.backgroundTurn) &&
       entry?.activePromptOriginatorClientId

@@ -2248,7 +2248,12 @@ describe('WorkflowRunRegistry', () => {
     const { r, completion, bg } = withCompletion();
     const entry = promptIdContext.run('local-turn', () =>
       runWithInvocationContext(
-        { version: 1, sessionId: 's', promptId: 'invocation-turn' },
+        {
+          version: 1,
+          sessionId: 's',
+          promptId: 'invocation-turn',
+          originatorClientId: 'workflow-client',
+        },
         () => bg('wf_turn'),
       ),
     );
@@ -2256,6 +2261,7 @@ describe('WorkflowRunRegistry', () => {
     r.complete(entry.runId, 'done', 1_000);
 
     expect(entry.sourceTurnId).toBe('invocation-turn');
+    expect(entry.sourceOriginatorClientId).toBe('workflow-client');
     expect(completion.mock.calls[0][2].sourceTurnId).toBe('invocation-turn');
   });
 

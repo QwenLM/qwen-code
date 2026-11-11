@@ -1324,7 +1324,11 @@ describe('BridgeClient — mode promotion fallback', () => {
       const client = new BridgeClient(
         (() => entry) as never,
         vi.fn(),
-        { request: vi.fn(), cancelForPrompt: vi.fn() },
+        {
+          request: vi.fn(),
+          cancelForPrompt: vi.fn(),
+          cancelWorkflowApproval: vi.fn(),
+        },
         0,
         Infinity,
       );
@@ -5478,7 +5482,11 @@ describe('background execution ownership', () => {
       const client = new BridgeClient(
         (() => entry) as never,
         vi.fn(),
-        { request: vi.fn(), cancelForPrompt: vi.fn() },
+        {
+          request: vi.fn(),
+          cancelForPrompt: vi.fn(),
+          cancelWorkflowApproval: vi.fn(),
+        },
         0,
         Infinity,
       );
@@ -5714,7 +5722,11 @@ describe('persisted last user prompt metadata', () => {
     const args: ConstructorParameters<typeof BridgeClient> = [
       (id) => (id === sessionId ? entry : undefined),
       () => undefined,
-      { request: vi.fn(), cancelForPrompt: vi.fn() },
+      {
+        request: vi.fn(),
+        cancelForPrompt: vi.fn(),
+        cancelWorkflowApproval: vi.fn(),
+      },
       0,
       Infinity,
     ];

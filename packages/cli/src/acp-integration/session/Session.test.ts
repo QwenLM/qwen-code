@@ -58180,7 +58180,11 @@ describe('Session', () => {
       const client = new BridgeClient(
         () => entry as BridgeClientSessionEntry,
         () => undefined,
-        { request: vi.fn(), cancelForPrompt: vi.fn() },
+        {
+          request: vi.fn(),
+          cancelForPrompt: vi.fn(),
+          cancelWorkflowApproval: vi.fn(),
+        },
         0,
         Infinity,
       );

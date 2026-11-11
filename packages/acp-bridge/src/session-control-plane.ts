@@ -6423,32 +6423,7 @@ export function createSessionControlPlane(
     }
   }
 
-  /**
-   * Resolve every pending request belonging to one session as cancelled.
-   *
-   * **Scope contract (per ACP spec / live-collab default):**
-   * Permissions are issued by the agent inline DURING an active
-   * prompt — `requestPermission` returns a Promise the agent awaits
-   * before continuing. Per the bridge's per-session FIFO + ACP's
-   * "one active prompt per session" guarantee, ALL outstanding
-   * permissions at any moment belong to the **currently active
-   * prompt**. So "cancel all pending permissions for this session"
-   * is equivalent to "cancel the active prompt's permissions" — and
-   * that's exactly what ACP requires when a prompt is cancelled
-   * ("cancelling a prompt MUST resolve outstanding requestPermission
-   * calls with outcome.cancelled").
-   *
-   * **Multi-client live-collab caveat:** under `sessionScope: 'single'`
-   * Client B may have been about to vote on A's pending permission
-   * via SSE — when A disconnects mid-prompt, B's vote (if it arrives
-   * after the abort) gets `404`. This is the right behavior: A's
-   * prompt is being cancelled, so the permission belongs to a turn
-   * that no longer matters. From B's side they see
-   * `permission_resolved` with `outcome: cancelled` on the SSE
-   * stream, then the prompt's `cancelled` stop reason. Voting on a
-   * cancelled-prompt's permission was never going to drive the
-   * agent forward anyway.
-   */
+  // Session teardown also cancels work that outlives an individual turn.
   const cancelPendingForSession = (sessionId: string) => {
     // Mediator first (it cancels each pending,
     // emits `permission_resolved`, writes audit, settles the
@@ -11670,7 +11645,7 @@ export function createSessionControlPlane(
           settleActivePromptState(entry, pendingEntry.promptId);
           // Unlock the dispatch race / FIFO first, then abort so the
           // existing onAbort path (prompt_cancelled UI signal +
-          // cancelPendingForSession + best-effort connection.cancel) runs.
+          // prompt approval cancellation + best-effort connection.cancel) runs.
           deadlineReject?.(deadlineErr);
           pendingAbort.abort(deadlineErr);
         };
@@ -12108,7 +12083,10 @@ export function createSessionControlPlane(
                         // already ends the turn visibly; a phantom
                         // forward-failure line and prompt_cancelled broadcast
                         // would misreport it.
-                        cancelPendingForSession(sessionId);
+                        permissionMediator.cancelForPrompt(
+                          sessionId,
+                          pendingEntry.promptId,
+                        );
                         return;
                       }
                       writeStderrLine(
@@ -12121,7 +12099,10 @@ export function createSessionControlPlane(
                         originatorClientId,
                         'forward_failed',
                       );
-                      cancelPendingForSession(sessionId);
+                      permissionMediator.cancelForPrompt(
+                        sessionId,
+                        pendingEntry.promptId,
+                      );
                     },
                   )
                   .catch(() => {});
@@ -12137,7 +12118,10 @@ export function createSessionControlPlane(
                     pendingEntry.promptId,
                     originatorClientId,
                   );
-                  cancelPendingForSession(sessionId);
+                  permissionMediator.cancelForPrompt(
+                    sessionId,
+                    pendingEntry.promptId,
+                  );
                   if (byId.get(sessionId) === entry) {
                     void forwardRunningPromptCancel(entry, pendingEntry, {
                       sessionId,
@@ -12320,19 +12304,21 @@ export function createSessionControlPlane(
       // `...Once` dedups against the `sendPrompt` abort path by prompt id, so
       // a client that POSTs /cancel and then drops its socket doesn't emit two
       // `prompt_cancelled` frames for the same turn.
+      const promptId =
+        entry.activePromptId ??
+        entry.backgroundTurn?.turnId ??
+        runningPrompt?.promptId;
       broadcastPromptCancelledOnce(
         entry,
         sessionId,
-        entry.activePromptId ??
-          entry.backgroundTurn?.turnId ??
-          runningPrompt?.promptId,
+        promptId,
         cancelOriginatorClientId,
       );
       // ACP spec: cancelling a prompt MUST resolve outstanding
       // requestPermission calls with outcome.cancelled. Do this *before*
       // forwarding the notification so the agent's wind-down sees the
       // resolutions.
-      cancelPendingForSession(sessionId);
+      permissionMediator.cancelForPrompt(sessionId, promptId);
       // Cancel intentionally bypasses the prompt queue: it's a notification
       // that the agent uses to wind down the *currently active* prompt, not
       // something to wait behind queued work.

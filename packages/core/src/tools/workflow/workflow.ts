@@ -1897,6 +1897,9 @@ export class WorkflowTool extends BaseDeclarativeTool<
     }
     if (params.run_in_background === true) {
       if (!hostSupportsBackgroundWorkflows(this.config)) {
+        if (this.config.isSessionAgentSession?.() === true) {
+          return 'WorkflowTool: Qwen Session Agents must run workflows in the foreground to return the result to the calling session. Omit `run_in_background`.';
+        }
         return this.config.getExperimentalZedIntegration?.() === true
           ? 'WorkflowTool: `run_in_background` is not available in this session: its workflow controls are off (workflows disabled, bare mode, or an untrusted workspace), so a background run could not be watched or stopped.'
           : 'WorkflowTool: `run_in_background` is available only in the interactive TUI and ACP clients such as Web Shell.';
