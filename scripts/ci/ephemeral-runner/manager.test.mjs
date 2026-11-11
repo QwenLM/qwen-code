@@ -2472,6 +2472,153 @@ test('drain stops an idle runner instead of waiting out the window', async (t) =
   );
 });
 
+test('drain keeps draining when GitHub refuses the registration retirement', async (t) => {
+  const { f, clock } = await drainHarness(t);
+  f.config.drainTimeoutSeconds = 600;
+  // A busy answer means GitHub may have just assigned the job the idle probe
+  // could not see yet.
+  f.setRejectFirstDelete(422);
+  const jobStartsAt = clock.now + 10_000;
+  const jobEndsAt = clock.now + 20_000;
+  let workerSeen = false;
+  let removedBeforeWorker = 0;
+  let releaseWait;
+  let manager;
+  const command = (program, args, options) => {
+    if (program === 'docker' && args[0] === 'start') manager.stop();
+    if (program === 'docker' && args[0] === 'wait')
+      return new Promise((resolveWait) => {
+        releaseWait = () => resolveWait('0\n');
+      });
+    if (program === 'docker' && args[0] === 'top') {
+      if (clock.now < jobStartsAt) return '';
+      workerSeen = true;
+      return 'Runner.Worker\n';
+    }
+    if (program === 'docker' && args[0] === 'rm' && !workerSeen)
+      removedBeforeWorker += 1;
+    return f.command(program, args, options);
+  };
+  manager = createManager(f.config, {
+    command,
+    sleep: async (ms) => {
+      clock.now += ms;
+      if (clock.now >= jobEndsAt) releaseWait?.();
+    },
+  });
+  await manager.start();
+  assert.equal(
+    workerSeen,
+    true,
+    'the job assigned after the refusal must keep running',
+  );
+  assert.equal(
+    removedBeforeWorker,
+    0,
+    'a refused retirement must not remove the container before the job runs',
+  );
+  assert.equal(
+    f.calls.filter((c) => c.program === 'docker' && c.args[0] === 'rm').length,
+    1,
+    'the container must be removed exactly once, after the job exits',
+  );
+  assert.equal(
+    f.calls.filter((c) => c.program === 'gh' && c.args.includes('DELETE'))
+      .length,
+    2,
+    'one refused retirement gate, then the cleanup delete',
+  );
+  assert.deepEqual(
+    f.runnerList(),
+    [],
+    'the registration must end up deleted after the job exits',
+  );
+});
+
+test('drain retires the registration before removing the container', async (t) => {
+  const { f, clock } = await drainHarness(t);
+  f.config.drainTimeoutSeconds = 600;
+  const order = [];
+  let deletes = 0;
+  let manager;
+  const command = (program, args, options) => {
+    if (program === 'docker' && args[0] === 'start') manager.stop();
+    if (program === 'docker' && args[0] === 'wait')
+      return new Promise(() => {});
+    if (program === 'docker' && args[0] === 'top') return 'sh\n';
+    if (program === 'docker' && args[0] === 'rm') order.push('rm');
+    if (program === 'gh' && args.includes('DELETE')) {
+      deletes += 1;
+      if (deletes === 1) {
+        order.push('delete-gate');
+        // The gate is accepted; the registration stays listed (GitHub's
+        // listing lag), so cleanup's delete hits 404 and must be tolerated
+        // rather than failing the cycle after the container is already gone.
+        return '';
+      }
+      order.push('delete-cleanup');
+      const error = Object.assign(new Error('gh failed (exit 1, HTTP 404)'), {
+        status: 404,
+      });
+      return Promise.reject(error);
+    }
+    return f.command(program, args, options);
+  };
+  manager = createManager(f.config, {
+    command,
+    sleep: async (ms) => {
+      clock.now += ms;
+    },
+  });
+  await manager.start();
+  assert.ok(
+    order.indexOf('delete-gate') < order.indexOf('rm'),
+    'the registration must be retired before the container is removed',
+  );
+  assert.equal(
+    f.calls.filter((c) => c.program === 'docker' && c.args[0] === 'rm').length,
+    1,
+    'the container must be removed exactly once',
+  );
+  assert.ok(
+    order.includes('delete-gate') && order.includes('delete-cleanup'),
+    'cleanup must retry the registration and tolerate its 404',
+  );
+});
+
+test('a rate-limited retirement backs off instead of polling every five seconds', async (t) => {
+  const { f, clock } = await drainHarness(t);
+  f.config.drainTimeoutSeconds = 600;
+  f.setRejectFirstDelete(429);
+  const deleteTimes = [];
+  let manager;
+  const command = (program, args, options) => {
+    if (program === 'docker' && args[0] === 'start') manager.stop();
+    if (program === 'docker' && args[0] === 'wait')
+      return new Promise(() => {});
+    if (program === 'docker' && args[0] === 'top') return '';
+    if (program === 'gh' && args.includes('DELETE'))
+      deleteTimes.push(clock.now);
+    return f.command(program, args, options);
+  };
+  manager = createManager(f.config, {
+    command,
+    sleep: async (ms) => {
+      clock.now += ms;
+    },
+  });
+  await manager.start();
+  assert.equal(deleteTimes.length, 2, 'the gate is retried after the refusal');
+  // The 429 pushes the next drain decision onto the rate-limit ladder
+  // (15-30 s), plus the fresh two-poll idle window, so it cannot come back at
+  // the five-second poll cadence.
+  const gap = deleteTimes[1] - deleteTimes[0];
+  assert.ok(
+    gap >= 20_000,
+    `a rate-limited retirement must back off, but retried after ${gap}ms`,
+  );
+});
+
 test('drain lets an assigned job exit before stopping the runner', async (t) => {
   const { f, clock } = await drainHarness(t);
   f.config.drainTimeoutSeconds = 600;

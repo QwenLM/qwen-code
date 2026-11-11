@@ -881,10 +881,35 @@ export function createManager(config, dependencies = {}) {
         let nextHealthCheck = Date.now() + config.ttlSeconds * 1000;
         let nextDrainCheck = 0;
         let idleSince;
+        let retireRefusalLogged;
         let stoppedIdle = false;
         let stoppedByExit = false;
         let exitCode;
         let waitWarningLogged = false;
+        // `docker top` observes processes, not the assignment queue, so an
+        // idle probe alone cannot prove GitHub will not hand this online
+        // runner a job in the gap before the container is removed. Deleting
+        // the registration is the server-side gate: once GitHub accepts the
+        // DELETE the runner is no longer assignable, and only then may the
+        // container stop. Busy (422) means a job may have just been
+        // assigned; 403/429 mean the answer is unknown — both keep the
+        // container draining and retry, and the deadline still forces the
+        // shutdown. A 404 means the registration is already gone, which is
+        // the same closed gate. Returns the refusal error, or undefined when
+        // the registration is retired.
+        const retireRegistration = async () => {
+          try {
+            await gh([
+              '-X',
+              'DELETE',
+              `/repos/${config.repo}/actions/runners/${state.runnerId}`,
+            ]);
+            return undefined;
+          } catch (error) {
+            if (error.status === 404) return undefined;
+            return error;
+          }
+        };
         const controller = new AbortController();
         const watch = () =>
           run('docker', ['wait', id], {
@@ -980,9 +1005,31 @@ export function createManager(config, dependencies = {}) {
               if (await containerHasWorker(id)) idleSince = undefined;
               else if (idleSince === undefined) idleSince = Date.now();
               else if (Date.now() - idleSince >= drainPollMs) {
-                stoppedIdle = true;
-                log(`slot ${slot}: idle; stopping the runner for shutdown`);
-                break;
+                const refusal = await retireRegistration();
+                if (!refusal) {
+                  stoppedIdle = true;
+                  log(`slot ${slot}: idle; stopping the runner for shutdown`);
+                  break;
+                }
+                // A refused retirement is not proof the slot is free: a job
+                // could have been assigned after the probe. Start the idle
+                // window over so the next decision needs a fresh two-poll
+                // observation, and keep draining until the deadline.
+                idleSince = undefined;
+                const refusalKey = refusal.status ?? 'unknown';
+                if (refusalKey !== retireRefusalLogged) {
+                  retireRefusalLogged = refusalKey;
+                  log(
+                    `slot ${slot}: runner registration not retired${
+                      refusal.status ? ` (HTTP ${refusal.status})` : ''
+                    }; keeping the container and draining`,
+                  );
+                }
+                // Do not hammer the API at the poll cadence when GitHub is
+                // already rate-limiting this credential; reuse the same
+                // backoff ladder as the rest of the manager.
+                if (refusal.status === 403 || refusal.status === 429)
+                  nextDrainCheck = Date.now() + backoffDelay(1, true);
               }
             }
           }
