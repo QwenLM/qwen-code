@@ -178,7 +178,7 @@ class ClientFilesRelayServiceTest {
         assertThat(jdbc.queryForObject("SELECT error_code FROM ma_client_files_request WHERE request_id='1'",
                 String.class)).isEqualTo("client_files_offline");
         verify(harness).clientFilesOperation(eq(tenant), eq(session),
-                eq(Map.of("action", "unregister")));
+                eq(Map.of("action", "unregister", "generation", registration.generation())));
     }
 
     @Test
@@ -405,7 +405,7 @@ class ClientFilesRelayServiceTest {
         for (int i = 0; i < 300; i++) {
             store.enqueue(tenant, session, registration.generation(), "r" + i, "{}",
                     old + 1_000, old);
-            store.answer(tenant, session, registration.generation(), "r" + i, "{}", old);
+            store.answer(tenant, session, registration.generation(), CONNECTION, "r" + i, "{}", old);
         }
         service.expireRequests();
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_client_files_request", Integer.class))

@@ -129,9 +129,9 @@ class ClientFilesRelayStoreTest {
         tx(() -> store.register(tenant, session, actor, "local-files", "a".repeat(64), 9_000L, 1_000L, "conn"));
         tx(() -> store.enqueue(tenant, session, 1L, "req-1", "{}", 9_000L, 1_000L));
         tx(() -> store.enqueue(tenant, session, 1L, "req-2", "{}", 9_000L, 1_000L));
-        assertThat(tx(() -> store.answer(tenant, session, 1L, "req-1", "{\"ok\":true}", 2_000L))).isTrue();
-        assertThat(tx(() -> store.answer(tenant, session, 1L, "req-1", "{\"ok\":false}", 2_100L))).isFalse();
-        assertThat(tx(() -> store.fail(tenant, session, 1L, "req-2", ClientFilesModels.ERROR_OFFLINE, 2_200L))).isTrue();
+        assertThat(tx(() -> store.answer(tenant, session, 1L, "conn", "req-1", "{\"ok\":true}", 2_000L))).isTrue();
+        assertThat(tx(() -> store.answer(tenant, session, 1L, "conn", "req-1", "{\"ok\":false}", 2_100L))).isFalse();
+        assertThat(tx(() -> store.fail(tenant, session, 1L, "conn", "req-2", ClientFilesModels.ERROR_OFFLINE, 2_200L))).isTrue();
         assertThat(tx(() -> store.queuedCount(tenant, session, 1L, 2_000L))).isZero();
         assertThat(jdbc.queryForObject("SELECT response_json FROM ma_client_files_request WHERE request_id='req-1'",
                 String.class)).isEqualTo("{\"ok\":true}");
@@ -155,7 +155,7 @@ class ClientFilesRelayStoreTest {
         tx(() -> store.enqueue(tenant, session, 1L, "req-1", "{}", 1_500L, 1_000L));
         tx(() -> store.enqueue(tenant, session, 1L, "req-2", "{}", 1_600L, 1_000L));
         tx(() -> store.enqueue(tenant, session, 1L, "req-3", "{}", 9_000L, 1_000L));
-        tx(() -> store.answer(tenant, session, 1L, "req-3", "{}", 1_200L));
+        tx(() -> store.answer(tenant, session, 1L, "conn", "req-3", "{}", 1_200L));
         assertThat(tx(() -> store.expireBefore(2_000L, 1))).isEqualTo(1);
         assertThat(tx(() -> store.expireBefore(2_000L, 10))).isEqualTo(1);
         assertThat(jdbc.queryForObject("SELECT state FROM ma_client_files_request WHERE request_id='req-3'",
@@ -188,11 +188,11 @@ class ClientFilesRelayStoreTest {
     void deleteSettledBeforeDropsOnlyOldSettledRows() {
         tx(() -> store.register(tenant, session, actor, "local-files", "a".repeat(64), 9_000L, 1_000L, "conn"));
         tx(() -> store.enqueue(tenant, session, 1L, "answered", "{}", 9_000L, 1_000L));
-        tx(() -> store.answer(tenant, session, 1L, "answered", "{}", 1_000L));
+        tx(() -> store.answer(tenant, session, 1L, "conn", "answered", "{}", 1_000L));
         tx(() -> store.enqueue(tenant, session, 1L, "failed", "{}", 9_000L, 1_000L));
-        tx(() -> store.fail(tenant, session, 1L, "failed", ClientFilesModels.ERROR_OFFLINE, 1_000L));
+        tx(() -> store.fail(tenant, session, 1L, "conn", "failed", ClientFilesModels.ERROR_OFFLINE, 1_000L));
         tx(() -> store.enqueue(tenant, session, 1L, "recent", "{}", 9_000L, 1_000L));
-        tx(() -> store.answer(tenant, session, 1L, "recent", "{}", 8_000L));
+        tx(() -> store.answer(tenant, session, 1L, "conn", "recent", "{}", 8_000L));
         tx(() -> store.enqueue(tenant, session, 1L, "queued", "{}", 9_000L, 1_000L));
         // Cutoff 5_000: the rows settled at 1_000 go; the row settled at 8_000
         // and the still-queued row stay.
@@ -255,8 +255,8 @@ class ClientFilesRelayStoreTest {
         // downlink must not receive the work, and a late answer must not settle
         // it (the Runtime has already been told it failed).
         assertThat(tx(() -> store.queued(tenant, session, 1L, 10, 2_000L))).isEmpty();
-        assertThat(tx(() -> store.answer(tenant, session, 1L, "req-1", "{}", 2_000L))).isFalse();
-        assertThat(tx(() -> store.fail(tenant, session, 1L, "req-1", ClientFilesModels.ERROR_OFFLINE, 2_000L))).isFalse();
+        assertThat(tx(() -> store.answer(tenant, session, 1L, "conn", "req-1", "{}", 2_000L))).isFalse();
+        assertThat(tx(() -> store.fail(tenant, session, 1L, "conn", "req-1", ClientFilesModels.ERROR_OFFLINE, 2_000L))).isFalse();
         assertThat(jdbc.queryForObject("SELECT state FROM ma_client_files_request WHERE request_id='req-1'",
                 String.class)).isEqualTo(ClientFilesModels.REQUEST_QUEUED);
     }
@@ -305,6 +305,54 @@ class ClientFilesRelayStoreTest {
                 "c".repeat(64), 29_000L, 5_000L, "conn-c"));
         assertThat(tx(() -> store.restore(tenant, session, 2L, first, 6_000L))).isFalse();
         assertThat(tx(() -> store.find(tenant, session)).tokenHash()).isEqualTo("c".repeat(64));
+    }
+
+    @Test
+    void registerCapturingPreviousReturnsTheAtomicallyReplacedBinding() {
+        ClientFilesModels.RegisterOutcome first = tx(() -> store.registerCapturingPrevious(
+                tenant, session, actor, "local-files", "a".repeat(64), 9_000L, 1_000L, "conn-a"));
+        assertThat(first.previous()).isNull();
+        ClientFilesModels.RegisterOutcome second = tx(() -> store.registerCapturingPrevious(
+                tenant, session, actor, "local-files", "b".repeat(64), 19_000L, 2_000L, "conn-b"));
+        assertThat(second.previous().generation()).isEqualTo(first.binding().generation());
+        ClientFilesModels.RegisterOutcome third = tx(() -> store.registerCapturingPrevious(
+                tenant, session, actor, "local-files", "c".repeat(64), 29_000L, 3_000L, "conn-c"));
+        // The compensation target for the third attempt is the binding it actually
+        // replaced (generation 2), not the generation-1 snapshot an earlier read
+        // outside the lock would have returned.
+        assertThat(third.previous().generation()).isEqualTo(second.binding().generation());
+        assertThat(third.previous().tokenHash()).isEqualTo("b".repeat(64));
+        assertThat(tx(() -> store.restore(tenant, session, third.binding().generation(),
+                third.previous(), 4_000L))).isTrue();
+        assertThat(tx(() -> store.find(tenant, session)).generation())
+                .isEqualTo(second.binding().generation());
+    }
+
+    @Test
+    void settlementIsFencedOnTheConnectionIdentityAcrossGenerationReuse() {
+        tx(() -> store.register(tenant, session, actor, "local-files",
+                "a".repeat(64), 9_000L, 1_000L, "conn-a"));
+        ClientFilesModels.RegisterOutcome failed = tx(() -> store.registerCapturingPrevious(
+                tenant, session, actor, "local-files", "b".repeat(64), 19_000L, 2_000L, "conn-b"));
+        tx(() -> store.enqueue(tenant, session, failed.binding().generation(), "0", "{}",
+                19_000L, 2_000L));
+        // The refused attempt is compensated; the next registration re-allocates
+        // its generation with a fresh connection identity.
+        tx(() -> store.restore(tenant, session, failed.binding().generation(), failed.previous(),
+                3_000L));
+        ClientFilesModels.RegisterOutcome fresh = tx(() -> store.registerCapturingPrevious(
+                tenant, session, actor, "local-files", "c".repeat(64), 29_000L, 4_000L, "conn-c"));
+        assertThat(fresh.binding().generation()).isEqualTo(failed.binding().generation());
+        tx(() -> store.enqueue(tenant, session, fresh.binding().generation(), "0",
+                "{\"new\":true}", 29_000L, 4_000L));
+        // The failed attempt's in-flight response must not settle the fresh
+        // connection's request even though the generation and request id match.
+        assertThat(tx(() -> store.answer(tenant, session, fresh.binding().generation(), "conn-b",
+                "0", "{\"old\":true}", 5_000L))).isFalse();
+        assertThat(tx(() -> store.answer(tenant, session, fresh.binding().generation(), "conn-c",
+                "0", "{\"new\":true}", 5_000L))).isTrue();
+        assertThat(tx(() -> store.request(tenant, session, fresh.binding().generation(), "0"))
+                .responseJson()).isEqualTo("{\"new\":true}");
     }
 
     private <T> T tx(Supplier<T> work) {

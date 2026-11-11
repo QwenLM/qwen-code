@@ -130,6 +130,12 @@ export function useManagedLocalFilesBridge(
       unsubscribeRef.current = undefined;
       void bridgeRef.current?.disconnect();
       bridgeRef.current = undefined;
+      // The listener is detached, so the old bridge's late `stopped` can no
+      // longer reset the panel; settle it here so a Session switch does not
+      // keep the previous Session's connected state (which would hide Connect).
+      setStatus((current) =>
+        current.phase === 'unavailable' ? current : IDLE,
+      );
     };
   }, [sessionId]);
 

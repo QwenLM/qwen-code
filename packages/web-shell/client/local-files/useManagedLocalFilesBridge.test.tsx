@@ -170,6 +170,32 @@ describe('useManagedLocalFilesBridge', () => {
     expect(result.current.status.phase).toBe('idle');
   });
 
+  it('resets the local-files status when switching Sessions', async () => {
+    const peer = await startPeer();
+    servers.push(peer.server);
+    const fakeWin = {
+      location: { origin: 'http://localhost' },
+    } as unknown as Window;
+    const { result, rerender } = renderHook(
+      ({ sessionId }) =>
+        useManagedLocalFilesBridge({
+          sessionId,
+          baseUrl: peer.baseUrl,
+          fetch: peerFetch,
+          win: fakeWin,
+        }),
+      { initialProps: { sessionId: 'session-A' } },
+    );
+    act(() => {
+      void result.current.connect();
+    });
+    await waitFor(() => expect(result.current.status.phase).toBe('connected'));
+    // The control is reused across Sessions without a key: switching must not
+    // keep Session A's connected state, which would hide Connect for Session B.
+    rerender({ sessionId: 'session-B' });
+    await waitFor(() => expect(result.current.status.phase).toBe('idle'));
+  });
+
   it('does not connect without a session', async () => {
     const peer = await startPeer();
     servers.push(peer.server);

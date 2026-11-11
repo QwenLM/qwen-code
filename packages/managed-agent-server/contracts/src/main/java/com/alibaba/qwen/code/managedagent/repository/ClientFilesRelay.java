@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.repository;
 
 import com.alibaba.qwen.code.managedagent.contracts.clientfiles.ClientFilesModels.Binding;
 import com.alibaba.qwen.code.managedagent.contracts.clientfiles.ClientFilesModels.QueuedRequest;
+import com.alibaba.qwen.code.managedagent.contracts.clientfiles.ClientFilesModels.RegisterOutcome;
 
 import java.util.List;
 
@@ -12,16 +13,30 @@ import java.util.List;
  * not journal records.
  */
 public interface ClientFilesRelay {
-    Binding register(String tenantId, String sessionId, String actorId, String serverId,
-            String tokenHash, long expiresAt, long now, String connectionId);
+    default Binding register(String tenantId, String sessionId, String actorId, String serverId,
+            String tokenHash, long expiresAt, long now, String connectionId) {
+        return registerCapturingPrevious(tenantId, sessionId, actorId, serverId, tokenHash,
+                expiresAt, now, connectionId).binding();
+    }
+
+    /**
+     * Registers atomically and also returns the binding this attempt replaced
+     * (null for a first registration), so a refused dispatch can compensate
+     * against the exact snapshot it replaced rather than one read earlier
+     * outside the lock, which a concurrent registration may have changed.
+     */
+    RegisterOutcome registerCapturingPrevious(String tenantId, String sessionId, String actorId,
+            String serverId, String tokenHash, long expiresAt, long now, String connectionId);
 
     /**
      * Compensates a refused re-registration by re-activating the previous
      * credential, but only while the failed attempt still owns the active
      * binding (a newer registration or an unregister already committed makes
-     * this a no-op). The restored binding advances to a fresh monotonic
-     * generation so a new client never reuses the failed attempt's request
-     * namespace. Returns whether the compensation was applied.
+     * this a no-op). It rewinds to the generation the previous client's
+     * downlink was opened with so that client keeps draining; settlement is
+     * fenced on the connection identity so a reused generation cannot let an
+     * old response settle a new connection's request. Returns whether the
+     * compensation was applied.
      */
     boolean restore(String tenantId, String sessionId, long failedGeneration, Binding previous,
             long now);
@@ -43,11 +58,11 @@ public interface ClientFilesRelay {
 
     QueuedRequest request(String tenantId, String sessionId, long generation, String requestId);
 
-    boolean answer(String tenantId, String sessionId, long generation, String requestId,
-            String responseJson, long now);
+    boolean answer(String tenantId, String sessionId, long generation, String connectionId,
+            String requestId, String responseJson, long now);
 
-    boolean fail(String tenantId, String sessionId, long generation, String requestId,
-            String errorCode, long now);
+    boolean fail(String tenantId, String sessionId, long generation, String connectionId,
+            String requestId, String errorCode, long now);
 
     int failQueued(String tenantId, String sessionId, long generation, String errorCode, long now);
 

@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent.persistence;
 import com.alibaba.qwen.code.managedagent.contracts.clientfiles.ClientFilesModels;
 import com.alibaba.qwen.code.managedagent.contracts.clientfiles.ClientFilesModels.Binding;
 import com.alibaba.qwen.code.managedagent.contracts.clientfiles.ClientFilesModels.QueuedRequest;
+import com.alibaba.qwen.code.managedagent.contracts.clientfiles.ClientFilesModels.RegisterOutcome;
 import com.alibaba.qwen.code.managedagent.repository.ClientFilesRelay;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -43,11 +44,15 @@ public class ClientFilesRelayStore implements ClientFilesRelay {
     }
 
     @Override
-    public Binding register(String tenantId, String sessionId, String actorId, String serverId,
-            String tokenHash, long expiresAt, long now, String connectionId) {
+    public RegisterOutcome registerCapturingPrevious(String tenantId, String sessionId,
+            String actorId, String serverId, String tokenHash, long expiresAt, long now,
+            String connectionId) {
         String scope = ManagedSchemaKeys.key(tenantId, sessionId);
         // The read is locked so concurrent registrations serialize their
-        // generation increments instead of losing an update.
+        // generation increments instead of losing an update. The snapshot read
+        // here is returned as the compensation target: a caller that read the
+        // binding earlier, outside this lock, may hold a snapshot a concurrent
+        // registration has already replaced.
         Binding previous = findByScopeForUpdate(scope);
         if (previous == null) {
             try {
@@ -57,8 +62,9 @@ public class ClientFilesRelayStore implements ClientFilesRelay {
                         ManagedSchemaKeys.identity(sessionId), ManagedSchemaKeys.identity(actorId),
                         1L, ClientFilesModels.STATE_ACTIVE, serverId, tokenHash, connectionId,
                         expiresAt, now, now);
-                return new Binding(tenantId, sessionId, actorId, 1L, ClientFilesModels.STATE_ACTIVE,
-                        serverId, tokenHash, expiresAt, now, now, connectionId);
+                return new RegisterOutcome(new Binding(tenantId, sessionId, actorId, 1L,
+                        ClientFilesModels.STATE_ACTIVE, serverId, tokenHash, expiresAt, now, now,
+                        connectionId), null);
             } catch (org.springframework.dao.DuplicateKeyException raced) {
                 // A concurrent first registration won the insert; advance it.
                 previous = findByScopeForUpdate(scope);
@@ -70,8 +76,9 @@ public class ClientFilesRelayStore implements ClientFilesRelay {
                         + " WHERE session_scope_key=?",
                 ManagedSchemaKeys.identity(actorId), generation, ClientFilesModels.STATE_ACTIVE,
                 serverId, tokenHash, connectionId, expiresAt, now, scope);
-        return new Binding(tenantId, sessionId, actorId, generation, ClientFilesModels.STATE_ACTIVE,
-                serverId, tokenHash, expiresAt, previous.createdAt(), now, connectionId);
+        return new RegisterOutcome(new Binding(tenantId, sessionId, actorId, generation,
+                ClientFilesModels.STATE_ACTIVE, serverId, tokenHash, expiresAt, previous.createdAt(),
+                now, connectionId), previous);
     }
 
     @Override
@@ -177,27 +184,36 @@ public class ClientFilesRelayStore implements ClientFilesRelay {
     }
 
     @Override
-    public boolean answer(String tenantId, String sessionId, long generation, String requestId,
-            String responseJson, long now) {
+    public boolean answer(String tenantId, String sessionId, long generation, String connectionId,
+            String requestId, String responseJson, long now) {
         // A late answer after the deadline must not settle work the Runtime has
-        // already been told failed.
+        // already been told failed. The settlement is also fenced on the live
+        // registration identity, atomically with the update: a restore may rewind
+        // the generation and a new connection may reuse it, so an old connection's
+        // in-flight response must not settle the new connection's request.
         return jdbc.update("UPDATE ma_client_files_request SET state=?,response_json=?,gmt_modified=?"
                         + " WHERE session_scope_key=? AND binding_generation=? AND request_id=?"
-                        + " AND state=? AND expires_at>?",
+                        + " AND state=? AND expires_at>?"
+                        + " AND EXISTS (SELECT 1 FROM ma_client_files_binding b"
+                        + " WHERE b.session_scope_key=ma_client_files_request.session_scope_key"
+                        + " AND b.connection_id=? AND b.state=?)",
                 ClientFilesModels.REQUEST_ANSWERED, responseJson, now,
                 ManagedSchemaKeys.key(tenantId, sessionId), generation, requestId,
-                ClientFilesModels.REQUEST_QUEUED, now) > 0;
+                ClientFilesModels.REQUEST_QUEUED, now, connectionId, ClientFilesModels.STATE_ACTIVE) > 0;
     }
 
     @Override
-    public boolean fail(String tenantId, String sessionId, long generation, String requestId,
-            String errorCode, long now) {
+    public boolean fail(String tenantId, String sessionId, long generation, String connectionId,
+            String requestId, String errorCode, long now) {
         return jdbc.update("UPDATE ma_client_files_request SET state=?,error_code=?,gmt_modified=?"
                         + " WHERE session_scope_key=? AND binding_generation=? AND request_id=?"
-                        + " AND state=? AND expires_at>?",
+                        + " AND state=? AND expires_at>?"
+                        + " AND EXISTS (SELECT 1 FROM ma_client_files_binding b"
+                        + " WHERE b.session_scope_key=ma_client_files_request.session_scope_key"
+                        + " AND b.connection_id=? AND b.state=?)",
                 ClientFilesModels.REQUEST_FAILED, errorCode, now,
                 ManagedSchemaKeys.key(tenantId, sessionId), generation, requestId,
-                ClientFilesModels.REQUEST_QUEUED, now) > 0;
+                ClientFilesModels.REQUEST_QUEUED, now, connectionId, ClientFilesModels.STATE_ACTIVE) > 0;
     }
 
     @Override

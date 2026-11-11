@@ -9283,8 +9283,17 @@ export function registerHostedHarnessSessionRoutes(
     if (action === 'unregister') {
       // Unregister is admitted during a Turn and teardown: it only drops the
       // catalog and connection so later Turns stop advertising tools whose
-      // binding is gone. Only register needs the idle/teardown gates.
-      await session.clientFiles?.unregister();
+      // binding is gone. Only register needs the idle/teardown gates. A stale
+      // teardown carries the generation it closed; if a newer registration has
+      // since installed, leave that catalog alone.
+      const files = session.clientFiles;
+      const generation = body?.['generation'];
+      if (
+        files &&
+        (typeof generation !== 'number' || files.generation === generation)
+      ) {
+        await files.unregister();
+      }
       return res.json({ registered: false });
     }
     // Refuse register mid-teardown like the sibling mutation routes: the

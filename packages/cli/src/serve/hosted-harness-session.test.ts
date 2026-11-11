@@ -42200,6 +42200,112 @@ describe('client files registration route', () => {
     }
   });
 
+  it('a stale unregister does not drop a newer registration catalog', async () => {
+    // The two relay peers advertise different tool counts, so the catalog a
+    // registration leaves installed is observable through the toolCount a
+    // later lower-generation register reports: a no-op downgrade returns the
+    // current catalog's count, while a fresh install returns the new peer's.
+    const toolsPeer = (toolCount: number) => {
+      const peer = createServer((req, res) => {
+        if (req.method !== 'POST') {
+          res.writeHead(req.method === 'DELETE' ? 200 : 405);
+          res.end();
+          return;
+        }
+        let body = '';
+        req.on('data', (chunk) => (body += chunk));
+        req.on('end', () => {
+          const message = JSON.parse(body) as { id?: unknown; method?: string };
+          if (message.id === undefined) {
+            res.writeHead(202);
+            res.end();
+            return;
+          }
+          const result =
+            message.method === 'initialize'
+              ? {
+                  protocolVersion: '2024-11-05',
+                  capabilities: { tools: {} },
+                  serverInfo: { name: 'relay', version: '1.0.0' },
+                }
+              : message.method === 'tools/list'
+                ? {
+                    tools: Array.from({ length: toolCount }, (_, i) => ({
+                      name: `read_file_${i}`,
+                      description: 'Read a client file',
+                      inputSchema: { type: 'object' },
+                    })),
+                  }
+                : { content: [{ type: 'text', text: 'ok' }] };
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ jsonrpc: '2.0', id: message.id, result }));
+        });
+      });
+      return peer;
+    };
+    const peerOne = toolsPeer(1);
+    const peerTwo = toolsPeer(2);
+    await new Promise<void>((resolve) =>
+      peerOne.listen(0, '127.0.0.1', resolve),
+    );
+    await new Promise<void>((resolve) =>
+      peerTwo.listen(0, '127.0.0.1', resolve),
+    );
+    const urlOne = `http://127.0.0.1:${(peerOne.address() as { port: number }).port}/mcp`;
+    const urlTwo = `http://127.0.0.1:${(peerTwo.address() as { port: number }).port}/mcp`;
+    const { server, sessionId, clientId } = await sessionWithClient();
+    try {
+      const dispatch = JSON.parse(
+        await readFile(
+          new URL(
+            '../../../managed-agent-server/verification/src/test/resources/clientfiles/dispatch-register.json',
+            import.meta.url,
+          ),
+          'utf8',
+        ),
+      ) as Record<string, unknown>;
+      const register = (generation: number, url: string) =>
+        headers(supertest(server).post(`/session/${sessionId}/client-files`))
+          .set('X-Qwen-Client-Id', clientId)
+          .send({ ...dispatch, url, generation });
+      expect((await register(1, urlOne)).body.toolCount).toBe(1);
+      expect((await register(2, urlTwo)).body.toolCount).toBe(2);
+      // A stale teardown for generation 1 must not drop the generation-2
+      // catalog. Re-registering generation 1 stays a no-op and reports the
+      // still-installed generation-2 catalog (2 tools), not peer one's single
+      // tool — which is what a wrongly cleared catalog would reinstall.
+      const stale = await headers(
+        supertest(server).post(`/session/${sessionId}/client-files`),
+      )
+        .set('X-Qwen-Client-Id', clientId)
+        .send({ action: 'unregister', generation: 1 });
+      expect(stale.status).toBe(200);
+      expect((await register(1, urlOne)).body.toolCount).toBe(2);
+      // The matching teardown clears the catalog, so a later generation-1
+      // registration installs peer one's single tool again.
+      const current = await headers(
+        supertest(server).post(`/session/${sessionId}/client-files`),
+      )
+        .set('X-Qwen-Client-Id', clientId)
+        .send({ action: 'unregister', generation: 2 });
+      expect(current.status).toBe(200);
+      expect((await register(1, urlOne)).body.toolCount).toBe(1);
+    } finally {
+      await headers(supertest(server).delete(`/session/${sessionId}`)).set(
+        'X-Qwen-Client-Id',
+        clientId,
+      );
+      await new Promise<void>((resolve) => {
+        peerOne.close(() => resolve());
+        peerOne.closeAllConnections();
+      });
+      await new Promise<void>((resolve) => {
+        peerTwo.close(() => resolve());
+        peerTwo.closeAllConnections();
+      });
+    }
+  });
+
   it('refuses an invalid registration payload', async () => {
     const { server, sessionId, clientId } = await sessionWithClient();
     try {

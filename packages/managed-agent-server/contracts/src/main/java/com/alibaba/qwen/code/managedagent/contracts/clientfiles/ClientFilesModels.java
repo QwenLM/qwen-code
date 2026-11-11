@@ -22,6 +22,14 @@ public final class ClientFilesModels {
         }
     }
 
+    /**
+     * The new binding plus the binding it atomically replaced (null for a first
+     * registration). Compensation must restore the snapshot captured inside the
+     * locked register, not one read earlier outside it, which a concurrent
+     * registration may already have replaced.
+     */
+    public record RegisterOutcome(Binding binding, Binding previous) {}
+
     public record QueuedRequest(String requestId, long bindingGeneration, String payloadJson,
             String state, String responseJson, String errorCode, long expiresAt,
             long createdAt, long modifiedAt) {}

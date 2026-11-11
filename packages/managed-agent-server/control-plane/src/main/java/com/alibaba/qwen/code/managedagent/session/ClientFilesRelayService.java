@@ -114,13 +114,17 @@ public class ClientFilesRelayService {
         requireExecutionAuthority(tenant, actor, session);
         String relayUrl = requireRelayUrl();
         long now = System.currentTimeMillis();
-        Binding previous = relay.find(tenant, session);
         byte[] secret = new byte[32];
         RANDOM.nextBytes(secret);
         String token = Base64.getUrlEncoder().withoutPadding().encodeToString(secret);
         long expiresAt = now + settings.getClientFiles().getBindingTtl().toMillis();
-        Binding binding = relay.register(tenant, session, actor, SERVER_ID,
-                DigestUtils.sha256Hex(token), expiresAt, now, connectionId);
+        // The compensation target must be the binding this attempt atomically
+        // replaced, not one read here outside the store lock: a concurrent
+        // registration may already have replaced that earlier snapshot.
+        ClientFilesModels.RegisterOutcome outcome = relay.registerCapturingPrevious(tenant, session,
+                actor, SERVER_ID, DigestUtils.sha256Hex(token), expiresAt, now, connectionId);
+        Binding binding = outcome.binding();
+        Binding previous = outcome.previous();
         int toolCount;
         try {
             Map<String, Object> registered = harness.clientFilesOperation(tenant, session, Map.of(
@@ -178,8 +182,12 @@ public class ClientFilesRelayService {
         relay.failQueued(tenant, session, binding.generation(), ClientFilesModels.ERROR_OFFLINE, now);
         // The binding is already closed, so a Harness that cannot be reached
         // must not fail the teardown; its own session cleanup drops the tools.
+        // Carry the generation so a stale teardown cannot drop a newer
+        // registration's catalog: a replacement may install between the close
+        // and this dispatch, and the Harness fences on the identity.
         try {
-            harness.clientFilesOperation(tenant, session, Map.of("action", "unregister"));
+            harness.clientFilesOperation(tenant, session,
+                    Map.of("action", "unregister", "generation", binding.generation()));
         } catch (RuntimeException ignored) {
             // best-effort dispatch
         }
@@ -223,7 +231,8 @@ public class ClientFilesRelayService {
         relay.close(tenant, session, generation, now);
         relay.failQueued(tenant, session, generation, ClientFilesModels.ERROR_OFFLINE, now);
         try {
-            harness.clientFilesOperation(tenant, session, Map.of("action", "unregister"));
+            harness.clientFilesOperation(tenant, session,
+                    Map.of("action", "unregister", "generation", generation));
         } catch (RuntimeException ignored) {
             // best-effort dispatch; the harness session cleanup also drops it
         }
@@ -302,8 +311,10 @@ public class ClientFilesRelayService {
         requirePayloadSize(payload);
         long now = System.currentTimeMillis();
         boolean settled = answer
-                ? relay.answer(tenant, session, binding.generation(), requestId, responseJson, now)
-                : relay.fail(tenant, session, binding.generation(), requestId, errorCode, now);
+                ? relay.answer(tenant, session, binding.generation(), connectionId, requestId,
+                        responseJson, now)
+                : relay.fail(tenant, session, binding.generation(), connectionId, requestId,
+                        errorCode, now);
         if (!settled) {
             throw error(404, "client_files_request_not_found");
         }
