@@ -336,8 +336,8 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     'packages/cli/src/serve/managed-runtime-attestation-worker.ts',
     {
       reason:
-        'The Runtime worker scrubs the loader variables that only started its own process, so the commands it runs do not inherit them.',
-      accesses: { whole: 1 },
+        'The Runtime worker scrubs the loader variables that only started its own process, so the commands it runs do not inherit them, and passes its environment to the terminal host that spawns PTY sessions.',
+      accesses: { whole: 2 },
     },
   ],
   [
