@@ -186,6 +186,7 @@ import type {
   WorkspaceRuntime,
 } from './workspace-registry.js';
 import type { SessionArchiveCoordinator } from './server/session-archive.js';
+import type { RequestedSessionIdAdmission } from './session-id-admission.js';
 import type {
   DaemonTrustPolicySnapshot,
   DaemonWorkspaceTrustDecision,
@@ -7629,8 +7630,93 @@ async function runQwenServeImpl(
     const refreshGeneration = ++sessionPrRefreshGeneration;
     if (opts.profile !== 'hosted-harness') {
       void import('./server/session-pr-refresh.js')
-        .then((mod) => {
+        .then(async (mod) => {
           if (refreshGeneration !== sessionPrRefreshGeneration) return;
+          // Built once, asynchronously: the allowed set needs the hosted
+          // channels' configs, whose loader is async. Until it resolves the
+          // getters return undefined and the watch stays inert — the same
+          // degradation as a failed chunk load.
+          let prWatchDeps:
+            | import('./server/pr-watch-deps.js').PrWatchDeps
+            | undefined;
+          void (async () => {
+            try {
+              const [depsMod, webhookRuntime] = await Promise.all([
+                import('./server/pr-watch-deps.js'),
+                loadChannelWebhookConfigRuntime(),
+              ]);
+              if (refreshGeneration !== sessionPrRefreshGeneration) return;
+              prWatchDeps = depsMod.createPrWatchDeps({
+                workspaceRegistry,
+                archiveCoordinator: () =>
+                  (
+                    app.locals as {
+                      sessionArchiveCoordinator?: SessionArchiveCoordinator;
+                    }
+                  ).sessionArchiveCoordinator,
+                restore: async (input) => {
+                  const admission = (
+                    app.locals as {
+                      requestedSessionIdAdmission?: RequestedSessionIdAdmission;
+                    }
+                  ).requestedSessionIdAdmission;
+                  if (!admission) {
+                    throw new Error('PR watch: no session-id admission');
+                  }
+                  const restoreMod = await import(
+                    './server/session-restore.js'
+                  );
+                  return restoreMod.restoreSessionCore({
+                    action: 'resume',
+                    ...input,
+                    requestedSessionIdAdmission: admission,
+                    assertRuntimeGenerationOpen: () =>
+                      input.runtime.generationGuard?.assertOpen(),
+                    daemonLog,
+                    materializeLiveConversationDirectory: undefined,
+                    historyPageSize: undefined,
+                    liveReplayMode: undefined,
+                    compactedReplayMode: undefined,
+                    clientId: undefined,
+                    approvalMode: undefined,
+                    restoreSource: {},
+                    isCancelled: () => false,
+                  });
+                },
+                // Only the groups the channel grouping already attributed to a
+                // trusted workspace, so an untrusted workspace's settings never
+                // widen the allowed set.
+                hostedChannelBaseUrls: () => {
+                  const urls: unknown[] = [];
+                  for (const group of channelWorkspaceGroups ?? []) {
+                    let merged: Record<string, unknown>;
+                    try {
+                      merged = webhookRuntime.loadChannelsConfig(
+                        group.workspaceCwd,
+                      );
+                    } catch {
+                      continue;
+                    }
+                    for (const entry of Object.values(merged)) {
+                      if (!entry || typeof entry !== 'object') continue;
+                      const config = entry as Record<string, unknown>;
+                      if (config['type'] !== 'github') continue;
+                      urls.push(config['baseUrl']);
+                    }
+                  }
+                  return urls;
+                },
+                daemonLog,
+                log: (message) => daemonLog.warn(message),
+              });
+            } catch (error) {
+              daemonLog.warn(
+                `PR watch deps unavailable: ${
+                  error instanceof Error ? error.message : String(error)
+                }`,
+              );
+            }
+          })();
           sessionPrRefreshTimer = mod.startSessionPrRefreshTimer({
             workspaceRegistry,
             // The coordinator lives on the serve app (createServeApp below),
@@ -7642,6 +7728,8 @@ async function runQwenServeImpl(
                   sessionArchiveCoordinator?: SessionArchiveCoordinator;
                 }
               ).sessionArchiveCoordinator,
+            getPrWatchDeps: () => prWatchDeps?.watch,
+            getPrDrainDeps: () => prWatchDeps?.drain,
           });
           const handle = sessionPrRefreshTimer;
           stopPrWatchOnShutdown = handle ? () => handle.stopWatch() : undefined;

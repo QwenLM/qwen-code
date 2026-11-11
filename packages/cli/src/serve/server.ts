@@ -164,6 +164,7 @@ import { registerStandaloneSessionRoutes } from './routes/standalone-sessions.js
 import {
   createRequestedSessionIdAdmission,
   requestedSessionIdPersistenceExists,
+  type RequestedSessionIdAdmission,
 } from './session-id-admission.js';
 import { sessionAttachmentsRoots } from './session-attachments-root.js';
 import {
@@ -3679,6 +3680,13 @@ export function createServeApp(
         }
       : {}),
   });
+  // The PR watch's in-process wake shares this instance with the routes: a
+  // second tracker would not see these reservations and could restore over one.
+  (
+    app.locals as {
+      requestedSessionIdAdmission?: RequestedSessionIdAdmission;
+    }
+  ).requestedSessionIdAdmission = requestedSessionIdAdmission;
 
   if (standaloneSessionService) {
     registerStandaloneSessionRoutes(app, {
