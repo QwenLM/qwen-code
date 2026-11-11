@@ -19,7 +19,10 @@ import type { Content, Part } from '@google/genai';
 import { readFile, stat } from 'node:fs/promises';
 import { realpathSync } from 'node:fs';
 import { resolve as resolvePath, sep as pathSep } from 'node:path';
-import { CHARS_PER_TOKEN } from './tokenEstimation.js';
+import {
+  CHARS_PER_TOKEN,
+  estimateContextTextTokens,
+} from './tokenEstimation.js';
 import { getFunctionResponseParts } from './compactionInputSlimming.js';
 import { escapeXml } from '../utils/xml.js';
 import { ToolNames } from '../tools/tool-names.js';
@@ -378,8 +381,9 @@ export async function readFileSizeAdaptive(
  *  - One embed block per small file with full content.
  *  - Nothing for missing/binary files.
  *
- * Files that would exceed the token budget (50K by default) are downgraded
- * to references.
+ * Files that would exceed the CJK-aware token budget (50K by default) are
+ * downgraded to references. The per-file reader first applies its existing
+ * character-size cap to bound disk reads.
  */
 export async function buildFileRestorationBlocks(
   filePaths: string[],
@@ -389,8 +393,7 @@ export async function buildFileRestorationBlocks(
   const references: string[] = [];
   const embeds: Array<{ path: string; content: string }> = [];
 
-  let usedChars = 0;
-  const budgetChars = tokenBudget * CHARS_PER_TOKEN;
+  let usedTokens = 0;
 
   for (const filePath of filePaths) {
     if (signal?.aborted) break;
@@ -405,19 +408,20 @@ export async function buildFileRestorationBlocks(
       continue;
     }
     // embed — check global budget; downgrade to reference if over.
-    if (usedChars + result.content.length > budgetChars) {
+    const fileTokens = estimateContextTextTokens(result.content);
+    if (usedTokens + fileTokens > tokenBudget) {
       references.push(filePath);
       continue;
     }
     embeds.push({ path: filePath, content: result.content });
-    usedChars += result.content.length;
+    usedTokens += fileTokens;
   }
 
   const blocks: Content[] = [];
 
   if (references.length > 0) {
     const lines = [
-      'The following files were recently accessed before context was compacted. They are listed as reference only because they are large. Use `read_file` to view current content for any file you need:',
+      'The following files were recently accessed before context was compacted. They are listed as reference only due to file size or the restoration budget. Use `read_file` to view current content for any file you need:',
       '',
       ...references.map((p) => `- ${sanitizePathForDisplay(p)}`),
     ];

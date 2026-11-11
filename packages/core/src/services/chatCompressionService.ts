@@ -28,7 +28,6 @@ import { makeChatCompressionEvent } from '../telemetry/types.js';
 import { PreCompactTrigger, PostCompactTrigger } from '../hooks/types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
-  estimateContentChars,
   resolveCompactionTuning,
   resolveSlimmingConfig,
   slimCompactionInput,
@@ -36,6 +35,7 @@ import {
 import {
   CHARS_PER_TOKEN,
   estimateContentTokens,
+  estimateContextTextTokens,
   estimatePromptTokens,
 } from './tokenEstimation.js';
 import {
@@ -148,6 +148,21 @@ export const MAX_CONSECUTIVE_FAILURES = 3;
 const CJK_CHAR_TOKEN_MULTIPLIER = 1.5;
 const CJK_CHAR_PATTERN =
   /[\u3040-\u30ff\u3400-\u9fff\uf900-\ufaff\uac00-\ud7af]/g;
+
+function estimatePostCompactTokens(
+  contents: Content[],
+  imageTokenEstimate: number,
+): number {
+  const text = contents
+    .flatMap((content) => content.parts ?? [])
+    .map((part) => part.text ?? '')
+    .join('');
+  return (
+    estimateContentTokens(contents, imageTokenEstimate) +
+    estimateContextTextTokens(text) -
+    Math.ceil(text.length / CHARS_PER_TOKEN)
+  );
+}
 
 function estimateSummaryOutputTokens(
   summary: string,
@@ -1289,6 +1304,10 @@ export class ChatCompressionService {
         lastCurated.parts?.some((p) => !!p.functionCall)
           ? curatedHistory.slice(0, -1)
           : curatedHistory;
+      const restorationThreshold = computeThresholds(
+        reactiveContextCeiling,
+        config.getAutoCompactThreshold(),
+      ).auto;
 
       // Use the new composer — assembles summary + ack + file restores +
       // image restore. No tail preservation, no continuation bridge.
@@ -1301,7 +1320,8 @@ export class ChatCompressionService {
             signal,
             fileTokenBudget: Math.min(
               POST_COMPACT_TOKEN_BUDGET,
-              Math.floor(contextLimit / 4),
+              Math.floor(reactiveContextCeiling / 4),
+              Math.floor(restorationThreshold / 2),
             ),
             // A payload-overflow compaction (#10380) exists because the
             // serialized request exceeded the gateway's BYTE limit while
@@ -1369,6 +1389,12 @@ export class ChatCompressionService {
         ];
       }
 
+      const restoredHistory = extraHistory.slice(2); // skip [summary, model ack]
+      const restorationTokenCount = estimatePostCompactTokens(
+        restoredHistory,
+        slimmingConfig.imageTokenEstimate,
+      );
+
       // Best-effort token math using model-reported token counts when
       // available. Some OpenAI-compatible providers omit usage for the
       // compression side-query; in that case, fall back to the same local
@@ -1416,23 +1442,24 @@ export class ChatCompressionService {
         // compressionOutputTokenCount. Estimate their cost locally so the
         // inflation guard below fires when attachments dominate the
         // post-compact size.
-        const restorationChars = extraHistory
-          .slice(2) // skip [summary, model ack]
-          .reduce(
-            (acc, c) =>
-              acc + estimateContentChars(c, slimmingConfig.imageTokenEstimate),
-            0,
-          );
-        newTokenCount += Math.ceil(restorationChars / CHARS_PER_TOKEN);
+        newTokenCount += restorationTokenCount;
       } else {
         const estimatedOriginalVisibleTokenCount = estimateContentTokens(
           curatedHistory,
           slimmingConfig.imageTokenEstimate,
         );
-        const estimatedNewVisibleTokenCount = estimateContentTokens(
-          extraHistory,
-          slimmingConfig.imageTokenEstimate,
-        );
+        // Correct restored text while keeping the summary/history delta on
+        // its existing basis, including when the summary contains CJK text.
+        const estimatedNewVisibleTokenCount =
+          estimateContentTokens(
+            extraHistory,
+            slimmingConfig.imageTokenEstimate,
+          ) +
+          restorationTokenCount -
+          estimateContentTokens(
+            restoredHistory,
+            slimmingConfig.imageTokenEstimate,
+          );
         if (
           estimatedOriginalVisibleTokenCount > 0 &&
           estimatedNewVisibleTokenCount > 0
@@ -1468,9 +1495,9 @@ export class ChatCompressionService {
       if (
         canCalculateNewTokenCount &&
         extraHistory.length > 2 &&
-        newTokenCount >=
-          computeThresholds(contextLimit, config.getAutoCompactThreshold()).auto
+        newTokenCount + pendingToolResultTokenCount >= restorationThreshold
       ) {
+        // Zero attachment limits make this composition free of disk I/O.
         const withoutRestoration = await composePostCompactHistory(
           historyForCompose,
           summary,
@@ -1485,18 +1512,27 @@ export class ChatCompressionService {
         );
         // Remove only the restored-history delta, preserving the existing
         // accounting for the summary and non-visible system/tool context.
+        const tokenCountBeforeDroppingRestoration = newTokenCount;
         newTokenCount = Math.max(
           0,
           newTokenCount +
-            estimateContentTokens(
+            estimatePostCompactTokens(
               withoutRestoration,
               slimmingConfig.imageTokenEstimate,
             ) -
-            estimateContentTokens(
+            estimatePostCompactTokens(
               extraHistory,
               slimmingConfig.imageTokenEstimate,
             ),
         );
+        config
+          .getDebugLogger()
+          .debug(
+            `[chat-compression] dropped restored files and images: ` +
+              `${tokenCountBeforeDroppingRestoration} + ${pendingToolResultTokenCount} pending tokens ` +
+              `reached the auto threshold ${restorationThreshold}; ` +
+              `post-compression count ${tokenCountBeforeDroppingRestoration} -> ${newTokenCount}`,
+          );
         extraHistory = withoutRestoration;
       }
     }
