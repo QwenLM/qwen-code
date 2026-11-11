@@ -13938,6 +13938,7 @@ describe('client files tool execution', () => {
   function clientFilesTurn(
     files: import('./hosted-client-files-session.js').HostedClientFilesSession,
     mode: HostedApprovalMode = 'yolo',
+    permissionRules?: HostedApprovalSettings['permissionRules'],
   ) {
     return new HostedWorkspaceToolTurn(
       { baseUrl: 'http://127.0.0.1:1', token: 'test' },
@@ -13948,7 +13949,14 @@ describe('client files tool execution', () => {
       messageFitsInline,
       undefined,
       undefined,
-      { settings: { mode, timeoutMs: 60_000 }, waiters },
+      {
+        settings: {
+          mode,
+          timeoutMs: 60_000,
+          ...(permissionRules ? { permissionRules } : {}),
+        },
+        waiters,
+      },
       { clientFiles: files },
     );
   }
@@ -14009,6 +14017,46 @@ describe('client files tool execution', () => {
       (await session.sink.project()).map((record) => record.type),
     ).not.toContain('tool_result');
   });
+
+  it.each(['allow', 'deny'] as const)(
+    'matches permission rules against the browser tool identity (%s)',
+    async (rule) => {
+      const invoke = vi.fn(async () => ({
+        content: [{ type: 'text', text: 'ok' }],
+      }));
+      // The identity permissionDecision resolves for a browser tool is
+      // mcp__<serverId>__<browser tool name>, not the namespaced declaration
+      // name; a rule on that identity must allow/deny the call accordingly.
+      const permissionRules = {
+        allow: [] as string[],
+        ask: [] as string[],
+        deny: [] as string[],
+      };
+      permissionRules[rule].push('mcp__local-files__read_file');
+      turn = clientFilesTurn(
+        clientFilesSession(invoke),
+        'default',
+        permissionRules,
+      );
+      const responses = await turn.execute(
+        [clientFilesCall],
+        clientFilesParts,
+        'model',
+        new AbortController().signal,
+      );
+      if (rule === 'deny') {
+        expect(responses[0].functionResponse?.response?.['error']).toContain(
+          'permission rules denied',
+        );
+        expect(invoke).not.toHaveBeenCalled();
+      } else {
+        expect(responses[0].functionResponse?.response?.['output']).toBe('ok');
+        expect(invoke).toHaveBeenCalledTimes(1);
+      }
+      await turn.consumeResults();
+      await turn.finish();
+    },
+  );
 
   it('converts a relay call failure into a tool error without failing the Turn', async () => {
     const invoke = vi.fn(async () => {

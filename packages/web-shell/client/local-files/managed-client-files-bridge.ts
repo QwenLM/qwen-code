@@ -11,11 +11,12 @@
  * node test against a scripted control-plane peer.
  */
 
-import type { JsonRpcRequest, JsonRpcResponse } from './mcp-server.js';
+import type { JsonRpcRequest } from './mcp-server.js';
+// Single source of truth for the RPC contract: the sibling daemon bridge
+// already exports this structural type; re-export it rather than re-declaring.
+import type { LocalFilesRpcServer } from './bridge-client.js';
 
-export interface LocalFilesRpcServer {
-  handle(message: JsonRpcRequest): Promise<JsonRpcResponse | undefined>;
-}
+export type { LocalFilesRpcServer };
 
 export type ManagedFetch = (
   url: string,
