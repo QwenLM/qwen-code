@@ -40,6 +40,47 @@ Hosts with restricted upstream connectivity can set `DEBIAN_MIRROR`,
 `PIP_INDEX_URL` or `RUNNER_RELEASE_URL` at build time. The runner archive is
 still verified against its pinned digest when served from a mirror.
 
+## Browsers in the image
+
+The image bakes Chromium, its system libraries and ffmpeg. The lanes that
+install browsers (`ci.yml`, `e2e.yml`, `web-shell-visuals.yml`) skip their own
+install when `PLAYWRIGHT_BROWSERS_PATH` is set, and only this image sets it for
+them, so a job on it needs no browser egress and no apt round trip for the
+libraries. That holds for Chromium only: the image does not bake WebKit, and the
+lanes that install `chromium webkit` (hosted `ubuntu-latest` and the persistent
+ARM64 machines) still download both. A disposable container has no cache to
+reuse: without this, every visuals job paid a fresh download, and on 2026-11-11
+the upstream CDN served the browser at about 61 KB/s from the hz4/hz5 hosts — a
+110 MB headless shell was still at 70% after six minutes when two jobs were
+cancelled. The same object came from `cdn.npmmirror.com` at 8.9 MB/s on the same
+host, which is why `PLAYWRIGHT_DOWNLOAD_HOST` defaults there. Set it to the
+upstream CDN, or to an internal mirror, on a host that reaches one faster.
+
+The mirror is incomplete: its `builds/cft/` starts at 148.0.7778.96, so it
+carries 1.61.1's and 1.62.1's Chromium but not 1.58.2's 145.0.7632.6 (nor
+1.58.2's non-CFT `builds/chromium/1208/`). The install loop therefore falls back
+per version to Playwright's own CDN list, and logs which version it retried, so
+the default host cannot fail the build on a version it does not mirror.
+
+Size is the price. From the archives' Content-Length, the three versions are
+about 0.92 GB of downloads, roughly 2.0-2.3 GB extracted, plus 2.2-2.5 GB for
+the apt packages (Chromium's system libraries and ffmpeg) — estimates, not a
+measured image delta; weigh them against the host's disk floor.
+
+Every playwright the repository resolves picks its own browser revision, and the
+tree currently carries three: 1.61.1 at the root and in Web Shell, 1.62.1 under
+Browser Use, and 1.58.2 pulled in transitively. All three are baked, because the
+integration lane installs browsers for Browser Use as well and would otherwise
+download at job time. `PLAYWRIGHT_VERSIONS` overrides the list.
+
+The list lives in the Dockerfile because this image's build context is its own
+directory, so the lockfile is not available to it; the revisions are read from
+each version's own `browsers.json` during the build, never written down.
+`scripts/tests/verify-capture.test.js` compares the list against `pnpm-lock.yaml`,
+so a dependency bump fails that test rather than silently leaving a revision to
+be downloaded inside a job. The final layer asserts the font baseline, ffmpeg and
+a launchable Chromium, and fails the build if any of them is missing.
+
 For a real deployment, publish the image to a registry and configure its
 immutable `repository@sha256:...` digest. A local `sha256:...` image ID may be
 used for a trial. Runner and base versions need routine security updates.
@@ -84,7 +125,7 @@ label set matching the actual CI route. The current ARM64 pool registers only
 `self-hosted` and `ecs-qwen-ephemeral`. Omitting generic Linux/ARM64 labels keeps
 unrelated ARM64 jobs out of this pool. Validate the existing
 CI jobs with these formal labels rather than a separate smoke workflow. The
-example runs one slot; hz4 currently maintains ten fixed slots, and the
+example runs one slot; hz4 currently maintains thirty fixed slots, and the
 manager accepts up to 64 slots per host. Keep capacity conservative until real CI execution and resource use are stable. Restrict configuration and
 credential directories to the manager account.
 
@@ -107,10 +148,22 @@ manager rejects such URLs at startup.
 `noProxy` should include the cloud metadata endpoint (`100.100.100.200`)
 to avoid leaking instance credentials through the proxy.
 
-The `ttlSeconds` limit starts when the container starts, including idle time.
-A job assigned near the deadline can be interrupted. The manager removes and
-replaces the container; GitHub remains authoritative for job status. The
-manager logs cleanup but does not distinguish expiry from normal completion.
+`ttlSeconds` now sets the age at which health checks begin; it is not a hard
+container lifetime. Healthy idle runners stay available, and an assigned job
+can finish even if the container was already near that age. After this age the
+manager checks the recorded GitHub runner ID/name and online status every five
+minutes. An unavailable, offline or mismatched registration logs `WATCHDOG ALERT`
+and keeps the container. Job runtime limits belong to the workflow's
+`timeout-minutes` (currently 45–90 minutes for the routed jobs).
+
+Only a confirmed container exit triggers normal replacement. A failed
+`docker wait` client is checked against Docker state and retried rather than
+being treated as a job exit. The wait client has no age timeout and is cancelled
+when monitoring ends. A stuck runner that cannot honor a GitHub cancellation
+requires operator inspection and targeted recovery; an offline registration is
+not proof that killing its container is safe. This deliberately trades automatic
+age-based reclamation for avoiding interruption of live jobs.
+
 A nonzero or unknown container exit status delays replenishment by 60 seconds;
 a successful short job is replenished immediately. GitHub remains authoritative
 for job success. Diagnostic export is best effort: stderr is not archived, and
@@ -136,6 +189,29 @@ the reported duration is the threshold rounded up to the current cadence. A
 stall alert means the slot is serving no jobs and needs reconciliation; the
 manager keeps retrying and never exits on its own, so systemd does not restart
 it. Alert on that journal marker rather than on service state.
+
+`drainTimeoutSeconds` (default 0, disabled; the example config sets 1800)
+turns SIGTERM into a drain instead of a fixed grace deadline. Replenishment
+stops immediately, and a slot holding an assigned job keeps serving until that
+job's ephemeral runner exits on its own. A slot whose container shows no
+`Runner.Worker` process for two consecutive five-second polls is retired before
+its container stops: the manager deletes the runner's GitHub registration and
+treats an accepted DELETE as the point at which the runner can no longer be
+assigned work. That gate is what covers the gap between the last idle probe and
+`docker rm -f` — a job assigned there would otherwise be killed by the removal.
+A refused retirement keeps the container draining and restarts the idle window:
+422 (GitHub still reports the runner busy) means a job may have just been
+assigned, 403/429 (rate limiting) is an unknown answer and backs off on the same
+ladder as the rest of the manager, and any other failure fails closed.
+The drain window is added to `shutdownGraceSeconds`, which remains the final
+forced-cleanup bound; keep the sum below the unit's `TimeoutStopSec` (the
+supplied unit allows 55 minutes). A job that outlives the window is stopped and
+the slot logs `drain window elapsed`, so size the window against the longest
+routed job. JIT labels are read-only, so removing the scheduling label is not an
+available drain mechanism: the registration DELETE is the stop signal, and the
+worker poll is what keeps that attempt from firing while a job is running.
+Record the deployed commit and manager checksum together; update them only
+after installing that exact source.
 
 Upgrading: `stallAlertRetries`, the earlier retry-count threshold, is no longer
 read. A config that still carries it has no effect and falls back to the

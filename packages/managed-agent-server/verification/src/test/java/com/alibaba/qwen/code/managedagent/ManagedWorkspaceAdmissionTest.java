@@ -27,6 +27,7 @@ import com.alibaba.qwen.code.managedagent.session.HarnessCoordinator;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -3045,9 +3046,9 @@ class ManagedWorkspaceAdmissionTest {
         jdbc.update("INSERT INTO ma_storage"
                         + " (alias_key,tenant_key,storage_key,tenant_id,storage_id,fence_operation_id)"
                         + " VALUES (?,?,?,?,?,?)",
-                com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository.storageAliasKey(tenant, storageId),
-                com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository.storageFenceKey(tenant),
-                com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository.storageFenceKey(storageId),
+                RuntimeAdmissionFences.storageAliasKey(tenant, storageId),
+                RuntimeAdmissionFences.storageFenceKey(tenant),
+                RuntimeAdmissionFences.storageFenceKey(storageId),
                 tenant, storageId, UUID.randomUUID().toString());
     }
 
