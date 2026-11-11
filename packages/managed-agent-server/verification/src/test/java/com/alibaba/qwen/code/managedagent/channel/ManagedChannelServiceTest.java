@@ -16,6 +16,7 @@ import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ChannelDeliveryRepository;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ChannelSegmentRepository;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ChannelSegmentRepository.SegmentLedger;
+import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionRecords;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicChannel;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicChannelDelivery;
@@ -1911,8 +1912,6 @@ class ManagedChannelServiceTest {
     }
 
     static final class RecordingHarness implements HarnessConnector {
-        private static final java.util.Set<String> TERMINAL = java.util.Set.of(
-                "delivered", "unknown", "rejected", "cancelled");
         final List<Map<String, Object>> operations = new ArrayList<>();
         final Map<String, String> replies = new LinkedHashMap<>();
         // Each chain's segments as the committed record holds them: ordinal,
@@ -2071,17 +2070,17 @@ class ManagedChannelServiceTest {
                 case "settle_delivery" -> {
                     String outcome = String.valueOf(body.get("outcome"));
                     String current = deliveryStates.get(deliveryId);
-                    // The H5a successor rules freeze a terminal line: the
-                    // real authority refuses an outcome that disagrees.
-                    if (current != null && TERMINAL.contains(current)
-                            && !current.equals(outcome)) {
-                        throw new IllegalStateException("Channel delivery"
-                                + " line " + outcome + " does not match its"
-                                + " run and segment receipts");
-                    }
+                    requireDeliveryStep(current, outcome);
                     deliveryStates.put(deliveryId, outcome);
                     projection.deliveryState(sessionId, deliveryId, outcome);
                     answer.put("delivery", delivery(deliveryId, outcome));
+                }
+                case "cancel_delivery" -> {
+                    String current = deliveryStates.get(deliveryId);
+                    requireDeliveryStep(current, "cancelled");
+                    deliveryStates.put(deliveryId, "cancelled");
+                    projection.deliveryState(sessionId, deliveryId, "cancelled");
+                    answer.put("delivery", delivery(deliveryId, "cancelled"));
                 }
                 case "resend_delivery" -> {
                     String resent = deliveryId + ":r1";
@@ -2131,6 +2130,22 @@ class ManagedChannelServiceTest {
                 default -> throw new IllegalArgumentException(kind);
             }
             return answer;
+        }
+
+        /** The delivery line is a two-language contract: refuse a step the
+         * real successor table forbids, not only a terminal freeze — the
+         * latter alone would let planned -> rejected through and hide the
+         * re-import loop. A same-state replay is a no-op, as in the funnel. */
+        private void requireDeliveryStep(String current, String target) {
+            if (current == null || current.equals(target)) {
+                return;
+            }
+            java.util.List<String> allowed = ManagedExtensionRecords.TRANSITIONS
+                    .get("delivery").get(current);
+            if (allowed == null || !allowed.contains(target)) {
+                throw new IllegalStateException("Channel delivery line " + target
+                        + " does not match its run and segment receipts");
+            }
         }
 
         private Map<String, Object> delivery(String deliveryId, String state) {

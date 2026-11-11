@@ -764,14 +764,20 @@ public class ManagedChannelService {
 
     /** Retires a pending record whose chain conflicts with the stored one, so
      * the claim sweep stops re-importing it. The journal record's state is the
-     * Harness's to move, so settle it rejected rather than leaving it planned
-     * for the next sweep to retry. */
+     * Harness's to move, and the delivery line admits no planned/partial ->
+     * rejected step: a planned chain that never dispatched cancels, a partial
+     * one settles unknown (no provider refusal a never-dispatched chain never
+     * received). Both leave the pending set the sweep selects from. */
     private void settleConflictingChain(String tenantId, PendingDelivery pending) {
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("operationId", UUID.randomUUID().toString());
-        body.put("kind", "settle_delivery");
         body.put("deliveryId", pending.deliveryId());
-        body.put("outcome", "rejected");
+        if ("partial".equals(pending.deliveryState())) {
+            body.put("kind", "settle_delivery");
+            body.put("outcome", "unknown");
+        } else {
+            body.put("kind", "cancel_delivery");
+        }
         try {
             harness.runChannelOperation(tenantId, pending.sessionId(), body);
         } catch (HarnessFailure error) {
