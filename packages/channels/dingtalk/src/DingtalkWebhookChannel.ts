@@ -17,6 +17,9 @@ import type {
   SessionTarget,
 } from '@qwen-code/channel-base';
 import { extractTitle } from './markdown.js';
+import { isRetryableDingtalkStatus } from './interactive-card-client.js';
+
+export const DINGTALK_WEBHOOK_DELIVERY_TARGET_ID = 'default';
 
 const REQUEST_TIMEOUT_MS = 15_000;
 const MAX_RESPONSE_BYTES = 16_384;
@@ -113,14 +116,18 @@ export class DingtalkWebhookChannel extends ChannelBase {
     return (
       target.channelName === this.name &&
       target.isGroup === true &&
-      target.chatId === 'default' &&
-      target.senderId === 'default' &&
+      target.chatId === DINGTALK_WEBHOOK_DELIVERY_TARGET_ID &&
+      target.senderId === DINGTALK_WEBHOOK_DELIVERY_TARGET_ID &&
       target.threadId === undefined
     );
   }
 
   async sendMessage(chatId: string, text: string): Promise<void> {
-    if (chatId !== 'default' || typeof text !== 'string' || !text.trim()) {
+    if (
+      chatId !== DINGTALK_WEBHOOK_DELIVERY_TARGET_ID ||
+      typeof text !== 'string' ||
+      !text.trim()
+    ) {
       throw new ChannelProactiveDeliveryError(
         'permanent',
         'DingTalk webhook requires its configured destination and non-empty text.',
@@ -175,7 +182,7 @@ export class DingtalkWebhookChannel extends ChannelBase {
       if (!response.ok) {
         await response.body?.cancel().catch(() => {});
         throw new ChannelProactiveDeliveryError(
-          response.status === 429 || response.status >= 500
+          isRetryableDingtalkStatus(response.status)
             ? 'transient'
             : 'permanent',
           `DingTalk webhook request failed (HTTP ${response.status}).`,

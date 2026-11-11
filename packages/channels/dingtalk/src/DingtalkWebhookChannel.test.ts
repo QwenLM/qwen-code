@@ -84,6 +84,8 @@ describe('DingTalk webhook configuration', () => {
     '$UNRESOLVED_URL',
     'https://oapi.dingtalk.com/robot/send',
     'https://oapi.dingtalk.com/robot/send?access_token=',
+    'https://oapi.dingtalk.com/robot/send?access_token=%20',
+    'https://oapi.dingtalk.com/robot/send?access_token=%09%20',
     'https://oapi.dingtalk.com/robot/send?access_token=a&access_token=b',
     'https://oapi.dingtalk.com/robot/send?access_token=a&sign=stale',
     'https://oapi.dingtalk.com/robot/send?access_token=a#fragment',
@@ -243,9 +245,16 @@ describe('DingTalk webhook delivery', () => {
     },
   );
 
-  it.each([400, 403, 429, 503])(
+  it.each([
+    [400, 'permanent'],
+    [403, 'permanent'],
+    [408, 'transient'],
+    [425, 'transient'],
+    [429, 'transient'],
+    [503, 'transient'],
+  ] as const)(
     'reports HTTP %s without a response body or retries',
-    async (status) => {
+    async (status, disposition) => {
       const { channel } = make();
       fetchMock.mockResolvedValueOnce(
         new Response(`${WEBHOOK_URL} ${SIGNING_SECRET}`, { status }),
@@ -254,8 +263,7 @@ describe('DingTalk webhook delivery', () => {
       await expect(
         channel.deliverProactive(TARGET, 'message'),
       ).rejects.toMatchObject({
-        disposition:
-          status === 429 || status >= 500 ? 'transient' : 'permanent',
+        disposition,
         message: `DingTalk webhook request failed (HTTP ${status}).`,
       });
       expect(fetchMock).toHaveBeenCalledOnce();

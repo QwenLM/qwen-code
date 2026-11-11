@@ -38,6 +38,11 @@ and the sanitized Channel type catalog. The latter describes a `user` or `chat`
 target ID and optional label, without credentials. Metadata is validated before
 publication. Existing plugins omit it and keep their current behavior.
 
+Catalog validation checks metadata structure and length and rejects `scheme://`
+IDs; it is not a general credential detector. Plugin authors must keep public
+IDs and labels credential-free. Otherwise, IDs retain the existing opaque
+`user`/`chat` semantics rather than introducing an ASCII-only grammar.
+
 The new `dingtalk-webhook` plugin declares `outboundOnly: true` and the fixed
 `chat/default` destination. One named Channel binds one configured endpoint.
 Changing its URL changes future deliveries through that named Channel.
@@ -78,6 +83,14 @@ signed URL. Transport errors, invalid responses, non-success HTTP status and
 nonzero business error codes reject with a bounded, sanitized reason in line
 with #7521. Never expose the credential URL, signature, secret or message body
 through an error. There is no implicit retry.
+
+HTTP 408, 425, 429 and 5xx responses are classified as transient using the
+package's shared DingTalk policy. For business responses, the official
+[custom robot error table](https://open.dingtalk.com/document/development/custom-robots-send-group-messages)
+identifies `-1` as system busy and `410100` as rate limiting; these are transient.
+Other business codes remain permanent unless endpoint-specific evidence supports
+a different classification. Generic transport failures do not establish whether
+delivery was accepted, so their sanitized error retains that uncertainty.
 
 Connect validates local configuration and initializes sending resources; it does
 not send a message or authenticate a long connection. Connected means locally
