@@ -102,6 +102,10 @@ export class ManagedClientFilesBridge {
     this.abort = abort;
     let registerFailed = false;
     try {
+      // A binding left active by an earlier page load must not be adopted:
+      // remember the current generation as a baseline and only accept a newer
+      // one — the generation register creates.
+      const baseline = await this.readGeneration(abort.signal);
       // register blocks on the Harness discovery that this drain must
       // answer, and the stream route requires the binding that register
       // creates: fire register, wait for the binding, drain, then await
@@ -124,16 +128,26 @@ export class ManagedClientFilesBridge {
         });
       // The binding poll may settle before anyone awaits registering.
       registering.catch(() => {});
-      const generation = await this.waitForBinding(abort.signal, registering);
+      const generation = await this.waitForBinding(
+        abort.signal,
+        registering,
+        baseline,
+      );
       this.running = true;
-      const draining = this.drain(abort.signal, generation);
+      // Handle the drain rejection at creation: register can take up to its
+      // discovery timeout, and a fast stream refusal must not surface as an
+      // unhandled rejection in that window.
+      let drainError: unknown;
+      const draining = this.drain(abort.signal, generation).catch((cause) => {
+        drainError = cause;
+      });
       let registered: { generation?: number; toolCount?: number };
       try {
         registered = await registering;
       } catch (cause) {
         registerFailed = true;
         abort.abort();
-        await draining.catch(() => {});
+        await draining;
         throw cause;
       }
       this.setState({
@@ -142,6 +156,7 @@ export class ManagedClientFilesBridge {
         toolCount: registered.toolCount ?? 0,
       });
       await draining;
+      if (drainError !== undefined) throw drainError;
     } catch (cause) {
       this.running = false;
       if (abort.signal.aborted && !registerFailed) {
@@ -157,12 +172,15 @@ export class ManagedClientFilesBridge {
   }
 
   /**
-   * Polls status until the binding register created is active. The stream
-   * route refuses an unknown binding, so the drain cannot start earlier.
+   * Polls status until the binding register created is active at a generation
+   * newer than the baseline. The stream route refuses an unknown binding, so
+   * the drain cannot start earlier; the baseline keeps a stale binding left
+   * active by an earlier load from being adopted.
    */
   private async waitForBinding(
     signal: AbortSignal,
     registering: Promise<unknown>,
+    baseline: number,
   ): Promise<number> {
     const settled = registering.then(
       () => true,
@@ -177,6 +195,7 @@ export class ManagedClientFilesBridge {
         signal,
       });
       let state: string | undefined;
+      let generation: number | undefined;
       if (status.ok) {
         // An absent binding answers 200 with an empty body.
         const body = (await status.json().catch(() => ({}))) as {
@@ -184,8 +203,13 @@ export class ManagedClientFilesBridge {
           generation?: number;
         };
         state = body.state;
-        if (state === 'active' && typeof body.generation === 'number') {
-          return body.generation;
+        generation = body.generation;
+        if (
+          state === 'active' &&
+          typeof generation === 'number' &&
+          generation > baseline
+        ) {
+          return generation;
         }
       }
       const ok = await Promise.race([
@@ -199,6 +223,26 @@ export class ManagedClientFilesBridge {
         throw new Error('client files binding closed during registration');
       }
     }
+  }
+
+  /** The active binding's generation, or 0 when absent/closed. */
+  private async readGeneration(signal: AbortSignal): Promise<number> {
+    const status = await this.options.fetch(this.url('status'), {
+      method: 'POST',
+      headers: this.headers(true),
+      body: JSON.stringify({ sessionId: this.options.sessionId }),
+      signal,
+    });
+    if (status.ok) {
+      const body = (await status.json().catch(() => ({}))) as {
+        state?: string;
+        generation?: number;
+      };
+      if (body.state === 'active' && typeof body.generation === 'number') {
+        return body.generation;
+      }
+    }
+    return 0;
   }
 
   /** Stops the downlink and unregisters the binding (best-effort). */
@@ -219,45 +263,55 @@ export class ManagedClientFilesBridge {
   }
 
   private async drain(signal: AbortSignal, generation: number): Promise<void> {
-    const response = await this.options.fetch(this.url('requests/stream'), {
-      method: 'POST',
-      headers: this.headers(true),
-      body: JSON.stringify({
-        sessionId: this.options.sessionId,
-        generation,
-      }),
-      signal,
-    });
-    if (!response.ok || !response.body) {
-      throw new Error(`request stream failed with HTTP ${response.status}`);
-    }
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-    try {
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        let boundary: number;
-        while ((boundary = buffer.indexOf('\n\n')) >= 0) {
-          const frame = buffer.slice(0, boundary);
-          buffer = buffer.slice(boundary + 2);
-          const data = sseData(frame);
-          if (data !== undefined) await this.answer(data, signal, generation);
-        }
-      }
-    } finally {
-      reader.releaseLock();
-    }
-    if (this.running) {
-      // The downlink ended without a local disconnect: the binding is gone.
-      this.running = false;
-      this.setState({
-        phase: 'failed',
-        code: 'client_files_stream_closed',
-        message: 'The client files request stream closed.',
+    while (this.running) {
+      signal.throwIfAborted();
+      const response = await this.options.fetch(this.url('requests/stream'), {
+        method: 'POST',
+        headers: this.headers(true),
+        body: JSON.stringify({
+          sessionId: this.options.sessionId,
+          generation,
+        }),
+        signal,
       });
+      if (!response.ok || !response.body) {
+        throw new Error(`request stream failed with HTTP ${response.status}`);
+      }
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      try {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          let boundary: number;
+          while ((boundary = buffer.indexOf('\n\n')) >= 0) {
+            const frame = buffer.slice(0, boundary);
+            buffer = buffer.slice(boundary + 2);
+            const data = sseData(frame);
+            if (data !== undefined) await this.answer(data, signal, generation);
+          }
+        }
+      } finally {
+        reader.releaseLock();
+      }
+      if (!this.running) return;
+      signal.throwIfAborted();
+      // A clean end (the emitter's idle timeout) is not a lost binding: reopen
+      // the downlink while the binding is still active at this generation.
+      // Only a closed/rotated binding ends the bridge.
+      const active = await this.readGeneration(signal);
+      if (active !== generation) {
+        this.running = false;
+        this.setState({
+          phase: 'failed',
+          code: 'client_files_stream_closed',
+          message: 'The client files request stream closed.',
+        });
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 250));
     }
   }
 

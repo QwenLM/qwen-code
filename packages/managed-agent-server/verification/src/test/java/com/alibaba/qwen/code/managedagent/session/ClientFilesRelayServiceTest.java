@@ -142,6 +142,36 @@ class ClientFilesRelayServiceTest {
     }
 
     @Test
+    void streamClosedTearsDownTheBindingAndQueue() throws Exception {
+        Registration registration = service.register(tenant, ACTOR, session);
+        mcpInBackground(registration.token(), request("1"));
+        awaitQueue(registration.generation(), 1);
+        service.streamClosed(tenant, ACTOR, session, registration.generation());
+        assertThat(jdbc.queryForObject("SELECT state FROM ma_client_files_binding", String.class))
+                .isEqualTo("closed");
+        assertThat(jdbc.queryForObject("SELECT state FROM ma_client_files_request WHERE request_id='1'",
+                String.class)).isEqualTo("failed");
+        assertThat(jdbc.queryForObject("SELECT error_code FROM ma_client_files_request WHERE request_id='1'",
+                String.class)).isEqualTo("client_files_offline");
+        verify(harness).clientFilesOperation(eq(tenant), eq(session),
+                eq(Map.of("action", "unregister")));
+    }
+
+    @Test
+    void streamClosedIsGenerationFencedAndIdempotent() throws Exception {
+        Registration registration = service.register(tenant, ACTOR, session);
+        // A stale stream callback for an older generation must not close the
+        // current binding.
+        service.streamClosed(tenant, ACTOR, session, registration.generation() + 1);
+        assertThat(service.status(tenant, ACTOR, session).state()).isEqualTo("active");
+        service.streamClosed(tenant, ACTOR, session, registration.generation());
+        assertThat(service.status(tenant, ACTOR, session).state()).isEqualTo("closed");
+        // A second callback for the now-closed binding is a no-op.
+        service.streamClosed(tenant, ACTOR, session, registration.generation());
+        assertThat(service.status(tenant, ACTOR, session).state()).isEqualTo("closed");
+    }
+
+    @Test
     void reRegisterAdvancesGenerationAndFailsTheOldQueue() throws Exception {
         Registration first = service.register(tenant, ACTOR, session);
         mcpInBackground(first.token(), request("1"));

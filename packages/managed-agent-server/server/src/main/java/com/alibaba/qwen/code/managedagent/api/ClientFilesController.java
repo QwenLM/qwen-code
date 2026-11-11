@@ -37,6 +37,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
 @RequestMapping("/api/agent/web-shell/v1/client-files")
 public class ClientFilesController {
     private final ClientFilesRelayService service;
+    /** One live downlink per (tenant, actor, Session); a new stream replaces it. */
+    private final java.util.concurrent.ConcurrentHashMap<String, SseEmitter> streams =
+            new java.util.concurrent.ConcurrentHashMap<>();
 
     public ClientFilesController(ClientFilesRelayService service) {
         this.service = service;
@@ -69,9 +72,27 @@ public class ClientFilesController {
         service.requests(tenant.tenantId(), actor, session, generation);
         var emitter = new SseEmitter(300_000L);
         var open = new AtomicBoolean(true);
-        emitter.onCompletion(() -> open.set(false));
+        // Single owner per (tenant, actor, Session): a reconnect replaces the
+        // previous downlink instead of running a second poll loop that would
+        // deliver the same queued request twice. Completing the old emitter
+        // runs its onCompletion (not onError), so it does not close the binding.
+        String ownerKey = tenant.tenantId() + "|" + actor + "|" + session;
+        SseEmitter previous = streams.put(ownerKey, emitter);
+        if (previous != null) {
+            previous.complete();
+        }
+        emitter.onCompletion(() -> {
+            open.set(false);
+            streams.remove(ownerKey, emitter);
+        });
+        // An idle timeout is a clean end: the binding stays active and the
+        // bridge reopens the stream. Only a dropped/errored connection tears
+        // the registration down.
         emitter.onTimeout(() -> open.set(false));
-        emitter.onError(error -> open.set(false));
+        emitter.onError(error -> {
+            open.set(false);
+            service.streamClosed(tenant.tenantId(), actor, session, generation);
+        });
         Thread.startVirtualThread(() -> {
             Set<String> sent = new HashSet<>();
             try {

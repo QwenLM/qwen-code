@@ -10,16 +10,30 @@ interface Peer {
   registered: Array<Record<string, unknown>>;
   unregistered: Array<Record<string, unknown>>;
   responses: Array<Record<string, unknown>>;
+  /** How many times the SSE downlink was opened. */
+  streamOpens: number;
   /** Resolves once the browser posts its first response. */
   firstResponse: Promise<Record<string, unknown>>;
   /** Push one JSON-RPC request down the SSE downlink. */
   push(requestId: string, payload: JsonRpcRequest): void;
 }
 
-function startPeer(): Promise<Peer> {
+interface PeerOptions {
+  /** A binding left active by an earlier load, before register runs. */
+  initialGeneration?: number;
+  /** The generation register creates (defaults to 1). */
+  registerGeneration?: number;
+  /** Answer the stream route with this status instead of opening SSE. */
+  streamStatus?: number;
+  /** End the SSE response cleanly right after opening it (idle timeout). */
+  endStream?: boolean;
+}
+
+function startPeer(opts: PeerOptions = {}): Promise<Peer> {
   const registered: Array<Record<string, unknown>> = [];
   const unregistered: Array<Record<string, unknown>> = [];
   const responses: Array<Record<string, unknown>> = [];
+  const peerState = { streamOpens: 0 };
   let resolveFirst: (value: Record<string, unknown>) => void;
   const firstResponse = new Promise<Record<string, unknown>>((resolve) => {
     resolveFirst = resolve;
@@ -27,7 +41,11 @@ function startPeer(): Promise<Peer> {
   let streamRes: import('node:http').ServerResponse | undefined;
   // Like the real control plane: register creates the binding, then blocks
   // on the Harness discovery that the browser drain must answer.
-  let binding: { generation: number; state: string } | undefined;
+  let binding: { generation: number; state: string } | undefined =
+    opts.initialGeneration !== undefined
+      ? { generation: opts.initialGeneration, state: 'active' }
+      : undefined;
+  const registerGeneration = opts.registerGeneration ?? 1;
   let resolveRegister: (() => void) | undefined;
   const registerDone = new Promise<void>((resolve) => {
     resolveRegister = resolve;
@@ -40,10 +58,12 @@ function startPeer(): Promise<Peer> {
       const path = req.url ?? '';
       if (path.endsWith('/client-files/register')) {
         registered.push(parsed);
-        binding = { generation: 1, state: 'active' };
-        await registerDone;
+        binding = { generation: registerGeneration, state: 'active' };
+        if (opts.streamStatus === undefined) await registerDone;
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ generation: 1, toolCount: 1 }));
+        res.end(
+          JSON.stringify({ generation: registerGeneration, toolCount: 1 }),
+        );
         return;
       }
       if (path.endsWith('/client-files/status')) {
@@ -59,12 +79,23 @@ function startPeer(): Promise<Peer> {
         return;
       }
       if (path.endsWith('/client-files/requests/stream')) {
+        peerState.streamOpens += 1;
+        if (opts.streamStatus !== undefined) {
+          res.writeHead(opts.streamStatus, {
+            'Content-Type': 'application/json',
+          });
+          res.end(JSON.stringify({ code: 'client_files_generation_conflict' }));
+          return;
+        }
         res.writeHead(200, {
           'Content-Type': 'text/event-stream',
           'Cache-Control': 'no-store',
         });
         res.write(': open\n\n');
         streamRes = res;
+        // End only the first downlink cleanly; a reopen stays open so the
+        // reconnect can be observed and exercised.
+        if (opts.endStream && peerState.streamOpens === 1) res.end();
         return;
       }
       if (path.endsWith('/client-files/responses')) {
@@ -88,6 +119,9 @@ function startPeer(): Promise<Peer> {
         registered,
         unregistered,
         responses,
+        get streamOpens() {
+          return peerState.streamOpens;
+        },
         firstResponse,
         push(requestId, payload) {
           streamRes?.write(
@@ -119,8 +153,8 @@ describe('ManagedClientFilesBridge', () => {
     );
   });
 
-  async function peer() {
-    const created = await startPeer();
+  async function peer(opts: PeerOptions = {}) {
+    const created = await startPeer(opts);
     peers.push(created);
     return created;
   }
@@ -207,6 +241,59 @@ describe('ManagedClientFilesBridge', () => {
       res.writeHead(503, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ code: 'client_files_disabled' }));
     });
+    const b = bridge(p, {
+      async handle() {
+        return undefined;
+      },
+    });
+    await b.connect();
+    expect(b.getState()).toMatchObject({ phase: 'failed' });
+  });
+
+  it('adopts the generation register creates, not a stale active binding', async () => {
+    const p = await peer({ initialGeneration: 1, registerGeneration: 2 });
+    const b = bridge(p, {
+      async handle(message) {
+        return {
+          jsonrpc: '2.0',
+          id: message.id ?? null,
+          result: { tools: [] },
+        };
+      },
+    });
+    void b.connect();
+    await vi.waitFor(() => expect(p.registered.length).toBe(1));
+    p.push('7', { jsonrpc: '2.0', id: '7', method: 'tools/list' });
+    const response = await p.firstResponse;
+    expect(response.generation).toBe(2);
+    await vi.waitFor(() =>
+      expect(b.getState()).toMatchObject({ phase: 'connected', generation: 2 }),
+    );
+  });
+
+  it('reopens the downlink after a clean end while the binding is active', async () => {
+    const p = await peer({ endStream: true });
+    const b = bridge(p, {
+      async handle(message) {
+        return {
+          jsonrpc: '2.0',
+          id: message.id ?? null,
+          result: { tools: [] },
+        };
+      },
+    });
+    void b.connect();
+    await vi.waitFor(() => expect(p.streamOpens).toBeGreaterThanOrEqual(2));
+    p.push('7', { jsonrpc: '2.0', id: '7', method: 'tools/list' });
+    const response = await p.firstResponse;
+    expect(response.rpcRequestId).toBe('7');
+    await vi.waitFor(() =>
+      expect(b.getState()).toMatchObject({ phase: 'connected', generation: 1 }),
+    );
+  });
+
+  it('handles a fast stream refusal without an unhandled rejection', async () => {
+    const p = await peer({ streamStatus: 409 });
     const b = bridge(p, {
       async handle() {
         return undefined;

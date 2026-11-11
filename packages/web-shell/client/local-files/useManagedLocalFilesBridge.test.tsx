@@ -20,12 +20,13 @@ vi.mock('./pick-directory.js', () => ({
     requested: false,
   })),
 }));
+const storeSpies = vi.hoisted(() => ({
+  save: vi.fn(async () => true),
+  load: vi.fn(async () => undefined as unknown as FileSystemDirectoryHandle),
+  clear: vi.fn(async () => true),
+}));
 vi.mock('./directory-handle-store.js', () => ({
-  createDirectoryHandleStore: () => ({
-    save: vi.fn(async () => true),
-    load: vi.fn(async () => undefined),
-    clear: vi.fn(async () => true),
-  }),
+  createDirectoryHandleStore: () => storeSpies,
 }));
 vi.mock('./local-directory.js', () => ({
   LocalDirectory: class {
@@ -36,6 +37,7 @@ vi.mock('./local-directory.js', () => ({
 }));
 
 import { useManagedLocalFilesBridge } from './useManagedLocalFilesBridge.js';
+import { pickDirectoryHandle } from './pick-directory.js';
 import type { ManagedFetch } from './managed-client-files-bridge.js';
 
 const peerFetch = ((url: string, init?: RequestInit) =>
@@ -168,5 +170,67 @@ describe('useManagedLocalFilesBridge', () => {
       await result.current.connect();
     });
     expect(result.current.status.phase).not.toBe('connected');
+  });
+
+  it('disconnect releases the grant so the picker is reached again', async () => {
+    const peer = await startPeer();
+    servers.push(peer.server);
+    const fakeWin = {
+      location: { origin: 'http://localhost' },
+    } as unknown as Window;
+    const { result } = renderHook(() =>
+      useManagedLocalFilesBridge({
+        sessionId: 'session-1',
+        baseUrl: peer.baseUrl,
+        fetch: peerFetch,
+        win: fakeWin,
+      }),
+    );
+    act(() => {
+      void result.current.connect();
+    });
+    await waitFor(() => expect(result.current.status.phase).toBe('connected'));
+    expect(vi.mocked(pickDirectoryHandle)).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      await result.current.disconnect();
+    });
+    expect(storeSpies.clear).toHaveBeenCalled();
+    act(() => {
+      void result.current.connect();
+    });
+    await waitFor(() => expect(result.current.status.phase).toBe('connected'));
+    expect(vi.mocked(pickDirectoryHandle)).toHaveBeenCalledTimes(2);
+    await act(async () => {
+      await result.current.disconnect();
+    });
+  });
+
+  it('unregisters the binding on pagehide', async () => {
+    const peer = await startPeer();
+    servers.push(peer.server);
+    const listeners = new Map<string, () => void>();
+    const fakeWin = {
+      location: { origin: 'http://localhost' },
+      addEventListener: (event: string, handler: () => void) =>
+        listeners.set(event, handler),
+      removeEventListener: (event: string) => listeners.delete(event),
+    } as unknown as Window;
+    const { result } = renderHook(() =>
+      useManagedLocalFilesBridge({
+        sessionId: 'session-1',
+        baseUrl: peer.baseUrl,
+        fetch: peerFetch,
+        win: fakeWin,
+      }),
+    );
+    act(() => {
+      void result.current.connect();
+    });
+    await waitFor(() => expect(result.current.status.phase).toBe('connected'));
+    expect(listeners.has('pagehide')).toBe(true);
+    await act(async () => {
+      listeners.get('pagehide')?.();
+    });
+    await waitFor(() => expect(result.current.status.phase).toBe('idle'));
   });
 });

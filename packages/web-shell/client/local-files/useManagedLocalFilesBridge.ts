@@ -126,8 +126,25 @@ export function useManagedLocalFilesBridge(
   const disconnect = useCallback(async () => {
     await bridgeRef.current?.disconnect();
     bridgeRef.current = undefined;
+    // Release the grant so a wrong directory can be undone: Disconnect then
+    // Connect must reach the picker again instead of silently reusing it.
+    handleRef.current = undefined;
+    await storeRef.current?.clear();
     setStatus((current) => (current.phase === 'unavailable' ? current : IDLE));
   }, []);
+
+  // A closed tab stops answering the downlink; unregister the binding on
+  // pagehide so the harness stops advertising tools no browser will answer.
+  // The stored grant is kept for a silent restore on return; the control
+  // plane also drops the binding when the SSE connection errors.
+  useEffect(() => {
+    if (!win || typeof win.addEventListener !== 'function') return;
+    const onPageHide = () => {
+      void bridgeRef.current?.disconnect();
+    };
+    win.addEventListener('pagehide', onPageHide);
+    return () => win.removeEventListener('pagehide', onPageHide);
+  }, [win]);
 
   const connect = useCallback(async () => {
     if (!win || blocker !== null || !sessionId) return;

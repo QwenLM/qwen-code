@@ -182,6 +182,31 @@ public class ClientFilesRelayService {
         return new Status(binding.serverId(), binding.generation(), binding.state(), binding.expiresAt());
     }
 
+    /**
+     * Tears down a registration whose SSE downlink dropped (a closed tab or a
+     * lost connection), so the harness stops advertising tools no browser will
+     * answer. Generation-fenced and idempotent: a stale stream callback for a
+     * binding that already closed or rotated is a no-op, and an idle emitter
+     * timeout does not call this — the bridge reopens that stream.
+     */
+    public void streamClosed(String tenant, String actor, String session, long generation) {
+        requireEnabled();
+        requireSessionId(session);
+        Binding binding = relay.find(tenant, session);
+        if (binding == null || !binding.active() || binding.generation() != generation
+                || !binding.actorId().equals(actor)) {
+            return;
+        }
+        long now = System.currentTimeMillis();
+        relay.close(tenant, session, generation, now);
+        relay.failQueued(tenant, session, generation, ClientFilesModels.ERROR_OFFLINE, now);
+        try {
+            harness.clientFilesOperation(tenant, session, Map.of("action", "unregister"));
+        } catch (RuntimeException ignored) {
+            // best-effort dispatch; the harness session cleanup also drops it
+        }
+    }
+
     public List<QueuedRequest> requests(String tenant, String actor, String session, long generation) {
         requireEnabled();
         requireSessionId(session);
