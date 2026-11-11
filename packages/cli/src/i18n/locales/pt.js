@@ -990,6 +990,22 @@ export default {
     'Uso: /forget <texto de memória a remover>',
   'No managed auto-memory entries matched: {{query}}':
     'Nenhuma entrada de memória automática gerenciada correspondeu: {{query}}',
+  'Bind a GitHub pull request to this session':
+    'Vincular um pull request do GitHub a esta sessão',
+  'Usage: /pr <number | url>': 'Uso: /pr <número | url>',
+  'No PRs bound to this session.': 'Nenhum PR vinculado a esta sessão.',
+  'Bound PRs: {{list}}': 'PRs vinculados: {{list}}',
+  'Invalid PR reference. Usage: /pr <number | url>':
+    'Referência de PR inválida. Uso: /pr <número | url>',
+  'Could not resolve PR #{{number}} via gh. Pass the full PR URL instead.':
+    'Não foi possível resolver o PR #{{number}} via gh. Informe a URL completa do PR.',
+  'Bound PR #{{number}} to this session.':
+    'PR #{{number}} vinculado a esta sessão.',
+  'PR #{{number}} is already bound to this session.':
+    'O PR #{{number}} já está vinculado a esta sessão.',
+  'Failed to bind PR #{{number}}.': 'Falha ao vincular o PR #{{number}}.',
+  'Failed to bind PR #{{number}}: {{message}}':
+    'Falha ao vincular o PR #{{number}}: {{message}}',
   'Consolidate managed auto-memory topic files.':
     'Consolidar arquivos de tópicos de memória automática gerenciada.',
   'Could not retrieve tool registry.':

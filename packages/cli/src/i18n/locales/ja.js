@@ -751,6 +751,23 @@ export default {
     '使い方: /forget <削除するメモリテキスト>',
   'No managed auto-memory entries matched: {{query}}':
     '一致するマネージド自動メモリエントリなし: {{query}}',
+  'Bind a GitHub pull request to this session':
+    'GitHub プルリクエストをこのセッションにバインド',
+  'Usage: /pr <number | url>': '使用法: /pr <番号 | url>',
+  'No PRs bound to this session.':
+    'このセッションにバインドされた PR はありません。',
+  'Bound PRs: {{list}}': 'バインド済み PR: {{list}}',
+  'Invalid PR reference. Usage: /pr <number | url>':
+    '無効な PR 参照です。使用法: /pr <番号 | url>',
+  'Could not resolve PR #{{number}} via gh. Pass the full PR URL instead.':
+    'gh で PR #{{number}} を解決できませんでした。完全な PR URL を指定してください。',
+  'Bound PR #{{number}} to this session.':
+    'PR #{{number}} をこのセッションにバインドしました。',
+  'PR #{{number}} is already bound to this session.':
+    'PR #{{number}} はすでにこのセッションにバインドされています。',
+  'Failed to bind PR #{{number}}.': 'PR #{{number}} のバインドに失敗しました。',
+  'Failed to bind PR #{{number}}: {{message}}':
+    'PR #{{number}} のバインドに失敗しました: {{message}}',
   'Consolidate managed auto-memory topic files.':
     'マネージド自動メモリトピックファイルを統合する。',
   'No MCP servers configured.': 'MCP servers が設定されていません',

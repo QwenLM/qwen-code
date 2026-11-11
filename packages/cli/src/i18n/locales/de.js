@@ -985,6 +985,23 @@ export default {
     'Verwendung: /forget <zu entfernender Erinnerungstext>',
   'No managed auto-memory entries matched: {{query}}':
     'Keine verwalteten Auto-Speicher-Einträge gefunden: {{query}}',
+  'Bind a GitHub pull request to this session':
+    'GitHub-Pull-Request an diese Sitzung binden',
+  'Usage: /pr <number | url>': 'Verwendung: /pr <Nummer | url>',
+  'No PRs bound to this session.': 'An diese Sitzung sind keine PRs gebunden.',
+  'Bound PRs: {{list}}': 'Gebundene PRs: {{list}}',
+  'Invalid PR reference. Usage: /pr <number | url>':
+    'Ungültiger PR-Verweis. Verwendung: /pr <Nummer | url>',
+  'Could not resolve PR #{{number}} via gh. Pass the full PR URL instead.':
+    'PR #{{number}} konnte über gh nicht aufgelöst werden. Geben Sie stattdessen die vollständige PR-URL an.',
+  'Bound PR #{{number}} to this session.':
+    'PR #{{number}} wurde an diese Sitzung gebunden.',
+  'PR #{{number}} is already bound to this session.':
+    'PR #{{number}} ist bereits an diese Sitzung gebunden.',
+  'Failed to bind PR #{{number}}.':
+    'PR #{{number}} konnte nicht gebunden werden.',
+  'Failed to bind PR #{{number}}: {{message}}':
+    'PR #{{number}} konnte nicht gebunden werden: {{message}}',
   'Consolidate managed auto-memory topic files.':
     'Verwaltete Auto-Speicher-Themendateien konsolidieren.',
   'Could not retrieve tool registry.':

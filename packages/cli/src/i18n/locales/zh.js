@@ -1364,6 +1364,21 @@ export default {
   'Usage: /forget <memory text to remove>': '用法：/forget <要删除的记忆文本>',
   'No managed auto-memory entries matched: {{query}}':
     '没有匹配的托管自动记忆条目：{{query}}',
+  'Bind a GitHub pull request to this session':
+    '将 GitHub 拉取请求绑定到本会话',
+  'Usage: /pr <number | url>': '用法：/pr <编号 | url>',
+  'No PRs bound to this session.': '本会话尚未绑定 PR。',
+  'Bound PRs: {{list}}': '已绑定 PR：{{list}}',
+  'Invalid PR reference. Usage: /pr <number | url>':
+    '无效的 PR 引用。用法：/pr <编号 | url>',
+  'Could not resolve PR #{{number}} via gh. Pass the full PR URL instead.':
+    '无法通过 gh 解析 PR #{{number}}。请改用完整 PR URL。',
+  'Bound PR #{{number}} to this session.': '已将 PR #{{number}} 绑定到本会话。',
+  'PR #{{number}} is already bound to this session.':
+    'PR #{{number}} 已绑定到本会话。',
+  'Failed to bind PR #{{number}}.': '绑定 PR #{{number}} 失败。',
+  'Failed to bind PR #{{number}}: {{message}}':
+    '绑定 PR #{{number}} 失败：{{message}}',
   'Consolidate managed auto-memory topic files.': '整理托管自动记忆主题文件',
   'Import MCP servers from Claude configs': '从 Claude 配置导入 MCP 服务器',
   'Open MCP management dialog': '打开 MCP 管理对话框',

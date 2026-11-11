@@ -1000,6 +1000,22 @@ export default {
     'Использование: /forget <текст воспоминания для удаления>',
   'No managed auto-memory entries matched: {{query}}':
     'Не найдено совпадающих записей автопамяти: {{query}}',
+  'Bind a GitHub pull request to this session':
+    'Привязать pull request GitHub к этой сессии',
+  'Usage: /pr <number | url>': 'Использование: /pr <номер | url>',
+  'No PRs bound to this session.': 'К этой сессии не привязан ни один PR.',
+  'Bound PRs: {{list}}': 'Привязанные PR: {{list}}',
+  'Invalid PR reference. Usage: /pr <number | url>':
+    'Недопустимая ссылка на PR. Использование: /pr <номер | url>',
+  'Could not resolve PR #{{number}} via gh. Pass the full PR URL instead.':
+    'Не удалось разрешить PR #{{number}} через gh. Укажите полный URL PR.',
+  'Bound PR #{{number}} to this session.':
+    'PR #{{number}} привязан к этой сессии.',
+  'PR #{{number}} is already bound to this session.':
+    'PR #{{number}} уже привязан к этой сессии.',
+  'Failed to bind PR #{{number}}.': 'Не удалось привязать PR #{{number}}.',
+  'Failed to bind PR #{{number}}: {{message}}':
+    'Не удалось привязать PR #{{number}}: {{message}}',
   'Consolidate managed auto-memory topic files.':
     'Консолидировать файлы тем управляемой автопамяти.',
   'Could not retrieve tool registry.':

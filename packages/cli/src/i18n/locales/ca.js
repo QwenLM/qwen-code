@@ -1035,6 +1035,22 @@ export default {
     'Ús: /forget <text de memòria a eliminar>',
   'No managed auto-memory entries matched: {{query}}':
     'Cap entrada de memòria automàtica gestionada coincideix: {{query}}',
+  'Bind a GitHub pull request to this session':
+    'Vincula una pull request de GitHub a aquesta sessió',
+  'Usage: /pr <number | url>': 'Ús: /pr <número | url>',
+  'No PRs bound to this session.': 'Cap PR vinculat a aquesta sessió.',
+  'Bound PRs: {{list}}': 'PR vinculats: {{list}}',
+  'Invalid PR reference. Usage: /pr <number | url>':
+    'Referència de PR no vàlida. Ús: /pr <número | url>',
+  'Could not resolve PR #{{number}} via gh. Pass the full PR URL instead.':
+    'No s’ha pogut resoldre el PR #{{number}} mitjançant gh. Indiqueu l’URL complet del PR.',
+  'Bound PR #{{number}} to this session.':
+    'PR #{{number}} vinculat a aquesta sessió.',
+  'PR #{{number}} is already bound to this session.':
+    'El PR #{{number}} ja està vinculat a aquesta sessió.',
+  'Failed to bind PR #{{number}}.': 'No s’ha pogut vincular el PR #{{number}}.',
+  'Failed to bind PR #{{number}}: {{message}}':
+    'No s’ha pogut vincular el PR #{{number}}: {{message}}',
   'Consolidate managed auto-memory topic files.':
     'Consolida els fitxers de temes de memòria automàtica gestionada.',
   'Open MCP management dialog': 'Obre el diàleg de gestió MCP',

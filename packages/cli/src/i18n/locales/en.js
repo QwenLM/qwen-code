@@ -1432,6 +1432,22 @@ export default {
     'Usage: /forget <memory text to remove>',
   'No managed auto-memory entries matched: {{query}}':
     'No managed auto-memory entries matched: {{query}}',
+  'Bind a GitHub pull request to this session':
+    'Bind a GitHub pull request to this session',
+  'Usage: /pr <number | url>': 'Usage: /pr <number | url>',
+  'No PRs bound to this session.': 'No PRs bound to this session.',
+  'Bound PRs: {{list}}': 'Bound PRs: {{list}}',
+  'Invalid PR reference. Usage: /pr <number | url>':
+    'Invalid PR reference. Usage: /pr <number | url>',
+  'Could not resolve PR #{{number}} via gh. Pass the full PR URL instead.':
+    'Could not resolve PR #{{number}} via gh. Pass the full PR URL instead.',
+  'Bound PR #{{number}} to this session.':
+    'Bound PR #{{number}} to this session.',
+  'PR #{{number}} is already bound to this session.':
+    'PR #{{number}} is already bound to this session.',
+  'Failed to bind PR #{{number}}.': 'Failed to bind PR #{{number}}.',
+  'Failed to bind PR #{{number}}: {{message}}':
+    'Failed to bind PR #{{number}}: {{message}}',
   'Consolidate managed auto-memory topic files.':
     'Consolidate managed auto-memory topic files.',
   'Import MCP servers from Claude configs':
