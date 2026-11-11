@@ -1807,6 +1807,12 @@ class ManagedAgentApiContractTest {
             exchange(drift, sideAction + "WebShellSessionSideQuery", 404,
                     post(WEB_SHELL + "/session-side-queries/" + sideAction).header(TENANT, tenant).principal(actor(tenant)), sideBody);
         }
+        // The ticket route is mounted with the Broker; the web-terminal opt-in
+        // is off here, so admission refuses with workspace_unavailable.
+        exchange(drift, "webShellTerminalTicket", 409,
+                post(WEB_SHELL + "/sessions/terminal-ticket").header(TENANT, tenant)
+                        .principal(actor(tenant)),
+                "{\"sessionId\":\"" + sessionId + "\",\"terminalId\":\"term-contract\"}");
         assertThat(exercised).containsExactlyInAnyOrderElementsOf(
                 CONTRACT.operations().stream()
                         .filter(operation -> !"planned".equals(

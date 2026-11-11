@@ -140,9 +140,13 @@ class TerminalRelayHandlerTest {
     }
 
     private static ToolExecutionRecord hold(String executionCallId) {
-        ToolExecutionRecord hold = mock(ToolExecutionRecord.class);
-        when(hold.getExecutionCallId()).thenReturn(executionCallId);
-        return hold;
+        // A real record: getExecutionCallId is final and cannot be stubbed.
+        return new ToolExecutionRecord(executionCallId, "idem-1", "binding-1", 1,
+                "session-a", "terminal-term-1", "turn-1", "tool-1", "digest-1",
+                Map.of("sessionId", "terminal-term-1", "promptId", "turn-1",
+                        "callId", "tool-1", "argsDigest", "digest-1"),
+                ToolExecutionRecord.State.PREPARED, null, null, 0, false,
+                null, null, 0, 1, null);
     }
 
     @Test
@@ -186,22 +190,23 @@ class TerminalRelayHandlerTest {
         WebSocket worker = mock(WebSocket.class);
         List<byte[]> delivered = new CopyOnWriteArrayList<>();
         List<CompletableFuture<WebSocket>> sends = new CopyOnWriteArrayList<>();
-        AtomicReference<CompletableFuture<WebSocket>> pending = new AtomicReference<>();
-        // Mimic the JDK client: a second send while one is pending is rejected.
+        AtomicReference<CompletableFuture<WebSocket>> lastSend = new AtomicReference<>();
+        // Mimic the JDK client: a second send while the previous one is still
+        // pending is rejected. Read the previous future's completion state
+        // rather than a flag cleared in a callback, so the check does not race
+        // the relay's chained dependent.
         when(worker.sendBinary(any(ByteBuffer.class), eq(true))).thenAnswer(invocation -> {
-            if (pending.get() != null) {
+            CompletableFuture<WebSocket> previous = lastSend.get();
+            if (previous != null && !previous.isDone()) {
                 throw new IllegalStateException("Send pending");
             }
             ByteBuffer buffer = invocation.getArgument(0);
             byte[] bytes = new byte[buffer.remaining()];
             buffer.get(bytes);
             CompletableFuture<WebSocket> future = new CompletableFuture<>();
-            pending.set(future);
+            lastSend.set(future);
             sends.add(future);
-            future.whenComplete((ignored, error) -> {
-                delivered.add(bytes);
-                pending.set(null);
-            });
+            future.whenComplete((ignored, error) -> delivered.add(bytes));
             return future;
         });
         Attached attached = attach(worker);
@@ -240,11 +245,10 @@ class TerminalRelayHandlerTest {
 
     private static Attached attach(WebSocket worker) throws Exception {
         RuntimeBrokerOperations broker = mock(RuntimeBrokerOperations.class);
-        ToolExecutionRecord hold = mock(ToolExecutionRecord.class);
-        when(hold.getExecutionCallId()).thenReturn("terminal-attach:term-1:process");
         when(broker.admitTerminalHold("session-a", "term-1"))
                 .thenReturn(CompletableFuture.completedFuture(
-                        new TerminalHoldAdmission(hold, true)));
+                        new TerminalHoldAdmission(
+                                hold("terminal-attach:term-1:process"), true)));
         HttpClient client = mock(HttpClient.class);
         WebSocket.Builder builder = mock(WebSocket.Builder.class);
         when(client.newWebSocketBuilder()).thenReturn(builder);
