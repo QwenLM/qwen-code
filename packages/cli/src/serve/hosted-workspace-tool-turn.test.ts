@@ -2239,6 +2239,65 @@ it('a lone loop_wakeup batch acquires no Runtime mount', async () => {
   }
 });
 
+it('an auto-mode arm is classified once by the funnel, not the approval path', async () => {
+  const gateKey = 'QWEN_MANAGED_AGENT_LOOP_ENABLED';
+  const gateBefore = process.env[gateKey];
+  process.env[gateKey] = 'true';
+  try {
+    const approvalClassifier = vi.fn(async () => ({
+      shouldBlock: false,
+      unavailable: false,
+      reason: '',
+      model: 'classifier',
+      stage: 'fast',
+      durationMs: 0,
+    }));
+    const funnelClassify = vi.fn(async () => ({ allowed: true, reason: null }));
+    const loops = new HostedLoopSession(
+      {
+        authority: session.authority,
+        resources: session.resources,
+        sink: session.sink,
+      },
+      session.authority.sessionHeader.sessionKey,
+      { cwd: root, classify: funnelClassify },
+    );
+    turn = new HostedWorkspaceToolTurn(
+      { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+      session,
+      harness,
+      'prompt',
+      commit,
+      messageFitsInline,
+      undefined,
+      undefined,
+      { settings: { mode: 'auto', timeoutMs: 60_000 }, waiters },
+      { profile: 'hosted-workspace-shell/3', loops, wakeKick: () => {} },
+    );
+    turn.setPermissionClassifier(approvalClassifier);
+    await turn.declarations(new AbortController().signal);
+    const call = {
+      ...calls[0],
+      callId: 'call-auto-arm',
+      name: 'loop_wakeup',
+      args: { delaySeconds: 60, prompt: '/loop tick' },
+    };
+    await turn.execute(
+      [call],
+      [{ functionCall: { id: call.callId, name: call.name, args: call.args } }],
+      'model',
+      new AbortController().signal,
+    );
+    // The funnel admission review is the single classification; the approval
+    // path must not run the generic classifier on the same arm.
+    expect(approvalClassifier).not.toHaveBeenCalled();
+    expect(funnelClassify).toHaveBeenCalledTimes(1);
+  } finally {
+    if (gateBefore === undefined) delete process.env[gateKey];
+    else process.env[gateKey] = gateBefore;
+  }
+});
+
 it.each([WORKSPACE_CAPABILITY_DIGEST, RESIDENT_WORKSPACE_CAPABILITY_DIGEST])(
   'uses the existing warm capability after a legacy route 404 (%s)',
   async (digest) => {

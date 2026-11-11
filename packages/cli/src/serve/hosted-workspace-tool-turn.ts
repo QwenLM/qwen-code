@@ -9472,6 +9472,10 @@ export class HostedWorkspaceToolTurn {
           (request.call.name === 'skill' && this.skills !== undefined) ||
           (request.memory && HOSTED_MEMORY_READS.has(request.call.name)) ||
           this.hookAllowed.has(request.call.callId) ||
+          // The arm's funnel admission review is the single classification
+          // (decision 9 replaces the interactive dialog); classifying here too
+          // would double-gate every tick and lose the durable admission record.
+          request.loop ||
           !hostedApprovalAsks(settings, request.call.name, globProfile)
         )
           continue;
