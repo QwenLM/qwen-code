@@ -725,6 +725,20 @@ describe('GlobTool', () => {
       }
     });
 
+    it('answers No files found for a directory an ignore rule hides', async () => {
+      // The docs call `glob 'src'` an existence probe and qualify it: a hidden
+      // directory still answers absent. This is the case an agent hits most
+      // often (node_modules, dist), and it is the one the docs carve out.
+      await put('.gitignore', 'builddir/\n');
+      await mkdirp('builddir');
+
+      const result = await runFresh({ pattern: 'builddir' });
+
+      expect(result.llmContent).toContain(
+        'No files found matching pattern "builddir"',
+      );
+    });
+
     it('honors gitignore negation re-inclusion during traversal', async () => {
       // `!build/keep.keep` re-includes a file under an otherwise-ignored path.
       // Dropping negations (as a pattern conversion must) would wrongly prune

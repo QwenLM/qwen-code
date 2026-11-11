@@ -144,12 +144,12 @@ notebook_edit(
 - **Behavior:**
   - Searches for files and directories matching the glob pattern within the specified directory.
   - Returns a list of absolute paths, sorted with the most recently modified entries first.
-  - A directory whose name matches the pattern is reported as a match, so `glob 'src'` is a valid existence probe; the search does not descend into it unless the pattern does.
+  - A directory whose name matches the pattern is reported as a match, so `glob 'src'` is a valid existence probe; the search does not descend into it unless the pattern does. A directory excluded by an ignore rule is the exception: it is hidden like any other ignored entry, so `No files found` means the path is absent _or_ ignored.
   - Respects .gitignore, .qwenignore, and configured custom Qwen ignore files by default.
   - Limits results to 100 entries to prevent context overflow.
 - **Output (`llmContent`):** A message like: `Found 5 file(s) matching "*.ts" within /path/to/search/dir, sorted by modification time (newest first):\n---\n/path/to/file1.ts\n/path/to/subdir/file2.ts\n---\n[95 files truncated] ...`
 
-  A directory match is reported in the same message, which is what makes the existence probe work: `glob "src"` yields `Found 1 file(s) matching "src" within /path/to/search/dir, sorted by modification time (newest first):\n---\n/path/to/search/dir/src`. The header count covers every collected match rather than the truncated list, so `Found at least N` means "N or more".
+  A directory match is reported in the same message, which is what makes the existence probe work: `glob "src"` yields `Found 1 file(s) matching "src" in the workspace directory, sorted by modification time (newest first):\n---\n/path/to/search/dir/src`. The location phrase depends on the call: `in the workspace directory` when neither `path` nor a multi-root workspace applies, `across N workspace directories` for a multi-root workspace, and `within <dir>` only when `path` is set — so a `glob "src"` call without `path` never prints `within`. The header count covers every collected match rather than the truncated list, so `Found at least N` means "N or more".
 
 - **Confirmation:** No.
 
