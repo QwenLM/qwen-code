@@ -1661,7 +1661,10 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
                         childAgentsCapability(session, worktree),
                         (session.workspace() == null || maySubmit) && supportsSideQueries(session),
                         (session.workspace() == null || maySubmit) && supportsSideQueries(session),
-                        (session.workspace() == null || maySubmit) && supportsClientFiles(session)),
+                        // Registration refuses a Workspace-less Session (mayExecute
+                        // requires a bound Workspace), so the capability must not
+                        // advertise it there.
+                        session.workspace() != null && maySubmit && supportsClientFiles(session)),
                 session.workspace() != null || session.agentDefinitionDigest() != null
                         ? approvalSelection == null ? session.approvalMode() : approvalSelection.mode() : null,
                 modelContext, modelSelection, approvalSelection == null ? null : approvalSelection.revision(),

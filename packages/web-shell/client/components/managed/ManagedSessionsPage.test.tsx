@@ -67,7 +67,7 @@ const localFilesBridge = vi.hoisted(() => ({
   connect: vi.fn(),
   disconnect: vi.fn(),
 }));
-vi.mock('../local-files/useManagedLocalFilesBridge', () => ({
+vi.mock('../../local-files/useManagedLocalFilesBridge', () => ({
   useManagedLocalFilesBridge: () => localFilesBridge,
 }));
 vi.mock('../MessageList', () => ({

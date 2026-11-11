@@ -5197,7 +5197,11 @@ export class HostedWorkspaceToolTurn {
       this.hooks ||
       this.mcp ||
       requests.some(
-        (request) => !request.skill && !request.todo && !request.memory,
+        (request) =>
+          !request.skill &&
+          !request.todo &&
+          !request.memory &&
+          !request.clientFiles,
       )
     )
       await waitForTurn(this.warmed, signal);
@@ -5221,7 +5225,8 @@ export class HostedWorkspaceToolTurn {
           request.command !== true &&
           !request.skill &&
           !request.todo &&
-          !request.memory,
+          !request.memory &&
+          request.clientFiles !== true,
       )
     ) {
       // Acquisition may have taken effect even when its reply is lost.

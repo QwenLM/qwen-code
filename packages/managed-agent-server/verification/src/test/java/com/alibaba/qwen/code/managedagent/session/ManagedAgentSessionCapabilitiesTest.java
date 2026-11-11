@@ -214,20 +214,37 @@ class ManagedAgentSessionCapabilitiesTest {
 
     @ParameterizedTest
     @CsvSource({
-        "true,true,ACTIVE,true",
-        "true,true,CLOSED,false",
-        "false,true,ACTIVE,false",
-        "true,false,ACTIVE,false"
+        "true,true,ACTIVE,true,true",
+        "true,true,CLOSED,true,false",
+        "false,true,ACTIVE,true,false",
+        "true,false,ACTIVE,true,false",
+        // Registration refuses a Workspace-less Session, so the capability
+        // must not advertise it there even with the flag and harness on.
+        "true,true,ACTIVE,false,false"
     })
     void clientFilesCapabilityRequiresTheDeploymentFlagHarnessSupportAndAnActiveSession(boolean enabled,
-            boolean harnessSupports, String status, boolean expected) {
+            boolean harnessSupports, String status, boolean hasWorkspace, boolean expected) {
         var store = mock(AgentStateStore.class);
         var harness = mock(HarnessConnector.class);
+        var workspaces = mock(JdbcManagedWorkspaceRegistry.class);
         var service = new ManagedAgentService(store, new RequestDigests(),
-                mock(HarnessCoordinator.class), harness, mock(JdbcManagedWorkspaceRegistry.class),
+                mock(HarnessCoordinator.class), harness, workspaces,
                 new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
-        var session = new SessionRecord("tenant", "session", "qwen-code", "title", status,
-                null, null, 0, 0, 1, 1, null, 1);
+        var workspace = new ContextBinding("tenant", "workspace", 1,
+                "storage", ".", WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1);
+        var session = hasWorkspace
+                ? new SessionRecord("tenant", "session", "qwen-code", "1", "title", status,
+                        null, null, 0, 0, 0, 1, 1, null, 1, workspace, "default",
+                        WorkspaceToolProfiles.FILES, null, 1)
+                : new SessionRecord("tenant", "session", "qwen-code", "title", status,
+                        null, null, 0, 0, 1, 1, null, 1);
+        when(store.workspaceFilesEnabled()).thenReturn(true);
+        when(harness.isWorkspaceFilesAvailable()).thenReturn(true);
+        when(workspaces.canRead("tenant", "actor", "workspace")).thenReturn(true);
+        when(workspaces.findReadable(eq("tenant"), eq("actor"), anyCollection()))
+                .thenReturn(Map.of("workspace",
+                        new JdbcManagedWorkspaceRegistry.ReadableGrant("workspace", 1, "storage", true)));
+        when(store.sessionsWithExecutionRegistryFacts(eq("tenant"), any())).thenReturn(Set.of("session"));
         when(store.requireSession("tenant", "session")).thenReturn(session);
         assertThat(service.getWebShellSession("tenant", "actor", "session")
                 .capabilities().clientFiles()).isFalse();

@@ -13970,6 +13970,10 @@ describe('client files tool execution', () => {
     expect(invoke).toHaveBeenCalledWith(browserTool, { path: 'a.txt' });
     expect(broker.prepare).not.toHaveBeenCalled();
     expect(broker.execute).not.toHaveBeenCalled();
+    // A client-files-only batch takes no Workspace mount it never uses. (The
+    // constructor's eager warm is fire-and-forget; the per-batch gate no longer
+    // awaits it for a client-files-only batch, so the turn never blocks on it.)
+    expect(broker.acquire).not.toHaveBeenCalled();
     expect((await session.sink.project()).map((record) => record.type)).toEqual(
       ['assistant', 'tool_result'],
     );
