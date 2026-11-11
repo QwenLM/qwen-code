@@ -6272,6 +6272,16 @@ export const MessageList = memo(
     return (
       <McpAppSessionContext.Provider value={mcpAppSessionId}>
         <div className={styles.listFrame}>
+          <SessionTimeline
+            action={timelineAction}
+            entries={sessionTimelineEntries}
+            currentTurnId={currentTimelineTurnId}
+            currentRange={sessionTimelineRange}
+            hidden={
+              !isSessionTimelineVisible || !hasEnoughSessionTimelineEntries
+            }
+            onSelect={scrollToMessage}
+          />
           <div
             ref={containerRef}
             className={joinClassNames(
@@ -6374,16 +6384,6 @@ export const MessageList = memo(
               })
             )}
           </div>
-          <SessionTimeline
-            action={timelineAction}
-            entries={sessionTimelineEntries}
-            currentTurnId={currentTimelineTurnId}
-            currentRange={sessionTimelineRange}
-            hidden={
-              !isSessionTimelineVisible || !hasEnoughSessionTimelineEntries
-            }
-            onSelect={scrollToMessage}
-          />
         </div>
       </McpAppSessionContext.Provider>
     );
