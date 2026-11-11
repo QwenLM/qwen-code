@@ -100,11 +100,16 @@ being stranded on entries the operator never touched:
 
 - The editor's shape check skips entries that are present in the stored groups
   (compared case-insensitively, since the draft lower-cases repository ids), the
-  same convention the number-field branch already uses for stored values.
+  same convention the number-field branch already uses for stored values. This
+  tolerance is **GitLab-only**, the newly admitted platform; GitHub keeps its
+  strict shape check so its behavior is unchanged.
 - The daemon store's unchanged-value tolerance follows a group entry across a
   case rewrite: when the exact key is absent it falls back to a case-insensitive
   match of the previous entry, mirroring `GroupGate.groupConfigFor`'s
-  exact-then-normalized order, with the exact spelling always winning.
+  exact-then-normalized order, with the exact spelling always winning. The
+  fallback is gated on the case-folding platforms (GitHub/GitLab, the only
+  adapters that override `normalizeGroupId`); the other platforms treat
+  case-variant keys as distinct groups and keep exact-key matching.
 
 ### The repository UX copy was GitHub-worded
 
@@ -185,11 +190,15 @@ unrelated edit on a pre-existing entry that predates the shape check.
 
 `channel-editor-state.ts`: the save-path `repoFilter` canonicalization is gated
 on `descriptor.type === 'github'` (matching the validator), so a preserved,
-unmanaged `repoFilter` on a GitLab channel is never rewritten.
+unmanaged `repoFilter` on a GitLab channel is never rewritten. The allowlist
+stored-entry tolerance is gated on `descriptor.type === 'gitlab'`, so GitHub's
+strict shape check is unchanged.
 `packages/cli/src/serve/channel-settings-store.ts`: the `groups` unchanged-value
 tolerance falls back to a case-insensitive match of the previous entry when the
 exact key is absent, so re-casing a group key on save does not drop the tolerance
-for an unchanged legacy nested value. The exact spelling always wins.
+for an unchanged legacy nested value. The exact spelling always wins. The
+fallback is gated on the channel type being GitHub or GitLab (the adapters that
+fold group-key case), so the other platforms keep exact-key matching.
 
 ### GitLab repository copy
 
@@ -285,14 +294,17 @@ and "GitLab usernames…". The generic speakers label and placeholder stay share
 4. A newly typed malformed GitLab entry (e.g. a single segment) is rejected with
    a project-path remedy, while a stored entry that predates the shape check does
    not block an unrelated edit.
-5. GitHub still rejects a multi-segment id such as `owner/repo/extra`.
+5. GitHub still rejects a multi-segment id such as `owner/repo/extra`, even when
+   that key is already present in storage (the stored-entry tolerance is
+   GitLab-only).
 6. The GitLab allowlist field, validation remedy, conflict remedy, and speakers
    description/inherited copy show GitLab project wording in both locales, not
-   `owner/repo` / "GitHub logins".
+   `owner/repo` / "GitHub logins"; the GitHub speakers copy stays "GitHub logins".
 7. Saving a GitLab channel writes no `privatePolicy`/`allowedUsers`, and leaves a
    preserved unmanaged `repoFilter` byte-identical.
 8. A re-cased group key keeps the daemon's unchanged-value tolerance for a legacy
-   nested value; a changed value is still refused.
+   nested value on GitHub/GitLab; a changed value is still refused, and a
+   non-case-folding platform does not borrow tolerance across case-variant keys.
 9. The seven other admitted platforms behave unchanged.
 
 ## Open questions

@@ -82,10 +82,13 @@ daemon 仅在其逐字节未变时才容忍。保存时归一化它会让 daemon
 条目卡住：
 
 - 编辑器形状校验跳过已存在于存量 groups 的条目（大小写不敏感比对，因为 draft 把
-  仓库 id 小写化），与数字字段分支对存量值既有的约定一致。
+  仓库 id 小写化），与数字字段分支对存量值既有的约定一致。该容忍**仅限 GitLab**
+  （新接入的平台）；GitHub 保持严格形状校验，行为不变。
 - daemon store 的“未变值容忍”跟随群组键的大小写改写：精确键缺失时回退到对上一条目
   的大小写不敏感匹配，镜像 `GroupGate.groupConfigFor` 的先精确后归一顺序，精确拼写
-  始终优先。
+  始终优先。该回退按折叠大小写的平台（GitHub/GitLab，仅有的两个覆写
+  `normalizeGroupId` 的适配器）门控；其余平台把大小写变体键视为不同群组，保持精确
+  键匹配。
 
 ### 仓库 UX 文案曾是 GitHub 措辞
 
@@ -153,10 +156,12 @@ GitLab 仓库文案，及其测试。
 
 `channel-editor-state.ts`：保存路径的 `repoFilter` 归一化按
 `descriptor.type === 'github'` 门控（与校验块一致），故 GitLab 渠道上被保留、不受
-管理的 `repoFilter` 永不被改写。
+管理的 `repoFilter` 永不被改写。允许列表的存量条目容忍按
+`descriptor.type === 'gitlab'` 门控，故 GitHub 的严格形状校验不变。
 `packages/cli/src/serve/channel-settings-store.ts`：`groups` 的“未变值容忍”在精确键
 缺失时回退到对上一条目的大小写不敏感匹配，故保存时改写群组键大小写不会丢掉对未变
-legacy 嵌套值的容忍。精确拼写始终优先。
+legacy 嵌套值的容忍。精确拼写始终优先。该回退按渠道类型为 GitHub 或 GitLab（折叠
+群组键大小写的适配器）门控，故其余平台保持精确键匹配。
 
 ### GitLab 仓库文案
 
@@ -237,12 +242,15 @@ group/subgroup/project.”、项目路径冲突修复指示、以及“GitLab us
    保持完整。
 4. 新输入的畸形 GitLab 条目（如单段）被拒并给出项目路径修复指示，而先于形状校验
    存在的存量条目不阻塞无关编辑。
-5. GitHub 仍拒绝多段 id，如 `owner/repo/extra`。
+5. GitHub 仍拒绝多段 id，如 `owner/repo/extra`，即便该键已存在于存量（存量条目容忍
+   仅限 GitLab）。
 6. GitLab 允许列表字段、校验修复指示、冲突修复指示、发言人描述/继承文案在两语下
-   显示 GitLab 项目措辞，而非 `owner/repo` / “GitHub logins”。
+   显示 GitLab 项目措辞，而非 `owner/repo` / “GitHub logins”；GitHub 发言人文案
+   保持 “GitHub logins”。
 7. 保存 GitLab 渠道不写 `privatePolicy`/`allowedUsers`，且被保留、不受管理的
    `repoFilter` 逐字节不变。
-8. 大小写改写的群组键对 legacy 嵌套值保留 daemon 的“未变值容忍”；改值仍被拒。
+8. 大小写改写的群组键在 GitHub/GitLab 上对 legacy 嵌套值保留 daemon 的“未变值
+   容忍”；改值仍被拒，且非折叠大小写平台不跨大小写变体键借用容忍。
 9. 其余七个已接入平台行为不变。
 
 ## 遗留问题

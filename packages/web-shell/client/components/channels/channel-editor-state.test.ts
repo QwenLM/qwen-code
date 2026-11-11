@@ -1409,6 +1409,27 @@ describe('Repository-only channel access config', () => {
     });
   });
 
+  it('keeps GitHub strict even when the off-shape key is already stored', () => {
+    // The stored-entry tolerance is GitLab-only (the newly admitted platform).
+    // GitHub must keep rejecting an off-shape key even when it is present in
+    // storage, so its behavior is unchanged by this PR.
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'release-bot',
+      config: {
+        type: 'github',
+        groupPolicy: 'allowlist',
+        groups: { 'owner/repo/extra': {} },
+      },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    const draft = createChannelEditorDraft(GITHUB, instance);
+    expect(validateChannelEditorDraft(GITHUB, draft, [], instance)).toEqual({
+      allowedGroupIds: 'invalidRepoId',
+    });
+  });
+
   it('keeps a nested GitLab project narrowed during a temporary switch when the save lands on Open', () => {
     // The non-Allowlist save path projects draft-only repositories through
     // repositoryAllowlistIds, which must use the GitLab shape: a nested path
@@ -1468,13 +1489,18 @@ describe('Repository-only channel access config', () => {
   it('tolerates a stored GitLab allowlist entry that predates the shape check', () => {
     // A single-segment key was storable before GitLab joined the repository-only
     // set; an unrelated edit must not be blocked by a shape check the entry was
-    // never validated against.
+    // never validated against. The stored key is mixed-case and non-empty so
+    // this pins both halves of the tolerance: the case-insensitive comparison
+    // (the draft seeds the lower-cased 'mygroup') and the round-trip — the
+    // entry must be preserved with its sender policy, not silently dropped.
     const instance: DaemonChannelInstanceSnapshot = {
       name: 'release-bot',
       config: {
         type: 'gitlab',
         groupPolicy: 'allowlist',
-        groups: { mygroup: {} },
+        groups: {
+          MyGroup: { senders: 'allowlist', allowedUsers: ['alice'] },
+        },
       },
       secrets: { token: { present: true, source: 'literal' } },
       startsWithServe: false,
@@ -1482,6 +1508,12 @@ describe('Repository-only channel access config', () => {
     };
     const draft = createChannelEditorDraft(GITLAB, instance);
     expect(validateChannelEditorDraft(GITLAB, draft, [], instance)).toEqual({});
+    const saved = buildChannelUpsertRequest(GITLAB, draft, 'rev-2', instance)
+      .config['groups'] as Record<string, unknown>;
+    expect(saved['mygroup']).toEqual({
+      senders: 'allowlist',
+      allowedUsers: ['alice'],
+    });
   });
 
   it('still rejects a newly typed malformed GitLab entry', () => {

@@ -2790,7 +2790,10 @@ describe('ChannelEditorDialog', () => {
     });
 
     expect(onSave).not.toHaveBeenCalled();
-    expect(document.body.textContent).toContain('group/subgroup/project');
+    // Assert the remedy sentence itself: the field description also contains
+    // "group/subgroup/project", so that substring alone would not distinguish
+    // a correct remedy from a wrong one.
+    expect(document.body.textContent).toContain('Enter each project as a path');
     expect(document.body.textContent).not.toContain('owner/repo');
   });
 
@@ -2815,6 +2818,30 @@ describe('ChannelEditorDialog', () => {
 
     expect(document.body.textContent).toContain('GitLab usernames');
     expect(document.body.textContent).not.toContain('GitHub logins');
+  });
+
+  it('describes GitHub repository speakers as GitHub logins', async () => {
+    // The mirror direction: the speaker-copy selection must keep the GitHub
+    // wording for GitHub, not unconditionally render the GitLab copy.
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'github-bot',
+      config: {
+        type: 'github',
+        groupPolicy: 'allowlist',
+        groups: {
+          'acme/widgets': { senders: 'allowlist', allowedUsers: ['alice'] },
+        },
+      },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    await renderDialog({ descriptor: GITHUB_CONFIGURED, instance });
+
+    expect(document.body.textContent).toContain(
+      'GitHub logins allowed to start tasks in this repository',
+    );
+    expect(document.body.textContent).not.toContain('GitLab usernames');
   });
 
   it('describes an inherited GitLab speaker list with the inherited copy', async () => {

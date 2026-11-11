@@ -1623,13 +1623,15 @@ describe('WorkspaceChannelSettingsStore', () => {
   it('follows a re-cased group key for the unchanged-value tolerance', async () => {
     // A repository-only editor lower-cases group keys on save. The unchanged
     // legacy value must keep its tolerance across the case rewrite, mirroring
-    // GroupGate's exact-then-normalized lookup.
+    // GroupGate's exact-then-normalized lookup. Only case-folding platforms
+    // (GitHub/GitLab) get this fallback; the real GitLab plugin is used here.
     writeWorkspaceSettings(`{
   "$version": 4,
   "channels": { "bot": {
-    "type": "management-validation-test",
-    "clientId": "client-id",
-    "clientSecret": "existing-secret",
+    "type": "gitlab",
+    "token": "existing-token",
+    "groupPolicy": "open",
+    "action_prompt_template": { "mentioned": "%project%" },
     "groups": {
       "Owner/Repo": { "groupHistoryLimit": "50" }
     }
@@ -1640,14 +1642,14 @@ describe('WorkspaceChannelSettingsStore', () => {
     const next = await store.upsert('bot', {
       expectedRevision: store.snapshot().revision,
       config: {
-        type: 'management-validation-test',
-        clientId: 'updated-id',
+        type: 'gitlab',
+        groupPolicy: 'open',
+        action_prompt_template: { mentioned: '%project%' },
         groups: { 'owner/repo': { groupHistoryLimit: '50' } },
       },
-      secrets: { clientSecret: { operation: 'preserve' } },
+      secrets: { token: { operation: 'preserve' } },
     });
     expect(next.channels['bot']).toMatchObject({
-      clientId: 'updated-id',
       groups: { 'owner/repo': { groupHistoryLimit: '50' } },
     });
 
@@ -1655,9 +1657,40 @@ describe('WorkspaceChannelSettingsStore', () => {
       store.upsert('bot', {
         expectedRevision: next.revision,
         config: {
+          type: 'gitlab',
+          groupPolicy: 'open',
+          action_prompt_template: { mentioned: '%project%' },
+          groups: { 'owner/repo': { groupHistoryLimit: '60' } },
+        },
+        secrets: { token: { operation: 'preserve' } },
+      }),
+    ).rejects.toMatchObject({ code: 'channel_settings_invalid_config' });
+  });
+
+  it('does not borrow tolerance across case for a non-folding platform', async () => {
+    // Chat platforms treat case-variant group keys as distinct groups (their
+    // normalizeGroupId is identity), so the re-cased-key fallback must not
+    // apply: a legacy value under 'Team-A' cannot be carried onto 'team-a'.
+    writeWorkspaceSettings(`{
+  "$version": 4,
+  "channels": { "bot": {
+    "type": "management-validation-test",
+    "clientId": "client-id",
+    "clientSecret": "existing-secret",
+    "groups": {
+      "Team-A": { "groupHistoryLimit": "50" }
+    }
+  } }
+}\n`);
+    const store = new WorkspaceChannelSettingsStore(workspace);
+
+    await expect(
+      store.upsert('bot', {
+        expectedRevision: store.snapshot().revision,
+        config: {
           type: 'management-validation-test',
           clientId: 'updated-id',
-          groups: { 'owner/repo': { groupHistoryLimit: '60' } },
+          groups: { 'team-a': { groupHistoryLimit: '50' } },
         },
         secrets: { clientSecret: { operation: 'preserve' } },
       }),

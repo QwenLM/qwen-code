@@ -138,6 +138,7 @@ function assertSharedField(
   key: string,
   value: unknown,
   previous?: unknown,
+  channelType?: unknown,
 ): boolean {
   if (key === 'messageRoutes' || key === 'defaultMessageRoute') {
     return true;
@@ -210,7 +211,12 @@ function assertSharedField(
       let previousGroup = isRecord(previousGroups[groupId])
         ? previousGroups[groupId]
         : undefined;
-      if (previousGroup === undefined) {
+      // Only the GitHub and GitLab adapters fold group-key case
+      // (normalizeGroupId); the other platforms treat case-variant keys as
+      // distinct groups, so the fallback must not borrow tolerance across them.
+      const foldsGroupKeyCase =
+        channelType === 'github' || channelType === 'gitlab';
+      if (previousGroup === undefined && foldsGroupKeyCase) {
         // A repository-only editor normalizes group-key case on save, so the
         // entry may arrive under a different spelling than it was stored.
         // Follow it across the case rewrite so the unchanged-value tolerance
@@ -456,6 +462,7 @@ function assertManagedConfig(
         key,
         value,
         Object.hasOwn(previous, key) ? previous[key] : undefined,
+        config['type'],
       )
     ) {
       continue;

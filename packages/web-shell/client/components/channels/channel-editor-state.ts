@@ -654,10 +654,10 @@ export function validateChannelEditorDraft(
   ) {
     const pattern = repositoryIdPattern(descriptor.type);
     // A stored entry the runtime already tolerates must not block an unrelated
-    // edit (same convention as the number-field branch above). Admitting a
-    // channel to this set subjects its pre-existing allowlist to a shape check
-    // it was never validated against; only entries the operator typed or
-    // changed are held to the shape. The draft lower-cases repository ids, so
+    // edit (same convention as the number-field branch above). This applies
+    // only to GitLab, the newly admitted platform whose pre-existing allowlist
+    // was never validated against the shape; GitHub keeps its strict check so
+    // its behavior is unchanged. The draft lower-cases repository ids, so
     // compare against the stored keys case-insensitively.
     const storedGroups = instance?.config['groups'];
     const storedIds = new Set(
@@ -668,7 +668,10 @@ export function validateChannelEditorDraft(
     if (
       splitList(draft.allowedGroupIds).some(
         (groupId) =>
-          !pattern.test(groupId) && !storedIds.has(groupId.toLowerCase()),
+          !pattern.test(groupId) &&
+          !(
+            descriptor.type === 'gitlab' && storedIds.has(groupId.toLowerCase())
+          ),
       )
     ) {
       errors['allowedGroupIds'] = 'invalidRepoId';
