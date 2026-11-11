@@ -8617,9 +8617,9 @@ export function registerHostedHarnessSessionRoutes(
                 throw cause;
               }
             }
-          // Only a delete is terminal; a close keeps the deterministic owner
-          // re-acquirable across the reload (R14-1).
-          await session.hooks?.close({ terminal: kind === 'delete' });
+          // Both public lifecycle operations end the Session. Ordinary detach
+          // keeps its deterministic owner re-acquirable through the default.
+          await session.hooks?.close({ terminal: true });
           await releaseLeaseNow(session);
           // Neither an unprovable drain nor a Session whose own settlement
           // already failed proved to the Runtime that anything stopped, so
@@ -8637,7 +8637,9 @@ export function registerHostedHarnessSessionRoutes(
             await loop.stop(stopSettle);
           await session.shell?.publisher?.close();
           await session.backgroundLane?.publisher?.close();
-          await session.mcp?.closeResources({ terminal: kind === 'delete' });
+          // Terminal on a close as on a delete; HostedMcpSession.closeResources
+          // says why that is safe.
+          await session.mcp?.closeResources({ terminal: true });
         }
         res.json({
           protocolVersion: 2,

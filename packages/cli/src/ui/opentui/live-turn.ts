@@ -44,6 +44,8 @@ import {
 import { readFileSync } from 'node:fs';
 import { ShellExecutionService } from '@qwen-code/qwen-code-core/services/shellExecutionService.js';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
+import { LlmEventType } from '@qwen-code/qwen-code-core/core/turn.js';
+import { LoopReason } from '@qwen-code/qwen-code-core/telemetry/types.js';
 import {
   MessageSenderType,
   type Logger,
@@ -74,7 +76,6 @@ import {
   modPromptRow,
 } from '../../services/mod-prompt-frame.js';
 import type { ModQueuedPrompt } from '@qwen-code/qwen-code-core/mods/types.js';
-import type { ServerLlmStreamEvent } from '@qwen-code/qwen-code-core';
 import {
   livePromptEvents,
   nextLivePromptId,
@@ -773,6 +774,14 @@ export function useOpenTuiLiveTurn(
           workflowModeEligible: editablePrompt !== undefined,
           refreshContextFilesOnWrite: turnOptions?.refreshContextFilesOnWrite,
           isCurrentTurn: () => seq === turnSeqRef.current,
+          onStreamEvent: (event) => {
+            if (
+              event.type === LlmEventType.LoopDetected &&
+              event.value?.loopReason === LoopReason.PROVIDER_DUPLICATE_ID
+            )
+              failed = true;
+            modTurn?.saw(event);
+          },
           ...(mods && {
             onPromptAdmitted: () => {
               // A notice naming the Mod, not a row the person typed: it is not
@@ -801,7 +810,6 @@ export function useOpenTuiLiveTurn(
                 promptId,
               );
             },
-            onStreamEvent: (event: ServerLlmStreamEvent) => modTurn?.saw(event),
             onToolsCancelled: () => {
               toolsCancelled = true;
               // The person declined every tool, which stops the session's

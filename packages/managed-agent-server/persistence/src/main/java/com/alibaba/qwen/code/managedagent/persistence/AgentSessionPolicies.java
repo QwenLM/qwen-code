@@ -268,7 +268,7 @@ final class AgentSessionPolicies {
         if (!access.canRead()) {
             throw new ManagedAgentException(404, "session_not_found", "The Session was not found.");
         }
-        if (mutation && !access.atLeast(WorkspaceAccess.OPERATOR)) {
+        if (!access.atLeast(WorkspaceAccess.OPERATOR)) {
             throw new ManagedAgentException(403,
                 "session_operation_forbidden", "Only a Workspace operator may apply extensions.");
         }
@@ -276,9 +276,9 @@ final class AgentSessionPolicies {
         JsonNode current = ManagedMcpSettings.find(jdbc, tenantId, sessionId);
         boolean same = ManagedConfigInstall.isPackageConfig(current) && operationId != null
                 && operationId.equals(current.path("operationId").asText());
-        if (lineage != null && mutation && (!same || !childExtensionBootstrapCommand(session, lineage).equals(current.path("command")))
+        if (mutation && (lineage != null && (!same || !childExtensionBootstrapCommand(session, lineage).equals(current.path("command")))
                 || !workspaceFilesEnabled
-                || !EXTENSION_APPLY_PROFILES.contains(session.toolProfile())) {
+                || !EXTENSION_APPLY_PROFILES.contains(session.toolProfile()))) {
             throw new ManagedAgentException(409, "unsupported_feature", "Extension management is unavailable.");
         }
         if (mutation) {
