@@ -126,6 +126,8 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
     private final AtomicBoolean closed = new AtomicBoolean();
     private final RuntimeBindingRegistry bindingRegistry;
     private final RuntimeBindingProvisioning bindingProvisioning;
+    private final TerminalHolds terminalHolds;
+    private final BackgroundProcessAdmission backgroundProcessAdmission;
     private final RuntimeExecutionState executionState;
     private final RuntimeExecutionDispatcher executionDispatcher;
     private final RuntimeExecutionReconciler executionReconciler;
@@ -281,6 +283,10 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
         this.bindingProvisioning = new RuntimeBindingProvisioning(bindingRegistry, bindingRepository,
                 sessionRepository, executionRepository, provisioner, transport, this.brokerOwnerId,
                 this.operationLeaseDuration, clock, scheduler, closed, BindingRenewal::new);
+        this.terminalHolds = new TerminalHolds(this, bindingRegistry, bindingRepository,
+                sessionRepository, executionRepository, clock, closed);
+        this.backgroundProcessAdmission = new BackgroundProcessAdmission(bindingRepository,
+                sessionRepository, executionRepository);
         this.executionState = new RuntimeExecutionState(bindingRepository, sessionRepository, executionRepository,
                 this.brokerOwnerId, this.dispatchLeaseDuration, clock);
         this.executionDispatcher = new RuntimeExecutionDispatcher(bindingRegistry, executionState,
@@ -1432,156 +1438,16 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                 idempotencyKey, reference, null);
     }
 
-    /**
-     * Admits the durable hold for one user terminal. A terminal is not a model
-     * tool call, so its attach invocation is admitted and settled through the
-     * never-dispatched evidence path ({@code settlePrepared}) rather than a
-     * dispatch claim; the TERMINAL process row admitted beside it holds the
-     * Runtime Session until the worker proves the terminal ended, exactly the
-     * background Shell/Monitor hold semantics. Re-admitting the same terminal
-     * (a reconnect) returns the existing hold.
-     */
+    @Override
     public CompletionStage<TerminalHoldAdmission> admitTerminalHold(
             String harnessSessionId, String terminalId) {
-        requireOpen(closed);
-        String harness = BrokerValues.requirePathSafe(
-                BrokerValues.requireId(harnessSessionId, "harnessSessionId"),
-                "harnessSessionId");
-        String terminal = BrokerValues.requirePathSafe(
-                BrokerValues.requireId(terminalId, "terminalId"), "terminalId");
-        // A terminal owns a deterministic Runtime Session of its own, so the
-        // relay never has to resolve one. The deterministic process id is the
-        // cross-Session guard (a terminal id is only unique within a Session);
-        // the active hold is found through the Runtime Session so a reconnect
-        // reuses it, while a re-create after settlement admits a fresh hold
-        // instead of handing back a settled one that no longer protects a PTY.
-        String runtime = "terminal-" + terminal;
-        String baseInvocationId = "terminal-attach:" + terminal;
-        String baseProcessId = baseInvocationId + ":process";
-        return mapStoreFailure(safeStage(() -> {
-            ToolExecutionRecord base = executionRepository.findByExecutionCallId(baseProcessId);
-            if (base != null) {
-                requireTerminalHoldOwner(base, harness, runtime);
-            }
-            return acquire(harness, runtime, "bootstrap", null, null)
-                    .thenCompose(ignored -> bindingRegistry.requireReadySession(harness, runtime))
-                    .thenApply(context -> {
-                        context.lock();
-                        try {
-                            bindingRegistry.requireReadySessionRecord(context);
-                            ToolExecutionRecord baseAgain = executionRepository
-                                    .findByExecutionCallId(baseProcessId);
-                            if (baseAgain != null) {
-                                requireTerminalHoldOwner(baseAgain, harness, runtime);
-                            }
-                            ToolExecutionRecord active = activeTerminalHold(context);
-                            if (active != null) {
-                                return new TerminalHoldAdmission(active, false);
-                            }
-                            // The first attach keeps the deterministic identity;
-                            // a re-create after the previous hold settled takes
-                            // a fresh one so it never collides with that row.
-                            String invocationId = baseAgain == null
-                                    ? baseInvocationId
-                                    : baseInvocationId + ":" + UUID.randomUUID();
-                            String processId = invocationId + ":process";
-                            String digest = "sha256:" + DigestUtils.sha256Hex(terminal);
-                            Map<String, Object> reference = Map.of(
-                                    "sessionId", runtime,
-                                    "promptId", harness,
-                                    "callId", terminal,
-                                    "argsDigest", digest);
-                            ToolExecutionRecord candidate = ToolExecutionRecord.prepared(
-                                    invocationId, invocationId,
-                                    context.binding().getBindingId(),
-                                    context.binding().getGeneration(),
-                                    harness, runtime, harness, terminal, digest, reference);
-                            ToolExecutionRecord admitted = bindingRepository.admitExecution(
-                                    sessionRepository, executionRepository, candidate);
-                            Map<String, Object> result = new LinkedHashMap<>();
-                            result.put("executionStatus", "success");
-                            result.put("responseParts", List.of());
-                            result.put("capture", null);
-                            executionRepository.settlePrepared(admitted, result, clock.instant());
-                            admitBackgroundProcess(context, admitted, ManagedHoldFamily.TERMINAL);
-                            ToolExecutionRecord process = executionRepository
-                                    .findByExecutionCallId(processId);
-                            return new TerminalHoldAdmission(
-                                    process == null ? admitted : process, true);
-                        } finally {
-                            context.unlock();
-                        }
-                    });
-        }));
-    }
-
-    /** A terminal id is only unique within its Session; never hand one
-     * Session another's hold on a reconnect. */
-    private static void requireTerminalHoldOwner(ToolExecutionRecord hold,
-            String harnessSessionId, String runtimeSessionId) {
-        if (!hold.getHarnessSessionId().equals(harnessSessionId)
-                || !hold.getRuntimeSessionId().equals(runtimeSessionId)) {
-            throw conflict("runtime_terminal_hold_conflict",
-                    "Terminal hold belongs to another Session");
-        }
-    }
-
-    /** The non-terminal hold of this terminal's dedicated Runtime Session, or
-     * null once the previous hold settled. A settled hold no longer protects a
-     * re-created PTY, so the caller must admit a fresh one rather than reuse it.
-     * The session carries at most one live terminal hold (admission is locked),
-     * so the first background row is that hold. */
-    private ToolExecutionRecord activeTerminalHold(SessionContext context) {
-        RuntimeSessionRecord session = sessionRepository.findById(
-                context.session().getScope(), context.session().getRuntimeSessionId());
-        if (session == null) {
-            return null;
-        }
-        List<ToolExecutionRecord> rows = executionRepository
-                .findBackgroundProcesses(session, null, 100);
-        return rows.isEmpty() ? null : rows.get(0);
+        return terminalHolds.admit(harnessSessionId, terminalId);
     }
 
     @Override
     public CompletionStage<ToolExecutionRecord> abandonTerminalHold(
             String harnessSessionId, String terminalId, String executionCallId) {
-        requireOpen(closed);
-        String harness = BrokerValues.requirePathSafe(
-                BrokerValues.requireId(harnessSessionId, "harnessSessionId"),
-                "harnessSessionId");
-        String terminal = BrokerValues.requirePathSafe(
-                BrokerValues.requireId(terminalId, "terminalId"), "terminalId");
-        String callId = BrokerValues.requireId(executionCallId, "executionCallId");
-        String runtime = "terminal-" + terminal;
-        return mapStoreFailure(safeStage(() -> acquire(harness, runtime, "bootstrap", null, null)
-                .thenCompose(ignored -> bindingRegistry.requireReadySession(harness, runtime))
-                .thenApply(context -> {
-                    context.lock();
-                    try {
-                        bindingRegistry.requireReadySessionRecord(context);
-                        ToolExecutionRecord active = activeTerminalHold(context);
-                        // Only the hold this attach newly admitted may be
-                        // discharged. A reconnect reuses a live PTY's hold and
-                        // a concurrent attach may own a different one; neither
-                        // may be settled by this failed attempt.
-                        if (active == null
-                                || !active.getExecutionCallId().equals(callId)) {
-                            return null;
-                        }
-                        requireTerminalHoldOwner(active, harness, runtime);
-                        // The attach never produced a PTY, so there is no exit
-                        // to prove; settle the hold directly instead of letting
-                        // it wedge on an unknown control answer.
-                        Map<String, Object> result = new LinkedHashMap<>();
-                        result.put("executionStatus", "success");
-                        result.put("responseParts", List.of());
-                        result.put("capture", null);
-                        return executionRepository.settlePrepared(
-                                active, result, clock.instant());
-                    } finally {
-                        context.unlock();
-                    }
-                })));
+        return terminalHolds.abandon(harnessSessionId, terminalId, executionCallId);
     }
 
     public CompletionStage<ToolExecutionRecord> prepareCsiExecution(String harnessSessionId, String runtimeSessionId,
@@ -2346,41 +2212,9 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
     // admitted at start, carrying no model result and staying non-terminal
     // until physical proof — that is what `hasActiveBy*` counts while it
     // lives.
-    private void admitBackgroundProcess(SessionContext context,
+    void admitBackgroundProcess(SessionContext context,
             ToolExecutionRecord invocation, ManagedHoldFamily family) {
-        context.lock();
-        try {
-            Map<String, Object> invocationReference = invocation.getReference();
-            String callId = referenceString(invocationReference, "callId");
-            Map<String, Object> reference = Map.of(
-                    "dispatchMode", family.dispatchMode(),
-                    "processOf", invocation.getExecutionCallId(),
-                    "sessionId", referenceString(invocationReference, "sessionId"),
-                    "promptId", referenceString(invocationReference, "promptId"),
-                    "callId", callId,
-                    "argsDigest", invocation.getRequestDigest());
-            ToolExecutionRecord candidate = ToolExecutionRecord.prepared(
-                    invocation.getExecutionCallId() + ":process",
-                    invocation.getExecutionCallId() + ":process",
-                    invocation.getBindingId(),
-                    invocation.getRuntimeGeneration(),
-                    invocation.getHarnessSessionId(),
-                    invocation.getRuntimeSessionId(),
-                    referenceString(invocationReference, "promptId"),
-                    callId,
-                    invocation.getRequestDigest(),
-                    reference);
-            try {
-                bindingRepository.admitExecution(sessionRepository,
-                        executionRepository, candidate);
-            } catch (IllegalArgumentException exception) {
-                throw conflict("runtime_execution_conflict",
-                        "background process identity is already in use", exception);
-            }
-            context.backgroundProcesses().add(candidate.getExecutionCallId());
-        } finally {
-            context.unlock();
-        }
+        backgroundProcessAdmission.admit(context, invocation, family);
     }
 
     /**
