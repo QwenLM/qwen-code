@@ -503,6 +503,20 @@ describe('ChannelQrLogin pagehide release', () => {
     expect(a.cancel).not.toHaveBeenCalled();
   });
 
+  it('does not release on a back/forward-cache freeze', async () => {
+    // Pressing Back restores this panel with the code still on screen, so a
+    // release here would cancel a login the operator never abandoned.
+    const { a } = await render();
+    await click('Scan to bind');
+    await act(async () => {
+      window.dispatchEvent(
+        Object.assign(new Event('pagehide'), { persisted: true }),
+      );
+    });
+    expect(a.release).not.toHaveBeenCalled();
+    expect(a.cancel).not.toHaveBeenCalled();
+  });
+
   it('does not release a login it attached to', async () => {
     const a = actions({ start: async () => ({ ...START, attached: true }) });
     await render({ actions: a });

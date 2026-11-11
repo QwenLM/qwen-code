@@ -105,7 +105,12 @@ export function ChannelQrLogin({
   // last hook that does run, and the release is sent with `keepalive` so it
   // outlives the document. Same ownership condition as the unmount path.
   useEffect(() => {
-    const release = () => {
+    const release = (event: PageTransitionEvent) => {
+      // A back/forward-cache freeze restores this panel with the code still on
+      // screen, so releasing there would cancel a login the operator never
+      // abandoned. Only a terminal departure releases it. Truthy, not
+      // `!== false`: a plain `Event('pagehide')` carries no `persisted`.
+      if (event.persisted) return;
       const id = pendingLoginRef.current;
       if (id && id === ownedLoginRef.current) {
         void actionsRef.current.release(id).catch(() => undefined);
