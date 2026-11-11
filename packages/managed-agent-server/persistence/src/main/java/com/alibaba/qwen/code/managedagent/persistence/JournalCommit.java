@@ -498,7 +498,7 @@ final class JournalCommit {
         JournalFencing.requireCsiWriter(original, head);
         fencing.requireWriter(head, request.writerId(), request.writerGeneration(), writerToken, storeRows.databaseNow(), true);
         validateHead(head, request);
-        var proof = JdbcCsiActivationAdmission.terminalPreflight(target, authority, JournalStoreRows.CSI_JSON.valueToTree(request), bindings);
+        var proof = JdbcCsiActivationAdmission.terminalPreflight(target, authority, JournalStoreRows.CSI_JSON.valueToTree(request), bindings, true);
         return new JdbcManagedSessionStore.TerminalCandidate(request, proof, head.leaseTokenHash());
     }
 
@@ -509,7 +509,7 @@ final class JournalCommit {
         if (authority.stage() != com.alibaba.qwen.code.runtimebroker.persistence.JdbcCsiApplicationRetirement.Stage.FROZEN) {
             throw JournalFencing.nativeReadConflict();
         }
-        var frozen = WorkspaceCsiApplicationJson.object(authority.frozenBytes(), WorkspaceCsiApplicationInventory.MAX_BYTES);
+        var frozen = WorkspaceCsiApplicationJson.object(authority.frozenBytes(), WorkspaceCsiApplicationStore.FROZEN_LIMIT);
         byte[] saved = WorkspaceCsiApplicationJson.base64(frozen.path("commitBodyBase64"), 128 * 1024);
         if (!java.util.Arrays.equals(saved, exactBody)
                 || !com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof.sha256(saved)
