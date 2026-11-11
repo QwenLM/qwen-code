@@ -1394,7 +1394,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description Registers the calling actor's client directory grant into the Session and issues the one-time relay credential for the Runtime MCP leg. Requires the deployment opt-in and current execution authority on the bound ACTIVE Workspace. Registration is ephemeral session state; no file content is persisted. */
+        /** @description Registers the calling actor's client directory grant into the Session and issues the one-time relay credential for the Runtime MCP leg. Requires the deployment opt-in and current execution authority on the bound ACTIVE Workspace. Registration is ephemeral session state: the bounded TTL queue holds the size-bounded JSON-RPC bodies (which may include file content) only until they settle or expire, no credential or directory path is persisted, and no file content enters the journal or public events beyond the normal durable tool-result policy. */
         post: operations["registerWebShellClientFiles"];
         delete?: never;
         options?: never;
@@ -3867,9 +3867,13 @@ export interface components {
         };
         WebShellClientFilesRegisterRequest: {
             sessionId: string;
+            /** @description Browser-generated identity correlating this registration's downlink and teardown with its own binding. */
+            connectionId: string;
         };
         WebShellClientFilesUnregisterRequest: {
             sessionId: string;
+            /** @description The unregistering bridge's owned registration identity; a stale teardown of a replaced binding is a no-op. */
+            connectionId?: string;
         };
         WebShellClientFilesStatusRequest: {
             sessionId: string;
@@ -3877,6 +3881,8 @@ export interface components {
         WebShellClientFilesStreamRequest: {
             sessionId: string;
             generation: number;
+            /** @description The downlink's owned registration identity; a stream omitting it or naming another tab's binding is refused. */
+            connectionId: string;
         };
         WebShellClientFilesRespondRequest: {
             sessionId: string;
@@ -3891,18 +3897,28 @@ export interface components {
             generation: number;
             /** @description The one-time relay credential for the Runtime MCP leg; never persisted. */
             token: string;
-            /** @description Binding deadline in Unix epoch milliseconds. */
+            /**
+             * Format: int64
+             * @description Binding deadline in Unix epoch milliseconds.
+             */
             expiresAt: number;
             /** @description Number of browser tools the Harness discovered during registration. */
             toolCount: number;
+            /** @description Echo of the registration identity the caller supplied, for downlink correlation. */
+            connectionId: string;
         };
         WebShellClientFilesStatus: {
             serverId: string;
             generation: number;
             /** @enum {unknown} */
             state: "active" | "closed";
-            /** @description Binding deadline in Unix epoch milliseconds. */
+            /**
+             * Format: int64
+             * @description Binding deadline in Unix epoch milliseconds.
+             */
             expiresAt: number;
+            /** @description The current binding's registration identity, for downlink correlation. */
+            connectionId?: string;
         };
         WebShellClientFilesRespondReceipt: {
             settled: boolean;

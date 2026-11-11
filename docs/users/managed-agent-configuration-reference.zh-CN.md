@@ -109,7 +109,7 @@ Managed Agent 服务端的顶层设置：内置 agent 的修订号、存储的 A
 | `enabled` | — | 布尔 | `false` | 是否允许 Managed Web Shell 用户把客户端目录注册进 Session，让 agent 经控制面 relay 使用其文件工具。默认关闭；关闭时所有 client-files 路由拒绝注册，不创建任何 relay 状态。客户端文件内容绝不进入会话 journal 或公共事件；relay 的有界 TTL 队列仅在受大小限制的 JSON-RPC 请求/响应体（可能含文件内容）结算或过期前暂存，随后删除。 |
 | `max-payload-bytes` | — | 整数 | — | relay 在 Runtime 与浏览器之间转发的单条 JSON-RPC 请求或响应体的最大字节数；更大的 payload 以结构化错误拒绝。默认与 worker MCP 结果上限对齐（60 KiB）。 |
 | `queue-depth` | — | 整数 | `32` | 单个 Session 注册可为浏览器排队等待应答的 JSON-RPC 请求上限；超出的请求以结构化错误拒绝，而不是阻塞 Turn。默认与 worker MCP 在途上限对齐（32）。 |
-| `relay-url` | — | 字符串 | *（空）* | 从 Hosted Harness 可达的本控制面内部监听器基地址，用于构造 Harness 回连的 relay MCP 端点（`<relay-url>/internal/managed-client-files/v1/sessions/<id>/mcp`）。`qwen.managed-agent.client-files.enabled` 为 true 时必填；为空时拒绝注册。必须是不带凭据、查询串或片段的 http(s) URL。 |
+| `relay-url` | — | 字符串 | *（空）* | 从 Hosted Harness 可达的本控制面内部监听器基地址，用于构造 Harness 回连的 relay MCP 端点（`<relay-url>/internal/managed-client-files/v1/sessions/<id>/mcp`）。`qwen.managed-agent.client-files.enabled` 为 true 且留空时，从 internal listener 推导；推导不出则启动失败。显式配置的值必须是不带凭据、查询串或片段的 http(s) URL。 |
 | `request-ttl` | — | 时长 | `25s` | 单条排队 JSON-RPC 请求等待浏览器应答的时长，到期后过期并向 Runtime 返回结构化离线错误。接受 `25s` 这类时长；不带单位的数字按秒计。 |
 
 ## `qwen.managed-agent.dispatch`

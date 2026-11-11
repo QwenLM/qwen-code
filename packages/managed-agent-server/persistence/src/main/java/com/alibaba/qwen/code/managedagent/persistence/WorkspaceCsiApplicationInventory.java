@@ -2982,6 +2982,15 @@ final class WorkspaceCsiApplicationInventory {
                             && Objects.equals(parent.text("agent_id"), row.text("agent_id"))
                             && Objects.equals(parent.text("agent_revision"), String.valueOf(row.number("revision"))));
                 }
+                // Ephemeral relay state: accept every shape the store can legally
+                // write so a session that registered a browser directory can still
+                // be retired (the rows are deleted behind this check).
+                case "ma_client_files_binding" -> expect(table, row, tenant.equals(row.text("tenant_id"))
+                        && row.number("generation") != null && row.number("generation") > 0
+                        && oneOf(row.text("state"), "active", "closed"));
+                case "ma_client_files_request" -> expect(table, row, tenant.equals(row.text("tenant_id"))
+                        && row.number("binding_generation") != null && row.number("binding_generation") > 0
+                        && oneOf(row.text("state"), "queued", "answered", "failed", "expired"));
                 default -> block(table, key(row), "unsupported_first_lane");
             }
         }

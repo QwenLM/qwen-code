@@ -42075,6 +42075,21 @@ describe('Hosted Harness stored definitions', () => {
 });
 
 describe('client files registration route', () => {
+  // This describe is top-level, so it does not inherit the no-tool-session
+  // fixture's fresh runtime root; give each test its own so a fixed session id
+  // never lands on a prior test's journal.
+  beforeEach(async () => {
+    state.root = await mkdtemp(path.join(tmpdir(), 'hosted-harness-test-'));
+  });
+  afterEach(async () => {
+    await rm(state.root, {
+      recursive: true,
+      force: true,
+      maxRetries: 5,
+      retryDelay: 100,
+    });
+  });
+
   async function relayPeer() {
     const peer = createServer((req, res) => {
       if (req.method !== 'POST') {

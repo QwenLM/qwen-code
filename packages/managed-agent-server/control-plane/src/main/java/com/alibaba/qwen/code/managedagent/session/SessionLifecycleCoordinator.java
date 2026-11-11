@@ -136,6 +136,11 @@ public class SessionLifecycleCoordinator {
     private final ManagedAgentService sessions;
     private final ChildWorkspaceStore childWorkspaces;
     private final ObjectProvider<RuntimeBrokerOperations> brokerProviders;
+    // Lazy provider: the relay service depends on ManagedAgentService, so a
+    // constructor parameter here could form a cycle. Used to close the
+    // client-files binding when the harness detaches or the Session closes.
+    @org.springframework.beans.factory.annotation.Autowired
+    private ObjectProvider<ClientFilesRelayService> clientFilesRelay;
     private final ExecutorService executor;
     private final Clock clock;
     private final Duration leaseDuration;
@@ -153,6 +158,19 @@ public class SessionLifecycleCoordinator {
     @jakarta.annotation.PreDestroy
     void stopRenewals() {
         renewals.shutdownNow();
+    }
+
+    // The harness-local client-files catalog is gone once the harness detaches
+    // or the Session closes; close the control-plane binding so the panel stops
+    // reporting a registration the model can no longer use. Best-effort: a
+    // relay failure must not wedge the lifecycle.
+    private void closeClientFilesBinding(OperationRecord operation) {
+        try {
+            clientFilesRelay.ifAvailable(relay ->
+                    relay.closeForSession(operation.tenantId(), operation.sessionId()));
+        } catch (RuntimeException ignored) {
+            // best-effort teardown
+        }
     }
 
     private final Set<String> active = ConcurrentHashMap.newKeySet();
@@ -815,6 +833,7 @@ public class SessionLifecycleCoordinator {
                 lifecycle.verifyResources(operation);
             }
             harness.detachLifecycle(operation);
+            closeClientFilesBinding(operation);
             if (sessionStore.hasLiveWriter(operation.tenantId(), operation.sessionId())) {
                 throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_writer_active");
             }
@@ -839,6 +858,7 @@ public class SessionLifecycleCoordinator {
                 // this attempt is not "the settle never happened".
                 harnessSettled.set(true);
                 harnessConfirmed = holder != null && holder.equals(answered);
+                closeClientFilesBinding(operation);
             } else if (holder != null && !bound) {
                 throw new IllegalStateException(
                         "The Hosted Harness is required to close the Session");

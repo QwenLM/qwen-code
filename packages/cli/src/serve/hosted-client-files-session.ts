@@ -75,16 +75,22 @@ export class HostedClientFilesSession {
    * tools — a refused dispatch leaves the working registration intact.
    */
   async register(registration: HostedClientFilesRegistration): Promise<number> {
-    const run = this.registering.then(() => this.registerSerial(registration));
+    // Capture the epoch at request time, not when the queued registration
+    // starts executing: a Disconnect that lands while this registration is
+    // still queued must invalidate it, which a later read would miss.
+    const epoch = this.epoch;
+    const run = this.registering.then(() =>
+      this.registerSerial(registration, epoch),
+    );
     this.registering = run.catch(() => {});
     return run;
   }
 
   private async registerSerial(
     registration: HostedClientFilesRegistration,
+    epoch: number,
   ): Promise<number> {
     if (this.closed) throw new Error('Client files session is closed.');
-    const epoch = this.epoch;
     const transport = new StreamableHTTPClientTransport(
       new URL(registration.url),
       {

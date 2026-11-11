@@ -345,4 +345,40 @@ describe('ManagedClientFilesBridge', () => {
     expect(handled).toEqual([]);
     expect(p.responses).toEqual([]);
   });
+
+  it('disconnect during a pending register ends stopped, not failed', async () => {
+    const p = await peer();
+    const phases: string[] = [];
+    const b = bridge(p, {
+      async handle() {
+        return undefined;
+      },
+    });
+    b.onState((state) => phases.push(state.phase));
+    void b.connect();
+    // The binding is created and the drain opens, but discovery is never
+    // answered, so connect parks awaiting the register promise. Disconnect
+    // aborts it: an abort is a clean stop, not a failure.
+    await vi.waitFor(() => expect(p.streamOpens).toBeGreaterThanOrEqual(1));
+    await b.disconnect();
+    expect(phases).not.toContain('failed');
+    expect(phases[phases.length - 1]).toBe('stopped');
+    expect(b.getState().phase).toBe('stopped');
+  });
+
+  it('unregisters the owned binding when the downlink fails after register', async () => {
+    const p = await peer({ streamStatus: 409 });
+    const b = bridge(p, {
+      async handle() {
+        return undefined;
+      },
+    });
+    await b.connect();
+    expect(b.getState()).toMatchObject({ phase: 'failed' });
+    // The register created a live binding; the failure exit must release it
+    // exactly once, fenced by this connection's identity.
+    expect(p.unregistered.length).toBe(1);
+    expect(p.unregistered[0].sessionId).toBe('session-1');
+    expect(p.unregistered[0].connectionId).toBeTypeOf('string');
+  });
 });

@@ -23243,7 +23243,7 @@
       "WebShellClientFilesStreamRequest": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["sessionId", "generation"],
+        "required": ["sessionId", "generation", "connectionId"],
         "properties": {
           "sessionId": {
             "type": "string"
@@ -23255,7 +23255,7 @@
           "connectionId": {
             "type": "string",
             "maxLength": 64,
-            "description": "The downlink's owned registration identity; a stream for another tab's binding is refused."
+            "description": "The downlink's owned registration identity; a stream omitting it or naming another tab's binding is refused."
           }
         }
       },

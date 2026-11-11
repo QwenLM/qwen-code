@@ -85,14 +85,17 @@ public class ClientFilesRelayStore implements ClientFilesRelay {
         if (current == null || current.generation() != failedGeneration || !current.active()) {
             return false;
         }
-        // Advance to a fresh monotonic generation rather than rewinding to the
-        // previous one, so a new client never reuses the failed attempt's
-        // request namespace (its retained rows would poison retry ids).
-        long generation = failedGeneration + 1;
+        // Rewind to the generation the previous client's downlink was opened
+        // with, so that client keeps draining instead of being refused 409.
+        // The next registration re-allocates the failed attempt's generation,
+        // so drop the failed attempt's retained request rows first — otherwise
+        // a fresh client's restarted JSON-RPC ids would attach to them.
+        jdbc.update("DELETE FROM ma_client_files_request WHERE session_scope_key=?"
+                + " AND binding_generation=?", scope, failedGeneration);
         jdbc.update("UPDATE ma_client_files_binding SET actor_id=?,generation=?,state=?,"
                         + "server_id=?,token_hash=?,connection_id=?,expires_at=?,gmt_modified=?"
                         + " WHERE session_scope_key=?",
-                ManagedSchemaKeys.identity(previous.actorId()), generation,
+                ManagedSchemaKeys.identity(previous.actorId()), previous.generation(),
                 ClientFilesModels.STATE_ACTIVE, previous.serverId(), previous.tokenHash(),
                 previous.connectionId(), previous.expiresAt(), now, scope);
         return true;

@@ -2002,6 +2002,10 @@ export class HostedWorkspaceToolTurn {
   private readonly hookAllowed = new Set<string>();
   private readonly mcp?: HostedMcpSession;
   private readonly clientFiles?: HostedClientFilesSession;
+  // Client-files tool names captured when declarations were built, so a call
+  // to a since-revoked registration is refused even though resolve() now
+  // returns nothing (the declarations snapshot still advertises the name).
+  private clientFilesDeclaredNames: ReadonlySet<string> = new Set();
   private readonly hooks?: HostedHookSession;
   private readonly profile?: string;
   private readonly context?: HostedWorkspaceContextSlot;
@@ -2412,6 +2416,11 @@ export class HostedWorkspaceToolTurn {
     const memberCommands = await this.memberCommandsDeclared();
     const skill = this.skills?.declaration();
     const todoTool = this.declaresTodoTool();
+    this.clientFilesDeclaredNames = new Set(
+      (this.clientFiles?.tools() ?? [])
+        .map((tool) => tool.name)
+        .filter((name): name is string => Boolean(name)),
+    );
     this.advertised = [
       ...[
         ...(this.publication || this.shell
@@ -4399,6 +4408,16 @@ export class HostedWorkspaceToolTurn {
         } else if (mcpInput) {
           input = { ...mcpInput.input };
         } else if (clientFilesTool) {
+          input = { ...call.args };
+        } else if (this.clientFilesDeclaredNames.has(call.name)) {
+          // The declarations snapshot still advertises this client-files tool,
+          // but the registration was revoked before the call ran. Refuse it
+          // here instead of letting it fall through to the Workspace file-tool
+          // arm (which would tell the model to retry with file_path and then
+          // dispatch it through the broker).
+          validationError = denied(
+            'The client filesystem registration is no longer active.',
+          );
           input = { ...call.args };
         } else if (skill) {
           validationError = source.some((other) => other.name !== 'skill')

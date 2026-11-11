@@ -225,6 +225,26 @@ public class ClientFilesRelayService {
         }
     }
 
+    /**
+     * Lifecycle-initiated teardown when the harness detaches or the Session
+     * closes: the harness-local catalog is gone, so the binding must not keep
+     * reporting active (the panel would show connected while the model has no
+     * client-file tools). No actor/generation fence — the lifecycle owns the
+     * whole Session. Registrations stay ephemeral; no durable recovery.
+     */
+    public void closeForSession(String tenant, String session) {
+        if (!settings.getClientFiles().isEnabled()) {
+            return;
+        }
+        Binding binding = relay.find(tenant, session);
+        if (binding == null || !binding.active()) {
+            return;
+        }
+        long now = System.currentTimeMillis();
+        relay.close(tenant, session, binding.generation(), now);
+        relay.failQueued(tenant, session, binding.generation(), ClientFilesModels.ERROR_OFFLINE, now);
+    }
+
     public List<QueuedRequest> requests(String tenant, String actor, String session, long generation) {
         requireEnabled();
         requireSessionId(session);
@@ -244,7 +264,10 @@ public class ClientFilesRelayService {
         requireEnabled();
         requireSessionId(session);
         Binding binding = requireDeliveryAuthority(tenant, actor, session, generation);
-        if (connectionId != null && !connectionId.equals(binding.connectionId())) {
+        // The identity is mandatory: an omitted connectionId must be refused,
+        // not short-circuited, or a second client of the same actor could attach
+        // to the queue and settle another registration's requests.
+        if (connectionId == null || !connectionId.equals(binding.connectionId())) {
             throw error(409, "client_files_generation_conflict");
         }
     }
@@ -327,9 +350,16 @@ public class ClientFilesRelayService {
         }
         long deadline = now + settings.getClientFiles().getRequestTtl().toMillis();
         Waiter waiter = new Waiter(deadline, id);
-        waiters.computeIfAbsent(
-                new WaiterKey(tenant, session, binding.generation(), requestId),
-                key -> new CopyOnWriteArrayList<>()).add(waiter);
+        // Publish atomically: a separate computeIfAbsent + add lets a concurrent
+        // settleWaiters removal detach the fresh list between the two calls,
+        // stranding the waiter's future until the controller timeout.
+        waiters.compute(new WaiterKey(tenant, session, binding.generation(), requestId),
+                (key, list) -> {
+                    CopyOnWriteArrayList<Waiter> target =
+                            list == null ? new CopyOnWriteArrayList<>() : list;
+                    target.add(waiter);
+                    return target;
+                });
         return waiter.future;
     }
 
@@ -364,9 +394,9 @@ public class ClientFilesRelayService {
                 list.remove(waiter);
                 waiter.future.complete(answer);
             }
-            if (list.isEmpty()) {
-                waiters.remove(key, list);
-            }
+            // Remove only if still empty, atomically against a concurrent mcp()
+            // compute that may have added a waiter to this same list.
+            waiters.computeIfPresent(key, (k, l) -> l.isEmpty() ? null : l);
         });
     }
 

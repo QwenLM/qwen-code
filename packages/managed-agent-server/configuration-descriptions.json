@@ -214,8 +214,8 @@
       "type": "duration"
     },
     "qwen.managed-agent.client-files.relay-url": {
-      "en": "The base URL of this control plane's internal listener as reachable from the Hosted Harness, used to build the relay MCP endpoint the Harness connects back to (`<relay-url>/internal/managed-client-files/v1/sessions/<id>/mcp`). Required while `qwen.managed-agent.client-files.enabled` is true; registration is refused when it is blank. Must be an http(s) URL without credentials, query or fragment.",
-      "zh": "从 Hosted Harness 可达的本控制面内部监听器基地址，用于构造 Harness 回连的 relay MCP 端点（`<relay-url>/internal/managed-client-files/v1/sessions/<id>/mcp`）。`qwen.managed-agent.client-files.enabled` 为 true 时必填；为空时拒绝注册。必须是不带凭据、查询串或片段的 http(s) URL。"
+      "en": "The base URL of this control plane's internal listener as reachable from the Hosted Harness, used to build the relay MCP endpoint the Harness connects back to (`<relay-url>/internal/managed-client-files/v1/sessions/<id>/mcp`). When left blank while `qwen.managed-agent.client-files.enabled` is true, it is derived from the internal listener; if no URL can be derived, startup fails. A configured value must be an http(s) URL without credentials, query or fragment.",
+      "zh": "从 Hosted Harness 可达的本控制面内部监听器基地址，用于构造 Harness 回连的 relay MCP 端点（`<relay-url>/internal/managed-client-files/v1/sessions/<id>/mcp`）。`qwen.managed-agent.client-files.enabled` 为 true 且留空时，从 internal listener 推导；推导不出则启动失败。显式配置的值必须是不带凭据、查询串或片段的 http(s) URL。"
     },
     "qwen.managed-agent.definition-models": {
       "en": "The model IDs a stored AgentDefinition may name in `model.id`, as a comma-separated list; a Session whose definition names any other model is refused at admission. Each ID should match a model provider route configured in the Harness. Empty admits only definitions without a model.",

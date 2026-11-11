@@ -4633,6 +4633,10 @@ export function registerHostedHarnessSessionRoutes(
       session.monitorWake?.close();
       for (const stop of session.streams) stop();
       await session.stores!.stopLocal();
+      // Drop the client-files registration wherever the Session is dropped, so
+      // a releasing instance does not leave a live relay client behind.
+      await session.clientFiles?.close();
+      session.clientFiles = undefined;
       released.set(sessionId, { clientId: session.clientId, receipt });
       if (released.size > 256) released.delete(released.keys().next().value!);
       sessions.delete(sessionId);
@@ -5356,6 +5360,8 @@ export function registerHostedHarnessSessionRoutes(
         await resident.managed.close();
         await resident.stores!.close();
         for (const stop of resident.streams) stop();
+        await resident.clientFiles?.close();
+        resident.clientFiles = undefined;
         sessions.delete(sessionId);
         resident = undefined;
       } catch {
@@ -9276,12 +9282,18 @@ export function registerHostedHarnessSessionRoutes(
     const body = object(req.body);
     const action = body?.['action'];
     if (action === 'unregister') {
-      // Unregister is admitted during a Turn: it only drops the catalog and
-      // connection so later Turns stop advertising tools whose binding is
-      // gone. Only register needs the idle gate.
+      // Unregister is admitted during a Turn and teardown: it only drops the
+      // catalog and connection so later Turns stop advertising tools whose
+      // binding is gone. Only register needs the idle/teardown gates.
       await session.clientFiles?.unregister();
       return res.json({ registered: false });
     }
+    // Refuse register mid-teardown like the sibling mutation routes: the
+    // registration would otherwise be installed after close cleared it and
+    // before the session leaves the map, orphaning a relay client.
+    if (session.mcpClosing) return error(res, 409, 'hosted_session_closing');
+    if (session.mcpBusy || session.mcpRecovering)
+      return error(res, 409, 'hosted_mcp_operation_active');
     if (session.active || session.blocked)
       return error(res, 409, 'hosted_turn_active');
     if (action !== 'register')

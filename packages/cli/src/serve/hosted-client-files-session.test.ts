@@ -457,4 +457,37 @@ describe('HostedClientFilesSession', () => {
     expect(count).toBe(1);
     expect(files.active).toBe(true);
   });
+
+  it('a registration queued before Disconnect is invalidated too', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const url = await peer({ tools: [{ name: 'read_file' }], listGate: gate });
+    const files = session();
+    // gen 1 parks at tools/list; gen 2 queues behind it. Disconnect lands
+    // while gen 2 is still queued — its epoch was captured at request time,
+    // so it must not install itself once it finally runs.
+    const first = files.register({
+      serverId: 'local-files',
+      generation: 1,
+      url,
+      token: 't',
+    });
+    first.catch(() => {});
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const second = files.register({
+      serverId: 'local-files',
+      generation: 2,
+      url,
+      token: 't2',
+    });
+    second.catch(() => {});
+    await files.unregister();
+    release();
+    await expect(first).rejects.toThrow();
+    await expect(second).rejects.toThrow();
+    expect(files.active).toBe(false);
+    expect(files.tools()).toEqual([]);
+  });
 });

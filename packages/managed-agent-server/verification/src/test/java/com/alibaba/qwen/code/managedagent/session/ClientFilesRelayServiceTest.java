@@ -134,11 +134,10 @@ class ClientFilesRelayServiceTest {
                 .thenThrow(new UnsupportedOperationException("hosted_turn_active"));
         assertThatThrownBy(() -> service.register(tenant, ACTOR, session, CONNECTION))
                 .hasFieldOrPropertyWithValue("code", "client_files_relay_unavailable");
-        // The previous credential is active again at a fresh monotonic
-        // generation (never rewinding into the failed attempt's namespace) and
-        // still reaches the queue, instead of fencing every call to a refused
-        // token.
-        long restoredGeneration = first.generation() + 2;
+        // The previous credential is active again at the generation the previous
+        // client's downlink was opened with, so a stream at that generation keeps
+        // draining rows mcp() enqueues afterwards (instead of being refused 409).
+        long restoredGeneration = first.generation();
         assertThat(service.status(tenant, ACTOR, session).generation())
                 .isEqualTo(restoredGeneration);
         assertThat(service.status(tenant, ACTOR, session).state()).isEqualTo("active");

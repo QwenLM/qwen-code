@@ -242,24 +242,30 @@ class ClientFilesRelayStoreTest {
     }
 
     @Test
-    void restoreIsFencedOnTheFailedAttemptAndAdvancesMonotonically() {
+    void restoreIsFencedAndRewindsToTheConnectedGeneration() {
         Binding first = tx(() -> store.register(tenant, session, actor, "local-files",
                 "a".repeat(64), 9_000L, 1_000L, "conn-a"));
         Binding failed = tx(() -> store.register(tenant, session, actor, "local-files",
                 "b".repeat(64), 19_000L, 2_000L, "conn-b"));
         assertThat(failed.generation()).isEqualTo(2L);
-        // Compensation restores the previous credential at a fresh monotonic
-        // generation (never rewinding into the failed attempt's namespace).
+        // The failed attempt left a request row in its own generation.
+        tx(() -> store.enqueue(tenant, session, 2L, "0", "{}", 19_000L, 2_000L));
+        // Compensation rewinds to the generation the previous client's downlink
+        // was opened with (so it keeps draining) and drops the failed attempt's
+        // request rows (so the next registration re-allocating that generation
+        // does not attach to them).
         assertThat(tx(() -> store.restore(tenant, session, 2L, first, 3_000L))).isTrue();
         Binding restored = tx(() -> store.find(tenant, session));
-        assertThat(restored.generation()).isEqualTo(3L);
+        assertThat(restored.generation()).isEqualTo(first.generation());
         assertThat(restored.tokenHash()).isEqualTo("a".repeat(64));
         assertThat(restored.connectionId()).isEqualTo("conn-a");
         assertThat(restored.active()).isTrue();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_client_files_request"
+                + " WHERE binding_generation=2", Integer.class)).isZero();
         // A late compensation for the same failed attempt is a no-op: the
         // binding no longer sits at that generation.
         assertThat(tx(() -> store.restore(tenant, session, 2L, first, 4_000L))).isFalse();
-        assertThat(tx(() -> store.find(tenant, session)).generation()).isEqualTo(3L);
+        assertThat(tx(() -> store.find(tenant, session)).generation()).isEqualTo(first.generation());
     }
 
     @Test

@@ -79,6 +79,10 @@ export function useManagedLocalFilesBridge(
   const handleRef = useRef<FileSystemDirectoryHandle | undefined>(undefined);
   const bridgeRef = useRef<ManagedClientFilesBridge | undefined>(undefined);
   const storeRef = useRef<DirectoryHandleStore | undefined>(undefined);
+  // Bumped on teardown/session change/disconnect so a connect() parked on the
+  // native picker does not save a grant and register a bridge after the view
+  // unmounted or the session changed (mirrors the daemon hook's generationRef).
+  const generationRef = useRef(0);
 
   const blocker = useMemo(
     () =>
@@ -118,12 +122,14 @@ export function useManagedLocalFilesBridge(
   // Tear the bridge down when the session changes or the hook unmounts.
   useEffect(() => {
     return () => {
+      generationRef.current += 1;
       void bridgeRef.current?.disconnect();
       bridgeRef.current = undefined;
     };
   }, [sessionId]);
 
   const disconnect = useCallback(async () => {
+    generationRef.current += 1;
     await bridgeRef.current?.disconnect();
     bridgeRef.current = undefined;
     // Release the grant so a wrong directory can be undone: Disconnect then
@@ -140,7 +146,11 @@ export function useManagedLocalFilesBridge(
   useEffect(() => {
     if (!win || typeof win.addEventListener !== 'function') return;
     const onPageHide = () => {
-      void bridgeRef.current?.disconnect();
+      const bridge = bridgeRef.current;
+      // Clear the ref so a later Connect cannot call disconnect() a second
+      // time on the already-disconnected bridge (an identity-less teardown).
+      bridgeRef.current = undefined;
+      void bridge?.disconnect();
     };
     win.addEventListener('pagehide', onPageHide);
     return () => win.removeEventListener('pagehide', onPageHide);
@@ -148,9 +158,12 @@ export function useManagedLocalFilesBridge(
 
   const connect = useCallback(async () => {
     if (!win || blocker !== null || !sessionId) return;
+    const generation = generationRef.current;
+    const stale = () => generationRef.current !== generation;
     let handle = handleRef.current;
     if (!handle) {
       const picked = await pickDirectoryHandle(win);
+      if (stale()) return;
       if (picked.kind === 'cancelled') return;
       if (picked.kind === 'unavailable') {
         setStatus({ phase: 'unavailable', blocker: picked.blocker });
@@ -163,7 +176,9 @@ export function useManagedLocalFilesBridge(
       handle = picked.handle;
       handleRef.current = handle;
       await storeRef.current?.save(handle);
+      if (stale()) return;
     }
+    if (stale()) return;
     const server = new LocalFilesMcpServer(new LocalDirectory(handle));
     const bridge = new ManagedClientFilesBridge({
       baseUrl,

@@ -248,4 +248,48 @@ describe('useManagedLocalFilesBridge', () => {
     });
     await waitFor(() => expect(result.current.status.phase).toBe('idle'));
   });
+
+  it('does not register when unmounted while the picker is open', async () => {
+    const peer = await startPeer();
+    servers.push(peer.server);
+    let registerCalls = 0;
+    const countingFetch = ((url: string, init?: RequestInit) => {
+      if (String(url).endsWith('/client-files/register')) registerCalls += 1;
+      return nodeFetch(url, init);
+    }) as unknown as ManagedFetch;
+    let releasePicker!: (value: {
+      kind: 'picked';
+      handle: FileSystemDirectoryHandle;
+    }) => void;
+    const pickerGate = new Promise<{
+      kind: 'picked';
+      handle: FileSystemDirectoryHandle;
+    }>((resolve) => {
+      releasePicker = resolve;
+    });
+    vi.mocked(pickDirectoryHandle).mockImplementationOnce(
+      () => pickerGate as ReturnType<typeof pickDirectoryHandle>,
+    );
+    const fakeWin = {
+      location: { origin: 'http://localhost' },
+    } as unknown as Window;
+    const { result, unmount } = renderHook(() =>
+      useManagedLocalFilesBridge({
+        sessionId: 'session-1',
+        baseUrl: peer.baseUrl,
+        fetch: countingFetch,
+        win: fakeWin,
+      }),
+    );
+    act(() => {
+      void result.current.connect();
+    });
+    // The picker is still open; unmounting bumps the generation so the parked
+    // connect() must bail before saving a grant or registering a bridge.
+    unmount();
+    releasePicker({ kind: 'picked', handle: fakeHandle });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(registerCalls).toBe(0);
+    expect(storeSpies.save).not.toHaveBeenCalled();
+  });
 });

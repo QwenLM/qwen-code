@@ -14030,6 +14030,30 @@ describe('client files tool execution', () => {
     await expect(turn.finish()).resolves.toBeUndefined();
   });
 
+  it('refuses a declared client-files call revoked before prepare, without the broker', async () => {
+    const invoke = vi.fn();
+    // The declarations snapshot still advertises the tool, but resolve() no
+    // longer returns it: the registration was revoked before the call ran.
+    // The call must be refused here, not fall through to the Workspace
+    // file-tool arm and dispatch through the broker.
+    turn = clientFilesTurn(clientFilesSession(invoke, () => undefined));
+    const responses = await turn.execute(
+      [clientFilesCall],
+      clientFilesParts,
+      'model',
+      new AbortController().signal,
+    );
+    expect(responses[0].functionResponse?.response?.['error']).toContain(
+      'no longer active',
+    );
+    expect(invoke).not.toHaveBeenCalled();
+    expect(broker.prepare).not.toHaveBeenCalled();
+    expect(broker.execute).not.toHaveBeenCalled();
+    expect(broker.acquire).not.toHaveBeenCalled();
+    await turn.consumeResults();
+    await expect(turn.finish()).resolves.toBeUndefined();
+  });
+
   it('converts an isError browser result into a tool error', async () => {
     const invoke = vi.fn(async () => ({
       content: [{ type: 'text', text: 'permission denied' }],

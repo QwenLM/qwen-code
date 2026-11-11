@@ -107,6 +107,7 @@ export class ManagedClientFilesBridge {
     const connectionId = crypto.randomUUID();
     this.connectionId = connectionId;
     let registerFailed = false;
+    let bindingCreated = false;
     try {
       // register blocks on the Harness discovery that this drain must
       // answer, and the stream route requires the binding that register
@@ -139,6 +140,7 @@ export class ManagedClientFilesBridge {
         registering,
         connectionId,
       );
+      bindingCreated = true;
       this.running = true;
       // Handle the drain rejection at creation: register can take up to its
       // discovery timeout, and a fast stream refusal must not surface as an
@@ -157,7 +159,9 @@ export class ManagedClientFilesBridge {
       try {
         registered = await registering;
       } catch (cause) {
-        registerFailed = true;
+        // An abort is a deliberate Disconnect, not a register failure: keep it
+        // on the stopped path instead of publishing a failure status.
+        if (!abort.signal.aborted) registerFailed = true;
         abort.abort();
         await draining;
         throw cause;
@@ -185,6 +189,15 @@ export class ManagedClientFilesBridge {
       if (abort.signal.aborted && !registerFailed) {
         this.setState({ phase: 'stopped' });
         return;
+      }
+      // A failure after the binding was created must close the registration
+      // this client created, so the control plane does not hold an active
+      // registration nobody drains until the binding TTL. The identity fence
+      // makes this a no-op if another tab already replaced the binding.
+      if (bindingCreated) {
+        abort.abort();
+        this.connectionId = undefined;
+        await this.unregisterOwned(connectionId);
       }
       this.setState({
         phase: 'failed',
@@ -283,19 +296,28 @@ export class ManagedClientFilesBridge {
     return false;
   }
 
-  /** Stops the downlink and unregisters the binding (best-effort). */
+  /** Stops the downlink and unregisters the binding (best-effort). Idempotent:
+   * once the owned identity is cleared, a second call sends nothing, so it can
+   * never issue an identity-less teardown that closes another registration. */
   async disconnect(): Promise<void> {
     this.running = false;
     this.abort?.abort();
     this.abort = undefined;
     const connectionId = this.connectionId;
     this.connectionId = undefined;
+    if (connectionId !== undefined) {
+      await this.unregisterOwned(connectionId);
+    }
+    this.setState({ phase: 'stopped' });
+  }
+
+  /** Best-effort unregister carrying the owned identity; the server fences a
+   * stale identity to a no-op, so this never closes another tab's binding. */
+  private async unregisterOwned(connectionId: string): Promise<void> {
     try {
       await this.options.fetch(this.url('unregister'), {
         method: 'POST',
         headers: this.headers(true),
-        // Carry the owned identity so a stale teardown cannot close a newer
-        // tab's registration.
         body: JSON.stringify({
           sessionId: this.options.sessionId,
           connectionId,
@@ -304,7 +326,6 @@ export class ManagedClientFilesBridge {
     } catch {
       // best-effort: the control plane also drops the binding on SSE close.
     }
-    this.setState({ phase: 'stopped' });
   }
 
   private async drain(

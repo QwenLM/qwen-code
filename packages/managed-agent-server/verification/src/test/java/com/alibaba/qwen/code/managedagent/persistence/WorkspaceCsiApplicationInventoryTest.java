@@ -2230,6 +2230,22 @@ class WorkspaceCsiApplicationInventoryTest {
                 });
     }
 
+    @Test
+    void clientFilesRowsDoNotBlockCsiRetirement() throws Exception {
+        var manager = new DataSourceTransactionManager(source);
+        new TransactionTemplate(manager).executeWithoutResult(status -> {
+            var relay = new ClientFilesRelayStore(jdbc);
+            long now = System.currentTimeMillis();
+            relay.register("tenant", session, "actor", "local-files", "a".repeat(64),
+                    now + 3_600_000, now, "conn-csi");
+            relay.enqueue("tenant", session, 1L, "req-1", "{}", now + 25_000, now);
+        });
+        var snapshot = inspect();
+        assertThat(snapshot.blockers()).noneMatch(blocker ->
+                blocker.table().equals("ma_client_files_binding")
+                        || blocker.table().equals("ma_client_files_request"));
+    }
+
     private WorkspaceCsiApplicationInventory.Snapshot inspect() throws Exception {
         try (var connection = source.getConnection()) {
             connection.setAutoCommit(false);
