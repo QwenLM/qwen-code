@@ -121,6 +121,7 @@ final class AgentStoreRows {
             "SELECT " + ManagedSchemaProjection.SESSION.columns("ma_session")
                     + ", es.last_sequence AS list_last_sequence,"
                     + " es.replay_floor_sequence AS list_floor_sequence,"
+                    + " es.gmt_modified AS list_last_activity,"
                     + " sp.version AS authority_version,"
                     + " sp.user_id AS authority_user_id,"
                     + " sp.actor_present AS authority_actor_present,"
