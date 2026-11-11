@@ -18,7 +18,7 @@ The `v1.0.0-preview` branch re-expressed the same cycle as an event-driven state
 - **An explicit event vocabulary.** Ten bus events (`query.submitted/output/cancelled/finished`, `llm.request/tool_use/settled`, `tool.cancel/settled`, `handler.failed`) name every transition. In the procedural loop the same transitions are implicit in control flow, so a new loop-level behavior has to be threaded through the function body.
 - **Delivery guarantees.** The bus delivers events for one subscriber and one query serially in publish order, and different queries never block each other. A listener that throws becomes a `handler.failed` event instead of an unhandled rejection. Callbacks today have neither ordering nor failure semantics beyond "throwing ends the loop".
 - **Writer ownership.** Per-query state is split so that Conversation owns decisions and context, Llm owns selection and the model result, Tool owns the dispatched batch. The procedural loop shares mutable locals across all three concerns.
-- **Round scoping.** Every event carries a `roundId`; late events from an abandoned round are dropped by construction (`currentRound`). The procedural loop handles this with ad-hoc checks (for example dropping collected calls on `Retry`/`ModelFallback`).
+- **Round scoping.** Every event carries a `round`; late events from an abandoned round are dropped by construction (`currentRound`). The procedural loop handles this with ad-hoc checks (for example dropping collected calls on `Retry`/`ModelFallback`).
 - **Bounded settlement.** Cancellation and consumer close settle within a cap (10 s in preview) instead of waiting on a stuck handler.
 
 We want these properties in main's shared loop without disturbing the convergence that is already in flight, and without a second competing loop.
@@ -43,7 +43,7 @@ Surfaces: headless runs `runAgentLoop` (merged, #15369); ACP uses `runModelRound
 
 `packages/core/src/event-bus/`:
 
-- `bus.ts` (147 lines) — `QueryEventBus`: typed publish/subscribe, routing by `queryId`, per-`(subscriber, query)` serial promise chains, listener failures republished as `handler.failed`, `eventId` dedup key.
+- `bus.ts` (147 lines) — `QueryEventBus`: typed publish/subscribe, routing by `queryId`, per-`(subscriber, query)` serial promise chains, listener failures republished as `handler.failed`, an `eventId` identifier consumers can dedup on (the bus does not deduplicate).
 - `events.ts` (114) — the event map and the reason enums (`RequestReason`, `LlmFailureKind`, cancel reasons).
 - `state.ts` (292) — `QueryStateStore` plus the ownership split described above.
 - `conversation-handler.ts` + `conversation/` (~2,400) — the only decision maker: submit, model-settled, tool-settled, failure finalization.
@@ -82,7 +82,7 @@ Surfaces (unchanged): AgentLoopHost callbacks, AgentLoopToolExecutor, scheduler 
 runAgentLoop (same signature) — adapter: hosts ↔ bus subscriptions
    ▼
 event-bus/  (new, packages/core/src/event-bus/)
-   bus.ts          QueryEventBus: routing, serial delivery, handler.failed
+   bus.ts          LoopEventBus: routing, serial delivery, handler.failed
    events.ts       loop event vocabulary over main's types
    state.ts        per-run state, writer ownership
    conversation.ts decisions: continue / stop / next round
@@ -99,7 +99,7 @@ The adapter is the compatibility boundary: it subscribes to the bus and invokes 
 Preview routes by `queryId` and scopes rounds by a UUID `roundId`. Main's loop runs once per interaction with a `promptId` and a numeric round counter. The port keeps main's identities:
 
 - `runId`: generated at `runAgentLoop` entry; the routing key (one run = one preview "query"). `promptId` is attribution, carried on events, never a routing key — a drain turn may reuse a prompt id across runs.
-- `roundId`: the run's round number, assigned when Conversation publishes `llm.request`. Late events are dropped by the same `currentRound` check.
+- `round`: the run's round number, assigned when Conversation publishes `llm.request`. Late events are dropped by the same `currentRound` check.
 
 | Bus event        | Payload (main types)                                   | Published by                         |
 | ---------------- | ------------------------------------------------------ | ------------------------------------ |
@@ -112,7 +112,7 @@ Preview routes by `queryId` and scopes rounds by a UUID `roundId`. Main's loop r
 | `llm.settled`    | `{ round, calls, terminal? }`                          | Llm, at round end                    |
 | `tool.cancel`    | `{ reason }`                                           | Conversation                         |
 | `tool.settled`   | `{ round }`                                            | Tool, at batch end                   |
-| `handler.failed` | `{ source, round?, error }`                            | bus, on listener failure             |
+| `handler.failed` | `{ source, eventType, round?, error }`                 | bus, on listener failure             |
 
 `llm.settled` carries the round's terminal classification (the `STOP_EVENTS` mapping that `runModelRound` does today) so Conversation remains the only place that maps a model outcome to an `AgentLoopStopReason`. Duplicate/replay bookkeeping stays in the Tool handler, using the existing `toolCallIdUtils` helpers, exactly where `runToolBatch` does it today. Event payloads carry only routing and decision data; the full model result and tool batch live in the run state under their owner's slot, so the bus never duplicates them.
 
@@ -124,11 +124,11 @@ One state object per run, created by the adapter, deleted when the run settles:
 - **Llm** writes: the round's collected calls, discarded calls on `Retry`/`ModelFallback`, the round outcome.
 - **Tool** writes: the batch's working state and its settled results.
 
-The store rejects a second create for the same `runId`, and `currentRound(state, roundId)` returns undefined for a late event — the same construction preview uses to make abandoned rounds harmless.
+The store rejects a second create for the same `runId`, and `currentRound(state, round)` returns undefined for a late event — the same construction preview uses to make abandoned rounds harmless.
 
 ### Delivery and failure
 
-Port `QueryEventBus` essentially as-is (it depends only on a logger): serial chains per `(subscriber, runId)`, cross-run isolation, `handler.failed` republication, `eventId` dedup. Two adaptations:
+The bus (`LoopEventBus`) is ported essentially as-is (it depends only on a logger): serial chains per `(subscriber, runId)`, cross-run isolation, `handler.failed` republication, and an `eventId` identifier that consumers can dedup on — the bus itself does not deduplicate, so two publishes with the same id are both delivered. Two adaptations:
 
 - The logger becomes main's `debugLogger`/`runLogger` convention.
 - `handler.failed` from a **host callback** (invoked by the adapter) ends the run with the error outcome, preserving today's semantics; `handler.failed` from an internal handler is a bug and ends the run the same way, with the source named in the error.

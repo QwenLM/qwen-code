@@ -18,7 +18,7 @@
 - **显式事件词汇。** 十个总线事件（`query.submitted/output/cancelled/finished`、`llm.request/tool_use/settled`、`tool.cancel/settled`、`handler.failed`）为每次迁移命名。过程式循环里同样的迁移隐含在控制流中，新增循环级行为必须穿过函数主体接线。
 - **投递保证。** 总线对同一订阅者同一 query 按发布顺序串行投递，不同 query 互不阻塞。监听器抛错会变成 `handler.failed` 事件，而不是未处理的 rejection。今天的回调除了「抛错即结束循环」外没有顺序与失败语义。
 - **写者所有权。** 每 query 的状态被切分：Conversation 拥有决策与上下文，Llm 拥有选择与模型结果，Tool 拥有派发批次。过程式循环让三个关注点共享可变局部变量。
-- **轮次作用域。** 每个事件携带 `roundId`；被放弃轮次的迟到事件由构造即丢弃（`currentRound`）。过程式循环靠临时检查处理（例如 `Retry`/`ModelFallback` 时丢弃已收集的调用）。
+- **轮次作用域。** 每个事件携带 `round`；被放弃轮次的迟到事件由构造即丢弃（`currentRound`）。过程式循环靠临时检查处理（例如 `Retry`/`ModelFallback` 时丢弃已收集的调用）。
 - **有界收尾。** 取消与消费者关闭在一个上限内收尾（preview 为 10 秒），而不是等待卡死的 handler。
 
 我们希望 main 的共享循环获得这些性质，同时不打断已在进行的收敛，也不引入第二个相互竞争的循环。
@@ -43,7 +43,7 @@
 
 `packages/core/src/event-bus/`：
 
-- `bus.ts`（147 行）—— `QueryEventBus`：类型化发布/订阅，按 `queryId` 路由，按 `(订阅者, query)` 串行 promise 链，监听器失败重发布为 `handler.failed`，`eventId` 去重键。
+- `bus.ts`（147 行）—— `QueryEventBus`：类型化发布/订阅，按 `queryId` 路由，按 `(订阅者, query)` 串行 promise 链，监听器失败重发布为 `handler.failed`，`eventId` 标识（供消费方去重，总线本身不去重）。
 - `events.ts`（114）—— 事件映射与原因枚举（`RequestReason`、`LlmFailureKind`、取消原因）。
 - `state.ts`（292）—— `QueryStateStore` 与上述所有权切分。
 - `conversation-handler.ts` + `conversation/`（约 2,400）—— 唯一决策者：submit、model-settled、tool-settled、失败收尾。
@@ -82,7 +82,7 @@ Surfaces（不变）：AgentLoopHost 回调、AgentLoopToolExecutor、scheduler 
 runAgentLoop（签名不变）—— 适配器：hosts ↔ 总线订阅
    ▼
 event-bus/（新增，packages/core/src/event-bus/）
-   bus.ts          QueryEventBus：路由、串行投递、handler.failed
+   bus.ts          LoopEventBus：路由、串行投递、handler.failed
    events.ts       基于 main 类型的循环事件词汇
    state.ts        每 run 状态，写者所有权
    conversation.ts 决策：续跑 / 停止 / 下一轮
@@ -99,7 +99,7 @@ LlmClient → Turn → LlmChat、CoreToolScheduler（不变）
 preview 按 `queryId` 路由、用 UUID `roundId` 标记轮次。main 的循环每次交互跑一次，带 `promptId` 与数字轮次计数。移植保留 main 的身份：
 
 - `runId`：在 `runAgentLoop` 入口生成；路由键（一个 run = preview 的一个「query」）。`promptId` 只是归属信息，随事件携带，绝不作路由键 —— drain 轮可能跨 run 复用同一 prompt id。
-- `roundId`：run 的轮次编号，由 Conversation 发布 `llm.request` 时赋值。迟到事件由同样的 `currentRound` 检查丢弃。
+- `round`：run 的轮次编号，由 Conversation 发布 `llm.request` 时赋值。迟到事件由同样的 `currentRound` 检查丢弃。
 
 | 总线事件         | 载荷（main 类型）                              | 发布者                              |
 | ---------------- | ---------------------------------------------- | ----------------------------------- |
@@ -112,7 +112,7 @@ preview 按 `queryId` 路由、用 UUID `roundId` 标记轮次。main 的循环�
 | `llm.settled`    | `{ round, calls, terminal? }`                  | Llm，轮结束时                       |
 | `tool.cancel`    | `{ reason }`                                   | Conversation                        |
 | `tool.settled`   | `{ round }`                                    | Tool，批结束时                      |
-| `handler.failed` | `{ source, round?, error }`                    | 总线，监听器失败时                  |
+| `handler.failed` | `{ source, eventType, round?, error }`         | 总线，监听器失败时                  |
 
 `llm.settled` 携带该轮的终止分类（今天 `runModelRound` 做的 `STOP_EVENTS` 映射），使 Conversation 仍是把模型结局映射为 `AgentLoopStopReason` 的唯一位置。去重/replay 记账留在 Tool handler，使用现有 `toolCallIdUtils` 助手，位置与今天 `runToolBatch` 完全一致。事件载荷只携带路由与决策数据；完整的模型结果与工具批按所有权存于 run 状态的对应槽位，总线不重复承载它们。
 
@@ -124,11 +124,11 @@ preview 按 `queryId` 路由、用 UUID `roundId` 标记轮次。main 的循环�
 - **Llm** 写：该轮收集的调用、`Retry`/`ModelFallback` 时丢弃的调用、轮结局。
 - **Tool** 写：批次工作状态与其已收尾结果。
 
-状态库拒绝同一 `runId` 的二次创建；`currentRound(state, roundId)` 对迟到事件返回 undefined —— 与 preview 让被放弃轮次无害化的构造相同。
+状态库拒绝同一 `runId` 的二次创建；`currentRound(state, round)` 对迟到事件返回 undefined —— 与 preview 让被放弃轮次无害化的构造相同。
 
 ### 投递与失败
 
-`QueryEventBus` 基本原样移植（只依赖一个 logger）：按 `(订阅者, runId)` 串行链、跨 run 隔离、`handler.failed` 重发布、`eventId` 去重。两处适配：
+总线（`LoopEventBus`）基本原样移植（只依赖一个 logger）：按 `(订阅者, runId)` 串行链、跨 run 隔离、`handler.failed` 重发布，以及供消费方去重的 `eventId` 标识 —— 总线本身不去重，相同 id 的两次发布都会投递。两处适配：
 
 - logger 换成 main 的 `debugLogger`/`runLogger` 约定。
 - 来自 **host 回调**（由适配器调用）的 `handler.failed` 以 error 结局结束 run，保持今天语义；来自内部 handler 的 `handler.failed` 属于 bug，同样结束 run，并在错误中点名来源。

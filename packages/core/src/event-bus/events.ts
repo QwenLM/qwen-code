@@ -57,7 +57,7 @@ export interface LoopBusEventMap {
 export type LoopBusEventType = keyof LoopBusEventMap;
 
 export interface BusEvent<T extends LoopBusEventType = LoopBusEventType> {
-  /** Dedup key. */
+  /** Identifier consumers can dedup on; the bus does not deduplicate. */
   eventId: string;
   type: T;
   /** Routing key: one run of the agent loop. */

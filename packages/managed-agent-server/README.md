@@ -231,6 +231,8 @@ See the complete design:
 
 Tool publication depends on `ToolPublicationObjectStore`; Aliyun OSS is its default implementation. Publication remains disabled unless `qwen.managed-agent.tool-publication.enabled=true`. To use another backend, register one application `@Bean` returning `ToolPublicationObjectStore` from a configuration imported into the Spring server. The default OSS auto-configuration then backs off, and no OSS endpoint, region, bucket or credentials are needed. Common publication service URL, capacities and verification deadlines remain required. Without a custom store, existing OSS configuration and client lifecycle are unchanged.
 
+Oversized private Session resources and closed-Session journal cold storage use the same object store through `qwen.managed-agent.session-resources.*`. All controls default off: `enabled` admits allocate/upload/finalize for over-cap resources (while off they are refused with HTTP 501 `managed_session_oss_disabled`); `pack-job-enabled` builds and publishes immutable journal packs without deleting SQL bodies; `deletion-enabled` evicts covered SQL bodies only after `deletion-grace` (default 72h, must exceed backup replication lag) and only once pack-only mode is qualified. `oss-key-prefix`, `pack-target-bytes`, `pack-max-transactions` and `scan-delay` tune placement and the background sweeper. Deploy compatible readers before enabling writes, qualify pack-only mode before enabling eviction; rollback disables writes/eviction but keeps readers, hydration and reconciliation.
+
 Implement atomic create without overwrite, guarded reads, idempotent physical deletion and `validateConfiguration()` for private, durable, immutable storage. Throw `ToolPublicationStorageException` with `ACCESS_DENIED` for definite storage denial or `FAILURE` for other backend failures, preserving the original cause. Even with scheduled GC disabled, failed-publication cleanup requires deletion. Do not automatically replay completed writes or a returned stream. All server instances sharing a SQL catalog must use the same byte namespace: replacing the bean does not migrate retained objects or enable fallback to another backend.
 
 The extension applies to the Spring server. Standalone `WorkspaceRecoveryMain` and `WorkspaceCsiWorkerAckMain` still construct their documented OSS/inline storage directly; custom-backend deployments must integrate the same backend into their maintenance tooling. No additional production backend is included. Design: [English](../../docs/design/2026-10-16-managed-tool-storage-interface.md) | [简体中文](../../docs/design/2026-10-16-managed-tool-storage-interface.zh-CN.md).
@@ -1312,7 +1314,8 @@ warns. Cadences bound through `@Scheduled` placeholders —
 `artifacts.projection-interval`, `channels.scan-delay`,
 `child-relay.scan-delay`, `child-workspace.scan-delay`,
 `dispatch.scan-delay`, `events.replay-floor-interval`,
-`message-relay.scan-delay`, `session-worktree.scan-delay` and
+`message-relay.scan-delay`, `session-resources.scan-delay`,
+`session-worktree.scan-delay` and
 `wake-recovery.scan-delay` — also read a bare number as milliseconds,
 and the startup warning cannot see them, so always write the suffix
 there.
@@ -1754,6 +1757,28 @@ Runtime project Skill snapshots and personal HTTP MCP OAuth are separate depende
 ### Import project Skills from the current Runtime
 
 After first-stage self-service is available, enable `qwen.managed-agent.extensions.runtime-skill-import-enabled` only with the Hosted `managed-runtime-skill-import/1` capability. Use **Import from current Workspace** to discover `.qwen/skills` and `.agents/skills` in the Session's original ready Runtime. Snapshot and archive reads retain the observed owner/generation and filesystem boundary; a changed source or owner fails without fallback or provisioning. Review and explicitly apply the immutable snapshot through the existing installation chain. Re-import publishes a new revision and does not watch or automatically update existing Sessions. See the [English design](../../docs/design/2026-11-08-managed-runtime-skill-import.md) and [Chinese design](../../docs/design/2026-11-08-managed-runtime-skill-import.zh-CN.md). Personal OAuth is a separate delivery and is not required.
+
+## Application-owned extension sources and archive storage
+
+Applications can supply Spring Beans implementing `ManagedExtensionSource` and `ExtensionArchiveStorage` from `com.alibaba:qwen-managed-agent-contracts`. Source IDs must be stable and unique; duplicate IDs fail startup. The default directory backend backs off when custom storage is present, so an embedding application using OSS does not need `extensions.artifact-directory`.
+
+The source adapter implements `id()`, `resolve(Context, Reference)` and `open(Context, Resolved)`. Resolve must authorize the trusted tenant/Actor against the requested exact business revision on every call. Return a canonical resource ID and a private archive handle; never return partial materials or substitute a current revision for a missing historical revision. `open` returns the original ZIP/tar.gz stream; Managed closes it, computes `sourceDigest` from actual bytes and compiles through Hosted `managed-package-preparation/1`. Providers enforce finite database/network timeouts within the context deadline. The resolved handle is never a public response or persisted credential.
+
+`ExtensionArchiveStorage` implements `validateConfiguration()`, `putIfAbsent(Key, byteLength, InputStream)` and `open(Key)`. Bind it to a private deployment-specific prefix separate from raw business packages. Include the tenant, Workspace and digest in object identity. Writes must be atomic, immutable and readable on success; identical writes may be replayed. A timeout has an unknown outcome, so adapters must not blindly retry writes. Return streams rather than signed URLs or local paths. Managed stages and verifies packages with bounded temporary files, and retains their leases through actual HTTP streaming or asynchronous Runtime upload completion. Existing execution packages remain retained; no automatic GC is added.
+
+After enabling existing extension/self-service permissions and preparation capability, a trusted business service can import its selected resource:
+
+```http
+POST /v1/agents/workspaces/workspace-1/extensions/source-imports
+Idempotency-Key: selected-skill-17
+Content-Type: application/json
+
+{"reference":{"providerId":"business","kind":"skill","resourceId":"skill-1","revision":"17"},"target":{"platform":"linux","arch":"any"}}
+```
+
+The signed request uses the existing Managed tenant/Actor authentication. `extension` covers expert-suite archives. Dynamic versions and business default/forced selection rules are resolved in the business entry point. The response contains the original `operation`, `source` and `pin` after publication; publication does not install it. Supply the returned Pin to Session `extensionPins` or explicit apply. Query an import by `GET .../source-imports/{operationId}` or by `GET .../source-imports` with the original `Idempotency-Key` header. Intents are saved before source I/O: a pending intent has `operationId`, `state`, `reference`, and no Pin until publication. The Java SDK exposes `importSource`, `sourceImportReceipt` and `lookupSourceImport`.
+
+New selection, details, independent archive access, inspection and settings recheck business access. Revocation blocks these paths. Already admitted Session recovery, original Session-creation replay, admitted apply replay/continuation and import receipt queries retain original operation semantics and existing Workspace/Actor checks; they do not resolve the business source again. Missing providers or invalid provenance fail new access without becoming ordinary uploads. `source_json` and source-import intents belong to the Managed schema and CSI inventory. Business asset tables and original objects are not copied or migrated. See the [English design](../../docs/design/2026-11-10-managed-extension-sources.md) and [Chinese design](../../docs/design/2026-11-10-managed-extension-sources.zh-CN.md).
 
 ## Linux extension process acceptance
 

@@ -1,4 +1,6 @@
 export { DingtalkChannel } from './DingtalkAdapter.js';
+export { DingtalkWebhookChannel } from './DingtalkWebhookChannel.js';
+export { webhookPlugin } from './webhook-plugin.js';
 export { downloadMedia } from './media.js';
 
 import { DingtalkChannel } from './DingtalkAdapter.js';
