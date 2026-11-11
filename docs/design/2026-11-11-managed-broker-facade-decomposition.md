@@ -38,7 +38,7 @@ The drain/close cascade moves verbatim into a module-internal collaborator: harn
 
 ### Ratchet tightening
 
-The facade pin lowers from 2895 to 1931 and the provisioning pin from 1310 to 1309; the new collaborators are each below the 800-line pin threshold. `GLOBAL_MAX_LINES` lowers from 2894 to 2662, the size of the largest remaining class (`JdbcRuntimeBindingRepository`). Ceilings only go down. The pin baseline is reconciled against upstream, which already decomposed the CSI application inventory; the local checkout predates that, so the lowered global ceiling is verified by CI on the upstream-based tree.
+The facade pin lowers from 2895 to 1930 and the provisioning pin from 1310 to 1309; the new collaborators are each below the 800-line pin threshold. `GLOBAL_MAX_LINES` lowers from 2894 to 2662, the size of the largest remaining class (`JdbcRuntimeBindingRepository`). Ceilings only go down. The pin baseline is reconciled against upstream, which already decomposed the CSI application inventory; the local checkout predates that, so the lowered global ceiling is verified by CI on the upstream-based tree.
 
 ## Considered and rejected
 

@@ -38,7 +38,7 @@ drain/close 级联逐字搬入一个模块内部协作类：harness drain、resi
 
 ### 棘轮收紧
 
-门面 pin 从 2895 降到 1931，provisioning pin 从 1310 降到 1309；新协作类均低于 800 行 pin 阈值。`GLOBAL_MAX_LINES` 从 2894 降到 2662，即剩余最大类（`JdbcRuntimeBindingRepository`）的尺寸。上限只降不升。pin 基线对齐上游——上游已分解 CSI application inventory；本地检出早于该分解，故下调后的全局上限由 CI 在上游基线树上验证。
+门面 pin 从 2895 降到 1930，provisioning pin 从 1310 降到 1309；新协作类均低于 800 行 pin 阈值。`GLOBAL_MAX_LINES` 从 2894 降到 2662，即剩余最大类（`JdbcRuntimeBindingRepository`）的尺寸。上限只降不升。pin 基线对齐上游——上游已分解 CSI application inventory；本地检出早于该分解，故下调后的全局上限由 CI 在上游基线树上验证。
 
 ## 考虑过但否决
 

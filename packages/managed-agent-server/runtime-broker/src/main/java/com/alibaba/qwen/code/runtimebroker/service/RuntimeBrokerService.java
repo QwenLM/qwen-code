@@ -1927,5 +1927,4 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
         executor.setRemoveOnCancelPolicy(true);
         return executor;
     }
-
 }
