@@ -302,10 +302,13 @@ test('host defaults keep existing page URLs while explicit lists still restrict 
   page,
   baseURL,
 }) => {
-  // Thirteen full app boots against the dev server (one per mode/path pair,
-  // plus the sidebar rewrites) need more than the default 60s on a loaded CI
-  // host even when every assertion passes.
-  test.setTimeout(120_000);
+  // Thirteen full app boots against the dev server: three sidebar modes
+  // times (three paths plus one live redirect) plus one explicit-list live
+  // boot. A quiet Linux host measured about 102s for this matrix, leaving
+  // 120s too little headroom; the worst nightly attempt reached only 9 of
+  // 13 boots in 60s (~6.7s/boot, ~87s extrapolated). 180s matches the
+  // stream-performance spec's budget.
+  test.setTimeout(180_000);
   await install(page, baseURL!);
   await page.route('**/agentic-code**', async (route) => {
     if (!route.request().isNavigationRequest()) return route.fallback();
