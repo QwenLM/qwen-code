@@ -2598,6 +2598,8 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
 
     private void requireCancellerRole(SessionRecord session,
             SessionPrincipal principal) {
+        ManagedWorkspaceRegistry.requireSessionVisibility(session, principal,
+                workspaces);
         if (session.workspace() == null) {
             store.requireSessionAuthority(session.tenantId(),
                     session.sessionId(), principal);
@@ -2689,6 +2691,8 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
 
     void requireTaskCanceller(SessionRecord session,
             SessionPrincipal principal) {
+        ManagedWorkspaceRegistry.requireSessionVisibility(session, principal,
+                workspaces);
         if (session.workspace() == null) {
             store.requireSessionAuthority(session.tenantId(),
                     session.sessionId(), principal);
@@ -2819,13 +2823,13 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
 
     void requireReadGrant(SessionRecord session,
             SessionPrincipal principal) {
+        ManagedWorkspaceRegistry.requireSessionVisibility(session, principal,
+                workspaces);
         if (session.workspace() == null) {
             // The unified read authority runs for every caller, anonymous
             // included: a present ownership row is the sole authority (a
             // null principal never matches it), while a genuine legacy
-            // Session that never wrote a row stays tenant-wide. The action
-            // surface reads tenant-wide through requireActionReadableSession
-            // instead.
+            // Session that never wrote a row stays tenant-wide.
             store.requireSessionReadAuthority(session.tenantId(),
                     session.sessionId(), principal);
             return;
@@ -2836,48 +2840,6 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
             throw new ManagedAgentException(404,
                     "session_not_found", "The Session was not found.");
         }
-    }
-
-    /**
-     * The action surface read: visibility plus the Workspace read grant, but
-     * tenant-wide for an unbound Session. The action gate enforces creator
-     * authority itself (403 action_forbidden), so a foreign actor must reach
-     * it rather than collapse to a 404 at the read.
-     */
-    public SessionRecord requireActionReadableSession(String tenantId,
-            SessionPrincipal principal, String sessionId) {
-        SessionRecord session = inputPolicy.requireVisibleSession(tenantId,
-                sessionId);
-        if (session.workspace() != null && !workspaces.canRead(
-                session.tenantId(),
-                principal == null ? null : principal.userId(),
-                session.workspace().getWorkspaceId())) {
-            throw new ManagedAgentException(404,
-                    "session_not_found", "The Session was not found.");
-        }
-        return session;
-    }
-
-    // The raw-actor twin: the bound arm compares the filter-admitted actor
-    // verbatim, never a byte-bounded principal (R7-1).
-    public SessionRecord requireActionReadableSession(String tenantId,
-            String actorId, String sessionId) {
-        SessionRecord session = inputPolicy.requireVisibleSession(tenantId,
-                sessionId);
-        if (session.workspace() != null && !workspaces.canRead(
-                session.tenantId(), actorId,
-                session.workspace().getWorkspaceId())) {
-            throw new ManagedAgentException(404,
-                    "session_not_found", "The Session was not found.");
-        }
-        return session;
-    }
-
-    public SessionRecord requireActionReadableSession(SessionPrincipal principal,
-            String sessionId) {
-        return requireActionReadableSession(
-                principal == null ? null : principal.tenantId(), principal,
-                sessionId);
     }
 
     private static SessionPrincipal principalOf(String tenantId,

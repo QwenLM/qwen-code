@@ -180,7 +180,7 @@ class ManagedAgentServiceWorkflowChildTest {
         when(store.insertSessionCommand(anyString(),
                 any(SessionPrincipal.class), anyString(), anyString(),
                 anyString(), any(), any(), any(), anyList(), anyString(),
-                any())).thenReturn(new StoreModels.Admission(
+                any(), any())).thenReturn(new StoreModels.Admission(
                         "session-new", null, false, true));
         String raw = "x surrogate " + (char) 0xD800 + " here";
 
@@ -194,7 +194,7 @@ class ManagedAgentServiceWorkflowChildTest {
                 ArgumentCaptor.forClass(SessionPrincipal.class);
         verify(store).insertSessionCommand(anyString(), principal.capture(),
                 anyString(), anyString(), anyString(), any(), any(), any(),
-                input.capture(), digest.capture(), any());
+                input.capture(), digest.capture(), any(), any());
         // The trusted actor becomes the immutable ownership principal.
         assertThat(principal.getValue())
                 .isEqualTo(SessionPrincipal.ofUser(TENANT, "actor"));

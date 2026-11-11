@@ -592,26 +592,26 @@ final class AgentSessionCommands {
 
     private SessionPrincipal resolveWritePrincipal(String tenantId,
             String sessionId, SessionPrincipal principal, String actorId) {
-        // A supplied principal keeps the exact-match gate; a raw actor is
-        // authorised by the raw twin, which defers construction until a row
-        // has to be matched — a filter-admitted byte-long actor keeps
-        // writing its legacy row-less Session (R11-3).
-        if (principal != null) {
-            ManagedSessionPrincipal.requireAuthority(jdbc, tenantId, sessionId,
-                    principal);
-            return principal;
-        }
-        ManagedSessionPrincipal.requireAuthority(jdbc, tenantId, sessionId,
-                actorId);
-        return null;
+        requireWriteAuthority(tenantId, sessionId, principal, actorId);
+        return principal;
     }
 
-    private void requireMutationReceiptGrant(String tenantId,
-            SessionRecord requested, CommandRecord command, String actorId,
-            SessionPrincipal principal) {
+    // A supplied principal keeps the exact-match gate; a raw actor is
+    // authorised by the raw twin, which defers construction (R11-3, R13-2).
+    private void requireWriteAuthority(String tenantId, String sessionId,
+            SessionPrincipal principal, String actorId) {
+        if (principal == null) {
+            ManagedSessionPrincipal.requireAuthority(jdbc, tenantId, sessionId, actorId);
+        } else {
+            ManagedSessionPrincipal.requireAuthority(jdbc, tenantId, sessionId, principal);
+        }
+    }
+
+    private void requireMutationReceiptGrant(String tenantId, SessionRecord requested,
+            CommandRecord command, String actorId, SessionPrincipal principal) {
         if (command.sessionId().equals(requested.sessionId())) {
             if (requested.workspace() == null) {
-                ManagedSessionPrincipal.requireAuthority(jdbc, tenantId, requested.sessionId(), principal);
+                requireWriteAuthority(tenantId, requested.sessionId(), principal, actorId);
             }
             return;
         }
@@ -624,7 +624,7 @@ final class AgentSessionCommands {
             if (storeRows.findSession(tenantId, command.sessionId()).map(recorded -> recorded.workspace() != null).orElse(false)) {
                 throw new ManagedAgentException(404, "session_not_found", "The Session was not found.");
             }
-            ManagedSessionPrincipal.requireAuthority(jdbc, tenantId, command.sessionId(), principal);
+            requireWriteAuthority(tenantId, command.sessionId(), principal, actorId);
         } else if (!workspaces.createdSession(tenantId, actorId,
                 requested.sessionId())) {
             // Bound Workspace Sessions gate on the caller's own requested

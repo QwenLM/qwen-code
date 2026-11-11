@@ -1007,6 +1007,26 @@ public class SurfaceAdmissionAcceptanceTest {
 
     @Test
     public void actionRespondOnLegacyRefusesTheNonOwnerWithTheFamilyCode() throws Exception {
+        // The family code belongs to the genuine row-less arm: a legacy
+        // Session wrote no ownership row, so its unbound Action gate — never
+        // the read — refuses the non-owner with 403.
+        String rowless = createLegacySession(tenant);
+        String rowlessAction = insertAction(tenant, rowless);
+        mvc.perform(post("/api/agent/web-shell/v1/actions/respond")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .principal(actor(tenant, STRANGER))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"sessionId\":\"" + rowless
+                                + "\",\"actionId\":\"" + rowlessAction
+                                + "\",\"idempotencyKey\":\"" + nextKey()
+                                + "\",\"response\":{\"kind\":\"permission\","
+                                + "\"inputRevision\":1,\"policyRevision\":"
+                                + "\"policy\",\"optionId\":\"allow\"}}"))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.error.code")
+                        .value("action_forbidden"));
+        // A row-bearing Session stays closed at the read, so answering it is
+        // as invisible as its by-id read: one unified answer, not two.
         mvc.perform(post("/api/agent/web-shell/v1/actions/respond")
                         .header(TenantContextFilter.HEADER, tenant)
                         .principal(actor(tenant, STRANGER))
@@ -1017,9 +1037,9 @@ public class SurfaceAdmissionAcceptanceTest {
                                 + "\",\"response\":{\"kind\":\"permission\","
                                 + "\"inputRevision\":1,\"policyRevision\":"
                                 + "\"policy\",\"optionId\":\"allow\"}}"))
-                .andExpect(status().isForbidden())
+                .andExpect(status().isNotFound())
                 .andExpect(jsonPath("$.error.code")
-                        .value("action_forbidden"));
+                        .value("session_not_found"));
     }
 
     @Test

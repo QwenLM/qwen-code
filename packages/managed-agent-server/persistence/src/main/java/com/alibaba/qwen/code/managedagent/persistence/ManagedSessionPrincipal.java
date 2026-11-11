@@ -128,6 +128,22 @@ public final class ManagedSessionPrincipal {
     }
 
     /**
+     * Whether the recorded ownership row, when one exists, names this
+     * principal. A row-less legacy Session stays open — its caller's read
+     * gate already admitted it tenant-wide — and so does the raw-actor path,
+     * which that gate authorised without a principal. Callers use this to
+     * keep an admission decision on the same identity granularity as the row.
+     */
+    public static boolean permits(JdbcTemplate jdbc, String tenantId,
+            String sessionId, SessionPrincipal principal) {
+        if (principal == null) {
+            return true;
+        }
+        Row row = find(jdbc, tenantId, sessionId);
+        return row == null || matches(row, principal);
+    }
+
+    /**
      * The unified write authority over an unbound Session; identical to the
      * read authority. A legacy Session has no per-actor mutation gate, so the
      * row — when present — is the only authority that distinguishes callers.

@@ -78,6 +78,8 @@ public class ManagedUserMessagePolicy implements UserMessagePolicy {
 
     void requireSubmitterRole(SessionRecord session,
             SessionPrincipal principal) {
+        ManagedWorkspaceRegistry.requireSessionVisibility(session, principal,
+                workspaces);
         if (session.workspace() == null) {
             store.requireSessionAuthority(session.tenantId(),
                     session.sessionId(), principal);
@@ -112,6 +114,8 @@ public class ManagedUserMessagePolicy implements UserMessagePolicy {
 
     void requireSubmitterFacts(SessionRecord session,
             SessionPrincipal principal) {
+        ManagedWorkspaceRegistry.requireSessionVisibility(session, principal,
+                workspaces);
         if (session.publicChildAgentsVersion() == 1 && store.findChildLineage(session.tenantId(), session.sessionId()) != null) {
             throw new ManagedAgentException(409, "unsupported_feature", "Public child Sessions accept only their delegated input");
         }
@@ -218,6 +222,8 @@ public class ManagedUserMessagePolicy implements UserMessagePolicy {
 
     void requireLegacyWorkspace(SessionRecord session,
             SessionPrincipal principal) {
+        ManagedWorkspaceRegistry.requireSessionVisibility(session, principal,
+                workspaces);
         if (session.workspace() == null) {
             store.requireSessionAuthority(session.tenantId(),
                     session.sessionId(), principal);

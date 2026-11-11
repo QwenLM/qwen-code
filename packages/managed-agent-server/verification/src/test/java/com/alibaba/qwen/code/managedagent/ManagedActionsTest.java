@@ -1335,20 +1335,24 @@ class ManagedActionsTest {
         String owned = hostedSession(tenant, "owner");
         ActionJournal journal = action(tenant, owned,
                 System.currentTimeMillis(), 9007199254740991L);
+        // The ownership row is the sole authority, so the action surface
+        // answers a foreign or anonymous caller exactly as the by-id read
+        // does — 404 — while the row-less arm above keeps the store's own
+        // 403 for a genuinely recorded creator.
         mvc.perform(auth(post(path(owned, journal.id) + "/responses"),
                 tenant, "other")
                         .header("Idempotency-Key", "foreign-answer")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(response("allow")))
-                .andExpect(status().isForbidden())
-                .andExpect(jsonPath("$.error.code").value("action_forbidden"));
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.error.code").value("session_not_found"));
         mvc.perform(post(path(owned, journal.id) + "/responses")
                         .header(TenantContextFilter.HEADER, tenant)
                         .header("Idempotency-Key", "anonymous-answer")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(response("allow")))
-                .andExpect(status().isForbidden())
-                .andExpect(jsonPath("$.error.code").value("action_forbidden"));
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.error.code").value("session_not_found"));
         readAccepted(auth(post(path(owned, journal.id) + "/responses"),
                 tenant, "owner")
                         .header("Idempotency-Key", "owner-answer")

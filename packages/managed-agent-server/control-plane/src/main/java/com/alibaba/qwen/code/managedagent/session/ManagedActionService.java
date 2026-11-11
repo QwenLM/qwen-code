@@ -283,10 +283,13 @@ public class ManagedActionService {
             String option,
             JsonNode answers,
             boolean publicNames) {
-        return respondInternal(tenant, actor, session, id, key, kind,
+        return respondInternal(tenant, null, actor, session, id, key, kind,
                 revision, policy, option, answers, publicNames);
     }
 
+    // The principal keeps its business-actor subject: the read grant and the
+    // admission both key on the Session's ownership record, so a sibling
+    // sharing only the user id is refused exactly as the reads refuse it.
     public OperationAdmission respond(
             String tenant,
             SessionPrincipal principal,
@@ -299,13 +302,14 @@ public class ManagedActionService {
             String option,
             JsonNode answers,
             boolean publicNames) {
-        return respondInternal(tenant,
+        return respondInternal(tenant, principal,
                 principal == null ? null : principal.userId(), session, id,
                 key, kind, revision, policy, option, answers, publicNames);
     }
 
     private OperationAdmission respondInternal(
             String tenant,
+            SessionPrincipal principal,
             String actorId,
             String session,
             String id,
@@ -316,11 +320,16 @@ public class ManagedActionService {
             String option,
             JsonNode answers,
             boolean publicNames) {
-        // The tenant stays explicit: an anonymous caller still answers inside
-        // its own tenant — the action gate, not the read, refuses a foreign or
-        // unrecorded actor — so deriving it from a null principal would collapse
-        // the read to a null-tenant 404.
-        sessions.requireActionReadableSession(tenant, actorId, session);
+        // The full read grant, not a lighter action read: only it enforces the
+        // owner_only fence and, for an unbound Session, the ownership row
+        // (R13-3), and it keys on the principal whenever the caller has one.
+        // The tenant stays explicit so an anonymous caller still reads inside
+        // its own tenant rather than collapsing to a null-tenant 404.
+        if (principal == null) {
+            sessions.requireReadableSession(tenant, actorId, session);
+        } else {
+            sessions.requireReadableSession(principal, session);
+        }
         ManagedAgentService.validateIdempotencyKey(key);
         if (!("permission".equals(kind) || "question".equals(kind))
                 || revision == null
@@ -354,6 +363,7 @@ public class ManagedActionService {
                 actions.admit(
                         tenant,
                         session,
+                        principal,
                         actorId,
                         digests.digest(Map.of("actorId", actorId == null ? "" : actorId)),
                         key,

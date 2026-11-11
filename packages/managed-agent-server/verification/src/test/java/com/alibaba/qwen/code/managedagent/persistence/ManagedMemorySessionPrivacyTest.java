@@ -9,15 +9,19 @@ import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.InputBlock;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
+import com.alibaba.qwen.code.managedagent.model.SessionPrincipal;
 import com.alibaba.qwen.code.managedagent.model.StoreModels;
 import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.session.ActionResponseCoordinator;
 import com.alibaba.qwen.code.managedagent.session.HarnessCoordinator;
+import com.alibaba.qwen.code.managedagent.session.ManagedActionService;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
 import com.alibaba.qwen.code.managedagent.session.ManagedUserMessagePolicy;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import org.assertj.core.api.ThrowableAssert.ThrowingCallable;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.BeforeEach;
@@ -109,11 +113,31 @@ public class ManagedMemorySessionPrivacyTest {
         String shared = workspaceSession("owner", "workspace-a", null);
         assertThat(service.requireReadableSession(tenant, "other", shared).sessionId()).isEqualTo(shared);
         notFound(() -> service.requireReadableSession(tenant, "other", session));
+        // R13-1: the principal twin carries the same owner_only fence; a
+        // workspace OPERATOR that is not the owner reads nothing.
+        notFound(() -> service.requireReadableSession(tenant,
+                SessionPrincipal.ofUser(tenant, "other"), session));
+        notFound(() -> service.requireReadableSession(
+                SessionPrincipal.ofUser(tenant, "other"), session));
         notFound(() -> service.submitTurn(tenant, "other", "submit", session, List.of(new InputBlock("text", "hello"))));
         notFound(() -> service.cancelTurn(tenant, "other", "cancel", session, "turn"));
         notFound(() -> service.renameSession(tenant, "other", "rename", session, "renamed"));
         notFound(() -> new ManagedUserMessagePolicy(store, new RequestDigests(), harness, workspaces)
                 .authorizeUserMessageActor(tenant, "other", session));
+        notFound(() -> new ManagedUserMessagePolicy(store, new RequestDigests(), harness, workspaces)
+                .authorizeUserMessageActor(SessionPrincipal.ofUser(tenant, "other"), session));
+        // R13-3/R13-4: answering the private Session's Actions runs the full
+        // read grant, so the non-owner operator is refused at the gate
+        // instead of being admitted by the store's Workspace-operator arm.
+        notFound(() -> actions().respond(tenant, "other", session,
+                "tool_approval_missing", "private-action", "permission",
+                JsonNodeFactory.instance.numberNode(1L), "policy", "allow",
+                null, false));
+        notFound(() -> actions().respond(tenant,
+                SessionPrincipal.ofUser(tenant, "other"), session,
+                "tool_approval_missing", "private-action-principal", "permission",
+                JsonNodeFactory.instance.numberNode(1L), "policy", "allow",
+                null, false));
         notFound(() -> transaction.execute(status -> store.changeSessionModel(
                 tenant, "other", session, "model", "digest", "model", 0, true)));
         notFound(() -> transaction.execute(status -> store.changeSessionApproval(
@@ -227,6 +251,14 @@ public class ManagedMemorySessionPrivacyTest {
                         + "armed_at,gmt_create,gmt_modified) VALUES (?,?,?,'workspace-a',?,1,1,?,?,'0 * * * *','UTC','reuse','skip','skip',1,'armed',1,1,1)",
                 tenant, id, session, actorKey("owner"), "a".repeat(64), "private synthetic context");
         return id;
+    }
+
+    private ManagedActionService actions() {
+        return new ManagedActionService(service,
+                new JdbcManagedActionStore(jdbc, store),
+                new JdbcManagedExtensionRecordStore(jdbc),
+                mock(ActionResponseCoordinator.class), new RequestDigests(),
+                Clock.systemUTC(), new ObjectMapper());
     }
 
     private String workspaceSession(String actor, String workspace, String memory) {

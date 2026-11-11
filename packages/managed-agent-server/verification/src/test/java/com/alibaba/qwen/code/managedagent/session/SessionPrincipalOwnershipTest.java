@@ -256,6 +256,11 @@ class SessionPrincipalOwnershipTest {
             // null principal, or the Session's own owner reads 404.
             assertThat(f.service.unarchiveSession("tenant", "user", "unarchive", id)
                     .replayed()).isFalse();
+            // R13-2: the subject-less retry authorises with the raw actor the
+            // caller actually carries, so it replays instead of answering the
+            // principal arm's 404.
+            assertThat(f.service.unarchiveSession("tenant", "user", "unarchive", id)
+                    .replayed()).isTrue();
             assertThat(f.jdbc.queryForObject("SELECT status FROM ma_session WHERE session_id=?",
                     String.class, id)).isNotEqualTo("ARCHIVED");
         });
@@ -338,11 +343,12 @@ class SessionPrincipalOwnershipTest {
                         f.store, f.service, records,
                         mock(com.alibaba.qwen.code.managedagent.extensions.ManagedExtensionPackageService.class),
                         new ObjectMapper(), f.harness);
+        var actionStore =
+                new com.alibaba.qwen.code.managedagent.persistence.JdbcManagedActionStore(
+                        f.jdbc, f.store);
         var actions =
                 new com.alibaba.qwen.code.managedagent.session.ManagedActionService(
-                        f.service,
-                        new com.alibaba.qwen.code.managedagent.persistence.JdbcManagedActionStore(
-                                f.jdbc, f.store),
+                        f.service, actionStore,
                         records, mock(ActionResponseCoordinator.class),
                         new RequestDigests(), Clock.systemUTC(), new ObjectMapper());
         f.tx.executeWithoutResult(status -> {
@@ -364,6 +370,28 @@ class SessionPrincipalOwnershipTest {
             denied(() -> extensions.query(sibling, id, null));
             denied(() -> actions.listPublic(sibling, id, null, 10));
             denied(() -> mcpManagement.get(sibling, id));
+            // R13-4: the action-response path keys on the same identity as
+            // the read above, so the sibling never reaches the store's
+            // admission (which would answer action_not_found for a missing
+            // Action) and is refused exactly as the read refuses it.
+            denied(() -> actions.respond("tenant", sibling, id, "tool_approval_missing",
+                    "sibling-response", "permission",
+                    com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.numberNode(1L),
+                    "policy", "allow", null, false));
+            denied(() -> f.service.requireReadableSession(sibling, id));
+            assertThat(f.service.requireReadableSession(OWNER, id).sessionId())
+                    .isEqualTo(id);
+            // R13-4: the admission comparison keys on the ownership row too,
+            // so a caller that reaches it without the read gate still cannot
+            // re-admit the owner's Action decision under the shared user id.
+            assertThatThrownBy(() -> actionStore.admit("tenant", id, sibling,
+                    "user", "actor-digest", "sibling-admit", "c".repeat(64),
+                    "tool_approval_missing",
+                    com.fasterxml.jackson.databind.node.JsonNodeFactory
+                            .instance.objectNode().put("optionId", "allow"), 1L))
+                    .isInstanceOfSatisfying(ManagedAgentException.class,
+                            error -> assertThat(error.getCode())
+                                    .isEqualTo("action_forbidden"));
         });
     }
 
