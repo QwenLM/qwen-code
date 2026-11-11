@@ -258,8 +258,9 @@ export function ignoreLines(text) {
  * incremental scope. The depth guarantee lives in `Fetch incremental lint
  * history`, which fetches the base at depth 100 and deepens until the merge
  * base resolves — and that step is deliberately absent below, so it stays in
- * the slice. Adding it to this list would let a base-side change to the depth
- * guarantee silently narrow what lint covers.
+ * the slice as the only guard of that guarantee. Losing the merge base does not
+ * narrow what lint covers: `lint-scope.js` then reports `full: true` and the
+ * lane runs the wider, slower full lint, which is the direction the test pins.
  */
 export const CI_PLUMBING_STEPS = new Set([
   'Create isolated HOME',

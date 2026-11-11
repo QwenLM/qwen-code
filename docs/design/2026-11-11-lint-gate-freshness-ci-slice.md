@@ -258,6 +258,12 @@ head commit` stay outside the slice. A base-side `ref:` or `fetch-depth:` edit,
   kept step references a local action, the reference is in the slice but the
   action's implementation is not, so a base-side change to that implementation is
   invisible to this check — a gap that predates this PR, left to a follow-up.
+- **Accepted residual risk:** the cache plumbing is outside the slice.
+  `Create isolated HOME` in this lane exports `COREPACK_HOME` and
+  `XDG_CACHE_HOME`, and `Configure persistent npm cache (self-hosted)` elsewhere
+  exports `NPM_CONFIG_CACHE`. A base-side edit that points corepack's home at a
+  shared directory is exactly the cache-poisoning channel the per-run home
+  prevents, and this check cannot see it.
 - **Accepted residual over-rejection:** everything above `jobs:` is kept
   wholesale, so a base-side `on:` or `concurrency:` edit still stales every
   in-flight PR even though it cannot change what lint checks. Narrowing that
@@ -268,9 +274,9 @@ head commit` stay outside the slice. A base-side `ref:` or `fetch-depth:` edit,
 ## Validation plan
 
 1. `node --test .github/scripts/check-lint-gate-freshness.test.mjs` — 62 cases,
-   including the 16 added here. CI corroborates this on Linux through
+   including the 15 added here. CI corroborates this on Linux through
    `Run .github/scripts helper tests`, which collects the suite from
-   `HELPER_TESTS_DEP_FREE`.
+   `${{ env.HELPER_TESTS }}`.
 2. Mutation witnesses: each of eight deliberate defects must redden the suite —
    dropping `ci.yml` from `NARROWINGS`, returning the whole file as the slice,
    keeping headers only, comparing the head instead of the merge base, absorbing
@@ -278,9 +284,9 @@ head commit` stay outside the slice. A base-side `ref:` or `fetch-depth:` edit,
    label without the linter check, and dropping the job `env` from the slice.
 3. Slice completeness against the real workflow: every `scripts/lint.js` lane
    flag must survive in the slice.
-4. Live API, ten historical base tips with a fork point one commit behind each,
-   content read at real refs: six plumbing-only commits must pass and four
-   gate-changing commits must stay stale.
+4. Live API, thirteen historical base tips with a fork point one commit behind
+   each, content read at real refs: six plumbing-only commits must pass and
+   seven gate-changing commits must stay stale.
 5. Live API on the branch that motivated the report (#16939 at `07d89196bd21`):
    it must stay stale, because #16920 really did change the Prettier lane.
 

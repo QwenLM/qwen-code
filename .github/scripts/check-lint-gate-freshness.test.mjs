@@ -1065,11 +1065,14 @@ test('every lint job step is classified, and no plumbing name is stale', () => {
 test('the depth guarantee that makes excluding Checkout safe stays in the slice', () => {
   // The step that owns the incremental-lint depth guarantee must stay OUT of
   // the plumbing list. `Checkout` is only safe to exclude because this step
-  // fetches the base deep enough for lint-scope's merge-base; excluding it too
-  // would let a base-side depth change silently narrow what lint covers.
+  // fetches the base deep enough for lint-scope's merge-base. Excluding it too
+  // would leave that guarantee unguarded: a base-side depth change could make
+  // the merge base unresolvable, and lint-scope then falls back to `full: true`
+  // — a wider, slower run. So the pin guards who owns the fallback, not a
+  // narrowing this check could miss.
   assert.ok(
     !CI_PLUMBING_STEPS.has('Fetch incremental lint history'),
-    "'Fetch incremental lint history' owns the depth guarantee that makes excluding 'Checkout' safe — it must stay in the slice",
+    "'Fetch incremental lint history' is the only guard of the depth guarantee that makes excluding 'Checkout' safe — it must stay in the slice",
   );
 });
 

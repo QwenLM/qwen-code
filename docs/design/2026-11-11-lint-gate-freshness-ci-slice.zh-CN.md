@@ -137,14 +137,15 @@ merge base 取自该检查**已经做过**的包含比较，因此 narrowing 不
 - **接受的残余风险：** `classify_pr` 的 `Checkout trusted CI classifier` 属同一类——checkout 被排除，而真正选择 profile 的步骤保留在切片内。
 - **接受的残余风险：** job 级的 `runs-on` 与 `timeout-minutes` 被丢弃。routing 可以经 self-hosted Node action 间接改变 linter 的运行时；收紧 timeout 会在合入后打红 `main`，而不是打红分支。
 - **接受的残余风险：** `.github/actions/**` 不在 `GATE_FILES` 中。保留步骤对本地 action 的引用在切片内，但 action 的实现不在，因此 base 侧对该实现的改动对本检查不可见——这是本 PR 之前就存在的缺口，留待 follow-up。
+- **接受的残余风险：** 缓存相关的 plumbing 在切片之外。本 lane 的 `Create isolated HOME` 导出 `COREPACK_HOME` 与 `XDG_CACHE_HOME`，别处的 `Configure persistent npm cache (self-hosted)` 导出 `NPM_CONFIG_CACHE`。若 base 侧改动把 corepack 的 home 指向共享目录，就形成本检查看不见的缓存投毒通道——每次运行独立 home 正是为阻断它。
 - **接受的残余过度拒绝：** `jobs:` 之上的内容整体保留，因此 base 侧对 `on:` 或 `concurrency:` 的改动仍会让所有在途 PR 变 stale，尽管它不可能改变 lint 检查什么。把这段前置内容收窄到只有 `env` 也能消掉这些红，但它同时承载 `permissions` 与 `defaults.run.shell`，而这两者确实会改变每个步骤的行为。刻意留在安全方向。
 
 ## 验证计划
 
-1. `node --test .github/scripts/check-lint-gate-freshness.test.mjs`——62 个用例，含本次新增的 16 个。CI 通过 `Run .github/scripts helper tests` 在 Linux 上佐证这一点，该步骤从 `HELPER_TESTS_DEP_FREE` 收集本测试。
+1. `node --test .github/scripts/check-lint-gate-freshness.test.mjs`——62 个用例，含本次新增的 15 个。CI 通过 `Run .github/scripts helper tests` 在 Linux 上佐证这一点，该步骤从 `${{ env.HELPER_TESTS }}` 收集本测试。
 2. mutation witness：八个刻意植入的缺陷都必须让测试变红——从 `NARROWINGS` 移除 `ci.yml`、把整个文件当作切片返回、只保留 header、比对 head 而非 merge base、吸收未命名步骤、把缺失 merge base 当作 fresh、去掉 linter 检查而只信任 plumbing 标签，以及把 job `env` 从切片中移除。
 3. 针对真实 workflow 的切片完整性：每个 `scripts/lint.js` lane 参数都必须在切片中存活。
-4. 真实 API：取十个历史 base tip，各自的分叉点落后一个提交，内容按真实 ref 读取——六个纯 plumbing 提交必须通过，四个改变闸门的提交必须保持 stale。
+4. 真实 API：取十三个历史 base tip，各自的分叉点落后一个提交，内容按真实 ref 读取——六个纯 plumbing 提交必须通过，七个改变闸门的提交必须保持 stale。
 5. 真实 API 验证触发本次报告的那个分支（#16939 在 `07d89196bd21`）：它必须保持 stale，因为 #16920 确实改了 Prettier lane。
 
 ## 验收标准
