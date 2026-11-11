@@ -23,6 +23,7 @@ import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -246,7 +247,7 @@ class SshWorkspaceStoreTest {
         store.reserve(retry, "new", registration(intent));
         store.complete(retry, "new");
         jdbc.update("UPDATE ma_storage SET fence_operation_id = ? WHERE alias_key = ?", "fence",
-                JdbcRuntimeBindingRepository.storageAliasKey("tenant", intent.storageId()));
+                RuntimeAdmissionFences.storageAliasKey("tenant", intent.storageId()));
         assertThatThrownBy(() -> store.verify(binding(intent))).isInstanceOf(RuntimeException.class);
     }
 

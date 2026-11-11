@@ -135,6 +135,7 @@ import { createHealthRoutes } from './routes/health.js';
 import { registerWorkspaceAuthRoutes } from './routes/workspace-auth.js';
 import { registerWorkspaceSubscriptionRoutes } from './routes/workspace-subscription.js';
 import { registerSubscriptionAuthRoutes } from './routes/subscription-auth.js';
+import { registerWeixinAuthRoutes } from './routes/weixin-auth.js';
 import { registerWorkspaceExtensionRoutes } from './routes/workspace-extensions.js';
 import type { WorkspaceFileSystemFactory } from './fs/index.js';
 import {
@@ -3627,6 +3628,9 @@ export function createServeApp(
   );
   app.locals['stopSubscriptionAuth'] = stopSubscriptionAuth;
 
+  const stopWeixinAuth = registerWeixinAuthRoutes(app, mutate);
+  app.locals['stopWeixinAuth'] = stopWeixinAuth;
+
   registerWorkspaceAuthRoutes(app, {
     mutate,
     deviceFlowRegistry,
@@ -4480,6 +4484,7 @@ export function createServeApp(
       stopAppResource(locals.stopSessionAgentOrchestrators);
       stopAppResource(locals.stopHostedMountHandbacks);
       stopAppResource(stopSubscriptionAuth);
+      stopAppResource(stopWeixinAuth);
       stopAppResource(() => deviceFlowRegistry.dispose());
       stopAppResource(() => rateLimiter?.setDraining(true));
       stopAppResource(() => rateLimiter?.dispose());

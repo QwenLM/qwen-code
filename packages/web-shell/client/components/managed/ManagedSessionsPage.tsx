@@ -24,6 +24,7 @@ import {
 import { ChatEditor } from '../ChatEditor';
 import type { WorkspaceSelectorOption } from '../WorkspaceSelector';
 import { WelcomeHeader } from '../WelcomeHeader';
+import { useWebShellCustomization } from '../../customization';
 import { ChatContextHeader } from '../ChatContextHeader';
 import { SessionRenameDialog } from '../dialogs/SessionRenameDialog';
 import type {
@@ -44,6 +45,10 @@ import {
   getManagedClientId,
   managedRequestId,
 } from './managed-session-storage';
+import {
+  getComposerPlaceholderKey,
+  getComposerPlaceholderState,
+} from '../../utils/composerInputState';
 import { useManagedFileReferences } from './use-managed-file-references';
 import type { ComposerSubmitMetadata } from '../../hooks/useComposerCore';
 import { useManagedSession } from './use-managed-session';
@@ -383,6 +388,18 @@ function ManagedSessionsContent({
   navigationSearch: string;
 }) {
   const { t, language } = useI18n();
+  // 宿主定制（欢迎头等）经 WebShellCustomizationProvider 已传入；此前 Managed 页未消费，
+  // 导致同一宿主下 Managed 与普通会话呈现两套欢迎区。这里与普通分支同一口径消费。
+  // 与 ChatPane 消费同一份 customization：宿主传入的定制品此处同样生效，
+  // 不新增宿主 API；此前只有 WelcomeHeader 被消费，导致 Managed 与 ordinary 呈现两套外壳。
+  const {
+    renderWelcomeHeader,
+    renderWelcomeFooter,
+    renderComposerFooter: CustomComposerFooter,
+    showManagedSessionHeader = true,
+    alignManagedChatWithHost = false,
+    composerPlaceholders,
+  } = useWebShellCustomization();
   const diagnosticsText = useManagedDiagnosticsText();
   const recoveryText = useManagedRecoveryText();
   const home = hostSessionOnly || navigationTarget !== undefined;
@@ -564,7 +581,8 @@ function ManagedSessionsContent({
   const [error, setError] = useState<string>();
   const [discarded, setDiscarded] = useState(false);
   const [text, setText] = useState('');
-  const [busy, setBusy] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [restoreBusy, setRestoreBusy] = useState(true);
   const userMessages = useManagedUserMessages(
     provider,
     interactive ? sessionId : undefined,
@@ -846,17 +864,25 @@ function ManagedSessionsContent({
     const abort = new AbortController();
     lifetime.current = abort;
     setPendingRestoreFailed(false);
-    setBusy(true);
+    setRestoreBusy(true);
+    // The pending key changed, so the previous controller was aborted and any
+    // send it owned can never reach its own `setBusy(false)` (R7-7). Only this
+    // effect may clear it: a non-host switch keeps the same key and leaves a
+    // live send running under it.
+    setBusy(false);
     void readManagedPending(pendingKey).then(
       (value) => {
         if (abort.signal.aborted) return;
         const saved = readPending(pendingKey, value);
         pendingRef.current = saved;
         setPending(saved);
-        setBusy(false);
+        setRestoreBusy(false);
       },
       () => {
-        if (!abort.signal.aborted) setPendingRestoreFailed(true);
+        if (!abort.signal.aborted) {
+          setPendingRestoreFailed(true);
+          setRestoreBusy(false);
+        }
       },
     );
     return () => abort.abort();
@@ -1157,6 +1183,7 @@ function ManagedSessionsContent({
       !abort ||
       abort.signal.aborted ||
       busy ||
+      pendingRestoreFailed ||
       encoding.current ||
       lifecycle.blocked(sessionId) ||
       modelChange.isBlocked() ||
@@ -1436,7 +1463,7 @@ function ManagedSessionsContent({
     onSelectSession(undefined, draft.workspaceId);
   }
   const modelContext = currentSummary?.modelContext;
-  const selectedModel = currentSummary?.modelSelection?.modelId;
+  const selectedModel = modelChange.selection?.modelId;
   const displayedModel =
     hostSessionOnly && !modelChange.supported
       ? ''
@@ -1784,6 +1811,24 @@ function ManagedSessionsContent({
       />
     );
   }
+  // The host composer footer must not disagree with the composer it sits under,
+  // so both read this single predicate (ChatPane passes one expression too).
+  const composerDisabled =
+    !interactive ||
+    busy ||
+    restoreBusy ||
+    pendingRestoreFailed ||
+    Boolean(pending) ||
+    lifecycle.blocked(sessionId) ||
+    modelChange.blocked ||
+    compression.blocked ||
+    approvalChange.blocked ||
+    Boolean(
+      sessionId &&
+        (!summary?.capabilities.canSend ||
+          recovery.value?.nextTurnAllowed === false) &&
+        !userMessages.supported,
+    );
   return (
     <div
       ref={pageRef}
@@ -1896,7 +1941,7 @@ function ManagedSessionsContent({
               pendingRef.current = undefined;
               setPending(undefined);
               setPendingRestoreFailed(false);
-              setBusy(false);
+              setRestoreBusy(false);
               setError(undefined);
             }}
           >
@@ -1932,9 +1977,10 @@ function ManagedSessionsContent({
             home &&
             messages.length === 0 &&
             !detail.loading &&
-            // A failed restore keeps `busy` until the user discards, and the
-            // pane is still empty then (the base marker ignored `busy`).
-            (!busy || pendingRestoreFailed) &&
+            // The restore window (`restoreBusy`) is not empty-state yet; a
+            // failed restore keeps the marker because the pane stays empty
+            // until the user discards the pending record.
+            ((!busy && !restoreBusy) || pendingRestoreFailed) &&
             !summary?.failure
               ? true
               : undefined
@@ -1946,27 +1992,32 @@ function ManagedSessionsContent({
               <ChatContextHeader
                 content={
                   <span className="flex min-w-0 items-center gap-2">
-                    <span
-                      className="truncate"
-                      onDoubleClick={() => rename.open()}
-                    >
-                      {summary.title === summary.sessionId
-                        ? summary.sessionId.slice(0, 8)
-                        : summary.title}
-                    </span>
+                    {showManagedSessionHeader && (
+                      <span
+                        className="truncate"
+                        onDoubleClick={() => rename.open()}
+                      >
+                        {summary.title === summary.sessionId
+                          ? summary.sessionId.slice(0, 8)
+                          : summary.title}
+                      </span>
+                    )}
                     {sessionActions(summary)}
                     {diagnosticsButton}
                     {sideQueryButtons}
                   </span>
                 }
+                hideWorkspaceIcon={!showManagedSessionHeader}
                 workspaceName={summary.workspace?.workspaceId}
                 location={
-                  <Badge variant="secondary">
-                    {t(`managed.phase.${summary.phase}`)}
-                    {summary.lifecycleStatus &&
-                      summary.lifecycleStatus !== 'active' &&
-                      ` · ${t(`managed.sessionState.${summary.lifecycleStatus}`)}`}
-                  </Badge>
+                  showManagedSessionHeader ? (
+                    <Badge variant="secondary">
+                      {t(`managed.phase.${summary.phase}`)}
+                      {summary.lifecycleStatus &&
+                        summary.lifecycleStatus !== 'active' &&
+                        ` · ${t(`managed.sessionState.${summary.lifecycleStatus}`)}`}
+                    </Badge>
+                  ) : undefined
                 }
                 environmentOpen={taskPanelOpen}
                 environmentAvailable={Boolean(
@@ -2168,6 +2219,10 @@ function ManagedSessionsContent({
                   onSelectSession(createdId, createdWorkspaceId);
                 }}
                 onAbandoned={() => setListRevision((current) => current + 1)}
+                renderWelcomeHeader={renderWelcomeHeader}
+                renderWelcomeFooter={renderWelcomeFooter}
+                renderComposerFooter={CustomComposerFooter}
+                alignManagedChatWithHost={alignManagedChatWithHost}
               />
             )}
           {latestSuccessfulTodos !== undefined &&
@@ -2212,14 +2267,33 @@ function ManagedSessionsContent({
                   welcomeHeader={
                     messages.length === 0 &&
                     !detail.loading &&
-                    !summary?.failure ? (
-                      <WelcomeHeader
-                        version=""
-                        cwd=""
-                        currentModel={displayedModel}
-                        currentMode=""
-                      />
-                    ) : undefined
+                    !summary?.failure
+                      ? (() => {
+                          // Best-effort mirror of App's welcomeHeaderProps:
+                          // real workspace values, not literal placeholders.
+                          // Managed surfaces have no absolute cwd, no daemon
+                          // version and no hideTips flag — see
+                          // WelcomeHeaderProps for the documented shape.
+                          const welcomeProps = {
+                            version: '',
+                            cwd: summary?.workspace?.cwdRelative ?? '',
+                            currentModel: displayedModel,
+                            currentMode: summary?.approvalMode ?? '',
+                          };
+                          return (
+                            <>
+                              {renderWelcomeHeader ? (
+                                renderWelcomeHeader(welcomeProps)
+                              ) : (
+                                <WelcomeHeader {...welcomeProps} />
+                              )}
+                              {/* Same pairing App keeps on the ordinary path:
+                                  a host that supplies both slots gets both. */}
+                              {renderWelcomeFooter?.(welcomeProps)}
+                            </>
+                          );
+                        })()
+                      : undefined
                   }
                 />
               </ToolDetailsContext.Provider>
@@ -2640,29 +2714,17 @@ function ManagedSessionsContent({
                   !interactive ||
                   !modelChange.supported ||
                   !modelChange.options?.supported ||
-                  modelChange.optionsLoading ||
                   modelChange.busy ||
                   approvalChange.busy ||
                   modelChange.blocked ||
                   approvalChange.blocked ||
-                  compression.blocked ||
-                  busy ||
-                  Boolean(active) ||
-                  Boolean(pendingApproval) ||
-                  Boolean(pending) ||
-                  modelChange.options.modelSelection.revision !==
-                    (currentSummary?.modelSelection?.revision ?? 0)
+                  compression.blocked
                 }
                 onSelectModel={
                   modelChange.supported
                     ? (modelId) => {
                         if (
                           !interactive ||
-                          busy ||
-                          encoding.current ||
-                          pendingRef.current ||
-                          active ||
-                          pendingApproval ||
                           approvalChange.isBlocked() ||
                           compression.isBlocked()
                         )
@@ -2790,25 +2852,33 @@ function ManagedSessionsContent({
                     ? () => void cancel()
                     : undefined
                 }
-                disabled={
-                  !interactive ||
-                  busy ||
-                  Boolean(pending) ||
-                  lifecycle.blocked(sessionId) ||
-                  modelChange.blocked ||
-                  compression.blocked ||
-                  approvalChange.blocked ||
-                  Boolean(
-                    sessionId &&
-                      (!summary?.capabilities.canSend ||
-                        recovery.value?.nextTurnAllowed === false) &&
-                      !userMessages.supported,
-                  )
-                }
+                disabled={composerDisabled}
                 placeholderText={t(
-                  active && userMessages.supported
-                    ? 'managed.queue.placeholder'
-                    : 'managed.prompt',
+                  alignManagedChatWithHost
+                    ? (() => {
+                        // Resolve exactly like the ordinary composer in App:
+                        // the host override map wins per state, otherwise the
+                        // localized default for that state. The default keeps
+                        // the queue-support gate: without the user-messages
+                        // API a running turn submits a fresh prompt, so it
+                        // must not promise queueing.
+                        const input = {
+                          isPreparingPrompt: busy || restoreBusy,
+                          isStreaming: Boolean(active),
+                        };
+                        const custom =
+                          composerPlaceholders?.[
+                            getComposerPlaceholderState(input)
+                          ];
+                        return custom?.trim()
+                          ? custom
+                          : active && !userMessages.supported
+                            ? t('managed.prompt')
+                            : t(getComposerPlaceholderKey(input));
+                      })()
+                    : active && userMessages.supported
+                      ? 'managed.queue.placeholder'
+                      : 'managed.prompt',
                 )}
               />
               {userMessages.snapshot && (
@@ -2863,7 +2933,6 @@ function ManagedSessionsContent({
               )}
               {interactive &&
                 (modelChange.busy ||
-                  modelChange.blocked ||
                   modelChange.optionsLoading ||
                   modelChange.optionsError) && (
                   <div
@@ -2874,27 +2943,11 @@ function ManagedSessionsContent({
                       {t(
                         modelChange.busy
                           ? 'managed.model.changing'
-                          : modelChange.blocked
-                            ? 'managed.model.unconfirmed'
-                            : modelChange.optionsLoading
-                              ? 'managed.model.loading'
-                              : 'managed.model.optionsError',
+                          : modelChange.optionsLoading
+                            ? 'managed.model.loading'
+                            : 'managed.model.optionsError',
                       )}
                     </span>
-                    {modelChange.pending && (
-                      <span>{modelChange.pending.modelId}</span>
-                    )}
-                    {modelChange.blocked && (
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        disabled={modelChange.busy || !provider.modelChange}
-                        onClick={() => void modelChange.confirm()}
-                      >
-                        {t('managed.model.confirm')}
-                      </Button>
-                    )}
                     {modelChange.optionsError && !modelChange.blocked && (
                       <Button
                         type="button"
@@ -2907,23 +2960,19 @@ function ManagedSessionsContent({
                     )}
                   </div>
                 )}
-              {interactive &&
-                modelChange.errorCode &&
-                modelChange.errorCode !== 'unconfirmed' && (
-                  <p className="text-xs text-destructive" role="alert">
-                    {t(
-                      modelChange.errorCode === 'storage_unavailable'
-                        ? 'managed.model.storage'
-                        : modelChange.errorCode === 'model_selection_conflict'
-                          ? 'managed.model.conflict'
-                          : ['turn_active', 'session_context_busy'].includes(
-                                modelChange.errorCode,
-                              )
-                            ? 'managed.model.busy'
-                            : 'managed.model.failed',
-                    )}
-                  </p>
-                )}
+              {interactive && modelChange.errorCode && (
+                <p className="text-xs text-destructive" role="alert">
+                  {t(
+                    modelChange.errorCode === 'model_selection_conflict'
+                      ? 'managed.model.conflict'
+                      : ['turn_active', 'session_context_busy'].includes(
+                            modelChange.errorCode,
+                          )
+                        ? 'managed.model.busy'
+                        : 'managed.model.failed',
+                  )}
+                </p>
+              )}
               {interactive &&
                 approvalChange.options?.permissionRulesSupported && (
                   <ManagedPermissionRulesDialog
@@ -3022,16 +3071,31 @@ function ManagedSessionsContent({
                     )}
                   </p>
                 )}
-              {displayedModel && !modelChange.supported && (
-                <p className="text-xs text-muted-foreground">
-                  {t('managed.modelFixed')}
-                </p>
+              {CustomComposerFooter && (
+                <CustomComposerFooter
+                  disabled={composerDisabled}
+                  isRunning={Boolean(active)}
+                  currentMode={summary?.approvalMode ?? 'default'}
+                  currentModel={displayedModel ?? ''}
+                  sessionName={summary?.title}
+                />
               )}
-              {summary?.approvalMode && !approvalChange.supported && (
-                <p className="text-xs text-muted-foreground">
-                  {t('managed.approvalFixed')}
-                </p>
-              )}
+              {!CustomComposerFooter &&
+                !alignManagedChatWithHost &&
+                displayedModel &&
+                !modelChange.supported && (
+                  <p className="text-xs text-muted-foreground">
+                    {t('managed.modelFixed')}
+                  </p>
+                )}
+              {!CustomComposerFooter &&
+                !alignManagedChatWithHost &&
+                summary?.approvalMode &&
+                !approvalChange.supported && (
+                  <p className="text-xs text-muted-foreground">
+                    {t('managed.approvalFixed')}
+                  </p>
+                )}
               {((sessionId &&
                 !active &&
                 summary &&
@@ -3042,7 +3106,8 @@ function ManagedSessionsContent({
                   {sessionId &&
                     !active &&
                     summary &&
-                    !summary.capabilities.canSend && (
+                    !summary.capabilities.canSend &&
+                    !alignManagedChatWithHost && (
                       <span className="mr-auto text-sm text-muted-foreground">
                         {t('managed.newRequired')}
                       </span>
