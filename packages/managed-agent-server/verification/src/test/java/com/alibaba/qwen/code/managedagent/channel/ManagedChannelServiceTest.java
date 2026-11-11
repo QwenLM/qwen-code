@@ -712,6 +712,49 @@ class ManagedChannelServiceTest {
     }
 
     @Test
+    void reconcileHealsATruncatedReceiptedPrefixInsteadOfClosingIt() {
+        InboundAdmission admitted = service.submitInbound(TENANT, channel,
+                event(1, "1700:114", "please reply"));
+        String deliveryId = admitted.inputId() + ":reply";
+        plannedDelivery(admitted.sessionId(), deliveryId, admitted.routeId(),
+                "The build is green.", 3);
+        service.claimDeliveries(TENANT, channel, 16);
+        service.receipt(TENANT, channel, deliveryId,
+                new ReceiptRequest("accepted", 0, "<m0@example.com>", null));
+        service.receipt(TENANT, channel, deliveryId,
+                new ReceiptRequest("accepted", 1, "<m1@example.com>", null));
+        // An interrupted plan write left a receipted PREFIX: the tail row is
+        // gone while the record is still partial. The ledger's row set alone
+        // is not proof of completeness (R5-1).
+        jdbc.update("DELETE FROM ma_channel_segment WHERE tenant_id = ?"
+                        + " AND channel_id = ? AND segment_ordinal = 2",
+                TENANT, channel);
+        assertThat(segmentLedger.list(TENANT, channel, deliveryId)).hasSize(2);
+        expire(deliveryId);
+        JdbcChannelInstanceStore observing = org.mockito.Mockito.spy(
+                new JdbcChannelInstanceStore(jdbc));
+        ManagedChannelService observingService = new ManagedChannelService(
+                observing, new JdbcChannelRouteRepository(jdbc),
+                new JdbcChannelDeliveryRepository(jdbc), segmentLedger,
+                sessions, workspaces, harness, mapper, Duration.ofMinutes(10),
+                clock::get);
+        observingService.reconcile();
+        // The record is partial, so the gate keeps the read and planSegments
+        // re-creates the missing row. Removing the gate's record-state
+        // condition reds here: the prefix would close delivered with 2 rows.
+        org.mockito.Mockito.verify(observing, org.mockito.Mockito.atLeastOnce())
+                .readResource(org.mockito.ArgumentMatchers.eq(TENANT),
+                        org.mockito.ArgumentMatchers.eq(admitted.sessionId()),
+                        org.mockito.ArgumentMatchers.anyString());
+        assertThat(segmentLedger.list(TENANT, channel, deliveryId))
+                .extracting(SegmentLedger::segmentId)
+                .containsExactly(deliveryId + ":0", deliveryId + ":1",
+                        deliveryId + ":2");
+        assertThat(service.ledger(TENANT, channel, deliveryId)).get()
+                .extracting(row -> row.state()).isNotEqualTo("delivered");
+    }
+
+    @Test
     void aTerminalReceiptOnAPreLedgerClaimReplansTheSegmentRows() {
         InboundAdmission admitted = service.submitInbound(TENANT, channel,
                 event(1, "1700:101", "please reply"));
