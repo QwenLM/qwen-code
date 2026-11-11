@@ -104,6 +104,7 @@ const FIELD_LABEL_KEYS: Record<string, Record<string, string>> = {
   },
   weixin: {
     groupPolicy: 'channels.editor.field.weixin.groupPolicy',
+    allowedUsers: 'channels.editor.field.weixin.allowedUsers',
   },
   wecom: {
     botId: 'channels.editor.field.wecom.botId',
@@ -209,6 +210,9 @@ const FIELD_PLACEHOLDER_KEYS: Record<string, string> = {
   'github.repoFilter': 'owner/repo, owner/repo',
   'email.allowedUsers': 'you@example.com, colleague@example.com',
   'email.operators': 'you@example.com',
+  // The id shape, not a WeChat handle: an operator who reads "user ID" and
+  // types their WeChat name gets a silently inert allowlist entry.
+  'weixin.allowedUsers': 'oAbCd…@im.wechat',
 };
 
 // Email's endpoint and TLS keys are declared by no other channel, so listing
