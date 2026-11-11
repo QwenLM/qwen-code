@@ -452,4 +452,33 @@ describe('ChannelQrLogin unmount cleanup', () => {
     });
     expect(a.cancel).not.toHaveBeenCalled();
   });
+
+  it('does not cancel a login it attached to rather than created', async () => {
+    // The web shell sends no client id, so the daemon reattaches across tabs
+    // and hands back a peer's loginId. Closing this panel must not pull the
+    // code out from under the tab that created it.
+    const a = actions({ start: async () => ({ ...START, attached: true }) });
+    await render({ actions: a });
+    await click('Scan to bind');
+    expect(container.querySelector('img')).not.toBeNull();
+    await unmount();
+    expect(a.cancel).not.toHaveBeenCalled();
+  });
+
+  it('does not cancel a late result it attached to', async () => {
+    let resolveStart!: (value: DaemonChannelQrLoginStartResult) => void;
+    const a = actions({
+      start: () =>
+        new Promise<DaemonChannelQrLoginStartResult>((resolve) => {
+          resolveStart = resolve;
+        }),
+    });
+    await render({ actions: a });
+    await click('Scan to bind');
+    await unmount();
+    await act(async () => {
+      resolveStart({ ...START, attached: true });
+    });
+    expect(a.cancel).not.toHaveBeenCalled();
+  });
 });

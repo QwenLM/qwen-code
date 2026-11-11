@@ -50,6 +50,7 @@ export function ChannelQrLogin({
   const [error, setError] = useState<string | undefined>(undefined);
   const mounted = useRef(true);
   const boundFor = useRef<string | undefined>(undefined);
+  const ownedLoginRef = useRef<string | undefined>(undefined);
 
   useEffect(() => {
     mounted.current = true;
@@ -63,6 +64,7 @@ export function ChannelQrLogin({
     setView(undefined);
     setError(undefined);
     boundFor.current = undefined;
+    ownedLoginRef.current = undefined;
   }, [channelName]);
 
   const loginId = view?.status === 'pending' ? view.loginId : undefined;
@@ -71,18 +73,29 @@ export function ChannelQrLogin({
   // four slots and polls Tencent whether or not this panel is on screen.
   // Closing the editor must therefore drop the session explicitly, or four
   // abandoned attempts reject every real bind until those sessions time out.
-  // Both refs keep the unmount-only cleanup off the render-time identities: an
-  // effect keyed on `actions` or `loginId` would also fire on every change and
-  // cancel a login the operator is still waiting on.
+  //
+  // Only a login this panel CREATED is ours to drop. The web shell sends no
+  // client id on these routes, so the daemon reattaches across tabs and
+  // browsers (`undefined === undefined`) and hands back a peer's `loginId`
+  // with `attached: true`; cancelling that would pull the code out from under
+  // another operator. Ownership is recorded where the id is learned, not
+  // derived from what is on screen.
   const actionsRef = useRef(actions);
   actionsRef.current = actions;
-  const liveLoginRef = useRef<string | undefined>(undefined);
-  liveLoginRef.current = loginId;
+  const pendingLoginRef = useRef<string | undefined>(undefined);
+  pendingLoginRef.current = loginId;
+  // The refs keep the unmount-only cleanup off the render-time identities: an
+  // effect keyed on `actions` or the id would also fire on every change and
+  // cancel a login the operator is still waiting on. Both conditions matter —
+  // still pending, so a finished bind is left alone, and created here, so a
+  // peer's reattached login is left alone.
   useEffect(
     () => () => {
-      const id = liveLoginRef.current;
+      const id = pendingLoginRef.current;
       // Nobody is left to show a failure to; the session expires on its own.
-      if (id) void actionsRef.current.cancel(id).catch(() => undefined);
+      if (id && id === ownedLoginRef.current) {
+        void actionsRef.current.cancel(id).catch(() => undefined);
+      }
     },
     [],
   );
@@ -134,9 +147,13 @@ export function ChannelQrLogin({
       // really produces a new code, and so it does not consume a second slot.
       if (loginId) await actions.cancel(loginId);
       const result = await actions.start(channelName);
+      // Ownership is learned here, where the daemon says whether it minted a
+      // login or reattached a peer's — never inferred from what is on screen.
+      const owned = !result.attached && result.status === 'pending';
+      ownedLoginRef.current = owned ? result.loginId : undefined;
       if (mounted.current) {
         setView(result);
-      } else if (result.status === 'pending') {
+      } else if (owned) {
         // The login was created after the panel went away, so the unmount
         // cleanup never saw its id and it would hold a slot and poll Tencent
         // for its whole deadline with nobody watching — the same leak, in the
