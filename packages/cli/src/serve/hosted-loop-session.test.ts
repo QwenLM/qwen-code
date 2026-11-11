@@ -151,6 +151,35 @@ describe('HostedLoopSession arm', () => {
     });
   });
 
+  it('refuses to arm when the deployment gate is unset (default off)', async () => {
+    delete process.env[gateKey];
+    const harness = await createHarness();
+    await withLoop(harness, async (loops, authority) => {
+      await expect(
+        loops.arm({ delaySeconds: 60, prompt: '/loop tick' }),
+      ).rejects.toBeInstanceOf(LoopWakeupError);
+      expect(loopPending(authority)).toHaveLength(0);
+    });
+  });
+
+  it('the gate gates arming only: list and cancel still work when off', async () => {
+    const harness = await createHarness();
+    await withLoop(harness, async (loops, authority) => {
+      const arm = await loops.arm({ delaySeconds: 60, prompt: 'one' });
+      process.env[gateKey] = 'false';
+      // An already-armed wakeup stays listable and cancellable with the gate
+      // off; the pump delivers journal inputs regardless of the tool surface.
+      const listed = await loops.list();
+      expect(listed.map((wakeup) => wakeup.id)).toEqual([arm.id]);
+      expect(await loops.cancel(arm.id)).toBe(true);
+      expect(loopPending(authority)).toHaveLength(0);
+      // A new arm, however, is refused.
+      await expect(
+        loops.arm({ delaySeconds: 60, prompt: 'two' }),
+      ).rejects.toBeInstanceOf(LoopWakeupError);
+    });
+  });
+
   it('clamps the delay and commits a loop input due at notBefore', async () => {
     const harness = await createHarness();
     await withLoop(harness, async (loops, authority) => {
@@ -244,6 +273,30 @@ describe('HostedLoopSession replacement', () => {
         [first.id, second.id].sort(),
       );
     });
+  });
+
+  it('a denied re-arm keeps the previously armed wakeup', async () => {
+    const harness = await createHarness();
+    let deny = false;
+    const classify: HostedLoopClassifier = async () =>
+      deny
+        ? { allowed: false, reason: 'second arm denied' }
+        : { allowed: true, reason: null };
+    await withLoop(
+      harness,
+      async (loops, authority) => {
+        const first = await loops.arm({ delaySeconds: 60, prompt: 'one' });
+        deny = true;
+        await expect(
+          loops.arm({ delaySeconds: 120, prompt: 'two' }),
+        ).rejects.toBeInstanceOf(LoopWakeupError);
+        // The denial lands before any replacement: the first wakeup stays the
+        // single unfired pending, untouched.
+        const pending = loopPending(authority);
+        expect(pending.map((input) => input.turnId)).toEqual([first.id]);
+      },
+      classify,
+    );
   });
 });
 

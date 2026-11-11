@@ -9036,6 +9036,10 @@ describe('Hosted Harness no-tool session', () => {
         event.kind === 'turn.settled' && event.payload['turnId'] === loopTurnId,
     );
     expect(settled).toHaveLength(1);
+    expect(settled[0]!.payload).toMatchObject({
+      outcome: 'cancelled',
+      stopReason: 'session_closing',
+    });
     await cleanup(supertest(server).post(`/session/${SESSION_ID}/detach`))
       .send({ authority })
       .expect(204);
