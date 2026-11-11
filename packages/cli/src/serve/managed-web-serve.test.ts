@@ -392,6 +392,69 @@ describe('dedicated Managed Web gateway', () => {
     peerSocket?.destroy();
   });
 
+  it('shutdown tears down an in-flight upgrade whose 101 is withheld', async () => {
+    let peerSocket: import('node:stream').Duplex | undefined;
+    const peerReceived = new Promise<void>((resolve) => {
+      peer.on('upgrade', (_req, socket) => {
+        peerSocket = socket;
+        socket.resume();
+        // Withhold the 101 so the upgrade stays in flight at shutdown.
+        resolve();
+      });
+    });
+    await start();
+    const clientSocket = await new Promise<import('node:stream').Duplex>(
+      (resolve, reject) => {
+        const upgrade = request(
+          `${gateway!.url}/api/agent/web-shell/v1/sessions/sess-1/terminal?terminalId=t1&replay=1`,
+          {
+            headers: {
+              Connection: 'Upgrade',
+              Upgrade: 'websocket',
+              'Sec-WebSocket-Key': 'dGhlIHNhbXBsZSBub25jZQ==',
+              'Sec-WebSocket-Version': '13',
+              'Sec-WebSocket-Protocol': 'qwen-ws, qwen-bearer.ticket-abc',
+              Authorization: `Bearer ${browserToken}`,
+            },
+          },
+        );
+        upgrade.on('socket', (socket) => resolve(socket));
+        upgrade.on('error', reject);
+        upgrade.end();
+      },
+    );
+    let relayed101 = false;
+    clientSocket.on('data', (chunk) => {
+      if (chunk.toString().includes('101')) relayed101 = true;
+    });
+    const clientClosed = new Promise<void>((resolve) =>
+      clientSocket.once('close', () => resolve()),
+    );
+    const timeout = (message: string) =>
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error(message)), 5_000).unref(),
+      );
+    // Ensure the control-plane leg is actually established before shutdown.
+    await Promise.race([
+      peerReceived,
+      timeout('peer never received the upgrade'),
+    ]);
+    await Promise.race([
+      gateway!.close(),
+      timeout('gateway close hung with an in-flight upgrade'),
+    ]);
+    // Shutdown must tear the browser end down rather than wait on the in-flight
+    // upgrade, and no late 101 may be relayed to a client that no longer exists.
+    await Promise.race([
+      clientClosed,
+      timeout('client socket survived gateway shutdown'),
+    ]);
+    expect(relayed101).toBe(false);
+    // The control-plane leg is destroyed by shutdown; drop our reference so the
+    // peer server can close cleanly.
+    peerSocket?.destroy();
+  });
+
   it('fails before listening for invalid configuration or missing, weak, shared credentials', async () => {
     for (const token of [
       undefined,

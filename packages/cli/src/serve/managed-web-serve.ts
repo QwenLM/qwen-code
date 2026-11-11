@@ -89,6 +89,13 @@ function forwardTerminalUpgrade(
     path: req.url,
     headers,
   });
+  // Track the upstream socket as soon as it is assigned — before the 101
+  // arrives — so shutdown destroys an in-flight upgrade's control-plane leg
+  // too, not just the browser end.
+  upstream.on('socket', (upstreamSocket) => {
+    tracked.add(upstreamSocket);
+    upstreamSocket.once('close', () => tracked.delete(upstreamSocket));
+  });
   upstream.on('upgrade', (upstreamRes, upstreamSocket, upstreamHead) => {
     tracked.add(upstreamSocket);
     upstreamSocket.once('close', () => tracked.delete(upstreamSocket));
@@ -118,6 +125,10 @@ function forwardTerminalUpgrade(
   });
   upstream.on('error', () => socket.destroy());
   socket.on('error', () => upstream.destroy());
+  // Shutdown destroys the tracked browser socket, which emits 'close' (not
+  // 'error'); tear down the in-flight upstream request too, or it survives
+  // close() and a late 101 is relayed to a client that no longer exists.
+  socket.once('close', () => upstream.destroy());
   upstream.end();
 }
 

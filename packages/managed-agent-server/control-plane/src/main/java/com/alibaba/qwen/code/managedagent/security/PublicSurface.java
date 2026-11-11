@@ -4,6 +4,8 @@ import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.http.server.PathContainer;
 import org.springframework.web.util.ServletRequestPathUtils;
 
+import java.util.regex.Pattern;
+
 /**
  * The surface predicates shared by the filters and the exception handler.
  * Each decides on the path Spring routes with, so a normalized spelling
@@ -46,6 +48,11 @@ public final class PublicSurface {
                 || path.startsWith("/api/agent/web-shell/v1/");
     }
 
+    // Compiled once: both header filters call this on every request, and
+    // String.matches would recompile the pattern each time.
+    private static final Pattern TERMINAL_UPGRADE =
+            Pattern.compile("/api/agent/web-shell/v1/sessions/[^/]+/terminal");
+
     /**
      * The terminal WebSocket upgrade authenticates with the single-use ticket
      * carried in the bearer subprotocol, not the tenant/signature headers a
@@ -55,6 +62,6 @@ public final class PublicSurface {
      * ticket before the relay opens the worker.
      */
     public static boolean terminalUpgrade(String path) {
-        return path.matches("/api/agent/web-shell/v1/sessions/[^/]+/terminal");
+        return TERMINAL_UPGRADE.matcher(path).matches();
     }
 }

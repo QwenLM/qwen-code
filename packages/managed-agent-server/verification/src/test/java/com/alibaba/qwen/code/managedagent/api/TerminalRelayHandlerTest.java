@@ -86,8 +86,43 @@ class TerminalRelayHandlerTest {
 
         handler.afterConnectionEstablished(session());
 
-        verify(broker).admitTerminalHold("session-a", "term-1");
-        verify(client).newWebSocketBuilder();
+        // The hold must be admitted BEFORE the worker upgrade opens: a close
+        // racing the attach must never release the Runtime under a terminal
+        // that is about to exist. InOrder is what catches a reorder.
+        org.mockito.InOrder order = org.mockito.Mockito.inOrder(broker, client);
+        order.verify(broker).admitTerminalHold("session-a", "term-1");
+        order.verify(client).newWebSocketBuilder();
+    }
+
+    @Test
+    void presentsTheLeaseIdentityAndTerminalTargetOnTheWorkerUpgrade() throws Exception {
+        RuntimeBrokerOperations broker = mock(RuntimeBrokerOperations.class);
+        HttpClient client = mock(HttpClient.class);
+        WebSocket.Builder builder = mock(WebSocket.Builder.class);
+        when(client.newWebSocketBuilder()).thenReturn(builder);
+        when(builder.header(anyString(), anyString())).thenReturn(builder);
+        when(builder.connectTimeout(any())).thenReturn(builder);
+        when(builder.buildAsync(any(URI.class), any(WebSocket.Listener.class)))
+                .thenReturn(CompletableFuture.completedFuture(mock(WebSocket.class)));
+        when(broker.admitTerminalHold("session-a", "term-1"))
+                .thenReturn(CompletableFuture.completedFuture(
+                        new TerminalHoldAdmission(hold("terminal-attach:term-1:process"), true)));
+        TerminalRelayHandler handler = new TerminalRelayHandler(broker, client);
+
+        handler.afterConnectionEstablished(session());
+
+        // The worker upgrade must carry the binding's bearer and lease identity
+        // and name this terminal and Session, or the worker refuses the attach
+        // (or wires a superseded lease epoch's PTY).
+        verify(builder).header("Authorization", "Bearer token");
+        verify(builder).header("X-Qwen-Managed-Lease-Id", "lease-1");
+        verify(builder).header("X-Qwen-Managed-Lease-Epoch", "7");
+        ArgumentCaptor<URI> uri = ArgumentCaptor.forClass(URI.class);
+        verify(builder).buildAsync(uri.capture(), any(WebSocket.Listener.class));
+        assertThat(uri.getValue().getPath())
+                .isEqualTo("/internal/managed-runtime/v3/terminal");
+        assertThat(uri.getValue().getQuery())
+                .isEqualTo("terminalId=term-1&cwd=session-a&replay=1");
     }
 
     @Test
@@ -187,6 +222,10 @@ class TerminalRelayHandlerTest {
         byte[] received = new byte[message.getPayload().remaining()];
         message.getPayload().get(received);
         assertThat(received).isEqualTo(full);
+        // The listener must re-grant demand after every callback (onOpen plus
+        // the two fragments); a dropped request(1) would silence the terminal
+        // after the first frame while every other assertion stays green.
+        verify(worker, org.mockito.Mockito.times(3)).request(1);
     }
 
     @Test
