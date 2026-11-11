@@ -7011,7 +7011,7 @@ class QwenAgent implements Agent {
         .filter(Boolean)
         .join('\n\n');
     } catch (error) {
-      debugLogger.debug(`Team reattach failed: ${error}`);
+      debugLogger.warn(`Team reattach failed: ${error}`);
     }
   }
 

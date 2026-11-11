@@ -34705,6 +34705,9 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         mcpServers: [],
       }),
     ).resolves.toMatchObject({ modes: expect.anything() });
+    expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('Team reattach failed: Error: disk full'),
+    );
 
     mockConnectionState.resolve();
     await agentPromise;

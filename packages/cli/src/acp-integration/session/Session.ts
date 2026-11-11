@@ -13821,7 +13821,9 @@ export class Session implements SessionContext {
           isProtected: (_projected, index) => {
             const queued = this.notificationQueue[index]!;
             // A teammate report is consumed from the inbox before it is
-            // queued, so evicting it loses the only copy.
+            // queued, so evicting it loses the only copy. Coalescing per team
+            // in #enqueueTeammateReport caps each team to one queued slot,
+            // narrowing the all-protected overflow drop window.
             return (
               queued.kind === 'teammate' ||
               (guardDefersUnrelatedWork &&
