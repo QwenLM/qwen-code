@@ -1210,7 +1210,7 @@ test('a dropped job key takes its block-scalar body with it', () => {
   const jobEnd = realCi.indexOf('\n  web_shell_e2e_smoke:', jobAt);
   const job = realCi.slice(jobAt, jobEnd);
   const patched = job.replace(
-    /^    timeout-minutes: .*$/m,
+    /^ {4}timeout-minutes: .*$/m,
     '    timeout-minutes: |-\n      45\n    env:\n      KEEP_ME: 1',
   );
   assert.notEqual(patched, job, 'timeout-minutes anchor not found');
