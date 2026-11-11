@@ -9419,7 +9419,7 @@ describe('Session', () => {
           internals.pendingPrompt = new AbortController();
           try {
             await expect(statusWhileLoading).resolves.toEqual({
-              kind: 'interrupted_prompt',
+              kind: 'clean',
               canContinue: false,
             });
           } finally {
@@ -10094,10 +10094,10 @@ describe('Session', () => {
 
       expect(result).toEqual({
         accepted: false,
-        interruption: 'interrupted_prompt',
+        interruption: 'none',
       });
       expect(session.getRecoveryStatus()).toEqual({
-        kind: 'interrupted_prompt',
+        kind: 'clean',
         canContinue: false,
       });
       expect(promptSpy).not.toHaveBeenCalled();
@@ -10206,12 +10206,12 @@ describe('Session', () => {
 
       try {
         expect(session.getRecoveryStatus()).toEqual({
-          kind: 'interrupted_prompt',
+          kind: 'clean',
           canContinue: false,
         });
         expect(await session.continueLastTurn()).toEqual({
           accepted: false,
-          interruption: 'interrupted_prompt',
+          interruption: 'none',
         });
         expect(promptSpy).not.toHaveBeenCalled();
         expect(liveTurn.signal.aborted).toBe(false);
@@ -10237,12 +10237,12 @@ describe('Session', () => {
 
       try {
         expect(session.getRecoveryStatus()).toEqual({
-          kind: 'interrupted_prompt',
+          kind: 'clean',
           canContinue: false,
         });
         expect(await session.continueLastTurn()).toEqual({
           accepted: false,
-          interruption: 'interrupted_prompt',
+          interruption: 'none',
         });
         expect(liveTurn.signal.aborted).toBe(false);
       } finally {
@@ -10468,6 +10468,51 @@ describe('Session', () => {
         expect(await session.getRecoveryStatusForClient()).toEqual({
           kind: 'interrupted_turn',
           canContinue: true,
+        });
+      });
+
+      // While a turn is running, the tail after a tool batch is the same
+      // `user[functionResponse]` shape a genuinely interrupted turn leaves
+      // behind, and the classifier cannot tell them apart. `kind` must not
+      // report `interrupted_prompt` for an active turn: the web shell renders
+      // the recovery banner from `kind`, not `canContinue`, so an in-flight
+      // turn would pin the spurious "interrupted before the response
+      // completed" banner the moment a client fetches its context.
+      function withPendingPrompt(controller: AbortController | null): void {
+        (
+          session as unknown as { pendingPrompt: AbortController | null }
+        ).pendingPrompt = controller;
+      }
+
+      it('reports clean, not interrupted_prompt, while a turn is in flight', async () => {
+        createSessionWithLedger(() => completedTerminal());
+        withPendingPrompt(new AbortController());
+
+        expect(session.getRecoveryStatus()).toEqual({
+          kind: 'clean',
+          canContinue: false,
+        });
+        expect(await session.getRecoveryStatusForClient()).toEqual({
+          kind: 'clean',
+          canContinue: false,
+        });
+        expect(await session.continueLastTurn()).toEqual({
+          accepted: false,
+          interruption: 'none',
+        });
+      });
+
+      it('keeps the settled-tail certification once the turn settles', async () => {
+        createSessionWithLedger(() => completedTerminal());
+        withPendingPrompt(null);
+
+        expect(session.getRecoveryStatus()).toEqual({
+          kind: 'interrupted_prompt',
+          canContinue: true,
+        });
+        expect(await session.getRecoveryStatusForClient()).toEqual({
+          kind: 'clean',
+          canContinue: false,
         });
       });
     });

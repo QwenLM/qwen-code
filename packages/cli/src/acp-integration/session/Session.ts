@@ -6682,6 +6682,7 @@ export class Session implements SessionContext {
 
   getRecoveryStatus(): NonNullable<ServeSessionContextStatus['recovery']> {
     const recoveryPlan = this.#getRecoveryPlan(false);
+    const activeTurn = this.#hasActiveTurn();
     // A turn is still in flight, so there is no settled turn to continue.
     // `pendingPrompt` alone misses the automatic turns: notification and cron
     // turns run their own streaming loop under `notificationAbortController` /
@@ -6698,12 +6699,21 @@ export class Session implements SessionContext {
     // `channelTaskCaptures.size === 0`, which `assertCanStartTurn()` does NOT
     // reject, so taking it wholesale would suppress recovery while a channel
     // task capture is queued for no admission-side reason.
+    //
+    // `kind` is gated on the same signal. While a turn is in flight the tail
+    // classifier cannot tell "the model is still producing after a tool
+    // result" from "the prompt was interrupted": both present as a bare
+    // `user[functionResponse]` tail, and `completedToolCallIds` is empty
+    // outside Goal sessions, so it reports `interrupted_prompt`. The web
+    // shell renders the recovery banner from `kind`, not `canContinue`, so
+    // without the gate a healthy running turn shows the spurious "interrupted
+    // before the response completed" banner the moment a client fetches its
+    // context. An active turn has no settled turn to recover, so it reports
+    // `clean`.
     return {
-      kind: recoveryPlan?.kind ?? 'clean',
+      kind: activeTurn ? 'clean' : (recoveryPlan?.kind ?? 'clean'),
       canContinue:
-        recoveryPlan?.canContinue === true &&
-        !this.closing &&
-        !this.#hasActiveTurn(),
+        recoveryPlan?.canContinue === true && !this.closing && !activeTurn,
     };
   }
 
@@ -6795,15 +6805,21 @@ export class Session implements SessionContext {
     interruption: 'none' | 'interrupted_prompt' | 'interrupted_turn';
   }> {
     const recovery = await this.getRecoveryStatusForClient();
-    if (!recovery.canContinue && recovery.kind !== 'clean') {
+    if (
+      !recovery.canContinue &&
+      (recovery.kind !== 'clean' || this.#hasActiveTurn())
+    ) {
       // Name the veto that fired. `canContinue` collapses `closing` plus the
       // ten `#hasActiveTurn()` members into one boolean and the only UI
       // consumer renders nothing for it, so without this a leaked flag —
       // recovery disabled for the rest of the session — is indistinguishable
       // from a healthy automatic turn in flight. Logged here rather than in
       // `getRecoveryStatus()` to stay off the per-poll
-      // `buildSessionContextStatus` path, and gated on a non-clean kind so
-      // the ordinary "nothing to continue" no-op stays quiet.
+      // `buildSessionContextStatus` path, and gated so the ordinary
+      // "nothing to continue" no-op stays quiet. An in-flight turn now
+      // reports a clean kind (the in-flight gate above), so the veto — and a
+      // leaked flag masquerading as a healthy turn — is named off
+      // `#hasActiveTurn()` instead of the kind.
       debugLogger.debug('[Session] recovery canContinue vetoed', {
         kind: recovery.kind,
         closing: this.closing,
