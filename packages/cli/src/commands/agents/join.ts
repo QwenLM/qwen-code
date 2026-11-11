@@ -268,10 +268,11 @@ export async function runAgentsJoin(
     }.${saved ? ' The daemon reconnects after restarts.' : ''}`,
   );
   // Still a successful join: it is connected, and only the reconnect after a
-  // restart is lost.
+  // restart is lost. The same command again keeps the connection and retries
+  // the save, so the warning points at that.
   if (!saved) {
     deps.err(
-      `Warning: the daemon could not save this connection, so it will not reconnect after a restart or a workspace reload: ${result.saveError || 'no detail'}`,
+      `Warning: the daemon could not save this connection, so it will not reconnect after a restart or a workspace reload: ${result.saveError || 'no detail'}. Run the same command again to save it.`,
     );
   }
   return 0;

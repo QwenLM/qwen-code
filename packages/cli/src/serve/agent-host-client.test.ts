@@ -1263,7 +1263,7 @@ describe('enrolling', () => {
           );
 
           await expect(connect()).rejects.toThrow(
-            'Agent Host could not confirm its connection',
+            'Agent Host could not confirm its connection to the coordinator. Check the callback URL and saved credential, then join again with the same token.',
           );
           await expect(readJson(files.credential)).resolves.toMatchObject({
             hostId: 'x',
@@ -1335,6 +1335,89 @@ describe('enrolling', () => {
       // Back to the real rename, should the rejection above not be used.
       vi.mocked(fs.rename).mockReset();
     }
+  });
+
+  it('does not point a re-join at a rerun when its credential could not record the token', async () => {
+    const saved = {
+      schemaVersion: 1,
+      serverUrl,
+      workspaceId,
+      hostId: 'x',
+      secret: 'x'.repeat(43),
+    };
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    try {
+      await withCoordinator(
+        () => Response.json({ error: 'unexpected' }, { status: 500 }),
+        async (files) => {
+          await fs.mkdir(path.dirname(files.credential), { recursive: true });
+          await fs.writeFile(files.credential, JSON.stringify(saved));
+
+          // The record did not land, so the rerun would be refused: the
+          // advice must not send the operator into it.
+          await expect(connect()).rejects.toThrow(
+            'Agent Host could not confirm its connection to the coordinator. Check the callback URL and saved credential.',
+          );
+          expect(stderr.mock.calls.map(([line]) => String(line))).toContain(
+            'Agent Host credential could not record its enrollment: ENOSPC: no space left on device\n',
+          );
+          await expect(readJson(files.credential)).resolves.toEqual(saved);
+        },
+        (url, input) => {
+          if (!url.includes('/x/heartbeat')) return undefined;
+          if (input['enrollmentToken']) {
+            // The next rename is the credential's save, after this answer.
+            vi.mocked(fs.rename).mockRejectedValueOnce(
+              Object.assign(new Error('ENOSPC: no space left on device'), {
+                code: 'ENOSPC',
+              }),
+            );
+            return undefined;
+          }
+          // The confirmation heartbeat meets a busy store.
+          return Response.json({ error: 'busy' }, { status: 503 });
+        },
+      );
+    } finally {
+      stderr.mockRestore();
+      // Back to the real rename, should the rejection above not be used.
+      vi.mocked(fs.rename).mockReset();
+    }
+  });
+
+  it('still points a rerun at itself when the credential already records the token', async () => {
+    let busy = true;
+    await withCoordinator(
+      () => Response.json({ error: 'unexpected' }, { status: 500 }),
+      async (files) => {
+        await fs.mkdir(path.dirname(files.credential), { recursive: true });
+        await fs.writeFile(
+          files.credential,
+          JSON.stringify({
+            schemaVersion: 1,
+            serverUrl,
+            workspaceId,
+            hostId: 'x',
+            secret: 'x'.repeat(43),
+            enrollmentTokenHash: tokenHash('join-token'),
+          }),
+        );
+
+        await expect(connect()).rejects.toThrow(
+          'Agent Host could not confirm its connection to the coordinator. Check the callback URL and saved credential, then join again with the same token.',
+        );
+      },
+      (url, input) => {
+        if (!url.includes('/x/heartbeat')) return undefined;
+        // Answered as a repeat of the enrollment it records: token unspent.
+        if (input['enrollmentToken']) return undefined;
+        if (!busy) return undefined;
+        busy = false;
+        return Response.json({ error: 'busy' }, { status: 503 });
+      },
+    );
   });
 
   it('does not save a re-join’s token over a credential removed meanwhile', async () => {

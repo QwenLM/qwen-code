@@ -1009,6 +1009,9 @@ async function connectAgentHost(
     }
     assertOpen();
   }
+  // Whether the credential file records this join's token, so a failed
+  // first heartbeat can point at a rerun that goes on with it.
+  let recorded = false;
   if (!credential) {
     if (!options.enrollmentToken) {
       throw new Error(
@@ -1100,19 +1103,28 @@ async function connectAgentHost(
       enrollmentTokenHash: tokenHash,
     };
     await writeCredential(filePath, credential, savedCurrentCredential);
+    recorded = true;
     await clearEnrollmentSecret(files.enrollment, proposed.secret);
   } else if (!savedCurrentCredential) {
     await writeCredential(filePath, credential, undefined);
+    recorded = true;
   } else if (credential !== savedCurrentCredential) {
     // Only the token it spent changed. A failed save costs only a rerun of
     // this command, refused as it was before.
     await writeCredential(filePath, credential, savedCurrentCredential, {
       onlyOverSaved: true,
-    }).catch((error: unknown) =>
-      writeStderrLine(
-        `Agent Host credential could not record its enrollment: ${extractErrorMessage(error)}`,
-      ),
+    }).then(
+      () => {
+        recorded = true;
+      },
+      (error: unknown) =>
+        writeStderrLine(
+          `Agent Host credential could not record its enrollment: ${extractErrorMessage(error)}`,
+        ),
     );
+  } else {
+    // The saved credential already records this token.
+    recorded = true;
   }
   const activeCredential = credential;
 
@@ -1670,11 +1682,14 @@ async function connectAgentHost(
 
   if (!(await heartbeat())) {
     stop.signal.throwIfAborted();
-    // With a token, the credential is saved and (best effort, on a
-    // re-join) records it: the same join again goes on with it.
+    // The same join again goes on with the credential only if it records
+    // this token; a re-join whose record write failed has no such rerun,
+    // so the advice must not send the operator into a refused one.
     throw new Error(
       `Agent Host could not confirm its connection to the coordinator. Check the callback URL and saved credential${
-        options.enrollmentToken ? ', then join again with the same token' : ''
+        options.enrollmentToken && recorded
+          ? ', then join again with the same token'
+          : ''
       }.`,
     );
   }

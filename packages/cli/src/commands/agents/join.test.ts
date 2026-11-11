@@ -105,7 +105,7 @@ it('warns, and still succeeds, when the daemon could not save the connection', a
   expect(out.join('\n')).toContain('Joined https://hub.example:4170');
   expect(out.join('\n')).not.toContain('reconnects after restarts');
   expect(err).toEqual([
-    'Warning: the daemon could not save this connection, so it will not reconnect after a restart or a workspace reload: Lock file is already being held',
+    'Warning: the daemon could not save this connection, so it will not reconnect after a restart or a workspace reload: Lock file is already being held. Run the same command again to save it.',
   ]);
 });
 
@@ -122,7 +122,7 @@ it('says "no detail" when the daemon gives no reason for the failed save', async
   );
 
   expect(err).toEqual([
-    'Warning: the daemon could not save this connection, so it will not reconnect after a restart or a workspace reload: no detail',
+    'Warning: the daemon could not save this connection, so it will not reconnect after a restart or a workspace reload: no detail. Run the same command again to save it.',
   ]);
 });
 

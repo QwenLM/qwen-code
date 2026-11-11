@@ -26,7 +26,7 @@ afterEach(() => {
 });
 
 const NOT_SAVED_HERE =
-  'This computer joined, but could not save the connection, so it will not reconnect after a restart or a workspace reload: disk full';
+  'This computer joined, but could not save the connection, so it will not reconnect after a restart or a workspace reload: disk full. Join again with the same link and token to save it.';
 const NOT_SAVED_THERE =
   'That computer connected, but could not save the connection, so it will not reconnect after a restart or a workspace reload: disk full';
 
@@ -179,7 +179,7 @@ it.each([
 
 it('renders the unsaved notice with a period when a join reports no save error', async () => {
   // joinOutcome maps {connected: true, saved: false} with no saveError to
-  // {saveError: ''}; the notice must still render, ending in the '.' fallback
+  // {saveError: ''}; the notice must still render, with the '.' fallback
   // rather than a dangling colon. Pins both the render guard (!== undefined,
   // not truthiness) and the message's empty-error fallback.
   const onJoinCoordinator = vi.fn(async () => ({ saveError: '' }));
@@ -190,7 +190,7 @@ it('renders the unsaved notice with a period when a join reports no save error',
   await submit('join-coordinator');
 
   expect(notSavedNotice()).toBe(
-    'This computer joined, but could not save the connection, so it will not reconnect after a restart or a workspace reload.',
+    'This computer joined, but could not save the connection, so it will not reconnect after a restart or a workspace reload. Join again with the same link and token to save it.',
   );
 });
 
@@ -640,6 +640,62 @@ it.each([
     ).toBe('join-token');
   },
 );
+
+it('does not send a kept token to another link', async () => {
+  const onJoinCoordinator = vi.fn(async (): Promise<RuntimeJoinOutcome> => {
+    throw new Error('Agent request failed (504)');
+  });
+  await renderDialog({ onJoinCoordinator });
+  await chooseTab('Join a coordinator');
+  await type('joinLink', 'https://hub.example:4170/join/ws_1');
+  await type('enrollmentToken', 'join-token');
+  await submit('join-coordinator');
+  expect(
+    document.querySelector<HTMLInputElement>('input[name="enrollmentToken"]')!
+      .value,
+  ).toBe('join-token');
+
+  // The token was kept for that link's retry; another coordinator must not
+  // receive it.
+  await type('joinLink', 'https://other.example:4170/join/ws_1');
+  expect(
+    document.querySelector<HTMLInputElement>('input[name="enrollmentToken"]')!
+      .value,
+  ).toBe('');
+  await submit('join-coordinator');
+  expect(onJoinCoordinator).toHaveBeenNthCalledWith(1, {
+    serverUrl: 'https://hub.example:4170',
+    workspaceId: 'ws_1',
+    enrollmentToken: 'join-token',
+    allowHttp: false,
+  });
+  expect(onJoinCoordinator).toHaveBeenNthCalledWith(2, {
+    serverUrl: 'https://other.example:4170',
+    workspaceId: 'ws_1',
+    enrollmentToken: '',
+    allowHttp: false,
+  });
+});
+
+it('keeps a typed token when the link is entered after it', async () => {
+  // Only a token kept from a failed join is bound to a link; one the user
+  // typed is theirs to send with whatever link they enter next.
+  const onJoinCoordinator = vi.fn(
+    async (): Promise<RuntimeJoinOutcome> => ({}),
+  );
+  await renderDialog({ onJoinCoordinator });
+  await chooseTab('Join a coordinator');
+  await type('enrollmentToken', 'join-token');
+  await type('joinLink', 'https://hub.example:4170/join/ws_1');
+  await submit('join-coordinator');
+
+  expect(onJoinCoordinator).toHaveBeenCalledWith({
+    serverUrl: 'https://hub.example:4170',
+    workspaceId: 'ws_1',
+    enrollmentToken: 'join-token',
+    allowHttp: false,
+  });
+});
 
 it('does not put the remote’s notice on another machine’s connected result', async () => {
   // A computer that joined through a join command is not the remote the

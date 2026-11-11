@@ -382,6 +382,9 @@ export function AddRuntimeDialog({
   );
   const [joinLink, setJoinLink] = useState('');
   const [joinToken, setJoinToken] = useState('');
+  // The link a kept token was sent with: it is kept for that link's retry
+  // only, never carried to another coordinator.
+  const [keptTokenLink, setKeptTokenLink] = useState<string>();
   const [joinAllowHttp, setJoinAllowHttp] = useState(false);
   // The coordinator this daemon joined, once it accepted.
   const [joined, setJoined] = useState<string>();
@@ -583,6 +586,7 @@ export function AddRuntimeDialog({
       if (outcome) {
         setJoined(joinTarget.serverUrl);
         setJoinToken('');
+        setKeptTokenLink(undefined);
         if (outcome.saveError !== undefined) {
           const here = outcome.saveError;
           setNotSaved((current) => ({ ...current, here }));
@@ -590,9 +594,14 @@ export function AddRuntimeDialog({
       }
     } catch (cause) {
       // The same token sent again picks up what a failed join did (its
-      // answer lost, or its first heartbeat failed), so it is kept; only one
-      // the coordinator refused is dropped.
-      if (isRefusedJoinToken(cause)) setJoinToken('');
+      // answer lost, or its first heartbeat failed), so it is kept for the
+      // link it was sent with; only one the coordinator refused is dropped.
+      if (isRefusedJoinToken(cause)) {
+        setJoinToken('');
+        setKeptTokenLink(undefined);
+      } else {
+        setKeptTokenLink(joinLink);
+      }
       const name = (cause as Error | undefined)?.name;
       setError(
         'join',
@@ -873,7 +882,20 @@ export function AddRuntimeDialog({
                     required
                     readOnly={busy}
                     value={joinLink}
-                    onChange={(event) => setJoinLink(event.target.value)}
+                    onChange={(event) => {
+                      const link = event.target.value;
+                      setJoinLink(link);
+                      // A token kept from a failed join belongs to the link
+                      // it was sent with; another coordinator must not
+                      // receive it.
+                      if (
+                        keptTokenLink !== undefined &&
+                        link !== keptTokenLink
+                      ) {
+                        setKeptTokenLink(undefined);
+                        setJoinToken('');
+                      }
+                    }}
                     placeholder="https://coordinator:4170/join/<workspace>"
                     aria-invalid={
                       joinLink.trim() !== '' && !joinTarget ? true : undefined
@@ -889,7 +911,12 @@ export function AddRuntimeDialog({
                     required
                     readOnly={busy}
                     value={joinToken}
-                    onChange={(event) => setJoinToken(event.target.value)}
+                    onChange={(event) => {
+                      // A typed token is the user's own, not one kept from
+                      // a failed join.
+                      setKeptTokenLink(undefined);
+                      setJoinToken(event.target.value);
+                    }}
                   />
                 </label>
                 <label className="flex items-center gap-2 text-xs text-muted-foreground">
