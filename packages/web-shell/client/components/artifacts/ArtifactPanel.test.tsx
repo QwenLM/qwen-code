@@ -5597,6 +5597,106 @@ it('shows a backslash-bearing artifact diff exactly as the file has it', async (
   expect(cm!.textContent).not.toContain('C:\\\\tmp');
 });
 
+it('copies visible escapes from a wide artifact diff', async () => {
+  const clientWidth = Object.getOwnPropertyDescriptor(
+    HTMLElement.prototype,
+    'clientWidth',
+  );
+  Object.defineProperty(HTMLElement.prototype, 'clientWidth', {
+    configurable: true,
+    get: () => 800,
+  });
+  vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({
+    measureText: () => ({ width: 0 }),
+  } as unknown as CanvasRenderingContext2D);
+  try {
+    const oldText = 'safe\u202elooking\nsafe\u200bzero\n';
+    const newText = 'safe\u202elooking changed\nsafe\u200bzero\n';
+    const changes = [
+      {
+        path: 'src/invisible.ts',
+        status: 'modified' as const,
+        toolCallId: 'tool-invisible',
+        isArtifact: false,
+        diffs: [{ oldText, newText, fullContent: true }],
+      },
+    ];
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    await act(async () =>
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[
+              {
+                id: 'review',
+                kind: 'review',
+                title: 'Review',
+                changes,
+                workspaceCwd: '/primary',
+                workspaceId: 'primary-id',
+              },
+            ]}
+            activeTabId="review"
+            reviewChanges={changes}
+            selectedReviewPath={null}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+          />
+        </I18nProvider>,
+      ),
+    );
+    act(() =>
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="src/invisible.ts"]',
+        )
+        ?.click(),
+    );
+    await flush();
+    await act(async () => {
+      await vi.waitFor(() => {
+        if (!container.querySelector('.cm-content')) {
+          throw new Error('CodeMirror editor not mounted yet');
+        }
+      });
+    });
+    const cm = container.querySelector('.cm-content')!;
+    const view = EditorView.findFromDOM(cm)!;
+    view.dispatch({ selection: { anchor: 0, head: view.state.doc.length } });
+    const range = document.createRange();
+    range.selectNodeContents(cm);
+    const selection = window.getSelection()!;
+    selection.removeAllRanges();
+    selection.addRange(range);
+    document.dispatchEvent(new Event('selectionchange'));
+    const copied: Record<string, string> = {};
+    const event = new Event('copy', { bubbles: true, cancelable: true });
+    Object.defineProperty(event, 'clipboardData', {
+      value: {
+        clearData: () => {},
+        setData: (type: string, value: string) => (copied[type] = value),
+      },
+    });
+    act(() => cm.dispatchEvent(event));
+    expect(copied['text/plain']).toContain('safe\\u202elooking');
+    expect(copied['text/plain']).toContain('safe\\u200bzero');
+    expect(copied['text/plain']).not.toContain('\u202e');
+    expect(copied['text/plain']).not.toContain('\u200b');
+  } finally {
+    if (clientWidth) {
+      Object.defineProperty(HTMLElement.prototype, 'clientWidth', clientWidth);
+    } else {
+      Reflect.deleteProperty(HTMLElement.prototype, 'clientWidth');
+    }
+  }
+});
+
 describe('ArtifactPanel binary document previews', () => {
   const bytes = Buffer.from('%PDF-1.7');
   function pdfArtifact(patch: Partial<DaemonSessionArtifact> = {}) {

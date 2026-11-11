@@ -788,6 +788,39 @@ describe('ToolApproval accessibility', () => {
     );
   });
 
+  it('keeps raw diff sides distinct through the permission adapter', () => {
+    const adapted = extractPendingPermission([
+      {
+        id: 'permission-edit-invisible',
+        kind: 'permission',
+        requestId: 'request-edit-invisible',
+        sessionId: 'session-edit-invisible',
+        title: 'Edit: /outside/invisible.txt',
+        options: [],
+        toolCall: {
+          kind: 'edit',
+          _meta: { toolName: 'replace' },
+          content: [
+            {
+              type: 'diff',
+              path: '/outside/invisible.txt',
+              oldText: 'a\\u200bb',
+              newText: 'a\u200bb',
+            },
+          ],
+        },
+        preview: { kind: 'generic' },
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    ])!;
+    render(undefined, { ...adapted, options: request.options });
+    const diff = container!.querySelector('[aria-label="File diff"]')!;
+    expect(diff).toBeTruthy();
+    expect(diff.textContent).toContain('-a\\u200bb');
+    expect(diff.textContent).toContain('+a\\u200bb');
+  });
+
   it('localizes the omitted-diff notice instead of hardcoding English', () => {
     // `buildContextBoundedDiff` lives in an import-free module, so it cannot
     // reach the `t()` catalog: it used to emit an English sentence that then

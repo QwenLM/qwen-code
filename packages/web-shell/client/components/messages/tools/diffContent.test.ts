@@ -22,6 +22,14 @@ describe('escapeInvisibleForMerge', () => {
     expect(escapeInvisibleForMerge('\ta\t')).toBe('\ta\t');
   });
 
+  it('escapes a lone CR without rewriting a CRLF terminator', () => {
+    expect(escapeInvisibleForMerge('a\rb\r\n')).toBe('a\\rb\r\n');
+    expect(escapePairForMerge('a\rb\n', 'a\rB\n')).toEqual({
+      oldText: 'a\\rb\n',
+      newText: 'a\\rB\n',
+    });
+  });
+
   it('still neutralises the characters that can hide content inside a line', () => {
     expect(escapeInvisibleForMerge('a\u200bb')).toBe('a\\u200bb');
     expect(escapeInvisibleForMerge('a\u202eb')).toBe('a\\u202eb');
@@ -51,10 +59,9 @@ describe('escapeInvisibleForMerge', () => {
   });
 
   it('differs from the decoration class on exactly the structural set', () => {
-    // The two classes differ on CR alone: LF and TAB were never in either, so
-    // CR is the one character that reached a document as a literal escape.
-    // The decoration layer keeps it (a row is rendered as text anyway); this
-    // one must not, because it builds the document.
+    // The decoration class marks every CR because it renders rows. The merge
+    // transform preserves CRLF structure but separately neutralises a lone CR
+    // before the two merge documents can disagree about line boundaries.
     const marks = (pattern: RegExp, character: string): boolean => {
       pattern.lastIndex = 0;
       return pattern.test(character);

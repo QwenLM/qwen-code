@@ -2917,6 +2917,11 @@ function CodeMirrorDiff({
           return node;
         },
       }),
+      EditorView.clipboardOutputFilter.of((text) =>
+        text.replace(DIFF_INVISIBLE_CHARACTERS, (character) =>
+          escapeDiffContent(character),
+        ),
+      ),
       EditorView.editable.of(false),
       EditorState.readOnly.of(true),
       EditorView.lineWrapping,

@@ -31,18 +31,25 @@ export function escapeInvisibleForMerge(content: string): string {
   // collapse to the same string, the merge reports "unchanged" for a file
   // that did change, and resizing across the wide/narrow breakpoint flips
   // the verdict because the wide branch compares raw text.
-  return content
-    .replace(/\\/g, '\\\\')
-    .replace(DIFF_MERGE_INVISIBLE_CHARACTERS, (character) =>
-      escapeDiffContent(character),
-    );
+  return (
+    content
+      .replace(/\\/g, '\\\\')
+      // CodeMirror splits the editable document on a lone CR, while the merge
+      // extension only splits its original document on CRLF or LF. Keep CRLF
+      // terminators structural, but turn every other CR into visible text so
+      // both sides agree on their line boundaries.
+      .replace(/\r(?!\n)/g, '\\r')
+      .replace(DIFF_MERGE_INVISIBLE_CHARACTERS, (character) =>
+        escapeDiffContent(character),
+      )
+  );
 }
 
 // Non-global on purpose: `test()` on a global regex advances `lastIndex`, and
 // `DIFF_MERGE_INVISIBLE_CHARACTERS` is shared with `MatchDecorator`, which
 // mutates that state on its own schedule.
 const MERGE_INVISIBLE_PROBE = new RegExp(
-  DIFF_MERGE_INVISIBLE_CHARACTERS.source,
+  `\\r(?!\\n)|${DIFF_MERGE_INVISIBLE_CHARACTERS.source}`,
   'u',
 );
 

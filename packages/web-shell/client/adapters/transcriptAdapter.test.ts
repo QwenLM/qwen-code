@@ -112,7 +112,7 @@ describe('extractPendingPermission', () => {
     }
   });
 
-  it('escapes control characters in diff previews', () => {
+  it('keeps raw diff previews for the diff renderer', () => {
     const permission = extractPendingPermission([
       genericPermission({
         content: [
@@ -129,9 +129,9 @@ describe('extractPendingPermission', () => {
     expect(permission?.content).toEqual([
       {
         type: 'diff',
-        path: 'safe\\u202e.txt',
-        oldText: 'old\\u202e',
-        newText: 'new\\u202e',
+        path: 'safe\u202e.txt',
+        oldText: 'old\u202e',
+        newText: 'new\u202e',
       },
     ]);
   });

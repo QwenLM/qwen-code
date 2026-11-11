@@ -101,12 +101,13 @@ function getPermissionContent(
         return [
           {
             type: 'diff',
-            path: escapePreviewText(block['path']),
+            // Diff construction needs the raw pair to distinguish a literal
+            // escape from the character it represents. DiffView escapes each
+            // rendered row, and ToolApproval escapes the path at its sink.
+            path: block['path'],
             oldText:
-              typeof block['oldText'] === 'string'
-                ? escapePreviewText(block['oldText'])
-                : '',
-            newText: escapePreviewText(block['newText']),
+              typeof block['oldText'] === 'string' ? block['oldText'] : '',
+            newText: block['newText'],
           },
         ];
       }
