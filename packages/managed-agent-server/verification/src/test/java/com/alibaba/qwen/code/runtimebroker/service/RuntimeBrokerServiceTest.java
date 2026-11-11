@@ -25,6 +25,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
+import com.alibaba.qwen.code.runtimebroker.TerminalHoldAdmission;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.ToolHoldRow;
@@ -2027,8 +2028,10 @@ class RuntimeBrokerServiceTest {
     @Test
     void terminalHoldAdmitsSettledAttachAndProcessRow() throws Exception {
         try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
-            ToolExecutionRecord hold = join(fixture.service.admitTerminalHold(
+            TerminalHoldAdmission admission = join(fixture.service.admitTerminalHold(
                     "harness", "term-1"));
+            assertTrue(admission.created());
+            ToolExecutionRecord hold = admission.hold();
             assertEquals("terminal-attach:term-1:process", hold.getExecutionCallId());
             assertEquals("web_terminal_process", hold.getReference().get("dispatchMode"));
             assertEquals("terminal-attach:term-1", hold.getReference().get("processOf"));
@@ -2037,9 +2040,12 @@ class RuntimeBrokerServiceTest {
             // The attach invocation settles through the never-dispatched path.
             awaitExecution(fixture.executionRepository, "terminal-attach:term-1",
                     ToolExecutionRecord.State.SETTLED);
-            // Re-admitting the same terminal (a reconnect) returns the same hold.
-            assertEquals(hold.getExecutionCallId(), join(fixture.service.admitTerminalHold(
-                    "harness", "term-1")).getExecutionCallId());
+            // Re-admitting the same terminal (a reconnect) reuses the same hold
+            // and reports created=false, so a failed reconnect cannot abandon it.
+            TerminalHoldAdmission reconnect = join(fixture.service.admitTerminalHold(
+                    "harness", "term-1"));
+            assertFalse(reconnect.created());
+            assertEquals(hold.getExecutionCallId(), reconnect.hold().getExecutionCallId());
             // The hold keeps the terminal's Runtime Session against a routine release.
             assertEquals("runtime_session_held",
                     failure(fixture.service.release("harness", "terminal-term-1")).getCode());
@@ -2071,7 +2077,7 @@ class RuntimeBrokerServiceTest {
     void terminalHoldRecreateAfterSettlementAdmitsAFreshActiveHold() throws Exception {
         try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
             ToolExecutionRecord first = join(fixture.service.admitTerminalHold(
-                    "harness", "term-1"));
+                    "harness", "term-1")).hold();
             assertEquals("terminal-attach:term-1:process", first.getExecutionCallId());
             Map<String, Object> exited = new LinkedHashMap<>();
             exited.put("operationId", "term-1");
@@ -2084,34 +2090,46 @@ class RuntimeBrokerServiceTest {
             // A reconnect after settlement must admit a fresh ACTIVE hold: the
             // settled one no longer protects a re-created PTY, so handing it
             // back would let the Runtime retire under a live terminal.
-            ToolExecutionRecord recreated = join(fixture.service.admitTerminalHold(
-                    "harness", "term-1"));
+            TerminalHoldAdmission recreatedAdmission = join(
+                    fixture.service.admitTerminalHold("harness", "term-1"));
+            assertTrue(recreatedAdmission.created());
+            ToolExecutionRecord recreated = recreatedAdmission.hold();
             org.junit.jupiter.api.Assertions.assertNotEquals(
                     first.getExecutionCallId(), recreated.getExecutionCallId());
             assertEquals(ToolExecutionRecord.State.PREPARED, recreated.getState());
             assertEquals("terminal-term-1", recreated.getRuntimeSessionId());
             // A further reconnect reuses the fresh hold instead of leaking another.
-            assertEquals(recreated.getExecutionCallId(), join(fixture.service.admitTerminalHold(
-                    "harness", "term-1")).getExecutionCallId());
+            TerminalHoldAdmission again = join(fixture.service.admitTerminalHold(
+                    "harness", "term-1"));
+            assertFalse(again.created());
+            assertEquals(recreated.getExecutionCallId(), again.hold().getExecutionCallId());
         }
     }
 
     @Test
     void terminalHoldAbandonDischargesARefusedAttach() throws Exception {
         try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
-            ToolExecutionRecord hold = join(fixture.service.admitTerminalHold(
+            TerminalHoldAdmission admission = join(fixture.service.admitTerminalHold(
                     "harness", "term-1"));
+            ToolExecutionRecord hold = admission.hold();
             assertEquals(ToolExecutionRecord.State.PREPARED, hold.getState());
             assertEquals("runtime_session_held",
                     failure(fixture.service.release("harness", "terminal-term-1")).getCode());
+            // A failed concurrent attach names a different hold: it must not
+            // discharge this one, which still protects the pending PTY.
+            assertNull(join(fixture.service.abandonTerminalHold(
+                    "harness", "term-1", "terminal-attach:term-1:other")));
+            assertEquals(ToolExecutionRecord.State.PREPARED,
+                    fixture.executionRepository.findByExecutionCallId(
+                            hold.getExecutionCallId()).getState());
             // The worker refused the attach before a PTY existed; the control
             // plane discharges the hold so it never wedges on an unknown answer.
             ToolExecutionRecord abandoned = join(fixture.service.abandonTerminalHold(
-                    "harness", "term-1"));
+                    "harness", "term-1", hold.getExecutionCallId()));
             assertEquals(ToolExecutionRecord.State.SETTLED, abandoned.getState());
             // Abandoning again is a no-op: no active hold remains.
-            org.junit.jupiter.api.Assertions.assertNull(join(
-                    fixture.service.abandonTerminalHold("harness", "term-1")));
+            assertNull(join(fixture.service.abandonTerminalHold(
+                    "harness", "term-1", hold.getExecutionCallId())));
             assertTrue(join(fixture.service.release("harness", "terminal-term-1")));
         }
     }

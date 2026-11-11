@@ -30,6 +30,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeToolMeasurements;
 import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
+import com.alibaba.qwen.code.runtimebroker.TerminalHoldAdmission;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.protocol.ProviderRuntimeProtocol;
@@ -1440,7 +1441,7 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
      * background Shell/Monitor hold semantics. Re-admitting the same terminal
      * (a reconnect) returns the existing hold.
      */
-    public CompletionStage<ToolExecutionRecord> admitTerminalHold(
+    public CompletionStage<TerminalHoldAdmission> admitTerminalHold(
             String harnessSessionId, String terminalId) {
         requireOpen(closed);
         String harness = BrokerValues.requirePathSafe(
@@ -1475,7 +1476,7 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                             }
                             ToolExecutionRecord active = activeTerminalHold(context);
                             if (active != null) {
-                                return active;
+                                return new TerminalHoldAdmission(active, false);
                             }
                             // The first attach keeps the deterministic identity;
                             // a re-create after the previous hold settled takes
@@ -1505,7 +1506,8 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                             admitBackgroundProcess(context, admitted, ManagedHoldFamily.TERMINAL);
                             ToolExecutionRecord process = executionRepository
                                     .findByExecutionCallId(processId);
-                            return process == null ? admitted : process;
+                            return new TerminalHoldAdmission(
+                                    process == null ? admitted : process, true);
                         } finally {
                             context.unlock();
                         }
@@ -1542,13 +1544,14 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
 
     @Override
     public CompletionStage<ToolExecutionRecord> abandonTerminalHold(
-            String harnessSessionId, String terminalId) {
+            String harnessSessionId, String terminalId, String executionCallId) {
         requireOpen(closed);
         String harness = BrokerValues.requirePathSafe(
                 BrokerValues.requireId(harnessSessionId, "harnessSessionId"),
                 "harnessSessionId");
         String terminal = BrokerValues.requirePathSafe(
                 BrokerValues.requireId(terminalId, "terminalId"), "terminalId");
+        String callId = BrokerValues.requireId(executionCallId, "executionCallId");
         String runtime = "terminal-" + terminal;
         return mapStoreFailure(safeStage(() -> acquire(harness, runtime, "bootstrap", null, null)
                 .thenCompose(ignored -> bindingRegistry.requireReadySession(harness, runtime))
@@ -1557,7 +1560,12 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                     try {
                         bindingRegistry.requireReadySessionRecord(context);
                         ToolExecutionRecord active = activeTerminalHold(context);
-                        if (active == null) {
+                        // Only the hold this attach newly admitted may be
+                        // discharged. A reconnect reuses a live PTY's hold and
+                        // a concurrent attach may own a different one; neither
+                        // may be settled by this failed attempt.
+                        if (active == null
+                                || !active.getExecutionCallId().equals(callId)) {
                             return null;
                         }
                         requireTerminalHoldOwner(active, harness, runtime);

@@ -18,6 +18,7 @@ import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -75,18 +76,20 @@ public final class TerminalRelayHandler extends AbstractWebSocketHandler
         URI workerUri = workerUri(lease.getEndpoint(), sessionId, terminalId);
         // Admit the durable hold before the worker terminal exists, so a close
         // racing the attach can never release the Runtime out from under it.
-        broker.admitTerminalHold(sessionId, terminalId).whenComplete((hold, holdError) -> {
+        broker.admitTerminalHold(sessionId, terminalId).whenComplete((admission, holdError) -> {
             if (holdError != null) {
                 relay.fail();
                 closeQuietly(session, CloseStatus.SERVER_ERROR);
                 return;
             }
-            openWorker(session, relay, lease, workerUri, sessionId, terminalId);
+            openWorker(session, relay, lease, workerUri, sessionId, terminalId,
+                    admission.created(), admission.hold().getExecutionCallId());
         });
     }
 
     private void openWorker(WebSocketSession session, Relay relay,
-            RuntimeLease lease, URI workerUri, String sessionId, String terminalId) {
+            RuntimeLease lease, URI workerUri, String sessionId, String terminalId,
+            boolean createdHold, String holdCallId) {
         try {
             client.newWebSocketBuilder()
                     .header("Authorization", "Bearer " + lease.getToken())
@@ -98,24 +101,28 @@ public final class TerminalRelayHandler extends AbstractWebSocketHandler
                     .whenComplete((worker, error) -> {
                         if (error != null) {
                             relay.fail();
-                            abandonHold(sessionId, terminalId);
+                            abandonHold(sessionId, terminalId, createdHold, holdCallId);
                             closeQuietly(session, CloseStatus.SERVER_ERROR);
                         }
                     });
         } catch (RuntimeException error) {
             relay.fail();
-            abandonHold(sessionId, terminalId);
+            abandonHold(sessionId, terminalId, createdHold, holdCallId);
             closeQuietly(session, CloseStatus.SERVER_ERROR);
         }
     }
 
-    /** The worker refused the attach before a PTY existed; discharge the hold
-     * admitted ahead of it so a refused attach never leaves a permanent hold.
-     * Best-effort: a failure here leaves the hold to the drain, never masks
-     * the refused upgrade. */
-    private void abandonHold(String sessionId, String terminalId) {
+    /** A failed attach may only discharge the hold this attempt newly admitted.
+     * A reconnect reuses a live PTY's hold, so a transient failed reconnect must
+     * retain it; the broker additionally settles only the named hold. Best-effort:
+     * a failure here leaves the hold to the drain, never masks the refused upgrade. */
+    private void abandonHold(String sessionId, String terminalId,
+            boolean createdHold, String holdCallId) {
+        if (!createdHold) {
+            return;
+        }
         try {
-            broker.abandonTerminalHold(sessionId, terminalId)
+            broker.abandonTerminalHold(sessionId, terminalId, holdCallId)
                     .whenComplete((ignored, error) -> {
                         // The drain remains the backstop if this cannot settle.
                     });
@@ -192,6 +199,17 @@ public final class TerminalRelayHandler extends AbstractWebSocketHandler
         private final AtomicReference<WebSocket> worker = new AtomicReference<>();
         private final java.util.concurrent.atomic.AtomicLong pendingBytes =
                 new java.util.concurrent.atomic.AtomicLong();
+        // The JDK listener may deliver one worker message across several
+        // callbacks; reassemble to the message boundary before the browser
+        // decodes it, or a multibyte character split across callbacks corrupts.
+        private final java.io.ByteArrayOutputStream binaryBuffer =
+                new java.io.ByteArrayOutputStream();
+        private final StringBuilder textBuffer = new StringBuilder();
+        // JDK sends are asynchronous and reject a second send while one is
+        // pending; chain them so backpressured input queues instead of closing.
+        private final Object sendLock = new Object();
+        private CompletionStage<WebSocket> sendTail =
+                CompletableFuture.completedFuture(null);
         private volatile boolean failed;
 
         Relay(WebSocketSession browser) {
@@ -213,7 +231,18 @@ public final class TerminalRelayHandler extends AbstractWebSocketHandler
         @Override
         public CompletionStage<?> onText(WebSocket webSocket, CharSequence data,
                 boolean last) {
-            sendToBrowser(new TextMessage(data.toString()));
+            textBuffer.append(data);
+            if (textBuffer.length() > MAX_PENDING_BYTES) {
+                fail();
+                closeWorker();
+                closeQuietly(browser, CloseStatus.TOO_BIG_TO_PROCESS);
+                return null;
+            }
+            if (last) {
+                String message = textBuffer.toString();
+                textBuffer.setLength(0);
+                sendToBrowser(new TextMessage(message));
+            }
             webSocket.request(1);
             return null;
         }
@@ -221,9 +250,20 @@ public final class TerminalRelayHandler extends AbstractWebSocketHandler
         @Override
         public CompletionStage<?> onBinary(WebSocket webSocket, ByteBuffer data,
                 boolean last) {
-            byte[] bytes = new byte[data.remaining()];
-            data.get(bytes);
-            sendToBrowser(new BinaryMessage(bytes));
+            byte[] chunk = new byte[data.remaining()];
+            data.get(chunk);
+            binaryBuffer.writeBytes(chunk);
+            if (binaryBuffer.size() > MAX_PENDING_BYTES) {
+                fail();
+                closeWorker();
+                closeQuietly(browser, CloseStatus.TOO_BIG_TO_PROCESS);
+                return null;
+            }
+            if (last) {
+                byte[] message = binaryBuffer.toByteArray();
+                binaryBuffer.reset();
+                sendToBrowser(new BinaryMessage(message));
+            }
             webSocket.request(1);
             return null;
         }
@@ -251,27 +291,40 @@ public final class TerminalRelayHandler extends AbstractWebSocketHandler
             send(webSocket -> webSocket.sendBinary(payload, true), bytes);
         }
 
-        /** Bounds the browser-to-worker queue at the worker's ceiling. */
+        /** Bounds the browser-to-worker queue at the worker's ceiling and
+         * serializes the asynchronous JDK sends, which reject a second send
+         * while one is pending; queued input waits its turn instead of closing
+         * the connection. */
         private void send(java.util.function.Function<WebSocket,
                 CompletionStage<WebSocket>> op, int bytes) {
             WebSocket webSocket = worker.get();
             if (webSocket == null || failed) {
                 return;
             }
-            if (pendingBytes.addAndGet(bytes) > MAX_PENDING_BYTES) {
-                pendingBytes.addAndGet(-bytes);
-                fail();
-                closeWorker();
-                closeQuietly(browser, CloseStatus.TOO_BIG_TO_PROCESS);
-                return;
-            }
-            op.apply(webSocket).whenComplete((ignored, error) -> {
-                pendingBytes.addAndGet(-bytes);
-                if (error != null) {
-                    fail();
-                    closeQuietly(browser, CloseStatus.SERVER_ERROR);
+            synchronized (sendLock) {
+                if (failed) {
+                    return;
                 }
-            });
+                if (pendingBytes.addAndGet(bytes) > MAX_PENDING_BYTES) {
+                    pendingBytes.addAndGet(-bytes);
+                    fail();
+                    closeWorker();
+                    closeQuietly(browser, CloseStatus.TOO_BIG_TO_PROCESS);
+                    return;
+                }
+                sendTail = sendTail.thenCompose(ignored -> {
+                    if (failed) {
+                        return CompletableFuture.completedFuture(webSocket);
+                    }
+                    return op.apply(webSocket);
+                }).whenComplete((ignored, error) -> {
+                    pendingBytes.addAndGet(-bytes);
+                    if (error != null) {
+                        fail();
+                        closeQuietly(browser, CloseStatus.SERVER_ERROR);
+                    }
+                });
+            }
         }
 
         private void sendToBrowser(org.springframework.web.socket.WebSocketMessage<?> message) {

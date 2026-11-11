@@ -61,17 +61,18 @@ public interface RuntimeBrokerOperations {
             String harnessSessionId, String runtimeSessionId,
             String idempotencyKey, Map<String, Object> reference);
 
-    public CompletionStage<ToolExecutionRecord> admitTerminalHold(
+    public CompletionStage<TerminalHoldAdmission> admitTerminalHold(
             String harnessSessionId, String terminalId);
 
-    /** Discharges a terminal hold whose worker attach never succeeded. The
-     * hold is admitted before the worker terminal exists so a racing close
-     * cannot release the Runtime; when the attach is refused there is no PTY
-     * to prove an exit for, so the control plane settles the hold itself
-     * rather than leaving it to wedge on an {@code unknown} control answer.
-     * Returns null when no active hold remains. */
+    /** Discharges a terminal hold that this attach newly admitted and whose
+     * worker attach never produced a PTY. Only the hold named by
+     * {@code executionCallId} is settled, and only while it is still the active
+     * prepared hold: a reconnect reuses a live PTY's hold, so a failed
+     * reconnect must never discharge it, and a failed concurrent attach must
+     * never discharge a successful one's hold. Returns null when the named hold
+     * is not the active hold (already settled, replaced, or never created). */
     public CompletionStage<ToolExecutionRecord> abandonTerminalHold(
-            String harnessSessionId, String terminalId);
+            String harnessSessionId, String terminalId, String executionCallId);
 
     public CompletionStage<ToolExecutionRecord> prepareCsiExecution(String harnessSessionId, String runtimeSessionId,
             String idempotencyKey, Map<String, Object> reference, byte[] inputBytes, byte[] definitionBytes);
