@@ -32,7 +32,7 @@ export const TERMINAL_RETENTION_MS = 60_000;
  *
  * Sized against the worst gap between two polls the daemon actually serves,
  * not against the poll cadence. The panel schedules its next poll only after
- * the previous one settles, and each request carries its own 15 s budget, so
+ * the previous one settles, and each poll carries its own 15 s budget, so
  * one stalled request alone puts 16.5 s between served polls. A hidden tab is
  * worse: Chromium throttles a page hidden for five minutes to one timer per
  * minute, so a backgrounded login can go ~75 s without a served poll. Reaping

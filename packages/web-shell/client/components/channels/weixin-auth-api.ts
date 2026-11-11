@@ -23,7 +23,8 @@ export interface WeixinAuthTarget {
 }
 
 /**
- * Per-request budget. The daemon's abandonment bound has to exceed it: the
+ * Budget for the synchronous reads and for polling — not for starting a flow,
+ * which has its own below. The daemon's abandonment bound has to exceed it: the
  * panel schedules its next poll only after this one settles, so a stalled
  * request delays the next poll the daemon can see by this much. Pinned against
  * that bound by `weixin-auth.test.ts` in the CLI package.
