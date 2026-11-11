@@ -24,6 +24,50 @@ async function expectSameEdges(message: Locator, composer: Locator) {
     .toBeLessThanOrEqual(1);
 }
 
+async function expectTimelineCentered(
+  rail: Locator,
+  viewport: Locator,
+  message: Locator,
+) {
+  const railViewport = rail.locator(':scope > div').first();
+  const tick = rail.locator('button').first().locator(':scope > span').first();
+  const action = rail.locator(':scope > button[title]');
+  await expect(action).toBeVisible();
+  await expect
+    .poll(async () => {
+      const [viewportBox, messageBox, railViewportBox, tickBox, actionBox] =
+        await Promise.all([
+          viewport.boundingBox(),
+          message.boundingBox(),
+          railViewport.boundingBox(),
+          tick.boundingBox(),
+          action.boundingBox(),
+        ]);
+      if (
+        !viewportBox ||
+        !messageBox ||
+        !railViewportBox ||
+        !tickBox ||
+        !actionBox
+      )
+        return Infinity;
+      const gutterCenter = (viewportBox.x + messageBox.x) / 2;
+      const contentCenter =
+        (Math.min(railViewportBox.y, actionBox.y) +
+          Math.max(
+            railViewportBox.y + railViewportBox.height,
+            actionBox.y + actionBox.height,
+          )) /
+        2;
+      return Math.max(
+        Math.abs(tickBox.x + tickBox.width / 2 - gutterCenter),
+        Math.abs(actionBox.x + actionBox.width / 2 - gutterCenter),
+        Math.abs(contentCenter - viewportBox.y - viewportBox.height / 2),
+      );
+    })
+    .toBeLessThanOrEqual(1);
+}
+
 for (const navigation of [true, false]) {
   test(`transcript matches composer edges with turn navigation ${navigation ? 'enabled' : 'unsupported'} @smoke`, async ({
     page,
@@ -31,10 +75,10 @@ for (const navigation of [true, false]) {
   }, testInfo) => {
     await page.setViewportSize({ width: 1600, height: 900 });
     const scenario = createWebShellDaemonScenario({
-      events: Array.from({ length: 4 }, (_, index) => [
+      events: Array.from({ length: 6 }, (_, index) => [
         userTextEvent('What is the weather?', { id: index * 3 + 1 }),
         assistantTextEvent(
-          index < 3
+          index < 5
             ? 'Earlier forecast.'
             : `the weather report is ready\n\n${Array.from(
                 { length: 80 },
@@ -58,9 +102,9 @@ for (const navigation of [true, false]) {
           v: 1,
           sessionId: scenario.sessionId,
           snapshot: 'mock-snapshot',
-          totalTurns: 4,
+          totalTurns: 6,
           start: 0,
-          turns: Array.from({ length: 4 }, (_, ordinal) => ({
+          turns: Array.from({ length: 6 }, (_, ordinal) => ({
             ordinal,
             turnId: `record-${ordinal}`,
             kind: 'prompt',
@@ -88,6 +132,7 @@ for (const navigation of [true, false]) {
       : page.getByTestId('session-timeline');
     await expect(rail).toBeVisible();
 
+    const viewport = page.locator('[data-history-viewport]');
     const messageList = page.locator('[data-web-shell-message-list]');
     const message = messageList
       .locator('[data-web-shell-message-row]')
@@ -107,6 +152,7 @@ for (const navigation of [true, false]) {
       .toHaveCSS('border-bottom-width', '1px');
     await messageList.hover();
     await page.mouse.wheel(0, -400);
+    await expectTimelineCentered(rail, viewport, message);
     const scrollToBottom = page.getByRole('button', {
       name: /Scroll to bottom|回到底部/,
     });
@@ -122,7 +168,6 @@ for (const navigation of [true, false]) {
     ]) {
       await page.setViewportSize({ width, height: 900 });
       await expectSameEdges(message, composer);
-      const viewport = page.locator('[data-history-viewport]');
       await expect
         .poll(async () => {
           const scrollBox = await messageList.boundingBox();
@@ -136,12 +181,17 @@ for (const navigation of [true, false]) {
       const viewportBox = await viewport.boundingBox();
       if (viewportBox && viewportBox.width >= 1128) {
         await expect(rail).toBeVisible();
+        await expectTimelineCentered(rail, viewport, message);
         const railBox = await rail.boundingBox();
         const messageBox = await message.boundingBox();
         expect(railBox!.x + railBox!.width).toBeLessThanOrEqual(messageBox!.x);
       } else {
         await expect(rail).toBeHidden();
       }
+    }
+    for (const height of [900, 640, 480]) {
+      await page.setViewportSize({ width: 1600, height });
+      await expectTimelineCentered(rail, viewport, message);
     }
     {
       await page.setViewportSize({ width: 1600, height: 900 });

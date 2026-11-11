@@ -2864,7 +2864,7 @@ const SessionTimeline = memo(function SessionTimeline({
     <div className={styles.sessionTimelineLayer} aria-hidden="false">
       <nav
         ref={panelRef}
-        className={styles.sessionTimelinePanel}
+        className={`${styles.sessionTimelinePanel} ${styles.sessionTimelineNav}`}
         aria-label={t('timeline.sessionTimeline')}
         data-testid="session-timeline"
         onMouseLeave={hideTooltip}
@@ -6271,49 +6271,109 @@ export const MessageList = memo(
 
     return (
       <McpAppSessionContext.Provider value={mcpAppSessionId}>
-        <div
-          ref={containerRef}
-          className={joinClassNames(
-            styles.list,
-            deletion?.active ? styles.deletionMode : undefined,
-            hasHeader && centerWelcomeHeader
-              ? styles.listWithWelcomeHeader
-              : undefined,
-          )}
-          data-web-shell-message-list
-          onClickCapture={handleDisclosureClickCapture}
-        >
-          {showLoadingSkeleton && (
-            <LoadingTranscriptSkeleton label={t('editor.sessionLoading')} />
-          )}
-          {loadingOlderHistory &&
-            !showLoadingSkeleton &&
-            !suppressOlderHistoryLoadingStatus && (
+        <div className={styles.listFrame}>
+          <div
+            ref={containerRef}
+            className={joinClassNames(
+              styles.list,
+              deletion?.active ? styles.deletionMode : undefined,
+              hasHeader && centerWelcomeHeader
+                ? styles.listWithWelcomeHeader
+                : undefined,
+            )}
+            data-web-shell-message-list
+            onClickCapture={handleDisclosureClickCapture}
+          >
+            {showLoadingSkeleton && (
+              <LoadingTranscriptSkeleton label={t('editor.sessionLoading')} />
+            )}
+            {loadingOlderHistory &&
+              !showLoadingSkeleton &&
+              !suppressOlderHistoryLoadingStatus && (
+                <div className={styles.historyStatus} role="status">
+                  {t('history.loadingEarlier')}
+                </div>
+              )}
+            {historyCapacityReached && !showLoadingSkeleton && (
               <div className={styles.historyStatus} role="status">
-                {t('history.loadingEarlier')}
+                {t('history.capacityReached')}
               </div>
             )}
-          {historyCapacityReached && !showLoadingSkeleton && (
-            <div className={styles.historyStatus} role="status">
-              {t('history.capacityReached')}
-            </div>
-          )}
-          {historyPaginationError &&
-            !showLoadingSkeleton &&
-            !historyCapacityReached && (
-              <div className={styles.historyStatus}>
-                <span role="status">{t('history.paginationError')}</span>
-                {onLoadOlderHistory && (
-                  <button
-                    type="button"
-                    className={styles.historyRetryButton}
-                    onClick={retryOlderHistory}
+            {historyPaginationError &&
+              !showLoadingSkeleton &&
+              !historyCapacityReached && (
+                <div className={styles.historyStatus}>
+                  <span role="status">{t('history.paginationError')}</span>
+                  {onLoadOlderHistory && (
+                    <button
+                      type="button"
+                      className={styles.historyRetryButton}
+                      onClick={retryOlderHistory}
+                    >
+                      {t('history.retry')}
+                    </button>
+                  )}
+                </div>
+              )}
+            {useVirtualScroll ? (
+              <div
+                ref={virtualizer.containerRef}
+                className={styles.virtualSizer}
+              >
+                {virtualItems.map((virtualRow) => (
+                  <div
+                    key={virtualRow.key}
+                    data-index={virtualRow.index}
+                    ref={measureVirtualRow}
+                    className={joinClassNames(
+                      styles.virtualRow,
+                      getRowClassName(
+                        visibleItems[virtualRow.index - headerOffset],
+                      ),
+                    )}
+                    data-message-row-key={String(getItemKey(virtualRow.index))}
+                    data-source-block-ids={displayItemSourceBlockIds(
+                      visibleItems[virtualRow.index - headerOffset],
+                      messages,
+                    )}
+                    data-web-shell-message-row
+                    style={{
+                      position: 'absolute',
+                      top: 0,
+                      left: 0,
+                      right: 0,
+                    }}
                   >
-                    {t('history.retry')}
-                  </button>
-                )}
+                    {renderSelection(
+                      visibleItems[virtualRow.index - headerOffset],
+                    )}
+                    {renderVirtualItem(virtualRow.index)}
+                  </div>
+                ))}
               </div>
+            ) : (
+              Array.from({ length: totalCount }, (_, index) => {
+                const key = getItemKey(index);
+                const item = visibleItems[index - headerOffset];
+                return (
+                  <div
+                    key={key}
+                    data-index={index}
+                    className={getRowClassName(item)}
+                    data-message-row-key={String(key)}
+                    data-source-block-ids={displayItemSourceBlockIds(
+                      item,
+                      messages,
+                    )}
+                    data-web-shell-message-row
+                  >
+                    {renderSelection(item)}
+                    {renderVirtualItem(index)}
+                  </div>
+                );
+              })
             )}
+          </div>
           <SessionTimeline
             action={timelineAction}
             entries={sessionTimelineEntries}
@@ -6324,61 +6384,6 @@ export const MessageList = memo(
             }
             onSelect={scrollToMessage}
           />
-          {useVirtualScroll ? (
-            <div ref={virtualizer.containerRef} className={styles.virtualSizer}>
-              {virtualItems.map((virtualRow) => (
-                <div
-                  key={virtualRow.key}
-                  data-index={virtualRow.index}
-                  ref={measureVirtualRow}
-                  className={joinClassNames(
-                    styles.virtualRow,
-                    getRowClassName(
-                      visibleItems[virtualRow.index - headerOffset],
-                    ),
-                  )}
-                  data-message-row-key={String(getItemKey(virtualRow.index))}
-                  data-source-block-ids={displayItemSourceBlockIds(
-                    visibleItems[virtualRow.index - headerOffset],
-                    messages,
-                  )}
-                  data-web-shell-message-row
-                  style={{
-                    position: 'absolute',
-                    top: 0,
-                    left: 0,
-                    right: 0,
-                  }}
-                >
-                  {renderSelection(
-                    visibleItems[virtualRow.index - headerOffset],
-                  )}
-                  {renderVirtualItem(virtualRow.index)}
-                </div>
-              ))}
-            </div>
-          ) : (
-            Array.from({ length: totalCount }, (_, index) => {
-              const key = getItemKey(index);
-              const item = visibleItems[index - headerOffset];
-              return (
-                <div
-                  key={key}
-                  data-index={index}
-                  className={getRowClassName(item)}
-                  data-message-row-key={String(key)}
-                  data-source-block-ids={displayItemSourceBlockIds(
-                    item,
-                    messages,
-                  )}
-                  data-web-shell-message-row
-                >
-                  {renderSelection(item)}
-                  {renderVirtualItem(index)}
-                </div>
-              );
-            })
-          )}
         </div>
       </McpAppSessionContext.Provider>
     );

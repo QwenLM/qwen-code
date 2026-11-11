@@ -168,7 +168,7 @@ export function GlobalTurnNavigation({
     <TooltipProvider disableHoverableContent>
       <nav
         aria-label={t('timeline.sessionTimeline')}
-        className="pointer-events-none flex h-full min-h-0 w-full shrink-0 flex-col justify-center px-[min(12px,25%)] py-4 text-muted-foreground"
+        className={`${timelineStyles.sessionTimelineNav} pointer-events-none flex h-full min-h-0 w-full shrink-0 flex-col justify-center px-[min(12px,25%)] py-4 text-muted-foreground`}
         data-global-turn-navigation
       >
         <span className="sr-only">
