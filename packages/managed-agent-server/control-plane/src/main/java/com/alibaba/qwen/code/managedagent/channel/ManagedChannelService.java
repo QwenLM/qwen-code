@@ -385,6 +385,22 @@ public class ManagedChannelService {
             plan.add(new SegmentLedger(String.valueOf(segment.get("segmentId")),
                     ((Number) segment.get("ordinal")).intValue(), null));
         }
+        // The first-segment guard above only proves the chain's head matches.
+        // A stored chain that shares segment 0 but diverges later would slip
+        // through it, and INSERT IGNORE (unique on (delivery_key, segment_id),
+        // not on ordinal) would splice the divergent segment in beside the old
+        // one — a mixed chain with two rows at one ordinal. Compare the full
+        // (segmentId, ordinal) chain before planning so any divergence is
+        // refused rather than spliced (review 5853133846).
+        List<SegmentLedger> stored = segments.list(tenantId, channelId, resentId);
+        if (!stored.isEmpty() && !sameSegmentChain(stored, plan)) {
+            LOG.warn("channel resend chain conflict tenant={} channel={}"
+                    + " delivery={} resent={} storedCount={} resentCount={}",
+                    tenantId, channelId, deliveryId, resentId,
+                    stored.size(), plan.size());
+            throw new ManagedAgentException(409, "channel_delivery_conflict",
+                    "The resent delivery id already names a different stored chain.");
+        }
         segments.plan(tenantId, channelId, resentId, plan);
         ChannelDelivery row = deliveries.findOrCreate(new ChannelDelivery(
                 tenantId, channelId, resentId,
@@ -394,6 +410,25 @@ public class ManagedChannelService {
         instances.claim(tenantId, channelId, resentId, claim.sessionId());
         return new ResendResponse(resentId, deliveryId, true,
                 view(row, claim.sessionId()));
+    }
+
+    /** Whether two segment lists name the same (segmentId, ordinal) chain.
+     * Both are ordered by ordinal; receipts are ignored — a replayed resend
+     * carries none while the stored chain may already hold some. */
+    private static boolean sameSegmentChain(List<SegmentLedger> stored,
+            List<SegmentLedger> resent) {
+        if (stored.size() != resent.size()) {
+            return false;
+        }
+        for (int index = 0; index < stored.size(); index++) {
+            SegmentLedger left = stored.get(index);
+            SegmentLedger right = resent.get(index);
+            if (left.ordinal() != right.ordinal()
+                    || !left.segmentId().equals(right.segmentId())) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /**

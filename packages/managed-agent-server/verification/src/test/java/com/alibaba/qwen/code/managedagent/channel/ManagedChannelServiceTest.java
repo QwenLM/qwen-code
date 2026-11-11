@@ -961,6 +961,40 @@ class ManagedChannelServiceTest {
     }
 
     @Test
+    void aResendDivergingAfterTheFirstSegmentIsRejected() {
+        InboundAdmission admitted = service.submitInbound(TENANT, channel,
+                event(1, "1700:112", "please reply"));
+        String deliveryId = admitted.inputId() + ":reply";
+        plannedDelivery(admitted.sessionId(), deliveryId, admitted.routeId(),
+                "The build is green.", 2);
+        service.claimDeliveries(TENANT, channel, 16);
+        // The stored chain under the resent id shares segment 0 with the
+        // Harness answer but diverges at ordinal 1. The first-segment guard
+        // alone would pass, and INSERT IGNORE (unique on segment_id, not
+        // ordinal) would splice the answer's second segment in beside the
+        // stored one — a mixed chain with two rows at ordinal 1.
+        String resentId = deliveryId + ":r1";
+        new JdbcChannelDeliveryRepository(jdbc).findOrCreate(
+                new ChannelDeliveryRepository.ChannelDelivery(TENANT, channel,
+                        resentId, deliveryId + ":0", 0, "planned", null, 0, 0));
+        segmentLedger.plan(TENANT, channel, resentId, List.of(
+                new SegmentLedger(deliveryId + ":0", 0, null),
+                new SegmentLedger("other:1", 1, null)));
+        assertThatThrownBy(() -> service.resend(TENANT, channel, deliveryId))
+                .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
+                    assertThat(error.getStatus()).isEqualTo(409);
+                    assertThat(error.getCode())
+                            .isEqualTo("channel_delivery_conflict");
+                });
+        // The divergent segment was refused, not spliced: the stored chain is
+        // intact and the answer's second segment was never planned.
+        assertThat(segmentLedger.list(TENANT, channel, resentId))
+                .extracting(SegmentLedger::segmentId)
+                .containsExactly(deliveryId + ":0", "other:1");
+        assertThat(instances.findClaim(TENANT, channel, resentId)).isEmpty();
+    }
+
+    @Test
     void deliveryRowsAreCreatedOnlyAfterTheirSegmentsArePlanned() {
         InboundAdmission admitted = service.submitInbound(TENANT, channel,
                 event(1, "1700:98", "please reply"));

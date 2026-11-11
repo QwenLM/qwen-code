@@ -37,7 +37,12 @@ and non-empty (`minItems: 1`, `maxItems: 64`), matching the record contract's
 row is visible. A resend whose minted id already names a stored delivery with
 a different first segment (id or ordinal) is rejected before any segment is
 planned, so a refused resend leaves no orphan segment rows; a replayed resend
-under a matching id converges instead of conflicting.
+under a matching id converges instead of conflicting. The first-segment check
+is backed by a full-chain comparison: when the stored chain under the resent
+id is non-empty, its (segmentId, ordinal) pairs must equal the resent plan's,
+so a divergence after segment 0 is refused too — otherwise INSERT IGNORE
+(unique on segment_id, not ordinal) would splice the two chains into one
+delivery with two rows at a single ordinal.
 
 The contract version bumps from 1.108.0 to 1.109.0. The Java record and the
 OpenAPI schema change together, enforced by the record-to-schema contract
