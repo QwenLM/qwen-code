@@ -298,41 +298,6 @@ public final class JdbcCsiExecutionAdmission {
         return grantTail(execution, prefix, revision, value, checkpoint, pinned);
     }
 
-    /** Validates retained data only; checkpoint uniqueness, member closure and owner reads belong to the caller. */
-    public static Map<String, Object> verifyHistoricalGrant(JdbcCsiFilesRetirementGuard.Original original,
-            ToolExecutionRecord execution, CsiNativeActivationProof.Prefix prefix, long maximumRevision, long ceiling,
-            String saved, DispatchCheckpoint checkpoint, Map<String, Object> pinnedContext) {
-        require(original != null && original.request() != null && maximumRevision > 0
-                && CsiFilesRetirementProfile.isProfile(original.request().getScope())
-                && ceiling > 0 && ceiling <= original.version());
-        var value = grantHeader(original, execution, prefix, ceiling, saved);
-        if (value.isNull()) {
-            require(checkpoint == null && pinnedContext == null);
-            return null;
-        }
-        return grantTail(execution, prefix, maximumRevision, value, checkpoint, pinnedContext);
-    }
-
-    /** Data membership only; complete scoped rows and resource associations must be established by the reader. */
-    public static void verifyHistoricalMembers(JdbcCsiFilesRetirementGuard.Original original,
-            CsiNativeActivationProof.Prefix prefix, List<ToolExecutionRecord> members,
-            java.util.function.Function<JsonNode, byte[]> resourceReader) {
-        CsiNativeToolReservation.verifyHistoricalMembers(original, prefix, members, resourceReader);
-        verifyReceiptMembers(prefix, members);
-    }
-
-    /** Decodes the caller's already bounded complete row; this method performs no SQL or admission. */
-    public static ToolExecutionRecord readHistoricalMember(ResultSet row) throws SQLException {
-        var member = JdbcToolExecutionRepository.mapExecution(row);
-        JsonNode reference = CsiNativeActivationProof.readObject(CsiNativeActivationProof.utf8(row.getString("reference_json")));
-        require(same(reference, member.getReference()));
-        String result = row.getString("result_json");
-        if (result != null) {
-            require(same(CsiNativeActivationProof.readObject(CsiNativeActivationProof.utf8(result)), member.getResult()));
-        }
-        return member;
-    }
-
     /** Reconstructs grant context data; the caller must separately validate the original handle and installed owner. */
     public static Map<String, Object> historicalGrantContext(RuntimeProvisionRequest original,
             com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding installed, JsonNode handle) {

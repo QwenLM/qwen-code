@@ -149,12 +149,28 @@ stall alert means the slot is serving no jobs and needs reconciliation; the
 manager keeps retrying and never exits on its own, so systemd does not restart
 it. Alert on that journal marker rather than on service state.
 
-Before upgrading or restarting, pause replenishment, retire idle registrations
-after confirming their containers have no job worker, and wait for assigned
-jobs to finish. JIT labels are read-only and cannot be removed for draining.
-The configured shutdown grace remains an explicit stop deadline, not an
-automatic drain. Record the deployed commit and manager
-checksum together; update them only after installing that exact source.
+`drainTimeoutSeconds` (default 0, disabled; the example config sets 1800)
+turns SIGTERM into a drain instead of a fixed grace deadline. Replenishment
+stops immediately, and a slot holding an assigned job keeps serving until that
+job's ephemeral runner exits on its own. A slot whose container shows no
+`Runner.Worker` process for two consecutive five-second polls is retired before
+its container stops: the manager deletes the runner's GitHub registration and
+treats an accepted DELETE as the point at which the runner can no longer be
+assigned work. That gate is what covers the gap between the last idle probe and
+`docker rm -f` — a job assigned there would otherwise be killed by the removal.
+A refused retirement keeps the container draining and restarts the idle window:
+422 (GitHub still reports the runner busy) means a job may have just been
+assigned, 403/429 (rate limiting) is an unknown answer and backs off on the same
+ladder as the rest of the manager, and any other failure fails closed.
+The drain window is added to `shutdownGraceSeconds`, which remains the final
+forced-cleanup bound; keep the sum below the unit's `TimeoutStopSec` (the
+supplied unit allows 55 minutes). A job that outlives the window is stopped and
+the slot logs `drain window elapsed`, so size the window against the longest
+routed job. JIT labels are read-only, so removing the scheduling label is not an
+available drain mechanism: the registration DELETE is the stop signal, and the
+worker poll is what keeps that attempt from firing while a job is running.
+Record the deployed commit and manager checksum together; update them only
+after installing that exact source.
 
 Upgrading: `stallAlertRetries`, the earlier retry-count threshold, is no longer
 read. A config that still carries it has no effect and falls back to the
