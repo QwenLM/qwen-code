@@ -373,7 +373,7 @@ public class ManagedChannelService {
                         String.valueOf(first.get("segmentId")),
                         ((Number) first.get("ordinal")).intValue());
                 throw new ManagedAgentException(409, "channel_delivery_conflict",
-                        "The resent delivery id already belongs to another segment.");
+                        "The resent delivery id already names a different stored chain.");
             }
         });
         // The new chain carries only the segments proven unsent, so none of

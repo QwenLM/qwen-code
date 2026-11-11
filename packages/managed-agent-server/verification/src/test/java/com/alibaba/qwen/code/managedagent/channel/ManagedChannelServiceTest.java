@@ -743,17 +743,39 @@ class ManagedChannelServiceTest {
                         resentId, "other:0", 0, "planned", null, 0, 0));
         segmentLedger.plan(TENANT, channel, resentId,
                 List.of(new SegmentLedger("other:0", 0, null)));
-        assertThatThrownBy(() -> service.resend(TENANT, channel, deliveryId))
-                .isInstanceOf(ManagedAgentException.class)
-                .satisfies(e -> {
-                    assertThat(((ManagedAgentException) e).getStatus()).isEqualTo(409);
-                    assertThat(((ManagedAgentException) e).getCode())
-                            .isEqualTo("channel_delivery_conflict");
-                });
+        ch.qos.logback.classic.Logger serviceLog =
+                (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory
+                        .getLogger(ManagedChannelService.class);
+        ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent>
+                logged = new ch.qos.logback.core.read.ListAppender<>();
+        logged.start();
+        serviceLog.addAppender(logged);
+        try {
+            assertThatThrownBy(() -> service.resend(TENANT, channel, deliveryId))
+                    .isInstanceOf(ManagedAgentException.class)
+                    .satisfies(e -> {
+                        assertThat(((ManagedAgentException) e).getStatus()).isEqualTo(409);
+                        assertThat(((ManagedAgentException) e).getCode())
+                                .isEqualTo("channel_delivery_conflict");
+                    });
+        } finally {
+            serviceLog.detachAppender(logged);
+            logged.stop();
+        }
         // The refused chain planned nothing: only the original row remains.
         assertThat(segmentLedger.list(TENANT, channel, resentId))
                 .extracting(SegmentLedger::segmentId)
                 .containsExactly("other:0");
+        // The two segment ids genuinely differ here, so the WARN must name
+        // which side is the stored truth; swapping the two id arguments reds.
+        assertThat(logged.list).anySatisfy(event -> {
+            assertThat(event.getLevel())
+                    .isEqualTo(ch.qos.logback.classic.Level.WARN);
+            assertThat(event.getFormattedMessage())
+                    .contains("channel resend identity conflict")
+                    .contains("storedSegment=other:0")
+                    .contains("resentSegment=" + resentId + ":0");
+        });
     }
 
     @Test
