@@ -16,6 +16,7 @@ import type { ModRenderInput } from '@qwen-code/qwen-code-core/mods/render-tree.
 import { getInteractiveModSession } from '../../services/interactive-mod-session.js';
 
 const unsubscribed = () => {};
+const noSessions = () => unsubscribed;
 
 /**
  * The props the Mods' hooks draw a transcript row with, while it is shown:
@@ -46,6 +47,12 @@ export function useModRow<T extends ModRenderInput>(
       live = false;
     };
   }, [session, ready]);
+  // The session the Mods draw rows for. A transcript may switch sessions
+  // before the Mods adopt the new one; its rows ask again once they do.
+  const rowSession = useSyncExternalStore(
+    session?.subscribeSession ?? noSessions,
+    () => session?.rowSession,
+  );
   const key = input ? JSON.stringify(input) : '';
   // The input is read through its key, so a re-created equal input keeps the
   // subscription.
@@ -56,16 +63,17 @@ export function useModRow<T extends ModRenderInput>(
       (ready &&
         stable &&
         sessionId !== undefined &&
+        sessionId === rowSession &&
         session?.watchRow(sessionId, stable, listener)) ||
       unsubscribed,
-    [session, sessionId, ready, stable],
+    [session, sessionId, rowSession, ready, stable],
   );
   const snapshot = useCallback(
     () =>
-      stable && sessionId !== undefined
+      stable && sessionId !== undefined && sessionId === rowSession
         ? (session?.rowProps(sessionId, stable) as T['props'] | undefined)
         : undefined,
-    [session, sessionId, stable],
+    [session, sessionId, rowSession, stable],
   );
   return useSyncExternalStore(subscribe, snapshot);
 }

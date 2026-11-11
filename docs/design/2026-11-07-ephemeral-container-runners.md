@@ -123,11 +123,17 @@ targeted recovery. This is an explicit availability tradeoff: container age or
 an offline control-plane record cannot safely identify a finished job, and
 malicious jobs are not guaranteed to exit cooperatively. Resource limits remain
 in force. Manager restart recovery still reconciles old resources first.
-Before an upgrade, pause replenishment and retire only idle registrations after
-checking that their containers have no job worker. Let assigned jobs finish
-before stopping the service; explicit stop still has the configured shutdown
-grace. GitHub treats JIT registration labels as read-only, so removing the
-scheduling label is not an available drain mechanism.
+A stop with a drain window configured is automatic: replenishment stops, and a
+slot whose container has shown no job worker for two consecutive polls retires
+its registration with a DELETE before the container is removed. The accepted
+deletion is the point at which GitHub can no longer assign work to that runner,
+which is what closes the gap between the last idle probe and `docker rm -f`. A
+refused retirement — busy, rate limited, or otherwise unconfirmed — keeps the
+container draining and restarts the idle window; only the drain deadline forces
+the shutdown. Assigned jobs finish on their own; the deadline, not the idle
+test, is what bounds a job that outlives the window. GitHub treats JIT
+registration labels as read-only, so removing the scheduling label is not an
+available drain mechanism; retiring the registration is.
 Record the actual installed commit and manager checksum when deploying.
 
 If deleting a container fails, that slot stops; if GitHub registration cleanup
