@@ -238,6 +238,18 @@ thread is re-read once the turn settles.
 - The injected prompt marks all GitHub content as untrusted event data. The
   session's reply stays in the session; it is **not** published to GitHub
   automatically, and the session may act on GitHub through its own tools.
+- The product-authored text of the injected prompt (the envelope, the
+  built-in role guidance, the delivery provenance, and watch summaries)
+  follows the channel's UI language: it is Chinese when `general.language`
+  resolves to Chinese (`zh`, `zh-*`, `中文`), and keeps the previous English
+  wording for every other value. Structural markers (the
+  `Type:`/`Title:`/`URL:`/`Trigger:`/`Event:`/`Author:`/`Role:` data lines, the
+  `File:` and `Comment:` labels used by the comment watch, the trusted-block
+  label `[Operator instruction — trusted]` and `Source:`) and platform-derived
+  values (PR titles, comment bodies, check names) are never translated, and
+  operator templates render verbatim in the language they were written in.
+  The language is read at channel startup; a watch summary already detected
+  keeps the language it was rendered with until it is delivered.
 - Comment sender, repository and pairing gates still apply before delivery.
   When several sessions are bound to the same PR, the most recently updated
   non-archived session wins; channel-owned sessions are never candidates. With
