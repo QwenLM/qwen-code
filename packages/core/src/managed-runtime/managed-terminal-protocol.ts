@@ -37,5 +37,7 @@ export interface ManagedTerminalOperationView {
   readonly operationId: string;
   /** `exited` is proven, `running` is registered-live, `unknown` is nothing. */
   readonly state: 'exited' | 'running' | 'unknown';
+  /** The worker's unit name; the wire requires it on a `running` answer. */
+  readonly unitName?: string;
   readonly evidence?: ManagedTerminalExitEvidence;
 }

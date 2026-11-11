@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.api;
 
+import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import org.junit.jupiter.api.Test;
 
 import java.time.Clock;
@@ -8,6 +9,7 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * A terminal ticket is a single-use, short-lived carrier of one admission; it
@@ -73,5 +75,23 @@ class TerminalTicketStoreTest {
         String first = store.issue(admission());
         String second = store.issue(admission());
         assertThat(first).isNotEqualTo(second);
+    }
+
+    @Test
+    void capacityRefusalIsTypedAndPerTenant() {
+        TerminalTicketStore store = new TerminalTicketStore(new MutableClock());
+        for (int i = 0; i < 256; i += 1) {
+            store.issue(new TerminalTicketStore.Admission("tenant", "actor",
+                    "session-" + i, "term-" + i, null));
+        }
+        // One tenant holding its share must get a typed 503, not an untyped 500.
+        assertThatThrownBy(() -> store.issue(admission()))
+                .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
+                    assertThat(error.getStatus()).isEqualTo(503);
+                    assertThat(error.getCode()).isEqualTo("terminal_ticket_capacity");
+                });
+        // Another tenant can still mint within the process-wide budget.
+        assertThat(store.issue(new TerminalTicketStore.Admission("other", "actor",
+                "session-x", "term-x", null))).isNotNull();
     }
 }

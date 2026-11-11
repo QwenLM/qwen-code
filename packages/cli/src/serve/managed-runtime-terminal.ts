@@ -8,6 +8,10 @@ import { createHash, timingSafeEqual } from 'node:crypto';
 import type { IncomingMessage, Server } from 'node:http';
 import type { Duplex } from 'node:stream';
 import { WebTerminalRegistry } from '@qwen-code/qwen-code-core/services/web-terminal-registry.js';
+import type {
+  ManagedTerminalLook,
+  ManagedTerminalOperationView,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-terminal-protocol.js';
 import { WebSocketServer } from 'ws';
 import type { WebSocket } from 'ws';
 import {
@@ -69,16 +73,6 @@ function refuseUpgrade(
   socket.destroy();
 }
 
-interface ParsedTerminalOperation {
-  readonly kind: 'terminal-status' | 'terminal-terminate';
-  readonly operationId: string;
-  readonly targetOperationId: string;
-  readonly sessionKey: {
-    readonly tenantId: string;
-    readonly sessionId: string;
-  };
-}
-
 const OPERATION_KEYS = [
   'kind',
   'operationId',
@@ -86,7 +80,7 @@ const OPERATION_KEYS = [
   'targetOperationId',
 ];
 
-function parseTerminalOperation(value: unknown): ParsedTerminalOperation {
+function parseTerminalOperation(value: unknown): ManagedTerminalLook {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new Error('managed_terminal_invalid');
   }
@@ -305,12 +299,7 @@ export class ManagedRuntimeTerminals {
    * a terminal ends so a released/reclaimed terminal still answers `exited`
    * instead of wedging its hold.
    */
-  control(value: unknown): {
-    operationId: string;
-    state: 'exited' | 'running' | 'unknown';
-    unitName?: string;
-    evidence?: { exitCode: number | null; exitSignal: string | null };
-  } {
+  control(value: unknown): ManagedTerminalOperationView {
     const operation = parseTerminalOperation(value);
     const terminalId = operation.targetOperationId;
     const selector = operation.sessionKey.sessionId;

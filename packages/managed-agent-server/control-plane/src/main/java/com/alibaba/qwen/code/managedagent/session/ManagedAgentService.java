@@ -129,6 +129,7 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
     private Clock renameClock = Clock.systemUTC();
     private BooleanSupplier sideQueriesEnabled = () -> false;
     private BooleanSupplier terminalEnabled = () -> false;
+    private java.util.function.Predicate<SessionRecord> terminalPlacementCapable = session -> false;
 
     @Autowired
     void configureSideQueries(ManagedAgentSettings properties) {
@@ -139,6 +140,16 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
     @Autowired
     void configureTerminal(ManagedAgentSettings properties) {
         terminalEnabled = () -> properties.getRuntimeBroker().isWebTerminal();
+    }
+
+    @Autowired(required = false)
+    void configureTerminalPlacement(
+            org.springframework.beans.factory.ObjectProvider<
+                    com.alibaba.qwen.code.managedagent.workspace.runtime.WorkspaceRuntimeResolver> resolvers) {
+        var resolver = resolvers.getIfAvailable();
+        if (resolver != null) {
+            terminalPlacementCapable = resolver::terminalCapable;
+        }
     }
 
     private boolean supportsSideQueries(SessionRecord session) {
@@ -1656,8 +1667,11 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
                         (session.workspace() == null || maySubmit) && supportsSideQueries(session),
                         // UI hint only; the relay re-runs the full admission on attach.
                         // Null while the opt-in is off so both surfaces omit it alike.
+                        // Only advertise it for placements that can actually attach
+                        // (local-mount measured), not ssh/resident/extension ones.
                         terminalEnabled.getAsBoolean()
                                 ? maySubmit && Boolean.TRUE.equals(foregroundShell(session, worktree))
+                                        && terminalPlacementCapable.test(session)
                                 : null),
                 session.workspace() != null || session.agentDefinitionDigest() != null
                         ? approvalSelection == null ? session.approvalMode() : approvalSelection.mode() : null,

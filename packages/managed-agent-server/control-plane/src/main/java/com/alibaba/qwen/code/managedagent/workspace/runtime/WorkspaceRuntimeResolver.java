@@ -146,6 +146,29 @@ public final class WorkspaceRuntimeResolver {
                 digest, boundSessionIsolationClass).withLifecycleAuthority(lifecycle));
     }
 
+    /**
+     * Whether this Session's placement can actually attach a web terminal. The
+     * terminal digest is only ever substituted on the local-mount measured
+     * path, so ssh, resident and extension placements can never attach; the
+     * capability hint must not advertise a terminal they would always refuse.
+     */
+    public boolean terminalCapable(SessionRecord session) {
+        if (!webTerminal || !measuredTools || managedExtensions.isEnabled()) {
+            return false;
+        }
+        ContextBinding binding = session.workspace();
+        if (binding == null) {
+            return false;
+        }
+        if (ssh != null && ssh.runtimeStorage(binding) != null) {
+            return false;
+        }
+        if (residents.find(binding) != null) {
+            return false;
+        }
+        return mount(binding) != null;
+    }
+
     private String extensionDigest(String platform) {
         if (!managedExtensions.isEnabled()) {
             return measuredTools

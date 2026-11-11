@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.api;
 
+import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 
 import java.security.SecureRandom;
@@ -25,6 +26,9 @@ public final class TerminalTicketStore {
     static final Duration TTL = Duration.ofSeconds(30);
     /** Bounds memory even if a caller mints tickets without upgrading. */
     private static final int MAX_LIVE_TICKETS = 1024;
+    /** Per-tenant share of the budget, so one tenant cannot deny minting to
+     * every other tenant by holding the whole process-wide cap. */
+    private static final int MAX_LIVE_TICKETS_PER_TENANT = 256;
 
     /** The admission a ticket carries to the upgrade. */
     public record Admission(String tenantId, String actorId, String sessionId,
@@ -42,11 +46,22 @@ public final class TerminalTicketStore {
         this.clock = clock;
     }
 
-    /** Mints a ticket for an already-admitted terminal attach. */
-    public String issue(Admission admission) {
+    /** Mints a ticket for an already-admitted terminal attach. Capacity
+     * refusals are typed (503) rather than an untyped 500, and a per-tenant
+     * share keeps one tenant from exhausting the process-wide budget. The
+     * evict/check/put sequence is serialized so the cap cannot be raced. */
+    public synchronized String issue(Admission admission) {
         evictExpired();
         if (tickets.size() >= MAX_LIVE_TICKETS) {
-            throw new IllegalStateException("terminal_ticket_capacity");
+            throw new ManagedAgentException(503, "terminal_ticket_capacity",
+                    "Too many live terminal tickets; retry shortly.");
+        }
+        long tenantLive = tickets.values().stream()
+                .filter(entry -> entry.admission().tenantId().equals(admission.tenantId()))
+                .count();
+        if (tenantLive >= MAX_LIVE_TICKETS_PER_TENANT) {
+            throw new ManagedAgentException(503, "terminal_ticket_capacity",
+                    "Too many live terminal tickets for this tenant; retry shortly.");
         }
         byte[] bytes = new byte[32];
         random.nextBytes(bytes);
