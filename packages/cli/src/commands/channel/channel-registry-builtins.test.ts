@@ -29,6 +29,16 @@ const { dingtalkPlugin } = vi.hoisted(() => {
 
 vi.mock('@qwen-code/channel-dingtalk', () => ({
   plugin: dingtalkPlugin,
+  webhookPlugin: {
+    channelType: 'dingtalk-webhook',
+    displayName: 'DingTalk Webhook',
+    outboundOnly: true,
+    defaultDeliveryTarget: { type: 'chat', id: 'default' },
+    management: { fields: [] },
+    createChannel() {
+      throw new Error('not used');
+    },
+  },
 }));
 
 import {
@@ -69,6 +79,7 @@ describe('built-in channel registry', () => {
       catalog.filter((entry) => entry.manageable).map((entry) => entry.type),
     ).toEqual([
       'weixin',
+      'dingtalk-webhook',
       'dws',
       'email',
       'wecom',

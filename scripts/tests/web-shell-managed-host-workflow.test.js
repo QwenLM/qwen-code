@@ -185,9 +185,11 @@ describe('managed host build lane', () => {
 describe('managed host stays out of the default build and the package', () => {
   it('does not charge the default build for the host bundle', () => {
     expect(pkg.scripts.build).not.toContain('managed-host');
-    // The default passes it replaces must survive the split.
-    expect(pkg.scripts.build).toContain('--mode transcript');
-    expect(pkg.scripts.build).toContain('tsc -p tsconfig.lib.json');
+    // `build` runs the chain through the heap-capped `build:steps` delegate,
+    // so the default passes it replaces must survive in that delegate.
+    expect(pkg.scripts.build).toContain('npm run build:steps');
+    expect(pkg.scripts['build:steps']).toContain('--mode transcript');
+    expect(pkg.scripts['build:steps']).toContain('tsc -p tsconfig.lib.json');
   });
 
   it('keeps the entry unpublished so the lane is its only gate', () => {
