@@ -886,6 +886,8 @@ function isDaemonPath(path: string): boolean {
     ) ||
     path === '/goals' ||
     /^\/file\/?$/.test(path) ||
+    /^\/session\/[^/]+\/metadata\/?$/.test(path) ||
+    /^\/workspaces\/[^/]+\/session\/[^/]+\/metadata\/?$/.test(path) ||
     /^\/session\/[^/]+\/artifacts\/?$/.test(path) ||
     /^\/session\/[^/]+\/transcript\/?$/.test(path) ||
     /^\/permission\/[^/]+\/?$/.test(path) ||
@@ -1094,6 +1096,13 @@ function isDaemonRoute(method: string, path: string): boolean {
   if (
     method === 'PATCH' &&
     /^\/standalone\/sessions\/[^/]+\/metadata\/?$/.test(path)
+  ) {
+    return true;
+  }
+  if (
+    method === 'PATCH' &&
+    (/^\/session\/[^/]+\/metadata\/?$/.test(path) ||
+      /^\/workspaces\/[^/]+\/session\/[^/]+\/metadata\/?$/.test(path))
   ) {
     return true;
   }
@@ -2190,6 +2199,56 @@ async function handleDaemonRoute(
       });
       return;
     }
+  }
+  const sessionMetadataMatch =
+    path.match(/^\/session\/([^/]+)\/metadata\/?$/) ??
+    path.match(/^\/workspaces\/[^/]+\/session\/([^/]+)\/metadata\/?$/);
+  if (method === 'PATCH' && sessionMetadataMatch) {
+    const sessionId = decodeURIComponent(sessionMetadataMatch[1]);
+    const index = scenario.sessions.findIndex(
+      (session) => session.sessionId === sessionId,
+    );
+    if (index < 0) {
+      await json(
+        route,
+        {
+          code: 'session_not_found',
+          message: `Session ${sessionId} was not found.`,
+        },
+        404,
+      );
+      return;
+    }
+    const summary = scenario.sessions[index];
+    const displayName = readStringField(body, 'displayName');
+    const prInput = getRecordValue(body, 'pr');
+    let prs = summary.prs ?? [];
+    if (prInput && typeof prInput === 'object') {
+      const pr = prInput as Record<string, unknown>;
+      const state = pr['state'];
+      if (typeof pr['number'] === 'number' && typeof pr['url'] === 'string') {
+        const entry = {
+          number: pr['number'],
+          url: pr['url'],
+          ...(state === 'open' || state === 'merged' || state === 'closed'
+            ? { state }
+            : {}),
+        };
+        prs = [...prs.filter((p) => p.number !== entry.number), entry];
+      }
+    }
+    scenario.sessions[index] = {
+      ...summary,
+      ...(displayName !== undefined ? { displayName } : {}),
+      prs,
+      updatedAt: now,
+    };
+    await json(route, {
+      sessionId,
+      ...(displayName !== undefined ? { displayName } : {}),
+      prs,
+    });
+    return;
   }
   if (method === 'POST' && path === '/session') {
     await json(route, sessionEnvelope(scenario, { attached: false }));

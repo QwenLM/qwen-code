@@ -35,6 +35,7 @@ import {
   ArrowUpDownIcon,
   CircleIcon,
   CircleHelpIcon,
+  GitPullRequestIcon,
   InfoIcon,
   ShieldQuestionIcon,
   DownloadIcon,
@@ -72,6 +73,10 @@ import {
   SESSION_ORGANIZATION_FEATURE,
 } from '../constants/sessions';
 import { ErrorBoundary } from './ErrorBoundary';
+import {
+  BindSessionPrDialog,
+  type BindSessionPrPayload,
+} from './dialogs/BindSessionPrDialog';
 import { SessionDetailsTooltip } from './sidebar/SessionDetailsTooltip';
 import { isAbsolutePath } from './sidebar/WorkspaceSection';
 import { Button } from './ui/button';
@@ -623,6 +628,8 @@ function SessionOverviewPanelInner({
     null,
   );
   const [deleteTarget, setDeleteTarget] = useState<SessionCard[] | null>(null);
+  const [bindPrTarget, setBindPrTarget] = useState<SessionCard | null>(null);
+  const [bindPrError, setBindPrError] = useState<string | undefined>();
   const [batchBusy, setBatchBusy] = useState(false);
   const [footerSticky, setFooterSticky] = useState(false);
   const panelRef = useRef<HTMLDivElement>(null);
@@ -1142,6 +1149,66 @@ function SessionOverviewPanelInner({
     t,
     workspace.client,
   ]);
+
+  const startBindPr = useCallback((card: SessionCard) => {
+    setActionError(null);
+    setBindPrError(undefined);
+    setBindPrTarget(card);
+  }, []);
+
+  // Supplementary PR registration — same three-branch routing as
+  // saveRename: the current session binds through its own session actions,
+  // other sessions through the owning workspace's metadata route.
+  const submitBindPr = useCallback(
+    (pr: BindSessionPrPayload) => {
+      const card = bindPrTarget;
+      if (!card || batchBusy) return;
+      const ownerCwd = card.workspaceCwd || primaryCwd;
+      void runBusy(card, async () => {
+        setBindPrError(undefined);
+        try {
+          if (isCurrentCard(card)) {
+            await actions.bindSessionPr(pr);
+          } else if (card.workspaceCwd) {
+            await workspace.client
+              .workspaceByCwd(card.workspaceCwd)
+              .updateSessionMetadata(card.sessionId, { pr });
+          } else {
+            await workspace.client.updateSessionMetadata(card.sessionId, {
+              pr,
+            });
+          }
+          setBindPrTarget(null);
+          if (ownerCwd) {
+            sessionCatalogController.refreshWorkspace(ownerCwd);
+          }
+          await reloadData();
+        } catch (err) {
+          if (ownerCwd) {
+            sessionCatalogController.refreshWorkspace(ownerCwd);
+          }
+          setBindPrError(
+            err instanceof Error
+              ? `${t('sessionsOverview.bindPrFailed')}: ${err.message}`
+              : t('sessionsOverview.bindPrFailed'),
+          );
+        }
+      });
+    },
+    [
+      actions,
+      batchBusy,
+      bindPrTarget,
+      isCurrentCard,
+      primaryCwd,
+      reloadData,
+      runBusy,
+      sessionCatalogController,
+      t,
+      workspace.client,
+    ],
+  );
+
   const editingNameRef = useRef(editingName);
   const saveRenameRef = useRef(saveRename);
   editingNameRef.current = editingName;
@@ -1629,6 +1696,24 @@ function SessionOverviewPanelInner({
                   <PenLineIcon className="size-4" />
                 </Button>
               )}
+              {(isCurrentCard(card) || sessionMetadataEnabled) && (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-xs"
+                  className="shrink-0 text-muted-foreground hover:text-foreground"
+                  disabled={batchBusy || busy || !canRename}
+                  onClick={() => startBindPr(card)}
+                  aria-label={t('sessionsOverview.bindPr')}
+                  title={
+                    canRename
+                      ? t('sessionsOverview.bindPr')
+                      : t('sessionsOverview.actionUnavailable')
+                  }
+                >
+                  <GitPullRequestIcon className="size-4" />
+                </Button>
+              )}
               {(canExportSessions || canExportWorkspaceSessions) && (
                 <Button
                   type="button"
@@ -1685,7 +1770,7 @@ function SessionOverviewPanelInner({
         meta: {
           fixed: 'right',
           fixedEdge: true,
-          width: 156,
+          width: 180,
           fixedWidth: true,
           headerClassName: 'text-center',
           stopRowClick: true,
@@ -1709,6 +1794,7 @@ function SessionOverviewPanelInner({
       registeredWorkspaces,
       sessionMetadataEnabled,
       sessionDetailsProps,
+      startBindPr,
       startRename,
       t,
     ],
@@ -2196,6 +2282,16 @@ function SessionOverviewPanelInner({
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      {bindPrTarget && (
+        <BindSessionPrDialog
+          workspaceCwd={bindPrTarget.workspaceCwd || primaryCwd || ''}
+          busy={busyIds.has(getSessionIdentity(bindPrTarget))}
+          error={bindPrError}
+          onSubmit={submitBindPr}
+          onClose={() => setBindPrTarget(null)}
+        />
+      )}
     </div>
   );
 }

@@ -86,12 +86,14 @@ let workspaceClient: {
   exportStandaloneSession: ReturnType<typeof vi.fn>;
   archiveStandaloneSessions: ReturnType<typeof vi.fn>;
   deleteStandaloneSessions: ReturnType<typeof vi.fn>;
+  updateSessionMetadata: ReturnType<typeof vi.fn>;
 };
 // Primary-workspace actions surfaced by useWorkspace / useActions.
 let workspaceActions: {
   deleteSession: ReturnType<typeof vi.fn>;
   archiveSession: ReturnType<typeof vi.fn>;
   renameSession: ReturnType<typeof vi.fn>;
+  bindSessionPr: ReturnType<typeof vi.fn>;
   exportSession: ReturnType<typeof vi.fn>;
 };
 
@@ -248,6 +250,7 @@ beforeEach(() => {
     deleteSession: vi.fn(async () => true),
     archiveSession: vi.fn(async () => true),
     renameSession: vi.fn(async () => ({ displayName: 'Renamed' })),
+    bindSessionPr: vi.fn(async () => ({ prs: [] })),
     exportSession: vi.fn(async () => ({
       content: '<html></html>',
       filename: 'session.html',
@@ -275,6 +278,12 @@ beforeEach(() => {
         errors: [],
       })),
       updateSessionMetadata: vi.fn(async () => ({ displayName: 'Renamed' })),
+      workspaceGitHubPullRequests: vi.fn(async () => ({
+        v: 1,
+        workspaceCwd: cwd,
+        available: true,
+        pullRequests: [],
+      })),
       exportSession: vi.fn(async () => ({
         content: '<html></html>',
         filename: 'session.html',
@@ -312,6 +321,7 @@ beforeEach(() => {
       errors: [],
       fileCleanupPending: [],
     })),
+    updateSessionMetadata: vi.fn(async () => ({ prs: [] })),
   };
   sessionsReload.mockClear();
   statusReload.mockClear();
@@ -2184,7 +2194,7 @@ describe('SessionOverviewPanel', () => {
       '[data-slot="table"]',
     ) as HTMLTableElement;
     expect(renderedTable.dataset.layout).toBe('scroll');
-    expect(renderedTable.style.minWidth).toBe('696px');
+    expect(renderedTable.style.minWidth).toBe('720px');
     expect(renderedTable.style.tableLayout).toBe('fixed');
     expect(renderedTable.querySelectorAll('col')).toHaveLength(headers.length);
     expect(
@@ -2193,8 +2203,8 @@ describe('SessionOverviewPanel', () => {
     ).toBe('260px');
     expect(headers.at(-1)?.textContent).toContain('Actions');
     expect(headers.at(-1)?.className).toContain('text-center');
-    expect((headers.at(-1) as HTMLElement).style.width).toBe('156px');
-    expect((cells.at(-1) as HTMLElement).style.width).toBe('156px');
+    expect((headers.at(-1) as HTMLElement).style.width).toBe('180px');
+    expect((cells.at(-1) as HTMLElement).style.width).toBe('180px');
     expect(cells.at(-1)?.firstElementChild?.className).toContain(
       'justify-center',
     );
@@ -2289,7 +2299,7 @@ describe('SessionOverviewPanel', () => {
         parseFloat((headers[1] as HTMLElement).style.width),
       ).toBeGreaterThan(260);
       expect((headers[1] as HTMLElement).style.minWidth).toBe('260px');
-      expect((headers.at(-1) as HTMLElement).style.width).toBe('156px');
+      expect((headers.at(-1) as HTMLElement).style.width).toBe('180px');
       const columnWidth = Array.from(table.querySelectorAll('col')).reduce(
         (total, column) => total + parseFloat(column.style.width),
         0,
@@ -3674,6 +3684,175 @@ describe('SessionOverviewPanel', () => {
     );
     expect(sessionCatalogController.refreshWorkspace).toHaveBeenCalledWith(
       '/wsB',
+    );
+  });
+
+  it('binds a PR to the current session through its own actions', async () => {
+    connectionState.sessionId = 's1';
+    connectionState.capabilities = { features: [], workspaceCwd: '/w' };
+    sessionsState.sessions = [session('s1', { displayName: 'One' })];
+    render();
+    act(() => click(rowActionButton(rows()[0]!, 'Bind PR')));
+    const input = document.querySelector(
+      'input[aria-label="Bind PR"]',
+    ) as HTMLInputElement;
+    expect(input).not.toBeNull();
+    const url = 'https://github.com/QwenLM/qwen-code/pull/16865';
+    act(() => setInputValue(input, url));
+    act(() =>
+      input
+        .closest('form')!
+        .dispatchEvent(
+          new Event('submit', { bubbles: true, cancelable: true }),
+        ),
+    );
+    await flushAsync();
+    expect(workspaceActions.bindSessionPr).toHaveBeenCalledWith({
+      number: 16865,
+      url,
+    });
+    expect(sessionCatalogController.refreshWorkspace).toHaveBeenCalledWith(
+      '/w',
+    );
+    expect(document.querySelector('input[aria-label="Bind PR"]')).toBeNull();
+  });
+
+  it('binds a PR number resolved through the workspace PR list', async () => {
+    connectionState.sessionId = 's1';
+    connectionState.capabilities = { features: [], workspaceCwd: '/w' };
+    sessionsState.sessions = [session('s1', { displayName: 'One' })];
+    const prUrl = 'https://github.com/QwenLM/qwen-code/pull/16865';
+    workspaceClient.workspaceByCwd.mockImplementation((cwd: string) => ({
+      listWorkspaceSessionsPage: vi.fn(async () => ({
+        sessions: otherWorkspaceSessions[cwd] ?? [],
+      })),
+      updateSessionMetadata: vi.fn(async () => ({})),
+      workspaceGitHubPullRequests: vi.fn(async () => ({
+        v: 1,
+        workspaceCwd: cwd,
+        available: true,
+        pullRequests: [{ number: 16865, url: prUrl, title: 'feat' }],
+      })),
+    }));
+    render();
+    act(() => click(rowActionButton(rows()[0]!, 'Bind PR')));
+    const input = document.querySelector(
+      'input[aria-label="Bind PR"]',
+    ) as HTMLInputElement;
+    act(() => setInputValue(input, '16865'));
+    act(() =>
+      input
+        .closest('form')!
+        .dispatchEvent(
+          new Event('submit', { bubbles: true, cancelable: true }),
+        ),
+    );
+    await flushAsync();
+    expect(workspaceActions.bindSessionPr).toHaveBeenCalledWith({
+      number: 16865,
+      url: prUrl,
+      state: 'open',
+    });
+  });
+
+  it('binds a PR to an other-workspace session through the qualified client', async () => {
+    connectionState.capabilities = {
+      features: ['workspace_session_metadata', 'workspace_qualified_rest_core'],
+      workspaceCwd: '/w',
+      workspaces: [
+        { id: 'w0', cwd: '/w', primary: true, trusted: true },
+        { id: 'w1', cwd: '/wsB', primary: false, trusted: true },
+      ],
+    };
+    sessionsState.sessions = [session('a', { displayName: 'Alpha' })];
+    otherWorkspaceSessions['/wsB'] = [
+      session('b1', { workspaceCwd: '/wsB', displayName: 'Beta' }),
+    ];
+    render();
+    await flushAsync();
+    const beta = rows().find((tr) => tr.textContent?.includes('Beta'))!;
+    act(() => click(rowActionButton(beta, 'Bind PR')));
+    const input = document.querySelector(
+      'input[aria-label="Bind PR"]',
+    ) as HTMLInputElement;
+    const url = 'https://github.com/QwenLM/qwen-code/pull/42';
+    act(() => setInputValue(input, url));
+    act(() =>
+      input
+        .closest('form')!
+        .dispatchEvent(
+          new Event('submit', { bubbles: true, cancelable: true }),
+        ),
+    );
+    await flushAsync();
+    const qualified = workspaceClient.workspaceByCwd.mock.results.at(-1)!.value;
+    expect(qualified.updateSessionMetadata).toHaveBeenCalledWith('b1', {
+      pr: { number: 42, url },
+    });
+    expect(workspaceActions.bindSessionPr).not.toHaveBeenCalled();
+    expect(sessionCatalogController.refreshWorkspace).toHaveBeenCalledWith(
+      '/wsB',
+    );
+  });
+
+  it('binds a legacy primary session without a workspace cwd through the top-level client', async () => {
+    connectionState.sessionId = 'current';
+    connectionState.workspaceCwd = '';
+    connectionState.capabilities = {
+      features: ['workspace_session_metadata'],
+      workspaceCwd: '',
+    };
+    sessionsState.sessions = [
+      session('legacy', { workspaceCwd: '', displayName: 'Legacy' }),
+    ];
+    render();
+    act(() => click(rowActionButton(rows()[0]!, 'Bind PR')));
+    const input = document.querySelector(
+      'input[aria-label="Bind PR"]',
+    ) as HTMLInputElement;
+    const url = 'https://github.com/QwenLM/qwen-code/pull/7';
+    act(() => setInputValue(input, url));
+    act(() =>
+      input
+        .closest('form')!
+        .dispatchEvent(
+          new Event('submit', { bubbles: true, cancelable: true }),
+        ),
+    );
+    await flushAsync();
+    expect(workspaceClient.updateSessionMetadata).toHaveBeenCalledWith(
+      'legacy',
+      { pr: { number: 7, url } },
+    );
+    expect(workspaceActions.bindSessionPr).not.toHaveBeenCalled();
+  });
+
+  it('keeps the bind dialog open with an error when the bind fails', async () => {
+    connectionState.sessionId = 's1';
+    connectionState.capabilities = { features: [], workspaceCwd: '/w' };
+    sessionsState.sessions = [session('s1', { displayName: 'One' })];
+    workspaceActions.bindSessionPr.mockRejectedValue(new Error('locked'));
+    render();
+    act(() => click(rowActionButton(rows()[0]!, 'Bind PR')));
+    const input = document.querySelector(
+      'input[aria-label="Bind PR"]',
+    ) as HTMLInputElement;
+    act(() =>
+      setInputValue(input, 'https://github.com/QwenLM/qwen-code/pull/1'),
+    );
+    act(() =>
+      input
+        .closest('form')!
+        .dispatchEvent(
+          new Event('submit', { bubbles: true, cancelable: true }),
+        ),
+    );
+    await flushAsync();
+    expect(
+      document.querySelector('input[aria-label="Bind PR"]'),
+    ).not.toBeNull();
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain(
+      'Bind PR failed',
     );
   });
 

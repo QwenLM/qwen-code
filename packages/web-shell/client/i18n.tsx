@@ -840,6 +840,15 @@ const EN: Messages = {
   'githubPrs.checksFailing': 'Checks failing',
   'githubPrs.checksPending': 'Checks pending',
   'githubPrs.open': (v) => `Open pull request #${v?.number ?? ''} on GitHub`,
+  'sessionsOverview.bindPr': 'Bind PR',
+  'sessionsOverview.bindPrPlaceholder': 'PR number or URL',
+  'sessionsOverview.bindPrSubmit': 'Bind',
+  'sessionsOverview.bindPrInvalid': 'Enter a PR number or a full PR URL.',
+  'sessionsOverview.bindPrNotInList': (v) =>
+    `PR #${v?.number ?? ''} is not in the open PR list. Paste its full URL instead.`,
+  'sessionsOverview.bindPrListFailed':
+    'Could not load the PR list. Paste the full PR URL instead.',
+  'sessionsOverview.bindPrFailed': 'Bind PR failed',
   'workspace.paneLabel': (v) => `Workspace: ${v?.name ?? ''}`,
   'about.auth': 'Auth',
   'about.baseUrl': 'Base URL',
@@ -5940,6 +5949,14 @@ const ZH: Messages = {
   'githubPrs.checksFailing': '检查失败',
   'githubPrs.checksPending': '检查进行中',
   'githubPrs.open': (v) => `在 GitHub 上打开拉取请求 #${v?.number ?? ''}`,
+  'sessionsOverview.bindPr': '绑定 PR',
+  'sessionsOverview.bindPrPlaceholder': 'PR 编号或 URL',
+  'sessionsOverview.bindPrSubmit': '绑定',
+  'sessionsOverview.bindPrInvalid': '请输入 PR 编号或完整 PR URL。',
+  'sessionsOverview.bindPrNotInList': (v) =>
+    `PR #${v?.number ?? ''} 不在开放 PR 列表中。请改用其完整 URL。`,
+  'sessionsOverview.bindPrListFailed': '无法加载 PR 列表。请改用完整 PR URL。',
+  'sessionsOverview.bindPrFailed': '绑定 PR 失败',
   'workspace.paneLabel': (v) => `工作区：${v?.name ?? ''}`,
   // Tool display names (chat-stream badge labels). Keyed by `toolName.<wire>`;
   // a wire name with no entry here falls back to the English display name via
