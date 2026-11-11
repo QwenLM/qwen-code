@@ -29,6 +29,7 @@ import {
   type ComparatorInputs,
 } from './fixtures.js';
 import {
+  clickWhenStill,
   setValue,
   settle,
   text,
@@ -312,7 +313,7 @@ export async function runBillSplitter(
 
   await checks.guard('copies-current', 'case 1 / R5', async () => {
     await env.page.evaluate(() => navigator.clipboard.writeText(''));
-    await view.locator('#copy').click();
+    await clickWhenStill(view.locator('#copy'));
     await env.page.waitForTimeout(500);
     const copied = await env.page.evaluate(() =>
       navigator.clipboard.readText(),
@@ -329,7 +330,7 @@ export async function runBillSplitter(
 
   await checks.guard('reset', 'case 1', async () => {
     await setValue(view, 'subtotal', formatCents(BILL_DEFAULTS.subtotal + 100));
-    await view.locator('#reset').click();
+    await clickWhenStill(view.locator('#reset'));
     const expectedInputs = {
       subtotal: BILL_DEFAULTS.subtotal / 100,
       people: BILL_DEFAULTS.people,
@@ -432,9 +433,24 @@ async function itemSlot(
   return ids[0]?.replace(/-text$/, '');
 }
 
+/**
+ * Clicks a checkbox or radio and waits for the view to show it checked. The
+ * view may re-render the box in response, so Playwright's `check()`, which
+ * asserts on the clicked element right away, can report a re-rendered box as
+ * unchanged.
+ */
+async function checkBox(view: Frame, id: string) {
+  const box = view.locator(`#${id}`);
+  if (!(await box.isChecked())) await clickWhenStill(box);
+  await settle(
+    () => box.isChecked().catch(() => false),
+    (checked) => checked,
+  );
+}
+
 async function addItem(view: Frame, label: string) {
   await setValue(view, 'new-item', label);
-  await view.locator('#add').click();
+  await clickWhenStill(view.locator('#add'));
   await settle(
     () => itemTexts(view),
     (texts) => texts.includes(label),
@@ -479,7 +495,7 @@ export async function runChecklist(
   if (added) {
     await checks.guard('check-and-filter', 'case 2', async () => {
       const slot = await itemSlot(view, 'Notes');
-      await view.locator(`#${slot}-check`).check();
+      await checkBox(view, `${slot}-check`);
       await env.page.waitForTimeout(300);
       await setValue(view, 'filter', 'done');
       const done = await settle(
@@ -503,7 +519,7 @@ export async function runChecklist(
 
     await checks.guard('delete', 'case 2', async () => {
       const slot = await itemSlot(view, 'Actions');
-      await view.locator(`#${slot}-delete`).click();
+      await clickWhenStill(view.locator(`#${slot}-delete`));
       const texts = await settle(
         () => itemTexts(view),
         (value) => !value.includes('Actions'),
@@ -517,12 +533,12 @@ export async function runChecklist(
     });
 
     await checks.guard('repeated-undo', 'case 2', async () => {
-      await view.locator('#undo').click();
+      await clickWhenStill(view.locator('#undo'));
       const afterFirst = await settle(
         () => itemTexts(view),
         (value) => value.includes('Actions'),
       );
-      await view.locator('#undo').click();
+      await clickWhenStill(view.locator('#undo'));
       await env.page.waitForTimeout(500);
       const slot = await itemSlot(view, 'Notes');
       const notesChecked = slot
@@ -595,10 +611,7 @@ export async function runChecklist(
     notesSlot &&
     beforeSave.some((item) => item.text === 'Notes' && !item.checked)
   ) {
-    await view
-      .locator(`#${notesSlot}-check`)
-      .check()
-      .catch(() => {});
+    await checkBox(view, `${notesSlot}-check`).catch(() => {});
     await env.page.waitForTimeout(300);
     prepared = sameState(
       await settle(
@@ -640,13 +653,13 @@ export async function runChecklist(
           `${label}: expected ${JSON.stringify(saved)}, saw ${JSON.stringify(restored)}`,
         );
       }
-      await reopened.view.locator('#undo').click();
+      await clickWhenStill(reopened.view.locator('#undo'));
       const undone = await settle(
         () => itemStates(reopened.view),
         (value) => sameState(value, beforeSave),
       );
       const restoredSlot = await itemSlot(reopened.view, 'Notes');
-      await reopened.view.locator(`#${restoredSlot}-check`).check();
+      await checkBox(reopened.view, `${restoredSlot}-check`);
       await reopened.view.page().waitForTimeout(300);
       const resaved = await settle(
         () => itemStates(reopened.view),
@@ -966,8 +979,8 @@ async function selectComparator(
   inputs: { seats: number; billing: string; plan: string },
 ) {
   await setValue(view, 'seats', String(inputs.seats));
-  await view.locator(`#billing-${inputs.billing}`).check();
-  await view.locator(`#plan-${inputs.plan}`).check();
+  await checkBox(view, `billing-${inputs.billing}`);
+  await checkBox(view, `plan-${inputs.plan}`);
   await view.page().waitForTimeout(500);
 }
 
@@ -1123,7 +1136,7 @@ export async function runComparator(
     const download = env.page
       .waitForEvent('download', { timeout: 5_000 })
       .catch(() => undefined);
-    await target.view.locator('#export').click();
+    await clickWhenStill(target.view.locator('#export'));
     const file = await download;
     if (!file) {
       return checks.expect(

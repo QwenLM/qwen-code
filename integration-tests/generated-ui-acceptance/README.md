@@ -20,6 +20,8 @@ The checklist and the activity form check behavior rather than figures:
 - **Checklist:** add, check, filter, delete, repeated undo and editing an item's text; then persistence of item text, checked state and undo after reload and after reopening the conversation; then isolation from a new conversation. The prompt asks for all of these, including undo history that survives a reload.
 - **Activity form:** edits start no model request; one explicit submission sends every field once; the answer uses the values. The submit button is clicked at a person's pace (held for 150 ms): a zero-delay synthetic click right after typing is released inside the few milliseconds the host disables the button while the edited field loses focus, and the browser drops it.
 
+Other controls are clicked once they have held their position for 1.2 s. A card moves for a second or two after it changes (it grows while the transcript stays pinned to the bottom, and the composer updates when the view's values reach the model context), and a click during that motion lands where the target was and is lost.
+
 Amounts are read from the text a view renders. Commas (ASCII or full-width) and no-break spaces group thousands, a plain space does not (`Person 1 137.84` is a label and an amount), and percentages are ignored. A share row may also hold a label or a total; its share is the first amount written with a fraction.
 
 The bill reset check verifies all input values, allocations and the chart against their defaults. Chart comparison uses normalized markup and canvas pixels so regenerated element IDs (including ARIA references and `<style>` selectors) and iframe scrolling do not count as a changed chart, while a chart drawn only on a canvas still counts as changing.

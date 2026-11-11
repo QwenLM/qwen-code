@@ -31,6 +31,7 @@ import {
   type Browser,
   type BrowserContext,
   type Frame,
+  type Locator,
   type Page,
 } from 'playwright';
 import {
@@ -616,6 +617,37 @@ export async function text(view: Frame, id: string): Promise<string> {
       .textContent({ timeout: 2_000 })
       .catch(() => null)) ?? ''
   ).trim();
+}
+
+/**
+ * How long a click target must keep its position before the harness clicks.
+ * A card moves for a second or two after it changes: it grows, the transcript
+ * stays pinned to the bottom, and the composer updates once the view's values
+ * reach the model context about 800 ms after an edit. A click during that
+ * motion lands where the target was and is lost.
+ */
+const STILL_MS = 1_200;
+
+/** Clicks `target` once it has stopped moving, as a person would. */
+export async function clickWhenStill(
+  target: Locator,
+  timeoutMs = 10_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let last: string | undefined;
+  let since = Date.now();
+  while (Date.now() < deadline) {
+    const box = await target.boundingBox({ timeout: 1_000 }).catch(() => null);
+    const position = box && JSON.stringify(box);
+    if (position !== last) {
+      last = position ?? undefined;
+      since = Date.now();
+    } else if (position && Date.now() - since >= STILL_MS) {
+      break;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  await target.click();
 }
 
 /** Polls until `read` returns a value accepted by `done`, or the timeout. */

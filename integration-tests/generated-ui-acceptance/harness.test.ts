@@ -121,7 +121,7 @@ describe('acceptance daemon environment', () => {
     let env: AcceptanceEnv | undefined;
     try {
       env = await startAcceptanceEnv(options);
-      const daemonEnv = mocks.spawnDaemon.mock.calls[0][0].env ?? {};
+      const daemonEnv = mocks.spawnDaemon.mock.calls[0]?.[0]?.env ?? {};
       // Blank values override what the daemon would inherit from the parent.
       expect(daemonEnv['QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP']).toBe('');
       expect(daemonEnv['QWEN_GENERATED_UI_LIVE_API_KEY']).toBe('');
