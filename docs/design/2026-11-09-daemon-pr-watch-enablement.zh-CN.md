@@ -12,7 +12,7 @@ drain 已完整但不可达。`runPrWatchDrainTick` 把 restore、准入、regis
 - `wakeDormant: false` 会把投递推迟最多一个 refresh interval，**不会**永久搁浅条目：drain 在每个 tick 的观测之后运行、重新读取每个 watch 文件的 `pending` 列表，且只有 `isSessionLive` 为假时才进休眠分支——所以会话一旦 live，下一个 tick 就投递。缺的是即时性：没有任何东西在 resume 那一刻触发 drain，因此一条转换可能要为一个用户正在看的会话等满一个 interval（默认 5 分钟）。
 - 关停会与后继者重叠。没有任何东西停止 watch 或释放 owner 记录，因此后继 daemon 可能在前任的 restore 与准入仍在途时就 claim（主 §2）。
 
-另有两处缺口关乎正确性而非可达性：观测丢弃了绑定扫描的 `partial` 标志（其自身注释明写启用增量必须在任何负面决策前透传它），以及 slim listing 从不把 `state` 写进 watch 文件、也不提供 `listedKeys`，因此 listing 已返回的 closed PR 会永远留在 view 轮转里。
+另有两处缺口曾关乎正确性而非可达性，现均已在 §5 定案：观测丢弃的 `partial` 标志无需透传（它不做任何负面决策，加选项不会有任何读取方），而 slim listing 现在会把 `state` 写进 watch 文件并提供 `listedKeys`，因此 listing 已返回的 closed PR 会离开 view 轮转。该写入还会触发它所替代的那次 view 本会触发的 `state_change`。
 
 ## 现状
 
@@ -31,7 +31,7 @@ drain 已完整但不可达。`runPrWatchDrainTick` 把 restore、准入、regis
 - 给 drain 一个真实的 `wakeSession`，铸造并释放 client registration，并按 channel 的方式划分结果。
 - 在 resume 那一刻触发 drain，使 `wakeDormant: false` 的条目在会话变 live 时立即投递，而不是等到下一个 refresh tick。
 - 关停时停止 watch 并释放 owner 记录，且在途工作落定之后才释放。
-- 填充两个 deps 接缝：watch 目录与锁 registry、allowed hosts、准入、restore、自推账本，以及扫描的 `partial`。
+- 填充两个 deps 接缝：watch 目录与锁 registry、allowed hosts、准入、restore 与自推账本。扫描的 `partial` 无需透传进观测——见 §5。
 - 把 slim listing 的 `state` 写进 watch 文件并提供 `listedKeys`。
 - 保持开关关闭、设置不读：生产中零行为与零 API 量变化。
 

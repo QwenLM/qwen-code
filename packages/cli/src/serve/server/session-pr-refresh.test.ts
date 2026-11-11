@@ -45,6 +45,7 @@ import {
   prWatchFilePath,
   readPrWatchStateSync,
   writePrWatchStateSync,
+  PR_WATCH_PENDING_CAP,
 } from './pr-watch-store.js';
 import {
   refreshWorkspaceSessionPrStates,
@@ -2148,19 +2149,19 @@ describe('refreshWorkspaceSessionPrStates', () => {
           await gate;
         },
       );
-      const flush = async (): Promise<void> => {
-        await new Promise<void>((r) => setImmediate(r));
-      };
-      for (let i = 0; i < 200 && !holding; i++) await flush();
-      expect(holding).toBe(true);
+      // Wait on the condition, not on a turn budget: the refresh does real
+      // filesystem work before it reaches the lock, so any fixed number of
+      // event-loop turns is a machine-speed verdict. A bare promise wait would
+      // hang instead of reddening when the lock is never taken at all.
+      await vi.waitFor(() => expect(holding).toBe(true), { timeout: 15_000 });
       fetchGitHubPullRequestsMock.mockResolvedValue({
         kind: 'ok',
         pullRequests: [pr(42, 'closed')],
       });
+      let pending: Promise<unknown> | undefined;
       try {
-        // Record the lock attempt itself. Waiting a fixed number of turns
-        // would observe "the write has not started yet" — the refresh scans
-        // binders asynchronously first — and pass with no lock at all.
+        // Record the lock attempt itself, so the assertion is about a lock that
+        // was actually taken rather than one that has not been reached yet.
         const attempts: string[] = [];
         const real = locks.runExclusive.bind(locks);
         locks.runExclusive = <T>(
@@ -2171,10 +2172,12 @@ describe('refreshWorkspaceSessionPrStates', () => {
           attempts.push(key);
           return real(key, fn, signal);
         };
-        const pending = refreshWorkspaceSessionPrStates(runtime, undefined, {
+        pending = refreshWorkspaceSessionPrStates(runtime, undefined, {
           prWatch: { watchDir, locks, allowedHosts },
         });
-        for (let i = 0; i < 1000 && attempts.length === 0; i++) await flush();
+        await vi.waitFor(() => expect(attempts).toHaveLength(1), {
+          timeout: 15_000,
+        });
         // The identity is the watch file path, not the logical key.
         expect(attempts).toEqual([prWatchFilePath(watchDir, identity42)]);
         // The lock is held by someone else, so the write must still be waiting.
@@ -2186,6 +2189,10 @@ describe('refreshWorkspaceSessionPrStates', () => {
       } finally {
         openGate();
         await held;
+        // Settle the refresh before removing the tree: otherwise it writes into
+        // a fixture that is already being torn down and removeTempTree throws
+        // ENOTEMPTY, masking whatever the case actually asserted.
+        await pending?.catch(() => {});
         await removeTempTree(watchDir);
       }
     });
@@ -2450,6 +2457,79 @@ describe('refreshWorkspaceSessionPrStates', () => {
         // an event for a host the observation refuses to view.
         expect(result.listedKeys).toEqual(new Set(['github.com/o/r#42']));
         expect(readPrWatchStateSync(watchDir, identity42).kind).toBe('absent');
+      });
+    });
+
+    it.skipIf(!arePermissionBitsEnforced())(
+      'does not overwrite a watch file it could not read',
+      async () => {
+        await seedBinding();
+        await withWatchDir(async (watchDir) => {
+          const filePath = prWatchFilePath(watchDir, identity42);
+          await fsp.writeFile(filePath, '{"pr":{}}', 'utf8');
+          await fsp.chmod(filePath, 0o000);
+          fetchGitHubPullRequestsMock.mockResolvedValue({
+            kind: 'ok',
+            pullRequests: [pr(42, 'closed')],
+          });
+          try {
+            await refreshWorkspaceSessionPrStates(runtime, undefined, {
+              prWatch: {
+                watchDir,
+                locks: new PathMutexRegistry(),
+                allowedHosts,
+              },
+            });
+            // Still unreadable: the write goes through temp-file-and-rename,
+            // which succeeds over an unreadable target, so without the
+            // fail-closed return this file would have been replaced.
+            expect(readPrWatchStateSync(watchDir, identity42).kind).toBe(
+              'error',
+            );
+          } finally {
+            await fsp.chmod(filePath, 0o600);
+          }
+        });
+      },
+    );
+
+    it('logs when the listing write evicts an undelivered transition', async () => {
+      await seedBinding();
+      await withWatchDir(async (watchDir) => {
+        const full = Array.from({ length: PR_WATCH_PENDING_CAP }, (_, i) => ({
+          type: 'ci_failure' as const,
+          key: `ci_failure@queued-${i}`,
+          summary: 'CI failed',
+          detectedAt: '2026-11-09T00:00:00.000Z',
+        }));
+        writePrWatchStateSync(watchDir, identity42, {
+          pr: identity42,
+          state: 'open',
+          headSha: 'c'.repeat(40),
+          checks: 'passing',
+          pending: full,
+        });
+        const logged: string[] = [];
+        fetchGitHubPullRequestsMock.mockResolvedValue({
+          kind: 'ok',
+          pullRequests: [pr(42, 'closed')],
+        });
+        await refreshWorkspaceSessionPrStates(runtime, undefined, {
+          prWatch: {
+            watchDir,
+            locks: new PathMutexRegistry(),
+            allowedHosts,
+            log: (m) => logged.push(m),
+          },
+        });
+        const after = readPrWatchStateSync(watchDir, identity42);
+        expect(after.kind).toBe('state');
+        if (after.kind !== 'state') throw new Error('unreachable');
+        expect(after.state.pending).toHaveLength(PR_WATCH_PENDING_CAP);
+        // The oldest entry was evicted, so the diagnostic must say so — the
+        // view path logs the same overflow.
+        expect(after.state.pending?.[0]?.key).toBe('ci_failure@queued-1');
+        expect(logged.some((m) => m.includes('pending overflow'))).toBe(true);
       });
     });
 

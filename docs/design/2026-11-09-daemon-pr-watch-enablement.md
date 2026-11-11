@@ -12,7 +12,7 @@ The drain is complete but unreachable. `runPrWatchDrainTick` takes its restore, 
 - `wakeDormant: false` delays delivery by up to one refresh interval. It does **not** strand entries: the drain runs after the observation on every tick, re-reads each watch file's `pending` list, and only takes the dormant branch when `isSessionLive` is false — so once the session is live, the next tick delivers. What is missing is immediacy: nothing drains at the moment of resume, so a transition can wait a full interval (5 minutes by default) for a session the user is already looking at.
 - Shutdown overlaps a successor. Nothing stops the watch or releases the owner record, so a successor daemon can claim while the predecessor's restores and admissions are still in flight (master §2).
 
-Two further gaps are load-bearing for correctness rather than reachability: the observation discards the bindings scan's `partial` flag (its own comment says enablement MUST thread it before any negative decision), and the slim listing never writes `state` to a watch file nor supplies `listedKeys`, so a closed PR the listing returns stays in the view rotation forever.
+Two further gaps were load-bearing for correctness rather than reachability, and both are now settled in section 5: the observation's discarded `partial` flag needs no threading (it makes no negative decision, so an added option would have no reader), and the slim listing now writes `state` to the watch file and supplies `listedKeys`, so a closed PR the listing returned leaves the view rotation. The listing write also fires the `state_change` that the view it replaces would have fired.
 
 ## Current state
 
@@ -31,7 +31,7 @@ Two further gaps are load-bearing for correctness rather than reachability: the 
 - Give the drain a real `wakeSession` that mints and releases a client registration, classifying outcomes as the channel does.
 - Drain at the moment of resume, so a `wakeDormant: false` entry is delivered as soon as the session is live instead of at the next refresh tick.
 - Stop the watch and release the owner record on shutdown, after in-flight work settles.
-- Populate both deps seams: watch directory and lock registry, allowed hosts, admission, restore, self-push ledger, and the scan's `partial`.
+- Populate both deps seams: watch directory and lock registry, allowed hosts, admission, restore, and the self-push ledger. The scan's `partial` needs no threading into the observation — see section 5.
 - Write the slim listing's `state` to watch files and supply `listedKeys`.
 - Keep the switch off and the setting unread: zero behaviour or API-volume change in production.
 

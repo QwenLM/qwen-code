@@ -44,6 +44,7 @@ import {
   prWatchFilePath,
   readPrWatchStateSync,
   writePrWatchStateSync,
+  PR_WATCH_PENDING_CAP,
   type PrWatchIdentity,
 } from './pr-watch-store.js';
 import type { PathMutexRegistry } from '../fs/path-mutex-registry.js';
@@ -251,9 +252,14 @@ async function recordListedPrStates(
   for (const { identity, state } of rows) {
     try {
       assertGenerationOpen();
-      // The observation locks on the watch FILE PATH, not the logical key.
-      // Locking the key here would take a different mutex entry and serialize
-      // with nothing.
+      // This ladder mirrors the one in observeWorkspacePrBindings, which owns
+      // the protocol: lock on the watch FILE PATH (not the logical key — that
+      // would take a different mutex entry and serialize with nothing), read,
+      // skip on a read error, log an invalid file, detect, log a pending
+      // overflow, write. Keep those steps in sync with it. The final write
+      // deliberately differs: the view path persists the detector's whole
+      // state, while a listing is a partial observation and must carry the
+      // fields it cannot see (title, headSha, checks) forward from the file.
       await prWatch.locks.runExclusive(
         prWatchFilePath(prWatch.watchDir, identity),
         async () => {
@@ -296,6 +302,18 @@ async function recordListedPrStates(
                   observedAt,
                 )
               : undefined;
+          // Same diagnostic the view path emits: an evicted entry is a lost
+          // notification, and without this an operator cannot tell it apart
+          // from a transition that never happened.
+          if (
+            detection &&
+            (base.pending?.length ?? 0) + detection.transitions.length >
+              PR_WATCH_PENDING_CAP
+          ) {
+            log(
+              `PR watch: pending overflow for ${identity.repo}#${identity.number}; dropping the oldest entries (cap ${PR_WATCH_PENDING_CAP})`,
+            );
+          }
           writePrWatchStateSync(prWatch.watchDir, identity, {
             ...base,
             state,
@@ -341,29 +359,6 @@ export async function refreshWorkspaceSessionPrStates(
   const assertGenerationOpen = (): void =>
     runtime.generationGuard?.assertOpen();
   const sessionService = createWorkspaceRuntimeSessionService(runtime);
-  // The watch's binder set is the shared scan's own answer, not a re-derivation
-  // of it: that scan excludes archived, hidden-catalog and unreadable sessions,
-  // and the drain deletes a watch file it does not list. Approximating it here
-  // would recreate that churn for whichever exclusion was missed.
-  const boundKeys = new Set<string>();
-  if (options.prWatch) {
-    const log = options.prWatch.log ?? (() => {});
-    const bindings: SessionPrBindingSummary[] = [];
-    try {
-      await scanWorkspaceBindings(runtime, bindings);
-    } catch (error) {
-      // Unknown binders, not absent ones: write nothing rather than guess.
-      log(
-        `PR watch: bindings scan failed for ${runtime.workspaceCwd}; listing write skipped: ${String(error)}`,
-      );
-    }
-    for (const summary of bindings) {
-      for (const entry of summary.prs) {
-        const identity = prWatchIdentityFromUrl(entry.url);
-        if (identity) boundKeys.add(prWatchFileKey(identity));
-      }
-    }
-  }
   const pendingNumbers: Array<{
     sessionId: string;
     prPath: string;
@@ -546,6 +541,29 @@ export async function refreshWorkspaceSessionPrStates(
         // Only the watch consumes these keys, so a caller without the seam
         // keeps the exact result shape it had before the watch existed.
         if (options.prWatch) {
+          // Scanned here rather than at the top of the sweep: only this branch
+          // has a listing to record, so an Aone workspace or an empty pending
+          // list must not pay for a session-directory scan it discards.
+          // The binder set is the shared scan's own answer, not a re-derivation
+          // of it: that scan excludes archived, hidden-catalog and unreadable
+          // sessions, and the drain deletes a watch file it does not list.
+          const watchLog = options.prWatch.log ?? (() => {});
+          const bindings: SessionPrBindingSummary[] = [];
+          try {
+            await scanWorkspaceBindings(runtime, bindings);
+          } catch (error) {
+            // Unknown binders, not absent ones: write nothing rather than guess.
+            watchLog(
+              `PR watch: bindings scan failed for ${runtime.workspaceCwd}; listing write skipped: ${String(error)}`,
+            );
+          }
+          const boundKeys = new Set<string>();
+          for (const summary of bindings) {
+            for (const entry of summary.prs) {
+              const identity = prWatchIdentityFromUrl(entry.url);
+              if (identity) boundKeys.add(prWatchFileKey(identity));
+            }
+          }
           listedKeys = await recordListedPrStates(
             result.pullRequests,
             options.prWatch,
