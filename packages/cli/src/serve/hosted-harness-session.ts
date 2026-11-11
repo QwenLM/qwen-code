@@ -955,12 +955,24 @@ function compressionFor(session: HostedSession): HostedContextCompression {
         .join('\n\n'),
     busy: () => {
       const pending = new Set<string>();
+      const now = Date.now();
       for (const event of session.managed.authority.eventsInSequenceRange(
         1,
         session.managed.authority.committedSequence,
       )) {
-        if (event.kind === 'input.accepted')
+        if (event.kind === 'input.accepted') {
+          // A not-yet-due loop wakeup is parked, not busy. Mirror the
+          // authority's compaction carve-out exactly, or the host would
+          // refuse a compaction the authority is prepared to admit.
+          const notBefore = event.payload['notBefore'];
+          if (
+            event.payload['source'] === LOOP_INPUT_SOURCE &&
+            typeof notBefore === 'number' &&
+            notBefore > now
+          )
+            continue;
           pending.add(event.payload['turnId'] as string);
+        }
         if (event.kind === 'turn.settled')
           pending.delete(event.payload['turnId'] as string);
       }

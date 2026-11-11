@@ -9024,6 +9024,137 @@ describe('Hosted Harness no-tool session', () => {
     await headers(supertest(server).delete(`/session/${SESSION_ID}`));
   });
 
+  async function prewriteLoopWakeupInput(notBefore: number): Promise<void> {
+    const key = {
+      tenantId: 'tenant',
+      workspaceId: 'workspace',
+      sessionId: SESSION_ID,
+    };
+    const resources = LocalManagedSessionResourceStore.create({
+      runtimeBaseDir: state.root,
+      sessionKey: key,
+    });
+    const managed = await openManagedSession({
+      runtimeBaseDir: state.root,
+      transcriptPath: '',
+      sessionId: SESSION_ID,
+      sessionKey: key,
+      cwd: state.root,
+      version: 'hosted-harness/1',
+      workerId: BOOT_ID,
+      activationLeaseDurationMs: 60_000,
+      journalStore: new LocalJsonlManagedSessionJournalStore({
+        runtimeBaseDir: state.root,
+        sessionId: SESSION_ID,
+        transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+      }),
+      resourceStore: resources,
+      create: {
+        definitionRef: await resources.publish(
+          'managed-definition',
+          Buffer.from(
+            JSON.stringify({
+              engine: 'managed',
+              sessionId: SESSION_ID,
+              toolProfile: 'hosted-workspace-shell/1',
+              hookCatalog: hookPin,
+            }),
+          ),
+        ),
+        rootSnapshotRef: await resources.publish(
+          'managed-root',
+          Buffer.from(JSON.stringify({ cwd: state.root })),
+        ),
+        createdBy: 'hosted-harness',
+      },
+    });
+    const loopTurnId = 'loop:wakeup-compaction';
+    try {
+      await managed.authority.submitInput(
+        {
+          operation: 'submitInput',
+          commandId: loopTurnId,
+          sessionKey: key,
+          contentDigest: 'a'.repeat(64),
+        },
+        {
+          inputId: loopTurnId,
+          turnId: loopTurnId,
+          source: 'loop',
+          contentRef: await managed.resources.publish(
+            'managed-input',
+            Buffer.from(JSON.stringify({ text: '/loop tick' }), 'utf8'),
+          ),
+          admissionRef: await managed.resources.publish(
+            'managed-admission',
+            Buffer.from('{}', 'utf8'),
+          ),
+          deadline: null,
+          wakeReason: 'input',
+          notBefore,
+        },
+      );
+    } finally {
+      await managed.close().catch(() => undefined);
+    }
+  }
+
+  it('does not keep the Session busy while a loop wakeup is still deferred', async () => {
+    await prewriteLoopWakeupInput(Date.now() + 3_600_000);
+    mockBrokerBroker();
+    const server = await app(true);
+    const loaded = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({
+      managedSessionStore: store(),
+      toolProfile: 'hosted-workspace-shell/1',
+    });
+    expect(loaded.status).toBe(200);
+    const compress = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/context/compress`),
+    )
+      .set('X-Qwen-Client-Id', loaded.body.clientId as string)
+      .send({
+        operationId: 'compaction-deferred-loop',
+        expectedCompactionRevision: 0,
+      });
+    // The parked wakeup must not trip the host busy() gate. This fixture has
+    // no compression model config, so admission proceeds past busy() into
+    // createConfig; removing the busy() carve-out instead refuses up front
+    // with session_context_busy.
+    expect(compress.body.code).not.toBe('session_context_busy');
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`));
+  });
+
+  it('refuses context compaction while a due loop wakeup is still pending', async () => {
+    await prewriteLoopWakeupInput(Date.now() - 1_000);
+    mockBrokerBroker();
+    // Park the pump so the due wakeup stays pending (unsettled) for the
+    // admission check instead of being delivered as a turn.
+    vi.spyOn(HostedMonitorWakeScheduler.prototype, 'kick').mockImplementation(
+      () => {},
+    );
+    const server = await app(true);
+    const loaded = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({
+      managedSessionStore: store(),
+      toolProfile: 'hosted-workspace-shell/1',
+    });
+    expect(loaded.status).toBe(200);
+    const compress = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/context/compress`),
+    )
+      .set('X-Qwen-Client-Id', loaded.body.clientId as string)
+      .send({
+        operationId: 'compaction-due-loop',
+        expectedCompactionRevision: 0,
+      });
+    expect(compress.status).toBe(409);
+    expect(compress.body.code).toBe('session_context_busy');
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`));
+  });
+
   // #13803 (K2): a workflow child's acceptance notification closes through
   // the same wake-owned drain — its source names the record's own kind. The
   // kick is parked so the close, never the live pump, owns this settle: the
