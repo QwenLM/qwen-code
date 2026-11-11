@@ -1799,8 +1799,10 @@ jobs:
           echo "Selected CI profile: ${profile}"
 
       # Deliberately gated on skip_ci ONLY, not on the CI profile: a PR that
-      # touches nothing but .github/ classifies as `github_ci_only`, and that
-      # is exactly the PR most likely to push a workflow file past GitHub's
+      # touches only files on the `github_ci_only` whitelist — .github/CODEOWNERS,
+      # the actionlint config, the PR-safety-precheck and ECS-runner workflows
+      # and their helper scripts — classifies as `github_ci_only`, and that is
+      # exactly the kind of PR most likely to push a workflow file past GitHub's
       # 500 KB start-runs limit — the limit that silently killed the autofix
       # loop for a day on 2026-08-19. Costs one `wc -c` per workflow file.
       - name: 'Check workflow file size'
@@ -1970,6 +1972,16 @@ jobs:
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && (steps.ci_profile.outputs.ci_profile == 'full' || steps.ci_profile.outputs.ci_profile == 'docs_only' || steps.ci_profile.outputs.ci_profile == 'github_ci_only') && runner.environment == 'self-hosted' }}"
         run: 'bash .github/scripts/check-disk-floor.sh "${GITHUB_WORKSPACE}" "${RUNNER_TEMP:-/tmp}"'
 
+      - name: 'GitHub CI helper checks'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'github_ci_only' }}"
+        timeout-minutes: 5
+        run: |-
+          # Keep this path dependency-free: it stays dependency-free by contract even though the install prelude below now runs on all three profiles (full, docs_only, github_ci_only) to provide the lockfile's Prettier — this step consumes nothing from that install, so only the node-builtin-only HELPER_TESTS_DEP_FREE suites run here. The full-profile helper step below re-runs the complete HELPER_TESTS list after `npm ci`, and the Prettier lane below now checks script formatting on every profile.
+          node scripts/lint.js --setup
+          node scripts/lint.js --actionlint
+          node scripts/lint.js --yamllint
+          node --test --test-concurrency=1 ${{ env.HELPER_TESTS_DEP_FREE }}
+
       - name: 'Install dependencies'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && (steps.ci_profile.outputs.ci_profile == 'full' || steps.ci_profile.outputs.ci_profile == 'docs_only' || steps.ci_profile.outputs.ci_profile == 'github_ci_only') }}"
         timeout-minutes: 30
@@ -2008,16 +2020,6 @@ jobs:
           cache_dir="${NPM_CONFIG_CACHE:-$(npm config get cache)}"
           echo "npm cache: ${cache_dir}"
           du -sh "${cache_dir}" 2>/dev/null || true
-
-      - name: 'GitHub CI helper checks'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'github_ci_only' }}"
-        timeout-minutes: 5
-        run: |-
-          # Keep this path dependency-free: it stays dependency-free by contract even though the install prelude above now runs on all three profiles (full, docs_only, github_ci_only) to provide the lockfile's Prettier — this step consumes nothing from that install, so only the node-builtin-only HELPER_TESTS_DEP_FREE suites run here. The full-profile helper step below re-runs the complete HELPER_TESTS list after `npm ci`, and the Prettier lane below now checks script formatting on every profile.
-          node scripts/lint.js --setup
-          node scripts/lint.js --actionlint
-          node scripts/lint.js --yamllint
-          node --test --test-concurrency=1 ${{ env.HELPER_TESTS_DEP_FREE }}
 
       - name: 'Audit critical runtime dependencies'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
@@ -2060,11 +2062,12 @@ jobs:
       # checks every file with the lockfile's Prettier, so a profile that skips
       # this lane lets a formatting-only break merge green and redden main
       # (#16872 was a docs-only README change that passed PR lint and failed
-      # the push lint; #16899 closed the same gap for github_ci_only — workflow
-      # YAML and test-free Markdown outside docs/, e.g. a package README, are
-      # Prettier-eligible too). The install prelude above widens to this same
-      # gate to provide that Prettier. The dependency-free helper step still
-      # gives github_ci_only actionlint/yamllint feedback ahead of this lane.
+      # the push lint; #16899 closed the same gap for github_ci_only — the
+      # whitelisted helper and workflow files plus test-free Markdown outside
+      # docs/, e.g. a package README, are Prettier-eligible too). The install
+      # prelude widens to this same gate to provide that Prettier. The
+      # dependency-free helper step still gives github_ci_only
+      # actionlint/yamllint feedback ahead of this lane.
       - name: 'Run Prettier'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && (steps.ci_profile.outputs.ci_profile == 'full' || steps.ci_profile.outputs.ci_profile == 'docs_only' || steps.ci_profile.outputs.ci_profile == 'github_ci_only') }}"
         run: 'node scripts/lint.js --prettier'
