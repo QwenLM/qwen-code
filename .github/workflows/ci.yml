@@ -1488,18 +1488,24 @@ jobs:
         # 47232 with "Invalid character in entity name", while both runs'
         # tests had passed. The report is advisory (`fail-on-error: false`),
         # so a broken artifact must not turn a green suite red.
-        # `**`, not `*`: `*` does not cross `/`, so a single-level pattern
-        # cannot reach a nested workspace's report (packages/channels/base).
-        # Both workspace trees report: the side lane runs integrations/* too.
-        # The reporter follows symlinks, and pnpm links each workspace into
-        # its dependents' node_modules, so without the exclusion every
-        # report would be matched once per link and multiply the badge
-        # counts. Comma-separated: this action splits `path` on commas.
+        # List each workspace depth explicitly instead of excluding
+        # node_modules. Both actions take several patterns, but they compose
+        # them differently: upload-artifact hands the whole multiline input to
+        # `@actions/glob`, where `!**/node_modules/**` negates across the set,
+        # while this action splits `path` on commas and globs each segment on
+        # its own (`src/main.ts` -> `local-file-provider.ts`), so a bare
+        # negation has no positive set to subtract from and matches nothing.
+        # With `followSymbolicLinks` on by default, `packages/**` therefore
+        # counts every pnpm link copy of a workspace report — the badge
+        # multiplies. These four positive patterns are exactly the lane
+        # workspaces' report locations and nothing else; the completeness
+        # meta-test derives the set from the workspace configs and fails if a
+        # workspace is added or one of these patterns is dropped or widened
         continue-on-error: true
         uses: 'dorny/test-reporter@a43b3a5f7366b97d083190328d2c652e1a8b6aa2' # ratchet:dorny/test-reporter@v3
         with:
           name: 'Test Results (ubuntu-latest, Node 22.x, shard ${{ matrix.shard }})'
-          path: 'packages/**/junit.xml,integrations/**/junit.xml,!**/node_modules/**'
+          path: 'packages/*/junit.xml,packages/channels/*/junit.xml,packages/cua-driver/typescript/junit.xml,integrations/*/junit.xml'
           reporter: 'java-junit'
           fail-on-error: 'false'
 
@@ -1510,11 +1516,12 @@ jobs:
         # failure must not turn a green suite red. `always()` also fires on a
         # run cancelled mid-suite, so a partial report can be retained under
         # the complete run's name. The path keeps the publisher's
-        # nested-workspace reach across both workspace trees, so the raw
-        # evidence matches the badge. This action follows symlinks too, so
-        # it needs the same node_modules exclusion, or pnpm's workspace
-        # links would pack every report once per link. Newline-separated:
-        # this action reads `path` as multiline input.
+        # reach across both workspace trees, so the raw evidence matches the
+        # badge set the publisher enumerates explicitly above. This action
+        # follows symlinks too, so it needs the node_modules exclusion; unlike
+        # the publisher, this one applies that exclusion across the whole
+        # pattern set. Newline-separated: this action reads `path` as
+        # multiline input.
         continue-on-error: true
         uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
         with:

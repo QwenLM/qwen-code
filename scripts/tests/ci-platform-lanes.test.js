@@ -286,11 +286,15 @@ describe('raw JUnit report retention', () => {
     const unitTests = steps.find((step) => step.id === 'unit_tests');
     expect(publisher['continue-on-error']).toBe(true);
     expect(publisher.with['fail-on-error']).toBe('false');
-    // The badge reads the same reports as the artifact upload, so it needs
-    // the same nested-workspace reach and the same node_modules exclusion
-    // (see the path pin above). This action splits `path` on commas.
+    // The badge reads the same reports as the artifact upload, but it cannot
+    // copy that step's pattern: this action splits `path` on commas and globs
+    // each segment on its own, so `!**/node_modules/**` is a no-op segment and
+    // every pnpm link copy counts. List each workspace depth explicitly
+    // instead (flat packages, packages/channels/*, the cua-driver tree and
+    // integrations/*); the scripts suite checks the set against the workspace
+    // declarations.
     expect(publisher.with.path).toBe(
-      'packages/**/junit.xml,integrations/**/junit.xml,!**/node_modules/**',
+      'packages/*/junit.xml,packages/channels/*/junit.xml,packages/cua-driver/typescript/junit.xml,integrations/*/junit.xml',
     );
     expect(upload['continue-on-error']).toBe(true);
     expect(unitTests['continue-on-error']).not.toBe(true);
