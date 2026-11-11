@@ -706,7 +706,9 @@ class HostedWorkspaceToolTurnIT {
         // Runtime Session stays READY for the fleet. The one family whose
         // work genuinely never settles here — the PREPARED prepare-twice
         // execution — retains its original membership until its outcome
-        // is known.
+        // is known. A settled turn's owed release is paid by the detach's
+        // terminal drain (#16484), so release-before-forward ends RELEASED
+        // like release; only the never-settled turns above stay READY.
         boolean retained = !storeFaults && fault.equals("prepare-twice");
         assertThat(member.get("execution_storage_key")).as(fault + " execution membership")
                 .isEqualTo(retained ? physical : null);

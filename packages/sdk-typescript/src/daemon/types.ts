@@ -5144,6 +5144,14 @@ export interface DaemonChannelTypeDescriptor {
    */
   supportsQrLogin?: boolean;
   fields: readonly DaemonChannelConfigFieldDescriptor[];
+  /** True for sending-only integrations; absent on older daemons. */
+  outboundOnly?: boolean;
+  /** Adapter-owned logical destination, without endpoint credentials. */
+  defaultDeliveryTarget?: {
+    type: 'user' | 'chat';
+    id: string;
+    label?: string;
+  };
 }
 
 export type DaemonChannelTypeCatalog = DaemonChannelTypeDescriptor[];

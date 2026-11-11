@@ -1328,6 +1328,57 @@ test('submits permission decisions through the fake daemon @smoke', async ({
   });
 });
 
+test('aligns shell explanation and permission actions @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario({
+    events: [
+      permissionRequestEvent('perm-layout', {
+        id: 1,
+        toolCall: {
+          title: 'Shell',
+          kind: 'execute',
+          _meta: { toolName: 'run_shell_command' },
+          rawInput: {
+            command: 'printf web-shell-e2e',
+            description: 'Print a test message',
+          },
+        },
+      }),
+    ],
+  });
+  scenario.capabilities.features.push('session_generation');
+  const daemon = await installScenario(page, scenario, testInfo);
+  await gotoSession(page, scenario, daemon);
+
+  const panel = page.locator('[data-web-shell-permission-panel]');
+  const explain = panel.getByRole('button', { name: 'Explain', exact: true });
+  const options = panel.getByRole('radiogroup');
+  await expect(explain).toBeVisible();
+  await expect(options).toBeVisible();
+
+  await expect
+    .poll(async () => {
+      const explainBox = (await explain.boundingBox())!;
+      const optionsBox = (await options.boundingBox())!;
+      return Math.abs(
+        explainBox.y +
+          explainBox.height / 2 -
+          (optionsBox.y + optionsBox.height / 2),
+      );
+    })
+    .toBeLessThanOrEqual(2);
+
+  await page.setViewportSize({ width: 600, height: 900 });
+  await expect
+    .poll(async () => {
+      const explainBox = (await explain.boundingBox())!;
+      const optionsBox = (await options.boundingBox())!;
+      return optionsBox.y - (explainBox.y + explainBox.height);
+    })
+    .toBeGreaterThan(0);
+});
+
 test('opens slash menu, resume dialog, model dialog, and theme dialog @smoke', async ({
   page,
 }, testInfo) => {
