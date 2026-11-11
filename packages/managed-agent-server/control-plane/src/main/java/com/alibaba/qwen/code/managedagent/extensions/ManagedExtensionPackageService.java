@@ -121,8 +121,9 @@ public class ManagedExtensionPackageService implements ExtensionPackages {
             context.checkDeadline();
             if (result == null || result.reference() == null || result.archiveId() == null || result.archiveId().isBlank()
                     || !reference.providerId().equals(result.reference().providerId())
-                    || !reference.kind().equals(result.reference().kind()) || !reference.revision().equals(result.reference().revision())) {
-                throw new ManagedAgentException(409, "extension_source_invalid", "The extension source returned a different revision.");
+                    || !reference.kind().equals(result.reference().kind()) || !reference.resourceId().equals(result.reference().resourceId())
+                    || !reference.revision().equals(result.reference().revision())) {
+                throw new ManagedAgentException(409, "extension_source_invalid", "The extension source returned a different reference.");
             }
             if (result.expectedDigest() != null) {
                 requireDigest(result.expectedDigest());

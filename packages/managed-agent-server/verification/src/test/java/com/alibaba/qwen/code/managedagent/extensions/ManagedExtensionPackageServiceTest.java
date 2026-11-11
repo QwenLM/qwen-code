@@ -202,6 +202,21 @@ class ManagedExtensionPackageServiceTest {
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_extension_package", Integer.class)).isEqualTo(1);
     }
 
+    @Test
+    void rejectsProviderReferenceDriftBeforePublishingTheImport() throws Exception {
+        var provider = sourceProvider();
+        var command = new SourceImport(new ManagedExtensionSource.Reference("business", "skill", "skill_1", "1"), manifest.target());
+        org.mockito.Mockito.doAnswer(call -> new ManagedExtensionSource.Resolved(
+                new ManagedExtensionSource.Reference("business", "skill", "hijacked-resource", "1"), "private/object", null))
+                .when(provider).resolve(any(), any());
+        assertThatThrownBy(() -> service.importSource("tenant", "operator", "workspace", "source", command))
+                .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
+                    assertThat(error.getStatus()).isEqualTo(409);
+                    assertThat(error.getCode()).isEqualTo("extension_source_invalid");
+                });
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_extension_package", Integer.class)).isZero();
+    }
+
     private ManagedExtensionSource sourceProvider() throws Exception {
         var provider = mock(ManagedExtensionSource.class);
         when(provider.id()).thenReturn("business");
