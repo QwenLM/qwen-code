@@ -724,10 +724,15 @@ export function ensureConfigInitialized(config: Config): Promise<void> {
       throw err;
     })
     .then(async () => {
-      await getInteractiveModSession(config)?.initialize(['AbovePrompt'], {
-        prompts: true,
-        runsPrompts: true,
-      });
+      // Every OpenTUI transcript row is drawn again on change, so reply rows
+      // are offered in both screen modes.
+      await getInteractiveModSession(config)?.initialize(
+        ['AbovePrompt', 'AssistantMessage'],
+        {
+          prompts: true,
+          runsPrompts: true,
+        },
+      );
     });
   // Fire-and-forget callers (the entry) must not trip unhandled-rejection
   // handling; awaiters still receive the rejection.
