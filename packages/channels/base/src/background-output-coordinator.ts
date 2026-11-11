@@ -1,4 +1,7 @@
-import type { BackgroundResponseContext } from './ChannelAgentBridge.js';
+import type {
+  BackgroundResponseContext,
+  ChannelWorkflowOrigin,
+} from './ChannelAgentBridge.js';
 import type { ChannelOutputMode, SessionTarget } from './types.js';
 import { sanitizeLogText } from './sanitize.js';
 
@@ -9,6 +12,7 @@ const BACKGROUND_OUTPUT_MAX_RETRIES = 3;
 export interface BackgroundOutputTarget {
   target: SessionTarget;
   sourceLabel?: string;
+  workflowOrigin?: ChannelWorkflowOrigin;
 }
 
 export interface BackgroundOutputPacket {
@@ -30,10 +34,17 @@ export type BackgroundOutputDelivery = (
 
 export interface BackgroundOutputCoordinatorOptions {
   outputMode?: ChannelOutputMode;
-  getTarget(sessionId: string): SessionTarget | undefined;
-  getSourceLabel?(sessionId: string): string | undefined;
+  getTarget(
+    sessionId: string,
+    workflowOrigin?: ChannelWorkflowOrigin,
+  ): SessionTarget | undefined;
+  getSourceLabel?(
+    sessionId: string,
+    workflowOrigin?: ChannelWorkflowOrigin,
+  ): string | undefined;
   resolveDelivery(
     sessionId: string,
+    workflowOrigin?: ChannelWorkflowOrigin,
   ): Promise<BackgroundOutputTarget | undefined>;
   createDelivery(
     sessionId: string,
@@ -43,11 +54,9 @@ export interface BackgroundOutputCoordinatorOptions {
   log(message: string): void;
 }
 
-interface BackgroundResponseAggregation {
+interface BackgroundResponseAggregation extends BackgroundOutputTarget {
   key: string;
   sessionId: string;
-  target: SessionTarget;
-  sourceLabel?: string;
   status: string;
   kind: BackgroundResponseContext['kind'];
   label?: string;
@@ -69,10 +78,8 @@ interface BackgroundResponseAggregation {
 }
 
 /** Background response segments waiting for target resolution. */
-interface PendingBackgroundResponseTerminal {
+interface PendingBackgroundResponseTerminal extends BackgroundOutputTarget {
   sessionId: string;
-  target: SessionTarget;
-  sourceLabel?: string;
   resolvers: number;
   held: Array<{
     text: string;
@@ -135,7 +142,10 @@ export class BackgroundOutputCoordinator {
     text: string,
     context: BackgroundResponseContext,
   ): Promise<void> {
-    const target = this.options.getTarget(sessionId);
+    const workflowOrigin =
+      context.kind === 'workflow' ? context.channelWorkflowOrigin : undefined;
+    if (context.kind === 'workflow' && !workflowOrigin) return;
+    const target = this.options.getTarget(sessionId, workflowOrigin);
     if (!target) return;
     const key = JSON.stringify([
       sessionId,
@@ -162,7 +172,8 @@ export class BackgroundOutputCoordinator {
       parked = {
         sessionId,
         target,
-        sourceLabel: this.options.getSourceLabel?.(sessionId),
+        workflowOrigin,
+        sourceLabel: this.options.getSourceLabel?.(sessionId, workflowOrigin),
         resolvers: 0,
         held: [],
       };
@@ -205,7 +216,8 @@ export class BackgroundOutputCoordinator {
       parked ??= {
         sessionId,
         target,
-        sourceLabel: this.options.getSourceLabel?.(sessionId),
+        workflowOrigin,
+        sourceLabel: this.options.getSourceLabel?.(sessionId, workflowOrigin),
         resolvers: 0,
         held: [],
       };
@@ -215,7 +227,10 @@ export class BackgroundOutputCoordinator {
       try {
         let delivery: BackgroundOutputTarget | undefined;
         try {
-          delivery = await this.options.resolveDelivery(sessionId);
+          delivery = await this.options.resolveDelivery(
+            sessionId,
+            parked.workflowOrigin,
+          );
         } catch (error) {
           if (
             parked.resolvers === 1 &&
@@ -252,7 +267,8 @@ export class BackgroundOutputCoordinator {
         }
         if (
           !delivery ||
-          this.options.getTarget(sessionId) !== delivery.target
+          this.options.getTarget(sessionId, parked.workflowOrigin) !==
+            delivery.target
         ) {
           if (
             parked.resolvers === 1 &&
@@ -311,8 +327,7 @@ export class BackgroundOutputCoordinator {
             key,
             sessionId,
             parked.held[0]?.context ?? context,
-            delivery.target,
-            delivery.sourceLabel,
+            delivery,
           );
         this.applyHeldBackgroundResponses(current, parked);
         this.applyPendingBackgroundResponseTerminal(current, parked);
@@ -397,6 +412,17 @@ export class BackgroundOutputCoordinator {
     }
     if (aggregation.retryTimer) clearTimeout(aggregation.retryTimer);
     aggregation.retryTimer = undefined;
+    if (
+      aggregation.workflowOrigin &&
+      this.options.getTarget(
+        aggregation.sessionId,
+        aggregation.workflowOrigin,
+      ) !== aggregation.target
+    ) {
+      if (aggregation.timeoutTimer) clearTimeout(aggregation.timeoutTimer);
+      this.removeBackgroundResponseAggregation(key, aggregation);
+      return;
+    }
 
     let delivery = aggregation.delivery;
     if (!delivery) {
@@ -429,6 +455,9 @@ export class BackgroundOutputCoordinator {
         send: this.options.createDelivery(aggregation.sessionId, {
           target: aggregation.target,
           sourceLabel: aggregation.sourceLabel,
+          ...(aggregation.workflowOrigin
+            ? { workflowOrigin: aggregation.workflowOrigin }
+            : {}),
         }),
       };
       aggregation.delivery = delivery;
@@ -575,12 +604,14 @@ export class BackgroundOutputCoordinator {
       pending.completionPartial = true;
       if (
         pending.held.length > 0 &&
-        this.options.getTarget(pending.sessionId) === pending.target
+        this.options.getTarget(pending.sessionId, pending.workflowOrigin) ===
+          pending.target
       ) {
         flushes.push(
           this.flushDetachedBackgroundResponse('', pending.sessionId, pending, {
             target: pending.target,
             sourceLabel: pending.sourceLabel,
+            workflowOrigin: pending.workflowOrigin,
           }),
         );
       } else if (pending.held.length > 0) {
@@ -629,14 +660,12 @@ export class BackgroundOutputCoordinator {
     key: string,
     sessionId: string,
     context: BackgroundResponseContext,
-    target: SessionTarget,
-    sourceLabel?: string,
+    delivery: BackgroundOutputTarget,
   ): BackgroundResponseAggregation {
     const aggregation: BackgroundResponseAggregation = {
       key,
       sessionId,
-      target,
-      sourceLabel,
+      ...delivery,
       status: context.status,
       kind: context.kind,
       label: context.label,
@@ -712,7 +741,10 @@ export class BackgroundOutputCoordinator {
   ): Promise<void> {
     let delivery: BackgroundOutputTarget | undefined;
     try {
-      delivery = await this.options.resolveDelivery(sessionId);
+      delivery = await this.options.resolveDelivery(
+        sessionId,
+        pending.workflowOrigin,
+      );
     } catch (error) {
       if (
         (this.pendingBackgroundResponseTerminals.get(key) === pending &&
@@ -723,7 +755,11 @@ export class BackgroundOutputCoordinator {
       }
       throw error;
     }
-    if (!delivery || this.options.getTarget(sessionId) !== delivery.target) {
+    if (
+      !delivery ||
+      this.options.getTarget(sessionId, pending.workflowOrigin) !==
+        delivery.target
+    ) {
       if (pending.retiring) {
         if (pending.held.length > 0) {
           this.options.log(
@@ -763,8 +799,7 @@ export class BackgroundOutputCoordinator {
       key,
       sessionId,
       first.context,
-      delivery.target,
-      delivery.sourceLabel,
+      delivery,
     );
     this.applyHeldBackgroundResponses(aggregation, pending);
     if (pending.resolutionDropped) {
@@ -854,8 +889,7 @@ export class BackgroundOutputCoordinator {
     const aggregation: BackgroundResponseAggregation = {
       key,
       sessionId,
-      target: delivery.target,
-      sourceLabel: delivery.sourceLabel,
+      ...delivery,
       status: first.context.status,
       kind: first.context.kind,
       label: first.context.label,

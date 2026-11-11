@@ -25891,6 +25891,85 @@ describe('createAcpSessionBridge', () => {
       }
     });
 
+    it.each(['designated', 'first-responder'] as const)(
+      'handles detached workflow approvals when the originator detaches under %s',
+      async (permissionPolicy) => {
+        const { bridge, session, conn } = await setupForPermission({
+          permissionPolicy,
+        });
+        const { sessionId, clientId } = session;
+        try {
+          const secondRegistration = await bridge.spawnOrAttach({
+            workspaceCwd: WS_A,
+            clientId,
+          });
+          const other = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+          expect(secondRegistration.clientId).toBe(clientId);
+          expect(other.sessionId).toBe(sessionId);
+          expect(other.clientId).not.toBe(clientId);
+
+          const requestWorkflowApproval = (toolCallId: string) =>
+            conn.requestPermission({
+              sessionId,
+              _meta: { workflowOriginatorClientId: clientId },
+              toolCall: {
+                toolCallId,
+                title: 'Workflow tool',
+                _meta: {
+                  workflowApproval: true,
+                  backgroundWorkflowApproval: true,
+                },
+              },
+              options: [
+                { optionId: 'allow', name: 'Allow', kind: 'allow_once' },
+              ],
+            });
+          const pending = requestWorkflowApproval('workflow-first');
+          await vi.waitFor(() => expect(bridge.pendingPermissionCount).toBe(1));
+
+          await bridge.detachClient(sessionId, clientId);
+          expect(bridge.pendingPermissionCount).toBe(1);
+          await bridge.detachClient(sessionId, clientId);
+
+          if (permissionPolicy === 'designated') {
+            await expect(pending).resolves.toMatchObject({
+              outcome: { outcome: 'cancelled' },
+            });
+            expect(bridge.pendingPermissionCount).toBe(0);
+            const reopened = await bridge.spawnOrAttach({
+              workspaceCwd: WS_A,
+              clientId,
+            });
+            expect(reopened.clientId).not.toBe(clientId);
+            const lastEventId = bridge.getSessionLastEventId(sessionId);
+            await expect(
+              requestWorkflowApproval('workflow-late'),
+            ).resolves.toMatchObject({ outcome: { outcome: 'cancelled' } });
+            expect(bridge.getSessionLastEventId(sessionId)).toBe(lastEventId);
+            expect(bridge.pendingPermissionCount).toBe(0);
+          } else {
+            expect(bridge.pendingPermissionCount).toBe(1);
+            const requestId =
+              bridge.getSessionSummary(sessionId)?.pendingInteractions?.[0]
+                ?.requestId;
+            expect(
+              bridge.respondToSessionPermission(
+                sessionId,
+                requestId!,
+                { outcome: { outcome: 'selected', optionId: 'allow' } },
+                { clientId: other.clientId },
+              ),
+            ).toBe(true);
+            await expect(pending).resolves.toEqual({
+              outcome: { outcome: 'selected', optionId: 'allow' },
+            });
+          }
+        } finally {
+          await bridge.shutdown();
+        }
+      },
+    );
+
     it('shutdown resolves outstanding permissions as cancelled', async () => {
       const { bridge, session, conn } = await setupForPermission();
 

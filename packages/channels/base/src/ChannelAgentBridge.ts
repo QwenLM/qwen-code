@@ -2,6 +2,7 @@ import type {
   RequestPermissionRequest,
   RequestPermissionResponse,
 } from '@agentclientprotocol/sdk';
+import type { SessionTarget } from './types.js';
 
 export const CHANNEL_PROMPT_DISPLAY_TEXT_META_KEY =
   'qwen.daemon.promptDisplayText';
@@ -11,6 +12,7 @@ export const CHANNEL_PROMPT_AUTHORIZATION_META_KEY =
 // strips it from untrusted callers and honors it only when an authenticated
 // channel worker (or a private-parent channel bridge) set it.
 export const CHANNEL_PROMPT_META_KEY = 'qwen.channel.prompt';
+export const CHANNEL_WORKFLOW_ORIGIN_META_KEY = 'qwen.channel.workflowOrigin';
 export const CHANNEL_OUTPUT_MODE_META_KEY = 'qwen.channel.outputMode';
 // Marks a slash-command notice that must ride the turn's reply: a response
 // boundary clears the chunk collection, so the notice needs its own slot and
@@ -125,6 +127,51 @@ export interface PermissionResolvedEvent {
   outcome?: RequestPermissionResponse['outcome'];
 }
 
+export type ChannelWorkflowOrigin = Readonly<
+  SessionTarget & { userInitiated?: true }
+>;
+
+export function parseChannelWorkflowOrigin(
+  value: unknown,
+): ChannelWorkflowOrigin | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return undefined;
+  }
+  const {
+    channelName,
+    chatId,
+    senderId,
+    threadId,
+    isGroup,
+    messageRoute,
+    userInitiated,
+  } = value as Record<string, unknown>;
+  if (
+    typeof channelName !== 'string' ||
+    !channelName ||
+    typeof chatId !== 'string' ||
+    !chatId ||
+    typeof senderId !== 'string' ||
+    !senderId ||
+    (threadId !== undefined && (typeof threadId !== 'string' || !threadId)) ||
+    (isGroup !== undefined && typeof isGroup !== 'boolean') ||
+    (messageRoute !== undefined &&
+      (typeof messageRoute !== 'string' || !messageRoute)) ||
+    (userInitiated !== undefined && userInitiated !== true)
+  ) {
+    return undefined;
+  }
+  return Object.freeze({
+    channelName,
+    chatId,
+    senderId,
+    ...(threadId !== undefined ? { threadId } : {}),
+    ...(isGroup !== undefined ? { isGroup } : {}),
+    ...(messageRoute !== undefined ? { messageRoute } : {}),
+    ...(userInitiated === true ? { userInitiated } : {}),
+  });
+}
+
 export interface BackgroundResponseContext {
   taskId: string;
   status: string;
@@ -135,6 +182,7 @@ export interface BackgroundResponseContext {
   turnId?: string;
   turnComplete?: boolean;
   partial?: boolean;
+  channelWorkflowOrigin?: ChannelWorkflowOrigin;
 }
 
 export function parseBackgroundResponseContext(
@@ -173,6 +221,12 @@ export function parseBackgroundResponseContext(
   }
   if (typeof record['partial'] === 'boolean') {
     context.partial = record['partial'];
+  }
+  if (kind === 'workflow') {
+    const origin = parseChannelWorkflowOrigin(
+      record[CHANNEL_WORKFLOW_ORIGIN_META_KEY],
+    );
+    if (origin) context.channelWorkflowOrigin = origin;
   }
   return context;
 }
@@ -231,6 +285,7 @@ export interface ChannelPromptImage {
 
 export interface ChannelAgentBridgePromptOptions {
   outputMode?: 'per_task';
+  workflowOrigin?: ChannelWorkflowOrigin;
   onTaskResult?: (result: { partial: boolean }) => void;
   images?: ChannelPromptImage[];
   imageBase64?: string;

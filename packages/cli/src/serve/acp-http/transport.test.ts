@@ -2654,6 +2654,129 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     }
   });
 
+  it.each([
+    'disconnect',
+    'observer RPC error',
+    'forbidden vote',
+    'originator RPC error',
+  ] as const)(
+    'handles workflow approval copies independently through %s',
+    async (failure) => {
+      const vote = vi
+        .spyOn(bridge, 'respondToSessionPermission')
+        .mockReturnValue(true);
+      const ownerId = await initialize();
+      await newSession(ownerId);
+      const owner = acpHandle!.registry.get(ownerId)!;
+      const ownerReader = frameReader(await openStream(ownerId, 'sess-1'));
+      await waitUntil(() => bridge.queues.has('sess-1'));
+      const ownerQueue = bridge.queues.get('sess-1')!;
+      const originatorClientId = owner.sessions.get('sess-1')!.clientId;
+      expect(originatorClientId).toBe('client-1');
+      const observerId = await initialize();
+      bridge.spawnClientId = 'observer-client';
+      await newSession(observerId);
+      const observer = acpHandle!.registry.get(observerId)!;
+      const observerReader = frameReader(
+        await openStream(observerId, 'sess-1'),
+      );
+      try {
+        await waitUntil(() => bridge.queues.get('sess-1') !== ownerQueue);
+        const observerQueue = bridge.queues.get('sess-1')!;
+        const permission = {
+          type: 'permission_request',
+          originatorClientId,
+          data: {
+            requestId: 'workflow-approval',
+            sessionId: 'sess-1',
+            toolCall: {
+              toolCallId: 'workflow-tool',
+              title: 'Edit fixture',
+              _meta: {
+                workflowApproval: true,
+                backgroundWorkflowApproval: true,
+              },
+            },
+            options: [{ optionId: 'allow', name: 'Allow' }],
+          },
+        } as const;
+        ownerQueue.push(permission);
+        observerQueue.push(permission);
+        const ownerFrame = (await ownerReader.next()) as { id: string };
+        await observerReader.next();
+        expect(owner.pending.size).toBe(1);
+        expect(observer.pending.size).toBe(1);
+        const selected = {
+          outcome: { outcome: 'selected', optionId: 'allow' },
+        };
+        if (failure === 'disconnect') {
+          await fetch(`${base}/acp`, {
+            method: 'DELETE',
+            headers: { 'acp-connection-id': observerId },
+          });
+          await waitUntil(() => observer.pending.size === 0);
+        } else {
+          if (failure === 'forbidden vote') {
+            vote.mockImplementationOnce(() => {
+              throw new PermissionForbiddenError(
+                'workflow-approval',
+                'sess-1',
+                'designated_mismatch',
+              );
+            });
+          }
+          await post(
+            failure === 'originator RPC error' ? ownerId : observerId,
+            {
+              jsonrpc: '2.0',
+              id: ownerFrame.id,
+              ...(failure === 'forbidden vote'
+                ? { result: selected }
+                : { error: { code: -32603, message: 'Client failure' } }),
+            },
+          );
+          if (failure === 'forbidden vote') {
+            await waitUntil(() => vote.mock.calls.length > 0);
+          }
+        }
+        if (failure !== 'originator RPC error') {
+          expect(owner.pending.has(ownerFrame.id)).toBe(true);
+          expect(vote).toHaveBeenCalledTimes(
+            failure === 'forbidden vote' ? 1 : 0,
+          );
+          await post(ownerId, {
+            jsonrpc: '2.0',
+            id: ownerFrame.id,
+            result: selected,
+          });
+        }
+        await waitUntil(() => owner.pending.size === 0);
+        expect(vote).toHaveBeenCalledTimes(
+          failure === 'forbidden vote' ? 2 : 1,
+        );
+        expect(vote.mock.calls.at(-1)).toEqual([
+          'sess-1',
+          'workflow-approval',
+          failure === 'originator RPC error'
+            ? { outcome: { outcome: 'cancelled' } }
+            : selected,
+          expect.any(Object),
+        ]);
+        if (failure !== 'disconnect') {
+          expect(observer.pending.size).toBe(1);
+          observerQueue.push({
+            type: 'permission_resolved',
+            data: { requestId: 'workflow-approval', sessionId: 'sess-1' },
+          });
+          await waitUntil(() => observer.pending.size === 0);
+        }
+      } finally {
+        ownerReader.close();
+        observerReader.close();
+      }
+    },
+  );
+
   it('cross-connection permission response resolves for a co-owned session', async () => {
     let resolvedWith: unknown;
     let voteCount = 0;

@@ -5,6 +5,7 @@
  */
 
 import type { BundledGeneratedUiStatus } from '@qwen-code/qwen-code-core/config/generated-ui.js';
+import type { ChannelWorkflowOrigin } from '@qwen-code/qwen-code-core/utils/invocation-context.js';
 import type {
   ApprovalMode,
   McpAppToolResult,
@@ -1432,6 +1433,7 @@ export interface BridgeClientRequestContext {
    * wire key from untrusted callers and re-injects it only from this flag.
    */
   channelPrompt?: boolean;
+  channelWorkflowOrigin?: ChannelWorkflowOrigin;
   /** Trusted Channel delivery correlation injected by the daemon prompt
    * route. Never populated from caller-controlled ACP metadata. */
   channelDelivery?: {
@@ -1534,6 +1536,7 @@ export const DAEMON_INPUT_ANNOTATIONS_META_KEY = 'inputAnnotations';
 // dependency path between them, so a cross-package test pins the value.
 export const CHANNEL_PROMPT_META_KEY = 'qwen.channel.prompt';
 export const CHANNEL_OUTPUT_MODE_META_KEY = 'qwen.channel.outputMode';
+export const CHANNEL_WORKFLOW_ORIGIN_META_KEY = 'qwen.channel.workflowOrigin';
 
 /**
  * Returned from `recordHeartbeat`. `lastSeenAt` is the server-side

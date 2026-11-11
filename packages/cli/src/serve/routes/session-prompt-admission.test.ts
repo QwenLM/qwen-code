@@ -12,6 +12,7 @@ vi.mock('./session-pr-backfill.js', () => ({
 
 import {
   CHANNEL_PROMPT_META_KEY,
+  CHANNEL_WORKFLOW_ORIGIN_META_KEY,
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
   DAEMON_SUBMITTED_PROMPT_META_KEY,
   SUBMITTED_PROMPT_META_KEY,
@@ -103,6 +104,13 @@ beforeEach(() => {
 
 describe('classifyPromptRequest', () => {
   const runtime = { workspaceCwd: '/ws', primary: true, trusted: true };
+  const workflowOrigin = {
+    channelName: 'telegram',
+    chatId: 'launch-chat',
+    senderId: 'launch-user',
+    threadId: 'launch-thread',
+    userInitiated: true,
+  };
   afterEach(() => {
     revokeChannelWorkerPromptAuthorization('worker-token');
   });
@@ -116,6 +124,7 @@ describe('classifyPromptRequest', () => {
         idempotencyKey: 'k',
         _meta: {
           [CHANNEL_PROMPT_META_KEY]: true,
+          [CHANNEL_WORKFLOW_ORIGIN_META_KEY]: workflowOrigin,
           [CHANNEL_BOUND_RELAY_META_KEY]: true,
           [CHANNEL_WORKER_PROMPT_AUTHORIZATION_META_KEY]: 'forged',
           [DAEMON_PROMPT_DISPLAY_TEXT_META_KEY]: 'shown',
@@ -134,6 +143,7 @@ describe('classifyPromptRequest', () => {
       {
         _meta: {
           [CHANNEL_PROMPT_META_KEY]: true,
+          [CHANNEL_WORKFLOW_ORIGIN_META_KEY]: workflowOrigin,
           [CHANNEL_WORKER_PROMPT_AUTHORIZATION_META_KEY]: 'forged',
         },
       },
@@ -259,7 +269,7 @@ describe('classifyPromptRequest', () => {
     'classifies a worker prompt as a channel turn only for a marker of exactly true (marker: $marker)',
     ({ marker, channelPrompt, requested }) => {
       registerChannelWorkerPromptAuthorization('worker-token', '/ws');
-      const { classification } = classifyPromptRequest(
+      const { classification, forwardedBody } = classifyPromptRequest(
         {
           _meta: {
             ...(marker !== undefined
@@ -267,6 +277,7 @@ describe('classifyPromptRequest', () => {
               : {}),
             [CHANNEL_WORKER_PROMPT_AUTHORIZATION_META_KEY]: 'worker-token',
             [DAEMON_PROMPT_DISPLAY_TEXT_META_KEY]: 'shown',
+            [CHANNEL_WORKFLOW_ORIGIN_META_KEY]: workflowOrigin,
           },
         },
         runtime,
@@ -277,9 +288,11 @@ describe('classifyPromptRequest', () => {
       // off (`requestedChannelPrompt`).
       expect(classification).toStrictEqual({
         channelPrompt,
+        ...(channelPrompt ? { channelWorkflowOrigin: workflowOrigin } : {}),
         promptDisplayText: 'shown',
         requestedChannelPrompt: requested,
       });
+      expect(forwardedBody).toEqual({});
     },
   );
 

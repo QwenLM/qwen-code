@@ -27,7 +27,10 @@ import type {
   ChannelAgentBridge,
   ChannelLoopToolHandler,
 } from './ChannelAgentBridge.js';
-import { ChannelPromptCancelledError } from './ChannelAgentBridge.js';
+import {
+  CHANNEL_WORKFLOW_ORIGIN_META_KEY,
+  ChannelPromptCancelledError,
+} from './ChannelAgentBridge.js';
 import { ChannelBase, CLEAR_CANCEL_TIMEOUT_MS } from './ChannelBase.js';
 import type { ChannelBaseOptions } from './ChannelBase.js';
 import type { ChannelLoop, ChannelLoopInput } from './ChannelLoopStore.js';
@@ -3398,6 +3401,8 @@ describe('ChannelBase', () => {
               _meta: {
                 workflowApproval: true,
                 backgroundWorkflowApproval: true,
+                [CHANNEL_WORKFLOW_ORIGIN_META_KEY]: vi.mocked(bridge.prompt)
+                  .mock.calls[0]?.[2]?.workflowOrigin,
               },
             },
             options: [
@@ -3421,6 +3426,178 @@ describe('ChannelBase', () => {
       } finally {
         await active.finish();
       }
+    });
+
+    it.each(['single', 'user'] as const)(
+      'uses the %s workflow launch target and keeps approvals separate from subsequent prompts',
+      async (sessionScope) => {
+        const ch = createChannel({
+          sessionScope,
+          operators: ['operator'],
+          groupPolicy: 'open',
+        });
+        const room = {
+          isGroup: true,
+          isMentioned: true,
+          chatId: 'initial-chat',
+          threadId: 'initial-thread',
+          senderId: 'initial-user',
+        };
+        const launch = {
+          ...room,
+          ...(sessionScope === 'single'
+            ? { chatId: 'launch-chat', senderId: 'launch-user' }
+            : {}),
+          threadId: 'launch-thread',
+        };
+        const sessionId = await startSession(ch, room);
+        await ch.handleInbound(envelope({ ...launch, text: 'start workflow' }));
+        const [promptSessionId, , options] = vi.mocked(bridge.prompt).mock
+          .calls[1]!;
+        expect(promptSessionId).toBe(sessionId);
+        const origin = options?.workflowOrigin;
+        expect(origin).toMatchObject({
+          channelName: 'test-chan',
+          chatId: launch.chatId,
+          threadId: launch.threadId,
+          senderId: launch.senderId,
+          userInitiated: true,
+        });
+
+        let finishLater!: (text: string) => void;
+        vi.mocked(bridge.prompt).mockImplementationOnce(
+          () =>
+            new Promise<string>((resolve) => {
+              finishLater = resolve;
+            }),
+        );
+        const laterTurn = ch.handleInbound(
+          envelope({ ...room, threadId: 'later-thread', text: 'new prompt' }),
+        );
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(3));
+        try {
+          const dispatchApproval = (requestId: string) =>
+            ch.dispatchPermissionRequest({
+              requestId,
+              sessionId,
+              request: {
+                sessionId,
+                toolCall: {
+                  toolCallId: requestId,
+                  title: 'Workflow edit',
+                  _meta: {
+                    workflowApproval: true,
+                    backgroundWorkflowApproval: true,
+                    [CHANNEL_WORKFLOW_ORIGIN_META_KEY]: origin,
+                  },
+                },
+                options: [
+                  { optionId: 'once', kind: 'allow_once', name: 'Allow once' },
+                  {
+                    optionId: 'always',
+                    kind: 'allow_always',
+                    name: 'Always allow',
+                  },
+                  { optionId: 'deny', kind: 'reject_once', name: 'Deny' },
+                ],
+              },
+            });
+          await dispatchApproval('workflow-owner');
+          expect(ch.threadMessages.at(-1)).toMatchObject({
+            chatId: launch.chatId,
+            threadId: launch.threadId,
+            text: expect.stringContaining('Workflow edit'),
+          });
+          await ch.handleInbound(
+            envelope({
+              ...room,
+              senderId: 'operator',
+              text: '/approve workflow-owner',
+            }),
+          );
+          await ch.handleInbound(
+            envelope({
+              ...launch,
+              senderId: 'another-user',
+              text: '/approve workflow-owner',
+            }),
+          );
+          if (sessionScope === 'single') {
+            await ch.handleInbound(
+              envelope({
+                ...launch,
+                text: '/approve-always workflow-owner',
+              }),
+            );
+          }
+          expect(respondToPermissionMock()).not.toHaveBeenCalled();
+          await ch.handleInbound(
+            envelope({
+              ...launch,
+              text: '/approve workflow-owner',
+            }),
+          );
+          expect(respondToPermissionMock()).toHaveBeenCalledExactlyOnceWith(
+            'workflow-owner',
+            { outcome: { outcome: 'selected', optionId: 'once' } },
+          );
+          if (sessionScope === 'single') {
+            await dispatchApproval('workflow-operator');
+            await ch.handleInbound(
+              envelope({
+                ...launch,
+                senderId: 'operator',
+                text: '/deny workflow-operator',
+              }),
+            );
+            expect(respondToPermissionMock()).toHaveBeenLastCalledWith(
+              'workflow-operator',
+              { outcome: { outcome: 'selected', optionId: 'deny' } },
+            );
+          }
+
+          await ch.dispatchBackgroundResponse(sessionId, 'workflow result', {
+            taskId: 'wf',
+            kind: 'workflow',
+            status: 'completed',
+            channelWorkflowOrigin: origin,
+          });
+          expect(ch.threadMessages.at(-1)).toMatchObject({
+            chatId: launch.chatId,
+            threadId: launch.threadId,
+            text: 'workflow result',
+          });
+        } finally {
+          finishLater('');
+          await laterTurn;
+        }
+      },
+    );
+
+    it('does not use the session route for a detached workflow without a Channel launch', async () => {
+      const ch = createChannel();
+      const sessionId = await startSession(ch);
+      ch.threadMessages = [];
+      await ch.dispatchPermissionRequest({
+        requestId: 'host-workflow',
+        sessionId,
+        request: {
+          sessionId,
+          toolCall: {
+            toolCallId: 'host-workflow',
+            title: 'Host workflow',
+            _meta: { workflowApproval: true, backgroundWorkflowApproval: true },
+          },
+          options: [],
+        },
+      });
+      await ch.dispatchBackgroundResponse(sessionId, 'host result', {
+        taskId: 'host-workflow',
+        kind: 'workflow',
+        status: 'completed',
+      });
+      expect(ch.threadMessages).toEqual([]);
+      expect(respondToPermissionMock()).not.toHaveBeenCalled();
     });
 
     it('requires card-presented questions to be submitted or denied', async () => {
@@ -6051,6 +6228,12 @@ describe('ChannelBase', () => {
               _meta: {
                 workflowApproval: true,
                 backgroundWorkflowApproval: true,
+                [CHANNEL_WORKFLOW_ORIGIN_META_KEY]: {
+                  channelName: 'test-chan',
+                  chatId: 'chat1',
+                  senderId: 'user1',
+                  userInitiated: true,
+                },
               },
             },
             options: [
@@ -12456,11 +12639,11 @@ describe('ChannelBase', () => {
 
       await ch.handleInbound(envelope({ text: '/schedule list' }));
 
-      expect(bridge.prompt).toHaveBeenCalledWith('s-1', '/schedule list', {
-        displayText: '/schedule list',
-        imageBase64: undefined,
-        imageMimeType: undefined,
-      });
+      expect(bridge.prompt).toHaveBeenCalledWith(
+        's-1',
+        '/schedule list',
+        expect.objectContaining({ displayText: '/schedule list' }),
+      );
       expect(ch.sent).toEqual([{ chatId: 'chat1', text: 'agent response' }]);
     });
 
@@ -19033,11 +19216,11 @@ describe('ChannelBase', () => {
 
       await ch.handleInbound(envelope({ text: '!echo hello' }));
 
-      expect(bridge.prompt).toHaveBeenCalledWith('s-1', '!echo hello', {
-        displayText: '!echo hello',
-        imageBase64: undefined,
-        imageMimeType: undefined,
-      });
+      expect(bridge.prompt).toHaveBeenCalledWith(
+        's-1',
+        '!echo hello',
+        expect.objectContaining({ displayText: '!echo hello' }),
+      );
     });
 
     it('reports shell command failures without falling through to the agent', async () => {
@@ -21709,12 +21892,20 @@ describe('ChannelBase', () => {
           expect.stringContaining(
             '[External event "ci_failed" from github-ci]',
           ),
-          { displayText: expect.any(String) },
+          expect.objectContaining({ displayText: expect.any(String) }),
         );
         const [, webhookPrompt, webhookOptions] = (
           bridge.prompt as ReturnType<typeof vi.fn>
         ).mock.calls[0]!;
-        expect(webhookOptions).toEqual({ displayText: webhookPrompt });
+        expect(webhookOptions).toEqual({
+          displayText: webhookPrompt,
+          workflowOrigin: {
+            channelName: 'test-chan',
+            chatId: 'group-1',
+            isGroup: true,
+            senderId: 'webhook:github-ci',
+          },
+        });
         expect(ch.proactive).toEqual([
           { chatId: 'group-1', text: 'CI failed because lint broke.' },
         ]);
@@ -22659,6 +22850,12 @@ describe('ChannelBase', () => {
         {
           displayText:
             '[Loop "daily summary" created by Alice] Scheduled task running unattended: no one is present to answer questions, and your final response is delivered to this chat automatically — do whatever work the task requires, then put the result in your final response instead of trying to deliver it to this chat yourself.\n\npost summary',
+          workflowOrigin: {
+            channelName: 'test-chan',
+            chatId: 'group-1',
+            isGroup: true,
+            senderId: 'alice',
+          },
         },
       );
       expect(ch.proactive).toEqual([
@@ -23995,6 +24192,12 @@ describe('ChannelBase', () => {
           {
             displayText:
               '[Loop "daily summary" created by Alice] Scheduled task running unattended: no one is present to answer questions, and your final response is delivered to this chat automatically — do whatever work the task requires, then put the result in your final response instead of trying to deliver it to this chat yourself.\n\npost again',
+            workflowOrigin: {
+              channelName: 'test-chan',
+              chatId: 'chat1',
+              isGroup: false,
+              senderId: 'alice',
+            },
           },
         );
         expect(ch.proactive).toEqual([
@@ -24871,7 +25074,7 @@ describe('ChannelBase', () => {
       expect(bridge.prompt).toHaveBeenLastCalledWith(
         expect.any(String),
         'while loop runs',
-        { displayText: 'while loop runs' },
+        expect.objectContaining({ displayText: 'while loop runs' }),
       );
     });
 

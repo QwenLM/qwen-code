@@ -18,11 +18,13 @@ import type {
   BackgroundResponseContext,
   BackgroundOutputDelivery,
   BackgroundOutputPacket,
+  BackgroundOutputTarget,
   ChannelOutputSegmentContext,
   ChannelOutputSegmentEndReason,
   ChannelPermissionRequestContext,
   ChannelTaskLifecycleEvent,
   ChannelUserInputRequestContext,
+  ChannelWorkflowOrigin,
   Envelope,
   SessionTarget,
 } from '@qwen-code/channel-base';
@@ -223,16 +225,33 @@ vi.mock('@qwen-code/channel-base', async () => {
       }
       protected async resolveBackgroundResponseDelivery(
         sessionId: string,
-      ): Promise<{ target: SessionTarget; sourceLabel?: string } | undefined> {
+        workflowOrigin?: ChannelWorkflowOrigin,
+      ): Promise<BackgroundOutputTarget | undefined> {
         return (
           real.ChannelBase.prototype as unknown as {
             resolveBackgroundResponseDelivery(
               sessionId: string,
-            ): Promise<
-              { target: SessionTarget; sourceLabel?: string } | undefined
-            >;
+              workflowOrigin?: ChannelWorkflowOrigin,
+            ): Promise<BackgroundOutputTarget | undefined>;
           }
-        ).resolveBackgroundResponseDelivery.call(this, sessionId);
+        ).resolveBackgroundResponseDelivery.call(
+          this,
+          sessionId,
+          workflowOrigin,
+        );
+      }
+      protected workflowTarget(
+        sessionId: string,
+        origin: ChannelWorkflowOrigin,
+      ): SessionTarget | undefined {
+        return (
+          real.ChannelBase.prototype as unknown as {
+            workflowTarget(
+              sessionId: string,
+              origin: ChannelWorkflowOrigin,
+            ): SessionTarget | undefined;
+          }
+        ).workflowTarget.call(this, sessionId, origin);
       }
       protected async deliverBackgroundResponseToTarget(
         sessionId: string,
@@ -536,12 +555,20 @@ describe('turn-scoped output modes', () => {
     'keeps only the last assistant reply in a %s follow-up turn',
     async (kind) => {
       const { channel, create, stream } = createOutputChannel('per_turn');
+      const launch = {
+        channelName: 'test-dingtalk',
+        chatId: 'cidLaunchGroup==',
+        senderId: 'launch-owner',
+        isGroup: true,
+        userInitiated: true as const,
+      };
       const context = {
         taskId: 'task-1',
         turnId: 'turn-1',
         kind,
         status: 'completed',
         turnComplete: false,
+        ...(kind === 'workflow' ? { channelWorkflowOrigin: launch } : {}),
       };
       await channel.dispatchBackgroundResponse(
         'session-1',
@@ -559,6 +586,10 @@ describe('turn-scoped output modes', () => {
         turnComplete: true,
       });
       expect(create).toHaveBeenCalledOnce();
+      expect(create.mock.calls[0]![0].target).toEqual({
+        chatId: kind === 'workflow' ? launch.chatId : 'cidGroup==',
+        isGroup: true,
+      });
       expect(create.mock.calls[0]![0].cardParamMap).toEqual(
         expect.objectContaining({
           content:
@@ -615,6 +646,17 @@ describe('turn-scoped output modes', () => {
           status,
           turnComplete: true,
           label: 'Worker',
+          ...(kind === 'workflow'
+            ? {
+                channelWorkflowOrigin: {
+                  channelName: 'test-dingtalk',
+                  chatId: 'cidGroup==',
+                  senderId: 'owner-1',
+                  isGroup: true,
+                  userInitiated: true,
+                },
+              }
+            : {}),
         },
       );
       expect(create).toHaveBeenCalledExactlyOnceWith(
@@ -684,7 +726,7 @@ describe('turn-scoped output modes', () => {
     await new Promise((resolve) => setImmediate(resolve));
     channel.disconnect();
     await channel.waitForDisconnect();
-    expect(label).toHaveBeenCalledWith('session-1');
+    expect(label).toHaveBeenCalledWith('session-1', undefined);
     expect(create).toHaveBeenCalledExactlyOnceWith(
       expect.objectContaining({
         cardParamMap: expect.objectContaining({
@@ -2082,10 +2124,17 @@ function seedSessionTarget(
 ): void {
   (
     channel as unknown as {
-      router: { getTarget(sessionId: string): SessionTarget | undefined };
+      router: {
+        getTarget(sessionId: string): SessionTarget | undefined;
+        getSession(channelName: string): string | undefined;
+        isSessionLive(sessionId: string): boolean;
+      };
     }
   ).router = {
     getTarget: (id: string) => (id === sessionId ? target : undefined),
+    getSession: (channelName: string) =>
+      channelName === target.channelName ? sessionId : undefined,
+    isSessionLive: (id: string) => id === sessionId,
   };
 }
 

@@ -19,6 +19,16 @@ export interface InvocationContextV1 {
   readonly workflowModeWriteAllowed?: boolean;
 }
 
+export interface ChannelWorkflowOrigin {
+  readonly channelName: string;
+  readonly chatId: string;
+  readonly senderId: string;
+  readonly threadId?: string;
+  readonly isGroup?: boolean;
+  readonly messageRoute?: string;
+  readonly userInitiated?: true;
+}
+
 const invocationContextKeys = new Set([
   'version',
   'sessionId',
@@ -27,9 +37,10 @@ const invocationContextKeys = new Set([
   'workflowModeWriteAllowed',
 ]);
 
-const invocationContextStorage = new AsyncLocalStorage<
-  InvocationContextV1 | undefined
->();
+const invocationContextStorage = new AsyncLocalStorage<{
+  invocation?: InvocationContextV1;
+  channelWorkflowOrigin?: ChannelWorkflowOrigin;
+}>();
 
 function isNonBlankString(value: unknown): value is string {
   return typeof value === 'string' && value.trim().length > 0;
@@ -82,10 +93,18 @@ export function parseInvocationContext(
 export function runWithInvocationContext<T>(
   context: InvocationContextV1 | undefined,
   callback: () => T,
+  channelWorkflowOrigin?: ChannelWorkflowOrigin,
 ): T {
-  return invocationContextStorage.run(context, callback);
+  return invocationContextStorage.run(
+    { invocation: context, channelWorkflowOrigin },
+    callback,
+  );
 }
 
 export function getInvocationContext(): InvocationContextV1 | undefined {
-  return invocationContextStorage.getStore();
+  return invocationContextStorage.getStore()?.invocation;
+}
+
+export function getChannelWorkflowOrigin(): ChannelWorkflowOrigin | undefined {
+  return invocationContextStorage.getStore()?.channelWorkflowOrigin;
 }

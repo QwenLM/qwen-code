@@ -44,7 +44,11 @@ import {
   type ToolConfirmationPayload,
 } from '../tools/tools.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import { getInvocationContext } from '../utils/invocation-context.js';
+import {
+  getChannelWorkflowOrigin,
+  getInvocationContext,
+  type ChannelWorkflowOrigin,
+} from '../utils/invocation-context.js';
 import {
   promptIdContext,
   todoWorkChainContext,
@@ -325,6 +329,7 @@ export interface WorkflowTask extends TaskBase<WorkflowStatus> {
   sourceTurnId?: string;
   /** Live daemon client that originated the workflow's prompt, when known. */
   sourceOriginatorClientId?: string;
+  channelWorkflowOrigin?: ChannelWorkflowOrigin;
   sourceRef?: WorkflowSourceRef;
   workflowCalls?: WorkflowCallTrace[];
   workflowCallsTruncated?: boolean;
@@ -918,6 +923,7 @@ export class WorkflowRunRegistry {
     entry.isBackgrounded = registration.isBackgrounded ?? false;
     entry.todoWorkChainId ??= todoWorkChainContext.getStore();
     const invocation = getInvocationContext();
+    entry.channelWorkflowOrigin = getChannelWorkflowOrigin();
     entry.sourceTurnId ??= invocation?.promptId ?? promptIdContext.getStore();
     if (
       invocation?.originatorClientId &&

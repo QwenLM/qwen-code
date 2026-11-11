@@ -1057,11 +1057,16 @@ export class DingtalkChannel extends ChannelBase {
     this.outputMode = parseChannelOutputMode(name, config.outputMode, true);
     this.backgroundOutputCoordinator = new BackgroundOutputCoordinator({
       outputMode: this.outputMode,
-      getTarget: (sessionId) => this.router.getTarget(sessionId),
-      getSourceLabel: (sessionId) =>
-        this.getBackgroundResponseSourceLabel(sessionId),
-      resolveDelivery: (sessionId) =>
-        this.resolveBackgroundResponseDelivery(sessionId),
+      getTarget: (sessionId, workflowOrigin) =>
+        workflowOrigin
+          ? this.workflowTarget(sessionId, workflowOrigin)
+          : this.router.getTarget(sessionId),
+      getSourceLabel: (sessionId, workflowOrigin) =>
+        this.getBackgroundResponseSourceLabel(sessionId, workflowOrigin),
+      resolveDelivery: (sessionId, workflowOrigin) =>
+        workflowOrigin
+          ? this.resolveBackgroundResponseDelivery(sessionId, workflowOrigin)
+          : this.resolveBackgroundResponseDelivery(sessionId),
       createDelivery: (sessionId, target) =>
         this.createBackgroundOutputDelivery(sessionId, target),
       isRetryableError: (error) =>
@@ -2883,7 +2888,14 @@ export class DingtalkChannel extends ChannelBase {
     text: string,
     context?: BackgroundResponseContext,
   ): Promise<void> {
-    const target = this.router.getTarget(sessionId);
+    const workflowOrigin =
+      context?.kind === 'workflow' ? context.channelWorkflowOrigin : undefined;
+    if (context?.kind === 'workflow' && !workflowOrigin) return;
+    const getTarget = () =>
+      workflowOrigin
+        ? this.workflowTarget(sessionId, workflowOrigin)
+        : this.router.getTarget(sessionId);
+    const target = getTarget();
     if (!target || target.channelName !== this.name) {
       return super.dispatchBackgroundResponse(sessionId, text, context);
     }
@@ -2894,9 +2906,10 @@ export class DingtalkChannel extends ChannelBase {
       return;
     }
     if (!text.trim()) return;
-    const delivery = await this.resolveBackgroundResponseDelivery(sessionId);
-    if (!delivery || this.router.getTarget(sessionId) !== delivery.target)
-      return;
+    const delivery = workflowOrigin
+      ? await this.resolveBackgroundResponseDelivery(sessionId, workflowOrigin)
+      : await this.resolveBackgroundResponseDelivery(sessionId);
+    if (!delivery || getTarget() !== delivery.target) return;
     await this.deliverBackgroundResponseToTarget(
       sessionId,
       text,
@@ -3083,11 +3096,11 @@ export class DingtalkChannel extends ChannelBase {
   protected override async deliverBackgroundResponseToTarget(
     sessionId: string,
     text: string,
-    delivery: { target: SessionTarget; sourceLabel?: string },
+    delivery: BackgroundOutputTarget,
     prepared = false,
     result?: { status: string; partial?: boolean },
   ): Promise<void> {
-    const { target, sourceLabel } = delivery;
+    const { target, sourceLabel, workflowOrigin } = delivery;
     if (
       this.statusCardController &&
       this.supportsProactiveDeliveryTarget(target) &&
@@ -3113,6 +3126,19 @@ export class DingtalkChannel extends ChannelBase {
     }
     if (this.supportsProactiveSend() && this.supportsProactiveTarget(target)) {
       return super.deliverBackgroundResponseToTarget(sessionId, text, delivery);
+    }
+    if (workflowOrigin) {
+      if (!workflowOrigin.userInitiated) {
+        return this.pushProactive(target, text, sourceLabel);
+      }
+      return this.sendReply(
+        target.chatId,
+        text,
+        undefined,
+        sourceLabel,
+        prepared,
+        true,
+      );
     }
     await this.deliverBackgroundReply(
       target.chatId,

@@ -67,6 +67,7 @@ describe('workflow ancestor trust bridge dispatch', () => {
         },
         cancelForPrompt: () => undefined,
         cancelWorkflowApproval: () => undefined,
+        policy: 'first-responder',
       },
       0,
       Infinity,

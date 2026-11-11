@@ -14,6 +14,7 @@ import {
   CHANNEL_PROMPT_META_KEY,
   CHANNEL_OUTPUT_MODE_META_KEY,
   CHANNEL_TASK_OUTPUT_META_KEY,
+  CHANNEL_WORKFLOW_ORIGIN_META_KEY,
   ChannelPromptCancelledError,
   type ChannelPromptImage,
 } from './ChannelAgentBridge.js';
@@ -4817,6 +4818,13 @@ describe('DaemonChannelBridge', () => {
   it.each([undefined, 'per_task'] as const)(
     'consumes a task result only for %s',
     async (outputMode) => {
+      const workflowOrigin = {
+        channelName: 'telegram',
+        chatId: 'launch-chat',
+        senderId: 'launch-user',
+        threadId: 'launch-thread',
+        userInitiated: true as const,
+      };
       const events = new EventQueue();
       const session = createFakeSession(events);
       session.prompt.mockImplementation(async () => {
@@ -4849,9 +4857,10 @@ describe('DaemonChannelBridge', () => {
                   [CHANNEL_TASK_OUTPUT_META_KEY]: claimed,
                   backgroundTask: {
                     taskId: 'task-1',
-                    kind: 'agent',
+                    kind: 'workflow',
                     status: 'completed',
                     turnComplete: true,
+                    [CHANNEL_WORKFLOW_ORIGIN_META_KEY]: workflowOrigin,
                   },
                 },
               },
@@ -4870,18 +4879,23 @@ describe('DaemonChannelBridge', () => {
       await bridge.start();
       await bridge.newSession('/repo');
       await expect(
-        bridge.prompt('session-1', 'question', { outputMode }),
+        bridge.prompt('session-1', 'question', { outputMode, workflowOrigin }),
       ).resolves.toBe(outputMode ? 'Task result' : 'Main result');
       expect(
         session.prompt.mock.calls[0]?.[0]?._meta?.[
           CHANNEL_OUTPUT_MODE_META_KEY
         ],
       ).toBe(outputMode);
+      expect(
+        session.prompt.mock.calls[0]?.[0]?._meta?.[
+          CHANNEL_WORKFLOW_ORIGIN_META_KEY
+        ],
+      ).toEqual(workflowOrigin);
       expect(backgroundResponse).toHaveBeenCalledOnce();
       expect(backgroundResponse).toHaveBeenCalledWith(
         'session-1',
         'Unrelated result',
-        expect.any(Object),
+        expect.objectContaining({ channelWorkflowOrigin: workflowOrigin }),
       );
       events.close();
       bridge.stop();

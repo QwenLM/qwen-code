@@ -92,6 +92,7 @@ import {
   CHANNEL_PROMPT_META_KEY,
   CHANNEL_TASK_OUTPUT_META_KEY,
   CHANNEL_TASK_RESULT_META_KEY,
+  CHANNEL_WORKFLOW_ORIGIN_META_KEY,
 } from '@qwen-code/channel-base';
 import { SERVE_CONTROL_EXT_METHODS } from '@qwen-code/acp-bridge/status';
 import { DAEMON_INPUT_ANNOTATIONS_META_KEY } from '@qwen-code/acp-bridge/bridgeTypes';
@@ -2990,7 +2991,15 @@ describe('Session', () => {
     at: 1,
   });
 
-  it('bridges workflow approvals through ACP permission requests', async () => {
+  const channelWorkflowOrigin = {
+    channelName: 'telegram',
+    chatId: 'launch-chat',
+    threadId: 'launch-thread',
+    senderId: 'launch-user',
+    userInitiated: true as const,
+  };
+
+  it('preserves the launch target on detached Channel workflow approvals', async () => {
     mockToolRegistry.getTool.mockReturnValue({
       displayName: 'Shell',
       kind: core.Kind.Execute,
@@ -3006,7 +3015,11 @@ describe('Session', () => {
     expect(callback).toBeTypeOf('function');
 
     await callback?.(
-      { runId: 'wf_1' } as core.WorkflowTask,
+      {
+        runId: 'wf_1',
+        isBackgrounded: true,
+        channelWorkflowOrigin,
+      } as core.WorkflowTask,
       {
         approvalId: 'wfap_1',
         subagentId: 'agent-1',
@@ -3046,6 +3059,8 @@ describe('Session', () => {
           _meta: expect.objectContaining({
             toolName: 'run_shell_command',
             workflowApproval: true,
+            backgroundWorkflowApproval: true,
+            [CHANNEL_WORKFLOW_ORIGIN_META_KEY]: channelWorkflowOrigin,
           }),
         }),
       }),
@@ -17922,6 +17937,7 @@ describe('Session', () => {
         taskId: string,
         chainId = workChainId,
         status: 'completed' | 'cancelled' = 'completed',
+        sourceTurnId = workChainId,
       ) => {
         const registry = {
           agent: mockBackgroundTaskRegistry,
@@ -17943,6 +17959,7 @@ describe('Session', () => {
           [idField]: taskId,
           status,
           todoWorkChainId: chainId,
+          ...(kind === 'workflow' ? { sourceTurnId } : {}),
         });
       };
       const expectMainReleased = async () => {
@@ -18040,6 +18057,12 @@ describe('Session', () => {
             workflow: mockWorkflowRunRegistry.list,
           }[kind];
           list.mockReturnValue([task]);
+          if (kind === 'workflow') {
+            mockWorkflowRunRegistry.get.mockReturnValue({
+              ...task,
+              channelWorkflowOrigin,
+            });
+          }
           mockChat.sendMessageStream = vi
             .fn()
             .mockResolvedValueOnce(textStream('Main result'))
@@ -18079,6 +18102,51 @@ describe('Session', () => {
           });
         },
       );
+
+      it('does not collect a workflow from an earlier prompt on the same work chain', async () => {
+        const task = {
+          id: 'earlier-workflow',
+          description: 'Background workflow',
+          todoWorkChainId: workChainId,
+          status: 'running',
+          isBackgrounded: true,
+          channelWorkflowOrigin,
+        };
+        mockWorkflowRunRegistry.list.mockReturnValue([task]);
+        mockWorkflowRunRegistry.get.mockReturnValue(task);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(textStream('Main result'))
+          .mockResolvedValueOnce(textStream('Earlier workflow result'));
+        const resultPromise = session.prompt(taskPrompt);
+        await expectMainReleased();
+
+        task.status = 'completed';
+        emitNotification(
+          'workflow',
+          task.id,
+          workChainId,
+          'completed',
+          'earlier-turn',
+        );
+
+        const result = await resultPromise;
+        expect(result.stopReason).toBe('end_turn');
+        expect(result._meta?.[CHANNEL_TASK_RESULT_META_KEY]).toBeUndefined();
+        expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+          sessionId: 'test-session-id',
+          update: expect.objectContaining({
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'Earlier workflow result' },
+            _meta: expect.objectContaining({
+              backgroundTask: expect.objectContaining({
+                sourceTurnId: 'earlier-turn',
+                [CHANNEL_WORKFLOW_ORIGIN_META_KEY]: channelWorkflowOrigin,
+              }),
+            }),
+          }),
+        });
+      });
 
       it('waits for the last related notification after its queue and registry drain', async () => {
         const task = {
@@ -58184,6 +58252,7 @@ describe('Session', () => {
           request: vi.fn(),
           cancelForPrompt: vi.fn(),
           cancelWorkflowApproval: vi.fn(),
+          policy: 'first-responder',
         },
         0,
         Infinity,

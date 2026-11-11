@@ -166,6 +166,7 @@ import {
   type ActiveWorkSnapshotV1,
   CHANNEL_PROMPT_META_KEY,
   CHANNEL_OUTPUT_MODE_META_KEY,
+  CHANNEL_WORKFLOW_ORIGIN_META_KEY,
   DAEMON_CHANNEL_DELIVERY_META_KEY,
   DAEMON_ATTACHMENT_REFERENCES_META_KEY,
   DAEMON_INPUT_ANNOTATIONS_META_KEY,
@@ -4783,6 +4784,10 @@ export function createSessionControlPlane(
     if (count === undefined) return;
     if (count <= 1) {
       entry.clientIds.delete(clientId);
+      permissionMediator.cancelDesignatedWorkflowApprovalsForClient(
+        entry.sessionId,
+        clientId,
+      );
       entry.attachments.cancelClientUploads(clientId);
       for (const call of entry.mcpAppCalls?.values() ?? []) {
         if (call.clientId === clientId) call.cancel();
@@ -11858,6 +11863,7 @@ export function createSessionControlPlane(
                   // `channelPrompt` context flag below.
                   delete meta[CHANNEL_PROMPT_META_KEY];
                   delete meta[CHANNEL_OUTPUT_MODE_META_KEY];
+                  delete meta[CHANNEL_WORKFLOW_ORIGIN_META_KEY];
                   delete meta['qwen.goalProposalApproval'];
                   if (
                     originatorClientId !== undefined &&
@@ -11902,6 +11908,10 @@ export function createSessionControlPlane(
                     meta[CHANNEL_PROMPT_META_KEY] = true;
                     if (channelOutputMode === 'per_task') {
                       meta[CHANNEL_OUTPUT_MODE_META_KEY] = channelOutputMode;
+                    }
+                    if (context.channelWorkflowOrigin) {
+                      meta[CHANNEL_WORKFLOW_ORIGIN_META_KEY] =
+                        context.channelWorkflowOrigin;
                     }
                   }
                   meta[INVOCATION_CONTEXT_META_KEY] =

@@ -45,11 +45,16 @@ function fixture(overrides: Partial<BackgroundOutputCoordinatorOptions> = {}) {
   });
   const options = {
     outputMode: 'per_turn' as const,
-    getTarget: vi.fn(() => target),
+    getTarget: vi.fn<BackgroundOutputCoordinatorOptions['getTarget']>(
+      (_sessionId, workflowOrigin) => workflowOrigin ?? target,
+    ),
     getSourceLabel: vi.fn(() => 'Named session'),
-    resolveDelivery: vi.fn(async () => ({
-      target,
+    resolveDelivery: vi.fn<
+      BackgroundOutputCoordinatorOptions['resolveDelivery']
+    >(async (_sessionId, workflowOrigin) => ({
+      target: workflowOrigin ?? target,
       sourceLabel: 'Named session',
+      ...(workflowOrigin ? { workflowOrigin } : {}),
     })),
     createDelivery: vi.fn(() => send),
     isRetryableError: vi.fn(() => true),
@@ -112,23 +117,32 @@ describe('BackgroundOutputCoordinator', () => {
     'selects the latest non-empty %s output and preserves attribution',
     async (kind) => {
       const { coordinator, packets, options, target } = fixture();
+      const origin = {
+        ...target,
+        chatId: 'launch-chat',
+        userInitiated: true as const,
+      };
+      const launchContext = {
+        kind,
+        ...(kind === 'workflow' ? { channelWorkflowOrigin: origin } : {}),
+      };
       await coordinator.dispatch(
         'session-1',
         'Earlier output',
-        context({ kind }),
+        context(launchContext),
       );
       await coordinator.dispatch(
         'session-1',
         'Latest output',
-        context({ kind, label: 'npm test' }),
+        context({ ...launchContext, label: 'npm test' }),
       );
-      await coordinator.dispatch('session-1', '  ', context({ kind }));
+      await coordinator.dispatch('session-1', '  ', context(launchContext));
       expect(packets).toEqual([]);
 
       await coordinator.dispatch(
         'session-1',
         '',
-        context({ kind, status: 'completed', turnComplete: true }),
+        context({ ...launchContext, status: 'completed', turnComplete: true }),
       );
 
       expect(packets).toEqual([
@@ -142,12 +156,29 @@ describe('BackgroundOutputCoordinator', () => {
         },
       ]);
       expect(options.createDelivery).toHaveBeenCalledWith('session-1', {
-        target,
+        target: kind === 'workflow' ? origin : target,
+        ...(kind === 'workflow' ? { workflowOrigin: origin } : {}),
         sourceLabel: 'Named session',
       });
       expectIdle(coordinator);
     },
   );
+
+  it('discards a buffered workflow when its launch target is retired', async () => {
+    const { coordinator, packets, options, target } = fixture();
+    await coordinator.dispatch(
+      'session-1',
+      'Buffered workflow result',
+      context({
+        kind: 'workflow',
+        channelWorkflowOrigin: { ...target, chatId: 'launch-chat' },
+      }),
+    );
+    options.getTarget.mockReturnValue(undefined);
+    await coordinator.drain('session-1');
+    expect(packets).toEqual([]);
+    expectIdle(coordinator);
+  });
 
   it('aggregates unclaimed per-task background output until its turn completes', async () => {
     const { coordinator, packets, options } = fixture({

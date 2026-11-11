@@ -341,6 +341,9 @@ import {
   CHANNEL_TASK_RESULT_META_KEY,
   CHANNEL_TASK_RESULT_PARTIAL_META_KEY,
   CHANNEL_TURN_NOTICE_META_KEY,
+  CHANNEL_WORKFLOW_ORIGIN_META_KEY,
+  parseChannelWorkflowOrigin,
+  type ChannelWorkflowOrigin,
 } from '@qwen-code/channel-base';
 import { QWEN_CODE_SERVE_ENV } from '../../config/acp-channel-fallback.js';
 import { ENV_ACP_REPEATED_TOOL_FAILURE_GUARD } from '../../config/shared-env-keys.js';
@@ -2104,6 +2107,7 @@ export interface BackgroundNotificationQueueItem {
 }
 
 interface QueuedBackgroundNotification extends BackgroundNotificationQueueItem {
+  channelWorkflowOrigin?: ChannelWorkflowOrigin;
   continuesTodoStopGuardWorkChain: boolean;
   persisted?: true;
   turn?: BackgroundNotificationTurn;
@@ -2168,6 +2172,7 @@ interface PromptChannelDelivery {
 
 interface ChannelTaskResponseCapture {
   daemonPromptId?: string;
+  sourceTurnId?: string;
   workChainId?: string;
   finalText?: string;
   finalResponseTurnId?: string;
@@ -3704,7 +3709,12 @@ export class Session implements SessionContext {
   }
 
   async #requestWorkflowApproval(
-    { runId, isBackgrounded, sourceOriginatorClientId }: WorkflowTask,
+    {
+      runId,
+      isBackgrounded,
+      sourceOriginatorClientId,
+      channelWorkflowOrigin,
+    }: WorkflowTask,
     approval: WorkflowApproval,
     rawArgs: Record<string, unknown>,
     approvalSignal: AbortSignal,
@@ -3763,6 +3773,9 @@ export class Session implements SessionContext {
           toolName: approval.name,
           workflowApproval: true,
           ...(isBackgrounded ? { backgroundWorkflowApproval: true } : {}),
+          ...(isBackgrounded && channelWorkflowOrigin
+            ? { [CHANNEL_WORKFLOW_ORIGIN_META_KEY]: channelWorkflowOrigin }
+            : {}),
         },
       },
     };
@@ -6910,23 +6923,31 @@ export class Session implements SessionContext {
     // subprocesses (and hooks) read the CURRENT session's ID instead of
     // the process-global env slot, which in daemon mode only ever holds
     // the first session created in this process.
+    const channelWorkflowOrigin = channelTurn
+      ? parseChannelWorkflowOrigin(
+          params._meta?.[CHANNEL_WORKFLOW_ORIGIN_META_KEY],
+        )
+      : undefined;
     const execute = () =>
-      runWithInvocationContext(invocationContext, () =>
-        sessionIdContext.run(sessionId, async () => {
-          try {
-            return await this.#executePromptInner(
-              params,
-              pendingSend,
-              responseCapture,
-              modelPrompt,
-              rejectOnLoopDetected,
-              goalTurn,
-              channelTurn,
-            );
-          } finally {
-            await this.#keepUnsentEarlyMidTurnInput(pendingSend.signal);
-          }
-        }),
+      runWithInvocationContext(
+        invocationContext,
+        () =>
+          sessionIdContext.run(sessionId, async () => {
+            try {
+              return await this.#executePromptInner(
+                params,
+                pendingSend,
+                responseCapture,
+                modelPrompt,
+                rejectOnLoopDetected,
+                goalTurn,
+                channelTurn,
+              );
+            } finally {
+              await this.#keepUnsentEarlyMidTurnInput(pendingSend.signal);
+            }
+          }),
+        channelWorkflowOrigin,
       );
     return goalTurn
       ? goalTurnContext.run(goalTurn.permit, execute)
@@ -7694,6 +7715,8 @@ export class Session implements SessionContext {
             );
             this.activeTodoWorkChainPromptId = promptId;
             if (responseCapture.channelTask) {
+              responseCapture.channelTask.sourceTurnId =
+                getInvocationContext()?.promptId ?? promptId;
               responseCapture.channelTask.workChainId =
                 this.config.getActiveTodoWorkChainOwner(promptId);
             }
@@ -13549,6 +13572,7 @@ export class Session implements SessionContext {
         sourceTurnId: meta.sourceTurnId,
         status: meta.status,
         kind: 'workflow',
+        channelWorkflowOrigin: entry?.channelWorkflowOrigin,
         continuesTodoStopGuardWorkChain:
           !entry || !this.todoStopGuardBackgroundBaseline.workflows.has(entry),
         todoWorkChainId: meta.todoWorkChainId,
@@ -14789,7 +14813,7 @@ export class Session implements SessionContext {
   }
 
   async #emitBackgroundNotificationResponse(
-    item: BackgroundNotificationQueueItem,
+    item: QueuedBackgroundNotification,
     text: string,
     signal: AbortSignal,
     turnId: string,
@@ -14798,6 +14822,16 @@ export class Session implements SessionContext {
   ): Promise<void> {
     let channelTaskOutput = false;
     for (const capture of this.channelTaskCaptures) {
+      // Later prompts may inherit the same work chain from an unfinished plan.
+      // Only the launch prompt can collect a workflow's Channel response.
+      if (
+        item.kind === 'workflow' &&
+        (!item.channelWorkflowOrigin ||
+          !item.sourceTurnId ||
+          capture.sourceTurnId !== item.sourceTurnId)
+      ) {
+        continue;
+      }
       if (
         capture.workChainId &&
         capture.workChainId === item.todoWorkChainId &&
@@ -14832,6 +14866,9 @@ export class Session implements SessionContext {
           sourceTurnId: item.sourceTurnId,
           status: item.status,
           kind: item.kind,
+          ...(item.channelWorkflowOrigin
+            ? { [CHANNEL_WORKFLOW_ORIGIN_META_KEY]: item.channelWorkflowOrigin }
+            : {}),
           toolUseId: item.toolUseId,
           ...(label ? { label } : {}),
           turnId,

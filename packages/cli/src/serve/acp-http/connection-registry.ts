@@ -159,6 +159,8 @@ export interface PendingClientRequest {
   /** Maps the JSON-RPC id we issued back to the bridge's permission id. */
   bridgeRequestId: string;
   kind: 'permission';
+  /** This connection holds a delivery copy of a workflow-owned request. */
+  backgroundWorkflowApproval?: { originatorClientId?: string };
 }
 
 export interface SessionOwnershipIdentity {
@@ -336,15 +338,16 @@ export class AcpConnection {
   }
 
   /**
-   * True when a client request (a permission vote) is still outstanding for
-   * this session. Such a prompt cannot make progress without the client: once
-   * the entrance is revoked the vote can never arrive, so it must not be
-   * preserved across disconnect — it has to go through teardown, which
-   * abandons the pending request and releases the connection.
+   * True when an outstanding permission vote can depend on this client.
+   * A workflow approval relayed from another client does not hold this
+   * connection's prompt open after its stream detaches.
    */
   hasPendingClientRequest(sessionId: string): boolean {
+    const clientId = this.sessions.get(sessionId)?.clientId;
     for (const req of this.pending.values()) {
-      if (req.sessionId === sessionId) return true;
+      if (req.sessionId !== sessionId) continue;
+      const originator = req.backgroundWorkflowApproval?.originatorClientId;
+      if (originator === undefined || originator === clientId) return true;
     }
     return false;
   }
@@ -1503,7 +1506,8 @@ export class AcpConnection {
   }
 
   /**
-   * Cancel + drop any pending agent→client requests for a closing session.
+   * Drop this binding's pending agent→client requests for a closing session.
+   * Prompt-scoped requests also get cancelled on the bridge.
    * This is the LAST-RESORT recovery path: `resolveClientResponse` retains a
    * pending entry on double-failure (vote AND cancel both threw) precisely so
    * this teardown sweep can retry the cancel. We always drop the entry here

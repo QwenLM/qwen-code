@@ -11,6 +11,7 @@ import {
   CHANNEL_OUTPUT_MODE_META_KEY,
   CHANNEL_TASK_OUTPUT_META_KEY,
   CHANNEL_TURN_NOTICE_META_KEY,
+  CHANNEL_WORKFLOW_ORIGIN_META_KEY,
   ChannelPromptCancelledError,
   parseBackgroundResponseContext,
   resolvePromptImages,
@@ -827,6 +828,9 @@ export class DaemonChannelBridge
             prompt,
             _meta: {
               [CHANNEL_PROMPT_META_KEY]: true,
+              ...(options?.workflowOrigin
+                ? { [CHANNEL_WORKFLOW_ORIGIN_META_KEY]: options.workflowOrigin }
+                : {}),
               ...(options?.outputMode === 'per_task'
                 ? { [CHANNEL_OUTPUT_MODE_META_KEY]: 'per_task' }
                 : {}),

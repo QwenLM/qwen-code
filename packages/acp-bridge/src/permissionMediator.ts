@@ -667,6 +667,20 @@ export class MultiClientPermissionMediator implements PermissionMediator {
     );
   }
 
+  cancelDesignatedWorkflowApprovalsForClient(
+    sessionId: string,
+    clientId: string,
+  ): void {
+    if (this.policy !== 'designated') return;
+    this.cancelPending(
+      sessionId,
+      (pending) =>
+        pending.workflowApprovalToolCallId !== undefined &&
+        pending.originatorClientId === clientId,
+      'agent_cancelled',
+    );
+  }
+
   private cancelPending(
     sessionId: string,
     matches: (pending: MediatorPending) => boolean,

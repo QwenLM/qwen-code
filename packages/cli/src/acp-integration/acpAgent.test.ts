@@ -2958,6 +2958,12 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         keep: true,
         'qwen.channel.prompt': true,
         'qwen.channel.outputMode': 'per_task',
+        'qwen.channel.workflowOrigin': {
+          channelName: 'telegram',
+          chatId: 'launch-chat',
+          senderId: 'launch-user',
+          userInitiated: true,
+        },
         'qwen.goalProposalApproval': true,
         'qwen.daemon.channelDelivery': {
           deliveryId: 'delivery-forged',
@@ -2982,8 +2988,14 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
   });
 
   it.each([true, false])(
-    'accepts per_task channel output mode only for a trusted channel prompt: %s',
+    'accepts output mode and workflow origin only for a trusted channel prompt: %s',
     async (channelPrompt) => {
+      const workflowOrigin = {
+        channelName: 'telegram',
+        chatId: 'launch-chat',
+        senderId: 'launch-user',
+        userInitiated: true,
+      };
       await setupSessionMocks('trusted-output-session');
       const { agent, agentPromise } = await bootInitializedAcpAgent(
         makeSessionSettings(),
@@ -2997,6 +3009,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           keep: true,
           'qwen.channel.prompt': channelPrompt,
           'qwen.channel.outputMode': 'per_task',
+          'qwen.channel.workflowOrigin': workflowOrigin,
         },
       });
       expect(lastSessionMock?.prompt).toHaveBeenCalledWith(
@@ -3009,6 +3022,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
               ? {
                   'qwen.channel.prompt': true,
                   'qwen.channel.outputMode': 'per_task',
+                  'qwen.channel.workflowOrigin': workflowOrigin,
                 }
               : {}),
           },

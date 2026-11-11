@@ -25,6 +25,7 @@ import {
   CHANNEL_TASK_RESULT_META_KEY,
   CHANNEL_TASK_RESULT_PARTIAL_META_KEY,
   CHANNEL_TASK_OUTPUT_META_KEY,
+  CHANNEL_WORKFLOW_ORIGIN_META_KEY,
   ChannelPromptCancelledError,
   type ChannelLoopToolHandler,
   type ChannelPromptImage,
@@ -989,6 +990,13 @@ describe('AcpBridge', () => {
   it.each([undefined, 'per_task'] as const)(
     'consumes a task result only for %s',
     async (outputMode) => {
+      const workflowOrigin = {
+        channelName: 'telegram',
+        chatId: 'launch-chat',
+        senderId: 'launch-user',
+        threadId: 'launch-thread',
+        userInitiated: true as const,
+      };
       const bridge = new AcpBridge({
         cliEntryPath: '/tmp/qwen',
         cwd: '/tmp',
@@ -1013,9 +1021,10 @@ describe('AcpBridge', () => {
                 [CHANNEL_TASK_OUTPUT_META_KEY]: claimed,
                 backgroundTask: {
                   taskId: 'task-1',
-                  kind: 'agent',
+                  kind: 'workflow',
                   status: 'completed',
                   turnComplete: true,
+                  [CHANNEL_WORKFLOW_ORIGIN_META_KEY]: workflowOrigin,
                 },
               },
             },
@@ -1025,12 +1034,13 @@ describe('AcpBridge', () => {
       });
       bridge.connection = { extMethod: vi.fn(), prompt };
       await expect(
-        bridge.prompt('s-1', 'question', { outputMode }),
+        bridge.prompt('s-1', 'question', { outputMode, workflowOrigin }),
       ).resolves.toBe(outputMode ? 'Task result' : 'Main result');
       expect(prompt).toHaveBeenCalledWith(
         expect.objectContaining({
           _meta: {
             [CHANNEL_PROMPT_META_KEY]: true,
+            [CHANNEL_WORKFLOW_ORIGIN_META_KEY]: workflowOrigin,
             ...(outputMode
               ? { [CHANNEL_OUTPUT_MODE_META_KEY]: outputMode }
               : {}),
@@ -1041,7 +1051,7 @@ describe('AcpBridge', () => {
       expect(backgroundResponse).toHaveBeenCalledWith(
         's-1',
         'Unrelated result',
-        expect.any(Object),
+        expect.objectContaining({ channelWorkflowOrigin: workflowOrigin }),
       );
     },
   );

@@ -688,7 +688,7 @@ function sliceLineRange(
  *
  * Only the fields declared on this narrowed interface cross the boundary:
  * `sessionId`, `events`,
- * `pendingPermissionIds`, `pendingInteractions`, `activePromptId`,
+ * `clientIds`, `pendingPermissionIds`, `pendingInteractions`, `activePromptId`,
  * `activePromptOriginatorClientId`. New fields
  * BridgeClient grows must be added here too (and the factory's
  * `SessionEntry` is required to provide them — TS enforces the
@@ -711,6 +711,7 @@ export interface BridgeClientSessionEntry {
   deferredArtifactInputCount: number;
   attachments: SessionAttachmentStore;
   recordingDegraded: boolean;
+  clientIds: ReadonlyMap<string, number>;
   pendingPermissionIds: Set<string>;
   /** Pollable pending human interactions, keyed by permission request id. */
   pendingInteractions: Map<string, BridgePendingInteraction>;
@@ -883,7 +884,7 @@ export class BridgeClient implements Client {
      */
     private readonly mediator: Pick<
       PermissionMediator,
-      'request' | 'cancelForPrompt' | 'cancelWorkflowApproval'
+      'policy' | 'request' | 'cancelForPrompt' | 'cancelWorkflowApproval'
     >,
     /**
      * Bd1yh: wall-clock ms before `requestPermission` resolves as cancelled
@@ -1084,6 +1085,15 @@ export class BridgeClient implements Client {
       backgroundWorkflowApproval &&
       typeof workflowOriginatorClientId === 'string'
     ) {
+      if (
+        this.mediator.policy === 'designated' &&
+        !entry.clientIds.has(workflowOriginatorClientId)
+      ) {
+        return resolutionToAcpResponse({
+          kind: 'cancelled',
+          reason: 'agent_cancelled',
+        });
+      }
       permissionOriginator = workflowOriginatorClientId;
     }
     // Reserve model permission capacity within the existing session cap.

@@ -245,6 +245,7 @@ import {
 } from '../services/visionBridge/image-part-utils.js';
 import { bridgeToolResultImages } from '../services/visionBridge/tool-result-vision-bridge.js';
 import {
+  getChannelWorkflowOrigin,
   getInvocationContext,
   runWithInvocationContext,
 } from '../utils/invocation-context.js';
@@ -4801,6 +4802,7 @@ export class CoreToolScheduler {
 
             const originalOnConfirm = confirmationDetails.onConfirm;
             const invocationContext = getInvocationContext();
+            const channelWorkflowOrigin = getChannelWorkflowOrigin();
             let planShellResponseClaimed = false;
             const wrappedConfirmationDetails: ToolCallConfirmationDetails = {
               ...confirmationDetails,
@@ -4814,45 +4816,51 @@ export class CoreToolScheduler {
                 outcome: ToolConfirmationOutcome,
                 payload?: ToolConfirmationPayload,
               ) =>
-                runWithInvocationContext(invocationContext, async () => {
-                  await runInRequestGoalContext(reqInfo, async () => {
-                    if (planShellDecision.classification !== 'not-applicable') {
-                      if (planShellResponseClaimed) return;
-                      planShellResponseClaimed = true;
-                      const currentCall = this.toolCalls.find(
-                        (call) =>
-                          call.request.callId === reqInfo.callId &&
-                          call.status === 'awaiting_approval',
-                      ) as WaitingToolCall | undefined;
-                      if (!currentCall) return;
-                      const approval = await validatePlanModeShellApproval({
-                        config: this.config,
-                        decision: planShellDecision,
-                        requestArgs: currentCall.request.args,
-                        invocationParams: currentCall.invocation
-                          .params as Record<string, unknown>,
-                        signal,
-                        outcome,
-                        payload,
-                      });
+                runWithInvocationContext(
+                  invocationContext,
+                  async () => {
+                    await runInRequestGoalContext(reqInfo, async () => {
+                      if (
+                        planShellDecision.classification !== 'not-applicable'
+                      ) {
+                        if (planShellResponseClaimed) return;
+                        planShellResponseClaimed = true;
+                        const currentCall = this.toolCalls.find(
+                          (call) =>
+                            call.request.callId === reqInfo.callId &&
+                            call.status === 'awaiting_approval',
+                        ) as WaitingToolCall | undefined;
+                        if (!currentCall) return;
+                        const approval = await validatePlanModeShellApproval({
+                          config: this.config,
+                          decision: planShellDecision,
+                          requestArgs: currentCall.request.args,
+                          invocationParams: currentCall.invocation
+                            .params as Record<string, unknown>,
+                          signal,
+                          outcome,
+                          payload,
+                        });
+                        await this.handleConfirmationResponse(
+                          reqInfo.callId,
+                          originalOnConfirm,
+                          approval.outcome,
+                          signal,
+                          approval.payload,
+                        );
+                        return;
+                      }
                       await this.handleConfirmationResponse(
                         reqInfo.callId,
                         originalOnConfirm,
-                        approval.outcome,
+                        outcome,
                         signal,
-                        approval.payload,
+                        payload,
                       );
-                      return;
-                    }
-                    await this.handleConfirmationResponse(
-                      reqInfo.callId,
-                      originalOnConfirm,
-                      outcome,
-                      signal,
-                      payload,
-                    );
-                  });
-                }),
+                    });
+                  },
+                  channelWorkflowOrigin,
+                ),
             };
             this.setStatusInternal(
               reqInfo.callId,
