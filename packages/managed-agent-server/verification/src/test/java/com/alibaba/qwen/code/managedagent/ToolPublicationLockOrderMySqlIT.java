@@ -219,6 +219,16 @@ class ToolPublicationLockOrderMySqlIT {
             var jdbc = journal.jdbc;
             ToolPublicationObjectStore objects = new ToolPublicationObjectStore() {
                 @Override
+                public InputStream openRange(String key, long offset, long length, Runnable guard) {
+                    guard.run();
+                    try (InputStream full = open(key)) {
+                        byte[] bytes = full.readAllBytes();
+                        return new java.io.ByteArrayInputStream(bytes, (int) offset, (int) length);
+                    } catch (java.io.IOException error) {
+                        throw new IllegalStateException(error);
+                    }
+                }
+                @Override
                 public void putIfAbsent(String key, byte[] bytes) {
                     throw new AssertionError("Inline fixture expected");
                 }
