@@ -54,6 +54,44 @@ describe('Hosted committed-work exclusions', () => {
 });
 
 describe('Hosted snapshot turn identities', () => {
+  it('excludes a cancelled group from raw history without record filtering', () => {
+    const raw: ChatRecord[] = (
+      [
+        ['cancelled-user', 'cancelled', 'user', 'cancelled instruction'],
+        ['cancelled-answer', 'cancelled', 'assistant', 'cancelled answer'],
+        ['completed-user', 'completed', 'user', 'completed instruction'],
+        ['completed-answer', 'completed', 'assistant', 'completed answer'],
+      ] as const
+    ).map(([uuid, daemonPromptId, type, text]) => ({
+      uuid,
+      daemonPromptId,
+      type,
+      parentUuid: null,
+      sessionId: 'session',
+      timestamp: '2026-11-11T00:00:00.000Z',
+      cwd: '/workspace',
+      version: 'hosted-harness/1',
+      message: {
+        role: type === 'assistant' ? 'model' : 'user',
+        parts: [{ text }],
+      },
+    }));
+    const original = structuredClone(raw);
+    const excluded = new Set(['cancelled']);
+    const history = filterHostedTurnHistory(
+      buildSessionHistoryFromConversation({
+        messages: normalizeHostedTurnRecords(raw, excluded),
+      }).apiHistory,
+      excluded,
+    );
+
+    expect(history.map((entry) => entry.parts?.[0].text)).toEqual([
+      'completed instruction',
+      'completed answer',
+    ]);
+    expect(raw).toEqual(original);
+  });
+
   it.each(
     [false, true].flatMap((canonical) =>
       [false, true].map((wake) => ({ canonical, wake })),
