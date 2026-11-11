@@ -105,9 +105,12 @@ final class WorkspaceCsiApplicationInventory {
                     "operation_key:CHAR,scope_key:CHAR,tenant_id:VARBINARY,workspace_id:VARBINARY,actor_key:CHAR,"
                     + "operation_id:VARCHAR,extension_id:VARBINARY,operation_kind:VARCHAR,revision:BIGINT,"
                     + "package_digest:CHAR,request_digest:CHAR,state:VARCHAR,gmt_create:BIGINT"),
+            declaration("ma_extension_source_import", "import_key",
+                    "import_key:CHAR,tenant_id:VARBINARY,workspace_id:VARBINARY,actor_key:CHAR,operation_id:VARBINARY,"
+                    + "request_digest:CHAR,request_json:LONGTEXT,gmt_create:BIGINT"),
             declaration("ma_extension_package", "package_key",
                     "package_key:CHAR,scope_key:CHAR,tenant_id:VARBINARY,workspace_id:VARBINARY,extension_id:VARBINARY,"
-                    + "package_revision:BIGINT,package_digest:CHAR,manifest_json:LONGTEXT,byte_length:BIGINT,state:VARCHAR,gmt_create:BIGINT"),
+                    + "package_revision:BIGINT,package_digest:CHAR,manifest_json:LONGTEXT,source_json:LONGTEXT,byte_length:BIGINT,state:VARCHAR,gmt_create:BIGINT"),
             declaration("ma_extension_settings", "settings_key",
                     "settings_key:CHAR,scope_key:CHAR,tenant_id:VARBINARY,workspace_id:VARBINARY,extension_id:VARBINARY,"
                     + "settings_revision:BIGINT,encryption_key_id:VARBINARY,encrypted_values:LONGTEXT,configured_keys_json:LONGTEXT,gmt_create:BIGINT"),
@@ -2075,7 +2078,7 @@ final class WorkspaceCsiApplicationInventory {
                 case "ma_message" -> query(table, "tenant_id=T&session_id=sessions", "body_resource_key=resourceKeys");
                 case "ma_memory_store", "ma_memory_entry" -> query(table, "tenant_id=T&memory_store_id=memoryStores");
                 case "ma_agent_definition" -> query(table, "tenant_id=T&agent_id=agent&revision=agentRevision");
-                case "ma_workspace_access", "ma_channel_instance", "ma_extension_operation", "ma_extension_package",
+                case "ma_workspace_access", "ma_channel_instance", "ma_extension_operation", "ma_extension_package", "ma_extension_source_import",
                         "ma_extension_settings" -> query(table, "tenant_id=T&workspace_id=W");
                 case "ma_session_worktree" -> query(table, "tenant_id=T&session_id=sessions",
                         "tenant_id=T&workspace_id=W", "physical_key=F");
@@ -2137,7 +2140,7 @@ final class WorkspaceCsiApplicationInventory {
             }
             return switch (table) {
                 case "ma_tenant_guard", "ma_agent_definition" -> true;
-                case "ma_workspace_access", "ma_channel_instance", "ma_extension_operation", "ma_extension_package",
+                case "ma_workspace_access", "ma_channel_instance", "ma_extension_operation", "ma_extension_package", "ma_extension_source_import",
                         "ma_extension_settings" -> workspace.equals(row.text("workspace_id"));
                 case "ma_workspace" -> "ROOT".equals(row.text("workspace_kind"))
                         && row.cell("parent_session_id").isNull() && row.cell("parent_workspace_id").isNull();
@@ -3006,7 +3009,7 @@ final class WorkspaceCsiApplicationInventory {
                 }
                 case "ma_tenant_guard" -> expect(table, row, tenant.equals(row.text("tenant_id"))
                         && has("BT", row.text("tenant_key")) && oneOf(row.text("guard_domain"), "runtime_placement", "output_publication"));
-                case "ma_workspace_access", "ma_channel_instance", "ma_extension_operation", "ma_extension_package",
+                case "ma_workspace_access", "ma_channel_instance", "ma_extension_operation", "ma_extension_package", "ma_extension_source_import",
                         "ma_extension_settings" -> expect(table, row, tenant.equals(row.text("tenant_id")) && workspace.equals(row.text("workspace_id")));
                 case "ma_agent_definition" -> {
                     Row parent = originalRow("ma_session");

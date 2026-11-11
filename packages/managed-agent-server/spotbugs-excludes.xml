@@ -5,4 +5,18 @@
   - false positive: add a <Match> block here and justify it in the PR;
   - anything else: fix the code — never silence a real warning here.
 -->
-<FindBugsFilter/>
+<FindBugsFilter>
+  <!--
+    False positive: ToolPublicationContract.require(records != null, ...) is a
+    fail-closed null assertion that throws ContractViolationException before the
+    new String(records, ...) dereference. SpotBugs cannot see through the helper,
+    and ContractViolationException's constructor is private (only require() may
+    throw it), so an explicit null-throw is not possible without widening the
+    contracts API. The null path is unreachable at the dereference.
+  -->
+  <Match>
+    <Class name="com.alibaba.qwen.code.managedagent.persistence.ToolPublicationAdmissionStore"/>
+    <Method name="replay"/>
+    <Bug pattern="NP_NULL_PARAM_DEREF"/>
+  </Match>
+</FindBugsFilter>

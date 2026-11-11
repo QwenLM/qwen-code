@@ -698,7 +698,8 @@ class HostedWorkspaceToolTurnIT {
                 + " session_state, execution_storage_key, is_rewind_pending FROM ma_runtime_session"
                 + " WHERE tenant_id = ? AND harness_session_id = ? AND runtime_session_id = ?",
                 tenant, session.get("sessionId"), report.path("promptId").asText());
-        boolean released = storeFaults ? fault.equals("turn-reply") : List.of("prepare", "start", "release").contains(fault);
+        boolean released = storeFaults ? fault.equals("turn-reply")
+                : List.of("prepare", "start", "release", "release-before-forward").contains(fault);
         // #13800: a turn that recovery-blocks no longer parks its mount
         // forever — its handback clears membership once nothing is
         // unproven (every execution SETTLED, no control in flight) and the
@@ -714,7 +715,7 @@ class HostedWorkspaceToolTurnIT {
             assertThat(member.get("binding_id")).isEqualTo(executions.getFirst().get("binding_id"));
             assertThat(member.get("runtime_generation")).isEqualTo(executions.getFirst().get("runtime_generation"));
         }
-        assertThat(member.get("session_state")).isEqualTo(released ? "RELEASED" : "READY");
+        assertThat(member.get("session_state")).as(fault + " owner state").isEqualTo(released ? "RELEASED" : "READY");
         if (storeFaults) {
             assertStoreJournal(jdbc, tenant, session, report);
         }

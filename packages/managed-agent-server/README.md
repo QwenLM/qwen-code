@@ -1758,6 +1758,28 @@ Runtime project Skill snapshots and personal HTTP MCP OAuth are separate depende
 
 After first-stage self-service is available, enable `qwen.managed-agent.extensions.runtime-skill-import-enabled` only with the Hosted `managed-runtime-skill-import/1` capability. Use **Import from current Workspace** to discover `.qwen/skills` and `.agents/skills` in the Session's original ready Runtime. Snapshot and archive reads retain the observed owner/generation and filesystem boundary; a changed source or owner fails without fallback or provisioning. Review and explicitly apply the immutable snapshot through the existing installation chain. Re-import publishes a new revision and does not watch or automatically update existing Sessions. See the [English design](../../docs/design/2026-11-08-managed-runtime-skill-import.md) and [Chinese design](../../docs/design/2026-11-08-managed-runtime-skill-import.zh-CN.md). Personal OAuth is a separate delivery and is not required.
 
+## Application-owned extension sources and archive storage
+
+Applications can supply Spring Beans implementing `ManagedExtensionSource` and `ExtensionArchiveStorage` from `com.alibaba:qwen-managed-agent-contracts`. Source IDs must be stable and unique; duplicate IDs fail startup. The default directory backend backs off when custom storage is present, so an embedding application using OSS does not need `extensions.artifact-directory`.
+
+The source adapter implements `id()`, `resolve(Context, Reference)` and `open(Context, Resolved)`. Resolve must authorize the trusted tenant/Actor against the requested exact business revision on every call. Return a canonical resource ID and a private archive handle; never return partial materials or substitute a current revision for a missing historical revision. `open` returns the original ZIP/tar.gz stream; Managed closes it, computes `sourceDigest` from actual bytes and compiles through Hosted `managed-package-preparation/1`. Providers enforce finite database/network timeouts within the context deadline. The resolved handle is never a public response or persisted credential.
+
+`ExtensionArchiveStorage` implements `validateConfiguration()`, `putIfAbsent(Key, byteLength, InputStream)` and `open(Key)`. Bind it to a private deployment-specific prefix separate from raw business packages. Include the tenant, Workspace and digest in object identity. Writes must be atomic, immutable and readable on success; identical writes may be replayed. A timeout has an unknown outcome, so adapters must not blindly retry writes. Return streams rather than signed URLs or local paths. Managed stages and verifies packages with bounded temporary files, and retains their leases through actual HTTP streaming or asynchronous Runtime upload completion. Existing execution packages remain retained; no automatic GC is added.
+
+After enabling existing extension/self-service permissions and preparation capability, a trusted business service can import its selected resource:
+
+```http
+POST /v1/agents/workspaces/workspace-1/extensions/source-imports
+Idempotency-Key: selected-skill-17
+Content-Type: application/json
+
+{"reference":{"providerId":"business","kind":"skill","resourceId":"skill-1","revision":"17"},"target":{"platform":"linux","arch":"any"}}
+```
+
+The signed request uses the existing Managed tenant/Actor authentication. `extension` covers expert-suite archives. Dynamic versions and business default/forced selection rules are resolved in the business entry point. The response contains the original `operation`, `source` and `pin` after publication; publication does not install it. Supply the returned Pin to Session `extensionPins` or explicit apply. Query an import by `GET .../source-imports/{operationId}` or by `GET .../source-imports` with the original `Idempotency-Key` header. Intents are saved before source I/O: a pending intent has `operationId`, `state`, `reference`, and no Pin until publication. The Java SDK exposes `importSource`, `sourceImportReceipt` and `lookupSourceImport`.
+
+New selection, details, independent archive access, inspection and settings recheck business access. Revocation blocks these paths. Already admitted Session recovery, original Session-creation replay, admitted apply replay/continuation and import receipt queries retain original operation semantics and existing Workspace/Actor checks; they do not resolve the business source again. Missing providers or invalid provenance fail new access without becoming ordinary uploads. `source_json` and source-import intents belong to the Managed schema and CSI inventory. Business asset tables and original objects are not copied or migrated. See the [English design](../../docs/design/2026-11-10-managed-extension-sources.md) and [Chinese design](../../docs/design/2026-11-10-managed-extension-sources.zh-CN.md).
+
 ## Linux extension process acceptance
 
 `HostedExtensionsIT` is collected by the existing `hosted-harness-mysql` profile. It uses the public AgentDefinition and Session APIs, real MySQL, the packaged Harness and durable native worker, a stdio MCP process, and command Hooks in a delegated cgroup v2 subtree. It verifies static Skill bytes, extension revision pinning across Harness replacement, Hook allow/deny, cancellation of a Hook and its descendant, safe continuation, and physical close. A separate MCP fault case writes and fsyncs an effect before disconnecting, then verifies that a replacement Harness refuses recovery without replaying the effect or reporting successful close.

@@ -20,6 +20,7 @@ public final class ManagedSchemaContract {
                     "ma_session_record",
                     "ma_agent_definition",
                     "ma_extension_package",
+                    "ma_extension_source_import",
                     "ma_extension_settings",
                     "ma_extension_operation",
                     "ma_journal_pack",

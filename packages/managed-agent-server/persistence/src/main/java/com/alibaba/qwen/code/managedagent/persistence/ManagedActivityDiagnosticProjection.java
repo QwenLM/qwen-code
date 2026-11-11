@@ -428,7 +428,9 @@ final class ManagedActivityDiagnosticProjection {
                         transaction.revision(), (String) source.get("record_digest"),
                         transaction.bytes());
             }
-            require(raw != null, "Diagnostic recovery journal is missing.");
+            if (raw == null) {
+                throw rejected("Diagnostic recovery journal is missing.");
+            }
             require(raw.length == transaction.bytes() && DigestUtils.sha256Hex(raw).equals(source.get("record_digest")),
                     "Diagnostic recovery journal digest conflicts.");
             boolean complete = true;

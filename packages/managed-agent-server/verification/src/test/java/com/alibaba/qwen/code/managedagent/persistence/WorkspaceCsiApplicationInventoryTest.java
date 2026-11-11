@@ -790,7 +790,7 @@ class WorkspaceCsiApplicationInventoryTest {
     void inventoriesEveryDeclaredTableAndPreservesRealPrivateCreationFacts() throws Exception {
         var snapshot = inspect();
         assertThat(snapshot.tables()).hasSize(com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.TABLES.size());
-        assertThat(snapshot.tables().stream().map(table -> table.columns().size()).mapToInt(Integer::intValue).sum()).isEqualTo(884);
+        assertThat(snapshot.tables().stream().map(table -> table.columns().size()).mapToInt(Integer::intValue).sum()).isEqualTo(893);
         assertThat(snapshot.blockers()).noneMatch(blocker -> blocker.code().equals("schema_drift")
                 || blocker.code().equals("query_unavailable"));
         for (String table : new String[] {"ma_session", "ma_public_event", "ma_event_stream", "ma_storage", "ma_operation",
@@ -1400,6 +1400,26 @@ class WorkspaceCsiApplicationInventoryTest {
                 target.rollback();
             }
         }
+    }
+
+    @Test
+    void sourcePackagesAndImportIntentsSurviveCanonicalInventoryRoundTrip() throws Exception {
+        String origin = "{\"reference\":{\"providerId\":\"business\",\"kind\":\"skill\",\"resourceId\":\"skill_1\",\"revision\":\"7\"},"
+                + "\"sourceDigest\":\"" + "a".repeat(64) + "\",\"requestDigest\":\"" + "b".repeat(64) + "\"}";
+        jdbc.update("INSERT INTO ma_extension_package (package_key, scope_key, tenant_id, workspace_id, extension_id,"
+                        + "package_revision, package_digest, manifest_json, source_json, byte_length, state, gmt_create)"
+                        + " VALUES (?, ?, 'tenant', 'workspace', 'ext_source', 1, ?, '{}', ?, 12, 'PUBLISHED', 1)",
+                "c".repeat(64), "d".repeat(64), "e".repeat(64), origin);
+        jdbc.update("INSERT INTO ma_extension_source_import (import_key, tenant_id, workspace_id, actor_key, operation_id,"
+                        + "request_digest, request_json, gmt_create) VALUES (?, 'tenant', 'workspace', ?, ?, ?, '{}', 1)",
+                "f".repeat(64), "a".repeat(64), UUID.randomUUID().toString(), "b".repeat(64));
+        var observed = inspect();
+        var restored = WorkspaceCsiApplicationInventory.restoreCanonical(WorkspaceCsiApplicationInventory.expectedImage(observed.tables()).bytes());
+        assertThat(restored.table("ma_extension_package").rows()).hasSize(1);
+        assertThat(restored.table("ma_extension_package").rows().getFirst().text("source_json")).isEqualTo(origin);
+        assertThat(restored.table("ma_extension_source_import").rows()).hasSize(1);
+        assertThat(restored.table("ma_extension_source_import").rows().getFirst().bytes())
+                .isEqualTo(observed.table("ma_extension_source_import").rows().getFirst().bytes());
     }
 
     @Test

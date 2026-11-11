@@ -889,6 +889,20 @@ CREATE TABLE ma_workspace_access (
     CONSTRAINT pk_ma_workspace_access_id PRIMARY KEY (id)
 ) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT='Per-actor Workspace grants with READER, OPERATOR, or OWNER access.';
 
+CREATE TABLE ma_extension_source_import (
+    import_key CHAR(64) NOT NULL COMMENT 'Scoped actor source import receipt identity.',
+    tenant_id VARBINARY(512) NOT NULL COMMENT 'Tenant identity used for isolation.',
+    workspace_id VARBINARY(512) NOT NULL COMMENT 'Workspace identity within the tenant.',
+    actor_key CHAR(64) NOT NULL COMMENT 'Hashed tenant and Actor identity.',
+    operation_id VARBINARY(128) NOT NULL COMMENT 'Actor-scoped import operation identity.',
+    request_digest CHAR(64) NOT NULL COMMENT 'Source reference and target request fingerprint.',
+    request_json LONGTEXT NOT NULL COMMENT 'Original exact source reference and target, without locations or credentials.',
+    gmt_create BIGINT UNSIGNED NOT NULL COMMENT 'Receipt creation time in Unix epoch milliseconds.',
+    CONSTRAINT uk_ma_extension_source_import_business_key UNIQUE (import_key),
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Database-generated identity of this row.',
+    CONSTRAINT pk_ma_extension_source_import_id PRIMARY KEY (id)
+) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT='Source import intents retained before external I/O, paired with publication operations when prepared.';
+
 CREATE TABLE ma_extension_package (
     package_key CHAR(64) NOT NULL COMMENT 'Hashed identity of the scoped extension package revision.',
     scope_key CHAR(64) NOT NULL COMMENT 'Hashed tenant and Workspace identity.',
@@ -898,6 +912,7 @@ CREATE TABLE ma_extension_package (
     package_revision BIGINT UNSIGNED NOT NULL COMMENT 'Immutable extension package revision.',
     package_digest CHAR(64) NOT NULL COMMENT 'Digest of the extension package content.',
     manifest_json LONGTEXT NOT NULL COMMENT 'Validated extension package manifest.',
+    source_json LONGTEXT NULL COMMENT 'External source identity, exact business revision and verified source digest, null for direct uploads.',
     byte_length BIGINT UNSIGNED NOT NULL COMMENT 'Total published package size in bytes.',
     state VARCHAR(16) NOT NULL COMMENT 'Package publication state: PREPARING or PUBLISHED.',
     gmt_create BIGINT UNSIGNED NOT NULL COMMENT 'Record creation time in Unix epoch milliseconds.',
@@ -1499,6 +1514,7 @@ CREATE INDEX idx_ma_output_capture_seal_manifest_resource_key ON ma_output_captu
 CREATE INDEX idx_ma_event_stream_artifact_refs_resource_key ON ma_event_stream (artifact_refs_resource_key);
 
 CREATE INDEX idx_ma_extension_package_workspace ON ma_extension_package (tenant_id, workspace_id);
+CREATE INDEX idx_ma_extension_source_import_workspace ON ma_extension_source_import (tenant_id, workspace_id);
 
 CREATE INDEX idx_ma_extension_settings_workspace ON ma_extension_settings (tenant_id, workspace_id);
 
