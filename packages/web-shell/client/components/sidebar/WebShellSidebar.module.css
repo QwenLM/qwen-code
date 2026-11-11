@@ -27,6 +27,85 @@
   transition: none;
 }
 
+.selectionHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+  height: 32px;
+  padding: 0 8px;
+  font-weight: 600;
+}
+
+.selectionRow {
+  width: 100%;
+  text-align: left;
+}
+
+.selectionRow:hover,
+.sessionRow.selectionRowChecked {
+  background: var(--sidebar-accent);
+}
+
+.selectionRow:focus-visible {
+  outline: 2px solid var(--sidebar-ring);
+  outline-offset: -2px;
+}
+
+.selectionRow:disabled,
+.selectionActions button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.selectionCircle {
+  position: absolute;
+  top: 50%;
+  left: 4px;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  border: 1.5px solid var(--sidebar-border);
+  border-radius: 50%;
+}
+
+.selectionRowChecked .selectionCircle {
+  background: var(--primary);
+  border-color: var(--primary);
+  color: var(--primary-foreground);
+}
+
+.selectionActions {
+  display: flex;
+  flex-shrink: 0;
+  padding: 6px 0;
+  border-top: 1px solid var(--sidebar-border);
+}
+
+.selectionActions button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.selectionActions button + button {
+  border-left: 1px solid var(--sidebar-border);
+}
+
 .collapsed {
   width: 56px;
   min-width: 56px;
@@ -113,9 +192,11 @@
 
 .newTaskNav {
   display: flex;
+  align-items: center;
+  gap: 4px;
   width: 100%;
   flex: 0 0 auto;
-  padding: 12px 0 2px;
+  padding: 7px 0;
   border-bottom: 1px solid transparent;
 }
 
@@ -226,6 +307,39 @@
   min-width: 0;
 }
 
+.topRowActions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+  min-width: 0;
+}
+
+.topRowActionsSearching {
+  flex: 1 1 auto;
+}
+
+.topRowSearchRow {
+  flex: 0 0 auto;
+  padding: 0 4px 12px;
+}
+
+.searchToggle {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  padding: 8px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.searchToggle:hover,
+.searchToggle:focus-visible {
+  background: var(--accent);
+}
+
 .brandLogo {
   flex: 0 0 28px;
   width: 28px;
@@ -322,6 +436,14 @@
 
 .workspaceSessionBody {
   margin-bottom: 12px;
+}
+
+.workspaceDropBefore {
+  box-shadow: 0 -2px var(--primary);
+}
+
+.workspaceDropAfter {
+  box-shadow: 0 2px var(--primary);
 }
 
 .liveWorkspaceHeader {
@@ -509,6 +631,13 @@ button.livePendingSession:hover {
 .projectSearch input {
   width: 100%;
   padding-left: 32px;
+}
+
+/* After `.projectSearch`: the top row width is the search field's budget, so
+   it must be able to shrink instead of pushing the icon buttons out. */
+.topRowSearchField {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 .addWorkspaceButton {
@@ -2292,6 +2421,10 @@ button.livePendingSession:hover {
 
 .railLayout .homeColumn[hidden] {
   display: none;
+}
+
+.railLayout .homeColumn:has(> .selectionActions) {
+  padding-bottom: 0;
 }
 
 .railLayout .homeFooter {

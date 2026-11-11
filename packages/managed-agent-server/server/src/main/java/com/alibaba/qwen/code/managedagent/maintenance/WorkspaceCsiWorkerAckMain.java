@@ -1,8 +1,9 @@
 package com.alibaba.qwen.code.managedagent.maintenance;
 
 import com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObjectStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedExtensionRecordStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationAdmissionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationDataStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationStore;
@@ -50,12 +51,12 @@ public final class WorkspaceCsiWorkerAckMain {
                 required("QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY")));
         var runtimeSessions = new JdbcRuntimeSessionRepository(source);
         var executions = new JdbcToolExecutionRepository(source);
-        var sessionStore = new ManagedSessionStore(jdbc,
-                new com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecordStore(jdbc), null,
+        var sessionStore = new JdbcManagedSessionStore(jdbc,
+                new JdbcManagedExtensionRecordStore(jdbc), null,
                 new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules(),
                 com.alibaba.qwen.code.managedagent.contracts.persistence.StorageReadPolicy.inProcess(),
                 null, null, null, null, null,
-                com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy.unbound(), null);
+                com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy.unbound(), null, null);
         var grants = new ToolPublicationStore(jdbc, manager, sessionStore, executions, bindings,
                 new ToolPublicationStore.Capacity(16L * 1024 * 1024, 64L * 1024 * 1024,
                         256L * 1024 * 1024, 64));
@@ -106,6 +107,11 @@ public final class WorkspaceCsiWorkerAckMain {
 
             @Override
             public InputStream open(String key) {
+                throw new IllegalStateException("External publication objects require OSS configuration");
+            }
+
+            @Override
+            public InputStream openRange(String key, long offset, long length, Runnable guard) {
                 throw new IllegalStateException("External publication objects require OSS configuration");
             }
 

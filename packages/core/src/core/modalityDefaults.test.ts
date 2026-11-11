@@ -135,6 +135,9 @@ describe('defaultModalities', () => {
       ['qwen-vl-max', ONLY_IMAGE_VIDEO],
       ['qwen3-vl-plus', has({ image: true, video: true })],
       ['qwen2.5-vl-32b-instruct', ONLY_IMAGE_VIDEO],
+      ['Ollama qwen3-vl tags', ONLY_IMAGE_VIDEO, 'qwen3-vl:8b'],
+      ['Ollama qwen2.5vl tags', ONLY_IMAGE_VIDEO, 'qwen2.5vl:7b'],
+      ['qwen2.5-vl without a size', ONLY_IMAGE_VIDEO, 'qwen2.5-vl'],
       [
         'quantized Qwen2.5-VL builds',
         ONLY_IMAGE_VIDEO,
@@ -148,9 +151,13 @@ describe('defaultModalities', () => {
       ['qwen3.8-flash', IMAGE_VIDEO],
       ['qwen3.8-plus', IMAGE_VIDEO],
       ['qwen3.6-35b variants', ONLY_IMAGE_VIDEO, 'qwen3.6-35b-a3b-nvfp4'],
-      // The bundled catalog adds video; its pdf stays endpoint-gated by the
-      // lookupModelCatalog correction.
+      // PDF stays endpoint-gated by the lookupModelCatalog correction.
       ['qwen3.8-max', IMAGE_VIDEO],
+      [
+        'qwen3.8-max-preview (provider-prefixed)',
+        IMAGE_VIDEO,
+        'bailian-token-plan/qwen3.8-max-preview',
+      ],
     ]);
 
     casesFor('returns text-only for', [
@@ -159,14 +166,7 @@ describe('defaultModalities', () => {
       ['qwen-turbo', TEXT_ONLY],
     ]);
 
-    casesFor('returns image for', [
-      ['qvq-72b-preview', IMAGE],
-      [
-        'qwen3.8-max-preview (provider-prefixed)',
-        IMAGE,
-        'bailian-token-plan/qwen3.8-max-preview',
-      ],
-    ]);
+    casesFor('returns image for', [['qvq-72b-preview', IMAGE]]);
 
     it('returns full multimodal for qwen omni models', () => {
       for (const model of [

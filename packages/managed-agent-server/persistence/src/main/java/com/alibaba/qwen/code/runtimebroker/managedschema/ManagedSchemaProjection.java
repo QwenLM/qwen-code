@@ -2,6 +2,13 @@ package com.alibaba.qwen.code.runtimebroker.managedschema;
 
 /** Explicit columns for Managed SQL readers; independent of live database metadata. */
 public enum ManagedSchemaProjection {
+    SIDE_QUERY(
+            "query_key, query_id, tenant_id, session_id, session_scope_key, actor_id, actor_scope_key, "
+                    + "kind, trigger_kind, question, state, active_slot, source_json, private_history_json, "
+                    + "model_config_digest, processing_version, input_resource_id, input_digest, is_input_ready, "
+                    + "claim_instance_id, claim_boot_id, claim_generation, claim_token_hash, read_lease_id, "
+                    + "read_deadline_at, deadline_at, result_revision, answer_text, outcome, usage_json, error_code, "
+                    + "gmt_create, gmt_modified"),
     ARTIFACT(
             "artifact_id, result_id, scope_key, descriptor_json, publication_id, binding_json, "
                     + "manifest_ref_json, stream_id, creation_sequence"),
@@ -24,6 +31,10 @@ public enum ManagedSchemaProjection {
                     + "replay_floor_sequence, covered_sequence, wake_covered_sequence, projection_version, "
                     + "artifact_refs_resource_key, "
                     + "output_ranges_json, is_projection_pending, gmt_modified"),
+    JOURNAL_PACK(
+            "pack_id, session_scope_key, tenant_id, workspace_id, session_id, from_revision, "
+                    + "through_revision, manifest_resource_key, object_key, state, byte_length, sha256, "
+                    + "gmt_create, gmt_modified"),
     MESSAGE(
             "tenant_id, session_id, item_id, turn_id, item_type, item_role, item_status, "
                     + "attributes_json, first_sequence, last_sequence, gmt_create, gmt_modified, revision, "
@@ -38,7 +49,7 @@ public enum ManagedSchemaProjection {
                     + "payload_version, request_json, result_json, state, phase, admission_stage, "
                     + "delivery_state, session_status_before, receipt_id, claim_owner, claim_generation, "
                     + "claim_until, available_at, attempt_count, budget_exempt_attempt, deadline, "
-                    + "recovery_deadline, execution_mode, verification_request_json, is_verification_ready, "
+                    + "recovery_deadline, verification_request_json, is_verification_ready, "
                     + "verification_next_at, publication_id, publication_command_id, slot_key, "
                     + "execution_key, item_id, policy_version, failure_status, failure_code, gmt_create, "
                     + "gmt_modified, completed_at, progress_format, progress_version, progress_stage, "
@@ -119,9 +130,10 @@ public enum ManagedSchemaProjection {
                     + "public_session_id, deleted_at, workspace_id, workspace_generation, "
                     + "workspace_storage_id, cwd_relative, context_config_ref, context_revision, "
                     + "workspace_config_ref, workspace_policy_ref, agent_revision, approval_mode, "
-                    + "tool_profile, creator_actor_key, owner_actor_key, parent_session_id, "
+                    + "tool_profile, creator_actor_key, owner_actor_key, memory_store_id, owner_only, parent_session_id, "
                     + "root_session_id, parent_child_run_id, child_depth, agent_definition_digest, "
                     + "session_kind, tenant_key, session_key, session_scope_key, title_revision, "
+                    + "preview, preview_revision, "
                     + "retirement_operation_id, retirement_generation, retired_at, is_recovery_protected, "
                     + "is_resource_gc_completed, runtime_request_key, is_csi_guard, model_id, model_revision, "
                     + "model_config_digest, model_config_key_id, model_config_ciphertext, "
@@ -131,7 +143,7 @@ public enum ManagedSchemaProjection {
             "tenant_id, workspace_id, session_id, storage_version, state, writer_generation, "
                     + "writer_id, writer_lease_until, lease_token_hash, journal_revision, "
                     + "committed_sequence, last_commit_digest, activation_epoch, "
-                    + "latest_checkpoint_resource_id, compacted_through_revision, recovery_status, "
+                    + "latest_checkpoint_resource_id, compacted_through_revision, packed_through_revision, recovery_status, "
                     + "recovery_detail_code, gmt_create, gmt_modified, activation_id, "
                     + "activation_phase, activation_event_epoch, activation_expires_at, "
                     + "activation_head_revision, tenant_key, harness_key, harness_session_id, head_kind, "

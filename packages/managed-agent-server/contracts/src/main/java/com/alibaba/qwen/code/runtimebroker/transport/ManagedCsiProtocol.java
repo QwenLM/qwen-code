@@ -6,21 +6,22 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionSeed;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
+import com.alibaba.qwen.code.runtimebroker.protocol.KubernetesNames;
 import com.alibaba.qwen.code.runtimebroker.protocol.ManagedContextProtocol;
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.core.JsonToken;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.commons.codec.digest.DigestUtils;
 
 import java.io.IOException;
 import java.math.BigInteger;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.text.Normalizer;
 import java.util.HexFormat;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
@@ -70,7 +71,7 @@ public final class ManagedCsiProtocol {
                 text.codePoints().forEach(point -> require(point > 31 && (point < 127 || point > 159)
                         && (point < 0xd800 || point > 0xdfff)));
             }
-            com.alibaba.qwen.code.runtimebroker.protocol.KubernetesNames.dnsLabel(string(storage, "namespace"));
+            KubernetesNames.dnsLabel(string(storage, "namespace"));
             require("diskplugin.csi.alibabacloud.com".equals(storage.get("driver")));
             require(string(storage, "diskSerial").matches("[A-Za-z0-9._:-]{1,128}"));
             for (String field : Set.of("registrationRevision", "reservationRevision")) {
@@ -144,7 +145,7 @@ public final class ManagedCsiProtocol {
             require(pod.keySet().equals(Set.of("uid", "namespace", "nodeName"))
                     && string(pod, "uid").matches("[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}")
                     && namespace.equals(pod.get("namespace")));
-            com.alibaba.qwen.code.runtimebroker.protocol.KubernetesNames.dnsSubdomain(string(pod, "nodeName"));
+            KubernetesNames.dnsSubdomain(string(pod, "nodeName"));
         } catch (RuntimeException failure) {
             throw new IllegalArgumentException("Managed CSI Pod identity is unavailable.");
         }
@@ -235,7 +236,7 @@ public final class ManagedCsiProtocol {
             validateCapture(request, boot, expectedCapture);
             require(actual.keySet().equals(ACK_RESPONSE_KEYS) && "ACKNOWLEDGED".equals(actual.get("state"))
                     && BrokerValues.sameJsonMap(map(actual.get("captureIdentity")), expectedCapture));
-            var echoed = new java.util.LinkedHashMap<>(actual);
+            var echoed = new LinkedHashMap<>(actual);
             echoed.remove("state");
             echoed.remove("captureIdentity");
             require(BrokerValues.sameJsonMap(echoed, request));
@@ -294,22 +295,18 @@ public final class ManagedCsiProtocol {
     }
 
     public static String physicalKey(String backend, String driver, String handle) {
-        try {
-            var digest = MessageDigest.getInstance("SHA-256");
-            for (String field : new String[] {"qwen-csi-physical/1", backend, driver, handle}) {
-                byte[] bytes = field.getBytes(StandardCharsets.UTF_8);
-                digest.update(ByteBuffer.allocate(4).putInt(bytes.length).array());
-                digest.update(bytes);
-            }
-            return HexFormat.of().formatHex(digest.digest());
-        } catch (NoSuchAlgorithmException impossible) {
-            throw new IllegalStateException("SHA-256 is unavailable", impossible);
+        var digest = DigestUtils.getSha256Digest();
+        for (String field : new String[] {"qwen-csi-physical/1", backend, driver, handle}) {
+            byte[] bytes = field.getBytes(StandardCharsets.UTF_8);
+            digest.update(ByteBuffer.allocate(4).putInt(bytes.length).array());
+            digest.update(bytes);
         }
+        return HexFormat.of().formatHex(digest.digest());
     }
 
     private static Map<String, Object> map(Object value) {
         require(value instanceof Map<?, ?>);
-        var result = new java.util.LinkedHashMap<String, Object>();
+        var result = new LinkedHashMap<String, Object>();
         ((Map<?, ?>) value).forEach((key, field) -> {
             require(key instanceof String);
             result.put((String) key, field);

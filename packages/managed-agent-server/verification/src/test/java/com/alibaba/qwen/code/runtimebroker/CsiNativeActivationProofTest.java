@@ -43,6 +43,26 @@ class CsiNativeActivationProofTest {
             jsonFixture.path("sessionKey").path("sessionId").textValue());
 
     @Test
+    void canonicalBase64HonoursItsDeclaredLimitInsteadOfTheShortTextCap() {
+        byte[] payload = new byte[4000];
+        java.util.Arrays.fill(payload, (byte) 'x');
+        String encoded = Base64.getEncoder().encodeToString(payload);
+        assertTrue(encoded.length() > 4096, "the payload must encode past the short-text cap");
+        ObjectNode value = JSON.createObjectNode().put("bytesBase64", encoded);
+
+        assertEquals(payload.length, CsiNativeActivationProof.canonicalBase64(value, "bytesBase64", 16 * 1024).length);
+    }
+
+    @Test
+    void canonicalBase64StillRefusesAPayloadPastItsDeclaredLimit() {
+        byte[] payload = new byte[17 * 1024];
+        ObjectNode value = JSON.createObjectNode().put("bytesBase64", Base64.getEncoder().encodeToString(payload));
+
+        assertThrows(RuntimeBrokerException.class,
+                () -> CsiNativeActivationProof.canonicalBase64(value, "bytesBase64", 16 * 1024));
+    }
+
+    @Test
     void compactLeaseMetadataPreservesIdentityAndRejectsPartialOrRegressedEvidence() {
         var genesis = genesis();
         var install = activation(transaction(1, genesis.lastRecordUuid()), request(1), genesis, null, resources);

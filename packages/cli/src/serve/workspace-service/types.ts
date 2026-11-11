@@ -43,12 +43,14 @@ import type { WorkspaceProvidersStatusProvider } from '../workspace-providers-st
 import type { WorkspaceSkillsStatusProvider } from '../workspace-skills-status.js';
 import type { ServeModelProviderRuntimeSyncResult } from '../types.js';
 import type {
+  WorkspaceSkillInstallOptions,
   WorkspaceSkillInstallRequest,
   WorkspaceSkillMutationResult,
   WorkspaceSkillScope,
 } from '../workspace-skill-management.js';
 
 export type {
+  WorkspaceSkillInstallOptions,
   WorkspaceSkillInstallRequest,
   WorkspaceSkillMutationResult,
   WorkspaceSkillScope,
@@ -271,7 +273,7 @@ export interface DaemonWorkspaceService {
   installWorkspaceSkill(
     ctx: WorkspaceRequestContext,
     request: WorkspaceSkillInstallRequest,
-    opts?: { refreshRuntime?: boolean },
+    opts?: WorkspaceSkillInstallOptions & { refreshRuntime?: boolean },
   ): Promise<WorkspaceSkillMutationResult>;
 
   /** Delete a managed project- or user-level Skill. */
@@ -363,6 +365,10 @@ export interface WorkspaceSettingsWrite {
   key: string;
   value: unknown;
 }
+
+export type WorkspaceSettingsWrites =
+  | WorkspaceSettingsWrite[]
+  | ((settings: LoadedSettings) => WorkspaceSettingsWrite[]);
 
 export class WorkspaceSettingsPartialPersistError extends Error {
   readonly committedWrites: WorkspaceSettingsWrite[];
@@ -506,6 +512,14 @@ export interface PersistDisabledSkillsBatchResult {
   outcomes: PersistDisabledSkillsBatchOutcome[];
   settingsChanges: Array<{
     key: 'skills.disabled' | 'skills.enabled';
+    value: string[] | undefined;
+  }>;
+}
+
+export interface PersistUserSkillsActivationResult {
+  outcomes: PersistDisabledSkillsBatchOutcome[];
+  settingsChanges: Array<{
+    key: 'skills.disabled' | 'skills.defaultDisabled' | 'skills.enabled';
     value: string[] | undefined;
   }>;
 }

@@ -1,23 +1,29 @@
 package com.alibaba.qwen.code.managedagent.adapters.workspace;
 
 import com.alibaba.qwen.code.managedagent.contracts.workspace.ChildWorkspaceException;
+import com.alibaba.qwen.code.managedagent.contracts.workspace.ChildWorktreeOperations;
 import org.apache.commons.lang3.StringUtils;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.charset.CharacterCodingException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.DirectoryNotEmptyException;
+import java.nio.file.FileVisitOption;
 import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
+import java.nio.file.InvalidPathException;
 import java.nio.file.LinkOption;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.SimpleFileVisitor;
 import java.nio.file.StandardCopyOption;
+import java.nio.file.StandardOpenOption;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.EnumSet;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -26,6 +32,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.LockSupport;
 import java.util.function.BooleanSupplier;
 import java.util.function.Supplier;
 import java.util.regex.Matcher;
@@ -42,7 +49,7 @@ import java.util.regex.Pattern;
  * repository's own config was read as data and found free of keys that
  * name a program (docs/design/2026-10-09-managed-child-workspace.md).
  */
-public final class ChildWorktreeGit implements com.alibaba.qwen.code.managedagent.contracts.workspace.ChildWorktreeGit {
+public final class ChildWorktreeGit implements ChildWorktreeOperations {
     /** The reserved directory below the storage root that holds every child Workspace. */
 
     private static final int MIN_MAJOR = 2;
@@ -303,7 +310,7 @@ public final class ChildWorktreeGit implements com.alibaba.qwen.code.managedagen
                 }
                 requireSafeMetadata(commonDir);
                 return;
-            } catch (IOException | java.nio.file.InvalidPathException error) {
+            } catch (IOException | InvalidPathException error) {
                 throw ChildWorkspaceException.layout("The repository's Git metadata is unreadable");
             }
         }
@@ -346,7 +353,7 @@ public final class ChildWorktreeGit implements com.alibaba.qwen.code.managedagen
                     || !directory.toRealPath().equals(directory)) {
                 throw ChildWorkspaceException.layout("The repository's " + name + " directory is not a real directory");
             }
-            Files.walkFileTree(directory, java.util.EnumSet.noneOf(java.nio.file.FileVisitOption.class), depth,
+            Files.walkFileTree(directory, EnumSet.noneOf(FileVisitOption.class), depth,
                     new SimpleFileVisitor<>() {
                         @Override
                         public FileVisitResult visitFile(Path file, BasicFileAttributes attributes) {
@@ -466,7 +473,7 @@ public final class ChildWorktreeGit implements com.alibaba.qwen.code.managedagen
         try {
             Files.deleteIfExists(partial);
             // CREATE_NEW never follows a link planted at the name.
-            Files.write(partial, refs, java.nio.file.StandardOpenOption.CREATE_NEW);
+            Files.write(partial, refs, StandardOpenOption.CREATE_NEW);
             Files.move(partial, record, StandardCopyOption.ATOMIC_MOVE);
         } catch (IOException error) {
             throw new ChildWorkspaceException(ChildWorkspaceException.GIT, true,
@@ -617,7 +624,7 @@ public final class ChildWorktreeGit implements com.alibaba.qwen.code.managedagen
     private static boolean occupied(Path top, String path, Map<String, Change> changes) {
         try {
             return occupiedOnDisk(top, path, changes);
-        } catch (java.nio.file.InvalidPathException error) {
+        } catch (InvalidPathException error) {
             // A name this JVM cannot spell: report it rather than guess.
             return true;
         }
@@ -660,7 +667,7 @@ public final class ChildWorktreeGit implements com.alibaba.qwen.code.managedagen
                 throw ChildWorkspaceException.diverged("A submodule pointer cannot be written at " + change.getKey());
             }
         }
-        Map<String, Entry> owed = changes(root, repository, parentTree, mergedTree);
+        Map<String, Entry> owed = changes(recorded);
         if (owed.isEmpty()) {
             return;
         }
@@ -966,7 +973,7 @@ public final class ChildWorktreeGit implements com.alibaba.qwen.code.managedagen
     private static boolean fileAt(Path top, String path) {
         try {
             return fileOnDisk(top, path);
-        } catch (java.nio.file.InvalidPathException error) {
+        } catch (InvalidPathException error) {
             return false;
         }
     }
@@ -1026,8 +1033,12 @@ public final class ChildWorktreeGit implements com.alibaba.qwen.code.managedagen
 
     /** The non-gitlink paths that differ between two trees, with their {@code to} entries. */
     private Map<String, Entry> changes(Path root, Repository repository, String from, String to) {
+        return changes(diffTree(root, repository, from, to));
+    }
+
+    private Map<String, Entry> changes(Map<String, Change> diff) {
         Map<String, Entry> changes = new LinkedHashMap<>();
-        for (Map.Entry<String, Change> change : diffTree(root, repository, from, to).entrySet()) {
+        for (Map.Entry<String, Change> change : diff.entrySet()) {
             if (!change.getValue().gitlink()) {
                 changes.put(change.getKey(), new Entry(change.getValue().toMode(), change.getValue().toObjectId()));
             }
@@ -1124,7 +1135,7 @@ public final class ChildWorktreeGit implements com.alibaba.qwen.code.managedagen
                     if (entry.resolve(Files.readString(gitdir).strip()).normalize().equals(gitFile)) {
                         deleteTree(entry);
                     }
-                } catch (java.nio.file.InvalidPathException | java.nio.charset.CharacterCodingException error) {
+                } catch (InvalidPathException | CharacterCodingException error) {
                     // Not a name this child's directory could have.
                 }
             }
@@ -1419,7 +1430,7 @@ public final class ChildWorktreeGit implements com.alibaba.qwen.code.managedagen
                     Set<Long> parents = new HashSet<>();
                     alive.forEach(child -> child.parent().ifPresent(parent -> parents.add(parent.pid())));
                     alive.stream().filter(child -> !parents.contains(child.pid())).forEach(ProcessHandle::destroyForcibly);
-                    java.util.concurrent.locks.LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(10));
+                    LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(10));
                 }
             } finally {
                 try {
@@ -1434,7 +1445,7 @@ public final class ChildWorktreeGit implements com.alibaba.qwen.code.managedagen
                     throw new ChildWorkspaceException(ChildWorkspaceException.STOP_UNVERIFIED, false,
                             "The original Git process tree has no confirmed stop proof");
                 }
-                java.util.concurrent.locks.LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(10));
+                LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(10));
             }
         } catch (RuntimeException unverified) {
             throw new ChildWorkspaceException(ChildWorkspaceException.STOP_UNVERIFIED, false,

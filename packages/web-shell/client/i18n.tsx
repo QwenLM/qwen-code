@@ -69,6 +69,11 @@ import {
 } from './components/managed/managed-task-messages.js';
 
 import {
+  BROWSER_NOTIFICATION_MESSAGES_EN,
+  BROWSER_NOTIFICATION_MESSAGES_ZH,
+} from './browser-notifications/messages.js';
+
+import {
   WORKSPACE_REGISTRATION_MESSAGES_EN,
   WORKSPACE_REGISTRATION_MESSAGES_ZH,
 } from './components/managed/managed-workspace-messages.js';
@@ -180,8 +185,6 @@ const EN: Messages = {
   'subscription.networkFailed': 'The network request failed or timed out.',
   'subscription.modelsUnavailable':
     'Could not load models. Your account is still signed in. Please try again.',
-  'subscription.connectFailed':
-    'Could not connect Qwen Subscription. Please try again.',
   'subscription.connected': (v) =>
     `✓ Signed in successfully · ${v?.email ?? ''}  \n✓ Current plan: Qwen ${v?.plan ?? ''}. Qwen Code is ready.${v?.model ? `  \nModel: ${v.model}. Run /upgrade to upgrade your plan, /usage to view usage, or /model to switch models.` : ''}${v?.url ? `  \nIf the browser didn't open, visit:  \n${v.url}` : ''}  \nCommon commands: /usage   /upgrade   /model   /status   /logout`,
   'subscription.signedIn': (v) => `Signed in successfully · ${v?.email ?? ''}`,
@@ -384,11 +387,29 @@ const EN: Messages = {
   'managed.discarded': 'Request discarded. The draft is back in the composer.',
   'managed.newRequired': 'Start a new task to send another message.',
   'managed.truncated': '[Details truncated]',
+  'managed.question.title': 'Answer the questions',
+  'managed.actions.title': 'Pending requests',
+  'managed.actions.root': 'This session',
+  'managed.actions.child': (v) => `Child session · ${v?.session}`,
+  'managed.actions.childSource': 'Child session request',
+  'managed.actions.question': 'Question',
+  'managed.actions.permission': 'Permission',
+  'managed.actions.expired': 'Expired',
+  'managed.actions.expires': (v) => `Expires ${v?.time}`,
+  'managed.question.other': 'Other answer',
+  'managed.question.expired':
+    'This question has expired. Refresh to check the session.',
+  'managed.question.tooLarge':
+    'Keep each text answer within 8192 characters and all answers within 32 KiB.',
+  'managed.question.failed':
+    'The answer could not be confirmed. Retry the same answers or refresh to check their status.',
+  'managed.question.forbidden':
+    "Only the Session's owner or a Workspace operator can answer these questions.",
   'managed.approval.failed':
     'The approval answer could not be confirmed. Retry the same option or refresh to check its status.',
-  'managed.approval.loadFailed': 'Pending approvals could not be loaded.',
-  'managed.approval.refreshFailed': 'Pending approvals could not be refreshed.',
-  'managed.approval.retry': 'Retry loading approvals',
+  'managed.approval.loadFailed': 'Pending requests could not be loaded.',
+  'managed.approval.refreshFailed': 'Pending requests could not be refreshed.',
+  'managed.approval.retry': 'Retry loading requests',
   'managed.approval.forbidden':
     "Only the Session's owner or a Workspace operator can answer this approval.",
   'managed.approval.argumentsUnavailable':
@@ -495,19 +516,14 @@ const EN: Messages = {
   'managed.model.optionsError': 'Could not load available models.',
   'managed.model.reload': 'Reload models',
   'managed.model.nextTurn':
-    'Change the model while idle. Your next message uses the selected model; conversation history is kept.',
+    'Your next message uses the selected model. An already running task keeps its model; conversation history is kept.',
   'managed.model.changing': 'Changing model…',
-  'managed.model.unconfirmed':
-    'The model change is not confirmed. Continue confirming the original request.',
-  'managed.model.confirm': 'Continue confirming',
   'managed.model.busy':
-    'Finish the active task, approval or unconfirmed request before changing model.',
-  'managed.model.storage':
-    'Browser session storage is unavailable. The model change cannot start safely.',
+    'Model changes are temporarily unavailable for this session. Try again shortly.',
   'managed.model.conflict':
     'The model has changed. Review the current selection and try again.',
   'managed.model.failed':
-    'The model change was refused. Review the available models and try again.',
+    'Could not change the model. Check the current selection and try again.',
   'managed.approvalOptionsLoading': 'Loading approval modes…',
   'managed.approvalOptionsLoadFailed': 'Could not load approval modes.',
   'managed.approvalOptionsInvalid':
@@ -1230,13 +1246,17 @@ const EN: Messages = {
   'composerAdd.loadError': 'Failed to load results',
   'composerAdd.unavailable': 'Unavailable',
   'composerAdd.file.label': 'Add file',
+  'composerAdd.file.description': 'Attach or upload files',
   'composerAdd.file.attachDisabled': 'Message attachments are unavailable',
   'composerAdd.file.uploadDisabled': 'Workspace upload is unavailable',
   'composerAdd.referenceFile.label': 'Reference file',
+  'composerAdd.referenceFile.description': 'Reference files or folders',
   'composerAdd.referenceFile.searchPlaceholder': 'Search workspace files',
   'composerAdd.extensions.label': 'Extensions',
+  'composerAdd.extensions.description': 'Reference enabled extensions',
   'composerAdd.extensions.empty': 'No extensions are enabled',
   'composerAdd.mcp.label': 'MCP',
+  'composerAdd.mcp.description': 'Reference an MCP server',
   'composerAdd.mcp.empty': 'No MCP servers are available',
   'managed.mcp.catalog': (v) =>
     `Catalog snapshot: ${plural(v?.tools, 'tool')} (${v?.toolsState}); ${plural(v?.resources, 'resource')} (${v?.resourcesState}); ${plural(v?.prompts, 'prompt')} (${v?.promptsState})`,
@@ -1245,6 +1265,7 @@ const EN: Messages = {
   'managed.mcp.discovery.failed': 'failed',
   'managed.mcp.discovery.stale': 'stale',
   'composerAdd.skills.label': 'Skills',
+  'composerAdd.skills.description': 'Use specialized skills',
   'composerAdd.plan.label': 'Plan mode',
   'composerAdd.plan.description': 'Plan first, run after you approve',
   'composerAdd.plan.busy': 'Switching mode',
@@ -1351,6 +1372,15 @@ const EN: Messages = {
   'askUser.submitFailed': 'Failed to submit answer',
   'askUser.submitOptionUnavailable': 'Submit option is unavailable',
   'askUser.ignore': 'Ignore',
+  'askUser.askDetails': 'Ask for details',
+  'askUser.askDetailsHint':
+    'Open a side task that explains this question before you answer',
+  'askUser.detailsPrompt': (v) =>
+    `${v?.questions ?? ''}
+
+The main session is waiting for me to answer the questions above. I want to understand the details before answering. Read the relevant code and context first. Base every claim on what you verify, and mark anything unverified.
+
+Write the explanation as a self-contained single-file HTML (inline CSS, no external resources). Language requirement: write the entire page in English — every heading, body sentence, list item, and label must be in English; do not mix in another language. Borrow the ASD-STE100 controlled-language sentence rules: one idea per sentence, active voice, short sentences (about 20 words max), one term per concept, conditions before actions, lists for three or more items, no metaphors or exclamations. Keep code, commands, paths, and config keys verbatim. Cover the background of each question, every option's meaning, differences, impact and risks, and a recommendation with reasons. Do not answer the questions for me and do not change the main session. Save the file under .qwen/tmp/ (for example .qwen/tmp/ask-details.html), then reply with its path and a one-sentence summary.`,
   'askUser.multiHint': 'multiple choice',
   'askUser.progress': (v) => `${v?.current ?? 0}/${v?.total ?? 0} questions`,
   'askUser.selectAnswer': 'Select an answer',
@@ -1402,6 +1432,18 @@ const EN: Messages = {
   'echartsChart.showData': 'Show data',
   'echartsChart.chart': 'Chart',
   'echartsChart.data': 'Data',
+  'echartsChart.nodes': 'Nodes',
+  'echartsChart.links': 'Links',
+  'echartsChart.name': 'Name',
+  'echartsChart.category': 'Category',
+  'echartsChart.id': 'ID',
+  'echartsChart.source': 'Source',
+  'echartsChart.target': 'Target',
+  'echartsChart.value': 'Value',
+  'echartsChart.depth': 'Depth',
+  'echartsChart.path': 'Path',
+  'echartsChart.idPath': 'ID path',
+  'echartsChart.subtreeTotal': 'Subtree total (derived)',
   'markdownTable.blank': '(blank)',
   'markdownTable.column': (v) => `Column ${v?.index ?? ''}`,
   'markdownTable.rows': (v) => {
@@ -1818,6 +1860,9 @@ const EN: Messages = {
     'Press / to search; Enter releases the selected live session',
   'release.releasing': 'Releasing...',
   'release.title': 'Release Session',
+  'session.limit.reached':
+    'The live-session limit has been reached. Release an idle session, or wait for active work to finish.',
+  'session.limit.release': 'Release idle sessions',
   'dialog.footer.menu': 'Esc to menu',
   'dialog.footer.mcpServers':
     '↑↓ to navigate · Enter details · r refresh · Esc close',
@@ -1911,6 +1956,7 @@ const EN: Messages = {
     'Help me set up a recurring scheduled task (keep it long-term). What I want: ',
   'scheduledTasks.name': 'Name',
   'scheduledTasks.workspace': 'Workspace',
+  'scheduledTasks.workspaceFixedByHost': 'Fixed by host',
   'scheduledTasks.session.label': 'Conversation',
   'scheduledTasks.session.dedicated': 'Dedicated task conversation',
   'scheduledTasks.session.current': 'Current conversation',
@@ -2087,6 +2133,41 @@ const EN: Messages = {
   'scheduledTasks.group.hint': 'Each run conversation is placed in this group.',
   'scheduledTasks.group.nameRequired': 'Enter a name for the new group.',
   'scheduledTasks.routing.loading': 'Loading models and groups…',
+  'scheduledTasks.delivery.channel': 'Delivery Channel',
+  'scheduledTasks.delivery.off': 'Delivery off',
+  'scheduledTasks.delivery.hint':
+    'Send the final response of a successful scheduled run to this destination. Delivery depends on the Channel and does not guarantee receipt.',
+  'scheduledTasks.delivery.unavailable':
+    'This daemon does not support Channel delivery changes.',
+  'scheduledTasks.delivery.discardChanges': 'Discard delivery changes',
+  'scheduledTasks.delivery.perRun':
+    'A new session every run does not support Channel delivery. Choose a persistent session or turn delivery off before saving.',
+  'scheduledTasks.delivery.required':
+    'Choose a Channel and enter a destination ID.',
+  'scheduledTasks.delivery.whitespace':
+    'This ID has leading or trailing whitespace, which will be sent as part of the destination.',
+  'scheduledTasks.delivery.trimWhitespace': 'Remove surrounding whitespace',
+  'scheduledTasks.delivery.loading': 'Loading Channels…',
+  'scheduledTasks.delivery.loadingContacts': 'Loading suggested destinations…',
+  'scheduledTasks.delivery.channelsFailed':
+    'Could not load Channels. Close and reopen the form to retry; existing delivery is preserved.',
+  'scheduledTasks.delivery.noChannels':
+    'No Channels are configured in this workspace. Configure one in Channels first.',
+  'scheduledTasks.delivery.targetUnavailable':
+    'This Channel is unavailable in this workspace. The saved destination is preserved; you can choose another Channel or turn delivery off.',
+  'scheduledTasks.delivery.notObserved':
+    'This destination is not in the recent suggestions. Its ID is preserved; contact discovery is not required for delivery.',
+  'scheduledTasks.delivery.suggestion': 'Suggested destination',
+  'scheduledTasks.delivery.manual': 'Enter a destination ID below',
+  'scheduledTasks.delivery.contactsFailed':
+    'Could not load suggestions. You can still enter a destination ID; existing delivery is preserved.',
+  'scheduledTasks.delivery.suggestionsHint':
+    'Suggestions come from recently observed contacts. You can also enter a known user or chat ID supported by the Channel.',
+  'scheduledTasks.delivery.type': 'Destination type',
+  'scheduledTasks.delivery.id': 'Destination ID',
+  'scheduledTasks.delivery.user': 'User',
+  'scheduledTasks.delivery.chat': 'Chat',
+  'scheduledTasks.delivery.cardPrefix': 'Delivery:',
   'scheduledTasks.gate': 'Gate command (optional)',
   'scheduledTasks.gatePlaceholder':
     'e.g. ./check-pr.sh 15057 — a command that prints only what changed',
@@ -2312,6 +2393,9 @@ const EN: Messages = {
   'sidebar.liveVoicePending': 'Voice chat',
   'sidebar.project': 'Workspaces',
   'sidebar.pinnedSessions': 'Pinned',
+  'sidebar.sessionSort': 'Sort sessions',
+  'sidebar.sortActivity': 'Recent activity',
+  'sidebar.sortQuestion': 'Last question',
   'sidebar.recentSessions': 'Recent',
   'sidebar.standalonePinUnavailable':
     'Pinning no-workspace sessions is not supported yet.',
@@ -2323,6 +2407,10 @@ const EN: Messages = {
   'sidebar.sessionIdCopied': 'Session ID copied',
   'sidebar.workspaceUntrusted': 'untrusted',
   'sidebar.manageWorkspaces': 'Manage workspaces…',
+  'sidebar.collapseAllWorkspaces': 'Collapse all workspaces',
+  'sidebar.expandAllWorkspaces': 'Expand all workspaces',
+  'sidebar.workspaceOrderError':
+    'Could not load or save workspace order. Reload and try again.',
   'sidebar.workspaceReadOnly': 'read-only',
   'sidebar.workspaceTrustToOpen': 'Trust this workspace to open the session.',
   'sidebar.addWorkspace': 'Add workspace',
@@ -2530,6 +2618,7 @@ const EN: Messages = {
   'sidebar.collapse': 'Collapse',
   'sidebar.expand': 'Expand',
   'sidebar.showAllSessions': 'Show all',
+  'sidebar.showMoreSessions': (v) => `Show ${v?.['count'] ?? 0} more`,
   'sidebar.subSessions': (v) => plural(v?.['count'], 'sub-session'),
   'sidebar.collapseProject': 'Collapse workspace',
   'sidebar.expandProject': 'Expand workspace',
@@ -2584,6 +2673,10 @@ const EN: Messages = {
   'sidebar.userInputNeededShort': 'Input',
   'sidebar.completedUnread': 'Finished',
   'sidebar.pin': 'Pin',
+  'sidebar.selectSessions': 'Select sessions',
+  'sidebar.exitSelection': 'Exit selection',
+  'sidebar.selectedSessions': (v) =>
+    `${v?.count ?? 0} ${v?.count === 1 ? 'session' : 'sessions'} selected`,
   'sidebar.unpin': 'Unpin',
   'sidebar.sessionGroup': 'Group',
   'sidebar.groupFilter': 'Session group',
@@ -3623,6 +3716,35 @@ const EN: Messages = {
   'skills.install.action': 'Upload',
   'skills.install.description':
     'Install a skill from GitHub, a local folder, or a ZIP archive.',
+  'skills.install.archiveHelp': (v) =>
+    `ZIP: ${v?.compressed ?? ''} MiB compressed, ${v?.expanded ?? ''} MiB extracted, ${v?.entries ?? ''} entries; root SKILL.md up to ${v?.manifest ?? ''} MiB. Installation continues after upload finishes.`,
+  'skills.install.legacyHelp':
+    'Up to 64 MiB total, 32 MiB per file, and 2000 files.',
+  'skills.install.legacyZipHelp':
+    'ZIP up to 7,864,071 bytes; 64 MiB extracted, 32 MiB per file, and 2000 files.',
+  'skills.install.error.archiveTooLarge': (v) =>
+    `The ZIP archive exceeds the ${v?.limit ?? ''} MiB compressed limit.`,
+  'skills.install.error.archivePackageTooLarge':
+    'The archive exceeds 200 MiB extracted, or its root SKILL.md exceeds 32 MiB.',
+  'skills.install.error.archiveEntries':
+    'The archive contains too many ZIP entries (max 4096, including folders and ignored metadata).',
+  'skills.install.error.zipUpgrade':
+    'This daemon accepts ZIP files up to 7,864,071 bytes. Upgrade the daemon to upload larger archives.',
+  'skills.install.checkingResult': 'Checking the installation result…',
+  'skills.install.stillRunning':
+    'The installation is still running. Check the result again; the archive will not be uploaded again.',
+  'skills.install.resultUnknown':
+    'The installation result could not be confirmed. Check again; this does not mean the installation failed.',
+  'skills.install.notCommitted': 'This archive was not installed.',
+  'skills.install.recoveryRequired':
+    'Installation recovery is required. Preserve the recovery paths shown below.',
+  'skills.install.checkResult': 'Check result',
+  'skills.install.stopChecking': 'Stop checking',
+  'skills.install.stoppedChecking':
+    'Stopped checking. This does not cancel or undo the installation. Verify its outcome before uploading again.',
+  'skills.install.cancelRequest': 'Cancel installation',
+  'skills.install.activationWarning': (v) =>
+    `Installed, but runtime activation failed: ${v?.detail ?? ''}`,
   'skills.install.error.authentication':
     'Authentication is required to upload skills.',
   'skills.install.error.folderRequired': 'Enter a folder path.',
@@ -3669,7 +3791,7 @@ const EN: Messages = {
   'skills.install.selectZip': 'Select a ZIP archive.',
   'skills.install.title': 'Upload skill',
   'skills.install.succeeded': (v) =>
-    `Skill “${v?.name ?? ''}” uploaded successfully.`,
+    `Skill “${v?.name ?? ''}” installed successfully.`,
   'skills.install.zipSelected': (v) => `Selected: ${v?.name ?? ''}`,
   'skills.delete.action': 'Delete skill',
   'skills.delete.description': (v) =>
@@ -3958,11 +4080,40 @@ const EN: Messages = {
   'trajectory.overview.lane.subagents': 'Subagent requests',
   'status.contextUsed': (v) => `${v?.pct ?? '0.0'}% context used`,
   'status.disconnected': 'Disconnected',
-  'status.modeHint': '(shift + tab or click to switch)',
-  'status.shortcuts': '? for shortcuts',
   'stream.cancel': 'esc to cancel',
   'stream.cancelArmed': 'Press Esc again to stop',
   'stream.tokens': (v) => `${v?.count ?? 0} tokens`,
+  'waitingGame.title': 'Juust Relax',
+  'waitingGame.activityTitle': 'Q&A activity',
+  'waitingGame.usageTitle': 'Token usage',
+  'waitingGame.openActivity': 'Open task activity',
+  'waitingGame.startGame': 'Start a random game',
+  'waitingGame.backToHeatmap': 'Back to activity',
+  'waitingGame.heatmap': 'Activity',
+  'waitingGame.tokens': 'Usage',
+  'waitingGame.heatmapTooltip': (v) =>
+    `${v?.time ?? ''} · ${v?.count ?? 0} Q&A`,
+  'waitingGame.jumpToMessage': 'Click to locate',
+  'waitingGame.tokenTotal': 'Total tokens',
+  'waitingGame.tokenInput': 'Input',
+  'waitingGame.tokenOutput': 'Output',
+  'waitingGame.tokenCached': 'Cached',
+  'waitingGame.tokenContext': 'Context',
+  'waitingGame.tokenEmpty': 'No token data yet',
+  'waitingGame.snakeControls': 'Arrows / WASD turn · Space pause · Esc close',
+  'waitingGame.collapse': 'Collapse',
+  'waitingGame.region': 'Waiting minigame',
+  'waitingGame.score': (v) => `Score ${v?.score ?? 0}`,
+  'waitingGame.best': (v) => `Best ${v?.score ?? 0}`,
+  'waitingGame.controls':
+    '↑↓ move · → speed up · ← rotate · Space pause/resume · clear a column +50',
+  'waitingGame.paused': 'Paused',
+  'waitingGame.pausedHint': 'Press Space to resume',
+  'waitingGame.gameOver': 'Game over',
+  'waitingGame.restart': 'Play again',
+  'waitingGame.cleared': (v) => `Cleared ${v?.count ?? 0} · +${v?.score ?? 0}`,
+  'waitingGame.mute': 'Mute game sound',
+  'waitingGame.unmute': 'Unmute game sound',
   'theme.current': (v) => `current: ${v?.theme ?? ''}`,
   'theme.auto': 'Auto',
   'theme.dark': 'Dark',
@@ -4238,10 +4389,6 @@ const EN: Messages = {
   'tasks.action.confirmHint': 'This will end the blocking turn.',
   'tasks.pill.agent': (v) => `${v?.count ?? 0} local agent`,
   'tasks.pill.agents': (v) => `${v?.count ?? 0} local agents`,
-  'tasks.pill.agentPaused': (v) => `${v?.count ?? 0} local agent paused`,
-  'tasks.pill.agentsPaused': (v) => `${v?.count ?? 0} local agents paused`,
-  'tasks.pill.done': (v) => `${v?.count ?? 0} task done`,
-  'tasks.pill.doneMany': (v) => `${v?.count ?? 0} tasks done`,
   'tasks.pill.monitor': (v) => `${v?.count ?? 0} monitor`,
   'tasks.pill.monitors': (v) => `${v?.count ?? 0} monitors`,
   'tasks.pill.shell': (v) => `${v?.count ?? 0} shell`,
@@ -4531,7 +4678,7 @@ const EN: Messages = {
   'channels.loadError.title': 'Channels could not be loaded',
   'channels.empty.title': 'No supported channels configured',
   'channels.empty.description':
-    'Configure DingTalk, WeCom, Feishu, GitHub, or GitLab to receive messages in this workspace.',
+    'Configure WeChat, DingTalk, WeCom, Feishu, GitHub, GitLab, or Email to receive messages in this workspace.',
   'channels.runtimeError': 'Channel runtime error',
   'channels.action.back': 'Back',
   'channels.action.refresh': 'Refresh',
@@ -4590,8 +4737,54 @@ const EN: Messages = {
   'channels.editor.field.sessionScope.option.chat_thread':
     'Per chat and thread',
   'channels.editor.field.sessionScope.option.single': 'One shared session',
+  'channels.qrLogin.title': 'Bind by QR code',
+  'channels.qrLogin.description':
+    'Scan with the QQ mobile app to bind a bot. The secret stays on this machine.',
+  'channels.qrLogin.start': 'Scan to bind',
+  'channels.qrLogin.refresh': 'New code',
+  'channels.qrLogin.waiting': 'Preparing the QR code…',
+  'channels.qrLogin.scanHint': 'Open QQ on your phone and scan this code.',
+  'channels.qrLogin.imageAlt': 'QQ bot binding QR code',
+  'channels.qrLogin.bound':
+    'Bot bound. The channel now uses the new credentials.',
+  'channels.qrLogin.failed': 'Binding failed',
+  'channels.qrLogin.expired': 'The code expired. Request a new one.',
+  'channels.qrLogin.cancelled': 'Binding cancelled.',
+  'channels.qrLogin.error': 'Could not complete the QR binding.',
   'channels.editor.field.dingtalk.clientId': 'Client ID (AppKey)',
   'channels.editor.field.dingtalk.clientSecret': 'Client Secret (AppSecret)',
+  'channels.editor.field.weixin.groupPolicy': 'Group policy',
+  'channels.editor.field.weixin.groupPolicy.description':
+    'WeChat iLink Bot only supports direct messages, so groups stay disabled.',
+  'channels.editor.field.weixin.groupPolicy.option.disabled': 'Disabled',
+  'channels.editor.field.weixin.allowedUsers': 'Pre-approved users (optional)',
+  'channels.editor.field.weixin.allowedUsers.description':
+    'Leave empty and approve people under "Pending requests" below instead — an approval is remembered. Fill this only to pre-approve someone whose platform user ID you already have (looks like oAbCd…@im.wechat). A WeChat name or handle does not match here and is silently ignored.',
+  'channels.weixin.title': 'WeChat account',
+  'channels.weixin.description':
+    'Log in by scanning a QR code with WeChat. This account is shared by every WeChat channel on this daemon.',
+  'channels.weixin.loggedIn': 'Logged in',
+  'channels.weixin.loggedOut': 'Not logged in',
+  'channels.weixin.login': 'Log in with QR code',
+  'channels.weixin.relogin': 'Log in again',
+  'channels.weixin.logout': 'Log out',
+  'channels.weixin.refresh': 'Refresh QR code',
+  'channels.weixin.waiting': 'Scan the QR code with WeChat.',
+  'channels.weixin.preparing': 'Preparing a new QR code…',
+  'channels.weixin.scanned': 'Scanned. Confirm on your phone.',
+  'channels.weixin.ready': 'WeChat connected.',
+  'channels.weixin.expired': 'QR code expired. Refresh to try again.',
+  'channels.weixin.error': 'WeChat login failed. Try again.',
+  'channels.weixin.credentialsError':
+    'WeChat connected, but the daemon could not save the credential. Check that its home directory is writable, then try again.',
+  'channels.weixin.unsupported':
+    'This daemon does not support WeChat login. Update the daemon, or run "qwen channel configure-weixin" on the host.',
+  'channels.weixin.restartHint':
+    'Channels that are already running keep the previous account until they are restarted.',
+  'channels.weixin.userId': (v) => `User ID: ${v?.id ?? ''}`,
+  'channels.weixin.savedAt': (v) => `Logged in at ${v?.time ?? ''}`,
+  'channels.weixin.qrAlt': 'WeChat login QR code',
+  'channels.weixin.openUrl': 'Open the login URL',
   'channels.editor.field.wecom.botId': 'Bot ID',
   'channels.editor.field.wecom.secret': 'Bot Secret',
   'channels.editor.field.wecom.wsUrl': 'WebSocket URL',
@@ -4615,7 +4808,7 @@ const EN: Messages = {
     'GitHub Enterprise API root (e.g. https://ghe.example.com/api/v3). Leave empty for github.com',
   'channels.editor.field.github.pollInterval': 'Poll Interval (ms)',
   'channels.editor.field.github.pollInterval.description':
-    'How often to check GitHub for new notifications. Leave empty for 60000 (one minute).',
+    "How often to check GitHub for new notifications. Leave empty for 60000 (one minute). A steady-state poll is raised to the endpoint's X-Poll-Interval when that is larger, which paces the PR watch too, so a smaller value will not make detection faster; at the default the header is also 60s.",
   'channels.editor.field.github.repositorySettings': 'Per-repository settings',
   'channels.editor.field.github.repositorySettings.description':
     'Each allowlisted repository inherits the channel-wide settings below until you override it here.',
@@ -4684,10 +4877,31 @@ const EN: Messages = {
     'member_feature_requested — organization members asked to enable a feature such as Copilot',
   'channels.editor.field.github.reasonFilter.option.security_advisory_credit':
     'security_advisory_credit — the bot was credited for contributing to a security advisory',
+  'channels.editor.field.github.repoFilterMode': 'Repository Filter',
+  'channels.editor.field.github.repoFilterMode.description':
+    'Filter incoming notifications by repository. Notifications about PRs bound to a session are filtered too; only their PR state watch events bypass the filter.',
+  'channels.editor.field.github.repoFilterMode.option.off':
+    'Off — all repositories',
+  'channels.editor.field.github.repoFilterMode.option.allowlist':
+    'Allowlist — only listed repositories',
+  'channels.editor.field.github.repoFilterMode.option.blocklist':
+    'Blocklist — all except listed repositories',
+  'channels.editor.field.github.repoFilter': 'Filtered Repositories',
+  'channels.editor.field.github.repoFilter.description':
+    'Comma-separated owner/repo names. You can paste repository or PR URLs; they are shortened to owner/repo on save.',
   'channels.editor.field.github.deliverToBoundSessions':
     'Deliver To PR-Bound Sessions',
   'channels.editor.field.github.deliverToBoundSessions.description':
     'Deliver events for PRs bound to a live session into that session as a prompt, instead of a channel-owned session. Requires a daemon-managed channel.',
+  'channels.editor.field.github.requireBoundWatch':
+    'Require Active Watch For Review/Verify Sessions',
+  'channels.editor.field.github.requireBoundWatch.description':
+    'Only deliver events to review/verify bound sessions while they hold an active watch on that PR (an /autofix-pr watch or /verify-pr --watch). One-shot /review and /verify-pr sessions stay bound but receive nothing; events with no eligible session retire privately instead of a public reply. Requires Deliver To PR-Bound Sessions. Unknown watch state (detection failure) keeps delivering.',
+  'channels.editor.field.github.requireBoundWatch.disabledHint':
+    'Enable "Deliver To PR-Bound Sessions" above to require an active watch.',
+  'channels.editor.field.github.prCommentWatch': 'PR Comment Watch',
+  'channels.editor.field.github.prCommentWatch.description':
+    'Poll same-account conversation and inline review comments on bound PRs and deliver each new one to every bound session that did not post it. Enabled by default; turn off to disable. Requires Deliver To PR-Bound Sessions.',
   'channels.editor.field.github.prWatchEvents': 'PR Watch Events',
   'channels.editor.field.github.prWatchEvents.description':
     'Optional. State transitions to watch for bound PRs (requires Deliver To PR-Bound Sessions). Leave empty to disable.',
@@ -4701,6 +4915,15 @@ const EN: Messages = {
     'head_change — the PR’s head commit changes',
   'channels.editor.field.github.prWatchEvents.option.state_change':
     'state_change — the PR is merged or closed',
+  'channels.editor.field.github.prWatchLimit': 'PR Watch Limit',
+  'channels.editor.field.github.prWatchLimit.description':
+    'Maximum open bound PRs watched per poll. Open PRs keep the full budget; merged/closed bindings drain in an additional slice (20% of the limit, at least one) outside it, so they never crowd out open PRs. Each watched PR still issues about one API request per poll, but an unchanged PR answers 304 and costs no primary rate limit, so the state watch is near-free while PRs are quiet. What still counts is the default-on comment watch (~60 requests/hour per PR at the 60s default) and the periodic CI re-checks, which put a 5000/hour budget at roughly 70-75 bound PRs. The ceiling moved from the state watch to the comment watch — it did not disappear, so do not read "near-free" as "unlimited". Over budget, every watch pass aborts on rate limits. Raise the poll interval when raising this. Requires Deliver To PR-Bound Sessions; the per-PR API request also needs PR Watch Events — without them the cap only bounds the comment watch. Leave empty for the default (30).',
+  'channels.editor.field.github.prWatchLimit.disabledHint':
+    'Enable "Deliver To PR-Bound Sessions" above to set the watch limit.',
+  'channels.editor.field.github.prWatchBudgetReserve':
+    'PR Watch Budget Reserve',
+  'channels.editor.field.github.prWatchBudgetReserve.description':
+    'REST requests held back for the interactive notification lane. When the last known remaining budget is at or below this, the PR state watch is skipped for that poll — and stopped mid-pass if a pass spends down to it — so a human mention is not starved by background polling; detection resumes once the budget recovers or its window resets. The default (200) is ~4% of a 5000/hour token budget. Set 0 to disable the gate. Requires Deliver To PR-Bound Sessions; the gate covers the comment watch too, so PR Watch Events are not required. Leave empty for the default.',
   'channels.editor.field.github.boundSessionActions': 'Bound Session Actions',
   'channels.editor.field.github.boundSessionActions.description':
     'Optional. Instruction templates delivered to PR-bound sessions. Pick an event key below; a role prefix (review:, verify:, fix:) targets that binding role only. Requires Deliver To PR-Bound Sessions. Each role with a matching key gets its own delivery; roles without one skip the event. Variables: %repo%, %pr%, %url%, %title%, %event%, %sender%, %role%; %% for a literal %. Leave empty for the default generic prompt.',
@@ -4756,6 +4979,36 @@ const EN: Messages = {
     'Unmergeable — MR becomes unmergeable (conflicts)',
   'channels.editor.field.gitlab.action_prompt_template.option.merge_train_removed':
     'Merge Train Removed — MR removed from merge train',
+  'channels.editor.field.email.address': 'Mailbox Address',
+  'channels.editor.field.email.imapHost': 'IMAP Host',
+  'channels.editor.field.email.imapUser': 'IMAP Username',
+  'channels.editor.field.email.imapPassword': 'IMAP Password',
+  'channels.editor.field.email.smtpHost': 'SMTP Host',
+  'channels.editor.field.email.smtpUser': 'SMTP Username',
+  'channels.editor.field.email.smtpPassword': 'SMTP Password',
+  'channels.editor.field.email.folder': 'IMAP Folder',
+  'channels.editor.field.email.imapPort': 'IMAP Port',
+  'channels.editor.field.email.smtpPort': 'SMTP Port',
+  'channels.editor.field.email.imapSecure': 'IMAP Implicit TLS',
+  'channels.editor.field.email.imapSecure.description':
+    'When disabled, STARTTLS is mandatory.',
+  'channels.editor.field.email.smtpSecure': 'SMTP Implicit TLS',
+  'channels.editor.field.email.smtpSecure.description':
+    'When disabled, STARTTLS is mandatory.',
+  'channels.editor.field.email.proactiveRecipients': 'Proactive Recipients',
+  'channels.editor.field.email.proactiveRecipients.description':
+    'Explicit bare addresses. Empty disables proactive email.',
+  'channels.editor.field.email.pollInterval': 'Poll Interval (ms)',
+  'channels.editor.field.email.maxMessageBytes': 'Message Size Limit (bytes)',
+  'channels.editor.field.email.maxAttachmentBytes':
+    'Attachment Size Limit (bytes)',
+  'channels.editor.field.email.maxTextLength': 'Text Character Limit',
+  'channels.editor.field.email.allowedUsers': 'Allowed email addresses',
+  'channels.editor.field.email.allowedUsers.description':
+    'Comma-separated bare mailbox addresses that can start private conversations.',
+  'channels.editor.field.email.operators': 'Session operator addresses',
+  'channels.editor.field.email.operators.description':
+    'Comma-separated bare mailbox addresses that may approve tool use and run /cancel, /clear or /loop in shared sessions.',
   'channels.editor.secret.environment': 'Stored in environment',
   'channels.editor.secret.stored': 'Stored securely',
   'channels.editor.secret.preserve': 'Keep',
@@ -4911,13 +5164,24 @@ const EN: Messages = {
     "Remove values that aren't in the allowed list.",
   'channels.editor.validation.requiresBoundDelivery':
     'Enable "Deliver To PR-Bound Sessions" to save the selected watch events.',
+  'channels.editor.validation.requiresBoundDeliveryForWatchGate':
+    'Enable "Deliver To PR-Bound Sessions" to require an active watch.',
+  'channels.editor.validation.repoFilterRequired':
+    'List at least one repository, or set Repository Filter to Off.',
   'channels.editor.validation.number': 'Enter a valid number.',
-  'channels.editor.validation.outOfRange': (v) =>
-    v?.min !== undefined && v?.max !== undefined
-      ? `Enter a number greater than ${v.min} and at most ${v.max}.`
-      : v?.max !== undefined
-        ? `Enter a number at most ${v.max}.`
-        : `Enter a number greater than ${v?.min ?? 0}.`,
+  'channels.editor.validation.outOfRange': (v) => {
+    const lower =
+      v?.minInclusive !== undefined
+        ? `at least ${v.minInclusive}`
+        : v?.min !== undefined
+          ? `greater than ${v.min}`
+          : undefined;
+    if (lower !== undefined && v?.max !== undefined) {
+      return `Enter a number ${lower} and at most ${v.max}.`;
+    }
+    if (v?.max !== undefined) return `Enter a number at most ${v.max}.`;
+    return `Enter a number ${lower ?? 'greater than 0'}.`;
+  },
   'channels.editor.validation.policy': 'Choose an access policy.',
   'channels.editor.saveError': 'Changes were not saved',
   'channels.editor.reloadLatest': 'Reload latest',
@@ -4941,50 +5205,13 @@ const EN: Messages = {
   'localControl.disabledHint':
     'Local Control is off. Turn it on in Settings to pair a phone on the same network.',
   'localControl.openSettings': 'Open Settings',
-  'browserNotifications.label': 'Task notifications',
-  'browserNotifications.description':
-    'Notify when the current chat or a split-view chat finishes, fails, needs approval or waits for your answer while this page is in the background or unfocused. Completed turns show prompt and reply excerpts; action reminders show the session title and waiting status. Saved for this browser site only; the page must remain open.',
-  'browserNotifications.prompt': (v) => `Prompt: ${v?.text ?? ''}`,
-  'browserNotifications.reply': (v) => `Reply: ${v?.text ?? ''}`,
-  'browserNotifications.completed': 'This turn has completed.',
-  'browserNotifications.failed':
-    'This turn failed. Return to view the details.',
-  'browserNotifications.ended':
-    'This turn has ended. Return to check the result.',
-  'browserNotifications.approval':
-    'This session needs your approval. Return to review the request.',
-  'browserNotifications.question':
-    'This session is waiting for your answer. Return to respond.',
-  'browserNotifications.allow': 'Allow notifications',
-  'browserNotifications.enable': 'Enable notifications',
-  'browserNotifications.helpEnabled': 'Enabled for this site.',
-  'browserNotifications.helpWaiting': 'Notifications are not authorized yet.',
-  'browserNotifications.helpWhen':
-    'While this page is in the background or you switch to another tab, get reminders when the current chat needs approval, waits for your answer, finishes or fails. Clicking a notification returns to its chat without approving or answering.',
-  'browserNotifications.helpSystem':
-    'If no reminders appear, follow the steps below to check system notifications.',
-  'browserNotifications.helpMac':
-    'Open System Settings → Notifications. Select your browser (for Chrome, also check Google Chrome Helper (Alerts) if listed), enable notifications and desktop banners/alerts. Check Focus and whether notifications are allowed during screen sharing.',
-  'browserNotifications.helpWindows':
-    'Open Settings → System → Notifications (Windows 10: Notifications & actions). Enable notifications and your browser, including notification banners. Turn off Do not disturb / Focus assist, or allow your browser through its rules.',
-  'browserNotifications.enabled': 'Enabled.',
-  'browserNotifications.disabled': 'Disabled.',
-  'browserNotifications.waiting': 'Waiting for browser permission.',
-  'browserNotifications.denied':
-    'Notifications are blocked. Allow them in your browser site settings.',
-  'browserNotifications.unavailable':
-    'Notifications are unavailable in this browser or page context.',
-  'browserNotifications.requesting': 'Waiting for your permission…',
-  'browserNotifications.error':
-    'Unable to enable or show notifications. Check your browser and system settings.',
-  'browserNotifications.temporary':
-    'This setting is saved for the current page only.',
   'welcome.changeModel': '(/model to change)',
   'welcome.defaultModel': 'unknown model',
   'welcome.modeHint': 'Shift+Tab or /approval-mode',
   'welcome.prompt': 'What would you like to do?',
   'welcome.titlePrefix': 'Welcome to',
   'welcome.tipLabel': 'Tips:',
+  ...BROWSER_NOTIFICATION_MESSAGES_EN,
   ...MCP_APP_MESSAGES_EN,
   ...VOICE_MESSAGES_EN,
   ...LIVE_MESSAGES_EN,
@@ -5114,7 +5341,6 @@ const ZH: Messages = {
   'subscription.rateLimited': '请求过多，请稍后重试。',
   'subscription.networkFailed': '网络请求失败或超时。',
   'subscription.modelsUnavailable': '无法加载模型。已保留登录态，请重试。',
-  'subscription.connectFailed': '无法连接 Qwen 订阅，请重试。',
   'subscription.connected': (v) =>
     `✓ 登录成功 · ${v?.email ?? ''}  \n✓ 当前套餐：Qwen ${v?.plan ?? ''}，已可使用 Qwen Code${v?.model ? `  \n模型：${v.model}，输入 /upgrade 升级套餐，/usage 查看用量，/model 切换模型。` : ''}${v?.url ? `  \n如果浏览器未打开，请访问：  \n${v.url}` : ''}  \n常用命令：/usage   /upgrade   /model   /status   /logout`,
   'subscription.signedIn': (v) => `登录成功 · ${v?.email ?? ''}`,
@@ -5295,11 +5521,28 @@ const ZH: Messages = {
   'managed.discarded': '已丢弃本次请求。草稿已放回输入框。',
   'managed.newRequired': '请新建任务后发送消息。',
   'managed.truncated': '[详情已截断]',
+  'managed.question.title': '请回答以下问题',
+  'managed.actions.title': '待处理请求',
+  'managed.actions.root': '当前会话',
+  'managed.actions.child': (v) => `子会话 · ${v?.session}`,
+  'managed.actions.childSource': '子会话请求',
+  'managed.actions.question': '问题',
+  'managed.actions.permission': '权限',
+  'managed.actions.expired': '已过期',
+  'managed.actions.expires': (v) => `到期时间：${v?.time}`,
+  'managed.question.other': '其他答案',
+  'managed.question.expired': '此问题已过期，请刷新查看会话状态。',
+  'managed.question.tooLarge':
+    '每个文本答案最多 8192 个字符，全部答案最多 32 KiB。',
+  'managed.question.failed':
+    '尚未确认回答结果，请重试相同的答案或刷新查看状态。',
+  'managed.question.forbidden':
+    '只有会话所有者或工作区操作员可以回答这些问题。',
   'managed.approval.failed':
     '无法确认审批回答的结果。请重试同一选项，或刷新以查看状态。',
-  'managed.approval.loadFailed': '待审批请求加载失败。',
-  'managed.approval.refreshFailed': '待审批请求刷新失败。',
-  'managed.approval.retry': '重新读取审批',
+  'managed.approval.loadFailed': '待处理请求加载失败。',
+  'managed.approval.refreshFailed': '待处理请求刷新失败。',
+  'managed.approval.retry': '重新读取请求',
   'managed.approval.forbidden':
     '只有此会话的拥有者或所属 Workspace 的操作者可以回答这项审批。',
   'managed.approval.argumentsUnavailable': '此项审批的工具参数暂不可见。',
@@ -5396,15 +5639,11 @@ const ZH: Messages = {
   'managed.model.optionsError': '加载可用模型失败。',
   'managed.model.reload': '重新加载模型',
   'managed.model.nextTurn':
-    '空闲时可切换模型；下一条消息使用所选模型，对话历史保留。',
+    '下一条消息使用所选模型；已经运行的任务保持原模型，对话历史保留。',
   'managed.model.changing': '正在切换模型…',
-  'managed.model.unconfirmed': '模型切换尚未确认，请继续确认原请求。',
-  'managed.model.confirm': '继续确认',
-  'managed.model.busy':
-    '请先完成正在执行的任务、审批或未确认请求，再切换模型。',
-  'managed.model.storage': '浏览器会话存储不可用，无法安全发起模型切换。',
+  'managed.model.busy': '当前会话暂时无法切换模型，请稍后重试。',
   'managed.model.conflict': '当前模型已变化，请检查选择后重试。',
-  'managed.model.failed': '模型切换被拒绝，请检查可用模型后重试。',
+  'managed.model.failed': '模型切换失败，请检查当前模型后重试。',
   'managed.approvalOptionsLoading': '正在加载审批策略…',
   'managed.approvalOptionsLoadFailed': '加载审批策略失败。',
   'managed.approvalOptionsInvalid': '服务返回了不支持的审批策略。',
@@ -6168,13 +6407,17 @@ const ZH: Messages = {
   'composerAdd.loadError': '加载失败',
   'composerAdd.unavailable': '不可用',
   'composerAdd.file.label': '添加文件',
+  'composerAdd.file.description': '添加附件或上传文件',
   'composerAdd.file.attachDisabled': '当前无法添加消息附件',
   'composerAdd.file.uploadDisabled': '当前工作区不可上传',
   'composerAdd.referenceFile.label': '引用文件',
+  'composerAdd.referenceFile.description': '引用工作区文件或文件夹',
   'composerAdd.referenceFile.searchPlaceholder': '搜索工作区文件',
   'composerAdd.extensions.label': '扩展',
+  'composerAdd.extensions.description': '引用已启用的扩展',
   'composerAdd.extensions.empty': '没有已启用的扩展',
   'composerAdd.mcp.label': 'MCP',
+  'composerAdd.mcp.description': '引用 MCP 服务器',
   'composerAdd.mcp.empty': '没有可用的 MCP 服务',
   'managed.mcp.catalog': (v) =>
     `目录快照：${v?.tools} 个工具（${v?.toolsState}）；${v?.resources} 个资源（${v?.resourcesState}）；${v?.prompts} 个提示（${v?.promptsState}）`,
@@ -6183,6 +6426,7 @@ const ZH: Messages = {
   'managed.mcp.discovery.failed': '失败',
   'managed.mcp.discovery.stale': '已过期',
   'composerAdd.skills.label': '技能',
+  'composerAdd.skills.description': '使用专项技能',
   'composerAdd.plan.label': '计划模式',
   'composerAdd.plan.description': '先出计划，批准后再执行',
   'composerAdd.plan.busy': '模式切换中',
@@ -6275,6 +6519,14 @@ const ZH: Messages = {
   'askUser.submitFailed': '提交回答失败',
   'askUser.submitOptionUnavailable': '提交选项不可用',
   'askUser.ignore': '忽略',
+  'askUser.askDetails': '问细节',
+  'askUser.askDetailsHint': '打开侧边任务，在作答前解释这个问题',
+  'askUser.detailsPrompt': (v) =>
+    `${v?.questions ?? ''}
+
+主会话正在等我回答上面的问题。我想先了解细节，再作答。请先阅读相关代码与上下文。结论以你核实到的事实为准，未核实的内容要标注。
+
+请把解释写成自包含单文件 HTML（内联 CSS，不引用外部资源）。语言要求：整页必须用简体中文写作——每个标题、正文句子、列表项和标签都用中文，不要混用其他语言。借鉴 ASD-STE100 受控句式：一句一个意思、主动语态、每句不超过 20 字（代码与标识符按 1 词计）、同一概念只用一个词、条件写在动作之前、三项以上用列表、不用比喻和感叹号。代码、命令、路径、配置键名原样保留。内容覆盖：每个问题的背景；每个选项的含义、差异、影响与风险；给出建议并说明理由。不要替我作答，也不要改动主会话。文件保存到 .qwen/tmp/ 下（例如 .qwen/tmp/ask-details.html），完成后回复文件路径和一句话摘要。`,
   'askUser.multiHint': '可多选',
   'askUser.progress': (v) => `${v?.current ?? 0}/${v?.total ?? 0} 个问题`,
   'askUser.selectAnswer': '选择一个答案',
@@ -6324,6 +6576,18 @@ const ZH: Messages = {
   'echartsChart.showData': '显示数据',
   'echartsChart.chart': '图表',
   'echartsChart.data': '数据',
+  'echartsChart.nodes': '节点',
+  'echartsChart.links': '连线',
+  'echartsChart.name': '名称',
+  'echartsChart.category': '分类',
+  'echartsChart.id': 'ID',
+  'echartsChart.source': '起点',
+  'echartsChart.target': '终点',
+  'echartsChart.value': '数值',
+  'echartsChart.depth': '深度',
+  'echartsChart.path': '路径',
+  'echartsChart.idPath': 'ID 路径',
+  'echartsChart.subtreeTotal': '子树合计（派生）',
   'markdownTable.blank': '(空白)',
   'markdownTable.column': (v) => `第 ${v?.index ?? ''} 列`,
   'markdownTable.rows': (v) => `共${v?.count ?? 0}行`,
@@ -6715,6 +6979,9 @@ const ZH: Messages = {
   'release.pressSearch': '按 / 搜索；Enter 释放选中的 live session',
   'release.releasing': '释放中...',
   'release.title': '释放会话',
+  'session.limit.reached':
+    '活跃会话已达上限，释放一个空闲会话或等待活跃工作结束后即可继续。',
+  'session.limit.release': '释放空闲会话',
   'dialog.footer.menu': 'Esc 返回菜单',
   'dialog.footer.mcpServers': '↑↓ 导航 · Enter 查看详情 · r 刷新 · Esc 关闭',
   'dialog.footer.mcpSelect': '↑↓ 导航 · Enter 选择 · Esc 返回',
@@ -6792,6 +7059,7 @@ const ZH: Messages = {
   'scheduledTasks.chatStarter': '帮我创建一个长期保留的定时任务，我想：',
   'scheduledTasks.name': '名称',
   'scheduledTasks.workspace': '工作区',
+  'scheduledTasks.workspaceFixedByHost': '由宿主固定',
   'scheduledTasks.session.label': '会话',
   'scheduledTasks.session.dedicated': '独立任务会话',
   'scheduledTasks.session.current': '当前会话',
@@ -6953,6 +7221,39 @@ const ZH: Messages = {
   'scheduledTasks.group.hint': '每次运行产生的会话都会放入这个分组。',
   'scheduledTasks.group.nameRequired': '请输入新分组名称。',
   'scheduledTasks.routing.loading': '正在加载模型和分组…',
+  'scheduledTasks.delivery.channel': '投递频道',
+  'scheduledTasks.delivery.off': '不投递',
+  'scheduledTasks.delivery.hint':
+    '将成功完成的定时任务的最终回复发送到此目标。投递依赖频道，不保证送达。',
+  'scheduledTasks.delivery.unavailable': '此 daemon 不支持修改频道投递配置。',
+  'scheduledTasks.delivery.discardChanges': '放弃投递修改',
+  'scheduledTasks.delivery.perRun':
+    '每次新会话不支持频道投递。请在保存前选择固定会话，或关闭投递。',
+  'scheduledTasks.delivery.required': '请选择频道并输入目标 ID。',
+  'scheduledTasks.delivery.whitespace':
+    '此 ID 的首尾含有空白字符，它们会作为目标 ID 的一部分原样发送。',
+  'scheduledTasks.delivery.trimWhitespace': '去除首尾空白',
+  'scheduledTasks.delivery.loading': '正在加载频道…',
+  'scheduledTasks.delivery.loadingContacts': '正在加载目标候选…',
+  'scheduledTasks.delivery.channelsFailed':
+    '无法加载频道。请关闭并重新打开表单重试；已有投递配置会保留。',
+  'scheduledTasks.delivery.noChannels':
+    '此工作区尚未配置频道。请先在频道页面中配置。',
+  'scheduledTasks.delivery.targetUnavailable':
+    '此频道在当前工作区不可用。已保存的目标会保留；你可以选择其他频道或关闭投递。',
+  'scheduledTasks.delivery.notObserved':
+    '此目标不在最近的候选中。其 ID 会保留；联系人发现不是投递的必要条件。',
+  'scheduledTasks.delivery.suggestion': '目标候选',
+  'scheduledTasks.delivery.manual': '在下方输入目标 ID',
+  'scheduledTasks.delivery.contactsFailed':
+    '无法加载候选。你仍可输入目标 ID；已有投递配置会保留。',
+  'scheduledTasks.delivery.suggestionsHint':
+    '候选来自最近观察到的联系人。你也可以输入频道支持的已知用户或群 ID。',
+  'scheduledTasks.delivery.type': '目标类型',
+  'scheduledTasks.delivery.id': '目标 ID',
+  'scheduledTasks.delivery.user': '用户',
+  'scheduledTasks.delivery.chat': '群聊',
+  'scheduledTasks.delivery.cardPrefix': '投递：',
   'scheduledTasks.gate': '闸门命令（可选）',
   'scheduledTasks.gatePlaceholder':
     '例如：./check-pr.sh 15057 —— 一条只打印变化的命令',
@@ -7165,6 +7466,9 @@ const ZH: Messages = {
   'sidebar.liveVoicePending': 'Voice chat',
   'sidebar.project': '工作区',
   'sidebar.pinnedSessions': '置顶',
+  'sidebar.sessionSort': '会话排序',
+  'sidebar.sortActivity': '最近活动',
+  'sidebar.sortQuestion': '最后提问时间',
   'sidebar.recentSessions': '最近',
   'sidebar.standalonePinUnavailable': '暂不支持置顶无工作区会话。',
   'sidebar.workspaceSelectLabel': '工作区',
@@ -7175,6 +7479,9 @@ const ZH: Messages = {
   'sidebar.sessionIdCopied': '会话 ID 已复制',
   'sidebar.workspaceUntrusted': '未信任',
   'sidebar.manageWorkspaces': '管理工作区…',
+  'sidebar.collapseAllWorkspaces': '收起所有工作区',
+  'sidebar.expandAllWorkspaces': '展开所有工作区',
+  'sidebar.workspaceOrderError': '无法加载或保存工作区顺序，请刷新后重试。',
   'sidebar.workspaceReadOnly': '只读',
   'sidebar.workspaceTrustToOpen': '信任此工作区后才能打开会话。',
   'sidebar.addWorkspace': '添加工作区',
@@ -7359,6 +7666,7 @@ const ZH: Messages = {
   'sidebar.collapse': '收起',
   'sidebar.expand': '展开',
   'sidebar.showAllSessions': '展开显示',
+  'sidebar.showMoreSessions': (v) => `再显示 ${v?.['count'] ?? 0} 个`,
   'sidebar.subSessions': (v) => `${v?.['count'] ?? 0} 个子会话`,
   'sidebar.collapseProject': '收起工作区',
   'sidebar.expandProject': '展开工作区',
@@ -7411,6 +7719,9 @@ const ZH: Messages = {
   'sidebar.userInputNeededShort': '需输入',
   'sidebar.completedUnread': '刚完成',
   'sidebar.pin': '置顶',
+  'sidebar.selectSessions': '多选对话',
+  'sidebar.exitSelection': '退出多选',
+  'sidebar.selectedSessions': (v) => `已选择 ${v?.count ?? 0} 个对话`,
   'sidebar.unpin': '取消置顶',
   'sidebar.sessionGroup': '分组',
   'sidebar.groupFilter': '会话分组',
@@ -8364,6 +8675,34 @@ const ZH: Messages = {
   'skills.enabled': 'Skill 已启用。',
   'skills.install.action': '上传',
   'skills.install.description': '从 GitHub、本地文件夹或 ZIP 压缩包安装技能。',
+  'skills.install.archiveHelp': (v) =>
+    `ZIP 压缩大小最多 ${v?.compressed ?? ''} MiB，展开最多 ${v?.expanded ?? ''} MiB、${v?.entries ?? ''} 个条目；根 SKILL.md 最多 ${v?.manifest ?? ''} MiB。上传结束后仍需完成安装。`,
+  'skills.install.legacyHelp':
+    '合计最多 64 MiB，单文件最多 32 MiB、2000 个文件。',
+  'skills.install.legacyZipHelp':
+    'ZIP 最多 7,864,071 字节；展开最多 64 MiB，单文件最多 32 MiB、2000 个文件。',
+  'skills.install.error.archiveTooLarge': (v) =>
+    `ZIP 压缩大小超过 ${v?.limit ?? ''} MiB 上限。`,
+  'skills.install.error.archivePackageTooLarge':
+    '归档展开大小超过 200 MiB，或根 SKILL.md 超过 32 MiB。',
+  'skills.install.error.archiveEntries':
+    'ZIP 条目超过 4096 个（包含目录和忽略的元数据）。',
+  'skills.install.error.zipUpgrade':
+    '当前 daemon 接受的 ZIP 最多为 7,864,071 字节。请升级 daemon 以上传更大的归档。',
+  'skills.install.checkingResult': '正在确认安装结果…',
+  'skills.install.stillRunning':
+    '安装仍在进行，请再次检查结果；不会重新上传归档。',
+  'skills.install.resultUnknown':
+    '暂时无法确认安装结果，请再次检查；这不代表安装失败。',
+  'skills.install.notCommitted': '本次归档未安装。',
+  'skills.install.recoveryRequired': '安装需要恢复处理，请保留下列恢复路径。',
+  'skills.install.checkResult': '检查结果',
+  'skills.install.stopChecking': '停止查询',
+  'skills.install.stoppedChecking':
+    '已停止查询，但这不会取消或撤销安装。请先确认原安装结果，再次上传。',
+  'skills.install.cancelRequest': '取消安装',
+  'skills.install.activationWarning': (v) =>
+    `已安装，但运行时激活失败：${v?.detail ?? ''}`,
   'skills.install.error.authentication': '上传技能需要身份认证。',
   'skills.install.error.folderRequired': '请输入文件夹路径。',
   'skills.install.error.githubRequired': '请输入 GitHub SKILL.md 地址。',
@@ -8404,7 +8743,7 @@ const ZH: Messages = {
   'skills.install.scope.workspace': '工作区',
   'skills.install.selectZip': '请选择 ZIP 压缩包。',
   'skills.install.title': '上传技能',
-  'skills.install.succeeded': (v) => `技能“${v?.name ?? ''}”上传成功。`,
+  'skills.install.succeeded': (v) => `技能“${v?.name ?? ''}”安装成功。`,
   'skills.install.zipSelected': (v) => `已选择：${v?.name ?? ''}`,
   'skills.delete.action': '删除技能',
   'skills.delete.description': (v) =>
@@ -8666,10 +9005,39 @@ const ZH: Messages = {
   'trajectory.overview.lane.subagents': '子代理请求',
   'status.contextUsed': (v) => `上下文已用 ${v?.pct ?? '0.0'}%`,
   'status.disconnected': '断开连接',
-  'status.modeHint': '(shift + tab 或点击切换)',
-  'status.shortcuts': '? 查看快捷键',
   'stream.cancel': 'esc 取消',
   'stream.cancelArmed': '再按一次 Esc 停止',
+  'waitingGame.title': 'Juust Relax',
+  'waitingGame.activityTitle': '问答热度',
+  'waitingGame.usageTitle': 'Token 消耗',
+  'waitingGame.openActivity': '打开任务热度',
+  'waitingGame.startGame': '随机开始游戏',
+  'waitingGame.backToHeatmap': '返回热力图',
+  'waitingGame.heatmap': '热力图',
+  'waitingGame.tokens': '消耗',
+  'waitingGame.heatmapTooltip': (v) =>
+    `${v?.time ?? ''} · ${v?.count ?? 0} 条问答`,
+  'waitingGame.jumpToMessage': '点击定位',
+  'waitingGame.tokenTotal': '总 Token',
+  'waitingGame.tokenInput': '输入',
+  'waitingGame.tokenOutput': '输出',
+  'waitingGame.tokenCached': '缓存',
+  'waitingGame.tokenContext': '上下文',
+  'waitingGame.tokenEmpty': '暂无 Token 数据',
+  'waitingGame.snakeControls': '方向键 / WASD 转向 · 空格暂停 · Esc 收起',
+  'waitingGame.collapse': '收起',
+  'waitingGame.region': '等待小游戏',
+  'waitingGame.score': (v) => `得分 ${v?.score ?? 0}`,
+  'waitingGame.best': (v) => `最高 ${v?.score ?? 0}`,
+  'waitingGame.controls':
+    '↑↓ 移动 · → 加速 · ← 旋转 · 空格 暂停/继续 · 满列消除 +50',
+  'waitingGame.paused': '已暂停',
+  'waitingGame.pausedHint': '按空格继续',
+  'waitingGame.gameOver': '游戏结束',
+  'waitingGame.restart': '再来一局',
+  'waitingGame.cleared': (v) => `消除 ${v?.count ?? 0} 列 · +${v?.score ?? 0}`,
+  'waitingGame.mute': '关闭游戏音效',
+  'waitingGame.unmute': '开启游戏音效',
   'stream.tokens': (v) => `${v?.count ?? 0} tokens`,
   'theme.current': (v) => `当前：${v?.theme ?? ''}`,
   'theme.auto': '自动',
@@ -8920,10 +9288,6 @@ const ZH: Messages = {
   'tasks.action.confirmHint': '这会终结当前阻塞轮次。',
   'tasks.pill.agent': (v) => `${v?.count ?? 0} 个本地智能体`,
   'tasks.pill.agents': (v) => `${v?.count ?? 0} 个本地智能体`,
-  'tasks.pill.agentPaused': (v) => `${v?.count ?? 0} 个本地智能体已暂停`,
-  'tasks.pill.agentsPaused': (v) => `${v?.count ?? 0} 个本地智能体已暂停`,
-  'tasks.pill.done': (v) => `${v?.count ?? 0} 个任务完成`,
-  'tasks.pill.doneMany': (v) => `${v?.count ?? 0} 个任务完成`,
   'tasks.pill.monitor': (v) => `${v?.count ?? 0} 个监控`,
   'tasks.pill.monitors': (v) => `${v?.count ?? 0} 个监控`,
   'tasks.pill.shell': (v) => `${v?.count ?? 0} 个 shell`,
@@ -9195,7 +9559,7 @@ const ZH: Messages = {
   'channels.loadError.title': '无法加载频道',
   'channels.empty.title': '尚未配置支持的频道',
   'channels.empty.description':
-    '配置钉钉、企业微信、飞书、GitHub 或 GitLab，让当前工作区接收消息。',
+    '配置微信、钉钉、企业微信、飞书、GitHub、GitLab 或 Email，让当前工作区接收消息。',
   'channels.runtimeError': '频道运行时错误',
   'channels.action.back': '返回',
   'channels.action.refresh': '刷新',
@@ -9250,9 +9614,54 @@ const ZH: Messages = {
   'channels.editor.field.sessionScope.option.thread': '按话题',
   'channels.editor.field.sessionScope.option.chat_thread': '按对话和话题',
   'channels.editor.field.sessionScope.option.single': '整个频道共享',
+  'channels.qrLogin.title': '扫码绑定',
+  'channels.qrLogin.description':
+    '用手机 QQ 扫码绑定机器人。密钥只保留在本机。',
+  'channels.qrLogin.start': '扫码绑定',
+  'channels.qrLogin.refresh': '换一张码',
+  'channels.qrLogin.waiting': '正在生成二维码…',
+  'channels.qrLogin.scanHint': '在手机上打开 QQ 扫描此二维码。',
+  'channels.qrLogin.imageAlt': 'QQ 机器人绑定二维码',
+  'channels.qrLogin.bound': '已绑定机器人,渠道将使用新凭据。',
+  'channels.qrLogin.failed': '绑定失败',
+  'channels.qrLogin.expired': '二维码已过期,请重新获取。',
+  'channels.qrLogin.cancelled': '已取消绑定。',
+  'channels.qrLogin.error': '无法完成扫码绑定。',
   'channels.editor.field.dingtalk.clientId': 'Client ID（原 AppKey）',
   'channels.editor.field.dingtalk.clientSecret':
     'Client Secret（原 AppSecret）',
+  'channels.editor.field.weixin.groupPolicy': '群聊策略',
+  'channels.editor.field.weixin.groupPolicy.description':
+    '微信 iLink Bot 只支持私聊，因此群聊始终禁用。',
+  'channels.editor.field.weixin.groupPolicy.option.disabled': '禁用',
+  'channels.editor.field.weixin.allowedUsers': '预先放行的用户（可留空）',
+  'channels.editor.field.weixin.allowedUsers.description':
+    '建议留空，改在下方「待处理的配对请求」里批准用户——批准一次就会记住。只有在你已经拿到对方的平台用户 ID（形如 oAbCd…@im.wechat）时才填这里。填微信号或昵称不会生效，且不会有任何报错。',
+  'channels.weixin.title': '微信账号',
+  'channels.weixin.description':
+    '使用微信扫码登录。该账号由此 daemon 上的所有微信 channel 共享。',
+  'channels.weixin.loggedIn': '已登录',
+  'channels.weixin.loggedOut': '未登录',
+  'channels.weixin.login': '扫码登录',
+  'channels.weixin.relogin': '重新登录',
+  'channels.weixin.logout': '退出登录',
+  'channels.weixin.refresh': '刷新二维码',
+  'channels.weixin.waiting': '请用微信扫描二维码。',
+  'channels.weixin.preparing': '正在生成新的二维码…',
+  'channels.weixin.scanned': '已扫描，请在手机上确认。',
+  'channels.weixin.ready': '微信已连接。',
+  'channels.weixin.expired': '二维码已过期，请刷新重试。',
+  'channels.weixin.error': '微信登录失败，请重试。',
+  'channels.weixin.credentialsError':
+    '微信已连接，但 daemon 无法保存凭据。请确认其 home 目录可写后重试。',
+  'channels.weixin.unsupported':
+    '当前 daemon 不支持微信登录。请升级 daemon，或在主机上运行「qwen channel configure-weixin」。',
+  'channels.weixin.restartHint':
+    '已在运行的 channel 仍使用旧账号，需重启后才会切换到新账号。',
+  'channels.weixin.userId': (v) => `用户 ID：${v?.id ?? ''}`,
+  'channels.weixin.savedAt': (v) => `登录时间：${v?.time ?? ''}`,
+  'channels.weixin.qrAlt': '微信登录二维码',
+  'channels.weixin.openUrl': '打开登录链接',
   'channels.editor.field.wecom.botId': 'Bot ID',
   'channels.editor.field.wecom.secret': 'Bot Secret',
   'channels.editor.field.wecom.wsUrl': 'WebSocket URL',
@@ -9275,7 +9684,7 @@ const ZH: Messages = {
     'GitHub Enterprise API 根地址（如 https://ghe.example.com/api/v3），github.com 留空',
   'channels.editor.field.github.pollInterval': '轮询间隔（毫秒）',
   'channels.editor.field.github.pollInterval.description':
-    '多久向 GitHub 查一次新通知。留空为 60000（一分钟）。',
+    '多久向 GitHub 查一次新通知。留空为 60000（一分钟）。稳态轮询会被抬到端点的 X-Poll-Interval（当它更大时），这也会同时压住 PR 监视的节奏，因此调小本值并不会让检测更快；默认值下该头也是 60 秒。',
   'channels.editor.field.github.repositorySettings': '按仓库设置',
   'channels.editor.field.github.repositorySettings.description':
     '每个已允许的仓库都继承下面的渠道级设置，直到你在这里覆盖它。',
@@ -9343,9 +9752,25 @@ const ZH: Messages = {
     'member_feature_requested — 组织成员请求启用 Copilot 等功能',
   'channels.editor.field.github.reasonFilter.option.security_advisory_credit':
     'security_advisory_credit — 机器人因参与安全公告而被致谢',
+  'channels.editor.field.github.repoFilterMode': '按仓库过滤',
+  'channels.editor.field.github.repoFilterMode.description':
+    '按仓库过滤入站通知。绑定到会话的 PR，其通知同样被过滤；只有它们的状态监视事件绕过此过滤器。',
+  'channels.editor.field.github.repoFilterMode.option.off': '关闭 — 所有仓库',
+  'channels.editor.field.github.repoFilterMode.option.allowlist':
+    '白名单 — 仅列出的仓库',
+  'channels.editor.field.github.repoFilterMode.option.blocklist':
+    '黑名单 — 除列出的仓库以外',
+  'channels.editor.field.github.repoFilter': '过滤的仓库',
+  'channels.editor.field.github.repoFilter.description':
+    '以逗号分隔的 owner/repo 仓库名。可以直接粘贴仓库或 PR 链接，保存时会自动缩短为 owner/repo。',
   'channels.editor.field.github.deliverToBoundSessions': '投递到 PR 绑定会话',
   'channels.editor.field.github.deliverToBoundSessions.description':
     '将已绑定到活跃会话的 PR 事件以 prompt 形式投递进该会话，而不是频道自有会话。需要 daemon 托管的频道。',
+  'channels.editor.field.github.requireBoundWatch': '评审/验证会话须有活跃监视',
+  'channels.editor.field.github.requireBoundWatch.description':
+    '仅当 review/verify 绑定会话对该 PR 持有活跃监视（/autofix-pr 监视或 /verify-pr --watch）时才投递事件。一次性的 /review 与 /verify-pr 会话保持绑定但不接收任何事件；没有合格会话的事件私下退役，不做公开回复。需开启「投递到 PR 绑定会话」。监视状态未知（检测失败）时照常投递。',
+  'channels.editor.field.github.requireBoundWatch.disabledHint':
+    '开启上方「投递到 PR 绑定会话」后即可要求活跃监视。',
   'channels.editor.field.github.prWatchEvents': 'PR 状态监视事件',
   'channels.editor.field.github.prWatchEvents.description':
     '可选。为绑定 PR 监视的状态转换（需开启"投递到 PR 绑定会话"）。留空则禁用。',
@@ -9359,6 +9784,14 @@ const ZH: Messages = {
     'head_change — PR 的 head 提交变更',
   'channels.editor.field.github.prWatchEvents.option.state_change':
     'state_change — PR 被合并或关闭',
+  'channels.editor.field.github.prWatchLimit': 'PR 监视上限',
+  'channels.editor.field.github.prWatchLimit.description':
+    '每轮轮询最多监视的 open 绑定 PR 数。open PR 独占全部预算；已合并/关闭的绑定在预算之外的一块额外名额（上限的 20%，至少一个）中排出，因此绝不会挤占 open PR。每个被监视的 PR 每轮仍约发出一次 API 请求，但未变化的 PR 会得到 304、不计入主速率限制，因此 PR 安静时状态监视近乎免费。仍然计费的是默认开启的评论监视（按默认 60 秒间隔约每小时 60 次/PR）与周期性 CI 复查，两者使 5000 次/小时的预算大约落在 70–75 个绑定 PR。上限是从状态监视转移到了评论监视，并没有消失，因此不要把「近乎免费」读成「没有上限」。超出预算会让每轮监视都因限流中止。提高本值时请同时提高轮询间隔。需开启"投递到 PR 绑定会话"；每个 PR 的 API 请求还需要配置监视事件——不配置时本上限只约束评论监视。留空则使用默认值（30）。',
+  'channels.editor.field.github.prWatchLimit.disabledHint':
+    '开启上方「投递到 PR 绑定会话」后即可设置监视上限。',
+  'channels.editor.field.github.prWatchBudgetReserve': 'PR 监视预算预留',
+  'channels.editor.field.github.prWatchBudgetReserve.description':
+    '为交互式通知车道留回的 REST 请求数。当上次已知剩余预算处于或低于此值时，本轮跳过 PR 状态监视（若某轮 pass 花到该值则中途停止），以免后台轮询饿死人工 mention；预算回升或其窗口重置后检测恢复。默认值（200）约为 5000 次/小时 token 预算的 4%。设为 0 可禁用该门。需开启"投递到 PR 绑定会话"；该门同样覆盖评论监视，因此不需要配置监视事件。留空则使用默认值。',
   'channels.editor.field.github.boundSessionActions': '绑定会话动作模板',
   'channels.editor.field.github.boundSessionActions.description':
     '可选。投递给 PR 绑定会话的 operator 指令模板。在下方选择事件键；加角色前缀（review:、verify:、fix:）可只定向该绑定角色。需开启"投递到 PR 绑定会话"。有匹配键的角色各自投递，没有匹配键的角色跳过该事件。变量：%repo%、%pr%、%url%、%title%、%event%、%sender%、%role%；%% 表示字面 %。留空则使用默认通用 prompt。',
@@ -9411,6 +9844,35 @@ const ZH: Messages = {
     '不可合并 — MR 变为不可合并（冲突）',
   'channels.editor.field.gitlab.action_prompt_template.option.merge_train_removed':
     '合并队列移除 — MR 从合并队列中移除',
+  'channels.editor.field.email.address': '邮箱地址',
+  'channels.editor.field.email.imapHost': 'IMAP 服务器',
+  'channels.editor.field.email.imapUser': 'IMAP 用户名',
+  'channels.editor.field.email.imapPassword': 'IMAP 密码',
+  'channels.editor.field.email.smtpHost': 'SMTP 服务器',
+  'channels.editor.field.email.smtpUser': 'SMTP 用户名',
+  'channels.editor.field.email.smtpPassword': 'SMTP 密码',
+  'channels.editor.field.email.folder': 'IMAP 文件夹',
+  'channels.editor.field.email.imapPort': 'IMAP 端口',
+  'channels.editor.field.email.smtpPort': 'SMTP 端口',
+  'channels.editor.field.email.imapSecure': 'IMAP 隐式 TLS',
+  'channels.editor.field.email.imapSecure.description':
+    '关闭后必须使用 STARTTLS。',
+  'channels.editor.field.email.smtpSecure': 'SMTP 隐式 TLS',
+  'channels.editor.field.email.smtpSecure.description':
+    '关闭后必须使用 STARTTLS。',
+  'channels.editor.field.email.proactiveRecipients': '主动投递收件人',
+  'channels.editor.field.email.proactiveRecipients.description':
+    '需填写精确的裸邮箱地址。留空则禁用主动投递邮件。',
+  'channels.editor.field.email.pollInterval': '轮询间隔（毫秒）',
+  'channels.editor.field.email.maxMessageBytes': '邮件大小上限（字节）',
+  'channels.editor.field.email.maxAttachmentBytes': '附件大小上限（字节）',
+  'channels.editor.field.email.maxTextLength': '文本字符数上限',
+  'channels.editor.field.email.allowedUsers': '允许的邮箱地址',
+  'channels.editor.field.email.allowedUsers.description':
+    '逗号分隔的裸邮箱地址，可发起私聊会话。',
+  'channels.editor.field.email.operators': '会话操作者邮箱地址',
+  'channels.editor.field.email.operators.description':
+    '逗号分隔的裸邮箱地址，可在共享会话中批准工具调用并运行 /cancel、/clear 或 /loop。',
   'channels.editor.secret.environment': '已保存在环境变量中',
   'channels.editor.secret.stored': '已安全保存',
   'channels.editor.secret.preserve': '保留',
@@ -9556,13 +10018,24 @@ const ZH: Messages = {
   'channels.editor.validation.invalidOption': '请移除不在允许列表中的值。',
   'channels.editor.validation.requiresBoundDelivery':
     '需开启「投递到 PR 绑定会话」才能保存所选的监视事件。',
+  'channels.editor.validation.requiresBoundDeliveryForWatchGate':
+    '需开启「投递到 PR 绑定会话」才能要求活跃监视。',
+  'channels.editor.validation.repoFilterRequired':
+    '请至少列出一个仓库，或把「按仓库过滤」设为关闭。',
   'channels.editor.validation.number': '请输入有效数字。',
-  'channels.editor.validation.outOfRange': (v) =>
-    v?.min !== undefined && v?.max !== undefined
-      ? `请输入大于 ${v.min} 且不超过 ${v.max} 的数字。`
-      : v?.max !== undefined
-        ? `请输入不超过 ${v.max} 的数字。`
-        : `请输入大于 ${v?.min ?? 0} 的数字。`,
+  'channels.editor.validation.outOfRange': (v) => {
+    const lower =
+      v?.minInclusive !== undefined
+        ? `不小于 ${v.minInclusive}`
+        : v?.min !== undefined
+          ? `大于 ${v.min}`
+          : undefined;
+    if (lower !== undefined && v?.max !== undefined) {
+      return `请输入${lower} 且不超过 ${v.max} 的数字。`;
+    }
+    if (v?.max !== undefined) return `请输入不超过 ${v.max} 的数字。`;
+    return `请输入${lower ?? '大于 0'} 的数字。`;
+  },
   'channels.editor.validation.policy': '请选择准入策略。',
   'channels.editor.saveError': '未能保存更改',
   'channels.editor.reloadLatest': '加载最新配置',
@@ -9585,40 +10058,11 @@ const ZH: Messages = {
   'localControl.disabledHint':
     '本地控制未开启。请在设置中开启后，配对同一网络下的手机。',
   'localControl.openSettings': '打开设置',
-  'browserNotifications.label': '任务通知',
-  'browserNotifications.description':
-    '页面在后台或窗口失焦时，提醒当前聊天和分屏聊天的回合结束、失败、需要审批或等待回答。回合结束通知包含提问和回复摘录；待处理提醒只显示会话标题和等待状态。仅保存在此浏览器站点；网页需保持打开。',
-  'browserNotifications.prompt': (v) => `提问：${v?.text ?? ''}`,
-  'browserNotifications.reply': (v) => `回复：${v?.text ?? ''}`,
-  'browserNotifications.completed': '本轮已完成。',
-  'browserNotifications.failed': '本轮执行失败，请返回查看。',
-  'browserNotifications.ended': '本轮已结束，请返回查看结果。',
-  'browserNotifications.approval': '此会话需要你的审批，请返回查看请求。',
-  'browserNotifications.question': '此会话正在等待你的回答，请返回处理。',
-  'browserNotifications.allow': '允许通知',
-  'browserNotifications.enable': '开启通知',
-  'browserNotifications.helpEnabled': '已为此站点开启通知。',
-  'browserNotifications.helpWaiting': '尚未获得浏览器通知授权。',
-  'browserNotifications.helpWhen':
-    '页面在后台或者切换到其他页签时，当前聊天需要审批、等待回答、回合结束或失败会发送提醒，点击通知返回对应聊天，不会自动审批或回答。',
-  'browserNotifications.helpSystem':
-    '如果没有收到提醒，请按下方指引检查系统通知',
-  'browserNotifications.helpMac':
-    '打开“系统设置 → 通知”，选择浏览器（Chrome 如列有 Google Chrome Helper (Alerts)，也需检查），开启允许通知及桌面横幅／提醒。检查专注模式，以及屏幕共享时是否允许通知。',
-  'browserNotifications.helpWindows':
-    '打开“设置 → 系统 → 通知”（Windows 10 为“通知和操作”），开启通知及浏览器通知，并允许显示通知横幅。关闭“请勿打扰／专注助手”，或在其规则中允许浏览器通知。',
-  'browserNotifications.enabled': '已开启。',
-  'browserNotifications.disabled': '未开启。',
-  'browserNotifications.waiting': '等待浏览器授权。',
-  'browserNotifications.denied': '浏览器已阻止通知，请在浏览器站点设置中允许。',
-  'browserNotifications.unavailable': '当前浏览器或页面环境无法使用通知。',
-  'browserNotifications.requesting': '等待你的授权…',
-  'browserNotifications.error': '无法启用或显示通知，请检查浏览器及系统设置。',
-  'browserNotifications.temporary': '设置仅在当前页面有效。',
   'welcome.modeHint': 'Shift+Tab 或 /approval-mode',
   'welcome.prompt': '你想构建什么？',
   'welcome.titlePrefix': '欢迎使用',
   'welcome.tipLabel': '提示：',
+  ...BROWSER_NOTIFICATION_MESSAGES_ZH,
   ...MCP_APP_MESSAGES_ZH,
   ...VOICE_MESSAGES_ZH,
   ...LIVE_MESSAGES_ZH,
@@ -9802,7 +10246,9 @@ export function languageLabel(language: WebShellLanguage): string {
 }
 
 export function getTranslator(language: WebShellLanguage) {
-  const messages = MESSAGES[language];
+  // The runtime value is not checked: an unshipped locale falls back to the
+  // EN table instead of crashing on the first key lookup.
+  const messages = MESSAGES[language] ?? EN;
   return (key: string, vars?: Record<string, string | number>) => {
     const message = messages[key] ?? EN[key] ?? key;
     return typeof message === 'function' ? message(vars) : message;

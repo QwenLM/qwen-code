@@ -12,17 +12,18 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.RuntimeResourceHandle;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.adapter.HttpRuntimeTransport;
+import com.alibaba.qwen.code.runtimebroker.protocol.KubernetesNames;
 import com.alibaba.qwen.code.runtimebroker.spi.KubernetesRuntimeClient;
+import org.apache.commons.codec.digest.DigestUtils;
 
+import java.io.IOException;
 import java.net.InetAddress;
 import java.net.URI;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
+import java.net.URISyntaxException;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
-import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -67,7 +68,7 @@ public final class KubernetesRuntimeProvisioner implements RuntimeProvisioner {
                 || startupTimeout == null || startupTimeout.isNegative() || startupTimeout.isZero()) {
             throw new IllegalArgumentException("Client, pinned image, worker command and positive timeout are required");
         }
-        com.alibaba.qwen.code.runtimebroker.protocol.KubernetesNames.dnsLabel(namespace);
+        KubernetesNames.dnsLabel(namespace);
         this.client = client;
         this.cluster = BrokerValues.requireId(cluster, "cluster");
         this.namespace = namespace;
@@ -158,6 +159,7 @@ public final class KubernetesRuntimeProvisioner implements RuntimeProvisioner {
                 throw conflict();
             }
             long deadline = System.nanoTime() + startupTimeout.toNanos();
+            long pause = 200;
             while (System.nanoTime() < deadline) {
                 RuntimeObservation observed = observe(request, seed, saved.handle());
                 if (observed.getOutcome() == RuntimeObservation.Outcome.READY) {
@@ -168,11 +170,12 @@ public final class KubernetesRuntimeProvisioner implements RuntimeProvisioner {
                     throw conflict();
                 }
                 try {
-                    Thread.sleep(100);
+                    Thread.sleep(pause);
                 } catch (InterruptedException error) {
                     Thread.currentThread().interrupt();
                     throw unavailable();
                 }
+                pause = Math.min(pause * 2, 2_000);
             }
             throw unavailable();
         }, executor);
@@ -565,11 +568,7 @@ public final class KubernetesRuntimeProvisioner implements RuntimeProvisioner {
     }
 
     private static String digest(Object value) {
-        try {
-            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(JsonCodec.encode(canonical(value))));
-        } catch (NoSuchAlgorithmException error) {
-            throw new IllegalStateException(error);
-        }
+        return DigestUtils.sha256Hex(JsonCodec.encode(canonical(value)));
     }
 
     private static Object canonical(Object value) {
@@ -595,7 +594,7 @@ public final class KubernetesRuntimeProvisioner implements RuntimeProvisioner {
                 throw conflict();
             }
             return new URI("http", null, address.getHostAddress(), 43190, "/", null, null);
-        } catch (java.io.IOException | java.net.URISyntaxException error) {
+        } catch (IOException | URISyntaxException error) {
             throw conflict();
         }
     }

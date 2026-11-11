@@ -82,7 +82,12 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   useWorkspace: () => workspaceState.current,
 }));
 
-const { ChannelEventsPage } = await import('./ChannelEventsPage');
+const { ChannelEventsPage, KNOWN_OUTCOMES } = await import(
+  './ChannelEventsPage'
+);
+const { CHANNEL_EVENTS_MESSAGES_EN, CHANNEL_EVENTS_MESSAGES_ZH } = await import(
+  './channel-events-messages'
+);
 const { I18nProvider } = await import('../../i18n');
 
 let container: HTMLDivElement;
@@ -110,10 +115,10 @@ afterEach(() => {
   container.remove();
 });
 
-async function renderPage() {
+async function renderPage(language: 'en' | 'zh-CN' = 'en') {
   await act(async () => {
     root.render(
-      <I18nProvider language="en">
+      <I18nProvider language={language}>
         <ChannelEventsPage onClose={vi.fn()} />
       </I18nProvider>,
     );
@@ -182,6 +187,14 @@ describe('ChannelEventsPage', () => {
     expect(rows[1]?.textContent).toContain('owner/repo#42');
     expect(rows[1]?.textContent).toContain('@alice');
     expect(rows[1]?.textContent).toContain('reason_filter');
+    // Absence coverage for the new counters. The catalogs format a missing
+    // count as zero, so dropping a `typeof … === 'number'` guard would not
+    // leave a blank — it would print a confident wrong number on every poll
+    // row, including this healthy one.
+    expect(rows[0]?.textContent).not.toContain('0 binding scans');
+    expect(rows[0]?.textContent).not.toContain('binding scan');
+    expect(rows[0]?.textContent).not.toContain('sessions listed');
+    expect(rows[1]?.textContent).not.toContain('session ');
   });
 
   it('links GitHub PR and Issue targets to their web URL', async () => {
@@ -744,6 +757,366 @@ describe('ChannelEventsPage', () => {
     );
     expect(useChannelsMock).toHaveBeenLastCalledWith(
       expect.objectContaining({ workspaceCwd: '/work/beta' }),
+    );
+  });
+
+  it('labels an ambiguous publication failure instead of showing the token', async () => {
+    eventsState.current.data = {
+      truncated: false,
+      events: [
+        {
+          at: '2026-11-02T02:00:00.000Z',
+          channel: 'bot',
+          type: 'outbound',
+          outcome: 'failed_ambiguous',
+          repository: 'owner/repo',
+          number: 42,
+          error: '502 Bad Gateway',
+        },
+      ],
+    };
+
+    await renderPage();
+
+    const rows = container.querySelectorAll('li');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.textContent).toContain('Failed (may have posted)');
+    expect(rows[0]?.textContent).not.toContain('failed_ambiguous');
+    expect(rows[0]?.textContent).toContain('502 Bad Gateway');
+  });
+
+  it('labels the ambiguous failure in Chinese too', async () => {
+    eventsState.current.data = {
+      truncated: false,
+      events: [
+        {
+          at: '2026-11-02T02:00:00.000Z',
+          channel: 'bot',
+          type: 'outbound',
+          outcome: 'failed_ambiguous',
+        },
+      ],
+    };
+
+    await renderPage('zh-CN');
+
+    expect(container.textContent).toContain('失败（可能已发表）');
+    expect(container.textContent).not.toContain('failed_ambiguous');
+  });
+
+  it('labels the private delivery and degraded scan outcomes', async () => {
+    eventsState.current.data = {
+      truncated: false,
+      events: [
+        {
+          at: '2026-11-02T02:00:00.000Z',
+          channel: 'bot',
+          type: 'task',
+          outcome: 'delivered',
+          repository: 'owner/repo',
+          number: 42,
+        },
+        {
+          at: '2026-11-02T02:01:00.000Z',
+          channel: 'bot',
+          type: 'task',
+          outcome: 'retired',
+          reason: 'dead_letter',
+        },
+        {
+          at: '2026-11-02T02:02:00.000Z',
+          channel: 'bot',
+          type: 'poll',
+          outcome: 'degraded',
+          reason: 'bindings_unreachable',
+        },
+      ],
+    };
+
+    await renderPage();
+
+    const rows = container.querySelectorAll('li');
+    expect(rows).toHaveLength(3);
+    // Newest first, like every other row on the page.
+    expect(rows[0]?.textContent).toContain('Degraded');
+    expect(rows[0]?.textContent).toContain('bindings_unreachable');
+    expect(rows[1]?.textContent).toContain('Retired');
+    expect(rows[1]?.textContent).toContain('dead_letter');
+    expect(rows[2]?.textContent).toContain('Delivered');
+  });
+
+  it('labels the watch-guard recovery edge as recovered, not degraded', async () => {
+    eventsState.current.data = {
+      truncated: false,
+      events: [
+        {
+          at: '2026-11-02T02:00:00.000Z',
+          channel: 'bot',
+          type: 'poll',
+          outcome: 'degraded',
+          reason: 'watch_reconcile_recovered',
+        },
+      ],
+    };
+
+    await renderPage();
+
+    const rows = container.querySelectorAll('li');
+    // The wire outcome stays `degraded`; the recovery reason names the label,
+    // so the row cannot read as an ongoing failure.
+    expect(rows[0]?.textContent).toContain('Recovered');
+    expect(rows[0]?.textContent).not.toContain('Degraded');
+    expect(rows[0]?.textContent).toContain('watch_reconcile_recovered');
+  });
+
+  it('labels the watch-budget recovery edge as recovered, not degraded', async () => {
+    eventsState.current.data = {
+      truncated: false,
+      events: [
+        {
+          at: '2026-11-02T02:00:00.000Z',
+          channel: 'bot',
+          type: 'poll',
+          outcome: 'degraded',
+          reason: 'watch_budget_recovered',
+        },
+      ],
+    };
+
+    await renderPage();
+
+    const rows = container.querySelectorAll('li');
+    expect(rows[0]?.textContent).toContain('Recovered');
+    expect(rows[0]?.textContent).not.toContain('Degraded');
+    expect(rows[0]?.textContent).toContain('watch_budget_recovered');
+  });
+
+  it('renders the low-budget numbers so a near-boundary trip is distinguishable', async () => {
+    // 199/200 (another consumer on a shared token) and 12/200 (mentions about
+    // to starve) must not look identical, and the reserve shown confirms what
+    // is actually in force after an operator edits it.
+    eventsState.current.data = {
+      truncated: false,
+      events: [
+        {
+          at: '2026-11-02T02:00:00.000Z',
+          channel: 'bot',
+          type: 'poll',
+          outcome: 'degraded',
+          reason: 'watch_budget_low',
+          detail: { remaining: 12, reserve: 200 },
+        },
+      ],
+    };
+
+    await renderPage();
+
+    const rows = container.querySelectorAll('li');
+    expect(rows[0]?.textContent).toContain('watch_budget_low');
+    expect(rows[0]?.textContent).toContain('12');
+    expect(rows[0]?.textContent).toContain('200');
+  });
+
+  it('shows which session a private delivery reached', async () => {
+    eventsState.current.data = {
+      truncated: false,
+      events: [
+        {
+          at: '2026-11-02T02:00:00.000Z',
+          channel: 'bot',
+          type: 'task',
+          outcome: 'delivered',
+          repository: 'owner/repo',
+          number: 42,
+          sessionId: '3f2b8c1e-9d4a-4b7e-8c1f-2a5d9e0b7c31',
+        },
+      ],
+    };
+
+    await renderPage();
+
+    const chip = container.querySelector('li code[title]');
+    expect(chip).not.toBeNull();
+    // Truncated for the row, full identity on hover: a UUID would otherwise
+    // push the reason and the counters out of the column.
+    expect(chip?.textContent).toBe('session 3f2b8c1e');
+    expect(chip?.getAttribute('title')).toBe(
+      '3f2b8c1e-9d4a-4b7e-8c1f-2a5d9e0b7c31',
+    );
+  });
+
+  it('shows the degraded binding scan counters', async () => {
+    eventsState.current.data = {
+      truncated: false,
+      events: [
+        {
+          at: '2026-11-02T02:00:00.000Z',
+          channel: 'bot',
+          type: 'poll',
+          outcome: 'degraded',
+          reason: 'bindings_partial',
+          detail: { streak: 10, sessions: 1 },
+        },
+      ],
+    };
+
+    await renderPage();
+
+    const rows = container.querySelectorAll('li');
+    expect(rows[0]?.textContent).toContain('bindings_partial');
+    expect(rows[0]?.textContent).toContain('10 consecutive binding scans');
+    expect(rows[0]?.textContent).toContain('1 session listed');
+  });
+
+  it('has an English and a Chinese label for every known outcome', async () => {
+    // The translator falls back to English and then to the key, so a missing
+    // Chinese label renders English rather than failing loudly. Check the
+    // catalogs directly.
+    expect(KNOWN_OUTCOMES.size).toBeGreaterThan(0);
+    const enKeys = Object.keys(CHANNEL_EVENTS_MESSAGES_EN);
+    const zhKeys = Object.keys(CHANNEL_EVENTS_MESSAGES_ZH);
+    for (const outcome of KNOWN_OUTCOMES) {
+      const key = `channelEvents.outcome.${outcome}`;
+      expect(enKeys).toContain(key);
+      expect(zhKeys).toContain(key);
+    }
+    expect(enKeys.sort()).toEqual(zhKeys.sort());
+  });
+
+  it('keeps the interpolating labels as functions in both catalogs', async () => {
+    // The translator ignores vars for a plain string, so turning one of these
+    // into a string — or keeping the arrow but dropping the interpolation —
+    // renders a bare "列出" / "连续 次绑定扫描" / "会话 " on every row. A key
+    // comparison cannot see that; the shape can.
+    const interpolating = [
+      'channelEvents.session',
+      'channelEvents.streak',
+      'channelEvents.sessions',
+      'channelEvents.notifications',
+      'channelEvents.moreFiltered',
+      'channelEvents.duration',
+      'channelEvents.openTarget',
+    ];
+    // Collected rather than asserted per key so the failure names the offenders.
+    const notFunctions = interpolating.filter(
+      (key) =>
+        typeof CHANNEL_EVENTS_MESSAGES_EN[key] !== 'function' ||
+        typeof CHANNEL_EVENTS_MESSAGES_ZH[key] !== 'function',
+    );
+    expect(notFunctions).toEqual([]);
+  });
+
+  it('renders the Chinese counters and session chip with their values', async () => {
+    eventsState.current.data = {
+      truncated: false,
+      events: [
+        {
+          at: '2026-11-02T02:00:00.000Z',
+          channel: 'bot',
+          type: 'task',
+          outcome: 'delivered',
+          repository: 'owner/repo',
+          number: 42,
+          sessionId: '3f2b8c1e-9d4a-4b7e-8c1f-2a5d9e0b7c31',
+        },
+        {
+          at: '2026-11-02T02:01:00.000Z',
+          channel: 'bot',
+          type: 'poll',
+          outcome: 'degraded',
+          reason: 'bindings_partial',
+          detail: { streak: 10, sessions: 1 },
+        },
+      ],
+    };
+
+    await renderPage('zh-CN');
+
+    const rows = container.querySelectorAll('li');
+    expect(rows).toHaveLength(2);
+    // Newest first: the degraded poll, then the delivery.
+    expect(rows[0]?.textContent).toContain('连续 10 次绑定扫描');
+    expect(rows[0]?.textContent).toContain('列出 1 个会话');
+    expect(rows[1]?.textContent).toContain('已投递');
+    expect(rows[1]?.textContent).toContain('会话 3f2b8c1e');
+    // A dropped interpolation leaves the counter's frame with a hole in it.
+    // The shape test alone would not catch that, and the render alone would
+    // not catch a plain-string label until a row happens to carry the var.
+    expect(rows[0]?.textContent).not.toContain('连续  次');
+    expect(rows[0]?.textContent).not.toContain('列出  个');
+  });
+
+  it('renders the Chinese degraded, retired and recovered outcome labels', async () => {
+    eventsState.current.data = {
+      truncated: false,
+      events: [
+        {
+          at: '2026-11-02T02:00:00.000Z',
+          channel: 'bot',
+          type: 'poll',
+          outcome: 'degraded',
+          reason: 'bindings_partial',
+          detail: { streak: 10, sessions: 1 },
+        },
+        {
+          at: '2026-11-02T02:01:00.000Z',
+          channel: 'bot',
+          type: 'task',
+          outcome: 'retired',
+          reason: 'dead_letter',
+        },
+        {
+          at: '2026-11-02T02:02:00.000Z',
+          channel: 'bot',
+          type: 'poll',
+          outcome: 'degraded',
+          reason: 'watch_reconcile_recovered',
+        },
+      ],
+    };
+
+    await renderPage('zh-CN');
+
+    const rows = container.querySelectorAll('li');
+    expect(rows).toHaveLength(3);
+    // Newest first: recovered, retired, degraded. A translator round that set
+    // any of these back to the English word would otherwise ship green — the
+    // parity test only checks key presence, not the rendered value.
+    expect(rows[0]?.textContent).toContain('已恢复');
+    expect(rows[0]?.textContent).not.toContain('Recovered');
+    expect(rows[1]?.textContent).toContain('已终止');
+    expect(rows[1]?.textContent).not.toContain('Retired');
+    expect(rows[2]?.textContent).toContain('降级');
+    expect(rows[2]?.textContent).not.toContain('Degraded');
+  });
+
+  it('renders the Chinese open-target label with its repository and number', async () => {
+    channelsState.current = {
+      'gh-bot': { config: { type: 'github' } },
+    };
+    eventsState.current.data = {
+      truncated: false,
+      events: [
+        {
+          at: '2026-11-02T02:00:00.000Z',
+          channel: 'gh-bot',
+          type: 'inbound',
+          outcome: 'accepted',
+          repository: 'owner/repo',
+          thread: 'pr:42',
+          number: 42,
+        },
+      ],
+    };
+
+    await renderPage('zh-CN');
+
+    // The shape guard catches a plain-string openTarget, but only a render
+    // assertion catches a function that dropped its interpolation: every ZH
+    // row would otherwise read "在 GitHub 上打开" with no target.
+    const link = container.querySelector('li a[target="_blank"]');
+    expect(link?.getAttribute('aria-label')).toBe(
+      '在 GitHub 上打开 owner/repo#42',
     );
   });
 });

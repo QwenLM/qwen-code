@@ -1,7 +1,9 @@
 package com.alibaba.qwen.code.managedagent.config;
 
 import com.alibaba.qwen.code.managedagent.api.ApiExceptionHandler;
+import com.alibaba.qwen.code.managedagent.api.ManagedMemorySessionController;
 import com.alibaba.qwen.code.managedagent.api.ManagedSessionStoreController;
+import com.alibaba.qwen.code.managedagent.api.ManagedSideQueryStoreController;
 import com.alibaba.qwen.code.managedagent.api.TenantContextArgumentResolver;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
 import org.springframework.context.annotation.Configuration;
@@ -9,7 +11,7 @@ import org.springframework.context.annotation.Import;
 
 /** Opt-in native journal callbacks; each operation retains its writer-credential check. */
 @Configuration(proxyBeanMethods = false)
-@Import({ManagedSessionStoreController.class, TenantContextArgumentResolver.class,
+@Import({ManagedSessionStoreController.class, ManagedMemorySessionController.class, ManagedSideQueryStoreController.class, TenantContextArgumentResolver.class,
         WebConfiguration.class, ManagedSessionJsonConfiguration.class, ApiExceptionHandler.class})
 public class ManagedAgentInternalConfiguration {
     @org.springframework.context.annotation.Bean

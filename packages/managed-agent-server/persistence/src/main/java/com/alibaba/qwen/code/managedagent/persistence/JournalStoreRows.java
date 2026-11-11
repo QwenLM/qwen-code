@@ -1,10 +1,13 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
+import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionRecords;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.RestoreHead;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.StoredResource;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.StoredTransaction;
+import com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
@@ -51,6 +54,7 @@ final class JournalStoreRows {
                         result.getLong("activation_epoch"),
                         result.getString("latest_checkpoint_resource_id"),
                         result.getLong("compacted_through_revision"),
+                        result.getLong("packed_through_revision"),
                         result.getString("recovery_status"),
                         result.getString("recovery_detail_code"),
                         result.getString("activation_id"),
@@ -295,7 +299,7 @@ final class JournalStoreRows {
                         "SELECT " + ManagedSchemaProjection.RESOURCE.columns() + " FROM ma_resource WHERE resource_key = ? AND session_scope_key = ?"
                         + " AND resource_id = ?" + (lock ? " FOR UPDATE" : ""),
                         resourceMapper,
-                        com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.resourceKey(scopeKey, resourceId),
+                        ManagedSessionStore.resourceKey(scopeKey, resourceId),
                         scopeKey,
                         resourceId);
         return rows.isEmpty() ? null : rows.get(0);
@@ -467,6 +471,15 @@ final class JournalStoreRows {
                             resource.digest(),
                             resource.byteLength());
             if (matching == null || matching != 1) {
+                throw resourceCorrupt();
+            }
+            return;
+        }
+        if ("OSS_OBJECT".equals(resource.storageKind())) {
+            if (!("PUBLISHED".equals(resource.state()) || "REFERENCED".equals(resource.state()))
+                    || resource.bytes() != null || resource.objectKey() == null
+                    || resource.objectVersionId() != null || resource.encryptionKeyId() != null
+                    || resource.captureState() != null) {
                 throw resourceCorrupt();
             }
             return;
@@ -678,7 +691,7 @@ final class JournalStoreRows {
             long journalRevision, long committedSequence,
             String lastCommitDigest, long activationEpoch,
             String latestCheckpointResourceId,
-            long compactedThroughRevision, String recoveryStatus,
+            long compactedThroughRevision, long packedThroughRevision, String recoveryStatus,
             String recoveryDetailCode, String activationId,
             String activationPhase, Long activationEventEpoch,
             Long activationExpiresAt, Long activationHeadRevision) {
@@ -695,10 +708,41 @@ final class JournalStoreRows {
             String recordDigest) {
     }
 
+    TransactionRow withRecordBytes(TransactionRow row, byte[] bytes) {
+        return new TransactionRow(row.workspaceId(), row.journalRevision(), row.transactionId(),
+                row.operation(), row.commandId(), row.contentDigest(), row.firstSequence(),
+                row.lastSequence(), row.eventCount(), row.eventsDigest(),
+                row.previousCommitDigest(), row.commitDigest(), row.writerGeneration(),
+                row.writerId(), row.writerTokenHash(), row.activationEpoch(),
+                row.latestCheckpointResourceId(), row.recordEncoding(), bytes, row.byteLength(),
+                row.recordDigest());
+    }
+
     record ResourceRow(String tenantId, String workspaceId,
             String sessionId, String resourceId, String kind,
             int schemaVersion, long byteLength, String digest,
             String storageKind, byte[] bytes, String objectKey,
             String objectVersionId, String encryptionKeyId, String state, String captureState, String deletionOperation) {
+    }
+
+    /**
+     * Converts the last activation.changed payload of a committed transaction, so the head row can
+     * answer authorization reads without rescanning the journal. The payload was already parsed by
+     * the extension record pass of this commit.
+     */
+    static ActivationChange activationChange(JsonNode payload) {
+        if (payload == null) {
+            return null;
+        }
+        return new ActivationChange(
+                ToolPublicationContract.text(payload, "activationId"),
+                ToolPublicationContract.text(payload, "phase"),
+                payload.path("epoch").asLong(),
+                ManagedExtensionRecords.millisLenient(
+                        payload.path("expiresAt")));
+    }
+
+    record ActivationChange(String id, String phase, long epoch,
+            Long expiresAt) {
     }
 }

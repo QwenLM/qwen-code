@@ -51,18 +51,22 @@ const MODALITY_PATTERNS: Array<[RegExp, InputModalities]> = [
   [/^qwen3\.5-plus/, { image: true, video: true }],
   [/^qwen3\.6-plus/, { image: true, video: true }],
   [/^qwen3\.7-plus/, { image: true, video: true }],
-  // Qwen 3.8 series: flash/plus support image + video; max supports image only
+  // The stable Qwen 3.8 chat models accept images and video. Max variants
+  // without catalog metadata default to image input.
   [/^qwen3\.8-flash/, { image: true, video: true }],
   [/^qwen3\.8-plus/, { image: true, video: true }],
+  [/^qwen3\.8-max$/, { image: true, video: true }],
   [/^qwen3\.8-max/, { image: true }],
   [/^coder-model$/, { image: true, video: true }],
 
   // Qwen VL (vision-language) models: image + video
   [/^qwen-vl-/, { image: true, video: true }],
-  [/^qwen3-vl-/, { image: true, video: true }],
+  // Ollama names these `qwen3-vl:8b` and `qwen2.5vl:7b`, so the tag strip
+  // leaves a bare `qwen3-vl` or a `qwen2.5vl` with no hyphen.
+  [/^qwen3-?vl(?:-|$)/, { image: true, video: true }],
   // Open-weight Qwen2-VL / Qwen2.5-VL, including sizes and quantized builds
   // the bundled catalog has no entry for (32B, 3B, -AWQ, -FP8).
-  [/^qwen2(?:\.5)?-vl-/, { image: true, video: true }],
+  [/^qwen2(?:\.5)?-?vl(?:-|$)/, { image: true, video: true }],
   // QVQ visual reasoning models.
   [/^qvq-/, { image: true }],
 

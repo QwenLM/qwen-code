@@ -172,6 +172,7 @@ describe('TUI product evidence', () => {
     ['packages/core/src/core/coreToolScheduler.ts', lanes.slice(0, -1)],
     ['packages/core/src/core/client.ts', lanes.slice(0, -1)],
     ['packages/cli/src/ui/opentui/live-turn.ts', lanes.slice(0, -1)],
+    ['packages/cli/src/ui/opentui/shared-model-round.ts', lanes.slice(0, -1)],
     ['packages/cli/src/ui/opentui/opentui-runtime.ts', lanes],
     ['pnpm-lock.yaml', lanes],
     ['packages/cli/package.json', lanes],
@@ -230,6 +231,8 @@ describe('TUI product evidence', () => {
           selected.includes('recovery'),
         );
       }
+      if (selected.length === 0)
+        expect(outputs.reason).toBe('Outside the TUI build/test closure');
       if (selected.length === 1)
         expect(outputs.reason).toContain(
           'maintainers should consider manual full',
@@ -637,11 +640,16 @@ describe('TUI product evidence', () => {
   const excludedTrees = (yamlText) =>
     parse(yamlText)
       .packages.filter((entry) => entry.startsWith('!'))
-      .map((entry) => entry.slice(1));
+      .map((entry) => entry.slice(1))
+      .filter((tree) => !/[*?[\]{}]/.test(tree));
 
   it('excludes every tree the pnpm workspace itself leaves out', async () => {
     const excluded = excludedTrees(readFileSync('pnpm-workspace.yaml', 'utf8'));
-    expect(excluded.length).toBeGreaterThan(0);
+    expect([...excluded].sort()).toEqual([
+      'packages/desktop',
+      'packages/live-host',
+      'packages/mobile-shell',
+    ]);
     for (const tree of excluded) {
       const { outputs } = await impact([
         { filename: `${tree}/placeholder.ts` },
@@ -651,7 +659,7 @@ describe('TUI product evidence', () => {
     }
   });
 
-  it('reconciles negations spelled with a trailing comment or another scope', () => {
+  it('reconciles literal negations across YAML spellings and ignores globs', () => {
     expect(
       excludedTrees(
         [
@@ -659,6 +667,10 @@ describe('TUI product evidence', () => {
           "  - 'packages/*'",
           "  - '!packages/desktop' # promoted to its own release later",
           "  - '!integrations/generated-ui'",
+          "  - '!**/fixtures/**'",
+          "  - '!packages/fixture?'",
+          "  - '!packages/[ab]'",
+          "  - '!packages/{foo,bar}'",
           '',
         ].join('\n'),
       ),
@@ -1096,18 +1108,25 @@ describe('e2e workflow', () => {
 
     it('probes the apt mirror instead of pinning a region', () => {
       // #16214: deb.debian.org serves this pool at MB/s from Hong Kong and
-      // 11-20 kB/s from the mainland hosts, where the two apt layers then
-      // outlast the job's 60-minute cap. So neither a single mirror nor a
+      // 11-45 kB/s from the mainland hosts, where the two apt layers then
+      // outlast the job's execution cap. So neither a single mirror nor a
       // host-name map is correct — the build probes and overrides only on a
-      // clear win, which leaves healthy hosts on the built-in source.
-      // The VPC intranet mirror is the durable fix: it bypasses the capped
-      // public egress that throttles the public mirrors (the maven script's
-      // rationale). It must stay a probe candidate — unreachable off-VPC, it
-      // measures 0 and loses, so no host map is needed.
-      expect(e2eRunScript).toContain('mirrors.cloud.aliyuncs.com');
-      expect(e2eRunScript).toContain('mirrors.aliyun.com');
-      expect(e2eRunScript).toContain('mirrors.tuna.tsinghua.edu.cn');
-      expect(e2eRunScript).toContain('--build-arg APT_MIRROR=');
+      // clear win, which leaves healthy hosts on the built-in source. The
+      // probe lives in a shared script so the release docker lane (#16271)
+      // selects the same source; the VPC intranet mirror bypasses the capped
+      // public egress (the maven script's rationale) and, unreachable off-VPC,
+      // measures 0 and loses — no host map needed.
+      const aptProbeScript = readFileSync(
+        '.github/scripts/apt-mirror-probe.sh',
+        'utf8',
+      );
+      // Pin the candidate loop itself, not a substring: the mirrors are also
+      // named in the comments, so a toContain would survive removing a
+      // candidate from the actual `for` list.
+      expect(aptProbeScript).toMatch(
+        /for mirror in mirrors\.cloud\.aliyuncs\.com mirrors\.aliyun\.com mirrors\.tuna\.tsinghua\.edu\.cn; do/,
+      );
+      expect(aptProbeScript).toContain('--build-arg APT_MIRROR=');
       // Both stages need the ARG: a stage cannot inherit an ARG declared
       // before its own FROM, so one declaration per stage is the contract.
       // Counting (not toMatch) catches deleting either one — R1-1 witnessed
@@ -1116,16 +1135,15 @@ describe('e2e workflow', () => {
         readFileSync('Dockerfile', 'utf8').match(/^ARG APT_MIRROR=$/gm),
       ).toHaveLength(2);
 
-      const selectIndex = e2eRunScript.indexOf('select_apt_mirror()');
-      expect(selectIndex).toBeGreaterThan(-1);
-      const callIndex = e2eRunScript.indexOf(
-        'apt_mirror="$(select_apt_mirror)"',
-      );
-      expect(callIndex).toBeGreaterThan(selectIndex);
-      // The probe has to run before the build consumes the flag, otherwise the
-      // mirror is decided after the layer it was meant to speed up.
+      // The E2E leg sources the shared probe and applies it before the build
+      // consumes the flag, otherwise the mirror is decided after the layer it
+      // was meant to speed up. Match the source statement, not a substring —
+      // the shellcheck directive above it also names the file.
+      expect(e2eRunScript).toMatch(/^source .*apt-mirror-probe\.sh"$/m);
+      const applyIndex = e2eRunScript.indexOf('apply_apt_mirror');
+      expect(applyIndex).toBeGreaterThan(-1);
       expect(e2eRunScript.indexOf('if ! build_image;')).toBeGreaterThan(
-        callIndex,
+        applyIndex,
       );
       // Two gates hold the override back, both on the mirror side: an absolute
       // floor (no "slow vs slower" override) and a 4x factor (a genuinely fast
@@ -1133,16 +1151,16 @@ describe('e2e workflow', () => {
       // pinned, not just the names: a 10x mutation of the floor flips the
       // both-slow shape onto a still-slow mirror. \b, not toContain, so the
       // 10x-up mutation 'fast_mirror=10000000' cannot satisfy the pin.
-      expect(e2eRunScript).toMatch(/fast_mirror=1000000\b/);
-      expect(e2eRunScript).toMatch(/-gt "\$\{fast_mirror\}" \]/);
-      expect(e2eRunScript).toMatch(/-gt \$\(\(default_rate \* 4\)\)/);
+      expect(aptProbeScript).toMatch(/fast_mirror=1000000\b/);
+      expect(aptProbeScript).toMatch(/-gt "\$\{fast_mirror\}" \]/);
+      expect(aptProbeScript).toMatch(/-gt \$\(\(default_rate \* 4\)\)/);
       // There must be NO "default looks healthy" gate: the mainland paths are
       // bimodal, so a short probe of the default cannot veto the override
       // (#16214 recurrence on hz4-2, run 41743539611). Pin its absence.
-      expect(e2eRunScript).not.toContain('slow_default');
+      expect(aptProbeScript).not.toContain('slow_default');
       // The measurements have to reach the log, or the next slow build is
       // another manual investigation.
-      expect(e2eRunScript).toContain('apt probe:');
+      expect(aptProbeScript).toContain('apt probe:');
     });
 
     it('keeps one bounded retry without pruning the shared daemon', () => {

@@ -25,7 +25,7 @@ mvn -f packages/managed-agent-server/pom.xml -DskipTests clean process-classes &
 | `server.port` | `SERVER_PORT` | 整数 | `8080` | 公共监听端口，API 和 `/actuator/health` 都在该端口上提供。Spring Boot 从 `SERVER_PORT` 读取。 |
 | `spring.datasource.druid.max-active` | `QWEN_MANAGED_AGENT_DB_MAX_POOL_SIZE` | 整数 | `20` | 控制面 Druid 数据库连接池最多可持有的连接数。连接全部占用时，获取连接的请求最多等待 30 秒，随后失败。`managed-local` profile 下不生效，其连接池固定为 20。 |
 | `spring.datasource.password` | `SPRING_DATASOURCE_PASSWORD` | 字符串 | *（空）* | `spring.datasource.username` 的密码。属于机密：应放在 `server.env` 这类私有环境文件中，不要写在命令行上。 |
-| `spring.datasource.url` | `SPRING_DATASOURCE_URL` | 字符串 | `jdbc:mysql://127.0.0.1:3306/qwen_managed_agent` | 存放控制面状态的 MySQL 8 数据库的 JDBC URL；启动时 Flyway 会对其执行 schema 迁移。`managed-local` profile 改用私有 H2 文件数据库，其他 URL 启动时拒绝。 |
+| `spring.datasource.url` | `SPRING_DATASOURCE_URL` | 字符串 | `jdbc:mysql://127.0.0.1:3306/qwen_managed_agent` | 存放控制面状态的 MySQL 8 数据库的 JDBC URL；启动时 Flyway 会对其执行 schema 迁移。`managed-local` profile 改用私有 H2 文件数据库，其他 URL 启动时拒绝。对 `jdbc:mysql:` URL，服务端会开启 Connector/J 的语句解析缓存：以连接属性加上 `cachePrepStmts=true`、`prepStmtCacheSize=512` 和 `prepStmtCacheSqlLimit=8192`，每一项只在该 URL 和 Druid 连接属性（`spring.datasource.druid.connect-properties` 或 `connection-properties`）都没有设置它时才加；任一处提到 `useServerPrepStmts` 或 `useCursorFetch` 时，无论取值如何，一项都不加，因为二者都可能让 Connector/J 在服务端准备语句。在 URL 里写 `cachePrepStmts=false` 即可关闭缓存。 |
 | `spring.datasource.username` | `SPRING_DATASOURCE_USERNAME` | 字符串 | `qwen` | 控制面连接数据库所用的用户。除控制面数据库的权限外，还需要 `performance_schema.user_variables_by_thread` 的 `SELECT` 权限，预检 `--check` 会校验该权限。 |
 
 ## `qwen.managed-agent`
@@ -42,8 +42,9 @@ Managed Agent 服务端的顶层设置：内置 agent 的修订号、存储的 A
 | `message-relay.scan-delay` | — | 时长 | `2s` | Session 消息中继两次运行之间的间隔；每次运行推进 Session 之间待投递的消息（移交、回执、接受），并结算无法投递的消息。没有可用 Hosted Harness 的节点会跳过。接受 `2s` 这类时长；不带单位的数字按毫秒计。 |
 | `model-catalog` | — | YAML 列表 | *（空）* | 为内置 `qwen-code` agent 的 Session 提供的可选模型，可在创建 Session 时选择，之后也可由 Workspace operator 更改。元素为对象列表，包含 `model-id`（Harness 中配置的模型 ID；必填、唯一、最多 512 字节）和 `label`（显示名称，默认等于 `model-id`，最多 512 个字符）；条目无效或重复时启动时拒绝。需在 YAML 配置文件中设置，没有对应的环境变量。模型选择还要求开启 `qwen.managed-agent.harness.workspace-files-enabled`，且 Harness 支持模型选择。 |
 | `model-config-base-urls` | — | YAML 列表 | *（空）* | 允许完整 Session 模型配置使用的 HTTP(S) API 地址，按完整字符串精确匹配，以 YAML 列表设置。为空时禁止准入新配置。公共创建接口接受 `model_config`，WebShell 创建接口接受 `modelConfig`。要求启用 Session Store、Harness 能力 `session-model-config/1` 和 `SecretProtector`（标准服务由已启用的 Runtime Broker 及其凭据密钥环提供）。模型 ID 和 API key 无需在 Harness 注册。参见 [Session 模型配置设计](../design/managed-session-model-config.zh-CN.md)。 |
-| `service-user` | `QWEN_MANAGED_AGENT_SERVICE_USER` | 字符串 | *（空）* | 服务端运行所用的操作系统账号。仅预检会读取该值：确认账号存在，并按该账号（而非运行预检的账号）检查配置文件和凭据文件是否可读。为空时按运行预检的账号检查访问权限。 |
+| `service-user` | `QWEN_MANAGED_AGENT_SERVICE_USER` | 字符串 | *（空）* | 服务端运行所用的操作系统账号。仅预检会读取该值：确认账号存在，并按该账号（而非运行预检的账号）检查配置文件和凭据文件是否可读。运行预检的账号看不到这类文件，或读不了检查要读取的文件时，该行为 FAIL，并提示以该账号运行检查。为空时按运行预检的账号检查访问权限。 |
 | `session-worktree.scan-delay` | — | 时长 | `1000` | Session worktree 任务两次运行之间的间隔；每次运行继续未完成的单 Session Git worktree 步骤，并使 worktree 未能准备好的 Session 的初始 Turn 失败。接受 `1s` 这类时长；不带单位的数字按毫秒计。 |
+| `side-queries-enabled` | `QWEN_MANAGED_AGENT_SIDE_QUERIES_ENABLED` | 布尔 | `false` | 为具备显式 model_config、执行权限、Session Store 以及声明 side-query/1 的 Harness 的 ACTIVE Session 开启新的 actor 私有 BTW 与 recap 生成。默认关闭。关闭新请求受理后仍保留已授权结果读取和已受理任务。此版本不支持模型目录或默认模型 Session。 |
 | `trusted-actor-header` | `QWEN_MANAGED_AGENT_TRUSTED_ACTOR_HEADER` | 字符串 | *（空）* | 一个请求头名称（例如 `X-Qwen-Actor-Id`），在没有上游认证主体时，其值连同 `X-Qwen-Tenant-Id` 一起被信任为调用方的 actor ID。仅在 open 认证模式下使用；与 signed 模式同时配置时启动时拒绝。open 模式下开启 `qwen.managed-agent.runtime-broker.local-directory-import-enabled` 时必须设置本项。切勿在不可信客户端能访问服务端的环境中设置。为空时禁用。 |
 | `wake-recovery.scan-delay` | — | 时长 | `2s` | 唤醒恢复扫描两次运行之间的间隔；每次运行最多找出 8 个存有已提交输入但无写入者持有的 Session，并重新挂接以运行其唤醒。仅在开启 `qwen.managed-agent.session-store.enabled` 且 Hosted Harness 可用时运行。接受 `2s` 这类时长；不带单位的数字按毫秒计。 |
 
@@ -80,7 +81,7 @@ Managed Agent 服务端的顶层设置：内置 agent 的修订号、存储的 A
 | 属性 | 环境变量 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- | --- |
 | `concurrency` | — | 整数 | `4` | 重叠策略为 `allow` 的单个自动化定义可同时持有的未结束运行数；超出后，再到期的槽位记为 `skipped`，原因为 `count_limit`。`qwen.managed-agent.automation.enabled` 为 true 时，小于 1 的值启动时拒绝。 |
-| `enabled` | `QWEN_MANAGED_AGENT_AUTOMATION_ENABLED` | 布尔 | `false` | 是否运行自动化扫描器，并受理自动化的创建、修改、退役与手动运行路由；关闭时这些路由返回 `409 automation_unavailable`，读取路由照常应答。这些路由还要求开启 `qwen.managed-agent.session-store.enabled`。开启后，自动化的计数或时长若不为正，启动时拒绝。 |
+| `enabled` | `QWEN_MANAGED_AGENT_AUTOMATION_ENABLED` | 布尔 | `true` | 是否运行自动化扫描器，并受理自动化的创建、修改、退役与手动运行路由；关闭时这些路由返回 `409 automation_unavailable`，读取路由照常应答。这些路由还要求开启 `qwen.managed-agent.session-store.enabled`。开启后，自动化的计数或时长若不为正，启动时拒绝。 |
 | `late-tolerance` | `QWEN_MANAGED_AGENT_AUTOMATION_LATE_TOLERANCE` | 时长 | `5m` | 扫描器发现到期槽位时，允许其迟到多久仍按计划触发。更迟的槽位按定义的补跑策略（`none`、`latest` 或 `bounded`）处理，未被补跑的记为错过。开启自动化时，非正值启动时拒绝。不带单位的数字按毫秒计。 |
 | `lease` | `QWEN_MANAGED_AGENT_AUTOMATION_LEASE` | 时长 | `60s` | 扫描器或手动运行持有自动化定义租约的时长，从认领该定义时起算；租约过期后其他节点即可认领该定义，自该认领起，原持有者对它的写入都会被拒绝。开启自动化时，非正值启动时拒绝。不带单位的数字按毫秒计。 |
 | `lookback` | `QWEN_MANAGED_AGENT_AUTOMATION_LOOKBACK` | 时长 | `24h` | 扫描器为定义推导到期槽位时最多回看的时长；早于该窗口（或早于定义启用时刻）的槽位既不触发也不记录，从而限定所有补跑的范围。开启自动化时，非正值启动时拒绝。不带单位的数字按毫秒计。 |
@@ -154,6 +155,8 @@ Workspace 扩展包的发布与管理，以及哪些 actor 有权执行这些操
 | `allowed-actors` | `QWEN_MANAGED_AGENT_EXTENSION_ALLOWED_ACTORS` | 列表 | *（空）* | 允许发布扩展包、保存其设置以及为 Session 选择或应用扩展包的 actor ID，以逗号分隔；`*` 表示允许所有 actor。该 actor 还需具备 Workspace OPERATOR 权限。为空时不允许任何人。 |
 | `artifact-directory` | `QWEN_MANAGED_AGENT_EXTENSION_ARTIFACT_DIRECTORY` | 字符串 | *（空）* | 存放已发布扩展包归档的目录，每个租户与 Workspace 各占一个私有（`0700`）子目录。为空时禁用扩展管理。根目录或子目录为符号链接时归档不可用。多个副本必须共享该目录。 |
 | `enabled` | `QWEN_MANAGED_AGENT_EXTENSION_PACKAGES_ENABLED` | 布尔 | `false` | 是否允许通过公开扩展 API 为 Workspace 发布和管理扩展包。管理操作还需要设置 `qwen.managed-agent.extensions.artifact-directory`、actor 位于 `qwen.managed-agent.extensions.allowed-actors` 中，并具备 Workspace OPERATOR 权限。开启 `qwen.managed-agent.runtime-broker.enabled` 时，开启 `qwen.managed-agent.managed-extensions.enabled` 而未开启本项会在启动时拒绝；否则扩展执行只是保持关闭。 |
+| `runtime-skill-import-enabled` | — | 布尔 | `false` | 是否允许符合条件的 Session 从原始 ready 执行 Runtime 显式发现项目 Skill 并制作快照。需要开启 `qwen.managed-agent.extensions.self-service-enabled`，且 Hosted 支持 `managed-runtime-skill-import/1`。owner 变化或不可用时直接失败，不回退或申请新实例。关闭本项不会删除已发布包，也不会监视或自动更新来源目录。 |
+| `self-service-enabled` | — | 布尔 | `false` | 是否允许在没有 daemon 时准备和导入上传的 Skill/扩展归档及用户编写的 MCP 配置。需要启用扩展管理、配置归档目录、actor 位于 allowlist 且具备 Workspace OPERATOR 权限，并要求 Hosted 支持 `managed-package-preparation/1`。关闭此入口保留已发布内容及现有包应用/恢复能力。 |
 
 ## `qwen.managed-agent.harness`
 
@@ -218,6 +221,16 @@ Workspace 扩展包的发布与管理，以及哪些 actor 有权执行这些操
 | `enabled` | `QWEN_MANAGED_AGENT_EXTENSION_EXECUTION_ENABLED` | 布尔 | `false` | Workspace Runtime 是否以托管扩展执行配置运行，使所选扩展包能在 Runtime worker 中运行其进程（如 Hook 和 MCP 服务器）。需要开启 `qwen.managed-agent.extensions.enabled`（否则启动时拒绝）并设置 `qwen.managed-agent.managed-extensions.cache-directory`，Linux 上还需设置 `qwen.managed-agent.managed-extensions.cgroup-root`。 |
 | `mode` | `QWEN_MANAGED_AGENT_EXTENSION_EXECUTION_MODE` | 字符串 | `linux-cgroup` | 扩展执行模式：`linux-cgroup` 将扩展进程限制在已委派的 cgroup v2 子树中；`developer-process-group` 是面向原生 macOS 开发、隔离较弱的进程组模式。Linux worker 始终使用 `linux-cgroup`；macOS worker 只有在该值为 `developer-process-group` 时才被接受。 |
 
+## `qwen.managed-agent.memory`
+
+显式启用的个人 MemoryStore：由服务端访问 Mem0，供明确绑定且仅所属用户可见的 Session 使用。
+
+| 属性 | 环境变量 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- | --- |
+| `api-key` | — | 字符串 | — | 开启记忆时，Control Plane 调用 Mem0 使用的服务凭据。必填、非空且不能含 CR 或 LF。应保存在服务端密钥配置中，不传入模型、Hosted Harness、沙箱或 MCP 配置。 |
+| `enabled` | — | 布尔 | `false` | 是否提供个人记忆，默认为 false。仅在验证专用 Mem0 服务并关闭跨服务共享后启用。要求开启 Session Store 且 Hosted 声明 session-memory/1 能力；Session 必须在创建时明确选择 Store。 |
+| `endpoint` | — | 字符串 | — | 专用 Mem0 服务的基础 URL，仅在开启记忆时读取。除回环 HTTP 测试外要求 HTTPS；拒绝内嵌凭据、查询参数和片段。该地址仅保留在 Control Plane。 |
+
 ## `qwen.managed-agent.runtime-broker`
 
 内嵌 Runtime Broker：包括面向 Hosted Harness 的私有 HTTP 监听器、放置并恢复执行 Hosted 工具的 Runtime worker 的 provisioner、worker 的 Workspace 挂载与隔离方式，以及加密其持久化 Runtime 凭据的密钥。
@@ -262,6 +275,7 @@ Workspace 扩展包的发布与管理，以及哪些 actor 有权执行这些操
 | `static-runtime-instance-id` | — | 字符串 | `standalone-runtime` | static Runtime worker 租约中的 Runtime 实例 ID；worker 的证明（attestation）必须回报相同的值。须为非空字符串，最长 512 个字符。仅当 `qwen.managed-agent.runtime-broker.provisioner` 为 `static` 时读取。 |
 | `static-token` | `QWEN_MANAGED_AGENT_STATIC_RUNTIME_TOKEN` | 字符串 | *（空）* | Broker 访问 static Runtime worker 时出示的 Bearer 令牌，属于密钥；已保存的绑定用 Runtime 凭据密钥（`qwen.managed-agent.runtime-broker.credential-key`）加密存储它。`qwen.managed-agent.runtime-broker.provisioner` 为 `static` 时必填，最长 512 个字符。 |
 | `token` | `QWEN_MANAGED_AGENT_RUNTIME_BROKER_TOKEN` | 字符串 | *（空）* | Hosted Harness 访问内嵌 Runtime Broker 私有监听端口时出示的 Bearer 令牌；它也用于授权仅限回环地址的外部存储登记接口。属于密钥。`qwen.managed-agent.runtime-broker.enabled` 为 true 时必填，最长 512 个字符。也可以改由 `qwen.managed-agent.harness.credentials-file` 中的 `QWEN_MANAGED_RUNTIME_BROKER_TOKEN` 提供；两处同时设置时启动时拒绝。 |
+| `tool-measurements` | `QWEN_MANAGED_AGENT_RUNTIME_TOOL_MEASUREMENTS` | 布尔 | `false` | 是否让新解析的普通 Workspace binding 选择经过 attestation 的 managed-workspace-execution/2 profile 和 Tool v4 数值执行/文件测量。默认 false；已有 binding、extension/MCP owner、resident 和 CSI profile 保留原契约。先部署兼容 Worker/Broker reader。测量提交复用现有 activity evidence，并要求 storage grant 支持 version 5；不引入独立 collector 开关。参见[执行诊断设计](../design/2026-11-07-managed-execution-diagnostics.zh-CN.md)。 |
 | `trusted-local-reboot-recovery` | `QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY` | 布尔 | `true` | Linux 主机整机重启后，Broker 是否把内核 boot ID 的变化视为原本地 worker 已停止的证据，并在所有执行都已终结后清除这些已保存 Runtime 绑定的持有者。它每 5 秒扫描 8 个已保存的绑定，从不启动替代 worker，也不重放执行。要求 `qwen.managed-agent.runtime-broker.durable-local-process` 和 `local-process` provisioner；不满足条件、在 macOS 上或配置了常驻 Workspace 时启动时拒绝。 |
 | `v3-result-window` | `QWEN_MANAGED_AGENT_RUNTIME_BROKER_V3_RESULT_WINDOW` | 时长 | `30m` | Runtime Broker 等待 worker 返回已派发的、会发布输出的 Shell 或 Monitor 执行（Tool v3，开启 `qwen.managed-agent.tool-publication.enabled` 时使用）结果的最长时间，超时后把该执行标记为 `UNKNOWN`；若短于最长的此类调用，该调用会变成 `UNKNOWN`。其他工具执行不使用此窗口。大于 `30m` 在随发行版提供的执行路径上没有作用：Hosted Harness 自身等待 Tool v3 执行的期限固定为 30 分钟。不带单位的数字按秒解析。低于 `1s` 时启动时拒绝。 |
 | `verified-workspace-recovery-enabled` | `QWEN_MANAGED_AGENT_RUNTIME_VERIFIED_WORKSPACE_RECOVERY_ENABLED` | 布尔 | `false` | LOCAL Workspace 的执行是否以已验证的物理存储登记为前提：在工具、文件访问或子 Git 操作运行前，服务端检查 Workspace 根目录是否仍与登记的身份和标记一致，否则以 `409 workspace_unavailable` 拒绝。`qwen.managed-agent.runtime-broker.workspace-creation-root` 和 `qwen.managed-agent.runtime-broker.local-directory-import-enabled` 都依赖它；未配置 `qwen.managed-agent.runtime-broker.workspace-mounts` 时，它也满足 `qwen.managed-agent.harness.workspace-files-enabled` 对 Workspace 来源的要求。与外部 provisioner 或常驻 Workspace 同时使用时启动时拒绝。 |
@@ -292,6 +306,21 @@ SSH Runtime 节点：服务端通过 SSH 访问的主机，用户可以在这些
 | `enabled` | — | 布尔 | — | 是否提供 SSH Workspace：节点 `access` 中列出的 actor 可以浏览该节点允许的根目录，并把其中的目录登记为 Workspace；关闭时这些路由返回 `404 ssh_runtime_disabled`。未开启 `qwen.managed-agent.harness.workspace-files-enabled` 或未配置 `qwen.managed-agent.runtime-broker.ssh.nodes`、使用外部 provisioner，或处于 `managed-local` profile 时，启动时拒绝。 |
 | `nodes` | — | YAML 列表 | *（空）* | SSH Runtime 节点，以列表形式写在配置文件（YAML）中。每一项包含 `node-id` 和 `display-name`；`ssh-host`（服务端账号 SSH 配置中的主机别名）；节点上的绝对路径 `node-executable`、`qwen-entry` 和 `state-directory`；`allowed-roots`（至少一个绝对目录，Workspace 只能登记在其下）；`publication-port`（节点上的 loopback 端口，工具发布通过 SSH 转发到这里）；`qwen-version`（必填，必须与节点报告的版本一致）；`access`（允许使用该节点的 `tenant-id` 与 `actor-id` 组合）。条目无效时启动时拒绝。配置了节点后，`qwen.managed-agent.tool-publication.service-base-url` 必须是 `http` URL。 |
 
+## `qwen.managed-agent.session-resources`
+
+将超大的私有 Session 资源与已关闭 Session 的日志冷藏到不可变对象存储；资源写入、pack 构建与 SQL 正文腾空由各自独立、默认关闭的开关控制。
+
+| 属性 | 环境变量 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- | --- |
+| `deletion-enabled` | — | 布尔 | `false` | 是否允许在删除宽限期后腾空被 pack 覆盖的 SQL journal 正文。需先完成只打包模式的资格验证；腾空受 head 水位与宽限期围栏保护。 |
+| `deletion-grace` | — | 时长 | `72h` | pack 发布且发布者被围栏后、到可腾空被覆盖 SQL 正文之间的宽限期；必须大于备份复制 lag。纯数字按秒解析。 |
+| `enabled` | — | 布尔 | `false` | 是否允许把超大的私有 Session 资源外置到不可变对象存储（journal 提交前 allocate/upload/finalize）。为 false 时超上限资源返回 HTTP 501 `managed_session_oss_disabled`；已外置资源仍可读取。 |
+| `oss-key-prefix` | — | 字符串 | `session-resources/` | 已配置对象存储 bucket 中用于外置 Session 资源与 journal pack 的 key 前缀。 |
+| `pack-job-enabled` | — | 布尔 | `false` | 后台清扫任务是否为符合条件的 Session 构建并发布不可变 journal pack。需要开启 `qwen.managed-agent.session-resources.enabled`。构建 pack 绝不删除 SQL 正文。 |
+| `pack-max-transactions` | — | 整数 | `4096` | 单个 journal pack 最多容纳的 journal 事务数。 |
+| `pack-target-bytes` | — | 整数 | — | 单个 journal pack 的目标压缩后大小；pack 范围会自适应收缩以不超过该值。 |
+| `scan-delay` | — | 时长 | `30s` | 后台 journal compaction 清扫任务的运行间隔。纯数字按毫秒解析，也可使用带单位的值如 `30s`。 |
+
 ## `qwen.managed-agent.session-store`
 
 私有的 Managed Session Store：Hosted Harness 通过本服务的内部路由读写 Session 日志；以及保护它的写入凭据与写入租约。
@@ -312,7 +341,6 @@ SSH Runtime 节点：服务端通过 SSH 访问的主机，用户可以在这些
 | 属性 | 环境变量 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- | --- |
 | `active-captures` | — | 整数 | — | 单个租户可同时处于打开状态的工具输出捕获数量；达到上限后新的预留会被拒绝，直到有捕获结束。`qwen.managed-agent.tool-publication.enabled` 为 true 时必填，且至少为 `1`（否则启动时拒绝）。 |
-| `async-verification-enabled` | `QWEN_MANAGED_AGENT_TOOL_PUBLICATION_ASYNC_VERIFICATION_ENABLED` | 布尔 | `false` | 是否允许客户端通过 `X-Qwen-Tool-Publication-Async: 1` 请求头为发布操作申请异步校验（先返回 HTTP 202，再轮询结果）；关闭时所有操作均同步校验。关闭后不再接纳新的异步操作，已接纳的操作仍会继续校验完毕。 |
 | `claim-timeout` | — | 时长 | — | 服务端对进行中的发布操作持有认领的时长；持有者每隔该时长的三分之一续期一次，认领失效后重试请求才能接管该操作。启用工具发布时必填，必须为正且短于 `qwen.managed-agent.tool-publication.operation-timeout`（否则启动时拒绝）。不带单位的数字按秒解析。 |
 | `deletion-grace` | `QWEN_MANAGED_AGENT_TOOL_PUBLICATION_DELETION_GRACE` | 时长 | `24h` | 已退役 Session 的工具输出和 Session 资源在可被垃圾回收删除之前的保留时长。仅在开启 `qwen.managed-agent.tool-publication.gc-enabled` 时生效；周期性的保留情况日志采样也使用该值。不得为负（启用工具发布时，否则启动时拒绝）。不带单位的数字按秒解析。 |
 | `enabled` | `QWEN_MANAGED_AGENT_TOOL_PUBLICATION_ENABLED` | 布尔 | `false` | 服务端是否接受工具输出发布：Hosted Shell 执行通过内部 `/internal/managed-tool-publications` API 将输出流式写入对象存储（未注册自定义存储 bean 时为阿里云 OSS）。必须同时设置本组的服务 URL、容量和期限，以及 OSS endpoint、region 和 bucket，否则启动时拒绝。内部接口不在回环地址上时还需要 `qwen.managed-agent.session-store.binding-key`，除非 `qwen.managed-agent.auth.allow-insecure-bind` 为 true。 |
@@ -328,4 +356,4 @@ SSH Runtime 节点：服务端通过 SSH 访问的主机，用户可以在这些
 | `session-bytes` | — | 整数 | — | 单个 Session 所有捕获合计可预留的工具输出字节数；每次预留按其捕获大小加上固定的 `4784128` 字节开销计算。超出该值的预留会被拒绝。启用工具发布时必填，且至少为 `1`（否则启动时拒绝）。 |
 | `tenant-bytes` | — | 整数 | — | 单个租户在其所有 Session 的捕获中合计可预留的工具输出字节数；每次预留按其捕获大小加上固定的 `4784128` 字节开销计算。超出该值的预留会被拒绝。启用工具发布时必填，且至少为 `1`（否则启动时拒绝）。 |
 | `verification-bytes-per-second` | — | 整数 | — | 校验吞吐量下限（字节/秒）：校验期限为 `qwen.managed-agent.tool-publication.operation-timeout` 加上每校验这么多字节增加的一秒，且不得超过 `qwen.managed-agent.tool-publication.max-verification-timeout`。启用工具发布时必填，且至少为 `1`（否则启动时拒绝）。 |
-| `verification-concurrency` | `QWEN_MANAGED_AGENT_TOOL_PUBLICATION_VERIFICATION_CONCURRENCY` | 整数 | `2` | 对已异步接纳的发布操作进行校验的后台线程数。关闭 `qwen.managed-agent.tool-publication.async-verification-enabled` 后校验器仍会运行，以便处理完已接纳的操作。至少为 `1`（启用工具发布时，否则启动时拒绝）。 |
+| `verification-concurrency` | `QWEN_MANAGED_AGENT_TOOL_PUBLICATION_VERIFICATION_CONCURRENCY` | 整数 | `2` | 对已接纳的发布操作进行校验的后台线程数。每个生产者操作在其输入保存后即返回 HTTP 202，由这些线程完成校验，客户端轮询结果。至少为 `1`（启用工具发布时，否则启动时拒绝）。 |

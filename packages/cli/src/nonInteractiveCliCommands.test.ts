@@ -34,6 +34,7 @@ import {
   type SlashCommand,
 } from './ui/commands/types.js';
 import { filterCommandsForMode } from './services/commandUtils.js';
+import { MAX_STACKED_SKILLS } from './ui/commands/commands.js';
 import { goalCommand } from './ui/commands/goalCommand.js';
 import { BuiltinCommandLoader } from './services/BuiltinCommandLoader.js';
 import { BundledSkillLoader } from './services/BundledSkillLoader.js';
@@ -1382,6 +1383,72 @@ describe('handleSlashCommand', () => {
         expect(texts).toContain('SKILL_BODY:feat-dev:feature workflow');
         expect(texts).toContain('SKILL_BODY:e2e-testing:e2e workflow');
         expect(texts).toContain('implement X');
+        expect(result.stackedSkillOverflow).toBeUndefined();
+      }
+    });
+
+    it('loads exactly MAX_STACKED_SKILLS and reports the overflow for six skills', async () => {
+      mockGetCommands.mockReturnValue([
+        createSkillCommand('feat-dev', 'feature workflow'),
+        createSkillCommand('e2e-testing', 'e2e workflow'),
+        createSkillCommand('bugfix', 'bugfix workflow'),
+        createSkillCommand('review', 'review workflow'),
+        createSkillCommand('simplify', 'simplify workflow'),
+        createSkillCommand('structured-debugging', 'debug workflow'),
+      ]);
+
+      const result = await handleSlashCommand(
+        '/feat-dev /e2e-testing /bugfix /review /simplify /structured-debugging do it',
+        abortController,
+        mockConfig,
+        mockSettings,
+      );
+
+      expect(result.type).toBe('submit_prompt');
+      if (result.type === 'submit_prompt') {
+        const texts = (result.content as Array<{ text: string }>).map(
+          (c) => c.text,
+        );
+        expect(
+          texts.filter((text) => text.startsWith('SKILL_BODY:')),
+        ).toHaveLength(MAX_STACKED_SKILLS);
+        // The 6th token is not loaded as a skill; it stays prompt text.
+        expect(texts).not.toContain(
+          'SKILL_BODY:structured-debugging:debug workflow',
+        );
+        expect(texts).toContain('/structured-debugging do it');
+        expect(result.stackedSkillOverflow).toBe(
+          'Only the first 5 skills were loaded. Additional /skill tokens were treated as prompt text.',
+        );
+      }
+    });
+
+    it('keeps exactly five stacked skills warning-free', async () => {
+      mockGetCommands.mockReturnValue([
+        createSkillCommand('feat-dev', 'feature workflow'),
+        createSkillCommand('e2e-testing', 'e2e workflow'),
+        createSkillCommand('bugfix', 'bugfix workflow'),
+        createSkillCommand('review', 'review workflow'),
+        createSkillCommand('simplify', 'simplify workflow'),
+      ]);
+
+      const result = await handleSlashCommand(
+        '/feat-dev /e2e-testing /bugfix /review /simplify do it',
+        abortController,
+        mockConfig,
+        mockSettings,
+      );
+
+      expect(result.type).toBe('submit_prompt');
+      if (result.type === 'submit_prompt') {
+        const texts = (result.content as Array<{ text: string }>).map(
+          (c) => c.text,
+        );
+        expect(
+          texts.filter((text) => text.startsWith('SKILL_BODY:')),
+        ).toHaveLength(MAX_STACKED_SKILLS);
+        expect(texts).toContain('do it');
+        expect(result.stackedSkillOverflow).toBeUndefined();
       }
     });
 

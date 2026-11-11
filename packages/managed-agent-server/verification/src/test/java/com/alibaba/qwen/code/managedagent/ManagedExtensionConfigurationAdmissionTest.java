@@ -2,9 +2,10 @@ package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.CommitResource;
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedMcpSettings;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -34,7 +35,7 @@ import static org.assertj.core.api.Assertions.*;
         "qwen.managed-agent.harness.enabled=false"
 })
 class ManagedExtensionConfigurationAdmissionTest {
-    @Autowired private ManagedSessionStore store;
+    @Autowired private JdbcManagedSessionStore store;
     @Autowired private AgentStateStore sessions;
     @Qualifier("managedJdbcTemplate")
     @Autowired private JdbcTemplate jdbc;
@@ -46,6 +47,21 @@ class ManagedExtensionConfigurationAdmissionTest {
     void enableOnlyTheStoreAdmissionBranch() {
         Object target = AopTestUtils.getUltimateTargetObject(sessions);
         com.alibaba.qwen.code.managedagent.VerificationFixtures.setAgentStoreField(target, "workspaceFilesEnabled", true);
+    }
+
+    @Test
+    void canApplyMatchesTheDefaultAndReadProfilesButRejectsFilesV3() {
+        String workspace = registerWorkspace();
+        String id = UUID.randomUUID().toString();
+        publicJournal(id, workspace);
+        for (String profile : List.of(WorkspaceToolProfiles.FILES, WorkspaceToolProfiles.READ)) {
+            jdbc.update("UPDATE ma_session SET tool_profile = ? WHERE tenant_id = ? AND session_id = ?", profile, "tenant",
+                    id.getBytes(StandardCharsets.UTF_8));
+            assertThat(sessions.canApplyExtensions(sessions.findSessionById(id).orElseThrow())).isTrue();
+        }
+        jdbc.update("UPDATE ma_session SET tool_profile = ? WHERE tenant_id = ? AND session_id = ?", WorkspaceToolProfiles.FILES_V3, "tenant",
+                id.getBytes(StandardCharsets.UTF_8));
+        assertThat(sessions.canApplyExtensions(sessions.findSessionById(id).orElseThrow())).isFalse();
     }
 
     @Test
@@ -66,6 +82,7 @@ class ManagedExtensionConfigurationAdmissionTest {
         String operation = UUID.randomUUID().toString();
         ObjectNode content = ManagedConfigInstallContractTest.record(ManagedConfigInstallContractTest.content("nullable_preparing"), 1);
         assertBusy(() -> transaction(() -> sessions.requireExtensionManagement("tenant", "actor", parent, operation, true)));
+        assertThatCode(() -> transaction(() -> sessions.requireExtensionManagement("tenant", "actor", parent, operation, false))).doesNotThrowAnyException();
         assertBusy(() -> transaction(() -> {
             sessions.requireConfigurationCommit("tenant", workspace, parent, content);
             return null;
@@ -114,8 +131,127 @@ class ManagedExtensionConfigurationAdmissionTest {
                 .isInstanceOfSatisfying(ManagedAgentException.class, error -> assertThat(error.getCode()).isEqualTo("session_config_recovery_required"));
     }
 
+    @Test
+    void packageConfigProjectionRetainsItsRecoveryResourceClosure() throws Exception {
+        String workspace = registerWorkspace();
+        String id = UUID.randomUUID().toString();
+        var journal = publicJournal(id, workspace);
+        byte[] partBytes = "{\"commands\":[]}".getBytes(StandardCharsets.UTF_8);
+        var part = new CommitResource("part", "managed-extension-contributions-part", 1,
+                partBytes.length, DigestUtils.sha256Hex(partBytes), Base64.getEncoder().encodeToString(partBytes));
+        ObjectNode manifest = json.createObjectNode().put("kind", "managed-extension-contributions")
+                .put("formatVersion", 1).put("byteLength", partBytes.length).put("digest", part.digest());
+        manifest.putArray("parts").addObject().put("resourceId", part.resourceId()).put("kind", part.kind())
+                .put("schemaVersion", 1).put("byteLength", part.byteLength()).put("digest", part.digest());
+        byte[] manifestBytes = ExtensionRecordJournal.bytes(manifest);
+        var contributions = new CommitResource("contributions", "managed-extension-contributions", 1,
+                manifestBytes.length, DigestUtils.sha256Hex(manifestBytes), Base64.getEncoder().encodeToString(manifestBytes));
+        ObjectNode bundle = json.createObjectNode();
+        bundle.putArray("packages").addObject().putObject("contributionsRef")
+                .put("resourceId", contributions.resourceId()).put("kind", contributions.kind())
+                .put("schemaVersion", 1).put("byteLength", contributions.byteLength()).put("digest", contributions.digest());
+        byte[] bundleBytes = ExtensionRecordJournal.bytes(bundle);
+        var bundleResource = new CommitResource("bundle", "managed-extension-config-bundle", 1,
+                bundleBytes.length, DigestUtils.sha256Hex(bundleBytes), Base64.getEncoder().encodeToString(bundleBytes));
+        ObjectNode bundleRef = json.createObjectNode().put("resourceId", bundleResource.resourceId())
+                .put("kind", bundleResource.kind()).put("schemaVersion", 1)
+                .put("byteLength", bundleResource.byteLength()).put("digest", bundleResource.digest());
+        ObjectNode inheritedRef = json.createObjectNode().put("resourceId", "inherited-baseline")
+                .put("kind", "managed-extension-config-bundle").put("schemaVersion", 1)
+                .put("byteLength", 2).put("digest", DigestUtils.sha256Hex("{}"));
+        List<CommitResource> resources = new ArrayList<>(resources());
+        resources.removeIf(resource -> resource.resourceId().equals("bundle"));
+        resources.addAll(List.of(bundleResource, contributions, part));
+        ObjectNode preparing = phase("nullable_preparing", 1, null).set("previousBundleRef", inheritedRef);
+        commit(journal, id, workspace, preparing, false, false, resources);
+        ObjectNode prepared = (ObjectNode) phase("prepared", 2, preparing).set("bundleRef", bundleRef);
+        prepared.set("previousBundleRef", inheritedRef);
+        commit(journal, id, workspace, prepared, false, false, resources);
+        ObjectNode committed = (ObjectNode) phase("prepared", 3, prepared).put("phase", "committed")
+                .set("bundleRef", bundleRef);
+        committed.set("previousBundleRef", inheritedRef);
+        commit(journal, id, workspace, committed, true, false, resources);
+        ObjectNode active = (ObjectNode) phase("active", 4, committed).set("bundleRef", bundleRef);
+        active.set("previousBundleRef", inheritedRef);
+        commit(journal, id, workspace, active, false, false, resources);
+
+        assertThat(jdbc.queryForList("SELECT resource_id FROM ma_resource_ref"
+                        + " WHERE owner_kind='SESSION_RECORD'", String.class))
+                .contains(bundleResource.resourceId(), contributions.resourceId(), part.resourceId(),
+                        ExtensionRecordJournal.resourceId(ExtensionRecordJournal.bytes(preparing)),
+                        ExtensionRecordJournal.resourceId(ExtensionRecordJournal.bytes(prepared)),
+                        ExtensionRecordJournal.resourceId(ExtensionRecordJournal.bytes(committed)));
+    }
+
+    @Test
+    void packageConfigProjectionGrowsByDeltaWithoutRewritingRetainedRows() throws Exception {
+        String workspace = registerWorkspace();
+        String id = UUID.randomUUID().toString();
+        var journal = publicJournal(id, workspace);
+        byte[] partBytes = "{\"commands\":[]}".getBytes(StandardCharsets.UTF_8);
+        var part = new CommitResource("part", "managed-extension-contributions-part", 1,
+                partBytes.length, DigestUtils.sha256Hex(partBytes), Base64.getEncoder().encodeToString(partBytes));
+        ObjectNode manifest = json.createObjectNode().put("kind", "managed-extension-contributions")
+                .put("formatVersion", 1).put("byteLength", partBytes.length).put("digest", part.digest());
+        manifest.putArray("parts").addObject().put("resourceId", part.resourceId()).put("kind", part.kind())
+                .put("schemaVersion", 1).put("byteLength", part.byteLength()).put("digest", part.digest());
+        byte[] manifestBytes = ExtensionRecordJournal.bytes(manifest);
+        var contributions = new CommitResource("contributions", "managed-extension-contributions", 1,
+                manifestBytes.length, DigestUtils.sha256Hex(manifestBytes), Base64.getEncoder().encodeToString(manifestBytes));
+        ObjectNode bundle = json.createObjectNode();
+        bundle.putArray("packages").addObject().putObject("contributionsRef")
+                .put("resourceId", contributions.resourceId()).put("kind", contributions.kind())
+                .put("schemaVersion", 1).put("byteLength", contributions.byteLength()).put("digest", contributions.digest());
+        byte[] bundleBytes = ExtensionRecordJournal.bytes(bundle);
+        var bundleResource = new CommitResource("bundle", "managed-extension-config-bundle", 1,
+                bundleBytes.length, DigestUtils.sha256Hex(bundleBytes), Base64.getEncoder().encodeToString(bundleBytes));
+        ObjectNode bundleRef = json.createObjectNode().put("resourceId", bundleResource.resourceId())
+                .put("kind", bundleResource.kind()).put("schemaVersion", 1)
+                .put("byteLength", bundleResource.byteLength()).put("digest", bundleResource.digest());
+        ObjectNode inheritedRef = json.createObjectNode().put("resourceId", "inherited-baseline")
+                .put("kind", "managed-extension-config-bundle").put("schemaVersion", 1)
+                .put("byteLength", 2).put("digest", DigestUtils.sha256Hex("{}"));
+        List<CommitResource> resources = new ArrayList<>(resources());
+        resources.removeIf(resource -> resource.resourceId().equals("bundle"));
+        resources.addAll(List.of(bundleResource, contributions, part));
+        ObjectNode preparing = phase("nullable_preparing", 1, null).set("previousBundleRef", inheritedRef);
+        commit(journal, id, workspace, preparing, false, false, resources);
+
+        byte[] session = id.getBytes(StandardCharsets.UTF_8);
+        long sentinel = 12345L;
+        int firstCount = jdbc.update("UPDATE ma_resource_ref SET gmt_create = ?"
+                + " WHERE owner_kind='SESSION_RECORD' AND session_id = ?", sentinel, session);
+        assertThat(firstCount).isPositive();
+        List<String> firstIds = jdbc.queryForList("SELECT resource_id FROM ma_resource_ref"
+                + " WHERE owner_kind='SESSION_RECORD' AND session_id = ?", String.class, session);
+
+        ObjectNode prepared = (ObjectNode) phase("prepared", 2, preparing).set("bundleRef", bundleRef);
+        prepared.set("previousBundleRef", inheritedRef);
+        commit(journal, id, workspace, prepared, false, false, resources);
+
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource_ref"
+                        + " WHERE owner_kind='SESSION_RECORD' AND session_id = ? AND gmt_create = ?",
+                        Integer.class, session, sentinel)).isEqualTo(firstCount);
+        List<String> secondIds = jdbc.queryForList("SELECT resource_id FROM ma_resource_ref"
+                + " WHERE owner_kind='SESSION_RECORD' AND session_id = ?", String.class, session);
+        assertThat(secondIds).containsAll(firstIds)
+                .contains(bundleResource.resourceId(), contributions.resourceId(), part.resourceId());
+        assertThat(secondIds.size()).isGreaterThan(firstIds.size());
+        // R2-8 / R2-5: the retained seed must keep every recovery resource
+        // projected exactly once across revisions. If the dedupe is lost, the
+        // prepared commit re-projects a resource the preparing commit already
+        // retained and its id appears a second time — projection growth would
+        // then track the revision count instead of the delta.
+        assertThat(secondIds).doesNotHaveDuplicates();
+    }
+
     private void commit(ExtensionRecordJournal journal, String id, String workspace, ObjectNode body,
             boolean binding, boolean mismatch) {
+        commit(journal, id, workspace, body, binding, mismatch, resources());
+    }
+
+    private void commit(ExtensionRecordJournal journal, String id, String workspace, ObjectNode body,
+            boolean binding, boolean mismatch, List<CommitResource> resources) {
         String operation = body.path("operationId").asText();
         var request = journal.request("commitDomainRecord", operation + ":phase:" + body.path("revision").asLong(), ExtensionRecordJournal.bytes(body), 1000,
                 event -> ((ObjectNode) event.path("payload")).put("operationId", operation), records -> {
@@ -130,7 +266,7 @@ class ManagedExtensionConfigurationAdmissionTest {
                     payload.set("rootSnapshotRef", body.get("rootSnapshotRef"));
                     int cut = records.indexOf('\n') + 1;
                     return records.substring(0, cut) + ExtensionRecordJournal.line(id, "managed_session_event_v1", event) + records.substring(cut);
-                }, binding ? 1 : 0, "config_install", resources());
+                }, binding ? 1 : 0, "config_install", resources);
         journal.commit(request);
         journal.committed(request);
     }

@@ -163,6 +163,7 @@ export interface SessionTokenLimitExceededValue {
 export interface LlmFinishedEventValue {
   reason: FinishReason | undefined;
   usageMetadata: GenerateContentResponseUsageMetadata | undefined;
+  finishMessage?: string;
 }
 
 /**
@@ -357,6 +358,10 @@ export function createDuplicateProviderToolCallResponse(
   const message = duplicateProviderToolCallMessage(providerCallId);
   return createNotStartedToolErrorResponse(request, message);
 }
+
+export const TOOL_LOOP_SKIPPED_METADATA = 'toolLoopSkipped';
+export const TOOL_LOOP_SKIPPED_MESSAGE =
+  'Tool skipped because the model repeated a tool-call id.';
 
 export function createNotStartedToolErrorResponse(
   request: ToolCallRequestInfo,
@@ -925,6 +930,7 @@ export class Turn {
 
         // Check if response was truncated or stopped for various reasons
         const finishReason = resp.candidates?.[0]?.finishReason;
+        const finishMessage = resp.candidates?.[0]?.finishMessage;
 
         // This is the key change: Only yield 'Finished' if there is a finishReason.
         if (finishReason) {
@@ -950,6 +956,7 @@ export class Turn {
             value: {
               reason: finishReason,
               usageMetadata: resp.usageMetadata,
+              ...(finishMessage ? { finishMessage } : {}),
             },
           };
         }

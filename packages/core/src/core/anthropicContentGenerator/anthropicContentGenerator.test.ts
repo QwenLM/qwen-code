@@ -191,9 +191,10 @@ const messageDelta = (
   stop_reason: string,
   output_tokens: number,
   usage: object = {},
+  stop_details?: object,
 ): SseEvent => ({
   type: 'message_delta',
-  delta: { stop_reason },
+  delta: { stop_reason, ...(stop_details ? { stop_details } : {}) },
   usage: { output_tokens, ...usage },
 });
 // Yields `events`, then fails with `error`.
@@ -743,6 +744,32 @@ describe('AnthropicContentGenerator', () => {
         expect(body.thinking).not.toHaveProperty('block_binding');
         expect(options.headers['anthropic-beta']).not.toContain(BINDING_BETA);
       }
+    });
+
+    it('returns a block-binding rejection on a single attempt', async () => {
+      const { retryContext } = await import('../../utils/retryContext.js');
+      createImpl
+        .mockRejectedValueOnce(status400(BINDING_REJECTION))
+        .mockResolvedValue(reply('claude-opus-5-5'));
+      const generator = await newGenerator(opus55Proxy());
+      const context = {
+        attempt: 1,
+        retryTotalDelayMs: 0,
+        requestSetupMs: 0,
+        singleAttempt: true,
+      };
+
+      await expect(
+        retryContext.run(context, () => generator.generateContent(opus55Hi())),
+      ).rejects.toThrow(BINDING_REJECTION);
+      expect(createImpl).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          thinking: expect.objectContaining({
+            block_binding: expect.anything(),
+          }),
+        }),
+        expect.objectContaining({ maxRetries: 0 }),
+      );
     });
 
     it('does not retry an unrelated proxy 400', async () => {
@@ -2450,6 +2477,27 @@ describe('AnthropicContentGenerator', () => {
       expect(error).toBeUndefined();
       expect(fnCalls(chunks)).toEqual([]);
       expect(lastFinish(chunks)).toBe(FinishReason.STOP);
+    });
+
+    it('surfaces a refusal stop-details category', async () => {
+      const { chunks, error } = await collectEvents(
+        messageDelta(
+          'refusal',
+          1,
+          {},
+          {
+            type: 'refusal',
+            category: 'cyber',
+            explanation: 'Provider-authored explanation',
+          },
+        ),
+      );
+
+      expect(error).toBeUndefined();
+      expect(lastFinish(chunks)).toBe(FinishReason.SAFETY);
+      expect(
+        chunks.flatMap((chunk) => chunk.candidates ?? []).at(-1)?.finishMessage,
+      ).toBe('Response refused due to cyber-related safety policy.');
     });
 
     it.each([

@@ -166,7 +166,11 @@ dispositions, changed files, checks actually run, and remaining blocker.
   unit-test run passing does not clear it. Never label a failure "pre-existing"
   or "unrelated" without reproducing it on the base branch. For a
   generated-artifact check, regenerate the artifact and compare (see the
-  generated-artifact rule above) rather than assuming.
+  generated-artifact rule above) rather than assuming. When `feedback.md`
+  carries a `Failed check evidence` section, start from its failed step names
+  and log excerpt instead of guessing from the check name; it is a bounded,
+  redacted snapshot that may be absent or partial, so still reproduce the
+  failure locally before fixing it.
 - Do not skip a failing check by attributing it to the environment without
   evidence. The runner does a clean `npm ci` and `npm run build` before you
   start, so assume the toolchain works unless a command actually fails. If a
