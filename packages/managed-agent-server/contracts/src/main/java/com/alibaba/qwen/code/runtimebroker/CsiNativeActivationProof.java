@@ -1810,8 +1810,12 @@ public final class CsiNativeActivationProof {
                 });
     }
 
-    private static byte[] canonicalBase64(JsonNode value, String field, int limit) {
-        String encoded = text(value, field);
+    static byte[] canonicalBase64(JsonNode value, String field, int limit) {
+        // Read the text directly: text() caps a field at 4096 characters, which would silently
+        // clamp every caller's declared limit to 3072 decoded bytes.
+        JsonNode node = value.get(field);
+        require(node != null && node.isTextual() && !node.textValue().isEmpty());
+        String encoded = node.textValue();
         require(encoded.length() <= ((limit + 2) / 3) * 4);
         try {
             byte[] bytes = Base64.getDecoder().decode(encoded);

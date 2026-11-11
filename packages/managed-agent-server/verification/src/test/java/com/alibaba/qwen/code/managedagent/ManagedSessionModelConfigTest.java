@@ -217,7 +217,7 @@ class ManagedSessionModelConfigTest {
         var modelConfigs = mock(ManagedSessionModelConfigs.class);
         var config = config("key");
         when(modelConfigs.read(tenant, "session", config.digest())).thenReturn(config);
-        var controller = new ManagedSessionStoreController(authority, null, null);
+        var controller = new ManagedSessionStoreController(authority, null, null, null);
         ReflectionTestUtils.setField(controller, "modelConfigs", modelConfigs);
         var mvc = MockMvcBuilders.standaloneSetup(controller)
                 .setCustomArgumentResolvers(new TenantContextArgumentResolver()).build();
@@ -244,7 +244,7 @@ class ManagedSessionModelConfigTest {
         var sessionStore = VerificationFixtures.managedSessionStore(jdbc);
         new TransactionTemplate(manager).execute(status -> sessionStore.acquireWriter(tenant, session, token,
                 new AcquireWriterRequest("ws", "writer", 60_000L)));
-        var controller = new ManagedSessionStoreController(sessionStore, null, null);
+        var controller = new ManagedSessionStoreController(sessionStore, null, null, null);
         ReflectionTestUtils.setField(controller, "modelConfigs", configs);
         var request = new ManagedSessionStoreController.ModelConfigQuery("ws", "writer", 1, config.digest(), null);
         var result = new TransactionTemplate(manager).execute(status -> controller.modelConfig(new TenantContext(tenant, null), session,
@@ -271,7 +271,7 @@ class ManagedSessionModelConfigTest {
         var config = config("hook-key");
         String session = create("hooks", config);
         var authority = mock(JdbcManagedSessionStore.class);
-        var controller = new ManagedSessionStoreController(authority, null, null);
+        var controller = new ManagedSessionStoreController(authority, null, null, null);
         ReflectionTestUtils.setField(controller, "modelConfigs", configs);
         controller.modelConfig(new TenantContext(tenant, null), session, token,
                 new ManagedSessionStoreController.ModelConfigQuery("ws", "writer", 1, config.digest(), "legacy-close"), new HttpHeaders());
