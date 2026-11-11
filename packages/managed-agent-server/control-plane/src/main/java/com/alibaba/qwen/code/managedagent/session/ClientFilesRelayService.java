@@ -132,6 +132,13 @@ public class ClientFilesRelayService {
                     ? count.intValue() : 0;
         } catch (RuntimeException cause) {
             LOG.warn("Client files registration dispatch failed for session {}", session, cause);
+            if (previous != null && previous.active()) {
+                // The harness keeps its previous client and credential when the
+                // dispatch is refused; put the previous binding back so the
+                // session keeps serving instead of fencing every call to a
+                // credential the harness never received.
+                relay.restore(tenant, session, previous, System.currentTimeMillis());
+            }
             throw error(503, "client_files_relay_unavailable");
         }
         return new Registration(binding.serverId(), binding.generation(), token, binding.expiresAt(),
@@ -178,8 +185,7 @@ public class ClientFilesRelayService {
     public List<QueuedRequest> requests(String tenant, String actor, String session, long generation) {
         requireEnabled();
         requireSessionId(session);
-        agentService.requireReadableSession(tenant, actor, session);
-        Binding binding = requireOwnedBinding(tenant, actor, session, generation);
+        Binding binding = requireDeliveryAuthority(tenant, actor, session, generation);
         return relay.queued(tenant, session, binding.generation(),
                 settings.getClientFiles().getQueueDepth());
     }
@@ -188,8 +194,7 @@ public class ClientFilesRelayService {
             String requestId, String responseJson, String errorCode) {
         requireEnabled();
         requireSessionId(session);
-        agentService.requireReadableSession(tenant, actor, session);
-        Binding binding = requireOwnedBinding(tenant, actor, session, generation);
+        Binding binding = requireDeliveryAuthority(tenant, actor, session, generation);
         if (requestId == null || requestId.isBlank() || requestId.length() > 128) {
             throw error(400, "client_files_invalid");
         }
@@ -340,6 +345,27 @@ public class ClientFilesRelayService {
             throw error(403, "client_files_execution_forbidden");
         }
         return visible;
+    }
+
+    /**
+     * Delivery and settlement re-apply the execution authority registration
+     * demanded: an actor demoted after registering must not keep reading and
+     * writing the user's directory for the rest of the binding TTL. On refusal
+     * the binding is closed and its queued rows failed so the stream ends and
+     * the Runtime receives the structured offline error.
+     */
+    private Binding requireDeliveryAuthority(String tenant, String actor, String session,
+            long generation) {
+        SessionRecord visible = agentService.requireReadableSession(tenant, actor, session);
+        Binding binding = requireOwnedBinding(tenant, actor, session, generation);
+        if (!mayExecute(visible, actor)) {
+            long now = System.currentTimeMillis();
+            relay.close(tenant, session, binding.generation(), now);
+            relay.failQueued(tenant, session, binding.generation(),
+                    ClientFilesModels.ERROR_OFFLINE, now);
+            throw error(403, "client_files_execution_forbidden");
+        }
+        return binding;
     }
 
     private boolean mayExecute(SessionRecord session, String actor) {

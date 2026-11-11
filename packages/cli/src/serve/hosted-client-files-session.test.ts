@@ -6,7 +6,8 @@
 
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { afterEach, describe, expect, it } from 'vitest';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   CLIENT_FILES_MAX_RESULT_BYTES,
   HostedClientFilesSession,
@@ -53,7 +54,10 @@ function startPeer(script: Script): Promise<{ server: Server; url: string }> {
         params?: { name?: string };
       };
       const reply = (result: unknown) => {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.writeHead(200, {
+          'Content-Type': 'application/json',
+          'Mcp-Session-Id': 'scripted-session',
+        });
         res.end(JSON.stringify({ jsonrpc: '2.0', id: message.id, result }));
       };
       const replyError = (error: { code: number; message: string }) => {
@@ -156,6 +160,13 @@ describe('HostedClientFilesSession', () => {
     const created = new HostedClientFilesSession();
     sessions.push(created);
     return created;
+  }
+
+  // The loser's transport must be terminated, not orphaned. Spy on the
+  // transport close directly: the SDK's DELETE is async and absent in
+  // POST-only fallback, so a network count is not a reliable signal.
+  function spyTransportCloses() {
+    return vi.spyOn(StreamableHTTPClientTransport.prototype, 'close');
   }
 
   it('discovers tools and exposes namespaced declarations', async () => {
@@ -301,6 +312,83 @@ describe('HostedClientFilesSession', () => {
     expect(files.generation).toBe(2);
     expect(files.tools()[0].name).not.toBe(before);
     expect(files.resolve(files.tools()[0]!.name!)?.name).toBe('write_file');
+  });
+
+  it('a refused re-registration keeps the working client', async () => {
+    const first = await peer({ tools: [{ name: 'read_file' }] });
+    const second = await peer({
+      tools: [{ name: 'write_file' }],
+      listError: true,
+    });
+    const files = session();
+    await files.register({
+      serverId: 'local-files',
+      generation: 1,
+      url: first,
+      token: 't',
+    });
+    await expect(
+      files.register({
+        serverId: 'local-files',
+        generation: 2,
+        url: second,
+        token: 't2',
+      }),
+    ).rejects.toThrow(/client_files_offline/);
+    expect(files.active).toBe(true);
+    expect(files.generation).toBe(1);
+    expect(files.resolve(files.tools()[0]!.name!)?.name).toBe('read_file');
+  });
+
+  it('a stale generation cannot replace a newer registration', async () => {
+    const older = await peer({ tools: [{ name: 'read_file' }] });
+    const newer = await peer({ tools: [{ name: 'write_file' }] });
+    const files = session();
+    await files.register({
+      serverId: 'local-files',
+      generation: 2,
+      url: newer,
+      token: 't2',
+    });
+    const closes = spyTransportCloses();
+    const count = await files.register({
+      serverId: 'local-files',
+      generation: 1,
+      url: older,
+      token: 't',
+    });
+    expect(files.generation).toBe(2);
+    expect(files.resolve(files.tools()[0]!.name!)?.name).toBe('write_file');
+    expect(count).toBe(1);
+    // The stale registration's transport was terminated, not orphaned.
+    expect(closes).toHaveBeenCalled();
+    closes.mockRestore();
+  });
+
+  it('overlapping registrations serialize to the newer generation', async () => {
+    const first = await peer({ tools: [{ name: 'read_file' }] });
+    const second = await peer({ tools: [{ name: 'write_file' }] });
+    const files = session();
+    const closes = spyTransportCloses();
+    await Promise.all([
+      files.register({
+        serverId: 'local-files',
+        generation: 1,
+        url: first,
+        token: 't',
+      }),
+      files.register({
+        serverId: 'local-files',
+        generation: 2,
+        url: second,
+        token: 't2',
+      }),
+    ]);
+    expect(files.generation).toBe(2);
+    expect(files.resolve(files.tools()[0]!.name!)?.name).toBe('write_file');
+    // The first registration's transport was terminated when the second won.
+    expect(closes).toHaveBeenCalled();
+    closes.mockRestore();
   });
 
   it('a refused initialize leaves no active client', async () => {

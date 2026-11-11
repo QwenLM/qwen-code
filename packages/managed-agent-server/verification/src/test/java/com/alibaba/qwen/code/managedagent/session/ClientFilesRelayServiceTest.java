@@ -126,6 +126,22 @@ class ClientFilesRelayServiceTest {
     }
 
     @Test
+    void refusedReRegisterRestoresThePreviousBinding() throws Exception {
+        Registration first = service.register(tenant, ACTOR, session);
+        when(harness.clientFilesOperation(anyString(), anyString(), any()))
+                .thenThrow(new UnsupportedOperationException("hosted_turn_active"));
+        assertThatThrownBy(() -> service.register(tenant, ACTOR, session))
+                .hasFieldOrPropertyWithValue("code", "client_files_relay_unavailable");
+        // The previous generation is active again and its credential still
+        // reaches the queue, instead of fencing every call to a refused token.
+        assertThat(service.status(tenant, ACTOR, session).generation())
+                .isEqualTo(first.generation());
+        assertThat(service.status(tenant, ACTOR, session).state()).isEqualTo("active");
+        service.mcp(tenant, session, first.token(), request("1"));
+        assertThat(awaitQueue(first.generation(), 1).get(0).requestId()).isEqualTo("1");
+    }
+
+    @Test
     void reRegisterAdvancesGenerationAndFailsTheOldQueue() throws Exception {
         Registration first = service.register(tenant, ACTOR, session);
         mcpInBackground(first.token(), request("1"));
@@ -229,6 +245,35 @@ class ClientFilesRelayServiceTest {
                 String.class)).isEqualTo("failed");
         assertThatThrownBy(() -> service.mcp(tenant, session, registration.token(), request("2")))
                 .hasFieldOrPropertyWithValue("code", "client_files_credential_invalid");
+    }
+
+    @Test
+    void deliveryRefusedAfterTheActorLosesExecutionAuthority() throws Exception {
+        Registration registration = service.register(tenant, ACTOR, session);
+        mcpInBackground(registration.token(), request("1"));
+        awaitQueue(registration.generation(), 1);
+        when(workspaces.accessOf(anyString(), anyString(), anyString())).thenReturn(WorkspaceAccess.READER);
+        assertThatThrownBy(() -> service.requests(tenant, ACTOR, session, registration.generation()))
+                .hasFieldOrPropertyWithValue("code", "client_files_execution_forbidden");
+        assertThat(jdbc.queryForObject("SELECT state FROM ma_client_files_request WHERE request_id='1'",
+                String.class)).isEqualTo("failed");
+        assertThat(jdbc.queryForObject("SELECT state FROM ma_client_files_binding", String.class))
+                .isEqualTo("closed");
+    }
+
+    @Test
+    void settlementRefusedAfterTheActorLosesExecutionAuthority() throws Exception {
+        Registration registration = service.register(tenant, ACTOR, session);
+        mcpInBackground(registration.token(), request("1"));
+        awaitQueue(registration.generation(), 1);
+        when(workspaces.accessOf(anyString(), anyString(), anyString())).thenReturn(WorkspaceAccess.READER);
+        assertThatThrownBy(() -> service.respond(tenant, ACTOR, session, registration.generation(),
+                "1", "{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"result\":{}}", null))
+                .hasFieldOrPropertyWithValue("code", "client_files_execution_forbidden");
+        assertThat(jdbc.queryForObject("SELECT state FROM ma_client_files_request WHERE request_id='1'",
+                String.class)).isEqualTo("failed");
+        assertThat(jdbc.queryForObject("SELECT state FROM ma_client_files_binding", String.class))
+                .isEqualTo("closed");
     }
 
     @Test

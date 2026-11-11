@@ -54,6 +54,7 @@ export class HostedClientFilesSession {
     tools: [],
   };
   private closed = false;
+  private registering: Promise<unknown> = Promise.resolve();
 
   get active(): boolean {
     return this.client !== undefined && !this.closed;
@@ -63,10 +64,22 @@ export class HostedClientFilesSession {
     return this.registration?.generation ?? 0;
   }
 
-  /** Connects to the relay and discovers the browser's tools. */
+  /**
+   * Connects to the relay and discovers the browser's tools. Overlapping
+   * registrations are serialized so no loser's transport is orphaned, and the
+   * previous client is dropped only after the new one has discovered its
+   * tools — a refused dispatch leaves the working registration intact.
+   */
   async register(registration: HostedClientFilesRegistration): Promise<number> {
+    const run = this.registering.then(() => this.registerSerial(registration));
+    this.registering = run.catch(() => {});
+    return run;
+  }
+
+  private async registerSerial(
+    registration: HostedClientFilesRegistration,
+  ): Promise<number> {
     if (this.closed) throw new Error('Client files session is closed.');
-    await this.unregister();
     const transport = new StreamableHTTPClientTransport(
       new URL(registration.url),
       {
@@ -86,6 +99,16 @@ export class HostedClientFilesSession {
       const listed = await client.listTools(undefined, {
         timeout: CLIENT_FILES_REQUEST_TIMEOUT_MS,
       });
+      // A close() or a newer generation may have landed while discovery was
+      // in flight; never install a client the session no longer owns.
+      if (this.closed) {
+        await client.close().catch(() => {});
+        throw new Error('Client files session is closed.');
+      }
+      if (this.active && this.generation > registration.generation) {
+        await client.close().catch(() => {});
+        return this.catalog.tools.length;
+      }
       const tools: HostedClientFilesTool[] = listed.tools.map((tool) => ({
         name: tool.name,
         ...(tool.description !== undefined
@@ -93,6 +116,7 @@ export class HostedClientFilesSession {
           : {}),
         inputSchema: (tool.inputSchema ?? {}) as Record<string, unknown>,
       }));
+      const previous = this.client;
       this.client = client;
       this.registration = registration;
       this.catalog = {
@@ -100,6 +124,7 @@ export class HostedClientFilesSession {
         generation: registration.generation,
         tools,
       };
+      if (previous) await previous.close().catch(() => {});
       return tools.length;
     } catch (cause) {
       await client.close().catch(() => {});

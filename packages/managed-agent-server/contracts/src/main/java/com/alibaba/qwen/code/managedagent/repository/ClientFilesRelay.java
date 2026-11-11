@@ -15,6 +15,14 @@ public interface ClientFilesRelay {
     Binding register(String tenantId, String sessionId, String actorId, String serverId,
             String tokenHash, long expiresAt, long now);
 
+    /**
+     * Re-activates a previous binding exactly (generation, credential digest,
+     * deadline) after a re-registration's harness dispatch was refused, so the
+     * still-installed harness leg keeps serving instead of being fenced to a
+     * credential it never received.
+     */
+    void restore(String tenantId, String sessionId, Binding previous, long now);
+
     Binding find(String tenantId, String sessionId);
 
     /** The internal MCP leg knows only the Session; the credential fences it. */

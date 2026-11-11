@@ -73,6 +73,19 @@ public class ClientFilesRelayStore implements ClientFilesRelay {
     }
 
     @Override
+    public void restore(String tenantId, String sessionId, Binding previous, long now) {
+        String scope = ManagedSchemaKeys.key(tenantId, sessionId);
+        // Locked so a concurrent re-registration cannot interleave with the
+        // compensation and leave the binding fenced to a refused credential.
+        findByScopeForUpdate(scope);
+        jdbc.update("UPDATE ma_client_files_binding SET actor_id=?,generation=?,state=?,"
+                        + "server_id=?,token_hash=?,expires_at=?,gmt_modified=? WHERE session_scope_key=?",
+                ManagedSchemaKeys.identity(previous.actorId()), previous.generation(),
+                ClientFilesModels.STATE_ACTIVE, previous.serverId(), previous.tokenHash(),
+                previous.expiresAt(), now, scope);
+    }
+
+    @Override
     public Binding find(String tenantId, String sessionId) {
         return findByScope(ManagedSchemaKeys.key(tenantId, sessionId));
     }
