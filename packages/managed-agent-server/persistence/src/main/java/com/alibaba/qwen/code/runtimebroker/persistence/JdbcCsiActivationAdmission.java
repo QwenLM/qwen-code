@@ -274,10 +274,10 @@ public final class JdbcCsiActivationAdmission {
 
     public static CsiNativeActivationProof.TerminalProof terminalPreflight(Connection connection,
             JdbcCsiApplicationRetirement.Authority authority, JsonNode metadata,
-            JdbcRuntimeBindingRepository bindings) throws SQLException {
+            JdbcRuntimeBindingRepository bindings, boolean liveLease) throws SQLException {
         authority.requirePreCut(connection);
         var original = authority.original();
-        var head = lockNativeHead(connection, original);
+        var head = liveLease ? lockNativeHead(connection, original) : activeNativeHead(connection, original);
         var binding = bindings.findByIdForUpdate(connection, original.bindingId());
         require(binding != null && original.request().equals(binding.getRequest())
                 && binding.getGeneration() == original.generation() && binding.getVersion() == original.version()
@@ -304,7 +304,7 @@ public final class JdbcCsiActivationAdmission {
         }
         JdbcCsiExecutionAdmission.verifyReceipts(connection, original, head, history.prefix(), 0, 0);
         long now = authority.requireCurrentTime(connection);
-        require(head.writerExpiresAt() > now && head.activationExpiresAt() > now);
+        require(!liveLease || head.writerExpiresAt() > now && head.activationExpiresAt() > now);
         return proof;
     }
 
@@ -644,19 +644,7 @@ public final class JdbcCsiActivationAdmission {
         return terminalHistory(connection, authority.original(), authority.frozenBytes(), JournalRead.LIVE);
     }
 
-    public static CsiNativeActivationProof.TerminalProof readHistoricalTerminal(Connection connection,
-            RuntimeBindingRecord binding, byte[] frozenBytes) throws SQLException {
-        var read = new JournalRead(System.nanoTime());
-        read.requireHistorical(connection);
-        var original = JdbcCsiFilesRetirementGuard.readHistoricalBinding(connection, binding);
-        long ceiling = JdbcCsiRetirementSeal.readHistorical(connection, original, frozenBytes, read);
-        var result = terminalHistory(connection, original, frozenBytes, read);
-        JdbcCsiExecutionAdmission.verifyHistoricalReceipts(connection, original, result, ceiling, read);
-        read.requireHistorical(connection);
-        return result;
-    }
-
-    private static CsiNativeActivationProof.TerminalProof terminalHistory(Connection connection,
+    static CsiNativeActivationProof.TerminalProof terminalHistory(Connection connection,
             JdbcCsiFilesRetirementGuard.Original original, byte[] frozenBytes, JournalRead read) throws SQLException {
         JsonNode frozen = JSON.valueToTree(ManagedCsiFilesProtocol.parse(frozenBytes, 32 * 1024 * 1024));
         require(frozen.path("commitBodyBase64").isTextual());
