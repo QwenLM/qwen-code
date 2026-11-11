@@ -2,7 +2,7 @@
 
 [English](2026-11-10-managed-web-terminal.md) | [简体中文](2026-11-10-managed-web-terminal.zh-CN.md)
 
-状态：提案，未实现；产品决策已于 2026-11-10 确认。日期：2026-11-10。
+状态：已实现；产品决策已于 2026-11-10 确认。日期：2026-11-10。
 
 ## 问题与现状
 
@@ -14,10 +14,10 @@ node-pty/bun-pty、有界 scrollback 重放、断线重连、空闲回收）。U
 `web_terminal` capability 门控，daemon 把解析后的 workspace runtime 的 cwd
 与环境变量交给 PTY（[Web 终端生命周期](web-terminal-lifecycle.md)）。
 
-Managed Agent 没有对应能力。capability parity 矩阵把这登记为有意保留的缺口：
-`packages/cli/src/serve/capability-parity.ts` 中的
-`web_terminal: NO_MANAGED_EQUIVALENT('no Managed web terminal')`
-（issue #15075）。Managed 现有的 "shell" 是 agent 工具而非用户终端：
+Managed Agent 此前没有对应能力；capability parity 矩阵曾把这登记为有意保留的
+缺口（`web_terminal: NO_MANAGED_EQUIVALENT`，issue #15075）。本增量补齐该缺口：
+parity 行现在为 `managed`，以 terminal-ticket surface 路由与本设计为证据。
+Managed 现有的 "shell" 是 agent 工具而非用户终端：
 `hosted-workspace-shell/1` 通过带审批的持久 Broker dispatch 暴露
 `run_shell_command` 与 `monitor`，而 H3 背景 Shell 设计
 （[Managed Shell/Monitor 运行时](2026-10-03-managed-shell-monitor-runtime.md)）
@@ -55,16 +55,19 @@ surface；Managed Web Shell 只消费 HTTP 与 SSE。
 
 ```
 浏览器（TerminalPanel / xterm，复用现有帧编解码）
-   |  WebSocket，同源 public bearer
+   |  1. 在已鉴权的 WebShell surface 上 POST terminal-ticket
+   |     （完整准入：租户、actor、授权、角色、profile、opt-in）
+   |  2. WebSocket upgrade，以一次性 ticket 作为 bearer 子协议
+   |     （浏览器无法设置部署的鉴权请求头）
    v
 Java 控制平面（WebShell surface）
-   - 握手鉴权：租户、actor、授权、角色、profile、opt-in
-   - Session -> READY binding -> worker endpoint；否则 fail closed
+   - upgrade 一次性消费 ticket，并复核 Session/终端身份
+   - Session -> READY 终端能力 binding -> worker endpoint；否则 fail closed
    - 字节级中继；终端 I/O 不产生 tool-execution 行
    - 有终端附着期间持久 hold；生命周期操作触发 drain
    |  WebSocket，worker bearer/lease 协议
    v
-Runtime worker（私有 HTTP surface，容器模式端口 43190）
+Runtime worker（私有 HTTP surface，端口 43190）
    - owned-route gate 之后的新终端 upgrade 路由
    - WebTerminalRegistry：PTY 位于该 Session 的 workspace cwd/env
 ```
@@ -149,8 +152,10 @@ worker 上重放，与 Broker「歧义工作只能凭原 Runtime 的证据结算
 终端是人类驱动的表面。按键不是 agent 工具调用，因此 Shell profile 的逐命令
 审批（default/auto-edit）不适用；授权边界是部署 opt-in 加上调用者在该
 Workspace 上的 OPERATOR 授权。这是一个有意的产品决策：启用终端的部署即
-接受「被授权的操作者可以在工作区容器内以 worker 用户身份执行任意命令，
-无需逐命令审批」。opt-in 默认关闭，且独立于 Shell opt-in，使部署可以启用
+接受「被授权的操作者可以在工作区内以 worker 用户身份执行任意命令，
+无需逐命令审批」。只有普通本地 Workspace binding 能启用终端，而那里
+worker 以服务器账户运行、没有容器隔离，因此该 opt-in 授予的是该账户的
+shell 访问。opt-in 默认关闭，且独立于 Shell opt-in，使部署可以启用
 agent Shell 而保持用户终端关闭。
 
 `external-scratch` 与 K1 scratch runtime 拒绝终端准入：它们的契约禁用
@@ -159,27 +164,34 @@ Session 不在范围内。
 
 ### 契约与能力声明
 
-终端是 WebSocket upgrade，不是 REST handler，因此不占用 `SurfaceRegistry`
-路由标签（D6 gate 枚举的是 `RequestMappingHandlerMapping` handler），也不占
-OpenAPI path。取而代之：
+终端的数据面是 WebSocket upgrade，不是 REST handler，因此 upgrade 本身不占用
+`SurfaceRegistry` 路由标签（D6 gate 枚举的是 `RequestMappingHandlerMapping`
+handler）。但其准入通过一条真实的公开路由铸造，且该路由完全纳入契约：
 
-- parity 矩阵该行翻为 `managed`，evidence 用 `docs:` 指向本设计文档；
-  `capability-parity.test.ts` 校验该文件存在。
+- `POST /api/agent/web-shell/v1/sessions/terminal-ticket` 带
+  `SESSION_TERMINAL_TICKET` `SurfaceRegistry` 标签与 OpenAPI path
+  （`WebShellTerminalTicketRequest` / `WebShellTerminalTicket`），因此受契约
+  actor-scope 漂移断言覆盖。它执行完整终端准入并返回一次性、短时效 ticket。
+- parity 矩阵该行翻为 `managed`，evidence 用 `surface:SESSION_TERMINAL_TICKET`
+  （并以本设计为次要证据）；`capability-parity.test.ts` 两者都校验。
 - `ManagedAgentSessionSummary.capabilities` 新增 `terminal?: boolean`
-  字段，由服务端按同一准入链计算，使 UI 入口只对真正能 attach 的 Session
-  出现。这是唯一的生成类型变更；WebShell 类型用
+  字段，由服务端按同一准入链计算，并按真正能 attach 的 placement 门控，使
+  UI 入口只对能 attach 的 Session 出现。WebShell 类型用
   `npm run generate:managed-agent-api --workspace=packages/web-shell`
   重新生成。
-- upgrade 路由、其准入与类型化拒绝记录在本设计文档，而非 OpenAPI 契约。
+- upgrade 一次性消费 ticket 并复核 Session/终端身份；其类型化拒绝记录在
+  本设计文档。
 
 ### Web Shell UI
 
-Managed 会话复用 `TerminalPanel` 与现有帧编解码；只有连接工厂与本地 daemon
-连接不同（带 Session id 的 Java WebShell WS URL、public bearer）。入口由
-`capabilities.terminal` 门控。重连通过 registry 重放 scrollback 与退出
-状态，与本地一致。页面刷新丢失内存中的 terminal id，因此 detach 的终端被
-空闲回收而非恢复——与本地生命周期完全相同。terminal-lost 控制帧渲染显式
-通知，而不是静默重连循环。
+Managed 会话使用专门的 `ManagedTerminalPanel`，共享本地帧编解码以及抽取出的
+xterm 主题 / 子协议 / 重连常量；只有连接工厂与本地 daemon 连接不同（带
+Session id 的 Java WebShell WS URL，以铸造的一次性 ticket 作为 bearer 子
+协议）。入口由 `capabilities.terminal` 门控。重连铸造新 ticket，并通过
+registry 重放 scrollback 与退出状态，与本地一致。页面刷新丢失内存中的
+terminal id，因此 detach 的终端被空闲回收而非恢复——与本地生命周期完全
+相同。terminal-lost 控制帧渲染显式通知，而不是静默重连循环。Escape 与
+外部交互关闭被阻止，以免释放存活 PTY；面板在瞬态 UI/能力波动期间保持挂载。
 
 ## 设计决策与理由
 
@@ -192,17 +204,17 @@ Managed 会话复用 `TerminalPanel` 与现有帧编解码；只有连接工厂�
 
 ## 受影响组件
 
-| 组件                                  | 变更                                                                                                             |
-| ------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| `packages/core` `WebTerminalRegistry` | 如现有接口无法表达，则补充 Session 标记的归属；边界、重放与回收语义不变                                          |
-| `packages/cli` managed runtime worker | 终端 upgrade 路由、route-gate 条目、bearer/lease 鉴权、capability digest 升级                                    |
-| `packages/cli` 统一启动器代理         | 终端路由的 WebSocket upgrade 转发                                                                                |
-| `packages/cli` `capability-parity.ts` | `web_terminal` 行翻为 `managed` 并给 `docs:` evidence                                                            |
-| Java WebShell surface                 | 首个 WebSocket 端点：握手鉴权、binding 解析、字节中继、生命周期触发关闭                                          |
-| Java hold 准入                        | 按 H3 模式的 owner 侧 hold execution 准入/结算；close/delete 的 drain 顺序                                       |
-| 契约                                  | session summary 的 `capabilities.terminal` + 重新生成的 WebShell 类型（WS upgrade 不进 OpenAPI/SurfaceRegistry） |
-| Web Shell 客户端                      | `TerminalPanel` 的 Managed 连接工厂、入口门控、terminal-lost 通知                                                |
-| 验证                                  | worker/Java/前端聚焦测试、契约门禁、真实进程 E2E 与故障用例                                                      |
+| 组件                                  | 变更                                                                                                                                                       |
+| ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `packages/core` `WebTerminalRegistry` | 如现有接口无法表达，则补充 Session 标记的归属；边界、重放与回收语义不变                                                                                    |
+| `packages/cli` managed runtime worker | 终端 upgrade 路由、route-gate 条目、bearer/lease 鉴权、capability digest 升级                                                                              |
+| `packages/cli` 统一启动器代理         | 终端路由的 WebSocket upgrade 转发                                                                                                                          |
+| `packages/cli` `capability-parity.ts` | `web_terminal` 行翻为 `managed` 并给 `surface:SESSION_TERMINAL_TICKET` + `docs:` evidence                                                                  |
+| Java WebShell surface                 | 首个 WebSocket 端点：握手鉴权、binding 解析、字节中继、生命周期触发关闭                                                                                    |
+| Java hold 准入                        | 按 H3 模式的 owner 侧 hold execution 准入/结算；close/delete 的 drain 顺序                                                                                 |
+| 契约                                  | session summary 的 `capabilities.terminal` + 重新生成的 WebShell 类型（terminal-ticket POST 进 SurfaceRegistry 与 OpenAPI；WS upgrade 本身不是 REST 路由） |
+| Web Shell 客户端                      | `TerminalPanel` 的 Managed 连接工厂、入口门控、terminal-lost 通知                                                                                          |
+| 验证                                  | worker/Java/前端聚焦测试、契约门禁、真实进程 E2E 与故障用例                                                                                                |
 
 ## 约束
 
@@ -267,9 +279,10 @@ digest 且准入链通过时才获得终端；已保存的 Session 作用域不�
   必须在 Java 侧同样镜像。
 - hold 复用双行 execution 模式，不改 schema；drain 与 wedge 语义由本设计
   固定。
-- 终端内容逃逸工作区（例如 `cd /`）由容器而非终端约束；治理 agent 工具的
-  workspace 包含规则不适用于人类终端。部署必须把该 opt-in 视为授予容器级
-  shell 访问。
+- 终端内容逃逸工作区（例如 `cd /`）不受终端约束；治理 agent 工具的
+  workspace 包含规则不适用于人类终端。能启用终端的只有普通本地 Workspace
+  binding，那里 worker 以服务器账户运行、没有容器隔离。部署必须把该 opt-in
+  视为授予该账户的 shell 访问。
 - 后续工作：背景 Shell 的 `send_input`（H3 预留）、经独立持久 owner 跨
   close 存活的 detach、每 Session 终端配额，以及未来是否向 files-only
   Session 暴露终端的决策。

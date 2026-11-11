@@ -2,7 +2,7 @@
 
 [English](2026-11-10-managed-web-terminal.md) | [简体中文](2026-11-10-managed-web-terminal.zh-CN.md)
 
-Status: proposal, not implemented; product decisions confirmed 2026-11-10.
+Status: implemented; product decisions confirmed 2026-11-10.
 Date: 2026-11-10.
 
 ## Problem and current state
@@ -16,9 +16,10 @@ The `web_terminal` capability gates the UI entry, and the daemon supplies the
 resolved workspace runtime's cwd and environment to the PTY
 ([web terminal lifecycle](web-terminal-lifecycle.md)).
 
-Managed Agent has no equivalent. The capability parity matrix records this as
-a deliberate gap: `web_terminal: NO_MANAGED_EQUIVALENT('no Managed web
-terminal')` in `packages/cli/src/serve/capability-parity.ts` (issue #15075).
+Managed Agent had no equivalent; the capability parity matrix recorded this
+as a deliberate gap (`web_terminal: NO_MANAGED_EQUIVALENT`, issue #15075).
+This increment closes that gap: the parity row now stands at `managed`,
+evidenced by the terminal-ticket surface route and this design.
 The existing Managed "shell" is an agent tool, not a user terminal:
 `hosted-workspace-shell/1` exposes `run_shell_command` and `monitor` through
 durable Broker dispatch with approval, and the H3 background Shell design
@@ -63,16 +64,19 @@ Non-goals:
 
 ```
 Browser (TerminalPanel / xterm, existing frame codec)
-   |  WebSocket, same-origin public bearer
+   |  1. POST terminal-ticket on the authenticated WebShell surface
+   |     (full admission: tenant, actor, grant, role, profile, opt-ins)
+   |  2. WebSocket upgrade offering the single-use ticket as a bearer
+   |     subprotocol (browsers cannot set the deployment auth headers)
    v
 Java control plane (WebShell surface)
-   - handshake authorization: tenant, actor, grant, role, profile, opt-ins
-   - Session -> READY binding -> worker endpoint; fail closed otherwise
+   - upgrade consumes the ticket once, re-checks Session/terminal identity
+   - Session -> READY terminal-capable binding -> worker endpoint; fail closed
    - byte-level relay; no tool-execution rows for terminal I/O
    - durable hold while any terminal is attached; drains on lifecycle ops
    |  WebSocket, worker bearer/lease protocol
    v
-Runtime worker (private HTTP surface, port 43190 in container mode)
+Runtime worker (private HTTP surface, port 43190)
    - new terminal upgrade route behind the owned-route gate
    - WebTerminalRegistry: PTY in the Session's workspace cwd/env
 ```
@@ -179,10 +183,12 @@ so the Shell profile's per-command approval (default/auto-edit) does not
 apply; the authorization boundary is the deployment opt-in plus the caller's
 OPERATOR grant on the Workspace. This is a deliberate product decision: a
 deployment that enables the terminal accepts that an authorized operator can
-run arbitrary commands as the worker user inside the workspace container,
-without per-command approval. The opt-in defaults to off and is independent
-of the Shell opt-in so a deployment can enable agent Shell while keeping the
-user terminal closed.
+run arbitrary commands as the worker user in the workspace, without
+per-command approval. Only ordinary local Workspace bindings can enable the
+terminal, and there the worker runs as the server account with no container
+isolating it, so the opt-in grants that account's shell access. The opt-in
+defaults to off and is independent of the Shell opt-in so a deployment can
+enable agent Shell while keeping the user terminal closed.
 
 `external-scratch` and K1 scratch runtimes refuse terminal admission: their
 contracts disable Workspace files and Shell, and the terminal inherits that
@@ -190,30 +196,41 @@ refusal. Sessions on `hosted-workspace-files/1` are out of scope.
 
 ### Contract and capability advertisement
 
-The terminal is a WebSocket upgrade, not a REST handler, so it does not take a
-`SurfaceRegistry` route label (the D6 gate enumerates
-`RequestMappingHandlerMapping` handlers) nor an OpenAPI path. Instead:
+The terminal's data plane is a WebSocket upgrade, not a REST handler, so the
+upgrade itself takes no `SurfaceRegistry` route label (the D6 gate enumerates
+`RequestMappingHandlerMapping` handlers). Its admission, however, is minted
+over a real public route that is fully contracted:
 
-- The parity row flips to `managed` with `docs:` evidence pointing at this
-  design; `capability-parity.test.ts` resolves the file.
+- `POST /api/agent/web-shell/v1/sessions/terminal-ticket` carries the
+  `SESSION_TERMINAL_TICKET` `SurfaceRegistry` label and an OpenAPI path
+  (`WebShellTerminalTicketRequest` / `WebShellTerminalTicket`), so it is
+  covered by the contract's actor-scope drift assertions. It runs the full
+  terminal admission and returns a single-use, short-lived ticket.
+- The parity row flips to `managed` with `surface:SESSION_TERMINAL_TICKET`
+  evidence (plus this design as secondary evidence);
+  `capability-parity.test.ts` resolves both.
 - `ManagedAgentSessionSummary.capabilities` gains a `terminal?: boolean`
-  field, computed server-side from the same admission chain, so the UI entry
-  appears only for Sessions that can actually attach. This is the only
-  generated-type change; WebShell types are regenerated with
+  field, computed server-side from the same admission chain and gated on a
+  placement that can actually attach, so the UI entry appears only for
+  Sessions that can attach. WebShell types are regenerated with
   `npm run generate:managed-agent-api --workspace=packages/web-shell`.
-- The upgrade route, its admission and its typed refusals are documented here
-  rather than in the OpenAPI contract.
+- The upgrade consumes the ticket once and re-checks Session/terminal
+  identity; its typed refusals are documented here.
 
 ### Web Shell UI
 
-The Managed conversation reuses `TerminalPanel` and the existing frame codec;
-only the connection factory differs (Java WebShell WS URL with the Session
-id, public bearer) from the local daemon connection. The entry is gated by
-`capabilities.terminal`. Reconnect replays scrollback and exit state through
-the registry, as locally. A page reload loses the in-memory terminal id, so
-the detached terminal is idle-reclaimed rather than restored — identical to
-the local lifecycle. A terminal-lost control frame renders an explicit notice
-instead of a silent reconnect loop.
+The Managed conversation uses a dedicated `ManagedTerminalPanel` sharing the
+local frame codec and the extracted xterm theme / subprotocol / reconnect
+constants; the connection factory differs (Java WebShell WS URL with the
+Session id, offering the minted single-use ticket as a bearer subprotocol)
+from the local daemon connection. The entry is gated by
+`capabilities.terminal`. Reconnect mints a fresh ticket and replays
+scrollback and exit state through the registry, as locally. A page reload
+loses the in-memory terminal id, so the detached terminal is idle-reclaimed
+rather than restored — identical to the local lifecycle. A terminal-lost
+control frame renders an explicit notice instead of a silent reconnect loop.
+Escape and outside-interaction dismissal are prevented so they cannot release
+a live PTY, and the panel stays mounted across transient UI/capability dips.
 
 ## Design decisions and rationale
 
@@ -226,17 +243,17 @@ instead of a silent reconnect loop.
 
 ## Affected components
 
-| Component                             | Change                                                                                                                            |
-| ------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| `packages/core` `WebTerminalRegistry` | Session-tagged ownership if not already expressible; no semantic change to bounds, replay or reclaim                              |
-| `packages/cli` managed runtime worker | Terminal upgrade route, route-gate entry, bearer/lease auth, capability digest bump                                               |
-| `packages/cli` unified launcher proxy | WebSocket upgrade forwarding for the terminal route                                                                               |
-| `packages/cli` `capability-parity.ts` | `web_terminal` row flips to `managed` with `docs:` evidence                                                                       |
-| Java WebShell surface                 | First WebSocket endpoint: handshake authorization, binding resolution, byte relay, lifecycle-triggered close                      |
-| Java hold admission                   | Owner-side hold execution admission/settlement on the H3 pattern; drain ordering in close/delete                                  |
-| Contracts                             | `capabilities.terminal` on the session summary + regenerated WebShell types (no OpenAPI/SurfaceRegistry entry for the WS upgrade) |
-| Web Shell client                      | Managed connection factory for `TerminalPanel`, entry gating, terminal-lost notice                                                |
-| Verification                          | Focused worker/Java/frontend tests, contract gates, real-process E2E and fault cases                                              |
+| Component                             | Change                                                                                                                                                                                               |
+| ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `packages/core` `WebTerminalRegistry` | Session-tagged ownership if not already expressible; no semantic change to bounds, replay or reclaim                                                                                                 |
+| `packages/cli` managed runtime worker | Terminal upgrade route, route-gate entry, bearer/lease auth, capability digest bump                                                                                                                  |
+| `packages/cli` unified launcher proxy | WebSocket upgrade forwarding for the terminal route                                                                                                                                                  |
+| `packages/cli` `capability-parity.ts` | `web_terminal` row flips to `managed` with `surface:SESSION_TERMINAL_TICKET` + `docs:` evidence                                                                                                      |
+| Java WebShell surface                 | First WebSocket endpoint: handshake authorization, binding resolution, byte relay, lifecycle-triggered close                                                                                         |
+| Java hold admission                   | Owner-side hold execution admission/settlement on the H3 pattern; drain ordering in close/delete                                                                                                     |
+| Contracts                             | `capabilities.terminal` on the session summary + regenerated WebShell types (the terminal-ticket POST is SurfaceRegistry-labelled and OpenAPI-contracted; the WS upgrade itself is not a REST route) |
+| Web Shell client                      | Managed connection factory for `TerminalPanel`, entry gating, terminal-lost notice                                                                                                                   |
+| Verification                          | Focused worker/Java/frontend tests, contract gates, real-process E2E and fault cases                                                                                                                 |
 
 ## Constraints
 
@@ -314,10 +331,12 @@ scope is not rewritten. Do not downgrade consumers with active holds.
   the worker-side 8 MiB ceiling must be mirrored on the Java side.
 - The hold reuses the two-row execution pattern with no schema change; the
   drain and wedge semantics are fixed by this design.
-- Terminal content escaping the workspace (for example `cd /`) is bounded by
-  the container, not by the terminal; the workspace containment rules that
-  govern agent tools do not apply to a human terminal. Deployments must treat
-  the opt-in as granting container-level shell access.
+- Terminal content escaping the workspace (for example `cd /`) is not bounded
+  by the terminal; the workspace containment rules that govern agent tools do
+  not apply to a human terminal. The only placements that can enable the
+  terminal are ordinary local Workspace bindings, where the worker runs as
+  the server account with no container isolating it. Deployments must treat
+  the opt-in as granting that account's shell access.
 - Follow-ups: `send_input` for background Shells (H3 reserved), detach that
   survives close via an independent durable owner, per-Session terminal
   quotas, and any later decision to expose terminals to files-only Sessions.
