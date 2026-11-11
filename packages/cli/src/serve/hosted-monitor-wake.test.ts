@@ -767,6 +767,9 @@ describe('HostedMonitorWakeScheduler deferral', () => {
     scheduler.kick();
     await vi.advanceTimersByTimeAsync(0);
     expect(ran).toEqual(['m:2']);
+    // The new pass must clear the stale deferral armed by the previous pass;
+    // without the pass-top clear a leftover timer keeps counting down.
+    expect(vi.getTimerCount()).toBe(0);
     scheduler.close();
   });
 
