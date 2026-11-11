@@ -41,6 +41,7 @@ import { pullRequestKey, samePullRequest } from './session-pr-url.js';
 import {
   claimPrWatchOwnershipSync,
   prWatchFileKey,
+  prWatchFilePath,
   readPrWatchStateSync,
   writePrWatchStateSync,
   type PrWatchIdentity,
@@ -205,43 +206,50 @@ async function recordListedPrStates(
   const keys = new Set<string>();
   const rows: Array<{
     identity: PrWatchIdentity;
-    key: string;
     state: 'open' | 'merged' | 'closed';
   }> = [];
   for (const pr of listed) {
     const identity = prWatchIdentityFromUrl(pr.url);
     if (!identity) continue;
-    const key = prWatchFileKey(identity);
-    keys.add(key);
+    keys.add(prWatchFileKey(identity));
     // The watch snapshot has no 'draft' variant — a draft is still open.
     const state = pr.state === 'draft' ? 'open' : pr.state;
-    rows.push({ identity, key, state });
+    rows.push({ identity, state });
   }
   if (!prWatch || rows.length === 0) return keys;
   const log = prWatch.log ?? (() => {});
   if (claimPrWatchOwnershipSync(prWatch.watchDir, log).kind === 'blocked') {
     return keys;
   }
+  // This advances the same baseline the observation's slow-view guard reads.
+  // Safe because the listing runs after the observation within a tick and
+  // ticks never overlap, so it is always the newer observation of the two.
   const observedAt = new Date(now()).toISOString();
-  for (const { identity, key, state } of rows) {
+  for (const { identity, state } of rows) {
     try {
       assertGenerationOpen();
-      await prWatch.locks.runExclusive(key, async () => {
-        const existing = readPrWatchStateSync(prWatch.watchDir, identity);
-        if (existing.kind === 'error') {
-          log(
-            `PR watch: read error for ${existing.filePath}; listing write skipped: ${String(existing.error)}`,
-          );
-          return;
-        }
-        const base =
-          existing.kind === 'state' ? existing.state : { pr: identity };
-        writePrWatchStateSync(prWatch.watchDir, identity, {
-          ...base,
-          state,
-          observedAt,
-        });
-      });
+      // The observation locks on the watch FILE PATH, not the logical key.
+      // Locking the key here would take a different mutex entry and serialize
+      // with nothing.
+      await prWatch.locks.runExclusive(
+        prWatchFilePath(prWatch.watchDir, identity),
+        async () => {
+          const existing = readPrWatchStateSync(prWatch.watchDir, identity);
+          if (existing.kind === 'error') {
+            log(
+              `PR watch: read error for ${existing.filePath}; listing write skipped: ${String(existing.error)}`,
+            );
+            return;
+          }
+          const base =
+            existing.kind === 'state' ? existing.state : { pr: identity };
+          writePrWatchStateSync(prWatch.watchDir, identity, {
+            ...base,
+            state,
+            observedAt,
+          });
+        },
+      );
     } catch (error) {
       log(
         `PR watch: listing write failed for ${identity.repo}#${identity.number}: ${String(error)}`,

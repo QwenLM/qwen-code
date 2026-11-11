@@ -42,7 +42,7 @@ import { PathMutexRegistry } from '../fs/path-mutex-registry.js';
 import {
   prWatchOwnerPath,
   buildPrWatchOwnerRecord,
-  prWatchFileKey,
+  prWatchFilePath,
   readPrWatchStateSync,
   writePrWatchStateSync,
 } from './pr-watch-store.js';
@@ -2074,10 +2074,16 @@ describe('refreshWorkspaceSessionPrStates', () => {
         openGate = resolve;
       });
       let holding = false;
-      const held = locks.runExclusive(prWatchFileKey(identity42), async () => {
-        holding = true;
-        await gate;
-      });
+      // Hold the lock the observation takes — the watch file path, not the
+      // logical key. Holding the key would let a write that locks the key
+      // proceed and this case would pass while serializing with nothing.
+      const held = locks.runExclusive(
+        prWatchFilePath(watchDir, identity42),
+        async () => {
+          holding = true;
+          await gate;
+        },
+      );
       const flush = async (): Promise<void> => {
         await new Promise<void>((r) => setImmediate(r));
       };
