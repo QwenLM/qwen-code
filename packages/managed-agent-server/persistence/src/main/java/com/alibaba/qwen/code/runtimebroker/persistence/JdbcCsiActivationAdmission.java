@@ -657,7 +657,7 @@ public final class JdbcCsiActivationAdmission {
         require(predecessorRevision > 1 && predecessorRevision < MAX_HISTORY);
         var predecessor = activeHistoryThrough(connection, original, predecessorRevision, predecessorSequence,
                 CsiNativeActivationProof.text(metadata, "previousCommitDigest"), CsiNativeActivationProof.text(metadata, "writerId"), read);
-        byte[] raw = com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiApplicationJson.base64(metadata.get("recordBytesBase64"), (int) MAX_HISTORY_BYTES);
+        byte[] raw = com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiApplicationJson.base64(metadata.get("recordBytesBase64"), 128 * 1024);
         CsiNativeActivationProof.TerminalProof proof;
         try (var statement = read.statement(connection,
                 "SELECT * FROM ma_session_journal_tx WHERE tenant_id = ? AND session_id = ?"

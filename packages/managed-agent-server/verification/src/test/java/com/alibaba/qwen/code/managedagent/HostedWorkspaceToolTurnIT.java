@@ -217,6 +217,16 @@ class HostedWorkspaceToolTurnIT {
         var objects = new ConcurrentHashMap<String, byte[]>();
         context.registerBean("unicodeObjects", ToolPublicationObjectStore.class, () -> new ToolPublicationObjectStore() {
             @Override
+            public InputStream openRange(String key, long offset, long length, Runnable guard) {
+                guard.run();
+                try (InputStream full = open(key)) {
+                    byte[] bytes = full.readAllBytes();
+                    return new java.io.ByteArrayInputStream(bytes, (int) offset, (int) length);
+                } catch (java.io.IOException error) {
+                    throw new IllegalStateException(error);
+                }
+            }
+            @Override
             public void putIfAbsent(String key, byte[] bytes) {
                 byte[] previous = objects.putIfAbsent(key, bytes.clone());
                 if (previous != null && !java.util.Arrays.equals(previous, bytes)) {
@@ -696,7 +706,9 @@ class HostedWorkspaceToolTurnIT {
         // Runtime Session stays READY for the fleet. The one family whose
         // work genuinely never settles here — the PREPARED prepare-twice
         // execution — retains its original membership until its outcome
-        // is known.
+        // is known. A settled turn's owed release is paid by the detach's
+        // terminal drain (#16484), so release-before-forward ends RELEASED
+        // like release; only the never-settled turns above stay READY.
         boolean retained = !storeFaults && fault.equals("prepare-twice");
         assertThat(member.get("execution_storage_key")).as(fault + " execution membership")
                 .isEqualTo(retained ? physical : null);
