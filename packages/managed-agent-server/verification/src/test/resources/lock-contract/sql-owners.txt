@@ -319,16 +319,9 @@ com/alibaba/qwen/code/managedagent/persistence/ToolPublicationRetentionStore.jav
 com/alibaba/qwen/code/managedagent/persistence/ToolPublicationRetentionStore.java|UPDATE ma_session_head SET state = 'DELETED', writer_id = NULL, writer_lease_until = NULL, lease_token_hash = NULL, latest_checkpoint_resource_id = NULL, gmt_modified =
 com/alibaba/qwen/code/managedagent/persistence/ToolPublicationStore.java|THEN 1 ELSE 0 END AS writer_live, recovery_status, activation_epoch, journal_revision, activation_id, activation_phase, activation_event_epoch, activation_expires_at, activation_head_revision FROM ma_session_head WHERE head_kind = 'MANAGED_SESSION' AND tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ? FOR UPDATE
 com/alibaba/qwen/code/managedagent/persistence/ToolPublicationStore.java|THEN 1 ELSE 0 END FROM ma_session_head WHERE head_kind = 'MANAGED_SESSION' AND tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ? FOR UPDATE
-com/alibaba/qwen/code/managedagent/persistence/WorkspaceCsiApplicationHistory.java|ma_session
-com/alibaba/qwen/code/managedagent/persistence/WorkspaceCsiApplicationHistory.java|ma_session_head
-com/alibaba/qwen/code/managedagent/persistence/WorkspaceCsiApplicationHistoryImage.java|ma_session
-com/alibaba/qwen/code/managedagent/persistence/WorkspaceCsiApplicationImage.java|ma_session_head
-com/alibaba/qwen/code/managedagent/persistence/WorkspaceCsiApplicationInventory.java|ma_event_stream
-com/alibaba/qwen/code/managedagent/persistence/WorkspaceCsiApplicationInventory.java|ma_session
-com/alibaba/qwen/code/managedagent/persistence/WorkspaceCsiApplicationInventory.java|ma_session_head
-com/alibaba/qwen/code/managedagent/persistence/WorkspaceCsiApplicationInventory.java|ma_turn
-com/alibaba/qwen/code/managedagent/persistence/WorkspaceCsiApplicationStore.java|ma_session
-com/alibaba/qwen/code/managedagent/persistence/WorkspaceCsiApplicationStore.java|ma_session_head
+com/alibaba/qwen/code/managedagent/persistence/WorkspaceCsiApplicationHistory.java|SELECT workspace_generation, workspace_storage_id, cwd_relative, context_config_ref, context_revision FROM ma_session WHERE tenant_id = ? AND session_id = ? AND workspace_id = ?
+com/alibaba/qwen/code/managedagent/persistence/WorkspaceCsiApplicationStore.java|SELECT lease_token_hash FROM ma_session_head WHERE head_kind = 'MANAGED_SESSION' AND tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ?
+com/alibaba/qwen/code/managedagent/persistence/WorkspaceCsiApplicationStore.java|SELECT workspace_generation, workspace_storage_id, cwd_relative, context_config_ref, context_revision FROM ma_session WHERE tenant_id = ? AND session_id = ? AND workspace_id = ?
 com/alibaba/qwen/code/managedagent/persistence/WorkspaceCsiCheckpointSnapshotStore.java|FROM ma_session_head WHERE tenant_key = ? AND harness_key = ?
 com/alibaba/qwen/code/managedagent/persistence/WorkspaceCsiCheckpointSnapshotStore.java|ma_session_head
 com/alibaba/qwen/code/managedagent/persistence/WorkspaceFileStore.java|SELECT * FROM ma_session WHERE tenant_id = ? AND session_id = ? AND status <> 'DELETED' AND (owner_only = 0 OR COALESCE(owner_actor_key, creator_actor_key) = ?)
