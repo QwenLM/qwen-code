@@ -8,6 +8,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as React from 'react';
 import { act } from 'react';
+import { createPortal } from 'react-dom';
 import { createRoot, type Root } from 'react-dom/client';
 import {
   McpAppGeneratedUiOwnerContext,
@@ -833,6 +834,81 @@ describe('WebShellSidebar current-session delete (issue #12619)', () => {
         new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
       );
     });
+    expect(onSearchQueryChange).toHaveBeenLastCalledWith('');
+  });
+
+  it('closes session search when a Managed row arrives through a portal', async () => {
+    const onSearchQueryChange = vi.fn();
+
+    function PortalHost() {
+      const [target, setTarget] = React.useState<HTMLElement | null>(null);
+      return (
+        <>
+          <I18nProvider language="en">
+            <McpAppGeneratedUiOwnerContext.Provider value={generatedUiOwner}>
+              <WebShellSidebar
+                archivedSessionsTarget={null}
+                collapsed={false}
+                onCollapsedChange={() => {}}
+                onOpenSettings={() => {}}
+                onOpenDaemonStatus={() => {}}
+                onOpenScheduledTasks={() => {}}
+                onOpenGoals={() => {}}
+                onOpenSessions={() => {}}
+                onOpenSplitView={() => {}}
+                onNewSession={() => false}
+                onLoadSession={loadSession}
+                onError={() => {}}
+                managedWorkspaces={<div ref={setTarget} />}
+                onSearchQueryChange={onSearchQueryChange}
+                sessionActions={{ inlineItems: ['delete'] }}
+              />
+            </McpAppGeneratedUiOwnerContext.Provider>
+          </I18nProvider>
+          {target
+            ? createPortal(
+                <div
+                  data-managed-session-id="managed-1"
+                  role="button"
+                  tabIndex={0}
+                >
+                  Managed session
+                </div>,
+                target,
+              )
+            : null}
+        </>
+      );
+    }
+
+    act(() => root.render(<PortalHost />));
+    await flushSidebar();
+    act(() =>
+      click(
+        container.querySelector<HTMLButtonElement>(
+          'button[aria-label="Search sessions"]',
+        )!,
+      ),
+    );
+    await flushSidebar();
+    const input = document.querySelector<HTMLInputElement>(
+      'input[aria-label="Search sessions"]',
+    )!;
+    expect(input).not.toBeNull();
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!.call(input, 'Managed needle');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await flushSidebar();
+    expect(onSearchQueryChange).toHaveBeenLastCalledWith('Managed needle');
+    const row = document.querySelector('[data-managed-session-id="managed-1"]');
+    expect(row).not.toBeNull();
+    act(() => (row as HTMLElement).click());
+    await flushSidebar();
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
     expect(onSearchQueryChange).toHaveBeenLastCalledWith('');
   });
 

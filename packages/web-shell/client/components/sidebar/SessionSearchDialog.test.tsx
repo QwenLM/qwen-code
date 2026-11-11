@@ -25,6 +25,7 @@ let portal: HTMLDivElement;
 let trigger: HTMLButtonElement;
 let props: Props;
 let search: ReturnType<typeof useSessionSearch>;
+const fakeClient = {} as NonNullable<Props['client']>;
 
 function Host({ options }: { options: Props }) {
   const [open, setOpen] = useState(true);
@@ -56,11 +57,18 @@ function input() {
 }
 
 async function key(key: string, options: KeyboardEventInit = {}) {
+  let prevented = false;
   await act(async () => {
-    input().dispatchEvent(
-      new KeyboardEvent('keydown', { key, bubbles: true, ...options }),
-    );
+    const event = new KeyboardEvent('keydown', {
+      key,
+      bubbles: true,
+      cancelable: true,
+      ...options,
+    });
+    input().dispatchEvent(event);
+    prevented = event.defaultPrevented;
   });
+  return prevented;
 }
 
 async function type(value: string) {
@@ -107,6 +115,7 @@ beforeEach(() => {
     includeStandalone: false,
     organizationEnabled: true,
     qualified: true,
+    catalogKey: '',
     onClose: vi.fn(),
     onSelect: vi.fn(),
     onQueryChange: vi.fn(),
@@ -123,7 +132,10 @@ afterEach(async () => {
 });
 
 it('focuses the real input through its ref and renders in the scoped portal', async () => {
-  await render();
+  await render({ client: fakeClient });
+  expect(vi.mocked(useSessionSearch).mock.lastCall?.[0].client).toBe(
+    fakeClient,
+  );
   expect(document.activeElement).toBe(input());
   expect(portal.querySelector('[role="dialog"]')).not.toBeNull();
   expect(container.querySelector('[role="dialog"]')).toBeNull();
@@ -133,17 +145,49 @@ it('focuses the real input through its ref and renders in the scoped portal', as
 });
 
 it('navigates results and opens the selected workspace even when IDs collide', async () => {
+  const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    await render();
+    await key('ArrowDown');
+    await key('ArrowUp');
+    expect(
+      portal.querySelector('[aria-selected="true"]')?.textContent,
+    ).toContain('First chat');
+    await key('ArrowDown');
+    await key('Enter');
+    expect(props.onSelect).toHaveBeenCalledExactlyOnceWith(search.entries[1]);
+    expect(props.onClose).toHaveBeenCalledOnce();
+    expect(portal.querySelector('[role="dialog"]')).toBeNull();
+    expect(
+      consoleError.mock.calls
+        .map((args) => args.join(' '))
+        .filter((message) => message.includes('same key')),
+    ).toEqual([]);
+  } finally {
+    consoleError.mockRestore();
+  }
+});
+
+it('leaves modified arrow keys to the text input', async () => {
   await render();
-  await key('ArrowDown');
-  await key('ArrowUp');
+  expect(await key('ArrowDown', { shiftKey: true })).toBe(false);
   expect(portal.querySelector('[aria-selected="true"]')?.textContent).toContain(
     'First chat',
   );
-  await key('ArrowDown');
-  await key('Enter');
-  expect(props.onSelect).toHaveBeenCalledExactlyOnceWith(search.entries[1]);
-  expect(props.onClose).toHaveBeenCalledOnce();
-  expect(portal.querySelector('[role="dialog"]')).toBeNull();
+});
+
+it('highlights the original text when lowercasing changes its length', async () => {
+  search.entries = [
+    {
+      session: { sessionId: 'istanbul', displayName: 'İstanbul session' },
+      workspaceCwd: '/a',
+    },
+  ];
+  await render();
+  await type('session');
+  const marks = portal.querySelectorAll('mark');
+  expect(marks).toHaveLength(1);
+  expect(marks[0].textContent).toBe('session');
 });
 
 it('closes with Escape and restores focus to the search trigger', async () => {
@@ -204,7 +248,11 @@ it('shows a useful recent-session empty state before a query', async () => {
 });
 
 it('forwards queries to custom content without taking over its selection', async () => {
-  await render({ customContent: <button>Host result</button> });
+  await render({
+    client: fakeClient,
+    customContent: <button>Host result</button>,
+  });
+  expect(vi.mocked(useSessionSearch).mock.lastCall?.[0].client).toBeUndefined();
   await type('host query');
   expect(props.onQueryChange).toHaveBeenCalledExactlyOnceWith('host query');
   expect(portal.textContent).toContain('Host result');

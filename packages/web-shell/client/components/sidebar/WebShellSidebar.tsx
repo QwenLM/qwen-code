@@ -6665,6 +6665,37 @@ export function WebShellSidebar({
   const sessionActionButtonClassName =
     'size-8 shrink-0 cursor-pointer rounded-lg p-[7px] hover:bg-accent';
   const searchEnabled = !liveView && !hideProjectHeader;
+  const [managedSearchNode, setManagedSearchNode] =
+    useState<HTMLDivElement | null>(null);
+  // Managed session rows are portaled into the dialog from another React
+  // tree, so React never dispatches their synthetic events through this
+  // wrapper. Only a native listener observes the row selection.
+  useEffect(() => {
+    if (!managedSearchNode) return;
+    const dismiss = (event: Event) => {
+      const target = event.target;
+      if (
+        !(target instanceof Element) ||
+        !target.closest('[data-managed-session-id]')
+      )
+        return;
+      if (
+        event instanceof KeyboardEvent &&
+        (event.isComposing ||
+          event.keyCode === 229 ||
+          (event.key !== 'Enter' && event.key !== ' '))
+      )
+        return;
+      setSearchOpen(false);
+      onSearchQueryChange?.('');
+    };
+    managedSearchNode.addEventListener('click', dismiss);
+    managedSearchNode.addEventListener('keydown', dismiss);
+    return () => {
+      managedSearchNode.removeEventListener('click', dismiss);
+      managedSearchNode.removeEventListener('keydown', dismiss);
+    };
+  }, [managedSearchNode, onSearchQueryChange]);
   // The activity panel replaces the session list, so a query typed there
   // filters rows the panel never shows.
   const topRowSearchVisible =
@@ -7106,6 +7137,10 @@ export function WebShellSidebar({
           initialSessions={sessions}
           primaryWorkspaceCwd={primaryWorkspaceCwd}
           includeStandalone={standaloneSessionsVisible}
+          catalogKey={`${workspaceSessionsReloadToken}:${sessions
+            .map((session) => session.sessionId)
+            .sort()
+            .join('|')}`}
           source={selectedSessionSource}
           organizationEnabled={organizationEnabled}
           qualified={workspaceQualifiedRestCoreEnabled}
@@ -7113,33 +7148,7 @@ export function WebShellSidebar({
           customContent={sessionContent}
           additionalContent={
             managedWorkspaces && !sectionView ? (
-              <div
-                onClick={(event) => {
-                  if (
-                    (event.target as HTMLElement).closest(
-                      '[data-managed-session-id]',
-                    )
-                  ) {
-                    setSearchOpen(false);
-                    onSearchQueryChange?.('');
-                  }
-                }}
-                onKeyDown={(event) => {
-                  if (
-                    (event.key === 'Enter' || event.key === ' ') &&
-                    !event.nativeEvent.isComposing &&
-                    event.nativeEvent.keyCode !== 229 &&
-                    (event.target as HTMLElement).closest(
-                      '[data-managed-session-id]',
-                    )
-                  ) {
-                    setSearchOpen(false);
-                    onSearchQueryChange?.('');
-                  }
-                }}
-              >
-                {managedWorkspaces}
-              </div>
+              <div ref={setManagedSearchNode}>{managedWorkspaces}</div>
             ) : undefined
           }
           onQueryChange={(query) => {

@@ -5,7 +5,11 @@
  */
 
 import { useEffect, useState } from 'react';
-import type { DaemonClient, DaemonSessionSummary } from '@qwen-code/sdk/daemon';
+import {
+  DaemonHttpError,
+  type DaemonClient,
+  type DaemonSessionSummary,
+} from '@qwen-code/sdk/daemon';
 import { sessionMatchesGitQuery, sessionMatchesSource } from './sessionSearch';
 
 export interface SessionSearchEntry {
@@ -27,6 +31,12 @@ export interface SessionSearchOptions {
   source?: string;
   organizationEnabled: boolean;
   qualified: boolean;
+  /**
+   * Order-insensitive catalog membership (reload token + sorted session ids).
+   * A change drops settled content hits for sessions deleted, archived, or
+   * renamed while a query is active.
+   */
+  catalogKey: string;
   query: string;
 }
 
@@ -45,6 +55,7 @@ export function useSessionSearch({
   source,
   organizationEnabled,
   qualified,
+  catalogKey,
   query,
 }: SessionSearchOptions) {
   const workspaceKey = JSON.stringify(
@@ -68,6 +79,7 @@ export function useSessionSearch({
     source,
     organizationEnabled,
     qualified,
+    catalogKey,
     normalizedQuery,
     attempt,
   ]);
@@ -172,17 +184,29 @@ export function useSessionSearch({
       ) {
         tasks.push(
           ...cwds.map(async (cwd) => {
-            const result = await client.searchWorkspaceSessions(
-              cwd,
-              normalizedQuery,
-              {
-                signal: controller.signal,
-              },
-            );
-            if (controller.signal.aborted) return;
-            for (const hit of result.results)
-              add({ ...hit, workspaceCwd: cwd });
-            publish(true);
+            try {
+              const result = await client.searchWorkspaceSessions(
+                cwd,
+                normalizedQuery,
+                {
+                  signal: controller.signal,
+                },
+              );
+              if (controller.signal.aborted) return;
+              for (const hit of result.results)
+                add({ ...hit, workspaceCwd: cwd });
+              publish(true);
+            } catch (error) {
+              // A daemon too old for the content-search route answers 404
+              // (501 for an unimplemented route). That is a supported legacy
+              // configuration, not a partial failure: degrade to local-only.
+              if (
+                error instanceof DaemonHttpError &&
+                (error.status === 404 || error.status === 501)
+              )
+                return;
+              throw error;
+            }
           }),
         );
       }
@@ -211,6 +235,7 @@ export function useSessionSearch({
     source,
     organizationEnabled,
     qualified,
+    catalogKey,
     normalizedQuery,
   ]);
 
@@ -218,6 +243,15 @@ export function useSessionSearch({
   const current =
     state?.key === key && state.client === client ? state : undefined;
   const merged = new Map<string, SessionSearchEntry>();
+  for (const entry of current?.entries ?? []) {
+    merged.set(
+      JSON.stringify([entry.workspaceCwd, entry.session.sessionId]),
+      entry,
+    );
+  }
+  // The freshly polled catalog wins over a query-time snapshot so an
+  // archiving or rename is honoured while the dialog is open; keep the
+  // content-search snippet the snapshot contributed.
   for (const session of initialSessions) {
     const cwd = session.workspaceCwd || primaryWorkspaceCwd;
     if (
@@ -226,16 +260,12 @@ export function useSessionSearch({
       (!qualified && cwd !== primaryWorkspaceCwd)
     )
       continue;
-    merged.set(JSON.stringify([cwd, session.sessionId]), {
+    const id = JSON.stringify([cwd, session.sessionId]);
+    merged.set(id, {
       session,
       workspaceCwd: cwd,
+      snippet: merged.get(id)?.snippet,
     });
-  }
-  for (const entry of current?.entries ?? []) {
-    merged.set(
-      JSON.stringify([entry.workspaceCwd, entry.session.sessionId]),
-      entry,
-    );
   }
   const needle = normalizedQuery.toLowerCase();
   const entries = [...merged.values()]

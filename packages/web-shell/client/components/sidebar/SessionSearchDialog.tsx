@@ -9,6 +9,7 @@ import {
   XIcon,
 } from 'lucide-react';
 import { useI18n } from '../../i18n';
+import { useListboxKeyboard } from '../../hooks/useListboxKeyboard';
 import { Dialog, DialogClose, DialogContent, DialogTitle } from '../ui/dialog';
 import { Input } from '../ui/input';
 import { useSessionSearch } from './use-session-search';
@@ -26,15 +27,19 @@ interface SessionSearchDialogProps extends Omit<SearchOptions, 'query'> {
 }
 
 function Match({ text, query }: { text: string; query: string }) {
-  const start = query ? text.toLowerCase().indexOf(query.toLowerCase()) : -1;
-  if (start < 0) return text;
+  if (!query) return text;
+  const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const match = new RegExp(escaped, 'i').exec(text);
+  if (!match) return text;
+  const start = match.index;
+  const end = start + match[0].length;
   return (
     <>
       {text.slice(0, start)}
       <mark className="bg-transparent font-semibold text-foreground">
-        {text.slice(start, start + query.length)}
+        {text.slice(start, end)}
       </mark>
-      {text.slice(start + query.length)}
+      {text.slice(end)}
     </>
   );
 }
@@ -72,6 +77,17 @@ export function SessionSearchDialog({
     onClose();
     onSelect(entry);
   };
+
+  useListboxKeyboard({
+    itemCount: entries.length,
+    activeIndex,
+    onActiveIndexChange: setSelected,
+    onConfirm: (index) => {
+      const entry = entries[index];
+      if (entry) select(entry);
+    },
+    enabled: customContent === undefined,
+  });
 
   return (
     <Dialog
@@ -115,29 +131,6 @@ export function SessionSearchDialog({
               setSelected(0);
               listRef.current?.scrollTo?.({ top: 0 });
               onQueryChange(event.target.value);
-            }}
-            onKeyDown={(event) => {
-              if (
-                event.nativeEvent.isComposing ||
-                event.nativeEvent.keyCode === 229 ||
-                customContent !== undefined
-              )
-                return;
-              if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
-                event.preventDefault();
-                setSelected(
-                  Math.max(
-                    0,
-                    Math.min(
-                      entries.length - 1,
-                      activeIndex + (event.key === 'ArrowDown' ? 1 : -1),
-                    ),
-                  ),
-                );
-              } else if (event.key === 'Enter' && entries[activeIndex]) {
-                event.preventDefault();
-                select(entries[activeIndex]);
-              }
             }}
           />
           {loading && customContent === undefined && (

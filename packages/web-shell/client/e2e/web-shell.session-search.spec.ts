@@ -225,6 +225,10 @@ test('pending and failed content requests keep local matches and discard stale r
   const oldResponse = new Promise<void>((resolve) => {
     releaseOld = resolve;
   });
+  let oldServed: (() => void) | undefined;
+  const oldServedPromise = new Promise<void>((resolve) => {
+    oldServed = resolve;
+  });
   let oldStarted = false;
   await page.route('**/sessions/search?*', async (route) => {
     const query = new URL(route.request().url()).searchParams.get('q');
@@ -241,6 +245,7 @@ test('pending and failed content requests keep local matches and discard stale r
           ],
         },
       });
+      oldServed?.();
     } else if (query === 'Authentication') {
       await route.fulfill({ status: 503, json: { error: 'Unavailable' } });
     } else {
@@ -268,6 +273,10 @@ test('pending and failed content requests keep local matches and discard stale r
     dialog.getByText('Some sessions could not be searched.'),
   ).toBeVisible();
   releaseOld?.();
+  await oldServedPromise;
+  await expect(dialog.getByRole('option')).toHaveText(
+    /Authentication architecture/,
+  );
   await expect(dialog.getByRole('listbox')).toHaveAttribute(
     'aria-busy',
     'false',

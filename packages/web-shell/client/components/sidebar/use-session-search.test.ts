@@ -7,9 +7,14 @@
 // @vitest-environment jsdom
 
 import React, { act } from 'react';
+import { flushSync } from 'react-dom';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { DaemonClient, type DaemonSessionSummary } from '@qwen-code/sdk/daemon';
+import {
+  DaemonClient,
+  DaemonHttpError,
+  type DaemonSessionSummary,
+} from '@qwen-code/sdk/daemon';
 import {
   useSessionSearch,
   type SessionSearchOptions,
@@ -58,6 +63,7 @@ const defaults: SessionSearchOptions = {
   includeStandalone: false,
   organizationEnabled: true,
   qualified: true,
+  catalogKey: '',
   query: '',
 };
 
@@ -226,6 +232,53 @@ describe('useSessionSearch', () => {
     );
   });
 
+  it('degrades an unsupported content-search route to local-only', async () => {
+    searchWorkspaceSessions.mockRejectedValue(
+      new DaemonHttpError(404, undefined, '404 not found'),
+    );
+    await render({
+      query: 'needle',
+      initialSessions: [session('local')],
+    });
+    await advance();
+    expect(result.failed).toBe(false);
+    expect(result.entries.map((entry) => entry.session.sessionId)).toEqual([
+      'local',
+    ]);
+  });
+
+  it('keeps real content-search failures as partial failures', async () => {
+    searchWorkspaceSessions.mockRejectedValue(
+      new DaemonHttpError(503, undefined, 'unavailable'),
+    );
+    await render({ query: 'needle' });
+    await advance();
+    expect(result.failed).toBe(true);
+  });
+
+  it('issues no daemon traffic without a client', async () => {
+    const rejections: unknown[] = [];
+    const onRejection = (reason: unknown) => rejections.push(reason);
+    process.on('unhandledRejection', onRejection);
+    try {
+      await render({ client: undefined, query: '' });
+      await advance();
+      expect(listWorkspaceSessionsPage).not.toHaveBeenCalled();
+      expect(listStandaloneSessionsPage).not.toHaveBeenCalled();
+      expect(searchWorkspaceSessions).not.toHaveBeenCalled();
+      await render({ client: undefined, query: 'ab' });
+      await advance();
+      expect(listWorkspaceSessionsPage).not.toHaveBeenCalled();
+      expect(listStandaloneSessionsPage).not.toHaveBeenCalled();
+      expect(searchWorkspaceSessions).not.toHaveBeenCalled();
+      expect(result.loading).toBe(false);
+      await new Promise((resolve) => process.nextTick(resolve));
+      expect(rejections).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onRejection);
+    }
+  });
+
   it('preserves successful and local results on partial failure and retries', async () => {
     listWorkspaceSessionsPage.mockImplementation(async (cwd) => {
       if (cwd === '/b') throw new Error('unavailable');
@@ -269,6 +322,58 @@ describe('useSessionSearch', () => {
     );
     expect(result.entries).toEqual([]);
     expect(result.loading).toBe(false);
+  });
+
+  it('drops settled content hits when catalog membership changes', async () => {
+    searchWorkspaceSessions.mockImplementation(async (cwd) => ({
+      results:
+        cwd === '/a' ? [{ session: session('ghost'), snippet: 'needle' }] : [],
+    }));
+    await render({ query: 'needle', catalogKey: '0:ghost' });
+    await advance();
+    expect(result.entries.map((entry) => entry.session.sessionId)).toEqual([
+      'ghost',
+    ]);
+    searchWorkspaceSessions.mockResolvedValue({ results: [] });
+    flushSync(() =>
+      root.render(
+        React.createElement(Host, {
+          ...defaults,
+          query: 'needle',
+          catalogKey: '1:',
+        }),
+      ),
+    );
+    expect(result.entries).toEqual([]);
+    await act(async () => {});
+  });
+
+  it('lets a fresh catalog snapshot win over a settled content hit', async () => {
+    searchWorkspaceSessions.mockImplementation(async (cwd) => ({
+      results:
+        cwd === '/a' ? [{ session: session('ghost'), snippet: 'needle' }] : [],
+    }));
+    await render({
+      query: 'needle',
+      catalogKey: '0:ghost',
+      initialSessions: [session('ghost')],
+    });
+    await advance();
+    expect(result.entries.map((entry) => entry.session.sessionId)).toEqual([
+      'ghost',
+    ]);
+    await render({
+      query: 'needle',
+      catalogKey: '0:ghost',
+      initialSessions: [
+        {
+          ...session('ghost'),
+          displayName: 'Renamed and archived',
+          isArchived: true,
+        },
+      ],
+    });
+    expect(result.entries).toEqual([]);
   });
 
   it('includes standalone results without a workspace route and respects source scope', async () => {
