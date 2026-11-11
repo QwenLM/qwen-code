@@ -631,7 +631,7 @@ it('keeps the remote’s notice when a join command is created next', async () =
 });
 
 const mayStillBeJoining = (error: string) =>
-  `No answer from this computer’s daemon (${error}). It may still be joining: check on the coordinator; if it did not join, join again with the same token, which picks up what this attempt did. Only a token it then refuses needs a new one.`;
+  `No answer from this computer’s daemon (${error}). It may still be joining: check on the coordinator. If it did not join, try the same join again: if the daemon recorded this join’s token, it goes on with it; a token it refuses needs a new one.`;
 
 it.each([
   [

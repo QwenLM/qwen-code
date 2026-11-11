@@ -295,8 +295,14 @@ it.each([
 
     expect(code).toBe(1);
     expect(err.join('\n')).toContain('the join may still complete');
-    // The same token picks up what the first run did.
-    expect(err.join('\n')).toContain('run the same command again');
+    // No usable answer arrived: whether the daemon recorded the token is
+    // unknowable, so the hint names the branches instead of promising the
+    // rerun goes on (on a released daemon it tears the connection down).
+    expect(err.join('\n')).toContain(
+      "if the daemon recorded this join's token",
+    );
+    expect(err.join('\n')).toContain('the same command again goes on with it');
+    expect(err.join('\n')).not.toContain('it picks up what the first run did');
     expect(err.join('\n')).not.toContain('No running qwen serve daemon');
     expect(err.join('\n')).not.toContain('Join failed');
     expect(err.join('\n')).not.toContain('qwen serve --join');

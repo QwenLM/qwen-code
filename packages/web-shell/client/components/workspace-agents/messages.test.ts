@@ -60,7 +60,7 @@ describe('collaboration messages', () => {
   });
 });
 
-describe('the unsaved-join notice', () => {
+describe('the join notices', () => {
   const en = COLLAB_MESSAGES_EN['collab.runtime.notSavedHere'];
   const zh = COLLAB_MESSAGES_ZH['collab.runtime.notSavedHere'];
 
@@ -94,5 +94,19 @@ describe('the unsaved-join notice', () => {
     expect(typeof en === 'function' ? en({}) : en).toBe(
       'This computer joined, but could not save the connection, so it will not reconnect after a restart or a workspace reload.',
     );
+  });
+
+  it('the timed-out join hint names the branches instead of promising', () => {
+    const enTimeout = COLLAB_MESSAGES_EN['collab.runtime.joinTimedOut'];
+    const zhTimeout = COLLAB_MESSAGES_ZH['collab.runtime.joinTimedOut'];
+    const enText = typeof enTimeout === 'function' ? enTimeout({}) : enTimeout;
+    const zhText = typeof zhTimeout === 'function' ? zhTimeout({}) : zhTimeout;
+    // Whether the daemon recorded the token is unknowable after a timeout:
+    // the hint must not promise the rerun goes on (a released daemon would
+    // tear the live connection down and refuse).
+    expect(enText).toContain('if the daemon recorded this join’s token');
+    expect(enText).not.toContain('picks up what this attempt did');
+    expect(zhText).toContain('若守护进程记录了本次加入的令牌');
+    expect(zhText).not.toContain('会接着这次尝试已完成的部分继续');
   });
 });

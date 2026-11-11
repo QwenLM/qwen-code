@@ -41,7 +41,12 @@ function mayHaveReachedDaemon(error: unknown): boolean {
  * but it is not one a join gives (not JSON, or without `connected`).
  */
 function mayStillComplete(baseUrl: string, answered = false): string {
-  return `The daemon at ${baseUrl} ${answered ? 'answered without confirming the join' : 'did not finish answering'}; the join may still complete. Check its log; if it did not join, run the same command again: it picks up what the first run did. Only a token it then refuses needs a new one.`;
+  // No usable answer arrived, so whether the daemon recorded this join's
+  // token is unknowable here — name the two branches instead of promising
+  // the rerun goes on. On a released daemon it does not: a token-bearing
+  // rerun aborts the live connection and is then refused, while a new
+  // token re-enrolls.
+  return `The daemon at ${baseUrl} ${answered ? 'answered without confirming the join' : 'did not finish answering'}; the join may still complete. Check its log before trying again: if the daemon recorded this join's token, the same command again goes on with it; one it refuses needs a new token.`;
 }
 
 export interface JoinArgs {
