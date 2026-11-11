@@ -38,5 +38,9 @@ RUN case "${TARGETARCH}" in \
 
 COPY entrypoint.sh /usr/local/bin/ephemeral-runner
 RUN chmod 755 /usr/local/bin/ephemeral-runner
+
+# Assert the final image, not the install list: a purge or font removal in
+# an earlier layer must fail the build here, not the fork-PR unit shard.
+RUN test -f /usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf
 USER node
 ENTRYPOINT ["/usr/local/bin/ephemeral-runner"]

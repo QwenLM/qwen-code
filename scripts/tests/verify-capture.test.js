@@ -19,22 +19,6 @@ const repoRoot = path.resolve(
 const HELPER = path.join(repoRoot, 'scripts/verify-capture.mjs');
 const ESC = String.fromCharCode(27);
 
-// The font pin's model of what a Dockerfile installs: remove whole-line
-// Dockerfile comments, join continuations, strip the shell comment a mid-line
-// `#` opens, then read each `apt-get install` statement on its own. A
-// comment naming the package must not satisfy it, and an earlier install must
-// not hide the statement that carries the package.
-function installStatements(dockerfile) {
-  return dockerfile
-    .replace(/^\s*#.*$/gm, '')
-    .replace(/\\\r?\n/g, ' ')
-    .split('\n')
-    .map((line) => line.replace(/(^|\s)#.*$/, '$1'))
-    .flatMap((line) => line.split('&&'))
-    .map((statement) => statement.trim().replace(/^RUN\s+/i, ''))
-    .filter((statement) => /^apt-get install\b/.test(statement));
-}
-
 // Every assertion here runs the real helper and inspects the real PNG. The
 // point of this script is that the browser pipeline it replaces never produced
 // an image in four live /verify runs — it needed a browser and a route that is
@@ -210,46 +194,22 @@ describe('verify-capture helper', () => {
       expect(colourOnly.equals(boldOnly)).toBe(false);
     }));
 
-  // The Linux unit shards for fork PRs run inside the ephemeral runner image.
-  // Without a bold-capable font there, font-weight="bold" has no face to
-  // resolve and rasterises identically to plain: the test above then sees
-  // byte-identical PNGs. Pin the package inside the install command's package
-  // list, so a slim-image cleanup cannot silently reintroduce that failure and
-  // a comment naming the package cannot satisfy the pin.
-  it('pins a font in the ephemeral runner image', () => {
+  // The image build asserts the bold face itself, so no text model of the
+  // apt command decides the pin. The check must be the last RUN so every
+  // layer that can purge the package or delete the font is behind it; moved
+  // earlier, a later cleanup could ship a fontless image green.
+  it('checks the bold face in the final image', () => {
     const dockerfile = readFileSync(
       path.join(repoRoot, 'scripts/ci/ephemeral-runner/Dockerfile'),
       'utf8',
     );
-    const installs = installStatements(dockerfile);
+    const runs = dockerfile.split('\n').filter((line) => /^RUN\s/.test(line));
     expect(
-      installs.length,
-      'no apt-get install block in scripts/ci/ephemeral-runner/Dockerfile',
-    ).toBeGreaterThan(0);
-    expect(
-      installs.some((statement) =>
-        /(?:^|\s)fonts-dejavu-core(?:[=:]|\s|$)/.test(statement),
-      ),
-      'the ephemeral runner image must install fonts-dejavu-core',
-    ).toBe(true);
-  });
-
-  // The pin is only as strong as its reading of the Dockerfile: the image
-  // file itself has no mid-line comment or layer split to exercise the model.
-  it('reads install statements the way the shell does', () => {
-    const installs = (body) =>
-      installStatements(`FROM node:22-bookworm-slim\n${body}\n`);
-    // A mid-line `#` opens a shell comment: what follows is not an argument.
-    expect(
-      installs('RUN apt-get install -y ca-certificates # fonts-dejavu-core'),
-    ).toEqual(['apt-get install -y ca-certificates']);
-    // An earlier unrelated install must not hide the one carrying the font.
-    expect(
-      installs(
-        'RUN apt-get install -y ca-certificates\n' +
-          'RUN apt-get install -y fonts-dejavu-core\n',
-      ),
-    ).toHaveLength(2);
+      runs.at(-1),
+      'the image build must assert the bold face after every layer that can change it',
+    ).toBe(
+      'RUN test -f /usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf',
+    );
   });
 
   // 256-colour and truecolor sequences produce getFgColor() values >= 16,
