@@ -65,10 +65,7 @@ export type JavaAgentEvent = Schemas['WebShellEvent'];
 
 export type JavaAgentResyncRequired = Schemas['WebShellResyncRequired'];
 
-export interface JavaAgentTerminalTicket {
-  ticket: string;
-  expiresInSeconds: number;
-}
+export type JavaAgentTerminalTicket = Schemas['WebShellTerminalTicket'];
 
 const RESYNC_REQUIRED = 'agent.session.resync_required';
 

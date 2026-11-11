@@ -33,6 +33,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/agent/web-shell/v1/sessions/terminal-ticket": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Mint the single-use, short-lived ticket a browser offers on the terminal WebSocket upgrade. The request travels the authenticated WebShell surface and runs the full terminal admission (readable, active, Shell capability and OPERATOR access) here, where the deployment authentication headers are available; the upgrade itself then only consumes the ticket. Mounted only with the Runtime Broker. The ticket is never carried in a URL and is consumed exactly once. */
+        post: operations["webShellTerminalTicket"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/agent/web-shell/v1/sessions/rename": {
         parameters: {
             query?: never;
@@ -1595,6 +1612,15 @@ export interface components {
         WebShellSessionRequest: {
             /** Format: uuid */
             sessionId: string;
+        };
+        WebShellTerminalTicketRequest: {
+            sessionId: string;
+            terminalId: string;
+        };
+        WebShellTerminalTicket: {
+            ticket: string;
+            /** Format: int64 */
+            expiresInSeconds: number;
         };
         WebShellTranscriptRequest: {
             /** Format: uuid */
@@ -3957,6 +3983,37 @@ export interface operations {
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
             413: components["responses"]["PayloadTooLarge"];
+        };
+    };
+    webShellTerminalTicket: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellTerminalTicketRequest"];
+            };
+        };
+        responses: {
+            /** @description Single-use terminal upgrade ticket and its lifetime in seconds. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellTerminalTicket"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
+            503: components["responses"]["Unavailable"];
         };
     };
     webShellRenameSession: {

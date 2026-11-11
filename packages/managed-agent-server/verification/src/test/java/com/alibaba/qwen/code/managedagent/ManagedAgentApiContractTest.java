@@ -7,6 +7,8 @@ import com.alibaba.qwen.code.managedagent.api.RequestIdFilter;
 import com.alibaba.qwen.code.managedagent.api.SshWorkspaceController;
 import com.alibaba.qwen.code.managedagent.api.TenantContextArgumentResolver;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
+import com.alibaba.qwen.code.managedagent.api.TerminalTicketController;
+import com.alibaba.qwen.code.managedagent.api.TerminalTicketStore;
 import com.alibaba.qwen.code.managedagent.api.WorkspaceDiscoveryController;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.model.ApiModels;
@@ -66,6 +68,7 @@ import com.alibaba.qwen.code.managedagent.repository.ManagedTaskEventStore;
 import com.alibaba.qwen.code.managedagent.repository.SessionWorktreeStore;
 import com.alibaba.qwen.code.managedagent.session.SessionRenameCoordinator;
 import com.alibaba.qwen.code.managedagent.workspace.SshWorkspaceService;
+import com.alibaba.qwen.code.managedagent.workspace.runtime.WorkspaceTerminalRelayService;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -78,6 +81,8 @@ import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.autoconfigure.web.servlet.MockMvcPrint;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.context.TestConfiguration;
+import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Import;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.MediaType;
@@ -3980,6 +3985,25 @@ class ManagedAgentApiContractTest {
             return gaps;
         } catch (IOException error) {
             throw new UncheckedIOException(error);
+        }
+    }
+
+    @TestConfiguration
+    static class TerminalTicketSurfaceConfiguration {
+        // The terminal ticket route is broker-gated and this context pins the
+        // Runtime Broker off, so mount the controller here to keep the route
+        // mapped for the spec-drift assertions. The relay runs the real
+        // Session admission; only the binding lookup is mocked. The actor-scope
+        // 403 probe is answered by TenantContextFilter before routing.
+        @Bean
+        public TerminalTicketController contractTerminalTicket(
+                com.alibaba.qwen.code.managedagent.session.ManagedAgentService sessions,
+                com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings settings) {
+            return new TerminalTicketController(
+                    new WorkspaceTerminalRelayService(sessions,
+                            mock(com.alibaba.qwen.code.runtimebroker.RuntimeBrokerOperations.class),
+                            settings),
+                    new TerminalTicketStore(java.time.Clock.systemUTC()));
         }
     }
 }
