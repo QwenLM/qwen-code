@@ -112,7 +112,7 @@ Preview routes by `queryId` and scopes rounds by a UUID `roundId`. Main's loop r
 | `llm.settled`    | `{ round, calls, discardedCalls, terminal? }`          | Llm, at round end                    |
 | `tool.cancel`    | `{ reason }`                                           | Conversation                         |
 | `tool.settled`   | `{ round, results: AgentLoopSettledCall[] }`           | Tool, at batch end                   |
-| `handler.failed` | `{ source, round?, error }`                            | bus, on listener failure             |
+| `handler.failed` | `{ source, eventType, round?, error }`                 | bus, on listener failure             |
 
 `llm.settled` carries the round's terminal classification (the `STOP_EVENTS` mapping that `runModelRound` does today) so Conversation remains the only place that maps a model outcome to an `AgentLoopStopReason`. Duplicate/replay bookkeeping stays in the Tool handler, using the existing `toolCallIdUtils` helpers, exactly where `runToolBatch` does it today.
 

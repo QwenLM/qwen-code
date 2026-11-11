@@ -112,7 +112,7 @@ preview 按 `queryId` 路由、用 UUID `roundId` 标记轮次。main 的循环�
 | `llm.settled`    | `{ round, calls, discardedCalls, terminal? }`  | Llm，轮结束时                       |
 | `tool.cancel`    | `{ reason }`                                   | Conversation                        |
 | `tool.settled`   | `{ round, results: AgentLoopSettledCall[] }`   | Tool，批结束时                      |
-| `handler.failed` | `{ source, round?, error }`                    | 总线，监听器失败时                  |
+| `handler.failed` | `{ source, eventType, round?, error }`         | 总线，监听器失败时                  |
 
 `llm.settled` 携带该轮的终止分类（今天 `runModelRound` 做的 `STOP_EVENTS` 映射），使 Conversation 仍是把模型结局映射为 `AgentLoopStopReason` 的唯一位置。去重/replay 记账留在 Tool handler，使用现有 `toolCallIdUtils` 助手，位置与今天 `runToolBatch` 完全一致。
 
