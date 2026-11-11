@@ -683,6 +683,22 @@ public class ManagedChannelService {
             throw new IllegalStateException(
                     "delivery id already belongs to another segment");
         }
+        // The head check only proves the chain's head matches. A stored chain
+        // that diverges at a later segment would be spliced by planSegments
+        // (INSERT IGNORE, unique on segment_id, not ordinal). Guard the full
+        // chain at the import site too: a resend refusal alone is not durable,
+        // because the funnel already committed this record as planned and the
+        // sweep discovers pending work from the journal, not from claim rows.
+        // Settle the record so it leaves the pending set instead of being
+        // re-imported on every sweep (review R7-1).
+        List<SegmentLedger> storedChain = segments.list(tenantId, channelId,
+                pending.deliveryId());
+        if (!storedChain.isEmpty()
+                && firstChainDivergence(storedChain, recordPlan(record)) >= 0) {
+            settleConflictingChain(tenantId, pending);
+            throw new IllegalStateException(
+                    "delivery id already belongs to another chain");
+        }
         planSegments(tenantId, channelId, pending.deliveryId(), record);
         // The delivery-level identity is the record's first segment, stable
         // across a resumed partial: naming the first unsent segment here
@@ -731,6 +747,11 @@ public class ManagedChannelService {
      */
     private void planSegments(String tenantId, String channelId,
             String deliveryId, JsonNode record) {
+        segments.plan(tenantId, channelId, deliveryId, recordPlan(record));
+    }
+
+    /** The (segmentId, ordinal, receipt) plan a delivery record names. */
+    private static List<SegmentLedger> recordPlan(JsonNode record) {
         List<SegmentLedger> plan = new ArrayList<>();
         for (JsonNode segment : record.required("segments")) {
             plan.add(new SegmentLedger(
@@ -738,7 +759,24 @@ public class ManagedChannelService {
                     segment.required("ordinal").asInt(),
                     segmentReceipt(segment)));
         }
-        segments.plan(tenantId, channelId, deliveryId, plan);
+        return plan;
+    }
+
+    /** Retires a pending record whose chain conflicts with the stored one, so
+     * the claim sweep stops re-importing it. The journal record's state is the
+     * Harness's to move, so settle it rejected rather than leaving it planned
+     * for the next sweep to retry. */
+    private void settleConflictingChain(String tenantId, PendingDelivery pending) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("operationId", UUID.randomUUID().toString());
+        body.put("kind", "settle_delivery");
+        body.put("deliveryId", pending.deliveryId());
+        body.put("outcome", "rejected");
+        try {
+            harness.runChannelOperation(tenantId, pending.sessionId(), body);
+        } catch (HarnessFailure error) {
+            throw translate(error);
+        }
     }
 
     /** The provider message id a record segment's receipt holds, when any. */

@@ -1019,6 +1019,18 @@ class ManagedChannelServiceTest {
                     .contains("storedSegment=other:1")
                     .contains("resentSegment=" + deliveryId + ":1");
         });
+        // The refusal must be durable: the funnel committed the resent record
+        // as planned, and the sweep discovers pending work from the journal, so
+        // it would otherwise re-import the record and splice the divergent
+        // segment. The sweep must refuse it and settle it out of the pending set.
+        service.claimDeliveries(TENANT, channel, 16);
+        assertThat(segmentLedger.list(TENANT, channel, resentId))
+                .extracting(SegmentLedger::segmentId)
+                .containsExactly(deliveryId + ":0", "other:1");
+        assertThat(jdbc.queryForObject("SELECT delivery_state FROM ma_session_record"
+                        + " WHERE tenant_id = ? AND session_id = ? AND record_id = ?",
+                String.class, TENANT, admitted.sessionId(), resentId))
+                .isNotIn("planned", "partial");
     }
 
     @Test
