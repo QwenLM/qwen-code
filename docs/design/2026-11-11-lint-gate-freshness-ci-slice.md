@@ -143,8 +143,8 @@ Whole-line comments and blank lines are dropped from the compared text, because
 non-space character is `#` is dropped, so a `#` inside a shell body is content
 and survives — the extractor never removes a line the runner would read.
 
-Measured on the current file, the slice is 372 lines of 3514, and the lint job
-contributes 44 of its 65 steps.
+Measured on the current file, the slice is 372 lines of 3514, and the lint job's
+42 steps contribute 29 (13 are plumbing).
 
 ### Why the default is "keep"
 
@@ -238,12 +238,30 @@ over-rejects, which is the safe direction.
   the drift reddens here first.
 - The slice covers the `Lint & Static` lane's gate only. `test_build` carries two
   static checks of its own (`check-serve-fast-path-bundle.js`,
-  `check:core-subpath-exports`); neither their definitions nor that job are in
-  this check's scope today, and this change does not widen it.
+  `check:core-subpath-exports`). Whole-file containment covered a base-side change
+  to them; this narrowing no longer does, and that is an accepted net reduction:
+  they do not belong to the `Lint & Static` lane, so a branch's green on that lane
+  never depended on them.
+- **Accepted residual risk:** `Checkout` and `Verify checkout includes expected
+  head commit` stay outside the slice. A base-side `ref:` or `fetch-depth:` edit,
+  or an edit to that verification step's body, is invisible here. A wrong tree
+  still reddens the lane at the verification step; going silent takes two
+  coordinated edits.
+- **Accepted residual risk:** `classify_pr`'s `Checkout trusted CI classifier` is
+  in the same class — the checkout is excluded while the step that actually
+  selects the profile is kept.
+- **Accepted residual risk:** the job-level `runs-on` and `timeout-minutes` are
+  dropped. Routing can change the linter's runtime indirectly through the
+  self-hosted Node action, and a tightened timeout reddens `main` after merge
+  rather than the branch.
+- **Accepted residual risk:** `.github/actions/**` is not in `GATE_FILES`. Where a
+  kept step references a local action, the reference is in the slice but the
+  action's implementation is not, so a base-side change to that implementation is
+  invisible to this check — a gap that predates this PR, left to a follow-up.
 
 ## Validation plan
 
-1. `node --test .github/scripts/check-lint-gate-freshness.test.mjs` — 60 cases,
+1. `node --test .github/scripts/check-lint-gate-freshness.test.mjs` — 61 cases,
    including the 14 added here.
 2. Mutation witnesses: each of six deliberate defects must redden the suite —
    dropping `ci.yml` from `NARROWINGS`, returning the whole file as the slice,

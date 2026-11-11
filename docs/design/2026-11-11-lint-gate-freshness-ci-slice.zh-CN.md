@@ -87,7 +87,7 @@ Checkout trusted CI classifier
 
 比对文本中会去掉整行注释与空行，因为 `ci.yml` 注释密集，且大量改动只是文字说明。只有首个非空白字符为 `#` 的行才被丢弃，因此 shell 正文里的 `#` 属于内容并会保留——提取器绝不会移除 runner 会读取的行。
 
-在当前文件上测量，切片为 3514 行中的 372 行，lint job 的 65 个步骤中贡献 44 个。
+在当前文件上测量，切片为 3514 行中的 372 行，lint job 的 42 个步骤中贡献 29 个（13 个属 plumbing）。
 
 ### 为什么默认是「保留」
 
@@ -132,11 +132,15 @@ merge base 取自该检查**已经做过**的包含比较，因此 narrowing 不
 - **误分类才是真正的风险。** 把某个闸门定义步骤错误地列入 plumbing 会隐藏 base 侧的闸门改动。缓解手段是默认保留规则、linter 调用拒绝，以及测试中的锚点漂移守卫。风险并未消除：任何修改该清单的 PR，review 都必须核对这份清单。
 - **本 PR 合入会要求所有在途 PR rebase 一次。** 该检查以整文件包含判定监听自身文件，所以这次修改本身就是一次 base 侧闸门改动——与它引入时造成的那一次性波及相同。
 - **锚点漂移。** 破坏行锚点的重排版会让 narrowing 失效。它 fail-closed 并输出告警，且测试读取真实文件，因此漂移会先在这里变红。
-- 切片只覆盖 `Lint & Static` lane 的闸门。`test_build` 自带两个静态检查（`check-serve-fast-path-bundle.js`、`check:core-subpath-exports`）；它们的定义与该 job 今天都不在本检查的范围内，本次改动也不扩大范围。
+- 切片只覆盖 `Lint & Static` lane 的闸门。`test_build` 自带两个静态检查（`check-serve-fast-path-bundle.js`、`check:core-subpath-exports`）；整文件包含时，它们 base 侧的改动曾受覆盖，本次收窄后**不再覆盖**。这是**接受的净缩减**：它们不属于 `Lint & Static` lane，分支在那条 lane 上的绿本来就不依赖它们。
+- **接受的残余风险：** `Checkout` 与 `Verify checkout includes expected head commit` 在切片之外。base 侧修改 `ref:` 或 `fetch-depth:`，或修改那条校验步骤的正文，都不会被本检查发现。取错树仍会由该校验步骤把 lane 弄红；要静默需要两处协同改动。
+- **接受的残余风险：** `classify_pr` 的 `Checkout trusted CI classifier` 属同一类——checkout 被排除，而真正选择 profile 的步骤保留在切片内。
+- **接受的残余风险：** job 级的 `runs-on` 与 `timeout-minutes` 被丢弃。routing 可以经 self-hosted Node action 间接改变 linter 的运行时；收紧 timeout 会在合入后打红 `main`，而不是打红分支。
+- **接受的残余风险：** `.github/actions/**` 不在 `GATE_FILES` 中。保留步骤对本地 action 的引用在切片内，但 action 的实现不在，因此 base 侧对该实现的改动对本检查不可见——这是本 PR 之前就存在的缺口，留待 follow-up。
 
 ## 验证计划
 
-1. `node --test .github/scripts/check-lint-gate-freshness.test.mjs`——60 个用例，含本次新增的 14 个。
+1. `node --test .github/scripts/check-lint-gate-freshness.test.mjs`——61 个用例，含本次新增的 14 个。
 2. mutation witness：六个刻意植入的缺陷都必须让测试变红——从 `NARROWINGS` 移除 `ci.yml`、把整个文件当作切片返回、只保留 header、比对 head 而非 merge base、吸收未命名步骤，以及把缺失 merge base 当作 fresh。
 3. 针对真实 workflow 的切片完整性：每个 `scripts/lint.js` lane 参数都必须在切片中存活。
 4. 真实 API：取十个历史 base tip，各自的分叉点落后一个提交，内容按真实 ref 读取——六个纯 plumbing 提交必须通过，四个改变闸门的提交必须保持 stale。
