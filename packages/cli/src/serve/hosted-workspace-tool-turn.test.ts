@@ -2026,6 +2026,30 @@ it.each([
   },
 );
 
+it('declares loop_wakeup on shell/2 but not on shell/1', async () => {
+  const mk = (profile: string) =>
+    new HostedWorkspaceToolTurn(
+      { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+      session,
+      harness,
+      'prompt',
+      commit,
+      messageFitsInline,
+      undefined,
+      undefined,
+      undefined,
+      { profile },
+    );
+  const shell2 = await mk('hosted-workspace-shell/2').declarations(
+    new AbortController().signal,
+  );
+  expect(shell2.map((tool) => tool.name)).toContain('loop_wakeup');
+  const shell1 = await mk('hosted-workspace-shell/1').declarations(
+    new AbortController().signal,
+  );
+  expect(shell1.map((tool) => tool.name)).not.toContain('loop_wakeup');
+});
+
 it.each([WORKSPACE_CAPABILITY_DIGEST, RESIDENT_WORKSPACE_CAPABILITY_DIGEST])(
   'uses the existing warm capability after a legacy route 404 (%s)',
   async (digest) => {

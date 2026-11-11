@@ -70,6 +70,7 @@ import {
 import {
   HOSTED_WORKSPACE_FILE_PROFILE,
   HOSTED_WORKSPACE_SHELL_PROFILE,
+  HOSTED_WORKSPACE_SHELL_PROFILE_V2,
   HOSTED_WORKSPACE_FILE_PROFILE_V2,
   HOSTED_WORKSPACE_FILE_PROFILE_V3,
   HOSTED_WORKSPACE_READ_PROFILE,
@@ -80,6 +81,10 @@ import {
   isHostedWorkspaceReadProfile,
   type HostedWorkspaceToolProfile,
 } from './hosted-workspace-profiles.js';
+import {
+  LoopWakeupError,
+  type HostedLoopSession,
+} from './hosted-loop-session.js';
 import type { FunctionDeclaration, Part } from '@google/genai';
 import {
   HOSTED_PUBLIC_PLAN_TOOL,
@@ -786,6 +791,37 @@ export const HOSTED_TODO_WRITE_TOOL: FunctionDeclaration = {
       },
     },
     required: ['todos'],
+    additionalProperties: false,
+  },
+};
+// Self-paced /loop: schedule the next wakeup of a self-paced loop. The
+// continuation is future model input, so the arm is vetted by the turn's
+// permission classifier and gated by qwen.managed-agent.loop.enabled.
+export const HOSTED_LOOP_WAKEUP_TOOL: FunctionDeclaration = {
+  name: 'loop_wakeup',
+  description:
+    'Schedule when to resume work in a self-paced loop iteration (always pass the `prompt` arg). Call this before ending the turn to keep the loop alive; omit the call to end the loop. One-shot and durable — it survives a Harness restart. A self-paced wakeup chain may run for at most 24h. When a background task you started will wake you on its own, keep this wakeup as a long fallback heartbeat rather than a poll.',
+  parametersJsonSchema: {
+    type: 'object',
+    properties: {
+      delaySeconds: {
+        type: 'number',
+        description:
+          'Seconds from now to wake up. Clamped to [60, 3600]. Use 60-270s only when actively polling external state that nothing else reports; when a background task will wake you via a notification, use 1200-1800s as a fallback. With no specific signal to watch, default to 1200s+.',
+      },
+      prompt: {
+        type: 'string',
+        maxLength: 10000,
+        description:
+          'Continuation prompt to enqueue when the wakeup fires. Prefix with `/loop` so the next firing re-invokes the loop skill.',
+      },
+      reason: {
+        type: 'string',
+        description:
+          'One short sentence explaining the chosen delay. Shown to the user. Be specific.',
+      },
+    },
+    required: ['delaySeconds', 'prompt'],
     additionalProperties: false,
   },
 };
@@ -1857,6 +1893,7 @@ interface HostedPreparedRequest {
   planExit?: boolean;
   question?: boolean;
   todo?: boolean;
+  loop?: boolean;
   memory?: boolean;
 }
 
@@ -1870,6 +1907,7 @@ function skipsRuntimeBroker(request: HostedPreparedRequest): boolean {
       request.question ||
       request.skill ||
       request.todo ||
+      request.loop ||
       request.memory ||
       request.workflow,
   );
@@ -1975,6 +2013,8 @@ export class HostedWorkspaceToolTurn {
   private readonly foregroundOnly: boolean;
   private readonly childRuns?: HostedChildRunSession;
   private readonly monitors?: HostedMonitorSession;
+  private readonly loops?: HostedLoopSession;
+  private readonly wakeKick?: () => void;
   private readonly backgroundLane?: HostedShellTurnOptions;
   private readonly childAgents?: HostedChildAgentSession;
   private childModelRoute?: { modelId: string; route: PublicChildModelRoute };
@@ -2062,6 +2102,8 @@ export class HostedWorkspaceToolTurn {
       childDepth?: number;
       childRuns?: HostedChildRunSession;
       monitors?: HostedMonitorSession;
+      loops?: HostedLoopSession;
+      wakeKick?: () => void;
       backgroundLane?: HostedShellTurnOptions;
       childAgents?: {
         readonly funnel: HostedChildAgentSession;
@@ -2115,6 +2157,8 @@ export class HostedWorkspaceToolTurn {
     this.context = extras?.context;
     this.childRuns = this.foregroundOnly ? undefined : extras?.childRuns;
     this.monitors = this.foregroundOnly ? undefined : extras?.monitors;
+    this.loops = this.foregroundOnly ? undefined : extras?.loops;
+    this.wakeKick = this.foregroundOnly ? undefined : extras?.wakeKick;
     this.backgroundLane = this.foregroundOnly
       ? undefined
       : extras?.backgroundLane;
@@ -2206,6 +2250,10 @@ export class HostedWorkspaceToolTurn {
       this.profile === HOSTED_WORKSPACE_FILE_PROFILE_V3 ||
       this.profile === HOSTED_WORKSPACE_SHELL_PROFILE
     );
+  }
+
+  private declaresLoopTool(): boolean {
+    return this.profile === HOSTED_WORKSPACE_SHELL_PROFILE_V2;
   }
 
   private questionsAdmitted(): boolean {
@@ -2377,6 +2425,7 @@ export class HostedWorkspaceToolTurn {
     const memberCommands = await this.memberCommandsDeclared();
     const skill = this.skills?.declaration();
     const todoTool = this.declaresTodoTool();
+    const loopTool = this.declaresLoopTool();
     this.advertised = [
       ...[
         ...(this.publication || this.shell
@@ -2384,6 +2433,7 @@ export class HostedWorkspaceToolTurn {
           : [...HOSTED_WORKSPACE_FILE_TOOLS, HOSTED_WEB_FETCH_TOOL]),
         ...(search ? [HOSTED_GLOB_TOOL] : []),
         ...(todoTool ? [HOSTED_TODO_WRITE_TOOL] : []),
+        ...(loopTool ? [HOSTED_LOOP_WAKEUP_TOOL] : []),
       ]
         .filter((tool) => tool.name !== 'monitor' || this.monitorsAdmitted())
         .map((declaration) => {
@@ -3335,6 +3385,7 @@ export class HostedWorkspaceToolTurn {
         // its error, so its committed answer is its own dispatch evidence.
         (((call.name === 'skill' && this.skills !== undefined) ||
           (call.name === 'todo_write' && this.declaresTodoTool()) ||
+          (call.name === 'loop_wakeup' && this.declaresLoopTool()) ||
           (this.memory !== undefined && isHostedMemoryTool(call.name)) ||
           HOSTED_TEAM_TOOL_NAMES.includes(call.name) ||
           (call.name === 'exit_plan_mode' &&
@@ -4526,6 +4577,19 @@ export class HostedWorkspaceToolTurn {
           const check = checkHostedTodoWriteInput(call.args);
           input = check.input;
           if (check.error) validationError = check.error;
+        } else if (call.name === 'loop_wakeup') {
+          const args = call.args;
+          const delaySeconds = args['delaySeconds'];
+          const prompt = args['prompt'];
+          const reason = args['reason'];
+          if (typeof delaySeconds !== 'number') {
+            validationError = 'loop_wakeup requires a numeric delaySeconds.';
+          } else if (typeof prompt !== 'string' || !prompt.trim()) {
+            validationError = 'loop_wakeup requires a nonempty prompt.';
+          } else if (reason !== undefined && typeof reason !== 'string') {
+            validationError = 'loop_wakeup reason must be a string.';
+          }
+          input = { delaySeconds, prompt, reason };
         } else if (call.name === 'monitor') {
           const args = call.args;
           const unsupportedKey = Object.keys(args).find(
@@ -5053,6 +5117,7 @@ export class HostedWorkspaceToolTurn {
           planExit,
           question: call.name === 'ask_user_question',
           todo: call.name === 'todo_write',
+          loop: mcpInput === undefined && call.name === 'loop_wakeup',
           memory: this.memory !== undefined && isHostedMemoryTool(call.name),
         };
       });
@@ -6139,6 +6204,49 @@ export class HostedWorkspaceToolTurn {
           if (!this.messageFitsInline('tool_result', converted, model))
             throw new Error(
               'Hosted Todo result exceeds the inline Session Store limit.',
+            );
+          await this.commit('tool_result', converted, model);
+          responses.push(...converted);
+          continue;
+        }
+        if (request.loop) {
+          let converted: Part[];
+          try {
+            const arm = await this.loops!.arm({
+              delaySeconds: request.input['delaySeconds'] as number,
+              prompt: request.input['prompt'] as string,
+              reason: request.input['reason'] as string | undefined,
+            });
+            this.wakeKick?.();
+            converted = convertToFunctionResponse(
+              request.call.name,
+              request.call.callId,
+              [
+                {
+                  text: `Loop wakeup ${arm.id} scheduled for ${new Date(arm.fireAt).toISOString()} (in ${arm.clampedDelaySeconds}s).`,
+                },
+              ],
+            );
+            const response = converted[0]?.functionResponse;
+            if (!response)
+              throw new Error('Hosted loop wakeup result is missing.');
+            response.response = {
+              ...response.response,
+              ...arm,
+              executionStatus: 'success',
+            };
+          } catch (cause) {
+            if (!(cause instanceof LoopWakeupError)) throw cause;
+            converted = convertToFunctionErrorResponse(
+              request.call.name,
+              request.call.callId,
+              [],
+              cause.message,
+            );
+          }
+          if (!this.messageFitsInline('tool_result', converted, model))
+            throw new Error(
+              'Hosted loop wakeup result exceeds the inline Session Store limit.',
             );
           await this.commit('tool_result', converted, model);
           responses.push(...converted);

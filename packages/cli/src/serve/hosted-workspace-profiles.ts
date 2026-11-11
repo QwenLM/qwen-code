@@ -13,6 +13,8 @@ export const HOSTED_WORKSPACE_SHELL_PROFILE = 'hosted-workspace-shell/1';
 export const HOSTED_WORKSPACE_FILE_PROFILE_V2 = 'hosted-workspace-files/2';
 // #15076: `files/3` adds `todo_write` to its `/2` counterpart.
 export const HOSTED_WORKSPACE_FILE_PROFILE_V3 = 'hosted-workspace-files/3';
+// Self-paced /loop: `shell/2` adds `loop_wakeup` to its `/1` counterpart.
+export const HOSTED_WORKSPACE_SHELL_PROFILE_V2 = 'hosted-workspace-shell/2';
 export const HOSTED_WORKSPACE_TEAM_LEAD_PROFILE =
   'hosted-workspace-team-lead/1';
 // #13753 I3: a snapshot child's profile, `read_file` and `glob` only. The
@@ -25,6 +27,7 @@ export type HostedWorkspaceToolProfile =
   | typeof HOSTED_WORKSPACE_SHELL_PROFILE
   | typeof HOSTED_WORKSPACE_FILE_PROFILE_V2
   | typeof HOSTED_WORKSPACE_FILE_PROFILE_V3
+  | typeof HOSTED_WORKSPACE_SHELL_PROFILE_V2
   | typeof HOSTED_WORKSPACE_TEAM_LEAD_PROFILE
   | typeof HOSTED_WORKSPACE_READ_PROFILE;
 
@@ -36,6 +39,7 @@ export function isHostedWorkspaceProfile(
     profile === HOSTED_WORKSPACE_SHELL_PROFILE ||
     profile === HOSTED_WORKSPACE_FILE_PROFILE_V2 ||
     profile === HOSTED_WORKSPACE_FILE_PROFILE_V3 ||
+    profile === HOSTED_WORKSPACE_SHELL_PROFILE_V2 ||
     profile === HOSTED_WORKSPACE_TEAM_LEAD_PROFILE ||
     profile === HOSTED_WORKSPACE_READ_PROFILE
   );
@@ -44,6 +48,7 @@ export function isHostedWorkspaceProfile(
 export function isHostedWorkspaceShellProfile(profile: unknown): boolean {
   return (
     profile === HOSTED_WORKSPACE_SHELL_PROFILE ||
+    profile === HOSTED_WORKSPACE_SHELL_PROFILE_V2 ||
     profile === HOSTED_WORKSPACE_TEAM_LEAD_PROFILE
   );
 }
@@ -62,6 +67,7 @@ export function isHostedWorkspaceSearchProfile(profile: unknown): boolean {
     profile === HOSTED_WORKSPACE_FILE_PROFILE ||
     profile === HOSTED_WORKSPACE_FILE_PROFILE_V2 ||
     profile === HOSTED_WORKSPACE_SHELL_PROFILE ||
+    profile === HOSTED_WORKSPACE_SHELL_PROFILE_V2 ||
     profile === HOSTED_WORKSPACE_FILE_PROFILE_V3
   );
 }
