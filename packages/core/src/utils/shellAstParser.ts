@@ -1063,12 +1063,48 @@ function evaluateCommandSafety(commandNode: SyntaxNode): ShellCommandSafety {
   );
 }
 
+/** The parts of a `heredoc_redirect` node that are the heredoc itself. */
+const HEREDOC_OWN_PART = /^heredoc_(?:start|body|end)$/;
+
+/**
+ * Judges what shares a heredoc's first line. tree-sitter files all of it
+ * under the `heredoc_redirect` node, where no rule looked: in
+ * `cat <<EOF > out.txt`, `cat <<EOF | sh` and `cat <<EOF && rm x`, the
+ * redirection, the pipeline and the second command are that node's children,
+ * and a plain word after the delimiter is its `argument`. A redirection and a
+ * statement get the rule for their kind. A word is an argument no rule has
+ * seen, so it is `unknown`, as is any other node (#16856).
+ */
+function evaluateHeredocLine(heredoc: SyntaxNode): ShellCommandSafety {
+  return mergeSafety(
+    evaluateRedirectionSafety(heredoc),
+    ...heredoc.namedChildren
+      .filter(
+        (child) =>
+          !HEREDOC_OWN_PART.test(child.type) &&
+          !child.type.endsWith('_redirect'),
+      )
+      .map(evaluateStatementSafety),
+  );
+}
+
 function evaluateRedirectionSafety(node: SyntaxNode): ShellCommandSafety {
   let result: ShellCommandSafety = 'read-only';
   for (const redirect of node.namedChildren) {
     if (!redirect.type.endsWith('_redirect')) continue;
     result = mergeSafety(result, evaluateSubstitutions(redirect));
+    if (redirect.type === 'heredoc_redirect') {
+      result = mergeSafety(result, evaluateHeredocLine(redirect));
+    }
     if (redirect.type !== 'file_redirect') continue;
+    // bash takes one word as a redirection's target. tree-sitter attaches the
+    // words after it to the redirection as well, so they never reach the
+    // command's arguments: `git branch < /dev/null -D main` reads as
+    // `git branch`. No rule has seen those words, so the command is not known
+    // to be read-only (#16856).
+    if (redirect.childrenForFieldName('destination').length > 1) {
+      result = mergeSafety(result, 'unknown');
+    }
     const operator = redirect.children.find(
       (child) => child.type !== 'file_descriptor',
     );

