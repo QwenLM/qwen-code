@@ -80,6 +80,7 @@ import type { McpAppPromptSubmission } from './hooks/useMcpAppMessages';
 import type { ArtifactPanel } from './components/artifacts/ArtifactPanel';
 import type { WebShellSettingsOptions } from './settings';
 import type { WebShellModelManagementOptions } from './modelManagement';
+import type { WebShellModelPickerOptions } from './model-picker';
 import { DEFAULT_SESSION_ACTION_ITEMS } from './components/sidebar/WebShellSidebar';
 import type { Message } from './adapters/types';
 import type {
@@ -421,6 +422,12 @@ type ChatEditorTestProps = {
     trusted: boolean;
   }>;
   atWorkspaceCwd?: string;
+  modelPickerScope?: {
+    sessionId?: string;
+    workspaceId?: string;
+    workspaceCwd?: string;
+    daemonBaseUrl?: string;
+  };
   composerScopeKey?: string;
   workspaceFeaturesEnabled?: boolean;
   attachmentsEnabled?: boolean;
@@ -943,6 +950,7 @@ const {
       queuedPromptSessionHasActivePrompt: false,
       chatEditorRenderCount: 0,
       latestChatEditorProps: null as ChatEditorTestProps | null,
+      latestModelPicker: undefined as WebShellModelPickerOptions | undefined,
       onChatEditorLayout: null as ((props: ChatEditorTestProps) => void) | null,
       latestToastHostElevated: false,
       latestTaskChipsTasks: null as
@@ -1484,6 +1492,7 @@ vi.mock('./components/ChatEditor', async () => {
         testState.latestChatEditorProps = props;
         const { onAttachmentsChange } = props;
         const customization = useWebShellCustomization();
+        testState.latestModelPicker = customization.modelPicker;
         React.useEffect(() => {
           onAttachmentsChange?.(
             Boolean(
@@ -12865,6 +12874,7 @@ beforeEach(() => {
   testState.queuedPromptSessionHasActivePrompt = false;
   testState.chatEditorRenderCount = 0;
   testState.latestChatEditorProps = null;
+  testState.latestModelPicker = undefined;
   testState.onChatEditorLayout = null;
   testState.latestToastHostElevated = false;
   testState.latestTaskChipsTasks = null;
@@ -52589,6 +52599,40 @@ describe('App manual-run orchestration (scheduled tasks)', () => {
     expect(mockSessionActions.clearSession).toHaveBeenCalledTimes(1); // attempted
     expect(editorInsertText).not.toHaveBeenCalled(); // but priming skipped
   });
+});
+
+describe('modelPicker customization plumbing', () => {
+  it('shares and updates the host picker configuration through customization', async () => {
+    const first = { mountHeader: () => null };
+    const second = { displayContentByModelId: { qwen: () => null } };
+    const { rerender } = renderApp({ modelPicker: first });
+    await flush();
+    expect(testState.latestModelPicker).toBe(first);
+
+    rerender({ modelPicker: second });
+    await flush();
+    expect(testState.latestModelPicker).toBe(second);
+
+    rerender({});
+    await flush();
+    expect(testState.latestModelPicker).toBeUndefined();
+  });
+
+  it.each(['workspace', 'standalone'] as const)(
+    'uses the main %s composer scope and preserves the full daemon base URL',
+    async (kind) => {
+      mockConnection.sessionContext =
+        kind === 'workspace' ? { kind, cwd: '/tmp/project' } : { kind };
+      mockWorkspace.baseUrl = 'https://models.example/daemon/proxy';
+      renderApp();
+      await flush();
+      expect(testState.latestChatEditorProps?.modelPickerScope).toEqual({
+        sessionId: 'session-1',
+        workspaceCwd: kind === 'workspace' ? '/tmp/project' : undefined,
+        daemonBaseUrl: 'https://models.example/daemon/proxy',
+      });
+    },
+  );
 });
 
 describe('fileUploadEnabled customization plumbing', () => {

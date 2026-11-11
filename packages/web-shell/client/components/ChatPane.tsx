@@ -2126,6 +2126,11 @@ export function ChatPane({
             currentModel={connection.currentModel ?? ''}
             modelRefresh={modelRefresh}
             availableModels={availableModels}
+            modelPickerScope={{
+              sessionId: connection.sessionId,
+              workspaceCwd: paneWorkspaceCwd,
+              daemonBaseUrl: workspace.baseUrl,
+            }}
             unavailableModels={unavailableModels}
             mountUnavailableModelTooltip={mountUnavailableModelTooltip}
             onSelectMode={handleSelectMode}
