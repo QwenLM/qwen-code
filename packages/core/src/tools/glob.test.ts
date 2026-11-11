@@ -185,6 +185,16 @@ describe('GlobTool', () => {
       expectFound(await run({ pattern: 'sub' }), 1, 'sub');
     });
 
+    it('reports a directory match in the same message shape the docs quote', async () => {
+      // docs/developers/tools/file-system.md §5 shows this exact wording, so a
+      // change to the header or the separator has to update the page too.
+      const result = await run({ pattern: 'sub' });
+
+      expect(result.llmContent).toBe(
+        `Found 1 file(s) matching "sub" in the workspace directory, sorted by modification time (newest first):\n---\n${path.join(tempRootDir, 'sub')}`,
+      );
+    });
+
     it('should match real and symlinked directories alike', async () => {
       await fs.symlink(
         path.join(tempRootDir, 'sub'),

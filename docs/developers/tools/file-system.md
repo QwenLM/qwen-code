@@ -133,7 +133,7 @@ notebook_edit(
 
 ## 5. `glob` (Glob)
 
-`glob` finds files matching specific glob patterns (e.g., `src/**/*.ts`, `*.md`), returning absolute paths sorted by modification time (newest first).
+`glob` finds files and directories matching specific glob patterns (e.g., `src/**/*.ts`, `*.md`), returning absolute paths sorted by modification time (newest first).
 
 - **Tool name:** `glob`
 - **Display name:** Glob
@@ -142,11 +142,15 @@ notebook_edit(
   - `pattern` (string, required): The glob pattern to match against (e.g., `"*.py"`, `"src/**/*.js"`).
   - `path` (string, optional): The directory to search in. If not specified, the current working directory will be used.
 - **Behavior:**
-  - Searches for files matching the glob pattern within the specified directory.
-  - Returns a list of absolute paths, sorted with the most recently modified files first.
+  - Searches for files and directories matching the glob pattern within the specified directory.
+  - Returns a list of absolute paths, sorted with the most recently modified entries first.
+  - A directory whose name matches the pattern is reported as a match, so `glob 'src'` is a valid existence probe; the search does not descend into it unless the pattern does.
   - Respects .gitignore, .qwenignore, and configured custom Qwen ignore files by default.
-  - Limits results to 100 files to prevent context overflow.
+  - Limits results to 100 entries to prevent context overflow.
 - **Output (`llmContent`):** A message like: `Found 5 file(s) matching "*.ts" within /path/to/search/dir, sorted by modification time (newest first):\n---\n/path/to/file1.ts\n/path/to/subdir/file2.ts\n---\n[95 files truncated] ...`
+
+  A directory match is reported in the same message, which is what makes the existence probe work: `glob "src"` yields `Found 1 file(s) matching "src" within /path/to/search/dir, sorted by modification time (newest first):\n---\n/path/to/search/dir/src`. The header count covers every collected match rather than the truncated list, so `Found at least N` means "N or more".
+
 - **Confirmation:** No.
 
 ## 6. `grep_search` (Grep)
