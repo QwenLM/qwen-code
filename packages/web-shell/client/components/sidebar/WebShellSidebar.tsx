@@ -119,6 +119,10 @@ import {
   PopoverTrigger,
 } from '../ui/popover';
 import { formatDateTime } from '../../utils/formatDateTime';
+import {
+  BindSessionPrDialog,
+  type BindSessionPrPayload,
+} from '../dialogs/BindSessionPrDialog';
 import { DialogShell } from '../dialogs/DialogShell';
 import { useWorkspaceRemoval } from '../workspaces/useWorkspaceRemoval';
 import {
@@ -1804,6 +1808,10 @@ export function WebShellSidebar({
   );
   const [deleteCandidate, setDeleteCandidate] =
     useState<DaemonSessionSummary | null>(null);
+  const [bindPrCandidate, setBindPrCandidate] =
+    useState<DaemonSessionSummary | null>(null);
+  const [bindPrSubmitting, setBindPrSubmitting] = useState(false);
+  const [bindPrError, setBindPrError] = useState<string | undefined>();
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedSessions, setSelectedSessions] = useState(
     () => new Map<string, DaemonSessionSummary>(),
@@ -3979,6 +3987,64 @@ export function WebShellSidebar({
     ],
   );
 
+  const handleBindPrFromMenu = useCallback((session: DaemonSessionSummary) => {
+    setBindPrError(undefined);
+    setBindPrCandidate(session);
+  }, []);
+
+  // Supplementary PR registration — same routing as saveRename: the current
+  // session binds through its own session actions, other sessions through
+  // the owning workspace's metadata route.
+  const submitBindPr = useCallback(
+    (pr: BindSessionPrPayload) => {
+      const session = bindPrCandidate;
+      if (!session || bindPrSubmitting) return;
+      const sessionId = session.sessionId;
+      const workspaceCwd = getSessionWorkspaceCwd(session);
+      setBindPrSubmitting(true);
+      setBindPrError(undefined);
+      const bind = isCurrentSession(session)
+        ? actions.bindSessionPr(pr)
+        : workspaceCwd
+          ? workspace.client
+              .workspaceByCwd(workspaceCwd)
+              .updateSessionMetadata(sessionId, { pr })
+          : workspace.client.updateSessionMetadata(sessionId, { pr });
+      bind
+        .then(() => {
+          setBindPrCandidate(null);
+          if (workspaceCwd) {
+            sessionCatalogController.refreshWorkspace(workspaceCwd);
+          }
+          bumpWorkspaceReload();
+        })
+        .catch((err: unknown) => {
+          setBindPrError(
+            err instanceof Error
+              ? `${t('sessionsOverview.bindPrFailed')}: ${err.message}`
+              : t('sessionsOverview.bindPrFailed'),
+          );
+          if (workspaceCwd) {
+            sessionCatalogController.refreshWorkspace(workspaceCwd);
+          }
+        })
+        .finally(() => {
+          setBindPrSubmitting(false);
+        });
+    },
+    [
+      actions,
+      bindPrCandidate,
+      bindPrSubmitting,
+      bumpWorkspaceReload,
+      getSessionWorkspaceCwd,
+      isCurrentSession,
+      sessionCatalogController,
+      t,
+      workspace.client,
+    ],
+  );
+
   const handleDeleteSession = useCallback(
     (session: DaemonSessionSummary) => {
       if (!canDeleteSession(session)) return;
@@ -5699,6 +5765,10 @@ export function WebShellSidebar({
       const showRename = standalone
         ? sessionActionItems.has('rename')
         : canRenameSession(session);
+      // PR binding shares rename's metadata-mutation gate; standalone
+      // sessions are excluded because their metadata route only accepts
+      // displayName.
+      const showBindPr = !standalone && showRename;
       const activeExportScope = getActiveExportScope(session);
       const showExport = standalone
         ? sessionActionItems.has('export')
@@ -5757,6 +5827,7 @@ export function WebShellSidebar({
         (showPin && !inlineActionItems.has('pin')) ||
         showArchive ||
         (showRename && !inlineActionItems.has('rename')) ||
+        showBindPr ||
         showGroup ||
         (showExport && !inlineActionItems.has('export')) ||
         (showDelete && !inlineActionItems.has('delete'));
@@ -5766,6 +5837,7 @@ export function WebShellSidebar({
           showPin ||
           showArchive ||
           showRename ||
+          showBindPr ||
           showExport ||
           showDelete ||
           showGroup);
@@ -6137,6 +6209,15 @@ export function WebShellSidebar({
                                 {t('sidebar.rename')}
                               </DropdownMenuItem>
                             )}
+                            {showBindPr && (
+                              <DropdownMenuItem
+                                disabled={busy}
+                                onSelect={() => handleBindPrFromMenu(session)}
+                              >
+                                <GitPullRequestIcon />
+                                {t('sessionsOverview.bindPr')}
+                              </DropdownMenuItem>
+                            )}
                             {showGroup && (
                               <DropdownMenuItem
                                 disabled={busy}
@@ -6214,6 +6295,7 @@ export function WebShellSidebar({
       getIdentityForSession,
       getSessionWorkspaceCwd,
       handleArchive,
+      handleBindPrFromMenu,
       handleDeleteSession,
       handleExportSession,
       handleLoadSession,
@@ -7351,6 +7433,17 @@ export function WebShellSidebar({
               </div>
             </div>
           </DialogShell>
+        )}
+        {bindPrCandidate && (
+          <BindSessionPrDialog
+            workspaceCwd={getSessionWorkspaceCwd(bindPrCandidate) ?? ''}
+            busy={bindPrSubmitting}
+            error={bindPrError}
+            onSubmit={submitBindPr}
+            onClose={() => {
+              if (!bindPrSubmitting) setBindPrCandidate(null);
+            }}
+          />
         )}
         {workspaceRenameCandidate && (
           <WorkspaceRenameDialog

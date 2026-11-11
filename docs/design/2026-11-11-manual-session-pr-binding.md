@@ -53,7 +53,7 @@ itself (TUI + Web Shell) and in the Web Shell session overview.
   in the TUI, headless CLI, or a daemon (Web Shell) session — no token, no
   session-id lookup.
 - A user can bind a PR to any session from the Web Shell session overview
-  panel through a small dialog.
+  panel or the sidebar session menu through a small dialog.
 - Both entries reuse the existing persistence, provenance, cap, and refresh
   machinery; the daemon and SDK gain no new routes or types.
 
@@ -135,10 +135,13 @@ error row + Cancel/Bind). The input accepts a PR number or URL:
   only carries open/draft PRs; a number absent from it produces an error
   asking for the full URL (merged/closed PRs bind by URL).
 
-Entry point: a `GitPullRequestIcon` ghost button in the
+Entry points: a `GitPullRequestIcon` ghost button in the
 `SessionOverviewPanel` actions column, next to Rename, gated by the same
-`canRenameCard` capability (metadata mutation). A `bindPrTarget` state
-(mirroring `archiveTarget`) drives the dialog.
+`canRenameCard` capability (metadata mutation); and a Bind PR item in the
+sidebar session dropdown (`WebShellSidebar`), gated by `showRename` and
+hidden for standalone sessions (their metadata route only accepts
+`displayName`). A `bindPrTarget` / `bindPrCandidate` state drives the same
+dialog from either surface.
 
 Submit routing mirrors `saveRename`'s three branches:
 
@@ -186,13 +189,13 @@ i18n: new `sessionsOverview.bindPr*` keys in both EN and ZH dictionaries of
 
 ## Files affected
 
-| Layer       | Files                                                                                                                                                         |
-| ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| core        | `utils/github-prs.ts` (new `fetchPullRequestByReference`)                                                                                                     |
-| CLI command | `ui/commands/pr-command.ts` (new), `services/BuiltinCommandLoader.ts`                                                                                         |
-| CLI i18n    | `i18n/locales/*.js` (9 files)                                                                                                                                 |
-| Web Shell   | `components/dialogs/BindSessionPrDialog.tsx` (new), `components/SessionOverviewPanel.tsx`, `daemon/session/actions.ts`, `daemon/session/types.ts`, `i18n.tsx` |
-| Tests       | collocated unit tests for each of the above                                                                                                                   |
+| Layer       | Files                                                                                                                                                                                                                             |
+| ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| core        | `utils/github-prs.ts` (new `fetchPullRequestByReference`)                                                                                                                                                                         |
+| CLI command | `ui/commands/pr-command.ts` (new), `services/BuiltinCommandLoader.ts`                                                                                                                                                             |
+| CLI i18n    | `i18n/locales/*.js` (9 files)                                                                                                                                                                                                     |
+| Web Shell   | `components/dialogs/BindSessionPrDialog.tsx` (new), `components/SessionOverviewPanel.tsx`, `components/sidebar/WebShellSidebar.tsx`, `daemon/session/actions.ts`, `daemon/session/types.ts`, `i18n.tsx`, `test/sidebarHarness.ts` |
+| Tests       | collocated unit tests for each of the above                                                                                                                                                                                       |
 
 ## Constraints and risks
 

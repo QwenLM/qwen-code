@@ -46,7 +46,7 @@ Shell 里的用户够不着这条路径，实践中总要提醒 agent 去跑。
 
 - 用户在 TUI、headless CLI 或 daemon（Web Shell）会话里敲 `/pr <number|url>`
   即可把 PR 绑到当前会话——不需要 token，不需要查会话 id。
-- 用户在 Web Shell 会话总览面板通过一个小对话框把 PR 绑到任意会话。
+- 用户在 Web Shell 会话总览面板或侧栏会话菜单通过一个小对话框把 PR 绑到任意会话。
 - 两个入口都复用既有的落盘、provenance、上限与刷新机制；daemon 与 SDK 不
   新增路由或类型。
 
@@ -119,8 +119,10 @@ Cancel/Bind）。输入框接受 PR 号或 URL：
   并要求给完整 URL（merged/closed PR 走 URL 绑定）。
 
 入口：`SessionOverviewPanel` actions 列 Rename 旁加一个 `GitPullRequestIcon`
-ghost 按钮，用与 Rename 相同的 `canRenameCard` 能力门控（元数据变更）。
-`bindPrTarget` state（仿 `archiveTarget`）驱动对话框。
+ghost 按钮，用与 Rename 相同的 `canRenameCard` 能力门控（元数据变更）；
+侧栏会话下拉菜单（`WebShellSidebar`）加一个 Bind PR 项，用 `showRename`
+门控，standalone 会话隐藏（其元数据路由只接受 `displayName`）。
+`bindPrTarget` / `bindPrCandidate` state 从两个面驱动同一个对话框。
 
 提交路由仿 `saveRename` 的三分支：
 
@@ -158,13 +160,13 @@ i18n：`client/i18n.tsx` 的 EN 与 ZH 两份字典各加 `sessionsOverview.bind
 
 ## 影响文件
 
-| 层        | 文件                                                                                                                                                            |
-| --------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| core      | `utils/github-prs.ts`（新增 `fetchPullRequestByReference`）                                                                                                     |
-| CLI 命令  | `ui/commands/pr-command.ts`（新增）、`services/BuiltinCommandLoader.ts`                                                                                         |
-| CLI i18n  | `i18n/locales/*.js`（9 个文件）                                                                                                                                 |
-| Web Shell | `components/dialogs/BindSessionPrDialog.tsx`（新增）、`components/SessionOverviewPanel.tsx`、`daemon/session/actions.ts`、`daemon/session/types.ts`、`i18n.tsx` |
-| 测试      | 上述各处的 collocated 单测                                                                                                                                      |
+| 层        | 文件                                                                                                                                                                                                                                |
+| --------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| core      | `utils/github-prs.ts`（新增 `fetchPullRequestByReference`）                                                                                                                                                                         |
+| CLI 命令  | `ui/commands/pr-command.ts`（新增）、`services/BuiltinCommandLoader.ts`                                                                                                                                                             |
+| CLI i18n  | `i18n/locales/*.js`（9 个文件）                                                                                                                                                                                                     |
+| Web Shell | `components/dialogs/BindSessionPrDialog.tsx`（新增）、`components/SessionOverviewPanel.tsx`、`components/sidebar/WebShellSidebar.tsx`、`daemon/session/actions.ts`、`daemon/session/types.ts`、`i18n.tsx`、`test/sidebarHarness.ts` |
+| 测试      | 上述各处的 collocated 单测                                                                                                                                                                                                          |
 
 ## 约束与风险
 
