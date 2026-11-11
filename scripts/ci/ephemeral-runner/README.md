@@ -40,6 +40,47 @@ Hosts with restricted upstream connectivity can set `DEBIAN_MIRROR`,
 `PIP_INDEX_URL` or `RUNNER_RELEASE_URL` at build time. The runner archive is
 still verified against its pinned digest when served from a mirror.
 
+## Browsers in the image
+
+The image bakes Chromium, its system libraries and ffmpeg. The lanes that
+install browsers (`ci.yml`, `e2e.yml`, `web-shell-visuals.yml`) skip their own
+install when `PLAYWRIGHT_BROWSERS_PATH` is set, and only this image sets it for
+them, so a job on it needs no browser egress and no apt round trip for the
+libraries. That holds for Chromium only: the image does not bake WebKit, and the
+lanes that install `chromium webkit` (hosted `ubuntu-latest` and the persistent
+ARM64 machines) still download both. A disposable container has no cache to
+reuse: without this, every visuals job paid a fresh download, and on 2026-11-11
+the upstream CDN served the browser at about 61 KB/s from the hz4/hz5 hosts — a
+110 MB headless shell was still at 70% after six minutes when two jobs were
+cancelled. The same object came from `cdn.npmmirror.com` at 8.9 MB/s on the same
+host, which is why `PLAYWRIGHT_DOWNLOAD_HOST` defaults there. Set it to the
+upstream CDN, or to an internal mirror, on a host that reaches one faster.
+
+The mirror is incomplete: its `builds/cft/` starts at 148.0.7778.96, so it
+carries 1.61.1's and 1.62.1's Chromium but not 1.58.2's 145.0.7632.6 (nor
+1.58.2's non-CFT `builds/chromium/1208/`). The install loop therefore falls back
+per version to Playwright's own CDN list, and logs which version it retried, so
+the default host cannot fail the build on a version it does not mirror.
+
+Size is the price. From the archives' Content-Length, the three versions are
+about 0.92 GB of downloads, roughly 2.0-2.3 GB extracted, plus 2.2-2.5 GB for
+the apt packages (Chromium's system libraries and ffmpeg) — estimates, not a
+measured image delta; weigh them against the host's disk floor.
+
+Every playwright the repository resolves picks its own browser revision, and the
+tree currently carries three: 1.61.1 at the root and in Web Shell, 1.62.1 under
+Browser Use, and 1.58.2 pulled in transitively. All three are baked, because the
+integration lane installs browsers for Browser Use as well and would otherwise
+download at job time. `PLAYWRIGHT_VERSIONS` overrides the list.
+
+The list lives in the Dockerfile because this image's build context is its own
+directory, so the lockfile is not available to it; the revisions are read from
+each version's own `browsers.json` during the build, never written down.
+`scripts/tests/verify-capture.test.js` compares the list against `pnpm-lock.yaml`,
+so a dependency bump fails that test rather than silently leaving a revision to
+be downloaded inside a job. The final layer asserts the font baseline, ffmpeg and
+a launchable Chromium, and fails the build if any of them is missing.
+
 For a real deployment, publish the image to a registry and configure its
 immutable `repository@sha256:...` digest. A local `sha256:...` image ID may be
 used for a trial. Runner and base versions need routine security updates.
