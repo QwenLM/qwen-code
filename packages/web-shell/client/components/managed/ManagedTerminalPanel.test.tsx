@@ -270,6 +270,34 @@ describe('ManagedTerminalPanel', () => {
     expect(ws.send).not.toHaveBeenCalledWith('\x00{"type":"release"}');
   });
 
+  it('restores the snapshot replay and re-arms input', async () => {
+    const ticketFn = vi
+      .fn()
+      .mockResolvedValue({ ticket: 'ticket-one', expiresInSeconds: 30 });
+    await render(ticketFn);
+    const ws = FakeWebSocket.instances[0]!;
+    ws.open();
+    // The snapshot control frame arms the restore; the following binary frame
+    // is the replayed scrollback.
+    act(() => {
+      ws.onmessage?.({
+        data: '\x00{"type":"snapshot","replay":false,"handlesPrimaryDa":false}',
+      } as MessageEvent);
+    });
+    act(() => {
+      ws.onmessage?.({
+        data: new TextEncoder().encode('replayed-scrollback').buffer,
+      } as MessageEvent);
+    });
+    await flush();
+    expect(terminalMock.write).toHaveBeenCalledWith(
+      'replayed-scrollback',
+      expect.any(Function),
+    );
+    // Input is re-armed on the restored terminal (initial arm + restore arm).
+    expect(terminalMock.onData.mock.calls.length).toBeGreaterThanOrEqual(2);
+  });
+
   it('releases the terminal and disposes xterm on unmount', async () => {
     const ticketFn = vi
       .fn()
