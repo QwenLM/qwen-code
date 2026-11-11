@@ -48,6 +48,7 @@ import {
   type CaseResult,
   type CheckResult,
 } from './report.js';
+import { toolUse } from './tool-use.js';
 
 const enabled = process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1';
 
@@ -72,8 +73,7 @@ async function run(
     case: name,
     model: 'replay',
     trial: 1,
-    calledTool: true,
-    viewErrors: 0,
+    ...toolUse(env.mainRequests()),
     secondsToFirstCard:
       env.firstCardMs === undefined
         ? undefined
@@ -98,6 +98,7 @@ describe.runIf(enabled)('Generated UI acceptance replay (#14019)', () => {
       runBillSplitter(e, BILL_SPLITTER_PROMPT),
     );
     expect(statusMap([result])).toEqual(EXPECTED.bill);
+    expect(result.viewErrors).toBe(0);
   }, 600_000);
 
   it('checklist', async () => {
@@ -105,6 +106,7 @@ describe.runIf(enabled)('Generated UI acceptance replay (#14019)', () => {
       runChecklist(e, CHECKLIST_PROMPT),
     );
     expect(statusMap([result])).toEqual(EXPECTED.checklist);
+    expect(result.viewErrors).toBe(0);
   }, 600_000);
 
   it('activity form', async () => {
@@ -112,6 +114,7 @@ describe.runIf(enabled)('Generated UI acceptance replay (#14019)', () => {
       runActivityForm(e, ACTIVITY_FORM_PROMPT),
     );
     expect(statusMap([result])).toEqual(EXPECTED.form);
+    expect(result.viewErrors).toBe(0);
   }, 600_000);
 
   it('comparator', async () => {
@@ -123,6 +126,7 @@ describe.runIf(enabled)('Generated UI acceptance replay (#14019)', () => {
       }),
     );
     expect(statusMap([result])).toEqual(EXPECTED.comparator);
+    expect(result.viewErrors).toBe(0);
   }, 900_000);
 });
 
@@ -130,8 +134,8 @@ describe.runIf(enabled)('Generated UI acceptance replay (#14019)', () => {
  * Baseline on main, 2026-11. `fail` entries are the gaps later stages close:
  * copy and export need host-mediated clipboard/download (stage 8), the
  * checklist needs persisted view state (stage 6), extension needs card
- * revisions (stage 8). `form.first-click-submits` and
- * `form.reports-acceptance` are defects in today's host, found by this run.
+ * revisions (stage 8). The save acknowledgement and isolation rows are
+ * `not-applicable` until something persists.
  */
 const EXPECTED: Record<string, Record<string, string>> = {
   bill: {
@@ -153,6 +157,7 @@ const EXPECTED: Record<string, Record<string, string>> = {
     'checklist.check-and-filter': 'pass',
     'checklist.delete': 'pass',
     'checklist.repeated-undo': 'pass',
+    'checklist.edit': 'pass',
     'checklist.persists-after-reload': 'fail',
     'checklist.persists-after-reopen': 'fail',
     'checklist.save-acknowledged': 'not-applicable',
@@ -161,10 +166,10 @@ const EXPECTED: Record<string, Record<string, string>> = {
   form: {
     'form.called-tool': 'pass',
     'form.edits-start-no-turn': 'pass',
-    'form.first-click-submits': 'fail',
+    'form.first-click-submits': 'pass',
     'form.one-submission': 'pass',
     'form.submits-every-field': 'pass',
-    'form.reports-acceptance': 'fail',
+    'form.reports-acceptance': 'pass',
     'form.answer-uses-values': 'pass',
   },
   comparator: {

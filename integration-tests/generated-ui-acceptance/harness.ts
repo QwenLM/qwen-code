@@ -67,7 +67,9 @@ export interface RecordedRequest {
 }
 
 /** Replay handler for main-agent requests; side requests are answered here. */
-export type ReplayScript = (request: RecordedRequest) => FakeOpenAIResponse;
+export type ReplayScript = (
+  request: RecordedRequest,
+) => FakeOpenAIResponse | Promise<FakeOpenAIResponse>;
 
 export interface LiveModel {
   label: string;
@@ -131,26 +133,37 @@ interface ModelBackend {
   apiKey: string;
   model: string;
   requests: RecordedRequest[];
+  /** Model requests whose response has not finished yet. */
+  inFlight(): number;
   close(): Promise<void>;
 }
 
 async function startReplay(script: ReplayScript): Promise<ModelBackend> {
   const requests: RecordedRequest[] = [];
-  const server: FakeOpenAIServer = await startFakeOpenAIServer(({ body }) => {
-    const request = record(body);
-    requests.push(request);
-    if (request.lastUserText.includes(CLASSIFIER_MARKER)) {
-      // No classifier verdict: the host falls back to asking the user.
-      return { content: 'unavailable' };
-    }
-    if (!request.main) return { content: 'Generated UI acceptance' };
-    return script(request);
-  });
+  let pending = 0;
+  const server: FakeOpenAIServer = await startFakeOpenAIServer(
+    async ({ body }) => {
+      const request = record(body);
+      requests.push(request);
+      if (request.lastUserText.includes(CLASSIFIER_MARKER)) {
+        // No classifier verdict: the host falls back to asking the user.
+        return { content: 'unavailable' };
+      }
+      if (!request.main) return { content: 'Generated UI acceptance' };
+      pending++;
+      try {
+        return await script(request);
+      } finally {
+        pending--;
+      }
+    },
+  );
   return {
     baseUrl: server.baseUrl,
     apiKey: 'fake-key',
     model: 'fake-model',
     requests,
+    inFlight: () => pending,
     close: () => server.close(),
   };
 }
@@ -164,11 +177,17 @@ async function readBody(request: IncomingMessage): Promise<Buffer> {
 /** Forwards to a real endpoint and records each request body. */
 async function startRecordingProxy(model: LiveModel): Promise<ModelBackend> {
   const requests: RecordedRequest[] = [];
+  let pending = 0;
   const upstream = model.baseUrl.replace(/\/+$/, '');
   const server: Server = createServer(
     async (request: IncomingMessage, response: ServerResponse) => {
       const controller = new AbortController();
-      response.once('close', () => controller.abort());
+      // A streamed answer counts as running until its response closes.
+      pending++;
+      response.once('close', () => {
+        pending--;
+        controller.abort();
+      });
       try {
         const body = await readBody(request);
         if (body.length) {
@@ -229,6 +248,7 @@ async function startRecordingProxy(model: LiveModel): Promise<ModelBackend> {
     apiKey: 'proxy-key',
     model: model.model,
     requests,
+    inFlight: () => pending,
     close: () =>
       new Promise<void>((resolve) => {
         server.closeAllConnections();
@@ -266,7 +286,10 @@ export interface AcceptanceEnv {
   assistantTexts(): Promise<string[]>;
   /** Waits for the nth card (0-based, creation order) to render. */
   waitForCard(index: number, timeoutMs?: number): Promise<Card>;
-  /** Waits until the model is idle (no request for `quietMs`). */
+  /**
+   * Waits until a turn started after the latest prompt and then stayed idle
+   * for `quietMs`: no response in flight, no new request, no running composer.
+   */
   waitForIdle(quietMs?: number, timeoutMs?: number): Promise<void>;
   /** Approves a pending tool call when the host asks. */
   approvePending(): Promise<boolean>;
@@ -278,6 +301,10 @@ export interface AcceptanceEnv {
 }
 
 const APPROVE_LABEL = 'Yes, allow once';
+/** The only operator variables the daemon inherits. */
+export const INHERITED_ENV = ['PATH', 'TMPDIR', 'LANG', 'LC_ALL'] as const;
+/** Labels the composer's submit button shows while a turn runs (English UI). */
+const RUNNING_LABELS = ['esc to cancel', 'Press Esc again to stop'];
 
 export async function startAcceptanceEnv(options: {
   mode: ModelMode;
@@ -333,6 +360,15 @@ export async function startAcceptanceEnv(options: {
     await daemon?.dispose().catch(() => {});
     await backend.close().catch(() => {});
   };
+  // Start the daemon from a blank environment, as the sibling Web Shell
+  // runtime specs do: the operator's shell must not change the measured
+  // product (for example an agent-loop flag), nor hand it credentials.
+  const daemonEnv: Record<string, string> = Object.fromEntries(
+    Object.keys(process.env).map((key) => [key, '']),
+  );
+  for (const key of INHERITED_ENV) {
+    if (process.env[key]) daemonEnv[key] = process.env[key]!;
+  }
   try {
     daemon = await spawnDaemon({
       cliBin: process.env['TEST_CLI_PATH'] ?? DEFAULT_CLI_BIN,
@@ -340,6 +376,7 @@ export async function startAcceptanceEnv(options: {
       extraArgs: workspaces.slice(1).flatMap((ws) => ['--workspace', ws]),
       bootTimeoutMs: 60_000,
       env: {
+        ...daemonEnv,
         HOME: home,
         USERPROFILE: home,
         QWEN_HOME: home,
@@ -386,7 +423,11 @@ export async function startAcceptanceEnv(options: {
   const composer = () =>
     page.locator('[data-web-shell-composer-editor] .cm-content');
 
+  // Requests recorded before the latest prompt; `waitForIdle` needs a turn
+  // that started after it.
+  let promptMark = 0;
   async function submit(prompt: string): Promise<void> {
+    promptMark = backend.requests.length;
     await composer().waitFor({ timeout: 60_000 });
     await composer().click();
     await page.keyboard.insertText(prompt);
@@ -444,21 +485,39 @@ export async function startAcceptanceEnv(options: {
       const deadline = Date.now() + timeoutMs;
       let count = backend.requests.length;
       let since = Date.now();
+      let started = false;
       while (Date.now() < deadline) {
         await env.approvePending();
         await page.waitForTimeout(500);
-        if (backend.requests.length !== count) {
+        const busy =
+          backend.inFlight() > 0 ||
+          (await page
+            .locator(
+              [
+                '[data-web-shell-composer-stop]',
+                ...RUNNING_LABELS.map(
+                  (label) =>
+                    `[data-web-shell-composer-submit][aria-label="${label}"]`,
+                ),
+              ].join(', '),
+            )
+            .first()
+            .isVisible()
+            .catch(() => false));
+        // Silence before the prompt's first request is not idleness.
+        started ||= busy || backend.requests.length > promptMark;
+        if (busy || backend.requests.length !== count) {
           count = backend.requests.length;
           since = Date.now();
-        } else if (Date.now() - since >= quietMs) {
-          const busy = await page
-            .locator('[data-web-shell-composer-stop]')
-            .isVisible()
-            .catch(() => false);
-          if (!busy) return;
+        } else if (started && Date.now() - since >= quietMs) {
+          return;
         }
       }
-      throw new Error('the session did not become idle');
+      throw new Error(
+        started
+          ? 'the session did not become idle'
+          : 'no model request followed the prompt',
+      );
     },
     async assistantTexts() {
       const projects = path.join(root, 'runtime', 'projects');

@@ -14,7 +14,12 @@ import {
   billTotal,
   comparatorPayment,
 } from './fixtures.js';
-import { formatCents, parseAmounts, parseLastAmount } from './money.js';
+import {
+  formatCents,
+  parseAmounts,
+  parseLastAmount,
+  parseShareAmount,
+} from './money.js';
 
 describe('acceptance fixtures reproduce the figures stated in #14019', () => {
   it('bill splitter defaults: CNY 924 total, CNY 154 each for six people', () => {
@@ -49,7 +54,18 @@ describe('money parsing', () => {
   it('reads currency-decorated, grouped and full-width amounts as cents', () => {
     expect(parseAmounts('¥1,234.50 / CNY 964.85')).toEqual([123_450, 96_485]);
     expect(parseAmounts('合计：９２４元')).toEqual([92_400]);
-    expect(parseAmounts('10 483.20')).toEqual([1_048_320]);
+    expect(parseAmounts('10\u00A0483.20')).toEqual([1_048_320]);
+    expect(parseAmounts('10\u202F483.20')).toEqual([1_048_320]);
+    expect(parseAmounts('¥14，227.20')).toEqual([1_422_720]);
+    expect(parseAmounts('Person 1 137.84')).toEqual([100, 13_784]);
+    expect(parseAmounts('137.84 (14.3%)')).toEqual([13_784]);
     expect(parseLastAmount('Person 3: 137.84')).toBe(13_784);
+    expect(parseLastAmount('Person 1 137.84')).toBe(13_784);
+    expect(parseLastAmount('Person 1: 137.84 (14.3%)')).toBe(13_784);
+    expect(parseShareAmount('Person 12 137.84')).toBe(13_784);
+    expect(parseShareAmount('137.84 of 964.85')).toBe(13_784);
+    expect(parseShareAmount('Person 1: 154')).toBe(15_400);
+    expect(parseShareAmount('Person 1 (14.3%) 137.84')).toBe(13_784);
+    expect(parseShareAmount('第 3 位：１３７．８４ 元')).toBe(13_784);
   });
 });

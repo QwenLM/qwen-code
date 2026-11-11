@@ -9,6 +9,7 @@ import type { AcceptanceEnv, LiveModel } from './harness.js';
 import { startAcceptanceEnv } from './harness.js';
 import { runLiveCase } from './live-case.js';
 import { renderMarkdown, type CaseResult, type CheckResult } from './report.js';
+import { toolUse } from './tool-use.js';
 
 vi.mock('./harness.js', () => ({
   SHOW_TOOL: 'mcp__generated-ui__generated_ui_show',
@@ -75,5 +76,42 @@ describe('live case failure isolation', () => {
       expect(env.close).toHaveBeenCalledTimes(1);
       expect(env.screenshot).not.toHaveBeenCalled();
     }
+  });
+});
+
+describe('tool use across sessions', () => {
+  it('counts a rejected view from an earlier session once', () => {
+    const show = {
+      role: 'assistant',
+      tool_calls: [
+        {
+          id: 'call_1',
+          function: { name: 'mcp__generated-ui__generated_ui_show' },
+        },
+      ],
+    };
+    const rejected = {
+      role: 'tool',
+      tool_call_id: 'call_1',
+      content: 'VIEW_ERROR: the script threw',
+    };
+    const request = (messages: unknown[]) =>
+      ({ messages, tools: [], main: true, lastUserText: '' }) as never;
+    expect(
+      toolUse([
+        request([{ role: 'user', content: 'first session' }, show, rejected]),
+        request([
+          { role: 'user', content: 'first session' },
+          show,
+          rejected,
+          { role: 'user', content: 'again' },
+        ]),
+        request([{ role: 'user', content: 'second session' }]),
+      ]),
+    ).toEqual({ calledTool: true, viewErrors: 1 });
+    expect(toolUse([request([{ role: 'user', content: 'no view' }])])).toEqual({
+      calledTool: false,
+      viewErrors: 0,
+    });
   });
 });

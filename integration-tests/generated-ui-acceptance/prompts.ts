@@ -31,12 +31,13 @@ export const BILL_SPLITTER_PROMPT = [
 
 export const CHECKLIST_PROMPT = [
   '帮我做一个会议清单，我想在对话里直接用：能添加、编辑、勾选、删除条目，能按全部/未完成/已完成筛选，',
-  '能多次撤销，清单为空时要有提示。我刷新页面或者之后回到这个对话时，进度要还在。',
+  '能多次撤销，清单为空时要有提示。我刷新页面或者之后回到这个对话时，条目、勾选状态和撤销历史都要还在；',
+  '换一个新对话时不能看到这个对话的条目。',
   '',
   CONTRACT_PREAMBLE,
   'Inputs: new-item (text), filter (select with values all, open, done).',
   'Buttons: add, undo.',
-  'Each item N (starting at 1) has item-N-check (checkbox), item-N-text (its text) and item-N-delete (button).',
+  'Each item N (starting at 1) has item-N-check (checkbox), item-N-text (a text field holding its text; changing it and leaving the field renames the item) and item-N-delete (button).',
   'Output: empty (the empty-state message).',
 ].join('\n');
 

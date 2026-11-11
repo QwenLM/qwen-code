@@ -67,6 +67,12 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
       },
       { submissions: 1, batched: false, answer: '建议 12 人一起体验密室逃脱' },
       { submissions: 1, batched: false, answer: '人数：12，建议密室逃脱' },
+      { submissions: 1, batched: false, answer: '共12个人一起体验密室逃脱' },
+      {
+        submissions: 1,
+        batched: false,
+        answer: '建议 12 名同事参加密室逃脱',
+      },
       {
         submissions: 1,
         batched: false,
@@ -184,6 +190,8 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
       'control',
       'reversed',
       'regenerated-chart-id',
+      'regenerated-chart-aria-id',
+      'split-share-label',
       'canvas-chart',
       'css-chart',
       'unchanged-chart',
@@ -237,8 +245,11 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
                 const shares = Array.from({ length: people }, (_, i) => base + (i < total % people ? 1 : 0));
                 if (${JSON.stringify(mode)} === 'reversed') shares.reverse();
                 document.getElementById('total').textContent = (total / 100).toFixed(2);
-                document.getElementById('shares').innerHTML = shares.map((share, i) => '<li>Person ' + (i + 1) + ': ' + (share / 100).toFixed(2) + '</li>').join('');
-                document.getElementById('chart').innerHTML = '<svg viewBox="0 0 ' + people * 30 + ' 100"><rect width="' + people + '" height="10"></rect></svg>';
+                document.getElementById('shares').innerHTML = ${JSON.stringify(mode)} === 'split-share-label'
+                  ? shares.map((share, i) => '<li><span>' + (i + 1) + '</span><span>' + (share / 100).toFixed(2) + '</span></li>').join('')
+                  : shares.map((share, i) => '<li>Person ' + (i + 1) + ': ' + (share / 100).toFixed(2) + '</li>').join('');
+                // A canvas chart has no markup: only its pixels change.
+                if (!canvasChart) document.getElementById('chart').innerHTML = '<svg viewBox="0 0 ' + people * 30 + ' 100"><rect width="' + people + '" height="10"></rect></svg>';
                 if (${JSON.stringify(mode)} === 'css-chart') document.getElementById('chart').innerHTML = '<div style="background:blue;height:10px;width:' + people * 10 + 'px"></div>';
                 if (${JSON.stringify(mode)} === 'unchanged-chart') document.getElementById('chart').innerHTML = '<svg><rect width="6" height="10"></rect></svg>';
                 if (${JSON.stringify(mode)} === 'empty-chart') document.getElementById('chart').innerHTML = '';
@@ -254,6 +265,14 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
                   const gradient = 'gradient-' + Math.random();
                   svg.insertAdjacentHTML('afterbegin', '<defs><linearGradient id="' + gradient + '"><stop offset="0" stop-color="black" /></linearGradient></defs>');
                   svg.querySelector('rect').setAttribute('fill', 'url(#' + gradient + ')');
+                }
+                if (${JSON.stringify(mode)} === 'regenerated-chart-aria-id') {
+                  const svg = document.querySelector('#chart svg');
+                  const title = 'title-' + Math.random();
+                  const bar = 'bar-' + Math.random();
+                  svg.setAttribute('aria-labelledby', title);
+                  svg.insertAdjacentHTML('afterbegin', '<title id="' + title + '">Shares</title><style>#' + bar + ' { fill: teal; }</style>');
+                  svg.querySelector('rect').id = bar;
                 }
                 if (${JSON.stringify(mode)} === 'stale-chart-data') {
                   const svg = document.querySelector('#chart svg');
@@ -350,6 +369,8 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
       'completed-last',
       'progress-loss',
       'history-loss',
+      'inert-add',
+      'no-edit',
     ] as const)(
       'checks checklist progress and undo persistence: %s',
       async (mode) => {
@@ -377,9 +398,14 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
                   const row = document.createElement('li');
                   const filter = byId('filter').value;
                   row.hidden = filter === 'done' ? !item.done : filter === 'open' ? item.done : false;
-                  row.innerHTML = '<input type="checkbox" id="' + slot + '-check"><span id="' + slot + '-text"></span><button id="' + slot + '-delete">Delete</button>';
+                  const text = ${JSON.stringify(mode)} === 'no-edit'
+                    ? '<span id="' + slot + '-text"></span>'
+                    : '<input id="' + slot + '-text">';
+                  row.innerHTML = '<input type="checkbox" id="' + slot + '-check">' + text + '<button id="' + slot + '-delete">Delete</button>';
                   byId('items').append(row);
-                  byId(slot + '-text').textContent = item.text;
+                  if (${JSON.stringify(mode)} === 'no-edit') byId(slot + '-text').textContent = item.text;
+                  else byId(slot + '-text').value = item.text;
+                  byId(slot + '-text').onchange = event => { history.push(snapshot()); item.text = event.target.value; render(); };
                   byId(slot + '-check').checked = item.done;
                   byId(slot + '-check').onchange = event => { history.push(snapshot()); item.done = event.target.checked; render(); };
                   byId(slot + '-delete').onclick = () => { history.push(snapshot()); items.splice(index, 1); render(); };
@@ -389,7 +415,10 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
                   history: ${JSON.stringify(mode)} === 'history-loss' ? [] : history,
                 }));
               }
-              byId('add').onclick = () => { history.push(snapshot()); items.push({ text: byId('new-item').value, done: false }); byId('new-item').value = ''; render(); };
+              byId('add').onclick = () => {
+                if (${JSON.stringify(mode)} === 'inert-add') return;
+                history.push(snapshot()); items.push({ text: byId('new-item').value, done: false }); byId('new-item').value = ''; render();
+              };
               byId('filter').onchange = render;
               byId('undo').onclick = () => { if (history.length) items = history.pop(); render(); };
               render();
@@ -443,6 +472,7 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
           const env = {
             page,
             context,
+            cardTimeoutMs: 10_000,
             daemon: { token },
             startSession: async () => {
               await page.goto(
@@ -454,13 +484,44 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
           } as unknown as AcceptanceEnv;
 
           const results = await runChecklist(env, 'checklist');
+          const status = (id: string) =>
+            results.find((check) => check.id === `checklist.${id}`)?.status;
+          // The same ids in every mode: unreached checks are not-applicable.
+          expect(results.map((check) => check.id).sort()).toEqual(
+            [
+              'add',
+              'check-and-filter',
+              'delete',
+              'edit',
+              'empty-state',
+              'isolated-across-sessions',
+              'persists-after-reload',
+              'persists-after-reopen',
+              'repeated-undo',
+              'save-acknowledged',
+            ].map((id) => `checklist.${id}`),
+          );
+          // The reopened tab stays open while it is read, then is closed.
+          expect(context.pages()).toEqual([page]);
+          if (mode === 'inert-add') {
+            expect(status('add')).toBe('fail');
+            for (const id of [
+              'check-and-filter',
+              'delete',
+              'repeated-undo',
+              'edit',
+            ]) {
+              expect(status(id)).toBe('not-applicable');
+            }
+            return;
+          }
           expect(checkedBeforeReload).toBe(true);
           expect(reopenedAuthenticated).toBe(true);
           for (const id of ['persists-after-reload', 'persists-after-reopen']) {
-            expect(
-              results.find((check) => check.id === `checklist.${id}`)?.status,
-            ).toBe(
-              mode === 'control' || mode === 'completed-last' ? 'pass' : 'fail',
+            expect(status(id)).toBe(
+              mode === 'progress-loss' || mode === 'history-loss'
+                ? 'fail'
+                : 'pass',
             );
           }
           for (const id of [
@@ -470,10 +531,11 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
             'repeated-undo',
             'isolated-across-sessions',
           ]) {
-            expect(
-              results.find((check) => check.id === `checklist.${id}`)?.status,
-            ).toBe('pass');
+            expect(status(id)).toBe('pass');
           }
+          expect(status('edit')).toBe(mode === 'no-edit' ? 'fail' : 'pass');
+          // Nothing the host offers acknowledges a save yet.
+          expect(status('save-acknowledged')).toBe('not-applicable');
         } finally {
           await context.close();
         }
@@ -571,7 +633,8 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
           } as unknown as AcceptanceEnv;
           vi.spyOn(page, 'waitForEvent').mockResolvedValue({
             createReadStream: async () =>
-              Readable.from(['plan,payment\nteam,14227.20\n']),
+              // A correct total written without zero padding or grouped.
+              Readable.from(['plan,payment\nteam,"14,227.2"\n']),
           } as never);
 
           const results = await runComparator(env, {
@@ -608,6 +671,80 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
             'comparator.reset-via-follow-up':
               resetFault === 'none' ? 'pass' : 'fail',
           });
+        } finally {
+          await page.close();
+        }
+      },
+    );
+
+    it.each(['no-seats', 'no-follow-up-card'] as const)(
+      'reports every comparator check when %s',
+      async (fault) => {
+        const page = await browser.newPage();
+        page.setDefaultTimeout(1_000);
+        try {
+          vi.spyOn(page, 'waitForTimeout').mockResolvedValue();
+          const view = await newView(
+            page,
+            `${fault === 'no-seats' ? '' : '<input id="seats" value="6">'}
+            <input type="radio" name="billing" id="billing-monthly" checked>
+            <input type="radio" name="billing" id="billing-annual">
+            <input type="radio" name="plan" id="plan-basic" checked>
+            <input type="radio" name="plan" id="plan-pro"><input type="radio" name="plan" id="plan-team">
+            <input id="support" type="checkbox"><button id="export">Export</button>
+            <span id="basic-monthly"></span><span id="basic-payment"></span>
+            <span id="pro-monthly"></span><span id="pro-payment"></span>
+            <span id="team-monthly"></span><span id="team-payment"></span>`,
+          );
+          let cards = 0;
+          const env = {
+            page,
+            startSession: async () => {},
+            waitForCard: async () => {
+              cards++;
+              if (fault === 'no-follow-up-card' && cards === 2) {
+                throw new Error('card 0 did not render within 100 ms');
+              }
+              return { view, app: page.mainFrame() };
+            },
+            waitForIdle: async () => {},
+            send: async () => {},
+          } as unknown as AcceptanceEnv;
+          const exported = vi.spyOn(page, 'waitForEvent').mockResolvedValue({
+            createReadStream: async () =>
+              Readable.from(['plan,payment\nteam,14227.20\n']),
+          } as never);
+
+          const results = await runComparator(env, {
+            initial: 'initial',
+            support: 'support',
+            reset: 'reset',
+          });
+          const statuses = Object.fromEntries(
+            results.map(({ id, status }) => [id, status]),
+          );
+          expect(Object.keys(statuses).sort()).toEqual(
+            [
+              'exports-current-csv',
+              'extends-existing-card',
+              'keeps-choices',
+              'monthly-vs-payment',
+              'reset-via-follow-up',
+              'support-totals',
+            ].map((id) => `comparator.${id}`),
+          );
+          expect(statuses['comparator.monthly-vs-payment']).toBe('fail');
+          expect(statuses['comparator.support-totals']).toBe('fail');
+          if (fault === 'no-follow-up-card') {
+            // Nothing to measure after the follow-up, and the export is not
+            // measured on the earlier card instead.
+            expect(statuses).toMatchObject({
+              'comparator.keeps-choices': 'not-applicable',
+              'comparator.extends-existing-card': 'not-applicable',
+              'comparator.exports-current-csv': 'not-applicable',
+            });
+            expect(exported).not.toHaveBeenCalled();
+          }
         } finally {
           await page.close();
         }

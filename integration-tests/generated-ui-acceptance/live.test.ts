@@ -27,8 +27,9 @@ import {
   runChecklist,
   runComparator,
 } from './cases.js';
-import type { AcceptanceEnv, LiveModel } from './harness.js';
+import type { AcceptanceEnv } from './harness.js';
 import { runLiveCase } from './live-case.js';
+import { liveModels, selectCases } from './live-config.js';
 import {
   ACTIVITY_FORM_PROMPT,
   BILL_SPLITTER_PROMPT,
@@ -39,20 +40,9 @@ import {
 } from './prompts.js';
 import { renderMarkdown, type CaseResult, type CheckResult } from './report.js';
 
-function modelFrom(prefix: string, label: string): LiveModel | undefined {
-  const baseUrl = process.env[`${prefix}_BASE_URL`];
-  const apiKey = process.env[`${prefix}_API_KEY`];
-  const model = process.env[`${prefix}_MODEL`];
-  return baseUrl && apiKey && model
-    ? { label: `${label}:${model}`, baseUrl, apiKey, model }
-    : undefined;
-}
-
 const enabled = process.env['QWEN_GENERATED_UI_LIVE'] === '1';
-const models = [
-  modelFrom('QWEN_GENERATED_UI_LIVE', 'gating'),
-  modelFrom('QWEN_GENERATED_UI_COMPARE', 'comparison'),
-].filter((model): model is LiveModel => model !== undefined);
+// Validated only when enabled, so collecting this file stays harmless.
+const models = enabled ? liveModels(process.env) : [];
 const trials = Math.max(
   1,
   Number(process.env['QWEN_GENERATED_UI_LIVE_TRIALS'] ?? '1') || 1,
@@ -69,43 +59,36 @@ const CASES: Record<string, (env: AcceptanceEnv) => Promise<CheckResult[]>> = {
       reset: COMPARATOR_RESET_PROMPT,
     }),
 };
-const selected = (process.env['QWEN_GENERATED_UI_LIVE_CASES'] ?? '')
-  .split(',')
-  .map((name) => name.trim())
-  .filter(Boolean);
-const caseNames = Object.keys(CASES).filter(
-  (name) => selected.length === 0 || selected.includes(name),
-);
+const caseNames = enabled
+  ? selectCases(Object.keys(CASES), process.env['QWEN_GENERATED_UI_LIVE_CASES'])
+  : [];
 
-describe.runIf(enabled && models.length > 0)(
-  'Generated UI acceptance, live models (#14019)',
-  () => {
-    it(
-      'runs every selected case for every configured model',
-      async () => {
-        const results: CaseResult[] = [];
-        for (const model of models) {
-          for (const name of caseNames) {
-            for (let trial = 1; trial <= trials; trial++) {
-              results.push(await runLiveCase(model, name, trial, CASES[name]));
-            }
+describe.runIf(enabled)('Generated UI acceptance, live models (#14019)', () => {
+  it(
+    'runs every selected case for every configured model',
+    async () => {
+      const results: CaseResult[] = [];
+      for (const model of models) {
+        for (const name of caseNames) {
+          for (let trial = 1; trial <= trials; trial++) {
+            results.push(await runLiveCase(model, name, trial, CASES[name]));
           }
         }
-        const report = renderMarkdown(results);
-        console.log(report);
-        const out = process.env['QWEN_GENERATED_UI_ACCEPTANCE_OUT'];
-        if (out) {
-          await fs.mkdir(out, { recursive: true });
-          const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-          await fs.writeFile(
-            path.join(out, `live-${stamp}.json`),
-            JSON.stringify(results, null, 2),
-          );
-          await fs.writeFile(path.join(out, `live-${stamp}.md`), report);
-        }
-        expect(results.length).toBe(models.length * caseNames.length * trials);
-      },
-      4 * 60 * 60 * 1000,
-    );
-  },
-);
+      }
+      const report = renderMarkdown(results);
+      console.log(report);
+      const out = process.env['QWEN_GENERATED_UI_ACCEPTANCE_OUT'];
+      if (out) {
+        await fs.mkdir(out, { recursive: true });
+        const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+        await fs.writeFile(
+          path.join(out, `live-${stamp}.json`),
+          JSON.stringify(results, null, 2),
+        );
+        await fs.writeFile(path.join(out, `live-${stamp}.md`), report);
+      }
+      expect(results.length).toBe(models.length * caseNames.length * trials);
+    },
+    4 * 60 * 60 * 1000,
+  );
+});

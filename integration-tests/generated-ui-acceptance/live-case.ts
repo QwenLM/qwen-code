@@ -5,13 +5,12 @@
  */
 
 import {
-  SHOW_TOOL,
-  messageText,
   startAcceptanceEnv,
   type AcceptanceEnv,
   type LiveModel,
 } from './harness.js';
 import type { CaseResult, CheckResult } from './report.js';
+import { toolUse } from './tool-use.js';
 
 export async function runLiveCase(
   model: LiveModel,
@@ -36,28 +35,7 @@ export async function runLiveCase(
   } finally {
     await env?.close();
   }
-  const main = env?.mainRequests() ?? [];
-  const calledTool = main.some((request) =>
-    request.messages.some((message) =>
-      (message.tool_calls ?? []).some(
-        (call) => call.function?.name === SHOW_TOOL,
-      ),
-    ),
-  );
-  const last = main[main.length - 1];
-  const showIds = new Set(
-    (last?.messages ?? []).flatMap((message) =>
-      (message.tool_calls ?? [])
-        .filter((call) => call.function?.name === SHOW_TOOL)
-        .map((call) => call.id),
-    ),
-  );
-  const viewErrors = (last?.messages ?? []).filter(
-    (message) =>
-      message.role === 'tool' &&
-      showIds.has(message.tool_call_id) &&
-      messageText(message.content).includes('VIEW_ERROR'),
-  ).length;
+  const { calledTool, viewErrors } = toolUse(env?.mainRequests() ?? []);
   if (error) {
     checks.push({
       id: `${name}.harness`,

@@ -112,6 +112,31 @@ describe('acceptance environment startup', () => {
   );
 });
 
+describe('acceptance daemon environment', () => {
+  it('starts the daemon without the operator environment', async () => {
+    vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', '1');
+    vi.stubEnv('QWEN_GENERATED_UI_LIVE_API_KEY', 'operator-secret');
+    vi.stubEnv('OPENAI_BASE_URL', 'https://operator.invalid/v1');
+    vi.stubEnv('PATH', '/operator/bin');
+    let env: AcceptanceEnv | undefined;
+    try {
+      env = await startAcceptanceEnv(options);
+      const daemonEnv = mocks.spawnDaemon.mock.calls[0][0].env ?? {};
+      // Blank values override what the daemon would inherit from the parent.
+      expect(daemonEnv['QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP']).toBe('');
+      expect(daemonEnv['QWEN_GENERATED_UI_LIVE_API_KEY']).toBe('');
+      expect(daemonEnv['OPENAI_BASE_URL']).toBe('http://127.0.0.1:12345');
+      expect(daemonEnv['PATH']).toBe('/operator/bin');
+      expect(
+        Object.values(daemonEnv).filter((value) => value.includes('operator')),
+      ).toEqual(['/operator/bin']);
+    } finally {
+      await env?.close();
+      vi.unstubAllEnvs();
+    }
+  });
+});
+
 describe('acceptance environment setup cleanup', () => {
   it.each([
     ['daemon creation', mocks.spawnDaemon, false, false],

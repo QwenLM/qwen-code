@@ -60,13 +60,25 @@ function singleCard(document: GeneratedUiDocument) {
 export const billSplitterReplay = singleCard(billSplitterDocument);
 export const checklistReplay = singleCard(checklistDocument);
 
-export function activityFormReplay(
+/**
+ * How long the stand-in model takes to answer a submission. An instant answer
+ * finished the turn before the host reported the message as admitted, so the
+ * card showed the acceptance as unconfirmed; no real model run has been that
+ * fast. Answering after a model-like pause keeps that race out of the
+ * baseline.
+ */
+export const SUBMISSION_REPLY_DELAY_MS = 3_000;
+
+export async function activityFormReplay(
   request: RecordedRequest,
-): FakeOpenAIResponse {
+): Promise<FakeOpenAIResponse> {
   if (lastIsToolResult(request)) return { content: 'The form is ready.' };
   if (showCalls(request) === 0) return show(request, activityFormDocument);
   const inputs = parseSubmittedInputs(request.lastUserText);
   if (Object.keys(inputs).length) {
+    await new Promise((resolve) =>
+      setTimeout(resolve, SUBMISSION_REPLY_DELAY_MS),
+    );
     return {
       content: `Plan: ${inputs['activity']?.value} on ${inputs['date']?.value} for ${inputs['participants']?.value} people at CNY ${inputs['budget']?.value} each (${inputs['notes']?.value}).`,
     };

@@ -86,7 +86,7 @@ render();
 export const checklistDocument: GeneratedUiDocument = {
   title: 'Meeting checklist',
   summary:
-    'A checklist for the meeting with add, check, delete, filter and undo. It starts empty.',
+    'A checklist for the meeting with add, edit, check, delete, filter and undo. It starts empty.',
   html:
     '<label for="new-item">New item</label><input id="new-item" type="text" maxlength="80">' +
     '<button id="add" type="button">Add</button> ' +
@@ -95,8 +95,7 @@ export const checklistDocument: GeneratedUiDocument = {
     '<p id="empty">No items yet.</p><ul id="items">' +
     Array.from(
       { length: 8 },
-      (_, index) =>
-        `<li id="item-${index + 1}"><input id="item-${index + 1}-check" type="checkbox"><span id="item-${index + 1}-text"></span><button id="item-${index + 1}-delete" type="button">Delete</button></li>`,
+      (_, index) => `<li id="item-${index + 1}"></li>`,
     ).join('') +
     '</ul>',
   css: '#items{list-style:none;padding:0}',
@@ -109,8 +108,8 @@ function render(){
   for(var i=0;i<SLOTS;i++){
     var item=items[i], id='item-'+(i+1);
     var visible=!!item&&(filter==='all'||(filter==='done')===item.done);
-    ui.html(id, visible?'<input id="'+id+'-check" type="checkbox"'+(item.done?' checked':'')+'><span id="'+id+'-text"></span><button id="'+id+'-delete" type="button">Delete</button>':'');
-    if(visible){ui.text(id+'-text',item.text);shown++;}
+    ui.html(id, visible?'<input id="'+id+'-check" type="checkbox"'+(item.done?' checked':'')+'><input id="'+id+'-text" type="text" maxlength="80" aria-label="Item text"><button id="'+id+'-delete" type="button">Delete</button>':'');
+    if(visible){ui.value(id+'-text',item.text);shown++;}
   }
   ui.text('empty', shown?'':(items.length?'Nothing matches this filter.':'No items yet.'));
 }
@@ -122,6 +121,7 @@ ui.on('add','click',function(){
 for(var s=0;s<SLOTS;s++)(function(i){
   ui.on('item-'+(i+1)+'-check','change',function(e){if(!items[i])return;snapshot();items[i].done=e.checked;render();});
   ui.on('item-'+(i+1)+'-delete','click',function(){if(!items[i])return;snapshot();items.splice(i,1);render();});
+  ui.on('item-'+(i+1)+'-text','change',function(e){var text=e.value.trim();if(!items[i]||!text||text===items[i].text)return;snapshot();items[i].text=text;render();});
 })(s);
 ui.on('filter','change',render);
 ui.on('undo','click',function(){if(!history.length)return;items=JSON.parse(history.pop());render();});

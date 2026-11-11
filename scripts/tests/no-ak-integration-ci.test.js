@@ -204,6 +204,7 @@ describe('no-AK integration CI wiring', () => {
       './generated-ui-acceptance/fixtures.test.ts',
       './generated-ui-acceptance/harness.test.ts',
       './generated-ui-acceptance/live-case.test.ts',
+      './generated-ui-acceptance/live-config.test.ts',
       './test-helper.test.ts',
       './chat-transcript-contract.test.ts',
       './skill-hooks-invocation-parity.test.ts',
