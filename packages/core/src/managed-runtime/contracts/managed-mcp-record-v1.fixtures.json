@@ -419,7 +419,12 @@
       "id": "unsafe-server-revision",
       "domain": "mcp_operation",
       "patch": {
-        "serverRevision": 9007199254740991
+        "serverRevision": 9007199254740991,
+        "run": {
+          "definition": {
+            "definitionRevision": 9007199254740991
+          }
+        }
       },
       "valid": false,
       "start": false
