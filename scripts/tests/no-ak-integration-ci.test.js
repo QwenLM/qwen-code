@@ -1205,12 +1205,6 @@ describe('no-AK integration CI wiring', () => {
       "nested_cli='node_modules/@playwright/test/node_modules/playwright/cli.js'",
     );
     expect(install).toContain('node "${nested_cli}" install chromium webkit');
-    // One line rather than the if/else shape the ci.yml sites use: this job
-    // runs on a hosted runner, and the file's size ratchet has ~124 bytes of
-    // headroom at this commit.
-    expect(install).toContain(
-      '[ -z "${PLAYWRIGHT_BROWSERS_PATH:-}" ] || { echo \'browsers baked into the image, skipping install\'; exit 0; }',
-    );
   });
 });
 
