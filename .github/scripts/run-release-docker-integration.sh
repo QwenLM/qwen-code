@@ -206,8 +206,9 @@ DOCKER_TEST_STEP_BUDGET_SECONDS=6600
 # A retry admitted after a fast failure still spends the suite's own length,
 # so the gate charges the larger of the failed attempt and the suite's
 # expected duration. Measured failures: `cli` 1685s and 2317s, `interactive`
-# ~21 minutes in the passing release job. Over-refusing a retry whose first
-# attempt hung is the safe direction; admitting one that cannot fit is not.
+# ~21 minutes in the passing release job. The charge is an estimate, so a
+# retry slower than expected can still overrun the step budget; over-refusing a
+# retry whose first attempt hung is the safe direction.
 DOCKER_TEST_CLI_EXPECTED_SECONDS=2400
 DOCKER_TEST_INTERACTIVE_EXPECTED_SECONDS=1260
 run_docker_test_suite() {
