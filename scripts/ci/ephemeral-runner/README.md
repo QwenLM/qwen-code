@@ -84,7 +84,7 @@ label set matching the actual CI route. The current ARM64 pool registers only
 `self-hosted` and `ecs-qwen-ephemeral`. Omitting generic Linux/ARM64 labels keeps
 unrelated ARM64 jobs out of this pool. Validate the existing
 CI jobs with these formal labels rather than a separate smoke workflow. The
-example runs one slot; hz4 currently maintains ten fixed slots, and the
+example runs one slot; hz4 currently maintains thirty fixed slots, and the
 manager accepts up to 64 slots per host. Keep capacity conservative until real CI execution and resource use are stable. Restrict configuration and
 credential directories to the manager account.
 
@@ -107,10 +107,22 @@ manager rejects such URLs at startup.
 `noProxy` should include the cloud metadata endpoint (`100.100.100.200`)
 to avoid leaking instance credentials through the proxy.
 
-The `ttlSeconds` limit starts when the container starts, including idle time.
-A job assigned near the deadline can be interrupted. The manager removes and
-replaces the container; GitHub remains authoritative for job status. The
-manager logs cleanup but does not distinguish expiry from normal completion.
+`ttlSeconds` now sets the age at which health checks begin; it is not a hard
+container lifetime. Healthy idle runners stay available, and an assigned job
+can finish even if the container was already near that age. After this age the
+manager checks the recorded GitHub runner ID/name and online status every five
+minutes. An unavailable, offline or mismatched registration logs `WATCHDOG ALERT`
+and keeps the container. Job runtime limits belong to the workflow's
+`timeout-minutes` (currently 45–90 minutes for the routed jobs).
+
+Only a confirmed container exit triggers normal replacement. A failed
+`docker wait` client is checked against Docker state and retried rather than
+being treated as a job exit. The wait client has no age timeout and is cancelled
+when monitoring ends. A stuck runner that cannot honor a GitHub cancellation
+requires operator inspection and targeted recovery; an offline registration is
+not proof that killing its container is safe. This deliberately trades automatic
+age-based reclamation for avoiding interruption of live jobs.
+
 A nonzero or unknown container exit status delays replenishment by 60 seconds;
 a successful short job is replenished immediately. GitHub remains authoritative
 for job success. Diagnostic export is best effort: stderr is not archived, and
@@ -136,6 +148,13 @@ the reported duration is the threshold rounded up to the current cadence. A
 stall alert means the slot is serving no jobs and needs reconciliation; the
 manager keeps retrying and never exits on its own, so systemd does not restart
 it. Alert on that journal marker rather than on service state.
+
+Before upgrading or restarting, pause replenishment, retire idle registrations
+after confirming their containers have no job worker, and wait for assigned
+jobs to finish. JIT labels are read-only and cannot be removed for draining.
+The configured shutdown grace remains an explicit stop deadline, not an
+automatic drain. Record the deployed commit and manager
+checksum together; update them only after installing that exact source.
 
 Upgrading: `stallAlertRetries`, the earlier retry-count threshold, is no longer
 read. A config that still carries it has no effect and falls back to the

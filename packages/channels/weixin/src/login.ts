@@ -40,7 +40,7 @@ export type WeixinLoginEvent =
  * would wedge the cap. The poll below already bounds each request; this is the
  * same bound for the mint.
  */
-const QR_MINT_TIMEOUT_MS = 30_000;
+export const QR_MINT_TIMEOUT_MS = 30_000;
 
 /** Step 1: Get QR code from server. */
 export async function startLogin(
