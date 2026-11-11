@@ -10522,23 +10522,37 @@ export function registerHostedHarnessSessionRoutes(
     return unproven;
   };
 
-  // A delete must release every config-scoped owner the durable chain names.
-  // HostedHookSession.close() is what sweeps the earlier ones, so an apply
+  // A delete must release every reload-stable owner no live object will
+  // release. HostedHookSession.close() sweeps the earlier ones, so an apply
   // that moves to a bundle with no Hook catalog — drain nils the session and
-  // enable does not rebuild it — leaves no object to run that sweep, and the
+  // enable does not rebuild it — leaves nothing to run that sweep, and the
   // delete answers 204 having released nothing (R7-1). Reachable without any
   // recovery: install hooks, fire one, then apply a hook-free revision.
-  // Only the orphan case is handled here; a live Hooks session already swept
-  // them, and a live MCP broker owns its own id until its own close.
   const releaseOrphanedConfigOwners = async (
     session: HostedSession,
   ): Promise<boolean> => {
-    if (!brokerOptions || session.hooks) return false;
+    if (!brokerOptions) return false;
+    // Only a Hooks session that OWNS its broker ran those sweeps: `ownsBroker`
+    // gates both `releaseEarlierOwners` and the terminal owner release, and
+    // delegating the broker to MCP clears it. Sharing the broker is how this
+    // file spells that delegation — Hooks is constructed on
+    // `session.mcp?.broker` and delegated whenever the two brokers match, the
+    // same test the apply path already uses (R9-2).
+    if (session.hooks && session.hooks.broker !== session.mcp?.broker)
+      return false;
     let unproven = false;
     const sessionKey = session.managed.authority.sessionHeader.sessionKey;
-    for (const revision of session.extensions?.configRevisions ?? []) {
-      const id = hostedConfigScopedOwnerId(sessionKey, revision);
-      if (id === session.mcp?.broker.runtimeSessionId) continue;
+    // The very set the exemption uses, so the two sides cannot drift one
+    // owner family at a time (R9-1). Skipping the live ids leaves exactly the
+    // owners whose own close is absent or delegated away.
+    const live = new Set(
+      [
+        session.hooks?.broker.runtimeSessionId,
+        session.mcp?.broker.runtimeSessionId,
+      ].filter((id): id is string => id !== undefined),
+    );
+    for (const id of sessionReloadStableOwnerIds(session)) {
+      if (live.has(id)) continue;
       try {
         await new HostedWorkspaceBroker(brokerOptions, sessionKey, id).release({
           drain: true,

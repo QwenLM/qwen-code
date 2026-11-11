@@ -25975,9 +25975,10 @@ describe('Hosted Harness tool approvals', () => {
     { arm: 'detach', terminal: false },
     { arm: 'delete', terminal: true },
     { arm: 'detach, row already released', terminal: false, releasedRow: true },
+    { arm: 'delete, no hold row', terminal: true, noHoldRow: true },
   ])(
     'exempts a durable MCP owner with no live object on $arm',
-    async ({ terminal, releasedRow = false }) => {
+    async ({ terminal, releasedRow = false, noHoldRow = false }) => {
       // R8-2: the mcp-<digest> family needs the same durable source the
       // config-scoped family got in R5-1. A plain Session builds neither live
       // object, so nothing here is nulled by the test; the restore seeds the
@@ -26015,7 +26016,7 @@ describe('Hosted Harness tool approvals', () => {
       vi.spyOn(
         HostedWorkspaceBroker.prototype,
         'activeHoldRuntimeSessionIds',
-      ).mockResolvedValue([durableMcpOwner]);
+      ).mockResolvedValue(noHoldRow ? [] : [durableMcpOwner]);
       const reloaded = await app(true);
       const loaded = await headers(
         supertest(reloaded).post(`/session/${SESSION_ID}/load`),
@@ -26039,7 +26040,7 @@ describe('Hosted Harness tool approvals', () => {
       ).session;
       expect(resident.hooks).toBeUndefined();
       expect(resident.mcp).toBeUndefined();
-      expect(resident.heldRuntimeTurns.has(durableMcpOwner)).toBe(true);
+      expect(resident.heldRuntimeTurns.has(durableMcpOwner)).toBe(!noHoldRow);
       const authority = resident.managed.authority;
       const recordsInDomain =
         authority.extensionRecordsInDomain.bind(authority);
@@ -26091,6 +26092,8 @@ describe('Hosted Harness tool approvals', () => {
       // A detach must leave a live owner re-acquirable; only a delete may
       // tombstone it. A row already RELEASED is one no successor recomputes,
       // so it is not exempt and the detach drains it like any other hold.
+      // With no hold row the drain cannot reach it either, so a delete only
+      // discharges it if the sweep enumerates the durable MCP family (R9-1).
       expect(released.includes(durableMcpOwner)).toBe(terminal || releasedRow);
     },
   );
@@ -26123,6 +26126,13 @@ describe('Hosted Harness tool approvals', () => {
       protocol: 2,
       reconciling: true,
     },
+    {
+      arm: 'legacy delete, broker delegated to MCP',
+      terminal: true,
+      protocol: 1,
+      retained: true,
+      delegated: true,
+    },
   ])(
     'releases the orphaned config-scoped owners a hook-free apply left behind ($arm)',
     async ({
@@ -26131,6 +26141,7 @@ describe('Hosted Harness tool approvals', () => {
       retained = false,
       refused = false,
       reconciling = false,
+      delegated = false,
     }) => {
       // R7-1, driven end to end: no session field is assigned by this test.
       // Installing hooks, firing one, then applying a revision whose bundle
@@ -26314,6 +26325,7 @@ describe('Hosted Harness tool approvals', () => {
               hooks?: unknown;
               mcp?: unknown;
               extensions?: { configRevisions: readonly number[] };
+              toolProfile?: string;
               shell?: {
                 monitorLoops?: Map<
                   string,
@@ -26340,6 +26352,24 @@ describe('Hosted Harness tool approvals', () => {
       expect(residentOf().hooks === undefined).toBe(!retained);
       expect(residentOf().mcp).toBeUndefined();
       expect(residentOf().extensions?.configRevisions).toEqual([1, 2]);
+      if (delegated) {
+        // R9-2: build MCP on the Hooks broker and delegate, exactly as the
+        // apply path does. `ownsBroker` now gates BOTH Hooks sweeps off, so
+        // only the orphan sweep can still reach revision 1's owner.
+        const hooks = residentOf().hooks as HostedHookSession;
+        residentOf().mcp = {
+          broker: hooks.broker,
+          recoveryBlocked: false,
+          hasPendingOperations: () => false,
+          close: async () => {},
+          closeResources: async () => {},
+          reconcileEffects: async () => {},
+        };
+        hooks.delegateBrokerToMcp();
+        // The legacy close refuses an MCP-carrying Shell resident outright,
+        // so this arm runs the profile the legacy close admits MCP on.
+        residentOf().toolProfile = 'hosted-workspace-mcp/1';
+      }
       const stop = vi.fn(async () => {});
       const loopHost = residentOf();
       loopHost.shell ??= {};
