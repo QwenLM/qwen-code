@@ -42,7 +42,7 @@ class ClientFilesRelayStoreTest {
     @Test
     void registerPersistsOnlyTheTokenDigestAndFindReadsItBack() {
         String tokenHash = "a".repeat(64);
-        Binding binding = tx(() -> store.register(tenant, session, actor, "local-files", tokenHash, 9_000L, 1_000L));
+        Binding binding = tx(() -> store.register(tenant, session, actor, "local-files", tokenHash, 9_000L, 1_000L, "conn"));
         assertThat(binding.generation()).isEqualTo(1L);
         assertThat(binding.active()).isTrue();
         Binding read = tx(() -> store.find(tenant, session));
@@ -54,7 +54,7 @@ class ClientFilesRelayStoreTest {
     @Test
     void findBySessionResolvesTheBindingWithoutTheTenant() {
         Binding binding = tx(() -> store.register(tenant, session, actor, "local-files",
-                "a".repeat(64), 9_000L, 1_000L));
+                "a".repeat(64), 9_000L, 1_000L, "conn"));
         assertThat(tx(() -> store.findBySession(session))).isEqualTo(binding);
         assertThat(tx(() -> store.findBySession("missing"))).isNull();
     }
@@ -72,7 +72,7 @@ class ClientFilesRelayStoreTest {
                 try {
                     start.await();
                     Binding binding = tx(() -> store.register(tenant, session, actor, "local-files",
-                            tokenHash, 9_000L, 1_000L));
+                            tokenHash, 9_000L, 1_000L, "conn"));
                     generations.add(binding.generation());
                 } catch (Throwable error) {
                     errors.add(error);
@@ -91,8 +91,8 @@ class ClientFilesRelayStoreTest {
 
     @Test
     void reRegisterAdvancesTheGenerationAndKeepsCreationTime() {
-        tx(() -> store.register(tenant, session, actor, "local-files", "a".repeat(64), 9_000L, 1_000L));
-        Binding second = tx(() -> store.register(tenant, session, "actor-2", "local-files", "b".repeat(64), 19_000L, 2_000L));
+        tx(() -> store.register(tenant, session, actor, "local-files", "a".repeat(64), 9_000L, 1_000L, "conn"));
+        Binding second = tx(() -> store.register(tenant, session, "actor-2", "local-files", "b".repeat(64), 19_000L, 2_000L, "conn"));
         assertThat(second.generation()).isEqualTo(2L);
         assertThat(second.actorId()).isEqualTo("actor-2");
         assertThat(second.tokenHash()).isEqualTo("b".repeat(64));
@@ -103,8 +103,8 @@ class ClientFilesRelayStoreTest {
 
     @Test
     void closeFencesStaleGenerationsAndIsIdempotentOnlyForTheOwner() {
-        tx(() -> store.register(tenant, session, actor, "local-files", "a".repeat(64), 9_000L, 1_000L));
-        tx(() -> store.register(tenant, session, actor, "local-files", "b".repeat(64), 19_000L, 2_000L));
+        tx(() -> store.register(tenant, session, actor, "local-files", "a".repeat(64), 9_000L, 1_000L, "conn"));
+        tx(() -> store.register(tenant, session, actor, "local-files", "b".repeat(64), 19_000L, 2_000L, "conn"));
         assertThat(tx(() -> store.close(tenant, session, 1L, 3_000L))).isFalse();
         assertThat(tx(() -> store.find(tenant, session)).active()).isTrue();
         assertThat(tx(() -> store.close(tenant, session, 2L, 3_000L))).isTrue();
@@ -114,11 +114,11 @@ class ClientFilesRelayStoreTest {
 
     @Test
     void enqueueOrdersRequestsAndRejectsDuplicateIdentities() {
-        tx(() -> store.register(tenant, session, actor, "local-files", "a".repeat(64), 9_000L, 1_000L));
+        tx(() -> store.register(tenant, session, actor, "local-files", "a".repeat(64), 9_000L, 1_000L, "conn"));
         tx(() -> store.enqueue(tenant, session, 1L, "req-1", "{\"id\":\"req-1\"}", 9_000L, 1_000L));
         tx(() -> store.enqueue(tenant, session, 1L, "req-2", "{\"id\":\"req-2\"}", 9_000L, 1_100L));
         assertThat(tx(() -> store.queuedCount(tenant, session, 1L, 2_000L))).isEqualTo(2);
-        List<QueuedRequest> queued = tx(() -> store.queued(tenant, session, 1L, 10));
+        List<QueuedRequest> queued = tx(() -> store.queued(tenant, session, 1L, 10, 2_000L));
         assertThat(queued).extracting(QueuedRequest::requestId).containsExactly("req-1", "req-2");
         assertThatThrownBy(() -> tx(() -> store.enqueue(tenant, session, 1L, "req-1", "{}", 9_000L, 1_200L)))
                 .isInstanceOf(DuplicateKeyException.class);
@@ -126,7 +126,7 @@ class ClientFilesRelayStoreTest {
 
     @Test
     void answerAndFailOnlyConsumeQueuedRequests() {
-        tx(() -> store.register(tenant, session, actor, "local-files", "a".repeat(64), 9_000L, 1_000L));
+        tx(() -> store.register(tenant, session, actor, "local-files", "a".repeat(64), 9_000L, 1_000L, "conn"));
         tx(() -> store.enqueue(tenant, session, 1L, "req-1", "{}", 9_000L, 1_000L));
         tx(() -> store.enqueue(tenant, session, 1L, "req-2", "{}", 9_000L, 1_000L));
         assertThat(tx(() -> store.answer(tenant, session, 1L, "req-1", "{\"ok\":true}", 2_000L))).isTrue();
@@ -141,9 +141,9 @@ class ClientFilesRelayStoreTest {
 
     @Test
     void failQueuedTearsDownOnlyTheOwnedGeneration() {
-        tx(() -> store.register(tenant, session, actor, "local-files", "a".repeat(64), 9_000L, 1_000L));
+        tx(() -> store.register(tenant, session, actor, "local-files", "a".repeat(64), 9_000L, 1_000L, "conn"));
         tx(() -> store.enqueue(tenant, session, 1L, "req-1", "{}", 9_000L, 1_000L));
-        tx(() -> store.register(tenant, session, actor, "local-files", "b".repeat(64), 19_000L, 2_000L));
+        tx(() -> store.register(tenant, session, actor, "local-files", "b".repeat(64), 19_000L, 2_000L, "conn"));
         tx(() -> store.enqueue(tenant, session, 2L, "req-2", "{}", 19_000L, 2_000L));
         assertThat(tx(() -> store.failQueued(tenant, session, 1L, ClientFilesModels.ERROR_OFFLINE, 3_000L))).isEqualTo(1);
         assertThat(tx(() -> store.queuedCount(tenant, session, 2L, 3_000L))).isEqualTo(1);
@@ -151,7 +151,7 @@ class ClientFilesRelayStoreTest {
 
     @Test
     void expireBeforeSweepsOnlyOverdueQueuedRequestsBoundedByLimit() {
-        tx(() -> store.register(tenant, session, actor, "local-files", "a".repeat(64), 9_000L, 1_000L));
+        tx(() -> store.register(tenant, session, actor, "local-files", "a".repeat(64), 9_000L, 1_000L, "conn"));
         tx(() -> store.enqueue(tenant, session, 1L, "req-1", "{}", 1_500L, 1_000L));
         tx(() -> store.enqueue(tenant, session, 1L, "req-2", "{}", 1_600L, 1_000L));
         tx(() -> store.enqueue(tenant, session, 1L, "req-3", "{}", 9_000L, 1_000L));
@@ -165,7 +165,7 @@ class ClientFilesRelayStoreTest {
 
     @Test
     void queuedCountExcludesExpiredButUnwalkedRows() {
-        tx(() -> store.register(tenant, session, actor, "local-files", "a".repeat(64), 9_000L, 1_000L));
+        tx(() -> store.register(tenant, session, actor, "local-files", "a".repeat(64), 9_000L, 1_000L, "conn"));
         tx(() -> store.enqueue(tenant, session, 1L, "req-1", "{}", 1_500L, 1_000L));
         // Still state=queued (the sweep has not run), but past its deadline: it
         // must not occupy a queue slot.
@@ -175,8 +175,8 @@ class ClientFilesRelayStoreTest {
 
     @Test
     void closeExpiredBindingsClosesOnlyOverdueActiveBindings() {
-        tx(() -> store.register(tenant, session, actor, "local-files", "a".repeat(64), 5_000L, 1_000L));
-        tx(() -> store.register(tenant, "session-2", actor, "local-files", "b".repeat(64), 20_000L, 1_000L));
+        tx(() -> store.register(tenant, session, actor, "local-files", "a".repeat(64), 5_000L, 1_000L, "conn"));
+        tx(() -> store.register(tenant, "session-2", actor, "local-files", "b".repeat(64), 20_000L, 1_000L, "conn"));
         assertThat(tx(() -> store.closeExpiredBindings(10_000L, 10))).isEqualTo(1);
         assertThat(tx(() -> store.find(tenant, session)).state()).isEqualTo(ClientFilesModels.STATE_CLOSED);
         assertThat(tx(() -> store.find(tenant, "session-2")).state()).isEqualTo(ClientFilesModels.STATE_ACTIVE);
@@ -186,7 +186,7 @@ class ClientFilesRelayStoreTest {
 
     @Test
     void deleteSettledBeforeDropsOnlyOldSettledRows() {
-        tx(() -> store.register(tenant, session, actor, "local-files", "a".repeat(64), 9_000L, 1_000L));
+        tx(() -> store.register(tenant, session, actor, "local-files", "a".repeat(64), 9_000L, 1_000L, "conn"));
         tx(() -> store.enqueue(tenant, session, 1L, "answered", "{}", 9_000L, 1_000L));
         tx(() -> store.answer(tenant, session, 1L, "answered", "{}", 1_000L));
         tx(() -> store.enqueue(tenant, session, 1L, "failed", "{}", 9_000L, 1_000L));
@@ -207,9 +207,9 @@ class ClientFilesRelayStoreTest {
 
     @Test
     void deleteSessionRemovesBothTablesForTheScopeOnly() {
-        tx(() -> store.register(tenant, session, actor, "local-files", "a".repeat(64), 9_000L, 1_000L));
+        tx(() -> store.register(tenant, session, actor, "local-files", "a".repeat(64), 9_000L, 1_000L, "conn"));
         tx(() -> store.enqueue(tenant, session, 1L, "req-1", "{}", 9_000L, 1_000L));
-        tx(() -> store.register(tenant, "session-2", actor, "local-files", "b".repeat(64), 9_000L, 1_000L));
+        tx(() -> store.register(tenant, "session-2", actor, "local-files", "b".repeat(64), 9_000L, 1_000L, "conn"));
         tx(() -> store.deleteSession(tenant, session));
         assertThat(tx(() -> store.find(tenant, session))).isNull();
         assertThat(tx(() -> store.find(tenant, "session-2"))).isNotNull();
@@ -219,12 +219,66 @@ class ClientFilesRelayStoreTest {
     @Test
     void tenantsSharingASessionIdStayIsolated() {
         String otherTenant = "tenant-" + UUID.randomUUID();
-        tx(() -> store.register(tenant, session, actor, "local-files", "a".repeat(64), 9_000L, 1_000L));
-        tx(() -> store.register(otherTenant, session, actor, "local-files", "b".repeat(64), 9_000L, 1_000L));
+        tx(() -> store.register(tenant, session, actor, "local-files", "a".repeat(64), 9_000L, 1_000L, "conn"));
+        tx(() -> store.register(otherTenant, session, actor, "local-files", "b".repeat(64), 9_000L, 1_000L, "conn"));
         assertThat(tx(() -> store.find(tenant, session)).tokenHash()).isEqualTo("a".repeat(64));
         assertThat(tx(() -> store.find(otherTenant, session)).tokenHash()).isEqualTo("b".repeat(64));
         assertThat(tx(() -> store.close(tenant, session, 1L, 2_000L))).isTrue();
         assertThat(tx(() -> store.find(otherTenant, session)).active()).isTrue();
+    }
+
+    @Test
+    void expiredRequestsAreNeitherDeliveredNorSettled() {
+        tx(() -> store.register(tenant, session, actor, "local-files", "a".repeat(64), 9_000L, 1_000L, "conn"));
+        tx(() -> store.enqueue(tenant, session, 1L, "req-1", "{}", 1_500L, 1_000L));
+        // Past the deadline but before the sweep flips the row: a resumed
+        // downlink must not receive the work, and a late answer must not settle
+        // it (the Runtime has already been told it failed).
+        assertThat(tx(() -> store.queued(tenant, session, 1L, 10, 2_000L))).isEmpty();
+        assertThat(tx(() -> store.answer(tenant, session, 1L, "req-1", "{}", 2_000L))).isFalse();
+        assertThat(tx(() -> store.fail(tenant, session, 1L, "req-1", ClientFilesModels.ERROR_OFFLINE, 2_000L))).isFalse();
+        assertThat(jdbc.queryForObject("SELECT state FROM ma_client_files_request WHERE request_id='req-1'",
+                String.class)).isEqualTo(ClientFilesModels.REQUEST_QUEUED);
+    }
+
+    @Test
+    void restoreIsFencedOnTheFailedAttemptAndAdvancesMonotonically() {
+        Binding first = tx(() -> store.register(tenant, session, actor, "local-files",
+                "a".repeat(64), 9_000L, 1_000L, "conn-a"));
+        Binding failed = tx(() -> store.register(tenant, session, actor, "local-files",
+                "b".repeat(64), 19_000L, 2_000L, "conn-b"));
+        assertThat(failed.generation()).isEqualTo(2L);
+        // Compensation restores the previous credential at a fresh monotonic
+        // generation (never rewinding into the failed attempt's namespace).
+        assertThat(tx(() -> store.restore(tenant, session, 2L, first, 3_000L))).isTrue();
+        Binding restored = tx(() -> store.find(tenant, session));
+        assertThat(restored.generation()).isEqualTo(3L);
+        assertThat(restored.tokenHash()).isEqualTo("a".repeat(64));
+        assertThat(restored.connectionId()).isEqualTo("conn-a");
+        assertThat(restored.active()).isTrue();
+        // A late compensation for the same failed attempt is a no-op: the
+        // binding no longer sits at that generation.
+        assertThat(tx(() -> store.restore(tenant, session, 2L, first, 4_000L))).isFalse();
+        assertThat(tx(() -> store.find(tenant, session)).generation()).isEqualTo(3L);
+    }
+
+    @Test
+    void restoreDoesNotReopenARevokedBindingOrClobberANewerRegistration() {
+        Binding first = tx(() -> store.register(tenant, session, actor, "local-files",
+                "a".repeat(64), 9_000L, 1_000L, "conn-a"));
+        tx(() -> store.register(tenant, session, actor, "local-files",
+                "b".repeat(64), 19_000L, 2_000L, "conn-b"));
+        // An unregister committed after the failed attempt: compensation must
+        // not reopen the revoked binding.
+        tx(() -> store.close(tenant, session, 2L, 3_000L));
+        assertThat(tx(() -> store.restore(tenant, session, 2L, first, 4_000L))).isFalse();
+        assertThat(tx(() -> store.find(tenant, session)).active()).isFalse();
+        // A newer registration committed after the failed attempt: compensation
+        // must not clobber its credential.
+        tx(() -> store.register(tenant, session, actor, "local-files",
+                "c".repeat(64), 29_000L, 5_000L, "conn-c"));
+        assertThat(tx(() -> store.restore(tenant, session, 2L, first, 6_000L))).isFalse();
+        assertThat(tx(() -> store.find(tenant, session)).tokenHash()).isEqualTo("c".repeat(64));
     }
 
     private <T> T tx(Supplier<T> work) {

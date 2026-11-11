@@ -60,6 +60,7 @@ export class ManagedClientFilesBridge {
   private readonly options: ManagedClientFilesOptions;
   private abort?: AbortController;
   private running = false;
+  private connectionId?: string;
   private state: ManagedClientFilesState = { phase: 'idle' };
   private readonly listeners = new Set<
     (state: ManagedClientFilesState) => void
@@ -100,12 +101,13 @@ export class ManagedClientFilesBridge {
     this.setState({ phase: 'connecting' });
     const abort = new AbortController();
     this.abort = abort;
+    // A unique identity for this registration: the downlink is correlated to
+    // it (not merely to "a generation newer than baseline"), so a concurrent
+    // tab's registration can never be adopted and drained onto this directory.
+    const connectionId = crypto.randomUUID();
+    this.connectionId = connectionId;
     let registerFailed = false;
     try {
-      // A binding left active by an earlier page load must not be adopted:
-      // remember the current generation as a baseline and only accept a newer
-      // one — the generation register creates.
-      const baseline = await this.readGeneration(abort.signal);
       // register blocks on the Harness discovery that this drain must
       // answer, and the stream route requires the binding that register
       // creates: fire register, wait for the binding, drain, then await
@@ -114,7 +116,10 @@ export class ManagedClientFilesBridge {
         .fetch(this.url('register'), {
           method: 'POST',
           headers: this.headers(true),
-          body: JSON.stringify({ sessionId: this.options.sessionId }),
+          body: JSON.stringify({
+            sessionId: this.options.sessionId,
+            connectionId,
+          }),
           signal: abort.signal,
         })
         .then(async (response) => {
@@ -124,6 +129,7 @@ export class ManagedClientFilesBridge {
           return (await response.json()) as {
             generation?: number;
             toolCount?: number;
+            connectionId?: string;
           };
         });
       // The binding poll may settle before anyone awaits registering.
@@ -131,17 +137,23 @@ export class ManagedClientFilesBridge {
       const generation = await this.waitForBinding(
         abort.signal,
         registering,
-        baseline,
+        connectionId,
       );
       this.running = true;
       // Handle the drain rejection at creation: register can take up to its
       // discovery timeout, and a fast stream refusal must not surface as an
       // unhandled rejection in that window.
       let drainError: unknown;
-      const draining = this.drain(abort.signal, generation).catch((cause) => {
-        drainError = cause;
-      });
-      let registered: { generation?: number; toolCount?: number };
+      const draining = this.drain(abort.signal, generation, connectionId).catch(
+        (cause) => {
+          drainError = cause;
+        },
+      );
+      let registered: {
+        generation?: number;
+        toolCount?: number;
+        connectionId?: string;
+      };
       try {
         registered = await registering;
       } catch (cause) {
@@ -149,6 +161,17 @@ export class ManagedClientFilesBridge {
         abort.abort();
         await draining;
         throw cause;
+      }
+      // The registration reply must name the same connection we correlated;
+      // otherwise another tab replaced us mid-discovery and we must not serve.
+      if (
+        registered.connectionId !== connectionId ||
+        registered.generation !== generation
+      ) {
+        registerFailed = true;
+        abort.abort();
+        await draining;
+        throw new Error('client files registration was superseded');
       }
       this.setState({
         phase: 'connected',
@@ -172,46 +195,49 @@ export class ManagedClientFilesBridge {
   }
 
   /**
-   * Polls status until the binding register created is active at a generation
-   * newer than the baseline. The stream route refuses an unknown binding, so
-   * the drain cannot start earlier; the baseline keeps a stale binding left
-   * active by an earlier load from being adopted.
+   * Polls status until the binding carrying this registration's connection
+   * identity is active. Matching the identity (not just a newer generation)
+   * guarantees the drain serves this tab's registration, never a concurrent
+   * tab's. The stream route refuses an unknown binding, so the drain cannot
+   * start earlier.
    */
   private async waitForBinding(
     signal: AbortSignal,
     registering: Promise<unknown>,
-    baseline: number,
+    connectionId: string,
   ): Promise<number> {
     const settled = registering.then(
       () => true,
       () => false,
     );
-    for (;;) {
-      signal.throwIfAborted();
+    const readOwnBinding = async (): Promise<number | undefined> => {
       const status = await this.options.fetch(this.url('status'), {
         method: 'POST',
         headers: this.headers(true),
         body: JSON.stringify({ sessionId: this.options.sessionId }),
         signal,
       });
-      let state: string | undefined;
-      let generation: number | undefined;
       if (status.ok) {
         // An absent binding answers 200 with an empty body.
         const body = (await status.json().catch(() => ({}))) as {
           state?: string;
           generation?: number;
+          connectionId?: string;
         };
-        state = body.state;
-        generation = body.generation;
         if (
-          state === 'active' &&
-          typeof generation === 'number' &&
-          generation > baseline
+          body.state === 'active' &&
+          typeof body.generation === 'number' &&
+          body.connectionId === connectionId
         ) {
-          return generation;
+          return body.generation;
         }
       }
+      return undefined;
+    };
+    for (;;) {
+      signal.throwIfAborted();
+      const own = await readOwnBinding();
+      if (own !== undefined) return own;
       const ok = await Promise.race([
         settled,
         new Promise<undefined>((resolve) =>
@@ -219,14 +245,23 @@ export class ManagedClientFilesBridge {
         ),
       ]);
       if (ok === false) await registering;
-      if (ok === true && state === 'closed') {
-        throw new Error('client files binding closed during registration');
+      if (ok === true) {
+        // Register settled: a final fresh read decides whether this binding is
+        // still ours. A concurrent tab that replaced it (or a close) means we
+        // were superseded — fail rather than drain another tab's requests.
+        const final = await readOwnBinding();
+        if (final !== undefined) return final;
+        throw new Error('client files registration was superseded');
       }
     }
   }
 
-  /** The active binding's generation, or 0 when absent/closed. */
-  private async readGeneration(signal: AbortSignal): Promise<number> {
+  /** Whether the binding still carries this registration's identity. */
+  private async ownsConnection(
+    signal: AbortSignal,
+    connectionId: string,
+    generation: number,
+  ): Promise<boolean> {
     const status = await this.options.fetch(this.url('status'), {
       method: 'POST',
       headers: this.headers(true),
@@ -237,12 +272,15 @@ export class ManagedClientFilesBridge {
       const body = (await status.json().catch(() => ({}))) as {
         state?: string;
         generation?: number;
+        connectionId?: string;
       };
-      if (body.state === 'active' && typeof body.generation === 'number') {
-        return body.generation;
-      }
+      return (
+        body.state === 'active' &&
+        body.generation === generation &&
+        body.connectionId === connectionId
+      );
     }
-    return 0;
+    return false;
   }
 
   /** Stops the downlink and unregisters the binding (best-effort). */
@@ -250,11 +288,18 @@ export class ManagedClientFilesBridge {
     this.running = false;
     this.abort?.abort();
     this.abort = undefined;
+    const connectionId = this.connectionId;
+    this.connectionId = undefined;
     try {
       await this.options.fetch(this.url('unregister'), {
         method: 'POST',
         headers: this.headers(true),
-        body: JSON.stringify({ sessionId: this.options.sessionId }),
+        // Carry the owned identity so a stale teardown cannot close a newer
+        // tab's registration.
+        body: JSON.stringify({
+          sessionId: this.options.sessionId,
+          connectionId,
+        }),
       });
     } catch {
       // best-effort: the control plane also drops the binding on SSE close.
@@ -262,7 +307,11 @@ export class ManagedClientFilesBridge {
     this.setState({ phase: 'stopped' });
   }
 
-  private async drain(signal: AbortSignal, generation: number): Promise<void> {
+  private async drain(
+    signal: AbortSignal,
+    generation: number,
+    connectionId: string,
+  ): Promise<void> {
     while (this.running) {
       signal.throwIfAborted();
       const response = await this.options.fetch(this.url('requests/stream'), {
@@ -271,6 +320,7 @@ export class ManagedClientFilesBridge {
         body: JSON.stringify({
           sessionId: this.options.sessionId,
           generation,
+          connectionId,
         }),
         signal,
       });
@@ -299,10 +349,10 @@ export class ManagedClientFilesBridge {
       if (!this.running) return;
       signal.throwIfAborted();
       // A clean end (the emitter's idle timeout) is not a lost binding: reopen
-      // the downlink while the binding is still active at this generation.
-      // Only a closed/rotated binding ends the bridge.
-      const active = await this.readGeneration(signal);
-      if (active !== generation) {
+      // the downlink while the binding still carries this registration's
+      // identity. A closed, rotated, or superseded binding ends the bridge.
+      const owned = await this.ownsConnection(signal, connectionId, generation);
+      if (!owned) {
         this.running = false;
         this.setState({
           phase: 'failed',

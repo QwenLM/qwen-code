@@ -1667,9 +1667,12 @@ public class SurfaceAdmissionAcceptanceTest {
             case SIDE_QUERY_CREATE -> publicSurface ? "{\"kind\":\"btw\",\"question\":\"probe\"}"
                     : "{\"sessionId\":\"" + session + "\",\"kind\":\"btw\",\"question\":\"probe\",\"idempotencyKey\":\"" + nextKey() + "\"}";
             case SIDE_QUERY_LIST, SIDE_QUERY_CONTEXT -> "{\"sessionId\":\"" + session + "\"}";
-            case CLIENT_FILES_REGISTER, CLIENT_FILES_UNREGISTER, CLIENT_FILES_STATUS ->
+            case CLIENT_FILES_REGISTER ->
+                    "{\"sessionId\":\"" + session + "\",\"connectionId\":\"conn-probe\"}";
+            case CLIENT_FILES_UNREGISTER, CLIENT_FILES_STATUS ->
                     "{\"sessionId\":\"" + session + "\"}";
-            case CLIENT_FILES_STREAM -> "{\"sessionId\":\"" + session + "\",\"generation\":1}";
+            case CLIENT_FILES_STREAM ->
+                    "{\"sessionId\":\"" + session + "\",\"generation\":1,\"connectionId\":\"conn-probe\"}";
             case CLIENT_FILES_RESPOND -> "{\"sessionId\":\"" + session
                     + "\",\"generation\":1,\"rpcRequestId\":\"probe\",\"responseJson\":\"{}\"}";
             case INTERNAL_CLIENT_FILES_MCP -> "{\"jsonrpc\":\"2.0\",\"id\":\"probe\",\"method\":\"tools/list\"}";

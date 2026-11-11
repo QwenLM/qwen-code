@@ -13,15 +13,18 @@ import java.util.List;
  */
 public interface ClientFilesRelay {
     Binding register(String tenantId, String sessionId, String actorId, String serverId,
-            String tokenHash, long expiresAt, long now);
+            String tokenHash, long expiresAt, long now, String connectionId);
 
     /**
-     * Re-activates a previous binding exactly (generation, credential digest,
-     * deadline) after a re-registration's harness dispatch was refused, so the
-     * still-installed harness leg keeps serving instead of being fenced to a
-     * credential it never received.
+     * Compensates a refused re-registration by re-activating the previous
+     * credential, but only while the failed attempt still owns the active
+     * binding (a newer registration or an unregister already committed makes
+     * this a no-op). The restored binding advances to a fresh monotonic
+     * generation so a new client never reuses the failed attempt's request
+     * namespace. Returns whether the compensation was applied.
      */
-    void restore(String tenantId, String sessionId, Binding previous, long now);
+    boolean restore(String tenantId, String sessionId, long failedGeneration, Binding previous,
+            long now);
 
     Binding find(String tenantId, String sessionId);
 
@@ -35,7 +38,8 @@ public interface ClientFilesRelay {
 
     int queuedCount(String tenantId, String sessionId, long generation, long now);
 
-    List<QueuedRequest> queued(String tenantId, String sessionId, long generation, int limit);
+    List<QueuedRequest> queued(String tenantId, String sessionId, long generation, int limit,
+            long now);
 
     QueuedRequest request(String tenantId, String sessionId, long generation, String requestId);
 

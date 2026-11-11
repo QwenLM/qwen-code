@@ -55,6 +55,10 @@ export class HostedClientFilesSession {
   };
   private closed = false;
   private registering: Promise<unknown> = Promise.resolve();
+  // Bumped by unregister/close so a discovery still in flight cannot install
+  // its client/catalog after a Disconnect; a later explicit registration
+  // captures the new epoch and proceeds normally.
+  private epoch = 0;
 
   get active(): boolean {
     return this.client !== undefined && !this.closed;
@@ -80,6 +84,7 @@ export class HostedClientFilesSession {
     registration: HostedClientFilesRegistration,
   ): Promise<number> {
     if (this.closed) throw new Error('Client files session is closed.');
+    const epoch = this.epoch;
     const transport = new StreamableHTTPClientTransport(
       new URL(registration.url),
       {
@@ -99,9 +104,11 @@ export class HostedClientFilesSession {
       const listed = await client.listTools(undefined, {
         timeout: CLIENT_FILES_REQUEST_TIMEOUT_MS,
       });
-      // A close() or a newer generation may have landed while discovery was
-      // in flight; never install a client the session no longer owns.
-      if (this.closed) {
+      // A close()/unregister() or a newer generation may have landed while
+      // discovery was in flight; never install a client the session no longer
+      // owns. The epoch check invalidates a registration that was already
+      // awaiting discovery when Disconnect completed.
+      if (this.closed || epoch !== this.epoch) {
         await client.close().catch(() => {});
         throw new Error('Client files session is closed.');
       }
@@ -132,8 +139,10 @@ export class HostedClientFilesSession {
     }
   }
 
-  /** Drops the connection and catalog; idempotent. */
+  /** Drops the connection and catalog; idempotent. Invalidates any discovery
+   * still in flight so it cannot reinstall the catalog after Disconnect. */
   async unregister(): Promise<void> {
+    this.epoch += 1;
     const client = this.client;
     this.client = undefined;
     this.registration = undefined;

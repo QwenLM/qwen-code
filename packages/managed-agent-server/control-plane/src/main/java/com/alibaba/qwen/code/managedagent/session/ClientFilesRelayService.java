@@ -107,9 +107,10 @@ public class ClientFilesRelayService {
         }
     }
 
-    public Registration register(String tenant, String actor, String session) {
+    public Registration register(String tenant, String actor, String session, String connectionId) {
         requireEnabled();
         requireSessionId(session);
+        requireConnectionId(connectionId);
         requireExecutionAuthority(tenant, actor, session);
         String relayUrl = requireRelayUrl();
         long now = System.currentTimeMillis();
@@ -119,7 +120,7 @@ public class ClientFilesRelayService {
         String token = Base64.getUrlEncoder().withoutPadding().encodeToString(secret);
         long expiresAt = now + settings.getClientFiles().getBindingTtl().toMillis();
         Binding binding = relay.register(tenant, session, actor, SERVER_ID,
-                DigestUtils.sha256Hex(token), expiresAt, now);
+                DigestUtils.sha256Hex(token), expiresAt, now, connectionId);
         if (previous != null && previous.active() && previous.generation() != binding.generation()) {
             relay.failQueued(tenant, session, previous.generation(), ClientFilesModels.ERROR_OFFLINE, now);
         }
@@ -137,18 +138,20 @@ public class ClientFilesRelayService {
             LOG.warn("Client files registration dispatch failed for session {}", session, cause);
             if (previous != null && previous.active()) {
                 // The harness keeps its previous client and credential when the
-                // dispatch is refused; put the previous binding back so the
-                // session keeps serving instead of fencing every call to a
-                // credential the harness never received.
-                relay.restore(tenant, session, previous, System.currentTimeMillis());
+                // dispatch is refused; put the previous credential back so the
+                // session keeps serving. Fenced on this attempt still owning the
+                // active binding, and monotonic, so a late compensation cannot
+                // clobber a newer registration or reopen a revoked binding.
+                relay.restore(tenant, session, binding.generation(), previous,
+                        System.currentTimeMillis());
             }
             throw error(503, "client_files_relay_unavailable");
         }
         return new Registration(binding.serverId(), binding.generation(), token, binding.expiresAt(),
-                toolCount);
+                toolCount, binding.connectionId());
     }
 
-    public Status unregister(String tenant, String actor, String session) {
+    public Status unregister(String tenant, String actor, String session, String connectionId) {
         requireEnabled();
         requireSessionId(session);
         SessionRecord visible = agentService.requireReadableSession(tenant, actor, session);
@@ -159,6 +162,12 @@ public class ClientFilesRelayService {
         }
         if (binding == null) {
             throw error(404, "client_files_not_found");
+        }
+        // A stale teardown (an old tab whose registration was already replaced)
+        // must not close the newer binding or drop its harness catalog.
+        if (connectionId != null && !connectionId.equals(binding.connectionId())) {
+            return new Status(binding.serverId(), binding.generation(), binding.state(),
+                    binding.expiresAt(), binding.connectionId());
         }
         long now = System.currentTimeMillis();
         relay.close(tenant, session, binding.generation(), now);
@@ -171,7 +180,7 @@ public class ClientFilesRelayService {
             // best-effort dispatch
         }
         return new Status(binding.serverId(), binding.generation(), ClientFilesModels.STATE_CLOSED,
-                binding.expiresAt());
+                binding.expiresAt(), binding.connectionId());
     }
 
     public Status status(String tenant, String actor, String session) {
@@ -187,7 +196,8 @@ public class ClientFilesRelayService {
         // sweep flips the row.
         String state = binding.expiresAt() <= System.currentTimeMillis()
                 ? ClientFilesModels.STATE_CLOSED : binding.state();
-        return new Status(binding.serverId(), binding.generation(), state, binding.expiresAt());
+        return new Status(binding.serverId(), binding.generation(), state, binding.expiresAt(),
+                binding.connectionId());
     }
 
     /**
@@ -220,7 +230,23 @@ public class ClientFilesRelayService {
         requireSessionId(session);
         Binding binding = requireDeliveryAuthority(tenant, actor, session, generation);
         return relay.queued(tenant, session, binding.generation(),
-                settings.getClientFiles().getQueueDepth());
+                settings.getClientFiles().getQueueDepth(), System.currentTimeMillis());
+    }
+
+    /**
+     * Correlates a downlink with the registration that opened it: even when the
+     * actor and generation match, a stream carrying a different connection
+     * identity belongs to another tab's registration and must not drain this
+     * binding's requests.
+     */
+    public void requireStreamConnection(String tenant, String actor, String session,
+            long generation, String connectionId) {
+        requireEnabled();
+        requireSessionId(session);
+        Binding binding = requireDeliveryAuthority(tenant, actor, session, generation);
+        if (connectionId != null && !connectionId.equals(binding.connectionId())) {
+            throw error(409, "client_files_generation_conflict");
+        }
     }
 
     public void respond(String tenant, String actor, String session, long generation,
@@ -517,6 +543,12 @@ public class ClientFilesRelayService {
 
     private static void requireSessionId(String session) {
         if (session == null || session.isBlank() || session.length() > 128) {
+            throw error(400, "client_files_invalid");
+        }
+    }
+
+    private static void requireConnectionId(String connectionId) {
+        if (connectionId == null || connectionId.isBlank() || connectionId.length() > 64) {
             throw error(400, "client_files_invalid");
         }
     }

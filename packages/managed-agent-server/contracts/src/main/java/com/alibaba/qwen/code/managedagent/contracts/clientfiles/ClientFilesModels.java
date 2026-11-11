@@ -16,7 +16,7 @@ public final class ClientFilesModels {
 
     public record Binding(String tenantId, String sessionId, String actorId, long generation,
             String state, String serverId, String tokenHash, long expiresAt,
-            long createdAt, long modifiedAt) {
+            long createdAt, long modifiedAt, String connectionId) {
         public boolean active() {
             return STATE_ACTIVE.equals(state);
         }
@@ -28,18 +28,19 @@ public final class ClientFilesModels {
 
     /** The one-time registration answer; the token is shown once, never stored. */
     public record Registration(String serverId, long generation, String token, long expiresAt,
-            int toolCount) {}
+            int toolCount, String connectionId) {}
 
     /** Binding summary without the credential. */
-    public record Status(String serverId, long generation, String state, long expiresAt) {}
+    public record Status(String serverId, long generation, String state, long expiresAt,
+            String connectionId) {}
 
-    public record RegisterRequest(String sessionId) {}
+    public record RegisterRequest(String sessionId, String connectionId) {}
 
-    public record UnregisterRequest(String sessionId) {}
+    public record UnregisterRequest(String sessionId, String connectionId) {}
 
     public record StatusRequest(String sessionId) {}
 
-    public record StreamRequest(String sessionId, long generation) {}
+    public record StreamRequest(String sessionId, long generation, String connectionId) {}
 
     public record RespondRequest(String sessionId, long generation, String rpcRequestId,
             String responseJson, String errorCode) {}

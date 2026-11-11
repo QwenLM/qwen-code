@@ -1778,7 +1778,7 @@ class ManagedAgentApiContractTest {
         }
         exchange(drift, "registerWebShellClientFiles", 404,
                 post(WEB_SHELL + "/client-files/register").header(TENANT, tenant).principal(actor(tenant)),
-                "{\"sessionId\":\"" + sideSession + "\"}");
+                "{\"sessionId\":\"" + sideSession + "\",\"connectionId\":\"conn-contract\"}");
         exchange(drift, "unregisterWebShellClientFiles", 404,
                 post(WEB_SHELL + "/client-files/unregister").header(TENANT, tenant).principal(actor(tenant)),
                 "{\"sessionId\":\"" + sideSession + "\"}");

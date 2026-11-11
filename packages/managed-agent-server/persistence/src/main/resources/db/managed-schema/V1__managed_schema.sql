@@ -1483,6 +1483,7 @@ CREATE TABLE ma_client_files_binding (
     state VARCHAR(16) NOT NULL COMMENT 'Binding lifecycle state: active or closed.',
     server_id VARCHAR(128) NOT NULL COMMENT 'Client-hosted MCP server name exposed to the Session.',
     token_hash CHAR(64) NOT NULL COMMENT 'Hash of the session relay credential, never the plaintext.',
+    connection_id VARCHAR(64) COMMENT 'Browser registration identity correlating the downlink with its own register.',
     expires_at BIGINT UNSIGNED NOT NULL COMMENT 'Binding deadline in Unix epoch milliseconds.',
     gmt_create BIGINT UNSIGNED NOT NULL COMMENT 'Record creation time in Unix epoch milliseconds.',
     gmt_modified BIGINT UNSIGNED NOT NULL COMMENT 'Last record update time in Unix epoch milliseconds.',

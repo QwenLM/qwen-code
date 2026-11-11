@@ -280,7 +280,8 @@ class HostedClientFilesRelayIT {
             String session) {
         return java.util.concurrent.CompletableFuture.supplyAsync(() -> {
             try {
-                return webShellRaw("POST", "/register", Map.of("sessionId", session));
+                return webShellRaw("POST", "/register",
+                        Map.of("sessionId", session, "connectionId", "conn-it"));
             } catch (Exception failure) {
                 throw new java.util.concurrent.CompletionException(failure);
             }
@@ -533,7 +534,8 @@ class HostedClientFilesRelayIT {
                         .POST(HttpRequest.BodyPublishers.ofString(
                                 json.writeValueAsString(Map.of(
                                         "sessionId", session,
-                                        "generation", generation))))
+                                        "generation", generation,
+                                        "connectionId", "conn-it"))))
                         .build(),
                 HttpResponse.BodyHandlers.ofInputStream());
         return drain;

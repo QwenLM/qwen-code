@@ -23191,10 +23191,15 @@
       "WebShellClientFilesRegisterRequest": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["sessionId"],
+        "required": ["sessionId", "connectionId"],
         "properties": {
           "sessionId": {
             "type": "string"
+          },
+          "connectionId": {
+            "type": "string",
+            "maxLength": 64,
+            "description": "Browser-generated identity correlating this registration's downlink and teardown with its own binding."
           }
         }
       },
@@ -23205,6 +23210,11 @@
         "properties": {
           "sessionId": {
             "type": "string"
+          },
+          "connectionId": {
+            "type": "string",
+            "maxLength": 64,
+            "description": "The unregistering bridge's owned registration identity; a stale teardown of a replaced binding is a no-op."
           }
         }
       },
@@ -23229,6 +23239,11 @@
           "generation": {
             "type": "integer",
             "minimum": 1
+          },
+          "connectionId": {
+            "type": "string",
+            "maxLength": 64,
+            "description": "The downlink's owned registration identity; a stream for another tab's binding is refused."
           }
         }
       },
@@ -23266,7 +23281,8 @@
           "generation",
           "token",
           "expiresAt",
-          "toolCount"
+          "toolCount",
+          "connectionId"
         ],
         "properties": {
           "serverId": {
@@ -23289,6 +23305,10 @@
             "type": "integer",
             "minimum": 0,
             "description": "Number of browser tools the Harness discovered during registration."
+          },
+          "connectionId": {
+            "type": "string",
+            "description": "Echo of the registration identity the caller supplied, for downlink correlation."
           }
         }
       },
@@ -23311,6 +23331,10 @@
             "type": "integer",
             "format": "int64",
             "description": "Binding deadline in Unix epoch milliseconds."
+          },
+          "connectionId": {
+            "type": "string",
+            "description": "The current binding's registration identity, for downlink correlation."
           }
         }
       },

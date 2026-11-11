@@ -23,6 +23,9 @@ interface Script {
   callStatus?: number;
   /** Answer tools/list with the relay offline error during registration. */
   listError?: boolean;
+  /** Hold the tools/list response until this promise resolves (to exercise a
+   * Disconnect landing while discovery is still in flight). */
+  listGate?: Promise<void>;
 }
 
 /** A minimal in-process Streamable HTTP MCP peer standing in for the relay. */
@@ -42,7 +45,7 @@ function startPeer(script: Script): Promise<{ server: Server; url: string }> {
     }
     let body = '';
     req.on('data', (chunk) => (body += chunk));
-    req.on('end', () => {
+    req.on('end', async () => {
       if (body === '') {
         res.writeHead(400);
         res.end();
@@ -89,6 +92,7 @@ function startPeer(script: Script): Promise<{ server: Server; url: string }> {
         return;
       }
       if (message.method === 'tools/list') {
+        if (script.listGate) await script.listGate;
         if (script.listError) {
           replyError({ code: -32000, message: 'client_files_offline' });
           return;
@@ -418,5 +422,39 @@ describe('HostedClientFilesSession', () => {
         token: 't',
       }),
     ).rejects.toThrow(/closed/);
+  });
+
+  it('unregister invalidates a discovery still in flight', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const url = await peer({ tools: [{ name: 'read_file' }], listGate: gate });
+    const files = session();
+    const registering = files.register({
+      serverId: 'local-files',
+      generation: 1,
+      url,
+      token: 't',
+    });
+    registering.catch(() => {});
+    // Let discovery reach the held tools/list, then Disconnect before it
+    // answers; the delayed response must not reinstall the catalog.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    await files.unregister();
+    release();
+    await expect(registering).rejects.toThrow();
+    expect(files.active).toBe(false);
+    expect(files.tools()).toEqual([]);
+    // A later explicit registration still proceeds normally.
+    const next = await peer({ tools: [{ name: 'write_file' }] });
+    const count = await files.register({
+      serverId: 'local-files',
+      generation: 2,
+      url: next,
+      token: 't2',
+    });
+    expect(count).toBe(1);
+    expect(files.active).toBe(true);
   });
 });

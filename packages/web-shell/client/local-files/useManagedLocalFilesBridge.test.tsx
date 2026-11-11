@@ -46,7 +46,9 @@ const peerFetch = ((url: string, init?: RequestInit) =>
 function startPeer(): Promise<{ server: Server; baseUrl: string }> {
   // Like the real control plane: register blocks on the discovery the
   // browser drain answers; the stream pushes tools/list on open.
-  let binding: { generation: number; state: string } | undefined;
+  let binding:
+    | { generation: number; state: string; connectionId?: string }
+    | undefined;
   let resolveRegister: (() => void) | undefined;
   const registerDone = new Promise<void>((resolve) => {
     resolveRegister = resolve;
@@ -57,10 +59,23 @@ function startPeer(): Promise<{ server: Server; baseUrl: string }> {
     req.on('end', async () => {
       const path = req.url ?? '';
       if (path.endsWith('/client-files/register')) {
-        binding = { generation: 1, state: 'active' };
+        const parsed = body
+          ? (JSON.parse(body) as Record<string, unknown>)
+          : {};
+        binding = {
+          generation: 1,
+          state: 'active',
+          connectionId: parsed.connectionId as string | undefined,
+        };
         await registerDone;
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ generation: 1, toolCount: 2 }));
+        res.end(
+          JSON.stringify({
+            generation: 1,
+            toolCount: 2,
+            connectionId: parsed.connectionId,
+          }),
+        );
         return;
       }
       if (path.endsWith('/client-files/status')) {

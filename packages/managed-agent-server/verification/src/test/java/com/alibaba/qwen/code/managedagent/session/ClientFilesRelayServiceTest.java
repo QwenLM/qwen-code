@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent.session;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.clientfiles.ClientFilesModels.QueuedRequest;
 import com.alibaba.qwen.code.managedagent.contracts.clientfiles.ClientFilesModels.Registration;
+import com.alibaba.qwen.code.managedagent.contracts.clientfiles.ClientFilesModels.Status;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.persistence.ClientFilesRelayStore;
@@ -35,6 +36,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class ClientFilesRelayServiceTest {
+    private static final String CONNECTION = "conn-service";
     private static final String ACTOR = "operator";
     private JdbcTemplate jdbc;
     private ClientFilesRelayStore store;
@@ -72,7 +74,7 @@ class ClientFilesRelayServiceTest {
 
     @Test
     void registerIssuesOneTimeCredentialAndPersistsOnlyItsDigest() {
-        Registration registration = service.register(tenant, ACTOR, session);
+        Registration registration = service.register(tenant, ACTOR, session, CONNECTION);
         assertThat(registration.serverId()).isEqualTo("local-files");
         assertThat(registration.generation()).isEqualTo(1L);
         assertThat(registration.token()).isNotBlank();
@@ -85,7 +87,7 @@ class ClientFilesRelayServiceTest {
     @Test
     void registerRefusedWhileDisabled() {
         properties.getClientFiles().setEnabled(false);
-        assertThatThrownBy(() -> service.register(tenant, ACTOR, session))
+        assertThatThrownBy(() -> service.register(tenant, ACTOR, session, CONNECTION))
                 .hasFieldOrPropertyWithValue("code", "client_files_disabled");
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_client_files_binding", Integer.class)).isZero();
     }
@@ -93,21 +95,21 @@ class ClientFilesRelayServiceTest {
     @Test
     void registerRefusedBelowExecutionAuthority() {
         when(workspaces.accessOf(anyString(), anyString(), anyString())).thenReturn(WorkspaceAccess.READER);
-        assertThatThrownBy(() -> service.register(tenant, ACTOR, session))
+        assertThatThrownBy(() -> service.register(tenant, ACTOR, session, CONNECTION))
                 .hasFieldOrPropertyWithValue("code", "client_files_execution_forbidden");
     }
 
     @Test
     void registerRefusedWithoutRelayUrl() {
         properties.getClientFiles().setRelayUrl("");
-        assertThatThrownBy(() -> service.register(tenant, ACTOR, session))
+        assertThatThrownBy(() -> service.register(tenant, ACTOR, session, CONNECTION))
                 .hasFieldOrPropertyWithValue("code", "client_files_relay_unconfigured");
     }
 
     @Test
     @SuppressWarnings("unchecked")
     void registerDispatchesTheRelayEndpointAndTokenToTheHarness() throws Exception {
-        Registration registration = service.register(tenant, ACTOR, session);
+        Registration registration = service.register(tenant, ACTOR, session, CONNECTION);
         // The CLI harness route test posts this same fixture, so a field
         // rename on either side of the dispatch turns one suite red.
         Map<String, Object> expected = new ObjectMapper().readValue(
@@ -121,29 +123,32 @@ class ClientFilesRelayServiceTest {
     void registerFailsWhenTheHarnessCannotBeReached() {
         when(harness.clientFilesOperation(anyString(), anyString(), any()))
                 .thenThrow(new UnsupportedOperationException("unavailable"));
-        assertThatThrownBy(() -> service.register(tenant, ACTOR, session))
+        assertThatThrownBy(() -> service.register(tenant, ACTOR, session, CONNECTION))
                 .hasFieldOrPropertyWithValue("code", "client_files_relay_unavailable");
     }
 
     @Test
     void refusedReRegisterRestoresThePreviousBinding() throws Exception {
-        Registration first = service.register(tenant, ACTOR, session);
+        Registration first = service.register(tenant, ACTOR, session, CONNECTION);
         when(harness.clientFilesOperation(anyString(), anyString(), any()))
                 .thenThrow(new UnsupportedOperationException("hosted_turn_active"));
-        assertThatThrownBy(() -> service.register(tenant, ACTOR, session))
+        assertThatThrownBy(() -> service.register(tenant, ACTOR, session, CONNECTION))
                 .hasFieldOrPropertyWithValue("code", "client_files_relay_unavailable");
-        // The previous generation is active again and its credential still
-        // reaches the queue, instead of fencing every call to a refused token.
+        // The previous credential is active again at a fresh monotonic
+        // generation (never rewinding into the failed attempt's namespace) and
+        // still reaches the queue, instead of fencing every call to a refused
+        // token.
+        long restoredGeneration = first.generation() + 2;
         assertThat(service.status(tenant, ACTOR, session).generation())
-                .isEqualTo(first.generation());
+                .isEqualTo(restoredGeneration);
         assertThat(service.status(tenant, ACTOR, session).state()).isEqualTo("active");
         service.mcp(tenant, session, first.token(), request("1"));
-        assertThat(awaitQueue(first.generation(), 1).get(0).requestId()).isEqualTo("1");
+        assertThat(awaitQueue(restoredGeneration, 1).get(0).requestId()).isEqualTo("1");
     }
 
     @Test
     void streamClosedTearsDownTheBindingAndQueue() throws Exception {
-        Registration registration = service.register(tenant, ACTOR, session);
+        Registration registration = service.register(tenant, ACTOR, session, CONNECTION);
         mcpInBackground(registration.token(), request("1"));
         awaitQueue(registration.generation(), 1);
         service.streamClosed(tenant, ACTOR, session, registration.generation());
@@ -159,7 +164,7 @@ class ClientFilesRelayServiceTest {
 
     @Test
     void streamClosedIsGenerationFencedAndIdempotent() throws Exception {
-        Registration registration = service.register(tenant, ACTOR, session);
+        Registration registration = service.register(tenant, ACTOR, session, CONNECTION);
         // A stale stream callback for an older generation must not close the
         // current binding.
         service.streamClosed(tenant, ACTOR, session, registration.generation() + 1);
@@ -173,10 +178,10 @@ class ClientFilesRelayServiceTest {
 
     @Test
     void reRegisterAdvancesGenerationAndFailsTheOldQueue() throws Exception {
-        Registration first = service.register(tenant, ACTOR, session);
+        Registration first = service.register(tenant, ACTOR, session, CONNECTION);
         mcpInBackground(first.token(), request("1"));
         awaitQueue(first.generation(), 1);
-        Registration second = service.register(tenant, ACTOR, session);
+        Registration second = service.register(tenant, ACTOR, session, CONNECTION);
         assertThat(second.generation()).isEqualTo(2L);
         assertThat(jdbc.queryForObject("SELECT state FROM ma_client_files_request WHERE request_id='1'",
                 String.class)).isEqualTo("failed");
@@ -186,7 +191,7 @@ class ClientFilesRelayServiceTest {
 
     @Test
     void mcpRefusesWrongOrMissingCredential() {
-        service.register(tenant, ACTOR, session);
+        service.register(tenant, ACTOR, session, CONNECTION);
         assertThatThrownBy(() -> service.mcp(tenant, session, "wrong", request("1")))
                 .hasFieldOrPropertyWithValue("code", "client_files_credential_invalid");
         assertThatThrownBy(() -> service.mcp(tenant, session, null, request("1")))
@@ -195,7 +200,7 @@ class ClientFilesRelayServiceTest {
 
     @Test
     void mcpRoundTripsThroughTheBrowserQueue() throws Exception {
-        Registration registration = service.register(tenant, ACTOR, session);
+        Registration registration = service.register(tenant, ACTOR, session, CONNECTION);
         CompletableFuture<String> call =
                 service.mcp(tenant, session, registration.token(), request("7"));
         List<QueuedRequest> drained = awaitQueue(registration.generation(), 1);
@@ -207,7 +212,7 @@ class ClientFilesRelayServiceTest {
 
     @Test
     void mcpExpiresToTheStructuredOfflineError() throws Exception {
-        Registration registration = service.register(tenant, ACTOR, session);
+        Registration registration = service.register(tenant, ACTOR, session, CONNECTION);
         String answer = service.mcp(tenant, session, registration.token(), request("9"))
                 .get(5, TimeUnit.SECONDS);
         assertThat(answer).contains("client_files_offline").contains("\"id\":\"9\"");
@@ -215,7 +220,7 @@ class ClientFilesRelayServiceTest {
 
     @Test
     void mcpRetryOfAnAnsweredIdReplaysTheAnswer() throws Exception {
-        Registration registration = service.register(tenant, ACTOR, session);
+        Registration registration = service.register(tenant, ACTOR, session, CONNECTION);
         CompletableFuture<String> call =
                 service.mcp(tenant, session, registration.token(), request("3"));
         awaitQueue(registration.generation(), 1);
@@ -228,7 +233,7 @@ class ClientFilesRelayServiceTest {
 
     @Test
     void mcpSessionResolvesTheTenantFromTheBinding() throws Exception {
-        Registration registration = service.register(tenant, ACTOR, session);
+        Registration registration = service.register(tenant, ACTOR, session, CONNECTION);
         CompletableFuture<String> call =
                 service.mcpSession(session, registration.token(), request("5"));
         List<QueuedRequest> drained = awaitQueue(registration.generation(), 1);
@@ -242,7 +247,7 @@ class ClientFilesRelayServiceTest {
 
     @Test
     void mcpNotificationIsFireAndForget() throws Exception {
-        Registration registration = service.register(tenant, ACTOR, session);
+        Registration registration = service.register(tenant, ACTOR, session, CONNECTION);
         assertThat(service.mcp(tenant, session, registration.token(),
                 "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}")
                 .get(5, TimeUnit.SECONDS)).isNull();
@@ -251,7 +256,7 @@ class ClientFilesRelayServiceTest {
 
     @Test
     void respondValidatesShapeOwnershipAndGeneration() {
-        Registration registration = service.register(tenant, ACTOR, session);
+        Registration registration = service.register(tenant, ACTOR, session, CONNECTION);
         long generation = registration.generation();
         assertThatThrownBy(() -> service.respond(tenant, ACTOR, session, generation, "1", "{}", "boom"))
                 .hasFieldOrPropertyWithValue("code", "client_files_invalid");
@@ -267,10 +272,10 @@ class ClientFilesRelayServiceTest {
 
     @Test
     void unregisterClosesTheBindingAndFailsQueuedRequests() throws Exception {
-        Registration registration = service.register(tenant, ACTOR, session);
+        Registration registration = service.register(tenant, ACTOR, session, CONNECTION);
         mcpInBackground(registration.token(), request("1"));
         awaitQueue(registration.generation(), 1);
-        assertThat(service.unregister(tenant, ACTOR, session).state()).isEqualTo("closed");
+        assertThat(service.unregister(tenant, ACTOR, session, null).state()).isEqualTo("closed");
         assertThat(jdbc.queryForObject("SELECT state FROM ma_client_files_request WHERE request_id='1'",
                 String.class)).isEqualTo("failed");
         assertThatThrownBy(() -> service.mcp(tenant, session, registration.token(), request("2")))
@@ -278,8 +283,22 @@ class ClientFilesRelayServiceTest {
     }
 
     @Test
+    void staleUnregisterDoesNotCloseAReplacedBinding() throws Exception {
+        Registration registration = service.register(tenant, ACTOR, session, CONNECTION);
+        // An old tab whose registration was replaced tears down with its own
+        // (now stale) connection identity: it must not close the current binding.
+        Status stale = service.unregister(tenant, ACTOR, session, "superseded-connection");
+        assertThat(stale.state()).isEqualTo("active");
+        assertThat(stale.generation()).isEqualTo(registration.generation());
+        assertThat(service.status(tenant, ACTOR, session).state()).isEqualTo("active");
+        // The owning connection still closes it.
+        assertThat(service.unregister(tenant, ACTOR, session, CONNECTION).state())
+                .isEqualTo("closed");
+    }
+
+    @Test
     void deliveryRefusedAfterTheActorLosesExecutionAuthority() throws Exception {
-        Registration registration = service.register(tenant, ACTOR, session);
+        Registration registration = service.register(tenant, ACTOR, session, CONNECTION);
         mcpInBackground(registration.token(), request("1"));
         awaitQueue(registration.generation(), 1);
         when(workspaces.accessOf(anyString(), anyString(), anyString())).thenReturn(WorkspaceAccess.READER);
@@ -293,7 +312,7 @@ class ClientFilesRelayServiceTest {
 
     @Test
     void settlementRefusedAfterTheActorLosesExecutionAuthority() throws Exception {
-        Registration registration = service.register(tenant, ACTOR, session);
+        Registration registration = service.register(tenant, ACTOR, session, CONNECTION);
         mcpInBackground(registration.token(), request("1"));
         awaitQueue(registration.generation(), 1);
         when(workspaces.accessOf(anyString(), anyString(), anyString())).thenReturn(WorkspaceAccess.READER);
@@ -308,7 +327,7 @@ class ClientFilesRelayServiceTest {
 
     @Test
     void oversizePayloadIsRefused() {
-        Registration registration = service.register(tenant, ACTOR, session);
+        Registration registration = service.register(tenant, ACTOR, session, CONNECTION);
         String body = "{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"method\":\"tools/call\",\"params\":\""
                 + "x".repeat(properties.getClientFiles().getMaxPayloadBytes()) + "\"}";
         assertThatThrownBy(() -> service.mcp(tenant, session, registration.token(), body))
@@ -318,7 +337,7 @@ class ClientFilesRelayServiceTest {
     @Test
     void queueDepthIsBounded() throws Exception {
         properties.getClientFiles().setQueueDepth(1);
-        Registration registration = service.register(tenant, ACTOR, session);
+        Registration registration = service.register(tenant, ACTOR, session, CONNECTION);
         mcpInBackground(registration.token(), request("1"));
         awaitQueue(registration.generation(), 1);
         assertThatThrownBy(() -> service.mcp(tenant, session, registration.token(), request("2")))

@@ -28,6 +28,7 @@ function startPeer(clientFilesEnabled: boolean): Promise<{
   const registered: Record<string, unknown>[] = [];
   const responses: Record<string, unknown>[] = [];
   const unregistered: Record<string, unknown>[] = [];
+  let relayConnectionId: unknown;
   const heartbeats = new Set<NodeJS.Timeout>();
   const summary = {
     sessionId: 's1',
@@ -102,12 +103,14 @@ function startPeer(clientFilesEnabled: boolean): Promise<{
         });
       if (path.endsWith('/client-files/register')) {
         registered.push(parsed);
+        relayConnectionId = parsed.connectionId;
         return json(200, {
           serverId: 'local-files',
           generation: 1,
           token: 'fixture-token',
           expiresAt: Date.now() + 3_600_000,
           toolCount: 1,
+          connectionId: relayConnectionId,
         });
       }
       if (path.endsWith('/client-files/status'))
@@ -116,6 +119,7 @@ function startPeer(clientFilesEnabled: boolean): Promise<{
           generation: 1,
           state: 'active',
           expiresAt: Date.now() + 3_600_000,
+          connectionId: relayConnectionId,
         });
       if (path.endsWith('/client-files/unregister')) {
         unregistered.push(parsed);

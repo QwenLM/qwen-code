@@ -48,13 +48,15 @@ public class ClientFilesController {
     @PostMapping("/register")
     public ResponseEntity<Registration> register(TenantContext tenant,
             @RequestBody RegisterRequest request) {
-        return noStore(service.register(tenant.tenantId(), tenant.requireActorId(), request.sessionId()));
+        return noStore(service.register(tenant.tenantId(), tenant.requireActorId(),
+                request.sessionId(), request.connectionId()));
     }
 
     @PostMapping("/unregister")
     public ResponseEntity<Status> unregister(TenantContext tenant,
             @RequestBody UnregisterRequest request) {
-        return noStore(service.unregister(tenant.tenantId(), tenant.requireActorId(), request.sessionId()));
+        return noStore(service.unregister(tenant.tenantId(), tenant.requireActorId(),
+                request.sessionId(), request.connectionId()));
     }
 
     @PostMapping("/status")
@@ -69,7 +71,8 @@ public class ClientFilesController {
         String actor = tenant.requireActorId();
         String session = request.sessionId();
         long generation = request.generation();
-        service.requests(tenant.tenantId(), actor, session, generation);
+        service.requireStreamConnection(tenant.tenantId(), actor, session, generation,
+                request.connectionId());
         var emitter = new SseEmitter(300_000L);
         var open = new AtomicBoolean(true);
         // Single owner per (tenant, actor, Session): a reconnect replaces the

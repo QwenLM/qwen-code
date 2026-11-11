@@ -27,6 +27,9 @@ interface PeerOptions {
   streamStatus?: number;
   /** End the SSE response cleanly right after opening it (idle timeout). */
   endStream?: boolean;
+  /** Force the binding's connection identity to this value, simulating a
+   * concurrent tab that replaced this bridge's registration. */
+  hijackConnectionId?: string;
 }
 
 function startPeer(opts: PeerOptions = {}): Promise<Peer> {
@@ -41,7 +44,9 @@ function startPeer(opts: PeerOptions = {}): Promise<Peer> {
   let streamRes: import('node:http').ServerResponse | undefined;
   // Like the real control plane: register creates the binding, then blocks
   // on the Harness discovery that the browser drain must answer.
-  let binding: { generation: number; state: string } | undefined =
+  let binding:
+    | { generation: number; state: string; connectionId?: string }
+    | undefined =
     opts.initialGeneration !== undefined
       ? { generation: opts.initialGeneration, state: 'active' }
       : undefined;
@@ -58,11 +63,26 @@ function startPeer(opts: PeerOptions = {}): Promise<Peer> {
       const path = req.url ?? '';
       if (path.endsWith('/client-files/register')) {
         registered.push(parsed);
-        binding = { generation: registerGeneration, state: 'active' };
-        if (opts.streamStatus === undefined) await registerDone;
+        const connectionId =
+          opts.hijackConnectionId ??
+          (parsed.connectionId as string | undefined);
+        binding = {
+          generation: registerGeneration,
+          state: 'active',
+          connectionId,
+        };
+        if (
+          opts.streamStatus === undefined &&
+          opts.hijackConnectionId === undefined
+        )
+          await registerDone;
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(
-          JSON.stringify({ generation: registerGeneration, toolCount: 1 }),
+          JSON.stringify({
+            generation: registerGeneration,
+            toolCount: 1,
+            connectionId,
+          }),
         );
         return;
       }
@@ -73,7 +93,12 @@ function startPeer(opts: PeerOptions = {}): Promise<Peer> {
       }
       if (path.endsWith('/client-files/unregister')) {
         unregistered.push(parsed);
-        if (binding) binding.state = 'closed';
+        // A stale teardown (connection identity no longer current) is a no-op.
+        const stale =
+          binding !== undefined &&
+          parsed.connectionId !== undefined &&
+          parsed.connectionId !== binding.connectionId;
+        if (binding && !stale) binding.state = 'closed';
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ registered: false }));
         return;
@@ -301,5 +326,23 @@ describe('ManagedClientFilesBridge', () => {
     });
     await b.connect();
     expect(b.getState()).toMatchObject({ phase: 'failed' });
+  });
+
+  it('does not serve a concurrent tab that replaced its registration', async () => {
+    // The binding ends up carrying another tab's connection identity; this
+    // bridge must fail rather than drain that tab's requests onto its own
+    // directory handle.
+    const p = await peer({ hijackConnectionId: 'other-tab' });
+    const handled: JsonRpcRequest[] = [];
+    const b = bridge(p, {
+      async handle(message) {
+        handled.push(message);
+        return { jsonrpc: '2.0', id: message.id ?? null, result: {} };
+      },
+    });
+    await b.connect();
+    expect(b.getState()).toMatchObject({ phase: 'failed' });
+    expect(handled).toEqual([]);
+    expect(p.responses).toEqual([]);
   });
 });
