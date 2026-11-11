@@ -486,6 +486,38 @@ function fdRedirectFile(word: string): string | undefined {
  * unquoted `>&`, `N>&` or `<&`, and `fdCloses` those of them that close the
  * descriptor with an unquoted `-` and pass the rest of the word on.
  */
+/**
+ * True when a token is a here-string operator glued to the text that follows
+ * it (`<<<x`, `<<<x>out.txt`). `bare` marks which characters were typed
+ * unquoted; without it the raw prefix decides.
+ */
+function isGluedHereString(token: string, bare: string | undefined): boolean {
+  if (!token.startsWith('<<<') || token.length === 3) return false;
+  return bare === undefined || bare.startsWith('111');
+}
+
+/** Index of the first unquoted `<` or `>` in a word, or -1 when there is none. */
+function firstUnquotedRedirectIndex(
+  word: string,
+  bare: string | undefined,
+): number {
+  for (let index = 0; index < word.length; index++) {
+    const char = word[index];
+    if (char !== '<' && char !== '>') continue;
+    if (bare !== undefined) {
+      if (bare[index] === '1') return index;
+      continue;
+    }
+    // No marking available: an odd run of backslashes still escapes it.
+    let backslashes = 0;
+    for (let back = index - 1; back >= 0 && word[back] === '\\'; back--) {
+      backslashes++;
+    }
+    if (backslashes % 2 === 0) return index;
+  }
+  return -1;
+}
+
 function extractRedirects(
   tokens: string[],
   cwd: string,
@@ -496,6 +528,33 @@ function extractRedirects(
   const readFiles: string[] = [];
   const writeFiles: string[] = [];
   const toRemove = new Set<number>();
+
+  // A here-string operator can be glued to its operand (`<<<x`) or to a
+  // redirect that follows it (`<<<x>out.txt`). Bash reads `<<<`, then the
+  // operand word, then the redirect, so split the operator off and let the
+  // loop treat the remainder as the ordinary words it is.
+  if (tokens.some((tok, index) => isGluedHereString(tok, bares?.[index]))) {
+    const splitTokens: string[] = [];
+    const splitBares: string[] = [];
+    for (let index = 0; index < tokens.length; index++) {
+      const tok = tokens[index]!;
+      const mark = bares?.[index];
+      if (isGluedHereString(tok, mark)) {
+        splitTokens.push('<<<', tok.slice(3));
+        const marks = mark ?? '1'.repeat(tok.length);
+        splitBares.push(marks.slice(0, 3), marks.slice(3));
+      } else {
+        splitTokens.push(tok);
+        splitBares.push(mark ?? '');
+      }
+    }
+    tokens.length = 0;
+    tokens.push(...splitTokens);
+    if (bares !== undefined) {
+      bares.length = 0;
+      bares.push(...splitBares);
+    }
+  }
 
   for (let i = 0; i < tokens.length; i++) {
     const tok = tokens[i]!;
@@ -578,11 +637,25 @@ function extractRedirects(
         i++;
       }
     } else if (syntax === '<<<') {
-      // A here-string operand feeds stdin; it is never an argument.
+      // A here-string operand feeds stdin; it is never an argument. A
+      // redirect can be glued to that operand (`<<< x>out.txt`) and it still
+      // performs the write, so consume only the operand word and leave the
+      // rest of the token for the combined-redirect branch below (R26-3).
       toRemove.add(i);
-      if (tokens[i + 1]) {
-        toRemove.add(i + 1);
-        i++;
+      const operand = tokens[i + 1];
+      if (operand !== undefined) {
+        const cut = firstUnquotedRedirectIndex(operand, bares?.[i + 1]);
+        if (cut === -1) {
+          toRemove.add(i + 1);
+          i++;
+        } else if (cut > 0) {
+          tokens[i + 1] = operand.slice(cut);
+          if (bares !== undefined && bares[i + 1] !== undefined) {
+            bares[i + 1] = bares[i + 1]!.slice(cut);
+          }
+        }
+        // cut === 0: the token is only a redirect; leave it for the next
+        // iteration, which extracts it.
       }
     } else if (
       syntax === '2>' ||
@@ -2573,25 +2646,105 @@ function stripHeredocBodies(command: string): StrippedHeredocs {
   const pendingDelimiters: string[] = [];
   const lexer = new HeredocLexer();
 
-  for (const line of lines) {
+  let index = 0;
+  while (index < lines.length) {
+    const line = lines[index]!;
     if (pendingDelimiters.length > 0) {
       if (line.trim() === pendingDelimiters[0]) {
         pendingDelimiters.shift();
       }
+      index++;
       continue;
     }
 
-    kept.push(line);
-    pendingDelimiters.push(...lexer.scan(line));
+    // Bash removes a `\`+newline before it parses, so a continuation inside a
+    // heredoc opener word glues the next line into that word: `cat <<EO\` +
+    // `F` names the delimiter `EOF`, and `cd` after it becomes an argument.
+    // Without the join the opener looks unresolvable, the following line is
+    // read as the previous body and the real command after the body is lost.
+    // A `\` at the end of a *comment* does not continue the line (bash, dash
+    // and sh all run the next line), so those are left unjoined.
+    let logical = line;
+    while (
+      index + 1 < lines.length &&
+      endsWithJoinedBackslashOutsideComment(logical)
+    ) {
+      index++;
+      logical = logical.slice(0, -1) + lines[index]!;
+    }
+
+    kept.push(logical);
+    pendingDelimiters.push(...lexer.scan(logical));
     const commentStart = lexer.takeCommentStart();
     if (commentStart !== null) {
       // bash never executes a commented tail; dropping it keeps a `>` inside
       // it from being read as a write.
-      kept[kept.length - 1] = line.slice(0, commentStart);
+      kept[kept.length - 1] = logical.slice(0, commentStart);
     }
+    index++;
   }
 
   return { text: kept.join('\n') };
+}
+
+/**
+ * Offset of a definite `#` comment start in `line`, or null.
+ *
+ * Deliberately simpler than {@link HeredocLexer}: this only decides whether a
+ * trailing backslash sits inside a comment, and answering "no comment" merely
+ * keeps the pre-existing line-by-line behaviour, so the cheap scan is safe.
+ */
+function commentStartOffset(line: string): number | null {
+  let single = false;
+  let double = false;
+  let escaped = false;
+  let backtick = false;
+  for (let index = 0; index < line.length; index++) {
+    const char = line[index]!;
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (char === '\\' && !single) {
+      escaped = true;
+      continue;
+    }
+    if (single) {
+      if (char === "'") single = false;
+      continue;
+    }
+    if (double) {
+      if (char === '"') double = false;
+      continue;
+    }
+    if (char === '`') {
+      backtick = !backtick;
+      continue;
+    }
+    if (char === "'") {
+      single = true;
+      continue;
+    }
+    if (char === '"') {
+      double = true;
+      continue;
+    }
+    if (
+      char === '#' &&
+      !backtick &&
+      (index === 0 || /[\s;&|()]/.test(line[index - 1]!))
+    ) {
+      return index;
+    }
+  }
+  return null;
+}
+
+/** True when the line ends with a `\` that bash joins to the next line. */
+function endsWithJoinedBackslashOutsideComment(line: string): boolean {
+  const trailing = /\\+$/.exec(line)?.[0].length ?? 0;
+  if (trailing % 2 === 0) return false;
+  return commentStartOffset(line) === null;
 }
 
 class HeredocLexer {

@@ -845,24 +845,29 @@ describe('extractShellOperationsAcrossCommand', () => {
       [write(REPO_SETTINGS)],
     ],
     [
-      // R25-1 (5): an earlier delimiter survives a later opener that closes,
-      // so the write after it is real. Measured with bash, dash and sh: both
-      // here-docs close, then `echo {} > .qwen/settings.json` runs.
-      'keeps earlier delimiters when a later opener closes',
-      'cat <<A && cat <<EO\nA\nEO\necho {} > .qwen/settings.json',
-      [write(REPO_SETTINGS)],
+      // R25-1 (6): bash joins the continuation into the delimiter word, so
+      // `<<EO` + `F` is `EOF`, the body is `cd /tmp`, and the trailing
+      // `cat > settings.json` runs in the current directory. Measured with
+      // bash, dash and sh: all three create `./settings.json`.
+      'joins a continued heredoc delimiter before reading its body',
+      'cat <<EO\\\nF\ncd /tmp\nEOF\ncat > settings.json',
+      [write('/repo/settings.json')],
     ],
     [
-      // Same shape with a backslash-newline inside the opener word. bash glues
-      // the continuation into the word (`<<EO` + `cd` becomes the delimiter
-      // `EOcd`, `/tmp` becomes cat's argument), so it performs neither the `cd`
-      // nor the write: measured, bash/dash/sh exit 1 on `cat /tmp` and create
-      // no file. This lexer does not model that fold, so it keeps the later
-      // redirect visible. That is the conservative direction, and this case
-      // pins the over-report so it cannot silently become a miss.
-      'keeps a later redirect visible when a continued opener swallows the line',
+      // Same shape with a redirect on the opener and an earlier heredoc: both
+      // delimiters are real (`A`, then the joined `EOcd`), the body after each
+      // is data, and nothing is written. `cat` does get `/tmp` as an argument
+      // (bash: `cat: /tmp: Is a directory`), so the read is the only op.
+      'does not report a write swallowed by a joined delimiter',
       'cat <<A && cat <<EO\\\ncd /tmp\nA\necho {} > .qwen/settings.json',
-      [write(REPO_SETTINGS)],
+      [read('/tmp')],
+    ],
+    [
+      // A `\` at the end of a comment does not continue the line: bash, dash
+      // and sh all run the next line, so its write must stay visible.
+      'keeps the line after a comment continuation',
+      'echo a # x \\\necho hi > out.txt',
+      [write('/repo/out.txt')],
     ],
     [
       // C1: a `<<` inside double quotes is data, not a heredoc opener; the
@@ -898,6 +903,25 @@ describe('extractShellOperationsAcrossCommand', () => {
       'reports a redirect on a static cd segment from the starting cwd',
       "cd .qwen > settings.json && echo '{}' > settings.local.json",
       [write('/repo/settings.json'), write('/repo/.qwen/settings.local.json')],
+    ],
+    [
+      // R26-3: only the here-string operand feeds stdin. A redirect glued to
+      // it still runs: bash creates out.txt (2 bytes, "x") for both spellings.
+      'keeps a redirect glued to a spaced here-string operand',
+      'cat <<< x>out.txt',
+      [write('/repo/out.txt')],
+    ],
+    [
+      'keeps a redirect glued to an unspaced here-string operand',
+      'cat <<<x>out.txt',
+      [write('/repo/out.txt')],
+    ],
+    [
+      // The `<` side of the same token: bash redirects stdin from the file,
+      // overriding the here-string.
+      'keeps a read redirect glued to a here-string operand',
+      'cat <<< x</etc/passwd',
+      [read('/etc/passwd')],
     ],
     [
       'reports a redirect on a dynamic cd segment from the current cwd',
