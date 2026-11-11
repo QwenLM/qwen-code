@@ -575,11 +575,13 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
   voice_transcribe: NO_MANAGED_EQUIVALENT('no Managed voice route'),
   realtime_voice: NO_MANAGED_EQUIVALENT('no Managed voice route'),
   realtime_voice_web: NO_MANAGED_EQUIVALENT('no Managed voice route'),
-  // The Managed terminal is a WebSocket upgrade, not a REST handler, so it
-  // is evidenced by its design rather than a SurfaceRegistry route label.
+  // The Managed terminal is a WebSocket upgrade; its admission ticket is
+  // minted over the labelled terminal-ticket route, with the design as
+  // secondary evidence.
   web_terminal: {
     standing: 'managed',
-    evidence: 'docs:docs/design/2026-11-10-managed-web-terminal.md',
+    evidence:
+      'surface:SESSION_TERMINAL_TICKET,docs:docs/design/2026-11-10-managed-web-terminal.md',
   },
 };
 
