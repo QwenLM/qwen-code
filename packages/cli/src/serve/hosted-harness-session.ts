@@ -1293,7 +1293,7 @@ function record(
   };
 }
 
-async function readHostedClassifierUserText(
+export async function readHostedClassifierUserText(
   session: HostedSession,
 ): Promise<ReadonlyMap<string, string>> {
   const accepted = session.managed.authority
@@ -1301,13 +1301,33 @@ async function readHostedClassifierUserText(
     .filter(
       (event) =>
         event.kind === 'input.accepted' &&
-        event.payload['source'] === 'hosted-harness',
+        (event.payload['source'] === 'hosted-harness' ||
+          event.payload['source'] === LOOP_INPUT_SOURCE),
     )
     .slice(-40);
   return new Map(
     await Promise.all(
       accepted.map(async (event) => {
         const promptId = String(event.payload['inputId']);
+        if (event.payload['source'] === LOOP_INPUT_SOURCE) {
+          // A loop continuation's prompt lives in its input envelope, not the
+          // hosted-harness parts format readHostedInput parses. Carry it so a
+          // fired tick's successor arm is vetted against its own prompt.
+          let text = '';
+          try {
+            const ref = assertManagedSessionDurableRef(
+              event.payload['contentRef'],
+              'loop wakeup input',
+            );
+            const body = JSON.parse(
+              (await session.managed.resources.read(ref)).toString('utf8'),
+            ) as { text?: unknown };
+            if (typeof body.text === 'string') text = body.text;
+          } catch {
+            text = '';
+          }
+          return [promptId, text] as const;
+        }
         return [
           promptId,
           (await readHostedInput(session.managed, promptId, '')).text,
@@ -11961,6 +11981,9 @@ export function registerHostedHarnessSessionRoutes(
             history,
             excludedPromptIds: unansweredPrompts(session),
             classifierUserText: () => readHostedClassifierUserText(session),
+            setLoopClassifier: (classify) => {
+              session.loopClassify = classify;
+            },
             commitCompression: async (payload) => {
               await session.managed.sink.write(
                 record(session, sessionId, 'system', null, {

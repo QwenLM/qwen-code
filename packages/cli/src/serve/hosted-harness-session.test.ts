@@ -92,6 +92,7 @@ import {
 } from './hosted-harness-contract.js';
 import {
   attributeShellReceipts,
+  readHostedClassifierUserText,
   registerHostedHarnessSessionRoutes,
   settleCancelledHookTurn,
   settleCrashedWakeTurnAftermath,
@@ -9098,6 +9099,94 @@ describe('Hosted Harness no-tool session', () => {
       await managed.close().catch(() => undefined);
     }
   }
+
+  it('classifier user-text map carries loop continuations for arm vetting', async () => {
+    const key = {
+      tenantId: 'tenant',
+      workspaceId: 'workspace',
+      sessionId: SESSION_ID,
+    };
+    const resources = LocalManagedSessionResourceStore.create({
+      runtimeBaseDir: state.root,
+      sessionKey: key,
+    });
+    const managed = await openManagedSession({
+      runtimeBaseDir: state.root,
+      transcriptPath: '',
+      sessionId: SESSION_ID,
+      sessionKey: key,
+      cwd: state.root,
+      version: 'hosted-harness/1',
+      workerId: BOOT_ID,
+      activationLeaseDurationMs: 60_000,
+      journalStore: new LocalJsonlManagedSessionJournalStore({
+        runtimeBaseDir: state.root,
+        sessionId: SESSION_ID,
+        transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+      }),
+      resourceStore: resources,
+      create: {
+        definitionRef: await resources.publish(
+          'managed-definition',
+          Buffer.from(
+            JSON.stringify({
+              engine: 'managed',
+              sessionId: SESSION_ID,
+              toolProfile: 'hosted-workspace-shell/1',
+            }),
+          ),
+        ),
+        rootSnapshotRef: await resources.publish(
+          'managed-root',
+          Buffer.from(JSON.stringify({ cwd: state.root })),
+        ),
+        createdBy: 'hosted-harness',
+      },
+    });
+    try {
+      const submit = async (turnId: string, source: string) => {
+        const envelope =
+          source === 'loop'
+            ? { text: `text of ${turnId}` }
+            : [{ type: 'text', text: `text of ${turnId}` }];
+        await managed.authority.submitInput(
+          {
+            operation: 'submitInput',
+            commandId: turnId,
+            sessionKey: key,
+            contentDigest: 'a'.repeat(64),
+          },
+          {
+            inputId: turnId,
+            turnId,
+            source,
+            contentRef: await managed.resources.publish(
+              'managed-input',
+              Buffer.from(JSON.stringify(envelope), 'utf8'),
+            ),
+            admissionRef: await managed.resources.publish(
+              'managed-admission',
+              Buffer.from('{}', 'utf8'),
+            ),
+            deadline: null,
+            wakeReason: 'input',
+            notBefore: null,
+          },
+        );
+      };
+      await submit('loop:tick-1', 'loop');
+      await submit('prompt-human', 'hosted-harness');
+      const map = await readHostedClassifierUserText({
+        managed,
+      } as unknown as Parameters<typeof readHostedClassifierUserText>[0]);
+      // A fired loop tick must find its own prompt here, or its successor
+      // arm is refused as unavailable; removing loop from the map reds this.
+      expect(map.get('loop:tick-1')).toBe('text of loop:tick-1');
+      expect(map.get('prompt-human')).toBe('text of prompt-human');
+    } finally {
+      await managed.close().catch(() => undefined);
+    }
+  });
 
   it('does not keep the Session busy while a loop wakeup is still deferred', async () => {
     await prewriteLoopWakeupInput(Date.now() + 3_600_000);

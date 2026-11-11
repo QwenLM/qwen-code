@@ -1459,6 +1459,10 @@ async function runPreparedHostedHarnessTextTurn(
     throw cause;
   } finally {
     input.hooks?.setMessagesProvider(undefined);
+    // The loop classifier is only valid for this turn; clear it so a later
+    // turn cannot arm against a finished turn's closure (and the funnel's
+    // "no active classifier" refusal stays reachable).
+    input.setLoopClassifier?.(undefined);
     try {
       await config.shutdown({
         shutdownTelemetry: false,

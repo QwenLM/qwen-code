@@ -503,6 +503,94 @@ describe('Hosted Harness model boundary', () => {
     }
   });
 
+  it('vets a loop arm on a tick whose prompt is in the classifier user-text map', async () => {
+    config([
+      { type: LlmEventType.Content, value: 'done' },
+      { type: LlmEventType.Finished },
+    ]);
+    const classify = vi.spyOn(classifier, 'classifyAction').mockResolvedValue({
+      shouldBlock: false,
+      reason: '',
+      model: 'classifier',
+      stage: 'fast',
+      durationMs: 1,
+    });
+    let loopClassify:
+      | import('./hosted-loop-session.js').HostedLoopClassifier
+      | undefined;
+    let cleared = false;
+    try {
+      await runHostedHarnessTextTurn({
+        ...input,
+        prompt: '/loop check the deploy',
+        // The fired tick's own prompt, as the host user-text map now carries
+        // it for a loop input.
+        classifierUserText: async () =>
+          new Map([[input.promptId, '/loop check the deploy']]),
+        setLoopClassifier: (value) => {
+          if (value === undefined) cleared = true;
+          else loopClassify = value;
+        },
+        toolTurn: {
+          declarations: async () => [],
+          execute: async () => [],
+          consumeResults: async () => undefined,
+          setPermissionClassifier: () => {},
+        },
+      });
+      expect(loopClassify).toBeDefined();
+      const verdict = await loopClassify!({
+        delaySeconds: 60,
+        prompt: '/loop next tick',
+        reason: '',
+      });
+      expect(verdict.allowed).toBe(true);
+      expect(classify).toHaveBeenCalled();
+      // The classifier is cleared when the turn ends, so a later turn cannot
+      // arm against this finished turn's closure.
+      expect(cleared).toBe(true);
+    } finally {
+      classify.mockRestore();
+    }
+  });
+
+  it('refuses a loop arm when the tick prompt is absent from the user-text map', async () => {
+    config([
+      { type: LlmEventType.Content, value: 'done' },
+      { type: LlmEventType.Finished },
+    ]);
+    const classify = vi.spyOn(classifier, 'classifyAction');
+    let loopClassify:
+      | import('./hosted-loop-session.js').HostedLoopClassifier
+      | undefined;
+    try {
+      await runHostedHarnessTextTurn({
+        ...input,
+        prompt: '/loop check the deploy',
+        classifierUserText: async () => new Map(),
+        setLoopClassifier: (value) => {
+          if (value !== undefined) loopClassify = value;
+        },
+        toolTurn: {
+          declarations: async () => [],
+          execute: async () => [],
+          consumeResults: async () => undefined,
+          setPermissionClassifier: () => {},
+        },
+      });
+      expect(loopClassify).toBeDefined();
+      const verdict = await loopClassify!({
+        delaySeconds: 60,
+        prompt: '/loop next tick',
+        reason: '',
+      });
+      expect(verdict.allowed).toBe(false);
+      expect(classify).not.toHaveBeenCalled();
+    } finally {
+      classify.mockRestore();
+    }
+  });
+
   it('commits queued guidance in FIFO order before requesting the model', async () => {
     const model = config([{ type: LlmEventType.Finished, value: {} }]);
     const commit = vi.fn().mockResolvedValue(undefined);
