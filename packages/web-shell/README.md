@@ -3,9 +3,51 @@
 Qwen Code Web Shell 是面向浏览器的 daemon 会话终端 UI，可以作为 React
 组件嵌入到其他项目中。
 
+## 宿主已有 Managed Session
+
+`ManagedAgentWebShell` 支持注入 `managedAgentProvider`；省略它时必须同时传 `baseUrl`，
+由它创建内置 Java provider。两者都给不出时渲染的是 shell 自己的错误回退界面（守卫
+的错误信息只打到 `console.error`，不会抛给宿主），不会把请求解析到
+`<origin>/undefined`。恢复需要宿主重新提供 `baseUrl` 或新的 provider：边界只通过
+`resetKeys` 清除错误，回退界面自带的「重试」会用相同 props 重渲染并再次落到同一错误。
+宿主传 `hostSessionOnly: true` 时只打开显式给定的 `sessionId`，隐藏内部会话列表、
+New 与列表刷新；没有 ID 时等待宿主选择，不自动选择或创建。官方消息列表和 composer
+沿用 provider 的真实 capabilities；四 API 宿主应设置 `canCancel: false`、省略不支持的
+可选 API，并按单轮/运行状态提供 `capabilities.canSend`。
+
+非 React 宿主可使用本地 ESM 入口：
+
+```ts
+// 相对于产物目录根（dist-managed-host/）；该目录已整体提供给宿主。
+import { renderManagedAgentWebShell } from './index.js';
+
+const shell = renderManagedAgentWebShell(container, {
+  managedAgentProvider: provider,
+  hostSessionOnly: true,
+  sessionId: existingSessionId,
+  language: 'zh-CN',
+  theme: 'dark',
+});
+// update 接受完整的新 props；宿主销毁时调用 shell.unmount()。
+```
+
+在包内执行 `npm run build:managed-host`，输出
+`dist-managed-host/index.js` 及相对 chunks，已 bundle React/React DOM 和运行时依赖，
+复用原有 scoped CSS 注入，无需单独 CSS 或 import map。需提供整个输出目录。
+该模式**不在**包的 `build` 里，避免给每次本地构建和全新克隆的 `prepare` 增加一次完整
+打包；防腐坏由独立 CI 任务 `Web Shell Managed Host Build` 承担，只在入口、构建配置或
+锁文件变化时触发。产物目录在 `dist/` 之外，普通应用构建清空 `dist/` 不会删掉它。
+入口仍未接入 `exports` 和 `files`，不随 npm 包发布（`dist/types/managed-host.d.ts`
+也在发布产物之外）。
+`navigationTarget` / `archivedNavigationTarget` 指向 shell 容器之外的宿主插槽时，
+入口会把列表包进带作用域标记的容器并同步主题变量，宿主无需自行引入 CSS。
+自定义 provider 的 `storageKey` 必须包含租户/账号身份；切换身份时更换 provider 与
+storageKey，旧 scope 沿用的 ID 会先丢弃，再由宿主显式给出新选择。详见
+[宿主接入设计](../../docs/design/2026-10-29-managed-host-webshell.zh-CN.md)。
+
 ## Managed 工作区与模型
 
-完整 Web Shell 在配置 `managedAgentProvider` 后，在同一个项目列表中同时显示本地和托管工作区，不再使用本地/托管 tab。名称旁的标志显示所属服务，工作区的新建会话使用统一的书写图标；顶部“新任务”继承当前会话或草稿的服务。新任务的工作区菜单可双向选择两类服务已有的工作区，保留原身份和独立草稿，提交前不创建工作区或会话。添加工作区时可明确选择本地（daemon）或托管（Managed Agent），切换表单或取消不会改变当前会话。托管模式复用标准欢迎界面、输入框、对话和工具卡片、审批、停止按钮及侧栏，后台任务继续运行。未配置 provider 时保持原首页。Java Vite 演示入口 `?managedProvider=java` 默认托管，`managed=0` 可明确选择本地，`managed=1&managedSession=...` 深链继续有效；直接打开本地会话链接时保持本地。完整行为与边界见[统一工作区导航设计](../../docs/design/2026-10-21-unified-workspace-navigation.zh-CN.md)。
+完整 Web Shell 在配置 `managedAgentProvider` 后，在同一个工作区列表中同时显示本地和托管工作区，不再使用本地/托管 tab。名称旁的标志显示所属服务，工作区的新建会话使用统一的书写图标；顶部“新建会话”继承当前会话或草稿的服务。新会话的工作区菜单可双向选择两类服务已有的工作区，保留原身份和独立草稿，提交前不创建工作区或会话。添加工作区时可明确选择本地（daemon）或托管（Managed Agent），切换表单或取消不会改变当前会话。托管模式复用标准欢迎界面、输入框、对话和工具卡片、审批、停止按钮及侧栏，后台任务继续运行。未配置 provider 时保持原首页。Java Vite 演示入口 `?managedProvider=java` 默认托管，`managed=0` 可明确选择本地，`managed=1&managedSession=...` 深链继续有效；直接打开本地会话链接时保持本地。完整行为与边界见[统一工作区导航设计](../../docs/design/2026-10-21-unified-workspace-navigation.zh-CN.md)。
 
 已有 Managed 会话的工作区、相对目录、Agent 预设和环境状态在会话上下文中查看。模型和工作区仍由 Java 授权，界面复用不改变后端工具范围或审批策略。导出的 `ManagedAgentWebShell` 独立入口保持兼容。
 
@@ -13,7 +55,7 @@ Qwen Code Web Shell 是面向浏览器的 daemon 会话终端 UI，可以作为 
 
 Java 新建页直接复用标准 Web Shell 的欢迎标题、输入框、原生模型菜单和工作区底栏。选择工作区、相对目录和模型后输入任务并发送，一次请求创建会话与首个 Turn；响应丢失保留冻结请求，已创建后的读回重试不会再次发送输入。旧 provider 的空创建能力保持兼容。更换工作区需新建会话；支持模型切换的会话可在空闲时选择服务端允许的模型，绑定工作区内切换目录仍使用已有修订校验流程。对话复用标准消息列表及输入框布局，保留 Managed 审批、取消、结果与未确认请求重试；不提供 daemon 附件、文件引用或斜杠命令。
 
-工作区查询返回 `capabilities.approvalModeSelection: true` 时，新任务按所选 Agent 查询审批策略，并复用输入框的策略菜单。Shell profile 支持 Ask Approval 与 Auto Edit，纯文件 profile 还可提供 Full Access；托管模式不提供 Classifier Approval 或 Plan。已保存的 AgentDefinition 只提供自身固定策略。选项加载失败或无效时暂停创建；更换模型会重新读取选项并保留草稿和工作区。明确选择的策略与会话创建请求一起固定保存，刷新后的重试沿用原策略；旧待确认请求继续省略策略。已有会话显示服务端保存的策略并禁用修改，需要新建任务才能更换。未宣告能力的旧服务端保留原行为。
+工作区查询返回 `capabilities.approvalModeSelection: true` 时，新会话按所选 Agent 查询审批策略，并复用输入框的策略菜单。Shell profile 支持 Ask Approval 与 Auto Edit，纯文件 profile 还可提供 Full Access；托管模式不提供 Classifier Approval 或 Plan。已保存的 AgentDefinition 只提供自身固定策略。选项加载失败或无效时暂停创建；更换模型会重新读取选项并保留草稿和工作区。明确选择的策略与会话创建请求一起固定保存，刷新后的重试沿用原策略；旧待确认请求继续省略策略。已有会话显示服务端保存的策略并禁用修改，需要新建会话才能更换。未宣告能力的旧服务端保留原行为。
 
 已有工作区托管会话的输入框优先显示服务端已确认的模型选择，其次显示最近成功主模型请求的实际模型；没有这些数据时只显示 Agent 身份。会话摘要返回 `capabilities.modelChange: true` 时，模型菜单从 `/session-models/query` 读取服务端允许列表，空闲时通过 `/session-models/change` 在同一会话内切换，后续消息使用新模型。活跃任务、审批、目录切换或未确认请求期间暂停切换。请求发送前保存会话、目标模型、修订和幂等键；响应不确定或刷新后继续确认原请求，读回后才更新选择，对话与草稿保留。旧服务端和不支持的会话保持只读模型控件。上下文浮层复用原生环形控件，显示最近成功请求的 prompt token 数、同一模型配置的窗口及剩余容量；切换后等待新模型观测，缺少有效计数时明确显示未知，不能用累计计费量推测。该浮层仅提供当前占用，不显示尚无托管接口支持的手动压缩或分类明细操作。本地模式保持原有模型切换与上下文功能。
 
@@ -71,11 +113,11 @@ Pierre 目录树，点击文件后左侧显示内容、右侧保留目录树。M
 嵌入式宿主通过 `rightPanel={{ items: ['files', 'review', 'sideTask'] }}` 启用。
 此入口需要有效、可信且无歧义的 daemon 工作区归属。
 
-新建任务页的内置 `header` 只提供工作区级入口：右侧面板开关、启用时的
+新建会话页的内置 `header` 只提供工作区级入口：右侧面板开关、启用时的
 Local Control，以及多主机位置。面板开关遵循 `header.items`，并在工作区确定后
 才显示；`rightPanel.items` 此时仅保留 `files`、`terminal` 和 `webPreview`，
 `review`、`sideTask`、`trajectory` 要等首条消息创建会话后才出现。
-自定义 `renderChatHeader` 的宿主在新建任务页仍不调用该渲染器。
+自定义 `renderChatHeader` 的宿主在新建会话页仍不调用该渲染器。
 输入框没有显示工作区选择器时，精简 header 保留只读工作区图标。
 面板跟随输入框选择的工作区；各工作区草稿独立保存，刷新和会话切换后可恢复，
 首条消息创建会话时迁移面板并删除草稿。草稿与会话各保留最近 20 份面板存档，
@@ -124,7 +166,7 @@ Artifact 发布的网页链接会在对应轮次留下产物卡片；开启网�
 内容的记录不能自动还原；任意开发网站也不会自动打包成离线网页。
 
 嵌入式接入方通过 `rightPanel={{ items: ['review', 'sideTask', 'webPreview'] }}`
-开启入口。新建任务页也可使用此入口；网页预览的草稿按输入框已选工作区保存，
+开启入口。新建会话页也可使用此入口；网页预览的草稿按输入框已选工作区保存，
 首条消息创建会话后随面板迁移。宿主 CSP 需要允许预览来源的 `frame-src`，同时用
 `frame-ancestors` 限制宿主页面只能被受信任的宿主嵌入，不能允许开发页面
 反过来嵌入宿主。预览容器会限制直接子页面跳转，但开发应用自己的后代
@@ -141,6 +183,9 @@ daemon 自身。页面的防嵌入策略可能要求使用外部打开。远程�
 `true` 或 `undefined` 时由宿主接管，保持旧版无返回值回调的行为。
 未提供回调时仍使用原生行为，`onFileReviewOpen` 保持更高优先级。
 该回调处理右侧面板请求；原生直接外部打开的记录链接仍走外部链接能力。
+提供该回调时，managed 存储产物（仅有 managedId、无 workspace 路径或 URL）的
+卡片动作会标为 Preview，因为宿主可能自行渲染其内容；未提供回调时，这类产物
+在默认面板只有元信息，卡片保持 Open。
 
 `filterArtifact(artifact, { turnId, sourceSessionId })` 返回是否展示消息末尾的
 产物卡片。过滤先于折叠数量计算，并应用于主会话、分屏和嵌套会话。
@@ -681,12 +726,13 @@ daemon 参数的完整含义和配置方式见
 | `theme`                        | `'dark' \| 'light'`                                                                                                                   | UI 主题，默认 `dark`                                                                                                                                                         |
 | `onThemeChange`                | `(theme: WebShellTheme) => void`                                                                                                      | `/theme` 命令切换主题后触发                                                                                                                                                  |
 | `onThemeResolved`              | `(theme: WebShellTheme) => void`                                                                                                      | 未提供 `theme` 且 shell 从 daemon 设置解析出主题时触发；仅供宿主同步文档外观，不应持久化为宿主偏好                                                                           |
-| `language`                     | `'en' \| 'zh-CN' \| 'zh' \| 'zh-cn'`                                                                                                  | UI 语言                                                                                                                                                                      |
+| `language`                     | `'en' \| 'zh-CN' \| 'zh' \| 'zh-cn' \| 'ru' \| 'ru-ru'`                                                                               | UI 语言；`ru` 目前只覆盖 `goal.*`/`goals.*`（部分目录），未覆盖的键按键回退英文                                                                                              |
 | `onLanguageChange`             | `(language: WebShellLanguage) => void`                                                                                                | `/language ui` 切换 UI 语言后触发                                                                                                                                            |
 | `onLanguageResolved`           | `(language: WebShellLanguage) => void`                                                                                                | 未提供 `language` 时，有效 UI 语言在未成为宿主偏好时触发，包括设置解析、乐观切换与回滚；仅供同步文档外观                                                                     |
 | `brand`                        | `WebShellBrand`                                                                                                                       | 产品品牌（名称与 Logo，`logo` 为 React 节点）；提供时整体取代 daemon 解析出的品牌，见下方「品牌（白标）」                                                                    |
 | `onBrandResolved`              | `(brand: WebShellResolvedBrand) => void`                                                                                              | 品牌解析完成后触发，载荷只含 `name` 与 `logoDataUri`（不含 `logo` 节点），供宿主应用到自己的文档；shell 自身从不写 `document.title` 或 favicon                               |
-| `onSlashCommand`               | `(command: WebShellSlashCommand) => boolean \| void`                                                                                  | 斜杠命令进入默认处理前触发；返回 `true` 时由宿主接管并跳过默认行为                                                                                                           |
+| `onModelChange`                | `(modelId: string \| undefined, authType: string \| undefined) => void`                                                               | 当前模型连接变化时通知宿主；同名模型切换 provider 也会触发，可用于取消依赖旧连接的宿主操作。                                                                                 |
+| `onSlashCommand`               | `(command: WebShellSlashCommand) => boolean \| void`                                                                                  | 斜杠命令进入默认处理前触发；返回 `true` 时由宿主接管并跳过默认行为。内置 `/logout`、`/upgrade` 先检查 Qwen 登录态与当前订阅模型，再交给宿主。                                |
 | `onSessionArtifactsChange`     | `(change: WebShellSessionArtifactsChange) => void`                                                                                    | Session Artifact 初始恢复或变化后返回当前完整快照与 turn 投影                                                                                                                |
 | `onAssistantTurnSettled`       | `(event: WebShellAssistantTurnSettledEvent) => void`                                                                                  | daemon 权威终态提交后触发；多个 provider 可能重复上报，宿主按 `(sessionId, promptId)` 去重                                                                                   |
 | `settings`                     | `WebShellSettingsOptions`                                                                                                             | 可选。控制原生 `/settings` 页面的呈现；见 [原生设置呈现](#原生设置呈现)。                                                                                                    |
@@ -800,6 +846,17 @@ load/catch-up 结束；同 Session 短暂断线保留去重基线并主动对账
 原方式展示。桌面菜单使用下拉形式，触屏使用抽屉。已有 `composerToolbarActions`
 等配置继续决定默认和高级模式的可选操作，`composerPlaceholders` 占位文字覆盖继续
 生效。
+宿主若已通过 `renderComposerToolbarStart` 渲染自己的附件／添加入口，传入
+`hostOwnsAddMenu: true` 可隐藏内置 ＋ 菜单（主聊天、分屏与托管会话页一致；触屏上
+仅含命令的入口同样让位，该入口图标为斜杠、aria-label 为 All commands／
+「全部命令」），避免出现两个入口。`workflowMode` 的菜单入口随菜单一起隐藏，改由
+默认变体的工具栏提供双向开关：宿主未报告可用状态时（unbound、同步中、未知、
+写入中、未提供变更回调，或未请求且不可用）开关禁用；已请求但当前不可用时仍可关闭。
+`composerVariant: 'simple'` 不渲染工具栏前导区（宿主的
+`renderComposerToolbarStart` 也在其中），该变体因此没有 Workflow 回退，此开关只
+适用于默认变体，设在简洁变体上只会连内置菜单一起去掉。与从
+`composerToolbarActions` 中去掉 `addMenu` 不同（那只作用主输入框），本开关作用于
+各输入框的内置菜单。
 
 ### 品牌（白标）
 
@@ -874,7 +931,7 @@ daemon 不净化它读到的文件。该配置只从 User / System / SystemDefau
 
 ## 左侧导航与嵌入布局
 
-**Breaking change（不兼容变更）**：省略 `sidebar` 从隐藏侧栏改为展示首页；省略导航／底部菜单列表从默认全部改为仅新建任务／收起。旧宿主若要保持隐藏，传 `sidebar={false}`；若要保留原菜单，显式填写 `primaryNav.items` 和 `footer.items`。窄屏品牌默认显示，需隐藏时设置 `branding.hideWhenCompact: true`。
+**Breaking change（不兼容变更）**：省略 `sidebar` 从隐藏侧栏改为展示首页；省略导航／底部菜单列表从默认全部改为仅新建会话／收起。旧宿主若要保持隐藏，传 `sidebar={false}`；若要保留原菜单，显式填写 `primaryNav.items` 和 `footer.items`。窄屏品牌默认显示，需隐藏时设置 `branding.hideWhenCompact: true`。
 
 侧栏采用自动布局，不需要配置 `layout`。宿主不传 `sidebar`、传 `true` 或空配置时，
 默认仅首页：展示 300px 二级栏，不展示一级图标栏。显式配置其他可用导航项后，
@@ -885,7 +942,7 @@ daemon 不净化它读到的文件。该配置只从 User / System / SystemDefau
 未配置列表不再默认开放所有功能；宿主原有显式列表及 renderer 继续生效。
 
 双栏模式下，桌面端左侧包含常驻图标栏和可收起的首页栏。
-首页保留新建任务、置顶和项目会话；
+首页保留新建会话、置顶和工作区会话；
 主要功能入口直接显示在图标栏；底部只保留「更多」与「展开／收起」，
 版本号、设置、主题及其他已启用底部操作收进「更多」，关闭菜单不中断更新检查或本地文件连接。
 仅首页时收起／展开按钮放在二级底部，收起保留原有 56px 窄条与悬浮会话面板。存在一级栏时按钮只放一级底部，所有二级栏均无此按钮；收起后二级完全隐藏，仅剩 56px 一级栏。点击首页或一级展开按钮恢复会话栏，点击功能图标打开对应的现有页面。

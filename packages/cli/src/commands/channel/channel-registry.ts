@@ -10,6 +10,7 @@ export interface ChannelTypeDescriptor {
   type: string;
   displayName: string;
   manageable: boolean;
+  supportsQrLogin?: boolean;
   fields: readonly ChannelConfigFieldDescriptor[];
 }
 
@@ -243,6 +244,37 @@ function assertManagementField(
       );
     }
   }
+  const minimum = (field as { minimum?: unknown }).minimum;
+  if (minimum !== undefined) {
+    if (field.kind !== 'number') {
+      throw new Error(
+        `Channel field "${path}" can only declare minimum on number fields.`,
+      );
+    }
+    if (typeof minimum !== 'number' || !Number.isFinite(minimum)) {
+      throw new Error(`Channel field "${path}" must declare a finite minimum.`);
+    }
+  }
+  const maximum = (field as { maximum?: unknown }).maximum;
+  if (maximum !== undefined) {
+    if (field.kind !== 'number') {
+      throw new Error(
+        `Channel field "${path}" can only declare maximum on number fields.`,
+      );
+    }
+    if (typeof maximum !== 'number' || !Number.isFinite(maximum)) {
+      throw new Error(`Channel field "${path}" must declare a finite maximum.`);
+    }
+    if (
+      (field.exclusiveMinimum !== undefined &&
+        maximum <= field.exclusiveMinimum) ||
+      (field.minimum !== undefined && maximum < field.minimum)
+    ) {
+      throw new Error(
+        `Channel field "${path}" declares a maximum that leaves no valid value.`,
+      );
+    }
+  }
   if (field.kind === 'enum') {
     if (!Array.isArray(field.options) || field.options.length === 0) {
       throw new Error(
@@ -309,6 +341,16 @@ function assertManagementDescriptor(plugin: ChannelPlugin): void {
   ) {
     throw new Error(
       'Channel management metadata must declare validateConfig as a synchronous function.',
+    );
+  }
+  if (
+    management.qrLogin !== undefined &&
+    (management.qrLogin === null ||
+      typeof management.qrLogin !== 'object' ||
+      typeof management.qrLogin.start !== 'function')
+  ) {
+    throw new Error(
+      'Channel management metadata must declare qrLogin.start as a function.',
     );
   }
   if (!Array.isArray(management.fields)) {
@@ -446,6 +488,7 @@ export async function supportedChannelCatalog(): Promise<
       type: channelType,
       displayName,
       manageable: management !== undefined,
+      supportsQrLogin: management?.qrLogin !== undefined,
       fields: management
         ? managementFieldsWithSharedControls(
             management.fields,

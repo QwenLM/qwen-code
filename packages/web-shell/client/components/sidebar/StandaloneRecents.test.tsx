@@ -2,36 +2,50 @@
 
 import { act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
+import { renderToString } from 'react-dom/server';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   STANDALONE_SESSIONS_CAPABILITY,
   type DaemonSessionArchiveState,
   type DaemonStandaloneSessionSummary,
 } from '@qwen-code/sdk/daemon';
+import { createSidebarMocks } from '../../test/sidebarHarness';
 
-const mocks = vi.hoisted(() => ({
-  list: vi.fn(),
-  archive: vi.fn(),
-  unarchive: vi.fn(),
-  deleteSession: vi.fn(),
-  rename: vi.fn(),
-  exportSession: vi.fn(),
-  t: vi.fn((key: string) => key),
-  streamingState: 'idle',
-  connection: { sessionContext: { kind: 'standalone' } } as {
-    sessionContext?: { kind: string; cwd?: string };
+const mocks = createSidebarMocks({
+  workspaceCapabilities: {
+    qwenCodeVersion: '1.2.3',
+    features: [STANDALONE_SESSIONS_CAPABILITY],
   },
-  workspace: {} as Record<string, unknown>,
-}));
+});
+const { connection, workspace } = mocks;
+const list = vi.fn();
+const archive = vi.fn();
+const unarchive = vi.fn();
+const deleteSession = vi.fn();
+const rename = vi.fn();
+const exportSession = vi.fn();
+const t = vi.fn((key: string) => key);
+let streamingState = 'idle';
+
+// Standalone client methods are suite-specific; they ride on the stable
+// workspace client the harness creates (the component never re-fetches it).
+Object.assign(workspace.client, {
+  listStandaloneSessionsPage: list,
+  archiveStandaloneSessions: archive,
+  unarchiveStandaloneSessions: unarchive,
+  deleteStandaloneSessions: deleteSession,
+  renameStandaloneSession: rename,
+  exportStandaloneSession: exportSession,
+});
 
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
-  useConnection: () => mocks.connection,
-  useStreamingState: () => mocks.streamingState,
-  useWorkspace: () => mocks.workspace,
+  useConnection: () => connection,
+  useStreamingState: () => streamingState,
+  useWorkspace: () => workspace,
 }));
 
 vi.mock('../../i18n', () => ({
-  useI18n: () => ({ t: mocks.t }),
+  useI18n: () => ({ t }),
 }));
 
 vi.mock('../dialogs/DialogShell', () => ({
@@ -60,17 +74,17 @@ describe('StandaloneRecents', () => {
   beforeEach(() => {
     window.localStorage.clear();
     vi.spyOn(console, 'warn').mockImplementation(() => {});
-    mocks.t.mockImplementation((key: string) => key);
-    mocks.list.mockReset();
-    mocks.archive.mockReset();
-    mocks.unarchive.mockReset();
-    mocks.deleteSession.mockReset();
-    mocks.rename.mockReset();
-    mocks.exportSession.mockReset();
-    mocks.streamingState = 'idle';
-    mocks.connection = { sessionContext: { kind: 'standalone' } };
-    mocks.rename.mockResolvedValue(undefined);
-    mocks.exportSession.mockResolvedValue({
+    t.mockImplementation((key: string) => key);
+    list.mockReset();
+    archive.mockReset();
+    unarchive.mockReset();
+    deleteSession.mockReset();
+    rename.mockReset();
+    exportSession.mockReset();
+    streamingState = 'idle';
+    connection.sessionContext = { kind: 'standalone' };
+    rename.mockResolvedValue(undefined);
+    exportSession.mockResolvedValue({
       content: '<p>chat</p>',
       filename: 'chat.html',
       mimeType: 'text/html',
@@ -84,7 +98,7 @@ describe('StandaloneRecents', () => {
       value: vi.fn(),
     });
     vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
-    mocks.list.mockImplementation(
+    list.mockImplementation(
       async ({ archiveState }: { archiveState: string }) => ({
         sessions:
           archiveState === 'archived'
@@ -95,17 +109,6 @@ describe('StandaloneRecents', () => {
               ],
       }),
     );
-    mocks.workspace = {
-      capabilities: { features: [STANDALONE_SESSIONS_CAPABILITY] },
-      client: {
-        listStandaloneSessionsPage: mocks.list,
-        archiveStandaloneSessions: mocks.archive,
-        unarchiveStandaloneSessions: mocks.unarchive,
-        deleteStandaloneSessions: mocks.deleteSession,
-        renameStandaloneSession: mocks.rename,
-        exportStandaloneSession: mocks.exportSession,
-      },
-    };
     container = document.createElement('div');
     document.body.appendChild(container);
     root = createRoot(container);
@@ -124,6 +127,7 @@ describe('StandaloneRecents', () => {
       currentSessionReady?: boolean;
       refreshKey?: number;
       searchQuery?: string;
+      sortBy?: 'updatedAt' | 'lastUserPromptAt';
       onError?: (error: unknown, message: string) => void;
       onRenameSession?: (sessionId: string, displayName: string) => void;
       onLoadSession?: (sessionId: string) => Promise<void> | void;
@@ -168,6 +172,7 @@ describe('StandaloneRecents', () => {
           currentSessionReady={options.currentSessionReady}
           refreshKey={options.refreshKey}
           searchQuery={options.searchQuery}
+          sortBy={options.sortBy}
           onNewSession={options.onNewSession}
           renderSession={renderSession}
           onLoadSession={options.onLoadSession ?? vi.fn()}
@@ -194,7 +199,9 @@ describe('StandaloneRecents', () => {
     const newSession = container.querySelector<HTMLButtonElement>(
       '[data-testid="standalone-active-group"] button[aria-label="sidebar.newTask"]',
     );
-    expect(newSession?.parentElement?.className).toContain('invisible');
+    expect(newSession?.parentElement?.className).toContain(
+      'projectsHeaderActions',
+    );
     const sessions = container.querySelector(
       '[data-testid="standalone-active-group"] > div:nth-child(2)',
     );
@@ -202,6 +209,11 @@ describe('StandaloneRecents', () => {
     const header = container.querySelector<HTMLButtonElement>(
       '[data-testid="standalone-active-group"] > div > button',
     )!;
+    expect(header.parentElement?.className).toContain('projectsHeader');
+    expect(header.className).toContain('projectsHeaderToggle');
+    expect(header.querySelector('span + svg')?.classList).toContain(
+      'lucide-chevron-down',
+    );
     header.focus();
     await act(async () =>
       header.dispatchEvent(
@@ -209,6 +221,9 @@ describe('StandaloneRecents', () => {
       ),
     );
     expect(document.activeElement).not.toBe(header);
+    expect(header.querySelector('span + svg')?.classList).toContain(
+      'lucide-chevron-right',
+    );
     await act(async () =>
       header.dispatchEvent(
         new MouseEvent('click', { bubbles: true, detail: 1 }),
@@ -219,10 +234,59 @@ describe('StandaloneRecents', () => {
     expect(container.textContent).toContain('Active chat');
     expect(container.textContent).not.toContain('Child chat');
     expect(container.textContent).not.toContain('/private/standalone');
-    expect(mocks.list).toHaveBeenCalledWith({
+    expect(list).toHaveBeenCalledWith({
       archiveState: 'active',
       pageSize: 50,
     });
+  });
+
+  it('never pages with a cursor minted under the previous sort', async () => {
+    let release: (() => void) | undefined;
+    let cursor = 'cursor-from-updated-at';
+    list.mockImplementation(
+      async (options: { sortBy?: string; cursor?: string }) => {
+        if (options.sortBy !== 'lastUserPromptAt')
+          return {
+            sessions: [summary('active', 'Active chat')],
+            nextCursor: cursor,
+          };
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        return {
+          sessions: [summary('question', 'Question chat')],
+          nextCursor: cursor,
+        };
+      },
+    );
+    const showMore = () =>
+      Array.from(container.querySelectorAll('button')).find(
+        (button) => button.textContent === 'sidebar.showAllSessions',
+      );
+    const stalePageCalls = () =>
+      list.mock.calls.filter(
+        ([options]) =>
+          options.cursor !== undefined && options.sortBy === 'lastUserPromptAt',
+      );
+
+    await render();
+    expect(showMore()).toBeDefined();
+
+    await render({ sortBy: 'lastUserPromptAt' });
+    expect(showMore()).toBeUndefined();
+    await act(async () => showMore()?.click());
+    expect(stalePageCalls()).toHaveLength(0);
+    await act(async () => release?.());
+
+    // A refresh keeps the loaded pages, so the cursor survives the round trip
+    // and only the in-flight guard can hold the button.
+    cursor = 'cursor-from-last-user-prompt-at';
+    await render({ sortBy: 'lastUserPromptAt', refreshKey: 1 });
+    expect(showMore()?.disabled).toBe(true);
+    const beforeClick = list.mock.calls.length;
+    await act(async () => showMore()?.click());
+    expect(list.mock.calls).toHaveLength(beforeClick);
+    await act(async () => release?.());
   });
 
   it.each(['active', 'archived'] as const)(
@@ -313,6 +377,16 @@ describe('StandaloneRecents', () => {
   it('loads only the requested archived group', async () => {
     const { renderSession } = await render({ archiveState: 'archived' });
 
+    const group = container.querySelector(
+      '[data-testid="standalone-archived-group"]',
+    )!;
+    expect(group.classList).toContain('mb-3');
+    const header = group.querySelector('button[aria-expanded]')!;
+    expect(header.parentElement?.className).toContain('headerRow');
+    expect(header.querySelector('svg')?.classList).toContain(
+      'lucide-circle-dashed',
+    );
+    expect(header.querySelector('span + svg')).toBeNull();
     expect(container.textContent).toContain('Archived chat');
     expect(container.textContent).not.toContain('Active chat');
     expect(renderSession).toHaveBeenCalledWith(
@@ -324,73 +398,126 @@ describe('StandaloneRecents', () => {
         onUnarchive: expect.any(Function),
       }),
     );
-    expect(mocks.list).toHaveBeenCalledWith({
+    expect(list).toHaveBeenCalledWith({
       archiveState: 'archived',
       pageSize: 50,
     });
   });
 
-  it('keeps archived pagination reachable after an empty page', async () => {
-    mocks.list
-      .mockResolvedValueOnce({ sessions: [], nextCursor: 'next' })
-      .mockResolvedValueOnce({
-        sessions: [
-          summary('later', 'Later archived chat', { isArchived: true }),
-        ],
+  it.each(['active', 'archived'] as const)(
+    'keeps %s pagination reachable after an empty page',
+    async (archiveState) => {
+      list
+        .mockResolvedValueOnce({ sessions: [], nextCursor: 'next' })
+        .mockResolvedValueOnce({
+          sessions: [
+            summary('later', 'Later chat', {
+              isArchived: archiveState === 'archived',
+            }),
+          ],
+        });
+      await render({ archiveState });
+
+      const loadMore = Array.from(container.querySelectorAll('button')).find(
+        (button) => button.textContent === 'sidebar.showAllSessions',
+      );
+      expect(loadMore).toBeDefined();
+      await act(async () => loadMore!.click());
+
+      expect(list).toHaveBeenLastCalledWith({
+        archiveState,
+        cursor: 'next',
+        pageSize: 50,
       });
-    await render({ archiveState: 'archived' });
+      expect(container.textContent).toContain('Later chat');
+    },
+  );
 
-    const loadMore = Array.from(container.querySelectorAll('button')).find(
-      (button) => button.textContent === 'sidebar.showAllSessions',
+  it.each(['active', 'archived'] as const)(
+    'hides the empty %s group regardless of its expanded preference',
+    async (archiveState) => {
+      list.mockResolvedValue({ sessions: [] });
+      for (const expanded of [false, true]) {
+        window.localStorage.setItem(
+          `qwen.web-shell.sidebar.workspace-expanded:standalone:${archiveState}`,
+          String(expanded),
+        );
+        await render({ archiveState });
+        expect(container.querySelector('section')).toBeNull();
+        await act(async () => root.unmount());
+        root = createRoot(container);
+      }
+    },
+  );
+
+  it('keeps the group visible before the initial list request starts', () => {
+    const html = renderToString(
+      <StandaloneRecents
+        archiveState="active"
+        renderSession={() => null}
+        onLoadSession={vi.fn()}
+        onError={vi.fn()}
+        onNotice={vi.fn()}
+      />,
     );
-    expect(loadMore).toBeDefined();
-    await act(async () => loadMore!.click());
-
-    expect(mocks.list).toHaveBeenLastCalledWith({
-      archiveState: 'archived',
-      cursor: 'next',
-      pageSize: 50,
-    });
-    expect(container.textContent).toContain('Later archived chat');
+    expect(html).toContain('standalone-active-group');
+    expect(list).not.toHaveBeenCalled();
   });
 
-  it('aligns the empty state with the workspace label', async () => {
-    mocks.list.mockResolvedValue({ sessions: [] });
-    await render();
-
-    expect(container.querySelector('div[class*="empty"]')?.textContent).toBe(
-      'sidebar.noSessions',
+  it('keeps a loading group visible until the list is confirmed empty', async () => {
+    let resolveList!: (value: { sessions: never[] }) => void;
+    list.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveList = resolve;
+      }),
     );
+    await render();
+    expect(container.querySelector('section')).not.toBeNull();
+    await act(async () => resolveList({ sessions: [] }));
+    expect(container.querySelector('section')).toBeNull();
+  });
+
+  it('shows the first session and hides the group after the last session leaves on refresh', async () => {
+    list
+      .mockResolvedValueOnce({ sessions: [] })
+      .mockResolvedValueOnce({ sessions: [summary('first', 'First chat')] })
+      .mockResolvedValueOnce({ sessions: [] });
+    await render({ refreshKey: 0 });
+    expect(container.querySelector('section')).toBeNull();
+
+    await render({ refreshKey: 1 });
+    expect(container.textContent).toContain('First chat');
+
+    await render({ refreshKey: 2 });
+    expect(container.querySelector('section')).toBeNull();
   });
 
   it('does not reload when the selected session changes', async () => {
     const onError = vi.fn();
     await render({ onError });
-    expect(mocks.list).toHaveBeenCalledTimes(1);
+    expect(list).toHaveBeenCalledTimes(1);
 
     await render({ currentSessionId: 'active', onError });
 
-    expect(mocks.list).toHaveBeenCalledTimes(1);
+    expect(list).toHaveBeenCalledTimes(1);
   });
 
   it('refreshes on standalone completion but not workspace completion', async () => {
-    mocks.streamingState = 'responding';
-    mocks.connection = {
-      sessionContext: { kind: 'workspace', cwd: '/workspace' },
-    };
+    streamingState = 'responding';
+    connection.sessionContext = { kind: 'workspace', cwd: '/workspace' };
     await render();
 
-    mocks.streamingState = 'idle';
+    streamingState = 'idle';
     await render();
-    expect(mocks.list).toHaveBeenCalledTimes(1);
+    expect(list).toHaveBeenCalledTimes(1);
 
-    mocks.connection = { sessionContext: { kind: 'standalone' } };
-    mocks.streamingState = 'responding';
+    connection.sessionContext = { kind: 'standalone' };
+    streamingState = 'responding';
     await render();
-    mocks.streamingState = 'idle';
+    streamingState = 'idle';
     await render();
 
-    expect(mocks.list).toHaveBeenCalledTimes(2);
+    expect(list).toHaveBeenCalledTimes(2);
   });
 
   it('filters sessions by label or id', async () => {
@@ -403,7 +530,7 @@ describe('StandaloneRecents', () => {
   });
 
   it('shows five sessions until expanded', async () => {
-    mocks.list.mockResolvedValue({
+    list.mockResolvedValue({
       sessions: Array.from({ length: 6 }, (_, index) =>
         summary(`session-${index + 1}`, `Chat ${index + 1}`),
       ),
@@ -426,7 +553,7 @@ describe('StandaloneRecents', () => {
     let resolveMore!: (value: {
       sessions: DaemonStandaloneSessionSummary[];
     }) => void;
-    mocks.list
+    list
       .mockResolvedValueOnce({
         sessions: [summary('active', 'Active chat')],
         nextCursor: 'next',
@@ -464,7 +591,7 @@ describe('StandaloneRecents', () => {
   });
 
   it('reloads the loaded depth and drops sessions removed elsewhere', async () => {
-    mocks.list
+    list
       .mockResolvedValueOnce({
         sessions: [
           summary('kept', 'Kept chat'),
@@ -494,7 +621,7 @@ describe('StandaloneRecents', () => {
 
     expect(container.textContent).not.toContain('Removed chat');
     expect(container.textContent).toContain('Later chat');
-    expect(mocks.list).toHaveBeenLastCalledWith({
+    expect(list).toHaveBeenLastCalledWith({
       archiveState: 'active',
       cursor: 'next',
       pageSize: 50,
@@ -502,7 +629,7 @@ describe('StandaloneRecents', () => {
   });
 
   it('keeps a row visible when archive reports an item error', async () => {
-    mocks.archive.mockResolvedValue({
+    archive.mockResolvedValue({
       archived: [],
       alreadyArchived: [],
       errors: [{ sessionId: 'active', code: 'busy', message: 'still running' }],
@@ -522,7 +649,7 @@ describe('StandaloneRecents', () => {
   });
 
   it('removes a successfully archived row and notifies its parent', async () => {
-    mocks.archive.mockResolvedValue({
+    archive.mockResolvedValue({
       archived: ['active'],
       alreadyArchived: [],
       errors: [],
@@ -535,11 +662,12 @@ describe('StandaloneRecents', () => {
     await act(async () => archiveButton?.click());
 
     expect(container.textContent).not.toContain('Active chat');
+    expect(container.querySelector('section')).toBeNull();
     expect(onMutated).toHaveBeenCalledOnce();
   });
 
   it('treats an already archived row as a completed archive', async () => {
-    mocks.archive.mockResolvedValue({
+    archive.mockResolvedValue({
       archived: [],
       alreadyArchived: ['active'],
       errors: [],
@@ -557,7 +685,7 @@ describe('StandaloneRecents', () => {
   });
 
   it('treats an already active row as a completed restore', async () => {
-    mocks.unarchive.mockResolvedValue({
+    unarchive.mockResolvedValue({
       unarchived: [],
       alreadyActive: ['archived'],
       errors: [],
@@ -580,7 +708,7 @@ describe('StandaloneRecents', () => {
       alreadyArchived: string[];
       errors: never[];
     }) => void;
-    mocks.archive.mockReturnValue(
+    archive.mockReturnValue(
       new Promise((resolve) => {
         finishArchive = resolve;
       }),
@@ -595,7 +723,7 @@ describe('StandaloneRecents', () => {
       archiveButton.click();
       await Promise.resolve();
     });
-    expect(mocks.archive).toHaveBeenCalledOnce();
+    expect(archive).toHaveBeenCalledOnce();
 
     await act(async () => {
       finishArchive({
@@ -618,7 +746,7 @@ describe('StandaloneRecents', () => {
       await Promise.resolve();
     });
 
-    expect(mocks.exportSession).toHaveBeenCalledWith('active', {
+    expect(exportSession).toHaveBeenCalledWith('active', {
       format: 'html',
     });
     expect(URL.createObjectURL).toHaveBeenCalledOnce();
@@ -650,7 +778,7 @@ describe('StandaloneRecents', () => {
       await Promise.resolve();
     });
 
-    expect(mocks.rename).toHaveBeenCalledWith('active', 'Renamed chat');
+    expect(rename).toHaveBeenCalledWith('active', 'Renamed chat');
     expect(onRenameSession).toHaveBeenCalledWith('active', 'Renamed chat');
   });
   it.each([
@@ -735,7 +863,7 @@ describe('StandaloneRecents', () => {
 
   it('shows a list failure without a false empty state or host toast', async () => {
     const failure = new Error('legacy owner in use');
-    mocks.list.mockRejectedValueOnce(failure);
+    list.mockRejectedValueOnce(failure);
     const { onError } = await render();
     expect(container.textContent).toContain('sidebar.standaloneLoadFailed');
     expect(container.textContent).not.toContain('sidebar.noSessions');
@@ -756,7 +884,7 @@ describe('StandaloneRecents', () => {
   it.each(['active', 'archived'] as const)(
     'retries the failed %s page without discarding already loaded rows',
     async (archiveState) => {
-      mocks.list
+      list
         .mockResolvedValueOnce({
           sessions: [summary('first', 'First chat')],
           nextCursor: 'page-two',
@@ -778,7 +906,7 @@ describe('StandaloneRecents', () => {
           .find((button) => button.textContent === 'common.retry')
           ?.click(),
       );
-      expect(mocks.list).toHaveBeenLastCalledWith({
+      expect(list).toHaveBeenLastCalledWith({
         archiveState,
         cursor: 'page-two',
         pageSize: 50,
@@ -791,7 +919,7 @@ describe('StandaloneRecents', () => {
 
   it('ignores an old open failure after a newer session was selected', async () => {
     let rejectOld!: (error: Error) => void;
-    mocks.list.mockResolvedValue({
+    list.mockResolvedValue({
       sessions: [summary('old', 'Old chat'), summary('new', 'New chat')],
     });
     const onLoadSession = vi
@@ -820,7 +948,7 @@ describe('StandaloneRecents', () => {
   });
 
   it('closes a blocked rename dialog so its local retry is reachable', async () => {
-    mocks.rename.mockRejectedValueOnce(
+    rename.mockRejectedValueOnce(
       Object.assign(new Error('writer conflict'), {
         body: { code: 'session_writer_conflict' },
       }),
@@ -847,8 +975,8 @@ describe('StandaloneRecents', () => {
         .find((button) => button.textContent === 'common.retry')
         ?.click(),
     );
-    expect(mocks.rename).toHaveBeenCalledTimes(2);
-    expect(mocks.rename).toHaveBeenLastCalledWith('active', 'Active chat');
+    expect(rename).toHaveBeenCalledTimes(2);
+    expect(rename).toHaveBeenLastCalledWith('active', 'Active chat');
     expect(container.querySelector('[role="alert"]')).toBeNull();
   });
 
@@ -860,7 +988,7 @@ describe('StandaloneRecents', () => {
   ])(
     'preserves %s in batch diagnostics and translated local feedback',
     async (code) => {
-      mocks.archive.mockResolvedValue({
+      archive.mockResolvedValue({
         archived: [],
         alreadyArchived: [],
         errors: [
@@ -886,7 +1014,7 @@ describe('StandaloneRecents', () => {
         '[web-shell] standalone session action blocked by writer fence:',
         expect.objectContaining({ body: expect.objectContaining({ code }) }),
       );
-      mocks.t.mockImplementation((key: string) => `ZH:${key}`);
+      t.mockImplementation((key: string) => `ZH:${key}`);
       await render({ onError });
       expect(container.querySelector('[role="alert"]')?.textContent).toContain(
         'ZH:session.writerBlocked',
@@ -896,12 +1024,12 @@ describe('StandaloneRecents', () => {
 
   it('keeps a mutation failure visible after navigating to another session', async () => {
     let rejectArchive!: (error: Error) => void;
-    mocks.archive.mockReturnValueOnce(
+    archive.mockReturnValueOnce(
       new Promise((_resolve, reject) => {
         rejectArchive = reject;
       }),
     );
-    mocks.list.mockResolvedValue({
+    list.mockResolvedValue({
       sessions: [
         summary('active', 'Active chat'),
         summary('other', 'Other chat'),
@@ -940,7 +1068,7 @@ describe('StandaloneRecents', () => {
   });
 
   it('keeps an initially failing archived group visible for retry', async () => {
-    mocks.list.mockRejectedValueOnce(new Error('list failed'));
+    list.mockRejectedValueOnce(new Error('list failed'));
     const { onError } = await render({ archiveState: 'archived' });
     expect(container.querySelector('[role="alert"]')?.textContent).toContain(
       'sidebar.standaloneLoadFailed',
@@ -963,10 +1091,10 @@ describe('StandaloneRecents', () => {
       const sessionId = archiveState;
       const action =
         operation === 'archive'
-          ? mocks.archive
+          ? archive
           : operation === 'unarchive'
-            ? mocks.unarchive
-            : mocks.deleteSession;
+            ? unarchive
+            : deleteSession;
       const success =
         operation === 'archive'
           ? { archived: [sessionId], alreadyArchived: [], notFound: [] }

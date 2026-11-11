@@ -17,6 +17,7 @@ import type { HostedModelRequest } from './hosted-model-recovery.js';
 import type { HostedModelSelection } from './hosted-model-selection.js';
 import type { PublicChildModelRoute } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-operations.js';
 import { HOSTED_MODEL_REQUEST_BYTES } from '@qwen-code/qwen-code-core/managed-runtime/hosted-recovery-records.js';
+import { captureManagedContext } from '@qwen-code/qwen-code-core/managed-runtime/managed-context-snapshot.js';
 
 import type { Content, Part } from '@google/genai';
 import { classifyAction } from '@qwen-code/qwen-code-core/permissions/classifier.js';
@@ -36,7 +37,10 @@ import type {
 import { getApiHistoryPromptId } from '@qwen-code/qwen-code-core/utils/api-history-metadata.js';
 import { buildSessionHistoryFromConversation } from '@qwen-code/qwen-code-core/services/session-api-history.js';
 import { loadCliConfig, type CliArgs } from '../config/config.js';
+import type { HostedMemorySession } from './hosted-memory-session.js';
+import type { HostedModelConfigReader } from './hosted-model-config.js';
 import { loadSettings } from '../config/settings.js';
+import { getSeparatedHookSettings } from '../config/hook-approvals.js';
 import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 
 import {
@@ -306,11 +310,15 @@ export async function runHostedHarnessTextTurn(input: {
         | 'setChildModelResolver'
         | 'planModeInstructions'
         | 'todoInstructions'
+        | 'diagnosticMcpToolNames'
       >
     >;
   workspaceContext?: { read(): string | undefined };
   agentDefinition?: HostedAgentDefinition;
   modelSelection?: HostedModelSelection;
+  modelConfig?: HostedModelConfigReader;
+  memory?: Pick<HostedMemorySession, 'recall'>;
+  recallUserInput?: boolean;
   publicChildModelRoute?: PublicChildModelRoute;
   agentInstructions?: string;
   extensionInstructions?: string;
@@ -323,6 +331,14 @@ export async function runHostedHarnessTextTurn(input: {
     model: string,
   ) => Promise<void>;
 }): Promise<HostedHarnessModelResult> {
+  const sessionModelConfig = await input.modelConfig?.();
+  if (
+    sessionModelConfig &&
+    input.modelSelection &&
+    sessionModelConfig.model !== input.modelSelection.modelId
+  ) {
+    throw new HostedModelUnavailableError();
+  }
   const settings = loadSettings(input.cwd, {
     skipLoadEnvironment: true,
     skipWorkspaceSettings: true,
@@ -341,19 +357,25 @@ export async function runHostedHarnessTextTurn(input: {
     argv,
     input.cwd,
     undefined,
-    undefined,
+    getSeparatedHookSettings(settings),
     undefined,
     undefined,
     undefined,
     true,
-    { toolInvocationGuard: () => ({ allowed: false }) },
+    {
+      toolInvocationGuard: () => ({ allowed: false }),
+      lspDisabled: true,
+      ...(sessionModelConfig ? { modelConfiguration: sessionModelConfig } : {}),
+    },
   );
   const outputBudget = config.getToolOutputBatchBudget?.();
   if (outputBudget !== undefined)
     input.toolTurn?.setToolOutputBudget?.(outputBudget);
-  const model = input.modelSelection
-    ? { id: input.modelSelection.modelId }
-    : input.agentDefinition?.model;
+  const model = sessionModelConfig
+    ? { id: sessionModelConfig.model }
+    : input.modelSelection
+      ? { id: input.modelSelection.modelId }
+      : input.agentDefinition?.model;
   if (input.publicChildModelRoute)
     await applyHostedPublicChildModelPin(
       config,
@@ -362,7 +384,7 @@ export async function runHostedHarnessTextTurn(input: {
         : model,
       input.publicChildModelRoute.origin ?? input.publicChildModelRoute,
     );
-  else await applyHostedModelPin(config, model);
+  else if (!sessionModelConfig) await applyHostedModelPin(config, model);
   if (input.publicChildModelRoute?.origin) {
     // Config falls back to its own generator until authentication fills this frame.
     const view = {} as RuntimeContentGeneratorView;
@@ -648,14 +670,19 @@ async function runPreparedHostedHarnessTextTurn(
               .update(selected.baseUrl ?? '')
               .digest('hex'),
             providerPin: llmPreparedProviderPin(selected),
-            origin: {
-              modelId: config.getModel(),
-              authType: active.authType!,
-              endpointDigest: createHash('sha256')
-                .update(active.baseUrl ?? '')
-                .digest('hex'),
-              providerPin: llmPreparedProviderPin(active),
-            },
+            ...(!input.modelConfig ||
+            llmPreparedProviderPin(selected) !== llmPreparedProviderPin(active)
+              ? {
+                  origin: {
+                    modelId: config.getModel(),
+                    authType: active.authType!,
+                    endpointDigest: createHash('sha256')
+                      .update(active.baseUrl ?? '')
+                      .digest('hex'),
+                    providerPin: llmPreparedProviderPin(active),
+                  },
+                }
+              : {}),
           },
         };
       });
@@ -720,6 +747,19 @@ async function runPreparedHostedHarnessTextTurn(
           queued.fields,
           queued.signal,
         );
+    }
+    if (
+      input.memory &&
+      input.recallUserInput &&
+      !input.resumeFromToolResults &&
+      !input.resumeModel
+    ) {
+      const memoryContext = await input.memory.recall(
+        input.promptId,
+        input.prompt,
+        input.signal,
+      );
+      if (memoryContext) effectivePrompt += `\n${memoryContext}`;
     }
     const textDeltas = input.hooks
       ?.getCatalog()
@@ -951,7 +991,14 @@ async function runPreparedHostedHarnessTextTurn(
         if (submit?.shouldStopExecution() || submit?.isBlockingDecision())
           throw new Error('Hook blocked queued user input.');
         const updated = submit?.hookSpecificOutput?.['updatedPrompt'];
-        const context = submit?.getAdditionalContext();
+        const memoryContext = await input.memory?.recall(
+          message.id,
+          message.text,
+          input.signal,
+        );
+        const context = [submit?.getAdditionalContext(), memoryContext]
+          .filter(Boolean)
+          .join('\n');
         if (typeof updated === 'string' || context) {
           parts = [
             {
@@ -1035,9 +1082,10 @@ async function runPreparedHostedHarnessTextTurn(
       let modelFailure = true;
       let completeAttempt:
         | Awaited<ReturnType<ManagedHookModelScope['beginMainAttempt']>>
-        | undefined = input.prepareModel
-        ? undefined
-        : await input.modelScope?.beginMainAttempt(config.getModel());
+        | undefined =
+        input.prepareModel || input.modelScope?.diagnosticsEnabled
+          ? undefined
+          : await input.modelScope?.beginMainAttempt(config.getModel());
       let modelOccurrence =
         completeAttempt?.attemptId ?? `${input.promptId}:${round}`;
       let contextWindowSize =
@@ -1046,12 +1094,61 @@ async function runPreparedHostedHarnessTextTurn(
         prepared,
         captureUnsupported,
       ) => {
-        await captureChildRoute(prepared);
         const activeConfig = config.getContentGeneratorConfig();
         contextWindowSize =
           prepared.providerPin === llmPreparedProviderPin(activeConfig)
             ? activeConfig?.contextWindowSize
             : undefined;
+        const contextSnapshot = input.modelScope?.diagnosticsEnabled
+          ? captureManagedContext({
+              prepared,
+              turnId: input.promptId,
+              contextWindowSize,
+              autoCompactThreshold: config.getAutoCompactThreshold(),
+              mcpToolNames:
+                input.toolTurn?.diagnosticMcpToolNames?.() ?? new Set(),
+              origins: [
+                {
+                  category: 'instructionFiles',
+                  name: 'Agent instructions',
+                  text: input.agentInstructions
+                    ? `# Agent instructions\n\n${input.agentInstructions}`
+                    : undefined,
+                },
+                {
+                  category: 'instructionFiles',
+                  name: 'Extension instructions',
+                  text: input.extensionInstructions,
+                },
+                {
+                  category: 'instructionFiles',
+                  name: 'Workspace instructions',
+                  text: input.workspaceContext?.read(),
+                },
+                {
+                  category: 'skills',
+                  name: 'Skill catalog',
+                  text: input.skills?.instructions(),
+                },
+                {
+                  category: 'startupContext',
+                  name: 'Plan instructions',
+                  text: input.toolTurn?.planModeInstructions?.(),
+                },
+                {
+                  category: 'startupContext',
+                  name: 'Todo context',
+                  text: todoContext,
+                },
+                {
+                  category: 'memoryFiles',
+                  name: 'Auto memory',
+                  text: config.getAutoMemoryPrompt(),
+                },
+              ],
+            })
+          : undefined;
+        await captureChildRoute(prepared);
         if (completeAttempt) {
           const previous = completeAttempt;
           completeAttempt = undefined;
@@ -1067,12 +1164,18 @@ async function runPreparedHostedHarnessTextTurn(
         completeAttempt = await input.modelScope?.beginMainAttempt(
           prepared.request.model,
           recoveryRef,
+          ...(contextSnapshot ? ([contextSnapshot] as const) : []),
         );
         modelOccurrence = completeAttempt?.attemptId ?? modelOccurrence;
         finished = false;
         usage.length = 0;
       };
-      prepare.maxSnapshotBytes = HOSTED_MODEL_REQUEST_BYTES;
+      prepare.maxSnapshotBytes =
+        input.prepareModel ||
+        input.publicChildModelRoute ||
+        input.toolTurn?.capturesChildModelRoute?.()
+          ? HOSTED_MODEL_REQUEST_BYTES
+          : 0;
       const usage: unknown[] = [];
       let finalOutputHandled = false;
       try {
@@ -1100,6 +1203,7 @@ async function runPreparedHostedHarnessTextTurn(
               // handling below retracts the orphaned prefix (#13319).
               retractDeliveredOutputOnRetry: true,
               ...(input.prepareModel ||
+              input.modelScope?.diagnosticsEnabled ||
               input.publicChildModelRoute ||
               input.toolTurn?.capturesChildModelRoute?.()
                 ? { onPreparedRequest: prepare }

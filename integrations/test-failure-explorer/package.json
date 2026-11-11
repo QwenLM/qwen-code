@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/test-failure-explorer",
-  "version": "0.26.3",
+  "version": "0.27.1",
   "private": true,
   "description": "Workspace-bound queries over immutable Vitest JSON reports",
   "repository": {
@@ -39,6 +39,6 @@
     "react-dom": "^19.2.4",
     "typescript": "^5.4.5",
     "vitest": "^3.2.4",
-    "zod": "^3.25.0"
+    "zod": "^4.6.6"
   }
 }

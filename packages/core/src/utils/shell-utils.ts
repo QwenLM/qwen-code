@@ -238,6 +238,31 @@ export function getShellConfiguration(): ShellConfiguration {
 export const isWindows = () => os.platform() === 'win32';
 
 /**
+ * The name the model should see for a shell: the executable a command
+ * actually runs under, not the platform's usual shell. PowerShell is named by
+ * its real executable so `pwsh` is not described as Windows PowerShell 5.1.
+ */
+export function getShellDisplayName({
+  executable,
+  shell,
+}: ShellConfiguration): string {
+  switch (shell) {
+    case 'cmd':
+      return 'cmd.exe';
+    case 'powershell': {
+      const basename = path.win32.basename(executable).toLowerCase();
+      return basename === 'pwsh.exe' ? 'pwsh.exe' : 'powershell.exe';
+    }
+    case 'bash':
+      return 'bash';
+    default: {
+      const _exhaustive: never = shell;
+      return _exhaustive;
+    }
+  }
+}
+
+/**
  * Escapes a string so that it can be safely used as a single argument
  * in a shell command, preventing command injection.
  *
@@ -569,6 +594,387 @@ function trimBashEdgeSeparators(command: string): string {
   return command.slice(start, end);
 }
 
+const ANSI_C_SIMPLE: Record<string, string> = {
+  a: '\x07',
+  b: '\b',
+  e: '\x1b',
+  E: '\x1b',
+  f: '\f',
+  n: '\n',
+  r: '\r',
+  t: '\t',
+  v: '\v',
+  '\\': '\\',
+  "'": "'",
+  '"': '"',
+  '?': '?',
+};
+
+/**
+ * Decode one ANSI-C (`$'…'`) escape at `index`, or null when the backslash
+ * starts no escape bash knows (bash then keeps it literal). Shared with the
+ * shell-semantics tokenizer, which imports this module already.
+ */
+export function decodeAnsiCEscape(
+  body: string,
+  index: number,
+): { bytes: number[]; length: number } | null {
+  if (body[index] !== '\\' || index + 1 >= body.length) return null;
+  const next = body[index + 1]!;
+  const simple = ANSI_C_SIMPLE[next];
+  if (simple !== undefined)
+    return { bytes: [...Buffer.from(simple)], length: 2 };
+  if (next === 'x' || next === 'u' || next === 'U') {
+    const max = next === 'x' ? 2 : next === 'u' ? 4 : 8;
+    const digits = new RegExp(`^[0-9a-fA-F]{1,${max}}`).exec(
+      body.slice(index + 2),
+    )?.[0];
+    if (digits) {
+      const code = parseInt(digits, 16);
+      const length = 2 + digits.length;
+      if (next === 'x') return { bytes: [code], length };
+      const encoded = encodeUtf8CodePoint(code);
+      // Beyond the four-byte form bash's spelling is uncertain; keep the
+      // escape literal instead of throwing out of the permission guard.
+      if (encoded === null) {
+        return {
+          bytes: [...Buffer.from(body.slice(index, index + length))],
+          length,
+        };
+      }
+      return { bytes: encoded, length };
+    }
+  }
+  // `\c` needs an operand letter; at the end of the word (or right before the
+  // closing quote of the raw command) bash keeps it literal. Consuming the
+  // closing quote as the operand would swallow the rest of the command line.
+  if (next === 'c' && index + 2 < body.length && body[index + 2] !== "'") {
+    return {
+      bytes: [
+        body[index + 2] === '?'
+          ? 0x7f
+          : body[index + 2]!.toUpperCase().charCodeAt(0) & 0x1f,
+      ],
+      length: body[index + 2] === '\\' && body[index + 3] === '\\' ? 4 : 3,
+    };
+  }
+  if (next >= '0' && next <= '7') {
+    const digits = /^[0-7]{1,3}/.exec(body.slice(index + 1))![0];
+    return {
+      bytes: [parseInt(digits, 8) & 0xff],
+      length: 1 + digits.length,
+    };
+  }
+  return null;
+}
+
+/**
+ * UTF-8 encode a numeric code point, including the surrogate range and the
+ * 0x110000–0x1FFFFF range bash still writes in the four-byte form.
+ */
+function encodeUtf8CodePoint(code: number): number[] | null {
+  if (code <= 0x7f) return [code];
+  if (code <= 0x7ff) {
+    return [0xc0 | (code >> 6), 0x80 | (code & 0x3f)];
+  }
+  if (code <= 0xffff) {
+    return [
+      0xe0 | (code >> 12),
+      0x80 | ((code >> 6) & 0x3f),
+      0x80 | (code & 0x3f),
+    ];
+  }
+  if (code <= 0x1fffff) {
+    return [
+      0xf0 | (code >> 18),
+      0x80 | ((code >> 12) & 0x3f),
+      0x80 | ((code >> 6) & 0x3f),
+      0x80 | (code & 0x3f),
+    ];
+  }
+  return null;
+}
+
+/**
+ * Decode ANSI-C bytes. Invalid UTF-8 becomes one lone low surrogate per byte
+ * (`surrogateescape`), so two different byte paths never collapse into the
+ * same string and the bytes stay recoverable.
+ */
+export function decodeAnsiCBytes(bytes: number[]): string {
+  let text = '';
+  for (let index = 0; index < bytes.length; ) {
+    const first = bytes[index]!;
+    if (first < 0x80) {
+      text += String.fromCharCode(first);
+      index++;
+      continue;
+    }
+    let length = 0;
+    let code = 0;
+    if (first >= 0xc2 && first <= 0xdf) {
+      length = 2;
+      code = first & 0x1f;
+    } else if (first >= 0xe0 && first <= 0xef) {
+      length = 3;
+      code = first & 0x0f;
+    } else if (first >= 0xf0 && first <= 0xf4) {
+      length = 4;
+      code = first & 0x07;
+    }
+    let valid = length > 0 && index + length <= bytes.length;
+    for (let offset = 1; valid && offset < length; offset++) {
+      const next = bytes[index + offset]!;
+      if ((next & 0xc0) !== 0x80) valid = false;
+      else code = (code << 6) | (next & 0x3f);
+    }
+    if (
+      valid &&
+      ((length === 3 && code < 0x800) ||
+        (length === 4 && code < 0x10000) ||
+        code > 0x10ffff ||
+        (code >= 0xd800 && code <= 0xdfff))
+    ) {
+      valid = false;
+    }
+    if (!valid) {
+      text += String.fromCharCode(0xdc00 + first);
+      index++;
+      continue;
+    }
+    text += String.fromCodePoint(code);
+    index += length;
+  }
+  return text;
+}
+
+/**
+ * Decode a whole ANSI-C word body. A NUL ends the word bash builds:
+ * `$'--\0x'` is the word `--`; the rest of the segment is dropped.
+ */
+function decodeAnsiCWord(body: string): string {
+  const bytes: number[] = [];
+  for (let index = 0; index < body.length; index++) {
+    const escape = decodeAnsiCEscape(body, index);
+    if (!escape) {
+      const literal = String.fromCodePoint(body.codePointAt(index)!);
+      for (const byte of Buffer.from(literal)) bytes.push(byte);
+      index += literal.length - 1;
+      continue;
+    }
+    if (escape.bytes.includes(0)) break;
+    for (const byte of escape.bytes) bytes.push(byte);
+    index += escape.length - 1;
+  }
+  return decodeAnsiCBytes(bytes);
+}
+
+/**
+ * The word a token denotes once the shell removes its quoting, so `'--'`,
+ * `"--"`, `\--`, `$'--'`, `$'\x2d\x2d'` and `-'-'` all read as `--`.
+ * Expansion syntax stays literal text and sets `hasExpansion`; such a word
+ * is not a resolved terminator. Returns null on an unterminated quote.
+ * Locale quoting `$"…"` does NOT decode ANSI-C escapes (bash runs a program
+ * literally named `x2dx2d` for `$"\x2d\x2d"`), so it reads like a
+ * double-quoted word.
+ */
+function shellWordQuoteRemoval(
+  token: string,
+): { text: string; hasExpansion: boolean } | null {
+  let out = '';
+  let hasExpansion = false;
+  let i = 0;
+  const n = token.length;
+  while (i < n) {
+    const ch = token[i]!;
+    if (ch === "'") {
+      const close = token.indexOf("'", i + 1);
+      if (close === -1) return null;
+      out += token.slice(i + 1, close);
+      i = close + 1;
+      continue;
+    }
+    if (ch === '\\' && i + 1 < n) {
+      if (token[i + 1] === '\n') {
+        i += 2;
+        continue;
+      }
+      out += token[i + 1];
+      i += 2;
+      continue;
+    }
+    // `\`+newline is removed before the shell lexes, so `$\<newline>'…'` is
+    // still an ANSI-C word (`sh -c $\<newline>'cat > /etc/motd'` runs it).
+    let dollarAt = i + 1;
+    while (ch === '$' && token.startsWith('\\\n', dollarAt)) dollarAt += 2;
+    if (ch === '$' && dollarAt < n && token[dollarAt] === "'") {
+      let j = dollarAt + 1;
+      let body = '';
+      while (j < n) {
+        if (token[j] === '\\' && j + 1 < n) {
+          body += token.slice(j, j + 2);
+          j += 2;
+          continue;
+        }
+        if (token[j] === "'") break;
+        body += token[j];
+        j++;
+      }
+      if (j >= n) return null;
+      out += decodeAnsiCWord(body);
+      i = j + 1;
+      continue;
+    }
+    if (ch === '"') {
+      i++;
+      let closed = false;
+      while (i < n) {
+        const c = token[i]!;
+        if (c === '"') {
+          closed = true;
+          i++;
+          break;
+        }
+        if (c === '\\' && i + 1 < n) {
+          const next = token[i + 1]!;
+          if (next === '$' || next === '`' || next === '"' || next === '\\') {
+            out += next;
+            i += 2;
+            continue;
+          }
+          if (next === '\n') {
+            i += 2;
+            continue;
+          }
+          out += c;
+          i++;
+          continue;
+        }
+        if (c === '$' || c === '`') hasExpansion = true;
+        out += c;
+        i++;
+      }
+      if (!closed) return null;
+      continue;
+    }
+    if (ch === '$') {
+      if (token[dollarAt] === '"') {
+        i = dollarAt;
+        continue;
+      }
+      hasExpansion = true;
+      out += ch;
+      i++;
+      continue;
+    }
+    if (ch === '`') {
+      hasExpansion = true;
+      out += ch;
+      i++;
+      continue;
+    }
+    out += ch;
+    i++;
+  }
+  return { text: out, hasExpansion };
+}
+
+/**
+ * The word the shell hands a consumer: quote removal plus ANSI-C decoding
+ * when the whole word is static. A word carrying an expansion keeps its
+ * quote-stripped spelling.
+ */
+function resolveShellWord(token: string): string {
+  const removed = shellWordQuoteRemoval(token);
+  return removed !== null && !removed.hasExpansion
+    ? removed.text
+    : stripSymmetricQuotes(token).value;
+}
+
+/**
+ * The words an unquoted top-level `{a,b}` word expands to, or null when the
+ * word is not a brace list. Bash expands braces before it hands the words to
+ * the shell, so `{--,'script'}` is the terminator `--` plus the script.
+ */
+function braceAlternatives(token: string): string[] | null {
+  if (!token.startsWith('{') || !token.endsWith('}')) return null;
+  const body = token.slice(1, -1);
+  const parts: string[] = [];
+  let start = 0;
+  let quote: '"' | "'" | '' = '';
+  let escaped = false;
+  for (let index = 0; index < body.length; index++) {
+    const char = body[index]!;
+    if (quote === "'") {
+      if (char === "'") quote = '';
+      continue;
+    }
+    if (quote === '"') {
+      if (escaped) escaped = false;
+      else if (char === '\\') escaped = true;
+      else if (char === '"') quote = '';
+      continue;
+    }
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (char === '\\') {
+      escaped = true;
+      continue;
+    }
+    if (char === "'" || char === '"') {
+      quote = char;
+      continue;
+    }
+    // A nested list keeps its literal spelling; do not guess its expansion.
+    if (char === '{' || char === '}') return null;
+    if (char === ',') {
+      parts.push(body.slice(start, index));
+      start = index + 1;
+    }
+  }
+  if (parts.length === 0) return null;
+  parts.push(body.slice(start));
+  return parts;
+}
+
+/**
+ * True when the word right after `-c` is the option terminator `--` in any
+ * quoting bash resolves to that word, including ANSI-C escapes and a NUL
+ * truncation (`$'--\0x'`) or a brace list whose first word is `--`
+ * (`{--,'script'}`). A word carrying an expansion is not a resolved
+ * terminator; it keeps the base reading as the payload word.
+ */
+function isOptionTerminatorWord(token: string): boolean {
+  const removed = shellWordQuoteRemoval(token);
+  if (removed === null || removed.hasExpansion) return false;
+  if (removed.text === '--') return true;
+  const first = braceAlternatives(token)?.[0];
+  return first !== undefined && isOptionTerminatorWord(first);
+}
+
+/**
+ * The rest after a `-c` option terminator, or null when the first word is
+ * not a resolved `--` or no payload word follows it (a flag-only wrapper
+ * keeps the base reading so the cron gate keeps refusing it).
+ */
+function restAfterOptionTerminator(rest: string): string | null {
+  const terminator = takeLeadingToken(rest);
+  if (!terminator) return null;
+  const removed = shellWordQuoteRemoval(terminator.token);
+  const alternatives =
+    removed !== null && !removed.hasExpansion
+      ? braceAlternatives(terminator.token)
+      : null;
+  if (alternatives && isOptionTerminatorWord(alternatives[0]!)) {
+    const payload = alternatives[1];
+    if (payload === undefined || payload === '') return null;
+    return `${payload} ${terminator.rest}`;
+  }
+  if (!isOptionTerminatorWord(terminator.token)) return null;
+  return takeLeadingToken(terminator.rest) ? terminator.rest : null;
+}
+
 export function stripShellWrapper(command: string): string {
   const trimmed = trimBashEdgeSeparators(command);
   let rest = trimmed;
@@ -595,13 +1001,28 @@ export function stripShellWrapper(command: string): string {
     if (!token) return trimmed;
 
     if (isMonitorCommandMarker(wrapperToken.token, token.token)) {
-      const commandToken = takeLeadingToken(token.rest);
+      // `sh -c -- '…'` puts an option terminator before the command string;
+      // reading it as the program handed the guard a lone `--` while bash
+      // ran the next word. Every spelling of the same decoded word counts.
+      // cmd/PowerShell have no option parser: `--` stays a literal program.
+      let markerRest = token.rest;
+      if (!shellWrapperCommandConsumesRest(wrapperToken.token)) {
+        const afterTerminator = restAfterOptionTerminator(markerRest);
+        if (afterTerminator !== null) {
+          markerRest = afterTerminator;
+        }
+      }
+      const commandToken = takeLeadingToken(markerRest);
       if (!commandToken) return trimmed;
-      const { value: innerCommand, quote } = stripSymmetricQuotes(
-        commandToken.token,
-      );
+      const { value, quote } = stripSymmetricQuotes(commandToken.token);
+      // The resolved word, not its spelling: an ANSI-C or locale payload
+      // (`$'cat > /etc/motd'`, `$"…"`) is the script bash runs, so the
+      // operators and paths inside it stay visible to the callers.
+      const innerCommand = shellWrapperCommandConsumesRest(wrapperToken.token)
+        ? value
+        : resolveShellWord(commandToken.token);
       if (!quote && shellWrapperCommandConsumesRest(wrapperToken.token)) {
-        return token.rest.trimStart() || trimmed;
+        return markerRest.trimStart() || trimmed;
       }
       return innerCommand || trimmed;
     }
@@ -616,6 +1037,52 @@ export function stripShellWrapper(command: string): string {
     if (shellWrapperFlagConsumesOperand(token.token)) {
       const operandToken = takeLeadingToken(rest);
       if (!operandToken) return trimmed;
+      rest = operandToken.rest;
+    }
+  }
+}
+
+/**
+ * The alternative reading of a wrapper whose `-c` payload word carries an
+ * unresolvable expansion: the word may expand to the option terminator
+ * (`sh -c $(printf -- --) 'pkill -f qwen'`), so the NEXT word is a script
+ * bash can run. Returns that word's quote-removed text, or null when the
+ * payload is readable, no next word exists, or the wrapper is cmd-style
+ * (R7-9). The base reading of stripShellWrapper stays unchanged.
+ */
+function unresolvedWrapperAlternatePayload(command: string): string | null {
+  const trimmed = trimBashEdgeSeparators(command);
+  let rest = trimmed;
+  while (true) {
+    const token = takeLeadingToken(rest);
+    if (!token || !isEnvAssignmentToken(token.token)) break;
+    rest = token.rest;
+  }
+  const wrapperToken = takeLeadingToken(rest);
+  if (!wrapperToken || !isKnownMonitorWrapperToken(wrapperToken.token)) {
+    return null;
+  }
+  if (shellWrapperCommandConsumesRest(wrapperToken.token)) return null;
+  rest = wrapperToken.rest;
+  while (true) {
+    const token = takeLeadingToken(rest);
+    if (!token) return null;
+    if (isMonitorCommandMarker(wrapperToken.token, token.token)) {
+      const markerRest = restAfterOptionTerminator(token.rest) ?? token.rest;
+      const payload = takeLeadingToken(markerRest);
+      if (!payload) return null;
+      const removed = shellWordQuoteRemoval(payload.token);
+      if (removed === null || !removed.hasExpansion) return null;
+      const next = takeLeadingToken(payload.rest);
+      if (!next) return null;
+      return resolveShellWord(next.token) || null;
+    }
+    const normalized = getNormalizedShellToken(token.token);
+    if (!isShellWrapperFlagToken(normalized)) return null;
+    rest = token.rest;
+    if (shellWrapperFlagConsumesOperand(token.token)) {
+      const operandToken = takeLeadingToken(rest);
+      if (!operandToken) return null;
       rest = operandToken.rest;
     }
   }
@@ -1106,6 +1573,14 @@ export function detectSelfKillCommand(command: string): boolean {
     return false;
   }
 
+  // An unresolvable -c payload may be the option terminator: the word
+  // after it is a script bash runs, so the self-kill gate reads it too
+  // (R7-9). The base reading is still evaluated below.
+  const alternate = unresolvedWrapperAlternatePayload(command);
+  if (alternate !== null && detectSelfKillCommand(alternate)) {
+    return true;
+  }
+
   const segments = getCommandSegments(command);
   for (let index = 0; index < segments.length; index++) {
     const segment = segments[index]!;
@@ -1266,6 +1741,8 @@ interface ParsedMonitorShellWrapper {
   innerCommand: string;
   innerQuote: '"' | "'" | '';
   innerArgsSuffix?: string;
+  /** The `-c` terminator token itself expands into the script word. */
+  payloadInTerminator?: boolean;
 }
 
 export interface NormalizedMonitorCommand {
@@ -1530,7 +2007,23 @@ function parseMonitorShellWrapper(command: string): ParsedMonitorShellWrapper {
 
     if (isMonitorCommandMarker(wrapperToken.token, token.token)) {
       wrapperTokens.push(token.token);
-      const commandToken = takeLeadingToken(token.rest);
+      // Same option-terminator reading as stripShellWrapper: every decoded
+      // spelling of `--` hands `-c` the NEXT word, except for cmd/PowerShell
+      // which have no option parser.
+      let markerRest = token.rest;
+      let payloadInTerminator = false;
+      const afterTerminator = shellWrapperCommandConsumesRest(
+        wrapperToken.token,
+      )
+        ? null
+        : restAfterOptionTerminator(markerRest);
+      if (afterTerminator !== null) {
+        const terminatorToken = takeLeadingToken(markerRest)!.token;
+        wrapperTokens.push(terminatorToken);
+        payloadInTerminator = braceAlternatives(terminatorToken) !== null;
+        markerRest = afterTerminator;
+      }
+      const commandToken = takeLeadingToken(markerRest);
       if (!commandToken) {
         return {
           innerCommand: trimmed,
@@ -1547,6 +2040,7 @@ function parseMonitorShellWrapper(command: string): ParsedMonitorShellWrapper {
         // Blanks only: a newline right after the script separates the
         // next command, which the script's positional words are not.
         innerArgsSuffix: commandToken.rest.replace(/^[ \t]+/, ''),
+        payloadInTerminator,
       };
     }
 
@@ -1577,8 +2071,13 @@ function parseMonitorShellWrapper(command: string): ParsedMonitorShellWrapper {
 export function normalizeMonitorCommand(
   command: string,
 ): NormalizedMonitorCommand {
-  const { wrapperTokens, innerCommand, innerQuote, innerArgsSuffix } =
-    parseMonitorShellWrapper(command);
+  const {
+    wrapperTokens,
+    innerCommand,
+    innerQuote,
+    innerArgsSuffix,
+    payloadInTerminator,
+  } = parseMonitorShellWrapper(command);
   const leadingEnvTokens =
     wrapperTokens?.filter((token) => isEnvAssignmentToken(token)) ?? [];
   const analysisCommand = stripTrailingBackgroundAmp(innerCommand);
@@ -1589,24 +2088,42 @@ export function normalizeMonitorCommand(
   // execute: leading env assignments, the -c script, and argv suffixes. Wrapper
   // flags are preserved in spawnCommand, but are not converted into Bash(...)
   // command-rule surface.
+  // An unresolvable payload keeps the WHOLE wrapper as the safety surface:
+  // appending the following word surfaces the script bash may run, so a
+  // `Bash(bash -c *)` wildcard no longer covers the unreadable spelling
+  // while its readable twin asks (R7-9).
+  const alternatePayload = wrapperTokens
+    ? unresolvedWrapperAlternatePayload(command)
+    : null;
+  const removedInner = wrapperTokens
+    ? shellWordQuoteRemoval(innerCommand)
+    : null;
+  const payloadUnresolved =
+    removedInner !== null && removedInner.hasExpansion && !innerQuote;
   const safetyParts = [
     ...(wrapperTokens ? leadingEnvTokens : []),
     analysisCommand,
     ...(normalizedInnerArgsSuffix ? [normalizedInnerArgsSuffix] : []),
   ];
   const safetyCommand =
-    wrapperTokens && safetyParts.length > 0
+    wrapperTokens && !payloadUnresolved && safetyParts.length > 0
       ? safetyParts.join(' ').trim()
-      : analysisCommand;
+      : payloadUnresolved
+        ? [safetyParts.join(' ').trim(), alternatePayload ?? '']
+            .filter(Boolean)
+            .join(' ')
+        : analysisCommand;
   const strippedTrailingAmp =
     analysisCommand !== innerCommand ||
     normalizedInnerArgsSuffix !== rawInnerArgsSuffix;
   const spawnCommand = wrapperTokens
     ? [
         wrapperTokens.join(' '),
-        innerQuote
-          ? `${innerQuote}${analysisCommand}${innerQuote}`
-          : analysisCommand,
+        payloadInTerminator
+          ? ''
+          : innerQuote
+            ? `${innerQuote}${analysisCommand}${innerQuote}`
+            : analysisCommand,
         normalizedInnerArgsSuffix,
       ]
         .filter(Boolean)

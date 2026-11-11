@@ -12,7 +12,12 @@ import path from 'node:path';
 import { Readable } from 'node:stream';
 import express from 'express';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { CSI_FILES_RETIREMENT_CAPABILITY_DIGEST } from './managed-csi-file-profile.js';
+import {
+  CSI_FILES_RETIREMENT_CAPABILITY_DIGEST,
+  CSI_FILES_DIAGNOSTICS_CAPABILITY_DIGEST,
+  CSI_FILES_ACTIVITY_CAPABILITY_DIGEST,
+  matchesCsiFilesProfile,
+} from './managed-csi-file-profile.js';
 import { parseManagedCsiBoot } from './managed-csi-envelope.js';
 import { ManagedCsiMount } from './managed-csi-mount.js';
 import { registerManagedContextRoutes } from './managed-context-worker.js';
@@ -64,6 +69,69 @@ afterEach(async () => {
 });
 
 describe('reserved private CSI file profile', () => {
+  it('pins activity diagnostics without upgrading earlier profile semantics', () => {
+    const manifest = JSON.stringify({
+      profile: 'csi-files-retirement/3',
+      tools: ['read_file', 'write_file', 'edit'],
+      fileHistory: true,
+      invocationProtocol: 2,
+      resultRetention: 'until-finalize',
+      diagnostics: 'model-v1',
+      activityDiagnostics: 'activity-v1',
+    });
+    expect(
+      `sha256:${createHash('sha256').update(manifest).digest('hex')}`,
+    ).toBe(CSI_FILES_ACTIVITY_CAPABILITY_DIGEST);
+    expect(
+      matchesCsiFilesProfile(
+        'csi-files-retirement/3',
+        CSI_FILES_ACTIVITY_CAPABILITY_DIGEST,
+      ),
+    ).toBe(true);
+    expect(
+      matchesCsiFilesProfile(
+        'csi-files-retirement/2',
+        CSI_FILES_ACTIVITY_CAPABILITY_DIGEST,
+      ),
+    ).toBe(false);
+    expect(
+      matchesCsiFilesProfile(
+        'csi-files-retirement/3',
+        CSI_FILES_DIAGNOSTICS_CAPABILITY_DIGEST,
+      ),
+    ).toBe(false);
+  });
+  it('pins the diagnostics manifest independently and refuses cross-version digests', () => {
+    const manifest = JSON.stringify({
+      profile: 'csi-files-retirement/2',
+      tools: ['read_file', 'write_file', 'edit'],
+      fileHistory: true,
+      invocationProtocol: 2,
+      resultRetention: 'until-finalize',
+      diagnostics: 'model-v1',
+    });
+    expect(
+      `sha256:${createHash('sha256').update(manifest).digest('hex')}`,
+    ).toBe(CSI_FILES_DIAGNOSTICS_CAPABILITY_DIGEST);
+    expect(
+      matchesCsiFilesProfile(
+        'csi-files-retirement/2',
+        CSI_FILES_DIAGNOSTICS_CAPABILITY_DIGEST,
+      ),
+    ).toBe(true);
+    expect(
+      matchesCsiFilesProfile(
+        'csi-files-retirement/2',
+        CSI_FILES_RETIREMENT_CAPABILITY_DIGEST,
+      ),
+    ).toBe(false);
+    expect(
+      matchesCsiFilesProfile(
+        'csi-files-retirement/1',
+        CSI_FILES_DIAGNOSTICS_CAPABILITY_DIGEST,
+      ),
+    ).toBe(false);
+  });
   it('pins the private manifest for the dedicated worker', () => {
     const manifest = JSON.stringify({
       profile: 'csi-files-retirement/1',

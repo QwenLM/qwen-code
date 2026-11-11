@@ -1224,6 +1224,7 @@ describe('JavaManagedAgentClient', () => {
             error: {
               code: 'agent_api_idempotency_conflict',
               message: 'conflict',
+              request_id: 'request-409',
             },
           },
           409,
@@ -1243,6 +1244,7 @@ describe('JavaManagedAgentClient', () => {
         status: 409,
         code: 'agent_api_idempotency_conflict',
         message: 'conflict',
+        requestId: 'request-409',
       }),
     );
   });
@@ -1282,6 +1284,66 @@ describe('JavaManagedAgentClient', () => {
       sessionId: 's1',
       turnId: 'p1',
     });
+  });
+
+  it('loads one recent Item page and passes its opaque older cursor verbatim', async () => {
+    const page = {
+      items: [{ id: 'recent-item' }],
+      nextCursor: 'signed-backward.cursor',
+      hasMore: true,
+      snapshotThroughSequence: 120,
+    };
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(jsonResponse(page));
+    const client = new JavaManagedAgentClient({
+      baseUrl: 'https://product.example',
+      fetch: fetchImpl,
+    });
+    const signal = new AbortController().signal;
+    expect(
+      await client.getRecentTranscriptItems(
+        { sessionId: 's1', cursor: 'signed-backward.cursor', limit: 2 },
+        signal,
+      ),
+    ).toEqual(page);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchImpl.mock.calls[0]!;
+    expect(String(url)).toBe(
+      'https://product.example/api/agent/web-shell/v1/transcript/items/query',
+    );
+    expect(JSON.parse(String(init?.body))).toEqual({
+      sessionId: 's1',
+      cursor: 'signed-backward.cursor',
+      limit: 2,
+    });
+    expect(init?.signal).toBe(signal);
+  });
+
+  it('surfaces an expired recent Item cursor without draining or replaying history', async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          error: { code: 'cursor_expired', message: 'Expired' },
+        }),
+        {
+          status: 409,
+          headers: { 'Content-Type': 'application/json' },
+        },
+      ),
+    );
+    const client = new JavaManagedAgentClient({
+      baseUrl: 'https://product.example',
+      fetch: fetchImpl,
+    });
+    await expect(
+      client.getRecentTranscriptItems({
+        sessionId: 's1',
+        cursor: 'expired',
+        limit: 2,
+      }),
+    ).rejects.toMatchObject({ code: 'cursor_expired', status: 409 });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
   it('sends getSession, transcript and submit surfaces verbatim', async () => {
@@ -1336,7 +1398,10 @@ describe('JavaManagedAgentClient', () => {
     const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
       new Response('<html>bad gateway</html>', {
         status: 502,
-        headers: { 'content-type': 'text/html' },
+        headers: {
+          'content-type': 'text/html',
+          'x-request-id': 'gateway-request-502',
+        },
       }),
     );
     const client = new JavaManagedAgentClient({
@@ -1349,6 +1414,7 @@ describe('JavaManagedAgentClient', () => {
       expect.objectContaining<Partial<JavaManagedAgentHttpError>>({
         status: 502,
         code: 'http_502',
+        requestId: 'gateway-request-502',
       }),
     );
   });

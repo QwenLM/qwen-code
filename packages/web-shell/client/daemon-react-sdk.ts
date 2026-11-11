@@ -85,6 +85,9 @@ export { useDaemonAuth as useAuth } from './daemon/index.js';
 /** Channel catalog, configuration, lifecycle, and pairing management. */
 export { useDaemonChannels as useChannels } from './daemon/index.js';
 
+/** A workspace's Channel event journal, polled while enabled. */
+export { useDaemonChannelEvents as useChannelEvents } from './daemon/index.js';
+
 /** Language diagnostics (errors, warnings) from the workspace. */
 export { useDaemonDiagnostics as useDiagnostics } from './daemon/index.js';
 
@@ -239,6 +242,8 @@ export type {
   /** Prompt submission status: `'idle' | 'waiting' | 'streaming'`. */
   DaemonPromptStatus,
   DaemonReasoningControls,
+  DaemonWorkflowMode,
+  DaemonWorkflowModeStatus,
   /** Hook return value for daemon follow-up suggestions. */
   UseDaemonFollowupSuggestionReturn,
   /** Image attachment (base64 data + MIME type) for prompt submission. */
@@ -300,6 +305,7 @@ export type {
   DaemonWorkspaceActions,
   DaemonChannelPairingActions,
   DaemonChannelsResource,
+  DaemonChannelObservedContacts,
   /** Internal workspace context value (client + actions + status + error). */
   DaemonWorkspaceContextValue,
   /** Props accepted by `<DaemonWorkspaceProvider>`. */

@@ -123,11 +123,13 @@ New managed channels default to `pairing`. The deprecated `senderPolicy` and `dm
 
 ### Shared-Session Operators
 
-In a shared session (`sessionScope: "chat_thread"` or `"single"`, and group chats under `"thread"`), some commands affect everyone in the conversation: `/approve`, `/deny`, `/cancel`, `/clear`, `/who`, `/status`, `/loop`, `/btw`, the loop tool, and steering an in-flight turn. Only the session's operators may use them; other members' messages queue instead of steering. Sessions that are not shared belong to their own sender, who may always use them.
+In a shared session (`sessionScope: "chat_thread"` or `"single"`, and group chats under `"thread"`), session management requires operator privileges: `/approve-always`, `/cancel`, `/clear`, `/who`, `/status`, `/loop`, `/btw`, the loop tool, and steering an in-flight turn. Other members' messages queue instead of steering. Sessions that are not shared belong to their own sender, who may always use them.
+
+An admitted sender may use `/approve` (allow once) or `/deny` for their own pending tool request in their current attended turn, in direct messages and groups. This request-specific authority does not depend on `operators`, even when the list is empty. Another ordinary member cannot answer it, and an attempt from another chat or thread is rejected. Operators may still answer another sender's text permission request in the same chat and thread; native interactive cards retain their existing owner checks.
 
 Set `operators` to the user IDs allowed to manage shared sessions. Omitted or empty `operators` grants nobody this role. Private allowlists, user pairing, group pairing, and group member lists never imply operator permissions. Operators must still pass normal conversation admission.
 
-For example, `groups: { "*": { "senders": "open" } }` with `operators: ["alice"]` lets every admitted group member start a turn, but only Alice can manage its shared session.
+For example, `groups: { "*": { "senders": "open" } }` with `operators: ["alice"]` lets every admitted group member start a turn and approve once or deny their own current request. Only Alice can manage its shared session or answer another sender's text permission request.
 
 A saved loop is checked against the same rule when it fires, using its creator as the sender, and is disabled if the creator is no longer an operator.
 
@@ -249,6 +251,13 @@ Channel memory does not automatically learn facts from normal conversation or
 accept `第一个` as confirmation for an ambiguous natural reference. Use a clear
 remember request and an exact entry ID when a natural reference is ambiguous.
 
+A turn a channel sends also runs no
+[auto-memory](../memory#auto-memory-what-qwen-learns-about-you) extraction or
+periodic cleanup (Dream) and gets no
+[follow-up suggestion](../followup-suggestions), including a message delivered
+to a session bound to a pull request. Auto-memory recall still runs, so a reply
+can draw on saved auto-memories.
+
 ### Token Security
 
 Bot tokens should not be stored directly in `settings.json`. Instead, use environment variable references:
@@ -367,9 +376,9 @@ All group settings use field-by-field inheritance: the specific group, then `"*"
 
 `pairing` is deliberately not a `senders` value: pairing approvals are stored per user, so approving someone through a group message would also unlock their direct messages. Use `groupPolicy: "pairing"` to admit an entire group instead.
 
-On the `github` and `gitlab` channels all inbound traffic is group traffic, so only `groupPolicy` and group member settings govern admission — see those channels' Security notes before using it on a public repository or project. Under `sessionScope: "single"` direct messages and groups share one conversation, so opening a group also exposes direct-message history to its members.
+On the `github` and `gitlab` channels all inbound traffic is group traffic, so only `groupPolicy` and group member settings govern admission — see those channels' Security notes before using it on a public repository or project. The `email` channel is the opposite: every delivery is a direct conversation, so `groupPolicy` and `groups` never govern it and the Web Shell editor hides those controls. Under `sessionScope: "single"` direct messages and groups share one conversation, so opening a group also exposes direct-message history to its members.
 
-In the Web Shell channel editor, **Who can talk in groups** and **Allowed group member IDs** edit `groups["*"]`, and **Session operators** edits `operators`. When `senders` is unset, the editor shows its effective default and writes nothing until you pick a value. Per-group overrides and an explicitly empty `"operators": []` are set in `settings.json`; saving from the editor keeps them.
+In the Web Shell channel editor, **Who can talk in groups** and **Allowed group member IDs** edit `groups["*"]`, and **Session operators** edits `operators`. When `senders` is unset, the editor shows its effective default and writes nothing until you pick a value. On `github`, the editor also shows one row per allowlisted repository for that repository's `senders`, `allowedUsers`, and `requireMention` — see [GitHub](./github.md#editing-from-the-web-shell). Other per-group overrides (`dispatchMode`, `groupHistoryLimit`, and per-group `requireMention` on chat platforms) and an explicitly empty `"operators": []` are set in `settings.json`; saving from the editor keeps them.
 
 ### Group History Backfill
 
@@ -550,8 +559,12 @@ Channel loops differ from the session-scoped tasks described in
 - They are scoped to the current channel chat or thread. Each target can have up
   to 10 enabled loops, and each prompt is limited to 4,000 characters.
 - They require an adapter and target that support proactive delivery. Telegram,
-  DingTalk, Feishu, and WeCom opt in, subject to platform-specific target
-  restrictions.
+  DingTalk, DingTalk Workspace, Feishu, WeCom, QQ, and Email opt in, subject to
+  platform-specific target restrictions. Email opts in only when
+  `proactiveRecipients` lists the exact target. QQ delivers loop results as
+  active group messages, supports no threaded targets, and requires the chat
+  type to be already learned: a delivery to a group whose type is unknown is
+  rejected.
 - They are unavailable with `sessionScope: "single"` because that scope is not
   tied to one chat target.
 - A saved loop is disabled if its target is no longer authorized when it is due.
@@ -586,6 +599,34 @@ Channels support slash commands. These are handled locally (no agent round-trip)
 All other slash commands (e.g., `/compress`, `/summary`) are forwarded to the agent. Named-task commands are registered only when the mode is enabled, so `/sessions` remains agent-visible for existing configurations.
 
 Named-task commands work on all channel types (Telegram, WeChat, QQ, DingTalk, WeCom, Feishu, GitHub). `/cancel` is currently registered only by Telegram, and loop creation requires proactive delivery support for the current adapter and target.
+
+## Channel Events in the Web Shell
+
+The Web Shell's **Channel events** page shows a timeline of what every Channel
+in the current workspace did: the inbound messages it accepted, and the ones it
+skipped and why (`reason_filter`, `mention_required`, `duplicate`,
+`edited_comment` for an older GitHub comment that mentions the bot and was
+edited, a sender-gate rejection, `github_api_error` when reading or handling a GitHub
+thread failed;
+a `failed` row with that reason means the thread will be read again), the
+replies it published or suppressed, its inbound task transitions, and how each
+poll went. Pick the workspace whose Channels you want
+to inspect, then filter by Channel and by event type; the page refreshes every
+few seconds while its tab is visible, pauses in a background tab, and has a
+manual refresh.
+
+Use it to answer "why did the bot not reply to that comment?" without reading
+the daemon log. Events never include message text — only routing decisions,
+identifiers, and errors. The page and its route exist wherever Channel
+management is available (`channel_management`), and each Channel keeps its
+journal under `~/.qwen/channels/<workspace>/` with one rotated file, so it
+never grows without bound.
+
+Rows that refer to a concrete session carry an **Open session** button:
+outbound rows open the Channel's own reply session, and GitHub task rows for
+bound-session delivery open the PR-bound session that received the event —
+including when that session lives in another registered workspace. Rows
+without a session (polls, skipped inbound messages) show no button.
 
 ## Running
 

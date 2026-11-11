@@ -39,7 +39,7 @@ describe('no-AK integration CI wiring', () => {
         path.join(ROOT, '.github/workflows/ci.yml'),
         'utf8',
       );
-      const routingBlocks = ['test', 'test_macos', 'test_windows'].map(
+      const routingBlocks = ['test', 'test_macos_shards', 'test_windows'].map(
         (jobName) => {
           const testStep = getWorkflowStep(
             getWorkflowJob(workflow, jobName),
@@ -105,7 +105,7 @@ describe('no-AK integration CI wiring', () => {
       'utf8',
     );
 
-    for (const jobName of ['test', 'test_macos']) {
+    for (const jobName of ['test', 'test_macos_shards']) {
       const testStep = getWorkflowStep(
         getWorkflowJob(workflow, jobName),
         'Run tests and generate reports',
@@ -119,7 +119,7 @@ describe('no-AK integration CI wiring', () => {
         // The Linux job runs the suites through the lane script.
         jobName === 'test'
           ? '.github/scripts/ci/run-unit-test-lanes.sh'
-          : 'npm run test:ci',
+          : 'node scripts/run-macos-ci-group.js',
         'RC=$?',
         'set -e',
         'pkill -TERM -P "$SAMPLER_PID" 2>/dev/null || true',
@@ -229,17 +229,23 @@ describe('no-AK integration CI wiring', () => {
       './cli/list_directory.test.ts',
       './cli/tool-hook-context.test.ts',
       './cli/tool-hook-updated-input.test.ts',
+      './cli/mods-prompt-submit.test.ts',
+      './cli/qwen-serve-conversations-root.test.ts',
       './cli/qwen-serve-routes.test.ts',
       './cli/qwen-serve-session-cd.test.ts',
       './cli/qwen-serve-streaming.test.ts',
       './cli/qwen-serve-standalone-concurrency.test.ts',
+      './helpers/hosted-sse-observer.test.ts',
       './interactive/workflow-completion.test.ts',
       './interactive/workflow-intent.test.ts',
       './interactive/workflow-mode.test.ts',
       './interactive/mods-tool-middleware.test.ts',
+      './interactive/mods-prompt-submit.test.ts',
+      './interactive/mods-assistant-message.test.ts',
       './interactive/statusline-parity.test.ts',
       './interactive/tui-editor-parity.test.ts',
       './interactive/tui-input-ownership.test.ts',
+      './interactive/tui-agent-loop-parity.test.ts',
       './sdk-typescript/abort-and-lifecycle.test.ts',
       './sdk-typescript/permission-control.test.ts',
       './sdk-typescript/sdk-mcp-server.test.ts',
@@ -353,6 +359,7 @@ describe('no-AK integration CI wiring', () => {
       'cli/telemetry.test.ts': 'Real model required',
       'cli/todo_write.test.ts': 'Real model required',
       'cli/tool-search.test.ts': 'Real model required',
+      'cli/update-target-version.test.ts': 'Runtime budget',
       'cli/utf-bom-encoding.test.ts': 'Runtime budget',
       'cli/write_file.test.ts': 'Real model required',
       'export-artifact-contract.test.ts': 'Runtime budget',
@@ -413,7 +420,7 @@ describe('no-AK integration CI wiring', () => {
       'utf8',
     );
     const ubuntuJob = getWorkflowJob(workflow, 'test');
-    const macosJob = getWorkflowJob(workflow, 'test_macos');
+    const macosJob = getWorkflowJob(workflow, 'test_macos_shards');
     const windowsJob = getWorkflowJob(workflow, 'test_windows');
     const gateJob = getWorkflowJob(workflow, 'integration_no_ak');
     const classifyJob = getWorkflowJob(workflow, 'classify_pr');
@@ -426,7 +433,7 @@ describe('no-AK integration CI wiring', () => {
     expect(workflow.split(`npm run ${NO_AK_SCRIPT}`).length - 1).toBe(1);
     for (const [name, job] of Object.entries({
       test: ubuntuJob,
-      test_macos: macosJob,
+      test_macos_shards: macosJob,
       test_windows: windowsJob,
     })) {
       expect(job, `${name} must not run the no-AK script`).not.toContain(
@@ -434,12 +441,40 @@ describe('no-AK integration CI wiring', () => {
       );
     }
 
+    // The gate runs as two shards over test_build's tree; the aggregate
+    // job carries the required check name and fails when the build or any
+    // shard fails.
     expect(gateJob).toContain(
+      "    name: 'Integration Tests (no-AK, shard ${{ matrix.shard }}/2)'",
+    );
+    expect(gateJob).toContain(
+      "    needs:\n      - 'classify_pr'\n      - 'test_build'\n",
+    );
+    expect(gateJob).toContain('        shard: [1, 2]');
+    expect(gateJob).toContain(
+      `npm run ${NO_AK_SCRIPT} -- --shard=\${{ matrix.shard }}/2`,
+    );
+    const resultJob = getWorkflowJob(workflow, 'integration_no_ak_result');
+    expect(resultJob).toContain(
       "    name: 'Integration Tests (no-AK, No Sandbox)'",
     );
-    expect(gateJob).toContain("    needs: 'classify_pr'");
-    // Same runner routing as the Ubuntu gate, never a hard-coded pool.
-    expect(gateJob).toContain('needs.classify_pr.outputs.ubuntu_runner');
+    expect(resultJob).toContain(
+      "      - 'test_build'\n      - 'integration_no_ak'\n",
+    );
+    expect(resultJob).toContain(
+      'test "$BUILD_RESULT" = success && test "$SHARDS_RESULT" = success',
+    );
+    expect(
+      resultJob.split('\n').find((line) => line.startsWith('    if:')),
+    ).toBe(gateJob.split('\n').find((line) => line.startsWith('    if:')));
+    // Same trust class as lint (PR code on the pool, zero secrets by
+    // construction — 2026-11-02 extension of the 2026-10-31 decision),
+    // never a hard-coded pool. Pin the runs-on line itself: the timeout line
+    // also mentions lint_runner, so a bare substring stays green under a
+    // runs-on-only revert.
+    expect(gateJob).toContain(
+      "runs-on: '${{ fromJSON(needs.classify_pr.outputs.lint_runner",
+    );
     const jobIf = gateJob
       .split('\n')
       .find((line) => line.startsWith('    if:'));
@@ -494,7 +529,9 @@ describe('no-AK integration CI wiring', () => {
     expect(trustedClassifier).toContain(
       'trusted-ci-classifier/.github/scripts/ci/classify-pr-profile.sh "${GITHUB_REPOSITORY}" "${PR_NUMBER}"',
     );
-    expect(trustedClassifier).toContain('docs_only|github_ci_only|full) ;;');
+    expect(trustedClassifier).toContain(
+      'docs_only|github_ci_only|java_only|full) ;;',
+    );
     expect(trustedClassifier).toContain('profile=full');
     // The classify_pr job output resolves against the step ID: renaming it
     // empties the output and every consumer silently falls back to `full` —
@@ -533,7 +570,12 @@ describe('no-AK integration CI wiring', () => {
       // steps.ci_profile.outputs.ci_profile, so every downstream profile
       // gate mis-compares; dropping the case line lets an unexpected
       // profile value pass through unnormalized.
-      expect(profileStep).toContain('docs_only|github_ci_only|full) ;;');
+      // java_only either passes through (the gate and test skip their
+      // steps on it) or, in lint_and_static, maps to its full payload.
+      expect(profileStep).toMatch(
+        /docs_only\|github_ci_only\|(?:java_only\|)?full\) ;;/,
+      );
+      expect(profileStep).toContain('java_only');
       expect(profileStep).toContain(
         'echo "ci_profile=${profile}" >> "${GITHUB_OUTPUT}"',
       );
@@ -591,19 +633,22 @@ describe('no-AK integration CI wiring', () => {
     expect(gateStep.indexOf(integrationTypecheckCommand)).toBeLessThan(
       gateStep.indexOf(`npm run ${NO_AK_SCRIPT}`),
     );
+    // The job's first step publishes the run-unique HOME via GITHUB_ENV
+    // (2026-11-02 round-2: fork code starts at checkout/install, not at the
+    // gate — HOME/USERPROFILE are job-wide, not gate-scoped); the gate keeps
+    // QWEN_HOME + the key scrub.
     expect(gateStep).toContain(
-      "QWEN_HOME: '${{ runner.temp }}/qwen-no-ak-home/.qwen'",
+      "QWEN_HOME: '${{ runner.temp }}/qwen-no-ak-home-${{ github.run_id }}-${{ github.run_attempt }}/.qwen'",
     );
     expect(gateStep).toContain('timeout-minutes: 20');
-    expect(gateStep).toContain(
-      "\n          HOME: '${{ runner.temp }}/qwen-no-ak-home'",
-    );
-    expect(gateStep).toContain(
-      "\n          USERPROFILE: '${{ runner.temp }}/qwen-no-ak-home'",
-    );
+    // HOME/USERPROFILE are job-wide now (first-step GITHUB_ENV), so the
+    // gate must not re-pin them step-locally.
+    expect(gateStep).not.toContain('\n          HOME: ');
+    expect(gateStep).not.toContain('\n          USERPROFILE: ');
     for (const key of [
       'API_KEY',
       'ANTHROPIC_API_KEY',
+      'ANTHROPIC_AUTH_TOKEN',
       'ANTHROPIC_BASE_URL',
       'ANTHROPIC_MODEL',
       'BAILIAN_CODING_PLAN_API_KEY',

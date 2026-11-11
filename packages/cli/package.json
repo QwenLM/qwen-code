@@ -1,7 +1,7 @@
 {
   "name": "@qwen-code/qwen-code",
   "private": true,
-  "version": "0.26.3",
+  "version": "0.27.1",
   "description": "Qwen Code",
   "repository": {
     "type": "git",
@@ -30,7 +30,7 @@
     "lint": "eslint . --ext .ts,.tsx",
     "format": "prettier --write .",
     "test": "vitest run",
-    "test:ci": "vitest run",
+    "test:ci": "vitest run --bail=1",
     "typecheck": "tsc --noEmit",
     "check-i18n": "tsx ../../scripts/check-i18n.ts"
   },
@@ -38,12 +38,12 @@
     "dist"
   ],
   "config": {
-    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.26.3"
+    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.27.1"
   },
   "dependencies": {
-    "@alcalzone/ansi-tokenize": "0.3.0",
     "@a2a-js/sdk": "^1.1.0",
     "@agentclientprotocol/sdk": "^0.14.1",
+    "@alcalzone/ansi-tokenize": "0.3.0",
     "@google/genai": "2.6.0",
     "@iarna/toml": "^2.2.5",
     "@modelcontextprotocol/sdk": "^1.30.0",
@@ -89,6 +89,7 @@
     "prompts": "^2.4.2",
     "proper-lockfile": "^4.1.2",
     "punycode": "^2.3.1",
+    "qrcode": "^1.5.4",
     "qrcode-terminal": "^0.12.0",
     "react": "^19.2.4",
     "read-package-up": "^11.0.0",
@@ -110,8 +111,8 @@
     "ws": "^8.18.0",
     "yaml": "^2.8.1",
     "yargs": "^17.7.2",
-    "yauzl": "^2.10.0",
-    "zod": "^3.23.8"
+    "yauzl": "^3.4.0",
+    "zod": "^4.6.6"
   },
   "devDependencies": {
     "@babel/runtime": "^7.27.6",
@@ -126,6 +127,7 @@
     "@types/markdown-it": "^14.1.2",
     "@types/node": "^22.0.0",
     "@types/prompts": "^2.4.9",
+    "@types/qrcode": "^1.5.6",
     "@types/qrcode-terminal": "^0.12.2",
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",

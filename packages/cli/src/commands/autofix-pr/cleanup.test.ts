@@ -57,6 +57,7 @@ import {
   historyPath,
   readHistory,
   readState,
+  writeAnchor,
   writeState,
   type AutofixPrState,
 } from './state.js';
@@ -66,6 +67,7 @@ describe('runCleanup (real git)', () => {
   let headSha: string;
   let savedCwd: string;
   let savedSession: string | undefined;
+  let savedServe: string | undefined;
   let paths: ReturnType<typeof autofixPrPaths>;
 
   const run = (cwd: string, ...args: string[]) =>
@@ -104,10 +106,15 @@ describe('runCleanup (real git)', () => {
       postedCommentIds: [],
     };
     writeState(paths.statePath, state);
+    writeAnchor({ host: 'github.com', owner: 'o', repo: 'r' }, 7, repo);
     stdout.mockClear();
     savedCwd = process.cwd();
     savedSession = process.env['QWEN_CODE_SESSION_ID'];
     process.env['QWEN_CODE_SESSION_ID'] = 'session-a';
+    // `watchRoot` roots a daemon session's watch at its own worktree; a runner
+    // under `qwen serve` must not leak that into these clone-rooted tests.
+    savedServe = process.env['QWEN_CODE_SERVE'];
+    delete process.env['QWEN_CODE_SERVE'];
     process.chdir(repo);
   });
 
@@ -117,6 +124,8 @@ describe('runCleanup (real git)', () => {
     process.chdir(savedCwd);
     if (savedSession === undefined) delete process.env['QWEN_CODE_SESSION_ID'];
     else process.env['QWEN_CODE_SESSION_ID'] = savedSession;
+    if (savedServe === undefined) delete process.env['QWEN_CODE_SERVE'];
+    else process.env['QWEN_CODE_SERVE'] = savedServe;
     rmSync(repo, { recursive: true, force: true });
   });
 
@@ -250,6 +259,72 @@ describe('runCleanup (real git)', () => {
     } finally {
       rmSync(lib, { recursive: true, force: true });
     }
+  });
+
+  // Another checkout has the watch's branch (a `sync --discard` that could
+  // not switch back answers so, and the skill then stops the watch): git
+  // refuses to delete the branch, so nothing goes, --force or not, and the
+  // watch ends until that checkout lets the branch go.
+  describe('a branch another checkout has', () => {
+    let holder: string;
+    beforeEach(() => {
+      run(paths.worktreePath, 'switch', '-q', '-c', 'fix/ci');
+      holder = join(repo, 'other-wt');
+      run(repo, 'worktree', 'add', '-q', holder, paths.branch);
+    });
+    afterEach(() => rmSync(holder, { recursive: true, force: true }));
+
+    it.each([false, true])(
+      'keeps all three and ends the watch (force: %s)',
+      (force) => {
+        runCleanup(7, force);
+        expect(existsSync(paths.worktreePath)).toBe(true);
+        expect(branchExists()).toBe(true);
+        expect(readState(paths.statePath)?.ended).toEqual({
+          at: expect.any(String),
+          reason: `${paths.branch} is checked out in ${holder}`,
+        });
+        expect(lastReport()).toEqual({
+          removed: false,
+          worktreePath: paths.worktreePath,
+          heldBy: holder,
+          reason: expect.stringMatching(
+            /^kept because qwen-autofix\/pr-7 is checked out in .*other-wt\. Switch that checkout to another branch or remove it \(`git -C '.*' worktree remove '.*other-wt'`\); then run `qwen autofix-pr cleanup 7` again$/,
+          ),
+        });
+      },
+    );
+
+    it.skipIf(process.platform === 'win32')(
+      'removes all three once the command it gave has freed the branch',
+      () => {
+        runCleanup(7, false);
+        const [, command] =
+          /`(git -C [^`]+)`/.exec(String(lastReport()['reason'])) ?? [];
+        execFileSync('sh', ['-c', command!], { cwd: tmpdir(), stdio: 'pipe' });
+        runCleanup(7, false);
+        expect(lastReport()).toMatchObject({ removed: true });
+        expect(existsSync(paths.worktreePath)).toBe(false);
+        expect(existsSync(paths.statePath)).toBe(false);
+        expect(branchExists()).toBe(false);
+      },
+    );
+
+    it('keeps the branch and the state when the worktree was deleted by hand', () => {
+      rmSync(paths.worktreePath, { recursive: true, force: true });
+      runCleanup(7, false);
+      expect(existsSync(paths.statePath)).toBe(true);
+      expect(branchExists()).toBe(true);
+      expect(lastReport()).toMatchObject({ removed: false, heldBy: holder });
+    });
+  });
+
+  it("removes a watch whose own worktree, deleted by hand, is git's only holder of the branch", () => {
+    rmSync(paths.worktreePath, { recursive: true, force: true });
+    runCleanup(7, true);
+    expect(lastReport()).toMatchObject({ removed: true });
+    expect(existsSync(paths.statePath)).toBe(false);
+    expect(branchExists()).toBe(false);
   });
 
   it('keeps everything when the worktree has uncommitted changes', () => {
@@ -554,11 +629,31 @@ describe('runCleanup (real git)', () => {
     expect(existsSync(paths.statePath)).toBe(false);
   });
 
-  it('keeps the state file when the branch cannot be deleted', () => {
+  it('keeps the branch and the state of one the clone checkout has', () => {
     rmSync(paths.worktreePath, { recursive: true, force: true });
     run(repo, 'worktree', 'prune');
     run(repo, 'switch', '-q', paths.branch);
-    expect(() => runCleanup(7, false)).toThrow();
+    runCleanup(7, true);
+    expect(branchExists()).toBe(true);
+    expect(existsSync(paths.statePath)).toBe(true);
+    expect(lastReport()).toMatchObject({
+      removed: false,
+      heldBy: repo,
+      reason: expect.stringMatching(
+        /checked out in .*\. Switch that checkout to another branch; then run/,
+      ),
+    });
+  });
+
+  it('keeps the state file when the branch cannot be deleted', () => {
+    rmSync(paths.worktreePath, { recursive: true, force: true });
+    run(repo, 'worktree', 'prune');
+    // A lock git left on the ref stops the delete.
+    writeFileSync(
+      run(repo, 'rev-parse', '--git-path', `refs/heads/${paths.branch}.lock`),
+      '',
+    );
+    expect(() => runCleanup(7, false)).toThrow(/branch -D/);
     expect(branchExists()).toBe(true);
     expect(existsSync(paths.statePath)).toBe(true);
   });
@@ -645,5 +740,107 @@ describe('runCleanup (real git)', () => {
       process.chdir(repo);
       rmSync(other, { recursive: true, force: true });
     }
+  });
+
+  it('ends a main-rooted watch from a daemon session in a linked worktree', () => {
+    // The watch is rooted in the main worktree (beforeEach); a daemon session
+    // in a linked worktree must still discover and end it, not report a
+    // nonexistent path under its own root and leave the real watch running.
+    const linked = join(dirname(repo), `${basename(repo)}-linked`);
+    run(repo, 'worktree', 'add', '-q', '--detach', linked);
+    process.env['QWEN_CODE_SERVE'] = '1';
+    process.chdir(linked);
+    try {
+      runCleanup(7, false);
+      expect(lastReport()).toMatchObject({ removed: true });
+      expect(existsSync(paths.worktreePath)).toBe(false);
+      expect(branchExists()).toBe(false);
+    } finally {
+      process.chdir(repo);
+      delete process.env['QWEN_CODE_SERVE'];
+      run(repo, 'worktree', 'remove', '--force', linked);
+      rmSync(linked, { recursive: true, force: true });
+    }
+  });
+
+  it('ends the watch despite a sibling worktree with a malformed .qwen/tmp', () => {
+    const sibling = join(dirname(repo), `${basename(repo)}-sibling`);
+    run(repo, 'worktree', 'add', '-q', '--detach', sibling);
+    mkdirSync(join(sibling, '.qwen'), { recursive: true });
+    writeFileSync(join(sibling, '.qwen', 'tmp'), 'not a directory');
+    try {
+      // Discovery must isolate the sibling's ENOTDIR, not abort: the healthy
+      // main-rooted watch is still found and ended.
+      runCleanup(7, false);
+      expect(lastReport()).toMatchObject({ removed: true });
+      expect(branchExists()).toBe(false);
+    } finally {
+      run(repo, 'worktree', 'remove', '--force', sibling);
+      rmSync(sibling, { recursive: true, force: true });
+    }
+  });
+
+  describe('in place', () => {
+    const makeInPlace = () => {
+      run(repo, 'worktree', 'remove', '--force', paths.worktreePath);
+      run(repo, 'branch', '-D', paths.branch);
+      writeState(paths.statePath, {
+        ...readState(paths.statePath)!,
+        inPlace: true,
+        worktreePath: repo,
+        branch: 'main',
+      });
+    };
+
+    it('removes only the watch files; the checkout and its branch stay', () => {
+      makeInPlace();
+      run(repo, 'update-ref', paths.headRef, headSha);
+      const log = join(dirname(paths.statePath), 'autofix-pr-7-ci-1.log');
+      writeFileSync(log, 'log');
+      const before = run(repo, 'rev-parse', 'HEAD');
+      // cwd is the checkout itself: no "from inside it" refusal applies.
+      runCleanup(7, false);
+      expect(lastReport()).toMatchObject({
+        removed: true,
+        inPlace: true,
+        worktreePath: repo,
+      });
+      expect(existsSync(paths.statePath)).toBe(false);
+      expect(existsSync(log)).toBe(false);
+      expect(run(repo, 'for-each-ref', paths.headRef)).toBe('');
+      expect(run(repo, 'rev-parse', 'HEAD')).toBe(before);
+      expect(run(repo, 'symbolic-ref', 'HEAD')).toBe('refs/heads/main');
+      expect(
+        existsSync(
+          historyPath(paths, { host: 'github.com', owner: 'o', repo: 'r' }),
+        ),
+      ).toBe(true);
+    });
+
+    it('--force keeps a dirty checkout and its unpushed commits too', () => {
+      makeInPlace();
+      run(repo, 'commit', '-q', '--allow-empty', '-m', 'mine');
+      writeFileSync(join(repo, 'dirty.txt'), 'x');
+      const before = run(repo, 'rev-parse', 'HEAD');
+      runCleanup(7, true);
+      expect(existsSync(join(repo, 'dirty.txt'))).toBe(true);
+      expect(run(repo, 'rev-parse', 'HEAD')).toBe(before);
+      expect(run(repo, 'symbolic-ref', 'HEAD')).toBe('refs/heads/main');
+      expect(existsSync(paths.statePath)).toBe(false);
+    });
+
+    it('--force removes a killed helper lock, break and non-regular gate, and the head ref', () => {
+      makeInPlace();
+      run(repo, 'update-ref', paths.headRef, headSha);
+      mkdirSync(paths.lockPath, { recursive: true });
+      writeFileSync(`${paths.lockPath}.break`, '');
+      mkdirSync(paths.gatePath, { recursive: true });
+      runCleanup(7, true);
+      expect(run(repo, 'for-each-ref', paths.headRef)).toBe('');
+      expect(existsSync(paths.lockPath)).toBe(false);
+      expect(existsSync(`${paths.lockPath}.break`)).toBe(false);
+      expect(existsSync(paths.gatePath)).toBe(false);
+      expect(run(repo, 'symbolic-ref', 'HEAD')).toBe('refs/heads/main');
+    });
   });
 });

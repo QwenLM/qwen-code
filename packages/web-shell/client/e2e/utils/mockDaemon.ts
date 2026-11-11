@@ -43,6 +43,7 @@ import {
   type PermissionResponse,
   type PromptRequest,
 } from '@qwen-code/sdk/daemon';
+import { installBootRetry } from './bootRetry';
 import { installSseTransport, type SseTransport } from './sseTransport';
 
 /** One transcript page as the mock daemon serves it. */
@@ -97,6 +98,8 @@ export interface WebShellDaemonScenario {
   pairingApprovals: Record<string, string[]>;
   pairingGroupApprovals: Record<string, string[]>;
   sessions: DaemonSessionSummary[];
+  workspaceOrder: string[];
+  workspaceOrderSaveError?: boolean;
   standaloneSessions: DaemonStandaloneSessionSummary[];
   standaloneCreateError?: {
     status: number;
@@ -461,6 +464,8 @@ export function createWebShellDaemonScenario(
     pairingApprovals: overrides.pairingApprovals ?? {},
     pairingGroupApprovals: overrides.pairingGroupApprovals ?? {},
     sessions,
+    workspaceOrder: overrides.workspaceOrder ?? [],
+    workspaceOrderSaveError: overrides.workspaceOrderSaveError,
     standaloneSessions: overrides.standaloneSessions ?? [],
     standaloneCreateError: overrides.standaloneCreateError,
     sessionGroups: overrides.sessionGroups ?? [],
@@ -528,6 +533,9 @@ export async function installMockDaemon(
   peers.set(baseOrigin, { scenario, requests });
   const resolvePeer = (origin: string): DaemonPeer | undefined =>
     origin ? peers.get(origin) : undefined;
+  // Most app specs install their daemon before navigating, so hooking the
+  // boot retry here covers them without a page-setup line in each spec.
+  await installBootRetry(page);
   const sse = await installSseTransport<DaemonEvent>(page, { baseURL });
 
   await page.route(`${baseOrigin}/**`, async (route) => {
@@ -826,6 +834,7 @@ function isDaemonPath(path: string): boolean {
   return (
     path === '/health' ||
     path === '/capabilities' ||
+    path === '/workspace-order' ||
     path === '/brand' ||
     path === '/workspace/settings' ||
     path === '/workspace/providers' ||
@@ -895,6 +904,8 @@ function isDaemonPath(path: string): boolean {
 }
 
 function isDaemonRoute(method: string, path: string): boolean {
+  if ((method === 'GET' || method === 'POST') && path === '/workspace-order')
+    return true;
   if (
     method === 'GET' &&
     (path === '/health' || path === '/capabilities' || path === '/brand')
@@ -1251,6 +1262,24 @@ async function handleDaemonRoute(
   searchParams: URLSearchParams = new URLSearchParams(),
   resolvePeer?: (origin: string) => DaemonPeer | undefined,
 ): Promise<void> {
+  if (path === '/workspace-order') {
+    if (method === 'POST') {
+      if (scenario.workspaceOrderSaveError) {
+        await json(
+          route,
+          {
+            error: 'Failed to persist workspace order',
+            code: 'workspace_registration_store_error',
+          },
+          500,
+        );
+        return;
+      }
+      scenario.workspaceOrder = getRecordValue(body, 'cwds') as string[];
+    }
+    await json(route, { cwds: scenario.workspaceOrder });
+    return;
+  }
   if (method === 'GET' && path === '/health') {
     await json(route, { status: 'ok' });
     return;
@@ -2428,6 +2457,46 @@ async function handleDaemonRoute(
       const configId = readStringField(body, 'configId');
       const value = readStringField(body, 'value');
       const persist = getRecordValue(body, 'persist');
+      if (configId === 'workflow_mode') {
+        const currentConfigOptions = Array.isArray(scenario.state.configOptions)
+          ? scenario.state.configOptions
+          : [];
+        const workflow = currentConfigOptions.find(
+          (option) => isRecord(option) && option['id'] === configId,
+        );
+        const metadata = getRecordValue(
+          getRecordValue(workflow, '_meta'),
+          'qwen.workflowMode',
+        );
+        if (
+          (value !== 'on' && value !== 'off') ||
+          (isRecord(body) && 'persist' in body) ||
+          !isRecord(metadata) ||
+          typeof metadata['available'] !== 'boolean' ||
+          (value === 'on' && !metadata['available'])
+        ) {
+          await badRequest(route, 'Unsupported workflow mode request.');
+          return;
+        }
+        const configOptions = currentConfigOptions.map((option) =>
+          isRecord(option) && option['id'] === configId
+            ? {
+                ...option,
+                currentValue: value,
+                _meta: {
+                  ...(isRecord(option['_meta']) ? option['_meta'] : {}),
+                  'qwen.workflowMode': {
+                    ...metadata,
+                    effective: value === 'on' && metadata['available'],
+                  },
+                },
+              }
+            : option,
+        );
+        scenario.state.configOptions = configOptions;
+        await json(route, { configOptions, persisted: true });
+        return;
+      }
       if (
         configId !== 'reasoning_effort' ||
         !value ||

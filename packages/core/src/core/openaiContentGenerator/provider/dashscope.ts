@@ -25,6 +25,7 @@ import { getEffectiveReasoning } from '../../reasoning-overrides.js';
 import { clampReasoningEffort } from '../../reasoning-effort.js';
 import { DefaultOpenAICompatibleProvider } from './default.js';
 import { buildSessionAwareFetch } from '../../outbound-session-id.js';
+import { filterIsolatedModelOverrides } from './utils.js';
 import {
   QWENCLOUD_MAAS_HOSTS,
   withDashScopeSourceConfig,
@@ -35,8 +36,8 @@ const debugLogger = createDebugLogger('DashScopeOpenAICompatibleProvider');
 
 /**
  * Legacy input ladder for routes without an explicit reasoning capability.
- * DashScope accepts high/max as xhigh aliases; configured presets expose only
- * native low/medium/xhigh choices. Keep this fallback's clamp and warning for
+ * Configured presets declare the tiers the model accepts (qwen3.8 goes up to
+ * max) and bypass this ladder. Keep this fallback's clamp and warning for
  * existing unconfigured routes.
  */
 const DASHSCOPE_TIERED_EFFORTS: readonly ReasoningEffort[] = [
@@ -359,6 +360,10 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     return new OpenAI({
       apiKey,
       baseURL: baseUrl,
+      ...(this.contentGeneratorConfig.isolatedRoute && {
+        organization: null,
+        project: null,
+      }),
       timeout,
       maxRetries,
       defaultHeaders,
@@ -426,9 +431,12 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     const requestWithTokenLimits = this.applyOutputTokenLimit(request);
 
     const isTieredQwenModel = this.isTieredEffortModel(request.model);
+    const configuredExtraBody = filterIsolatedModelOverrides(
+      this.contentGeneratorConfig.extra_body,
+    );
     const extraBody = isTieredQwenModel
-      ? withoutNullishThinkingKnobs(this.contentGeneratorConfig.extra_body)
-      : this.contentGeneratorConfig.extra_body;
+      ? withoutNullishThinkingKnobs(configuredExtraBody)
+      : configuredExtraBody;
 
     // qwen3.8-max accepts the unified effort tiers directly. Older qwen hybrid
     // models still expose only the on/off `enable_thinking` switch. User
@@ -596,7 +604,8 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
 
   /**
    * Translate the unified reasoning effort into the wire shape the model
-   * accepts. The qwen3.8-max family takes the tiered `reasoning_effort`
+   * accepts. The tiered-effort Qwen families (qwen3.8-max,
+   * qwen-latest-series-invite-*, qwen4*) take the tiered `reasoning_effort`
    * directly; older qwen hybrid models expose only the on/off
    * `enable_thinking` switch, so the effort ladder collapses to on/off
    * there. Gated to qwen-family wire models (mirroring the pipeline's
@@ -1111,9 +1120,9 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
    * @returns true if cache control should be enabled, false otherwise
    */
   private shouldEnableCacheControl(): boolean {
-    // Cache control is enabled by default (when enableCacheControl is undefined or true).
-    return (
-      this.cliConfig.getContentGeneratorConfig()?.enableCacheControl !== false
-    );
+    const config = this.contentGeneratorConfig.isolatedRoute
+      ? this.contentGeneratorConfig
+      : this.cliConfig.getContentGeneratorConfig();
+    return config?.enableCacheControl !== false;
   }
 }

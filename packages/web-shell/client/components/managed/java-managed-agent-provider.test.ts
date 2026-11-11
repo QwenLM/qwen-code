@@ -1,6 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { artifact } from './managed-tool-result.test-fixtures';
 import { createJavaManagedAgentProvider } from './java-managed-agent-provider';
+import { pendingQuestion } from './managed-question.test-fixtures';
+import {
+  sideQuery,
+  sideQueryContext,
+} from './managed-side-query.test-fixtures';
+import {
+  diagnosticContext,
+  diagnosticResources,
+  diagnosticStats,
+  diagnosticTrace,
+} from './managed-diagnostics.test-fixtures';
 
 function jsonResponse(value: unknown): Response {
   return new Response(JSON.stringify(value), {
@@ -10,6 +21,146 @@ function jsonResponse(value: unknown): Response {
 }
 
 describe('createJavaManagedAgentProvider', () => {
+  it('uses the private product side-query routes and resumes full snapshots by revision', async () => {
+    const running = {
+      ...sideQuery,
+      status: 'running',
+      resultRevision: 1,
+      text: 'partial',
+    };
+    const frames = [running, running, sideQuery]
+      .map((query) => `event: snapshot\ndata: ${JSON.stringify(query)}\n\n`)
+      .join('');
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse(sideQueryContext))
+      .mockResolvedValueOnce(jsonResponse(running))
+      .mockResolvedValueOnce(
+        jsonResponse({ items: [running], nextCursor: 'older' }),
+      )
+      .mockResolvedValueOnce(jsonResponse(running))
+      .mockResolvedValueOnce(
+        new Response(frames, {
+          headers: { 'content-type': 'text/event-stream' },
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({ ...sideQuery, status: 'cancelled' }),
+      );
+    const provider = createJavaManagedAgentProvider({
+      baseUrl: 'https://product.example',
+      fetch: fetchImpl,
+    });
+    const signal = new AbortController().signal;
+    const options = { clientId: 'c', signal };
+    const api = provider.sideQueries!;
+    expect(await api.context('s1', options)).toEqual(sideQueryContext);
+    await api.create(
+      's1',
+      { kind: 'btw', question: 'question' },
+      { ...options, idempotencyKey: 'original-key' },
+    );
+    await api.list('s1', { ...options, cursor: 'cursor', limit: 20 });
+    await api.get('s1', 'q1', options);
+    const snapshots = [];
+    for await (const snapshot of api.stream('s1', 'q1', {
+      ...options,
+      afterRevision: 1,
+    }))
+      snapshots.push(snapshot);
+    expect(snapshots).toEqual([sideQuery]);
+    await api.cancel('s1', 'q1', options);
+    expect(fetchImpl.mock.calls.map(([url]) => url)).toEqual(
+      ['context', 'create', 'list', 'get', 'stream', 'cancel'].map(
+        (route) =>
+          `https://product.example/api/agent/web-shell/v1/session-side-queries/${route}`,
+      ),
+    );
+    expect(JSON.parse(String(fetchImpl.mock.calls[1][1]?.body))).toEqual({
+      sessionId: 's1',
+      kind: 'btw',
+      question: 'question',
+      idempotencyKey: 'original-key',
+    });
+    expect(JSON.parse(String(fetchImpl.mock.calls[4][1]?.body))).toEqual({
+      sessionId: 's1',
+      queryId: 'q1',
+      afterRevision: 1,
+    });
+    expect(
+      fetchImpl.mock.calls.every(([, request]) => request?.signal === signal),
+    ).toBe(true);
+  });
+
+  it('reads diagnostics through passive product routes and rejects foreign snapshots', async () => {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse(diagnosticContext))
+      .mockResolvedValueOnce(jsonResponse(diagnosticStats))
+      .mockResolvedValueOnce(jsonResponse(diagnosticResources))
+      .mockResolvedValueOnce(jsonResponse(diagnosticTrace));
+    const provider = createJavaManagedAgentProvider({
+      baseUrl: 'https://product.example',
+      productScope: 'tenant:actor',
+      fetch: fetchImpl,
+    });
+    const signal = new AbortController().signal;
+    const request = { clientId: 'c', signal };
+    await expect(
+      provider.diagnostics!.getContextUsage('s1', request),
+    ).resolves.toEqual(diagnosticContext);
+    await expect(
+      provider.diagnostics!.getStatistics('s1', request),
+    ).resolves.toEqual(diagnosticStats);
+    await expect(
+      provider.diagnostics!.getResources('s1', request),
+    ).resolves.toEqual(diagnosticResources);
+    await expect(
+      provider.diagnostics!.listAgentTrace('s1', {
+        ...request,
+        cursor: 'older',
+        limit: 20,
+      }),
+    ).resolves.toEqual(diagnosticTrace);
+    expect(fetchImpl.mock.calls.map(([url]) => url)).toEqual(
+      [
+        'session-context-usage',
+        'session-stats',
+        'session-resources',
+        'session-agent-trace',
+      ].map(
+        (route) =>
+          `https://product.example/api/agent/web-shell/v1/${route}/query`,
+      ),
+    );
+    expect(JSON.parse(String(fetchImpl.mock.calls[3][1]?.body))).toEqual({
+      sessionId: 's1',
+      cursor: 'older',
+      limit: 20,
+    });
+    expect(
+      fetchImpl.mock.calls.every(([, options]) => options?.signal === signal),
+    ).toBe(true);
+    fetchImpl.mockResolvedValueOnce(
+      jsonResponse({ ...diagnosticStats, sessionId: 'foreign' }),
+    );
+    await expect(
+      provider.diagnostics!.getStatistics('s1', request),
+    ).rejects.toThrow('identity mismatch');
+    fetchImpl.mockResolvedValueOnce(
+      jsonResponse({
+        sessionId: 's1',
+        status: 'closed',
+        createdAt: 1,
+        updatedAt: 2,
+        capabilities: { diagnostics: true, workspaceTurns: false },
+      }),
+    );
+    const summary = await provider.getSession('s1', request);
+    expect(summary.capabilities.diagnostics).toBe(true);
+    expect(summary.capabilities.canSend).toBe(false);
+  });
+
   it('submits and reads a compression operation through the product routes', async () => {
     const operation = {
       operationId: 'compression-1',
@@ -123,7 +274,7 @@ describe('createJavaManagedAgentProvider', () => {
     expect(
       createJavaManagedAgentProvider({ baseUrl: 'https://product.example' })
         .contextCompression,
-    ).toBeUndefined();
+    ).toBeDefined();
   });
 
   it.each([undefined, true, false])(
@@ -450,7 +601,7 @@ describe('createJavaManagedAgentProvider', () => {
     expect(
       createJavaManagedAgentProvider({ baseUrl: 'https://product.example' })
         .approvalChange,
-    ).toBeUndefined();
+    ).toBeDefined();
   });
 
   it('preserves stored-agent effective and initial approval policy from Session summaries', async () => {
@@ -627,7 +778,7 @@ describe('createJavaManagedAgentProvider', () => {
     expect(
       createJavaManagedAgentProvider({ baseUrl: 'https://product.example' })
         .modelChange,
-    ).toBeUndefined();
+    ).toBeDefined();
   });
 
   it.each([
@@ -779,7 +930,7 @@ describe('createJavaManagedAgentProvider', () => {
     },
   );
 
-  it('reads tasks without identity scope but only exposes cancellation with a product scope', async () => {
+  it('reads tasks without identity scope and exposes cancellation regardless of product scope', async () => {
     const fetchImpl = vi
       .fn<typeof fetch>()
       .mockResolvedValue(jsonResponse({ data: [], hasMore: false }));
@@ -788,13 +939,7 @@ describe('createJavaManagedAgentProvider', () => {
       fetch: fetchImpl,
     });
     expect(provider.tasks).toBeDefined();
-    expect(provider.tasks!.cancel).toBeUndefined();
-    expect(
-      createJavaManagedAgentProvider({
-        baseUrl: 'https://product.example',
-        productScope: '  ',
-      }).tasks!.cancel,
-    ).toBeUndefined();
+    expect(provider.tasks!.cancel).toBeDefined();
     const abort = new AbortController();
     await provider.tasks!.list('s1', {
       clientId: 'client',
@@ -1043,7 +1188,7 @@ describe('createJavaManagedAgentProvider', () => {
     ).toThrow('productScope');
   });
 
-  it('preserves model, worktree and extension pins on both creation paths', async () => {
+  it('preserves explicit memory, model, worktree and extension pins on both creation paths', async () => {
     const fetchImpl = vi
       .fn<typeof fetch>()
       .mockImplementation(async () =>
@@ -1058,6 +1203,7 @@ describe('createJavaManagedAgentProvider', () => {
     const request = {
       agentId: 'qwen-code',
       modelId: 'model-b',
+      memoryStoreId: 'memstore_personal',
       workspaceId: 'ws',
       cwdRelative: '.',
       approvalMode: 'yolo' as const,
@@ -1081,6 +1227,7 @@ describe('createJavaManagedAgentProvider', () => {
         expect.objectContaining({
           agentId: 'qwen-code',
           modelId: 'model-b',
+          memoryStoreId: 'memstore_personal',
           approvalMode: 'yolo',
           worktree: request.worktree,
           extensionPins: request.extensionPins,
@@ -1403,6 +1550,7 @@ describe('createJavaManagedAgentProvider', () => {
         events: [],
         items: [],
         lastSequence: 7,
+        coveredSequence: 5,
         hasMore: true,
         olderCursor: 'older-1',
       }),
@@ -1419,7 +1567,9 @@ describe('createJavaManagedAgentProvider', () => {
     });
 
     expect(transcript.olderCursor).toBe('older-1');
-    expect(transcript.lastEventId).toBe(7);
+    expect(transcript.lastEventId).toBe(5);
+    expect(transcript.history).toBe('items');
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
     const [url, init] = fetchImpl.mock.calls[0]!;
     expect(String(url)).toBe(
       'https://product.example/api/agent/web-shell/v1/transcript/query',
@@ -1431,6 +1581,65 @@ describe('createJavaManagedAgentProvider', () => {
         limit: 25,
       }),
     );
+  });
+
+  it.each([
+    ['missing', undefined],
+    ['null', null],
+    ['negative', -1],
+    ['fractional', 1.5],
+  ])(
+    'rejects %s message coverage instead of resuming at the head',
+    async (_label, coverage) => {
+      const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
+        jsonResponse({
+          events: [],
+          items: [],
+          lastSequence: 400,
+          coveredSequence: coverage,
+          hasMore: false,
+        }),
+      );
+      const provider = createJavaManagedAgentProvider({
+        baseUrl: 'https://product.example',
+        fetch: fetchImpl,
+      });
+      await expect(
+        provider.getTranscript('session-1', {
+          clientId: 'client-1',
+          limit: 100,
+        }),
+      ).rejects.toThrow('Invalid message transcript coverage.');
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('forwards personal memory only when explicitly selected', async () => {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockImplementation(async () =>
+        jsonResponse({ sessionId: 's', turnId: 't' }),
+      );
+    const provider = createJavaManagedAgentProvider({
+      baseUrl: 'https://product.example',
+      fetch: fetchImpl,
+    });
+    await provider.createSession(
+      { text: 'hello', memoryStoreId: 'memstore_personal' },
+      { clientId: 'client', idempotencyKey: 'with-memory' },
+    );
+    await provider.createSession(
+      { text: 'hello' },
+      { clientId: 'client', idempotencyKey: 'without-memory' },
+    );
+    expect(JSON.parse(String(fetchImpl.mock.calls[0]![1]?.body))).toMatchObject(
+      {
+        memoryStoreId: 'memstore_personal',
+      },
+    );
+    expect(
+      JSON.parse(String(fetchImpl.mock.calls[1]![1]?.body)),
+    ).not.toHaveProperty('memoryStoreId');
   });
 
   it('sends idempotent create, submit, and cancel commands only to Java', async () => {
@@ -1770,6 +1979,7 @@ describe('createJavaManagedAgentProvider', () => {
         olderCursor: 'older-1',
         hasMore: true,
         lastSequence: 4,
+        coveredSequence: 4,
       }),
     );
     const provider = createJavaManagedAgentProvider({
@@ -1919,6 +2129,7 @@ describe('createJavaManagedAgentProvider', () => {
                 ...permission,
                 actionId: 'question_1',
                 kind: 'question',
+                state: 'decided',
                 questions: [],
               },
             ],
@@ -1952,6 +2163,7 @@ describe('createJavaManagedAgentProvider', () => {
           toolName: 'write_file',
           inputRevision: 1,
           policyRevision: 'hosted-tool-approval/1',
+          createdAt: 1,
           expiresAt: 600_001,
           ...(inputPreview ? { inputPreview } : {}),
           options: [
@@ -2062,6 +2274,69 @@ describe('createJavaManagedAgentProvider', () => {
       }
     },
   );
+
+  it('lists a durable question and submits its structured answer through the existing operation', async () => {
+    const question = pendingQuestion();
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        jsonResponse({
+          data: [
+            {
+              ...question,
+              source: { kind: 'tool_call', id: question.functionCallId },
+              state: 'requested',
+              createdAt: 1,
+            },
+          ],
+          hasMore: false,
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          operationId: 'question-response',
+          type: 'action_response',
+          status: 'completed',
+        }),
+      );
+    const provider = createJavaManagedAgentProvider({
+      baseUrl: 'https://product.example',
+      fetch: fetchImpl,
+    });
+    const pending = await provider.actions!.listPending(question.sessionId, {
+      clientId: 'client',
+    });
+    expect(pending).toEqual([{ ...question, createdAt: 1 }]);
+    const response = {
+      kind: 'question' as const,
+      answers: [
+        { questionId: 'q1', optionIds: ['q1o2'] },
+        { questionId: 'q2', optionIds: ['q2o1', 'q2o2'], text: 'custom' },
+      ],
+    };
+    await provider.actions!.respond(question, response, {
+      clientId: 'client',
+      idempotencyKey: 'question:stable-digest',
+    });
+    expect(JSON.parse(String(fetchImpl.mock.calls[1][1]?.body))).toEqual({
+      requestId: expect.any(String),
+      sessionId: question.sessionId,
+      actionId: question.actionId,
+      idempotencyKey: 'question:stable-digest',
+      response: {
+        ...response,
+        inputRevision: question.inputRevision,
+        policyRevision: question.policyRevision,
+      },
+    });
+    await expect(
+      provider.actions!.respond(question, 'allow', {
+        clientId: 'client',
+        idempotencyKey: 'invalid',
+      }),
+    ).rejects.toThrow('kind does not match');
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
 
   describe('an accepted approval answer', () => {
     const action = {

@@ -44,6 +44,7 @@ import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordin
 import type { HostedModelRequest } from './hosted-model-recovery.js';
 import { HostedToolRecoveryRequiredError } from './hosted-workspace-tool-turn.js';
 import { ManagedSessionRecordError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
+import type { PublicChildModelRoute } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-operations.js';
 
 const state = vi.hoisted(() => ({
   config: undefined as unknown as {
@@ -56,7 +57,12 @@ const state = vi.hoisted(() => ({
   },
 }));
 vi.mock('../config/settings.js', () => ({
-  loadSettings: () => ({ merged: {} }),
+  loadSettings: () => ({
+    merged: {},
+    getSystemHooks: () => undefined,
+    getUserHooks: () => undefined,
+    getProjectHooks: () => undefined,
+  }),
 }));
 vi.mock('../config/config.js', () => ({
   loadCliConfig: vi.fn(async () => state.config),
@@ -183,6 +189,158 @@ function nativeInput(event: HookEventName): HookInput {
 
 describe('Hosted Harness model boundary', () => {
   beforeEach(() => vi.clearAllMocks());
+
+  it('recalls personal memory from original user input and injects it as request data', async () => {
+    const model = config([{ type: LlmEventType.Finished }]);
+    const hooks = hostedHooks([HookEventName.UserPromptSubmit]);
+    hooks.fire.mockImplementation(async (event) =>
+      event === HookEventName.UserPromptSubmit
+        ? {
+            hookSpecificOutput: {
+              hookEventName: event,
+              updatedPrompt: 'rewritten prompt',
+            },
+          }
+        : undefined,
+    );
+    const recall = vi
+      .fn()
+      .mockResolvedValue(
+        '<untrusted_external_context>known preference</untrusted_external_context>',
+      );
+    await runHostedHarnessTextTurn({
+      ...input,
+      memory: { recall },
+      recallUserInput: true,
+      hooks: hooks.session,
+      workspaceContext: { read: () => 'workspace instructions' },
+    });
+    expect(recall).toHaveBeenCalledExactlyOnceWith(
+      input.promptId,
+      'hello',
+      input.signal,
+    );
+    expect(model.requests[0][0].text).toContain('rewritten prompt');
+    expect(model.requests[0][0].text).toContain('<untrusted_external_context>');
+    expect(model.setUserMemory).toHaveBeenCalledWith('workspace instructions');
+    expect(model.setUserMemory.mock.calls.flat().join(' ')).not.toContain(
+      'known preference',
+    );
+  });
+
+  it('does not recall personal memory without a new accepted user input', async () => {
+    config([{ type: LlmEventType.Finished }]);
+    const recall = vi.fn();
+    await runHostedHarnessTextTurn({
+      ...input,
+      memory: { recall },
+      recallUserInput: false,
+    });
+    expect(recall).not.toHaveBeenCalled();
+  });
+
+  it.each(['tool-results', 'model'] as const)(
+    'does not recall accepted input again when resuming %s',
+    async (kind) => {
+      const model = config([{ type: LlmEventType.Finished }]);
+      const recall = vi.fn().mockResolvedValue('unexpected recall');
+      const responses: Part[] = [
+        {
+          functionResponse: {
+            id: 'saved-call',
+            name: 'context_search',
+            response: { status: 'ok', items: [] },
+          },
+        },
+      ];
+      const prepared = {
+        request: { model: 'saved-model', config: {}, contents: [] },
+      } as unknown as LlmPreparedRequest;
+      const replay =
+        kind === 'model'
+          ? vi
+              .spyOn(Turn.prototype, 'run')
+              .mockImplementation(async function* () {
+                yield {
+                  type: LlmEventType.Finished,
+                  value: { reason: undefined, usageMetadata: undefined },
+                };
+              })
+          : undefined;
+      try {
+        await runHostedHarnessTextTurn({
+          ...input,
+          memory: { recall },
+          recallUserInput: true,
+          ...(kind === 'model'
+            ? { resumeModel: { round: 0, prepared } as HostedModelRequest }
+            : { resumeFromToolResults: responses }),
+        });
+        expect(recall).not.toHaveBeenCalled();
+        if (replay) expect(replay).toHaveBeenCalled();
+        else expect(model.requests[0]).toEqual(responses);
+      } finally {
+        replay?.mockRestore();
+      }
+    },
+  );
+
+  it('recalls personal memory for each queued input using its accepted identity and original text', async () => {
+    config([{ type: LlmEventType.Finished }]);
+    const recall = vi.fn(
+      async (_id: string, text: string) => `memory for ${text}`,
+    );
+    const claim = vi
+      .fn()
+      .mockResolvedValueOnce([
+        {
+          id: 'umsg_next:2',
+          text: 'new preference',
+          parts: [{ text: 'new preference' }],
+        },
+      ])
+      .mockResolvedValue([]);
+    const commit = vi.fn();
+    await runHostedHarnessTextTurn({
+      ...input,
+      memory: { recall },
+      recallUserInput: true,
+      userMessages: { claim, commit, commitAssistant: vi.fn() },
+    });
+    expect(recall.mock.calls.map(([id, text]) => [id, text])).toEqual([
+      [input.promptId, 'hello'],
+      ['umsg_next:2', 'new preference'],
+    ]);
+    expect(commit).toHaveBeenCalledWith('umsg_next:2', [
+      { text: 'new preference\nmemory for new preference' },
+    ]);
+  });
+
+  it.each([false, true])(
+    'borrows diagnostics-only preparation while preserving durable capture (%s)',
+    async (durable) => {
+      const model = config([{ type: LlmEventType.Finished }]);
+      await runHostedHarnessTextTurn({
+        ...input,
+        ...(durable
+          ? { prepareModel: vi.fn().mockResolvedValue(undefined) }
+          : {}),
+        modelScope: {
+          bindBudget: vi.fn(),
+          evaluate: vi.fn(),
+          diagnosticsEnabled: true,
+          beginMainAttempt: vi.fn(),
+        },
+      });
+      const callback = (
+        model.sendOptions[0] as {
+          onPreparedRequest: LlmPreparedRequestCallback;
+        }
+      ).onPreparedRequest;
+      if (durable) expect(callback.maxSnapshotBytes).toBeGreaterThan(0);
+      else expect(callback.maxSnapshotBytes).toBe(0);
+    },
+  );
 
   it('classifies final call input using original user intent without Hook or compression instructions', async () => {
     config([
@@ -501,6 +659,148 @@ describe('Hosted Harness model boundary', () => {
     ).rejects.toBeInstanceOf(HostedModelUnavailableError);
     expect(model.sendMessageStream).toHaveBeenCalledOnce();
   });
+
+  it.each([
+    'same',
+    'explicit-inherit',
+    'explicit-same',
+    'legacy-explicit-same',
+    'endpoint-drift',
+    'provider-pin-drift',
+    'model-id-drift',
+  ])(
+    'inherits a configured child route with an empty host registry (%s)',
+    async (scenario) => {
+      const model = config([]);
+      const generation = {
+        model: 'tenant-model',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://tenant.test/v1',
+        apiKey: 'synthetic-tenant-key',
+        samplingParams: { temperature: 0.25 },
+      };
+      const modelConfig = vi.fn().mockResolvedValue(generation);
+      const getAllConfiguredModels = vi.fn().mockReturnValue([]);
+      const switchModel = vi.fn();
+      state.config['getModel'] = () => generation.model;
+      state.config['getModelsConfig'] = () => ({
+        getCurrentAuthType: () => generation.authType,
+        getGenerationConfig: () => generation,
+      });
+      state.config['getContentGeneratorConfig'] = () => generation;
+      state.config['getAllConfiguredModels'] = getAllConfiguredModels;
+      state.config['switchModel'] = switchModel;
+      const resolveForModel = vi.fn().mockResolvedValue({
+        model: generation.model,
+        contentGeneratorConfig: generation,
+      });
+      state.config['getBaseLlmClient'] = () => ({ resolveForModel });
+      let explicitRoute: PublicChildModelRoute | undefined;
+      model.sendMessageStream.mockImplementation(
+        async function* (_request, _signal, _promptId, options) {
+          await (
+            options as { onPreparedRequest: LlmPreparedRequestCallback }
+          ).onPreparedRequest({
+            request: { model: generation.model, contents: [], config: {} },
+            history: [],
+            completedToolCallIds: [],
+            routeSelector: `openai:${generation.model}`,
+            providerPin: llmPreparedProviderPin(generation),
+            promptTokensForClamp: 0,
+          });
+          if (scenario.includes('explicit-') && !explicitRoute) {
+            expect(model.shutdown).not.toHaveBeenCalled();
+            const selector =
+              scenario === 'explicit-inherit' ? 'inherit' : generation.model;
+            const resolved =
+              await setChildModelResolver.mock.calls[0]![0](selector);
+            expect(resolveForModel).toHaveBeenCalledExactlyOnceWith(selector, {
+              failClosed: true,
+            });
+            expect(resolved.modelId).toBe(generation.model);
+            explicitRoute = resolved.route;
+          }
+          yield { type: LlmEventType.Content, value: 'done' };
+          yield { type: LlmEventType.Finished };
+        },
+      );
+      const setChildModelRoute =
+        vi.fn<(modelId: string, route: PublicChildModelRoute) => void>();
+      const setChildModelResolver = vi.fn<
+        (
+          resolve: (selector: string) => Promise<{
+            modelId: string;
+            route: PublicChildModelRoute;
+          }>,
+        ) => void
+      >();
+      await expect(
+        runHostedHarnessTextTurn({
+          ...input,
+          ...(scenario === 'legacy-explicit-same' ? {} : { modelConfig }),
+          toolTurn: {
+            declarations: async () => [{ name: 'agent' }],
+            consumeResults: async () => undefined,
+            execute: vi.fn(),
+            capturesChildModelRoute: () => true,
+            setChildModelRoute,
+            setChildModelResolver,
+          },
+        }),
+      ).resolves.toMatchObject({ text: 'done' });
+      expect(setChildModelRoute).toHaveBeenCalledExactlyOnceWith(
+        generation.model,
+        {
+          authType: generation.authType,
+          endpointDigest: createHash('sha256')
+            .update(generation.baseUrl)
+            .digest('hex'),
+          providerPin: llmPreparedProviderPin(generation),
+        },
+      );
+      let route = { ...setChildModelRoute.mock.calls[0]![1] };
+      if (scenario === 'legacy-explicit-same') {
+        expect(explicitRoute).toEqual({
+          ...route,
+          origin: { modelId: generation.model, ...route },
+        });
+        expect(modelConfig).not.toHaveBeenCalled();
+        expect(
+          vi.mocked(loadCliConfig).mock.calls.at(-1)?.[9],
+        ).not.toHaveProperty('modelConfiguration');
+        return;
+      }
+      if (scenario.startsWith('explicit-')) {
+        expect(explicitRoute).toBeDefined();
+        route = explicitRoute!;
+      }
+      if (scenario === 'endpoint-drift') route.endpointDigest = 'f'.repeat(64);
+      if (scenario === 'provider-pin-drift') route.providerPin = 'f'.repeat(64);
+      const child = runHostedHarnessTextTurn({
+        ...input,
+        modelConfig,
+        modelSelection: {
+          modelId:
+            scenario === 'model-id-drift' ? 'other-model' : generation.model,
+          revision: 1,
+        },
+        publicChildModelRoute: route,
+      });
+      if (scenario === 'same' || scenario.startsWith('explicit-')) {
+        await expect(child).resolves.toMatchObject({ text: 'done' });
+        expect(model.sendMessageStream).toHaveBeenCalledTimes(2);
+        expect(getAllConfiguredModels).not.toHaveBeenCalled();
+      } else {
+        await expect(child).rejects.toBeInstanceOf(HostedModelUnavailableError);
+        expect(model.sendMessageStream).toHaveBeenCalledOnce();
+      }
+      expect(modelConfig).toHaveBeenCalledTimes(2);
+      expect(vi.mocked(loadCliConfig).mock.calls.at(-1)?.[9]).toMatchObject({
+        modelConfiguration: generation,
+      });
+      expect(switchModel).not.toHaveBeenCalled();
+    },
+  );
 
   it('restores a configured endpoint by exact route and uses its registry key', async () => {
     config([]);
@@ -941,6 +1241,7 @@ describe('Hosted Harness model boundary', () => {
         modelScope: {
           bindBudget: vi.fn(),
           evaluate: vi.fn(),
+          diagnosticsEnabled: false,
           beginMainAttempt: vi
             .fn()
             .mockResolvedValueOnce(first)
@@ -1089,6 +1390,7 @@ describe('Hosted Harness model boundary', () => {
     expect(args?.[9]?.toolInvocationGuard?.({} as never)).toMatchObject({
       allowed: false,
     });
+    expect(args?.[9]?.lspDisabled).toBe(true);
   });
 
   it('returns complete no-tool model Parts without aliasing provider history', async () => {
@@ -1776,6 +2078,7 @@ describe('Hosted Harness model boundary', () => {
       modelScope: {
         bindBudget,
         evaluate: vi.fn(),
+        diagnosticsEnabled: false,
         beginMainAttempt: vi.fn().mockResolvedValue(complete),
       },
     });
@@ -1862,6 +2165,7 @@ describe('Hosted Harness model boundary', () => {
       modelScope: {
         bindBudget: vi.fn(),
         evaluate: vi.fn(),
+        diagnosticsEnabled: false,
         beginMainAttempt: vi.fn().mockResolvedValue(complete),
       },
     });
@@ -1908,6 +2212,7 @@ describe('Hosted Harness model boundary', () => {
         modelScope: {
           bindBudget: vi.fn(),
           evaluate: vi.fn(),
+          diagnosticsEnabled: false,
           beginMainAttempt,
         },
       });
@@ -1947,6 +2252,7 @@ describe('Hosted Harness model boundary', () => {
       modelScope: {
         bindBudget: vi.fn(),
         evaluate: vi.fn(),
+        diagnosticsEnabled: false,
         beginMainAttempt,
       },
     });
@@ -1976,6 +2282,7 @@ describe('Hosted Harness model boundary', () => {
         modelScope: {
           bindBudget: vi.fn(),
           evaluate: vi.fn(),
+          diagnosticsEnabled: false,
           beginMainAttempt: vi.fn().mockResolvedValue(complete),
         },
       });
@@ -2154,6 +2461,7 @@ describe('Hosted Harness model boundary', () => {
       modelScope: {
         evaluate: vi.fn(),
         bindBudget: vi.fn(),
+        diagnosticsEnabled: false,
         beginMainAttempt: vi.fn(),
       },
       toolTurn,
@@ -2225,6 +2533,7 @@ describe('Hosted Harness model boundary', () => {
       const modelScope = {
         evaluate: vi.fn(),
         bindBudget: vi.fn(),
+        diagnosticsEnabled: false,
         beginMainAttempt: vi
           .fn()
           .mockResolvedValueOnce(complete('turn:model-1'))

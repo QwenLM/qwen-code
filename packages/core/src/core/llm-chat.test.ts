@@ -30,6 +30,9 @@ import type {
 } from '@google/genai';
 import { ApiError } from '@google/genai';
 import { AuthType, type ContentGenerator } from './contentGenerator.js';
+import { FinishReason } from './genai-compat.js';
+import { QwenSubscriptionSession } from '../qwen/subscription-session.js';
+import { SUBSCRIPTION_SIGN_IN_REQUIRED_MESSAGE } from '../qwen/subscription-errors.js';
 import { getPlanModeSystemReminder } from './prompts.js';
 import {
   LlmChat,
@@ -53,7 +56,10 @@ import {
   ResponsesStreamState,
 } from './openaiResponsesContentGenerator/responses-converter.js';
 import type { ResponsesSSEEvent } from './openaiResponsesContentGenerator/types.js';
-import { getToolCallFingerprint } from './toolCallIdUtils.js';
+import {
+  getToolCallFingerprint,
+  normalizeModelToolCallIds,
+} from './toolCallIdUtils.js';
 import {
   buildApiHistoryFromConversation,
   findApiHistoryPromptIndex,
@@ -80,7 +86,12 @@ import {
 } from '../config/config.js';
 import { setSimulate429 } from '../utils/testUtils.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
-import { CompressionStatus, type ChatCompressionInfo } from './turn.js';
+import {
+  CompressionStatus,
+  TOOL_LOOP_SKIPPED_MESSAGE,
+  TOOL_LOOP_SKIPPED_METADATA,
+  type ChatCompressionInfo,
+} from './turn.js';
 import {
   ChatCompressionService,
   MAX_CONSECUTIVE_FAILURES,
@@ -1030,6 +1041,46 @@ describe('LlmChat', async () => {
       expect(streamMock()).toHaveBeenCalledOnce();
     });
 
+    it.each([0, 64 * 1024])(
+      'copies the prepared conversation only with a positive snapshot budget (%s)',
+      async (maxSnapshotBytes) => {
+        streamMock().mockResolvedValue(
+          streamOf(stopResponse([{ text: 'done' }])),
+        );
+        const clone = vi.spyOn(globalThis, 'structuredClone');
+        const stringify = vi.spyOn(JSON, 'stringify');
+        let copiedDuringCapture = -1;
+        let serializedDuringCapture = -1;
+        const callback = Object.assign(
+          async () => {
+            copiedDuringCapture = clone.mock.calls.length;
+            serializedDuringCapture = stringify.mock.calls.filter(
+              ([value]) =>
+                value &&
+                typeof value === 'object' &&
+                'providerPin' in value &&
+                'request' in value &&
+                'history' in value,
+            ).length;
+          },
+          { maxSnapshotBytes },
+        );
+        const response = await chat.sendMessageStream(
+          'test-model',
+          { message: 'observation only' },
+          'prompt',
+          undefined,
+          { onPreparedRequest: callback },
+        );
+        clone.mockClear();
+        stringify.mockClear();
+        await drain(response);
+        expect(copiedDuringCapture).toBe(maxSnapshotBytes > 0 ? 1 : 0);
+        expect(serializedDuringCapture).toBe(maxSnapshotBytes > 0 ? 1 : 0);
+        expect(streamMock()).toHaveBeenCalledOnce();
+      },
+    );
+
     it('does not send, retry or fall back after a failed durability barrier', async () => {
       const dispatched = vi.fn();
       const callback = vi
@@ -1462,6 +1513,21 @@ describe('LlmChat', async () => {
     /** `send` for any message shape, a bare Part included. */
     const sendAny = (message: Message, promptId: string, target = chat) =>
       target.sendMessageStream('test-model', { message }, promptId);
+
+    it('reports signed-out subscription before processing the request', async () => {
+      mockConfig.getCurrentAuthType = vi
+        .fn()
+        .mockReturnValue(AuthType.QWEN_SUBSCRIPTION);
+      mockConfig.getContentGeneratorConfig = vi.fn().mockReturnValue(undefined);
+      vi.spyOn(QwenSubscriptionSession.prototype, 'isSignedIn').mockReturnValue(
+        false,
+      );
+
+      await expect(sendAny('hello', 'signed-out')).rejects.toThrow(
+        SUBSCRIPTION_SIGN_IN_REQUIRED_MESSAGE,
+      );
+      expect(mockContentGenerator.generateContentStream).not.toHaveBeenCalled();
+    });
 
     /** A user prompt followed by the model's (unanswered) call. */
     const afterCall = (
@@ -3048,7 +3114,11 @@ describe('LlmChat', async () => {
         mockStream(textStream('done'));
         await sendDrain(`question ${index}`, `memory-next-${index}`);
         const request = requestAt(index + 1).contents as Content[];
-        expect(request.slice(0, firstHistory.length)).toEqual(firstHistory);
+        // Each request extends the previous one: earlier entries are re-sent
+        // byte-identically, so the injected blocks stay inside the cached
+        // prefix instead of being re-prefilled every turn (#16259).
+        const previous = requestAt(index).contents as Content[];
+        expect(request.slice(0, previous.length)).toEqual(previous);
         expect(snapshots(request)).toHaveLength(index + 1);
         expect(snapshots(request).at(-1)?.text).toContain(next);
         expect(snapshots(request).at(-1)?.text).toContain(
@@ -3171,9 +3241,17 @@ describe('LlmChat', async () => {
       expect(target.getHistory().at(-1)?.parts?.at(-1)?.partMetadata).toEqual({
         'qwen-code:memory-catalog-snapshot': true,
       });
-      expect(prepare(recovery, { image: true }, false)).toEqual(
-        target.getHistory(),
-      );
+      // Same entries and the same parts, but the request copy leads with the
+      // catalog so the recovery prompt stays last (#16259). Stored history
+      // keeps the appended order.
+      const durableRequest = prepare(recovery, { image: true }, false);
+      const durableHistory = target.getHistory();
+      expect(durableRequest).toHaveLength(durableHistory.length);
+      expect(durableRequest.slice(0, -1)).toEqual(durableHistory.slice(0, -1));
+      expect(durableRequest.at(-1)?.parts).toEqual([
+        durableHistory.at(-1)!.parts![1],
+        durableHistory.at(-1)!.parts![0],
+      ]);
       expect(recordMemoryCatalogSnapshot).toHaveBeenCalledOnce();
       expect(target.getLastPromptTokenCount()).toBe(100);
       mockStream(textStream('answer'));
@@ -3214,6 +3292,151 @@ describe('LlmChat', async () => {
       expect(chat.getHistory()[0].parts).toEqual(
         JSON.parse(JSON.stringify(sentParts)),
       );
+    });
+
+    it('sends the user text last while history keeps the injected tail (#16259)', async () => {
+      const catalog = 'memory catalog';
+      mockConfig.getAutoMemoryContext = () => catalog;
+      const reminder = {
+        text: '<system-reminder>\nPlan mode is active.\n</system-reminder>',
+      };
+      const hookContext = createUserPromptSubmitContextPart('hook context');
+      const prompt = [
+        { text: 'step 1: read the module' },
+        { text: 'step 2: change only the parser' },
+      ];
+      chat.setHistory([userText('earlier'), modelText('earlier answer')]);
+      mockStream(textStream('working on it'));
+
+      await sendDrain(
+        [reminder, ...prompt, hookContext],
+        'prompt-context-placement',
+      );
+
+      const sent = (requestAt(0).contents as Content[]).at(-1)!.parts!;
+      const snapshot = sent.find(
+        (part) => part.partMetadata?.['qwen-code:memory-catalog-snapshot'],
+      )!;
+      expect(snapshot).toBeDefined();
+      // Injected blocks lead; the instruction closes the entry, so a model
+      // reading the tail still finds the task.
+      expect(sent).toEqual([
+        reminder,
+        expect.objectContaining({ text: hookContext.text }),
+        snapshot,
+        ...prompt,
+      ]);
+      // Stored history keeps the assembled order, injected blocks last: the
+      // transcript display projection and the resume receipt both read the
+      // hook block at the tail, ahead of the catalog snapshot appended after it.
+      const storedUserEntry = chat
+        .getHistory()
+        .find((entry) =>
+          entry.parts?.some((part) => part.text === hookContext.text),
+        )!;
+      expect(storedUserEntry.parts!.map((part) => part.text)).toEqual([
+        reminder.text,
+        ...prompt.map((part) => part.text),
+        hookContext.text,
+        snapshot.text,
+      ]);
+    });
+
+    it('re-sends a stored entry byte-identically on the next turn (#16259)', async () => {
+      mockConfig.getAutoMemoryContext = () => 'memory catalog';
+      const reminder = {
+        text: '<system-reminder>\nPlan mode is active.\n</system-reminder>',
+      };
+      const hookContext = createUserPromptSubmitContextPart('hook context');
+      mockStream(textStream('first answer'));
+      await sendDrain(
+        [reminder, { text: 'step 1' }, hookContext],
+        'prefix-turn-1',
+      );
+      const firstSent = (requestAt(0).contents as Content[]).at(-1)!;
+
+      mockStream(textStream('second answer'));
+      await sendDrain('follow up', 'prefix-turn-2');
+
+      const replayed = (requestAt(1).contents as Content[]).find((entry) =>
+        entry.parts?.some((part) => part.text === 'step 1'),
+      )!;
+      // Turn 1's entry is re-sent unchanged, so the injected blocks stay inside
+      // the shared provider prefix instead of being re-prefilled every turn.
+      expect(replayed).toEqual(firstSent);
+    });
+
+    it('keeps tool results first and the volatile request tail last', async () => {
+      mockConfig.getAutoMemoryContext = () => '';
+      const toolResult = fnResponse('read_file', { output: 'contents' }, 'c1');
+      const reminder = {
+        text: '<system-reminder>\nactive todo\n</system-reminder>',
+      };
+      // One contiguous region: the marker, then a label and the image. The
+      // cache passes count these trailing blocks, so they must not be split
+      // or moved ahead of the prompt.
+      const volatile = [
+        {
+          text: 'Recent images reattached',
+          partMetadata: { 'qwen-code:reattach-boundary': true },
+        },
+        { text: '[Image #abc]' },
+        { inlineData: { mimeType: 'image/png', data: 'shot' } },
+      ];
+      mockStream(textStream('done'));
+
+      await sendDrain(
+        [toolResult, { text: 'now fix it' }, reminder, ...volatile],
+        'prompt-context-tool-tail',
+      );
+
+      // The send path stamps tool-output provenance on the response part, so
+      // compare the ordering by identity rather than by deep equality.
+      const sentParts = (requestAt(0).contents as Content[]).at(-1)!.parts!;
+      expect(sentParts).toHaveLength(6);
+      expect(sentParts[0].functionResponse).toEqual(
+        toolResult.functionResponse,
+      );
+      expect(sentParts.slice(1)).toEqual([
+        reminder,
+        { text: 'now fix it' },
+        ...volatile,
+      ]);
+    });
+
+    it('leaves a prompt with no injected parts in its original order', async () => {
+      mockConfig.getAutoMemoryContext = () => '';
+      const parts = [{ text: 'first' }, { text: 'second' }];
+      mockStream(textStream('done'));
+
+      await sendDrain(parts, 'prompt-context-untouched');
+
+      expect(
+        (requestAt(0).contents as Content[])
+          .at(-1)!
+          .parts!.map((part) => part.text),
+      ).toEqual(['first', 'second']);
+    });
+
+    it('keeps a reminder the caller placed between its own parts in place', async () => {
+      mockConfig.getAutoMemoryContext = () => '';
+      const parts = [
+        { text: 'first' },
+        { text: '<system-reminder>\ncaller-authored\n</system-reminder>' },
+        { text: 'second' },
+        createUserPromptSubmitContextPart('appended context'),
+      ];
+      mockStream(textStream('done'));
+
+      await sendDrain(parts, 'prompt-context-interleaved');
+
+      // Only the appended block moves; the caller's own interleaving survives.
+      expect((requestAt(0).contents as Content[]).at(-1)!.parts).toEqual([
+        parts[0],
+        parts[1],
+        expect.objectContaining({ text: parts[3].text }),
+        parts[2],
+      ]);
     });
 
     const retainOneImage = () =>
@@ -3590,6 +3813,25 @@ describe('LlmChat', async () => {
       expect(recordAssistantTurn.mock.calls[0]?.[0].message).toEqual([
         ...[signed('A', 'sigA'), toolCall('call1')],
         ...[signed('B', 'sigB'), toolCall('call2')],
+      ]);
+    });
+
+    it('records function-call thought signatures for session resume', async () => {
+      const recordAssistantTurn = vi.fn();
+      const signedCall = {
+        ...toolCall('call-signed'),
+        thoughtSignature: 'sig-call',
+      };
+      await consolidate(
+        [signedCall],
+        'signed-call',
+        'p-signed-call-recording',
+        chatWithRecorder(recordAssistantTurn),
+      );
+
+      expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
+      expect(recordAssistantTurn.mock.calls[0]?.[0].message).toEqual([
+        signedCall,
       ]);
     });
 
@@ -6120,11 +6362,15 @@ describe('LlmChat', async () => {
         150_001,
       );
       const pending = (requestAt(0).contents as Content[]).at(-1)!;
+      // The catalog leads the pending turn now: injected context sits ahead of
+      // the user's own text so the instruction stays last (#16259).
       expect(
-        pending.parts?.at(-1)?.partMetadata?.[
-          'qwen-code:memory-catalog-snapshot'
-        ],
+        pending.parts?.some(
+          (part) =>
+            part.partMetadata?.['qwen-code:memory-catalog-snapshot'] === true,
+        ),
       ).toBe(true);
+      expect(pending.parts?.at(-1)?.text).toBe('hi');
       expect(sentMaxOutputTokens()).toBe(
         200_000 -
           120_000 -
@@ -6770,6 +7016,145 @@ describe('LlmChat', async () => {
       expect([...fingerprints.keys()]).toEqual(['cid_a']);
       expect(fingerprints.get('cid_a')).toBe(
         getToolCallFingerprint('read_file', { file_path: 'a.ts' }),
+      );
+    });
+
+    it.each(['marked', 'legacy'])(
+      'excludes %s loop-stopped calls until the provider id is handled',
+      (format) => {
+        const stoppedResponse = (id: string): Part => ({
+          ...fnResponse('read_file', { error: TOOL_LOOP_SKIPPED_MESSAGE }, id),
+          ...(format === 'marked'
+            ? { partMetadata: { [TOOL_LOOP_SKIPPED_METADATA]: true } }
+            : {}),
+        });
+        const stoppedHistory = [
+          content('model', readCall('handled', 'handled.ts')),
+          content(
+            'user',
+            fnResponse(
+              'read_file',
+              { error: TOOL_LOOP_SKIPPED_MESSAGE },
+              'handled',
+            ),
+          ),
+          content(
+            'model',
+            readCall('fresh', 'fresh.ts'),
+            readCall('loop-end', 'handled.ts'),
+          ),
+          content('user', stoppedResponse('fresh')),
+          content('user', stoppedResponse('loop-end')),
+        ];
+        const endIds = format === 'legacy' ? ['loop-end'] : [];
+        chat.setHistory(stoppedHistory, endIds);
+        expect(chat.getHistoryFunctionResponseIds()).toContain('fresh');
+        expect([...chat.getHistoryToolCallFingerprints().keys()]).toEqual([
+          'handled',
+        ]);
+
+        const [retried] = normalizeModelToolCallIds(
+          [readCall('fresh', 'retry.ts')],
+          new Set(['fresh']),
+          new Set(),
+        );
+        const id = retried.functionCall!.id!;
+        const history = [
+          ...stoppedHistory,
+          content('model', redactStructuredOutputArgsForRecording(retried)!),
+          content('user', fnResponse('read_file', { output: 'retried' }, id)),
+        ];
+        chat.setHistory(JSON.parse(JSON.stringify(history)), endIds);
+        const fingerprints = chat.getHistoryToolCallFingerprints();
+        const fingerprint = getToolCallFingerprint('read_file', {
+          file_path: 'retry.ts',
+        });
+        expect(fingerprints.get('fresh')).toBe(fingerprint);
+        expect(fingerprints.get(id)).toBe(fingerprint);
+        expect(fingerprints.has('loop-end')).toBe(false);
+        expect(chat.getHistoryToolCallFingerprints(new Set([id]))).toEqual(
+          new Map([
+            [id, fingerprint],
+            ['fresh', fingerprint],
+          ]),
+        );
+        expect(
+          chat.getHistoryToolCallFingerprints(new Set(['fresh', 'loop-end'])),
+        ).toEqual(new Map());
+
+        chat.setHistory(JSON.parse(JSON.stringify(history.slice(-2))));
+        expect(chat.getHistoryToolCallFingerprints()).toEqual(
+          new Map([
+            [id, fingerprint],
+            ['fresh', fingerprint],
+          ]),
+        );
+      },
+    );
+
+    it('chooses a retained provider alias before filtering to retry results', () => {
+      const rawId = 'reused';
+      const usedIds = new Set([rawId]);
+      const pair = (file: string, response: Record<string, unknown>) => {
+        const [call] = normalizeModelToolCallIds(
+          [readCall(rawId, file)],
+          usedIds,
+          new Set(),
+        );
+        return [
+          content('model', call),
+          content(
+            'user',
+            fnResponse('read_file', response, call.functionCall!.id),
+          ),
+        ];
+      };
+      const firstResult = pair('first.ts', { output: 'first' });
+      const secondResult = pair('second.ts', { output: 'second' });
+      const firstId = firstResult[0].parts![0].functionCall!.id!;
+      const secondId = secondResult[0].parts![0].functionCall!.id!;
+      const history = [...firstResult, ...secondResult];
+      const firstFingerprint = getToolCallFingerprint('read_file', {
+        file_path: 'first.ts',
+      });
+      const secondFingerprint = getToolCallFingerprint('read_file', {
+        file_path: 'second.ts',
+      });
+
+      chat.setHistory(history);
+      expect(chat.getHistoryToolCallFingerprints().get(rawId)).toBe(
+        firstFingerprint,
+      );
+      expect(chat.getHistoryToolCallFingerprints(new Set([secondId]))).toEqual(
+        new Map([[secondId, secondFingerprint]]),
+      );
+
+      chat.setHistory([
+        ...history,
+        content('model', readCall(rawId, 'original.ts')),
+        content('user', fnResponse('read_file', { output: 'original' }, rawId)),
+      ]);
+      expect(chat.getHistoryToolCallFingerprints().get(rawId)).toBe(
+        getToolCallFingerprint('read_file', { file_path: 'original.ts' }),
+      );
+      expect(chat.getHistoryToolCallFingerprints(new Set([firstId]))).toEqual(
+        new Map([[firstId, firstFingerprint]]),
+      );
+
+      chat.setHistory([
+        firstResult[0],
+        content(
+          'user',
+          fnResponse(
+            'read_file',
+            { error: ORPHAN_TOOL_USE_REPAIR_REASON },
+            firstId,
+          ),
+        ),
+        ...secondResult,
+      ]);
+      expect(chat.getHistoryToolCallFingerprints().get(rawId)).toBe(
+        secondFingerprint,
       );
     });
 
@@ -9515,6 +9900,52 @@ describe('LlmChat', async () => {
         expectRecordedText(record, 'Analysis: the file contains the bug.');
         // Record and history must agree even though the send was abandoned.
         expect(historyText).toBe(recordedText(record));
+      });
+
+      it('preserves finishMessage on the deferred tool-result finish chunk', async () => {
+        vi.useFakeTimers();
+        chat.setHistory([
+          userText('read the file'),
+          content(
+            'model',
+            fnCall('read_file', { path: '/tmp/x' }, 'call_refusal'),
+          ),
+        ]);
+        mockStreamsOnce(
+          streamOf(textChunk('Request refused.'), {
+            candidates: [
+              {
+                finishReason: FinishReason.SAFETY,
+                finishMessage:
+                  'Response refused due to cyber-related safety policy.',
+              },
+            ],
+          } as GenerateContentResponse),
+        );
+
+        const events = await collectStreamWithFakeTimers(
+          await sendToolResult(
+            'call_refusal',
+            'prompt-deferred-finish-message',
+          ),
+          10_000,
+        );
+        const finish = events
+          .filter((event) => event.type === StreamEventType.CHUNK)
+          .map(
+            (event) =>
+              (event as { value: GenerateContentResponse }).value
+                .candidates?.[0],
+          )
+          .find((candidate) => candidate?.finishReason);
+
+        expect(finish).toEqual(
+          expect.objectContaining({
+            finishReason: FinishReason.SAFETY,
+            finishMessage:
+              'Response refused due to cyber-related safety policy.',
+          }),
+        );
       });
 
       /**
@@ -14118,6 +14549,38 @@ describe('LlmChat', async () => {
       expect(result!.functionCall.args).toEqual({
         path: '/tmp/x',
         content: 'hello',
+      });
+    });
+
+    it('preserves thoughtSignature on ordinary function calls', () => {
+      const result = redactStructuredOutputArgsForRecording({
+        functionCall: { id: 'call-read', name: 'read_file', args: {} },
+        thoughtSignature: 'sig-record',
+      });
+
+      expect(result).toEqual({
+        functionCall: { id: 'call-read', name: 'read_file', args: {} },
+        thoughtSignature: 'sig-record',
+      });
+    });
+
+    it('preserves thoughtSignature while redacting structured output args', () => {
+      const result = redactStructuredOutputArgsForRecording({
+        functionCall: {
+          id: 'call-output',
+          name: 'structured_output',
+          args: { sensitive: 'payload' },
+        },
+        thoughtSignature: 'sig-record',
+      });
+
+      expect(result).toEqual({
+        functionCall: {
+          id: 'call-output',
+          name: 'structured_output',
+          args: { __redacted: 'structured_output payload (see stdout result)' },
+        },
+        thoughtSignature: 'sig-record',
       });
     });
 

@@ -5,6 +5,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import path from 'node:path';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import { OutputFormat } from '@qwen-code/qwen-code-core/output/types.js';
 import {
@@ -21,8 +22,11 @@ import {
   resolveModUnsupportedEvents,
 } from '@qwen-code/qwen-code-core/mods/options.js';
 import { ModRuntime } from '@qwen-code/qwen-code-core/mods/runtime.js';
+import { ModStore } from '@qwen-code/qwen-code-core/mods/store.js';
+import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 import {
   ENGINE_NODE,
+  type ModBandInput,
   type ModRenderElement,
   type ModRenderInput,
   type ModRenderSite,
@@ -35,6 +39,8 @@ import {
 import type {
   ModCommandPresentation,
   ModLog,
+  ModPromptSubmit,
+  ModQueuedPrompt,
   ModSessionFacts,
   ModTurnComplete,
   ModTurnStart,
@@ -48,10 +54,6 @@ import {
   LlmEventType,
   type ServerLlmStreamEvent,
 } from '@qwen-code/qwen-code-core/core/turn.js';
-import {
-  getGenAiUsageProvenance,
-  outputTokenCount,
-} from '@qwen-code/qwen-code-core/telemetry/gen-ai-usage.js';
 import type { ApiResponseEvent } from '@qwen-code/qwen-code-core/telemetry/types.js';
 import {
   EVENT_API_RESPONSE,
@@ -73,10 +75,17 @@ import {
 import { registerCleanup } from '../utils/cleanup.js';
 import { flushOutput } from '../utils/flush-output.js';
 import { projectJsonStringToByteBudget } from '../utils/json-string-byte-projection.js';
+import { completeModModel, modModelUsage } from './mod-model.js';
+import { ModRows } from './mod-rows.js';
 import type { JsonOutputAdapterInterface } from '../nonInteractive/io/BaseJsonOutputAdapter.js';
 
 const logger = createDebugLogger('MODS');
 
+/**
+ * How many turns the Mods' own prompts may start before the person sends one:
+ * a hook that submits a prompt at every turn's end would otherwise never stop.
+ */
+export const MOD_PROMPT_TURN_LIMIT = 8;
 // A resize redraws the band once it has settled; renders otherwise run at
 // Claude Code's rate for an expanded band, and at its steady rate for a second
 // after one ran longer than that.
@@ -84,6 +93,7 @@ const RENDER_SETTLE_MS = 150;
 const RENDER_LIVE_MS = 34;
 const RENDER_STEADY_MS = 100;
 const RENDER_SLOW_MS = 1_000;
+const ROW_RENDER_TIMEOUT_MS = 30_000;
 
 export interface ModTerminalHost {
   surface: 'terminal';
@@ -91,6 +101,15 @@ export interface ModTerminalHost {
   presentation(): ModCommandPresentation;
   /** The render sites the terminal draws, read once at load. */
   sites?(): readonly ModRenderSite[];
+  /** Whether the terminal raises `prompt.submit`, read once at load. */
+  prompts?(): boolean;
+  /**
+   * Whether the terminal runs the prompts the Mods submit with
+   * `$.prompt.submit`, read once at load.
+   */
+  runsPrompts?(): boolean;
+  /** A Mod's prompt was queued, for the terminal to run once idle. */
+  promptQueued?(): void;
   /** Draws the tree the band's hooks settled on, drawn by `owner`. */
   draw?(tree: ModRenderElement, owner: string): void;
 }
@@ -163,6 +182,16 @@ export class ModSession implements ICommandLoader {
   private recorder?: ChatRecordingService;
   private context = { tokens: 0, window: 0 };
   private turn?: RunningTurn;
+  // Prompts the Mods submitted, each waiting for the session to be idle.
+  private readonly submitted: Array<ModQueuedPrompt & { sessionId: string }> =
+    [];
+  // Turns the Mods' prompts started since the person last sent one.
+  private modTurns = 0;
+  // The person stopped a turn and has not sent a prompt since: what the Mods
+  // submit does not run, also a call a hook did not await before it ended.
+  private stopped = false;
+  // The session each prompt taken to run was queued for.
+  private readonly taken = new WeakMap<ModQueuedPrompt, string>();
   // Also runs on every API response, so a session that no hook saw still has
   // its figures when it ends. A subagent's response emits from inside its
   // agent frame, whose model would otherwise answer for the main session.
@@ -193,7 +222,7 @@ export class ModSession implements ICommandLoader {
   // The band's renders: the host's latest input, keyed as Claude Code keys
   // it, and the one render that may wait in the queue or run.
   private readonly band: {
-    input?: ModRenderInput;
+    input?: ModBandInput;
     key?: string;
     size?: string;
     settle?: ReturnType<typeof setTimeout>;
@@ -208,6 +237,15 @@ export class ModSession implements ICommandLoader {
     startedAt: -Infinity,
     steadyUntil: 0,
   };
+  // The transcript rows the Mods draw, one render at a time in the queue.
+  private readonly rows = new ModRows(
+    (task) => {
+      this.toolQueue = this.toolQueue
+        .then(task)
+        .catch((error) => logger.debug(`Mod ui.render: ${String(error)}`));
+    },
+    (input) => this.renderRow(input),
+  );
   private unregisterCleanup: () => void;
 
   constructor(
@@ -401,8 +439,24 @@ export class ModSession implements ICommandLoader {
           () => this.facts(),
           (turnId) => this.abortTurn(turnId),
           sites.length
-            ? { sites, invalidate: () => this.requestRender() }
+            ? { sites, invalidate: (plugin) => this.invalidateRenders(plugin) }
             : undefined,
+          this.terminal ? this.terminal.prompts?.() === true : true,
+          // A terminal runs a Mod's own prompts only once it says so.
+          this.terminal && this.terminal.runsPrompts?.() !== true
+            ? undefined
+            : (prompt) => this.queuePrompt(prompt),
+          (input, modelSignal) =>
+            completeModModel(
+              this.config,
+              input,
+              // During a session switch, the old session.end still runs
+              // after Config has already adopted the new identity.
+              this.sessionId === this.config.getSessionId()
+                ? modelSignal
+                : AbortSignal.abort(),
+            ),
+          new ModStore(path.join(Storage.getGlobalQwenDir(), 'mods', 'store')),
         );
         this.mods.push(
           ...ordered.map(({ extension }) => ({
@@ -504,6 +558,8 @@ export class ModSession implements ICommandLoader {
     await this.toolQueue;
     if (!this.closing && this.sessionId === this.config.getSessionId()) {
       this.toolGeneration = new AbortController();
+      this.requestRender();
+      this.refreshRows();
     }
   }
 
@@ -514,8 +570,10 @@ export class ModSession implements ICommandLoader {
   async syncSession(reason: 'clear' | 'resume'): Promise<void> {
     const current = this.config.getSessionId();
     if (current === this.sessionId) {
-      if (this.toolGeneration.signal.aborted)
+      if (this.toolGeneration.signal.aborted) {
         this.toolGeneration = new AbortController();
+        this.refreshRows();
+      }
       return;
     }
     this.invalidateTools();
@@ -523,6 +581,12 @@ export class ModSession implements ICommandLoader {
       if (current === this.sessionId || this.closing) return;
       await this.end(reason);
       this.sessionId = current;
+      // Rows are the old session's transcript.
+      this.rows.clear();
+      // The Mods' prompts and the turns they started belong to the old one.
+      this.submitted.length = 0;
+      this.modTurns = 0;
+      this.stopped = false;
       this.adoptedAt = Date.now();
       this.startedAt = undefined;
       this.recorder = undefined;
@@ -545,7 +609,7 @@ export class ModSession implements ICommandLoader {
    * Reports the band's input. A change of its key renders, after a change of
    * width or of `maxRows` has settled; a change of height alone does not.
    */
-  setRenderInput(input: ModRenderInput): void {
+  setRenderInput(input: ModBandInput): void {
     const band = this.band;
     const key = [
       input.viewport?.columns,
@@ -578,7 +642,7 @@ export class ModSession implements ICommandLoader {
       !this.sites.includes(band.input.component) ||
       band.settle ||
       band.wait ||
-      !this.runtime?.renderHooks.length ||
+      !this.runtime?.renderHooksFor('AbovePrompt').length ||
       band.state === 'waiting'
     )
       return;
@@ -608,10 +672,16 @@ export class ModSession implements ICommandLoader {
   private async render(): Promise<void> {
     const band = this.band;
     const runtime = this.runtime!;
-    const owner =
-      runtime.renderHooks.length === 1 ? runtime.renderHooks[0] : 'hooks';
+    const hooks = runtime.renderHooksFor('AbovePrompt');
+    const owner = hooks.length === 1 ? hooks[0] : 'hooks';
     band.state = 'running';
     band.startedAt = Date.now();
+    const signal = AbortSignal.any([
+      this.lifetime.signal,
+      this.toolGeneration.signal,
+    ]);
+    const isCurrent = () =>
+      !signal.aborted && this.sessionId === this.config.getSessionId();
     try {
       // A switch in progress renders once it is done.
       if (this.closing || this.sessionId !== this.config.getSessionId()) return;
@@ -619,16 +689,13 @@ export class ModSession implements ICommandLoader {
         this.terminal?.draw?.(ENGINE_NODE, owner);
         return;
       }
-      const { tree, notes } = await runtime.render(
-        band.input!,
-        this.lifetime.signal,
-      );
+      const { tree, notes } = await runtime.render(band.input!, signal);
       for (const note of notes) logger.debug(note);
-      if (!this.closing) this.terminal?.draw?.(tree, owner);
+      if (isCurrent()) this.terminal?.draw?.(tree, owner);
     } catch (error) {
       // The worker has failed or closed; the band draws nothing.
       logger.debug(`Mod ui.render: ${String(error)}`);
-      if (!this.closing) this.terminal?.draw?.(ENGINE_NODE, owner);
+      if (isCurrent()) this.terminal?.draw?.(ENGINE_NODE, owner);
     } finally {
       if (Date.now() - band.startedAt > RENDER_LIVE_MS)
         band.steadyUntil = Date.now() + RENDER_SLOW_MS;
@@ -637,6 +704,84 @@ export class ModSession implements ICommandLoader {
         band.again = false;
         this.requestRender();
       }
+      this.flushLogs();
+    }
+  }
+
+  /**
+   * Shows a transcript row the Mods may draw, calling `listener` when what it
+   * draws changes. Returns the release, or undefined where no hook hears the
+   * row's site or the row is too large to hand to the Mods.
+   */
+  watchRow(
+    sessionId: string,
+    input: ModRenderInput,
+    listener: () => void,
+  ): (() => void) | undefined {
+    if (
+      this.closing ||
+      sessionId !== this.sessionId ||
+      !this.sites.includes(input.component) ||
+      !this.runtime?.renderHooksFor(input.component).length ||
+      Buffer.byteLength(JSON.stringify(input)) > MOD_MAX_BYTES / 2
+    )
+      return undefined;
+    return this.rows.watch(input, listener);
+  }
+
+  /** The props a row draws with once its hooks answered, if they rewrote it. */
+  rowProps(
+    sessionId: string,
+    input: ModRenderInput,
+  ): ModRenderInput['props'] | undefined {
+    return sessionId === this.sessionId ? this.rows.get(input) : undefined;
+  }
+
+  // Rows answered while dispatches were cancelled render again.
+  private refreshRows(): void {
+    for (const site of this.sites)
+      if (site !== 'AbovePrompt') this.rows.invalidate(site);
+  }
+
+  private invalidateRenders(plugin: string): void {
+    const runtime = this.runtime;
+    if (!runtime) return;
+    for (const site of this.sites) {
+      if (!runtime.renderHooksFor(site).includes(plugin)) continue;
+      if (site === 'AbovePrompt') this.requestRender();
+      else this.rows.invalidate(site);
+    }
+  }
+
+  // A row's answer: the props its hooks rewrote, or none to draw its own.
+  private async renderRow(
+    input: ModRenderInput,
+  ): Promise<ModRenderInput['props'] | undefined> {
+    const runtime = this.runtime;
+    const generation = this.toolGeneration.signal;
+    if (
+      !runtime ||
+      this.closing ||
+      generation.aborted ||
+      this.sessionId !== this.config.getSessionId() ||
+      !this.allowed() ||
+      !this.active()
+    )
+      return undefined;
+    const signal = AbortSignal.any([
+      this.lifetime.signal,
+      generation,
+      // Provider I/O pauses the runtime's dispatch clock.
+      AbortSignal.timeout(ROW_RENDER_TIMEOUT_MS),
+    ]);
+    try {
+      const { props, notes } = await runtime.render(input, signal);
+      signal.throwIfAborted();
+      for (const note of notes) logger.debug(note);
+      return !props || stableJson(props) === stableJson(input.props)
+        ? undefined
+        : props;
+    } finally {
       this.flushLogs();
     }
   }
@@ -695,6 +840,180 @@ export class ModSession implements ICommandLoader {
       });
       this.toolQueue = task.catch(() => {});
       return task;
+    };
+  }
+
+  // `$.prompt.submit` lands here once the hooks let the prompt through.
+  private queuePrompt(prompt: ModQueuedPrompt): string | undefined {
+    // A switch to another session ends this one, as /clear or /resume do;
+    // the hooks that hear it end cannot queue a prompt for it.
+    if (this.closing || this.sessionId !== this.config.getSessionId())
+      return 'the session is ending';
+    const refused = this.stopped
+      ? 'the person stopped a turn and has not sent a prompt since'
+      : this.modTurns + this.submitted.length >= MOD_PROMPT_TURN_LIMIT
+        ? `the Mods have started ${MOD_PROMPT_TURN_LIMIT} turns since the last prompt from the person`
+        : undefined;
+    if (refused) {
+      this.pendingLogs.push({
+        text: `$.prompt.submit refused: ${refused}`,
+        to: 'transcript',
+        plugin: prompt.plugin,
+        sessionId: this.sessionId,
+      });
+      this.flushLogs();
+      return refused;
+    }
+    this.submitted.push({ ...prompt, sessionId: this.sessionId });
+    this.terminal?.promptQueued?.();
+    return undefined;
+  }
+
+  /**
+   * Takes the next prompt a Mod submitted for the current session, to run as
+   * a turn of its own now that the session is idle. It counts toward
+   * {@link MOD_PROMPT_TURN_LIMIT}.
+   */
+  takeSubmittedPrompt(): ModQueuedPrompt | undefined {
+    const sessionId = this.config.getSessionId();
+    let next = this.submitted.shift();
+    while (next && next.sessionId !== sessionId) next = this.submitted.shift();
+    if (!next || this.closing) return undefined;
+    this.modTurns++;
+    const { sessionId: queuedFor, ...prompt } = next;
+    this.taken.set(prompt, queuedFor);
+    return prompt;
+  }
+
+  /**
+   * Puts back a prompt {@link takeSubmittedPrompt} took, at the front of the
+   * queue, when the turn it was taken for could not start. It no longer counts
+   * toward {@link MOD_PROMPT_TURN_LIMIT}.
+   */
+  returnSubmittedPrompt(prompt: ModQueuedPrompt): void {
+    const sessionId = this.taken.get(prompt);
+    this.taken.delete(prompt);
+    // A session that ended since takes nothing back.
+    if (
+      sessionId === undefined ||
+      this.closing ||
+      this.stopped ||
+      sessionId !== this.config.getSessionId()
+    )
+      return;
+    this.modTurns = Math.max(0, this.modTurns - 1);
+    this.submitted.unshift({ ...prompt, sessionId });
+  }
+
+  /** Whether a prompt a Mod submitted for the current session waits to run. */
+  get hasSubmittedPrompts(): boolean {
+    const sessionId = this.config.getSessionId();
+    return (
+      !this.closing &&
+      this.submitted.some((prompt) => prompt.sessionId === sessionId)
+    );
+  }
+
+  /** The person sent a prompt, so the Mods' prompts may start turns again. */
+  notePersonPrompt(): void {
+    this.modTurns = 0;
+    this.stopped = false;
+  }
+
+  /**
+   * Drops the prompts the Mods submitted that have not started: a headless
+   * run that stopped early does not run them, and neither does the next one.
+   */
+  discardSubmittedPrompts(): void {
+    this.submitted.length = 0;
+  }
+
+  /**
+   * The person stopped the running turn: drops the prompts the Mods submitted
+   * that have not started, and refuses those they submit until the person
+   * sends a prompt again. A `turn.complete` hook of the stopped turn that
+   * submits, awaited or not, starts no turn.
+   */
+  stopSubmittedPrompts(): void {
+    this.discardSubmittedPrompts();
+    this.stopped = true;
+  }
+
+  /** Whether a loaded Mod hooks `prompt.submit`. */
+  get hearsPrompts(): boolean {
+    return !this.closing && (this.runtime?.promptHooks.length ?? 0) > 0;
+  }
+
+  /**
+   * Raises `prompt.submit` for a prompt a person submitted, before
+   * UserPromptSubmit. Returns the prompt that enters, with the context the
+   * hooks attached, or the line saying why it was dropped. A hook that fails
+   * never blocks a prompt, and neither does a prompt too long for a Mod
+   * payload, which no hook hears. `signal` is the prompt's own.
+   */
+  async submitPrompt(
+    text: string,
+    signal: AbortSignal,
+  ): Promise<{ text: string; context?: string[] } | { drop: string }> {
+    const plugins = this.runtime?.promptHooks ?? [];
+    if (!plugins.length || this.closing) return { text };
+    const input: ModPromptSubmit = {
+      text,
+      wait: false,
+      origin: { kind: this.terminal ? 'composer' : 'sdk' },
+    };
+    if (fitTurnText(text).truncated) {
+      this.pendingLogs.push({
+        text: 'prompt.submit hook skipped: the prompt is too long for a Mod payload',
+        to: 'transcript',
+        plugin: plugins.join('+'),
+        sessionId: this.sessionId,
+      });
+      this.flushLogs();
+      return { text };
+    }
+    const sessionId = this.sessionId;
+    const task = this.toolQueue.then(async () => {
+      signal.throwIfAborted();
+      if (
+        this.closing ||
+        sessionId !== this.config.getSessionId() ||
+        !this.allowed() ||
+        !this.active()
+      )
+        return { text };
+      try {
+        return await this.runtime!.submitPrompt(
+          input,
+          AbortSignal.any([signal, this.lifetime.signal]),
+        );
+      } catch (error) {
+        signal.throwIfAborted();
+        logger.debug(`Mod prompt.submit: ${String(error)}`);
+        return { text };
+      } finally {
+        this.flushLogs();
+      }
+    });
+    this.toolQueue = task.catch(() => {});
+    const result = await task;
+    if (!('drop' in result)) {
+      // A rewrite to nothing would send the model an empty prompt.
+      if (!result.text.trim() && text.trim())
+        return { drop: 'Prompt dropped by a hook: it left the prompt empty' };
+      return result;
+    }
+    if (!result.byHook) return { drop: `Prompt not submitted: ${result.drop}` };
+    // A drop's reason is one line, kept to its first 4,096 characters.
+    const reason = (this.terminal ? sanitizeTerminalLine : stripAnsiAndControl)(
+      result.drop.replace(/\r?\n/g, ' ').trim(),
+    );
+    if (cpLen(reason) > 4096)
+      logger.debug(
+        `${plugins.join('+')}: prompt.submit hook: a drop of ${cpLen(reason)} characters, kept up to its first 4096`,
+      );
+    return {
+      drop: `Prompt dropped by a hook: ${cpLen(reason) > 4096 ? `${cpSlice(reason, 0, 4096)}…` : reason}`,
     };
   }
 
@@ -1027,42 +1346,22 @@ export class ModSession implements ICommandLoader {
 
 // A provider's count as the Mods take it: a whole number, or 0 when it is
 // missing or not a count at all.
-function tokenCount(value: unknown): number {
-  return typeof value === 'number' && Number.isFinite(value) && value >= 0
-    ? Math.floor(value)
-    : 0;
-}
-
-// The API's four counts. Cache writes are known only where the provider
-// reports them apart, as Anthropic's does.
+// The API's four counts, summed over the turn's responses.
 function addTurnUsage(
   usage: RunningTurn['usage'],
   metadata: GenerateContentResponseUsageMetadata | undefined,
   authType: string | undefined,
 ): RunningTurn['usage'] {
   if (!metadata) return usage;
-  const prompt = tokenCount(metadata.promptTokenCount);
-  const read = tokenCount(metadata.cachedContentTokenCount);
-  const written = tokenCount(
-    getGenAiUsageProvenance(metadata)?.cacheCreationInputTokens,
-  );
-  // Counted as the session's billable output counts it.
-  const output = outputTokenCount(
-    {
-      input: prompt,
-      output: tokenCount(metadata.candidatesTokenCount),
-      thoughts: tokenCount(metadata.thoughtsTokenCount),
-      total: tokenCount(metadata.totalTokenCount),
-    },
-    authType,
-  );
+  const added = modModelUsage(metadata, authType);
   return {
-    input_tokens:
-      (usage?.input_tokens ?? 0) + Math.max(0, prompt - read - written),
-    output_tokens: (usage?.output_tokens ?? 0) + output,
-    cache_read_input_tokens: (usage?.cache_read_input_tokens ?? 0) + read,
+    input_tokens: (usage?.input_tokens ?? 0) + added.input_tokens,
+    output_tokens: (usage?.output_tokens ?? 0) + added.output_tokens,
+    cache_read_input_tokens:
+      (usage?.cache_read_input_tokens ?? 0) + added.cache_read_input_tokens,
     cache_creation_input_tokens:
-      (usage?.cache_creation_input_tokens ?? 0) + written,
+      (usage?.cache_creation_input_tokens ?? 0) +
+      added.cache_creation_input_tokens,
   };
 }
 

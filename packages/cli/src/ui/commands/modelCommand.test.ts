@@ -16,6 +16,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
 import { buildAcpModelOptions } from '../../utils/acpModelUtils.js';
+import { SubscriptionOAuthError } from '@qwen-code/qwen-code-core/qwen/subscription-oauth-client.js';
 
 // Helper function to create a mock config
 function createMockConfig(
@@ -166,20 +167,19 @@ describe('modelCommand', () => {
     });
   });
 
-  it('should return error when content generator config is not available', async () => {
+  it('opens the model picker without an initialized content generator', async () => {
     const mockConfig = createMockConfig(null);
     mockContext.services.config = mockConfig as Config;
 
     const result = await modelCommand.action!(mockContext, '');
 
     expect(result).toEqual({
-      type: 'message',
-      messageType: 'error',
-      content: 'Content generator configuration not available.',
+      type: 'dialog',
+      dialog: 'model',
     });
   });
 
-  it('should return error when auth type is not available', async () => {
+  it('opens the model picker after the active authentication was cleared', async () => {
     const mockConfig = createMockConfig({
       model: 'test-model',
       authType: undefined,
@@ -189,9 +189,8 @@ describe('modelCommand', () => {
     const result = await modelCommand.action!(mockContext, '');
 
     expect(result).toEqual({
-      type: 'message',
-      messageType: 'error',
-      content: 'Authentication type not available.',
+      type: 'dialog',
+      dialog: 'model',
     });
   });
 
@@ -250,10 +249,57 @@ describe('modelCommand', () => {
     const result = await modelCommand.action!(mockContext, '');
 
     expect(result).toEqual({
-      type: 'message',
-      messageType: 'error',
-      content: 'Authentication type not available.',
+      type: 'dialog',
+      dialog: 'model',
     });
+  });
+
+  it.each([null, { model: '' }])(
+    'switches an explicitly qualified provider without active auth (%j)',
+    async (generationConfig) => {
+      const switchModel = vi.fn().mockResolvedValue(undefined);
+      mockContext.services.config = {
+        ...createMockConfig(generationConfig),
+        getAvailableModelsForAuthType: vi.fn(() => [
+          { id: 'qwen3.6-plus', authType: AuthType.USE_OPENAI },
+        ]),
+        switchModel,
+      } as unknown as Config;
+      mockContext.services.settings = createMockSettings() as LoadedSettings;
+
+      expect(
+        await modelCommand.action!(mockContext, 'qwen3.6-plus(openai)'),
+      ).toMatchObject({
+        type: 'message',
+        messageType: 'info',
+      });
+      expect(switchModel).toHaveBeenCalledWith(
+        AuthType.USE_OPENAI,
+        'qwen3.6-plus',
+        { initializeIfNeeded: true },
+      );
+    },
+  );
+
+  it('requires cached credentials for an explicit OAuth selection without active auth', async () => {
+    const switchModel = vi.fn().mockResolvedValue(undefined);
+    mockContext.services.config = {
+      ...createMockConfig({ model: '' }),
+      getAvailableModelsForAuthType: vi.fn(() => [
+        { id: 'coder-model', authType: AuthType.QWEN_OAUTH },
+      ]),
+      switchModel,
+    } as unknown as Config;
+    mockContext.services.settings = createMockSettings() as LoadedSettings;
+    await modelCommand.action!(mockContext, 'coder-model(qwen-oauth)');
+    expect(switchModel).toHaveBeenCalledWith(
+      AuthType.QWEN_OAUTH,
+      'coder-model',
+      {
+        initializeIfNeeded: true,
+        requireCachedCredentials: true,
+      },
+    );
   });
 
   it('should switch a dual-role model directly in interactive mode', async () => {
@@ -286,11 +332,9 @@ describe('modelCommand', () => {
 
     const result = await modelCommand.action!(mockContext, 'qwen-max');
 
-    expect(switchModel).toHaveBeenCalledWith(
-      AuthType.QWEN_OAUTH,
-      'qwen-max',
-      undefined,
-    );
+    expect(switchModel).toHaveBeenCalledWith(AuthType.QWEN_OAUTH, 'qwen-max', {
+      initializeIfNeeded: true,
+    });
     expect(setValue).toHaveBeenCalledWith(
       expect.any(String),
       'model.name',
@@ -391,11 +435,9 @@ describe('modelCommand', () => {
 
     await modelCommand.action!(mockContext, 'qwen-max');
 
-    expect(switchModel).toHaveBeenCalledWith(
-      AuthType.QWEN_OAUTH,
-      'qwen-max',
-      undefined,
-    );
+    expect(switchModel).toHaveBeenCalledWith(AuthType.QWEN_OAUTH, 'qwen-max', {
+      initializeIfNeeded: true,
+    });
     expect(setValue).not.toHaveBeenCalled();
   });
 
@@ -725,11 +767,9 @@ describe('modelCommand', () => {
       'Refresh failed',
     );
 
-    expect(switchModel).toHaveBeenCalledWith(
-      AuthType.QWEN_OAUTH,
-      'qwen-max',
-      undefined,
-    );
+    expect(switchModel).toHaveBeenCalledWith(AuthType.QWEN_OAUTH, 'qwen-max', {
+      initializeIfNeeded: true,
+    });
     expect(setValue).not.toHaveBeenCalled();
   });
 
@@ -843,11 +883,9 @@ describe('modelCommand', () => {
       `gpt-4(${AuthType.USE_OPENAI})`,
     );
 
-    expect(switchModel).toHaveBeenCalledWith(
-      AuthType.USE_OPENAI,
-      'gpt-4',
-      undefined,
-    );
+    expect(switchModel).toHaveBeenCalledWith(AuthType.USE_OPENAI, 'gpt-4', {
+      initializeIfNeeded: true,
+    });
     expect(setValue).toHaveBeenCalledWith(
       expect.any(String),
       'security.auth.selectedType',
@@ -2251,7 +2289,7 @@ describe('modelCommand', () => {
     expect(switchModel).toHaveBeenCalledWith(
       AuthType.USE_OPENAI,
       '--fast-model',
-      undefined,
+      { initializeIfNeeded: true },
     );
     expect(setValue).toHaveBeenCalledWith(
       expect.any(String),
@@ -3278,5 +3316,82 @@ describe('isPickerOnlyModelInvocation', () => {
     'qwen-max write a one-off prompt',
   ])('treats %j as not picker-only', (args) => {
     expect(isPickerOnlyModelInvocation(args)).toBe(false);
+  });
+});
+
+it('opens subscription model selection after startup failed before generator initialization', async () => {
+  const context = createMockCommandContext({
+    services: {
+      config: {
+        getContentGeneratorConfig: vi.fn().mockReturnValue(null),
+        refreshSubscriptionModels: vi
+          .fn()
+          .mockResolvedValue({ models: ['replacement'], cached: false }),
+        getModel: vi.fn().mockReturnValue('removed'),
+      },
+      settings: {
+        ...createMockSettings(),
+        merged: {
+          security: { auth: { selectedType: AuthType.QWEN_SUBSCRIPTION } },
+        },
+      },
+    },
+  });
+  const result = await modelCommand.action!(context, '');
+  expect(result).toMatchObject({ type: 'dialog', dialog: 'model' });
+});
+
+it('opens the model picker after subscription expiry so other providers remain selectable', async () => {
+  const context = createMockCommandContext({
+    services: {
+      config: {
+        getContentGeneratorConfig: vi.fn().mockReturnValue(null),
+        refreshSubscriptionModels: vi
+          .fn()
+          .mockRejectedValue(new SubscriptionOAuthError('session_changed')),
+      },
+      settings: {
+        ...createMockSettings(),
+        merged: {
+          security: { auth: { selectedType: AuthType.QWEN_SUBSCRIPTION } },
+        },
+      },
+    },
+  });
+  expect(await modelCommand.action!(context, '')).toMatchObject({
+    type: 'dialog',
+    dialog: 'model',
+  });
+});
+
+it('reports catalog permission failures when explicitly selecting a subscription model', async () => {
+  const context = createMockCommandContext({
+    services: {
+      config: {
+        getContentGeneratorConfig: vi.fn().mockReturnValue(null),
+        refreshSubscriptionModels: vi
+          .fn()
+          .mockRejectedValue(
+            new SubscriptionOAuthError(
+              'request_failed',
+              403,
+              'Your account cannot access this model catalog.',
+            ),
+          ),
+      },
+      settings: {
+        ...createMockSettings(),
+        merged: {
+          security: { auth: { selectedType: AuthType.QWEN_SUBSCRIPTION } },
+        },
+      },
+    },
+  });
+  expect(
+    await modelCommand.action!(context, 'replacement(qwen-subscription)'),
+  ).toMatchObject({
+    type: 'message',
+    messageType: 'error',
+    content: 'Your account cannot access this model catalog.',
   });
 });

@@ -55,15 +55,33 @@ systemctl enable --now qwen-hosted-harness qwen-managed-agent-server
 
 ## 验证
 
-加载 unit 使用的同一份环境文件，并在服务停止时运行预检：
+在服务停止时，按 unit 运行服务端的方式运行预检：使用它的账号、它的环境文件、它的工作目录，并处于它的沙箱中：
 
 ```bash
 sudo systemd-run --wait --pipe --collect \
   --property=User=qwen-managed-agent \
+  --property=Group=qwen-managed-agent \
   --property=EnvironmentFile=/etc/qwen-managed-agent/server.env \
+  --working-directory=/opt/qwen-managed-agent \
+  --property=StateDirectory=qwen-managed-agent \
+  --property=StateDirectoryMode=0750 \
+  --property="ReadWritePaths=/var/lib/qwen-managed-agent /srv/qwen-workspace" \
+  --property=NoNewPrivileges=true \
+  --property=PrivateTmp=true \
+  --property=ProtectSystem=strict \
+  --property=ProtectHome=true \
   /opt/qwen-managed-agent/bin/qwen-managed-agent-server --check
 curl --fail http://127.0.0.1:8080/actuator/health
 ```
+
+预检按服务端的方式读取配置。除了 `SPRING_CONFIG_ADDITIONAL_LOCATION` 指定的文件，服务端还会读取其工作目录下的 `application.yml` 和 `config/application.yml`，因此 `--working-directory` 必须与 unit 的 `WorkingDirectory` 一致。沙箱相关的属性与 unit 的一致，使预检看到的文件与服务端相同：unit 会隐藏 `/home`、`/root`、`/run/user`，以及主机的 `/tmp` 和 `/var/tmp`，并且只能写入它的 `ReadWritePaths`。修改 unit 时请同步修改这些属性。预检为读到的每个文件打印一行 `config`；在服务端会拒绝启动，或本次运行无法检查服务端所读内容的地方，该行失败：
+
+- 指定的文件不存在；
+- 服务账号读不了的文件；
+- 只有运行 `--check` 的账号读不了的文件，或被其路径上某个目录挡住、它够不着的文件，修复方法是改用服务账号运行；
+- YAML 错误：给出行号；除非它位于由另一个文件内部 import 的文件中，否则也给出文件。
+
+含 secret 的文件对 group 或 others 可读时，该行为 `WARN` 并给出 `chmod 600`；`WARN` 不使检查失败。
 
 `--check` 会实际绑定配置端口，其 `workers` 行还会对上次启动遗留、仍在运行的 Runtime worker 给出警告，因此请在服务停止时运行。服务运行期间请加上 `--online`：端口相关的行改为检查服务端与 Broker 是否在监听；`workers` 行只报告已停止的服务端遗留的 worker，对持久模式的 Broker 则跳过，因为它会接管这些 worker。
 
@@ -73,9 +91,16 @@ curl --fail http://127.0.0.1:8080/actuator/health
 
 同一项 `KillMode=process` 也意味着 `systemctl stop qwen-managed-agent-server` 只向主进程发送信号：unit 报告 inactive 时 Runtime worker 仍在运行并持有状态目录与 Workspace，随后启动会与它们竞争。重启前先回收：`systemctl kill --kill-whom=all -s TERM qwen-managed-agent-server`。
 
+JVM 收到 `SIGTERM` 并正常关闭后以状态码 143 退出，因此 unit 设置了 `SuccessExitStatus=143`；否则每次停止都会让 unit 处于 failed 状态。
+
+## 升级
+
+使用新分发产物中的 `bin/qwen-managed-agent-upgrade` 升级，步骤见部署指南的“升级”一节。它会停止这两个 unit、回收 Runtime worker、备份数据库、Runtime 状态与配置，并在新版本的预检通过后启动它。第一次 `install` 会把 `/opt/qwen-managed-agent` 移到 `/opt/qwen-managed-agent-releases/<version>`，并在原位置放一个链接，因此 unit 中的路径不变。它从不修改这两个 unit：`check` 提示模板有变化时，请在 `start` 之前把变化同步过来并执行 `systemctl daemon-reload`。
+
 ## 路径
 
-- `/opt/qwen-managed-agent` — 解压后的分发产物（只读）。
+- `/opt/qwen-managed-agent` — 解压后的分发产物（只读）；第一次升级之后，是指向已安装版本的链接。
+- `/opt/qwen-managed-agent-releases` — 升级安装的各个版本，包括上一个版本。
 - `/etc/qwen-managed-agent` — 凭据与 `application.yml`。
 - `/var/lib/qwen-managed-agent` — Runtime 状态。
 - `/srv/qwen-workspace` — Workspace；迁移位置时同步调整 `ReadWritePaths`。

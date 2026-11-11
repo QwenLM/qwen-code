@@ -184,7 +184,10 @@ function bootIdOf(procStart: string | null | undefined): string | null {
  * nothing about the writer; an identity this side cannot read is likewise no
  * evidence, and a legacy record carries none at all.
  */
-function isLocalIdentity(info: ServiceInfo): boolean {
+export function isLocalIdentity(info: {
+  procStart?: string | null;
+  pidNs?: number | null;
+}): boolean {
   if (info.pidNs !== undefined && info.pidNs !== readPidNamespaceId()) {
     return false;
   }
@@ -355,7 +358,7 @@ function writeInfoExclusive(info: ServiceInfo): void {
   }
 }
 
-function readPidfileProcessToken(pid: number): string | null {
+export function readPidfileProcessToken(pid: number): string | null {
   let procStart = readProcStartToken(pid);
   if (process.platform !== 'linux' || procStart !== null) return procStart;
 
@@ -368,7 +371,7 @@ function readPidfileProcessToken(pid: number): string | null {
   );
 }
 
-function readPidfileNamespaceId(): number | null {
+export function readPidfileNamespaceId(): number | null {
   let pidNs = readPidNamespaceId();
   if (process.platform !== 'linux' || pidNs !== null) return pidNs;
 
