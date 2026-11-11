@@ -128,7 +128,8 @@ public final class AgentDefinitionExtensions {
                 || !(pin.get(prefix + "_id") instanceof String id) || !ID.matcher(id).matches()
                 || !(pin.get(prefix + "_revision") instanceof Number revision)
                 || !Double.isFinite(revision.doubleValue()) || revision.doubleValue() != revision.longValue()
-                || revision.longValue() < 1 || revision.longValue() > 9007199254740991L
+                || revision.longValue() < 1
+                || revision.longValue() > ManagedSessionStoreModels.MAX_SAFE_COUNTER
                 || !(pin.get("definition_digest") instanceof String digest) || !DIGEST.matcher(digest).matches()) {
             throw unsupported(field);
         }

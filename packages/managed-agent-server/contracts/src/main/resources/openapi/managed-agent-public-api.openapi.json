@@ -16592,7 +16592,7 @@
           "server_revision": {
             "type": "integer",
             "minimum": 1,
-            "maximum": 9007199254740991
+            "maximum": 9007199254740990
           },
           "definition_digest": {
             "type": "string",
@@ -17926,7 +17926,7 @@
           "serverRevision": {
             "type": "integer",
             "minimum": 1,
-            "maximum": 9007199254740991
+            "maximum": 9007199254740990
           },
           "definitionDigest": {
             "type": "string",
@@ -17951,7 +17951,7 @@
           "serverRevision": {
             "type": "integer",
             "minimum": 1,
-            "maximum": 9007199254740991
+            "maximum": 9007199254740990
           },
           "definitionDigest": {
             "type": "string",
@@ -17975,7 +17975,7 @@
           "serverRevision": {
             "type": "integer",
             "minimum": 1,
-            "maximum": 9007199254740991
+            "maximum": 9007199254740990
           },
           "definitionDigest": {
             "type": "string",
@@ -18015,7 +18015,7 @@
           "revision": {
             "type": "integer",
             "minimum": 1,
-            "maximum": 9007199254740991
+            "maximum": 9007199254740990
           },
           "state": {
             "type": "string",
@@ -18053,7 +18053,7 @@
           "revision": {
             "type": "integer",
             "minimum": 0,
-            "maximum": 9007199254740991
+            "maximum": 9007199254740990
           },
           "supported": {
             "type": "boolean"

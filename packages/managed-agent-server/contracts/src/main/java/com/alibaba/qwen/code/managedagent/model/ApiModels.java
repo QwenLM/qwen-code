@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.model;
 
 import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages.Pin;
+import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.repository.SessionWorktreeStore;
 import com.fasterxml.jackson.annotation.JsonAnySetter;
 import com.fasterxml.jackson.annotation.JsonInclude;
@@ -321,7 +322,7 @@ public final class ApiModels {
             String cursor, Integer limit) { }
 
     public record ManagedMcpServerPin(@NotBlank @Pattern(regexp = "[A-Za-z0-9._:-]{1,128}") String serverId,
-            @Min(1) @Max(9_007_199_254_740_991L) long serverRevision,
+            @Min(1) @Max(ManagedSessionStoreModels.MAX_SAFE_COUNTER) long serverRevision,
             @NotBlank @Pattern(regexp = "[a-f0-9]{64}") String definitionDigest) { }
 
     public record ManagedMcpManagementCommand(@NotBlank String action,
