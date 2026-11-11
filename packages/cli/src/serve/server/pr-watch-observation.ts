@@ -497,6 +497,14 @@ export interface PrWatchObservationTickOptions {
    * Defaults to now() + intervalMs/2 when omitted.
    */
   deadline?: number;
+  /**
+   * PR keys the slim listing returned, per workspace cwd, carried from the
+   * previous tick's refresh. The timer runs the observation before the
+   * refresh, so the listing that produces these keys always runs after the
+   * observation that consumes them; carrying them one tick is what lets a
+   * closed PR the listing covered leave the view rotation.
+   */
+  listedKeysByWorkspace?: ReadonlyMap<string, ReadonlySet<string>>;
 }
 
 /**
@@ -526,11 +534,13 @@ export async function runPrWatchObservationTick(
   for (const runtime of workspaces) {
     const bindings: SessionPrBindingSummary[] = [];
     try {
-      // The scan's `partial` flag is deliberately discarded here: this
-      // increment makes no negative decision (no deletion, no role-group
-      // skip), which master §4 reserves for a complete scan. The enablement
-      // increment MUST thread `partial` through before adding any such
-      // decision, or an unreadable workspace could delete a watch file.
+      // The scan's `partial` flag is deliberately discarded here: the
+      // observation makes no negative decision (no deletion, no role-group
+      // skip), so it has no reader for it. The drain, which does make those
+      // decisions, already ORs each workspace scan's own flag into the one it
+      // seeds from the caller-side coverage flag and consumes it at both
+      // guards. Any future negative decision here must thread this flag first,
+      // or an unreadable workspace could delete a watch file.
       await scanWorkspaceBindings(runtime, bindings);
     } catch (error) {
       log(
@@ -558,7 +568,12 @@ export async function runPrWatchObservationTick(
         now,
         log,
       },
-      { sweepStart, deadline, viewedThisTick },
+      {
+        sweepStart,
+        deadline,
+        viewedThisTick,
+        listedKeys: options.listedKeysByWorkspace?.get(runtime.workspaceCwd),
+      },
     );
     options.sweepOffsets.set(
       runtime.workspaceCwd,
