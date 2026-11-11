@@ -5,7 +5,7 @@
 - **状态**：提议中。实现从 PR 1（总线原语）开始；不改变任何 surface 的默认行为。
 - **日期**：2026-11-11，基于 `origin/main` `da270e434957`。
 - **关联**：
-  - [Unified agent loop](2026-10-23-unified-agent-loop.zh-CN.md) —— 本设计对其做内部架构升级的已批准设计；跟踪 issue #15327，#15343 批准，headless 已在 #15369 合入，ACP 模型轮在 #15509 评审中；
+  - [Unified agent loop](2026-10-23-unified-agent-loop.zh-CN.md) —— 本设计对其做内部架构升级的已批准设计；跟踪 issue #15327，#15343 批准，headless 已在 #15369 合入，ACP 模型轮已在 #15509 合入；
   - 被移植架构的来源：`v1.0.0-preview` 分支 `587e3429cabf`，`packages/core/src/event-bus/`（19 个文件，6,237 行）；
   - preview 移植试点 issue #16896（file-history 硬化）—— 另一条更小的独立线。
 
@@ -15,7 +15,7 @@
 
 `v1.0.0-preview` 分支把同样的循环重新表达为事件驱动状态机，其形态具备过程式循环没有的性质：
 
-- **显式事件词汇。** 十个总线事件（`query.submitted/output/cancelled/finished`、`llm.request/tool_use/settled`、`tool.cancel/settled`、`handler.failed`）为每次迁移命名。过程式循环里同样的迁移隐含在控制流中，新增循环级行为必须穿过函数主体接线。
+- **显式事件词汇。** 十个总线事件（`query.submitted/output/cancelled/finished`、`llm.request/tool_use/settled`、`tool.cancel/settled`、`handler.failed`）为每次状态转换命名。过程式循环里同样的状态转换隐含在控制流中，新增循环级行为必须穿过函数主体接线。
 - **投递保证。** 总线对同一订阅者同一 query 按发布顺序串行投递，不同 query 互不阻塞。监听器抛错会变成 `handler.failed` 事件，而不是未处理的 rejection。今天的回调除了「抛错即结束循环」外没有顺序与失败语义。
 - **写者所有权。** 每 query 的状态被切分：Conversation 拥有决策与上下文，Llm 拥有选择与模型结果，Tool 拥有派发批次。过程式循环让三个关注点共享可变局部变量。
 - **轮次作用域。** 轮次作用域事件携带 `roundId`；被放弃轮次的迟到事件由构造即丢弃（`currentRound`）。过程式循环靠临时检查处理（例如 `Retry`/`ModelFallback` 时丢弃已收集的调用）。
@@ -37,7 +37,7 @@
 | 模型事件     | `core/turn.ts:78` `LlmEventType`（21 种），`Turn`（`:752`）                                                                                        | 已是规范化事件流                                                                                           |
 | 现有总线     | `confirmation-bus/message-bus.ts:15` `MessageBus`；`agents/runtime/agent-events.ts:296` `AgentEventEmitter`；`packages/acp-bridge/src/eventBus.ts` | hooks 请求/响应；subagent 作用域事件；带 replay 的传输层 fan-out —— 都不是循环控制总线                     |
 
-各 surface：headless 跑 `runAgentLoop`（已合入，#15369）；ACP 用 `runModelRound` 加自己的工具步（#15509 评审中）；Ink TUI（`use-llm-stream.ts`）、OpenTUI、AgentCore、speculation 与 Hosted Harness 仍跑各自的循环，由 unified-agent-loop 迁移计划管辖。
+各 surface：headless 跑 `runAgentLoop`（已合入，#15369）；ACP 用 `runModelRound` 加自己的工具步（#15509 已合入）；Ink TUI（`use-llm-stream.ts`）、OpenTUI、AgentCore、speculation 与 Hosted Harness 仍跑各自的循环，由 unified-agent-loop 迁移计划管辖。
 
 ### preview（在 `587e3429cabf` 核实）
 
@@ -101,19 +101,19 @@ preview 按 `queryId` 路由、用 UUID `roundId` 标记轮次。main 的循环�
 - `runId`：在 `runAgentLoop` 入口生成；路由键（一个 run = preview 的一个「query」）。`promptId` 只是归属信息，随事件携带，绝不作路由键 —— drain 轮可能跨 run 复用同一 prompt id。它是 **run 级**的：取自 `first.promptId` 一次设定，因此即使 host 的 `nextRound` 返回不同的 promptId，续跑轮次的事件仍带 run 的首个 `promptId`（host 回调报告该轮的 `promptId`）。`promptId` 是否应改为跟随轮次，是暴露订阅那个切片要定的决策。
 - `round`：run 的轮次编号，由 Conversation 发布 `llm.request` 时赋值。迟到事件由同样的 `currentRound` 检查丢弃。
 
-| 总线事件         | 载荷（main 类型）                              | 发布者                          |
-| ---------------- | ---------------------------------------------- | ------------------------------- |
-| `loop.started`   | `{ promptId }`                                 | 适配器，状态创建后              |
-| `loop.output`    | `{ event: ServerLlmStreamEvent }` / 工具输出块 | 规划中（流式切片）              |
-| `loop.cancelled` | `{ reason }`                                   | 规划中（流式切片）              |
-| `loop.finished`  | `{ result: AgentLoopResult }`                  | Conversation                    |
-| `llm.request`    | `{ round, send: AgentLoopRound }`              | Conversation                    |
-| `llm.tool_call`  | `{ call: ToolCallRequestInfo }`                | 规划中（流式切片）              |
-| `llm.settled`    | `{ round, calls, terminal? }`                  | Llm，轮结束时                   |
-| `tool.request`   | `{ round, calls }`                             | Conversation，`onRoundEnd` 之后 |
-| `tool.cancel`    | `{ reason }`                                   | 规划中（流式切片）              |
-| `tool.settled`   | `{ round }`                                    | Tool，批结束时                  |
-| `handler.failed` | `{ source, eventType, round?, error }`         | 总线，监听器失败时              |
+| 总线事件         | 载荷（main 类型）                      | 发布者                          |
+| ---------------- | -------------------------------------- | ------------------------------- |
+| `loop.started`   | `{ promptId }`                         | 适配器，状态创建后              |
+| `loop.output`    | `{ event: ServerLlmStreamEvent }`      | 规划中（流式切片）              |
+| `loop.cancelled` | `{ reason }`                           | 规划中（流式切片）              |
+| `loop.finished`  | `{ result: AgentLoopResult }`          | Conversation                    |
+| `llm.request`    | `{ round, send: AgentLoopRound }`      | Conversation                    |
+| `llm.tool_call`  | `{ call: ToolCallRequestInfo }`        | 规划中（流式切片）              |
+| `llm.settled`    | `{ round, calls, terminal? }`          | Llm，轮结束时                   |
+| `tool.request`   | `{ round, calls }`                     | Conversation，`onRoundEnd` 之后 |
+| `tool.cancel`    | `{ reason }`                           | 规划中（流式切片）              |
+| `tool.settled`   | `{ round }`                            | Tool，批结束时                  |
+| `handler.failed` | `{ source, eventType, round?, error }` | 总线，监听器失败时              |
 
 标记*规划中*的事件已在词汇表中，但本切片不发射；它们随流式派发到来。今天的取消经 signal 流入 `runModelRound`/`runToolBatch`，而非总线事件。
 
@@ -133,7 +133,7 @@ preview 按 `queryId` 路由、用 UUID `roundId` 标记轮次。main 的循环�
 
 总线（`LoopEventBus`）基本原样移植（只依赖一个 logger）：按 `(订阅者, runId)` 串行链、跨 run 隔离、`handler.failed` 重发布，以及供消费方去重的 `eventId` 标识 —— 总线本身不去重，相同 id 的两次发布都会投递。两处适配：
 
-- logger 换成 main 的 `debugLogger`/`runLogger` 约定。
+- logger 换成 main 的 `debugLogger` 约定（main 没有 `runLogger`）。
 - 来自 **host 回调**（由适配器调用）的 `handler.failed` 以 error 结局结束 run，保持今天语义；来自内部 handler 的 `handler.failed` 属于 bug，同样结束 run，并在错误中点名来源。
 
 ### 取消
@@ -159,9 +159,16 @@ preview 按 `queryId` 路由、用 UUID `roundId` 标记轮次。main 的循环�
 
 ## 测试
 
-- 单元：总线原语（移植 + 新增）、状态所有权与迟到轮次丢弃、每个 handler 的迁移、适配器的回调顺序/抛错语义。测试与源码同置（`*.test.ts`），vitest。
-- Parity：统一循环套件（headless 已合入；ACP 轮评审中）对 PR 2 原样运行 —— 它们是 surface 无感知的证明。
+- 单元：总线原语（移植 + 新增）、状态所有权与迟到轮次丢弃、每个 handler 的状态转换、适配器的回调顺序/抛错语义。测试与源码同置（`*.test.ts`），vitest。
+- Parity：统一循环套件（headless 已合入；ACP 轮已合入）对 PR 2 原样运行 —— 它们是 surface 无感知的证明。
 - E2E：按 feat-dev 流程在 `.qwen/e2e-tests/` 下写计划，覆盖设置开/关两种状态的 headless 与 ACP prompt 轮；实现前先做基线 dry-run。
+
+## 验收标准
+
+- PR 1（原语）：bus/state/events 模块带单测落地、无运行时消费方、零行为变化（在无消费方时循环路径不变）；`tsc --build`、ESLint、Prettier 干净。
+- PR 2（handler，opt-in）：等价套件证明总线与过程式两条路径在脚本化场景下结果与有序回调日志完全一致，且既有 agent-loop 测试保持全绿；标志默认关，任何 surface 行为不变；`tsc --build`、ESLint、Prettier 干净。
+- 每个切片都把它的实现与测试放进同一个 PR，且双语设计文档保持同步（结构、决策、约束与本验收标准节）。
+- 真实 headless 场景（单轮、工具循环、重试、取消）在标志开/关下两路径 parity 成立，且总线路径由执行标记确认而非假设。
 
 ## 风险与未决问题
 

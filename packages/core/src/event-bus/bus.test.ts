@@ -252,4 +252,39 @@ describe('LoopEventBus', () => {
     expect(failures).toHaveLength(1);
     expect(failures[0].promptId).toBe('prompt-9');
   });
+
+  it('serializes subscriptions sharing a name and drains the chain after settling', async () => {
+    const bus = new LoopEventBus();
+    const gate = deferred();
+    const seen: string[] = [];
+    bus.subscribe(
+      'tool',
+      ['tool.cancel'],
+      async () => {
+        seen.push('first-start');
+        await gate.promise;
+        seen.push('first-end');
+      },
+      { name: 'shared' },
+    );
+    bus.subscribe(
+      'llm',
+      ['tool.cancel'],
+      () => {
+        seen.push('second');
+      },
+      { name: 'shared' },
+    );
+    bus.publish(
+      createBusEvent('tool.cancel', base('r1'), { reason: 'refusal' }),
+    );
+    await flush();
+    // The shared chain is held by the first listener; the second cannot overtake.
+    expect(seen).toEqual(['first-start']);
+    gate.resolve();
+    await flush();
+    expect(seen).toEqual(['first-start', 'first-end', 'second']);
+    const chains = (bus as unknown as { chains: Map<string, unknown> }).chains;
+    expect(chains.size).toBe(0);
+  });
 });

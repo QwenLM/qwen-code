@@ -5,7 +5,7 @@
 - **Status**: proposed. Implementation starts with PR 1 (bus primitives); no surface default changes.
 - **Date**: 2026-11-11, against `origin/main` `da270e434957`.
 - **Related**:
-  - [Unified agent loop](2026-10-23-unified-agent-loop.md) — the accepted design this one re-architects internally; tracking issue #15327, accepted in #15343, headless merged in #15369, ACP model round in review in #15509;
+  - [Unified agent loop](2026-10-23-unified-agent-loop.md) — the accepted design this one re-architects internally; tracking issue #15327, accepted in #15343, headless merged in #15369, ACP model round merged in #15509;
   - source of the ported architecture: the `v1.0.0-preview` branch at `587e3429cabf`, `packages/core/src/event-bus/` (19 files, 6,237 lines);
   - the preview-port pilot issue #16896 (file-history hardening) — a separate, smaller track.
 
@@ -37,7 +37,7 @@ We want these properties in main's shared loop without disturbing the convergenc
 | Model events   | `core/turn.ts:78` `LlmEventType` (21 kinds), `Turn` (`:752`)                                                                                       | already a normalized event stream                                                                                                 |
 | Existing buses | `confirmation-bus/message-bus.ts:15` `MessageBus`; `agents/runtime/agent-events.ts:296` `AgentEventEmitter`; `packages/acp-bridge/src/eventBus.ts` | hooks request/response; subagent-scoped events; transport fan-out with replay — none is a loop control bus                        |
 
-Surfaces: headless runs `runAgentLoop` (merged, #15369); ACP uses `runModelRound` with its own tool step (#15509 in review); Ink TUI (`use-llm-stream.ts`), OpenTUI, AgentCore, speculation and the Hosted Harness still run their own loops, governed by the unified-agent-loop migration plan.
+Surfaces: headless runs `runAgentLoop` (merged, #15369); ACP uses `runModelRound` with its own tool step (#15509 merged); Ink TUI (`use-llm-stream.ts`), OpenTUI, AgentCore, speculation and the Hosted Harness still run their own loops, governed by the unified-agent-loop migration plan.
 
 ### preview (verified at `587e3429cabf`)
 
@@ -101,19 +101,19 @@ Preview routes by `queryId` and scopes rounds by a UUID `roundId`. Main's loop r
 - `runId`: generated at `runAgentLoop` entry; the routing key (one run = one preview "query"). `promptId` is attribution, carried on events, never a routing key — a drain turn may reuse a prompt id across runs. It is **run-level**: set once from `first.promptId`, so continuation rounds keep the run's first `promptId` on events even when a host `nextRound` returns a different one (host callbacks report the round's `promptId`). Whether `promptId` should instead follow the round is a decision for the slice that exposes subscriptions.
 - `round`: the run's round number, assigned when Conversation publishes `llm.request`. Late events are dropped by the same `currentRound` check.
 
-| Bus event        | Payload (main types)                                   | Published by                     |
-| ---------------- | ------------------------------------------------------ | -------------------------------- |
-| `loop.started`   | `{ promptId }`                                         | adapter, after state creation    |
-| `loop.output`    | `{ event: ServerLlmStreamEvent }` / tool output chunks | planned (streaming slice)        |
-| `loop.cancelled` | `{ reason }`                                           | planned (streaming slice)        |
-| `loop.finished`  | `{ result: AgentLoopResult }`                          | Conversation                     |
-| `llm.request`    | `{ round, send: AgentLoopRound }`                      | Conversation                     |
-| `llm.tool_call`  | `{ call: ToolCallRequestInfo }`                        | planned (streaming slice)        |
-| `llm.settled`    | `{ round, calls, terminal? }`                          | Llm, at round end                |
-| `tool.request`   | `{ round, calls }`                                     | Conversation, after `onRoundEnd` |
-| `tool.cancel`    | `{ reason }`                                           | planned (streaming slice)        |
-| `tool.settled`   | `{ round }`                                            | Tool, at batch end               |
-| `handler.failed` | `{ source, eventType, round?, error }`                 | bus, on listener failure         |
+| Bus event        | Payload (main types)                   | Published by                     |
+| ---------------- | -------------------------------------- | -------------------------------- |
+| `loop.started`   | `{ promptId }`                         | adapter, after state creation    |
+| `loop.output`    | `{ event: ServerLlmStreamEvent }`      | planned (streaming slice)        |
+| `loop.cancelled` | `{ reason }`                           | planned (streaming slice)        |
+| `loop.finished`  | `{ result: AgentLoopResult }`          | Conversation                     |
+| `llm.request`    | `{ round, send: AgentLoopRound }`      | Conversation                     |
+| `llm.tool_call`  | `{ call: ToolCallRequestInfo }`        | planned (streaming slice)        |
+| `llm.settled`    | `{ round, calls, terminal? }`          | Llm, at round end                |
+| `tool.request`   | `{ round, calls }`                     | Conversation, after `onRoundEnd` |
+| `tool.cancel`    | `{ reason }`                           | planned (streaming slice)        |
+| `tool.settled`   | `{ round }`                            | Tool, at batch end               |
+| `handler.failed` | `{ source, eventType, round?, error }` | bus, on listener failure         |
 
 Events marked _planned_ are in the vocabulary but not emitted by this slice; they arrive with streaming dispatch. Cancellation today flows through the signal into `runModelRound`/`runToolBatch`, not through a bus event.
 
@@ -133,7 +133,7 @@ The store rejects a second create for the same `runId`, and `currentRound(state,
 
 The bus (`LoopEventBus`) is ported essentially as-is (it depends only on a logger): serial chains per `(subscriber, runId)`, cross-run isolation, `handler.failed` republication, and an `eventId` identifier that consumers can dedup on — the bus itself does not deduplicate, so two publishes with the same id are both delivered. Two adaptations:
 
-- The logger becomes main's `debugLogger`/`runLogger` convention.
+- The logger becomes main's `debugLogger` convention (main has no `runLogger`).
 - `handler.failed` from a **host callback** (invoked by the adapter) ends the run with the error outcome, preserving today's semantics; `handler.failed` from an internal handler is a bug and ends the run the same way, with the source named in the error.
 
 ### Cancellation
@@ -160,8 +160,15 @@ Each slice keeps the parity suites green and changes no surface default.
 ## Testing
 
 - Unit: bus primitives (ported + new), state ownership and late-round drops, each handler's transitions, and the adapter's callback order/throw semantics. Collocated `*.test.ts`, vitest.
-- Parity: the unified-loop suites (headless merged; ACP round in review) run unchanged against PR 2 — they are the proof that surfaces notice nothing.
+- Parity: the unified-loop suites (headless merged; ACP round merged) run unchanged against PR 2 — they are the proof that surfaces notice nothing.
 - E2E: a plan under `.qwen/e2e-tests/` covering headless and ACP prompt turns with the setting on and off, per the feat-dev workflow; baseline dry-run before implementation.
+
+## Acceptance criteria
+
+- PR 1 (primitives): the bus/state/events module lands with unit tests, no runtime consumer, and zero behaviour change (the loop path is unchanged while nothing consumes it); `tsc --build`, ESLint and Prettier are clean.
+- PR 2 (handlers, opt-in): the equivalence suite proves identical results and ordered callback logs between the bus and procedural paths across the scripted scenarios, and the existing agent-loop tests stay green; the flag defaults off so no surface's behaviour changes; `tsc --build`, ESLint and Prettier are clean.
+- Each slice lands its implementation and its tests in the same PR, and the bilingual design doc stays synchronized (structure, decisions, constraints, and this acceptance-criteria section).
+- Real headless scenarios (single turn, tool loop, retry, cancellation) produce parity between the procedural and bus paths with the flag on and off, with the bus path confirmed by an execution marker rather than assumed.
 
 ## Risks and open questions
 

@@ -45,7 +45,7 @@ export interface LoopBusEventMap {
   'tool.request': { round: number; calls: ToolCallRequestInfo[] };
   'tool.cancel': { reason: string };
   'tool.settled': ToolSettledData;
-  /** The only event carrying a native Error; serialize before crossing processes. */
+  /** Dedicated failure channel for a listener's thrown value; serialize it before crossing processes. */
   'handler.failed': {
     source: HandlerName;
     eventType: LoopBusEventType;
