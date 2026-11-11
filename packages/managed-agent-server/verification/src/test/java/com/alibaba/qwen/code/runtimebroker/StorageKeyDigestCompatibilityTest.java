@@ -1,7 +1,7 @@
 package com.alibaba.qwen.code.runtimebroker;
 
 import com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiRegistration;
-import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.alibaba.qwen.code.runtimebroker.transport.ManagedCsiProtocol;
 import org.junit.jupiter.api.Test;
 
@@ -20,7 +20,7 @@ class StorageKeyDigestCompatibilityTest {
     @Test
     void storageAliasKeyMatchesTheSharedRegistrationKey() {
         assertEquals(ALIAS, WorkspaceCsiRegistration.aliasKey("tenant", "storage"));
-        assertEquals(ALIAS, JdbcRuntimeBindingRepository.storageAliasKey("tenant", "storage"));
+        assertEquals(ALIAS, RuntimeAdmissionFences.storageAliasKey("tenant", "storage"));
     }
 
     @Test

@@ -2,7 +2,7 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
-import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
@@ -154,8 +154,8 @@ final class ManagedSessionRetirementStore {
             jdbc.update(
                     "UPDATE ma_session_head SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", compacted_through_revision = GREATEST(compacted_through_revision, ?) WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ? AND state = 'DELETED'",
                     revisions.getLast(),
-                    JdbcRuntimeBindingRepository.harnessDrainKey(tenant),
-                    JdbcRuntimeBindingRepository.harnessDrainKey(session),
+                    RuntimeAdmissionFences.harnessDrainKey(tenant),
+                    RuntimeAdmissionFences.harnessDrainKey(session),
                     tenant,
                     session);
             return true;
@@ -281,8 +281,8 @@ final class ManagedSessionRetirementStore {
                             + " writer_lease_until, latest_checkpoint_resource_id, recovery_status"
                             + " FROM ma_session_head WHERE tenant_key = ? AND harness_key = ? FOR"
                             + " UPDATE",
-                        JdbcRuntimeBindingRepository.harnessDrainKey(tenant),
-                        JdbcRuntimeBindingRepository.harnessDrainKey(session));
+                        RuntimeAdmissionFences.harnessDrainKey(tenant),
+                        RuntimeAdmissionFences.harnessDrainKey(session));
         if (!heads.isEmpty()
                 && (!tenant.equals(heads.getFirst().get("tenant_id"))
                         || !session.equals(heads.getFirst().get("harness_session_id")))) {

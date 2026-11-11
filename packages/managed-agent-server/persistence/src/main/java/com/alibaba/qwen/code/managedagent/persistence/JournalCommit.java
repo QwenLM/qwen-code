@@ -15,6 +15,7 @@ import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.ManagedCheckpointHistory;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcCsiActivationAdmission;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -405,7 +406,7 @@ final class JournalCommit {
                         : Long.valueOf(activation.epoch()),
                 activation == null ? head.activationExpiresAt()
                         : activation.expiresAt(),
-                activationHeadRevision, Math.max(head.storageVersion(), storageFloor), now.getTime(), JdbcRuntimeBindingRepository.harnessDrainKey(tenantId), JdbcRuntimeBindingRepository.harnessDrainKey(sessionId), tenantId, sessionId);
+                activationHeadRevision, Math.max(head.storageVersion(), storageFloor), now.getTime(), RuntimeAdmissionFences.harnessDrainKey(tenantId), RuntimeAdmissionFences.harnessDrainKey(sessionId), tenantId, sessionId);
         if (toolResults != null && csiOriginal == null) {
             toolResults.captureEvents(tenantId, request.workspaceId(), sessionId, revision, receiptEvents);
         }
@@ -482,7 +483,7 @@ final class JournalCommit {
         if (!org.springframework.jdbc.datasource.DataSourceUtils.isConnectionTransactional(
                 org.springframework.jdbc.datasource.DataSourceUtils.getTargetConnection(target), jdbc.getDataSource())
                 || bindings == null || !bindings.usesDataSource(jdbc.getDataSource())
-                || exactBody == null || exactBody.length == 0 || exactBody.length > 128 * 1024) {
+                || exactBody == null || exactBody.length == 0 || exactBody.length > com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof.TERMINAL_BODY_LIMIT) {
             throw JournalFencing.nativeReadConflict();
         }
         var original = authority.original();
@@ -510,7 +511,7 @@ final class JournalCommit {
             throw JournalFencing.nativeReadConflict();
         }
         var frozen = WorkspaceCsiApplicationJson.object(authority.frozenBytes(), WorkspaceCsiApplicationStore.FROZEN_LIMIT);
-        byte[] saved = WorkspaceCsiApplicationJson.base64(frozen.path("commitBodyBase64"), 128 * 1024);
+        byte[] saved = WorkspaceCsiApplicationJson.base64(frozen.path("commitBodyBase64"), com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof.TERMINAL_BODY_LIMIT);
         if (!java.util.Arrays.equals(saved, exactBody)
                 || !com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof.sha256(saved)
                         .equals(frozen.path("preparedCommitSha256").textValue())) {
@@ -543,7 +544,7 @@ final class JournalCommit {
                         + " WHERE head_kind = 'MANAGED_SESSION' AND tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ? AND state = 'ACTIVE'"
                         + " AND journal_revision = ? AND committed_sequence = ? AND last_commit_digest = ?",
                 revision, head.journalRevision(), revision, candidate.proof().terminalSequence(), request.commitDigest(), revision, now.getTime(),
-                JdbcRuntimeBindingRepository.harnessDrainKey(tenant), JdbcRuntimeBindingRepository.harnessDrainKey(session), tenant, session,
+                RuntimeAdmissionFences.harnessDrainKey(tenant), RuntimeAdmissionFences.harnessDrainKey(session), tenant, session,
                 head.journalRevision(), head.committedSequence(), head.lastCommitDigest());
         if (changed != 1) {
             throw JournalFencing.nativeReadConflict();
@@ -553,7 +554,7 @@ final class JournalCommit {
     }
 
     static CommitTransactionRequest csiTerminalRequest(byte[] bytes) {
-        WorkspaceCsiApplicationJson.object(bytes, 128 * 1024);
+        WorkspaceCsiApplicationJson.object(bytes, com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof.TERMINAL_BODY_LIMIT);
         try {
             return JournalStoreRows.CSI_TERMINAL_JSON.readValue(bytes, CommitTransactionRequest.class);
         } catch (IOException malformed) {

@@ -11,6 +11,7 @@ import {
   githubEventWebUrl,
   isChannelPlatformAvailable,
   isPrivateOnlyChannelType,
+  isRepositoryOnlyChannelType,
   isSupportedChannelType,
 } from './channel-platform';
 
@@ -101,6 +102,35 @@ describe('Private-only channel types', () => {
     }
     expect(isPrivateOnlyChannelType(undefined)).toBe(false);
     expect(isPrivateOnlyChannelType(42)).toBe(false);
+  });
+});
+
+describe('Repository-only channel types', () => {
+  it('classifies GitHub and GitLab as repository-only', () => {
+    // Both adapters build every envelope with isGroup: true, so the injected
+    // direct-message controls can never gate their traffic.
+    expect(isRepositoryOnlyChannelType('github')).toBe(true);
+    expect(isRepositoryOnlyChannelType('gitlab')).toBe(true);
+  });
+
+  it('leaves every direct-capable platform outside the set', () => {
+    // A leak here would hide the private controls on a platform that needs
+    // them, the same defect in the opposite direction.
+    for (const type of [
+      'dingtalk',
+      'dws',
+      'wecom',
+      'wecom-callback',
+      'feishu',
+      'email',
+      'telegram',
+      'weixin',
+      'qq',
+    ]) {
+      expect(isRepositoryOnlyChannelType(type)).toBe(false);
+    }
+    expect(isRepositoryOnlyChannelType(undefined)).toBe(false);
+    expect(isRepositoryOnlyChannelType(42)).toBe(false);
   });
 });
 
