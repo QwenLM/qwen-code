@@ -149,12 +149,20 @@ stall alert means the slot is serving no jobs and needs reconciliation; the
 manager keeps retrying and never exits on its own, so systemd does not restart
 it. Alert on that journal marker rather than on service state.
 
-Before upgrading or restarting, pause replenishment, retire idle registrations
-after confirming their containers have no job worker, and wait for assigned
-jobs to finish. JIT labels are read-only and cannot be removed for draining.
-The configured shutdown grace remains an explicit stop deadline, not an
-automatic drain. Record the deployed commit and manager
-checksum together; update them only after installing that exact source.
+`drainTimeoutSeconds` (default 0, disabled; the example config sets 1800)
+turns SIGTERM into a drain instead of a fixed grace deadline. Replenishment
+stops immediately, a slot whose
+container has no `Runner.Worker` process is stopped after two consecutive
+five-second polls, and a slot holding an assigned job keeps serving until that
+job's ephemeral runner exits on its own. The drain window is added to
+`shutdownGraceSeconds`, which remains the final forced-cleanup bound; keep the
+sum below the unit's `TimeoutStopSec` (the supplied unit allows 55 minutes). A
+job that outlives the window is stopped and the slot logs
+`drain window elapsed`, so size the window against the longest routed job.
+JIT labels are read-only, so draining cannot retire a registration GitHub
+still reports busy; polling for the worker is what avoids stranding one.
+Record the deployed commit and manager checksum together; update them only
+after installing that exact source.
 
 Upgrading: `stallAlertRetries`, the earlier retry-count threshold, is no longer
 read. A config that still carries it has no effect and falls back to the

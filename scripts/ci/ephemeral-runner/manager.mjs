@@ -105,6 +105,8 @@ function validate(c) {
     !(c.ttlSeconds > 0) ||
     !Number.isFinite(c.shutdownGraceSeconds) ||
     !(c.shutdownGraceSeconds >= 0) ||
+    (c.drainTimeoutSeconds !== undefined &&
+      (!Number.isFinite(c.drainTimeoutSeconds) || c.drainTimeoutSeconds < 0)) ||
     !Number.isSafeInteger(c.minDiskBytes) ||
     c.minDiskBytes < 0 ||
     (c.stallAlertSeconds !== undefined &&
@@ -205,6 +207,20 @@ export function createManager(config, dependencies = {}) {
       const chunk = Math.min(1000, remaining);
       await wait(chunk);
       remaining -= chunk;
+    }
+  };
+  // Draining is a shutdown-only cost, so a five-second poll per slot is
+  // cheap. Two consecutive idle observations keep a runner that is about to
+  // receive a queued job from being killed in the gap between the check and
+  // the stop.
+  const drainPollMs = 5000;
+  const containerHasWorker = async (id) => {
+    try {
+      return /\bRunner\.Worker\b/.test(await run('docker', ['top', id]));
+    } catch {
+      // An unreadable process table is not proof of an idle runner. Keep
+      // waiting and let the drain deadline decide.
+      return true;
     }
   };
   function parseJson(text) {
@@ -863,6 +879,10 @@ export function createManager(config, dependencies = {}) {
           `slot ${slot}: started runner ${state.runnerName}, id ${state.runnerId}, container ${id}`,
         );
         let nextHealthCheck = Date.now() + config.ttlSeconds * 1000;
+        let nextDrainCheck = 0;
+        let idleSince;
+        let stoppedIdle = false;
+        let stoppedByExit = false;
         let exitCode;
         let waitWarningLogged = false;
         const controller = new AbortController();
@@ -889,6 +909,7 @@ export function createManager(config, dependencies = {}) {
             if (result) {
               if (result.code !== undefined) {
                 exitCode = result.code;
+                stoppedByExit = true;
                 break;
               }
               // A failed wait client is not proof that the container exited.
@@ -905,12 +926,14 @@ export function createManager(config, dependencies = {}) {
                   exitCode = Number.isInteger(status.ExitCode)
                     ? status.ExitCode
                     : null;
+                  stoppedByExit = true;
                   break;
                 }
               } catch {
                 try {
                   if (!(await listContainers(slot)).includes(id)) {
                     exitCode = null;
+                    stoppedByExit = true;
                     break;
                   }
                 } catch {
@@ -948,10 +971,33 @@ export function createManager(config, dependencies = {}) {
                 );
               }
             }
+            if (
+              stopping &&
+              config.drainTimeoutSeconds > 0 &&
+              Date.now() >= nextDrainCheck
+            ) {
+              nextDrainCheck = Date.now() + drainPollMs;
+              if (await containerHasWorker(id)) idleSince = undefined;
+              else if (idleSince === undefined) idleSince = Date.now();
+              else if (Date.now() - idleSince >= drainPollMs) {
+                stoppedIdle = true;
+                log(`slot ${slot}: idle; stopping the runner for shutdown`);
+                break;
+              }
+            }
           }
         } finally {
           controller.abort();
         }
+        if (
+          stopping &&
+          config.drainTimeoutSeconds > 0 &&
+          !stoppedIdle &&
+          !stoppedByExit
+        )
+          log(
+            `slot ${slot}: drain window elapsed; stopping a runner with a job in flight`,
+          );
         if (exitCode !== undefined && exitCode !== 0) {
           earlyExit = true;
           log(
@@ -1084,7 +1130,15 @@ export function createManager(config, dependencies = {}) {
   }
   function stop() {
     stopping = true;
-    stopAt = Math.min(stopAt, Date.now() + config.shutdownGraceSeconds * 1000);
+    const drainMs = (config.drainTimeoutSeconds ?? 0) * 1000;
+    if (drainMs > 0)
+      log(
+        `draining up to ${Math.round((drainMs + config.shutdownGraceSeconds * 1000) / 1000)}s for in-flight jobs`,
+      );
+    stopAt = Math.min(
+      stopAt,
+      Date.now() + drainMs + config.shutdownGraceSeconds * 1000,
+    );
   }
   return { start, stop, cycle, cleanup };
 }
