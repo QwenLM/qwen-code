@@ -520,25 +520,25 @@ describe('ChatCompressionService', () => {
     );
   });
 
-  it('compresses when a phantom reasoning span crosses a complete envelope', async () => {
-    // The unterminated <think> pairs with the trailing block's </analysis>
-    // across the envelope, covering its closer. If the sanitizer drops the
-    // envelope here the round reports FAILED_EMPTY and strikes the
-    // consecutive-failure breaker, even though the model produced a valid
-    // snapshot.
+  it('compresses an instructed block closed by a native tag before an envelope', async () => {
+    // The merge-base unclosed-<analysis> pass consumes the native </think>
+    // closer and the complete envelope, taking FAILED_EMPTY. The fixed
+    // cross-name closer strips only the draft and preserves the snapshot.
     vi.mocked(mockChat.getHistory).mockReturnValue(
       turns('do the thing', 'working', 'continue', 'more'),
     );
+    const envelope =
+      '<state_snapshot><primary_request_and_intent>x</primary_request_and_intent></state_snapshot>';
     mockGenerate(
-      '<think>never closed\n' +
-        '<state_snapshot><primary_request_and_intent>x</primary_request_and_intent></state_snapshot>\n' +
-        '<analysis>draft</analysis>',
+      `<analysis>draft\n</think>\n${envelope}`,
       usage(49_000, 1_500),
     );
+
     const result = await run({ force: true, originalTokenCount: 100_000 });
+
     expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
-    expect(result.newHistory![0].parts![0].text).toContain(
-      'primary_request_and_intent',
+    expect(result.newHistory![0].parts![0].text).toBe(
+      `${envelope}\n\nResume the prior task using the summary above. Continue from the last in-flight step; do not acknowledge the summary, do not re-introduce, do not greet the user again.`,
     );
   });
 
