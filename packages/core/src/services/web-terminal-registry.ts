@@ -87,6 +87,13 @@ const MAX_BUFFER_BYTES = 4 * 1024 * 1024;
 const MAX_BUFFERED_INPUT_BYTES = 256 * 1024;
 const MAX_INPUT_FRAME_BYTES = 1024 * 1024;
 export const MAX_CONCURRENT_WEB_TERMINALS = 8;
+/**
+ * The end evidence for a terminal the PTY backend ended by failure. The
+ * backend has already torn the process tree down, so the terminal is
+ * definitively gone; this registry-defined code lets the hold settle instead
+ * of wedging on an unprovable end. It is not a claimed process exit status.
+ */
+export const WEB_TERMINAL_FAILURE_EXIT_CODE = 1;
 /** Reclaim a PTY session after this long with no connected listener. */
 const IDLE_RECLAIM_MS = 15 * 60 * 1000;
 
@@ -247,6 +254,11 @@ export class WebTerminalRegistry {
   private readonly sessions = new Map<string, PtySession>();
   private readonly creating = new Map<string, string>();
   private readonly cancelledCreations = new Set<string>();
+  // Terminals this registry released while live. A released terminal and a
+  // failed spawn both leave no session, but only the former has a proven
+  // release receipt; the distinction keeps a failed spawn from being reported
+  // as a clean exit.
+  private readonly released = new Set<string>();
   private disposed = false;
 
   private readonly nextId = (() => {
@@ -680,6 +692,39 @@ export class WebTerminalRegistry {
     };
   }
 
+  /**
+   * Read only the lifecycle state, without materializing the scrollback.
+   * Admission and maintenance polls need just these booleans; joining the
+   * whole replay buffer for them is O(scrollback) per call.
+   */
+  readState(
+    terminalId: string,
+  ): { exited: boolean; failed: boolean; exitCode?: number } | undefined {
+    const session = this.sessions.get(terminalId);
+    if (!session) return undefined;
+    if (session.failure) {
+      return {
+        exited: false,
+        failed: true,
+        exitCode: WEB_TERMINAL_FAILURE_EXIT_CODE,
+      };
+    }
+    return {
+      exited: session.exited,
+      failed: false,
+      ...(session.exitCode !== undefined ? { exitCode: session.exitCode } : {}),
+    };
+  }
+
+  /**
+   * Whether this registry released the terminal while it was live. A released
+   * terminal has a proven release receipt; a failed spawn leaves no session
+   * but was never released, so it must not be reported as a clean exit.
+   */
+  isReleased(terminalId: string): boolean {
+    return this.released.has(terminalId);
+  }
+
   write(terminalId: string, data: string): WebTerminalWriteResult {
     const session = this.sessions.get(terminalId);
     if (!session || session.exited || session.failure) return 'unavailable';
@@ -763,6 +808,7 @@ export class WebTerminalRegistry {
     }
     this.clearReclaim(session);
     this.sessions.delete(terminalId);
+    this.released.add(terminalId);
     if (!session.exited && !session.failure) {
       for (const listener of session.exitListeners) {
         listener({ exitCode: 143, signal: 15 });

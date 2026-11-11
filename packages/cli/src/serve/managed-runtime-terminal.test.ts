@@ -5,7 +5,7 @@
  */
 
 import { createServer, type Server } from 'node:http';
-import type { AddressInfo } from 'node:net';
+import { connect as netConnect, type AddressInfo } from 'node:net';
 import { afterEach, describe, expect, it } from 'vitest';
 import { WebSocket } from 'ws';
 import {
@@ -14,7 +14,10 @@ import {
   MAX_MANAGED_SESSION_TERMINALS,
   TERMINAL_RELEASE_EXIT_CODE,
 } from './managed-runtime-terminal.js';
-import { WebTerminalRegistry } from '@qwen-code/qwen-code-core/services/web-terminal-registry.js';
+import {
+  WebTerminalRegistry,
+  WEB_TERMINAL_FAILURE_EXIT_CODE,
+} from '@qwen-code/qwen-code-core/services/web-terminal-registry.js';
 
 const IDENTITY = { token: 'test-token', leaseId: 'lease-1', epoch: 7 };
 const WORKSPACE_CWD = process.cwd();
@@ -178,6 +181,33 @@ describe('ManagedRuntimeTerminals', () => {
     });
   });
 
+  it('refuses a malformed upgrade target without killing the worker', async () => {
+    const port = await start();
+    // "//[" is accepted by llhttp and emitted as an upgrade, but the WHATWG
+    // URL parser throws on it; the refusal must not escape the listener.
+    const response = await new Promise<string>((resolve, reject) => {
+      const socket = netConnect(port, '127.0.0.1', () => {
+        socket.write(
+          'GET //[ HTTP/1.1\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n',
+        );
+      });
+      let data = '';
+      socket.on('data', (chunk) => {
+        data += chunk.toString();
+      });
+      socket.on('end', () => resolve(data));
+      socket.on('error', reject);
+      setTimeout(() => {
+        socket.destroy();
+        resolve(data);
+      }, 5_000).unref();
+    });
+    expect(response).toContain('400');
+    // The worker survived and still serves upgrades.
+    const ws = await attachAndEcho(port, 'after-malformed', 'session-a');
+    expect(ws.readyState).toBe(WebSocket.OPEN);
+  });
+
   it('creates a terminal in the workspace and echoes input', async () => {
     const port = await start();
     const ws = await attachAndEcho(port, 't1', 'session-a');
@@ -211,6 +241,49 @@ describe('ManagedRuntimeTerminals', () => {
     await expect(connect(port, 'owned', 'session-b')).rejects.toMatchObject({
       status: 409,
     });
+  });
+
+  it('keeps ownership after a release so another Session cannot take over', async () => {
+    const port = await start();
+    const first = await attachAndEcho(port, 'retained', 'session-a');
+    // Release removes the snapshot but retains the owner record.
+    first.send('\x00{"type":"release"}');
+    await new Promise<void>((resolve) => first.once('close', () => resolve()));
+    // A second Session must not claim the released id even though no live
+    // snapshot exists.
+    await expect(connect(port, 'retained', 'session-b')).rejects.toMatchObject({
+      status: 409,
+    });
+    // The owning Session can still re-attach its own terminal.
+    const again = await connect(port, 'retained', 'session-a');
+    expect(again.readyState).toBe(WebSocket.OPEN);
+  });
+
+  it('counts terminals still being created against the Session cap', async () => {
+    const port = await start();
+    const internals = terminals as unknown as {
+      registry: WebTerminalRegistry;
+      owners: Map<string, string>;
+    };
+    // Seed the Session's budget with in-flight creations (no snapshot yet).
+    const pending: Array<Promise<unknown>> = [];
+    for (let i = 0; i < MAX_MANAGED_SESSION_TERMINALS; i += 1) {
+      const id = `creating-${i}`;
+      internals.owners.set(id, 'session-a');
+      pending.push(
+        internals.registry.create({
+          terminalId: id,
+          workspaceCwd: WORKSPACE_CWD,
+          env: process.env,
+        }),
+      );
+    }
+    expect(internals.registry.isCreating('creating-0')).toBe(true);
+    // A further upgrade for the same Session is refused while they create.
+    await expect(
+      connect(port, 'creating-over', 'session-a'),
+    ).rejects.toMatchObject({ status: 429 });
+    await Promise.all(pending);
   });
 
   it('replays scrollback on reconnect of the same Session', async () => {
@@ -331,5 +404,42 @@ describe('ManagedRuntimeTerminals control', () => {
   it('rejects a malformed operation', async () => {
     await start();
     expect(() => terminals!.control({ kind: 'terminal-status' })).toThrow();
+  });
+
+  it('settles a terminal the backend ended by failure', async () => {
+    const port = await start();
+    const ws = await attachAndEcho(port, 'failed-backend', 'session-a');
+    const internals = terminals as unknown as {
+      registry: WebTerminalRegistry;
+    };
+    const sessions = (
+      internals.registry as unknown as {
+        sessions: Map<string, { failure?: { message: string } }>;
+      }
+    ).sessions;
+    // The backend tore the tree down and reported a failure: no exit code, but
+    // a definitively dead terminal.
+    sessions.get('failed-backend')!.failure = { message: 'backend failure' };
+    expect(
+      terminals!.control(op('terminal-status', 'failed-backend', 'session-a')),
+    ).toEqual({
+      operationId: 'failed-backend',
+      state: 'exited',
+      evidence: { exitCode: WEB_TERMINAL_FAILURE_EXIT_CODE, exitSignal: null },
+    });
+    ws.terminate();
+  });
+
+  it('does not claim a clean exit for a failed spawn', async () => {
+    await start();
+    const internals = terminals as unknown as { owners: Map<string, string> };
+    // A failed spawn leaves an owner but no session, and was never released.
+    internals.owners.set('failed-spawn', 'session-a');
+    expect(
+      terminals!.control(op('terminal-status', 'failed-spawn', 'session-a')),
+    ).toMatchObject({ state: 'unknown' });
+    expect(
+      terminals!.control(op('terminal-terminate', 'failed-spawn', 'session-a')),
+    ).toMatchObject({ state: 'unknown' });
   });
 });

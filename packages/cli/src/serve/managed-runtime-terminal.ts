@@ -189,8 +189,14 @@ export class ManagedRuntimeTerminals {
     let live = 0;
     for (const [terminalId, owner] of this.owners) {
       if (owner !== selector) continue;
-      const snapshot = this.registry.readSnapshot(terminalId);
-      if (snapshot && !snapshot.exited && !snapshot.failed) live += 1;
+      // A terminal mid-creation already charges the Session's budget; the
+      // registry counts in-flight creations against its own ceiling too.
+      if (this.registry.isCreating(terminalId)) {
+        live += 1;
+        continue;
+      }
+      const state = this.registry.readState(terminalId);
+      if (state && !state.exited && !state.failed) live += 1;
     }
     return live;
   }
@@ -200,7 +206,16 @@ export class ManagedRuntimeTerminals {
     socket: Duplex,
     head: Buffer,
   ): void {
-    const url = new URL(req.url ?? '', 'http://localhost');
+    // A malformed target (e.g. "//[") makes the WHATWG parser throw; refuse it
+    // instead of letting the error escape the bare 'upgrade' listener and kill
+    // the whole worker before authentication.
+    let url: URL;
+    try {
+      url = new URL(req.url ?? '', 'http://localhost');
+    } catch {
+      refuseUpgrade(socket, 400, 'managed_terminal_invalid', 'Invalid target.');
+      return;
+    }
     if (
       req.method !== 'GET' ||
       url.pathname !== MANAGED_RUNTIME_TERMINAL_ROUTE.path
@@ -245,7 +260,11 @@ export class ManagedRuntimeTerminals {
     }
     const snapshot = this.registry.readSnapshot(terminalId);
     const owner = this.owners.get(terminalId);
-    if (snapshot && owner !== undefined && owner !== selector) {
+    // Ownership is recorded before the asynchronous create completes and is
+    // retained after the terminal ends, so the guard must not depend on a live
+    // snapshot: otherwise a second Session could claim the id mid-create (or
+    // after a release) and take over the first Session's terminal.
+    if (owner !== undefined && owner !== selector) {
       refuseUpgrade(
         socket,
         409,
@@ -299,8 +318,10 @@ export class ManagedRuntimeTerminals {
     if (owner !== undefined && owner !== selector) {
       return { operationId: terminalId, state: 'unknown' };
     }
-    const snapshot = this.registry.readSnapshot(terminalId);
-    if (snapshot && !snapshot.exited && !snapshot.failed) {
+    // Only the lifecycle state is needed here; reading the full snapshot would
+    // join the whole scrollback on every maintenance poll.
+    const state = this.registry.readState(terminalId);
+    if (state && !state.exited && !state.failed) {
       if (operation.kind === 'terminal-status') {
         return {
           operationId: terminalId,
@@ -315,17 +336,20 @@ export class ManagedRuntimeTerminals {
         evidence: { exitCode: TERMINAL_RELEASE_EXIT_CODE, exitSignal: null },
       };
     }
-    if (snapshot && snapshot.exitCode !== undefined) {
+    // A native exit carries its own code; a backend failure carries the
+    // registry's failure end evidence, so a definitively dead terminal settles
+    // its hold instead of answering unknown forever.
+    if (state && state.exitCode !== undefined) {
       return {
         operationId: terminalId,
         state: 'exited',
-        evidence: { exitCode: snapshot.exitCode, exitSignal: null },
+        evidence: { exitCode: state.exitCode, exitSignal: null },
       };
     }
     // Ownership is recorded before the asynchronous create completes, so a
-    // missing snapshot here can still be a terminal mid-creation — not a
-    // proven exit. Status keeps the hold; termination cancels the pending
-    // creation so the shell can never start after the hold is discharged.
+    // missing state here can still be a terminal mid-creation — not a proven
+    // exit. Status keeps the hold; termination cancels the pending creation so
+    // the shell can never start after the hold is discharged.
     if (this.registry.isCreating(terminalId)) {
       if (operation.kind === 'terminal-status') {
         return { operationId: terminalId, state: 'unknown' };
@@ -337,7 +361,9 @@ export class ManagedRuntimeTerminals {
         evidence: { exitCode: TERMINAL_RELEASE_EXIT_CODE, exitSignal: null },
       };
     }
-    if (owner !== undefined && !snapshot) {
+    // A released terminal has a proven release receipt. A failed spawn also
+    // leaves no state but was never released, so it must not claim a clean end.
+    if (owner !== undefined && !state && this.registry.isReleased(terminalId)) {
       return {
         operationId: terminalId,
         state: 'exited',
