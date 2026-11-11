@@ -2022,8 +2022,7 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                             == RuntimeSessionRecord.State.RELEASED) {
                         return CompletableFuture.completedFuture(true);
                     }
-                    RuntimeBindingRecord binding = bindingRepository.findById(
-                            record.getBindingId());
+                    RuntimeBindingRecord binding = owner;
                     if ((record.getState() == RuntimeSessionRecord.State.ACQUIRING
                             || record.getState() == RuntimeSessionRecord.State.RELEASING)
                             && binding != null && binding.getGeneration() == record.getRuntimeGeneration()

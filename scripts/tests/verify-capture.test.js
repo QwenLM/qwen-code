@@ -194,6 +194,24 @@ describe('verify-capture helper', () => {
       expect(colourOnly.equals(boldOnly)).toBe(false);
     }));
 
+  // The image build asserts the bold face itself, so no text model of the
+  // apt command decides the pin. The check must be the last RUN so every
+  // layer that can purge the package or delete the font is behind it; moved
+  // earlier, a later cleanup could ship a fontless image green.
+  it('checks the bold face in the final image', () => {
+    const dockerfile = readFileSync(
+      path.join(repoRoot, 'scripts/ci/ephemeral-runner/Dockerfile'),
+      'utf8',
+    );
+    const runs = dockerfile.split('\n').filter((line) => /^RUN\s/.test(line));
+    expect(
+      runs.at(-1),
+      'the image build must assert the bold face after every layer that can change it',
+    ).toBe(
+      'RUN test -f /usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf',
+    );
+  });
+
   // 256-colour and truecolor sequences produce getFgColor() values >= 16,
   // which the bounds guard maps to FG_DEFAULT (#d4d4d4). Decode pixels and
   // assert the fallback grey is present, so deleting the guard cannot ship

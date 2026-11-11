@@ -208,13 +208,13 @@ class ManagedAgentServiceWorkflowChildTest {
 
     @Test
     void replaceLoneSurrogatesTradesOnlyTheUnpaired() {
-        assertThat(ManagedAgentService.replaceLoneSurrogates(
+        assertThat(ManagedUserMessagePolicy.replaceLoneSurrogates(
                 "x" + (char) 0xD800)).isEqualTo("x" + '�');
-        assertThat(ManagedAgentService.replaceLoneSurrogates(
+        assertThat(ManagedUserMessagePolicy.replaceLoneSurrogates(
                 "x" + (char) 0xDFFF + "y")).isEqualTo("x" + '�' + "y");
-        assertThat(ManagedAgentService.replaceLoneSurrogates("café 中 😀"))
+        assertThat(ManagedUserMessagePolicy.replaceLoneSurrogates("café 中 😀"))
                 .isEqualTo("café 中 😀");
-        assertThat(ManagedAgentService.replaceLoneSurrogates("plain"))
+        assertThat(ManagedUserMessagePolicy.replaceLoneSurrogates("plain"))
                 .isEqualTo("plain");
     }
 }

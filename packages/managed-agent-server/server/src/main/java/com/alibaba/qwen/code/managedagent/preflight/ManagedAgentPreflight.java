@@ -2390,13 +2390,6 @@ public final class ManagedAgentPreflight {
                 checks.size(), warnings, failures);
     }
 
-    static boolean isLoopback(String address) {
-        return StringUtils.isBlank(address)
-                || "127.0.0.1".equals(address)
-                || "::1".equals(address)
-                || "localhost".equalsIgnoreCase(address);
-    }
-
     static boolean isDigest(String value) {
         return value != null && DIGEST.matcher(value).matches();
     }

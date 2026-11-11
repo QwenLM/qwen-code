@@ -655,11 +655,11 @@ class WorkspaceCsiSessionMainTest {
                     .sorted(Comparator.comparing(JsonNode::toString)).toList();
             result.put(table, json.valueToTree(rows));
         }
-        // 40 = the 39 baseline tables plus flyway_schema_history; the PR's
+        // 45 = the 44 baseline tables plus flyway_schema_history; the PR's
         // ma_session_principal ownership row table is the added baseline
         // entry (V1__managed_schema.sql), not a stray catalog artifact.
         assertThat(result).containsKey("ma_session_principal");
-        assertThat(result).hasSize(43);
+        assertThat(result).hasSize(45);
         return result;
     }
 

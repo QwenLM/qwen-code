@@ -70,7 +70,7 @@ public class ManagedExtensionManagementService {
             }
             return empty(sessionId, false);
         }
-        boolean supported = packages.list(tenant, actor, session.workspace().getWorkspaceId()).supported()
+        boolean supported = packages.supported()
                 && harness.supportsSessionExtensions();
         JsonNode latest = records.currentMcpSettings(tenant, sessionId);
         if (!ManagedConfigInstall.isPackageConfig(latest)) {
@@ -164,28 +164,52 @@ public class ManagedExtensionManagementService {
             throw invalid();
         }
         String operationId = applyOperationId(tenant, actor, principal, sessionId, key);
+        // The unified ownership fence governs the principal twin too: the
+        // raw-actor visibility check inside requireExtensionManagement cannot
+        // substitute for it (R13-1).
         if (principal == null) {
             sessions.requireReadableSession(tenant, actor, sessionId);
         } else {
             sessions.requireReadableSession(principal, sessionId);
         }
-        SessionRecord session = store.requireExtensionManagement(tenant, actor, sessionId, operationId, true);
-        packages.requireExecutionAccess(tenant, actor, session.workspace().getWorkspaceId());
-        if (!harness.supportsSessionExtensions()) {
-            throw unsupported();
-        }
-        for (JsonNode pin : command.get("extensions")) {
-            packages.get(tenant, actor,
-                    session.workspace().getWorkspaceId(), pin.get("extensionId").asText(),
-                    pin.get("packageRevision").asLong(), pin.get("packageDigest").asText());
-        }
+        SessionRecord session = store.requireExtensionManagement(tenant, actor, sessionId, operationId, false);
         Map<String, Object> request = new LinkedHashMap<>();
         request.put("operationId", operationId);
         request.put("actorKey", DigestUtils.sha256Hex(actor));
         request.put("expectedRevision", command.get("expectedConfigRevision").asLong());
         request.put("extensions", json.convertValue(command.get("extensions"), List.class));
-        return invoke(() -> harness.applyExtensions(tenant, sessionId,
-                request), sessionId, operationId);
+        JsonNode previous = records.currentMcpSettings(tenant, sessionId);
+        for (int step = 0; ManagedConfigInstall.isPackageConfig(previous); step++) {
+            if (operationId.equals(previous.path("operationId").asText())) {
+                if (!sameCommand(request, previous.get("command"))) {
+                    throw new ManagedAgentException(409, "idempotency_conflict", "The extension operation key was used for another request.");
+                }
+                return principal == null
+                        ? query(tenant, actor, sessionId, operationId)
+                        : query(principal, sessionId, operationId);
+            }
+            if (step >= 4095 || previous.path("previousRecordRef").isNull()) {
+                break;
+            }
+            previous = read(tenant, sessionId, previous.get("previousRecordRef"));
+        }
+        session = store.requireExtensionManagement(tenant, actor, sessionId, operationId, true);
+        packages.requireExecutionAccess(tenant, actor, session.workspace().getWorkspaceId());
+        if (!harness.supportsSessionExtensions()) {
+            throw unsupported();
+        }
+        List<com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages.Pin> pins = json.convertValue(command.get("extensions"), json.getTypeFactory().constructCollectionType(
+                List.class, com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages.Pin.class));
+        packages.authorizeSelection(tenant, actor, session.workspace().getWorkspaceId(), pins);
+        return invoke(() -> harness.applyExtensions(tenant, sessionId, request), sessionId, operationId);
+    }
+
+    private boolean sameCommand(Map<String, Object> request, JsonNode saved) {
+        try {
+            return json.readTree(json.writeValueAsBytes(request)).equals(saved);
+        } catch (java.io.IOException error) {
+            throw corrupt();
+        }
     }
 
     public JsonNode resume(String tenant, String actor, String sessionId, String operationId, boolean recoverPrevious) {

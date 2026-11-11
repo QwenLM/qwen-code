@@ -2730,6 +2730,7 @@ export interface components {
             revision: number;
             supported: boolean;
             availableServers: components["schemas"]["ManagedMcpPublishedServer"][];
+            /** @description The selected MCP server snapshot, including retained removed entries. Only non-removed entries count toward the 32-server live capacity, and the retained snapshot is capped at 96 total entries. */
             servers: components["schemas"]["ManagedMcpManagementServer"][];
             operation?: components["schemas"]["ManagedMcpManagementOperation"];
         };
@@ -2892,11 +2893,26 @@ export interface components {
             /** @description Exact source commit, resolved npm version, or imported content revision. Supplied together with sourceType. */
             sourceRevision?: string;
         };
+        ManagedExtensionSourceReference: {
+            providerId: string;
+            /** @enum {string} */
+            kind: "skill" | "extension";
+            resourceId: string;
+            /** @description Exact immutable business revision. Dynamic selectors must be resolved by the business entry point. */
+            revision: string;
+        };
+        ManagedExtensionSourceOrigin: {
+            reference: components["schemas"]["ManagedExtensionSourceReference"];
+            /** @description SHA-256 of the actual raw archive bytes, distinct from packageDigest. */
+            sourceDigest: string;
+            requestDigest: string;
+        };
         ManagedExtensionPackage: {
             pin: components["schemas"]["ManagedExtensionPackagePin"];
             manifest: components["schemas"]["ManagedExtensionPackageManifest"];
             /** Format: int64 */
             byteLength: number;
+            source?: components["schemas"]["ManagedExtensionSourceOrigin"];
         };
         ManagedExtensionPackageCatalog: {
             supported: boolean;

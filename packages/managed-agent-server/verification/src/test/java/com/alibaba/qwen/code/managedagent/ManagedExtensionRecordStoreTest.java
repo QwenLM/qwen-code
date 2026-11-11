@@ -1870,7 +1870,7 @@ class ManagedExtensionRecordStoreTest {
 
     @Test
     void filtersChildInvocationsBeforeApplyingTheKeysetPage() throws Exception {
-        String sessionId = agents.createSession(TENANT, "child-pages-" + UUID.randomUUID(),
+        String sessionId = agents.createSession(TENANT, TENANT, "child-pages-" + UUID.randomUUID(),
                 "qwen-code", null, "children", Map.of(), List.of()).sessionId();
         ExtensionRecordJournal journal = journal(sessionId);
         CommitResource input = hookResource("child-page-input", "managed-input", "{}".getBytes(StandardCharsets.UTF_8));

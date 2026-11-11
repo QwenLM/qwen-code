@@ -16,6 +16,7 @@ import {
   isHostedWorkspaceProfile,
   isHostedWorkspaceShellProfile,
   isHostedWorkspaceSearchProfile,
+  hasHostedExternalFilesExcludedOptions,
 } from './hosted-workspace-profiles.js';
 
 it('admits the saved internal TeamLead as Shell execution without search', () => {
@@ -77,4 +78,32 @@ it('rejects the removed Shell profile', () => {
   expect(isHostedWorkspaceProfile('hosted-workspace-shell/2')).toBe(false);
   expect(isHostedWorkspaceShellProfile('hosted-workspace-shell/2')).toBe(false);
   expect(isHostedWorkspaceGlobProfile('hosted-workspace-shell/2')).toBe(false);
+});
+
+it('refuses every closed option the external-files profile cannot serve', () => {
+  for (const key of [
+    'agentDefinition',
+    'sessionSkillsRef',
+    'hookCatalog',
+    'mcpServers',
+    'initialSelection',
+    'publicChildModelRoute',
+    'publicChildExtensionAgent',
+    'lineage',
+    'captureBytes',
+    'memoryStoreId',
+  ]) {
+    expect(
+      hasHostedExternalFilesExcludedOptions({ [key]: 'value' }),
+      `${key} must be refused at create`,
+    ).toBe(true);
+  }
+  expect(hasHostedExternalFilesExcludedOptions({})).toBe(false);
+  expect(hasHostedExternalFilesExcludedOptions(null)).toBe(false);
+  // memoryStoreId is the lane the profile's own turn guard rejects as
+  // `External files profile does not support optional lanes.`, so the create
+  // surface must refuse it rather than admit a Session whose every turn fails.
+  expect(
+    hasHostedExternalFilesExcludedOptions({ memoryStoreId: 'mem-1' }),
+  ).toBe(true);
 });

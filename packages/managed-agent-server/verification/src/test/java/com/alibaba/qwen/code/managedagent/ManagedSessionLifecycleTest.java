@@ -44,10 +44,13 @@ import org.springframework.transaction.support.TransactionTemplate;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -420,26 +423,26 @@ class ManagedSessionLifecycleTest {
         assertThat(harness.renameCount()).isEqualTo(sends);
         String sessionId = attachedSession(tenant);
         String closeId;
-        harness.setAvailable(false);
+        CompletableFuture<Void> drain = runtime.holdDrain(sessionId);
         try {
             closeId = admit(post("/v1/agents/sessions/{id}/close", sessionId),
                     tenant, "close").get("id").asText();
+            await().atMost(Duration.ofSeconds(5))
+                    .until(() -> runtime.drained().contains(sessionId));
             lifecycle(delete("/v1/agents/sessions/{id}", sessionId), tenant,
                     "delete")
                     .andExpect(status().isConflict())
                     .andExpect(jsonPath("$.error.code")
                             .value("session_operation_active"));
-            HarnessConnector available = mock(HarnessConnector.class, delegatesTo(harness));
-            doReturn(true).when(available).isAvailable();
             ManagedAgentService subject = new ManagedAgentService(store,
-                    new RequestDigests(), null, available, null, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+                    new RequestDigests(), null, harness, null, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
             assertThatThrownBy(() -> subject.renameSession(tenant, null, "rename-closing", sessionId, "blocked"))
                     .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
                         assertThat(error.getStatus()).isEqualTo(409);
                         assertThat(error.getCode()).isEqualTo("session_operation_active");
                     });
         } finally {
-            harness.setAvailable(true);
+            drain.complete(null);
         }
         awaitCompleted(tenant, sessionId, closeId);
     }
@@ -1365,6 +1368,7 @@ class ManagedSessionLifecycleTest {
 
     static final class RecordingRuntimeWarmer implements RuntimeWarmer {
         private final List<String> drained = new CopyOnWriteArrayList<>();
+        private final Map<String, CompletableFuture<Void>> heldDrains = new ConcurrentHashMap<>();
         private final AtomicInteger drainFailures = new AtomicInteger();
 
         @Override
@@ -1385,7 +1389,14 @@ class ManagedSessionLifecycleTest {
                         new IllegalStateException("fixture drain failure"));
             }
             drained.add(sessionId);
-            return CompletableFuture.completedFuture(null);
+            CompletableFuture<Void> held = heldDrains.remove(sessionId);
+            return held == null ? CompletableFuture.completedFuture(null) : held;
+        }
+
+        CompletableFuture<Void> holdDrain(String sessionId) {
+            CompletableFuture<Void> held = new CompletableFuture<Void>().orTimeout(30, TimeUnit.SECONDS);
+            heldDrains.put(sessionId, held);
+            return held;
         }
 
         List<String> drained() {

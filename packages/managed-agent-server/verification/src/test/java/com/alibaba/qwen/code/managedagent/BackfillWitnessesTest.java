@@ -23,7 +23,7 @@ class BackfillWitnessesTest {
         activate(source);
         activate(source);
         ManagedSchema.validate(source);
-        // 40 = the 39 baseline tables plus flyway_schema_history; the PR's
+        // 45 = the 44 baseline tables plus flyway_schema_history; the PR's
         // ma_session_principal ownership row table is the added baseline
         // entry (V1__managed_schema.sql). Replaying the activation above
         // must not add any table beyond this pinned catalog.
@@ -34,7 +34,7 @@ class BackfillWitnessesTest {
                                             + " table_schema = 'public' AND table_type='BASE"
                                             + " TABLE'",
                                         Integer.class))
-                .isEqualTo(43);
+                .isEqualTo(45);
         assertThat(
                         new JdbcTemplate(source)
                                 .queryForObject(
