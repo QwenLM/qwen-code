@@ -159,6 +159,7 @@ public final class KubernetesRuntimeProvisioner implements RuntimeProvisioner {
                 throw conflict();
             }
             long deadline = System.nanoTime() + startupTimeout.toNanos();
+            long pause = 200;
             while (System.nanoTime() < deadline) {
                 RuntimeObservation observed = observe(request, seed, saved.handle());
                 if (observed.getOutcome() == RuntimeObservation.Outcome.READY) {
@@ -169,11 +170,12 @@ public final class KubernetesRuntimeProvisioner implements RuntimeProvisioner {
                     throw conflict();
                 }
                 try {
-                    Thread.sleep(100);
+                    Thread.sleep(pause);
                 } catch (InterruptedException error) {
                     Thread.currentThread().interrupt();
                     throw unavailable();
                 }
+                pause = Math.min(pause * 2, 2_000);
             }
             throw unavailable();
         }, executor);

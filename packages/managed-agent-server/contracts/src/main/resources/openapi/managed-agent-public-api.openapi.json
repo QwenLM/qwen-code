@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Qwen Managed Agent Public and WebShell API",
-    "version": "1.108.0",
-    "description": "Canonical first-release contract for the public Managed Agent resources and the WebShell adapter. Implemented routes and fields describe the current matching Server, Broker, Harness and WebShell build. Partial entries have remaining implementation or contract-test work; planned entries are not current server capabilities and must be excluded from production SDKs. Turn submission and cancellation always return the durable operation identifier and its persisted admission and delivery state. Session-list cursors are bound to the normalized archive state and title query. Earlier development API shapes, checkpoints and database catalogs are unsupported; initialize fresh state for this build. Runtime feature capabilities and deployment policy still govern optional execution modes. Public conversation history reads directly from mutable message projections; persisted conversation snapshots and fixed-content paging are no longer provided."
+    "version": "1.110.0",
+    "description": "Canonical first-release contract for the public Managed Agent resources and the WebShell adapter. Implemented routes and fields describe the current matching Server, Broker, Harness and WebShell build. Partial entries have remaining implementation or contract-test work; planned entries are not current server capabilities and must be excluded from production SDKs. Turn submission and cancellation always return the durable operation identifier and its persisted admission and delivery state. Session-list cursors are bound to the normalized archive state and title query. Earlier development API shapes, checkpoints and database catalogs are unsupported; initialize fresh state for this build. Runtime feature capabilities and deployment policy still govern optional execution modes. Public conversation history reads directly from mutable message projections; persisted conversation snapshots and fixed-content paging are no longer provided. Retained removed MCP-management entries stay in the response snapshot: only non-removed entries count toward the 32-server selection capacity, so the servers array may exceed 32 while preserving tombstones."
   },
   "servers": [
     {
@@ -15914,6 +15914,7 @@
           "segment_id",
           "ordinal",
           "state",
+          "segments",
           "created_at",
           "updated_at"
         ],
@@ -15949,7 +15950,16 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 512,
-            "description": "Opaque receipt the provider returned for this delivery; absent while the provider returned none, including a delivery reconciled out of unknown."
+            "description": "Representative opaque receipt the provider returned for this delivery; absent while the provider returned none, including a delivery reconciled out of unknown. The per-segment receipts are in segments."
+          },
+          "segments": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 64,
+            "items": {
+              "$ref": "#/components/schemas/PublicChannelDeliverySegment"
+            },
+            "description": "Every segment of the delivery in ordinal order, each with its own write-once provider receipt. The singular segment_id and ordinal name the first segment; this array is the authoritative per-segment view."
           },
           "created_at": {
             "type": "integer",
@@ -15960,6 +15970,31 @@
             "type": "integer",
             "format": "int64",
             "description": "Unix epoch milliseconds, unlike the seconds that the public Session, turn, event and item resources report."
+          }
+        },
+        "x-qwen-implementation-status": "partial"
+      },
+      "PublicChannelDeliverySegment": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["segment_id", "ordinal"],
+        "properties": {
+          "segment_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "description": "Stable identity of this segment; an explicit resend keeps it under a new deliveryId."
+          },
+          "ordinal": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Position of the segment within the delivery, contiguous from 0."
+          },
+          "provider_receipt": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512,
+            "description": "Opaque receipt the provider returned for this segment; absent until the segment is receipted."
           }
         },
         "x-qwen-implementation-status": "partial"
@@ -18031,7 +18066,19 @@
           },
           "servers": {
             "type": "array",
-            "maxItems": 32,
+            "description": "The selected MCP server snapshot, including retained removed entries. Only non-removed entries count toward the 32-server live capacity, and the retained snapshot is capped at 96 total entries.",
+            "maxItems": 96,
+            "contains": {
+              "type": "object",
+              "required": ["state"],
+              "properties": {
+                "state": {
+                  "enum": ["enabled", "disabled"]
+                }
+              }
+            },
+            "minContains": 0,
+            "maxContains": 32,
             "items": {
               "$ref": "#/components/schemas/ManagedMcpManagementServer"
             }

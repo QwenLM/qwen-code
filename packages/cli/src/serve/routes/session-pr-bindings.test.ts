@@ -25,6 +25,19 @@ import type {
 import { createWorkspaceGenerationGuard } from '../workspace-registry.js';
 import { registerSessionPrBindingsRoutes } from './session-pr-bindings.js';
 
+const watchMocks = vi.hoisted(() => ({
+  collectActivePrWatches: vi.fn(),
+}));
+
+vi.mock('./session-pr-watches.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('./session-pr-watches.js')>();
+  return {
+    ...actual,
+    collectActivePrWatches: watchMocks.collectActivePrWatches,
+  };
+});
+
 const SESSION_A = '00000000-0000-4000-8000-00000000000a';
 const SESSION_B = '00000000-0000-4000-8000-00000000000b';
 const SESSION_C = '00000000-0000-4000-8000-00000000000c';
@@ -39,6 +52,8 @@ beforeEach(async () => {
   );
   process.env['QWEN_RUNTIME_DIR'] = runtimeDir;
   liveSessions = new Map();
+  watchMocks.collectActivePrWatches.mockReset();
+  watchMocks.collectActivePrWatches.mockResolvedValue(new Map());
 });
 
 afterEach(async () => {
@@ -288,6 +303,7 @@ describe('GET /sessions/pr-bindings', () => {
               number: 101,
               url: 'https://github.com/acme/widgets/pull/101',
               state: 'open',
+              watching: false,
             },
           ],
         },
@@ -343,11 +359,13 @@ describe('GET /sessions/pr-bindings', () => {
         url: 'https://github.com/acme/widgets/pull/101',
         state: 'open',
         role: 'review',
+        watching: false,
       },
       {
         number: 102,
         url: 'https://github.com/acme/widgets/pull/102',
         state: 'open',
+        watching: false,
       },
     ]);
   });
@@ -532,6 +550,7 @@ describe('GET /sessions/pr-bindings', () => {
               number: 55,
               url: 'https://github.com/acme/widgets/pull/55',
               state: 'open',
+              watching: false,
             },
           ],
         },
@@ -1085,5 +1104,93 @@ describe('GET /sessions/pr-bindings', () => {
       expect.any(Error),
       { route: 'GET /sessions/pr-bindings' },
     );
+  });
+
+  it('annotates each entry from the session watch set, per PR', async () => {
+    const cwd = await makeWorkspace();
+    await seedTranscript(cwd, SESSION_A);
+    await seedBinding(cwd, SESSION_A, [101, 102], { role: 'verify' });
+    await seedTranscript(cwd, SESSION_B);
+    await seedBinding(cwd, SESSION_B, [101], { role: 'verify' });
+    watchMocks.collectActivePrWatches.mockResolvedValue(
+      new Map([[SESSION_A, new Set(['github.com/acme/widgets#101'])]]),
+    );
+
+    const body = await fetchBindings([makeEntry(makeRuntime(cwd))]);
+
+    expect(body.partial).toBe(false);
+    const bySession = new Map(
+      body.bindings.map((b) => [b.sessionId, b.prs] as const),
+    );
+    expect(bySession.get(SESSION_A)).toEqual([
+      expect.objectContaining({ number: 101, watching: true }),
+      expect.objectContaining({ number: 102, watching: false }),
+    ]);
+    expect(bySession.get(SESSION_B)).toEqual([
+      expect.objectContaining({ number: 101, watching: false }),
+    ]);
+  });
+
+  it('annotates live-merge rows from the same watch set', async () => {
+    const cwd = await makeWorkspace();
+    liveSessions.set(cwd, [
+      liveSummary(cwd, SESSION_A, {
+        prs: [
+          {
+            number: 55,
+            url: 'https://github.com/acme/widgets/pull/55',
+            state: 'open',
+          },
+        ],
+      }),
+    ]);
+    watchMocks.collectActivePrWatches.mockResolvedValue(
+      new Map([[SESSION_A, new Set(['github.com/acme/widgets#55'])]]),
+    );
+
+    const body = await fetchBindings([makeEntry(makeRuntime(cwd))]);
+
+    expect(body.bindings[0]?.prs).toEqual([
+      expect.objectContaining({ number: 55, watching: true }),
+    ]);
+  });
+
+  it('leaves watching absent and the snapshot complete when detection fails', async () => {
+    const cwd = await makeWorkspace();
+    await seedTranscript(cwd, SESSION_A);
+    await seedBinding(cwd, SESSION_A, [101], { role: 'verify' });
+    watchMocks.collectActivePrWatches.mockResolvedValue(undefined);
+    const lines = captureStderr();
+
+    const body = await fetchBindings([makeEntry(makeRuntime(cwd))]);
+
+    expect(body.partial).toBe(false);
+    expect(body.bindings[0]?.prs[0]).not.toHaveProperty('watching');
+    expect(lines).toContainEqual(
+      expect.stringContaining('watch detection unavailable'),
+    );
+  });
+
+  it('leaves watching absent for an unparseable binding URL, even with an active watch', async () => {
+    // The key lookup cannot place a URL without owner/repo segments (the
+    // sidecar shape check only requires http(s)): stamping watching:false
+    // would ban a session that may hold a live watch. Absent = unknown.
+    const cwd = await makeWorkspace();
+    await seedTranscript(cwd, SESSION_A);
+    const prPath = await seedBinding(cwd, SESSION_A, []);
+    await upsertSessionPr(prPath, {
+      number: 101,
+      url: 'https://github.com',
+      state: 'open',
+      role: 'verify',
+    });
+    watchMocks.collectActivePrWatches.mockResolvedValue(
+      new Map([[SESSION_A, new Set(['github.com/acme/widgets#101'])]]),
+    );
+
+    const body = await fetchBindings([makeEntry(makeRuntime(cwd))]);
+
+    expect(body.partial).toBe(false);
+    expect(body.bindings[0]?.prs[0]).not.toHaveProperty('watching');
   });
 });
