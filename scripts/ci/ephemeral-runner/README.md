@@ -40,6 +40,32 @@ Hosts with restricted upstream connectivity can set `DEBIAN_MIRROR`,
 `PIP_INDEX_URL` or `RUNNER_RELEASE_URL` at build time. The runner archive is
 still verified against its pinned digest when served from a mirror.
 
+## Browsers in the image
+
+The image bakes Chromium, its system libraries and ffmpeg, so a job's own
+`playwright install` only verifies what is already there and needs no browser
+egress. A disposable container has no cache to reuse: without this, every visuals
+job paid a fresh download, and on 2026-11-11 the upstream CDN served the browser
+at about 61 KB/s from the hz4/hz5 hosts — a 110 MB headless shell was still at 70%
+after six minutes when two jobs were cancelled. The same object came from
+`cdn.npmmirror.com` at 8.9 MB/s on the same host, which is why
+`PLAYWRIGHT_DOWNLOAD_HOST` defaults there. Set it to the upstream CDN, or to an
+internal mirror, on a host that reaches one faster.
+
+Every playwright the repository resolves picks its own browser revision, and the
+tree currently carries three: 1.61.1 at the root and in Web Shell, 1.62.1 under
+Browser Use, and 1.58.2 pulled in transitively. All three are baked, because the
+integration lane installs browsers for Browser Use as well and would otherwise
+download at job time. `PLAYWRIGHT_VERSIONS` overrides the list.
+
+The list lives in the Dockerfile because this image's build context is its own
+directory, so the lockfile is not available to it; the revisions are read from
+each version's own `browsers.json` during the build, never written down.
+`scripts/tests/verify-capture.test.js` compares the list against `pnpm-lock.yaml`,
+so a dependency bump fails that test rather than silently leaving a revision to
+be downloaded inside a job. The final layer asserts the font baseline, ffmpeg and
+a launchable Chromium, and fails the build if any of them is missing.
+
 For a real deployment, publish the image to a registry and configure its
 immutable `repository@sha256:...` digest. A local `sha256:...` image ID may be
 used for a trial. Runner and base versions need routine security updates.

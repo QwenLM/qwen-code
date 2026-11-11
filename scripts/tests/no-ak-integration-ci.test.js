@@ -651,6 +651,27 @@ describe('no-AK integration CI wiring', () => {
       "QWEN_HOME: '${{ runner.temp }}/qwen-no-ak-home-${{ github.run_id }}-${{ github.run_attempt }}/.qwen'",
     );
     expect(gateStep).toContain('timeout-minutes: 20');
+    // The typecheck carries no heap cap of its own, unlike the workspace test
+    // scripts, so it inherits Node's default old-space — sized from the memory
+    // Node can see, not from the container's limit. On 2026-11-11 it died at
+    // ~2040 MB on a disposable runner whose host reported 181 GB available
+    // (job 130506292678), so Node's own default was the cap and no host pressure
+    // was involved. The containers get 8 GiB (config.example.json), enough for
+    // 4096; the hosted lane keeps the default it has always passed with, under
+    // the same fleet predicate as the worker caps.
+    //
+    // Through `env` on that one command, NOT the step's env block: the
+    // zero-secrets contract above requires every value there but QWEN_HOME to
+    // be the empty string, and is enforced by value on purpose so a credential
+    // under an unanticipated name cannot ship green. A heap flag has no
+    // business joining that exemption list.
+    expect(gateStep).toContain(
+      "ecs-qwen-*) typecheck_heap=('NODE_OPTIONS=--max-old-space-size=4096') ;;",
+    );
+    expect(gateStep).toContain(
+      'env "${typecheck_heap[@]}" npm run typecheck:integration',
+    );
+    expect(gateStep).not.toContain('\n          NODE_OPTIONS: ');
     // HOME/USERPROFILE are job-wide now (first-step GITHUB_ENV), so the
     // gate must not re-pin them step-locally.
     expect(gateStep).not.toContain('\n          HOME: ');

@@ -3287,7 +3287,16 @@ jobs:
         run: |-
           mkdir -p "${QWEN_HOME}"
           if [ "${{ matrix.shard }}" = 1 ]; then
-            npm run typecheck:integration
+            # The typecheck has no heap cap of its own and died at Node's
+            # ~2 GB default inside an 8 GiB container. Via `env`, not the
+            # step's env block, whose zero-secrets contract requires every
+            # value but QWEN_HOME to be empty. Rationale and measurements:
+            # scripts/tests/no-ak-integration-ci.test.js.
+            typecheck_heap=()
+            case "${RUNNER_NAME:-}" in
+              ecs-qwen-*) typecheck_heap=('NODE_OPTIONS=--max-old-space-size=4096') ;;
+            esac
+            env "${typecheck_heap[@]}" npm run typecheck:integration
           fi
           npm run test:integration:no-ak:sandbox:none -- --shard=${{ matrix.shard }}/2
 
