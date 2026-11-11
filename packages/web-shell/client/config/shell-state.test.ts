@@ -13,10 +13,18 @@ function installDesktop(invoke: Invoke): void {
   (window as { __TAURI__?: unknown }).__TAURI__ = { core: { invoke } };
 }
 
-/** The mirror plus stamp `writeShellState` leaves behind for a launch. */
-function seedMirror(key: string, value: string, launch = 'launch-nonce'): void {
+/** The mirror, stamp and optional native base a launch leaves behind. */
+function seedMirror(
+  key: string,
+  value: string,
+  launch = 'launch-nonce',
+  base?: string,
+): void {
   window.localStorage.setItem(key, value);
   window.localStorage.setItem(`qwen-shell-mirror-launch:${key}`, launch);
+  if (base !== undefined) {
+    window.localStorage.setItem(`qwen-shell-mirror-base:${key}`, base);
+  }
 }
 
 describe('desktop shell state', () => {
@@ -114,14 +122,81 @@ describe('desktop shell state', () => {
     });
   });
 
-  it('keeps the native catalog when the mirror came from an earlier launch', async () => {
+  it('re-pushes an earlier-launch mirror whose recorded base still matches native', async () => {
+    const invoke = vi.fn(
+      async (command: string, args?: Record<string, unknown>) => {
+        if (command !== 'shell_state_read') return undefined;
+        return args?.['key'] === 'qwen-remote-connections'
+          ? '["https://a.example"]'
+          : null;
+      },
+    );
+    installDesktop(invoke);
+    // The write that produced this mirror never landed natively, and the
+    // catalog has not moved past the base the mirror records: the mirror is
+    // the only surviving copy of the newer value, not a stale one.
+    seedMirror(
+      'qwen-remote-connections',
+      '["https://a.example","https://b.example"]',
+      'earlier-launch',
+      '["https://a.example"]',
+    );
+
+    const { hydrateShellState, readShellState } = await import('./shell-state');
+    await hydrateShellState();
+
+    expect(readShellState('qwen-remote-connections')).toBe(
+      '["https://a.example","https://b.example"]',
+    );
+    expect(invoke).toHaveBeenCalledWith('shell_state_write', {
+      key: 'qwen-remote-connections',
+      value: '["https://a.example","https://b.example"]',
+      nonce: 'launch-nonce',
+    });
+  });
+
+  it('keeps the native catalog when an earlier-launch mirror has a stale base', async () => {
     const invoke = vi.fn(
       async (command: string): Promise<unknown> =>
         command === 'shell_state_read' ? '["https://new.example"]' : undefined,
     );
     installDesktop(invoke);
     // An ephemeral port came back around: this origin still holds the mirror a
-    // previous launch wrote, and the catalog has moved on since.
+    // previous launch wrote, and the catalog has moved past its base since.
+    seedMirror(
+      'qwen-remote-connections',
+      '["https://old.example"]',
+      'earlier-launch',
+      '["https://base.example"]',
+    );
+
+    const { hydrateShellState, readShellState } = await import('./shell-state');
+    await hydrateShellState();
+
+    expect(readShellState('qwen-remote-connections')).toBe(
+      '["https://new.example"]',
+    );
+    expect(window.localStorage.getItem('qwen-remote-connections')).toBeNull();
+    // The mirror's metadata must not outlive the mirror itself.
+    expect(
+      window.localStorage.getItem(
+        'qwen-shell-mirror-base:qwen-remote-connections',
+      ),
+    ).toBeNull();
+    expect(invoke).not.toHaveBeenCalledWith(
+      'shell_state_write',
+      expect.objectContaining({ key: 'qwen-remote-connections' }),
+    );
+  });
+
+  it('keeps the native catalog when an earlier-launch mirror has no recorded base', async () => {
+    const invoke = vi.fn(
+      async (command: string): Promise<unknown> =>
+        command === 'shell_state_read' ? '["https://new.example"]' : undefined,
+    );
+    installDesktop(invoke);
+    // A mirror written before the base record existed keeps the older
+    // behaviour: with a native value present it is dropped.
     seedMirror(
       'qwen-remote-connections',
       '["https://old.example"]',
@@ -239,6 +314,66 @@ describe('desktop shell state', () => {
         'qwen-shell-mirror-launch:qwen-remote-connections',
       ),
     ).toBe('launch-nonce');
+  });
+
+  it('records the pre-write cache value as the base, not the value written', async () => {
+    let native = '["https://a.example"]';
+    let rejectWrites = false;
+    const invoke = vi.fn(
+      async (command: string, args?: Record<string, unknown>) => {
+        if (command === 'shell_state_read') return native;
+        if (command === 'shell_state_write') {
+          if (rejectWrites) throw new Error('write rejected');
+          native = args?.['value'] as string;
+        }
+        return undefined;
+      },
+    );
+    installDesktop(invoke);
+
+    const first = await import('./shell-state');
+    await first.hydrateShellState();
+    // The first write lands natively; the second is rejected.
+    first.writeShellState(
+      'qwen-remote-connections',
+      '["https://a.example","https://b.example"]',
+    );
+    rejectWrites = true;
+    first.writeShellState(
+      'qwen-remote-connections',
+      '["https://a.example","https://b.example","https://c.example"]',
+    );
+    await Promise.resolve();
+
+    // The base is what the cache held before the rejected write — the value
+    // that landed natively — not the rejected value itself.
+    expect(
+      window.localStorage.getItem(
+        'qwen-shell-mirror-base:qwen-remote-connections',
+      ),
+    ).toBe('["https://a.example","https://b.example"]');
+
+    // The next launch reuses the origin: only the first write landed, so the
+    // mirror is the only surviving copy of the second and must be adopted.
+    vi.resetModules();
+    window.history.replaceState(null, '', '/#token=secret&shell=launch-two');
+    const secondInvoke = vi.fn(
+      async (command: string): Promise<unknown> =>
+        command === 'shell_state_read' ? native : undefined,
+    );
+    installDesktop(secondInvoke);
+
+    const second = await import('./shell-state');
+    await second.hydrateShellState();
+
+    expect(second.readShellState('qwen-remote-connections')).toBe(
+      '["https://a.example","https://b.example","https://c.example"]',
+    );
+    expect(secondInvoke).toHaveBeenCalledWith('shell_state_write', {
+      key: 'qwen-remote-connections',
+      value: '["https://a.example","https://b.example","https://c.example"]',
+      nonce: 'launch-two',
+    });
   });
 
   it('does not let a sibling catalog make an older mirror look current', async () => {

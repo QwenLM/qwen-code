@@ -29,6 +29,20 @@ function mirrorStampKey(key: string): string {
   return `${SHELL_MIRROR_STAMP_PREFIX}:${key}`;
 }
 
+/**
+ * Records, per catalog, the native value the mirror was derived from: what
+ * the cache held immediately before the write. A foreign-stamped mirror whose
+ * base still equals the native value is the only surviving copy of a write
+ * the shell never stored; one whose base no longer matches has been superseded.
+ * Like the stamp, this lives in localStorage — the native value is capped at
+ * SHELL_STATE_MAX_VALUE_BYTES and its key allowlist admits no metadata key.
+ */
+const SHELL_MIRROR_BASE_PREFIX = 'qwen-shell-mirror-base';
+
+function mirrorBaseKey(key: string): string {
+  return `${SHELL_MIRROR_BASE_PREFIX}:${key}`;
+}
+
 const cache = new Map<string, string | null>();
 let hydration: Promise<void> | undefined;
 let shellNonce: string | undefined;
@@ -71,12 +85,26 @@ function readLocal(key: string): string | null {
   }
 }
 
-function writeLocal(key: string, value: string): void {
+function writeLocal(key: string, value: string, base: string | null): void {
   try {
     window.localStorage.setItem(key, value);
     window.localStorage.setItem(mirrorStampKey(key), readShellNonce());
+    if (base === null) {
+      window.localStorage.removeItem(mirrorBaseKey(key));
+    } else {
+      window.localStorage.setItem(mirrorBaseKey(key), base);
+    }
   } catch {
     // The desktop copy below still persists it; a browser keeps the session copy.
+  }
+}
+
+/** The native value this catalog's mirror was derived from, if recorded. */
+function readMirrorBase(key: string): string | null {
+  try {
+    return window.localStorage.getItem(mirrorBaseKey(key));
+  } catch {
+    return null;
   }
 }
 
@@ -94,6 +122,8 @@ function mirrorFromThisLaunch(key: string): boolean {
 function removeLocal(key: string): void {
   try {
     window.localStorage.removeItem(key);
+    window.localStorage.removeItem(mirrorStampKey(key));
+    window.localStorage.removeItem(mirrorBaseKey(key));
   } catch {
     // Best effort: a stale copy is ignored once the native value is cached.
   }
@@ -112,7 +142,8 @@ export function readShellState(key: ShellStateKey): string | null {
 }
 
 export function writeShellState(key: ShellStateKey, value: string): void {
-  writeLocal(key, value);
+  const base = cache.get(key);
+  writeLocal(key, value, typeof base === 'string' ? base : null);
   const invoke = invokeDesktop();
   if (!invoke) return;
   cache.set(key, value);
@@ -122,8 +153,10 @@ export function writeShellState(key: ShellStateKey, value: string): void {
     nonce: readShellNonce(),
   }).catch(() => {
     // The in-memory copy keeps this session usable, and the mirror below is
-    // re-pushed at the next same-origin hydration: only a launch on a fresh
-    // loopback origin loses a write the shell never stored.
+    // re-pushed at the next same-origin hydration while the native catalog
+    // still matches the base the mirror records: a launch on a fresh loopback
+    // origin loses a write the shell never stored, and a native write that
+    // landed since supersedes it.
   });
 }
 
@@ -152,11 +185,19 @@ async function hydrateDesktop(): Promise<void> {
         if (local !== null && local !== native) {
           // A copy this launch wrote is newer than the native value: a write
           // that silently never landed. A copy from an earlier launch can
-          // reappear when an ephemeral port is reused, and there it is older —
-          // re-pushing it would drop whatever the launches in between added.
-          // With no native copy at all there is nothing to lose, so migration
-          // still adopts the mirror.
-          if (typeof native === 'string' && !mirrorFromThisLaunch(key)) {
+          // reappear when an ephemeral port is reused; it is older only when
+          // the native catalog moved past the base it records, and re-pushing
+          // it then would drop whatever the launches in between added. While
+          // its base still equals the native value it is instead the only
+          // surviving copy of a write that never landed, so it is adopted. A
+          // mirror with no recorded base is dropped the same way. With no
+          // native copy at all there is nothing to lose, so migration still
+          // adopts the mirror.
+          if (
+            typeof native === 'string' &&
+            !mirrorFromThisLaunch(key) &&
+            readMirrorBase(key) !== native
+          ) {
             cache.set(key, native);
             removeLocal(key);
             return;
