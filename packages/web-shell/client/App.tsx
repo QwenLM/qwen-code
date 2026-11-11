@@ -4998,6 +4998,14 @@ export function App({
         ? connection.workspaceCwd
         : resolveWorkspaceMaintenanceTargetCwd()))
     : undefined;
+  const modelPickerScope = useMemo(
+    () => ({
+      sessionId: connection.sessionId,
+      workspaceCwd: composerWorkspaceCwd,
+      daemonBaseUrl: workspace.baseUrl,
+    }),
+    [connection.sessionId, composerWorkspaceCwd, workspace.baseUrl],
+  );
   // The chat header always answers "which workspace is this session in?": the
   // workspace's name when there is one, and nothing when the session lives
   // outside every workspace (standalone, Live), which the header shows as the
@@ -26350,11 +26358,7 @@ export function App({
                           }
                           modelRefresh={modelRefresh}
                           availableModels={availableModels}
-                          modelPickerScope={{
-                            sessionId: connection.sessionId,
-                            workspaceCwd: composerWorkspaceCwd,
-                            daemonBaseUrl: workspace.baseUrl,
-                          }}
+                          modelPickerScope={modelPickerScope}
                           unavailableModels={unavailableModels}
                           mountUnavailableModelTooltip={
                             mountUnavailableModelTooltip
