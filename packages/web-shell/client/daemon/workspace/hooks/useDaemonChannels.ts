@@ -199,6 +199,12 @@ export function useDaemonChannels(options: DaemonChannelsOptions = {}) {
             workspaceClient.cancelWorkspaceChannelQrLogin(loginId, {
               clientId: attributed(cid),
             }),
+          release: (loginId, cid) =>
+            actions.channelQrLogin.release(
+              loginId,
+              attributed(cid),
+              workspaceCwd,
+            ),
         }
       : {
           start: (name, cid) =>
@@ -207,8 +213,14 @@ export function useDaemonChannels(options: DaemonChannelsOptions = {}) {
             actions.channelQrLogin.state(loginId, attributed(cid)),
           cancel: (loginId, cid) =>
             actions.channelQrLogin.cancel(loginId, attributed(cid)),
+          release: (loginId, cid) =>
+            actions.channelQrLogin.release(
+              loginId,
+              attributed(cid),
+              workspaceCwd,
+            ),
         };
-  }, [actions.channelQrLogin, workspaceClient, clientId]);
+  }, [actions.channelQrLogin, workspaceClient, clientId, workspaceCwd]);
 
   return {
     data: current

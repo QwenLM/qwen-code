@@ -343,6 +343,24 @@ export function createDaemonWorkspaceActions({
         );
         return workspace.cancelWorkspaceChannelQrLogin(loginId, { clientId });
       },
+
+      async release(loginId, clientId, workspaceCwd) {
+        // A raw REST call rather than the SDK method: the release must survive
+        // the document, and only `keepalive` does that. Same shape as
+        // detachDaemonClient, which exists for the same reason.
+        const cwd = workspaceCwd ?? getWorkspaceCwd();
+        if (!cwd) return;
+        const path = `/workspaces/${encodeURIComponent(cwd)}/channel-qr-logins/${encodeURIComponent(loginId)}`;
+        const headers: Record<string, string> = {
+          ...(createDaemonHeaders(token) as Record<string, string>),
+        };
+        if (clientId) headers['X-Qwen-Client-Id'] = clientId;
+        await requestRest(createDaemonRequestUrl(baseUrl, path), {
+          method: 'DELETE',
+          keepalive: true,
+          headers,
+        });
+      },
     },
 
     channelPairing: {

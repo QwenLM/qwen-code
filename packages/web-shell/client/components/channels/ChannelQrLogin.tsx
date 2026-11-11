@@ -100,6 +100,21 @@ export function ChannelQrLogin({
     [],
   );
 
+  // A reload or tab close runs no React cleanup, so the unmount release above
+  // never fires for the abandonment path operators use most. `pagehide` is the
+  // last hook that does run, and the release is sent with `keepalive` so it
+  // outlives the document. Same ownership condition as the unmount path.
+  useEffect(() => {
+    const release = () => {
+      const id = pendingLoginRef.current;
+      if (id && id === ownedLoginRef.current) {
+        void actionsRef.current.release(id).catch(() => undefined);
+      }
+    };
+    window.addEventListener('pagehide', release);
+    return () => window.removeEventListener('pagehide', release);
+  }, []);
+
   useEffect(() => {
     if (!loginId) return;
     let active = true;

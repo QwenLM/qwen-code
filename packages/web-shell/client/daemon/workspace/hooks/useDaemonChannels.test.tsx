@@ -50,6 +50,7 @@ const { actions, client, context, qualifiedWorkspace } = vi.hoisted(() => {
         start: vi.fn(),
         state: vi.fn(),
         cancel: vi.fn(),
+        release: vi.fn(),
       },
     },
     context: {
@@ -140,6 +141,7 @@ describe('useDaemonChannels', () => {
       actions.channelQrLogin.start,
       actions.channelQrLogin.state,
       actions.channelQrLogin.cancel,
+      actions.channelQrLogin.release,
     ]) {
       action.mockReset();
     }
@@ -493,5 +495,31 @@ describe('useDaemonChannels', () => {
     expect(
       qualifiedWorkspace.startWorkspaceChannelQrLogin,
     ).toHaveBeenCalledWith('bot', { clientId: undefined });
+  });
+
+  it('routes the pagehide release at the selected workspace with the tab id', async () => {
+    // The release goes through the keepalive REST path, not the SDK method, so
+    // it must be pointed at the workspace this hook is scoped to.
+    let result: ReturnType<typeof useDaemonChannels> | undefined;
+
+    function TestComponent() {
+      result = useDaemonChannels({
+        workspaceCwd: '/workspace-b',
+        clientId: 'tab-a',
+      });
+      return null;
+    }
+
+    await act(async () => root.render((<TestComponent />) as ReactNode));
+
+    await act(async () => {
+      await result?.qrLogin.release('login-1');
+    });
+
+    expect(actions.channelQrLogin.release).toHaveBeenCalledWith(
+      'login-1',
+      'tab-a',
+      '/workspace-b',
+    );
   });
 });

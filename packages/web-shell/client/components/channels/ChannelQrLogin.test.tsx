@@ -46,6 +46,7 @@ function actions(overrides?: {
           status: 'cancelled' as const,
         })),
     ),
+    release: vi.fn(async () => undefined),
   };
 }
 
@@ -342,6 +343,7 @@ describe('ChannelQrLogin unmount cleanup', () => {
     const plain = {
       start: base.start,
       state: base.state,
+      release: base.release,
       cancel: (id: string) => {
         calls.push(id);
         const rejecting: Promise<DaemonChannelQrLoginView> = Promise.reject(
@@ -405,6 +407,7 @@ describe('ChannelQrLogin unmount cleanup', () => {
     const plain = {
       start: base.start,
       state: base.state,
+      release: base.release,
       cancel: () => {
         const rejecting: Promise<DaemonChannelQrLoginView> = Promise.reject(
           new Error('daemon went away'),
@@ -480,5 +483,53 @@ describe('ChannelQrLogin unmount cleanup', () => {
       resolveStart({ ...START, attached: true });
     });
     expect(a.cancel).not.toHaveBeenCalled();
+  });
+});
+
+describe('ChannelQrLogin pagehide release', () => {
+  const pagehide = async () => {
+    await act(async () => {
+      window.dispatchEvent(new Event('pagehide'));
+    });
+  };
+
+  it('releases the login it created when the page goes away', async () => {
+    // A reload or tab close runs no React cleanup, so this is the only release
+    // for the abandonment path operators use most.
+    const { a } = await render();
+    await click('Scan to bind');
+    await pagehide();
+    expect(a.release).toHaveBeenCalledWith('login-1');
+    expect(a.cancel).not.toHaveBeenCalled();
+  });
+
+  it('does not release a login it attached to', async () => {
+    const a = actions({ start: async () => ({ ...START, attached: true }) });
+    await render({ actions: a });
+    await click('Scan to bind');
+    await pagehide();
+    expect(a.release).not.toHaveBeenCalled();
+  });
+
+  it('does not release a login that already succeeded', async () => {
+    const a = actions({
+      state: async () => ({ ...VIEW, status: 'succeeded' as const }),
+    });
+    await render({ actions: a });
+    await click('Scan to bind');
+    await act(async () => {
+      vi.advanceTimersByTime(2_000);
+    });
+    await pagehide();
+    expect(a.release).not.toHaveBeenCalled();
+  });
+
+  it('stops listening once the panel unmounts', async () => {
+    const { a } = await render();
+    await click('Scan to bind');
+    await unmount();
+    a.release.mockClear();
+    await pagehide();
+    expect(a.release).not.toHaveBeenCalled();
   });
 });

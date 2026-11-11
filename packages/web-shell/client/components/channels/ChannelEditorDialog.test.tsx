@@ -5030,6 +5030,7 @@ describe('QR bind inside the editor', () => {
         qrCodeDataUrl: undefined,
       }),
       cancel: vi.fn(),
+      release: vi.fn().mockResolvedValue(undefined),
     };
     vi.useFakeTimers();
     try {
@@ -5091,6 +5092,7 @@ describe('QR bind inside the editor', () => {
       start: vi.fn().mockResolvedValue({ ...pending, attached: false }),
       state: vi.fn().mockResolvedValue(pending),
       cancel: vi.fn().mockResolvedValue({ ...pending, status: 'cancelled' }),
+      release: vi.fn().mockResolvedValue(undefined),
     };
 
     function Host() {

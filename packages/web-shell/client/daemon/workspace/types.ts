@@ -282,6 +282,17 @@ export interface DaemonChannelQrLoginActions {
   ): Promise<DaemonChannelQrLoginStartResult>;
   state(loginId: string, clientId?: string): Promise<DaemonChannelQrLoginView>;
   cancel(loginId: string, clientId?: string): Promise<DaemonChannelQrLoginView>;
+  /**
+   * Release a login while the page is going away. Sent with `keepalive` so the
+   * request outlives the document: a reload or tab close runs no React cleanup,
+   * so `cancel` alone never fires for the abandonment path operators use most.
+   * Best-effort — the session still expires if the request is lost.
+   */
+  release(
+    loginId: string,
+    clientId?: string,
+    workspaceCwd?: string,
+  ): Promise<void>;
 }
 
 export interface DaemonChannelPairingActions {
