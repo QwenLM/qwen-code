@@ -45,10 +45,8 @@ export const LOOP_CHAIN_MAX_AGE_MS = 24 * 60 * 60 * 1000;
  * an already-armed wakeup still fires and stays listable/cancellable, since
  * the pump delivers journal inputs regardless of the tool surface.
  */
-export function isHostedLoopArmingEnabled(
-  env: NodeJS.ProcessEnv = process.env,
-): boolean {
-  return env['QWEN_MANAGED_AGENT_LOOP_ENABLED'] === 'true';
+export function isHostedLoopArmingEnabled(): boolean {
+  return process.env['QWEN_MANAGED_AGENT_LOOP_ENABLED'] === 'true';
 }
 
 /** The arm-time classifier review (decision 9): scheduling future model

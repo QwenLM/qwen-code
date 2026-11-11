@@ -68,6 +68,14 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     },
   ],
   [
+    'packages/cli/src/serve/hosted-loop-session.ts',
+    {
+      reason:
+        'The loop arming gate is a process-scoped deployment contract fixed when the Harness starts; it gates arming only and defaults off until the acceptance evidence lands.',
+      accesses: { 'key:QWEN_MANAGED_AGENT_LOOP_ENABLED': 1 },
+    },
+  ],
+  [
     'packages/cli/src/serve/hosted-harness-session.ts',
     {
       reason:
