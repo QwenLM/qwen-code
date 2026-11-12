@@ -53,7 +53,7 @@ change addresses. Measured over the thirteen most recent `ci.yml` commits rather
 than two branches, six are plumbing-only and now pass. One of them, #16551, was
 also among the nine reds in that sample — so "0 of 9" was a property of the two
 branches chosen, not of the approach. The dominant trigger in that sample,
-#16200's global ignore addition, remains the other design's subject.
+`#16200`'s global ignore addition, remains the other design's subject.
 
 ## Current state
 
@@ -169,8 +169,9 @@ runner would read"; the claim was false and the line is now kept.
 
 Line breaks are `\r\n`, `\n`, a lone `\r`, and the Unicode separators
 `\u2028`/`\u2029`. Splitting on `\n` alone read a CR-terminated file as one line
-and dropped whatever followed a `#` on the far side of the CR — the #11117 →
-#11216 shape, with the flag flipped on the base and the branch certified fresh.
+and dropped whatever followed a `#` on the far side of the CR — the
+`#11117 → #11216` shape, with the flag flipped on the base and the branch
+certified fresh.
 
 Measured on the current file, the slice is 624 lines of 3560, 28 of them markers
 for the jobs and plumbing steps it excludes.
