@@ -52,7 +52,43 @@ describe('Feishu markdown utilities', () => {
       expect(splitByTables(`${code}\n${table}`)).toEqual([code, table]);
     });
 
-    it('accepts up to three indentation spaces and closing whitespace', () => {
+    it('does not close a tilde fence with equally long backticks', () => {
+      const code = ['~~~text', '```', table, '~~~'].join('\n');
+      expect(splitByTables(`${code}\n${table}`)).toEqual([code, table]);
+    });
+
+    it('rejects backticks in a backtick fence info string', () => {
+      const prose = '```invalid`info';
+      expect(splitByTables(`${prose}\n${table}\nAfter`)).toEqual([
+        prose,
+        table,
+        'After',
+      ]);
+    });
+
+    it.each([
+      { indent: '    ', fence: '```' },
+      { indent: '\t', fence: '```' },
+      { indent: '    ', fence: '~~~' },
+      { indent: '\t', fence: '~~~' },
+    ])(
+      'preserves nested $fence fences with $indent indentation',
+      ({ indent, fence }) => {
+        const code = [
+          '- item',
+          `${indent}${fence}text`,
+          ...table.split('\n').map((line) => `${indent}${line}`),
+          `${indent}${fence}`,
+        ].join('\n');
+        expect(splitByTables(`${code}\n${table}`)).toEqual([code, table]);
+        const card = buildCardContent(code) as unknown as CardStructure;
+        expect(card.body.elements).toEqual([
+          { tag: 'markdown', content: code },
+        ]);
+      },
+    );
+
+    it('accepts indentation spaces and closing whitespace', () => {
       const code = `   ~~~text\n${table}\n   ~~~~  `;
       expect(splitByTables(`${code}\n${table}`)).toEqual([code, table]);
     });

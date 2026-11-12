@@ -4,7 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { EventEmitter } from 'node:events';
+import { EventEmitter, once } from 'node:events';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
   ChannelAgentBridge,
@@ -32,6 +34,7 @@ class TestChannel extends FeishuWebhookChannel {
 
 const channels: FeishuWebhookChannel[] = [];
 const fetchMock = vi.fn<typeof fetch>();
+const realFetch = globalThis.fetch;
 
 function make(extra: Record<string, unknown> = {}) {
   const bridge = Object.assign(new EventEmitter(), {
@@ -358,7 +361,6 @@ describe('Feishu webhook delivery', () => {
   );
 
   it.each([
-    [302, 'permanent'],
     [400, 'permanent'],
     [403, 'permanent'],
     [408, 'transient'],
@@ -369,9 +371,11 @@ describe('Feishu webhook delivery', () => {
     'reports HTTP %s without a response body or retries',
     async (status, disposition) => {
       const { channel } = make();
-      fetchMock.mockResolvedValueOnce(
-        new Response(`${WEBHOOK_URL} ${SIGNING_SECRET}`, { status }),
-      );
+      const response = new Response(`${WEBHOOK_URL} ${SIGNING_SECRET}`, {
+        status,
+      });
+      const cancel = vi.spyOn(response.body!, 'cancel');
+      fetchMock.mockResolvedValueOnce(response);
       await channel.connect();
       await expect(
         channel.deliverProactive(TARGET, 'message'),
@@ -379,9 +383,44 @@ describe('Feishu webhook delivery', () => {
         disposition,
         message: `Feishu webhook request failed (HTTP ${status}).`,
       });
+      expect(cancel).toHaveBeenCalledOnce();
       expect(fetchMock).toHaveBeenCalledOnce();
     },
   );
+
+  it('rejects a real redirect without following it or exposing its destination', async () => {
+    const requests: string[] = [];
+    const server = createServer((request, response) => {
+      requests.push(request.url!);
+      response.writeHead(302, {
+        location: `/redirect-target?secret=${SIGNING_SECRET}`,
+      });
+      response.end(WEBHOOK_URL);
+    });
+    try {
+      server.listen(0, '127.0.0.1');
+      await once(server, 'listening');
+      const endpoint = `http://127.0.0.1:${(server.address() as AddressInfo).port}/hook`;
+      fetchMock.mockImplementationOnce((_url, options) =>
+        realFetch(endpoint, options),
+      );
+      const { channel } = make();
+      await channel.connect();
+      const result = channel.deliverProactive(TARGET, 'message');
+      await expect(result).rejects.toMatchObject({
+        disposition: 'transient',
+        message:
+          'Feishu webhook request failed or returned an invalid response; delivery may have been accepted.',
+      });
+      await expect(result).rejects.not.toHaveProperty('cause');
+      expect(fetchMock.mock.calls[0]![1]?.redirect).toBe('error');
+      expect(requests).toEqual(['/hook']);
+      expect(fetchMock).toHaveBeenCalledOnce();
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
 
   it.each([
     'not-json',
@@ -445,6 +484,36 @@ describe('Feishu webhook delivery', () => {
     expect(fetchMock).toHaveBeenCalledOnce();
   });
 
+  it('bounds the cumulative response size across individually small chunks', async () => {
+    const bytes = new TextEncoder().encode(
+      JSON.stringify({ code: 0 }) + ' '.repeat(3 * 8_192),
+    );
+    const cancel = vi.fn();
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (let offset = 0; offset < bytes.length; offset += 8_192) {
+          controller.enqueue(bytes.slice(offset, offset + 8_192));
+        }
+      },
+      pull(controller) {
+        controller.close();
+      },
+      cancel,
+    });
+    fetchMock.mockResolvedValueOnce(new Response(body));
+    const { channel } = make();
+    await channel.connect();
+    await expect(
+      channel.deliverProactive(TARGET, 'message'),
+    ).rejects.toMatchObject({
+      disposition: 'transient',
+      message:
+        'Feishu webhook request failed or returned an invalid response; delivery may have been accepted.',
+    });
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
   it('does not truncate outgoing text or expose a transport exception', async () => {
     const text = 'x'.repeat(10_000);
     fetchMock.mockRejectedValueOnce(
@@ -484,27 +553,35 @@ describe('Feishu webhook lifecycle', () => {
     const { channel } = make();
     const connecting = channel.connect();
     channel.disconnect();
-    await expect(connecting).rejects.toThrow('connection was cancelled');
-    await expect(channel.sendMessage('default', 'text')).rejects.toThrow(
-      'not ready',
-    );
+    await expect(connecting).rejects.toMatchObject({
+      disposition: 'permanent',
+      message: 'Feishu webhook connection was cancelled.',
+    });
+    await expect(channel.sendMessage('default', 'text')).rejects.toMatchObject({
+      disposition: 'permanent',
+      message: 'Feishu webhook Channel is not ready.',
+    });
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it('requires readiness and aborts an actual pending request at its timeout', async () => {
     vi.useFakeTimers();
     const { channel } = make();
-    await expect(channel.sendMessage('default', 'text')).rejects.toThrow(
-      'not ready',
-    );
+    await expect(channel.sendMessage('default', 'text')).rejects.toMatchObject({
+      disposition: 'permanent',
+      message: 'Feishu webhook Channel is not ready.',
+    });
     expect(fetchMock).not.toHaveBeenCalled();
     await channel.connect();
     stall();
     const result = expect(
       channel.deliverProactive(TARGET, 'text'),
-    ).rejects.toThrow('timed out; delivery may have been accepted');
-    await vi.advanceTimersByTimeAsync(15_000);
-    await result;
+    ).rejects.toMatchObject({
+      disposition: 'transient',
+      message:
+        'Feishu webhook request timed out; delivery may have been accepted.',
+    });
+    await Promise.all([result, vi.advanceTimersByTimeAsync(15_000)]);
     expect(fetchMock.mock.calls[0]![1]?.signal?.aborted).toBe(true);
     expect(fetchMock).toHaveBeenCalledOnce();
   });
@@ -559,6 +636,47 @@ describe('Feishu webhook lifecycle', () => {
       }
     },
   );
+
+  it('keeps reconnect pending until the previous lifecycle has drained', async () => {
+    let release!: () => void;
+    fetchMock.mockImplementationOnce(
+      () =>
+        new Promise<Response>((_resolve, reject) => {
+          release = () => reject(new Error(WEBHOOK_URL));
+        }),
+    );
+    const { channel } = make();
+    await channel.connect();
+    const pending = expect(
+      channel.sendMessage('default', 'before disconnect'),
+    ).rejects.toMatchObject({
+      disposition: 'transient',
+      message:
+        'Feishu webhook request cancelled; delivery may have been accepted.',
+    });
+    channel.disconnect();
+    let connected = false;
+    const reconnect = channel.connect().then(() => {
+      connected = true;
+    });
+    try {
+      await new Promise(setImmediate);
+      expect(connected).toBe(false);
+      await expect(
+        channel.sendMessage('default', 'during drain'),
+      ).rejects.toMatchObject({
+        disposition: 'permanent',
+        message: 'Feishu webhook Channel is not ready.',
+      });
+      expect(fetchMock).toHaveBeenCalledOnce();
+    } finally {
+      release();
+      await Promise.all([pending, reconnect]);
+    }
+    expect(connected).toBe(true);
+    await channel.sendMessage('default', 'after drain');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
 
   it('cancels and drains concurrent sends on disconnect, then can reconnect', async () => {
     const { channel } = make();
