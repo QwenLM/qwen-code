@@ -43,14 +43,18 @@ import type { ManagedFetch } from './managed-client-files-bridge.js';
 const peerFetch = ((url: string, init?: RequestInit) =>
   nodeFetch(url, init)) as unknown as ManagedFetch;
 
-function startPeer(
-  unregisterGate?: Promise<void>,
-): Promise<{ server: Server; baseUrl: string }> {
+function startPeer(unregisterGate?: Promise<void>): Promise<{
+  server: Server;
+  baseUrl: string;
+  unregistered: Array<{ connectionId?: string }>;
+  registeredConnectionId: () => string | undefined;
+}> {
   // Like the real control plane: register blocks on the discovery the
   // browser drain answers; the stream pushes tools/list on open.
   let binding:
     | { generation: number; state: string; connectionId?: string }
     | undefined;
+  const unregistered: Array<{ connectionId?: string }> = [];
   let resolveRegister: (() => void) | undefined;
   const registerDone = new Promise<void>((resolve) => {
     resolveRegister = resolve;
@@ -107,6 +111,12 @@ function startPeer(
         return;
       }
       if (path.endsWith('/client-files/unregister')) {
+        const parsed = body
+          ? (JSON.parse(body) as Record<string, unknown>)
+          : {};
+        unregistered.push({
+          connectionId: parsed.connectionId as string | undefined,
+        });
         if (unregisterGate) await unregisterGate;
         if (binding) binding.state = 'closed';
         res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -123,6 +133,8 @@ function startPeer(
       resolve({
         server,
         baseUrl: `http://127.0.0.1:${port}/api/agent/web-shell/v1`,
+        unregistered,
+        registeredConnectionId: () => binding?.connectionId,
       });
     });
   });
@@ -309,10 +321,46 @@ describe('useManagedLocalFilesBridge', () => {
     });
     await waitFor(() => expect(result.current.status.phase).toBe('connected'));
     expect(listeners.has('pagehide')).toBe(true);
+    expect(peer.unregistered).toHaveLength(0);
     await act(async () => {
       listeners.get('pagehide')?.();
     });
     await waitFor(() => expect(result.current.status.phase).toBe('idle'));
+    // The title's contract is that a closed tab releases the control-plane
+    // binding, not merely that the local panel resets: observe the actual
+    // unregister POST carrying the owned registration identity.
+    await waitFor(() => expect(peer.unregistered).toHaveLength(1));
+    expect(peer.unregistered[0].connectionId).toBe(
+      peer.registeredConnectionId(),
+    );
+    expect(peer.unregistered[0].connectionId).toBeTruthy();
+  });
+
+  it('ignores a re-entrant connect while one is already in flight', async () => {
+    const peer = await startPeer();
+    servers.push(peer.server);
+    const fakeWin = {
+      location: { origin: 'http://localhost' },
+    } as unknown as Window;
+    const { result } = renderHook(() =>
+      useManagedLocalFilesBridge({
+        sessionId: 'session-1',
+        baseUrl: peer.baseUrl,
+        fetch: peerFetch,
+        win: fakeWin,
+      }),
+    );
+    // Two rapid Connect clicks: the second must be a no-op while the first is
+    // in flight, not a second picker/registration racing the bridge ref.
+    act(() => {
+      void result.current.connect();
+      void result.current.connect();
+    });
+    await waitFor(() => expect(result.current.status.phase).toBe('connected'));
+    expect(vi.mocked(pickDirectoryHandle)).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      await result.current.disconnect();
+    });
   });
 
   it('does not register when unmounted while the picker is open', async () => {

@@ -5153,7 +5153,8 @@ export class HostedWorkspaceToolTurn {
             (tool) => tool.name === call.name,
           ) &&
           !(this.memory && isHostedMemoryTool(call.name)) &&
-          !(this.publicPlanMode && call.name === 'exit_plan_mode'),
+          !(this.publicPlanMode && call.name === 'exit_plan_mode') &&
+          !this.clientFiles?.resolve(call.name),
       )
     ) {
       return this.refuseBatch(
@@ -5161,7 +5162,8 @@ export class HostedWorkspaceToolTurn {
         calls.map((call) =>
           HOSTED_WORKSPACE_FILE_TOOLS.some((tool) => tool.name === call.name) ||
           (this.memory && isHostedMemoryTool(call.name)) ||
-          (this.publicPlanMode && call.name === 'exit_plan_mode')
+          (this.publicPlanMode && call.name === 'exit_plan_mode') ||
+          this.clientFiles?.resolve(call.name)
             ? undefined
             : 'Resident Workspace supports only read_file, write_file and edit.',
         ),
@@ -7513,6 +7515,12 @@ export class HostedWorkspaceToolTurn {
       : this.childModelRoute;
     if (extensionAgent?.model && !childModel)
       throw new Error('Extension agent model is unavailable.');
+    // Client-files tool names are generation-scoped and vanish with the
+    // registration (a reconnect, an unregister or a harness restart), so they
+    // are deliberately not admitted into the durable launch pin: they are
+    // re-derived from the live catalog on every drive, and the strict snapshot
+    // comparison must fingerprint only the stable tool set or an ephemeral
+    // name would trigger a false recovery.
     const allowed = (this.advertised ?? [])
       .map((tool) => tool.name!)
       .filter(
@@ -7521,23 +7529,14 @@ export class HostedWorkspaceToolTurn {
             name === 'glob' ||
             name === 'skill' ||
             name === 'todo_write' ||
-            this.mcp?.tools().some((tool) => tool.name === name) ||
-            this.clientFiles?.tools().some((tool) => tool.name === name)) &&
+            this.mcp?.tools().some((tool) => tool.name === name)) &&
           (!extensionAgent?.tools || extensionAgent.tools.includes(name)) &&
           !extensionAgent?.disallowedTools?.includes(name),
       );
-    // Client-files tool names are generation-scoped and vanish with the
-    // registration (a reconnect, an unregister or a harness restart). Keep them
-    // out of the durable launch pin — they are re-derived from the live catalog
-    // on every drive — so the strict snapshot comparison fingerprints only the
-    // stable tool set and an ephemeral name cannot trigger a false recovery.
-    const ephemeralToolNames = new Set(
-      (this.clientFiles?.tools() ?? []).map((tool) => tool.name),
-    );
     const descriptor = extensionAgent
       ? {
           ...extensionAgent.descriptor,
-          toolNames: allowed.filter((name) => !ephemeralToolNames.has(name)),
+          toolNames: allowed,
         }
       : undefined;
     const publicLaunch = this.publicChildren

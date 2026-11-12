@@ -68,11 +68,12 @@ public interface ClientFilesRelay {
 
     int expireBefore(long now, int limit);
 
-    /** Closes active bindings whose deadline has passed; returns the count. */
-    int closeExpiredBindings(long now, int limit);
+    /**
+     * Closes active bindings whose deadline has passed; returns the bindings it
+     * actually closed so the caller can tear down each harness catalog.
+     */
+    List<Binding> closeExpiredBindings(long now, int limit);
 
     /** Deletes settled request rows older than the retention cutoff. */
     int deleteSettledBefore(long cutoff, int limit);
-
-    void deleteSession(String tenantId, String sessionId);
 }

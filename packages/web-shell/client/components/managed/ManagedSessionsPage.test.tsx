@@ -485,9 +485,13 @@ describe('ManagedSessionsPage', () => {
     expect(getContextUsage.mock.calls[0][1].signal.aborted).toBe(true);
   });
 
-  it.each([true, false])(
-    'gates the local files entry on the session capability (enabled: %s)',
-    async (enabled) => {
+  it.each(
+    [true, false].flatMap((enabled) =>
+      [true, false].map((home) => ({ enabled, home })),
+    ),
+  )(
+    'gates the local files entry on the session capability (enabled: $enabled, home: $home)',
+    async ({ enabled, home }) => {
       provider = {
         ...provider,
         clientFiles: {
@@ -506,7 +510,10 @@ describe('ManagedSessionsPage', () => {
           },
         }),
       );
-      await render('s1');
+      // The entry is inserted into two different headers (the home
+      // ChatContextHeader and the standalone session header); render both so
+      // neither insertion is unwitnessed.
+      await render('s1', 'en', provider, home ? null : undefined);
       const button = container.querySelector(
         'button[aria-label="Local files"]',
       );

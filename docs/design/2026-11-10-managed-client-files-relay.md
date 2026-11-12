@@ -67,10 +67,12 @@ proposed here is MCP-over-relay and needs no CDP and no WebSocket at all.
 | Java event stream      | `ManagedEventStreamService` is a **durable, journal-backed** SSE replay stream (sequence ids, replay floor, `agent.session.resync_required`, periodic read-grant recheck). It is not an ephemeral push channel. `ManagedSideQueryController` shows the precedent for a separate ephemeral `SseEmitter` stream.                                                                                                                                                                                                                                               |
 | Route admission        | Every mounted route needs an OpenAPI operation in `contracts/src/main/resources/openapi/managed-agent-public-api.openapi.json` plus a `SurfaceRegistry` entry (`ManagedAgentApiContractTest`, `SurfaceRegistryGateTest`). New configuration properties need `configuration-descriptions.json` entries.                                                                                                                                                                                                                                                       |
 
-Existing worker limits that the relay inherits (`managed-mcp-runtime.ts`):
-`MAX_INFLIGHT = 32`, `MAX_RESULT_BYTES = 60 KiB`,
-`MAX_MANIFEST_BYTES = 1 MiB`, connect timeout `25 s`,
-per-request timeout ceiling `600 s`, catalog category cap `16 KiB`.
+The relay's MCP client runs in the harness, not the worker, so the worker's
+`ManagedMcpRuntime` (`managed-mcp-runtime.ts`) is not on this path. The
+harness-side client adopts the same size and timeout bounds as that worker
+runtime — `MAX_RESULT_BYTES = 60 KiB`, connect timeout `25 s`, per-request
+timeout ceiling `600 s` — and the control plane separately bounds the queue
+(`queue-depth`, `max-payload-bytes`, `request-ttl`, `binding-ttl`).
 
 ## Goals
 
@@ -150,8 +152,9 @@ connection generation)`, and issues a short-lived session relay token.
   gesture. No durable recovery is attempted for a server that cannot exist
   without the browser.
 - Grant revocation stops delivery within the existing read-grant recheck
-  interval; the relay rechecks the actor's grant when enqueuing a request
-  and when the browser picks it up.
+  interval; the relay re-applies the actor's execution authority when a
+  request is delivered to the browser and when the browser's response
+  settles it. The credential-authenticated enqueue itself carries no actor.
 
 ### Ephemeral, not durable
 
@@ -285,10 +288,10 @@ Per the repository's route-ownership rule:
 - **Cross-node races.** Registration, teardown, and response delivery race
   across instances; the generation column fences stale connections, and
   ownership-scoped deletion follows the daemon registry's rule.
-- **Approval bypass.** If MCP invokes do not currently traverse the Hosted
-  approval path, the runtime slice must wire write-tool approval before
-  enabling the feature; this is a blocking acceptance criterion, not a
-  follow-up.
+- **Approval bypass.** Resolved by decision 6: relay tool names are never
+  pre-approved, so client-files invokes traverse the existing Hosted
+  approval path (`hostedApprovalAsks` + `permissionDecision`) with no new
+  wiring; a write tool still requires approval before it executes.
 - **Scope creep toward a general reverse channel.** The relay is deliberately
   single-purpose (one MCP server per Session, file tools only). Generalizing
   it is a separate design.
@@ -337,8 +340,10 @@ Per the repository's route-ownership rule:
 5. Harness restart leaves no stranded recovery state; the UI offers
    reconnect and re-registration succeeds with a fresh gesture.
 6. All new routes pass the OpenAPI contract and SurfaceRegistry gates; the
-   feature flag defaults OFF and the disabled deployment is byte-identical
-   in behavior to today.
+   feature flag defaults OFF and the disabled deployment is behaviorally
+   identical to today. The one accepted wire delta: every session summary
+   carries the `clientFiles` capability, present but `false` when disabled
+   (no registration is admitted and no client-files tool is advertised).
 
 ## Delivery slices
 

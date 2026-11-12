@@ -82,6 +82,9 @@ class ClientFilesRelayServiceTest {
         assertThat(jdbc.queryForObject("SELECT token_hash FROM ma_client_files_binding", String.class))
                 .isEqualTo(DigestUtils.sha256Hex(registration.token()));
         assertThat(service.status(tenant, ACTOR, session).state()).isEqualTo("active");
+        // The one-time credential must not leak through the record's toString
+        // into any log or error that prints the registration.
+        assertThat(registration.toString()).doesNotContain(registration.token());
     }
 
     @Test
@@ -410,6 +413,52 @@ class ClientFilesRelayServiceTest {
         service.expireRequests();
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_client_files_request", Integer.class))
                 .isZero();
+    }
+
+    @Test
+    void retentionSweepsStillRunAfterTheFeatureIsDisabled() {
+        Registration registration = service.register(tenant, ACTOR, session, CONNECTION);
+        long old = System.currentTimeMillis() - 120_000;
+        store.enqueue(tenant, session, registration.generation(), "settled", "{}", old + 1_000, old);
+        store.answer(tenant, session, registration.generation(), CONNECTION, "settled", "{}", old);
+        jdbc.update("UPDATE ma_client_files_binding SET expires_at=?", old);
+        // Turning the flag off must not strand already-persisted rows (whose
+        // bodies may hold file content) past their TTL: the sweeps create no
+        // state, so they keep running. Restoring the isEnabled early return
+        // turns this red.
+        properties.getClientFiles().setEnabled(false);
+        service.expireRequests();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_client_files_request", Integer.class))
+                .isZero();
+        assertThat(jdbc.queryForObject("SELECT state FROM ma_client_files_binding", String.class))
+                .isEqualTo("closed");
+    }
+
+    @Test
+    void expirySweepDispatchesAGenerationFencedUnregister() {
+        Registration registration = service.register(tenant, ACTOR, session, CONNECTION);
+        // A browser that vanished without an unregister: the deadline passes
+        // and the sweep closes the row. It must also tear down the harness
+        // catalog, not leave it advertising tools every call then refuses.
+        jdbc.update("UPDATE ma_client_files_binding SET expires_at=?", System.currentTimeMillis() - 1);
+        service.expireRequests();
+        assertThat(jdbc.queryForObject("SELECT state FROM ma_client_files_binding", String.class))
+                .isEqualTo("closed");
+        verify(harness).clientFilesOperation(eq(tenant), eq(session),
+                eq(Map.of("action", "unregister", "generation", registration.generation())));
+    }
+
+    @Test
+    void refusedFirstRegistrationDoesNotLeaveAnActiveBinding() {
+        when(harness.clientFilesOperation(anyString(), anyString(), any()))
+                .thenThrow(new UnsupportedOperationException("unavailable"));
+        assertThatThrownBy(() -> service.register(tenant, ACTOR, session, CONNECTION))
+                .hasFieldOrPropertyWithValue("code", "client_files_relay_unavailable");
+        // No browser holds the credential of a refused first registration, so
+        // the binding this attempt created must not linger active until
+        // binding-ttl with nothing able to drain it.
+        assertThat(jdbc.queryForObject("SELECT state FROM ma_client_files_binding", String.class))
+                .isEqualTo("closed");
     }
 
     private void mcpInBackground(String token, String body) {

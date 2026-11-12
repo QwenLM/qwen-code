@@ -36,7 +36,16 @@ public final class ClientFilesModels {
 
     /** The one-time registration answer; the token is shown once, never stored. */
     public record Registration(String serverId, long generation, String token, long expiresAt,
-            int toolCount, String connectionId) {}
+            int toolCount, String connectionId) {
+        @Override
+        public String toString() {
+            // The token is a one-time credential: the generated record toString
+            // would print it into any log or error that includes the registration.
+            return "Registration[serverId=" + serverId + ", generation=" + generation
+                    + ", token=<redacted>, expiresAt=" + expiresAt
+                    + ", toolCount=" + toolCount + ", connectionId=" + connectionId + "]";
+        }
+    }
 
     /** Binding summary without the credential. */
     public record Status(String serverId, long generation, String state, long expiresAt,

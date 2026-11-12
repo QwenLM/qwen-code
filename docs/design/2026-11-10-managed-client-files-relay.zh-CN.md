@@ -58,10 +58,11 @@ relay MCP 客户端放在 **harness**（`HostedClientFilesSession`），而非 w
 | Java 事件流           | `ManagedEventStreamService` 是**持久的、journal 支撑的** SSE 回放流（sequence id、回放地板、`agent.session.resync_required`、周期性读授权复查）。它不是临时推送通道。`ManagedSideQueryController` 提供了独立临时 `SseEmitter` 流的先例。                                                                                                                                                                                                                              |
 | 路由准入              | 每条挂载路由都需要 `contracts/src/main/resources/openapi/managed-agent-public-api.openapi.json` 里的 OpenAPI operation 加 `SurfaceRegistry` 条目（`ManagedAgentApiContractTest`、`SurfaceRegistryGateTest`）。新配置属性需要 `configuration-descriptions.json` 描述。                                                                                                                                                                                                 |
 
-relay 继承的 worker 现有限额（`managed-mcp-runtime.ts`）：
-`MAX_INFLIGHT = 32`、`MAX_RESULT_BYTES = 60 KiB`、
-`MAX_MANIFEST_BYTES = 1 MiB`、连接超时 `25 s`、单请求超时上限 `600 s`、
-catalog 单类上限 `16 KiB`。
+relay 的 MCP 客户端运行在 harness 侧而非 worker 侧，因此 worker 的
+`ManagedMcpRuntime`（`managed-mcp-runtime.ts`）不在这条路径上。harness 侧
+客户端采用与该 worker 运行时相同的大小与超时限额——`MAX_RESULT_BYTES = 60 KiB`、
+连接超时 `25 s`、单请求超时上限 `600 s`；控制面另对队列独立设限
+（`queue-depth`、`max-payload-bytes`、`request-ttl`、`binding-ttl`）。
 
 ## 目标
 
@@ -129,8 +130,8 @@ Hosted Harness — HostedClientFilesSession（harness 本地）
   工具调用绝不回退到 Workspace 文件。
 - Harness 重启或 worker 替换按设计丢失临时定义；UI 呈现「重新连接」，用户以
   新手势重新注册。对一个没有浏览器就不可能存在的 server，不做持久恢复。
-- 撤销授权在现有读授权复查间隔内停止投递；relay 在请求入队时与浏览器取走
-  请求时各复查一次 actor 授权。
+- 撤销授权在现有读授权复查间隔内停止投递；relay 在请求投递给浏览器时与浏览器
+  响应结算时各重新施加一次 actor 执行授权。凭据鉴权的入队本身不携带 actor。
 
 ### 临时态，而非持久态
 
@@ -230,8 +231,9 @@ IT（切片 4）实证。
   测试必须证明浏览器在调用中途消失时 Turn 仍（带错误地）完成。
 - **跨节点竞态。** 注册、拆除、响应投递跨实例竞争；generation 列栅栏过期
   连接，按所有权删除沿用 daemon 注册表规则。
-- **审批绕过。** 若 MCP invoke 今天不走 Hosted 审批路径，runtime 切片必须
-  在启用功能前接好写工具审批；这是阻断性验收标准，不是后续项。
+- **审批绕过。** 已由决策 6 解决：relay 工具名从不预批准，因此 client-files
+  invoke 走现有 Hosted 审批路径（`hostedApprovalAsks` + `permissionDecision`），
+  无需新接线；写工具执行前仍需审批。
 - **向通用反向通道的范围蔓延。** relay 刻意单一用途（每 Session 一个 MCP
   server，仅文件工具）。泛化它是独立设计。
 
@@ -268,7 +270,9 @@ IT（切片 4）实证。
    Workspace 工具结果受同样的租户隔离与读授权保护。
 5. Harness 重启不留下搁浅恢复状态；UI 提供重连，新手势重新注册成功。
 6. 所有新路由通过 OpenAPI 契约与 SurfaceRegistry 门禁；功能开关默认 OFF，
-   关闭部署的行为与今天逐字节一致。
+   关闭部署的行为与今天一致。唯一接受的线级差异：每个会话摘要都携带
+   `clientFiles` 能力，关闭时该字段存在但为 `false`（不接受注册、不宣告
+   client-files 工具）。
 
 ## 交付切片
 

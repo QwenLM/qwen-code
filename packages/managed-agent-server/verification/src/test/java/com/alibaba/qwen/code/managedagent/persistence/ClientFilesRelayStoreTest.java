@@ -177,11 +177,14 @@ class ClientFilesRelayStoreTest {
     void closeExpiredBindingsClosesOnlyOverdueActiveBindings() {
         tx(() -> store.register(tenant, session, actor, "local-files", "a".repeat(64), 5_000L, 1_000L, "conn"));
         tx(() -> store.register(tenant, "session-2", actor, "local-files", "b".repeat(64), 20_000L, 1_000L, "conn"));
-        assertThat(tx(() -> store.closeExpiredBindings(10_000L, 10))).isEqualTo(1);
+        List<Binding> closed = tx(() -> store.closeExpiredBindings(10_000L, 10));
+        assertThat(closed).hasSize(1);
+        assertThat(closed.get(0).sessionId()).isEqualTo(session);
+        assertThat(closed.get(0).generation()).isEqualTo(1L);
         assertThat(tx(() -> store.find(tenant, session)).state()).isEqualTo(ClientFilesModels.STATE_CLOSED);
         assertThat(tx(() -> store.find(tenant, "session-2")).state()).isEqualTo(ClientFilesModels.STATE_ACTIVE);
-        // Idempotent: a closed binding is not counted again.
-        assertThat(tx(() -> store.closeExpiredBindings(10_000L, 10))).isZero();
+        // Idempotent: a closed binding is not returned again.
+        assertThat(tx(() -> store.closeExpiredBindings(10_000L, 10))).isEmpty();
     }
 
     @Test
@@ -203,22 +206,6 @@ class ClientFilesRelayStoreTest {
                 Integer.class)).isEqualTo(1);
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_client_files_request WHERE request_id='recent'",
                 Integer.class)).isEqualTo(1);
-    }
-
-    @Test
-    void deleteSessionRemovesBothTablesForTheScopeOnly() {
-        tx(() -> store.register(tenant, session, actor, "local-files", "a".repeat(64), 9_000L, 1_000L, "conn"));
-        tx(() -> store.enqueue(tenant, session, 1L, "req-1", "{}", 9_000L, 1_000L));
-        tx(() -> store.register(tenant, "session-2", actor, "local-files", "b".repeat(64), 9_000L, 1_000L, "conn"));
-        // The surviving scope has its own in-flight request, so the request-table
-        // delete must be scope-fenced too — an unscoped delete would destroy it
-        // while a zero-count assertion could not tell the difference.
-        tx(() -> store.enqueue(tenant, "session-2", 1L, "req-2", "{}", 9_000L, 1_000L));
-        tx(() -> store.deleteSession(tenant, session));
-        assertThat(tx(() -> store.find(tenant, session))).isNull();
-        assertThat(tx(() -> store.find(tenant, "session-2"))).isNotNull();
-        assertThat(jdbc.queryForObject("SELECT request_id FROM ma_client_files_request", String.class))
-                .isEqualTo("req-2");
     }
 
     @Test

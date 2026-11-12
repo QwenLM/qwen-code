@@ -13993,6 +13993,87 @@ describe('client files tool execution', () => {
     await turn.finish();
   });
 
+  it('admits a registered client-files tool on the resident Workspace profile', async () => {
+    // The resident profile advertises the registration's tools, so the resident
+    // batch guard must admit a name the registration resolves instead of
+    // refusing it as a non-file tool (the panel would report connected for
+    // tools that can never run).
+    broker.capabilityDigest = RESIDENT_WORKSPACE_CAPABILITY_DIGEST;
+    const invoke = vi.fn(async () => ({
+      content: [{ type: 'text', text: 'resident file content' }],
+    }));
+    turn = clientFilesTurn(clientFilesSession(invoke));
+    const advertised = (
+      await turn.declarations(new AbortController().signal)
+    ).map((tool) => tool.name);
+    expect(advertised).toContain(clientFilesToolName);
+    const responses = await turn.execute(
+      [clientFilesCall],
+      clientFilesParts,
+      'model',
+      new AbortController().signal,
+    );
+    expect(JSON.stringify(responses)).not.toContain(
+      'Resident Workspace supports only',
+    );
+    expect(invoke).toHaveBeenCalledWith(
+      browserTool,
+      { path: 'a.txt' },
+      expect.any(AbortSignal),
+    );
+    await turn.consumeResults();
+    await turn.finish();
+  });
+
+  it('still refuses an unregistered non-file tool on the resident profile', async () => {
+    // The admission is by registration resolution, not a prefix test: a name
+    // the registration does not resolve stays refused on the resident profile.
+    broker.capabilityDigest = RESIDENT_WORKSPACE_CAPABILITY_DIGEST;
+    const invoke = vi.fn(async () => ({ content: [] }));
+    turn = clientFilesTurn(clientFilesSession(invoke));
+    const call = { ...clientFilesCall, name: 'web_fetch', callId: 'cf-web' };
+    const responses = await turn.execute(
+      [call],
+      [{ functionCall: { id: call.callId, name: call.name, args: call.args } }],
+      'model',
+      new AbortController().signal,
+    );
+    expect(JSON.stringify(responses)).toContain(
+      'Resident Workspace supports only',
+    );
+    expect(invoke).not.toHaveBeenCalled();
+    await turn.consumeResults();
+    await turn.finish();
+  });
+
+  it('advertises the registration tools on the main and read profiles', async () => {
+    // The resident-profile push is witnessed above; the main and read-profile
+    // declaration pushes must also hand the registration's tools to the model.
+    const invoke = vi.fn(async () => ({ content: [] }));
+    const files = clientFilesSession(invoke);
+    const declared = async (profile?: string) => {
+      const t = new HostedWorkspaceToolTurn(
+        { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+        session,
+        harness,
+        'prompt',
+        commit,
+        messageFitsInline,
+        undefined,
+        undefined,
+        { settings: { mode: 'yolo', timeoutMs: 60_000 }, waiters },
+        { clientFiles: files, ...(profile ? { profile } : {}) },
+      );
+      return (await t.declarations(new AbortController().signal)).map(
+        (tool) => tool.name,
+      );
+    };
+    expect(await declared()).toContain(clientFilesToolName);
+    expect(await declared('hosted-workspace-read/1')).toContain(
+      clientFilesToolName,
+    );
+  });
+
   it('does not journal a tool_result when the Turn is cancelled mid-call', async () => {
     let release!: (value: unknown) => void;
     const gate = new Promise<unknown>((resolve) => {

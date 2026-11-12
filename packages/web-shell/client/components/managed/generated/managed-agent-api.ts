@@ -1901,7 +1901,7 @@ export interface components {
             /** @default false */
             recap?: boolean;
             /**
-             * @description Browser local-files registration is available for this Session: the deployment enables the client-files relay and the Harness supports it. Workspace-bound Sessions additionally require current execution authority. Registration admission still checks the actor grant and idle state separately.
+             * @description Browser local-files registration is available for this Session: the Session is bound to a Workspace, the caller holds current execution authority, the deployment enables the client-files relay and the Harness supports it. A Workspace-less Session never advertises this capability. Registration admission still checks the actor grant and idle state separately.
              * @default false
              */
             clientFiles?: boolean;
@@ -3924,16 +3924,17 @@ export interface components {
             /** @description Echo of the registration identity the caller supplied, for downlink correlation. */
             connectionId: string;
         };
+        /** @description The binding summary. Every field is optional because an absent binding answers 200 with an empty body, which a client reads as an empty object; when a binding is present all fields are populated. */
         WebShellClientFilesStatus: {
-            serverId: string;
-            generation: number;
+            serverId?: string;
+            generation?: number;
             /** @enum {unknown} */
-            state: "active" | "closed";
+            state?: "active" | "closed";
             /**
              * Format: int64
              * @description Binding deadline in Unix epoch milliseconds.
              */
-            expiresAt: number;
+            expiresAt?: number;
             /** @description The current binding's registration identity, for downlink correlation. */
             connectionId?: string;
         };

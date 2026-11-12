@@ -114,6 +114,11 @@ public class SessionLifecycleCoordinator {
         this.lifecycle = lifecycle;
     }
 
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    public void setClientFilesRelay(ObjectProvider<ClientFilesRelayService> clientFilesRelay) {
+        this.clientFilesRelay = clientFilesRelay;
+    }
+
     public boolean supportsWorkspaceLifecycle() {
         return supportsWorkspaceLifecycle("hosted-workspace-files/1");
     }
@@ -139,7 +144,8 @@ public class SessionLifecycleCoordinator {
     // Lazy provider: the relay service depends on ManagedAgentService, so a
     // constructor parameter here could form a cycle. Used to close the
     // client-files binding when the harness detaches or the Session closes.
-    @org.springframework.beans.factory.annotation.Autowired
+    // Setter-injected (like setWorkspaceLifecycleStore) so tests can install a
+    // fake; unset means the teardown is a no-op rather than a swallowed NPE.
     private ObjectProvider<ClientFilesRelayService> clientFilesRelay;
     private final ExecutorService executor;
     private final Clock clock;
@@ -165,6 +171,9 @@ public class SessionLifecycleCoordinator {
     // reporting a registration the model can no longer use. Best-effort: a
     // relay failure must not wedge the lifecycle.
     private void closeClientFilesBinding(OperationRecord operation) {
+        if (clientFilesRelay == null) {
+            return;
+        }
         try {
             clientFilesRelay.ifAvailable(relay ->
                     relay.closeForSession(operation.tenantId(), operation.sessionId()));

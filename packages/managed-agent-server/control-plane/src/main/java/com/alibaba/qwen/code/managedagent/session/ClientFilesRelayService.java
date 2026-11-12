@@ -137,14 +137,23 @@ public class ClientFilesRelayService {
                     ? count.intValue() : 0;
         } catch (RuntimeException cause) {
             LOG.warn("Client files registration dispatch failed for session {}", session, cause);
-            if (previous != null && previous.active()) {
-                // The harness keeps its previous client and credential when the
-                // dispatch is refused; put the previous credential back so the
-                // session keeps serving. Fenced on this attempt still owning the
-                // active binding, and monotonic, so a late compensation cannot
-                // clobber a newer registration or reopen a revoked binding.
-                relay.restore(tenant, session, binding.generation(), previous,
-                        System.currentTimeMillis());
+            long compensationNow = System.currentTimeMillis();
+            // The harness keeps its previous client and credential when the
+            // dispatch is refused; put the previous credential back so the
+            // session keeps serving. Fenced on this attempt still owning the
+            // active binding, and monotonic, so a late compensation cannot
+            // clobber a newer registration or reopen a revoked binding.
+            boolean restored = previous != null && previous.active()
+                    && relay.restore(tenant, session, binding.generation(), previous, compensationNow);
+            if (!restored) {
+                // A refused first registration (or one whose predecessor is
+                // already closed) must not leave this attempt's binding active:
+                // no browser holds its credential and nothing will drain it.
+                // The close is generation-fenced, so it cannot destroy a newer
+                // registration that already replaced this attempt.
+                relay.close(tenant, session, binding.generation(), compensationNow);
+                relay.failQueued(tenant, session, binding.generation(),
+                        ClientFilesModels.ERROR_OFFLINE, compensationNow);
             }
             throw error(503, "client_files_relay_unavailable");
         }
@@ -438,9 +447,11 @@ public class ClientFilesRelayService {
 
     @Scheduled(fixedDelay = 30_000)
     public void expireRequests() {
-        if (!settings.getClientFiles().isEnabled()) {
-            return;
-        }
+        // Maintenance only: the sweeps create no state, so they must keep
+        // running even when the feature flag is turned back off — otherwise
+        // already-persisted queue rows (whose bodies may hold file content)
+        // and their bindings would strand past their TTL for the life of the
+        // Session, contradicting the retention guarantee.
         long now = System.currentTimeMillis();
         // Drain the expiry backlog within a bounded total so a mass disconnect
         // does not leave expired rows occupying queue slots for many ticks.
@@ -450,8 +461,20 @@ public class ClientFilesRelayService {
             }
         }
         // Close bindings whose deadline passed so status stops reporting active
-        // for a credential the relay already refuses.
-        relay.closeExpiredBindings(now, 64);
+        // for a credential the relay already refuses, and tear down each closed
+        // binding's harness catalog: a browser that vanished without an
+        // unregister (crash, killed tab) would otherwise leave the harness
+        // advertising tools every call then refuses as credential-invalid.
+        for (Binding binding : relay.closeExpiredBindings(now, 64)) {
+            relay.failQueued(binding.tenantId(), binding.sessionId(), binding.generation(),
+                    ClientFilesModels.ERROR_OFFLINE, now);
+            try {
+                harness.clientFilesOperation(binding.tenantId(), binding.sessionId(),
+                        Map.of("action", "unregister", "generation", binding.generation()));
+            } catch (RuntimeException ignored) {
+                // best-effort dispatch; the harness session cleanup also drops it
+            }
+        }
         // Drop settled rows past a retention cutoff that exceeds request-ttl, so
         // answered rows stay readable until waiters settle but the bounded queue
         // does not grow for the life of a long-lived Session. Drain the backlog
@@ -578,6 +601,15 @@ public class ClientFilesRelayService {
         if (!settings.getClientFiles().isEnabled()) {
             throw error(503, "client_files_disabled");
         }
+    }
+
+    /**
+     * The async MCP wait must outlive the request TTL that settles the future:
+     * the operator can raise request-ttl past any fixed safety-net timeout, so
+     * derive the ceiling from the configured TTL instead of hard-coding it.
+     */
+    public long mcpAsyncTimeoutMillis() {
+        return settings.getClientFiles().getRequestTtl().toMillis() + 60_000;
     }
 
     private String requireRelayUrl() {

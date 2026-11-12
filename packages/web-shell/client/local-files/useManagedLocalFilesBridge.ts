@@ -86,6 +86,9 @@ export function useManagedLocalFilesBridge(
   // native picker does not save a grant and register a bridge after the view
   // unmounted or the session changed (mirrors the daemon hook's generationRef).
   const generationRef = useRef(0);
+  // Re-entrancy guard: two rapid Connect clicks must not run two connect()
+  // bodies concurrently (both would pick/register and race the bridge ref).
+  const connectingRef = useRef(false);
 
   const blocker = useMemo(
     () =>
@@ -178,52 +181,64 @@ export function useManagedLocalFilesBridge(
 
   const connect = useCallback(async () => {
     if (!win || blocker !== null || !sessionId) return;
-    const generation = generationRef.current;
-    const stale = () => generationRef.current !== generation;
-    let handle = handleRef.current;
-    if (!handle) {
-      const picked = await pickDirectoryHandle(win);
-      if (stale()) return;
-      if (picked.kind === 'cancelled') return;
-      if (picked.kind === 'unavailable') {
-        setStatus({ phase: 'unavailable', blocker: picked.blocker });
-        return;
+    if (connectingRef.current) return;
+    connectingRef.current = true;
+    try {
+      const generation = generationRef.current;
+      const stale = () => generationRef.current !== generation;
+      let handle = handleRef.current;
+      if (!handle) {
+        const picked = await pickDirectoryHandle(win);
+        if (stale()) return;
+        if (picked.kind === 'cancelled') return;
+        if (picked.kind === 'unavailable') {
+          setStatus({ phase: 'unavailable', blocker: picked.blocker });
+          return;
+        }
+        if (picked.kind === 'failed') {
+          setStatus({
+            phase: 'failed',
+            blocker: null,
+            message: picked.message,
+          });
+          return;
+        }
+        handle = picked.handle;
+        handleRef.current = handle;
+        await storeRef.current?.save(handle);
+        if (stale()) return;
       }
-      if (picked.kind === 'failed') {
-        setStatus({ phase: 'failed', blocker: null, message: picked.message });
-        return;
-      }
-      handle = picked.handle;
-      handleRef.current = handle;
-      await storeRef.current?.save(handle);
       if (stale()) return;
-    }
-    if (stale()) return;
-    const server = new LocalFilesMcpServer(new LocalDirectory(handle));
-    const bridge = new ManagedClientFilesBridge({
-      baseUrl,
-      sessionId,
-      server,
-      fetch,
-    });
-    // Detach the previous bridge's listener before tearing it down: its
-    // disconnect() awaits the unregister POST and only then emits `stopped`,
-    // which would otherwise land after the new bridge's `connecting`/`connected`
-    // and overwrite the live panel status with a stale idle.
-    unsubscribeRef.current?.();
-    unsubscribeRef.current = undefined;
-    bridgeRef.current?.disconnect();
-    bridgeRef.current = bridge;
-    unsubscribeRef.current = bridge.onState((state) => {
-      setStatus({
-        phase: phaseOf(state, true),
-        blocker: null,
-        rootName: handle.name,
-        ...(state.phase === 'connected' ? { toolCount: state.toolCount } : {}),
-        ...(state.phase === 'failed' ? { message: state.message } : {}),
+      const server = new LocalFilesMcpServer(new LocalDirectory(handle));
+      const bridge = new ManagedClientFilesBridge({
+        baseUrl,
+        sessionId,
+        server,
+        fetch,
       });
-    });
-    await bridge.connect();
+      // Detach the previous bridge's listener before tearing it down: its
+      // disconnect() awaits the unregister POST and only then emits `stopped`,
+      // which would otherwise land after the new bridge's `connecting`/`connected`
+      // and overwrite the live panel status with a stale idle.
+      unsubscribeRef.current?.();
+      unsubscribeRef.current = undefined;
+      bridgeRef.current?.disconnect();
+      bridgeRef.current = bridge;
+      unsubscribeRef.current = bridge.onState((state) => {
+        setStatus({
+          phase: phaseOf(state, true),
+          blocker: null,
+          rootName: handle.name,
+          ...(state.phase === 'connected'
+            ? { toolCount: state.toolCount }
+            : {}),
+          ...(state.phase === 'failed' ? { message: state.message } : {}),
+        });
+      });
+      await bridge.connect();
+    } finally {
+      connectingRef.current = false;
+    }
   }, [win, blocker, sessionId, baseUrl, fetch]);
 
   if (blocker !== null && status.phase !== 'unavailable') {

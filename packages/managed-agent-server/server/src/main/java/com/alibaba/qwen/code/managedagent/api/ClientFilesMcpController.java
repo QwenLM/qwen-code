@@ -41,10 +41,12 @@ public class ClientFilesMcpController {
                 ? authorization.substring(BEARER.length()).trim() : null;
         // The wait runs on the service's shared poller, not a servlet thread;
         // validation refusals still throw synchronously into the exception
-        // handler. The timeout is a safety net — the request TTL settles the
-        // future first.
+        // handler. The timeout is a safety net derived from the request TTL so
+        // it always outlives the TTL that settles the future, even when the
+        // operator raises request-ttl.
         CompletableFuture<String> pending = service.mcpSession(sessionId, token, body);
-        DeferredResult<ResponseEntity<String>> result = new DeferredResult<>(300_000L);
+        DeferredResult<ResponseEntity<String>> result =
+                new DeferredResult<>(service.mcpAsyncTimeoutMillis());
         pending.whenComplete((response, failure) -> {
             if (failure != null) {
                 result.setErrorResult(failure);

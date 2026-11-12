@@ -48,6 +48,14 @@ public class ClientFilesRelayStore implements ClientFilesRelay {
             String actorId, String serverId, String tokenHash, long expiresAt, long now,
             String connectionId) {
         String scope = ManagedSchemaKeys.key(tenantId, sessionId);
+        // Lock the Session root first so concurrent first registrations queue
+        // on a record lock. Without it both readers take non-conflicting gap
+        // locks on the absent binding row and their INSERTs deadlock on InnoDB
+        // (error 1213), surfacing as a 500 instead of a registration. The
+        // service only registers sessions it has already resolved, so the root
+        // row exists in production.
+        jdbc.query("SELECT session_id FROM ma_session WHERE tenant_id=? AND session_id=? FOR UPDATE",
+                rs -> {}, tenantId, sessionId);
         // The read is locked so concurrent registrations serialize their
         // generation increments instead of losing an update. The snapshot read
         // here is returned as the compensation target: a caller that read the
@@ -233,10 +241,19 @@ public class ClientFilesRelayStore implements ClientFilesRelay {
     }
 
     @Override
-    public int closeExpiredBindings(long now, int limit) {
-        return jdbc.update("UPDATE ma_client_files_binding SET state=?,gmt_modified=?"
-                        + " WHERE state=? AND expires_at<=? LIMIT ?",
-                ClientFilesModels.STATE_CLOSED, now, ClientFilesModels.STATE_ACTIVE, now, limit);
+    public List<Binding> closeExpiredBindings(long now, int limit) {
+        List<Binding> expired = jdbc.query("SELECT " + BINDING_COLUMNS
+                        + " FROM ma_client_files_binding WHERE state=? AND expires_at<=? LIMIT ?",
+                BINDING_MAPPER, ClientFilesModels.STATE_ACTIVE, now, limit);
+        List<Binding> closed = new java.util.ArrayList<>();
+        for (Binding binding : expired) {
+            // Fence on the generation so a concurrent re-registration that
+            // already advanced it is not closed by this sweep.
+            if (close(binding.tenantId(), binding.sessionId(), binding.generation(), now)) {
+                closed.add(binding);
+            }
+        }
+        return closed;
     }
 
     @Override
@@ -245,13 +262,6 @@ public class ClientFilesRelayStore implements ClientFilesRelay {
                         + " AND gmt_modified<? LIMIT ?",
                 ClientFilesModels.REQUEST_ANSWERED, ClientFilesModels.REQUEST_FAILED,
                 ClientFilesModels.REQUEST_EXPIRED, cutoff, limit);
-    }
-
-    @Override
-    public void deleteSession(String tenantId, String sessionId) {
-        String scope = ManagedSchemaKeys.key(tenantId, sessionId);
-        jdbc.update("DELETE FROM ma_client_files_request WHERE session_scope_key=?", scope);
-        jdbc.update("DELETE FROM ma_client_files_binding WHERE session_scope_key=?", scope);
     }
 
     private Binding findByScope(String scope) {
