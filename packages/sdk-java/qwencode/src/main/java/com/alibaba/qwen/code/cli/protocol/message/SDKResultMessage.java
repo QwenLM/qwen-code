@@ -150,6 +150,7 @@ public class SDKResultMessage extends MessageBase {
      *
      * @param error Whether the result represents an error
      */
+    @JSONField(name = "is_error")
     public void setError(boolean error) {
         isError = error;
     }
