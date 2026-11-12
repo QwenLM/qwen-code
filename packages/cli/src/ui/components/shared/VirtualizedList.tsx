@@ -251,8 +251,9 @@ function VirtualizedList<T>(
   const { width: measuredContainerWidth, height: measuredContainerHeight } =
     useBoxMetrics(containerRef as React.RefObject<DOMElement>);
 
-  // A host that derives the viewport from the terminal (MainContent passes
-  // `Math.max(0, terminalHeight - header - tabBar)`) legitimately hands down 0.
+  // A host that derives the viewport from the terminal (AppContainer computes
+  // `Math.max(0, terminalHeight - controls - reservation - tabBar)`, which
+  // MainContent forwards unchanged) legitimately hands down 0.
   // `0` is a steady state, not only a settling frame: the controls region can
   // fill a short terminal for as long as it stays open. The component's own
   // measurement cannot stand in for the viewport — the root box sits under
