@@ -21,7 +21,7 @@ public enum ManagedSchemaProjection {
     DELIVERY(
             "delivery_key, delivery_kind, tenant_id, channel_id, delivery_id, source_session_id, "
                     + "target_session_id, source_scope_key, source_record_key, source_revision, "
-                    + "segment_id, segment_ordinal, creation_key, provider_id, provider_receipt_json, "
+                    + "segment_id, segment_ordinal, segment_count, creation_key, provider_id, provider_receipt_json, "
                     + "request_digest, payload_version, payload_json, transport_state, reception_state, "
                     + "consumption_state, claimed_at, reconcile_operation_id, claim_owner, "
                     + "claim_generation, claim_until, attempt_count, available_at, last_error, "
