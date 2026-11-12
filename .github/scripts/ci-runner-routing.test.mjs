@@ -792,10 +792,24 @@ describe('ci.yml lint HOME isolation', () => {
       // The realized removal by value, never $HOME: any `qwen-*` path passes a
       // substring check, so a retargeted `rm -rf` (or an `echo` stand-in)
       // would leave the run-unique home to accumulate on this persistent pool.
+      //
+      // The reap runs BEFORE the removal and in the SAME step: a daemon that
+      // outlived the suite recreates entries under the home while `rm -rf`
+      // unlinks them, and rmdir loses with ENOTEMPTY (job 130495062334: 223
+      // tests passed, then the required check went red on the cleanup). A
+      // separate step could be skipped by an `if`, and the cleanup must stay
+      // this lane's last step, so the ordering is pinned inside the run body.
+      //
+      // The helper owns the removal so the workflow does not grow past the size
+      // ratchet. The fallback matters: `always()` reaches this step with no
+      // checkout, or one predating the helper, and neither may redden the job.
       assert.equal(
         String(clean.run),
-        `rm -rf -- "\${RUNNER_TEMP}/${HOME_TEMPLATE[id]}"`,
-        `${id} must reclaim the exact run-unique HOME the create step built`,
+        `h="\${RUNNER_TEMP}/${HOME_TEMPLATE[id]}"; ` +
+          '{ [ -f .github/scripts/ci/reap-isolated-home.sh ] && ' +
+          'bash .github/scripts/ci/reap-isolated-home.sh "$h"; } || ' +
+          'rm -rf -- "$h" || true',
+        `${id} must reap this run's daemons, then reclaim the exact run-unique HOME the create step built`,
       );
     }
   });
