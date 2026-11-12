@@ -29,8 +29,9 @@ details, full-value dialogs, copying, and first-column freezing.
   text, and encode CRLF, CR and LF as table-cell line breaks.
 - At toolbar widths up to 500px, copying and expanding text use icons only,
   with accessible button names. Copy success is announced by a polite status.
-  When cells are selected, the table actions switch to icons at widths up to
-  720px to leave room for the selection statistics and Copy text button.
+  When cells are selected, table actions use icons at toolbar widths up to
+  1200px. Above 720px, secondary numeric statistics can scroll independently
+  when they exceed the space available beside the table actions.
 - Keep a single sort icon, with color and opacity identifying its direction
   so the visual state does not rely on color alone.
 - Drag selection scrolls at the edges, including the left action gutter and

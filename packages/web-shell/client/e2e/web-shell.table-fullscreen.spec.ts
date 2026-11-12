@@ -40,6 +40,7 @@ async function openFixture(
     shadow?: boolean;
     theme?: 'light' | 'dark';
     language?: 'en' | 'zh-CN';
+    markdown?: string;
   } = {},
 ) {
   const { width = 1280, language = 'en' } = options;
@@ -47,7 +48,7 @@ async function openFixture(
   const scenario = createWebShellDaemonScenario({
     events: [
       userTextEvent('Show a wide and tall table.', { id: 1 }),
-      assistantTextEvent(fixture, { id: 2 }),
+      assistantTextEvent(options.markdown ?? fixture, { id: 2 }),
       turnCompleteEvent('prompt-table', { id: 3 }),
     ],
   });
@@ -335,7 +336,7 @@ test.describe('enhanced table fullscreen', () => {
     ).toEqual([]);
   });
 
-  test('keeps the inline toolbar from overlapping after selecting a cell in a narrow window', async ({
+  test('@smoke keeps the inline toolbar from overlapping after selecting a cell in a narrow window', async ({
     page,
   }, testInfo) => {
     await openFixture(page, testInfo, {
@@ -361,6 +362,49 @@ test.describe('enhanced table fullscreen', () => {
     );
     expect((await rowCount.boundingBox())!.height).toBe(rowCountBefore.height);
     await expect(copyTable).toBeInViewport({ ratio: 1 });
+  });
+
+  test('@smoke keeps every toolbar action in view after selecting a numeric cell at desktop width', async ({
+    page,
+  }, testInfo) => {
+    const longScore = '1234567890.123456';
+    await openFixture(page, testInfo, {
+      width: 1280,
+      theme: 'light',
+      markdown: fixture.replace(' | 79 | ', ` | ${longScore} | `),
+    });
+    const table = page.locator('[data-selection-copy-table]');
+    const statistics = table.getByRole('group', {
+      name: 'Numeric selection statistics',
+    });
+    const expectActionsInView = async () => {
+      await expect(table.getByText('Numeric 1', { exact: true })).toBeVisible();
+      for (const name of [
+        'Copy text',
+        'Table density',
+        'Custom columns',
+        'Expand text',
+        'Copy',
+      ]) {
+        await expect(
+          table.getByRole('button', { name, exact: true }),
+        ).toBeInViewport({ ratio: 1 });
+      }
+    };
+
+    await table.getByRole('cell', { name: '80', exact: true }).click();
+    await expect(
+      statistics.getByText('Sum 80', { exact: true }),
+    ).toBeInViewport({ ratio: 1 });
+    await expectActionsInView();
+
+    await table.getByRole('cell', { name: longScore, exact: true }).click();
+    await expectActionsInView();
+    await statistics.press('ArrowRight');
+    await expect
+      .poll(() => statistics.evaluate((element) => element.scrollLeft))
+      .toBeGreaterThan(0);
+    await expectActionsInView();
   });
 
   test('keeps narrow-screen controls and Shadow DOM portals usable', async ({

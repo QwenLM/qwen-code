@@ -3302,8 +3302,8 @@ describe('EnhancedMarkdownTable', () => {
 
     dragColumn(container, 'Move Score', 'Move Team');
     dragCells(dataCell(container, 0, 0), dataCell(container, 1, 1));
-    const scroller = container.querySelector<HTMLElement>('div[tabindex="0"]');
-    expect(scroller).not.toBeNull();
+    const scroller = container.querySelector('table')?.parentElement;
+    expect(scroller).toBeDefined();
     const { event, setData } = dispatchCopy(scroller!);
 
     expect(event.defaultPrevented).toBe(true);
@@ -3656,8 +3656,8 @@ describe('EnhancedMarkdownTable', () => {
     outsideButton.focus();
 
     dragCells(dataCell(container, 0, 0), dataCell(container, 1, 1));
-    const scroller = container.querySelector<HTMLElement>('div[tabindex="0"]');
-    expect(scroller).not.toBeNull();
+    const scroller = container.querySelector('table')?.parentElement;
+    expect(scroller).toBeDefined();
     expect(document.activeElement).toBe(scroller);
     const { event, setData } = dispatchCopy(document.activeElement!);
 

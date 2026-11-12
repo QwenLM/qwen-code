@@ -113,13 +113,29 @@
   font-weight: 600;
 }
 
-.selectionStats {
+.selectionStats,
+.selectionStatsSecondary {
   display: flex;
-  flex-shrink: 0;
   flex-wrap: nowrap;
   gap: 4px 10px;
   align-items: center;
   color: var(--muted-foreground);
+}
+
+.selectionStats {
+  flex-shrink: 0;
+}
+
+.selectionStatsSecondary {
+  min-width: 0;
+  align-self: stretch;
+  overflow: auto hidden;
+  scrollbar-width: thin;
+}
+
+.selectionStatsSecondary:focus-visible {
+  outline: 2px solid var(--agent-blue-500);
+  outline-offset: -2px;
 }
 
 .selectionMetric {
@@ -621,12 +637,12 @@ tr:hover .frozenCell.selectedCell {
 
 @supports (container-type: inline-size) {
   @container table-toolbar (max-width: 720px) {
-    .selectionMetricSecondary {
+    .selectionStatsSecondary {
       display: none;
     }
   }
 
-  @container table-toolbar (500px < width <= 720px) {
+  @container table-toolbar (500px < width <= 1200px) {
     .selectionStats
       ~ .compactToolbarControl
       :is(.compactToolbarLabel, .toolbarChevron) {
