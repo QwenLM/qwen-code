@@ -304,6 +304,82 @@ public class ManagedAutomationService {
     }
 
     /**
+     * Session-scoped retire for the internal writer-binding routes. The
+     * binding authorized this exact Session, so a definition of any other
+     * Session is invisible (404) before any side effect; the actor is the
+     * bound Session's creator. Unlike the public retire this is ungated
+     * (design decision 2): an operator can retire what the gate stopped. The
+     * not-ACTIVE local fallback and the claim/replay discipline are inherited.
+     */
+    public Result<PublicAutomation> retireSession(String tenantId,
+            String sessionId, String actorId, String automationId,
+            String idempotencyKey) {
+        requireActor(actorId);
+        ManagedAgentService.validateIdempotencyKey(idempotencyKey);
+        requireScheduleId(automationId);
+        String requestDigest = digests.digest(Map.of("operation", "retire",
+                "automationId", automationId));
+        Optional<Result<PublicAutomation>> replay = replay(tenantId, actorId,
+                idempotencyKey, requestDigest, PublicAutomation.class);
+        if (replay.isPresent()) {
+            return replay.get();
+        }
+        ScheduleRow row = ledger.findSchedule(tenantId, automationId)
+                .orElseThrow(() -> new ManagedAgentException(404,
+                        "automation_not_found",
+                        "The automation was not found."));
+        if (!sessionId.equals(row.sessionId())) {
+            throw new ManagedAgentException(404,
+                    "automation_not_found", "The automation was not found.");
+        }
+        SessionRecord session;
+        try {
+            session = requireCreatorSession(tenantId, actorId, sessionId);
+        } catch (ManagedAgentException error) {
+            if (!"session_not_active".equals(error.getCode())) {
+                throw error;
+            }
+            session = null;
+        }
+        boolean claimed = ledger.claimCommand(row.sessionId(), new CommandRow(tenantId,
+                idempotencyKey, actorId, requestDigest, automationId, ""),
+                clock.get());
+        if (!claimed) {
+            Optional<Result<PublicAutomation>> concurrent = replay(tenantId,
+                    actorId, idempotencyKey, requestDigest,
+                    PublicAutomation.class);
+            if (concurrent.isPresent()) {
+                return concurrent.get();
+            }
+        }
+        if (!AutomationLedgerStore.STATE_LIVE.equals(row.state())) {
+            PublicAutomation already = publicAutomation(row);
+            remember(tenantId, actorId, idempotencyKey, requestDigest,
+                    automationId, already);
+            return new Result<>(already, true);
+        }
+        if (session == null) {
+            ledger.retire(tenantId, automationId, clock.get());
+            PublicAutomation retired = publicAutomation(ledger
+                    .findSchedule(tenantId, automationId).orElseThrow());
+            remember(tenantId, actorId, idempotencyKey, requestDigest,
+                    automationId, retired);
+            return new Result<>(retired, false);
+        }
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("operationId", operationIdFor(tenantId, idempotencyKey));
+        body.put("kind", "retire_schedule");
+        body.put("scheduleId", automationId);
+        Map<String, Object> answer = relayClaimed(tenantId, idempotencyKey,
+                requestDigest, actorId, session, body);
+        PublicAutomation retired = committedDefinition(session, answer);
+        ledger.retire(tenantId, automationId, clock.get());
+        remember(tenantId, actorId, idempotencyKey, requestDigest,
+                automationId, retired);
+        return new Result<>(retired, replayed(answer));
+    }
+
+    /**
      * A manual run: the Idempotency-Key is the occurrence, so a retry meets
      * the same run; the overlap policy applies as it does to a scheduled
      * occurrence, and the ledger row is durable before the Harness fires.
@@ -407,6 +483,36 @@ public class ManagedAutomationService {
             decoded = new ScheduleCursor(Long.parseLong(parts[0]), parts[1]);
         }
         SchedulePage page = ledger.listReadableSchedules(tenantId, actorId,
+                decoded, limit);
+        List<PublicAutomation> data = new ArrayList<>();
+        for (ScheduleRow row : page.rows()) {
+            data.add(publicAutomation(row));
+        }
+        String next = null;
+        if (page.hasMore() && !page.rows().isEmpty()) {
+            ScheduleRow last = page.rows().getLast();
+            next = encodeCursor(last.createdAt(), last.scheduleId());
+        }
+        return new PublicList<>("list", data, page.hasMore(), next);
+    }
+
+    /**
+     * Session-scoped list for the internal writer-binding routes: the binding
+     * authorized this exact Session, so the page is the Session's own
+     * definitions (filtered before the page limit), not the creator's
+     * Workspace-wide reach. Ungated, like the public list. The page size is
+     * chosen by the caller to cover the per-Session capacity in one page.
+     */
+    public PublicList<PublicAutomation> listSession(String tenantId,
+            String sessionId, String cursor, int limit) {
+        requireLimit(limit);
+        ScheduleCursor decoded = null;
+        if (cursor != null && !cursor.isEmpty()) {
+            String[] parts = decodeCursor(cursor,
+                    "Automation cursor is invalid.");
+            decoded = new ScheduleCursor(Long.parseLong(parts[0]), parts[1]);
+        }
+        SchedulePage page = ledger.listSessionSchedules(tenantId, sessionId,
                 decoded, limit);
         List<PublicAutomation> data = new ArrayList<>();
         for (ScheduleRow row : page.rows()) {

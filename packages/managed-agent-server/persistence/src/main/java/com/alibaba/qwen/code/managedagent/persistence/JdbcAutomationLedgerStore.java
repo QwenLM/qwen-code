@@ -354,6 +354,11 @@ public class JdbcAutomationLedgerStore
         return AutomationScheduleQueries.listReadable(jdbc, SCHEDULE, tenantId, actorId, cursor, limit);
     }
 
+    public SchedulePage listSessionSchedules(String tenantId, String sessionId,
+            ScheduleCursor cursor, int limit) {
+        return AutomationScheduleQueries.listSession(jdbc, SCHEDULE, tenantId, sessionId, cursor, limit);
+    }
+
     public int countLive(String tenantId, String sessionId) {
         Integer count = jdbc.queryForObject("SELECT COUNT(*) FROM"
                         + " ma_schedule WHERE tenant_id = ?"

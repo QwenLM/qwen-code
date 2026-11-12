@@ -44,4 +44,30 @@ final class AutomationScheduleQueries {
         return new SchedulePage(hasMore ? rows.subList(0, limit) : rows,
                 hasMore);
     }
+
+    /**
+     * Session-scoped page for the internal writer-binding routes: the binding
+     * already authorized this exact Session, so the filter is the Session
+     * itself, applied before the page limit (a controller-side post-filter
+     * would cut the page first and derive a wrong cursor). No actor/workspace
+     * reachability is re-derived here.
+     */
+    static SchedulePage listSession(JdbcTemplate jdbc, RowMapper<ScheduleRow> mapper,
+            String tenantId, String sessionId, ScheduleCursor cursor, int limit) {
+        String select = "SELECT " + ManagedSchemaProjection.SCHEDULE.columns("s")
+                + " FROM ma_schedule s WHERE s.tenant_id = ? AND s.session_id = ?";
+        List<ScheduleRow> rows = cursor == null
+                ? jdbc.query(select + " ORDER BY s.gmt_create DESC,"
+                        + " s.schedule_id DESC LIMIT ?", mapper, tenantId,
+                        sessionId, limit + 1)
+                : jdbc.query(select + " AND (s.gmt_create < ?"
+                        + " OR (s.gmt_create = ? AND s.schedule_id < ?))"
+                        + " ORDER BY s.gmt_create DESC, s.schedule_id DESC"
+                        + " LIMIT ?", mapper, tenantId, sessionId,
+                        cursor.createdAt(), cursor.createdAt(),
+                        cursor.scheduleId(), limit + 1);
+        boolean hasMore = rows.size() > limit;
+        return new SchedulePage(hasMore ? rows.subList(0, limit) : rows,
+                hasMore);
+    }
 }
