@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -9,7 +10,9 @@ import org.springframework.transaction.support.TransactionTemplate;
 /** Reclaims released public projection bodies, including those of still-live Sessions. */
 final class ManagedProjectionResourceCollector {
     private static final int BATCH = 32;
-    private static final String KINDS = "X'6d616e616765642d6d6573736167652d7061727473'";
+    private static final String KINDS = "X'6d616e616765642d6d6573736167652d7061727473',"
+            + "X'6d616e616765642d736964652d71756572792d696e707574',"
+            + "X'6d616e616765642d736964652d71756572792d6368756e6b'";
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transactions;
 
@@ -36,10 +39,10 @@ final class ManagedProjectionResourceCollector {
     boolean runOnce() {
         boolean changed = false;
         var candidates = jdbc.queryForList(
-                        "SELECT resource_key, tenant_id, session_id FROM ma_resource WHERE retention_until <= " + ManagedSchemaTime.SQL_NOW + " AND NOT EXISTS (SELECT 1 FROM ma_session s WHERE s.tenant_id = ma_resource.tenant_id AND s.session_id = ma_resource.session_id AND s.csi_guard = TRUE) ORDER BY retention_until, resource_key LIMIT "
+                        "SELECT resource_key, tenant_id, session_id FROM ma_resource WHERE retention_until <= " + ManagedSchemaTime.SQL_NOW + " AND NOT EXISTS (SELECT 1 FROM ma_session s WHERE s.tenant_id = ma_resource.tenant_id AND s.session_id = ma_resource.session_id AND s.is_csi_guard = TRUE) ORDER BY retention_until, resource_key LIMIT "
                                 + BATCH);
         for (var candidate : candidates) {
-            changed |= Boolean.TRUE.equals(ManagedSessionStore.skipContended(transactions,
+            changed |= Boolean.TRUE.equals(JdbcManagedSessionStore.skipContended(transactions,
                     status -> collect((String) candidate.get("tenant_id"),
                             (String) candidate.get("session_id"),
                             (String) candidate.get("resource_key"))));
@@ -48,13 +51,13 @@ final class ManagedProjectionResourceCollector {
     }
 
     private boolean collect(String tenant, String session, String key) {
-        ManagedSessionStore.lockBounded(() -> ToolPublicationRetentionStore.lockTenant(
-                jdbc, tenant, ManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
+        JdbcManagedSessionStore.lockBounded(() -> ToolPublicationRetentionStore.lockTenant(
+                jdbc, tenant, JdbcManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
         if (ManagedLegacySessionGuard.isPrivate(jdbc, tenant, session)) {
             return false;
         }
         ToolPublicationRetentionStore.lockSessionHead(jdbc, tenant, session);
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session);
+        String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
         var rows =
                 jdbc.queryForList(
                         "SELECT resource_key FROM ma_resource WHERE resource_key = ? AND"
@@ -88,7 +91,7 @@ final class ManagedProjectionResourceCollector {
                 ToolPublicationRetentionStore.hash(tenant), ToolPublicationRetentionStore.hash(session), tenant, session).isEmpty();
         protectedBody |= !jdbc.queryForList(
                                 "SELECT session_id FROM ma_session WHERE tenant_id = ? AND"
-                                        + " session_id = ? AND recovery_protected = TRUE",
+                                        + " session_id = ? AND is_recovery_protected = TRUE",
                 tenant, session).isEmpty();
         protectedBody |= !jdbc.queryForList(
                                 "SELECT lease_id FROM ma_read_lease WHERE tenant_key = ? AND"

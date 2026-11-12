@@ -34,6 +34,7 @@ import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 
 /** A shared Workspace binding answers each Runtime Session for its own Harness Session. */
 class SharedHarnessOwnershipTest {
@@ -79,6 +80,31 @@ class SharedHarnessOwnershipTest {
     }
 
     @Test
+    void harnessChecksDoNotWaitForTheTenantPlacementGuard() throws Exception {
+        bindings.requestHarnessDrain("tenant", "harness-a");
+        try (var holder = source.getConnection()) {
+            holder.setAutoCommit(false);
+            JdbcRuntimeBindingRepository.lockPlacementDomain(holder, "tenant");
+            try {
+                assertTimeoutPreemptively(Duration.ofSeconds(10), () -> {
+                    bindings.requireHarnessAdmission(SHARED, SCOPE, "harness-b", null);
+                    bindings.requireHarnessAdmission(SCOPE, "harness-b", null);
+                    bindings.requireHookAdmission(SHARED, SCOPE, "harness-b", null);
+                    bindings.requireHookAdmission(SCOPE, "harness-b", null);
+                    assertEquals(false, bindings.requireHarnessRecovery(SHARED, SCOPE, "harness-a", null));
+                    assertClosed(() -> bindings.requireHarnessAdmission(SHARED, SCOPE, "harness-a", null));
+                    assertClosed(() -> bindings.requireHarnessCleanup(SHARED, SCOPE, "harness-a",
+                            new RuntimeLifecycleAuthority("close", 1)));
+                    assertClosed(() -> bindings.requireHarnessCleanup(SCOPE, "harness-a",
+                            new RuntimeLifecycleAuthority("close", 1)));
+                });
+            } finally {
+                holder.rollback();
+            }
+        }
+    }
+
+    @Test
     void cleanupAuthorityFollowsTheRuntimeSessionsHarnessClaim() throws Exception {
         var binding = ready(bindings, SHARED);
         var authority = new RuntimeLifecycleAuthority("close", 1);
@@ -111,7 +137,7 @@ class SharedHarnessOwnershipTest {
         assertClosed(() -> bindings.requireHarnessAdmission(SHARED, SCOPE, "harness-a", authority));
         assertClosed(() -> bindings.requireHookAdmission(SHARED, SCOPE, "harness-a", authority));
         JdbcRepositorySupport.transaction(source, connection -> {
-            JdbcRuntimeBindingRepository.beginHarnessLifecycle(connection, "tenant", "harness-a", "close");
+            RuntimeAdmissionFences.beginHarnessLifecycle(connection, "tenant", "harness-a", "close");
             return null;
         });
         try (var connection = source.getConnection(); var statement = connection.prepareStatement(
@@ -140,7 +166,7 @@ class SharedHarnessOwnershipTest {
         // refuses a bound Workspace scope outright; the Harness claim fences it.
         assertClosed(() -> bindings.requireHarnessAdmission(SCOPE, "harness-a", authority));
         JdbcRepositorySupport.transaction(source, connection -> {
-            JdbcRuntimeBindingRepository.beginHarnessLifecycle(connection, "tenant", "harness-a", "close");
+            RuntimeAdmissionFences.beginHarnessLifecycle(connection, "tenant", "harness-a", "close");
             return null;
         });
         try (var connection = source.getConnection(); var statement = connection.prepareStatement(
@@ -169,17 +195,6 @@ class SharedHarnessOwnershipTest {
         assertClosed(() -> bindings.admitExecution(sessions, executions, execution(binding, a, "call-a")));
         assertEquals(ToolExecutionRecord.State.PREPARED,
                 bindings.admitExecution(sessions, executions, execution(binding, b, "call-b")).getState());
-    }
-
-    @Test
-    void inMemoryRepositoryFencesTheSameHarnessSession() {
-        var registry = new InMemoryRuntimeBindingRepository();
-        var saved = new InMemoryRuntimeSessionRepository();
-        var binding = ready(registry, SHARED);
-        registry.requestHarnessDrain("tenant", "harness-a");
-
-        assertClosed(() -> registry.admitSession(saved, candidate(binding, "harness-a", "a-1")));
-        assertNotNull(registry.admitSession(saved, candidate(binding, "harness-b", "b-1")));
     }
 
     @Test

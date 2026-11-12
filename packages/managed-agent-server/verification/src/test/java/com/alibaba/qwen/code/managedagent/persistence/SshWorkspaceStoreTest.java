@@ -8,6 +8,8 @@ import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfi
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
 import com.alibaba.qwen.code.managedagent.model.StoreModels;
+import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.repository.SshWorkspaceStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLease;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
@@ -21,6 +23,7 @@ import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -42,14 +45,14 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class SshWorkspaceStoreTest {
-    private JdbcTemplate jdbc;
-    private SshWorkspaceStore store;
+    JdbcTemplate jdbc;
+    JdbcSshWorkspaceStore store;
 
     @BeforeEach
     void setup() {
         var source = source();
         jdbc = new ManagedSchemaJdbcTemplate(source);
-        store = new SshWorkspaceStore(jdbc, new DataSourceTransactionManager(source));
+        store = new JdbcSshWorkspaceStore(jdbc, new DataSourceTransactionManager(source));
     }
 
     javax.sql.DataSource source() {
@@ -78,8 +81,8 @@ class SshWorkspaceStoreTest {
         assertThat(jdbc.queryForObject("SELECT role FROM ma_workspace_access", String.class)).isEqualTo("OWNER");
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_workspace", Integer.class)).isEqualTo(1);
         assertThat(store.verify(binding(intent))).isTrue();
-        assertThat(WorkspaceExecutionStore.storageKey(jdbc, binding(intent)))
-                .isEqualTo(SshWorkspaceStore.physicalKey(com.alibaba.qwen.code.managedagent.repository.SshWorkspaceStore.object(registration, "identity")));
+        assertThat(JdbcWorkspaceExecutionStore.storageKey(jdbc, binding(intent)))
+                .isEqualTo(JdbcSshWorkspaceStore.physicalKey(SshWorkspaceStore.object(registration, "identity")));
     }
 
     @Test
@@ -161,9 +164,12 @@ class SshWorkspaceStoreTest {
         properties.setDefinitionToolProfiles(List.of(WorkspaceToolProfiles.MCP));
         properties.getRuntimeBroker().setWorkspaceMounts(List.of(
                 new ManagedAgentProperties.RuntimeBroker.WorkspaceMount("tenant", "local", "/local")));
-        var sessions = sessions(properties);
-        var definitions = new ManagedAgentDefinitionStore(jdbc, new RequestDigests());
-        sessions.setManagedAgentDefinitionStore(definitions);
+        var definitions = new JdbcManagedAgentDefinitionStore(jdbc, new RequestDigests());
+        var registry = new JdbcManagedWorkspaceRegistry(jdbc);
+        registry.configureSsh(properties);
+        var sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(
+                jdbc, new com.fasterxml.jackson.databind.ObjectMapper(), Clock.systemUTC(), ignored -> {},
+                registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules(), definitions, null);
         var transaction = new org.springframework.transaction.support.TransactionTemplate(new DataSourceTransactionManager(jdbc.getDataSource()));
         String agent = "agent_" + "a".repeat(32);
         transaction.executeWithoutResult(ignored -> definitions.create("tenant", "definition", "digest", agent, "d".repeat(64),
@@ -185,7 +191,7 @@ class SshWorkspaceStoreTest {
         jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation, storage_id, display_name, config_ref, policy_ref, state)"
                 + " VALUES ('tenant', 'local', 1, 'local', 'Local', ?, ?, 'ACTIVE')", WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
         jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role) VALUES ('tenant', 'local', ?, 'OWNER')",
-                com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey("tenant", "actor"));
+                ManagedWorkspaceRegistry.actorKey("tenant", "actor"));
         var local = transaction.execute(ignored -> sessions.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
                 .tenantId("tenant")
                 .actorId("actor")
@@ -223,10 +229,10 @@ class SshWorkspaceStoreTest {
     }
 
     private ManagedAgentStore sessions(ManagedAgentProperties properties) {
-        var registry = new ManagedWorkspaceRegistry(jdbc);
+        var registry = new JdbcManagedWorkspaceRegistry(jdbc);
         registry.configureSsh(properties);
-        return com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, new com.fasterxml.jackson.databind.ObjectMapper(),
-                Clock.systemUTC(), ignored -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+        return com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, new com.fasterxml.jackson.databind.ObjectMapper(),
+                Clock.systemUTC(), ignored -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
     }
 
     @Test
@@ -241,7 +247,7 @@ class SshWorkspaceStoreTest {
         store.reserve(retry, "new", registration(intent));
         store.complete(retry, "new");
         jdbc.update("UPDATE ma_storage SET fence_operation_id = ? WHERE alias_key = ?", "fence",
-                JdbcRuntimeBindingRepository.storageAliasKey("tenant", intent.storageId()));
+                RuntimeAdmissionFences.storageAliasKey("tenant", intent.storageId()));
         assertThatThrownBy(() -> store.verify(binding(intent))).isInstanceOf(RuntimeException.class);
     }
 
@@ -266,8 +272,8 @@ class SshWorkspaceStoreTest {
         var first = runtimeSession(intent, "first");
         var second = runtimeSession(intent, "second");
         var manager = new DataSourceTransactionManager(jdbc.getDataSource());
-        var one = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new WorkspaceExecutionStore(jdbc, manager));
-        var two = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new WorkspaceExecutionStore(jdbc, manager));
+        var one = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new JdbcWorkspaceExecutionStore(jdbc, manager));
+        var two = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new JdbcWorkspaceExecutionStore(jdbc, manager));
         var binding = binding(intent);
         one.claim(binding, first);
         two.claim(binding, second);
@@ -283,7 +289,7 @@ class SshWorkspaceStoreTest {
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage_owner WHERE holder_key IS NOT NULL", Integer.class)).isZero();
     }
 
-    private RuntimeSessionRecord runtimeSession(SshWorkspaceStore.Intent intent, String id) {
+    private RuntimeSessionRecord runtimeSession(JdbcSshWorkspaceStore.Intent intent, String id) {
         var source = jdbc.getDataSource();
         var bindings = new JdbcRuntimeBindingRepository(source,
                 new AesGcmSecretProtector("test", new byte[32]));
@@ -330,7 +336,7 @@ class SshWorkspaceStoreTest {
         assertThat(store.findParked(10)).isEmpty();
         jdbc.update("UPDATE ma_operation SET available_at = 0");
         assertThat(store.findParked(10)).containsExactly(new StoreModels.ParkedOperation("tenant", null,
-                intent.operationId(), SshWorkspaceStore.OPERATION));
+                intent.operationId(), JdbcSshWorkspaceStore.OPERATION));
         var parked = store.parked("tenant", intent.operationId()).orElseThrow();
         assertThat(parked.reserved()).isTrue();
         assertThat(parked.failureCode()).isEqualTo("ssh_runtime_identity_mismatch");
@@ -372,6 +378,28 @@ class SshWorkspaceStoreTest {
         store.reserve(retry, "next", registration(retry));
         store.complete(retry, "next");
         assertThat(store.get("tenant", "actor", next.operationId()).status()).isEqualTo("completed");
+        assertThat(store.completeParked("tenant", intent.operationId())).isFalse();
+        assertThat(store.releaseParked("tenant", intent.operationId(), "late")).isFalse();
+        assertThat(store.verify(binding(retry))).isTrue();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"missing", "registration", "physical"})
+    void publicationRequiresItsOriginalPhysicalOwner(String mismatch) {
+        var intent = parkedReservation();
+        if ("missing".equals(mismatch)) {
+            jdbc.update("DELETE FROM ma_storage_owner");
+        } else if ("registration".equals(mismatch)) {
+            jdbc.update("UPDATE ma_storage_owner SET mount_registration_id = ?", UUID.randomUUID().toString());
+        } else {
+            jdbc.update("UPDATE ma_storage_owner SET storage_key = 'replacement', physical_key = 'replacement'");
+        }
+        assertThatThrownBy(() -> store.completeParked("tenant", intent.operationId()))
+                .isInstanceOfSatisfying(RuntimeBrokerException.class, error -> assertThat(error.getCode()).isEqualTo("workspace_unavailable"));
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_workspace", Integer.class)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage_owner WHERE mount_state = 'READY'", Integer.class)).isZero();
+        assertThat(jdbc.queryForObject("SELECT registration_state FROM ma_storage", String.class)).isEqualTo("FENCE_ONLY");
+        assertThat(store.parked("tenant", intent.operationId())).isPresent();
     }
 
     // A release never takes what another registration finished: it deletes
@@ -386,7 +414,7 @@ class SshWorkspaceStoreTest {
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage_owner", Integer.class)).isEqualTo(1);
     }
 
-    private SshWorkspaceStore.Intent parkedReservation() {
+    JdbcSshWorkspaceStore.Intent parkedReservation() {
         var operation = store.begin("tenant", "actor", "key", "mac", "/work/project", "Project");
         var intent = store.claim("tenant", "actor", operation.operationId(), "owner");
         store.reserve(intent, "owner", registration(intent));
@@ -443,7 +471,7 @@ class SshWorkspaceStoreTest {
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage_owner", Integer.class)).isEqualTo(1);
     }
 
-    private boolean reserveAfter(java.util.concurrent.CountDownLatch start, SshWorkspaceStore.Intent intent,
+    private boolean reserveAfter(java.util.concurrent.CountDownLatch start, JdbcSshWorkspaceStore.Intent intent,
             String owner, Map<String, Object> registration) throws InterruptedException {
         start.await();
         try {
@@ -455,16 +483,16 @@ class SshWorkspaceStoreTest {
         }
     }
 
-    private static ContextBinding binding(SshWorkspaceStore.Intent intent) {
+    private static ContextBinding binding(JdbcSshWorkspaceStore.Intent intent) {
         return new ContextBinding(intent.tenantId(), intent.workspaceId(), 1, intent.storageId(), ".",
                 WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1);
     }
 
-    private static Map<String, Object> registration(SshWorkspaceStore.Intent intent) {
+    static Map<String, Object> registration(JdbcSshWorkspaceStore.Intent intent) {
         return registration(intent, "/work/project", "2");
     }
 
-    private static Map<String, Object> registration(SshWorkspaceStore.Intent intent, String root, String inode) {
+    static Map<String, Object> registration(JdbcSshWorkspaceStore.Intent intent, String root, String inode) {
         Map<String, Object> identity = Map.of("root", root, "hostId", "host", "device", "1",
                 "inode", inode, "birthTime", "3");
         var marker = new LinkedHashMap<String, Object>(identity);

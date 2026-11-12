@@ -12,12 +12,19 @@
  * "commit was made by the agent in this session" exemption was unreachable
  * and Auto mode blocked *every* `git commit --amend`.
  *
+ * Since #13570 the guard no longer reads the registry — every amend asks for
+ * approval — so these rows now pin the *writer*: which commits the shell tool
+ * attributes to this session. That attribution still drives the Co-authored-by
+ * trailer and the git notes, and the registry stays a published export, so a
+ * wrong registration is still a real defect even though it no longer lifts a
+ * block.
+ *
  * The rows cross the wiring layer, not the primitive (calling
  * `registerSessionCommit` directly was green before the fix): a real
  * `git commit` runs through `ShellToolInvocation.execute()` in a real temp
- * repo, then the guard is asked whether the follow-up amend is allowed. The
- * fake `ShellExecutionService` really runs commands via `spawnSync`, so
- * `getGitHeadSync` / `getGitHead` see genuine HEADs, not stubbed SHAs.
+ * repo, then the registry is asked whether that HEAD was recorded. The fake
+ * `ShellExecutionService` really runs commands via `spawnSync`, so
+ * `getGitHeadBeforeCommand` / `getGitHead` see genuine HEADs, not stubbed SHAs.
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -43,7 +50,7 @@ import { ToolNames } from './tool-names.js';
 import { evaluateAutoMode } from '../permissions/autoMode.js';
 import {
   clearSessionCommits,
-  isDestructiveCommand,
+  isAmendOfSessionCommit,
 } from '../permissions/destructive-commands.js';
 
 // Runs the command for real in the requested cwd, shaped like
@@ -97,9 +104,13 @@ describe.skipIf(process.platform === 'win32')(
     // `afterEach`.
     let tempDirs: string[];
 
-    /** Guard verdict: `null`, or `{ blocked: true, reason }` when blocking. */
-    function amendVerdict(): ReturnType<typeof isDestructiveCommand> {
-      return isDestructiveCommand(AMEND_COMMAND, USER_PROMPT, repoDir);
+    /**
+     * Whether the shell tool registered this repository's HEAD. The guard no
+     * longer reads the registry (#13570: every amend asks), so these rows
+     * assert what the tool writes, not a verdict.
+     */
+    function isHeadRegistered(): boolean {
+      return isAmendOfSessionCommit(repoDir);
     }
 
     /** Runs `git <args>` bypassing ShellTool; returns trimmed stdout. */
@@ -137,6 +148,16 @@ describe.skipIf(process.platform === 'win32')(
       rawGit('config commit.gpgsign false', dir);
       rawCommit('seed.txt', seed, subject, dir);
       return dir;
+    }
+
+    /** An initialized repository with no commit yet (unborn HEAD). */
+    function initUnbornRepo(): void {
+      fs.rmSync(repoDir, { recursive: true, force: true });
+      fs.mkdirSync(repoDir, { recursive: true });
+      rawGit('init -q --initial-branch=main', repoDir);
+      rawGit('config user.email agent@example.com');
+      rawGit('config user.name Agent');
+      rawGit('config commit.gpgsign false');
     }
 
     /** A temp dir that is not a repository; removed in `afterEach`. */
@@ -208,7 +229,7 @@ describe.skipIf(process.platform === 'win32')(
       const preHead = writeFeature(stage);
       await runShellCommand(command);
       expectFeatureCommitLanded(preHead);
-      expect(amendVerdict()).toBeNull();
+      expect(isHeadRegistered()).toBe(true);
     }
 
     /** A commit with nothing staged: HEAD must not move, nothing registers. */
@@ -219,7 +240,7 @@ describe.skipIf(process.platform === 'win32')(
       const preHead = headSha();
       await run(command);
       expect(headSha()).toBe(preHead);
-      expect(amendVerdict()?.blocked).toBe(true);
+      expect(isHeadRegistered()).toBe(false);
     }
 
     // `cd <other> && git commit` is `hasCommit` but not attributable in our
@@ -236,16 +257,16 @@ describe.skipIf(process.platform === 'win32')(
       // The commit really landed — in the OTHER repository.
       expect(lastLog('%s', otherDir)).toBe('other work');
       expect(headSha()).toBe(repoHeadBefore);
-      expect(amendVerdict()?.blocked).toBe(true);
+      expect(isHeadRegistered()).toBe(false);
     }
 
-    // Earns the amend exemption through the shell tool, so later steps start
-    // from a populated registry (an empty one makes "blocked again" pass for
-    // the wrong reason).
-    async function commitAndAssertExempt(): Promise<void> {
+    // Registers a commit through the shell tool, so later steps start from a
+    // populated registry (an empty one makes "not registered" pass for the
+    // wrong reason).
+    async function commitAndAssertRegistered(): Promise<void> {
       writeFeature();
       await runShellCommand(COMMIT_FEATURE);
-      expect(amendVerdict()).toBeNull();
+      expect(isHeadRegistered()).toBe(true);
     }
 
     /** A real Config over `repoDir` in `mode`, trusted unless told not to. */
@@ -387,11 +408,10 @@ describe.skipIf(process.platform === 'win32')(
       }
     });
 
-    it('registers a commit the shell tool really landed, so the follow-up amend is exempt', async () => {
-      // Sanity: with an empty registry the guard blocks the amend. That is
-      // the pre-fix behaviour for *every* amend, and it must stay true for
-      // commits the agent did not make (see the regressions below).
-      expect(amendVerdict()?.blocked).toBe(true);
+    it('registers a commit the shell tool really landed', async () => {
+      // Sanity: the registry starts empty, so the assertions below observe a
+      // registration this command performed rather than a leftover.
+      expect(isHeadRegistered()).toBe(false);
 
       const preHead = writeFeature();
       await runShellCommand(COMMIT_FEATURE);
@@ -401,19 +421,18 @@ describe.skipIf(process.platform === 'win32')(
       expect(realExecute).toHaveBeenCalled();
       expectFeatureHead(preHead);
 
-      // Witness for #12460: the agent's own commit is registered, so the guard
-      // returns null. Pre-fix `registerSessionCommit` had no production caller
-      // and every amend was `blocked: true`.
-      expect(amendVerdict()).toBeNull();
+      // Witness for #12460: the agent's own commit is registered. Pre-fix
+      // `registerSessionCommit` had no production caller at all.
+      expect(isHeadRegistered()).toBe(true);
     });
 
     it('registers a commit spelled behind shell control-flow keywords (issue #12514)', async () => {
       // #12514-B: `splitCommands` has no shell grammar, so `if true; then git
       // commit -m "x"; fi` yields `then git commit -m "x"`, whose tokens[0] is
       // `then`: the strict recogniser (`program === 'git'` at tokens[0]) never
-      // fires, while the guard's token scan still blocks the amend. Pre-fix
-      // that amend of the agent's own commit was blocked with the false
-      // reason "the target commit was not made by the agent in this session".
+      // fires, so the commit went unregistered. Pre-fix that cost the agent an
+      // amend of its own commit, blocked with the false reason "the target
+      // commit was not made by the agent in this session".
       await expectRegisters('if true; then git commit -m "feature"; fi');
     });
 
@@ -483,7 +502,7 @@ describe.skipIf(process.platform === 'win32')(
       expect(lastLog('%B', otherDir)).not.toContain(
         'Co-authored-by: Qwen-Coder',
       );
-      expect(amendVerdict()?.blocked).toBe(true);
+      expect(isHeadRegistered()).toBe(false);
     });
 
     it('registers a commit after an absolute `cd` into the same repo root (issue #12514)', async () => {
@@ -510,7 +529,7 @@ describe.skipIf(process.platform === 'win32')(
         `cd ${subDir} && git add feature.txt && git commit -m "feature"`,
       );
       expectFeatureCommitLanded(preHead);
-      expect(amendVerdict()).toBeNull();
+      expect(isHeadRegistered()).toBe(true);
     });
 
     it('keeps the cwd-shift latch for an absolute `cd` into a sibling directory that shares the repo path prefix (issue #12514)', async () => {
@@ -536,7 +555,7 @@ describe.skipIf(process.platform === 'win32')(
       expect(lastLog('%B', siblingDir)).not.toContain(
         'Co-authored-by: Qwen-Coder',
       );
-      expect(amendVerdict()?.blocked).toBe(true);
+      expect(isHeadRegistered()).toBe(false);
     });
 
     // R1-11: `COMMIT_RECOGNITION_LEADING_NOISE` feeds the one helper both
@@ -616,7 +635,7 @@ describe.skipIf(process.platform === 'win32')(
       // That false block is accepted because the alternative is wrong-repo
       // stamping; the other repository must stay untouched either way.
       expect(lastLog('%B')).not.toContain('Co-authored-by: Qwen-Coder');
-      expect(amendVerdict()?.blocked).toBe(true);
+      expect(isHeadRegistered()).toBe(false);
       expect(lastLog('%s', otherDir)).toBe('other seed');
     });
 
@@ -630,7 +649,7 @@ describe.skipIf(process.platform === 'win32')(
       expectFeatureHead(preHead);
       // Witness assertion: registration happened at settle, so the follow-up
       // amend of the agent's own commit is exempt.
-      expect(amendVerdict()).toBeNull();
+      expect(isHeadRegistered()).toBe(true);
     });
 
     it('does not register a promoted command whose commit lands in another repository', async () => {
@@ -664,12 +683,62 @@ describe.skipIf(process.platform === 'win32')(
       // settle-only, so no exemption yet: today's behaviour (R1-9 asks whether
       // it should be), and what makes the post-settle assertion causal.
       expect(headSha()).not.toBe(preHead);
-      expect(amendVerdict()?.blocked).toBe(true);
+      expect(isHeadRegistered()).toBe(false);
 
       firePromoteSettle!();
       // `onSettleWired` starts registration asynchronously, so wait for the
       // registry to reflect it instead of sleeping a fixed guess.
-      await vi.waitFor(() => expect(amendVerdict()).toBeNull());
+      await vi.waitFor(() => expect(isHeadRegistered()).toBe(true));
+    });
+
+    it('registers a promoted initial commit in a repository with an unborn HEAD (issue #12514-D)', async () => {
+      // An empty repository gives both a failed `rev-parse HEAD` and an
+      // unborn branch the same null SHA. The promoted path used to skip
+      // registration for both, so the next amend of the agent's root commit
+      // was falsely blocked. Capture must distinguish "verified repo with no
+      // HEAD" from "probe failed", and lineage must expect a null predecessor.
+      initUnbornRepo();
+      fs.writeFileSync(path.join(repoDir, 'initial.txt'), 'initial\n');
+
+      await runPromoted(
+        'git add initial.txt && git commit -m "initial feature"',
+      );
+
+      expect(lastLog('%s')).toBe('initial feature');
+      expect(isHeadRegistered()).toBe(true);
+    });
+
+    it('does not register an existing root commit when the pre-spawn HEAD probe is terminated', async () => {
+      initUnbornRepo();
+      rawCommit('human.txt', 'human\n', 'human root');
+      const humanSha = headSha();
+      const gitPath = execSync('command -v git', { encoding: 'utf-8' }).trim();
+      const probeBinDir = makeScratchDir('qwen-12514-probe-');
+      const probeGitPath = path.join(probeBinDir, 'git');
+      fs.writeFileSync(
+        probeGitPath,
+        '#!/bin/sh\n' +
+          'if [ "$1" = rev-parse ] && [ "$2" = --verify ] && [ "$3" = HEAD ]; then\n' +
+          '  kill -TERM "$$"\n' +
+          'fi\n' +
+          `exec ${JSON.stringify(gitPath)} "$@"\n`,
+      );
+      fs.chmodSync(probeGitPath, 0o755);
+      vi.stubEnv(
+        'PATH',
+        `${probeBinDir}${path.delimiter}${process.env['PATH']}`,
+      );
+      // Load-bearing: this row's closing assertions also hold when the shim is
+      // bypassed (the lineage check then rejects on a non-null predecessor), so
+      // pin that the interception is live before relying on it.
+      expect(() => rawGit('rev-parse --verify HEAD')).toThrow();
+
+      await runPromoted('git commit -m "nothing staged"', true);
+      firePromoteSettle!();
+      await new Promise((resolve) => setTimeout(resolve, 500));
+
+      expect(headSha()).toBe(humanSha);
+      expect(isHeadRegistered()).toBe(false);
     });
 
     it('does not adopt a commit somebody else landed while a promoted child ran (issue #12514)', async () => {
@@ -694,11 +763,10 @@ describe.skipIf(process.platform === 'win32')(
       firePromoteSettle!();
       // The settle probe is one `git log -g` (2 s timeout, ~10 ms healthy);
       // registering nothing leaves no observable to wait on, so give it room,
-      // then assert fail-closed: HEAD is the foreign commit, never adopted, and
-      // its amend stays hard-blocked.
+      // then assert fail-closed: HEAD is the foreign commit, never adopted.
       await new Promise((resolve) => setTimeout(resolve, 500));
       expect(headSha()).toBe(foreignSha);
-      expect(amendVerdict()?.blocked).toBe(true);
+      expect(isHeadRegistered()).toBe(false);
     });
 
     it('does not resurrect a promoted exemption across a session-commit registry clear', async () => {
@@ -718,7 +786,7 @@ describe.skipIf(process.platform === 'win32')(
       // The boundary: the registry is cleared while the promoted child still
       // counts as running, i.e. before `onSettleWired` can fire.
       clearSessionCommits();
-      expect(amendVerdict()?.blocked).toBe(true);
+      expect(isHeadRegistered()).toBe(false);
 
       firePromoteSettle!();
       // Nothing observable appears when registration is correctly skipped, so
@@ -729,18 +797,15 @@ describe.skipIf(process.platform === 'win32')(
       // come back. The control for the no-boundary path is the deferred-settle
       // row above, which still registers.
       expect(headSha()).not.toBe(preHead);
-      expect(amendVerdict()?.blocked).toBe(true);
+      expect(isHeadRegistered()).toBe(false);
     });
 
-    it('still blocks an amend of a commit the shell tool did not make', async () => {
+    it('does not register a commit the shell tool did not make', async () => {
       // Regression ①: a commit created outside the shell tool (a user commit,
       // or one from another session) must not be exempted.
       rawCommit('human.txt', 'human\n', 'human commit');
 
-      expect(amendVerdict()?.blocked).toBe(true);
-      expect(amendVerdict()?.reason).toContain(
-        'not made by the agent in this session',
-      );
+      expect(isHeadRegistered()).toBe(false);
     });
 
     it('does not register HEAD when the commit failed and HEAD did not move', async () => {
@@ -798,10 +863,7 @@ describe.skipIf(process.platform === 'win32')(
 
       // Witness assertion: the agent did not produce this HEAD, so the amend
       // must stay blocked.
-      expect(amendVerdict()?.blocked).toBe(true);
-      expect(amendVerdict()?.reason).toContain(
-        'not made by the agent in this session',
-      );
+      expect(isHeadRegistered()).toBe(false);
     });
 
     // Branch `other` gets a tip unlike `main`'s; the chain then lands the
@@ -823,7 +885,7 @@ describe.skipIf(process.platform === 'win32')(
       // different SHA from preHead, so only the reflog verb can reject it.
       expect(headSha()).toBe(otherHead);
       expect(headSha()).not.toBe(seedHead);
-      expect(amendVerdict()?.blocked).toBe(true);
+      expect(isHeadRegistered()).toBe(false);
     }
 
     it('does not register when a later segment checked HEAD out away from the commit', async () => {
@@ -862,10 +924,10 @@ describe.skipIf(process.platform === 'win32')(
 
       expect(headSha()).not.toBe(preHead);
       expect(rawGit('log -g -1 --format=%gs')).toMatch(/^commit\b/);
-      expect(amendVerdict()).toBeNull();
+      expect(isHeadRegistered()).toBe(true);
     });
 
-    it('registers nothing when the reflog cannot answer, so the amend stays blocked', async () => {
+    it('registers nothing when the reflog cannot answer', async () => {
       // Regression ⑨, the fail-closed branch itself: `getGitHeadOrigin`
       // resolves `null` when git cannot say what put HEAD there, and
       // `trackSessionCommit` registers nothing. Every other repo has a readable
@@ -898,22 +960,22 @@ describe.skipIf(process.platform === 'win32')(
       // criterion would register it. Only the unanswerable reflog stops it,
       // and the cost is a blocked amend rather than a lifted block.
       expect(headSha()).not.toBe(preHead);
-      expect(amendVerdict()?.blocked).toBe(true);
+      expect(isHeadRegistered()).toBe(false);
     });
 
-    it('registers the rewritten HEAD after an amend so amend-of-amend is exempt', async () => {
+    it('registers the rewritten HEAD after an amend, so amend-of-amend stays attributed', async () => {
       // Regression ③: an amend replaces HEAD, so the new SHA has to be
       // registered too — otherwise the second amend in a row is blocked.
-      await commitAndAssertExempt();
+      await commitAndAssertRegistered();
 
       fs.writeFileSync(path.join(repoDir, 'feature.txt'), 'work v2\n');
       const preAmendHead = headSha();
       await runShellCommand(`git add feature.txt && ${AMEND_COMMAND}`);
 
-      // The amend rewrote HEAD, so the guard reads a new SHA that the
-      // original commit never registered.
+      // The amend rewrote HEAD, so the registry has to be read against a new
+      // SHA that the original commit never registered.
       expectFeatureHead(preAmendHead);
-      expect(amendVerdict()).toBeNull();
+      expect(isHeadRegistered()).toBe(true);
     });
 
     it('reports an amend reached through an absolute `cd` to the attribution range', async () => {
@@ -923,7 +985,7 @@ describe.skipIf(process.platform === 'win32')(
       // `${postHead}~1..${postHead}`, which silently reports the amended
       // commit's parent's files as AI-authored. Asserted on the flag handed to
       // attribution because that is the only consumer of the verdict.
-      await commitAndAssertExempt();
+      await commitAndAssertRegistered();
       fs.writeFileSync(path.join(repoDir, 'feature.txt'), 'work v2\n');
       const amendSpy = vi.spyOn(
         ShellToolInvocation.prototype as unknown as {
@@ -944,6 +1006,45 @@ describe.skipIf(process.platform === 'win32')(
       expect(amendSpy.mock.calls[0]![2]).toBe(true);
     });
 
+    it.each([
+      [
+        'control-flow keywords',
+        () => 'if true; then git commit --amend --no-edit; fi',
+      ],
+      [
+        'absolute git path',
+        () =>
+          `${execSync('command -v git', { encoding: 'utf-8' }).trim()} commit --amend --no-edit`,
+      ],
+      ['leading time keyword', () => 'time git commit --amend --no-edit'],
+    ])(
+      'uses the amend delta in the attribution note for an amend spelled with %s (issue #12514)',
+      async (_label, buildCommand) => {
+        // #12514-C: `isAmendCommit` was the one recogniser that still required
+        // `tokens[0] === 'git'`. A loose-spelled amend therefore reached
+        // attribution classified as a fresh commit, so the note diffed
+        // `postHead~1..postHead` instead of `preHead..postHead`. The extra file
+        // below makes that observable: it landed in the pre-amend commit but
+        // was untouched by the amend, so only the wrong range includes it.
+        rawCommit('first.txt', 'first version\n', 'add first');
+        rawCommit('second.txt', 'second version\n', 'add second');
+        fs.writeFileSync(path.join(repoDir, 'first.txt'), 'first amended\n');
+        rawGit('add first.txt');
+        CommitAttributionService.getInstance().recordEdit(
+          path.join(repoDir, 'first.txt'),
+          'first version\n',
+          'first amended\n',
+        );
+
+        await runShellCommand(buildCommand());
+
+        const note = JSON.parse(
+          rawGit('notes --ref=refs/notes/ai-attribution show HEAD'),
+        );
+        expect(Object.keys(note.files)).toEqual(['first.txt']);
+      },
+    );
+
     it('registers the commit even when gitCoAuthor.commit attribution is disabled', async () => {
       // Regression ④: session tracking is deliberately independent of the
       // commit-attribution toggle. A user who turned attribution off must not
@@ -957,7 +1058,7 @@ describe.skipIf(process.platform === 'win32')(
 
       // The amend exemption works, because session tracking does not consult
       // the toggle...
-      await commitAndAssertExempt();
+      await commitAndAssertRegistered();
       // ...and the toggle really took effect: no Co-authored-by trailer.
       expect(lastLog('%B')).not.toContain('Co-authored-by');
     });
@@ -966,7 +1067,7 @@ describe.skipIf(process.platform === 'win32')(
       // Fail-closed witness for the `clearSessionCommits()` contract ("Called
       // on session end or mode switch"): exemptions earned under one approval
       // mode must not carry across a mode boundary.
-      await commitAndAssertExempt();
+      await commitAndAssertRegistered();
 
       // Constructed already in DEFAULT (rather than switching into it) so the
       // registry is not cleared before the transition under test.
@@ -976,16 +1077,16 @@ describe.skipIf(process.platform === 'win32')(
       realConfig.setApprovalMode(ApprovalMode.AUTO);
       expect(realConfig.getApprovalMode()).toBe(ApprovalMode.AUTO);
 
-      // Same repo, commit and command, but the mode switched, so the guard
-      // blocks again and the user has to re-approve.
-      expect(amendVerdict()?.blocked).toBe(true);
+      // Same repo, commit and command, but the mode switched, so the registry
+      // was cleared and this HEAD is no longer attributed to the session.
+      expect(isHeadRegistered()).toBe(false);
     });
 
     it('keeps the exemption when the approval mode is re-set to its current value', async () => {
       // Guard against over-clearing: several callers re-set the mode they are
       // already in, and wiping the registry there would silently take the
       // amend exemption away mid-session.
-      await commitAndAssertExempt();
+      await commitAndAssertRegistered();
 
       const realConfig = realConfigIn(ApprovalMode.DEFAULT, false);
       const currentMode = realConfig.getApprovalMode();
@@ -993,19 +1094,18 @@ describe.skipIf(process.platform === 'win32')(
 
       realConfig.setApprovalMode(currentMode);
 
-      expect(amendVerdict()).toBeNull();
+      expect(isHeadRegistered()).toBe(true);
     });
 
-    it('resolves the guard against the target dir when the call passes no directory', async () => {
-      // The guard must inspect the repo the shell tool registered in, whose cwd
-      // is `this.params.directory || this.config.getTargetDir()`, but
+    it('asks for an amend when the call passes no directory, even with HEAD registered', async () => {
       // `PermissionCheckContext.cwd` is only set when a call passes
-      // `directory`. With `undefined`, `isDestructiveCommand`'s `git rev-parse`
-      // uses `process.cwd()`: in a process hosting several sessions (ACP,
-      // daemon) or worktrees that is wherever the process started, so the
-      // exemption could be read from one repo's registry while the amend
-      // rewrites another's.
-      await commitAndAssertExempt();
+      // `directory`, so this is the shape a plain shell call has. The old
+      // exemption resolved its repository from that cwd and fell back to
+      // `process.cwd()` — in a process hosting several sessions (ACP, daemon)
+      // or worktrees, one repo's registry could exempt another repo's amend.
+      // The guard no longer reads the registry at all (#13570), so registering
+      // HEAD must not change the verdict here.
+      await commitAndAssertRegistered();
 
       const realConfig = realConfigIn(ApprovalMode.AUTO);
       expect(realConfig.getTargetDir()).toBe(repoDir);
@@ -1022,7 +1122,11 @@ describe.skipIf(process.platform === 'win32')(
         skipClassifierReason: 'total_denial',
       });
 
-      expect(decision.via).not.toBe('blocked:destructive-command');
+      expect(decision.via).toBe('fallback');
+      if (decision.via === 'fallback') {
+        expect(decision.reason).toBe('safety_check');
+        expect(decision.requiresHumanDecision).toBe(true);
+      }
     });
 
     it('keeps production abort/signal helpers behind the executor-only mock', () => {
@@ -1045,7 +1149,7 @@ describe.skipIf(process.platform === 'win32')(
       // it only cost the agent a false "not made by the agent in this session"
       // block on its own commit, inescapable inside AUTO. Both legs are
       // excluded, or the return leg alone still wipes it.
-      await commitAndAssertExempt();
+      await commitAndAssertRegistered();
 
       const realConfig = realConfigIn(ApprovalMode.AUTO);
       expect(realConfig.getApprovalMode()).toBe(ApprovalMode.AUTO);
@@ -1055,7 +1159,7 @@ describe.skipIf(process.platform === 'win32')(
       realConfig.setApprovalMode(ApprovalMode.AUTO);
       expect(realConfig.getApprovalMode()).toBe(ApprovalMode.AUTO);
 
-      expect(amendVerdict()).toBeNull();
+      expect(isHeadRegistered()).toBe(true);
     });
 
     it('keeps the root registry when a derived overlay changes its own mode', async () => {
@@ -1064,7 +1168,7 @@ describe.skipIf(process.platform === 'win32')(
       // transition cleared the *root* registry, against the design, and the
       // root hard-blocked an amend of its own minutes-old commit with a false
       // reason. Fail-closed (a wrong block, not a lifted one), but still wrong.
-      await commitAndAssertExempt();
+      await commitAndAssertRegistered();
 
       const realConfig = realConfigIn(ApprovalMode.AUTO);
       const overlay = deriveApprovalModeConfig(
@@ -1077,7 +1181,7 @@ describe.skipIf(process.platform === 'win32')(
       expect(overlay.config.getApprovalMode()).toBe(ApprovalMode.AUTO_EDIT);
       expect(realConfig.getApprovalMode()).toBe(ApprovalMode.AUTO);
 
-      expect(amendVerdict()).toBeNull();
+      expect(isHeadRegistered()).toBe(true);
     });
   },
 );

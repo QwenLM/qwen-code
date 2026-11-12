@@ -1,9 +1,10 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ExternalStorageRegistration;
+import com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
-import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.ReceiptNamespace;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.ReceiptScope;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
@@ -52,7 +53,7 @@ public final class ExternalStorageRegistrationStore implements ExternalStorageRe
         String encoded = encode(registration);
         String digest = ManagedSchemaKeys.key(encoded);
         String workspace = registration.alias().tenantWorkspaceId();
-        String aliasKey = JdbcRuntimeBindingRepository.storageAliasKey(tenant, workspace);
+        String aliasKey = RuntimeAdmissionFences.storageAliasKey(tenant, workspace);
         String physical = registration.identity().ownerKey();
         return transaction.execute(status -> {
             WorkspaceStorageKindGuard.lockDomain(jdbc, tenant, 10);
@@ -88,7 +89,7 @@ public final class ExternalStorageRegistrationStore implements ExternalStorageRe
                         + " storage_kind, registration_state, registration_revision, registration_json, gmt_create, gmt_modified)"
                         + " VALUES (?, ?, ?, ?, ?, ?, 'EXTERNAL', 'REGISTERED', ?, ?, " + ManagedSchemaTime.SQL_NOW
                         + ", " + ManagedSchemaTime.SQL_NOW + ")", aliasKey,
-                        JdbcRuntimeBindingRepository.storageFenceKey(tenant), JdbcRuntimeBindingRepository.storageFenceKey(workspace),
+                        RuntimeAdmissionFences.storageFenceKey(tenant), RuntimeAdmissionFences.storageFenceKey(workspace),
                         tenant, workspace, physical, registration.identity().registrationRevision(), encoded);
             } catch (DuplicateKeyException duplicate) {
                 // The global lock serializes registration, so the pre-checks above
@@ -110,9 +111,9 @@ public final class ExternalStorageRegistrationStore implements ExternalStorageRe
      * Reads one tenant-bound registration for the external Workspace profile.
      *
      * <p>Read-only by construction: no lock, no write, no idempotency record. The
-     * lookup uses the same primary key the write path inserts
-     * ({@link JdbcRuntimeBindingRepository#storageAliasKey}), joins the owner row
-     * on the owner's primary key, and admits only a {@code REGISTERED} row. It
+     * lookup uses the same unique business key the write path inserts
+     * ({@link RuntimeAdmissionFences#storageAliasKey}), joins the owner row
+     * on the owner's unique business key, and admits only a {@code REGISTERED} row. It
      * then enforces exactly these fields: the decoded record's alias id equals the
      * requested alias, its identity owner key equals the stored physical key, its
      * revision equals the stored {@code registration_revision}, and its mount root
@@ -135,7 +136,7 @@ public final class ExternalStorageRegistrationStore implements ExternalStorageRe
                     "invalid_external_storage_registration",
                     "Invalid external storage registration lookup.", false);
         }
-        String aliasKey = JdbcRuntimeBindingRepository.storageAliasKey(tenant,
+        String aliasKey = RuntimeAdmissionFences.storageAliasKey(tenant,
                 tenantWorkspaceId);
         List<Map<String, Object>> rows;
         try {
@@ -206,7 +207,7 @@ public final class ExternalStorageRegistrationStore implements ExternalStorageRe
         try {
             return json.writeValueAsString(value);
         } catch (JsonProcessingException error) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
     }
 
@@ -214,7 +215,7 @@ public final class ExternalStorageRegistrationStore implements ExternalStorageRe
         try {
             return json.readValue(value, type);
         } catch (JsonProcessingException | IllegalArgumentException error) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
     }
 

@@ -1,4 +1,12 @@
+import { useWorkspaceFileChanges } from './components/artifacts/useWorkspaceFileChanges';
+import {
+  filterWorkspaceFileChanges,
+  fileChangeOwnerSessionId,
+  loadGitIgnoredChangePaths,
+  workspaceRelativeChangePath,
+} from './components/artifacts/workspace-file-changes';
 import { DaemonConnectionBanner } from './components/DaemonConnectionBanner.js';
+import { ProjectHooksApprovalCard } from './components/ProjectHooksApprovalCard.js';
 import { useDaemonAvailability } from './daemon/availability-context.js';
 import { isDaemonUnavailableError } from './daemon/availability.js';
 import {
@@ -21,6 +29,7 @@ import type {
   WebShellUnavailableModel,
   WebShellUnavailableModelTooltipMount,
 } from './unavailableModels';
+import type { WebShellModelPickerOptions } from './model-picker';
 import './styles/globals.css';
 import {
   useMessageNavigation,
@@ -29,6 +38,7 @@ import {
 } from './hooks/useMessageNavigation';
 import { ConversationSearch } from './components/ConversationSearch';
 import { useWebShellNavigation } from './navigation';
+import { isCoarsePointerDevice } from './hooks/useIsTouchComposer';
 import { isWebShellPage, type WebShellPage } from './utils/navigationUrl';
 import { getSourceEntries } from './components/sources/sourceEntries';
 import { openSourceEntry } from './components/panels/SourcesSection';
@@ -98,12 +108,14 @@ import type {
   DaemonInputAnnotation,
   DaemonSessionAgentTaskStatus,
   DaemonSessionAttachmentReference,
+  DaemonSessionClient,
   DaemonSkillToggleMutation,
   DaemonTranscriptBlockChangeSummary,
   DaemonTranscriptBlock,
   DaemonSessionMonitorTaskStatus,
   DaemonSessionShellTaskStatus,
   DaemonSessionTaskWithWorkflowStatus,
+  DaemonSessionWorkflowTaskStatus,
   DaemonSessionArtifact,
   DaemonSessionSummary,
   DaemonStandaloneCreationRecovery,
@@ -118,8 +130,16 @@ import type {
 import { isGoalGateBlocked as isGoalGateBlockedFor } from './utils/goalGate';
 import { cancelledTurnProducedNothing } from './utils/cancelledTurn';
 import { useDaemonPromptSettled } from './daemon/session/DaemonSessionProvider';
-import { keepWorkspaceSplitSessionIds } from './utils/standalone-session-routing';
+import {
+  keepWorkspaceSplitSessionIds,
+  type SplitSessionClassification,
+  type SplitSessionOutcome,
+} from './utils/standalone-session-routing';
 import { setBoundedMapEntry } from './utils/bounded-map';
+import {
+  buildWaitingActivity,
+  buildWaitingTokenUsage,
+} from './utils/waitingActivity';
 import { type SessionGitIntent } from './components/GitModePopover';
 import { gitModeIntentMustReset } from './utils/gitModeIntent';
 import { LocalControlQrButton } from './components/LocalControlQrButton';
@@ -138,11 +158,11 @@ import {
   isRetryableTurnErrorKind,
   transcriptBlocksToDaemonMessages,
 } from './adapters/transcriptToMessages';
-import type {
-  MessageListProps,
-  MessageListHandle,
-} from './components/MessageList';
-import { TranscriptViewport } from './components/TranscriptViewport';
+import type { MessageListHandle } from './components/MessageList';
+import {
+  TranscriptViewport,
+  type TranscriptViewportProps,
+} from './components/TranscriptViewport';
 import { reorderChildrenUnderParents } from './components/messages/agentForest';
 import { SubagentDetailsProvider } from './subagentDetailsContext';
 import { TurnCallsProvider } from './turnCallsContext';
@@ -150,11 +170,9 @@ import { useModelConfigurations } from './hooks/useModelConfigurations';
 import { useModelRefresh } from './hooks/useModelRefresh';
 import { MonitorDetailsProvider } from './monitorDetailsContext';
 import { WorkflowDetailsProvider } from './workflowDetailsContext';
+import { createToolRevealStore, ToolRevealProvider } from './toolRevealContext';
 import { findMonitorTaskForTool } from './utils/monitorTasks';
-import {
-  hasActiveBackgroundAgent,
-  isComposerTask,
-} from './utils/composerTasks';
+import { isComposerTask } from './utils/composerTasks';
 import {
   getTaskActivityKey,
   hasActiveTaskActivity,
@@ -199,12 +217,22 @@ import {
 } from './hooks/useComposerCore';
 import type { PromptFile, PromptImage } from './adapters/promptTypes';
 import type { AttachmentPreviewRequest } from './adapters/messageTypes';
-import { StatusBar, type StatusBarHandle } from './components/StatusBar';
+import {
+  ComposerTaskChips,
+  type ComposerTaskChipsHandle,
+} from './components/ComposerTaskChips';
+import { ComposerUsageStats } from './components/ComposerUsageStats';
 import { GoalStatusStrip } from './components/GoalStatusStrip';
 import { SessionRecoveryBanner } from './components/SessionRecoveryBanner';
+import { SessionLimitBanner } from './components/SessionLimitBanner';
 import composerStatusStyles from './components/ComposerStatusStack.module.css';
 import { GoalEditDialog } from './components/dialogs/GoalEditDialog';
 import { StreamingStatus } from './components/StreamingStatus';
+import {
+  WaitingMinigame,
+  WaitingMinigameButton,
+} from './components/WaitingMinigame';
+import { readWaitingGamesEnabled } from './utils/waitingGamesConfig';
 import {
   ToastHost,
   TOAST_REQUEST_EVENT,
@@ -243,6 +271,7 @@ import type {
 import type { WorkspaceSelectorOption } from './components/WorkspaceSelector';
 import { DropdownMenuItem } from './components/ui/dropdown-menu';
 import {
+  managedSelectionFromRoute,
   managedSelectionFromUrl,
   saveManagedSelection,
 } from './components/managed/managed-session-storage';
@@ -341,6 +370,7 @@ import { buildGoalControlRequest } from './utils/goalControlRequest';
 import { ExtensionsManagerPage } from './components/extensions/ExtensionsManagerPage';
 import { PluginManagerPage } from './components/plugins/PluginManagerPage';
 import { ChannelsManagerPage } from './components/channels/ChannelsManagerPage';
+import { ChannelEventsPage } from './components/channels/ChannelEventsPage';
 import { ShadowDomBoundary } from './components/ShadowDomBoundary';
 import {
   McpAppHostContext,
@@ -362,7 +392,10 @@ import {
 } from './settings';
 import { SettingsMessage } from './components/messages/SettingsMessage';
 import { WorkspaceDirectoriesSection } from './components/workspaces/WorkspaceDirectoriesSection';
-import { isAskUserPermission } from './utils/askUserPermission';
+import {
+  formatAskUserQuestions,
+  isAskUserPermission,
+} from './utils/askUserPermission';
 import { ToolApproval } from './components/messages/ToolApproval';
 import { AskUserQuestion } from './components/messages/AskUserQuestion';
 import { HelpDialog } from './components/dialogs/HelpDialog';
@@ -433,7 +466,10 @@ import {
 import { mergeCommands } from './hooks/daemonSessionMappers';
 import { useAnimationFrameTranscriptSnapshot } from './hooks/useAnimationFrameTranscriptBlocks';
 import { useBackgroundTasks } from './hooks/useBackgroundTasks';
-import { getSubagentDetailsUnavailableReason } from './components/messages/toolFormatting';
+import {
+  getSubagentDetailsUnavailableReason,
+  toolContainsCallId,
+} from './components/messages/toolFormatting';
 import { isSessionDisconnectedError } from './utils/sessionErrors';
 import {
   projectStreamingTailMessages,
@@ -441,6 +477,7 @@ import {
 } from './hooks/useMessages';
 import { useSessionSources } from './hooks/useSessionSources';
 import { useContextCompressionReconcile } from './hooks/useContextCompressionReconcile';
+import { useSubscriptionLogout } from './hooks/useSubscriptionLogout';
 import type { SessionSource } from '@qwen-code/sdk/daemon';
 import { useSessionArtifacts } from './hooks/useSessionArtifacts';
 import { useSessionArtifactsChange } from './hooks/useSessionArtifactsChange';
@@ -695,6 +732,7 @@ function getArtifactPanelTabStops(
   );
 }
 const DEFAULT_COMPOSER_TOOLBAR_ACTIONS = [
+  'addMenu',
   'approvalMode',
   'workflowMode',
   'contextUsage',
@@ -732,6 +770,7 @@ function availableSkillInfos(status: {
     name: string;
     description?: string;
     argumentHint?: string;
+    extensionName?: string;
   }>;
 }): SkillInfo[] {
   return (status.skills ?? [])
@@ -740,6 +779,7 @@ function availableSkillInfos(status: {
       name: skill.name,
       description: skill.description ?? '',
       ...(skill.argumentHint ? { argumentHint: skill.argumentHint } : {}),
+      ...(skill.extensionName ? { extensionName: skill.extensionName } : {}),
     }))
     .sort((a, b) => a.name.localeCompare(b.name));
 }
@@ -1250,7 +1290,7 @@ function buildDisplayMessages(
 }
 
 type LiveMessageListProps = Omit<
-  MessageListProps,
+  TranscriptViewportProps,
   'messages' | 'transcriptBlockCount'
 > & {
   baselineBlocks: readonly DaemonTranscriptBlock[];
@@ -1368,6 +1408,7 @@ export type SessionChangeEvent =
   | { type: 'turn_complete'; sessionId: string; error?: Error };
 
 export interface WebShellApi {
+  refreshModels: () => Promise<void>;
   /** 按持久化记录 ID 定位当前会话消息，包含尚未渲染的历史。宿主先切换会话。 */
   navigateToMessage: (
     request: WebShellMessageNavigationRequest,
@@ -1415,6 +1456,8 @@ export interface WebShellProps {
   settings?: WebShellSettingsOptions;
   /** Model add/delete interactions across WebShell. Not a backend permission policy. */
   modelManagement?: WebShellModelManagementOptions;
+  /** Host-owned header and per-model display content in composer pickers. */
+  modelPicker?: WebShellModelPickerOptions;
   /** Extra catalog models shown disabled in the composer picker. */
   unavailableModels?: readonly WebShellUnavailableModel[];
   /** Host-owned hint for a disabled model. DOM/Solid hosts mount into the container. */
@@ -1433,6 +1476,11 @@ export interface WebShellProps {
     sessionId?: string;
     sessionName?: string;
   }) => void;
+  /** Called when the active model connection changes. */
+  onModelChange?: (
+    modelId: string | undefined,
+    authType: string | undefined,
+  ) => void;
   /** Called after a new session is created. Session setup waits up to 30 seconds. */
   onSessionCreated?: (sessionId: string) => Promise<void> | void;
   /** Explicit Managed Agent backend. Omit to keep the daemon provider unchanged. */
@@ -1537,6 +1585,11 @@ export interface WebShellProps {
    * needs them. Plan must be explicitly included.
    */
   composerToolbarActions?: readonly ComposerToolbarAction[];
+  /**
+   * The host renders its own add ("+") entry in
+   * `renderComposerToolbarStart`; hide the built-in composer AddMenu.
+   */
+  hostOwnsAddMenu?: boolean;
   /** Execution mode choices. Overrides ui.allowedApprovalModes; [] offers none. Presentation only. */
   allowedApprovalModes?: readonly WebShellApprovalMode[];
   /** Composer presentation shared by the main chat, split panes, and side tasks. */
@@ -1576,6 +1629,7 @@ export interface WebShellProps {
    * so its sessions stay distinguishable from CLI and browser ones.
    */
   sessionSourceType?: string;
+  subscriptionDraft?: { modelId: string };
   /** Built-in actions appended to the context-sensitive default toolbar. */
   composerToolbarAdditionalActions?: readonly ComposerToolbarAction[];
   /**
@@ -1652,6 +1706,15 @@ export interface WebShellProps {
   renderToolHeaderExtra?: ToolHeaderExtraRenderer;
   /** Artifact-card rendering overrides. */
   artifact?: WebShellArtifactCustomization;
+  /**
+   * 与普通会话对齐 Managed 对话区文案与能力提示口径（宿主已有外壳时置 true）。
+   */
+  alignManagedChatWithHost?: boolean;
+  /**
+   * 宿主外壳已展示会话身份（如宿主侧栏）时置 false，Managed 对话区不重复渲染
+   * 自有的会话标题 / 工作区 / 状态徽章。默认 true 保持独立整页行为。
+   */
+  showManagedSessionHeader?: boolean;
   /** Custom renderer for the welcome header. Receives version, cwd, model, and mode. */
   renderWelcomeHeader?: WelcomeHeaderRenderer;
   /** Custom renderer shown below the chat composer in the empty welcome state. */
@@ -1806,6 +1869,17 @@ type NewSessionIntent =
   | { kind: 'inherit'; leaveLive?: boolean }
   | { kind: 'workspace'; cwd: string };
 
+/**
+ * Result of creating the session a submitted prompt owns. `detachedSession`
+ * is set when the user navigated away during creation: the connection was
+ * never bound, so the prompt must be dispatched through this client without
+ * touching the current transcript.
+ */
+type PromptSessionAllocation = {
+  sessionId: string;
+  detachedSession?: DaemonSessionClient;
+};
+
 type StandaloneRecoveryResolution =
   | 'idle'
   | 'checking'
@@ -1862,6 +1936,7 @@ const NON_WORKSPACE_BLOCKED_COMMANDS = new Set([
   'extensions',
   'goal',
   'log',
+  'logout',
   'memory',
   'mcp',
   'prs',
@@ -1949,6 +2024,8 @@ const SIDEBAR_COLLAPSED_STORAGE_KEY = 'qwen-code-web-shell-sidebar-collapsed';
 const ENVIRONMENT_PANEL_OPEN_STORAGE_KEY =
   'qwen-code-web-shell-environment-panel-open';
 const RIGHT_PANEL_STATE_STORAGE_KEY = 'qwen-code-web-shell-right-panel-state';
+const DETAILS_CHILDREN_STORAGE_KEY = 'qwen-code-web-shell-details-children';
+const DETAILS_TAB_ID_PREFIX = 'side-task:details:';
 
 function resolveSidebarOptions(sidebar: WebShellProps['sidebar']): {
   enabled: boolean;
@@ -2062,6 +2139,67 @@ function writeStoredBooleanMap(
   } catch (error) {
     console.warn(
       '[web-shell] failed to persist environment panel state:',
+      error,
+    );
+  }
+}
+
+// Pending AskUser request -> details side-task child, per parent session.
+// Survives closing the details tab (and reloads) so "Ask for details" reopens
+// the existing child instead of provisioning a duplicate. One entry per
+// parent: a session has at most one pending question, so a newer details
+// task supersedes the resolved question's association.
+type StoredDetailsChildren = Record<string, Record<string, string>>;
+
+function readStoredDetailsChildren(key: string): StoredDetailsChildren {
+  if (typeof window === 'undefined') return {};
+  try {
+    const stored = window.localStorage.getItem(key);
+    if (!stored) return {};
+    const parsed = JSON.parse(stored) as unknown;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return {};
+    }
+    const storedStates = { ...(parsed as Record<string, unknown>) };
+    if (storedStates['v'] !== undefined && storedStates['v'] !== 1) return {};
+    delete storedStates['v'];
+    const result: StoredDetailsChildren = {};
+    for (const [sessionKey, value] of Object.entries(storedStates).slice(
+      -MAX_ARTIFACT_PANEL_SESSION_STATES,
+    )) {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) {
+        continue;
+      }
+      const entries: Record<string, string> = {};
+      for (const [requestId, childId] of Object.entries(
+        value as Record<string, unknown>,
+      )) {
+        if (typeof childId === 'string' && childId)
+          entries[requestId] = childId;
+      }
+      if (Object.keys(entries).length > 0) result[sessionKey] = entries;
+    }
+    return result;
+  } catch {
+    // localStorage can be unavailable in private or embedded contexts.
+  }
+  return {};
+}
+
+function writeStoredDetailsChildren(
+  key: string,
+  value: StoredDetailsChildren,
+): void {
+  try {
+    while (Object.keys(value).length > MAX_ARTIFACT_PANEL_SESSION_STATES) {
+      const oldestSessionKey = Object.keys(value)[0];
+      if (!oldestSessionKey) break;
+      delete value[oldestSessionKey];
+    }
+    window.localStorage.setItem(key, JSON.stringify({ v: 1, ...value }));
+  } catch (error) {
+    console.warn(
+      '[web-shell] failed to persist details side-task associations:',
       error,
     );
   }
@@ -3325,6 +3463,22 @@ function findToolCall(
   return undefined;
 }
 
+/** The id of the tool-group message whose row (or nested row) is `callId`. */
+function findToolMessageId(
+  messages: readonly Message[],
+  callId: string,
+): string | undefined {
+  for (const message of messages) {
+    if (
+      message.role === 'tool_group' &&
+      message.tools.some((tool) => toolContainsCallId(tool, callId))
+    ) {
+      return message.id;
+    }
+  }
+  return undefined;
+}
+
 function transcriptEventsToMessages(events: readonly DaemonEvent[]): Message[] {
   const state = createDaemonTranscriptState({
     maxBlocks: Math.max(2_000, events.length),
@@ -3469,6 +3623,7 @@ export function App({
   askUserFreeTextLabel,
   onSessionIdChange,
   onSessionInfoChange,
+  onModelChange,
   onSessionCreated,
   managedAgentProvider,
   theme: providedTheme,
@@ -3497,6 +3652,10 @@ export function App({
   artifact,
   fileDropAction,
   renderToolHeaderExtra,
+  alignManagedChatWithHost,
+
+  showManagedSessionHeader,
+
   renderWelcomeHeader,
   renderWelcomeFooter,
   mobileWelcomeFooterMiddle = false,
@@ -3521,6 +3680,7 @@ export function App({
   sidebar,
   settings: settingsPresentation,
   modelManagement,
+  modelPicker,
   unavailableModels,
   mountUnavailableModelTooltip,
   header,
@@ -3540,6 +3700,7 @@ export function App({
   filterArtifact,
   shellRef,
   composerToolbarActions,
+  hostOwnsAddMenu = false,
   allowedApprovalModes: allowedApprovalModesProp,
   composerVariant = 'default',
   mainModelFilter,
@@ -3551,6 +3712,7 @@ export function App({
   onUserMessageEditRequest,
   cycleModeOnTab = false,
   sessionSourceType = WEB_SHELL_SESSION_SOURCE_TYPE,
+  subscriptionDraft,
   composerToolbarAdditionalActions,
   composerPlaceholders,
   compactThinking = false,
@@ -3585,11 +3747,18 @@ export function App({
   const navigation = useWebShellNavigation();
   const navigationRef = useRef(navigation);
   navigationRef.current = navigation;
+  const standaloneShell = useContext(StandaloneContext);
   const [managedHome, setManagedHome] = useState(
     () =>
       managedAgentProvider !== undefined &&
-      managedSelectionFromUrl(
-        navigation?.route.page !== 'chat' || !navigation.route.sessionId,
+      managedSelectionFromRoute(
+        navigation?.route,
+        // Classify with the same rule WorkspaceSessionProvider applies. A
+        // route-less host reaches App two ways: the standalone embedding
+        // (StandaloneContext), which gates App in only for local targets, and
+        // the managed-only shell, which wraps App itself and defaults to the
+        // managed home. Only the former counts as a local target here.
+        standaloneShell,
       ).open,
   );
   const managedMode = managedAgentProvider !== undefined && managedHome;
@@ -3672,9 +3841,10 @@ export function App({
   const environmentPanelItems =
     environmentPanel?.items ?? DEFAULT_ENVIRONMENT_PANEL_ITEMS;
   // The environment panel is only reachable through the chat header toggle,
-  // so its sections replace the composer git entry / footer task pills only
-  // when that header is actually enabled. Embeddings that omit the header keep
-  // the legacy entries.
+  // so its sections replace the composer git entry (and give background
+  // agents a home, which the composer task chips rely on) only when that
+  // header is actually enabled. Embeddings that omit the header keep the
+  // legacy entries.
   const environmentPanelReachable =
     chatHeaderEnabled &&
     environmentHeaderItemVisible &&
@@ -3869,20 +4039,26 @@ export function App({
   );
 
   const allowedApprovalModes = useShallowMemo(allowedApprovalModesProp);
+  const hostOwnsArtifactPreview = Boolean(onRightPanelOpen);
   const customization = useMemo(
     () => ({
       onRefreshModels,
+      modelPicker,
       allowedApprovalModes,
       artifact,
       filterArtifact,
+      hostOwnsArtifactPreview,
       askUserFreeTextLabel,
       composerTagIcons,
       composerVariant,
       builtinAtProviders,
       atProviders,
       renderToolHeaderExtra,
+      alignManagedChatWithHost,
+      showManagedSessionHeader,
       renderWelcomeHeader,
       renderWelcomeFooter,
+      composerPlaceholders,
       parseUserMessageContent,
       renderUserMessageContent,
       renderComposerTag,
@@ -3895,6 +4071,7 @@ export function App({
       renderComposerToolbarStart,
       renderComposerToolbarEnd,
       renderComposerToolbarRight,
+      hostOwnsAddMenu,
       renderComposerHeader,
       renderComposerFooter,
       renderFooter,
@@ -3909,17 +4086,22 @@ export function App({
     }),
     [
       onRefreshModels,
+      modelPicker,
       allowedApprovalModes,
       artifact,
       filterArtifact,
+      hostOwnsArtifactPreview,
       askUserFreeTextLabel,
       composerTagIcons,
       composerVariant,
       builtinAtProviders,
       atProviders,
       renderToolHeaderExtra,
+      alignManagedChatWithHost,
+      showManagedSessionHeader,
       renderWelcomeHeader,
       renderWelcomeFooter,
+      composerPlaceholders,
       parseUserMessageContent,
       renderUserMessageContent,
       renderComposerTag,
@@ -3932,6 +4114,7 @@ export function App({
       renderComposerToolbarStart,
       renderComposerToolbarEnd,
       renderComposerToolbarRight,
+      hostOwnsAddMenu,
       renderComposerHeader,
       renderComposerFooter,
       renderFooter,
@@ -4084,6 +4267,8 @@ export function App({
   const sessionCatalogController = useSessionCatalogController(
     workspace.client,
   );
+  const [standaloneSessionsReloadToken, setStandaloneSessionsReloadToken] =
+    useState(0);
 
   const refreshWorkspaceCapabilities = workspace.refreshCapabilities;
   const refreshWorkspaceBrand = workspace.refreshBrand;
@@ -4120,12 +4305,85 @@ export function App({
     () => workspaces.filter((entry) => entry.kind !== 'live'),
     [workspaces],
   );
+  // Daemon-authoritative "turn is running" signal for the connected session:
+  // keeps the conversation indicator (and its cancel affordances) alive
+  // through >3s silent tool gaps where streamingState drops to idle (#9487).
+  const trustedLiveWorkspaces = useMemo(
+    () =>
+      workspaces.filter(
+        (entry) =>
+          entry.kind === 'live' && entry.trusted && isAbsolutePath(entry.cwd),
+      ),
+    [workspaces],
+  );
+  // A cleared session leaves connection.workspaceCwd set; without the
+  // sessionId gate the activity bridge would keep arming its full-catalog
+  // fallback for that cwd on the welcome view, issuing one idle catalog
+  // fetch for a result it then discards (#16355).
+  const activePromptWorkspaceCwd = !connection.sessionId
+    ? undefined
+    : connection.sessionContext?.kind === 'live'
+      ? trustedLiveWorkspaces.length === 1
+        ? trustedLiveWorkspaces[0]?.cwd
+        : undefined
+      : connection.workspaceCwd;
+  const [splitPaneWorkspaces, setSplitPaneWorkspaces] = useState<
+    readonly string[]
+  >([]);
+  const reportSplitPaneWorkspaces = useCallback((cwds: readonly string[]) => {
+    setSplitPaneWorkspaces((current) =>
+      current.length === cwds.length &&
+      current.every((cwd, index) => cwd === cwds[index])
+        ? current
+        : cwds,
+    );
+  }, []);
+  const [overviewLiveStateWorkspaceCwds, setOverviewLiveStateWorkspaceCwds] =
+    useState<readonly string[]>([]);
+  const reportOverviewLiveStateWorkspaceCwds = useCallback(
+    (cwds: readonly string[]) => {
+      setOverviewLiveStateWorkspaceCwds((current) =>
+        current.length === cwds.length &&
+        current.every((cwd, index) => cwd === cwds[index])
+          ? current
+          : cwds,
+      );
+    },
+    [],
+  );
+  // Without the sidebar the app-level poller covers exactly the workspaces
+  // the shell is attached to: the connected session's workspace (every
+  // trusted live workspace for a Live session), the mounted split panes, and
+  // the session overview's displayed set (#16355).
   const sidebarlessLiveStateWorkspaceCwds = useMemo(() => {
     if (sidebarOptions.enabled) return [];
+    const targets = new Set<string>([
+      ...splitPaneWorkspaces,
+      ...overviewLiveStateWorkspaceCwds,
+    ]);
+    if (connection.sessionId) {
+      if (connection.sessionContext?.kind === 'live') {
+        for (const entry of trustedLiveWorkspaces) targets.add(entry.cwd);
+      } else if (connection.workspaceCwd) {
+        targets.add(connection.workspaceCwd);
+      }
+    }
     return workspaces
-      .filter((entry) => entry.trusted && isAbsolutePath(entry.cwd))
+      .filter(
+        (entry) =>
+          targets.has(entry.cwd) && entry.trusted && isAbsolutePath(entry.cwd),
+      )
       .map((entry) => entry.cwd);
-  }, [sidebarOptions.enabled, workspaces]);
+  }, [
+    sidebarOptions.enabled,
+    splitPaneWorkspaces,
+    overviewLiveStateWorkspaceCwds,
+    connection.sessionId,
+    connection.sessionContext?.kind,
+    connection.workspaceCwd,
+    trustedLiveWorkspaces,
+    workspaces,
+  ]);
   useWorkspaceSessionLiveState(workspace.client, {
     pollIntervalMs: workspace.capabilities?.sessionLiveStatePollIntervalMs,
     enabled: Boolean(
@@ -4138,19 +4396,6 @@ export function App({
     workspaceCwds: sidebarlessLiveStateWorkspaceCwds,
     groupWorkspaceCwds: [],
   });
-  // Daemon-authoritative "turn is running" signal for the connected session:
-  // keeps the conversation indicator (and its cancel affordances) alive
-  // through >3s silent tool gaps where streamingState drops to idle (#9487).
-  const trustedLiveWorkspaces = workspaces.filter(
-    (entry) =>
-      entry.kind === 'live' && entry.trusted && isAbsolutePath(entry.cwd),
-  );
-  const activePromptWorkspaceCwd =
-    connection.sessionContext?.kind === 'live'
-      ? trustedLiveWorkspaces.length === 1
-        ? trustedLiveWorkspaces[0]?.cwd
-        : undefined
-      : connection.workspaceCwd;
   const {
     hasActivePrompt: daemonHasActivePrompt,
     activeWorkState: sessionActiveWorkState,
@@ -4746,6 +4991,21 @@ export function App({
     resolveWorkspaceMaintenanceTargetCwd,
     workspaceContextActive,
   ]);
+  const composerWorkspaceCwd = workspaceContextActive
+    ? (ordinaryWorkspaces.find((entry) => entry.cwd === lockedWorkspaceCwd)
+        ?.cwd ??
+      (connection.sessionId
+        ? connection.workspaceCwd
+        : resolveWorkspaceMaintenanceTargetCwd()))
+    : undefined;
+  const modelPickerScope = useMemo(
+    () => ({
+      sessionId: connection.sessionId,
+      workspaceCwd: composerWorkspaceCwd,
+      daemonBaseUrl: workspace.baseUrl,
+    }),
+    [connection.sessionId, composerWorkspaceCwd, workspace.baseUrl],
+  );
   // The chat header always answers "which workspace is this session in?": the
   // workspace's name when there is one, and nothing when the session lives
   // outside every workspace (standalone, Live), which the header shows as the
@@ -4826,6 +5086,25 @@ export function App({
   }, []);
 
   const messages = useMessagesFromBlocks(t, blocks, blockChangeSummary);
+  const waitingMinigameActivity = useMemo(
+    () => buildWaitingActivity(messages),
+    [messages],
+  );
+  const waitingMinigameTokens = useMemo(
+    () =>
+      buildWaitingTokenUsage(
+        messages,
+        connection.tokenUsage ?? {},
+        connection.tokenCount,
+        connection.contextWindow,
+      ),
+    [
+      messages,
+      connection.tokenUsage,
+      connection.tokenCount,
+      connection.contextWindow,
+    ],
+  );
   const messagesRef = useRef(messages);
   const [failedPrompt, setFailedPrompt] = useState<FailedPrompt | null>(null);
   const failedPromptRef = useRef<FailedPrompt | null>(failedPrompt);
@@ -5118,14 +5397,19 @@ export function App({
     artifactsByTurn,
     onChange: onSessionArtifactsChange,
   });
-  const fileChangesByTurn = useMemo(
-    () =>
-      getFileChangesByTurn(
-        displayMessages,
-        artifactsByTurn,
-        connection.workspaceCwd || '',
-      ),
-    [displayMessages, artifactsByTurn, connection.workspaceCwd],
+  const fileChangesByTurn = useWorkspaceFileChanges(
+    displayMessages,
+    artifactsByTurn,
+    connection.workspaceCwd ||
+      connection.standaloneSession?.projectlessOutputDirectory ||
+      '',
+    connection.sessionId,
+    connection.workspaceCwd &&
+      currentSessionSummary?.sessionId === connection.sessionId
+      ? (sessionWorktree?.path ?? connection.workspaceCwd)
+      : connection.workspaceCwd
+        ? undefined
+        : null,
   );
   const latestReviewChanges = useMemo(() => {
     let latest: readonly TurnOutputFileChange[] = [];
@@ -5169,6 +5453,13 @@ export function App({
   const artifactPanelPersistedStatesRef = useRef(
     initialArtifactPanelPersistedStates,
   );
+  const [initialDetailsChildren] = useState(() =>
+    readStoredDetailsChildren(DETAILS_CHILDREN_STORAGE_KEY),
+  );
+  const detailsChildrenRef = useRef(initialDetailsChildren);
+  // Details creations that are still in flight, keyed by tab id: the parent
+  // identity must survive the draft tab closing before creation resolves.
+  const detailsParentByTabRef = useRef(new Map<string, string>());
   const initialArtifactPanelOpen = Boolean(
     panelStateKey && initialArtifactPanelPersistedStates[panelStateKey]?.open,
   );
@@ -5643,22 +5934,87 @@ export function App({
           !archivedSideTaskCatalog.loaded)));
   const nextSideTaskTabIdRef = useRef(0);
   const createSideTask = useCallback(
-    (initialPrompt?: string) => {
+    (
+      initialPrompt?: string,
+      detailsRequestId?: string,
+      existingChildSessionId?: string,
+    ) => {
       const parentSessionId = connection.sessionId;
       if (!parentSessionId || !sideTasksAvailable) return false;
+      // This question already has a details child: focus whichever tab shows
+      // it (the details tab or a catalog reopen) instead of adding a second
+      // tab for the same session.
+      if (existingChildSessionId) {
+        const openTab = artifactPanelTabsRef.current.find(
+          (item): item is Extract<ArtifactPanelTab, { kind: 'side_task' }> =>
+            item.kind === 'side_task' &&
+            item.sessionId === existingChildSessionId,
+        );
+        if (openTab) {
+          // A catalog reopen carries no prompt. If the original details tab
+          // was closed before the pane admitted it, the child is still empty;
+          // supply the pending prompt so the pane's empty-session guard can
+          // deliver it (it never re-sends once the child has a user prompt).
+          const prompt = initialPrompt?.trim();
+          if (prompt && openTab.initialPrompt !== prompt) {
+            setArtifactPanelTabs((tabs) =>
+              tabs.map((tab) =>
+                tab.id === openTab.id ? { ...tab, initialPrompt: prompt } : tab,
+              ),
+            );
+          }
+          setActiveArtifactPanelTabId(openTab.id);
+          setArtifactPanelOpen(true);
+          return true;
+        }
+      }
+      // A details side task is one-per-pending-question: repeat clicks focus
+      // the existing tab instead of provisioning a duplicate child session.
+      // /btw side keeps the unique draft id — each invocation is a new task.
+      // The id must stay short: SideTaskPanel derives the pane's clientId as
+      // `side-task:<parentSessionId>:<tabId>` and the daemon rejects client
+      // ids over 128 chars. The request id alone is unique (uuid); tabs are
+      // already bucketed per parent session.
+      const id = detailsRequestId
+        ? `${DETAILS_TAB_ID_PREFIX}${detailsRequestId}`
+        : `side-task:draft:${Date.now()}:${++nextSideTaskTabIdRef.current}`;
       const tab: ArtifactPanelTab = {
-        id: `side-task:draft:${Date.now()}:${++nextSideTaskTabIdRef.current}`,
+        id,
         kind: 'side_task',
         title: t('sideTask.title'),
         parentSessionId,
         workspaceCwd: connection.workspaceCwd,
-        nameFromFirstPrompt: true,
-        ...(initialPrompt?.trim()
-          ? { initialPrompt: initialPrompt.trim() }
-          : {}),
+        // Reopening an existing child attaches to it directly. Keep the
+        // prompt on the reopened tab: creation resolves before the pane
+        // admits the prompt, so a tab closed in that window leaves an empty
+        // child. SideTaskPanel's empty-session guard sends the prompt only
+        // while the child has no user prompt yet, and never re-sends it.
+        ...(existingChildSessionId
+          ? {
+              sessionId: existingChildSessionId,
+              ...(initialPrompt?.trim()
+                ? { initialPrompt: initialPrompt.trim() }
+                : {}),
+            }
+          : {
+              nameFromFirstPrompt: true,
+              ...(initialPrompt?.trim()
+                ? { initialPrompt: initialPrompt.trim() }
+                : {}),
+            }),
       };
-      setArtifactPanelTabs((tabs) => [...tabs, tab]);
-      setActiveArtifactPanelTabId(tab.id);
+      setArtifactPanelTabs((tabs) => {
+        if (!tabs.some((item) => item.id === id)) return [...tabs, tab];
+        // A same-id tab that reaches this point is bound to a different child
+        // than the one being reopened: the openTab lookup above already focused
+        // any tab showing existingChildSessionId, so a survivor carries a stale
+        // sessionId (an archived child the read-site check forgot, or a binding
+        // copied from another browser tab). Replace it so the pane attaches to
+        // the right child instead of re-focusing an unloadable pane. The id
+        // stays the same (clientId budget).
+        return tabs.map((item) => (item.id === id ? tab : item));
+      });
+      setActiveArtifactPanelTabId(id);
       setArtifactPanelOpen(true);
       return true;
     },
@@ -5725,6 +6081,11 @@ export function App({
     (tabId: string, parentSessionId: string, title: string) => {
       const pending = sideTaskCreationPromisesRef.current.get(tabId);
       if (pending) return pending;
+      if (tabId.startsWith(DETAILS_TAB_ID_PREFIX)) {
+        // Capture the parent identity now: the draft tab may close before
+        // creation resolves, and the association must still be recorded.
+        detailsParentByTabRef.current.set(tabId, parentSessionId);
+      }
       const creation = (async () => {
         const owner = sessionOwnerGuard.capture();
         const ownerCwd = connection.workspaceCwd;
@@ -5752,7 +6113,15 @@ export function App({
           sessionId: session.sessionId,
           displayName: session.displayName,
         };
-      })().finally(() => sideTaskCreationPromisesRef.current.delete(tabId));
+      })()
+        .catch((error: unknown) => {
+          // A failed creation never reaches handleSideTaskCreated, so release
+          // the captured parent identity here or it leaks until reload. The
+          // success path keeps it: handleSideTaskCreated reads then deletes it.
+          detailsParentByTabRef.current.delete(tabId);
+          throw error;
+        })
+        .finally(() => sideTaskCreationPromisesRef.current.delete(tabId));
       sideTaskCreationPromisesRef.current.set(tabId, creation);
       return creation;
     },
@@ -5822,6 +6191,33 @@ export function App({
             artifactPanelPersistedStatesRef.current,
           );
           break;
+        }
+      }
+      if (tabId.startsWith(DETAILS_TAB_ID_PREFIX)) {
+        // Remember which child explains this pending question so closing the
+        // tab (or reloading) cannot trick "Ask for details" into provisioning
+        // a duplicate. Record it even when the draft tab already closed:
+        // server-side creation is not cancelled by closing the tab. One entry
+        // per parent supersedes the resolved question's association.
+        const requestId = tabId.slice(DETAILS_TAB_ID_PREFIX.length);
+        const parentId =
+          (createdTab?.kind === 'side_task'
+            ? createdTab.parentSessionId
+            : undefined) ?? detailsParentByTabRef.current.get(tabId);
+        detailsParentByTabRef.current.delete(tabId);
+        if (requestId && parentId) {
+          // Re-insert the parent so a re-recorded entry moves to the newest
+          // key slot: the writer evicts the oldest key, and a plain spread
+          // would leave a live, frequently re-recorded parent first in line
+          // (see utils/bounded-map.ts).
+          const nextParents = { ...detailsChildrenRef.current };
+          delete nextParents[parentId];
+          nextParents[parentId] = { [requestId]: sessionId };
+          detailsChildrenRef.current = nextParents;
+          writeStoredDetailsChildren(
+            DETAILS_CHILDREN_STORAGE_KEY,
+            detailsChildrenRef.current,
+          );
         }
       }
       const sideTaskTab =
@@ -6203,18 +6599,41 @@ export function App({
       tabId = 'review',
       sourceTurnId?: string,
       sourceSessionId?: string,
+      unfilteredChanges?: readonly TurnOutputFileChange[],
     ) => {
+      const sourceMessages =
+        artifactPanelRestoreInputsRef.current.displayMessages;
+      const sourceCwd =
+        connection.workspaceCwd ||
+        connection.standaloneSession?.projectlessOutputDirectory ||
+        '';
+      const sourceChanges =
+        unfilteredChanges ??
+        ((!sourceSessionId || sourceSessionId === connection.sessionId) &&
+        sourceTurnId
+          ? getFileChangesByTurn(
+              sourceMessages,
+              getArtifactsByTurn(
+                sourceMessages,
+                artifactsRef.current,
+                sourceCwd,
+              ),
+              sourceCwd,
+            ).get(sourceTurnId)
+          : undefined) ??
+        changes;
       const reviewTab: ArtifactPanelTab = {
         id: tabId,
         kind: 'review',
         title: t('turnOutputs.review'),
         changes,
+        unfilteredChanges: sourceChanges,
         ...(selectedPath ? { selectedPath } : {}),
         ...(reviewWorkspaceCwd ? { workspaceCwd: reviewWorkspaceCwd } : {}),
         ...(reviewWorkspaceId ? { workspaceId: reviewWorkspaceId } : {}),
         ...(sourceTurnId ? { sourceTurnId } : {}),
         ...(sourceSessionId ? { sourceSessionId } : {}),
-        sourceToolCallIds: changes.map((change) => change.toolCallId),
+        sourceToolCallIds: sourceChanges.map((change) => change.toolCallId),
       };
       setArtifactPanelTabs((tabs) =>
         tabs.some((item) => item.id === reviewTab.id)
@@ -6229,7 +6648,13 @@ export function App({
       );
       setArtifactPanelOpen(true);
     },
-    [getDefaultReviewPanelWidth, t],
+    [
+      connection.sessionId,
+      connection.workspaceCwd,
+      connection.standaloneSession?.projectlessOutputDirectory,
+      getDefaultReviewPanelWidth,
+      t,
+    ],
   );
   const openLatestReviewPanel = useCallback(() => {
     if (latestReviewChanges.length === 0) return;
@@ -6389,6 +6814,18 @@ export function App({
     },
     [getDefaultReviewPanelWidth, t],
   );
+  // The composer reading refreshes in the background, so it reads the route
+  // directly: a failed read must not raise a notice the way the session
+  // action does.
+  const loadComposerUsageStats = useCallback(
+    (sessionId: string) => workspace.client.sessionStats(sessionId),
+    [workspace.client],
+  );
+  const openComposerUsagePanel = useCallback(() => {
+    if (connection.sessionId) {
+      openTokenUsagePanel(connection.sessionId, sessionActions);
+    }
+  }, [connection.sessionId, openTokenUsagePanel, sessionActions]);
   const openTrajectoryPanel = useCallback(
     (sourceSessionId: string) => {
       const tab: ArtifactPanelTab = {
@@ -6658,6 +7095,144 @@ export function App({
       workspace.client,
     ],
   );
+  const filterReviewChanges = useCallback(
+    async (
+      changes: readonly TurnOutputFileChange[],
+      sourceSessionId: string,
+      reviewWorkspaceCwd?: string,
+    ): Promise<readonly TurnOutputFileChange[]> => {
+      const gitSessionId = fileChangeOwnerSessionId(sourceSessionId);
+      const summary = gitSessionId
+        ? await workspace.client
+            .sessionStatus(gitSessionId)
+            .catch(() => undefined)
+        : undefined;
+      const outputDirectory =
+        sourceSessionId === connection.sessionId
+          ? connection.standaloneSession?.projectlessOutputDirectory
+          : undefined;
+      if (
+        !outputDirectory &&
+        !reviewWorkspaceCwd &&
+        summary?.sourceType === 'standalone'
+      )
+        return changes;
+      const cwd =
+        outputDirectory ??
+        summary?.worktree?.path ??
+        reviewWorkspaceCwd ??
+        (sourceSessionId === connection.sessionId
+          ? connection.workspaceCwd
+          : undefined) ??
+        summary?.workspaceCwd;
+      if (!cwd) return changes;
+      const contained = filterWorkspaceFileChanges(
+        new Map([['review', changes]]),
+        cwd,
+      );
+      const ownerCwd =
+        reviewWorkspaceCwd ??
+        (outputDirectory ? undefined : summary?.workspaceCwd);
+      if (
+        !workspace.capabilities?.features?.includes(
+          'workspace_git_check_ignore',
+        ) ||
+        !ownerCwd ||
+        !summary ||
+        !resolveArtifactWorkspaceOwner(workspace.capabilities, ownerCwd)
+      )
+        return contained.get('review') ?? [];
+      const paths = [
+        ...new Set(
+          (contained.get('review') ?? []).map(
+            (change) => workspaceRelativeChangePath(change.path, cwd)!,
+          ),
+        ),
+      ];
+      const ignored = await loadGitIgnoredChangePaths(paths, (batch) =>
+        workspace.client
+          .workspaceByCwd(ownerCwd)
+          .workspaceGitIgnoredPaths(
+            batch,
+            summary.worktree?.path,
+            gitSessionId,
+          ),
+      ).catch(() => new Set<string>());
+      return (
+        filterWorkspaceFileChanges(contained, cwd, ignored).get('review') ?? []
+      );
+    },
+    [
+      connection.sessionId,
+      connection.workspaceCwd,
+      connection.standaloneSession?.projectlessOutputDirectory,
+      workspace.capabilities,
+      workspace.client,
+    ],
+  );
+  const reviewVisibilityKey = JSON.stringify([
+    [...fileChangesByTurn].map(([turn, changes]) => [
+      turn,
+      changes.map((change) => change.path),
+    ]),
+    artifactPanelTabs
+      .filter((tab) => tab.kind === 'review')
+      .map((tab) => [
+        tab.id,
+        tab.sourceSessionId,
+        tab.workspaceCwd,
+        tab.sourceToolCallIds,
+      ]),
+  ]);
+  useEffect(() => {
+    if (
+      !daemonAvailable ||
+      connection.status !== 'connected' ||
+      !workspace.capabilities?.features?.includes('workspace_git_check_ignore')
+    )
+      return;
+    let active = true;
+    const owner = sessionOwnerGuard.capture();
+    for (const tab of artifactPanelTabsRef.current) {
+      if (tab.kind !== 'review') continue;
+      const sourceSessionId = tab.sourceSessionId ?? connection.sessionId;
+      if (!sourceSessionId) continue;
+      void filterReviewChanges(
+        tab.unfilteredChanges ?? tab.changes ?? [],
+        sourceSessionId,
+        tab.workspaceCwd,
+      )
+        .then((changes) => {
+          if (active && owner.isCurrent())
+            setArtifactPanelTabs((tabs) =>
+              tabs.map((item) =>
+                item.kind === 'review' &&
+                item.id === tab.id &&
+                item.sourceSessionId === tab.sourceSessionId &&
+                item.changes === tab.changes
+                  ? {
+                      ...item,
+                      changes,
+                      unfilteredChanges: tab.unfilteredChanges ?? tab.changes,
+                    }
+                  : item,
+              ),
+            );
+        })
+        .catch(() => {});
+    }
+    return () => {
+      active = false;
+    };
+  }, [
+    connection.status,
+    daemonAvailable,
+    connection.sessionId,
+    filterReviewChanges,
+    reviewVisibilityKey,
+    sessionOwnerGuard,
+    workspace.capabilities,
+  ]);
   const hydratePendingArtifactPanelTab = useCallback(
     async (tab: Extract<ArtifactPanelTab, { kind: 'pending' }> | undefined) => {
       if (!tab) return;
@@ -6817,25 +7392,49 @@ export function App({
                 sourceArtifacts,
                 tab.workspaceCwd ?? '',
               ),
-              tab.workspaceCwd ?? '',
+              tab.workspaceCwd,
             );
-            const changes =
+            const sourceChanges =
               findReviewChangesByToolCallIds(
                 changesByTurn,
                 tab.sourceToolCallIds,
               ) ?? changesByTurn.get(tab.sourceTurnId ?? '');
+            const complete = (tab.sourceToolCallIds ?? []).every((id) =>
+              sourceChanges?.some((change) => change.toolCallId === id),
+            );
+            const changes =
+              sourceChanges && complete
+                ? await filterReviewChanges(
+                    sourceChanges,
+                    tab.sourceSessionId,
+                    tab.workspaceCwd,
+                  )
+                : undefined;
+            if (!owner.isCurrent()) return;
             if (changes) {
               restored = {
                 id: tab.id,
                 kind: 'review',
                 title: tab.title,
+                unfilteredChanges: sourceChanges,
                 changes,
                 selectedPath: tab.selectedPath,
                 sourceTurnId: tab.sourceTurnId,
                 sourceSessionId: tab.sourceSessionId,
                 sourceToolCallIds: tab.sourceToolCallIds,
-                workspaceCwd: tab.workspaceCwd,
-                workspaceId: tab.workspaceId,
+                workspaceCwd:
+                  tab.workspaceCwd ??
+                  (tab.sourceSessionId === connection.sessionId
+                    ? connection.workspaceCwd
+                    : undefined),
+                workspaceId:
+                  tab.workspaceId ??
+                  (tab.sourceSessionId === connection.sessionId
+                    ? resolveArtifactWorkspaceOwner(
+                        workspace.capabilities,
+                        tab.workspaceCwd ?? connection.workspaceCwd,
+                      )?.id
+                    : undefined),
               };
             }
           } else if (tab.targetKind === 'scheduled_task') {
@@ -6930,9 +7529,12 @@ export function App({
     },
     [
       connection.sessionId,
+      filterReviewChanges,
+      connection.workspaceCwd,
       sessionActions,
       sessionOwnerGuard,
       t,
+      workspace.capabilities,
       workspace.client,
     ],
   );
@@ -7176,7 +7778,7 @@ export function App({
       retainCurrentTrajectory();
       return;
     }
-    if (artifactsLoading) {
+    if (artifactsLoading || !workspace.capabilities) {
       saveCurrentState();
       artifactPanelRestoredSessionKeyRef.current = undefined;
       const pendingState =
@@ -7276,37 +7878,61 @@ export function App({
                 case 'turn_calls':
                   return { ...tab, sessionId: connection.sessionId };
                 case 'review': {
-                  if (
-                    tab.sourceSessionId &&
-                    tab.sourceSessionId !== connection.sessionId
-                  ) {
-                    return {
-                      ...tab,
-                      kind: 'pending',
-                      targetKind: 'review',
-                      sourceSessionId: tab.sourceSessionId,
-                    };
-                  }
-                  const changes =
-                    findReviewChangesByToolCallIds(
-                      restoreInputs.fileChangesByTurn,
-                      tab.sourceToolCallIds,
-                    ) ??
-                    (tab.sourceTurnId
-                      ? restoreInputs.fileChangesByTurn.get(tab.sourceTurnId)
-                      : restoreInputs.latestReviewChanges);
-                  const sourceSessionId =
+                  const reviewSessionId =
                     tab.sourceSessionId ?? connection.sessionId;
-                  return changes
-                    ? { ...tab, changes }
-                    : tab.sourceTurnId && sourceSessionId
-                      ? {
-                          ...tab,
-                          kind: 'pending',
-                          targetKind: 'review',
-                          sourceSessionId,
-                        }
-                      : undefined;
+                  if (!reviewSessionId) return undefined;
+                  if (reviewSessionId === connection.sessionId) {
+                    const cwd =
+                      connection.workspaceCwd ||
+                      connection.standaloneSession?.projectlessOutputDirectory;
+                    const memoryChanges = getFileChangesByTurn(
+                      restoreInputs.displayMessages,
+                      getArtifactsByTurn(
+                        restoreInputs.displayMessages,
+                        artifactsRef.current,
+                        cwd,
+                      ),
+                      cwd,
+                    );
+                    const changes =
+                      findReviewChangesByToolCallIds(
+                        memoryChanges,
+                        tab.sourceToolCallIds,
+                      ) ??
+                      (tab.sourceTurnId
+                        ? memoryChanges.get(tab.sourceTurnId)
+                        : [...memoryChanges.values()].at(-1));
+                    const complete = (tab.sourceToolCallIds ?? []).every((id) =>
+                      [...memoryChanges.values()].some((changes) =>
+                        changes.some((change) => change.toolCallId === id),
+                      ),
+                    );
+                    if (changes && complete)
+                      return {
+                        ...tab,
+                        sourceSessionId: reviewSessionId,
+                        workspaceCwd:
+                          tab.workspaceCwd ?? connection.workspaceCwd,
+                        workspaceId:
+                          tab.workspaceId ??
+                          resolveArtifactWorkspaceOwner(
+                            workspace.capabilities,
+                            tab.workspaceCwd ?? connection.workspaceCwd,
+                          )?.id,
+                        unfilteredChanges: changes,
+                        changes: await filterReviewChanges(
+                          changes,
+                          reviewSessionId,
+                          tab.workspaceCwd,
+                        ),
+                      };
+                  }
+                  return {
+                    ...tab,
+                    kind: 'pending',
+                    targetKind: 'review',
+                    sourceSessionId: reviewSessionId,
+                  };
                 }
                 case 'files':
                   return filesAvailable ? tab : undefined;
@@ -7583,6 +8209,7 @@ export function App({
     connection.loadingTranscript,
     connection.sessionId,
     connection.status,
+    connection.workspaceCwd,
     getDefaultReviewPanelWidth,
     hydratePendingArtifactPanelTab,
     hydrateRestoredAttachmentTab,
@@ -7595,6 +8222,10 @@ export function App({
     filesAvailable,
     webPreviewAvailable,
     workspace.baseUrl,
+    workspace.capabilities,
+    filterReviewChanges,
+    connection.standaloneSession?.projectlessOutputDirectory,
+    sessionWorktree?.path,
     workspace.client,
   ]);
   const openShellPanel = useCallback(
@@ -7867,6 +8498,7 @@ export function App({
             : undefined,
           request.turnId,
           request.sourceSessionId,
+          request.unfilteredChanges,
         );
         return;
       }
@@ -8345,6 +8977,8 @@ export function App({
       ? pendingApproval
       : null
     : null;
+  const pendingAskUserApprovalRef = useRef(pendingAskUserApproval);
+  pendingAskUserApprovalRef.current = pendingAskUserApproval;
   const pendingToolApproval =
     pendingApproval && !isAskUserPermission(pendingApproval)
       ? canActOnPendingApproval
@@ -8353,6 +8987,8 @@ export function App({
       : null;
   const pendingApprovalRef = useRef(pendingApproval);
   pendingApprovalRef.current = canActOnPendingApproval ? pendingApproval : null;
+  const [projectHooksApprovalActive, setProjectHooksApprovalActive] =
+    useState(false);
   // True exactly when an actionable approval overlay (ToolApproval or
   // AskUserQuestion) is on screen. Single source of truth for the three places
   // that must treat the composer as dormant while an approval owns the keyboard:
@@ -8360,7 +8996,9 @@ export function App({
   // dialogOpen prop.
   const approvalOverlayActive =
     !managedMode &&
-    (pendingToolApproval !== null || pendingAskUserApproval !== null);
+    (pendingToolApproval !== null ||
+      pendingAskUserApproval !== null ||
+      projectHooksApprovalActive);
   const approvalOverlayActiveRef = useRef(approvalOverlayActive);
   approvalOverlayActiveRef.current =
     approvalOverlayActive ||
@@ -8863,9 +9501,23 @@ export function App({
     () => (renderFooter ? footerHostTasks.map(mapToWebShellTaskInfo) : []),
     [footerHostTasks, renderFooter],
   );
-  const statusBarRef = useRef<StatusBarHandle>(null);
+  const composerTaskChipsRef = useRef<ComposerTaskChipsHandle>(null);
   const messageListRef = useRef<MessageListHandle | null>(null);
+  const toolRevealStore = useMemo(createToolRevealStore, []);
+  const locateWaitingActivity = useCallback((messageId: string) => {
+    messageListRef.current?.scrollToMessage(messageId);
+  }, []);
   const editorRef = useRef<EditorHandle | null>(null);
+  const chatFocusBlockedRef = useRef(false);
+  const focusChatAfterNavigation = useCallback(() => {
+    if (chatFocusBlockedRef.current) return;
+    // Keep touch navigation accessible without opening the soft keyboard.
+    if (isCoarsePointerDevice()) {
+      chatPaneRef.current?.focus({ preventScroll: true });
+    } else {
+      editorRef.current?.focus();
+    }
+  }, []);
   const restoreConversationSearchFocus = useCallback(() => {
     editorRef.current?.focus();
   }, []);
@@ -8967,6 +9619,14 @@ export function App({
       failedPromptRetryIsCurrent &&
       (!failedPromptRetry.admitted || failedPromptRetry.settled),
   );
+  const waitingMinigameVisible =
+    !suppressFailedPromptRetryStreaming &&
+    (streamingState !== 'idle' || sessionHasActivePrompt);
+  const waitingGamesEnabled = useMemo(() => readWaitingGamesEnabled(), []);
+  const [waitingMinigameOpen, setWaitingMinigameOpen] = useState(false);
+  useEffect(() => {
+    if (!waitingMinigameVisible) setWaitingMinigameOpen(false);
+  }, [waitingMinigameVisible]);
   const streamingStateRef = useRef<DaemonStreamingState>(streamingState);
   streamingStateRef.current = streamingState;
   // Cleared in three places: the session-switch effect, the drain loop, and
@@ -8999,6 +9659,12 @@ export function App({
   }
   previousStreamingStateRef.current = streamingState;
   const activeTurnStartedAt = useMemo(() => {
+    if (
+      connection.localPrompt &&
+      connection.localPrompt.sessionId === connection.sessionId
+    ) {
+      return connection.localPrompt.startedAt;
+    }
     if (connection.backgroundTurn) return connection.backgroundTurn.startedAt;
     if (streamingState === 'idle') return undefined;
     for (let i = displayMessages.length - 1; i >= 0; i--) {
@@ -9008,7 +9674,13 @@ export function App({
       }
     }
     return localStreamingStartedAtRef.current;
-  }, [displayMessages, streamingState, connection.backgroundTurn]);
+  }, [
+    displayMessages,
+    streamingState,
+    connection.backgroundTurn,
+    connection.localPrompt,
+    connection.sessionId,
+  ]);
   const lastSubmittedPromptRef = useRef<string>('');
   const lastSubmittedImagesRef = useRef<PromptImage[] | undefined>(undefined);
   const lastSubmittedFilesRef = useRef<PromptFile[] | undefined>(undefined);
@@ -9751,6 +10423,10 @@ export function App({
   const [showResumeDialog, setShowResumeDialog] = useState(false);
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
   const [showReleaseDialog, setShowReleaseDialog] = useState(false);
+  const [sessionLimitReached, setSessionLimitReached] = useState(false);
+  const sessionLimitScopeRef = useRef<
+    { sessionId?: string; workspaceCwd?: string } | undefined
+  >(undefined);
   const [showRewindDialog, setShowRewindDialog] = useState(false);
   const [showThemeDialog, setShowThemeDialog] = useState(false);
   const [showToolsDialog, setShowToolsDialog] = useState(false);
@@ -10064,6 +10740,26 @@ export function App({
   // Generation recorded when the latest classification started; differs from
   // the live generation only while a superseded classification is in flight.
   const splitClassificationStartGenerationRef = useRef(0);
+  // Publish/clear contract: a pending open is published when a classification
+  // starts (beginSplitClassification) and cleared when that generation settles
+  // (settlePendingSplitOpen). It is honoured only while its generation equals
+  // the live splitClassificationGenerationRef — navigation bumps that ref to
+  // cancel a pending selection. Do not clear it on the controlled effect's
+  // early returns: merging into a not-yet-classified controlled request is
+  // intended.
+  const pendingSplitOpenRef = useRef<{
+    generation: number;
+    sessionIds: string[];
+  } | null>(null);
+  // State mirror of the live pending open's ids, so the sidebar can render
+  // disabled/title during the opening window, when mainView is not 'split' yet
+  // and the real splitSessionIds is not handed over. Written and cleared
+  // alongside pendingSplitOpenRef; surfaced only while its generation is the
+  // live one (navigation invalidates it the same way it supersedes the ref).
+  const [pendingSplitPaneIds, setPendingSplitPaneIds] = useState<{
+    generation: number;
+    sessionIds: string[];
+  } | null>(null);
   splitSessionIdsRef.current = splitSessionIds;
   const previousSplitSessionIdsRef = useRef<string[]>(splitSessionIds);
   useEffect(() => {
@@ -10138,6 +10834,7 @@ export function App({
     | 'plugins'
     | 'agents'
     | 'channels'
+    | 'channel-events'
     | 'live'
     | 'workspaces'
     | null
@@ -10151,8 +10848,9 @@ export function App({
   if (managedHistoryRevision !== navigation?.historyRevision) {
     setManagedHistoryRevision(navigation?.historyRevision);
     if (managedAgentProvider) {
-      const selection = managedSelectionFromUrl(
-        navigation?.route.page !== 'chat' || !navigation.route.sessionId,
+      const selection = managedSelectionFromRoute(
+        navigation?.route,
+        standaloneShell,
       );
       setManagedHome(selection.open);
       if (managedSessionId !== selection.sessionId) {
@@ -10210,7 +10908,16 @@ export function App({
   }, [workspaceContextActive]);
   useEffect(() => {
     if (workspaceContextActive) return;
-    splitClassificationGenerationRef.current += 1;
+    // A first open started from the sidebar owns the live generation until
+    // navigation supersedes it; bumping here would silently kill the in-flight
+    // classification the click just began, so cancellation (the bump) is
+    // skipped while a pending open is live. The teardown below still runs.
+    if (
+      pendingSplitOpenRef.current?.generation !==
+      splitClassificationGenerationRef.current
+    ) {
+      splitClassificationGenerationRef.current += 1;
+    }
     if (!projectFeaturesAvailable) setSplitSessionIds([]);
     if (
       !projectFeaturesAvailable &&
@@ -10286,6 +10993,7 @@ export function App({
         | 'plugins'
         | 'agents'
         | 'channels'
+        | 'channel-events'
         | 'live'
         | 'workspaces',
     ) => {
@@ -10368,31 +11076,7 @@ export function App({
         if (item === 'workflows') return workflowsEnabled;
         if (item === 'prWatches') return prWatchesAvailable;
         return true;
-      }) ||
-        (sidebarOptions.footer !== false &&
-          sidebarOptions.footer?.items?.some((item) => {
-            if (item === 'collapse') return false;
-            if (item === 'settings') return settingsAvailable;
-            if (item === 'sessionsOverview' || item === 'splitView') {
-              return isSidebarFooterItemAvailable(
-                item,
-                projectFeaturesAvailable,
-                isLargeScreen,
-              );
-            }
-            if (item === 'workspacesOverview') return !lockedWorkspaceCwd;
-            if (item === 'localFiles' || item === 'desktopRelay')
-              return isPageOriginDaemon(workspace.baseUrl);
-            if (item === 'update') {
-              return (
-                !isDesktopShell() &&
-                Boolean(
-                  connection.capabilities?.features?.includes('daemon_update'),
-                )
-              );
-            }
-            return true;
-          })),
+      }),
     );
   const navigationRailVisible =
     sidebarOptions.enabled &&
@@ -10432,6 +11116,9 @@ export function App({
     sidebarRailEnabled &&
     sidebarOptions.showLive &&
     sidebarOptions.primaryNav?.items?.includes('live') !== false;
+  const channelNavigationEnabled =
+    projectFeaturesAvailable &&
+    (sidebarOptions.primaryNav?.items?.includes('channelEvents') ?? true);
   useEffect(() => {
     setSidebarSection((current) =>
       liveSidebarEnabled && connection.sessionContext?.kind === 'live'
@@ -10579,7 +11266,9 @@ export function App({
         ? 'scheduledTasks'
         : page === 'pr-watches'
           ? 'prWatches'
-          : page;
+          : page === 'channel-events'
+            ? 'channelEvents'
+            : page;
     const allowed =
       page === 'chat' ||
       (page === 'settings'
@@ -10589,6 +11278,7 @@ export function App({
         : projectFeaturesAvailable &&
           (page !== 'live' || liveSidebarEnabled) &&
           (page !== 'pr-watches' || prWatchesAvailable) &&
+          (page !== 'channel-events' || channelNavigationEnabled) &&
           (hostSidebar?.primaryNav?.items?.some(
             (item) => item === primaryItem,
           ) ??
@@ -10602,6 +11292,7 @@ export function App({
     setActivePanel(
       nextPage === 'plugins' ||
         nextPage === 'channels' ||
+        nextPage === 'channel-events' ||
         nextPage === 'live' ||
         nextPage === 'settings'
         ? nextPage
@@ -10626,6 +11317,7 @@ export function App({
     hostSidebar?.primaryNav?.items,
     liveSidebarEnabled,
     prWatchesAvailable,
+    channelNavigationEnabled,
     workspaceCapabilitiesReady,
   ]);
   useEffect(() => {
@@ -10650,20 +11342,120 @@ export function App({
     setForceMobileDrawer(true);
     setMobileDrawerOpen(true);
   }, [showChat, sidebarOptions.enabled]);
+  // Memoized per-id split classification. A merged re-open during a pending
+  // window must not re-fetch ids already classified (in flight or settled);
+  // transient failures are dropped so a retry re-classifies them. The memo is
+  // cleared on the same identities sanitizeSplitSessionIds is rebuilt on, so a
+  // daemon switch never reuses the previous target's answers. Entries that
+  // are still in flight when their open is cancelled by navigation are
+  // dropped at the next begin (see beginSplitClassification), so a re-open
+  // never waits on the cancelled open's classification.
+  const splitSessionClassificationRef = useRef<
+    Map<string, { promise: Promise<SplitSessionOutcome>; settled: boolean }>
+  >(new Map());
+  useEffect(() => {
+    splitSessionClassificationRef.current.clear();
+  }, [workspace.client, workspace.capabilities]);
+  const isSplitEligibleSession = useCallback(
+    (sessionId: string): Promise<SplitSessionOutcome> => {
+      const memo = splitSessionClassificationRef.current;
+      const cached = memo.get(sessionId);
+      if (cached) return cached.promise;
+      if (
+        !workspace.capabilities?.features?.includes(
+          STANDALONE_SESSIONS_CAPABILITY,
+        )
+      ) {
+        // Capability-absent fast path: every id is eligible, nothing to cache.
+        return Promise.resolve('workspace');
+      }
+      const outcome = workspace.client.getStandaloneSession(sessionId).then(
+        () => 'standalone' as const,
+        (error) =>
+          (isStandaloneSessionNotFoundError(error)
+            ? 'workspace'
+            : 'failed') as SplitSessionOutcome,
+      );
+      const entry = { promise: outcome, settled: false };
+      outcome.then((result) => {
+        entry.settled = true;
+        if (result === 'failed') memo.delete(sessionId);
+      });
+      memo.set(sessionId, entry);
+      return outcome;
+    },
+    [workspace.capabilities, workspace.client],
+  );
+  // Publishes a pending open when a split classification starts: bumps the
+  // generation refs, records the requested ids as the live pending open, and
+  // un-settles the split view so pane-bound reclaim waits for the decision.
+  // A pending open already superseded by navigation drops its still-in-flight
+  // classifications (see below). Returns the new generation.
+  const beginSplitClassification = useCallback(
+    (requested: readonly string[]) => {
+      // A pending open that is no longer on the live generation was
+      // superseded by navigation before it settled: its in-flight
+      // classifications are orphaned (the daemon call may never resolve),
+      // and a new open reusing them would stall, so drop the still-in-flight
+      // entries. Settled outcomes stay reusable; a live pending open (merged
+      // sidebar re-open) keeps its in-flight promises so the merged list
+      // doesn't re-classify.
+      const supersededPending = pendingSplitOpenRef.current;
+      if (
+        supersededPending &&
+        supersededPending.generation !==
+          splitClassificationGenerationRef.current
+      ) {
+        const memo = splitSessionClassificationRef.current;
+        for (const [id, entry] of memo) {
+          if (!entry.settled) memo.delete(id);
+        }
+      }
+      const generation = splitClassificationGenerationRef.current + 1;
+      splitClassificationGenerationRef.current = generation;
+      splitClassificationStartGenerationRef.current = generation;
+      const pending =
+        requested.length > 0
+          ? { generation, sessionIds: [...requested] }
+          : null;
+      pendingSplitOpenRef.current = pending;
+      setPendingSplitPaneIds(pending);
+      // A new decision is pending: un-settle so reclaim waits for it. The
+      // empty-request branch settles without classifying.
+      if (requested.length > 0) setSplitViewSettled(false);
+      return generation;
+    },
+    [],
+  );
+  // Clears the pending open when its generation settles; no-op once a newer
+  // generation (or navigation) has superseded it.
+  const settlePendingSplitOpen = useCallback((generation: number) => {
+    if (pendingSplitOpenRef.current?.generation === generation) {
+      pendingSplitOpenRef.current = null;
+    }
+    setPendingSplitPaneIds((current) =>
+      current?.generation === generation ? null : current,
+    );
+  }, []);
   const sanitizeSplitSessionIds = useCallback(
-    async (sessionIds: readonly string[]): Promise<string[]> => {
+    async (
+      sessionIds: readonly string[],
+    ): Promise<SplitSessionClassification> => {
       const requested = Array.from(new Set(sessionIds.filter(Boolean))).slice(
         0,
         MAX_SPLIT_PANES,
       );
-      if (requested.length === 0) return [];
+      if (requested.length === 0) {
+        return { kept: [], transientFailures: [] };
+      }
       return keepWorkspaceSplitSessionIds(
         workspace.client,
         workspace.capabilities,
         requested,
+        isSplitEligibleSession,
       );
     },
-    [workspace.capabilities, workspace.client],
+    [isSplitEligibleSession, workspace.capabilities, workspace.client],
   );
   // Open the in-window split view showing 2+ sessions side by side. `splitSessionIds`
   // is the live pane set — SplitView mirrors add/remove back into it via
@@ -10682,12 +11474,7 @@ export function App({
       const requested = Array.from(
         new Set((sessionIds ?? []).filter(Boolean)),
       ).slice(0, MAX_SPLIT_PANES);
-      const generation = splitClassificationGenerationRef.current + 1;
-      splitClassificationGenerationRef.current = generation;
-      splitClassificationStartGenerationRef.current = generation;
-      // A new decision is pending: un-settle so reclaim waits for it. The
-      // empty-request branch below settles without classifying.
-      if (requested.length > 0) setSplitViewSettled(false);
+      const generation = beginSplitClassification(requested);
       if (requested.length === 0) {
         const currentWorkspaceSessionId =
           connection.sessionId !== undefined &&
@@ -10707,7 +11494,8 @@ export function App({
         setSplitViewSettled(true);
         return;
       }
-      void sanitizeSplitSessionIds(requested).then((sanitized) => {
+      void sanitizeSplitSessionIds(requested).then((result) => {
+        settlePendingSplitOpen(generation);
         if (splitClassificationGenerationRef.current !== generation) {
           // Superseded: settle only when no newer classification started,
           // otherwise the newer one owns the decision.
@@ -10720,19 +11508,28 @@ export function App({
           return;
         }
         setSplitViewSettled(true);
-        if (sanitized.length === 0) {
+        if (result.transientFailures.length > 0) {
+          // A named session was lost to a transient (non-404) classification
+          // error: say so instead of opening a partial split silently.
+          pushToast('info', t('session.splitAddFailed'));
+        }
+        if (result.kept.length === 0) {
           return;
         }
-        setSplitSessionIds(sanitized);
+        setSplitSessionIds(result.kept);
         setMainView('split');
       });
     },
     [
+      beginSplitClassification,
       connection.sessionContext,
       connection.sessionId,
       connection.workspaceCwd,
+      pushToast,
       sanitizeSplitSessionIds,
+      settlePendingSplitOpen,
       showChat,
+      t,
       projectFeaturesAvailable,
     ],
   );
@@ -10745,6 +11542,26 @@ export function App({
   const externalSplitControlled = externalSplitSessionIds !== undefined;
   const onSplitSessionIdsChangeRef = useRef(onSplitSessionIdsChange);
   onSplitSessionIdsChangeRef.current = onSplitSessionIdsChange;
+  // The pane list a fresh split seeds with when the user picks no explicit
+  // sessions: the current session, but only in a workspace context — a
+  // standalone/live session is its own pane and must not be duplicated.
+  const splitSeedIds = useCallback(
+    () =>
+      workspaceContextActive && connection.sessionId
+        ? [connection.sessionId]
+        : [],
+    [connection.sessionId, workspaceContextActive],
+  );
+  const requestSplitWithIds = useCallback(
+    (ids: string[]) => {
+      if (externalSplitControlled) {
+        onSplitSessionIdsChangeRef.current?.(ids);
+      } else {
+        openSplitView(ids);
+      }
+    },
+    [externalSplitControlled, openSplitView],
+  );
   const requestOpenSplitView = useCallback(() => {
     if (!projectFeaturesAvailable) return;
     if (!externalSplitControlled) {
@@ -10753,16 +11570,12 @@ export function App({
     }
     if (!workspaceContextActive && splitSessionIds.length === 0) return;
     const requested =
-      splitSessionIds.length > 0
-        ? splitSessionIds
-        : workspaceContextActive && connection.sessionId
-          ? [connection.sessionId]
-          : [];
+      splitSessionIds.length > 0 ? splitSessionIds : splitSeedIds();
     onSplitSessionIdsChangeRef.current?.(requested);
   }, [
-    connection.sessionId,
     externalSplitControlled,
     openSplitView,
+    splitSeedIds,
     splitSessionIds,
     projectFeaturesAvailable,
     workspaceContextActive,
@@ -10772,12 +11585,7 @@ export function App({
     const requested = externalSplitSignature
       ? externalSplitSignature.split('\0')
       : [];
-    const generation = splitClassificationGenerationRef.current + 1;
-    splitClassificationGenerationRef.current = generation;
-    splitClassificationStartGenerationRef.current = generation;
-    // A new decision is pending: un-settle so reclaim waits for it. The
-    // empty-request branch below settles without classifying.
-    if (requested.length > 0) setSplitViewSettled(false);
+    const generation = beginSplitClassification(requested);
     if (requested.length > 0 && cockpitViewRequested()) {
       updateCockpitLocation(false, true);
     }
@@ -10801,7 +11609,8 @@ export function App({
       setSplitViewSettled(true);
       return;
     }
-    void sanitizeSplitSessionIds(requested).then((sanitized) => {
+    void sanitizeSplitSessionIds(requested).then((result) => {
+      settlePendingSplitOpen(generation);
       if (splitClassificationGenerationRef.current !== generation) {
         if (
           splitClassificationStartGenerationRef.current !==
@@ -10812,13 +11621,19 @@ export function App({
         return;
       }
       setSplitViewSettled(true);
-      setSplitSessionIds((previous) =>
-        areSessionIdsEqual(previous, sanitized) ? previous : sanitized,
-      );
-      if (!areSessionIdsEqual(requested, sanitized)) {
-        onSplitSessionIdsChangeRef.current?.(sanitized);
+      if (result.transientFailures.length > 0) {
+        // A named session was lost to a transient (non-404) classification
+        // error: say so instead of opening a partial split silently.
+        pushToast('info', t('session.splitAddFailed'));
       }
-      if (sanitized.length > 0) {
+      const kept = result.kept;
+      setSplitSessionIds((previous) =>
+        areSessionIdsEqual(previous, kept) ? previous : kept,
+      );
+      if (!areSessionIdsEqual(requested, kept)) {
+        onSplitSessionIdsChangeRef.current?.(kept);
+      }
+      if (kept.length > 0) {
         setActivePanel((previous) => (previous === null ? previous : null));
         setMainView((previous) => (previous === 'split' ? previous : 'split'));
       } else {
@@ -10826,11 +11641,15 @@ export function App({
       }
     });
   }, [
+    beginSplitClassification,
     externalSplitControlled,
     externalSplitSignature,
     effectiveSessionContext,
     projectFeaturesAvailable,
+    pushToast,
     sanitizeSplitSessionIds,
+    settlePendingSplitOpen,
+    t,
     workspace.status,
     workspaceCapabilitiesReady,
   ]);
@@ -10847,6 +11666,44 @@ export function App({
       onSplitSessionIdsChangeRef.current?.(sessionIds);
     },
     [closeUsageTabs, externalSplitControlled],
+  );
+  const addSessionToSplitView = useCallback(
+    (sessionId: string) => {
+      if (!isLargeScreen || !projectFeaturesAvailable) return;
+      const pending = pendingSplitOpenRef.current;
+      // Only merge an opening request that navigation has not superseded.
+      const previous =
+        pending?.generation === splitClassificationGenerationRef.current
+          ? pending.sessionIds
+          : mainView === 'split'
+            ? splitSessionIds
+            : undefined;
+      if (
+        previous &&
+        (previous.includes(sessionId) || previous.length >= MAX_SPLIT_PANES)
+      ) {
+        return;
+      }
+      closeMobileDrawer();
+      if (mainView === 'split' && previous) {
+        handleSplitPanesChange([...previous, sessionId]);
+        return;
+      }
+      const requested = Array.from(
+        new Set([...(previous ?? splitSeedIds()), sessionId]),
+      );
+      requestSplitWithIds(requested);
+    },
+    [
+      closeMobileDrawer,
+      handleSplitPanesChange,
+      isLargeScreen,
+      mainView,
+      projectFeaturesAvailable,
+      requestSplitWithIds,
+      splitSeedIds,
+      splitSessionIds,
+    ],
   );
   const notifyControlledSplitClose = useCallback(() => {
     if (externalSplitControlled) {
@@ -11030,17 +11887,17 @@ export function App({
     externalSplitControlled,
     sessionActions,
   ]);
-  // Land focus on the composer after a shrink-driven split close so keyboard
+  // Land focus in the chat after a shrink-driven split close so keyboard
   // users aren't dropped onto <body> — but not when the chat now shows an
   // approval overlay (it owns the keyboard) or a panel (it manages focus).
   useEffect(() => {
     if (mainView !== 'chat' || !focusComposerAfterSplitCloseRef.current) return;
     focusComposerAfterSplitCloseRef.current = false;
-    if (!activePanel && !approvalOverlayActive) editorRef.current?.focus();
-  }, [mainView, activePanel, approvalOverlayActive]);
+    if (!activePanel && !approvalOverlayActive) focusChatAfterNavigation();
+  }, [mainView, activePanel, approvalOverlayActive, focusChatAfterNavigation]);
   // The Settings / Daemon Status panel is a view, not a modal, so it lacks
   // DialogShell's focus trap/restore. Move focus into a panel when it opens (or
-  // when switching directly between panels) and back to the composer when it
+  // when switching directly between panels) and back to the chat when it
   // closes, so keyboard users aren't stranded on an element that is hidden.
   const panelBackRef = useRef<HTMLButtonElement | null>(null);
   const panelHeadingRef = useRef<HTMLHeadingElement | null>(null);
@@ -11074,23 +11931,23 @@ export function App({
       // than depending on that DOM coincidence.
       panelBackRef.current?.focus();
     } else if (prev) {
-      // Panel just closed. Return focus to the composer — unless an approval
+      // Panel just closed. Return focus to the chat — unless an approval
       // overlay is what forced it closed (see the effect below): that overlay
       // drives its own keyboard handling and ToolApproval ignores keys from
       // editable targets, so focusing the composer here would swallow its
       // shortcuts and leave the user unable to respond by keyboard.
       if (!approvalOverlayActive) {
-        editorRef.current?.focus();
+        focusChatAfterNavigation();
       }
     } else if (wasApprovalActive && !approvalOverlayActive) {
       // The panel was auto-closed for an approval (prev was consumed to null on
       // that render, editor focus skipped). Now the approval has resolved with
-      // no panel to return to, so restore the composer here. (useComposerCore's
+      // no panel to return to, so restore chat focus here. (useComposerCore's
       // dialogOpen effect also refocuses on this transition; this keeps the
       // panel focus effect self-contained instead of relying on that.)
-      editorRef.current?.focus();
+      focusChatAfterNavigation();
     }
-  }, [activePanel, approvalOverlayActive]);
+  }, [activePanel, approvalOverlayActive, focusChatAfterNavigation]);
   // A pending approval (a gated tool call or an AskUserQuestion) renders its
   // overlay in the chat footer, which is hidden (display:none) while a panel is
   // shown. Left alone, the turn would hang behind Settings/Status with no
@@ -11331,8 +12188,12 @@ export function App({
   );
   const [currentModel, setCurrentModel] = useState('');
   const currentModelRef = useRef(currentModel);
+  const subscriptionDraftModelRef = useRef<
+    { modelId: string; sourceVersion: number } | undefined
+  >(undefined);
   currentModelRef.current = currentModel;
   const setPendingModel = useCallback((modelId: string) => {
+    subscriptionDraftModelRef.current = undefined;
     currentModelRef.current = modelId;
     setCurrentModel(modelId);
   }, []);
@@ -11374,6 +12235,16 @@ export function App({
       setPendingModel(modelId);
     },
     [setPendingModel, setPendingReasoningIntent],
+  );
+  const selectSubscriptionDraftModel = useCallback(
+    (modelId: string) => {
+      selectWelcomeModel(modelId);
+      subscriptionDraftModelRef.current = {
+        modelId,
+        sourceVersion: composerSourceVersionRef.current,
+      };
+    },
+    [selectWelcomeModel],
   );
   /**
    * Whether a local action must be held back because a Goal owns the session.
@@ -11516,6 +12387,15 @@ export function App({
       sessionName: sessionDisplayName,
     });
   }, [connection.sessionId, onSessionInfoChange, sessionDisplayName]);
+  const currentModelAuthType = connection.context?.state._meta?.['authType'];
+  useEffect(() => {
+    onModelChange?.(
+      connection.currentModel,
+      typeof currentModelAuthType === 'string'
+        ? currentModelAuthType
+        : undefined,
+    );
+  }, [connection.currentModel, currentModelAuthType, onModelChange]);
   const [currentMode, setCurrentMode] = useState('default');
   const [planExecutionMode, setPlanExecutionMode] = useState('default');
   const executionMode =
@@ -11551,10 +12431,13 @@ export function App({
     promptPreparationOwnerRef.current = null;
     setIsPreparingPrompt(false);
   }, [logicalSessionKey]);
-  const createSessionPromiseRef = useRef<Promise<string | undefined> | null>(
-    null,
-  );
+  const createSessionPromiseRef = useRef<Promise<
+    PromptSessionAllocation | undefined
+  > | null>(null);
   const preparingSessionIdRef = useRef<string | null>(null);
+  // The composer source generation that started the pending creation: a
+  // different draft (New session bumps the generation) must not reuse it.
+  const preparingSessionSourceVersionRef = useRef<number | null>(null);
   useEffect(() => {
     if (
       connection.sessionId &&
@@ -11625,19 +12508,32 @@ export function App({
       const currentSessionId = connectionRef.current.sessionId;
       if (createSessionPromiseRef.current) {
         if (
-          !currentSessionId ||
-          currentSessionId === preparingSessionIdRef.current
+          (!currentSessionId ||
+            currentSessionId === preparingSessionIdRef.current) &&
+          composerSourceVersionRef.current ===
+            preparingSessionSourceVersionRef.current
         ) {
           return createSessionPromiseRef.current;
         }
-        return Promise.resolve(undefined);
+        if (currentSessionId) return Promise.resolve(undefined);
+        // A new draft started while another draft's creation is in flight:
+        // this submission owns a fresh session, not the pending allocation.
+        // Fall through to create it; the pending creation keeps running for
+        // its own submitter.
       }
       if (currentSessionId) return Promise.resolve(undefined);
       const pendingManualTitle = pendingManualTitleRef.current;
       const promise = (async () => {
         let allocatedSessionId: string | undefined;
-        const modelId =
-          currentModelRef.current || connectionRef.current.currentModel;
+        let detachedSessionResult: DaemonSessionClient | undefined;
+        const draftSelection = subscriptionDraftModelRef.current;
+        const subscriptionDraftModel =
+          draftSelection?.sourceVersion === composerSourceVersionRef.current
+            ? draftSelection.modelId
+            : undefined;
+        const modelId = draftSelection
+          ? subscriptionDraftModel
+          : currentModelRef.current || connectionRef.current.currentModel;
         const reasoningIntent = pendingReasoningIntentRef.current;
         const reasoningPreview = connectionRef.current.models?.find(
           (model) => model.id === modelId,
@@ -11701,11 +12597,24 @@ export function App({
           creationSessionContext?.kind === 'workspace'
             ? creationSessionContext.cwd
             : undefined;
+        const draftProviders = connectionRef.current.providers;
+        // Reapplying the effective workspace default would save it again,
+        // potentially overwriting a different default in user settings.
+        const useWorkspaceDefault =
+          !reasoningEffort &&
+          draftProviders?.workspaceCwd === catalogWorkspaceCwd &&
+          draftProviders?.current?.modelId === modelId;
         try {
+          const startupConfig =
+            subscriptionDraftModel &&
+            creationSessionContext?.kind !== 'standalone'
+              ? { modelServiceId: subscriptionDraftModel }
+              : undefined;
           await createAndAttachSessionForPrompt({
             sessionActions: sessionActions as typeof sessionActions &
               SessionActionsWithCreate,
-            modelId,
+            modelId: startupConfig || useWorkspaceDefault ? undefined : modelId,
+            startupConfig,
             reasoningEffort,
             modeId,
             planMode,
@@ -11722,15 +12631,19 @@ export function App({
                 ? { name: gitModeIntentRef.current.name }
                 : undefined,
             sessionSourceType: sessionSourceTypeRef.current,
-            onSessionCreated: async (sessionId) => {
+            onSessionCreated: async (sessionId, detachedSession) => {
+              // A detached creation never bound the connection: rename
+              // through the created client, not the current-session action.
+              const rename = (displayName: string) =>
+                detachedSession
+                  ? detachedSession.updateMetadata({ displayName })
+                  : sessionActions.renameSession(displayName);
               if (
                 pendingManualTitle &&
                 pendingManualTitleRef.current === pendingManualTitle
               ) {
                 try {
-                  await sessionActions.renameSession(
-                    pendingManualTitle.displayName,
-                  );
+                  await rename(pendingManualTitle.displayName);
                   if (catalogWorkspaceCwd) {
                     sessionCatalogController.renamed(
                       catalogWorkspaceCwd,
@@ -11747,7 +12660,7 @@ export function App({
                 // fallback. Best-effort: on failure the daemon's first-prompt
                 // label still names it.
                 try {
-                  await sessionActions.renameSession(initialTitle);
+                  await rename(initialTitle);
                   if (catalogWorkspaceCwd) {
                     sessionCatalogController.renamed(
                       catalogWorkspaceCwd,
@@ -11767,6 +12680,8 @@ export function App({
                   catalogWorkspaceCwd,
                   sessionId,
                 );
+              } else if (creationSessionContext?.kind === 'standalone') {
+                setStandaloneSessionsReloadToken((value) => value + 1);
               }
               await onSessionCreatedRef.current?.(sessionId);
             },
@@ -11807,15 +12722,26 @@ export function App({
             },
             getCurrentSessionId: () => connectionRef.current.sessionId,
             getCurrentWorkspaceCwd: getComposerWorkspaceCwd,
+            sourceVersion: composerSourceVersionRef.current,
+            getCurrentSourceVersion: () => composerSourceVersionRef.current,
           }).then((result) => {
+            if (subscriptionDraftModelRef.current === draftSelection) {
+              subscriptionDraftModelRef.current = undefined;
+            }
             if (pendingManualTitleRef.current === pendingManualTitle) {
               pendingManualTitleRef.current = undefined;
             }
-            if (result.worktree) {
-              setSessionWorktree(result.worktree);
-            }
-            if (result.branch) {
-              setSessionBranch(result.branch);
+            detachedSessionResult = result.detachedSession;
+            // Worktree/branch state describes the connected session; a
+            // detached creation belongs to a session the user left, so it
+            // must not overwrite the current session's chips.
+            if (!result.detachedSession) {
+              if (result.worktree) {
+                setSessionWorktree(result.worktree);
+              }
+              if (result.branch) {
+                setSessionBranch(result.branch);
+              }
             }
             // Clear the pending intent only on success. On failure the
             // composer chip stays in the selected mode so the user knows
@@ -11840,13 +12766,22 @@ export function App({
         if (creationSessionContext?.kind === 'workspace') {
           setSelectedWorkspaceCwd(undefined);
         }
-        return allocatedSessionId;
+        if (!allocatedSessionId) return undefined;
+        return {
+          sessionId: allocatedSessionId,
+          ...(detachedSessionResult
+            ? { detachedSession: detachedSessionResult }
+            : {}),
+        };
       })();
       createSessionPromiseRef.current = promise;
+      preparingSessionSourceVersionRef.current =
+        composerSourceVersionRef.current;
       const clearPreparation = () => {
         if (createSessionPromiseRef.current === promise) {
           createSessionPromiseRef.current = null;
           preparingSessionIdRef.current = null;
+          preparingSessionSourceVersionRef.current = null;
         }
       };
       void promise.then(clearPreparation, clearPreparation);
@@ -11910,6 +12845,30 @@ export function App({
     },
     [pushToast, t],
   );
+  // Drop any details association pointing at one of these children. Shared by
+  // the panel archive path and the read-site check so every route that retires
+  // a child forgets it the same way; an archived child's load 409s
+  // (session_archived), so a surviving binding would trap later clicks.
+  const forgetDetailsChildren = useCallback((childIds: ReadonlySet<string>) => {
+    if (childIds.size === 0) return;
+    const next: StoredDetailsChildren = {};
+    let changed = false;
+    for (const [parentKey, entries] of Object.entries(
+      detailsChildrenRef.current,
+    )) {
+      const kept = Object.fromEntries(
+        Object.entries(entries).filter(([, childId]) => !childIds.has(childId)),
+      );
+      if (Object.keys(kept).length !== Object.keys(entries).length) {
+        changed = true;
+      }
+      if (Object.keys(kept).length > 0) next[parentKey] = kept;
+    }
+    if (changed) {
+      detailsChildrenRef.current = next;
+      writeStoredDetailsChildren(DETAILS_CHILDREN_STORAGE_KEY, next);
+    }
+  }, []);
   const archiveSideTasks = useCallback(
     async (sideTasks: readonly SideTaskListItem[]) => {
       if (!sideTaskArchiveAvailable) return;
@@ -11972,6 +12931,11 @@ export function App({
             ),
           }));
           removeSideTaskTabs(archived);
+          // An archived child can no longer be attached (the daemon's load
+          // route 409s session_archived), so drop any details association
+          // pointing at it; the next click provisions a fresh child instead
+          // of reopening an unloadable one.
+          forgetDetailsChildren(archived);
           setSideTaskCatalogRefreshNonce((nonce) => nonce + 1);
         }
         const errorMessages = [
@@ -12000,6 +12964,7 @@ export function App({
       }
     },
     [
+      forgetDetailsChildren,
       reportError,
       removeSideTaskTabs,
       sideTaskArchiveAvailable,
@@ -12264,18 +13229,25 @@ export function App({
       }
       const existingSessionWorkspaceCwd = getComposerWorkspaceCwd();
       let allocatedSessionId: string | undefined;
+      let detachedSession: DaemonSessionClient | undefined;
       try {
-        allocatedSessionId = await ensureSessionForPrompt(
+        const allocation = await ensureSessionForPrompt(
           opts?.onSessionAllocated,
           opts?.suppressSessionTitle
             ? undefined
             : titleFromPrompt(preparedPrompt),
         );
-        if (!admissionSourceIsCurrent(allocatedSessionId)) {
+        allocatedSessionId = allocation?.sessionId;
+        detachedSession = allocation?.detachedSession;
+        // A detached allocation is dispatched to its own session below; the
+        // current-connection guards only apply to the attached path.
+        if (!detachedSession && !admissionSourceIsCurrent(allocatedSessionId)) {
           restoreCancelledSubmitState();
           return;
         }
-        if (opts?.beforeAdmission) await opts.beforeAdmission();
+        if (!detachedSession && opts?.beforeAdmission) {
+          await opts.beforeAdmission();
+        }
       } finally {
         if (
           appMountedRef.current &&
@@ -12283,6 +13255,74 @@ export function App({
         ) {
           finishPreparing();
         }
+      }
+      if (detachedSession && allocatedSessionId) {
+        // The user navigated away while the session was being created. The
+        // submitted prompt still owns that session: dispatch admission-only
+        // through the created client. The transcript store, prompt status,
+        // and composer belong to the session the user opened — never touch
+        // them here. The daemon runs the turn in the background.
+        const detachedSessionId = allocatedSessionId;
+        const detachedOwner = allocatedSessionCatalogOwnerRef.current;
+        const detachedWorkspaceCwd =
+          detachedOwner?.sessionId === detachedSessionId
+            ? detachedOwner.workspaceCwd
+            : undefined;
+        dispatchSessionChangeRef.current?.({
+          type: 'submit',
+          sessionId: detachedSessionId,
+          prompt: preparedPrompt,
+          queued: false,
+        });
+        try {
+          await sessionActions.sendDetachedPrompt(
+            detachedSession,
+            preparedPrompt,
+            {
+              ...(opts?.submittedPrompt !== undefined
+                ? { submittedPrompt: opts.submittedPrompt }
+                : {}),
+              images,
+              files,
+              inputAnnotations:
+                preparedInputAnnotations.length > 0
+                  ? preparedInputAnnotations
+                  : undefined,
+              retry: opts?.retry,
+              onAdmissionStarted: () => {
+                opts?.onAdmissionStarted?.(detachedSessionId);
+              },
+              onAdmitted: (admission) => {
+                if (detachedWorkspaceCwd) {
+                  sessionCatalogController.promptAdmitted(
+                    detachedWorkspaceCwd,
+                    detachedSessionId,
+                  );
+                }
+                opts?.onAdmitted?.(admission);
+              },
+            },
+          );
+          if (!preserveComposer) {
+            // Navigation-safe: commitAccepted's sourceChanged branch clears
+            // the original draft without touching the current composer. On
+            // failure the draft text stays so the user can resend it.
+            opts?.commitComposerAccepted?.();
+          }
+        } catch (error) {
+          if (
+            detachedWorkspaceCwd &&
+            !isDefinitelyRejectedPromptAdmission(error)
+          ) {
+            sessionCatalogController.promptAdmissionUncertain(
+              detachedWorkspaceCwd,
+            );
+          }
+          if (appMountedRef.current) {
+            reportError(error, 'Failed to send message');
+          }
+        }
+        return;
       }
       if (!appMountedRef.current) return;
       if (!admissionSourceIsCurrent(allocatedSessionId)) {
@@ -12739,6 +13779,7 @@ export function App({
   // this daemon composer; its shortcuts must not reach the Local session.
   const interactionBlocked =
     managedMode || dialogOpen || mainView !== 'chat' || artifactPanelFullscreen;
+  chatFocusBlockedRef.current = interactionBlocked;
   const mainVoiceTarget = useMemo(
     () =>
       workspaceContextActive
@@ -12992,6 +14033,8 @@ export function App({
     clientId: connection.clientId,
     canMutateMidTurn,
     canQueryMidTurn,
+    canQueryPendingPrompts:
+      connection.capabilities?.features.includes('session_prompt') === true,
     canInjectMidTurnMedia,
     workspaceFileActions: artifactWorkspaceActions,
     streamingState,
@@ -13305,6 +14348,12 @@ export function App({
         dismissNotice(notice.id);
         continue;
       }
+      if (
+        notice.code === 'session_limit_exceeded' &&
+        notice.operation === 'create_session'
+      ) {
+        setSessionLimitReached(true);
+      }
       if (shouldToastNotice(notice)) {
         pushToast(
           toastToneFromNotice(notice),
@@ -13330,6 +14379,22 @@ export function App({
     setBtwMessage(null);
     setTasksDialogMessage(null);
     lastRecapBlockCountRef.current = 0;
+  }, [connection.sessionId, connection.workspaceCwd]);
+
+  useEffect(() => {
+    const scope = {
+      sessionId: connection.sessionId,
+      workspaceCwd: connection.workspaceCwd,
+    };
+    const previous = sessionLimitScopeRef.current;
+    sessionLimitScopeRef.current = scope;
+    if (
+      previous !== undefined &&
+      (previous.sessionId !== scope.sessionId ||
+        previous.workspaceCwd !== scope.workspaceCwd)
+    ) {
+      setSessionLimitReached(false);
+    }
   }, [connection.sessionId, connection.workspaceCwd]);
 
   // A recap is one local annotation shared by both triggers: the latest request
@@ -13689,6 +14754,24 @@ export function App({
   // stable — pull it out so callbacks can depend on the function alone without
   // re-creating on every render (and without an exhaustive-deps warning).
   const reloadProviders = providersState.reload;
+  const {
+    available: subscriptionAvailable,
+    handleCommand: handleSubscriptionLogout,
+  } = useSubscriptionLogout({
+    t,
+    onCommand: (text) =>
+      invokeSlashCommandHandler(text, onSlashCommandRef.current, reportError),
+    workspaceCwd: workspaceContextActive
+      ? getComposerWorkspaceCwd()
+      : undefined,
+    isBlocked: () =>
+      streamingStateRef.current !== 'idle' ||
+      sessionHasActivePromptRef.current ||
+      isGoalGateBlocked(),
+    onBlocked: blockCommand,
+    onNotice: pushToast,
+    onError: reportError,
+  });
   const [modelActionBusy, setModelActionBusy] = useState(false);
   const modelActionTokenRef = useRef(0);
   useLayoutEffect(() => {
@@ -14316,6 +15399,10 @@ export function App({
     });
   }, [brandResolved, brandNameValue, brandLogoUri]);
 
+  const uiLanguageWorkspaceCwd =
+    effectiveSessionContext?.kind === 'live'
+      ? (workspace.capabilities?.workspaceCwd ?? workspace.workspaceCwd)
+      : getComposerWorkspaceCwd();
   const handleSettingsLanguageChange = useCallback(
     (nextLanguage: WebShellLanguage, scope: 'user' | 'workspace' = 'user') => {
       if (sessionWriteBlocked) return;
@@ -14326,18 +15413,12 @@ export function App({
       // row on the Workspace tab there; keep this guard for a scope that was
       // picked before the session context settled.
       const effectiveScope = sessionIsStandalone ? 'user' : scope;
-      // Forward the settings tab's scope to the command so a Workspace-tab edit
-      // persists to workspace settings instead of always writing user scope
-      // (the /language command otherwise defaults to user). The command still
-      // switches the daemon's live locale so command descriptions re-localize —
-      // which a plain scoped settings write wouldn't do.
-      const scopeFlag =
-        effectiveScope === 'workspace' ? ' --project' : ' --global';
-      const command = `/language ui ${nextLanguage}${scopeFlag}`;
       const refreshSettings = async () => {
         if (!owner.current.isCurrent()) return;
         await Promise.all([
-          sessionActions.refreshCommands(),
+          ...(connectionRef.current.sessionId
+            ? [sessionActions.refreshCommands()]
+            : []),
           reloadWorkspaceSettings(),
         ]);
       };
@@ -14359,16 +15440,28 @@ export function App({
         setSelectedLanguage(nextLanguage);
         onLanguageResolvedRef.current?.(nextLanguage);
       }
-      sendPrompt(command, undefined, undefined, {
-        ownerRef: owner,
-        suppressSessionTitle: true,
-      })
-        .then(() => {
+      workspaceActions
+        .setUiLanguage(
+          nextLanguage === 'zh-CN' ? 'zh' : nextLanguage,
+          effectiveScope,
+          uiLanguageWorkspaceCwd,
+        )
+        .then((result) => {
           if (!owner.current.isCurrent()) return;
+          const appliedLanguage =
+            languageSettingToWebShellLanguage(result.language) ??
+            normalizeLanguage(result.language);
+          if (!hostControlsLanguage && appliedLanguage !== nextLanguage) {
+            setSelectedLanguage(appliedLanguage);
+            onLanguageResolvedRef.current?.(appliedLanguage);
+          }
           if (effectiveScope === 'user') {
             // A user-scoped choice becomes the host's persisted opinion. A
             // workspace choice remains settings-owned for that workspace.
-            handleLanguageChange(nextLanguage);
+            handleLanguageChange(appliedLanguage);
+          }
+          if (result.refresh.failed > 0) {
+            pushToast('warning', t('language.refreshFailed'));
           }
           return refreshSettings().catch((error: unknown) => {
             if (!owner.current.isCurrent()) return;
@@ -14391,12 +15484,15 @@ export function App({
       reportError,
       providedLanguage,
       sessionWriteBlocked,
-      sendPrompt,
+      workspaceActions,
+      uiLanguageWorkspaceCwd,
       selectedLanguage,
       sessionActions,
       sessionOwnerGuard,
       sessionIsStandalone,
       isGoalGateBlocked,
+      pushToast,
+      t,
     ],
   );
 
@@ -14888,8 +15984,25 @@ export function App({
     const wasLateHydration =
       prevConnectionModelRef.current === undefined && next !== undefined;
     prevConnectionModelRef.current = next;
+    const draft = subscriptionDraftModelRef.current;
+    if (
+      !connection.sessionId &&
+      draft?.sourceVersion === composerSourceVersionRef.current
+    )
+      return;
     setCurrentModel((prev) => (wasLateHydration && prev ? prev : (next ?? '')));
-  }, [connection.currentModel, logicalSessionKey]);
+  }, [connection.currentModel, connection.sessionId, logicalSessionKey]);
+
+  useLayoutEffect(() => {
+    if (connectionRef.current.sessionId) return;
+    if (subscriptionDraft) {
+      selectSubscriptionDraftModel(
+        `${subscriptionDraft.modelId}(qwen-subscription)`,
+      );
+    } else if (!isDesktopShell() && subscriptionDraftModelRef.current) {
+      setPendingModel(connectionRef.current.currentModel ?? '');
+    }
+  }, [subscriptionDraft, selectSubscriptionDraftModel, setPendingModel]);
 
   const prevModeSessionKeyRef = useRef(logicalSessionKey);
   useLayoutEffect(() => {
@@ -15096,6 +16209,8 @@ export function App({
     autoRecapVersionRef.current += 1;
   }, [logicalSessionKey]);
   useEffect(() => {
+    // OpenAPI and Managed hosts may not expose the daemon's recap route.
+    if (!connection.capabilities?.features.includes('session_recap')) return;
     const AWAY_THRESHOLD_MS = 3 * 60 * 1000;
     const MIN_NEW_BLOCKS = 4;
     function onVisibilityChange() {
@@ -15166,6 +16281,7 @@ export function App({
     return () =>
       document.removeEventListener('visibilitychange', onVisibilityChange);
   }, [
+    connection.capabilities,
     connection.sessionId,
     sessionActions,
     sessionOwnerGuard,
@@ -15438,21 +16554,25 @@ export function App({
 
   const composerFocusRequestRef = useRef(0);
   const sessionOpenInvocationRef = useRef(0);
-  const scheduleComposerFocus = useCallback((sessionId?: string) => {
-    const request = ++composerFocusRequestRef.current;
-    window.setTimeout(() => {
-      if (
-        request !== composerFocusRequestRef.current ||
-        approvalOverlayActiveRef.current ||
-        (sessionId !== undefined &&
-          connectionRef.current.sessionId !== sessionId)
-      ) {
-        return;
-      }
-      editorRef.current?.focus();
-    }, 0);
-    return request;
-  }, []);
+  const scheduleChatFocus = useCallback(
+    (focus: () => void, sessionId?: string) => {
+      const request = ++composerFocusRequestRef.current;
+      window.setTimeout(() => {
+        if (
+          request !== composerFocusRequestRef.current ||
+          approvalOverlayActiveRef.current ||
+          chatFocusBlockedRef.current ||
+          (sessionId !== undefined &&
+            connectionRef.current.sessionId !== sessionId)
+        ) {
+          return;
+        }
+        focus();
+      }, 0);
+      return request;
+    },
+    [],
+  );
   const createNewSession = useCallback(
     async (
       intent: NewSessionIntent,
@@ -15629,7 +16749,7 @@ export function App({
         ).clearSession(
           dropSessionContextOnClear ? { dropSessionContext: true } : undefined,
         );
-        focusRequest = scheduleComposerFocus();
+        focusRequest = scheduleChatFocus(() => editorRef.current?.focus());
         await clearPromise;
         if (
           sessionOpenInvocationRef.current === invocation &&
@@ -15666,7 +16786,7 @@ export function App({
       reportError,
       refreshWorkspaceBrand,
       refreshWorkspaceCapabilities,
-      scheduleComposerFocus,
+      scheduleChatFocus,
       setPendingSessionContext,
       sessionActions,
       showChat,
@@ -15795,6 +16915,14 @@ export function App({
         // is the primary selection on both sides.
         const sameTarget = workspaceCwd === selectedWorkspaceCwdRef.current;
         if (!sameTarget) pendingManualTitleRef.current = undefined;
+        const subscriptionDraft = subscriptionDraftModelRef.current;
+        if (
+          sameTarget &&
+          pendingSessionContextRef.current?.kind !== 'standalone' &&
+          subscriptionDraft?.sourceVersion === composerSourceVersionRef.current
+        ) {
+          subscriptionDraft.sourceVersion += 1;
+        }
         composerSourceVersionRef.current += 1;
         selectedWorkspaceCwdRef.current = workspaceCwd;
         setSelectedWorkspaceCwd(workspaceCwd);
@@ -16578,6 +17706,8 @@ export function App({
 
   const shellApi = useMemo<WebShellApi>(
     () => ({
+      refreshModels: () =>
+        sessionActions.refreshModels(undefined, { reloadProviders: false }),
       navigateToMessage,
       openSplitView: () => {
         closeMobileDrawer();
@@ -16594,6 +17724,7 @@ export function App({
       respondToPendingPermission,
     }),
     [
+      sessionActions,
       navigateToMessage,
       closeMobileDrawer,
       createNewSession,
@@ -16823,6 +17954,7 @@ export function App({
             setStandaloneRecoveryResolution('archived');
             return;
           }
+          setStandaloneSessionsReloadToken((value) => value + 1);
           await loadSidebarSession(sessionId, undefined, {
             kind: 'standalone',
           });
@@ -16885,6 +18017,7 @@ export function App({
       return;
     }
     try {
+      setStandaloneSessionsReloadToken((value) => value + 1);
       await loadSidebarSession(sessionId, undefined, { kind: 'standalone' });
     } catch (error) {
       if (!isCurrent()) return;
@@ -17138,13 +18271,14 @@ export function App({
       !sessionWriteBlocked
     ) {
       setSidebarSwitchingSessionId(null);
-      scheduleComposerFocus(sidebarSwitchingSessionId);
+      scheduleChatFocus(focusChatAfterNavigation, sidebarSwitchingSessionId);
     }
   }, [
     connection.catchingUp,
     connection.loadingTranscript,
     connection.sessionId,
-    scheduleComposerFocus,
+    focusChatAfterNavigation,
+    scheduleChatFocus,
     sessionWriteBlocked,
     sidebarSwitchingSessionId,
   ]);
@@ -17429,8 +18563,8 @@ export function App({
       return;
     }
     focusComposerAfterCockpitCloseRef.current = false;
-    if (!activePanel && !approvalOverlayActive) editorRef.current?.focus();
-  }, [activePanel, approvalOverlayActive, mainView]);
+    if (!activePanel && !approvalOverlayActive) focusChatAfterNavigation();
+  }, [activePanel, approvalOverlayActive, mainView, focusChatAfterNavigation]);
   useEffect(() => {
     if (navigationRef.current && navigationRef.current.route.page !== 'chat')
       return;
@@ -17527,6 +18661,61 @@ export function App({
     },
     [handleOpenMonitorDetails, handleOpenShellDetails, openTasksPanel],
   );
+  // A workflow chip scrolls the transcript to the call that started the run
+  // and opens its inline view. A run with no row in this transcript (started
+  // from the runs page, a rerun, or history that is not loaded) opens in the
+  // tasks dialog instead, which renders the same run view.
+  const locateWorkflowTask = useCallback(
+    (task: DaemonSessionWorkflowTaskStatus) => {
+      const callId = task.toolUseId;
+      const messageId = callId
+        ? findToolMessageId(messages, callId)
+        : undefined;
+      if (callId && messageId) {
+        toolRevealStore.request(callId);
+        if (messageListRef.current?.scrollToMessage(messageId, callId)) return;
+        toolRevealStore.cancel(callId);
+      }
+      openTasksPanel();
+    },
+    [messages, openTasksPanel, toolRevealStore],
+  );
+  const openComposerTask = useCallback(
+    (task: DaemonSessionTaskWithWorkflowStatus) => {
+      switch (task.kind) {
+        case 'workflow':
+          locateWorkflowTask(task);
+          return;
+        case 'shell':
+          handleOpenShellDetails(task);
+          return;
+        case 'monitor':
+          handleOpenMonitorDetails(task);
+          return;
+        case 'agent': {
+          if (!connection.sessionId) return;
+          const tool = task.toolUseId
+            ? findToolCall(messages, task.toolUseId)
+            : undefined;
+          openSubagentPanelForSession(
+            tool ?? agentTaskAsToolCall(task),
+            connection.sessionId,
+            connection.workspaceCwd,
+          );
+          return;
+        }
+      }
+    },
+    [
+      connection.sessionId,
+      connection.workspaceCwd,
+      handleOpenMonitorDetails,
+      handleOpenShellDetails,
+      locateWorkflowTask,
+      messages,
+      openSubagentPanelForSession,
+    ],
+  );
 
   const refreshGoal = useCallback(async () => {
     const owner = sessionOwnerGuard.capture();
@@ -17587,7 +18776,11 @@ export function App({
   );
 
   const createGoalForAllocatedSession = useCallback(
-    async (sessionId: string, objective: string) => {
+    async (
+      sessionId: string,
+      objective: string,
+      opts?: { detached?: boolean },
+    ) => {
       const opId = ++goalControlOpSeqRef.current;
       goalControlOwnerRef.current = { opId, sessionId };
       setGoalControlBusy(true);
@@ -17600,9 +18793,14 @@ export function App({
         // the way `sessionActions.controlGoal` does, so install the create
         // response directly to keep the Goal strip and controls authoritative.
         sessionActions.applyGoalSnapshot(sessionId, response.snapshot);
+        // A detached allocation belongs to a session the user left: the
+        // current view — possibly an unrelated new draft — must not receive
+        // its goal strip. The missing-session publication below is only for
+        // the attached flow, where the draft is becoming this session.
         if (
-          !connectionRef.current.sessionId ||
-          connectionRef.current.sessionId === sessionId
+          !opts?.detached &&
+          (!connectionRef.current.sessionId ||
+            connectionRef.current.sessionId === sessionId)
         ) {
           setGoalSnapshot(response.snapshot);
         }
@@ -17957,49 +19155,70 @@ export function App({
         const sourceOwner = sessionOwnerGuard.capture();
         const sourceSessionId = connectionRef.current.sessionId;
         let allocatedSessionId: string | undefined;
+        let detachedGoalSession = false;
+        let detachedGoalClient: DaemonSessionClient | undefined;
         if (!connectionRef.current.sessionId) {
           if (operation.kind !== 'set') {
             throw new Error(t('localCommand.noSession'));
           }
-          allocatedSessionId = await ensureSessionForPrompt();
+          const allocation = await ensureSessionForPrompt();
+          allocatedSessionId = allocation?.sessionId;
+          detachedGoalSession = allocation?.detachedSession !== undefined;
+          detachedGoalClient = allocation?.detachedSession;
         }
-        const currentSessionId = connectionRef.current.sessionId;
-        const ownAllocationSucceeded =
-          sourceSessionId === undefined &&
-          allocatedSessionId !== undefined &&
-          (currentSessionId === undefined ||
-            currentSessionId === allocatedSessionId);
-        if (
-          (!sourceOwner.isCurrent() && !ownAllocationSucceeded) ||
-          (sourceSessionId !== undefined
-            ? currentSessionId !== sourceSessionId
-            : currentSessionId !== undefined &&
-              currentSessionId !== allocatedSessionId)
-        ) {
-          return;
-        }
-        if (!connectionRef.current.sessionId && !allocatedSessionId) {
-          throw new Error(t('localCommand.noSession'));
+        if (!detachedGoalSession) {
+          const currentSessionId = connectionRef.current.sessionId;
+          const ownAllocationSucceeded =
+            sourceSessionId === undefined &&
+            allocatedSessionId !== undefined &&
+            (currentSessionId === undefined ||
+              currentSessionId === allocatedSessionId);
+          if (
+            (!sourceOwner.isCurrent() && !ownAllocationSucceeded) ||
+            (sourceSessionId !== undefined
+              ? currentSessionId !== sourceSessionId
+              : currentSessionId !== undefined &&
+                currentSessionId !== allocatedSessionId)
+          ) {
+            return;
+          }
+          if (!connectionRef.current.sessionId && !allocatedSessionId) {
+            throw new Error(t('localCommand.noSession'));
+          }
         }
         if (needsSession) {
           if (commitComposerAccepted) commitComposerAccepted();
-          else editorRef.current?.clear();
+          else if (!detachedGoalSession) editorRef.current?.clear();
         }
-        store.appendLocalUserMessage(text, undefined, {
-          localCommandId: `local-command:${crypto.randomUUID()}`,
-        });
+        // A detached goal targets its own session by id; the visible
+        // transcript belongs to the session the user navigated to.
+        if (!detachedGoalSession) {
+          store.appendLocalUserMessage(text, undefined, {
+            localCommandId: `local-command:${crypto.randomUUID()}`,
+          });
+        }
         const action = operation.kind === 'set' ? 'replace' : operation.kind;
         const objective =
           operation.kind === 'set' || operation.kind === 'edit'
             ? operation.objective
             : undefined;
-        if (allocatedSessionId && operation.kind === 'set') {
-          await createGoalForAllocatedSession(
-            allocatedSessionId,
-            operation.objective,
-          );
-        } else {
-          await controlCurrentGoal(action, objective);
+        try {
+          if (allocatedSessionId && operation.kind === 'set') {
+            await createGoalForAllocatedSession(
+              allocatedSessionId,
+              operation.objective,
+              { detached: detachedGoalSession },
+            );
+          } else {
+            await controlCurrentGoal(action, objective);
+          }
+        } finally {
+          // Release only after the dispatch settles: the daemon closes an
+          // idle session when its last client detaches, and goal control
+          // resolves live sessions only.
+          if (detachedGoalClient) {
+            void detachedGoalClient.detach().catch(() => undefined);
+          }
         }
       })()
         .catch((error: unknown) => {
@@ -18058,7 +19277,6 @@ export function App({
       ),
     [hiddenSlashCommands],
   );
-  const hideSettings = hiddenCommands.has('settings');
 
   const handleSubmit = useCallback(
     (
@@ -18097,9 +19315,9 @@ export function App({
       ) {
         return false;
       }
-      // The host's documented slash-command override runs first; only when
-      // it declines does the policy consume a model-setup command — still
-      // ahead of daemon dispatch through the hidden-command forward below.
+      // Account commands must pass login and model checks before host overrides.
+      const subscriptionHandled = handleSubscriptionLogout(text);
+      if (subscriptionHandled !== undefined) return subscriptionHandled;
       if (
         invokeSlashCommandHandler(text, onSlashCommandRef.current, reportError)
       ) {
@@ -18441,7 +19659,7 @@ export function App({
           }
           if (cmd === 'language') {
             const args = text.slice(match[0].length).trim();
-            const [subCommand, languageArg] = args.split(/\s+/);
+            const [subCommand] = args.split(/\s+/);
             if (!args) {
               store.dispatch([
                 {
@@ -18462,6 +19680,17 @@ export function App({
               return true;
             }
             if (subCommand?.toLowerCase() === 'ui') {
+              const projectScope = /(?:^|\s)--project(?:\s|$)/.test(args);
+              const globalScope = /(?:^|\s)--global(?:\s|$)/.test(args);
+              if (projectScope && globalScope) {
+                pushToast('error', t('language.usage'));
+                return true;
+              }
+              const languageArg = args
+                .slice(subCommand.length)
+                .replace(/(?:^|\s)--project(?:\s|$)/, ' ')
+                .replace(/(?:^|\s)--global(?:\s|$)/, ' ')
+                .trim();
               if (!languageArg) {
                 store.dispatch([
                   {
@@ -18487,61 +19716,15 @@ export function App({
                 pushToast('error', t('language.invalid'));
                 return true;
               }
-              const owner = { current: sessionOwnerGuard.capture() };
-              const previousLanguage = selectedLanguage;
-              // The daemon sync is what keeps the agent answering in the
-              // language the chrome just switched to, so when it cannot run
-              // (turn in flight, or a Goal owning the session) refuse the
-              // command instead of switching the UI alone — the language
-              // picker treats the identical condition the same way.
               if (commandBlocked) return blockCommand();
-              setSelectedLanguage(nextLanguage);
-              if (providedLanguage === undefined) {
-                onLanguageResolvedRef.current?.(nextLanguage);
+              if (projectScope && !uiLanguageWorkspaceCwd) {
+                pushToast('info', t('session.workspaceActionUnavailable'));
+                return true;
               }
-              {
-                const deferComposerCommit =
-                  Boolean(
-                    prepareSubmitRef.current || onSubmitBeforeRef.current,
-                  ) || createSessionPromiseRef.current !== null;
-                const clearComposerOnPromptStart =
-                  !connectionRef.current.sessionId || deferComposerCommit;
-                sendPrompt(
-                  `/language ui ${nextLanguage}`,
-                  undefined,
-                  undefined,
-                  {
-                    ownerRef: owner,
-                    suppressSessionTitle: true,
-                    clearComposerOnPromptStart,
-                    commitComposerAccepted: clearComposerOnPromptStart
-                      ? commitComposerAccepted
-                      : undefined,
-                  },
-                )
-                  .then(() => {
-                    if (!owner.current.isCurrent()) return;
-                    handleLanguageChange(nextLanguage);
-                    return sessionActions
-                      .refreshCommands()
-                      .catch((error: unknown) => {
-                        if (!owner.current.isCurrent()) return;
-                        reportError(
-                          error,
-                          'Failed to refresh commands after /language',
-                        );
-                      });
-                  })
-                  .catch((error: unknown) => {
-                    if (!owner.current.isCurrent()) return;
-                    setSelectedLanguage(previousLanguage);
-                    if (providedLanguage === undefined) {
-                      onLanguageResolvedRef.current?.(previousLanguage);
-                    }
-                    reportError(error, 'Failed to sync /language command');
-                  });
-                return clearComposerOnPromptStart ? false : true;
-              }
+              handleSettingsLanguageChange(
+                nextLanguage,
+                projectScope ? 'workspace' : 'user',
+              );
               return true;
             }
           }
@@ -19237,7 +20420,9 @@ export function App({
 
                 let formattedAuth = '';
                 if (authSource) {
-                  if (
+                  if (authSource === 'qwen-subscription') {
+                    formattedAuth = 'Qwen Subscription';
+                  } else if (
                     authSource.startsWith('oauth') ||
                     authSource === 'qwen-oauth'
                   ) {
@@ -19414,13 +20599,22 @@ export function App({
               shellSubmitInFlightRef.current = false;
             }
           })
-          .then((createdSessionId) => {
-            if (drainGenerationRef.current !== generationAtSubmit) return;
+          .then((allocation) => {
+            const createdSessionId = allocation?.sessionId;
+            const detachedShellSession = allocation?.detachedSession;
+            // A detached command owns its session: a navigation bump of the
+            // drain generation cancels only current-session queue work.
+            if (
+              !detachedShellSession &&
+              drainGenerationRef.current !== generationAtSubmit
+            ) {
+              return;
+            }
             if (needsSession && createdSessionId) {
               sessionCreated = true;
               if (commitComposerAccepted) {
                 commitComposerAccepted();
-              } else {
+              } else if (!detachedShellSession) {
                 editorRef.current?.clear();
               }
               dispatchSessionChangeRef.current?.({
@@ -19436,7 +20630,15 @@ export function App({
                 ? allocatedOwner.workspaceCwd
                 : undefined
               : getComposerWorkspaceCwd();
-            return sessionActions.sendShellCommand(cmd).finally(() => {
+            const run = detachedShellSession
+              ? detachedShellSession
+                  .shellCommand(cmd)
+                  .then(() => undefined)
+                  .finally(() => {
+                    void detachedShellSession.detach().catch(() => undefined);
+                  })
+              : sessionActions.sendShellCommand(cmd);
+            return run.finally(() => {
               if (workspaceCwd) {
                 sessionCatalogController.invalidateWorkspace(workspaceCwd);
               }
@@ -19502,10 +20704,12 @@ export function App({
       sessionWorktree,
       gitHubPrsSupported,
       handleGoalSlashCommand,
+      handleSubscriptionLogout,
       handleThemeChange,
       handleSetMode,
       setComposerMode,
-      handleLanguageChange,
+      handleSettingsLanguageChange,
+      uiLanguageWorkspaceCwd,
       blockCommand,
       createSideTask,
       sideTasksAvailable,
@@ -19518,7 +20722,6 @@ export function App({
       runVisibleBtw,
       reconcileCatalogRename,
       requireActiveSessionForLocalCommand,
-      providedLanguage,
       selectedLanguage,
       setPendingModel,
       selectWelcomeModel,
@@ -19568,6 +20771,74 @@ export function App({
       sessionActions.submitPermission(id, selectedOption, answers),
     [sessionActions],
   );
+
+  // The composer is hidden while a question is pending, so the panel itself
+  // offers the /btw-side escape hatch: a side task that explains the question
+  // without answering it or touching the main session.
+  const handleAskUserDetails = useCallback(async () => {
+    const request = pendingAskUserApproval;
+    const parentSessionId = connection.sessionId;
+    const workspaceCwd = connection.workspaceCwd;
+    if (!request || !parentSessionId) return;
+    // The association outlives the details tab (and reloads): a closed tab
+    // must reopen its existing child, not provision a second one.
+    const existingChild =
+      detailsChildrenRef.current[parentSessionId]?.[request.id];
+    const questions = formatAskUserQuestions(request.rawInput);
+    const prompt = t('askUser.detailsPrompt', { questions });
+    let childToReuse: string | undefined = existingChild;
+    if (existingChild && workspaceCwd) {
+      // A child can be archived from any surface (sidebar, overview, activity
+      // catalog) or another browser tab, none of which touch this binding.
+      // Confirm it is still active before attaching: an archived child's load
+      // 409s (session_archived), which would otherwise trap every later click.
+      // On a query failure fall back to the persisted binding (no worse than
+      // trusting it outright).
+      try {
+        const page = await loadSessionCatalogOnce(
+          workspace.client,
+          {
+            routeKind: 'legacy',
+            workspaceCwd,
+            options: {
+              pageSize: SESSION_LIST_PAGE_SIZE,
+              archiveState: 'active',
+              sourceType: WEB_SHELL_SIDE_TASK_SOURCE_TYPE,
+              sourceId: parentSessionId,
+            },
+          },
+          { fresh: true },
+        );
+        if (
+          !page.sessions.some((session) => session.sessionId === existingChild)
+        ) {
+          forgetDetailsChildren(new Set([existingChild]));
+          childToReuse = undefined;
+        }
+      } catch {
+        // Keep the persisted binding when the check cannot run.
+      }
+    }
+    // The catalog query is async: the question may have been answered, ignored
+    // or cancelled, or the user may have switched sessions, during the
+    // round-trip. Re-check before opening a tab so we do not add a details tab
+    // for a resolved question or into another session's tab list.
+    if (
+      pendingAskUserApprovalRef.current?.id !== request.id ||
+      connectionRef.current.sessionId !== parentSessionId
+    ) {
+      return;
+    }
+    createSideTask(prompt, request.id, childToReuse);
+  }, [
+    pendingAskUserApproval,
+    connection.sessionId,
+    connection.workspaceCwd,
+    createSideTask,
+    forgetDetailsChildren,
+    t,
+    workspace.client,
+  ]);
 
   // Runs once the daemon has settled the cancelled turn, so the transcript
   // holds everything the turn produced.
@@ -19749,9 +21020,9 @@ export function App({
     hasQueuedPrompts,
   ]);
 
-  const handleFocusTaskPill = useCallback((): boolean => {
+  const handleFocusTaskChips = useCallback((): boolean => {
     if (interactionBlocked) return false;
-    return statusBarRef.current?.focusTaskPill() ?? false;
+    return composerTaskChipsRef.current?.focus() ?? false;
   }, [interactionBlocked]);
 
   const handleReturnToEditor = useCallback((text?: string) => {
@@ -20170,6 +21441,7 @@ export function App({
     handleCancel,
     handleCycleMode,
     artifactPanelFullscreen,
+    waitingMinigameOpen,
   });
   escLiveRef.current = {
     streamingState,
@@ -20181,6 +21453,7 @@ export function App({
     handleCancel,
     handleCycleMode,
     artifactPanelFullscreen,
+    waitingMinigameOpen,
   };
 
   // Clear a half-armed two-press whenever the streaming/idle boundary flips — the
@@ -20272,6 +21545,11 @@ export function App({
         }
         return;
       }
+
+      // The open waiting minigame owns Escape: its own window listener
+      // collapses the board. Don't also arm the two-press stream cancel
+      // behind it, or a second Escape would stop the turn by surprise.
+      if (live.waitingMinigameOpen) return;
 
       // Streaming takes priority over clearing text (queued prompts stay intact
       // and drain after the turn settles); see decideEscapeIntent for the rules.
@@ -20414,6 +21692,94 @@ export function App({
       store,
       t,
     ],
+  );
+
+  const subscriptionModelRefreshes = useRef(new Map<string, string>());
+  const refreshSubscriptionModels = useCallback(() => {
+    const { status, sessionId, workspaceCwd, currentModel } =
+      connectionRef.current;
+    const key = getLogicalSessionKey(sessionId, workspaceCwd);
+    const modelId = key && subscriptionModelRefreshes.current.get(key);
+    if (
+      status !== 'connected' ||
+      !key ||
+      !modelId ||
+      currentModel !== modelId
+    ) {
+      return;
+    }
+    const owner = sessionOwnerGuard.capture({ includeRecovery: true });
+    if (!owner.isCurrent()) return;
+    return sessionActions
+      .refreshModels(
+        (target) => {
+          if (
+            getLogicalSessionKey(target.sessionId, target.workspaceCwd) !== key
+          )
+            throw new Error('Session changed.');
+        },
+        { reloadProviders: false },
+      )
+      .then(() => {
+        const current = connectionRef.current;
+        if (
+          owner.isCurrent() &&
+          current.status === 'connected' &&
+          getLogicalSessionKey(current.sessionId, current.workspaceCwd) ===
+            key &&
+          current.currentModel === modelId &&
+          subscriptionModelRefreshes.current.get(key) === modelId
+        ) {
+          subscriptionModelRefreshes.current.delete(key);
+        }
+      })
+      .catch(() => {
+        // The model picker's refresh remains available if this read fails.
+      });
+  }, [sessionActions, sessionOwnerGuard]);
+  useEffect(() => {
+    void refreshSubscriptionModels();
+  }, [
+    connection.currentModel,
+    connection.status,
+    logicalSessionKey,
+    refreshSubscriptionModels,
+  ]);
+
+  const activateSessionSubscriptionModel = useCallback(
+    async (
+      workspaceCwd: string | undefined,
+      sessionId: string,
+      modelId: string,
+    ) => {
+      const key = getLogicalSessionKey(sessionId, workspaceCwd);
+      const isTarget = () => {
+        const current = connectionRef.current;
+        return (
+          getLogicalSessionKey(current.sessionId, current.workspaceCwd) === key
+        );
+      };
+      if (!key || !isTarget()) {
+        throw new DOMException('Subscription target changed.', 'AbortError');
+      }
+      if (isDesktopShell()) {
+        await workspace.client.setSessionModel(
+          sessionId,
+          modelId,
+          connectionRef.current.clientId,
+          { persistDefault: false },
+        );
+      } else if (connectionRef.current.status === 'connected') {
+        await sessionActions.setModel(modelId);
+      } else {
+        // The daemon can switch a live session while its event stream reconnects.
+        await workspace.client.setSessionModel(sessionId, modelId);
+      }
+      if (!isTarget()) return;
+      subscriptionModelRefreshes.current.set(key, modelId);
+      await refreshSubscriptionModels();
+    },
+    [refreshSubscriptionModels, sessionActions, workspace.client],
   );
 
   const handleWorkflowModeChange = useCallback(
@@ -20955,11 +22321,20 @@ export function App({
       mergeCommands(
         retainedCommands,
         refreshedSkillCommands,
-        getLocalCommands(t, { sideTaskAvailable: sideTasksAvailable }),
+        getLocalCommands(t, {
+          sideTaskAvailable: sideTasksAvailable,
+          subscriptionAvailable,
+        }),
         [...additionalSlashCommands],
       ),
       t,
     )
+      .filter(
+        (command) =>
+          subscriptionAvailable ||
+          !['logout', 'upgrade'].includes(command.name) ||
+          Boolean(command.source && command.source !== 'builtin-command'),
+      )
       .filter(
         (command) =>
           workspaceContextActive ||
@@ -20987,6 +22362,7 @@ export function App({
       });
   }, [
     additionalSlashCommands,
+    subscriptionAvailable,
     modelManagementPolicy.allowAdd,
     connection.commands,
     connection.sessionId,
@@ -21084,14 +22460,28 @@ export function App({
   const ensureAgentMentionSession = useCallback(async () => {
     const existing = connectionRef.current.sessionId;
     const allocated = existing ? undefined : await ensureSessionForPrompt();
-    const sessionId = existing ?? allocated ?? connectionRef.current.sessionId;
+    const sessionId =
+      existing ?? allocated?.sessionId ?? connectionRef.current.sessionId;
     if (!sessionId) return undefined;
     const allocatedOwner = allocatedSessionCatalogOwnerRef.current;
     const workspaceCwd =
       allocatedOwner?.sessionId === sessionId
         ? allocatedOwner.workspaceCwd
         : getComposerWorkspaceCwd();
-    return { sessionId, ...(workspaceCwd ? { workspaceCwd } : {}) };
+    const detachedClient = allocated?.detachedSession;
+    return {
+      sessionId,
+      ...(workspaceCwd ? { workspaceCwd } : {}),
+      // The daemon closes an idle session when its last client detaches;
+      // the hook releases only after the mention posts.
+      ...(detachedClient
+        ? {
+            release: () => {
+              void detachedClient.detach().catch(() => undefined);
+            },
+          }
+        : {}),
+    };
   }, [ensureSessionForPrompt, getComposerWorkspaceCwd]);
   const settledAgentRunsKey = useMemo(
     () => settledAgentRunKey(blocks),
@@ -22179,23 +23569,28 @@ export function App({
             />
           )}
           {modelManagementPolicy.allowAdd && showAuthDialog && (
-            <DialogShell
-              title={t('auth.title')}
-              size="lg"
+            <AuthMessage
+              dialog
+              standalone={isDesktopShell() && sessionIsStandalone}
+              allowAdd={modelManagementPolicy.allowAdd}
+              getWorkspaceCwd={getComposerWorkspaceCwd}
+              onModelActivated={
+                isDesktopShell() ? selectSubscriptionDraftModel : selectWelcomeModel
+              }
+              onChatProviderConfigured={() => {
+                if (subscriptionDraftModelRef.current)
+                  setPendingModel(connectionRef.current.currentModel ?? '');
+              }}
+              activateSessionSubscriptionModel={activateSessionSubscriptionModel}
+              onMessage={(text, type = 'status') => {
+                store.dispatch([
+                  type === 'error'
+                    ? { type: 'error', text }
+                    : { type: 'status', promptId: `local-command:${crypto.randomUUID()}`, text },
+                ]);
+              }}
               onClose={handleCloseAuthDialog}
-            >
-              <AuthMessage
-                allowAdd={modelManagementPolicy.allowAdd}
-                onMessage={(text, type = 'status') => {
-                  store.dispatch([
-                    type === 'error'
-                      ? { type: 'error', text }
-                      : { type: 'status', promptId: `local-command:${crypto.randomUUID()}`, text },
-                  ]);
-                }}
-                onClose={handleCloseAuthDialog}
-              />
-            </DialogShell>
+            />
           )}
           {projectFeaturesAvailable && showFallbacksDialog && (
             <DialogShell
@@ -22274,6 +23669,7 @@ export function App({
               <ReleaseSessionDialog
                 workspaceCwd={lockedWorkspaceCwd}
                 onReleased={(sessionId) => {
+                  setSessionLimitReached(false);
                   store.dispatch([
                     {
                       type: 'status',
@@ -22521,6 +23917,14 @@ export function App({
                       });
                     }
                   }}
+                  onOpenChannelEvents={
+                    channelNavigationEnabled
+                      ? () => {
+                          closeMobileDrawer();
+                          openPanel('channel-events');
+                        }
+                      : undefined
+                  }
                   onOpenManagedSessions={
                     managedAgentProvider
                       ? () => {
@@ -22559,6 +23963,15 @@ export function App({
                   canOpenSessionsOverview={canOpenSessionsOverview}
                   onOpenSplitView={openSplitViewFromSidebar}
                   canOpenSplitView={canOpenSplitView}
+                  onAddSessionToSplitView={addSessionToSplitView}
+                  splitSessionIds={
+                    mainView === 'split'
+                      ? splitSessionIds
+                      : pendingSplitPaneIds?.generation ===
+                          splitClassificationGenerationRef.current
+                        ? pendingSplitPaneIds.sessionIds
+                        : undefined
+                  }
                   theme={selectedTheme}
                   onThemeChange={(theme) => {
                     handleThemeChange(theme);
@@ -22614,9 +24027,14 @@ export function App({
                     managedAgentProvider ? setManagedNavigationSearch : undefined
                   }
                   currentSessionActive={!managedMode}
+                  onSessionArchived={(sessionId, workspaceCwd) => {
+                    closeUsageTabs([sessionId]);
+                    void handleCurrentSessionRemoved({ sessionId, workspaceCwd });
+                  }}
                   onNewStandaloneSession={() =>
                     createNewSession({ kind: 'global' })
                   }
+                  standaloneSessionsReloadToken={standaloneSessionsReloadToken}
                   onLoadSession={(sessionId, workspaceCwd) => {
                     showChat();
                     return loadSidebarSession(sessionId, workspaceCwd);
@@ -22972,6 +24390,7 @@ export function App({
             <div
               ref={chatPaneRef}
               data-testid="chat-pane-container"
+                tabIndex={-1}
               className={[
                 styles.chatPane,
                 mainView !== 'chat' ? styles.chatPaneShowingPage : undefined,
@@ -23195,7 +24614,10 @@ export function App({
                           configurations: modelConfigurations.models,
                           onUpdateContextWindow: handleModelContextWindowUpdate,
                           currentModelId:
-                            connection.currentModel ?? undefined,
+                            (connection.sessionId
+                              ? connection.currentModel
+                              : currentModel || connection.currentModel) ??
+                            undefined,
                           loading:
                             providersState.loading ||
                             modelConfigurations.loading,
@@ -23327,6 +24749,22 @@ export function App({
                             : returnToChat
                         }
                         initialFocusRef={panelHeadingRef}
+                        // A cleared session keeps clientId and workspaceCwd,
+                        // so the workspace comparison alone would still send
+                        // an id the daemon no longer knows (400).
+                        clientId={
+                          connection.sessionId ? connection.clientId : undefined
+                        }
+                        sessionWorkspaceCwd={connection.workspaceCwd}
+                      />
+                    ) : activePanel === 'channel-events' ? (
+                      <ChannelEventsPage
+                        onClose={
+                          channelNavigationEnabled && navigationRailVisible
+                            ? undefined
+                            : returnToChat
+                        }
+                        initialFocusRef={panelHeadingRef}
                       />
                     ) : activePanel === 'live' ? (
                       <div className="-mx-5 -mt-4">
@@ -23390,6 +24828,11 @@ export function App({
                         includeOtherWorkspaces={!lockedWorkspaceCwd}
                         workspaceCwd={lockedWorkspaceCwd}
                         manageLiveState={false}
+                        onLiveStateWorkspaceCwdsChange={
+                          sidebarOptions.enabled
+                            ? undefined
+                            : reportOverviewLiveStateWorkspaceCwds
+                        }
                       />
                     )}
                     </ShadowDomBoundary>
@@ -23432,14 +24875,15 @@ export function App({
                   <div className={styles.fullPageBody}>
                     <ScheduledTasksDialog
                       onRunPrompt={runTaskManually}
-                      // Registered workspaces (multi-workspace daemons only) so
-                      // the page aggregates every project's schedule and the New
-                      // form can target one; absent/single → primary-only view.
+                      // Registered workspaces let the page aggregate schedules
+                      // and the New form target a project; absent/single →
+                      // primary-only view.
                       workspaces={
                         lockedWorkspaceCwd
                           ? visibleWorkspaces
                           : ordinaryWorkspaces
                       }
+                      primaryWorkspaceCwd={workspace.capabilities?.workspaceCwd}
                       lockedWorkspace={lockedWorkspaceCapability}
                       currentSession={
                         currentSessionSummary
@@ -23456,6 +24900,12 @@ export function App({
                       )}
                       gateAvailable={workspace.capabilities?.features?.includes(
                         'scheduled_task_gate',
+                      )}
+                      deliveryAvailable={workspace.capabilities?.features?.includes(
+                        'channel_delivery',
+                      )}
+                      observedContactsAvailable={workspace.capabilities?.features?.includes(
+                        'workspace_channel_observed_contacts',
                       )}
                       autofixPrWatchesAvailable={prWatchesAvailable}
                       onCreateViaChat={() => {
@@ -23672,30 +25122,34 @@ export function App({
                         const allocationOwner = sessionOwnerGuard.capture();
                         const sourceSessionId =
                           connectionRef.current.sessionId;
-                        const allocatedSessionId =
-                          await ensureSessionForPrompt();
-                        const currentSessionId =
-                          connectionRef.current.sessionId;
-                        const ownAllocationSucceeded =
-                          sourceSessionId === undefined &&
-                          allocatedSessionId !== undefined &&
-                          (currentSessionId === undefined ||
-                            currentSessionId === allocatedSessionId);
-                        if (
-                          (!allocationOwner.isCurrent() &&
-                            !ownAllocationSucceeded) ||
-                          (sourceSessionId !== undefined
-                            ? currentSessionId !== sourceSessionId
-                            : currentSessionId !== undefined &&
-                              currentSessionId !== allocatedSessionId)
-                        ) {
-                          return false;
-                        }
-                        if (
-                          !connectionRef.current.sessionId &&
-                          !allocatedSessionId
-                        ) {
-                          return false;
+                        const allocation = await ensureSessionForPrompt();
+                        const allocatedSessionId = allocation?.sessionId;
+                        const detachedGoalSession =
+                          allocation?.detachedSession !== undefined;
+                        if (!detachedGoalSession) {
+                          const currentSessionId =
+                            connectionRef.current.sessionId;
+                          const ownAllocationSucceeded =
+                            sourceSessionId === undefined &&
+                            allocatedSessionId !== undefined &&
+                            (currentSessionId === undefined ||
+                              currentSessionId === allocatedSessionId);
+                          if (
+                            (!allocationOwner.isCurrent() &&
+                              !ownAllocationSucceeded) ||
+                            (sourceSessionId !== undefined
+                              ? currentSessionId !== sourceSessionId
+                              : currentSessionId !== undefined &&
+                                currentSessionId !== allocatedSessionId)
+                          ) {
+                            return false;
+                          }
+                          if (
+                            !connectionRef.current.sessionId &&
+                            !allocatedSessionId
+                          ) {
+                            return false;
+                          }
                         }
                         const owner = sessionOwnerGuard.capture();
                         try {
@@ -23703,6 +25157,7 @@ export function App({
                             await createGoalForAllocatedSession(
                               allocatedSessionId,
                               condition,
+                              { detached: detachedGoalSession },
                             );
                           } else {
                             await controlCurrentGoal('create', condition);
@@ -23717,6 +25172,21 @@ export function App({
                               connectionRef.current.sessionId;
                           }
                           throw error;
+                        } finally {
+                          // Same release rule as the /goal command: after
+                          // the dispatch settles, never at allocation.
+                          if (allocation?.detachedSession) {
+                            void allocation.detachedSession
+                              .detach()
+                              .catch(() => undefined);
+                          }
+                        }
+                        if (detachedGoalSession) {
+                          // The goal landed in its own session; the user
+                          // already navigated away, so do not pull the view
+                          // back to chat.
+                          strandedGoalSessionRef.current = undefined;
+                          return true;
                         }
                         if (!owner.isCurrent()) return false;
                         strandedGoalSessionRef.current = undefined;
@@ -23802,6 +25272,11 @@ export function App({
                         // callback stable to avoid looping SplitView's reporting
                         // effect.
                         onPanesChange={handleSplitPanesChange}
+                        onPaneWorkspacesChange={
+                          sidebarOptions.enabled
+                            ? undefined
+                            : reportSplitPaneWorkspaces
+                        }
                         onPendingPanesChange={handleSplitPendingPanesChange}
                         includeOtherWorkspaces={!lockedWorkspaceCwd}
                         workspaceCwd={lockedWorkspaceCwd}
@@ -23897,10 +25372,13 @@ export function App({
                       managedAgentProvider={managedAgentProvider}
                       creationSkills={managedCreationSkills}
                       interactive={managedChatVisible}
+                      // sidebar:false 表示外壳由宿主提供（宿主外壳即如此）。此处传 null 而非 undefined：
+                      // 按 navigationTarget 的既有约定，null 保持 home 布局但不挂载内置侧栏槽位，
+                      // 托管页因此与 ChatPane 一样不渲染自己的导航与「新建/刷新」工具条。
                       navigationTarget={
                         sidebarOptions.enabled
                           ? managedNavigationTarget
-                          : undefined
+                          : null
                       }
                       archivedNavigationTarget={managedArchivedNavigationTarget}
                       onArchivedSessionsStatusChange={setManagedArchivedStatus}
@@ -23911,6 +25389,9 @@ export function App({
               <div
                 className={[
                   styles.chatViewWrap,
+                  approvalOverlayActive && mainView === 'chat'
+                    ? styles.chatViewWithApproval
+                    : undefined,
                   hasMobileComposerBottom
                     ? styles.chatViewWithMobileComposerBottom
                     : undefined,
@@ -24011,6 +25492,7 @@ export function App({
                                   terminalBackgroundShellTaskIds
                                 }
                                 pendingApproval={pendingToolApproval}
+                                approvalOverlayActive={approvalOverlayActive}
                                 onShowContextDetail={
                                   contextUsageAvailable
                                     ? openCurrentContextUsagePanel
@@ -24135,7 +25617,9 @@ export function App({
                             );
                             const messageListWithWorkflowDetails = (
                               <WorkflowDetailsProvider tasks={sessionTasks}>
-                                {messageListWithTurnCalls}
+                                <ToolRevealProvider store={toolRevealStore}>
+                                  {messageListWithTurnCalls}
+                                </ToolRevealProvider>
                               </WorkflowDetailsProvider>
                             );
                             const messageListWithSubagentDetails = (
@@ -24304,6 +25788,19 @@ export function App({
                           />
                         </div>
                       )}
+                      {/* Workspace-level hooks trust decision uses the same
+                          approval slot and card as tool approvals; it is not
+                          a session permission request. */}
+                      {workspaceContextActive &&
+                        !managedMode &&
+                        !pendingToolApproval &&
+                        mainView === 'chat' && (
+                          <div className={styles.approvalOverlay}>
+                            <ProjectHooksApprovalCard
+                              onActiveChange={setProjectHooksApprovalActive}
+                            />
+                          </div>
+                        )}
                       {pendingAskUserApproval && mainView === 'chat' && (
                         <div
                           data-testid="approval-overlay"
@@ -24316,6 +25813,11 @@ export function App({
                             variant="floating"
                             keyboardActive={askUserOverlayVisible}
                             customInputLabel={askUserFreeTextLabel}
+                            onAskDetails={
+                              sideTasksAvailable
+                                ? handleAskUserDetails
+                                : undefined
+                            }
                           />
                         </div>
                       )}
@@ -24476,6 +25978,16 @@ export function App({
                             </span>
                           </div>
                         )}
+                        {waitingMinigameVisible && (
+                          <WaitingMinigame
+                            open={waitingMinigameOpen}
+                            onClose={() => setWaitingMinigameOpen(false)}
+                            activity={waitingMinigameActivity}
+                            tokenUsage={waitingMinigameTokens}
+                            onSelectActivity={locateWaitingActivity}
+                            gamesEnabled={waitingGamesEnabled}
+                          />
+                        )}
                         {streamingState !== 'idle' ||
                         sessionHasActivePrompt ? (
                           suppressFailedPromptRetryStreaming ? null : (
@@ -24490,6 +26002,14 @@ export function App({
                               backgroundLabel={
                                 connection.backgroundTurn?.label ??
                                 connection.backgroundTurn?.kind
+                              }
+                              trailing={
+                                <WaitingMinigameButton
+                                  open={waitingMinigameOpen}
+                                  onToggle={() =>
+                                    setWaitingMinigameOpen((value) => !value)
+                                  }
+                                />
                               }
                             />
                           )
@@ -24580,6 +26100,18 @@ export function App({
                             )}
                           </div>
                         )}
+                        {!CustomFooter && (
+                          <ComposerTaskChips
+                            ref={composerTaskChipsRef}
+                            tasks={sessionTasks}
+                            // Headerless embeds have no environment panel to
+                            // list background agents, and keep them out of
+                            // their task surfaces.
+                            includeAgents={environmentTasksReplacementEnabled}
+                            onSelectTask={openComposerTask}
+                            onReturnToInput={handleReturnToEditor}
+                          />
+                        )}
                         {(queuedPrompts.length > 0 ||
                           liveGoalSnapshot?.goal) && (
                           <div
@@ -24648,6 +26180,12 @@ export function App({
                             unknownPromptAdmission?.payloadAvailable === true
                           }
                         />
+                        {sessionLimitReached && workspaceContextActive && (
+                          <SessionLimitBanner
+                            onRelease={() => setShowReleaseDialog(true)}
+                            onDismiss={() => setSessionLimitReached(false)}
+                          />
+                        )}
                         <ChatEditor
                           ref={setEditorHandle}
                           liveVoicePortalContainer={
@@ -24731,7 +26269,7 @@ export function App({
                           }
                           voiceStatusRevision={mainVoiceStatusRevision}
                           queuedMessages={queuedTexts}
-                          onFocusFooter={handleFocusTaskPill}
+                          onFocusFooter={handleFocusTaskChips}
                           onPopQueuedMessages={editLastQueuedPrompt}
                           onClearQueuedMessages={clearQueuedPrompts}
                           currentMode={executionMode}
@@ -24811,6 +26349,7 @@ export function App({
                           }
                           modelRefresh={modelRefresh}
                           availableModels={availableModels}
+                          modelPickerScope={modelPickerScope}
                           unavailableModels={unavailableModels}
                           mountUnavailableModelTooltip={
                             mountUnavailableModelTooltip
@@ -24874,16 +26413,7 @@ export function App({
                           workspaceSelectionDisabled={
                             !composerWorkspaceSelectEnabled
                           }
-                          atWorkspaceCwd={
-                            workspaceContextActive
-                              ? (ordinaryWorkspaces.find(
-                                  (entry) => entry.cwd === lockedWorkspaceCwd,
-                                )?.cwd ??
-                                (connection.sessionId
-                                  ? connection.workspaceCwd
-                                  : resolveWorkspaceMaintenanceTargetCwd()))
-                              : undefined
-                          }
+                          atWorkspaceCwd={composerWorkspaceCwd}
                           composerScopeKey={
                             effectiveSessionContext?.kind === 'standalone'
                               ? 'standalone'
@@ -25019,53 +26549,24 @@ export function App({
                             onSelectModel={handleModelSelect}
                           />
                         )
-                      ) : (
-                        <StatusBar
-                          onSelectMode={() =>
-                            setShowApprovalModeDialog((v) => !v)
-                          }
-                          onSelectModel={() =>
-                            isStandaloneModelPickerUnavailable({
-                              sessionId: connection.sessionId,
-                              sessionContextKind: effectiveSessionContext?.kind,
-                              models: connection.models,
-                            })
-                              ? pushToast('info', t('model.unavailable'))
-                              : setModelDialogMode((v) =>
-                                  v ? null : 'main',
-                                )
-                          }
-                          onShowContext={() =>
-                            showContextUsage('/context', false)
-                          }
-                          onOpenSettings={() => openPanel('settings')}
-                          ref={statusBarRef}
-                          onOpenTasks={() => openTasksPanel()}
-                          onReturnToInput={handleReturnToEditor}
-                          // The pill filters composer tasks itself; it also
-                          // counts background agents, which the
-                          // pre-filtered list would have dropped. The full
-                          // snapshot reaches the pill only while a
-                          // background agent is still running in the
-                          // shipped entry, where the environment panel
-                          // replaces the footer task list; the empty chat
-                          // and headerless embeds keep the pre-filtered
-                          // composer tasks, so agents never reach them.
-                          tasks={
-                            isChatEmptyState ||
-                            !environmentTasksReplacementEnabled
-                              ? backgroundTasks
-                              : hasActiveBackgroundAgent(sessionTasks)
-                                ? sessionTasks
-                                : []
-                          }
-                          hideSettings={
-                            hideSettings || !workspaceContextActive
-                          }
-                          onToggleShortcuts={handleToggleShortcuts}
-                          compact={true}
-                        />
-                      )}
+                      ) : null}
+                      {!CustomFooter &&
+                        tokenUsageHeaderItemVisible &&
+                        !isChatEmptyState &&
+                        connection.status === 'connected' &&
+                        connection.sessionId && (
+                          <ComposerUsageStats
+                            sessionId={connection.sessionId}
+                            loadStats={loadComposerUsageStats}
+                            refreshSignal={connection.tokenCount}
+                            running={
+                              streamingState !== 'idle' ||
+                              sessionHasActivePrompt ||
+                              sessionActiveWorkState === 'active'
+                            }
+                            onOpen={openComposerUsagePanel}
+                          />
+                        )}
                       {isChatEmptyState && welcomeFooter && (
                         <div
                           className={[

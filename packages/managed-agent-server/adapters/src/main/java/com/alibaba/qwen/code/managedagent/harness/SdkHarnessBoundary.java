@@ -83,6 +83,16 @@ public final class SdkHarnessBoundary implements HarnessConnector {
     }
 
     @Override
+    public boolean supportsModelConfiguration() {
+        return call(delegate::supportsModelConfiguration);
+    }
+
+    @Override
+    public boolean supportsPersonalMemory() {
+        return call(delegate::supportsPersonalMemory);
+    }
+
+    @Override
     public boolean supportsUserMessageQueue() {
         return call(delegate::supportsUserMessageQueue);
     }
@@ -151,6 +161,42 @@ public final class SdkHarnessBoundary implements HarnessConnector {
     @Override
     public boolean supportsSessionExtensions() {
         return call(delegate::supportsSessionExtensions);
+    }
+
+    @Override
+    public boolean supportsPackagePreparation() { return call(delegate::supportsPackagePreparation); }
+
+    @Override
+    public PreparedPackage preparePackage(Map<String, Object> metadata, java.io.InputStream source) {
+        return call(() -> delegate.preparePackage(metadata, source));
+    }
+
+    @Override
+    public Map<String, Object> inspectPackage(Map<String, Object> metadata, java.io.InputStream source) {
+        return call(() -> delegate.inspectPackage(metadata, source));
+    }
+
+    @Override
+    public Map<String, Object> previewPackage(Map<String, Object> metadata, java.io.InputStream source) {
+        return call(() -> delegate.previewPackage(metadata, source));
+    }
+
+    @Override
+    public boolean supportsRuntimeSkillImport() { return call(delegate::supportsRuntimeSkillImport); }
+
+    @Override
+    public Map<String, Object> runtimeSkillCandidates(String tenant, String session) {
+        return call(() -> delegate.runtimeSkillCandidates(tenant, session));
+    }
+
+    @Override
+    public Map<String, Object> runtimeSkillSnapshot(String tenant, String session, Map<String, Object> request) {
+        return call(() -> delegate.runtimeSkillSnapshot(tenant, session, request));
+    }
+
+    @Override
+    public Map<String, Object> runtimeSkillArchive(String tenant, String session, Map<String, Object> request) {
+        return call(() -> delegate.runtimeSkillArchive(tenant, session, request));
     }
 
     @Override

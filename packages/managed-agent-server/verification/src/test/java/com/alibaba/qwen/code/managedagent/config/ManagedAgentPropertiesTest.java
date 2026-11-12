@@ -10,6 +10,7 @@ import com.alibaba.qwen.code.managedagent.session.WakeRecovery;
 import com.alibaba.qwen.code.managedagent.workspace.ChildResultRelay;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.api.io.TempDir;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.boot.test.system.CapturedOutput;
@@ -17,6 +18,8 @@ import org.springframework.boot.test.system.OutputCaptureExtension;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.scheduling.annotation.Scheduled;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
@@ -104,6 +107,33 @@ public class ManagedAgentPropertiesTest {
         assertThatCode(properties::validateWorkspaceFiles).doesNotThrowAnyException();
         properties.getRuntimeBroker().setVerifiedWorkspaceRecoveryEnabled(false);
         assertThatThrownBy(properties::validateWorkspaceFiles).isInstanceOf(IllegalStateException.class);
+    }
+
+    @Test
+    void preflightValidatesTheSelectedProviderAfterLoadingHarnessCredentials(@TempDir Path directory) throws Exception {
+        for (String digest : List.of("SHA256:" + "A".repeat(64), "sha256:" + "a".repeat(64))) {
+            var properties = new ManagedAgentProperties();
+            Path file = Files.writeString(directory.resolve("harness.env"), "QWEN_SERVER_TOKEN=" + "a".repeat(64)
+                    + "\nQWEN_HOSTED_HARNESS_CAPABILITY_DIGEST=" + digest + "\n");
+            properties.getHarness().setEnabled(true);
+            properties.getHarness().setCredentialsFile(file.toString());
+            properties.getSessionStore().setEnabled(true);
+            var broker = properties.getRuntimeBroker();
+            broker.setEnabled(true);
+            broker.setProvisioner("external-scratch");
+            broker.setTrustedLocalRebootRecovery(false);
+            broker.setExternalProviderUrl("http://provider.invalid/api");
+            broker.setExternalProviderToken("provider-token-for-tests");
+            broker.setWorkspaceId("scratch");
+            broker.setWorkspaceCwd("/worker/scratch");
+            if (digest.startsWith("SHA256:")) {
+                assertThatThrownBy(properties::validateForPreflight).isInstanceOf(IllegalStateException.class)
+                        .hasMessageContaining("External Runtime Harness capability digest");
+            } else {
+                assertThatCode(properties::validateForPreflight).doesNotThrowAnyException();
+            }
+            assertThat(properties.getHarness().getCapabilityDigest()).isEqualTo(digest);
+        }
     }
 
     @Test
@@ -267,10 +297,10 @@ public class ManagedAgentPropertiesTest {
         }
         // The walk must not pass vacuously: extracting a group out of
         // the properties class empties it and the millisecond
-        // exceptions would go unchecked. 36 is the current field
+        // exceptions would go unchecked. 37 is the current field
         // inventory — update it in the same change that adds or
         // removes a Duration field.
-        assertThat(visited).containsAll(MILLIS_BINDINGS).hasSize(36);
+        assertThat(visited).containsAll(MILLIS_BINDINGS).hasSize(37);
     }
 
     @Test
@@ -611,6 +641,7 @@ public class ManagedAgentPropertiesTest {
                 "events.replay-floor-interval",
                 "message-relay.scan-delay",
                 "runtime-broker.retention.scan-delay",
+                "session-resources.scan-delay",
                 "session-worktree.scan-delay",
                 "wake-recovery.scan-delay");
         var placeholderOnly = new java.util.TreeSet<String>();
@@ -916,7 +947,7 @@ public class ManagedAgentPropertiesTest {
                         .getFailure().hasRootCauseInstanceOf(IllegalStateException.class)
                         .hasRootCauseMessage("Hosted Workspace files require"
                                 + " a supported Harness, Session Store and Session-isolated"
-                                + " local-process Broker with Workspace mounts"));
+                                + " local-process Broker with Workspace mounts or an SSH-only Broker"));
         // A definition Session publishes instructions through the Session
         // Store at Harness create, so the Harness implies the Store even
         // when Workspace files are off.
@@ -1215,6 +1246,8 @@ public class ManagedAgentPropertiesTest {
 
     @Test
     public void automationTunablesBindFromTheShippedConfiguration() throws Exception {
+        assertThat(new ManagedAgentProperties().getAutomation().isEnabled())
+                .isTrue();
         var yaml = new org.springframework.boot.env.YamlPropertySourceLoader()
                 .load("application.yml",
                         new org.springframework.core.io.ClassPathResource(
@@ -1239,7 +1272,7 @@ public class ManagedAgentPropertiesTest {
             assertThat(source.containsProperty("qwen.managed-agent.automation"
                     + ".scanner-threads")).isTrue();
         });
-        new ApplicationContextRunner()
+        var runner = new ApplicationContextRunner()
                 .withUserConfiguration(PropertiesConfiguration.class)
                 .withInitializer(ctx -> {
                     java.util.Map<String, Object> ambient =
@@ -1252,25 +1285,33 @@ public class ManagedAgentPropertiesTest {
                                     "systemEnvironment", ambient));
                     yaml.forEach(ctx.getEnvironment().getPropertySources()
                             ::addLast);
-                })
-                .run(started -> {
-                    assertThat(started).hasNotFailed();
-                    var automation = started
-                            .getBean(ManagedAgentProperties.class)
-                            .getAutomation();
-                    assertThat(automation.isEnabled()).isFalse();
-                    assertThat(automation.getScanDelay())
-                            .isEqualTo(java.time.Duration.ofSeconds(10));
-                    assertThat(automation.getLease())
-                            .isEqualTo(java.time.Duration.ofSeconds(60));
-                    assertThat(automation.getLateTolerance())
-                            .isEqualTo(java.time.Duration.ofMinutes(5));
-                    assertThat(automation.getLookback())
-                            .isEqualTo(java.time.Duration.ofHours(24));
-                    assertThat(automation.getMaxSlotsPerTick()).isEqualTo(1000);
-                    assertThat(automation.getConcurrency()).isEqualTo(4);
-                    assertThat(automation.getScannerThreads()).isEqualTo(4);
                 });
+        runner.run(started -> {
+            assertThat(started).hasNotFailed();
+            var automation = started.getBean(ManagedAgentProperties.class)
+                    .getAutomation();
+            assertThat(automation.isEnabled()).isTrue();
+            assertThat(automation.getScanDelay())
+                    .isEqualTo(java.time.Duration.ofSeconds(10));
+            assertThat(automation.getLease())
+                    .isEqualTo(java.time.Duration.ofSeconds(60));
+            assertThat(automation.getLateTolerance())
+                    .isEqualTo(java.time.Duration.ofMinutes(5));
+            assertThat(automation.getLookback())
+                    .isEqualTo(java.time.Duration.ofHours(24));
+            assertThat(automation.getMaxSlotsPerTick()).isEqualTo(1000);
+            assertThat(automation.getConcurrency()).isEqualTo(4);
+            assertThat(automation.getScannerThreads()).isEqualTo(4);
+        });
+        for (String override : List.of(
+                "QWEN_MANAGED_AGENT_AUTOMATION_ENABLED=false",
+                "qwen.managed-agent.automation.enabled=false")) {
+            runner.withPropertyValues(override).run(started -> {
+                assertThat(started).hasNotFailed();
+                assertThat(started.getBean(ManagedAgentProperties.class)
+                        .getAutomation().isEnabled()).isFalse();
+            });
+        }
     }
 
     @Test
@@ -1287,7 +1328,6 @@ public class ManagedAgentPropertiesTest {
                 p -> p.getAutomation().setLookback(java.time.Duration.ZERO));
         for (Consumer<ManagedAgentProperties> change : invalid) {
             ManagedAgentProperties properties = new ManagedAgentProperties();
-            properties.getAutomation().setEnabled(true);
             // The complete values bind cleanly: the offender alone throws.
             assertThatCode(properties::validateWorkspaceFiles)
                     .doesNotThrowAnyException();
@@ -1297,6 +1337,7 @@ public class ManagedAgentPropertiesTest {
         }
         // And automation OFF may carry any values untouched.
         ManagedAgentProperties off = new ManagedAgentProperties();
+        off.getAutomation().setEnabled(false);
         off.getAutomation().setMaxSlotsPerTick(0);
         assertThatCode(off::validateWorkspaceFiles).doesNotThrowAnyException();
     }

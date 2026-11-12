@@ -6,6 +6,7 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiRegi
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels;
+import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
@@ -55,7 +56,7 @@ class WorkspaceCsiSessionGuardTest {
     private JdbcRuntimeBindingRepository bindings;
     private JdbcRuntimeSessionRepository sessions;
     private JdbcToolExecutionRepository executions;
-    private ManagedSessionStore journal;
+    private JdbcManagedSessionStore journal;
     private RuntimeProvisionRequest request;
     private String sessionId;
     private RuntimeBindingRecord binding;
@@ -81,20 +82,20 @@ class WorkspaceCsiSessionGuardTest {
                 CsiFilesRetirementProfile.CONFIG_REF, CsiFilesRetirementProfile.POLICY_REF);
         jdbc.update(
                 "INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
-                        + " VALUES ('tenant', 'workspace', ?, 'OPERATOR')", com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey("tenant", "actor"));
+                        + " VALUES ('tenant', 'workspace', ?, 'OPERATOR')", ManagedWorkspaceRegistry.actorKey("tenant", "actor"));
         var properties = new ManagedAgentProperties();
         properties.setAgentRevision("reviewed-agent/1");
         sessionId = com.alibaba.qwen.code.managedagent.persistence.PrivateCsiFixture.create(jdbc, manager, json, properties,
                 new com.alibaba.qwen.code.managedagent.contracts.workspace.PrivateCsiSession.Request(registration, "actor", "create", null, null,
                         new WorkspaceSelection("workspace", "."))).sessionId();
-        var managed = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, json, Clock.systemUTC(), ignored -> {},
-                new ManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+        var managed = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, json, Clock.systemUTC(), ignored -> {},
+                new JdbcManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         request = transaction.execute(status -> managed.requireCsiRequest(registration, sessionId));
         bindings = new JdbcRuntimeBindingRepository(source,
                 new AesGcmSecretProtector("test", new byte[32]));
         sessions = new JdbcRuntimeSessionRepository(source);
         executions = new JdbcToolExecutionRepository(source);
-        journal = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc));
+        journal = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
     }
 
     @ParameterizedTest
@@ -102,8 +103,8 @@ class WorkspaceCsiSessionGuardTest {
     void publicLifecycleCannotFenceAnOriginalPrivateCsiSession(StoreModels.OperationKind kind) {
         var properties = new ManagedAgentProperties();
         properties.getHarness().setWorkspaceFilesEnabled(true);
-        var managed = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, new ObjectMapper(), Clock.systemUTC(), ignored -> {},
-                new ManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+        var managed = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, new ObjectMapper(), Clock.systemUTC(), ignored -> {},
+                new JdbcManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         var before = jdbc.queryForMap("SELECT " + ManagedSchemaProjection.SESSION.columns() + " FROM ma_session WHERE session_id = ?", sessionId);
         var ownership = reservations.inspect(registration);
         assertApiCode(() -> transaction.execute(status -> managed.beginWorkspaceLifecycle("tenant", sessionId,
@@ -263,7 +264,7 @@ class WorkspaceCsiSessionGuardTest {
         second.put("runtime_generation", 2L);
         second.put("binding_state", "RELEASED");
         second.put("isolation_key", "foreign-owned-isolation-key");
-        second.remove("provision_seeded");
+        second.remove("is_provision_seeded");
         jdbc.update(
                 "INSERT INTO ma_runtime_binding ("
                         + String.join(",", second.keySet()) + ") VALUES ("
@@ -311,7 +312,7 @@ class WorkspaceCsiSessionGuardTest {
                         + " runtime_request_key = NULL");
         jdbc.update("UPDATE ma_runtime_slot SET active_binding_id = NULL");
         jdbc.update("DELETE FROM ma_runtime_binding");
-        assertThat(jdbc.queryForObject("SELECT csi_guard FROM ma_session", Boolean.class)).isFalse();
+        assertThat(jdbc.queryForObject("SELECT is_csi_guard FROM ma_session", Boolean.class)).isFalse();
         assertBrokerCode(() -> transaction.execute(status -> acquire()), "csi_original_binding_unavailable");
     }
 
@@ -350,9 +351,15 @@ class WorkspaceCsiSessionGuardTest {
     @Test
     void privateWriterCannotBorrowAnUnboundConnection() {
         ready();
-        assertThatThrownBy(this::acquire).isInstanceOf(IllegalStateException.class)
+        var grant = acquire();
+        assertThat(grant.writerGeneration()).isEqualTo(1);
+        assertThat(org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive()).isFalse();
+        var before = jdbc.queryForMap("SELECT " + ManagedSchemaProjection.SESSION_HEAD.columns() + " FROM ma_session_head");
+        assertThatThrownBy(() -> journal.renewWriter("tenant", sessionId, TOKEN,
+                new ManagedSessionStoreModels.RenewWriterRequest("workspace", "writer", grant.writerGeneration(), 60_000L)))
+                .isInstanceOf(IllegalStateException.class)
                 .hasMessage("CSI mutation requires its original transaction connection");
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_head", Integer.class)).isZero();
+        assertThat(jdbc.queryForMap("SELECT " + ManagedSchemaProjection.SESSION_HEAD.columns() + " FROM ma_session_head")).isEqualTo(before);
     }
 
     @Test

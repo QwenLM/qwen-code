@@ -36,13 +36,6 @@ class BindingExecutionInventoryTest {
     private static final Instant COMPLETION = Instant.parse("2026-10-02T00:00:00Z");
 
     @Test
-    void memoryInventoriesEveryStateAcrossSessionsWithStablePaging() {
-        var repository = new InMemoryToolExecutionRepository();
-        verifyInventory(repository, repository, repository::abandonByBinding);
-        verifyBounds(repository);
-    }
-
-    @Test
     void independentJdbcInstancesInventoryEveryStateWithStablePaging() {
         DataSource source = dataSource();
         var writer = new JdbcToolExecutionRepository(source);
@@ -139,13 +132,16 @@ class BindingExecutionInventoryTest {
     }
 
     @Test
-    void memoryRejectsExecutionIdsThatAliasWhenEncodedForTheHashCursor() {
-        var repository = new InMemoryToolExecutionRepository();
+    void jdbcRejectsExecutionIdsThatAliasWhenEncodedForTheHash() {
+        DataSource source = dataSource();
+        var repository = new JdbcToolExecutionRepository(source);
         repository.findOrCreate(prepared("?", BINDING, GENERATION, "session"));
-        repository.findOrCreate(prepared("\ud800", BINDING, GENERATION, "session"));
         assertEquals(JdbcRepositorySupport.valueKey("?"), JdbcRepositorySupport.valueKey("\ud800"));
-        assertThrows(IllegalArgumentException.class,
-                () -> repository.findByBinding(BINDING, GENERATION, null, 100));
+        // The unique hash constraint refuses the aliasing insert; the ledger
+        // keeps exactly the original row.
+        assertThrows(IllegalStateException.class,
+                () -> repository.findOrCreate(prepared("\ud800", BINDING, GENERATION, "session")));
+        assertEquals(List.of("?"), executionIds(repository.findByBinding(BINDING, GENERATION, null, 100)));
     }
 
     @Test

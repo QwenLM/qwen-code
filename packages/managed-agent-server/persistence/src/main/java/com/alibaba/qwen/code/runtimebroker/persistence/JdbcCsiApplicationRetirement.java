@@ -9,6 +9,8 @@ import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.time.Instant;
 
+import static com.alibaba.qwen.code.runtimebroker.persistence.JdbcRepositorySupport.statement;
+
 /** Same-connection authority for the sole original application retirement. */
 public final class JdbcCsiApplicationRetirement {
     public enum Stage { SETTLING, FROZEN, CUT, DRAINED }
@@ -124,8 +126,8 @@ public final class JdbcCsiApplicationRetirement {
         try (var statement = statement(connection,
                 "SELECT workspace_id, state, activation_phase FROM ma_session_head"
                         + " WHERE head_kind = 'MANAGED_SESSION' AND tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ? FOR UPDATE")) {
-            statement.setString(1, JdbcRuntimeBindingRepository.harnessDrainKey(original.request().getScope().getTenantId()));
-            statement.setString(2, JdbcRuntimeBindingRepository.harnessDrainKey(original.request().getIsolationKey()));
+            statement.setString(1, RuntimeAdmissionFences.harnessDrainKey(original.request().getScope().getTenantId()));
+            statement.setString(2, RuntimeAdmissionFences.harnessDrainKey(original.request().getIsolationKey()));
             JdbcRepositorySupport.setIdentity(statement, 3, original.request().getScope().getTenantId());
             JdbcRepositorySupport.setIdentity(statement, 4, original.request().getIsolationKey());
             try (var row = statement.executeQuery()) {
@@ -167,12 +169,6 @@ public final class JdbcCsiApplicationRetirement {
     }
 
     private static byte[] copy(byte[] bytes) { return bytes == null ? null : bytes.clone(); }
-
-    private static PreparedStatement statement(Connection connection, String sql) throws SQLException {
-        var statement = connection.prepareStatement(sql);
-        statement.setQueryTimeout(10);
-        return statement;
-    }
 
     private static void require(boolean valid) {
         if (!valid) {

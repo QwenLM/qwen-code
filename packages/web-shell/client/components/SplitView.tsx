@@ -124,6 +124,8 @@ export interface SplitViewProps {
    * each render would re-fire the reporting effect and loop.
    */
   onPanesChange?: (sessionIds: string[]) => void;
+  /** Report the resolved owners of mounted panes for the app-level poller. */
+  onPaneWorkspacesChange?: (cwds: readonly string[]) => void;
   onAssistantTurnSettled?: (event: WebShellAssistantTurnSettledEvent) => void;
   /**
    * Report panes surfacing approvals, including hidden panes. Keep stable while
@@ -187,6 +189,7 @@ export function SplitView({
   sessionIds,
   showSessionDetails = true,
   onPanesChange,
+  onPaneWorkspacesChange,
   onAssistantTurnSettled,
   onPendingPanesChange,
   onExit,
@@ -429,6 +432,23 @@ export function SplitView({
 
   const paneIdsRef = useRef(paneIds);
   paneIdsRef.current = paneIds;
+  // Parent-appended panes (controlled mode): reveal and focus the new one.
+  // paneIds derives from the prop, so by the time this runs the render-time
+  // ref above is already current — track the previous commit here instead.
+  const prevControlledIdsRef = useRef(normalizedSessionIds);
+  useEffect(() => {
+    if (!sessionIdsControlled) return;
+    const prev = prevControlledIdsRef.current;
+    const addedSessionId = normalizedSessionIds.find(
+      (id) => !prev.includes(id),
+    );
+    prevControlledIdsRef.current = normalizedSessionIds;
+    if (addedSessionId) {
+      setMaximizedPaneId(null);
+      setActivePaneId(addedSessionId);
+    }
+  }, [normalizedSessionIds, sessionIdsControlled]);
+
   // Probe verdicts per session id, recorded for the lifetime of the pane set.
   // Only definitive outcomes are recorded: a successful probe of a live
   // standalone session, a not-found or archived answer (nothing a pane can
@@ -538,6 +558,17 @@ export function SplitView({
     }
     return map;
   }, [allSessions, seedSessionId, connection.workspaceCwd, paneIds]);
+
+  useEffect(() => {
+    if (!onPaneWorkspacesChange) return;
+    const cwds = new Set<string>();
+    for (const id of paneIds) {
+      const cwd = workspaceCwdById.get(id) ?? workspaceCwd;
+      if (cwd) cwds.add(cwd);
+    }
+    onPaneWorkspacesChange([...cwds]);
+  }, [onPaneWorkspacesChange, paneIds, workspaceCwd, workspaceCwdById]);
+  useEffect(() => () => onPaneWorkspacesChange?.([]), [onPaneWorkspacesChange]);
 
   const addPane = useCallback(
     (sessionId: string) => {
@@ -1005,11 +1036,8 @@ export function SplitView({
                     <ChatPane
                       showResponseTokensPerSecond={showResponseTokensPerSecond}
                       title={titleById.get(sessionId)}
-                      sessionSummary={
-                        showSessionDetails
-                          ? sessionById.get(sessionId)
-                          : undefined
-                      }
+                      sessionSummary={sessionById.get(sessionId)}
+                      showSessionDetails={showSessionDetails}
                       isActive={activeId === sessionId}
                       onApprovalChange={handleApprovalChange}
                       workspaceCwd={paneWorkspaceCwd}

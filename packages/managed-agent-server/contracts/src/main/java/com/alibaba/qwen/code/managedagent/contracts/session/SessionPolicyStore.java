@@ -53,6 +53,8 @@ public interface SessionPolicyStore {
         throw new UnsupportedOperationException("Extension management is unavailable");
     }
 
+    public default boolean canApplyExtensions(SessionRecord session) { return false; }
+
     public default void requireConfigurationCommit(String tenantId, String workspaceId, String sessionId, JsonNode body) {
         throw new UnsupportedOperationException("Extension management is unavailable");
     }

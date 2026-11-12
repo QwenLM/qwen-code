@@ -14,8 +14,13 @@ import { convertClaudePluginPackage } from '@qwen-code/qwen-code-core/extension/
 import { OutputFormat } from '@qwen-code/qwen-code-core/output/types.js';
 import {
   MOD_END_TIMEOUT_MS,
+  MOD_MAX_BYTES,
   type ModCommand,
   type ModLog,
+  type ModModelHost,
+  type ModPromptSubmit,
+  type ModPromptSubmitted,
+  type ModQueuedPrompt,
   type ModSessionFacts,
   type ModTurnComplete,
   type ModTurnStart,
@@ -39,7 +44,11 @@ import {
 } from '@qwen-code/qwen-code-core/agents/runtime/agent-context.js';
 import type { LoadedSettings } from '../config/settings.js';
 import type { JsonOutputAdapterInterface } from '../nonInteractive/io/BaseJsonOutputAdapter.js';
-import { ModSession, type ModTerminalHost } from './mod-session.js';
+import {
+  MOD_PROMPT_TURN_LIMIT,
+  ModSession,
+  type ModTerminalHost,
+} from './mod-session.js';
 import { CommandService } from '../services/CommandService.js';
 import { CommandKind, type CommandContext } from '../ui/commands/types.js';
 import { registerCleanup, runExitCleanup } from '../utils/cleanup.js';
@@ -106,6 +115,14 @@ describe('Mod session ownership', () => {
       end: vi.fn().mockResolvedValue(undefined),
       dispose: vi.fn().mockResolvedValue(undefined),
       turnHooks: { start: false, complete: [] as string[] },
+      promptHooks: [] as string[],
+      submitPrompt:
+        vi.fn<
+          (
+            input: ModPromptSubmit,
+            signal: AbortSignal,
+          ) => Promise<ModPromptSubmitted>
+        >(),
       startTurn:
         vi.fn<(input: ModTurnStart, signal: AbortSignal) => Promise<void>>(),
       completeTurn:
@@ -171,6 +188,35 @@ describe('Mod session ownership', () => {
     await session.toolCall(repeat)!({ tool: 'write_file' }, next, signal);
     expect(next).toHaveBeenCalledTimes(2);
     expect(repeat).toHaveBeenCalledTimes(1);
+  });
+
+  it('aborts old session.end model calls during a session switch', async () => {
+    const generateText = vi.fn().mockResolvedValue({ text: 'current answer' });
+    const { session, runtime, config } = setup({
+      getModel: () => 'current-model',
+      getContentGeneratorConfig: () => ({ authType: 'openai' }),
+      getAllConfiguredModels: () => [],
+      getBaseLlmClient: () => ({ generateText }),
+    });
+    const signal = new AbortController().signal;
+    await session.initialize(signal);
+    const runModel = mocks.create.mock.calls[0][12] as ModModelHost;
+    const input = { model: 'sonnet', prompt: 'test request' };
+    let ending: Awaited<ReturnType<ModModelHost>> | undefined;
+    runtime.end.mockImplementationOnce(async () => {
+      ending = await runModel(input, signal);
+    });
+
+    config.getSessionId.mockReturnValue('session-2');
+    await session.syncSession('clear');
+    expect(ending).toMatchObject({ isAnswered: false, reason: 'aborted' });
+    expect(generateText).not.toHaveBeenCalled();
+
+    await expect(runModel(input, signal)).resolves.toMatchObject({
+      isAnswered: true,
+      text: 'current answer',
+    });
+    expect(generateText).toHaveBeenCalledOnce();
   });
 
   it('serializes roots and refuses a queued call after group invalidation', async () => {
@@ -302,6 +348,7 @@ describe('Mod session ownership', () => {
     });
     const commands = await session.loadCommands(signal);
     expect(mocks.create).toHaveBeenCalledTimes(1);
+    expect(mocks.create.mock.calls[0][10]).toBe(true);
     expect(await commands[0].action!({} as CommandContext, 'hello')).toEqual({
       type: 'message',
       messageType: 'info',
@@ -357,6 +404,22 @@ describe('Mod session ownership', () => {
       presentation,
     );
     expect(mocks.create.mock.calls[0][5]).toBe('terminal');
+    // A terminal that does not say it raises prompt.submit skips its hooks.
+    expect(mocks.create.mock.calls[0][10]).toBe(false);
+  });
+
+  it('loads prompt.submit hooks for a terminal that raises the event', async () => {
+    const { session } = setup(
+      { isInteractive: () => true },
+      {
+        surface: 'terminal',
+        log: vi.fn(),
+        presentation: () => ({ isFullscreen: false, columns: 80 }),
+        prompts: () => true,
+      },
+    );
+    await session.initialize(new AbortController().signal);
+    expect(mocks.create.mock.calls[0][10]).toBe(true);
   });
 
   it.each([false, true])(
@@ -673,6 +736,305 @@ describe('Mod session ownership', () => {
       loaded.runtime.completeTurn.mock.calls.at(-1)?.[0] as ModTurnComplete;
     return { ...loaded, abortTurn, ended };
   };
+
+  const loadPrompts = async () => {
+    const loaded = setup();
+    loaded.runtime.promptHooks = ['hello-mod'];
+    await loaded.session.initialize(new AbortController().signal);
+    return loaded;
+  };
+
+  describe('prompts a Mod submits', () => {
+    const queueOf = (index = 0) =>
+      mocks.create.mock.calls[index][11] as
+        | ((prompt: ModQueuedPrompt) => string | undefined)
+        | undefined;
+    const prompt = (text: string): ModQueuedPrompt => ({
+      plugin: 'lint',
+      text,
+    });
+
+    it('queues them for the session to run once idle, in order', async () => {
+      const { session } = setup();
+      await session.initialize(new AbortController().signal);
+      const queue = queueOf()!;
+      expect(session.hasSubmittedPrompts).toBe(false);
+      expect(queue(prompt('one'))).toBeUndefined();
+      expect(queue({ ...prompt('two'), context: ['c'], asUser: true })).toBe(
+        undefined,
+      );
+      expect(session.hasSubmittedPrompts).toBe(true);
+      expect(session.takeSubmittedPrompt()).toEqual(prompt('one'));
+      expect(session.takeSubmittedPrompt()).toEqual({
+        ...prompt('two'),
+        context: ['c'],
+        asUser: true,
+      });
+      expect(session.takeSubmittedPrompt()).toBeUndefined();
+      expect(session.hasSubmittedPrompts).toBe(false);
+    });
+
+    it(`refuses past ${MOD_PROMPT_TURN_LIMIT} turns until the person sends a prompt`, async () => {
+      const { session, adapter } = setup();
+      await session.initialize(new AbortController().signal);
+      const queue = queueOf()!;
+      // Queued and started prompts count alike.
+      for (let i = 0; i < MOD_PROMPT_TURN_LIMIT; i++) {
+        expect(queue(prompt(`p${i}`))).toBeUndefined();
+        if (i % 2) session.takeSubmittedPrompt();
+      }
+      const refused = queue(prompt('one more'));
+      // The guide and the design doc promise 8.
+      expect(MOD_PROMPT_TURN_LIMIT).toBe(8);
+      expect(refused).toBe(
+        'the Mods have started 8 turns since the last prompt from the person',
+      );
+      expect(adapter.emitSystemMessage).toHaveBeenCalledWith(
+        'ui_log',
+        expect.objectContaining({
+          plugin: 'lint',
+          text: `$.prompt.submit refused: ${refused}`,
+        }),
+      );
+      while (session.takeSubmittedPrompt());
+      expect(queue(prompt('still'))).toBe(refused);
+      session.notePersonPrompt();
+      expect(queue(prompt('again'))).toBeUndefined();
+    });
+
+    it('drops a prompt queued for a session that has ended, or once it closes', async () => {
+      const { session, config } = setup();
+      await session.initialize(new AbortController().signal);
+      const queue = queueOf()!;
+      queue(prompt('old'));
+      config.getSessionId.mockReturnValue('session-2');
+      expect(session.hasSubmittedPrompts).toBe(false);
+      expect(session.takeSubmittedPrompt()).toBeUndefined();
+      config.getSessionId.mockReturnValue('session-1');
+      expect(queue(prompt('new'))).toBeUndefined();
+      await session.close();
+      expect(session.takeSubmittedPrompt()).toBeUndefined();
+      expect(queue(prompt('late'))).toBe('the session is ending');
+    });
+
+    it('refuses a prompt while /clear ends the session, and starts the next one clean', async () => {
+      const { session, config, runtime } = setup();
+      await session.initialize(new AbortController().signal);
+      const queue = queueOf()!;
+      for (let index = 0; index < MOD_PROMPT_TURN_LIMIT; index++)
+        expect(queue(prompt(`p${index}`))).toBeUndefined();
+      session.takeSubmittedPrompt();
+      // The config moves to the next session before the old one ends.
+      config.getSessionId.mockReturnValue('session-2');
+      let atEnd: string | undefined;
+      runtime.end.mockImplementation(async () => {
+        atEnd = queue(prompt('at end'));
+      });
+      await session.syncSession('clear');
+      expect(runtime.end).toHaveBeenCalled();
+      expect(atEnd).toBe('the session is ending');
+      expect(session.takeSubmittedPrompt()).toBeUndefined();
+      // Neither the old session's queue nor its turns count against this one.
+      for (let index = 0; index < MOD_PROMPT_TURN_LIMIT; index++)
+        expect(queue(prompt(`n${index}`))).toBeUndefined();
+      expect(session.takeSubmittedPrompt()?.text).toBe('n0');
+    });
+
+    it('drops what has not started when a run discards it, freeing the limit', async () => {
+      const { session } = setup();
+      await session.initialize(new AbortController().signal);
+      const queue = queueOf()!;
+      for (let index = 0; index < MOD_PROMPT_TURN_LIMIT; index++)
+        expect(queue(prompt(`p${index}`))).toBeUndefined();
+      session.discardSubmittedPrompts();
+      expect(session.takeSubmittedPrompt()).toBeUndefined();
+      expect(queue(prompt('after'))).toBeUndefined();
+      expect(session.takeSubmittedPrompt()?.text).toBe('after');
+    });
+
+    it('refuses the Mods’ prompts after the person stops a turn, until they send one', async () => {
+      const { session, config } = setup();
+      await session.initialize(new AbortController().signal);
+      const queue = queueOf()!;
+      expect(queue(prompt('queued'))).toBeUndefined();
+      const taken = session.takeSubmittedPrompt()!;
+      expect(queue(prompt('waiting'))).toBeUndefined();
+      session.stopSubmittedPrompts();
+      expect(session.hasSubmittedPrompts).toBe(false);
+      // What a stopped turn's hooks submit, awaited or not, does not run.
+      expect(queue(prompt('from turn.complete'))).toBe(
+        'the person stopped a turn and has not sent a prompt since',
+      );
+      session.returnSubmittedPrompt(taken);
+      expect(session.takeSubmittedPrompt()).toBeUndefined();
+      session.notePersonPrompt();
+      expect(queue(prompt('after'))).toBeUndefined();
+      expect(session.takeSubmittedPrompt()?.text).toBe('after');
+      // A new session starts unstopped.
+      session.stopSubmittedPrompts();
+      config.getSessionId.mockReturnValue('session-2');
+      await session.syncSession('clear');
+      expect(queue(prompt('fresh'))).toBeUndefined();
+    });
+
+    const terminal = (runsPrompts?: boolean, promptQueued = vi.fn()) =>
+      setup(
+        { isInteractive: () => true },
+        {
+          surface: 'terminal',
+          log: vi.fn(),
+          presentation: () => ({ isFullscreen: false, columns: 80 }),
+          prompts: () => true,
+          ...(runsPrompts === undefined
+            ? {}
+            : { runsPrompts: () => runsPrompts }),
+          promptQueued,
+        },
+      );
+
+    it('offers a terminal a queue only once it runs the prompts', async () => {
+      for (const runs of [undefined, false]) {
+        mocks.create.mockClear();
+        const { session } = terminal(runs);
+        await session.initialize(new AbortController().signal);
+        expect(queueOf()).toBeUndefined();
+      }
+      mocks.create.mockClear();
+      const promptQueued = vi.fn();
+      const { session } = terminal(true, promptQueued);
+      await session.initialize(new AbortController().signal);
+      expect(queueOf()!(prompt('one'))).toBeUndefined();
+      // The terminal hears each prompt queued, to run it once idle.
+      expect(promptQueued).toHaveBeenCalledTimes(1);
+      expect(session.takeSubmittedPrompt()).toEqual(prompt('one'));
+    });
+
+    it('puts back a prompt whose turn could not start, uncounted', async () => {
+      const { session, config } = setup();
+      await session.initialize(new AbortController().signal);
+      const queue = queueOf()!;
+      for (let index = 0; index < MOD_PROMPT_TURN_LIMIT - 1; index++)
+        queue(prompt(`p${index}`));
+      const first = session.takeSubmittedPrompt()!;
+      queue(prompt('last'));
+      expect(queue(prompt('over'))).toBeDefined();
+      session.returnSubmittedPrompt(first);
+      // A prompt is put back once.
+      session.returnSubmittedPrompt(first);
+      expect(queue(prompt('over'))).toBeDefined();
+      expect(session.takeSubmittedPrompt()).toEqual(prompt('p0'));
+      expect(session.takeSubmittedPrompt()).toEqual(prompt('p1'));
+      // A session that ended since takes nothing back.
+      const taken = session.takeSubmittedPrompt()!;
+      config.getSessionId.mockReturnValue('session-2');
+      session.returnSubmittedPrompt(taken);
+      config.getSessionId.mockReturnValue('session-1');
+      expect(session.takeSubmittedPrompt()).toEqual(prompt('p3'));
+      // Put back, it counts as queued, not as started too.
+      session.discardSubmittedPrompts();
+      session.notePersonPrompt();
+      queue(prompt('again'));
+      session.returnSubmittedPrompt(session.takeSubmittedPrompt()!);
+      session.discardSubmittedPrompts();
+      for (let index = 0; index < MOD_PROMPT_TURN_LIMIT; index++)
+        expect(queue(prompt(`n${index}`))).toBeUndefined();
+    });
+  });
+
+  it('says whether a loaded Mod hooks prompt.submit', async () => {
+    const quiet = setup();
+    await quiet.session.initialize(new AbortController().signal);
+    expect(quiet.session.hearsPrompts).toBe(false);
+    const { session } = await loadPrompts();
+    expect(session.hearsPrompts).toBe(true);
+    await session.close();
+    expect(session.hearsPrompts).toBe(false);
+  });
+
+  it('passes a prompt through when no hook hears prompt.submit', async () => {
+    const { session, runtime } = setup();
+    await session.initialize(new AbortController().signal);
+    expect(await session.submitPrompt('hi', turnSignal)).toEqual({
+      text: 'hi',
+    });
+    expect(runtime.submitPrompt).not.toHaveBeenCalled();
+  });
+
+  it('enters the prompt and context the hooks passed on', async () => {
+    const { session, runtime } = await loadPrompts();
+    runtime.submitPrompt.mockResolvedValue({ text: 'HI', context: ['note'] });
+    expect(await session.submitPrompt('hi', turnSignal)).toEqual({
+      text: 'HI',
+      context: ['note'],
+    });
+    expect(runtime.submitPrompt).toHaveBeenCalledWith(
+      { text: 'hi', wait: false, origin: { kind: 'sdk' } },
+      expect.any(AbortSignal),
+    );
+  });
+
+  it('drops a prompt the hooks rewrote to nothing', async () => {
+    const { session, runtime } = await loadPrompts();
+    for (const text of ['', ' \n ']) {
+      runtime.submitPrompt.mockResolvedValueOnce({ text, context: ['note'] });
+      expect(await session.submitPrompt('hi', turnSignal)).toEqual({
+        drop: 'Prompt dropped by a hook: it left the prompt empty',
+      });
+    }
+  });
+
+  it('says why a prompt was dropped, in one line of 4,096 characters', async () => {
+    const { session, runtime } = await loadPrompts();
+    runtime.submitPrompt.mockResolvedValueOnce({
+      drop: 'it holds\na secret\u001b[31m',
+      byHook: true,
+    });
+    expect(await session.submitPrompt('hi', turnSignal)).toEqual({
+      drop: 'Prompt dropped by a hook: it holds a secret',
+    });
+    runtime.submitPrompt.mockResolvedValueOnce({
+      drop: 'x'.repeat(5000),
+      byHook: true,
+    });
+    expect(await session.submitPrompt('hi', turnSignal)).toEqual({
+      drop: `Prompt dropped by a hook: ${'x'.repeat(4096)}…`,
+    });
+    runtime.submitPrompt.mockResolvedValueOnce({
+      drop: 'a hook answered without passing the prompt on',
+      byHook: false,
+    });
+    expect(await session.submitPrompt('hi', turnSignal)).toEqual({
+      drop: 'Prompt not submitted: a hook answered without passing the prompt on',
+    });
+  });
+
+  it('lets a prompt through when the hooks fail, but not when it is cancelled', async () => {
+    const { session, runtime } = await loadPrompts();
+    runtime.submitPrompt.mockRejectedValueOnce(new Error('worker failed'));
+    expect(await session.submitPrompt('hi', turnSignal)).toEqual({
+      text: 'hi',
+    });
+    const cancel = new AbortController();
+    runtime.submitPrompt.mockImplementationOnce(async (_input, signal) => {
+      cancel.abort();
+      signal.throwIfAborted();
+      return { text: 'unreached' };
+    });
+    await expect(session.submitPrompt('hi', cancel.signal)).rejects.toThrow();
+  });
+
+  it('runs no hook on a prompt too long for a Mod payload, and says so', async () => {
+    const { session, runtime, adapter } = await loadPrompts();
+    const long = 'x'.repeat(MOD_MAX_BYTES);
+    expect(await session.submitPrompt(long, turnSignal)).toEqual({
+      text: long,
+    });
+    expect(runtime.submitPrompt).not.toHaveBeenCalled();
+    expect(adapter.emitSystemMessage).toHaveBeenLastCalledWith('ui_log', {
+      plugin: 'hello-mod',
+      text: 'prompt.submit hook skipped: the prompt is too long for a Mod payload',
+    });
+  });
 
   it('starts no turn when no hook hears the turn events', async () => {
     const { session, runtime } = setup();

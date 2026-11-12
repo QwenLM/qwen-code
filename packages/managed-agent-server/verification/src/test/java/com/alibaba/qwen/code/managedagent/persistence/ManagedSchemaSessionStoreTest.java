@@ -4,8 +4,11 @@ import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.BeforeEach;
@@ -47,13 +50,13 @@ public class ManagedSchemaSessionStoreTest {
         tx = new TransactionTemplate(new DataSourceTransactionManager(source));
         tx.setIsolationLevel(org.springframework.transaction.TransactionDefinition.ISOLATION_REPEATABLE_READ);
         store =
-                com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(
+                com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(
                         jdbc,
                         new ObjectMapper(),
                         clock,
                         ignored -> {},
-                        new ManagedWorkspaceRegistry(jdbc),
-                        new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+                        new JdbcManagedWorkspaceRegistry(jdbc),
+                        new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         tenant = "tenant-" + UUID.randomUUID();
         session =
                 tx.execute(
@@ -70,6 +73,31 @@ public class ManagedSchemaSessionStoreTest {
                                                 List.of(),
                                                 null))
                         .sessionId();
+    }
+
+    @Test
+    void executionFactsReadNullableUnsignedWorkspaceGenerations() {
+        assertThat(store.sessionsWithExecutionRegistryFacts(tenant, List.of(session))).isEmpty();
+        byte[] actor = ManagedWorkspaceRegistry.actorKey(tenant, "actor");
+        jdbc.update(
+                "INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation, storage_id,"
+                        + " display_name, config_ref, policy_ref, state) VALUES"
+                        + " (?, 'workspace', 7, 'storage', 'Workspace', 'config', 'policy', 'ACTIVE')",
+                tenant);
+        jdbc.update(
+                "INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role) VALUES"
+                        + " (?, 'workspace', ?, 'OPERATOR')",
+                tenant, actor);
+        jdbc.update(
+                "UPDATE ma_session SET workspace_id = 'workspace', workspace_generation = 7,"
+                        + " workspace_storage_id = 'storage', cwd_relative = '',"
+                        + " context_config_ref = 'context', context_revision = 1,"
+                        + " workspace_config_ref = 'config', workspace_policy_ref = 'policy',"
+                        + " creator_actor_key = ? WHERE tenant_id = ? AND session_id = ?",
+                actor, tenant, session);
+        assertThat(store.sessionsWithExecutionRegistryFacts(tenant, List.of(session))).containsExactly(session);
+        jdbc.update("UPDATE ma_workspace_access SET role = 'READER' WHERE tenant_id = ?", tenant);
+        assertThat(store.sessionsWithExecutionRegistryFacts(tenant, List.of(session))).isEmpty();
     }
 
     @Test
@@ -170,7 +198,7 @@ public class ManagedSchemaSessionStoreTest {
                                 "SELECT COUNT(*) FROM ma_resource_ref WHERE owner_kind = 'MESSAGE'"
                                         + " AND session_scope_key = ?",
                                 Integer.class,
-                                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session)))
+                                ManagedSessionStore.sessionScopeKey(tenant, session)))
                 .isEqualTo(1);
     }
 
@@ -243,12 +271,12 @@ public class ManagedSchemaSessionStoreTest {
     @Test
     void projectionCleanupPreservesJournalReferencesAndRecoveryProtection() {
         alignProjectionClock();
-        var privateBody = tx.execute(status -> com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc))
+        var privateBody = tx.execute(status -> com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc)
                 .publishAgentInstructions(tenant, "workspace", session, "private instructions"));
         event("big", "a".repeat(70_000));
         materialize();
         String original = messageBody("big");
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session);
+        String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
         jdbc.update("INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key, owner_revision, resource_key, tenant_id, session_id, gmt_create) VALUES (?, 'JOURNAL', ?, 1, ?, ?, ?, " + ManagedSchemaTime.SQL_NOW + ")",
                 scope, scope, original, tenant, session);
         event("big", "b");
@@ -259,15 +287,15 @@ public class ManagedSchemaSessionStoreTest {
         tx.executeWithoutResult(status -> {
             ManagedProjectionResourceCollector.release(jdbc, scope, "JOURNAL", scope);
             jdbc.update("DELETE FROM ma_resource_ref WHERE owner_kind = 'JOURNAL' AND owner_key = ?", scope);
-            jdbc.update("UPDATE ma_session SET recovery_protected = TRUE WHERE tenant_id = ? AND session_id = ?", tenant, session);
+            jdbc.update("UPDATE ma_session SET is_recovery_protected = TRUE WHERE tenant_id = ? AND session_id = ?", tenant, session);
         });
         projectionCollector().runOnce();
         assertThat(resourceState(original)).isEqualTo("REFERENCED");
-        jdbc.update("UPDATE ma_session SET recovery_protected = FALSE WHERE tenant_id = ? AND session_id = ?", tenant, session);
+        jdbc.update("UPDATE ma_session SET is_recovery_protected = FALSE WHERE tenant_id = ? AND session_id = ?", tenant, session);
         makeProjectionCandidatesDue();
         projectionCollector().runOnce();
         assertThat(resourceState(original)).isEqualTo("COLLECTED");
-        assertThat(resourceState(com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.resourceKey(scope, privateBody.resourceId()))).isEqualTo("PUBLISHED");
+        assertThat(resourceState(ManagedSessionStore.resourceKey(scope, privateBody.resourceId()))).isEqualTo("PUBLISHED");
     }
 
     private void alignProjectionClock() {
@@ -292,57 +320,79 @@ public class ManagedSchemaSessionStoreTest {
         jdbc.update("UPDATE ma_resource SET retention_until = 946684800000 WHERE tenant_id = ? AND retention_until IS NOT NULL", tenant);
     }
 
+    // A snapshot can predate the rename that won the tenant-scoped receipt key.
     @Test
-    void renameRevisionAndClaimGenerationFenceStaleWorkers() {
-        var command =
-                tx.execute(
-                        status ->
-                                store.beginSessionRename(tenant, "r1", "digest", session, "first"));
-        var candidate = store.deliverableRenames(clock.millis()).getFirst();
-        var old =
+    void aRacingSessionReusingARenameKeyAnswersConflictFromTheReceiptKey() {
+        String other =
                 tx.execute(
                                 status ->
-                                        store.claimRename(
-                                                candidate, "same-owner", Duration.ofSeconds(1)))
-                        .orElseThrow();
-        jdbc.update(
-                "UPDATE ma_operation SET claim_until = 946684800000 WHERE"
-                        + " operation_kind = 'RENAME' AND tenant_id = ?",
-                tenant);
-        var current =
-                tx.execute(
-                                status ->
-                                        store.claimRename(
-                                                candidate, "same-owner", Duration.ofSeconds(1)))
-                        .orElseThrow();
-        store.retryRename(old, "same-owner", 0);
+                                        store.insertSessionCommand(
+                                                tenant,
+                                                "actor",
+                                                "CREATE_SESSION",
+                                                "create-other",
+                                                "create-other-digest",
+                                                "qwen-code",
+                                                null,
+                                                "title",
+                                                List.of(),
+                                                null))
+                        .sessionId();
+        var winner = new TransactionTemplate(new DataSourceTransactionManager(jdbc.getDataSource()));
+        winner.setPropagationBehavior(org.springframework.transaction.TransactionDefinition.PROPAGATION_REQUIRES_NEW);
         assertThatThrownBy(
                         () ->
-                                tx.execute(
-                                        status ->
-                                                store.completeSessionRename(
-                                                        old, "same-owner", "boot")))
-                .hasMessageContaining("claim was lost");
-        tx.execute(status -> store.completeSessionRename(current, "same-owner", "boot"));
+                                tx.executeWithoutResult(
+                                        status -> {
+                                            // Pin this transaction's snapshot before the winner commits.
+                                            jdbc.queryForObject(
+                                                            "SELECT COUNT(*) FROM ma_request_receipt"
+                                                                    + " WHERE namespace = 'SESSION_COMMAND'",
+                                                            Long.class);
+                                            winner.execute(ignored -> store.settleRenameSync(
+                                                    tenant, "shared", "digest", other, "theirs", "actor"));
+                                            store.settleRenameSync(tenant, "shared", "digest", session, "mine", "actor");
+                                        }))
+                .isInstanceOfSatisfying(
+                        com.alibaba.qwen.code.managedagent.exception.ManagedAgentException.class,
+                        error -> assertThat(error.getCode()).isEqualTo("idempotency_conflict"));
+        assertThat(store.requireSession(tenant, session).title()).isEqualTo("title");
+        // The synchronous settlement writes no delivery row at all.
+        assertThat(jdbc.queryForObject(
+                        "SELECT COUNT(*) FROM ma_operation WHERE operation_kind = 'RENAME' AND tenant_id = ?",
+                        Long.class,
+                        tenant))
+                .isZero();
+    }
+
+    @Test
+    void concurrentRenamesOfDifferentSessionsDoNotDeadlock() throws Exception {
+        String other = tx.execute(status -> store.insertSessionCommand(
+                tenant, "actor", "CREATE_SESSION", "create-other", "other-digest",
+                "qwen-code", null, "other", List.of(), null)).sessionId();
+        try (var threads = java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor()) {
+            var start = new java.util.concurrent.CyclicBarrier(2);
+            var first = threads.submit(() -> {
+                start.await(10, java.util.concurrent.TimeUnit.SECONDS);
+                return tx.execute(status -> store.settleRenameSync(
+                        tenant, "first", "first-digest", session, "first", "actor"));
+            });
+            var second = threads.submit(() -> {
+                start.await(10, java.util.concurrent.TimeUnit.SECONDS);
+                return tx.execute(status -> store.settleRenameSync(
+                        tenant, "second", "second-digest", other, "second", "actor"));
+            });
+            assertThat(first.get(15, java.util.concurrent.TimeUnit.SECONDS).revision())
+                    .isEqualTo(1);
+            assertThat(second.get(15, java.util.concurrent.TimeUnit.SECONDS).revision())
+                    .isEqualTo(1);
+        }
+        // Both titles settle synchronously; no delivery row is ever created.
         assertThat(store.requireSession(tenant, session).title()).isEqualTo("first");
-        var later =
-                tx.execute(
-                        status ->
-                                store.beginSessionRename(
-                                        tenant, "r2", "digest2", session, "second"));
-        assertThat(later.renameRevision()).isGreaterThan(command.renameRevision());
-        assertThatThrownBy(
-                        () ->
-                                tx.execute(
-                                        status ->
-                                                store.completeSessionRename(
-                                                        tenant,
-                                                        "r1",
-                                                        session,
-                                                        "first",
-                                                        "boot",
-                                                        command.renameRevision())))
-                .hasMessageContaining("later Session title");
+        assertThat(store.requireSession(tenant, other).title()).isEqualTo("second");
+        assertThat(jdbc.queryForObject(
+                "SELECT COUNT(*) FROM ma_operation WHERE operation_kind = 'RENAME' AND tenant_id = ?",
+                Long.class, tenant)).isZero();
     }
 
     @Test
@@ -374,7 +424,7 @@ public class ManagedSchemaSessionStoreTest {
         jdbc.update(
                 "UPDATE ma_resource SET session_scope_key = ? WHERE resource_key = (SELECT"
                     + " body_resource_key FROM ma_message WHERE tenant_id = ? AND item_id = ?)",
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, "another-session"),
+                ManagedSessionStore.sessionScopeKey(tenant, "another-session"),
                 tenant,
                 "big");
         assertThatThrownBy(() -> messages())
@@ -459,7 +509,7 @@ public class ManagedSchemaSessionStoreTest {
 
     @Test
     void writerHeartbeatCompletesWhileMessagePageReadIsPaused() throws Exception {
-        var privateStore = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc));
+        var privateStore = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
         String token = "a".repeat(32);
         var grant = tx.execute(status -> privateStore.acquireWriter(tenant, session, token,
                 new ManagedSessionStoreModels.AcquireWriterRequest("workspace", "writer", 60_000L)));
@@ -485,14 +535,14 @@ public class ManagedSchemaSessionStoreTest {
         String token = "a".repeat(32);
         jdbc.update(
                 "INSERT INTO ma_session_head (tenant_key, harness_key, tenant_id, harness_session_id, session_id, head_kind, gmt_create, gmt_modified) VALUES (?, ?, ?, ?, ?, 'HARNESS', " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ")",
-                com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository.harnessDrainKey(
+                RuntimeAdmissionFences.harnessDrainKey(
                         tenant),
-                com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository.harnessDrainKey(
+                RuntimeAdmissionFences.harnessDrainKey(
                         session),
                 tenant,
                 session,
                 session);
-        var privateStore = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc));
+        var privateStore = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
         assertThatThrownBy(() -> privateStore.restore(tenant, "workspace", session, token))
                 .isInstanceOfSatisfying(
                         ManagedAgentException.class,
@@ -697,13 +747,13 @@ public class ManagedSchemaSessionStoreTest {
     void duplicateMessageBodyIdentityIsReusedOnlyWhenItsImmutableRowMatches(String corruption) {
         var duplicate = new DuplicateBodyJdbc(jdbc.getDataSource(), corruption);
         var subject =
-                com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(
+                com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(
                         duplicate,
                         new ObjectMapper(),
                         clock,
                         ignored -> {},
-                        new ManagedWorkspaceRegistry(duplicate),
-                        new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+                        new JdbcManagedWorkspaceRegistry(duplicate),
+                        new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         event("big", "x".repeat(70_000));
         if ("none".equals(corruption)) {
             tx.executeWithoutResult(status -> subject.materializeNextBatch(tenant, session, 100));
@@ -805,7 +855,7 @@ public class ManagedSchemaSessionStoreTest {
                 }
             };
             subject = new ManagedAgentStore(paused, new ObjectMapper(), clock, ignored -> {},
-                    new ManagedWorkspaceRegistry(paused), new ManagedAgentProperties(),
+                    new JdbcManagedWorkspaceRegistry(paused), new ManagedAgentProperties(),
                     new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         }
 

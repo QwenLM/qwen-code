@@ -43,7 +43,7 @@ class WorkspaceCreationStoreTest {
     protected DataSource source;
     protected ManagedAgentProperties properties;
     protected WorkspaceStorageGuard guard;
-    protected ManagedWorkspaceRegistry registry;
+    protected JdbcManagedWorkspaceRegistry registry;
 
     protected DataSource dataSource() {
         return new DriverManagerDataSource("jdbc:h2:mem:create-" + UUID.randomUUID()
@@ -59,7 +59,7 @@ class WorkspaceCreationStoreTest {
         properties.getRuntimeBroker().setWorkspaceCreationRoot(Files.createDirectory(temp.resolve("created")).toRealPath().toString());
         properties.getRuntimeBroker().setStateDirectory(Files.createDirectory(temp.resolve("runtime")).toRealPath().toString());
         properties.getRuntimeBroker().setVerifiedWorkspaceRecoveryEnabled(true);
-        registry = new ManagedWorkspaceRegistry(jdbc);
+        registry = new JdbcManagedWorkspaceRegistry(jdbc);
         guard = new WorkspaceStorageGuard(jdbc, new DataSourceTransactionManager(source), properties,
                 path -> new StorageIdentityReader.Identity(path.toString(), "test-host", "device",
                         Files.readAttributes(path, BasicFileAttributes.class).fileKey().toString(),
@@ -184,8 +184,8 @@ class WorkspaceCreationStoreTest {
     void initialToolTurnAdmitsCompletedDynamicStorage() {
         var created = store(guard).create("tenant", "actor", "Tools", "tools");
         properties.getHarness().setWorkspaceFilesEnabled(true);
-        var sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, new ObjectMapper(), Clock.systemUTC(),
-                ignored -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+        var sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, new ObjectMapper(), Clock.systemUTC(),
+                ignored -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         var admitted = new TransactionTemplate(new DataSourceTransactionManager(source)).execute(status ->
                 sessions.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
                         .tenantId("tenant")
@@ -236,7 +236,7 @@ class WorkspaceCreationStoreTest {
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage_owner", Integer.class)).isEqualTo(1);
         assertThat(jdbc.queryForMap("SELECT * FROM ma_storage_owner")).containsEntry("holder_key", "existing-runtime")
                 .containsEntry("mount_registration_id", before.get("mount_registration_id"));
-        assertThat(new ManagedWorkspaceRegistry(jdbc).findReadable("tenant", "actor", created.workspaceId())
+        assertThat(new JdbcManagedWorkspaceRegistry(jdbc).findReadable("tenant", "actor", created.workspaceId())
                 .defaultCwdRelative()).isEqualTo("existing-project");
         assertThat(store(guard).create("tenant", "actor", "Project", "selected", parent.workspaceId(),
                 "existing-project")).isEqualTo(created);
@@ -365,7 +365,7 @@ class WorkspaceCreationStoreTest {
         Files.createDirectory(root.resolve("project"));
         var barrier = new CyclicBarrier(2);
         try (var pool = Executors.newFixedThreadPool(2)) {
-            java.util.concurrent.Callable<ManagedWorkspaceRegistry.WorkspaceSummary> action = () -> {
+            java.util.concurrent.Callable<JdbcManagedWorkspaceRegistry.WorkspaceSummary> action = () -> {
                 barrier.await();
                 return store(guard).create("tenant", "actor", "Project", "concurrent-project",
                         parent.workspaceId(), "project");
@@ -388,7 +388,7 @@ class WorkspaceCreationStoreTest {
         return project.toRealPath();
     }
 
-    private ManagedWorkspaceRegistry.WorkspaceSummary importProject(Path project, String key) {
+    private JdbcManagedWorkspaceRegistry.WorkspaceSummary importProject(Path project, String key) {
         return store(guard).create("tenant", "actor", project.getFileName().toString(), key, null, null, project.toString());
     }
 
@@ -412,7 +412,7 @@ class WorkspaceCreationStoreTest {
                 .isEqualTo(project.getParent());
         guard.verify(new ContextBinding("tenant", created.workspaceId(), 1, storage(created.workspaceId()), "first", "config", 1));
         properties.getHarness().setWorkspaceFilesEnabled(true);
-        var sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, new ObjectMapper(), Clock.systemUTC(), ignored -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+        var sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, new ObjectMapper(), Clock.systemUTC(), ignored -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         var admitted = new TransactionTemplate(new DataSourceTransactionManager(source)).execute(status ->
                 sessions.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
                         .tenantId("tenant")
@@ -524,7 +524,7 @@ class WorkspaceCreationStoreTest {
         Path project = localProject("project");
         var barrier = new CyclicBarrier(2);
         try (var pool = Executors.newFixedThreadPool(2)) {
-            java.util.concurrent.Callable<ManagedWorkspaceRegistry.WorkspaceSummary> action = () -> {
+            java.util.concurrent.Callable<JdbcManagedWorkspaceRegistry.WorkspaceSummary> action = () -> {
                 barrier.await();
                 return importProject(project, "concurrent-import");
             };

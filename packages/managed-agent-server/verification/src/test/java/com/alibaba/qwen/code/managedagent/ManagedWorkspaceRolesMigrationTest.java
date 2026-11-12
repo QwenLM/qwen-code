@@ -3,9 +3,8 @@ package com.alibaba.qwen.code.managedagent;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.h2.jdbcx.JdbcDataSource;
@@ -44,8 +43,8 @@ class ManagedWorkspaceRolesMigrationTest {
                 + " 'config', 'policy', 'ACTIVE')");
         jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role) VALUES ('tenant', 'workspace', ?, 'OPERATOR')", OPERATOR);
         jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role) VALUES ('tenant', 'workspace', ?, 'READER')", READER);
-        assertThat(new ManagedWorkspaceRegistry(jdbc).accessOf("tenant", "operator", "workspace").canCreate()).isTrue();
-        assertThat(new ManagedWorkspaceRegistry(jdbc).accessOf("tenant", "reader", "workspace").canCreate()).isFalse();
+        assertThat(new JdbcManagedWorkspaceRegistry(jdbc).accessOf("tenant", "operator", "workspace").canCreate()).isTrue();
+        assertThat(new JdbcManagedWorkspaceRegistry(jdbc).accessOf("tenant", "reader", "workspace").canCreate()).isFalse();
         assertThatThrownBy(() -> jdbc.update("INSERT INTO"
                 + " ma_workspace_access (tenant_id, workspace_id,"
                 + " actor_id, role) VALUES ('tenant', 'workspace', ?,"
@@ -82,9 +81,9 @@ class ManagedWorkspaceRolesMigrationTest {
                 + " 'workspace', ?, 'OPERATOR')", CREATOR);
         var properties = new ManagedAgentProperties();
         properties.getHarness().setWorkspaceFilesEnabled(true);
-        var store = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, new ObjectMapper(),
+        var store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, new ObjectMapper(),
                 Clock.systemUTC(), ignored -> {},
-                new ManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+                new JdbcManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         var transactions = new TransactionTemplate(
                 new DataSourceTransactionManager(source));
         String sessionId = transactions.execute(ignored -> store

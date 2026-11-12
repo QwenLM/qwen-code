@@ -43,6 +43,7 @@ import {
   type PermissionResponse,
   type PromptRequest,
 } from '@qwen-code/sdk/daemon';
+import { installBootRetry } from './bootRetry';
 import { installSseTransport, type SseTransport } from './sseTransport';
 
 /** One transcript page as the mock daemon serves it. */
@@ -97,6 +98,8 @@ export interface WebShellDaemonScenario {
   pairingApprovals: Record<string, string[]>;
   pairingGroupApprovals: Record<string, string[]>;
   sessions: DaemonSessionSummary[];
+  workspaceOrder: string[];
+  workspaceOrderSaveError?: boolean;
   standaloneSessions: DaemonStandaloneSessionSummary[];
   standaloneCreateError?: {
     status: number;
@@ -461,6 +464,8 @@ export function createWebShellDaemonScenario(
     pairingApprovals: overrides.pairingApprovals ?? {},
     pairingGroupApprovals: overrides.pairingGroupApprovals ?? {},
     sessions,
+    workspaceOrder: overrides.workspaceOrder ?? [],
+    workspaceOrderSaveError: overrides.workspaceOrderSaveError,
     standaloneSessions: overrides.standaloneSessions ?? [],
     standaloneCreateError: overrides.standaloneCreateError,
     sessionGroups: overrides.sessionGroups ?? [],
@@ -528,6 +533,9 @@ export async function installMockDaemon(
   peers.set(baseOrigin, { scenario, requests });
   const resolvePeer = (origin: string): DaemonPeer | undefined =>
     origin ? peers.get(origin) : undefined;
+  // Most app specs install their daemon before navigating, so hooking the
+  // boot retry here covers them without a page-setup line in each spec.
+  await installBootRetry(page);
   const sse = await installSseTransport<DaemonEvent>(page, { baseURL });
 
   await page.route(`${baseOrigin}/**`, async (route) => {
@@ -826,8 +834,11 @@ function isDaemonPath(path: string): boolean {
   return (
     path === '/health' ||
     path === '/capabilities' ||
+    path === '/workspace-order' ||
     path === '/brand' ||
+    path === '/auth/subscription' ||
     path === '/workspace/settings' ||
+    path === '/workspace/hooks' ||
     path === '/workspace/providers' ||
     path === '/workspace/skills' ||
     path === '/workspace/tools' ||
@@ -883,6 +894,7 @@ function isDaemonPath(path: string): boolean {
     /^\/session\/[^/]+\/pending-prompts(?:\/[^/]+)?\/?$/.test(path) ||
     /^\/session\/[^/]+\/goal\/?$/.test(path) ||
     /^\/session\/[^/]+\/status\/?$/.test(path) ||
+    /^\/session\/[^/]+\/stats\/?$/.test(path) ||
     /^\/session\/[^/]+\/tasks\/?$/.test(path) ||
     /^\/session\/[^/]+\/saved-workflows\/[^/]+\/?$/.test(path) ||
     /^\/session\/[^/]+\/mid-turn-message\/?$/.test(path) ||
@@ -895,12 +907,15 @@ function isDaemonPath(path: string): boolean {
 }
 
 function isDaemonRoute(method: string, path: string): boolean {
+  if ((method === 'GET' || method === 'POST') && path === '/workspace-order')
+    return true;
   if (
     method === 'GET' &&
     (path === '/health' || path === '/capabilities' || path === '/brand')
   ) {
     return true;
   }
+  if (method === 'GET' && path === '/auth/subscription') return true;
   if (method === 'GET' && path === '/workspace-path-suggestions') return true;
   if (method === 'GET' && path === '/remote-workspace-path-suggestions') {
     return true;
@@ -920,6 +935,7 @@ function isDaemonRoute(method: string, path: string): boolean {
     return true;
   }
   if (method === 'GET' && path === '/workspace/providers') return true;
+  if (method === 'GET' && path === '/workspace/hooks') return true;
   if (method === 'GET' && path === '/workspace/skills') return true;
   if (method === 'GET' && path === '/workspace/tools') return true;
   if (method === 'GET' && path === '/workspace/extensions') return true;
@@ -1118,6 +1134,9 @@ function isDaemonRoute(method: string, path: string): boolean {
   if (method === 'GET' && /^\/session\/[^/]+\/status\/?$/.test(path)) {
     return true;
   }
+  if (method === 'GET' && /^\/session\/[^/]+\/stats\/?$/.test(path)) {
+    return true;
+  }
   if (method === 'GET' && /^\/workspaces\/.+\/git\/?$/.test(path)) {
     return true;
   }
@@ -1251,6 +1270,24 @@ async function handleDaemonRoute(
   searchParams: URLSearchParams = new URLSearchParams(),
   resolvePeer?: (origin: string) => DaemonPeer | undefined,
 ): Promise<void> {
+  if (path === '/workspace-order') {
+    if (method === 'POST') {
+      if (scenario.workspaceOrderSaveError) {
+        await json(
+          route,
+          {
+            error: 'Failed to persist workspace order',
+            code: 'workspace_registration_store_error',
+          },
+          500,
+        );
+        return;
+      }
+      scenario.workspaceOrder = getRecordValue(body, 'cwds') as string[];
+    }
+    await json(route, { cwds: scenario.workspaceOrder });
+    return;
+  }
   if (method === 'GET' && path === '/health') {
     await json(route, { status: 'ok' });
     return;
@@ -1264,6 +1301,13 @@ async function handleDaemonRoute(
     // the visual baselines stay valid. A spec that needs a white-label shell
     // should give this a scenario field rather than loosening it here.
     await json(route, {});
+    return;
+  }
+  if (method === 'GET' && path === '/auth/subscription') {
+    // The shell reads the subscription config at boot. Keep it disabled unless
+    // a spec opts in with its own route, so the read succeeds without reaching
+    // the real network and without turning subscription UI on everywhere.
+    await json(route, { enabled: false });
     return;
   }
   if (method === 'GET' && path === '/workspace-path-suggestions') {
@@ -1395,6 +1439,21 @@ async function handleDaemonRoute(
         ...(overrides.hooks ?? {}),
       });
     }
+    return;
+  }
+  if (method === 'GET' && path === '/workspace/hooks') {
+    // The legacy primary-workspace route answers the same projection as the
+    // scoped /workspaces/:cwd/hooks route above.
+    const overrides = scenario.workspaceOverviews[scenario.workspaceCwd] ?? {};
+    await json(route, {
+      v: 1,
+      workspaceCwd: scenario.workspaceCwd,
+      initialized: true,
+      disabled: false,
+      hooks: [],
+      events: {},
+      ...(overrides.hooks ?? {}),
+    });
     return;
   }
   if (method === 'GET' && path === '/workspace/settings') {
@@ -2211,6 +2270,31 @@ async function handleDaemonRoute(
       sessionId: scenario.sessionId,
       workspaceCwd: scenario.workspaceCwd,
       displayName: scenario.displayName,
+    });
+    return;
+  }
+  const statsMatch = path.match(/^\/session\/([^/]+)\/stats\/?$/);
+  if (method === 'GET' && statsMatch) {
+    // The composer reads session usage in the background. A mock session makes
+    // no model API calls, so it reports zero usage and the reading renders
+    // nothing; specs that exercise the reading override this route with their
+    // own totals.
+    await json(route, {
+      v: 1,
+      sessionId: decodeURIComponent(statsMatch[1] ?? ''),
+      workspaceCwd: scenario.workspaceCwd,
+      sessionStartTimeMs: Date.now() - 60_000,
+      durationMs: 60_000,
+      promptCount: 0,
+      models: {},
+      tools: {
+        totalCalls: 0,
+        totalSuccess: 0,
+        totalFail: 0,
+        totalDurationMs: 0,
+        byName: {},
+      },
+      files: { totalLinesAdded: 0, totalLinesRemoved: 0 },
     });
     return;
   }

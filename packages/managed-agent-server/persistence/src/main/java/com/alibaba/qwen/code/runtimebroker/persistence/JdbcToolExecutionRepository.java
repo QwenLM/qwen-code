@@ -37,7 +37,7 @@ public final class JdbcToolExecutionRepository
             "runtime_session_id", "runtime_session_key", "turn_id",
             "tool_call_id", "request_digest", "reference_json",
             "execution_state", "execution_status", "result_json",
-            "last_sequence", "cancel_requested", "dispatch_owner",
+            "last_sequence", "is_cancel_requested", "dispatch_owner",
             "dispatch_lease_until", "dispatch_generation", "record_version",
             "settled_at", "abandoned_at", "loss_evidence_id",
             "authorized_dispatch_generation", "authorized_binding_version");
@@ -557,42 +557,19 @@ public final class JdbcToolExecutionRepository
     @Override
     public ToolExecutionRecord resolveUnknown(ToolExecutionRecord expected,
             Map<String, Object> resolutionResult, Instant resolutionTime) {
-        return resolve(expected, resolutionResult, resolutionTime, true);
+        return JdbcToolExecutionObservations.resolve(dataSource, expected, resolutionResult, resolutionTime, true);
+    }
+
+    @Override
+    public ToolExecutionRecord attachMeasurements(
+            ToolExecutionRecord expected, Map<String, Object> metadata) {
+        return JdbcToolExecutionObservations.attachMeasurements(dataSource, expected, metadata);
     }
 
     @Override
     public ToolExecutionRecord resolveUnsettled(ToolExecutionRecord expected,
             Map<String, Object> resolutionResult, Instant resolutionTime) {
-        return resolve(expected, resolutionResult, resolutionTime, false);
-    }
-
-    private ToolExecutionRecord resolve(ToolExecutionRecord expected,
-            Map<String, Object> resolutionResult, Instant resolutionTime,
-            boolean unknownOnly) {
-        if (expected == null) {
-            throw new IllegalArgumentException("expected is required");
-        }
-        return JdbcRepositorySupport.transaction(
-                dataSource,
-                connection -> {
-                    JdbcCsiActivationAdmission.refuseUnqualifiedWriter(
-                            connection, expected.getBindingId());
-                    ToolExecutionRecord current =
-                            selectByExecutionId(connection, expected.getExecutionCallId(), true);
-                    if (current == null
-                            || !current.sameIdentity(expected)
-                            || current.getVersion() != expected.getVersion()
-                            || !current.needsReconciliation()
-                            || unknownOnly
-                                    && current.getState() != ToolExecutionRecord.State.UNKNOWN) {
-                        return null;
-                    }
-                    ToolExecutionRecord resolved =
-                            current.resolveUnsettled(resolutionResult, resolutionTime)
-                                    .withVersion(current.getVersion() + 1);
-                    updateExecution(connection, resolved);
-                    return resolved;
-                });
+        return JdbcToolExecutionObservations.resolve(dataSource, expected, resolutionResult, resolutionTime, false);
     }
 
     private CsiContinuation lockCsiContinuation(Connection connection, ToolExecutionRecord hint)
@@ -1041,7 +1018,7 @@ public final class JdbcToolExecutionRepository
         return false;
     }
 
-    private static ToolExecutionRecord selectByExecutionId(
+    static ToolExecutionRecord selectByExecutionId(
             Connection connection, String executionCallId, boolean forUpdate)
             throws SQLException {
         String sql = "SELECT " + EXECUTION_COLUMNS
@@ -1078,11 +1055,11 @@ public final class JdbcToolExecutionRepository
         }
     }
 
-    private static void updateExecution(Connection connection,
+    static void updateExecution(Connection connection,
             ToolExecutionRecord record) throws SQLException {
         String sql = "UPDATE ma_tool_execution SET execution_state = ?, "
                 + "execution_status = ?, result_json = ?, "
-                + "last_sequence = ?, cancel_requested = ?, "
+                + "last_sequence = ?, is_cancel_requested = ?, "
                 + "dispatch_owner = ?, dispatch_lease_until = ?, "
                 + "dispatch_generation = ?, record_version = ?, "
                 + "settled_at = ?, abandoned_at = ?, loss_evidence_id = ?, "
@@ -1183,7 +1160,7 @@ public final class JdbcToolExecutionRepository
                 result.getString("execution_status"),
                 fromJson(result.getString("result_json")),
                 result.getLong("last_sequence"),
-                result.getBoolean("cancel_requested"),
+                result.getBoolean("is_cancel_requested"),
                 result.getString("dispatch_owner"),
                 JdbcRepositorySupport.getInstant(result,
                         "dispatch_lease_until"),

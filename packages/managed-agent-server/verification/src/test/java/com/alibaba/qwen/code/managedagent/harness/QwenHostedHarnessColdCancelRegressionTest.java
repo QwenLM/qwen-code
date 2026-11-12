@@ -10,10 +10,10 @@ import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationComma
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedActionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedActionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
-import com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.session.HarnessCoordinator;
 import com.alibaba.qwen.code.managedagent.session.HarnessEventProjector;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
@@ -70,7 +70,7 @@ class QwenHostedHarnessColdCancelRegressionTest {
     private ObjectMapper mapper;
 
     @Autowired
-    private ManagedWorkspaceRegistry registry;
+    private JdbcManagedWorkspaceRegistry registry;
 
     @Autowired
     @Qualifier("managedAgentTransactionManager")
@@ -92,8 +92,8 @@ class QwenHostedHarnessColdCancelRegressionTest {
         properties.getHarness().setWorkspaceFilesEnabled(true);
         properties.getHarness().setToken("test-token");
         properties.getHarness().setCapabilityDigest("sha256:" + "a".repeat(64));
-        ManagedAgentStore store = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, mapper, Clock.systemUTC(),
-                ignored -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+        ManagedAgentStore store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, mapper, Clock.systemUTC(),
+                ignored -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         var admission = store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
                 .tenantId(tenant)
                 .actorId("actor-a")
@@ -123,9 +123,9 @@ class QwenHostedHarnessColdCancelRegressionTest {
         var expectedRecovery = new com.alibaba.qwen.code.managedagent.harness.contracts.HarnessRuntimeRecovery(
                 null, "checkpoint-of-T1", "activation-of-T1", List.of(), false, false, false);
         when(attached.getRuntimeRecovery()).thenReturn(recovery);
-        ManagedActionStore actions = mock(ManagedActionStore.class);
+        JdbcManagedActionStore actions = mock(JdbcManagedActionStore.class);
         when(actions.approvalMode(tenant, session)).thenReturn("yolo");
-        WorkspaceExecutionStore execution = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new WorkspaceExecutionStore(jdbc, transactionManager));
+        JdbcWorkspaceExecutionStore execution = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new JdbcWorkspaceExecutionStore(jdbc, transactionManager));
         QwenHostedHarnessConnector connector = new QwenHostedHarnessConnector(properties, store, execution, actions);
         ReflectionTestUtils.setField(connector, "client", client);
         connector.createOrLoad(tenant, session, true);
@@ -226,8 +226,8 @@ class QwenHostedHarnessColdCancelRegressionTest {
         properties.getHarness().setWorkspaceFilesEnabled(true);
         properties.getHarness().setToken("test-token");
         properties.getHarness().setCapabilityDigest("sha256:" + "a".repeat(64));
-        ManagedAgentStore store = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, mapper, Clock.systemUTC(),
-                ignored -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+        ManagedAgentStore store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, mapper, Clock.systemUTC(),
+                ignored -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         String session = store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
                 .tenantId(tenant)
                 .actorId("actor-a")
@@ -249,9 +249,9 @@ class QwenHostedHarnessColdCancelRegressionTest {
         when(client.loadSession(any())).thenReturn(attached);
         when(attached.getHarnessBootId()).thenReturn(boot);
         when(attached.getApprovalMode()).thenReturn("yolo");
-        ManagedActionStore actions = mock(ManagedActionStore.class);
+        JdbcManagedActionStore actions = mock(JdbcManagedActionStore.class);
         when(actions.approvalMode(tenant, session)).thenReturn("yolo");
-        WorkspaceExecutionStore execution = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new WorkspaceExecutionStore(jdbc, transactionManager));
+        JdbcWorkspaceExecutionStore execution = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new JdbcWorkspaceExecutionStore(jdbc, transactionManager));
         QwenHostedHarnessConnector connector = new QwenHostedHarnessConnector(properties, store, execution, actions);
         ReflectionTestUtils.setField(connector, "client", client);
         try {
@@ -420,8 +420,8 @@ class QwenHostedHarnessColdCancelRegressionTest {
         properties.getHarness().setWorkspaceFilesEnabled(true);
         properties.getHarness().setToken("test-token");
         properties.getHarness().setCapabilityDigest("sha256:" + "a".repeat(64));
-        ManagedAgentStore store = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, mapper, Clock.systemUTC(),
-                ignored -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+        ManagedAgentStore store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, mapper, Clock.systemUTC(),
+                ignored -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         String session = store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
                 .tenantId(tenant)
                 .actorId("actor-a")
@@ -445,9 +445,9 @@ class QwenHostedHarnessColdCancelRegressionTest {
         when(recovery.getCheckpointId()).thenReturn("failure-checkpoint");
         when(recovery.getActivationId()).thenReturn("failure-activation");
         when(attached.getRuntimeRecovery()).thenReturn(recovery);
-        ManagedActionStore actions = mock(ManagedActionStore.class);
+        JdbcManagedActionStore actions = mock(JdbcManagedActionStore.class);
         when(actions.approvalMode(tenant, session)).thenReturn("default");
-        WorkspaceExecutionStore execution = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new WorkspaceExecutionStore(jdbc, transactionManager));
+        JdbcWorkspaceExecutionStore execution = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new JdbcWorkspaceExecutionStore(jdbc, transactionManager));
         QwenHostedHarnessConnector connector = new QwenHostedHarnessConnector(properties, store, execution, actions);
         ReflectionTestUtils.setField(connector, "client", client);
         String owner = "owner-a";

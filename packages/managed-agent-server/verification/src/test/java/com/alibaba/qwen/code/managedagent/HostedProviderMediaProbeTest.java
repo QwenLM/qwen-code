@@ -2,7 +2,7 @@ package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
-import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.Headers;
@@ -131,7 +131,7 @@ class HostedProviderMediaProbeTest {
         jdbc.update("INSERT INTO ma_tool_execution (execution_call_id_hash, execution_call_id,"
                 + " idempotency_key_hash, idempotency_key, binding_id, runtime_generation, harness_session_id,"
                 + " runtime_session_id, runtime_session_key, turn_id, tool_call_id, request_digest,"
-                + " reference_json, execution_state, last_sequence, cancel_requested, dispatch_generation,"
+                + " reference_json, execution_state, last_sequence, is_cancel_requested, dispatch_generation,"
                 + " record_version) VALUES (?, 'execute', ?, 'key', 'binding', 1, 'harness', 'runtime', ?,"
                 + " 'turn', 'call', 'digest', ?, 'PREPARED', 0, FALSE, 0, 1)",
                 "b".repeat(64), "c".repeat(64), "d".repeat(64), reference.toString());
@@ -143,7 +143,7 @@ class HostedProviderMediaProbeTest {
                 + " 'tool', 'binding', 1, 'READY', 1, ?, ?)", "e".repeat(64), tenant, System.currentTimeMillis(), physical);
         jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key, tenant_id, storage_id, physical_key)"
                 + " VALUES (?, ?, ?, ?, 'storage-0', ?)",
-                JdbcRuntimeBindingRepository.storageAliasKey(tenant, "storage-0"),
+                RuntimeAdmissionFences.storageAliasKey(tenant, "storage-0"),
                 "f".repeat(64), "0".repeat(64), tenant, physical);
         jdbc.update("INSERT INTO ma_storage_owner (storage_key) VALUES (?)", physical);
         var probe = mock(HostedProviderMediaProbe.class, CALLS_REAL_METHODS);
@@ -170,10 +170,10 @@ class HostedProviderMediaProbeTest {
         jdbc.update("UPDATE ma_runtime_session SET binding_id='binding', runtime_generation=2");
         assertThatThrownBy(() -> ReflectionTestUtils.invokeMethod(probe, "check", session, "prepared", fields))
                 .isInstanceOf(AssertionError.class).hasMessageContaining("original runtime generation");
-        jdbc.update("UPDATE ma_runtime_session SET runtime_generation=1, execution_exclusive=TRUE");
+        jdbc.update("UPDATE ma_runtime_session SET runtime_generation=1, is_rewind_pending=TRUE");
         assertThatThrownBy(() -> ReflectionTestUtils.invokeMethod(probe, "check", session, "prepared", fields))
                 .isInstanceOf(AssertionError.class).hasMessageContaining("shared execution membership");
-        jdbc.update("UPDATE ma_runtime_session SET execution_exclusive=FALSE");
+        jdbc.update("UPDATE ma_runtime_session SET is_rewind_pending=FALSE");
         jdbc.update("UPDATE ma_tool_execution SET execution_state='SETTLED', execution_status='success',"
                 + " dispatch_generation=1, result_json='{}'");
         ReflectionTestUtils.setField(probe, "dispatches", Map.of("runtime", 1));

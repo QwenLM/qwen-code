@@ -1,5 +1,9 @@
 package com.alibaba.qwen.code.managedagent.settings;
 
+import com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiRegistration;
+import com.alibaba.qwen.code.managedagent.contracts.runtime.ProtectionIdentity;
+import com.alibaba.qwen.code.managedagent.contracts.runtime.WorkerArtifact;
+
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
@@ -12,6 +16,8 @@ public interface ManagedAgentSettings {
     public EventTransport getEventTransport();
     public SessionStore getSessionStore();
     public ToolPublication getToolPublication();
+    /** Null means session-resource OSS externalization and journal compaction are disabled. */
+    public default SessionResources getSessionResources() { return null; }
     public Artifacts getArtifacts();
     public ManagedExtensions getManagedExtensions();
     public Extensions getExtensions();
@@ -22,6 +28,9 @@ public interface ManagedAgentSettings {
     public List<String> getDefinitionToolProfiles();
     public List<String> getDefinitionModels();
     public List<? extends ModelOption> getModelCatalog();
+    public default List<String> getModelConfigBaseUrls() { return List.of(); }
+    public default boolean isMemoryEnabled() { return false; }
+    public default boolean isSideQueriesEnabled() { return false; }
     public interface ModelOption {
         public String getModelId();
         public String getLabel();
@@ -73,7 +82,6 @@ public interface ManagedAgentSettings {
         public boolean isAllowInsecureHttp();
     }
     public interface ToolPublication {
-        public boolean isAsyncVerificationEnabled();
         public int getVerificationConcurrency();
         public boolean isGcEnabled();
         public Duration getDeletionGrace();
@@ -92,6 +100,15 @@ public interface ManagedAgentSettings {
         public Long getVerificationBytesPerSecond();
         public Duration getMaxVerificationTimeout();
     }
+    public interface SessionResources {
+        public boolean isEnabled();
+        public String getOssKeyPrefix();
+        public boolean isPackJobEnabled();
+        public boolean isDeletionEnabled();
+        public long getPackTargetBytes();
+        public int getPackMaxTransactions();
+        public Duration getDeletionGrace();
+    }
     public interface ManagedExtensions {
         public boolean isEnabled();
         public String getMode();
@@ -100,6 +117,8 @@ public interface ManagedAgentSettings {
     }
     public interface Extensions {
         public boolean isEnabled();
+        public default boolean isSelfServiceEnabled() { return false; }
+        public default boolean isRuntimeSkillImportEnabled() { return false; }
         public String getArtifactDirectory();
         public List<String> getAllowedActors();
     }
@@ -147,11 +166,16 @@ public interface ManagedAgentSettings {
         public Duration getV3ResultWindow();
         public String getToken();
         public String getProvisioner();
+        public Map<String, String> getProviderOptions();
         public String getWorkspaceId();
         public String getWorkspaceGeneration();
         public String getWorkspaceCwd();
         public String getIsolationClass();
         public String getBoundSessionIsolationClass();
+        public default boolean isToolMeasurements() {
+            return false;
+        }
+
         public boolean isSessionCreateWarm();
         public List<? extends WorkspaceMount> getWorkspaceMounts();
         public String getWorkspaceCreationRoot();
@@ -164,11 +188,11 @@ public interface ManagedAgentSettings {
         public interface ResidentWorkspace {
             public String workspaceId();
             public long workspaceGeneration();
-            public com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiRegistration registration();
-            public com.alibaba.qwen.code.managedagent.contracts.runtime.ProtectionIdentity protection();
+            public WorkspaceCsiRegistration registration();
+            public ProtectionIdentity protection();
             public String image();
             public List<String> command();
-            public List<com.alibaba.qwen.code.managedagent.contracts.runtime.WorkerArtifact> artifacts();
+            public List<WorkerArtifact> artifacts();
         }
         public List<? extends ResidentWorkspace> getResidentWorkspaces();
         public String getResidentKubernetesApiUrl();

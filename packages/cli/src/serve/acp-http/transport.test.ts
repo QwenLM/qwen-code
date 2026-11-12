@@ -11822,42 +11822,49 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       }
     });
 
-    it('_qwen/workspace/memory/forget queues and polls hidden tasks', async () => {
-      const connId = await initialize();
-      const streamRes = openStream(connId);
-      const reader = frameReader(await streamRes);
-      try {
-        await post(connId, {
-          jsonrpc: '2.0',
-          id: 82,
-          method: '_qwen/workspace/memory/forget',
-          params: { query: 'old preference' },
-        });
-        const queued = (await reader.next()) as {
-          result: { taskId: string; status: string };
-        };
-        expect(queued.result).toMatchObject({
-          status: 'queued',
-        });
+    it.each([false, true])(
+      '_qwen/workspace/memory/forget queues and polls hidden tasks with availability %s',
+      async (available) => {
+        vi.spyOn(
+          bridge,
+          'isWorkspaceMemoryRememberAvailable',
+        ).mockResolvedValue(available);
+        const connId = await initialize();
+        const streamRes = openStream(connId);
+        const reader = frameReader(await streamRes);
+        try {
+          await post(connId, {
+            jsonrpc: '2.0',
+            id: 82,
+            method: '_qwen/workspace/memory/forget',
+            params: { query: 'old preference' },
+          });
+          const queued = (await reader.next()) as {
+            result: { taskId: string; status: string };
+          };
+          expect(queued.result).toMatchObject({
+            status: 'queued',
+          });
 
-        await new Promise((resolve) => setTimeout(resolve, 30));
-        await post(connId, {
-          jsonrpc: '2.0',
-          id: 83,
-          method: '_qwen/workspace/memory/forget/get',
-          params: { taskId: queued.result.taskId },
-        });
-        const completed = (await reader.next()) as {
-          result: { status: string; result: { summary: string } };
-        };
-        expect(completed.result).toMatchObject({
-          status: 'completed',
-          result: { summary: 'forgot' },
-        });
-      } finally {
-        reader.close();
-      }
-    });
+          await new Promise((resolve) => setTimeout(resolve, 30));
+          await post(connId, {
+            jsonrpc: '2.0',
+            id: 83,
+            method: '_qwen/workspace/memory/forget/get',
+            params: { taskId: queued.result.taskId },
+          });
+          const completed = (await reader.next()) as {
+            result: { status: string; result: { summary: string } };
+          };
+          expect(completed.result).toMatchObject({
+            status: 'completed',
+            result: { summary: 'forgot' },
+          });
+        } finally {
+          reader.close();
+        }
+      },
+    );
 
     it('_qwen/workspace/memory/forget carries a scope through, and omits it when unscoped', async () => {
       const connId = await initialize();
@@ -13405,6 +13412,44 @@ describe('ACP WebSocket transport security', () => {
         })
       ).code,
     ).toBe(403);
+  });
+
+  it('uses remote listener origins and credentials without changing primary access', async () => {
+    await startServer({ token: 'operator', localControlToken: 'pairing' });
+    credentialStore!.setRemoteToken('remote-token');
+    const origin = `http://127.0.0.1:${lanPort}`;
+    tagListener(lanServer!, {
+      kind: 'remote-access',
+      authority: `127.0.0.1:${lanPort}`,
+      origin,
+      allowedOrigins: {
+        allows: (candidate) => candidate === 'http://localhost:5273',
+      },
+    });
+    const accepted = await wsConnectLocalControl('remote-token', {
+      Origin: 'http://localhost:5273',
+    });
+    expect(accepted.code).toBe(101);
+    const closed = new Promise<void>((resolve) =>
+      accepted.socket!.once('close', () => resolve()),
+    );
+    expect(
+      (
+        await wsConnectLocalControl('operator', {
+          Origin: 'http://localhost:5273',
+        })
+      ).code,
+    ).toBe(401);
+    expect(
+      (await wsConnectLocalControl('remote-token', { Origin: origin })).code,
+    ).toBe(403);
+    const primary = await wsConnect({
+      headers: { Authorization: 'Bearer operator' },
+    });
+    acpHandle!.detachServer(lanServer!);
+    await closed;
+    expect(primary.readyState).toBe(WebSocket.OPEN);
+    primary.terminate();
   });
 
   it('terminates LAN WebSockets when their listener is detached', async () => {

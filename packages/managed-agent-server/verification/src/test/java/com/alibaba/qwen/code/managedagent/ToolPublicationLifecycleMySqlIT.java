@@ -7,11 +7,10 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceLifecycleStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationAdmissionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationDataStore;
-import com.alibaba.qwen.code.managedagent.persistence.WorkspaceLifecycleStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -48,6 +47,7 @@ import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.COMMI
 import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.PUBLICATION_TOKEN;
 import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.WRITER_TOKEN;
 import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.digest;
+import static com.alibaba.qwen.code.managedagent.persistence.PublicationVerification.verified;
 import static org.assertj.core.api.Assertions.assertThat;
 
 class ToolPublicationLifecycleMySqlIT {
@@ -75,6 +75,16 @@ class ToolPublicationLifecycleMySqlIT {
             var transaction = new TransactionTemplate(new DataSourceTransactionManager(source));
             ToolPublicationObjectStore objects = new ToolPublicationObjectStore() {
                 @Override
+                public InputStream openRange(String key, long offset, long length, Runnable guard) {
+                    guard.run();
+                    try (InputStream full = open(key)) {
+                        byte[] bytes = full.readAllBytes();
+                        return new java.io.ByteArrayInputStream(bytes, (int) offset, (int) length);
+                    } catch (java.io.IOException error) {
+                        throw new IllegalStateException(error);
+                    }
+                }
+                @Override
                 public void putIfAbsent(String key, byte[] bytes) {
                     throw new AssertionError("Inline fixture expected");
                 }
@@ -94,7 +104,7 @@ class ToolPublicationLifecycleMySqlIT {
             envelope.set("capture", JSON.createObjectNode().put("captureStatus", "unavailable")
                     .put("captureReason", "storage_failed").put("previewTruncated", false)
                     .put("deliveryStatus", "pending").putNull("manifest"));
-            data.finish(key, "pub-1", PUBLICATION_TOKEN, "finish", envelope.toString().getBytes(StandardCharsets.UTF_8));
+            verified(data).finish(key, "pub-1", PUBLICATION_TOKEN, "finish", envelope.toString().getBytes(StandardCharsets.UTF_8));
             var outcome = JSON.createObjectNode().put("schemaVersion", 1).put("decision", "blocked").putNull("manifestRef");
             outcome.set("envelope", envelope);
             var history = JSON.createObjectNode().put("messageId", "11111111-1111-4111-8111-111111111111")
@@ -121,12 +131,12 @@ class ToolPublicationLifecycleMySqlIT {
 
             var properties = new ManagedAgentProperties();
             properties.getHarness().setWorkspaceFilesEnabled(true);
-            var agents = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, JSON, Clock.systemUTC(), ignored -> {},
-                    new ManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+
             var beans = new DefaultListableBeanFactory();
             beans.registerSingleton("bindings", journal.bindings);
-            var lifecycle = new WorkspaceLifecycleStore(jdbc, JSON, beans.getBeanProvider(RuntimeBindingRepository.class));
-            agents.setWorkspaceLifecycleStore(lifecycle);
+            var lifecycle = new JdbcWorkspaceLifecycleStore(jdbc, JSON, beans.getBeanProvider(RuntimeBindingRepository.class));
+            var agents = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, JSON, Clock.systemUTC(), ignored -> {},
+                    new JdbcManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules(), null, lifecycle);
             jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation,"
                     + " storage_id, display_name, config_ref, policy_ref, state)"
                     + " VALUES ('tenant-1', 'neighbor', 1, 'storage', 'Neighbor', ?, ?, 'ACTIVE')",
@@ -212,7 +222,12 @@ class ToolPublicationLifecycleMySqlIT {
                                     (prepared, call, values) -> {
                                         boolean execute = enabled && call.getName().startsWith("execute");
                                         String role = Thread.currentThread().getName();
-                                        if (execute && "receipt".equals(role) && sql.startsWith("INSERT INTO ma_tenant_guard") && sql.contains("'runtime_placement'")) {
+                                        // An ordinary publication lane enters on the
+                                        // Session root, not the placement guard
+                                        // (#16354), so the receipt parks on the root
+                                        // statement its lane actually runs.
+                                        if (execute && "receipt".equals(role)
+                                                && sql.startsWith("SELECT tenant_id, session_id, is_csi_guard FROM ma_session")) {
                                             receiptPlacement.countDown();
                                         }
                                         try {

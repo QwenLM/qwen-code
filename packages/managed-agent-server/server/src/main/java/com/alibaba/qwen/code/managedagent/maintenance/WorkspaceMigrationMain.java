@@ -2,11 +2,13 @@ package com.alibaba.qwen.code.managedagent.maintenance;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.RuntimeBroker.WorkspaceMount;
+import com.alibaba.qwen.code.managedagent.config.runtime.RuntimeProviderRegistry;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
-import com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceMigrationStore;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageGuard;
+import com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.workspace.runtime.WorkspaceRuntimeProvisioner;
 import com.alibaba.qwen.code.managedagent.workspace.runtime.WorkspaceRuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.adapter.HttpRuntimeTransport;
@@ -15,7 +17,6 @@ import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcToolExecutionRepository;
-import com.alibaba.qwen.code.runtimebroker.provisioning.LocalProcessRuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
@@ -42,6 +43,8 @@ public final class WorkspaceMigrationMain {
             throw new IllegalArgumentException("Usage: (retire|prepare|promote|abort) <request.json> --offline-confirmed"
                     + " | inspect <request.json>");
         }
+        var localFactory = "retire".equals(args[0]) ? new RuntimeProviderRegistry()
+                .require(com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.LOCAL_PROCESS) : null;
         Path input = Path.of(args[1]);
         if (!Files.isRegularFile(input, LinkOption.NOFOLLOW_LINKS) || Files.size(input) > 1024 * 1024) {
             throw new IllegalArgumentException("Invalid migration request file");
@@ -72,21 +75,22 @@ public final class WorkspaceMigrationMain {
                 case "retire" -> {
                     var sessions = new JdbcRuntimeSessionRepository(source);
                     var executions = new JdbcToolExecutionRepository(source);
-                    var ownership = new WorkspaceExecutionStore(jdbc, manager);
+                    var ownership = new JdbcWorkspaceExecutionStore(jdbc, manager);
                     var http = new HttpRuntimeTransport();
                     Path stateDirectory = Path.of(request.path("stateDirectory").asText());
                     if (!Files.isDirectory(stateDirectory, LinkOption.NOFOLLOW_LINKS)
                             || !stateDirectory.equals(stateDirectory.toRealPath())) {
                         throw new IllegalStateException("Original Runtime state directory is unavailable");
                     }
-                    var local = LocalProcessRuntimeProvisioner.durable(List.of("maintenance-never-starts-worker"),
-                            stateDirectory, http, false);
+                    properties.getRuntimeBroker().setStateDirectory(stateDirectory.toString());
+                    properties.getRuntimeBroker().setTrustedLocalRebootRecovery(false);
+                    var local = localFactory.createForMaintenance(properties.getRuntimeBroker(), http);
                     var transport = new WorkspaceRuntimeTransport(http, ownership, bindings, sessions, sessionId -> {
                         var found = jdbc.query("SELECT " + ManagedSchemaProjection.SESSION.columns() + " FROM ma_session WHERE session_kind = 'PUBLIC' AND tenant_id = ? AND session_id = ?",
                                 (row, index) -> ManagedAgentStore.readBinding(row),
                                 request.path("tenantId").asText(), sessionId);
                         if (found.size() != 1 || found.getFirst() == null) {
-                            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                            throw WorkspaceExecutionStore.unavailable();
                         }
                         return found.getFirst();
                     });

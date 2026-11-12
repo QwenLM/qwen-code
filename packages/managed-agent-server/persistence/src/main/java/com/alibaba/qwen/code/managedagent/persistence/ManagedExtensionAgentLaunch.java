@@ -6,6 +6,7 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
+import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore;
 import com.fasterxml.jackson.databind.JsonNode;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -19,7 +20,7 @@ import java.util.Set;
 public final class ManagedExtensionAgentLaunch {
     private ManagedExtensionAgentLaunch() { }
 
-    public static void require(JdbcTemplate jdbc, ManagedExtensionRecordStore records,
+    public static void require(JdbcTemplate jdbc, JdbcManagedExtensionRecordStore records,
             SessionRecord parent, JsonNode launch) {
         try {
             ManagedExtensionRecords.closed(launch, Set.of("version", "sourcePromptId", "approvalMode", "approvalRevision",
@@ -109,7 +110,7 @@ public final class ManagedExtensionAgentLaunch {
                 + " AND s.last_generation=b.runtime_generation WHERE b.binding_id=? AND b.runtime_generation=?"
                 + " AND b.tenant_id=? AND b.workspace_id=? AND b.workspace_generation=? AND b.storage_id=?"
                 + " AND b.isolation_class='session' AND b.isolation_key=? AND b.binding_state='READY'"
-                + " AND b.drain_requested=FALSE AND b.runtime_instance_id IS NOT NULL AND b.runtime_lease_id IS NOT NULL FOR UPDATE",
+                + " AND b.is_drain_requested=FALSE AND b.runtime_instance_id IS NOT NULL AND b.runtime_lease_id IS NOT NULL FOR UPDATE",
                 String.class, runtime.path("bindingId").asText(), selectedGeneration, parent.tenantId(),
                 parent.workspace().getWorkspaceId(), Long.toString(parent.workspace().getWorkspaceGeneration()),
                 parent.workspace().getStorageId(), parent.sessionId());
@@ -126,7 +127,7 @@ public final class ManagedExtensionAgentLaunch {
         }
     }
 
-    public static JsonNode readContributions(ManagedExtensionRecordStore records, String tenant, String session, JsonNode ref) {
+    public static JsonNode readContributions(JdbcManagedExtensionRecordStore records, String tenant, String session, JsonNode ref) {
         JsonNode manifest = records.readRecordResource(tenant, session, ref);
         ManagedExtensionRecords.closed(manifest, Set.of("kind", "formatVersion", "byteLength", "digest", "parts"), "Contribution manifest");
         long length = ManagedExtensionRecords.count(manifest.get("byteLength"), 1, 2 * 1024 * 1024, "Contribution length");
@@ -150,7 +151,7 @@ public final class ManagedExtensionAgentLaunch {
         if (bytes.length != length || !DigestUtils.sha256Hex(bytes).equals(manifest.path("digest").asText())) {
             throw refused();
         }
-        JsonNode contributions = com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore.parse(new String(bytes, StandardCharsets.UTF_8));
+        JsonNode contributions = ManagedExtensionRecordStore.parse(new String(bytes, StandardCharsets.UTF_8));
         if (contributions == null) {
             throw refused();
         }

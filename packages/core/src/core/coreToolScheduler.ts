@@ -1275,13 +1275,19 @@ const createCancelledResponse = (
   // model-visible output must not orphan files already persisted to disk.
   persistedOutputFiles?: string[],
   visionBridgeNotice?: string,
+  // A producer that reported its own interrupted work by returning (the shell
+  // tool on user cancel) already described what ran before the kill. Keep that
+  // text: the cancellation notice says the call never finished, the detail says
+  // how far it got.
+  detail?: string,
 ): CoreToolCallResponseInfo => {
   const cancellationPrefix =
     getModelFacingToolName(request) === ToolNames.TOOL_CALL &&
     executionStatus === 'not_started'
       ? DEFERRED_TOOL_CALL_CANCELLATION_PREFIX
       : '';
-  const errorMessage = `${cancellationPrefix}[Operation Cancelled] Reason: ${reason}`;
+  const errorDetail = detail?.trim() ? `\n\n${detail}` : '';
+  const errorMessage = `${cancellationPrefix}[Operation Cancelled] Reason: ${reason}${errorDetail}`;
   return {
     callId: request.callId,
     responseParts: [
@@ -4281,6 +4287,22 @@ export class CoreToolScheduler {
                   debugLogger.warn(
                     `Auto mode fallback to manual approval (${outcome.reason}): target outside workspace.`,
                   );
+                } else if (
+                  outcome.reason === 'safety_check' &&
+                  outcome.requiresHumanDecision === true &&
+                  outcome.message
+                ) {
+                  // A deterministic floor, not a recovery prompt: the dialog
+                  // needs the explanation and the hidden always-allow, but the
+                  // callId must NOT be armed for a counter reset — approving
+                  // one amend is not evidence that the denial streak is over.
+                  // The pending-tool sweep and the ACP host already treat it
+                  // this way; arming it here reset the counters on this path
+                  // only.
+                  autoModeFallback = {
+                    reason: outcome.reason,
+                    message: outcome.message,
+                  };
                 }
                 break;
               default: {
@@ -4430,10 +4452,14 @@ export class CoreToolScheduler {
               continue;
             }
 
-            // AUTO_EDIT mode: auto-approve edit-like and info tools
+            // AUTO_EDIT mode: auto-approve edit-like and info tools — except
+            // a call matching a user `permissions.ask` rule (`pmForcedAsk`),
+            // which always asks. Keyed on the rule, not on `ask` in general,
+            // so tools whose own default is `ask` (edits) stay auto-approved.
             if (
               !requiresUserInteraction &&
               !preToolUseAsk &&
+              !pmForcedAsk &&
               isAutoEditApproved(approvalMode, confirmationDetails)
             ) {
               this.setToolCallOutcome(
@@ -6597,8 +6623,12 @@ export class CoreToolScheduler {
       }
       if (aborted) {
         // PostToolUseFailure Hook
-        // `execute()` returned a result here, so the tool's work did finish.
-        let cancelMessage = TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE;
+        // `execute()` returned a result, but that alone does not mean the work
+        // finished: producers that signal interruption by returning (the shell
+        // tool on user cancel) set `interruptedBeforeCompletion`.
+        let cancelMessage = toolResult.interruptedBeforeCompletion
+          ? TOOL_CANCELLED_BEFORE_COMPLETION_MESSAGE
+          : TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE;
         let failureHookArtifacts: ToolArtifact[] | undefined;
         if (hooksEnabled && messageBus) {
           const failureHookResult = await this.withHookSpan(
@@ -6642,6 +6672,11 @@ export class CoreToolScheduler {
           executionStatus,
           failureHookArtifacts,
           toolResult.persistedOutputFiles,
+          undefined,
+          typeof toolResult.llmContent === 'string' &&
+            toolResult.interruptedBeforeCompletion
+            ? toolResult.llmContent
+            : undefined,
         );
         observeProducerOutput(cancelledResponse, true);
         this.setStatusInternal(callId, 'cancelled', cancelledResponse);
@@ -8485,7 +8520,9 @@ export class CoreToolScheduler {
                 (isDenialFallbackReason(outcome.reason) ||
                   outcome.reason === 'classifier_unavailable' ||
                   outcome.reason === 'external_write' ||
-                  outcome.reason === 'external_directory')
+                  outcome.reason === 'external_directory' ||
+                  (outcome.requiresHumanDecision === true &&
+                    outcome.reason === 'safety_check'))
               ) {
                 const autoModeFallback: AutoModeFallbackConfirmation = {
                   reason: outcome.reason,
