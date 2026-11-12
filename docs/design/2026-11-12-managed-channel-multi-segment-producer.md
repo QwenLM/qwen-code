@@ -29,20 +29,27 @@ are three separate concerns:
 - **Split.** `planChannelSegments(text)` returns up to `maxSegments` (64)
   pieces, each at most `maxSegmentBytes` (48 KiB) of UTF-8, cut on a code-point
   boundary. A reply that fits one segment returns a single piece with no notice
-  (today's short-reply behavior is byte-for-byte unchanged). Any reply within
-  the nominal byte capacity (`maxSegments * maxSegmentBytes`) is kept whole; a
-  reply past that capacity keeps the first 64 pieces and appends the existing
-  truncation notice to the last kept piece, so the overflow is visible, never
-  silent.
+  (today's short-reply behavior is byte-for-byte unchanged). A reply within the
+  nominal byte capacity (`maxSegments * maxSegmentBytes`) is kept whole up to
+  code-point alignment — the boundary back-off leaves at most 3 bytes of slack
+  per full-width piece, so an adversarial mixed-width input sitting exactly at
+  the capacity can still overflow by that slack plus the notice room, visibly
+  marked; uniform-width text never drifts. A reply past that capacity keeps the
+  first 64 pieces and appends the existing truncation notice to the last kept
+  piece, so the overflow is visible, never silent.
 - **Plan.** The outbound path publishes one segment resource per piece and
   builds the `segments` array with `segmentId` `deliveryId:i` in ordinal order,
   replacing the hard-coded single element. The dispatcher, receipts and recovery
   are unchanged: they already operate per segment.
 - **Representative reply.** The delivery's `contentRef` reply resource keeps the
   existing envelope-fitting loop (the inline reply must still satisfy
-  `maxEnvelopeBytes`), so the public read model's representative reply stays
-  bounded exactly as today. The full answer is carried by the segment resources;
-  model completion and external delivery remain projected separately (H5c).
+  `maxEnvelopeBytes`), so the public read model's representative reply keeps the
+  same bound as today. Its content for a long answer is a fitted prefix of the
+  full answer: the loop now starts from the whole planned text rather than a
+  pre-truncated single segment, so the first shrink lands sooner and the copy it
+  carries can be shorter than before — the bound, not the content, is what is
+  unchanged. The full answer is carried by the segment resources; model
+  completion and external delivery remain projected separately (H5c).
 
 The split prefers to break at the last newline within the byte budget so a
 segment boundary lands on a line end when one is available, but only when the
@@ -56,11 +63,14 @@ byte capacity reachable when they are long.
 ### Concatenation invariant
 
 Joining the planned segment texts reproduces the input exactly when the input is
-at most `maxSegments * maxSegmentBytes`; past that byte capacity the join
-reproduces the kept prefix plus the truncation notice (the last kept piece yields
-room for the notice within the byte bound). No code-point is ever split, and no
-segment exceeds the byte bound. This is the property the regression witnesses
-pin.
+at most `maxSegments * maxSegmentBytes`, up to code-point alignment: the back-off
+can leave at most 3 bytes of slack per full-width piece, so an adversarial
+mixed-width input at exactly the capacity can overflow by that slack plus the
+notice room (visibly marked); uniform-width text at the capacity is lossless.
+Past that byte capacity the join reproduces the kept prefix plus the truncation
+notice (the last kept piece yields room for the notice within the byte bound). No
+code-point is ever split, and no segment exceeds the byte bound. This is the
+property the regression witnesses pin.
 
 ## Files affected
 
@@ -90,9 +100,11 @@ pin.
   concatenates back to the input; each piece within the byte bound and on a
   code-point boundary; a reply at the nominal byte capacity stays whole even
   when its lines are longer than half a segment (the line-end cut must not spend
-  the segment count below capacity); overflow keeps 64 pieces and appends the
-  notice; removing the split (back to truncate), the notice, or the capacity
-  guard reds the corresponding case.
+  the segment count below capacity); the line-end cut is taken when the remainder
+  fits the remaining segments exactly; an adversarial mixed-width input at the
+  capacity loses only the alignment slack plus the notice room, visibly marked;
+  overflow keeps 64 pieces and appends the notice; removing the split (back to
+  truncate), the notice, or the capacity guard reds the corresponding case.
 - The outbound plan witness: a long reply plans N segment resources with
   `deliveryId:i` ids in order; a short reply still plans one.
 - The existing multi-segment service/contract/MySQL suites remain the baseline

@@ -381,6 +381,51 @@ describe('channel policy and envelopes', () => {
     }
   });
 
+  it('takes the line-end cut when the remainder fits the remaining segments exactly', () => {
+    const maxBytes = MANAGED_CHANNEL_LIMITS.maxSegmentBytes;
+    // A 40,001-byte first line then exactly 63 full segments: the bytes after
+    // the line-end cut equal the remaining segment budget to the byte, so the
+    // <= boundary must admit the cut. A one-byte-stricter guard would fall
+    // back to full width and lose the line end.
+    const firstLine = 'x'.repeat(40_000) + '\n';
+    const text = firstLine + 'y'.repeat(63 * maxBytes);
+    const pieces = planChannelSegments(text);
+    expect(pieces[0]).toBe(firstLine);
+    expect(pieces).toHaveLength(64);
+    expect(pieces.join('')).toBe(text);
+    expect(pieces[pieces.length - 1]!).not.toContain(CHANNEL_TRUNCATION_NOTICE);
+  });
+
+  it('bounds the visible loss when mixed widths sit exactly at the capacity', () => {
+    const maxBytes = MANAGED_CHANNEL_LIMITS.maxSegmentBytes;
+    const capacity = maxBytes * MANAGED_CHANNEL_LIMITS.maxSegments;
+    // A 4-byte emoji aligned so every full-width cut backs off 3 bytes: at
+    // exactly the nominal capacity the only loss is the alignment slack plus
+    // the notice room, and it stays visible, a strict prefix, never
+    // mid-code-point. Uniform-width text never drifts (49152 divides 1..4).
+    const unit = '\u{1F642}' + 'x'.repeat(49_145);
+    const text =
+      unit.repeat(MANAGED_CHANNEL_LIMITS.maxSegments) +
+      'x'.repeat(capacity - MANAGED_CHANNEL_LIMITS.maxSegments * 49_149);
+    const pieces = planChannelSegments(text);
+    expect(pieces).toHaveLength(MANAGED_CHANNEL_LIMITS.maxSegments);
+    for (const piece of pieces) {
+      expect(Buffer.byteLength(piece, 'utf8')).toBeLessThanOrEqual(maxBytes);
+      expect(piece).not.toContain(REPLACEMENT_CHARACTER);
+    }
+    const join = pieces.join('');
+    expect(join.endsWith(CHANNEL_TRUNCATION_NOTICE)).toBe(true);
+    const kept = join.slice(0, join.length - CHANNEL_TRUNCATION_NOTICE.length);
+    expect(text.startsWith(kept)).toBe(true);
+    const lost =
+      Buffer.byteLength(text, 'utf8') - Buffer.byteLength(kept, 'utf8');
+    expect(lost).toBeGreaterThan(0);
+    expect(lost).toBeLessThanOrEqual(
+      3 * MANAGED_CHANNEL_LIMITS.maxSegments +
+        Buffer.byteLength(CHANNEL_TRUNCATION_NOTICE, 'utf8'),
+    );
+  });
+
   it('keeps 64 segments past the count bound and marks the truncation', () => {
     const maxBytes = MANAGED_CHANNEL_LIMITS.maxSegmentBytes;
     const text = 'x'.repeat(

@@ -554,11 +554,14 @@ export function truncateChannelTextUtf8(
  * reply that fits one segment plans one, unchanged; a longer reply splits
  * into up to maxSegments pieces, preferring a line end within the byte
  * budget when the remainder still fits the remaining segment budget and
- * falling back to a code-point boundary otherwise. Any reply within
- * maxSegments * maxSegmentBytes is therefore kept whole; only a reply past
- * that byte capacity drops its tail, and the last kept piece then carries
- * the truncation notice. A provider with cards or threads supplies its own
- * plan against the same segment contract.
+ * falling back to a code-point boundary otherwise. A reply within
+ * maxSegments * maxSegmentBytes is kept whole up to code-point alignment:
+ * the back-off leaves at most 3 bytes of slack per full-width piece, so an
+ * adversarial mixed-width input at exactly the capacity can still overflow
+ * by that slack plus the notice room, visibly marked (uniform-width text
+ * never drifts). A reply past that capacity drops its tail, and the last
+ * kept piece carries the truncation notice. A provider with cards or threads
+ * supplies its own plan against the same segment contract.
  */
 export function planChannelSegments(text: string): readonly string[] {
   const maxBytes = MANAGED_CHANNEL_LIMITS.maxSegmentBytes;
