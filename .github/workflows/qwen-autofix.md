@@ -2423,6 +2423,20 @@ gate, the browser smoke and `Install Dependencies` all still file when they
 time out, because a genuinely hung suite is a regression and must not be
 re-run into silence. A regression test pins both halves: the two handoff
 annotations match, and those four do not.
+
+Separate from that class, `CONFIG_FAILURE_SIGNATURES` holds the gate's
+deterministic configuration errors (`HOST_LOAD_MAX_RATIO` /
+`HOST_LOAD_MAX_WAIT_TRIES` / `HOST_LOAD_WAIT_SECONDS` "must be a positive
+…"). A repository variable cannot change between attempts, so a re-run fails
+identically; the scan skips the PR instead of re-paying install, artifact
+download and tooling provisioning, and does not hand the typo to an agent
+that cannot edit a repository variable. The labels are kept even for the two
+knobs no workflow sets today, because the script declares every knob
+env-overridable: wiring one later must not make its typo read as the PR's
+code. `main-ci-failure-issue.yml` deliberately does not carry these — with
+no rerun to suppress, it files the failure record so a human fixes the
+variable. `Host load gate breached` stays in the infrastructure class: a
+re-run can land on another host.
 ```
 
 <a id="af-077"></a>

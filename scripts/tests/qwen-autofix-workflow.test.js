@@ -24,6 +24,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { parse } from 'yaml';
 
 import { getWorkflowJob } from './workflow-helpers.js';
 import {
@@ -1336,12 +1337,27 @@ describe('qwen-autofix workflow', () => {
 
     // Single-source the signature list from the workflow rather than re-typing
     // it here, so the production value and this test can never drift out of
-    // sync (same extract-from-source idiom as NON_BLOCKING_CHECKS above). The
-    // toContain guard fails loudly if the env is renamed or the regex breaks —
-    // otherwise an empty pattern would match every line and silently pass.
-    const INFRA_SIGNATURES =
-      workflow.match(/INFRA_FAILURE_SIGNATURES: '([^']*)'/)?.[1] ?? '';
+    // sync (same extract-from-source idiom as NON_BLOCKING_CHECKS above). Read
+    // it through the YAML parser, not a quote-shaped regex: the handoff
+    // signature contains apostrophes, so Prettier renders this scalar
+    // double-quoted, and a single-quote-only pattern extracts '' from it. The
+    // toContain guards then fail loudly instead of driving the block below
+    // with an empty pattern, which matches every annotation and would pass
+    // every "this reruns" case while asserting nothing.
+    const workflowEnv = parse(workflow).env ?? {};
+    const INFRA_SIGNATURES = workflowEnv.INFRA_FAILURE_SIGNATURES ?? '';
     expect(INFRA_SIGNATURES).toContain('lost communication with the server');
+    expect(INFRA_SIGNATURES).toContain(
+      "The action '(Download|Retry downloading) the built tree' has timed out",
+    );
+    // The deterministic configuration class is a separate list: its members
+    // must be absent from the rerun class, and an empty extraction would make
+    // the skip branch match every annotation, so guard it here too.
+    const CONFIG_SIGNATURES = workflowEnv.CONFIG_FAILURE_SIGNATURES ?? '';
+    expect(CONFIG_SIGNATURES).toContain('HOST_LOAD_MAX_RATIO');
+    for (const token of CONFIG_SIGNATURES.split('|')) {
+      expect(INFRA_SIGNATURES).not.toContain(token);
+    }
 
     const run = ({
       checks,
@@ -1400,6 +1416,7 @@ describe('qwen-autofix workflow', () => {
             REVIEW_PR_LIVE: reviewLive ? 'true' : 'false',
             CHECKS_JSON: JSON.stringify(checks),
             INFRA_FAILURE_SIGNATURES: INFRA_SIGNATURES,
+            CONFIG_FAILURE_SIGNATURES: CONFIG_SIGNATURES,
             PATH: `${bin}:${process.env.PATH}`,
           },
           encoding: 'utf8',
@@ -1431,6 +1448,25 @@ describe('qwen-autofix workflow', () => {
       run({
         checks: [FAIL],
         annotations: 'sdk-java host lock not acquired within 40 minutes',
+      }),
+    ).toEqual({ reran: true, continued: true });
+    // A malformed repository variable is deterministic: a re-run fails
+    // identically, so the scan must not rerun it — and must not spend an agent
+    // round on a typo no branch can fix either. It skips the PR for a human
+    // while the gate's own refusal, which a re-run can move off the host,
+    // stays in the rerun class (#16987 R1-1).
+    expect(
+      run({
+        checks: [FAIL],
+        annotations:
+          "::error::HOST_LOAD_MAX_RATIO must be a positive number or 'off', got '0'",
+      }),
+    ).toEqual({ reran: false, continued: true });
+    expect(
+      run({
+        checks: [FAIL],
+        annotations:
+          '::error::Host load gate breached on ecs-qwen-hk1-4: five-minute load 145.00 on 64 CPUs',
       }),
     ).toEqual({ reran: true, continued: true });
     // A REAL failure (no infra signature in the annotation) → never rerun; the
@@ -1516,6 +1552,34 @@ describe('qwen-autofix workflow', () => {
         annotations: 'The job has exceeded the maximum execution time of 20m0s',
       }),
     ).toEqual({ reran: false, continued: false });
+    // #16927: the built-tree handoff is the ONE step timeout admitted, and by
+    // name. The artifact fetch crosses a host route that leaves it outside the
+    // tunnel (~100 KB/s, both 15-minute attempts expiring, zero tests run),
+    // while the identical blob on a host needing no proxy took 19 seconds. The
+    // scan must rerun it rather than hand a transport fault to an agent.
+    for (const msg of [
+      "The action 'Download the built tree' has timed out after 15 minutes.",
+      "The action 'Retry downloading the built tree' has timed out after 15 minutes.",
+    ]) {
+      expect(run({ checks: [FAIL], annotations: msg })).toEqual({
+        reran: true,
+        continued: true,
+      });
+    }
+    // …and the name anchor is what keeps the rule above intact: every OTHER
+    // step timeout still falls through to the agent. Widening the signature to
+    // the bare phrase would rerun a genuinely hung suite into silence.
+    for (const msg of [
+      "The action 'Run tests and generate reports' has timed out after 45 minutes.",
+      "The action 'Run required no-AK integration gate' has timed out after 20 minutes.",
+      "The action 'Run web-shell browser smoke' has timed out after 30 minutes.",
+      "The action 'Install Dependencies' has timed out after 30 minutes.",
+    ]) {
+      expect(run({ checks: [FAIL], annotations: msg })).toEqual({
+        reran: false,
+        continued: false,
+      });
+    }
     // Self-trigger guard: a "Qwen Autofix" workflow's own failed check must NOT
     // be rerun (prevents the autofix from re-triggering itself), UNLESS the
     // check is a review-address job (the exception carved out in the jq filter).
