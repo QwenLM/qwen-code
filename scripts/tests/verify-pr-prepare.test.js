@@ -274,6 +274,29 @@ describe('detectIsolation', () => {
     });
   });
 
+  // Every marker is reported, in probe order, so a caller's own signal is not
+  // necessarily first. That is what CI's containers look like, and the CLI
+  // case below reads the line as a set for exactly this reason: pinning the
+  // joined string here keeps the ordering claim honest without letting a
+  // consumer depend on it.
+  it('reports the ambient markers ahead of the one the caller sets', () => {
+    expect(
+      detectIsolation(
+        { container: 'docker', SANDBOX: 'docker' },
+        (path) => path === '/.dockerenv' || path === '/run/.containerenv',
+      ),
+    ).toEqual({
+      isolated: true,
+      signals: [
+        'container=docker',
+        '/.dockerenv',
+        '/run/.containerenv',
+        'SANDBOX=docker',
+      ],
+      seatbelt: false,
+    });
+  });
+
   // The built-in macOS sandbox sets this value and runs a profile that still
   // reads host files, so counting it as a boundary would send untrusted PR code
   // down the local path the gate exists to prevent.
@@ -738,7 +761,22 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
     expect(result.stdout).toContain(
       'tree       at PR head, clean — reuse this tree; verify or refresh its install/build first',
     );
-    expect(result.stdout).toContain('isolation  SANDBOX=docker');
+    // The signals are every marker this process can observe, joined in the
+    // order they are probed, so the ambient ones come first: inside CI's
+    // disposable container `/.dockerenv` exists and the line reads
+    // `isolation  /.dockerenv, SANDBOX=docker`. Asserting the joined prefix
+    // pinned the absence of those markers, which held on the persistent
+    // runners and failed on every container the unit lane moved to. What
+    // this case is about is the one signal it sets, so read that line and
+    // ask for the signal — not for its position among signals it does not
+    // control.
+    const isolationLine = result.stdout
+      .split('\n')
+      .find((line) => line.startsWith('  isolation  '));
+    expect(isolationLine).toBeTruthy();
+    expect(isolationLine.split('  isolation  ')[1].split(', ')).toContain(
+      'SANDBOX=docker',
+    );
     expect(result.stdout).toContain('--require-isolation');
 
     const root = realpathSync(dir);
@@ -902,21 +940,28 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
   // The coordinate path always runs on the host, because resolving metadata
   // needs `gh`. Gating there would fire every round; the gate is the separate
   // mode, run where PR code actually executes.
-  it('reports a seatbelt process without claiming it is a boundary', () => {
-    const { dir, base, head } = makeRepo();
-    const env = installFakeGh(snapshotFor({ base, head }));
-    env.SANDBOX = 'sandbox-exec';
-    if (detectIsolation().isolated) return;
+  // Skipped rather than returned-from when this process already sits in a
+  // boundary: an early `return` reported a pass for a case that never ran, so
+  // CI's containers silently lost the seatbelt coverage while staying green.
+  it.skipIf(detectIsolation().isolated)(
+    'reports a seatbelt process without claiming it is a boundary',
+    () => {
+      const { dir, base, head } = makeRepo();
+      const env = installFakeGh(snapshotFor({ base, head }));
+      env.SANDBOX = 'sandbox-exec';
 
-    const prepared = runPrepare(dir, ['42', '--repo', REPO], env);
-    expect(prepared.status).toBe(0);
-    expect(prepared.stdout).toContain('isolation  none detected');
-    expect(prepared.stdout).toContain('not a boundary');
+      const prepared = runPrepare(dir, ['42', '--repo', REPO], env);
+      expect(prepared.status).toBe(0);
+      expect(prepared.stdout).toContain('isolation  none detected');
+      expect(prepared.stdout).toContain('not a boundary');
 
-    const boundary = runPrepare(dir, ['--require-isolation'], env);
-    expect(boundary.status).toBe(4);
-    expect(boundary.stderr).toContain('default profile still reads host files');
-  });
+      const boundary = runPrepare(dir, ['--require-isolation'], env);
+      expect(boundary.status).toBe(4);
+      expect(boundary.stderr).toContain(
+        'default profile still reads host files',
+      );
+    },
+  );
 
   // A marker says a container exists; it cannot say what the container mounts.
   // The CLI's own launcher attaches gcloud config, the ADC file and model
