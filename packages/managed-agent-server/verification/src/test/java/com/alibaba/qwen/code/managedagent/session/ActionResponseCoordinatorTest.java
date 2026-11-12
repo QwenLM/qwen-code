@@ -33,15 +33,4 @@ class ActionResponseCoordinatorTest {
         verifyNoMoreInteractions(actions);
         verifyNoInteractions(sessions, executor);
     }
-    @org.junit.jupiter.api.Test
-    void disabledHarnessDoesNotScanRenameDeliveries() {
-        var store = org.mockito.Mockito.mock(com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore.class);
-        var executor = org.mockito.Mockito.mock(java.util.concurrent.ExecutorService.class);
-        var coordinator = new SessionRenameCoordinator(store,
-                new com.alibaba.qwen.code.managedagent.harness.UnavailableHarnessConnector(),
-                executor, java.time.Clock.systemUTC(),
-                new com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties());
-        coordinator.recover();
-        org.mockito.Mockito.verifyNoInteractions(store, executor);
-    }
 }

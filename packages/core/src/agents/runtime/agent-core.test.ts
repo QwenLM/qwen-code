@@ -1017,6 +1017,71 @@ describe('AgentCore approval response deduplication', () => {
     });
     return events;
   }
+
+  it('resolves each approval before its tool batch returns results', async () => {
+    const { core } = buildCore();
+    const approvals = collectApprovals(core);
+    const resolved = vi.fn();
+    core.getEventEmitter().on(AgentEventType.TOOL_APPROVAL_RESOLVED, resolved);
+    const { results } = recordToolEvents(core);
+    const req = request('first');
+    const sibling = request('sibling');
+    const siblingWaiting = execWaiting(sibling);
+
+    await whileScheduled(
+      core,
+      req,
+      [[execWaiting(req), siblingWaiting]],
+      async () => {
+        await vi.waitFor(() => expect(approvals).toHaveLength(2));
+        expect(resolved).not.toHaveBeenCalled();
+
+        currentScheduler().onToolCallsUpdate?.([
+          scheduled(req),
+          siblingWaiting,
+        ]);
+        expect(resolved).toHaveBeenCalledExactlyOnceWith({
+          subagentId: expect.any(String),
+          round: 1,
+          callId: req.callId,
+          timestamp: expect.any(Number),
+        });
+
+        // An automatic or IDE decision bypasses the inline respond callback.
+        currentScheduler().onToolCallsUpdate?.([
+          scheduled(req, 'executing'),
+          scheduled(sibling),
+        ]);
+        expect(resolved).toHaveBeenCalledTimes(2);
+        expect(resolved).toHaveBeenLastCalledWith(
+          expect.objectContaining({ callId: sibling.callId }),
+        );
+        expect(results).toEqual([]);
+      },
+    );
+  });
+
+  it('retires an old approval before delivering its replacement', async () => {
+    const { core } = buildCore();
+    const order: string[] = [];
+    onApproval(core, () => order.push('waiting'));
+    core
+      .getEventEmitter()
+      .on(AgentEventType.TOOL_APPROVAL_RESOLVED, () => order.push('resolved'));
+    const req = request('replacement');
+
+    await whileScheduled(
+      core,
+      req,
+      [[execWaiting(req)], [hookWaiting(req, vi.fn())]],
+      async () => {
+        await vi.waitFor(() =>
+          expect(order).toEqual(['waiting', 'resolved', 'waiting']),
+        );
+      },
+    );
+  });
+
   function recordToolEvents(core: AgentCore) {
     const calls: AgentToolCallEvent[] = [];
     const results: AgentToolResultEvent[] = [];
