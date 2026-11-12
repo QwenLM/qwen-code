@@ -378,10 +378,6 @@ final class AgentLifecycleOperations {
                                 || !sessionQueries.hasCompletedWorkspaceClose(tenantId, sessionId)))) {
             throw AgentSessionPolicies.workspaceExecutionUnavailable();
         }
-        if (sessionPolicies.hasPendingRenameDelivery(tenantId, sessionId)) {
-            throw new ManagedAgentException(409, "session_operation_active",
-                    "The Session has a title delivery awaiting completion.");
-        }
         if (session.workspace() != null) {
             WorkspaceMigrationAdmission.requireOpen(jdbc, tenantId, session.workspace().getStorageId());
         }
@@ -948,8 +944,8 @@ final class AgentLifecycleOperations {
                 claimGeneration);
     }
 
-    // One lifecycle change at a time: a pending rename or unarchive command
-    // blocks an operation, and an open operation blocks both commands.
+    // One lifecycle change at a time: a pending unarchive command blocks an
+    // operation, and an open operation blocks the command.
     /** The latest terminally failed lifecycle operation of the kind: the
      * status the Session carried when it began and the protocol it ran
      * under — both re-pinned by a resumed admission. */
