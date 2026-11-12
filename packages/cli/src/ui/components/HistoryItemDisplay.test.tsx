@@ -165,7 +165,7 @@ describe('<HistoryItemDisplay />', () => {
   // clipped instead of wrapped. Screen-reader mode puts the transcript in a
   // 90% column under an overflow-hidden ancestor, so the width has to yield to
   // a narrower parent.
-  it.each(['gemini', 'gemini_content'] as const)(
+  it.each(['gemini', 'gemini_content', 'user', 'user_shell'] as const)(
     'keeps every %s word inside a column narrower than the terminal',
     (type) => {
       const item = {
