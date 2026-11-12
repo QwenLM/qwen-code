@@ -230,11 +230,41 @@ jobs, and move Java 17 to nightly only.
   `HostedMonitorRunFaultGatesIT` fails intermittently. Required today, the
   gate would block a large share of Java PRs on noise. Keep it advisory until
   #14361 is resolved; **Re-run failed jobs** is the escape hatch meanwhile.
-  Re-measured on 2026-11-11 and worse than the figure above: of the 65 completed
-  `sdk-java.yml` runs that actually started the two Hosted lanes, 49 failed at
-  least one of them (75%), and 18 of the last 22 did (82%). The lanes fail
-  independently — 26 process-fault, 26 failover — and only 6 of the 65 runs were
-  green end to end. The refusal has also changed shape: the Runtime Broker now
+
+  Re-measured on 2026-11-12. Two different denominators are in play and must not
+  be compared directly: 41% is the failure rate of the single
+  `HostedShellLifecycleRecoveryIT` class, while the figures below count runs in
+  which at least one of the two Hosted lanes failed.
+
+  Over the most recent 100 `sdk-java.yml` runs (2026-10-27T14:57Z →
+  2026-11-11T21:48Z), 70 had completed without cancellation and all 70 executed
+  both Hosted lanes. Of those, 54 failed at least one lane (77%), and only 6 were
+  green across every job in the run. In the newest 22 of them, 20 failed at least
+  one lane (91%).
+
+  **The failure is almost entirely one lane, not both.** Process-fault failed 54
+  times and failover 8, and every one of those 8 failover failures was in a run
+  where process-fault had also failed — failover never failed on its own. The
+  split is 46 runs with process-fault alone failing, 8 with both failing, and 16
+  with both passing. An earlier revision of this note reported "26 process-fault,
+  26 failover" and concluded the lanes fail independently; that count did not
+  reproduce and the conclusion was backwards. Whoever picks up #14361 should
+  start from the process-fault lane.
+
+  This series is nightly plus manual dispatch, not the gate's own runs: those 100
+  runs are 16 `schedule` and 84 `workflow_dispatch`, and `sdk-java.yml` has no
+  `pull_request` trigger at all. The nightly arm is worse — 15 of 16 nightlies
+  failed a Hosted lane and none was fully green, while all 6 fully green runs came
+  from the 54 completed dispatch runs. Read it as the harness's background failure
+  rate, which is what makes the gate unrequireable, not as the gate's pass rate.
+
+  The gate's own full tier is too young to give a rate. `managed-agent-gate.yml`
+  runs the lanes through reusable-workflow calls whose job names carry a
+  `SDK Java (full) /` prefix, and across its 500 most recent runs only 6 actually
+  executed both Hosted lanes. All 6 failed process-fault and passed failover —
+  the same shape as above, on far too small a sample to quote a percentage.
+
+  The refusal has also changed shape: the Runtime Broker now
   answers `409 managed_runtime_identity_conflict` where the original report had
   the Store answering `400 invalid_request`, freezing the turn the same way.
 - **Approval timing.** The full suite starts at the first approval, so merge
@@ -266,11 +296,21 @@ do not measure the Hosted lanes at all:
   fixed by `da270e434` — after which main went green on this workflow while the
   Hosted lanes kept failing at the rate above.
 
-Only runs that actually started `Hosted process fault gates` and `Hosted
-failover E2E` measure step 2, so filter on the presence of those two jobs and
-exclude cancelled runs before reading a pass rate. Main's required checks live
-in ruleset `main`, not in legacy branch protection, and adding the name there
-must not disturb its two-approval and dismiss-on-push rules.
+Only runs that actually executed `Hosted process fault gates` and `Hosted
+failover E2E` measure step 2. Filter on both jobs being present *and* not
+`skipped` — the gate emits both names on scoped-out PRs and skips them — and
+exclude cancelled runs before reading a pass rate.
+
+Name the run list and pin the window whenever quoting a rate, because the two
+lists differ and an unpinned count drifts as runs arrive. `sdk-java.yml` is
+nightly plus dispatch and has no `pull_request` trigger; the gate's own runs are
+under `managed-agent-gate.yml`, where the reusable-workflow job names carry a
+`SDK Java (full) /` prefix (for example run `43019171265`). The figures in Risks
+are pinned to the 100 most recent `sdk-java.yml` runs as of 2026-11-12, covering
+2026-10-27T14:57Z → 2026-11-11T21:48Z; a later reader will get a different
+denominator from the same query. Main's required checks live in ruleset `main`,
+not in legacy branch protection, and adding the name there must not disturb its
+two-approval and dismiss-on-push rules.
 
 Only step 3's single name is needed. The computed name is deliberate, not a
 defect to fix first: a touched PR shows `Managed Agent gate` as expected until

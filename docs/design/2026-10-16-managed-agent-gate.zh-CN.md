@@ -188,10 +188,35 @@ issue 交给人工分诊而不是 autofix：一条过期的临时报告只需关
   `HostedMonitorRunFaultGatesIT` 的 fg8f 时序断言也会间歇失败。如果现在就设为必需，
   门禁会因噪声卡住大量 Java PR。在 #14361 解决前保持为非必需；期间
   **Re-run failed jobs** 是逃生口。
-  2026-11-11 重新实测，比上面的数字更差：在真正启动了两条 Hosted 泳道的 65 次已完成
-  `sdk-java.yml` 运行中，49 次至少有一条失败（75%），最近 22 次里有 18 次（82%）。
-  两条泳道各自独立失败 —— process-fault 26 次、failover 26 次 —— 65 次中只有 6 次
-  整体全绿。拒绝原因也换了形态：现在是 Runtime Broker 回
+
+  2026-11-12 重新实测。这里有两个不同的分母，不能直接相互比较：41% 是
+  `HostedShellLifecycleRecoveryIT` 这一个类的失败率，而下面的数字统计的是「两条
+  Hosted 泳道中至少一条失败」的运行数。
+
+  在 `sdk-java.yml` 最近 100 次运行中（2026-10-27T14:57Z →
+  2026-11-11T21:48Z），70 次已完成且未被取消，这 70 次都真正执行了两条 Hosted
+  泳道。其中 54 次至少有一条泳道失败（77%），只有 6 次整个运行的所有 job 全绿。
+  在这 70 次里最新的 22 次中，20 次至少有一条失败（91%）。
+
+  **失败几乎集中在一条泳道，而不是两条。** process-fault 失败 54 次、failover 失败
+  8 次，而这 8 次 failover 失败全部发生在 process-fault 也失败的运行里 ——
+  failover 从未单独失败。分布是：46 次只有 process-fault 失败、8 次两条都失败、
+  16 次两条都通过。本文档早前的版本写的是「process-fault 26 次、failover 26 次」，
+  并据此认为两条泳道各自独立失败；那个计数复现不出来，结论也是反的。接 #14361 的
+  人应当从 process-fault 这条泳道入手。
+
+  这个序列是 nightly 加手工 dispatch，不是门禁自己的运行：那 100 次里有 16 次
+  `schedule` 和 84 次 `workflow_dispatch`，而 `sdk-java.yml` 根本没有
+  `pull_request` 触发器。nightly 一侧更差 —— 16 次 nightly 里有 15 次 Hosted 泳道
+  失败、没有一次全绿；6 次全绿全部来自 54 次已完成的 dispatch 运行。应当把它读作
+  测试脚手架的背景失败率（正是它让门禁无法设为必需），而不是门禁自身的通过率。
+
+  门禁自己的全量档还太新，给不出比率。`managed-agent-gate.yml` 通过可复用工作流
+  调用这两条泳道，job 名带 `SDK Java (full) /` 前缀；在它最近 500 次运行里，只有
+  6 次真正执行了两条 Hosted 泳道。这 6 次全部是 process-fault 失败、failover 通过
+  —— 与上面同一形态，但样本太小，不足以引用百分比。
+
+  拒绝原因也换了形态：现在是 Runtime Broker 回
   `409 managed_runtime_identity_conflict`，而最初报告里是 Store 回
   `400 invalid_request`，但以同样方式冻结 turn。
 - **approve 时机。** 全量在首个 approve 时启动，合入最多要在其后等约两小时。reviewer
@@ -218,10 +243,18 @@ Hosted 泳道：
   `Run Managed Agent Server Checkstyle` —— 一条未使用 import，已由 `da270e434` 修掉
   —— 此后本 workflow 在 main 上转绿，而 Hosted 泳道仍以上述比率失败。
 
-只有真正启动了 `Hosted process fault gates` 与 `Hosted failover E2E` 的运行才度量第 2
-步，所以在读通过率之前，先按这两个 job 是否存在来筛选，并排除 cancelled 运行。main 的
-必需检查位于 ruleset `main`，而不是旧的 branch protection；在那里添加名字时不得扰动它
-「两个 approve」与「push 后作废」这两条规则。
+只有真正执行了 `Hosted process fault gates` 与 `Hosted failover E2E` 的运行才度量第 2
+步。筛选时要求这两个 job 既存在、又不是 `skipped` —— 对于不在范围内的 PR，门禁同样会
+产出这两个名字但跳过它们 —— 并在读通过率之前排除 cancelled 运行。
+
+引用比率时要写明是哪个运行列表并钉住时间窗，因为两个列表并不相同，而不钉窗口的计数会随
+新运行漂移。`sdk-java.yml` 是 nightly 加 dispatch，没有 `pull_request` 触发器；门禁
+自己的运行记在 `managed-agent-gate.yml` 下，其可复用工作流的 job 名带
+`SDK Java (full) /` 前缀（例如 run `43019171265`）。「风险」一节的数字钉在截至
+2026-11-12 的 `sdk-java.yml` 最近 100 次运行，覆盖 2026-10-27T14:57Z →
+2026-11-11T21:48Z；后来的人用同一个查询会得到不同的分母。main 的必需检查位于 ruleset
+`main`，而不是旧的 branch protection；在那里添加名字时不得扰动它「两个 approve」与
+「push 后作废」这两条规则。
 
 第 3 步只需要那一个名字。计算出来的名字是刻意设计，不是需要先修的缺陷：碰了这些路径的
 PR 会显示 `Managed Agent gate` 为 expected，直到它首个 approve 的全量运行报出该名字，
