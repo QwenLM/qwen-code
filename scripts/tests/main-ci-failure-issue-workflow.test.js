@@ -2738,16 +2738,34 @@ printf '%s\\n' '{"jobs":[]}'
       // is the fail-closed half: an empty derivation would make the loop below
       // assert nothing at all.
       expect(handoffSteps, 'built-tree handoff steps missing').toHaveLength(2);
-      for (const annotation of handoffSteps.map(
-        (step) => `The action '${step}' has timed out after 15 minutes.`,
-      )) {
-        expect(
-          new RegExp(infraStep.env.INFRA_FAILURE_SIGNATURES, 'i').test(
-            annotation,
-          ),
-          annotation,
-        ).toBe(true);
-      }
+      const retryStep = handoffSteps.find((step) => /^Retry\b/i.test(step));
+      expect(retryStep, 'no retry step among the handoff steps').toBeTruthy();
+      // Only the retry is admitted. The first download runs with
+      // `continue-on-error: true`, so its timeout cannot end the job and its
+      // annotation survives on the check run even when the retry recovers.
+      expect(
+        new RegExp(infraStep.env.INFRA_FAILURE_SIGNATURES, 'i').test(
+          `The action '${retryStep}' has timed out after 15 minutes.`,
+        ),
+        retryStep,
+      ).toBe(true);
+    });
+
+    it('files a recovered first download instead of calling the run infrastructure', () => {
+      // The retry-only narrowing, as a blob: check run 131031419699 reports
+      // both handoff steps `success`, nine genuine AssertionErrors, and one
+      // stale `Download the built tree` timeout from the attempt the retry
+      // recovered. Matching that line classified a real failure as
+      // infrastructure and suppressed the issue record. Two annotation lines
+      // stand in for the blob; the run must stay a code failure, which here is
+      // "does not match" — this workflow files instead of rerunning.
+      const blob = [
+        "The action 'Download the built tree' has timed out after 15 minutes.",
+        "The action 'Run tests and generate reports' has timed out after 15 minutes.",
+      ].join('\n');
+      expect(
+        new RegExp(infraStep.env.INFRA_FAILURE_SIGNATURES, 'i').test(blob),
+      ).toBe(false);
     });
 
     it('does not let the handoff signature swallow a hung test or install step', () => {

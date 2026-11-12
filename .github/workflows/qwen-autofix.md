@@ -2407,22 +2407,30 @@ a real regression (a co-present timeout does not block a match — one
 matching line classifies the run). Case-insensitive, vs the annotations.
 
 The built-tree handoff is the one step timeout in the list, and it is
-admitted by NAME, not by the phrase: `The action '(Download|Retry
-downloading) the built tree' has timed out`. #16927 measured why that is a
-transport failure and not a budget problem — the proxy on the hz fleet
-routes `artifactcache.actions.githubusercontent.com` outside its tunnel, so
-the 125 MiB artifact arrives at ~100 KB/s over a 209 ms path with a
-congestion window collapsed to 3 segments, and BOTH 15-minute attempts
-expire. The identical blob, same commit, re-run onto hk (which needs no
-proxy) downloaded in 19 seconds. Nothing ran: the unpack and the test step
-are skipped, so the required check is red with zero test signal, and on main
-the unclassified annotation files a code-failure issue for a commit that
-never executed. The name anchor is what keeps the "never a bare test-level
-timeout" rule above intact — `Run tests and generate reports`, the no-AK
-gate, the browser smoke and `Install Dependencies` all still file when they
-time out, because a genuinely hung suite is a regression and must not be
-re-run into silence. A regression test pins both halves: the two handoff
-annotations match, and those four do not.
+admitted by NAME, not by the phrase: `The action 'Retry downloading the
+built tree' has timed out`. Only the RETRY, never the first download. The
+first `Download the built tree` runs with `continue-on-error: true`, so its
+timeout cannot end the job, and its annotation STAYS on the check run after
+the retry recovers. Classifying on it therefore reads a recovered run as an
+infrastructure failure and swallows whatever really failed beside it: check
+run `131031419699` reports both handoff steps `success`, nine annotations
+that are genuine `AssertionError`s, and one stale
+`The action 'Download the built tree' has timed out after 15 minutes.` —
+admitted by the old two-name alternation, filed as infrastructure, and the
+real failure never addressed. The retry is armed on
+`steps.download_tree.outcome == 'failure'`, so it runs whenever the first
+attempt failed, and a timeout there kills the job with nothing executed —
+which is the shape #16927 documents. #16927 also measured why that shape is
+transport and not budget: the proxy on the hz fleet routes
+`artifactcache.actions.githubusercontent.com` outside its tunnel, so the
+125 MiB artifact arrives at ~100 KB/s over a 209 ms path with a congestion
+window collapsed to 3 segments, and both 15-minute attempts expire, while
+the identical blob re-run onto hk (no proxy) downloaded in 19 seconds. The
+name anchor keeps the "never a bare test-level timeout" rule above intact —
+`Run tests and generate reports`, the no-AK gate, the browser smoke and
+`Install Dependencies` all still file when they time out. A regression test
+pins both halves: the retry annotation matches, and the recovered-download
+blob above does not.
 
 Separate from that class, `CONFIG_FAILURE_SIGNATURES` holds the gate's
 deterministic configuration errors (`HOST_LOAD_MAX_RATIO` /

@@ -100,31 +100,65 @@ function withoutAwk() {
 // The two workflows promise their INFRA_FAILURE_SIGNATURES lists stay equal;
 // read them from the workflows themselves instead of restating them. The
 // configuration class is autofix-only: main-ci deliberately files those.
-function readSignatures(name, key = 'INFRA_FAILURE_SIGNATURES') {
-  const workflow = readFileSync(
-    fileURLToPath(new URL(`../workflows/${name}`, import.meta.url)),
-    'utf8',
-  );
-  // Read the scalar in either quoting style. `yaml` is not importable here:
-  // this suite runs in the dependency-free helper battery
-  // (`HELPER_TESTS_DEP_FREE`, before `npm ci`), whose import closure must stay
-  // `node:` builtins. Both styles have to be accepted because one signature now
-  // contains a single quote, which forces the workflow to double quotes — a
-  // matcher pinned to one style reads that legal edit as "not found" and reds
-  // every lane that runs this suite.
-  const scalar = new RegExp(
-    `^\\s*${key}:[ \\t]*('[^']*'|"[^"]*"|[^\\s#][^\\n#]*?)[ \\t]*$`,
+function scalarValue(workflow, key, name) {
+  const match = new RegExp(
+    `^([ \\t]*)${key}:[ \\t]*(.*?)[ \\t]*(?:#.*)?$`,
     'm',
-  ).exec(workflow)?.[1];
-  assert.ok(scalar, `${name}: ${key} not found`);
-  const signatures =
-    scalar.startsWith("'") && scalar.endsWith("'")
-      ? scalar.slice(1, -1).replaceAll("''", "'")
-      : scalar.startsWith('"') && scalar.endsWith('"')
-        ? JSON.parse(scalar)
-        : scalar;
-  assert.ok(signatures, `${name}: ${key} is empty`);
-  return signatures;
+  ).exec(workflow);
+  assert.ok(match, `${name}: ${key} not found`);
+  const [, indent, raw] = match;
+  // A value opening with a block-scalar indicator, an anchor, an alias or a
+  // tag keeps its text somewhere this reader cannot follow. Returning the
+  // indicator would pin a one-character "pattern" that matches nothing while
+  // the assertion above it still passes, so refuse instead.
+  assert.ok(
+    !/^[|>&*!]/.test(raw),
+    `${name}: ${key} uses the \`${raw[0]}\` form, which this dependency-free reader cannot resolve`,
+  );
+  // A following line indented deeper than the key belongs to the same node.
+  const nextLine =
+    workflow.slice(match.index + match[0].length).split('\n')[1] ?? '';
+  assert.ok(
+    !new RegExp(`^[ \\t]{${indent.length + 1},}\\S`).test(nextLine),
+    `${name}: ${key} continues on a deeper-indented line, which this reader cannot follow`,
+  );
+  if (raw.startsWith("'") && raw.endsWith("'")) {
+    return raw.slice(1, -1).replaceAll("''", "'");
+  }
+  if (raw.startsWith('"') && raw.endsWith('"')) {
+    try {
+      return JSON.parse(raw);
+    } catch (error) {
+      throw new Error(
+        `${name}: ${key} is a double-quoted scalar this reader could not decode (${error.message}): ${raw}`,
+      );
+    }
+  }
+  assert.ok(
+    raw.length > 0,
+    `${name}: ${key} is empty; an empty pattern would match every annotation`,
+  );
+  assert.ok(
+    !/^["']/.test(raw),
+    `${name}: ${key} opens a quote it does not close on the same line`,
+  );
+  return raw;
+}
+
+function readSignatures(name, key = 'INFRA_FAILURE_SIGNATURES') {
+  // `yaml` is not importable here: this suite runs in the dependency-free helper
+  // battery (`HELPER_TESTS_DEP_FREE`, before `npm ci`), whose import closure
+  // must stay `node:` builtins. The value is therefore read by hand, and both
+  // quoting styles are accepted because one signature contains a single quote,
+  // which forces the workflow to double quotes.
+  return scalarValue(
+    readFileSync(
+      fileURLToPath(new URL(`../workflows/${name}`, import.meta.url)),
+      'utf8',
+    ),
+    key,
+    name,
+  );
 }
 
 describe('check-host-load', () => {
@@ -445,6 +479,51 @@ describe('check-host-load', () => {
       env: { HOST_LOAD_MAX_WAIT_TRIES: '1', HOST_LOAD_MAX_RATIO: '2.0' },
     });
     assert.equal(below.status, 0, below.stdout);
+  });
+
+  it('reads a plain or commented scalar, and refuses the forms it cannot follow', () => {
+    // R2-2: the reader replaced a quote-pinned regex, so it must fail closed
+    // rather than half-read a value. Each case below is a YAML form a workflow
+    // author could legally reach for; the first three must throw with a message
+    // naming the form (a silent truncation would pin a pattern that matches
+    // nothing, which is the fail-open class this suite exists to catch), and the
+    // last must return the value with the comment stripped.
+    const key = 'INFRA_FAILURE_SIGNATURES';
+    for (const [form, fixture] of [
+      ['>', `env:\n  ${key}: >\n    lost communication with the server\n`],
+      ['|', `env:\n  ${key}: |-\n    lost communication with the server\n`],
+      ['&', `env:\n  ${key}: &sigs lost communication with the server\n`],
+    ]) {
+      assert.throws(
+        () => scalarValue(fixture, key, 'fixture.yml'),
+        new RegExp(`uses the .${form}. form`),
+        `${form} must be refused, not read as the indicator`,
+      );
+    }
+    // A deeper-indented continuation is the same node, and this reader stops at
+    // the first line: refuse instead of reading a prefix.
+    assert.throws(
+      () =>
+        scalarValue(
+          `env:\n  ${key}: lost communication\n    with the server\n`,
+          key,
+          'fixture.yml',
+        ),
+      /continues on a deeper-indented line/,
+    );
+    // A trailing comment is legal YAML and is not part of the value.
+    assert.equal(
+      scalarValue(`env:\n  ${key}: 'a|b' # the rerun class\n`, key, 'f.yml'),
+      'a|b',
+    );
+    assert.equal(
+      scalarValue(
+        `env:\n  ${key}: "a|b" # quoted the other way\n`,
+        key,
+        'f.yml',
+      ),
+      'a|b',
+    );
   });
 
   it('emits a breach the infrastructure classifiers recognise', () => {

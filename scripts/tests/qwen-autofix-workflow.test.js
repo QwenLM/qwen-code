@@ -1347,8 +1347,13 @@ describe('qwen-autofix workflow', () => {
     const workflowEnv = parse(workflow).env ?? {};
     const INFRA_SIGNATURES = workflowEnv.INFRA_FAILURE_SIGNATURES ?? '';
     expect(INFRA_SIGNATURES).toContain('lost communication with the server');
+    // The retry only: the first download's timeout is continue-on-error, so
+    // its annotation can survive on a check run the retry already recovered.
     expect(INFRA_SIGNATURES).toContain(
-      "The action '(Download|Retry downloading) the built tree' has timed out",
+      "The action 'Retry downloading the built tree' has timed out",
+    );
+    expect(INFRA_SIGNATURES).not.toContain(
+      "The action 'Download the built tree' has timed out",
     );
     // The deterministic configuration class is a separate list: its members
     // must be absent from the rerun class, and an empty extraction would make
@@ -1557,15 +1562,27 @@ describe('qwen-autofix workflow', () => {
     // tunnel (~100 KB/s, both 15-minute attempts expiring, zero tests run),
     // while the identical blob on a host needing no proxy took 19 seconds. The
     // scan must rerun it rather than hand a transport fault to an agent.
-    for (const msg of [
-      "The action 'Download the built tree' has timed out after 15 minutes.",
-      "The action 'Retry downloading the built tree' has timed out after 15 minutes.",
-    ]) {
-      expect(run({ checks: [FAIL], annotations: msg })).toEqual({
-        reran: true,
-        continued: true,
-      });
-    }
+    expect(
+      run({
+        checks: [FAIL],
+        annotations:
+          "The action 'Retry downloading the built tree' has timed out after 15 minutes.",
+      }),
+    ).toEqual({ reran: true, continued: true });
+    // …but ONLY the retry. The first download carries
+    // `continue-on-error: true`, so its timeout cannot end the job and its
+    // annotation stays on the check run after the retry recovers — a blob of
+    // that stale line beside a real failure must not read as infrastructure,
+    // or the loop reruns a genuine regression and never addresses it.
+    expect(
+      run({
+        checks: [FAIL],
+        annotations: [
+          "The action 'Download the built tree' has timed out after 15 minutes.",
+          "The action 'Run tests and generate reports' has timed out after 15 minutes.",
+        ].join('\n'),
+      }),
+    ).toEqual({ reran: false, continued: false });
     // …and the name anchor is what keeps the rule above intact: every OTHER
     // step timeout still falls through to the agent. Widening the signature to
     // the bare phrase would rerun a genuinely hung suite into silence.
