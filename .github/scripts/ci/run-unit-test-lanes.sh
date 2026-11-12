@@ -44,8 +44,8 @@ set -uo pipefail
 # fails.
 #
 # Set to 0 or off to disable, for an operator who wants the first failure to
-# stand. `off` is what the other levers in this test step use (VITEST_RETRY,
-# HOST_LOAD_MAX_RATIO), so both tokens are accepted and `0` keeps working.
+# stand. `off` is what the sibling lever in this test step uses (VITEST_RETRY),
+# so both tokens are accepted and `0` keeps working.
 # A non-negative integer is how many re-runs one suite gets; `off` (and `0`)
 # disable it. Anything else is a configuration error rather than a silent
 # fall-through to "enabled": an operator writing `false` must not have the

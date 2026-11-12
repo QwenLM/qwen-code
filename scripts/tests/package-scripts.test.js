@@ -1250,6 +1250,14 @@ describe('package scripts', () => {
     expect(step).toContain(
       'VITEST_RETRY: "${{ vars.QWEN_CI_VITEST_RETRY || \'2\' }}"',
     );
+    // The lane's own retry is a separate lever from --retry above: it re-runs
+    // a whole workspace suite whose every test passed and whose only unhandled
+    // error was Vitest's worker RPC budget. The lane script's tests prove the
+    // script obeys the knob; nothing else proves CI sets it, so dropping this
+    // line while resolving a conflict silently pins the default forever.
+    expect(step).toContain(
+      'QWEN_CI_RPC_RETRY: "${{ vars.QWEN_CI_RPC_RETRY || \'1\' }}"',
+    );
     // 'off' must omit the flag rather than pass --retry=0, which would
     // outrank a workspace's own config-level retry (sdk-typescript).
     expect(step).toContain('[ "${VITEST_RETRY}" != \'off\' ]');
@@ -1986,9 +1994,9 @@ describe('package scripts', () => {
         expect(retryOff.stdout).not.toContain('Every test passed');
         expect([...retryOff.calls].sort()).toEqual([...passing.calls].sort());
 
-        // `off` is the token the sibling levers in this step use
-        // (VITEST_RETRY, HOST_LOAD_MAX_RATIO); it must disable exactly like
-        // `0`, not fall through to "enabled" without a word.
+        // `off` is the token the sibling lever in this step uses
+        // (VITEST_RETRY); it must disable exactly like `0`, not fall through
+        // to "enabled" without a word.
         const retryOffToken = run('rpc-retry-off-token', {
           report: rpcReport('@qwen-code/web-shell'),
           rpcRetry: 'off',

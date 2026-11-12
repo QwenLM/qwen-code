@@ -2618,19 +2618,14 @@ printf '%s\\n' '{"jobs":[]}'
       // classifiers must see it as infrastructure, or a variable typo files a
       // code-failure issue and sends autofix after the wrong thing. The
       // annotations are the strings the scripts actually emit.
-      for (const annotation of [
-        "::error::QWEN_CI_RPC_RETRY must be a non-negative integer or 'off', got 'false'",
-        "::error::HOST_LOAD_MAX_RATIO must be a positive number or 'off', got '0'",
-        "::error::HOST_LOAD_MAX_WAIT_TRIES must be a positive integer, got '0'",
-        "::error::HOST_LOAD_WAIT_SECONDS must be a positive integer, got 'many'",
-      ]) {
-        expect(
-          new RegExp(infraStep.env.INFRA_FAILURE_SIGNATURES, 'i').test(
-            annotation,
-          ),
+      const annotation =
+        "::error::QWEN_CI_RPC_RETRY must be a non-negative integer or 'off', got 'false'";
+      expect(
+        new RegExp(infraStep.env.INFRA_FAILURE_SIGNATURES, 'i').test(
           annotation,
-        ).toBe(true);
-      }
+        ),
+        annotation,
+      ).toBe(true);
     });
 
     it('classifies per failed job and only when EVERY one is infrastructure', () => {

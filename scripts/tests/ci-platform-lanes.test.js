@@ -1904,18 +1904,6 @@ describe('GitHub helper tests', () => {
     );
   });
 
-  it('includes the host-load gate suite on both helper lanes', () => {
-    // The gate is node-builtin-only, so the fast lane can run it too: it
-    // decides whether a shard runs at all, and a gate that rotted untested
-    // would refuse healthy hosts or admit the contended ones silently.
-    expect(ci.env.HELPER_TESTS).toContain(
-      '.github/scripts/check-host-load.test.mjs',
-    );
-    expect(ci.env.HELPER_TESTS_DEP_FREE).toContain(
-      '.github/scripts/check-host-load.test.mjs',
-    );
-  });
-
   it('runs every invocation serially', () => {
     const helperSteps = Object.values(ci.jobs)
       .flatMap((job) => job.steps ?? [])
