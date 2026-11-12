@@ -84,6 +84,21 @@ public final class ManagedExtensionsClient {
         return importInput(workspaceId, null, input, metadata, null, true);
     }
 
+    public Map<String, Object> importSource(String workspaceId, String providerId, String kind,
+            String resourceId, String revision, Map<String, Object> target, String idempotencyKey) {
+        return json("POST", workspace(workspaceId) + "/source-imports", Map.of("reference", Map.of(
+                "providerId", providerId, "kind", kind, "resourceId", resourceId, "revision", revision), "target", target),
+                header(idempotencyKey));
+    }
+
+    public Map<String, Object> sourceImportReceipt(String workspaceId, String operationId) {
+        return json("GET", workspace(workspaceId) + "/source-imports/" + segment(operationId), null, null);
+    }
+
+    public Map<String, Object> lookupSourceImport(String workspaceId, String idempotencyKey) {
+        return json("GET", workspace(workspaceId) + "/source-imports", null, header(idempotencyKey));
+    }
+
     public Map<String, Object> importPackage(String workspaceId, String extensionId, Path input,
             Map<String, Object> metadata, String idempotencyKey) {
         return importInput(workspaceId, extensionId, input, metadata, header(idempotencyKey), false);
@@ -128,6 +143,18 @@ public final class ManagedExtensionsClient {
 
     public Map<String, Object> lookupConfigurationOperation(String sessionId, String key) {
         return json("POST", session(sessionId) + "/operations/lookup", Map.of("idempotencyKey", header(key)), null);
+    }
+
+    public Map<String, Object> runtimeSkillCandidates(String sessionId) {
+        return json("GET", session(sessionId) + "/skills/candidates", null, null);
+    }
+
+    public Map<String, Object> runtimeSkillSnapshot(String sessionId, Map<String, Object> request) {
+        return json("POST", session(sessionId) + "/skills/snapshot", request, null);
+    }
+
+    public Map<String, Object> importRuntimeSkill(String sessionId, Map<String, Object> request, String key) {
+        return json("POST", session(sessionId) + "/skills/imports", request, header(key));
     }
 
     public Map<String, Object> settings(String workspaceId, String extensionId) {
@@ -196,7 +223,7 @@ public final class ManagedExtensionsClient {
         }
         String operation = method + " Managed extensions";
         try {
-            int limit = route.contains("/imports") || route.contains("/inspection")
+            int limit = route.contains("/imports") || route.contains("/inspection") || route.contains("/skills/")
                     ? 8 * 1024 * 1024 : HttpSupport.MAXIMUM_JSON_BYTES;
             HttpSupport.Response response = HttpSupport.consume(http.send(request.build(), HttpSupport.bodyHandler(limit)), operation);
             DaemonClient.requireStatus(response, 200, operation);

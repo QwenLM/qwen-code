@@ -36,6 +36,7 @@ describe('genai compatibility values', () => {
     });
     expect(FunctionCallingConfigMode).toEqual({
       ANY: SdkFunctionCallingConfigMode.ANY,
+      NONE: SdkFunctionCallingConfigMode.NONE,
     });
   });
 

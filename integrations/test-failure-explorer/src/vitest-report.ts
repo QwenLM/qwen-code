@@ -17,7 +17,7 @@ import {
   type ReportItem,
 } from './contracts.js';
 
-function failFastArray<T>(element: z.ZodType<T, z.ZodTypeDef, unknown>) {
+function failFastArray<T>(element: z.ZodType<T>) {
   return z.unknown().transform((value, ctx): T[] => {
     if (!Array.isArray(value)) {
       ctx.addIssue({
@@ -30,7 +30,7 @@ function failFastArray<T>(element: z.ZodType<T, z.ZodTypeDef, unknown>) {
     for (const entry of value) {
       const result = element.safeParse(entry);
       if (!result.success) {
-        ctx.addIssue(result.error.issues[0]);
+        ctx.addIssue({ ...result.error.issues[0] });
         return z.NEVER;
       }
       entries.push(result.data);

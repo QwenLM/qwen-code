@@ -337,22 +337,10 @@ Hosted CSI selection and physical holder release remain disabled. ACK success
 keeps the holder DRAINING and does not prove worker stop or NodeUnpublish.
 The K1 scratch adapter above retains its separate no-PVC contract.
 
-The private `KubernetesCsiLogReader` provides bounded native log segments for ACK
-qualification. It corroborates the expected plugin Pod/DaemonSet/Node/container/image
-API identity before and after a current-segment read and refuses changed log
-prefixes, incomplete lines and invalid timestamps. The HTTP client requests
-timestamps without `tailLines` or `limitBytes`, uses strict UTF-8 and rejects
-responses above one MiB. ConfigMap object reads separately allow one MiB plus
-64 KiB for the JSON envelope so the largest admitted base64 worker chunk fits;
-other object reads and request bodies keep their existing one-MiB limit. These are qualification inputs only: the durable
-pre-create collector, image-specific publication/unpublish parser and physical
-retirement coordinator remain gated. Log disappearance, a fresh baseline or a
-diagnostic snapshot never releases a Workspace holder.
-Kubernetes omits rotated log files and may skip malformed CRI records. Kubelet
-chooses the log container from local status asynchronously synchronized to the
-API server; these observations cannot bind log bytes to an exact container ID.
-That additional source-binding contract remains required. RFC3339 offsets are
-accepted without altering the bytes used for prefix and digest verification.
+The Kubernetes HTTP client rejects responses above one MiB. ConfigMap object
+reads separately allow one MiB plus 64 KiB for the JSON envelope so the largest
+admitted base64 worker chunk fits; other object reads and request bodies keep
+their one-MiB limit.
 
 ## Trusted local recovery
 

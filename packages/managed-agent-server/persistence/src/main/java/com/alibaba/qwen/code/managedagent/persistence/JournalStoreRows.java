@@ -7,9 +7,10 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.StoredTransaction;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
-import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.codec.digest.DigestUtils;
@@ -53,6 +54,7 @@ final class JournalStoreRows {
                         result.getLong("activation_epoch"),
                         result.getString("latest_checkpoint_resource_id"),
                         result.getLong("compacted_through_revision"),
+                        result.getLong("packed_through_revision"),
                         result.getString("recovery_status"),
                         result.getString("recovery_detail_code"),
                         result.getString("activation_id"),
@@ -234,8 +236,8 @@ final class JournalStoreRows {
                 "SELECT " + ManagedSchemaProjection.SESSION_HEAD.columns() + " FROM ma_session_head WHERE tenant_key = ? AND harness_key = ? AND"
                         + " tenant_id = ? AND session_id = ? AND head_kind = 'MANAGED_SESSION' FOR UPDATE",
                 headMapper,
-                JdbcRuntimeBindingRepository.harnessDrainKey(tenantId),
-                JdbcRuntimeBindingRepository.harnessDrainKey(sessionId), tenantId, sessionId);
+                RuntimeAdmissionFences.harnessDrainKey(tenantId),
+                RuntimeAdmissionFences.harnessDrainKey(sessionId), tenantId, sessionId);
         ToolPublicationRetentionStore.requireLive(jdbc, tenantId, sessionId);
         return heads.isEmpty() ? null : heads.getFirst();
     }
@@ -267,8 +269,8 @@ final class JournalStoreRows {
                         "SELECT " + ManagedSchemaProjection.SESSION_HEAD.columns() + " FROM ma_session_head WHERE tenant_key = ? AND harness_key = ? AND"
                             + " tenant_id = ? AND session_id = ? AND head_kind = 'MANAGED_SESSION'",
                         headMapper,
-                        JdbcRuntimeBindingRepository.harnessDrainKey(tenantId),
-                        JdbcRuntimeBindingRepository.harnessDrainKey(sessionId),
+                        RuntimeAdmissionFences.harnessDrainKey(tenantId),
+                        RuntimeAdmissionFences.harnessDrainKey(sessionId),
                         tenantId,
                         sessionId);
         if (rows.isEmpty()) {
@@ -297,7 +299,7 @@ final class JournalStoreRows {
                         "SELECT " + ManagedSchemaProjection.RESOURCE.columns() + " FROM ma_resource WHERE resource_key = ? AND session_scope_key = ?"
                         + " AND resource_id = ?" + (lock ? " FOR UPDATE" : ""),
                         resourceMapper,
-                        com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.resourceKey(scopeKey, resourceId),
+                        ManagedSessionStore.resourceKey(scopeKey, resourceId),
                         scopeKey,
                         resourceId);
         return rows.isEmpty() ? null : rows.get(0);
@@ -469,6 +471,15 @@ final class JournalStoreRows {
                             resource.digest(),
                             resource.byteLength());
             if (matching == null || matching != 1) {
+                throw resourceCorrupt();
+            }
+            return;
+        }
+        if ("OSS_OBJECT".equals(resource.storageKind())) {
+            if (!("PUBLISHED".equals(resource.state()) || "REFERENCED".equals(resource.state()))
+                    || resource.bytes() != null || resource.objectKey() == null
+                    || resource.objectVersionId() != null || resource.encryptionKeyId() != null
+                    || resource.captureState() != null) {
                 throw resourceCorrupt();
             }
             return;
@@ -680,7 +691,7 @@ final class JournalStoreRows {
             long journalRevision, long committedSequence,
             String lastCommitDigest, long activationEpoch,
             String latestCheckpointResourceId,
-            long compactedThroughRevision, String recoveryStatus,
+            long compactedThroughRevision, long packedThroughRevision, String recoveryStatus,
             String recoveryDetailCode, String activationId,
             String activationPhase, Long activationEventEpoch,
             Long activationExpiresAt, Long activationHeadRevision) {
@@ -695,6 +706,16 @@ final class JournalStoreRows {
             long activationEpoch, String latestCheckpointResourceId,
             String recordEncoding, byte[] recordBytes, long byteLength,
             String recordDigest) {
+    }
+
+    TransactionRow withRecordBytes(TransactionRow row, byte[] bytes) {
+        return new TransactionRow(row.workspaceId(), row.journalRevision(), row.transactionId(),
+                row.operation(), row.commandId(), row.contentDigest(), row.firstSequence(),
+                row.lastSequence(), row.eventCount(), row.eventsDigest(),
+                row.previousCommitDigest(), row.commitDigest(), row.writerGeneration(),
+                row.writerId(), row.writerTokenHash(), row.activationEpoch(),
+                row.latestCheckpointResourceId(), row.recordEncoding(), bytes, row.byteLength(),
+                row.recordDigest());
     }
 
     record ResourceRow(String tenantId, String workspaceId,

@@ -1,10 +1,12 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -30,10 +32,10 @@ class WorkspaceQueryScaleMySqlIT {
             var manager = new DataSourceTransactionManager(database.source());
             var transactions = new TransactionTemplate(manager);
             var store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, new ObjectMapper(), Clock.systemUTC(), ignored -> {},
-                    new ManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+                    new JdbcManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
             String session = transactions.execute(ignored -> store.insertSessionCommand("tenant", "actor", "CREATE_SESSION",
                     "create", "digest", "qwen-code", null, null, List.of(), null)).sessionId();
-            String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey("tenant", session);
+            String scope = ManagedSessionStore.sessionScopeKey("tenant", session);
             ManagedReceipts.insertCreation(jdbc, "tenant", "actor".getBytes(java.nio.charset.StandardCharsets.UTF_8), "creation", "digest", session, null, 1);
             jdbc.update("UPDATE ma_session SET workspace_id = X'726f6f74', workspace_generation = 1, workspace_storage_id = X'73746f72616765',"
                     + " cwd_relative = '.', context_config_ref = ?, context_revision = 1, workspace_config_ref = ?, workspace_policy_ref = ?"
@@ -42,7 +44,7 @@ class WorkspaceQueryScaleMySqlIT {
             jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation, storage_id, display_name, config_ref, policy_ref, state)"
                     + " VALUES ('tenant', 'root', 1, 'storage', 'Root', ?, ?, 'ACTIVE')",
                     WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
-            var children = new ChildWorkspaceStore(jdbc, manager);
+            var children = new JdbcChildWorkspaceStore(jdbc, manager);
             var binding = new ContextBinding("tenant", "root", 1, "storage", ".", "config", 1);
             for (int index = 0; index < 5; index++) {
                 children.admit("tenant", session, "due-" + index, binding, 1);
@@ -74,7 +76,7 @@ class WorkspaceQueryScaleMySqlIT {
             ManagedSchema.initialize(database.source());
             var jdbc = new CapturingJdbc(database.source());
             WorkspaceTestStorage.register(jdbc, "other-tenant", "other-storage");
-            String alias = com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository.storageAliasKey("other-tenant", "other-storage");
+            String alias = RuntimeAdmissionFences.storageAliasKey("other-tenant", "other-storage");
             String tenantKey = ManagedSchemaKeys.key("other-tenant");
             jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation, storage_id, display_name, config_ref, policy_ref, state)"
                     + " VALUES ('other-tenant', 'other-workspace', 1, 'other-storage', 'Workspace', 'config', 'policy', 'ACTIVE')");
@@ -89,12 +91,12 @@ class WorkspaceQueryScaleMySqlIT {
                     null, java.time.Instant.now()));
             new WorkspaceOperations(jdbc, "other-tenant").create(WorkspaceOperations.Kind.STORAGE_MIGRATION, "pending-migration",
                     WorkspaceOperations.values("storage_id", "other-storage", "state", "RETIRING"));
-            var child = new ChildWorkspaceStore(jdbc, new DataSourceTransactionManager(database.source())).admit(
+            var child = new JdbcChildWorkspaceStore(jdbc, new DataSourceTransactionManager(database.source())).admit(
                     "other-tenant", "collected-parent", "pending-child", new ContextBinding("other-tenant", "other-workspace", 1,
                             "other-storage", ".", WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1), 1);
             String childKey = WorkspaceOperations.key(WorkspaceOperations.Kind.CHILD_WORKSPACE, "other-tenant", child.childWorkspaceId());
-            jdbc.update("UPDATE ma_operation SET state = ? WHERE operation_key = ?", ChildWorkspaceStore.MERGED, childKey);
-            jdbc.update("UPDATE ma_workspace SET child_state = ? WHERE tenant_id = ? AND workspace_id = ?", ChildWorkspaceStore.MERGED,
+            jdbc.update("UPDATE ma_operation SET state = ? WHERE operation_key = ?", JdbcChildWorkspaceStore.MERGED, childKey);
+            jdbc.update("UPDATE ma_workspace SET child_state = ? WHERE tenant_id = ? AND workspace_id = ?", JdbcChildWorkspaceStore.MERGED,
                     "other-tenant", child.childWorkspaceId());
             for (int size : new int[] {1000, 10000}) {
                 int from = size == 1000 ? 0 : 1000;
@@ -107,13 +109,13 @@ class WorkspaceQueryScaleMySqlIT {
                 for (int index = from; index < size; index++) {
                     String id = "closed-" + index;
                     String sessionKey = ManagedSchemaKeys.key(id);
-                    sessions.add(new Object[] {id, tenantKey, sessionKey, com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey("other-tenant", id)});
+                    sessions.add(new Object[] {id, tenantKey, sessionKey, ManagedSessionStore.sessionScopeKey("other-tenant", id)});
                     heads.add(new Object[] {tenantKey, sessionKey, id, id});
                     bindings.add(new Object[] {id, ManagedSchemaKeys.key(id), ManagedSchemaKeys.key("scope", id), alias});
                     operations.add(new Object[] {ManagedSchemaKeys.key("operation", id), ManagedSchemaKeys.key("other-tenant"), id,
                             ManagedSchemaKeys.key(id), alias});
                     children.add(new Object[] {ManagedSchemaKeys.key("child-operation", id), ManagedSchemaKeys.key("other-tenant"), "child-" + id,
-                            ManagedSchemaKeys.key("child", id), alias, index % 2 == 0 ? ChildWorkspaceStore.MERGED : ChildWorkspaceStore.DISCARDED});
+                            ManagedSchemaKeys.key("child", id), alias, index % 2 == 0 ? JdbcChildWorkspaceStore.MERGED : JdbcChildWorkspaceStore.DISCARDED});
                     owners.add(new Object[] {ManagedSchemaKeys.key("old-physical", id), ManagedSchemaKeys.key("old-physical", id)});
                 }
                 jdbc.batchUpdate("INSERT INTO ma_session (tenant_id, session_id, session_kind, tenant_key, session_key, session_scope_key, workspace_storage_id,"
@@ -139,13 +141,13 @@ class WorkspaceQueryScaleMySqlIT {
                 jdbc.update("UPDATE ma_operation SET state = 'COMPLETED' WHERE operation_key = ?", migrationKey);
                 assertThat(jdbc.queryForList(operation.sql(), Integer.class, operation.arguments())).isEmpty();
                 assertBounded(jdbc, operation, "idx_ma_operation_storage", 5);
-                jdbc.update("UPDATE ma_operation SET state = ? WHERE operation_key = ?", ChildWorkspaceStore.PREPARING, childKey);
-                jdbc.update("UPDATE ma_workspace SET child_state = ? WHERE tenant_id = ? AND workspace_id = ?", ChildWorkspaceStore.PREPARING,
+                jdbc.update("UPDATE ma_operation SET state = ? WHERE operation_key = ?", JdbcChildWorkspaceStore.PREPARING, childKey);
+                jdbc.update("UPDATE ma_workspace SET child_state = ? WHERE tenant_id = ? AND workspace_id = ?", JdbcChildWorkspaceStore.PREPARING,
                         "other-tenant", child.childWorkspaceId());
                 assertThat(jdbc.queryForList(operation.sql(), Integer.class, operation.arguments())).containsExactly(1);
                 assertBounded(jdbc, operation, "idx_ma_operation_storage", 5);
-                jdbc.update("UPDATE ma_operation SET state = ? WHERE operation_key = ?", ChildWorkspaceStore.MERGED, childKey);
-                jdbc.update("UPDATE ma_workspace SET child_state = ? WHERE tenant_id = ? AND workspace_id = ?", ChildWorkspaceStore.MERGED,
+                jdbc.update("UPDATE ma_operation SET state = ? WHERE operation_key = ?", JdbcChildWorkspaceStore.MERGED, childKey);
+                jdbc.update("UPDATE ma_workspace SET child_state = ? WHERE tenant_id = ? AND workspace_id = ?", JdbcChildWorkspaceStore.MERGED,
                         "other-tenant", child.childWorkspaceId());
                 jdbc.update("UPDATE ma_operation SET state = 'RETIRING' WHERE operation_key = ?", migrationKey);
                 var head = new Query(LocalStorageOwners.HEAD_AUTHORITY_SQL, new Object[] {"other-tenant", tenantKey, "other-tenant", "other-storage"});
@@ -170,7 +172,7 @@ class WorkspaceQueryScaleMySqlIT {
             workspaces.add(new Object[] {child.getBytes(java.nio.charset.StandardCharsets.UTF_8), child.getBytes(java.nio.charset.StandardCharsets.UTF_8),
                     session.getBytes(java.nio.charset.StandardCharsets.UTF_8), rawRun.getBytes(java.nio.charset.StandardCharsets.UTF_8)});
             String resourceId = "history-resource-" + index;
-            String resourceKey = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.resourceKey(scope, resourceId);
+            String resourceKey = ManagedSessionStore.resourceKey(scope, resourceId);
             resources.add(new Object[] {resourceKey, scope, session.getBytes(java.nio.charset.StandardCharsets.UTF_8),
                     resourceId.getBytes(java.nio.charset.StandardCharsets.UTF_8), com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceRecoveryProtocol.hash("{}".getBytes(java.nio.charset.StandardCharsets.UTF_8))});
             references.add(new Object[] {scope, ManagedSchemaKeys.key(resourceId), resourceKey,

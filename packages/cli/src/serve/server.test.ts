@@ -304,47 +304,95 @@ vi.mock('node:fs', async (importOriginal) => {
     realpathSync: wrapped,
   };
 });
+// The worktree doubles live on the modules that define them, because the
+// shared restore core (`server/session-restore.ts`) imports those deep paths
+// rather than the barrel. The barrel mock below re-exports them, so a route
+// reading through the barrel and the restore reading through the deep path
+// observe the same double. The dependency runs barrel → deep only: a deep
+// factory that imported the mocked barrel would deadlock, since the barrel's
+// own `importOriginal` reaches these modules.
+vi.mock(
+  '@qwen-code/qwen-code-core/services/gitWorktreeService.js',
+  async (importOriginal) => {
+    const original =
+      await importOriginal<
+        typeof import('@qwen-code/qwen-code-core/services/gitWorktreeService.js')
+      >();
+    return {
+      ...original,
+      createWorktreeSessionMarkerExclusive: (...args: unknown[]) =>
+        mockWt.createMarker ? mockWt.createMarker(...args) : Promise.resolve(),
+      readWorktreeSessionMarkerStrict: (...args: unknown[]) =>
+        mockWt.readMarker
+          ? mockWt.readMarker(...args)
+          : Promise.resolve({ state: 'missing' }),
+      readWorktreeSessionMarker: (...args: unknown[]) =>
+        mockWt.readMarkerLenient
+          ? mockWt.readMarkerLenient(...args)
+          : (
+              original.readWorktreeSessionMarker as (...a: unknown[]) => unknown
+            )(...args),
+      GitWorktreeService: class MockGitWorktreeService {
+        static validateUserWorktreeSlug =
+          original.GitWorktreeService.validateUserWorktreeSlug;
+        static generateAutoSlug = original.GitWorktreeService.generateAutoSlug;
+        constructor() {
+          if (mockWt.impl) {
+            Object.assign(this, mockWt.impl());
+          }
+        }
+      },
+    };
+  },
+);
+vi.mock(
+  '@qwen-code/qwen-code-core/services/worktreeSessionService.js',
+  async (importOriginal) => {
+    const original =
+      await importOriginal<
+        typeof import('@qwen-code/qwen-code-core/services/worktreeSessionService.js')
+      >();
+    return {
+      ...original,
+      readWorktreeSession: (...args: unknown[]) =>
+        mockWt.readSidecar
+          ? mockWt.readSidecar(...args)
+          : Promise.resolve(null),
+      readWorktreeSessionStrict: async (...args: unknown[]) => {
+        if (mockWt.readSidecarStrict) {
+          return mockWt.readSidecarStrict(...args);
+        }
+        if (!mockWt.readSidecar) {
+          return { state: 'missing' };
+        }
+        const session = await mockWt.readSidecar(...args);
+        return session ? { state: 'valid', session } : { state: 'missing' };
+      },
+      writeWorktreeSession: (...args: unknown[]) =>
+        mockWt.writeSidecar ? mockWt.writeSidecar(...args) : Promise.resolve(),
+    };
+  },
+);
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const original =
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
+  const gitWorktree = await import(
+    '@qwen-code/qwen-code-core/services/gitWorktreeService.js'
+  );
+  const worktreeSession = await import(
+    '@qwen-code/qwen-code-core/services/worktreeSessionService.js'
+  );
   return {
     ...original,
-    createWorktreeSessionMarkerExclusive: (...args: unknown[]) =>
-      mockWt.createMarker ? mockWt.createMarker(...args) : Promise.resolve(),
-    readWorktreeSessionMarkerStrict: (...args: unknown[]) =>
-      mockWt.readMarker
-        ? mockWt.readMarker(...args)
-        : Promise.resolve({ state: 'missing' }),
-    readWorktreeSession: (...args: unknown[]) =>
-      mockWt.readSidecar ? mockWt.readSidecar(...args) : Promise.resolve(null),
-    readWorktreeSessionMarker: (...args: unknown[]) =>
-      mockWt.readMarkerLenient
-        ? mockWt.readMarkerLenient(...args)
-        : (original.readWorktreeSessionMarker as (...a: unknown[]) => unknown)(
-            ...args,
-          ),
-    readWorktreeSessionStrict: async (...args: unknown[]) => {
-      if (mockWt.readSidecarStrict) {
-        return mockWt.readSidecarStrict(...args);
-      }
-      if (!mockWt.readSidecar) {
-        return { state: 'missing' };
-      }
-      const session = await mockWt.readSidecar(...args);
-      return session ? { state: 'valid', session } : { state: 'missing' };
-    },
-    writeWorktreeSession: (...args: unknown[]) =>
-      mockWt.writeSidecar ? mockWt.writeSidecar(...args) : Promise.resolve(),
-    GitWorktreeService: class MockGitWorktreeService {
-      static validateUserWorktreeSlug =
-        original.GitWorktreeService.validateUserWorktreeSlug;
-      static generateAutoSlug = original.GitWorktreeService.generateAutoSlug;
-      constructor() {
-        if (mockWt.impl) {
-          Object.assign(this, mockWt.impl());
-        }
-      }
-    },
+    createWorktreeSessionMarkerExclusive:
+      gitWorktree.createWorktreeSessionMarkerExclusive,
+    readWorktreeSessionMarkerStrict:
+      gitWorktree.readWorktreeSessionMarkerStrict,
+    readWorktreeSessionMarker: gitWorktree.readWorktreeSessionMarker,
+    GitWorktreeService: gitWorktree.GitWorktreeService,
+    readWorktreeSession: worktreeSession.readWorktreeSession,
+    readWorktreeSessionStrict: worktreeSession.readWorktreeSessionStrict,
+    writeWorktreeSession: worktreeSession.writeWorktreeSession,
   };
 });
 
@@ -18915,15 +18963,16 @@ describe('createServeApp', () => {
       },
     );
 
-    // The restore handler's `!res.writable` cleanup branch (kill on
-    // !attached, detach on attached) is line-for-line identical to
-    // the matching branch on `POST /session`; routing-side
-    // disconnect tests for that handler weren't added when the
-    // cleanup was originally introduced because the supertest +
-    // Node http close-event timing makes the assertion flaky in
-    // CI. The same constraint applies here. The cleanup behavior
-    // is exercised manually via the route handler closure shared
-    // between both routes in `restoreSessionHandler`.
+    // The restore's disconnect cleanup (kill on !attached, detach on
+    // attached) is line-for-line identical to the matching branch on
+    // `POST /session`; routing-side disconnect tests for it weren't
+    // added when the cleanup was originally introduced because the
+    // supertest + Node http close-event timing makes the assertion
+    // flaky in CI. The same constraint applies here. The workspace-session
+    // arms now live in `restoreSessionCore` behind its `isCancelled`
+    // predicate, and `server/session-restore.test.ts` drives that predicate
+    // directly — no HTTP disconnect needed — so both arms, the telemetry
+    // sink and the reservation release are pinned there.
 
     it('restores worktree isolation on load when sidecar exists', async () => {
       const bridge = fakeBridge();

@@ -9,7 +9,7 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.AcceptanceVerdict;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.ParkedOperation;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecordStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedExtensionRecordStore;
 import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore.TaskTarget;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerService;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -58,7 +58,7 @@ class OperationReconcilerTest {
             TENANT, SESSION, "rename:3", "RENAME");
 
     private AgentStateStore store;
-    private ManagedExtensionRecordStore records;
+    private JdbcManagedExtensionRecordStore records;
     private HarnessConnector harness;
     private RuntimeBrokerService broker;
     private OperationReconciler reconciler;
@@ -67,7 +67,7 @@ class OperationReconcilerTest {
     @BeforeEach
     void setUp() {
         store = mock(AgentStateStore.class);
-        records = mock(ManagedExtensionRecordStore.class);
+        records = mock(JdbcManagedExtensionRecordStore.class);
         harness = mock(HarnessConnector.class);
         broker = mock(RuntimeBrokerService.class);
         when(records.findTaskTarget(TENANT, SESSION, TASK))

@@ -1607,6 +1607,7 @@ describe('release workflow', () => {
     // run never reached, words a test merely printed).
     const timeout = 'Error: [vitest-worker]: Timeout calling "x"';
     const tally = ' Tests  10614 passed (10614)';
+    const unhandled = '⎯⎯⎯⎯⎯⎯ Unhandled Errors ⎯⎯⎯⎯⎯⎯';
     const passedThrough =
       '::warning title=Workspace tests passed through a Vitest transport timeout::';
     const stands =
@@ -1622,14 +1623,14 @@ describe('release workflow', () => {
       // unhandled error Vitest counted. It cost this release three attempts.
       [
         'transport timeout, run completed',
-        `${timeout}\n${tally}\n     Errors  1 error`,
+        `${unhandled}\n${timeout}\n${tally}\n     Errors  1 error`,
         1,
         passedThrough,
         0,
       ],
       [
         'transport timeout, killed by a signal',
-        `${timeout}\n${tally}\n     Errors  1 error`,
+        `${unhandled}\n${timeout}\n${tally}\n     Errors  1 error`,
         137,
         '::warning title=Workspace tests exited 137 on a Vitest transport timeout::',
       ],
@@ -1637,7 +1638,7 @@ describe('release workflow', () => {
       // something else as well, whatever its header said.
       [
         'transport timeout beside a real one',
-        `${timeout}\nError: write after end\n${tally}\n     Errors  2 errors`,
+        `${unhandled}\n${timeout}\nError: write after end\n${tally}\n     Errors  2 errors`,
         1,
         stands,
       ],
@@ -1648,7 +1649,7 @@ describe('release workflow', () => {
       // them the oncall is told one of four things happened when none did.
       [
         'transport timeout counted twice against one unhandled error',
-        `${timeout}\n${timeout}\n${tally}\n     Errors  1 error`,
+        `${unhandled}\n${timeout}\n${timeout}\n${tally}\n     Errors  1 error`,
         1,
         '::warning title=Workspace tests exited 1 on a Vitest transport timeout::A transport timeout the run cannot account for — no passing tally, a failing tally, a signal death, an unhandled error that was not the transport, or the two counts disagreeing for a reason this log does not show. The failure stands (status 1, 1 counted error(s) vs 2 transport line(s)); rerun the job.',
       ],
@@ -1660,13 +1661,13 @@ describe('release workflow', () => {
       // The count sees both, because it never looks at the header.
       [
         'transport timeout beside a suffix-less crash header',
-        `${timeout}\nPoolTimeout: worker pool exhausted\n${tally}\n     Errors  2 errors`,
+        `${unhandled}\n${timeout}\nPoolTimeout: worker pool exhausted\n${tally}\n     Errors  2 errors`,
         1,
         stands,
       ],
       [
         'transport timeout beside a bare string throw',
-        `${timeout}\nUnknown Error: a bare string, no class header\n${tally}\n     Errors  2 errors`,
+        `${unhandled}\n${timeout}\nUnknown Error: a bare string, no class header\n${tally}\n     Errors  2 errors`,
         1,
         stands,
       ],
@@ -1677,18 +1678,18 @@ describe('release workflow', () => {
       // unmoved by them.
       [
         'transport timeout beside Error: lines a test printed',
-        `${timeout}\nError: boom\nError: Not implemented: navigation\n${tally}\n     Errors  1 error`,
+        `${unhandled}\n${timeout}\nError: boom\nError: Not implemented: navigation\n${tally}\n     Errors  1 error`,
         1,
         passedThrough,
         0,
       ],
-      // `--workspaces` prints one summary per workspace into one log, so both
-      // figures are whole-file sums: a passing tally cannot cover a later
-      // workspace's crash, and two transport deaths in two workspaces still
-      // pass.
+      // `--workspaces` prints one summary per workspace into one log, so the
+      // `Errors` figure is a whole-file sum: a passing tally cannot cover a
+      // later workspace's crash, and two transport deaths in two workspaces
+      // still pass.
       [
         'tally, then a later workspace crashing',
-        `${timeout}\n${tally}\n Tests  8 passed (8)\n     Errors  2 errors`,
+        `${unhandled}\n${timeout}\n${tally}\n Tests  8 passed (8)\n     Errors  2 errors`,
         1,
         stands,
       ],
@@ -1697,14 +1698,14 @@ describe('release workflow', () => {
       // one of them (run 33713579913).
       [
         'four transport deaths, four unhandled errors',
-        `${timeout}\n${timeout}\n${timeout}\n${timeout}\n${tally}\n     Errors  4 errors`,
+        `${unhandled}\n${timeout}\n${timeout}\n${timeout}\n${timeout}\n${tally}\n     Errors  4 errors`,
         1,
         passedThrough,
         0,
       ],
       [
         'two workspaces, both lost to the transport',
-        `${timeout}\n Tests  5 passed (5)\n     Errors  1 error\nError: [vitest-worker]: Timeout calling "y"\n Tests  7 passed (7)\n     Errors  1 error`,
+        `${unhandled}\n${timeout}\n Tests  5 passed (5)\n     Errors  1 error\n${unhandled}\nError: [vitest-worker]: Timeout calling "y"\n Tests  7 passed (7)\n     Errors  1 error`,
         1,
         passedThrough,
         0,
@@ -1713,13 +1714,13 @@ describe('release workflow', () => {
       // line at all, no passing tally, or a failing tally.
       [
         'transport timeout, no error summary to count',
-        `${timeout}\n${tally}`,
+        `${unhandled}\n${timeout}\n${tally}`,
         1,
         stands,
       ],
       [
         'transport timeout, no tally to back it',
-        'Error: [vitest-worker]: Timeout calling "onTaskUpdate"',
+        `${unhandled}\nError: [vitest-worker]: Timeout calling "onTaskUpdate"`,
         1,
         stands,
       ],
@@ -1728,7 +1729,7 @@ describe('release workflow', () => {
       // count is all transport.
       [
         'error summary with no tally to back it',
-        `${timeout}\n     Errors  1 error`,
+        `${unhandled}\n${timeout}\n     Errors  1 error`,
         1,
         stands,
       ],
@@ -1745,7 +1746,7 @@ describe('release workflow', () => {
       // beside a real transport death do not inflate it into a mismatch.
       [
         'transport timeout, and Timeout calling printed by a test',
-        `${timeout}\nTimeout calling the vendor API\n${tally}\n     Errors  1 error`,
+        `${unhandled}\n${timeout}\nTimeout calling the vendor API\n${tally}\n     Errors  1 error`,
         1,
         passedThrough,
         0,
@@ -1758,14 +1759,56 @@ describe('release workflow', () => {
       // earned — the false-red this PR exists to remove, back again.
       [
         'transport timeout, and a summary-shaped line a test printed',
-        `${timeout}\nErrors 2 errors occurred in fixture data\n${tally}\n     Errors  1 error`,
+        `${unhandled}\n${timeout}\nErrors 2 errors occurred in fixture data\n${tally}\n     Errors  1 error`,
+        1,
+        passedThrough,
+        0,
+      ],
+      // Console output is echoed at column 0, so a test that prints the
+      // transport's exact prefix outside the unhandled-error section must not
+      // move the count. A whole-file grep reads two here against one counted
+      // error and refuses the pass the run earned; the anchored count reads
+      // one and grants it.
+      [
+        'transport timeout, and the transport prefix printed outside the section',
+        `${unhandled}\n${timeout}\n${tally}\n     Errors  1 error\n[vitest-worker]: Timeout calling "printed by a test"`,
+        1,
+        passedThrough,
+        0,
+      ],
+      // The pass must be earned by at least one unhandled error Vitest itself
+      // counted. A log with no `Errors` summary and a transport prefix printed
+      // outside any section used to satisfy `0 == 0` and pass a shard whose
+      // only "evidence" was a test's own output.
+      [
+        'transport prefix printed, no error summary to count',
+        `${tally}\n[vitest-worker]: Timeout calling "printed by a test"`,
+        1,
+        stands,
+      ],
+      // The opener needs Vitest's ruler on both sides: the bare words are a
+      // phrase a test can print, not the section header.
+      [
+        'transport timeout, and the bare section words printed',
+        `Unhandled Errors\n${timeout}\n${unhandled}\n${timeout}\n${tally}\n     Errors  1 error`,
+        1,
+        passedThrough,
+        0,
+      ],
+      // A test can print a line that merely starts with the section header.
+      // The opener must match Vitest's ruler-shaped line, not any line that
+      // contains the words, or the printed copy opens a pseudo-section and the
+      // transport line after it is counted twice against one real error.
+      [
+        'transport timeout, and a printed near-miss of the section header',
+        `${unhandled}\n${timeout}\n${tally}\n     Errors  1 error\nUnhandled Errors: a test printed this\n${timeout}`,
         1,
         passedThrough,
         0,
       ],
       [
         'transport timeout, failing tally',
-        `${timeout}\n Tests  3 failed | 10611 passed (10614)\n     Errors  1 error`,
+        `${unhandled}\n${timeout}\n Tests  3 failed | 10611 passed (10614)\n     Errors  1 error`,
         1,
         stands,
       ],
@@ -1774,7 +1817,7 @@ describe('release workflow', () => {
       // across the whole log rather than trusted to the branch above.
       [
         'passing tally in one workspace, failing tally in another',
-        `${timeout}\n Tests  10 passed (10)\n Test Files  1 failed (3)\n     Errors  1 error`,
+        `${unhandled}\n${timeout}\n Tests  10 passed (10)\n Test Files  1 failed (3)\n     Errors  1 error`,
         1,
         stands,
       ],

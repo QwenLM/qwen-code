@@ -231,6 +231,8 @@ See the complete design:
 
 Tool publication depends on `ToolPublicationObjectStore`; Aliyun OSS is its default implementation. Publication remains disabled unless `qwen.managed-agent.tool-publication.enabled=true`. To use another backend, register one application `@Bean` returning `ToolPublicationObjectStore` from a configuration imported into the Spring server. The default OSS auto-configuration then backs off, and no OSS endpoint, region, bucket or credentials are needed. Common publication service URL, capacities and verification deadlines remain required. Without a custom store, existing OSS configuration and client lifecycle are unchanged.
 
+Oversized private Session resources and closed-Session journal cold storage use the same object store through `qwen.managed-agent.session-resources.*`. All controls default off: `enabled` admits allocate/upload/finalize for over-cap resources (while off they are refused with HTTP 501 `managed_session_oss_disabled`); `pack-job-enabled` builds and publishes immutable journal packs without deleting SQL bodies; `deletion-enabled` evicts covered SQL bodies only after `deletion-grace` (default 72h, must exceed backup replication lag) and only once pack-only mode is qualified. `oss-key-prefix`, `pack-target-bytes`, `pack-max-transactions` and `scan-delay` tune placement and the background sweeper. Deploy compatible readers before enabling writes, qualify pack-only mode before enabling eviction; rollback disables writes/eviction but keeps readers, hydration and reconciliation.
+
 Implement atomic create without overwrite, guarded reads, idempotent physical deletion and `validateConfiguration()` for private, durable, immutable storage. Throw `ToolPublicationStorageException` with `ACCESS_DENIED` for definite storage denial or `FAILURE` for other backend failures, preserving the original cause. Even with scheduled GC disabled, failed-publication cleanup requires deletion. Do not automatically replay completed writes or a returned stream. All server instances sharing a SQL catalog must use the same byte namespace: replacing the bean does not migrate retained objects or enable fallback to another backend.
 
 The extension applies to the Spring server. Standalone `WorkspaceRecoveryMain` and `WorkspaceCsiWorkerAckMain` still construct their documented OSS/inline storage directly; custom-backend deployments must integrate the same backend into their maintenance tooling. No additional production backend is included. Design: [English](../../docs/design/2026-10-16-managed-tool-storage-interface.md) | [简体中文](../../docs/design/2026-10-16-managed-tool-storage-interface.zh-CN.md).
@@ -277,29 +279,23 @@ revalidation window: [English](../../docs/design/2026-10-02-managed-agent-query-
 
 ## Asynchronous tool publication verification
 
-Enable `qwen.managed-agent.tool-publication.async-verification-enabled`
-(default `false`) to use asynchronous admission. `verification-concurrency`
-defaults to `2` and controls the dedicated verifier pool, independently of
-retention and GC.
+Every producer operation (segment, resource, seal, prefix and finish) is
+admitted asynchronously. The server stores the inputs, returns HTTP 202 with
+`state: PENDING`, and a dedicated verifier pool reads back, scans and installs
+the result; `verification-concurrency` (default `2`) sizes that pool,
+independently of retention and GC. Clients poll the operation status until it
+is `SUCCEEDED`. `FAILED` carries only a safe `error: {status, code}` and must
+be handled as a terminal error, outside network retry handling. The adapter
+keeps awaiting verified success before completing publish, seal, prefix, or
+finish.
 
-Clients that support asynchronous verification send
-`X-Qwen-Tool-Publication-Async: 1` and poll the operation status after HTTP 202.
-Synchronous responses remain supported when asynchronous verification is
-disabled or the request does not opt in. A mode is saved
-when each operation is created, so retries do not change it. `FAILED` carries
-only a safe `error: {status, code}` and must be handled as a terminal error,
-outside network retry handling. The adapter keeps awaiting verified success
-before completing publish, seal, prefix, or finish.
+Historical success replay returns the prior receipt; actual reads and final
+integrity checks still validate current storage bytes.
 
-For rollback, disable new async admission and leave the verifier and head
-authorization running until accepted work drains. Do not downgrade the server
-while pending async operations still need verification. Historical async
-success replay returns the prior receipt; actual reads and final integrity
-checks still validate current storage bytes.
-
-Design and client migration contract:
-[English](../../docs/design/2026-10-07-managed-tool-publication-async-verification.md) |
-[简体中文](../../docs/design/2026-10-07-managed-tool-publication-async-verification.zh-CN.md).
+Design: [English](../../docs/design/2026-10-07-managed-tool-publication-async-verification.md) |
+[简体中文](../../docs/design/2026-10-07-managed-tool-publication-async-verification.zh-CN.md);
+single verification mode: [English](../../docs/design/2026-11-10-managed-tool-publication-single-verification-mode.md) |
+[简体中文](../../docs/design/2026-11-10-managed-tool-publication-single-verification-mode.zh-CN.md).
 
 ## Experimental reference distribution
 
@@ -1030,7 +1026,7 @@ Schema V6 preserves the original policy and adds a current override plus per-Tur
 
 Workspace-bound WebShell Session summaries can include `modelContext` with the actual observed `modelId`, optional latest-request `inputTokens` and resolved `contextWindowSize`, and `observedAt`. The Hosted CLI records capacity beside successful provider usage; the Java Session Store projects only committed main-model attempts into one private latest-resource pointer. Lists read these observations in one batch without scanning journal history. Older or invalid usage advances the pointer but leaves missing values unknown; cumulative billing totals and inferred capacities never substitute for them. The shared usage popover does not offer manual compression. New tasks continue to select published AgentDefinition presets. This observation projection uses existing SQL tables and resource-reference cleanup without changing the recovery format.
 
-To allow an existing Workspace Session to change its next Turn's model, publish an explicit `qwen.managed-agent.model-catalog` list of `{modelId, label}` entries in the server configuration. The default is empty. IDs must identify configured, cached-credential models in the Hosted CLI; this selection path supplies only an ID. The Harness must advertise `model-selection/1`. `POST /api/agent/web-shell/v1/session-models/query` returns the catalog and current selection; `POST /api/agent/web-shell/v1/session-models/change` takes `sessionId`, `modelId`, `expectedRevision` and `idempotencyKey` and synchronously returns the saved selection. The caller needs Workspace OPERATOR or OWNER and the Session must be idle, without pending approval, context/lifecycle work or recovery. Same-key retries return their original result before mutable catalog and role gates, provided the caller still has read access. They never reapply a change.
+To allow an existing Workspace Session to change its next Turn's model, publish an explicit `qwen.managed-agent.model-catalog` list of `{modelId, label}` entries in the server configuration. The default is empty. IDs must identify configured, cached-credential models in the Hosted CLI; this selection path supplies only an ID. The Harness must advertise `model-selection/1`. `POST /api/agent/web-shell/v1/session-models/query` returns the catalog and current selection; `POST /api/agent/web-shell/v1/session-models/change` takes `sessionId`, `modelId`, `expectedRevision` and `idempotencyKey` and synchronously returns the saved selection. The caller needs Workspace OPERATOR or OWNER. A running Turn or pending approval does not prevent saving a later-Turn selection; already admitted Turns keep their immutable model snapshot. Lifecycle, recovery and unsettled context changes remain guarded. The browser treats a validated success receipt as completion, refreshes state in the background and does not require another user confirmation. Same-key retries return their original result before mutable catalog and role gates, provided the caller still has read access. They never reapply a change.
 
 Creation can instead supply a complete connection in public `model_config` or
 WebShell `modelConfig`:
@@ -1076,6 +1072,10 @@ parameter limits, quotas and outbound network restrictions must be enforced by
 the caller or deployment. Each Session retains an immutable credential snapshot,
 so replacing a provider key requires a new Session. See the
 [deployment boundary](../../docs/design/managed-session-model-config.md#multi-tenant-deployment-boundary).
+
+Managed BTW and recap generation is opt-in through `qwen.managed-agent.side-queries-enabled=true` (default `false`). Deploy matching Server, Java SDK, Harness and WebShell builds; the Session Store and `side-query/1` are required. Only ACTIVE Sessions with explicit `model_config` and the caller's execution authority can generate. Catalog/default-model Sessions remain unavailable. Cold Sessions do not attach to a Harness Session, acquire a writer, change placement or create a Runtime for these requests.
+
+WebShell provides `/btw <question>`, a private history panel and `/recap`. BTW retains the current actor's latest 20 successful pairs. Automatic recap defaults off; after at least five minutes away it waits for main/queue idle, needs three successful user turns initially and two new turns after a successful recap, and rechecks content and main-input boundaries before display. Queries have a five-minute deadline, one provider attempt and four physical execution slots per Harness. Stop affects only the side query. Disabling admission preserves authorized result reads and accepted work. The V1 baseline includes `ma_side_query`; recreate development catalogs. CSI application-image export with retained side-query data fails closed in this version. See the [design](../../docs/design/2026-11-09-managed-btw-recap.md) and [implementation evidence](../../docs/plans/2026-11-09-managed-btw-recap.md).
 
 Idle Workspace Sessions support manual context compression when the Harness advertises `context-compression/1`. Send `POST /v1/agents/sessions/{sessionId}/compress` with `Idempotency-Key` and `{ "expected_compaction_revision": 0 }`, using the Session's current `compaction_revision`; WebShell uses `/api/agent/web-shell/v1/sessions/compress` and camelCase fields. The public `context_compression` capability advertises deployment support; the WebShell `contextCompression` capability also reflects the current caller grant and execution facts. A Workspace OPERATOR or OWNER can admit the durable `context_compression` operation; the existing operation query returns `pending`, `running`, `recovery_blocked`, `completed` or `failed`, and a completed outcome is `compressed` or `noop`. Same-key retries resolve the original operation before mutable capability, revision and busy checks. Compression refuses active or queued Turns, approvals, unsettled Hooks and conflicting context work. It does not create a user Turn or change approval, Plan or Workspace context revisions. After compression, context usage stays unknown until the next main-model observation. Deploy matching Server/Broker, Harness and WebShell builds using the current V1 baseline; stop new compression admission and settle accepted operations before rollback. Existing retained journals establish their compaction revision on first read; if that evidence is unavailable, the capability is false and the revision is omitted.
 
@@ -1314,7 +1314,8 @@ warns. Cadences bound through `@Scheduled` placeholders —
 `artifacts.projection-interval`, `channels.scan-delay`,
 `child-relay.scan-delay`, `child-workspace.scan-delay`,
 `dispatch.scan-delay`, `events.replay-floor-interval`,
-`message-relay.scan-delay`, `session-worktree.scan-delay` and
+`message-relay.scan-delay`, `session-resources.scan-delay`,
+`session-worktree.scan-delay` and
 `wake-recovery.scan-delay` — also read a bare number as milliseconds,
 and the startup warning cannot see them, so always write the suffix
 there.
@@ -1753,6 +1754,32 @@ Review normalized resources and non-secret configuration before confirming insta
 
 Runtime project Skill snapshots and personal HTTP MCP OAuth are separate dependent deliveries. This installation protocol remains version 1 and adds no personal credential tables or bindings. See the complete [English design](../../docs/design/2026-11-07-managed-skills-mcp-self-service.md) and [Chinese design](../../docs/design/2026-11-07-managed-skills-mcp-self-service.zh-CN.md). Disabling self-service keeps already published and installed content available. Local focused checks and prior whole-branch CI do not establish real MySQL, browser-to-Runtime or process-fault acceptance of a split head.
 
+### Import project Skills from the current Runtime
+
+After first-stage self-service is available, enable `qwen.managed-agent.extensions.runtime-skill-import-enabled` only with the Hosted `managed-runtime-skill-import/1` capability. Use **Import from current Workspace** to discover `.qwen/skills` and `.agents/skills` in the Session's original ready Runtime. Snapshot and archive reads retain the observed owner/generation and filesystem boundary; a changed source or owner fails without fallback or provisioning. Review and explicitly apply the immutable snapshot through the existing installation chain. Re-import publishes a new revision and does not watch or automatically update existing Sessions. See the [English design](../../docs/design/2026-11-08-managed-runtime-skill-import.md) and [Chinese design](../../docs/design/2026-11-08-managed-runtime-skill-import.zh-CN.md). Personal OAuth is a separate delivery and is not required.
+
+## Application-owned extension sources and archive storage
+
+Applications can supply Spring Beans implementing `ManagedExtensionSource` and `ExtensionArchiveStorage` from `com.alibaba:qwen-managed-agent-contracts`. Source IDs must be stable and unique; duplicate IDs fail startup. The default directory backend backs off when custom storage is present, so an embedding application using OSS does not need `extensions.artifact-directory`.
+
+The source adapter implements `id()`, `resolve(Context, Reference)` and `open(Context, Resolved)`. Resolve must authorize the trusted tenant/Actor against the requested exact business revision on every call. Return a canonical resource ID and a private archive handle; never return partial materials or substitute a current revision for a missing historical revision. `open` returns the original ZIP/tar.gz stream; Managed closes it, computes `sourceDigest` from actual bytes and compiles through Hosted `managed-package-preparation/1`. Providers enforce finite database/network timeouts within the context deadline. The resolved handle is never a public response or persisted credential.
+
+`ExtensionArchiveStorage` implements `validateConfiguration()`, `putIfAbsent(Key, byteLength, InputStream)` and `open(Key)`. Bind it to a private deployment-specific prefix separate from raw business packages. Include the tenant, Workspace and digest in object identity. Writes must be atomic, immutable and readable on success; identical writes may be replayed. A timeout has an unknown outcome, so adapters must not blindly retry writes. Return streams rather than signed URLs or local paths. Managed stages and verifies packages with bounded temporary files, and retains their leases through actual HTTP streaming or asynchronous Runtime upload completion. Existing execution packages remain retained; no automatic GC is added.
+
+After enabling existing extension/self-service permissions and preparation capability, a trusted business service can import its selected resource:
+
+```http
+POST /v1/agents/workspaces/workspace-1/extensions/source-imports
+Idempotency-Key: selected-skill-17
+Content-Type: application/json
+
+{"reference":{"providerId":"business","kind":"skill","resourceId":"skill-1","revision":"17"},"target":{"platform":"linux","arch":"any"}}
+```
+
+The signed request uses the existing Managed tenant/Actor authentication. `extension` covers expert-suite archives. Dynamic versions and business default/forced selection rules are resolved in the business entry point. The response contains the original `operation`, `source` and `pin` after publication; publication does not install it. Supply the returned Pin to Session `extensionPins` or explicit apply. Query an import by `GET .../source-imports/{operationId}` or by `GET .../source-imports` with the original `Idempotency-Key` header. Intents are saved before source I/O: a pending intent has `operationId`, `state`, `reference`, and no Pin until publication. The Java SDK exposes `importSource`, `sourceImportReceipt` and `lookupSourceImport`.
+
+New selection, details, independent archive access, inspection and settings recheck business access. Revocation blocks these paths. Already admitted Session recovery, original Session-creation replay, admitted apply replay/continuation and import receipt queries retain original operation semantics and existing Workspace/Actor checks; they do not resolve the business source again. Missing providers or invalid provenance fail new access without becoming ordinary uploads. `source_json` and source-import intents belong to the Managed schema and CSI inventory. Business asset tables and original objects are not copied or migrated. See the [English design](../../docs/design/2026-11-10-managed-extension-sources.md) and [Chinese design](../../docs/design/2026-11-10-managed-extension-sources.zh-CN.md).
+
 ## Linux extension process acceptance
 
 `HostedExtensionsIT` is collected by the existing `hosted-harness-mysql` profile. It uses the public AgentDefinition and Session APIs, real MySQL, the packaged Harness and durable native worker, a stdio MCP process, and command Hooks in a delegated cgroup v2 subtree. It verifies static Skill bytes, extension revision pinning across Harness replacement, Hook allow/deny, cancellation of a Hook and its descendant, safe continuation, and physical close. A separate MCP fault case writes and fsyncs an effect before disconnecting, then verifies that a replacement Harness refuses recovery without replaying the effect or reporting successful close.
@@ -2134,7 +2161,7 @@ Use the Session's **Manage MCP** entry or the MCP management page. Add or edit s
 
 Management reattaches only to a Session resident in the current Harness and never triggers cleanup, recovery or wake dispatch. After a Harness restart, continue or recover the Session through its normal execution flow first; management otherwise returns `hosted_mcp_session_load_required`. A new empty Session may initialize through management without sending a Turn. Command status never creates a Session, and uncertain creation never loads a cold journal implicitly. Cleanup-only recovery attachments also refuse management until a normal execution load upgrades them.
 
-The original AgentDefinition and Skills stay pinned. Explicit management commands append independent Session MCP settings revisions; they do not change other Sessions or future defaults. Each snapshot retains at most 32 server identities including removed tombstones, with at most 16 enabled selections; the existing shared Runtime connection quota still applies. Removed and disabled selections survive Session reload. Direct detach remains governed by the existing lifecycle protocol. The Session retains its original owner and MCP history until ordered close, so Plan remains unavailable after MCP management even when every server is removed. File/Shell tools, approvals, backups and rewind retain their ordinary behavior. Restart drains the selected connection before reconnecting, without restarting a shared worker.
+The original AgentDefinition and Skills stay pinned. Explicit management commands append independent Session MCP settings revisions; they do not change other Sessions or future defaults. Each snapshot retains at most 32 live selections (enabled or disabled) and at most 96 total entries including removed tombstones, with at most 16 enabled selections. The total bound is sized against the effective bundle, which carries the retained array once next to package views, prepared pins and catalogs; composed at the widest field values with 32 package views, 32 prepared pins and 16 base pins it measures about 63.9 KiB against that resource's 64 KiB write limit, and the existing shared Runtime connection quota still applies. Every carrier enforces that limit independently, and a bundle that would exceed it is refused before publication, leaving the previous active configuration in place. Removed and disabled selections survive Session reload. Direct detach remains governed by the existing lifecycle protocol. The Session retains its original owner and MCP history until ordered close, so Plan remains unavailable after MCP management even when every server is removed. File/Shell tools, approvals, backups and rewind retain their ordinary behavior. Restart drains the selected connection before reconnecting, without restarting a shared worker.
 
 Public routes are `GET /v1/agents/sessions/{sessionId}/mcp-management`, `POST /v1/agents/sessions/{sessionId}/mcp-management/commands` with `Idempotency-Key`, and `GET /v1/agents/sessions/{sessionId}/mcp-management/commands/{operationId}`. WebShell has corresponding POST query, submit and operation-query routes under `/api/agent/web-shell/v1/session-mcp/management/`. Commands include `action`, `serverId` and `expectedRevision`; add/edit also include the exact selected `server` pin. Management requires Workspace execution permission and a public active Session. The settings commit rechecks idle/Plan/lifecycle admission atomically; a static settings revision or catalog is not proof of a healthy connection.
 

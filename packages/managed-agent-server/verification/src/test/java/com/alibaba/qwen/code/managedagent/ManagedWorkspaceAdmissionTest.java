@@ -15,15 +15,19 @@ import com.alibaba.qwen.code.managedagent.model.ApiModels.CommandAdmission;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.InputBlock;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionMutationKind;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentDefinitionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedAgentDefinitionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedUserMessageStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcSessionWorktreeStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedUserMessageStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
-import com.alibaba.qwen.code.managedagent.persistence.SessionWorktreeStore;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.session.HarnessCoordinator;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -93,7 +97,7 @@ class ManagedWorkspaceAdmissionTest {
     private ManagedAgentService service;
 
     @Autowired
-    private ManagedWorkspaceRegistry registry;
+    private JdbcManagedWorkspaceRegistry registry;
 
     @Autowired
     @Qualifier("managedAgentTransactionManager")
@@ -1792,7 +1796,7 @@ class ManagedWorkspaceAdmissionTest {
         // A Session pinned to a compiled stored definition (D8c-1) passes
         // the later-Turn gate exactly like qwen-code.
         String agentId = "agent_" + "b".repeat(32);
-        new ManagedAgentDefinitionStore(jdbc, new RequestDigests()).create(tenant, "def",
+        new JdbcManagedAgentDefinitionStore(jdbc, new RequestDigests()).create(tenant, "def",
                 "def-digest", agentId, "c".repeat(64),
                 "{\"model\":{},\"instructions\":\"\","
                         + "\"tools\":[{\"type\":\"hosted_profile\","
@@ -1900,7 +1904,7 @@ class ManagedWorkspaceAdmissionTest {
                     public Attachment createOrLoad(String tenantId,
                             String sessionId, boolean loadExisting) {
                         if (attaches++ == 0) {
-                            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                            throw WorkspaceExecutionStore.unavailable();
                         }
                         return new Attachment("boot");
                     }
@@ -2751,24 +2755,24 @@ class ManagedWorkspaceAdmissionTest {
         when(harness.supportsFencedTitles()).thenReturn(true);
         when(harness.supportsUserMessageQueue()).thenReturn(true);
         var enabled = boundServiceWith(harness);
-        var messages = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedUserMessageStore(jdbc, mapper, new RequestDigests(), enabled));
+        var messages = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new JdbcManagedUserMessageStore(jdbc, mapper, new RequestDigests(), enabled));
         var transaction = new TransactionTemplate(transactionManager);
         var input = List.of(new InputBlock("text", "queued"));
         var first = transaction.execute(status -> messages.command(tenant, "actor-a", session, "seed",
-                new ManagedUserMessageStore.Command("submit", null, null, input))).messages().getFirst();
+                new JdbcManagedUserMessageStore.Command("submit", null, null, input))).messages().getFirst();
         persistWorktree(tenant, session, state);
 
         assertThat(transaction.execute(status -> messages.queryMessages(tenant, "operator2", session)).messages()).hasSize(1);
         var edited = transaction.execute(status -> messages.command(tenant, "operator2", session, "edit",
-                new ManagedUserMessageStore.Command("edit", first.id(), 1L, List.of(new InputBlock("text", "edited")))));
+                new JdbcManagedUserMessageStore.Command("edit", first.id(), 1L, List.of(new InputBlock("text", "edited")))));
         assertThat(edited.messages().getFirst().revision()).isEqualTo(2);
         assertThat(edited.messages().getFirst().input().getFirst().get("text")).isEqualTo("edited");
         assertRefused(() -> transaction.execute(status -> messages.command(tenant, "operator2", session, "new",
-                new ManagedUserMessageStore.Command("submit", null, null, input))), "worktree_" + state.toLowerCase(java.util.Locale.ROOT));
+                new JdbcManagedUserMessageStore.Command("submit", null, null, input))), "worktree_" + state.toLowerCase(java.util.Locale.ROOT));
         assertRefused(() -> transaction.execute(status -> messages.command(tenant, "operator2", session, "resume",
-                new ManagedUserMessageStore.Command("resume", null, null, null))), "worktree_" + state.toLowerCase(java.util.Locale.ROOT));
+                new JdbcManagedUserMessageStore.Command("resume", null, null, null))), "worktree_" + state.toLowerCase(java.util.Locale.ROOT));
         assertThat(transaction.execute(status -> messages.command(tenant, "operator2", session, "withdraw",
-                new ManagedUserMessageStore.Command("withdraw", first.id(), 2L, null))).messages()).isEmpty();
+                new JdbcManagedUserMessageStore.Command("withdraw", first.id(), 2L, null))).messages()).isEmpty();
         assertRefused(() -> enabled.submitTurn(tenant, "operator2", "submit", session, input),
                 "worktree_" + state.toLowerCase(java.util.Locale.ROOT));
         assertRefused(() -> enabled.renameSession(tenant, "operator2", "rename", session, "renamed"),
@@ -2779,7 +2783,7 @@ class ManagedWorkspaceAdmissionTest {
                 org.mockito.ArgumentMatchers.anyBoolean(), org.mockito.ArgumentMatchers.anyBoolean());
         assertRefused(() -> enabled.authorizeUserMessages(tenant, "reader", session), "session_operation_forbidden");
         jdbc.update("UPDATE ma_workspace_access SET role = 'READER' WHERE tenant_id = ? AND workspace_id = ? AND actor_id = ?",
-                tenant, "ws-a", com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(tenant, "actor-a"));
+                tenant, "ws-a", ManagedWorkspaceRegistry.actorKey(tenant, "actor-a"));
         assertRefused(() -> enabled.authorizeUserMessages(tenant, "operator2", session), "workspace_unavailable");
     }
 
@@ -2857,7 +2861,7 @@ class ManagedWorkspaceAdmissionTest {
         String id = UUID.randomUUID().toString().replace("-", "");
         String cwd = ".qwen-managed-worktrees/" + id;
         var binding = store.requireSession(tenant, session).workspace();
-        var plan = new SessionWorktreeStore.Plan(tenant, "ws-a", 1, "storage-a", ".",
+        var plan = new JdbcSessionWorktreeStore.Plan(tenant, "ws-a", 1, "storage-a", ".",
                 binding.getContextConfigRef(), 1, "/workspace", "root-identity", ".", ".",
                 "/workspace/.git", "common-identity", "main", "a".repeat(40), id, cwd, cwd, "qwen/" + id);
         jdbc.update("UPDATE ma_session SET cwd_relative = ? WHERE tenant_id = ? AND session_id = ?", cwd, tenant, session);
@@ -2869,7 +2873,7 @@ class ManagedWorkspaceAdmissionTest {
         jdbc.update("INSERT INTO ma_session_worktree (tenant_id, session_id, workspace_id, storage_id, physical_key,"
                 + " worktree_id, owner_actor_key, state, revision, plan_json, operation_id, gmt_create, gmt_modified)"
                 + " VALUES (?, ?, 'ws-a', 'storage-a', ?, ?, ?, ?, 1, ?, ?, 1, 1)", tenant, session,
-                "a".repeat(64), id, com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(tenant, "actor-a"), state, mapper.writeValueAsString(plan), id);
+                "a".repeat(64), id, ManagedWorkspaceRegistry.actorKey(tenant, "actor-a"), state, mapper.writeValueAsString(plan), id);
     }
 
     private ManagedAgentService workspaceFilesService(String tenant,
@@ -3042,9 +3046,9 @@ class ManagedWorkspaceAdmissionTest {
         jdbc.update("INSERT INTO ma_storage"
                         + " (alias_key,tenant_key,storage_key,tenant_id,storage_id,fence_operation_id)"
                         + " VALUES (?,?,?,?,?,?)",
-                com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository.storageAliasKey(tenant, storageId),
-                com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository.storageFenceKey(tenant),
-                com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository.storageFenceKey(storageId),
+                RuntimeAdmissionFences.storageAliasKey(tenant, storageId),
+                RuntimeAdmissionFences.storageFenceKey(tenant),
+                RuntimeAdmissionFences.storageFenceKey(storageId),
                 tenant, storageId, UUID.randomUUID().toString());
     }
 
@@ -3104,7 +3108,7 @@ class ManagedWorkspaceAdmissionTest {
     // then the Session row as a tombstone.
     private void recordDelete(String tenant, String sessionId,
             String statusBefore) {
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, sessionId);
+        String scope = ManagedSessionStore.sessionScopeKey(tenant, sessionId);
         String target = ManagedSchemaKeys.key(sessionId);
         jdbc.update("INSERT INTO ma_operation (operation_key, scope_key,"
                         + " session_scope_key, operation_id, operation_kind,"
