@@ -295,6 +295,19 @@ export interface DaemonChannelQrLoginActions {
   ): Promise<void>;
 }
 
+/**
+ * What the channels hook hands its consumers: the identity is the tab's own, so
+ * a caller cannot supply one per call. Advertising the wider contract here
+ * would promise an attribution the hook does not honour — and with no tab id
+ * attached, honouring a caller's would attribute the login to a peer tab.
+ */
+export interface DaemonChannelQrLoginHandlers {
+  start(name: string): Promise<DaemonChannelQrLoginStartResult>;
+  state(loginId: string): Promise<DaemonChannelQrLoginView>;
+  cancel(loginId: string): Promise<DaemonChannelQrLoginView>;
+  release(loginId: string): Promise<void>;
+}
+
 export interface DaemonChannelPairingActions {
   list(name: string): Promise<DaemonChannelPairingRequestsSnapshot>;
   approve(

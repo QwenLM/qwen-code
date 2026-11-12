@@ -13,7 +13,7 @@ import type {
 import { useDaemonWorkspace } from '../DaemonWorkspaceProvider.js';
 import type {
   DaemonChannelPairingActions,
-  DaemonChannelQrLoginActions,
+  DaemonChannelQrLoginHandlers,
   DaemonChannelsResource,
   DaemonResourceOptions,
 } from '../types.js';
@@ -183,7 +183,7 @@ export function useDaemonChannels(options: DaemonChannelsOptions = {}) {
     [actions.channelPairing, workspaceClient],
   );
 
-  const qrLogin = useMemo<DaemonChannelQrLoginActions>(() => {
+  const qrLogin = useMemo<DaemonChannelQrLoginHandlers>(() => {
     return workspaceClient
       ? {
           start: (name) =>
