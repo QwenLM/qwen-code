@@ -1577,10 +1577,11 @@ describe('qwen-autofix workflow', () => {
       }),
     ).toEqual({ reran: false, continued: false });
     // #16927: the built-tree handoff is the ONE step timeout admitted, and by
-    // name. The artifact fetch crosses a host route that leaves it outside the
-    // tunnel (~100 KB/s, both 15-minute attempts expiring, zero tests run),
-    // while the identical blob on a host needing no proxy took 19 seconds. The
-    // scan must rerun it rather than hand a transport fault to an agent.
+    // name. The artifact fetch can expire at its 15-minute cap with zero tests
+    // run, and what makes the transfer stall is OPEN — #16927's 09:26:51Z
+    // measurements retract the earlier proxy theory, so this classifies the
+    // failure without diagnosing it (see af-076). The scan must rerun it rather
+    // than hand a transport fault to an agent.
     expect(
       run({
         checks: [FAIL],

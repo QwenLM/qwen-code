@@ -2722,15 +2722,17 @@ printf '%s\\n' '{"jobs":[]}'
     });
 
     it('recognises the built-tree handoff expiring as infrastructure', () => {
-      // #16927: the artifact fetch runs over a host route that forgets to
-      // tunnel it, so both attempts expire at their 15-minute cap and the job
-      // reddens the required check having executed no test at all. Measured on
-      // one failing job: ~100 KB/s on the hz fleet against 19 seconds for the
-      // identical blob on hk, where a re-run of the same head passed. That is
-      // infrastructure by the same rule as a lost runner — it clears when the
-      // re-run lands elsewhere — and leaving it unclassified spends a pool
-      // runner for half an hour and then files a code-failure issue for a
-      // commit that never ran.
+      // #16927: the artifact fetch can expire at its 15-minute cap, so the job
+      // reddens the required check having executed no test at all, and on main
+      // the unclassified annotation files a code-failure issue for a commit
+      // that never ran. That is infrastructure by the same rule as a lost
+      // runner — it clears when the re-run lands elsewhere. What makes the
+      // transfer stall is OPEN: #16927's 09:26:51Z measurements retract the
+      // earlier proxy theory (the download redirects to
+      // `productionresultssa<N>.blob.core.windows.net`; direct and proxied
+      // transfers both swung between ~2.3 MB/s and near-stall; `hk5`, which has
+      // no proxy at all, also fell to 451 KB/s), so this classifies the failure
+      // without diagnosing it, and a fix belongs to its own change.
       //
       // The wording of the annotation was captured from job 131012882515; the
       // step names come from ci.yml, so a rename there reddens here instead of
