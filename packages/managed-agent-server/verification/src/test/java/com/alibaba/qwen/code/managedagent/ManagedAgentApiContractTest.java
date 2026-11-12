@@ -109,6 +109,7 @@ import java.util.TreeMap;
 import java.util.TreeSet;
 import java.util.UUID;
 import java.util.stream.Collectors;
+import java.util.stream.StreamSupport;
 
 import static java.util.Map.entry;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -2869,6 +2870,15 @@ class ManagedAgentApiContractTest {
         segmentRepository.plan(channelTenant, "mail-1", "delivery-1",
                 List.of(new com.alibaba.qwen.code.managedagent.contracts.persistence.ChannelSegmentRepository.SegmentLedger("delivery-1:0", 0, null)));
         segmentRepository.receipt(channelTenant, "mail-1", "delivery-1", 0, "<m1@example.com>");
+        // A second delivery still in flight: segment 0 receipted, segment 1
+        // not — its wire shape must omit provider_receipt for the latter.
+        deliveryRepository.findOrCreate(new com.alibaba.qwen.code.managedagent.contracts.persistence.ChannelDeliveryRepository.ChannelDelivery(
+                channelTenant, "mail-1", "delivery-2", "delivery-2:0", 0, "planned", null, 1000, 1000));
+        deliveryRepository.transition(channelTenant, "mail-1", "delivery-2", "planned", "sending", null);
+        segmentRepository.plan(channelTenant, "mail-1", "delivery-2",
+                List.of(new com.alibaba.qwen.code.managedagent.contracts.persistence.ChannelSegmentRepository.SegmentLedger("delivery-2:0", 0, null),
+                        new com.alibaba.qwen.code.managedagent.contracts.persistence.ChannelSegmentRepository.SegmentLedger("delivery-2:1", 1, null)));
+        segmentRepository.receipt(channelTenant, "mail-1", "delivery-2", 0, "<m0@example.com>");
         JsonNode channels = json(exchange(drift, "listAgentChannels", 200,
                 get("/v1/agent-channels").header(TENANT, channelTenant)
                         .principal(reader).param("limit", "10"), null));
@@ -2890,9 +2900,23 @@ class ManagedAgentApiContractTest {
                 get("/v1/agent-channels/{id}/deliveries", "mail-1")
                         .header(TENANT, channelTenant).principal(reader),
                 null));
-        assertThat(deliveries.path("data")).hasSize(1);
-        assertThat(deliveries.path("data").get(0).path("state").asText())
-                .isEqualTo("delivered");
+        assertThat(deliveries.path("data")).hasSize(2);
+        // Anchor the wire state by id, not position: both fixture rows share
+        // gmt_create and the route orders by delivery_id DESC, so data[0] is
+        // delivery-2. A list projection serving a wrong-but-valid state must
+        // red here, not pass on row count alone.
+        JsonNode listed = StreamSupport.stream(
+                deliveries.path("data").spliterator(), false)
+                .filter(row -> "delivery-1".equals(row.path("id").asText()))
+                .findFirst().orElseThrow();
+        assertThat(listed.path("state").asText()).isEqualTo("delivered");
+        // The in-flight row's state must be pinned too: a projection serving a
+        // constant "delivered" would otherwise survive on the terminal row alone.
+        JsonNode inflightRow = StreamSupport.stream(
+                deliveries.path("data").spliterator(), false)
+                .filter(row -> "delivery-2".equals(row.path("id").asText()))
+                .findFirst().orElseThrow();
+        assertThat(inflightRow.path("state").asText()).isEqualTo("sending");
         exchange(drift, "listAgentChannelDeliveries", 404,
                 get("/v1/agent-channels/{id}/deliveries", "missing")
                         .header(TENANT, channelTenant).principal(reader),
@@ -2916,6 +2940,20 @@ class ManagedAgentApiContractTest {
                 .isEqualTo("delivery-1:0");
         assertThat(delivery.path("segments").get(0).path("provider_receipt").asText())
                 .isEqualTo("<m1@example.com>");
+        // The in-flight delivery serves a non-empty segments array, and the
+        // unreceipted segment omits provider_receipt entirely (NON_NULL).
+        JsonNode inflight = json(exchange(drift, "getAgentChannelDelivery",
+                200, get("/v1/agent-channels/{id}/deliveries/{d}", "mail-1",
+                        "delivery-2").header(TENANT, channelTenant)
+                        .principal(reader), null));
+        assertThat(inflight.path("state").asText()).isEqualTo("sending");
+        assertThat(inflight.path("segments").isArray()).isTrue();
+        assertThat(inflight.path("segments")).hasSize(2);
+        assertThat(inflight.path("segments").get(0).path("provider_receipt").asText())
+                .isEqualTo("<m0@example.com>");
+        assertThat(inflight.path("segments").get(1).path("segment_id").asText())
+                .isEqualTo("delivery-2:1");
+        assertThat(inflight.path("segments").get(1).has("provider_receipt")).isFalse();
         exchange(drift, "getAgentChannelDelivery", 404,
                 get("/v1/agent-channels/{id}/deliveries/{d}", "mail-1",
                         "missing").header(TENANT, channelTenant)

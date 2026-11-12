@@ -1815,6 +1815,19 @@
   gap: 2px;
 }
 
+.dropdownItem.modelPickerRow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 18px;
+  gap: 10px;
+  align-items: center;
+}
+
+.modelPickerContent {
+  min-width: 0;
+  width: 100%;
+  white-space: normal;
+}
+
 .dropdownItemLabel {
   overflow: hidden;
   color: var(--foreground);

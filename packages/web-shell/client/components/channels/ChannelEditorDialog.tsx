@@ -104,6 +104,10 @@ const FIELD_LABEL_KEYS: Record<string, Record<string, string>> = {
     clientId: 'channels.editor.field.dingtalk.clientId',
     clientSecret: 'channels.editor.field.dingtalk.clientSecret',
   },
+  'dingtalk-webhook': {
+    webhookUrl: 'channels.editor.field.dingtalkWebhook.webhookUrl',
+    signingSecret: 'channels.editor.field.dingtalkWebhook.signingSecret',
+  },
   weixin: {
     groupPolicy: 'channels.editor.field.weixin.groupPolicy',
     allowedUsers: 'channels.editor.field.weixin.allowedUsers',
@@ -561,11 +565,19 @@ export function ChannelEditorDialog({
     if (code === 'invalidGroupId')
       return t('channels.editor.validation.invalidGroupId');
     if (code === 'invalidRepoId')
-      return t('channels.editor.validation.invalidRepoId');
+      return t(
+        descriptor.type === 'gitlab'
+          ? 'channels.editor.validation.invalidProjectPath'
+          : 'channels.editor.validation.invalidRepoId',
+      );
     if (code === 'repoFilterRequired')
       return t('channels.editor.validation.repoFilterRequired');
     if (code === 'conflictingRepoAliases')
-      return t('channels.editor.validation.conflictingRepoAliases');
+      return t(
+        descriptor.type === 'gitlab'
+          ? 'channels.editor.validation.conflictingProjectAliases'
+          : 'channels.editor.validation.conflictingRepoAliases',
+      );
     if (code === 'invalidOption')
       return t('channels.editor.validation.invalidOption');
     if (code === 'requiresBoundDelivery')
@@ -1309,8 +1321,16 @@ export function ChannelEditorDialog({
   };
 
   const renderRepositoryOverrides = () => {
-    const repositories = repositoryAllowlistIds(draft.allowedGroupIds);
+    const repositories = repositoryAllowlistIds(
+      draft.allowedGroupIds,
+      descriptor.type,
+    );
     if (repositories.length === 0) return null;
+    // Speakers are GitHub logins or GitLab usernames; only the copy differs.
+    const speakerCopyKey =
+      descriptor.type === 'gitlab'
+        ? 'channels.editor.field.gitlab.repositorySpeakers'
+        : 'channels.editor.field.github.repositorySpeakers';
     const groups = instance?.config['groups'];
     // Fold the stored keys the same way the save path does, so a mixed-case
     // stored repository still finds its own row.
@@ -1448,8 +1468,8 @@ export function ChannelEditorDialog({
                   label={t('channels.editor.field.github.repositorySpeakers')}
                   description={t(
                     ownsSpeakerList
-                      ? 'channels.editor.field.github.repositorySpeakers.description'
-                      : 'channels.editor.field.github.repositorySpeakers.inherited',
+                      ? `${speakerCopyKey}.description`
+                      : `${speakerCopyKey}.inherited`,
                   )}
                 >
                   <Input
@@ -1544,9 +1564,11 @@ export function ChannelEditorDialog({
               </DialogTitle>
               <DialogDescription className="mt-1">
                 {t(
-                  instance
-                    ? 'channels.editor.editDescription'
-                    : 'channels.editor.addDescription',
+                  descriptor.outboundOnly
+                    ? 'channels.statusDescription.outbound'
+                    : instance
+                      ? 'channels.editor.editDescription'
+                      : 'channels.editor.addDescription',
                 )}
               </DialogDescription>
             </div>
@@ -1698,7 +1720,7 @@ export function ChannelEditorDialog({
               );
             })}
 
-            {boundSessionFields.length > 0 ? (
+            {!descriptor.outboundOnly && boundSessionFields.length > 0 ? (
               <section className={styles.settingsPanel}>
                 <div className={styles.settingsPanelHeader}>
                   <h3 className={styles.settingsPanelTitle}>
@@ -1712,7 +1734,7 @@ export function ChannelEditorDialog({
               </section>
             ) : null}
 
-            {sessionFields.length > 0 ? (
+            {!descriptor.outboundOnly && sessionFields.length > 0 ? (
               <section className={styles.settingsPanel}>
                 <h3 className={styles.settingsPanelTitle}>
                   {t('channels.editor.section.session')}
@@ -1784,9 +1806,15 @@ export function ChannelEditorDialog({
             ) : null}
 
             {(() => {
+              if (descriptor.outboundOnly) return null;
               const repositoryOnly = isRepositoryOnlyChannelType(
                 descriptor.type,
               );
+              // GitLab allowlists nested project paths; GitHub lists owner/repo.
+              const repositoryAllowlistKey =
+                descriptor.type === 'gitlab'
+                  ? 'channels.editor.field.gitlab.allowedRepos'
+                  : 'channels.editor.field.github.allowedRepos';
               const privateOnly = isPrivateOnlyChannelType(descriptor.type);
               const descriptorPolicy = hasDescriptorPrivatePolicy(descriptor);
               const effectivePolicy = repositoryOnly
@@ -1902,12 +1930,12 @@ export function ChannelEditorDialog({
                       id={`${formId}-allowedGroupIds`}
                       label={t(
                         repositoryOnly
-                          ? 'channels.editor.field.github.allowedRepos'
+                          ? repositoryAllowlistKey
                           : 'channels.editor.field.shared.allowedGroupIds',
                       )}
                       description={t(
                         repositoryOnly
-                          ? 'channels.editor.field.github.allowedRepos.description'
+                          ? `${repositoryAllowlistKey}.description`
                           : 'channels.editor.field.shared.allowedGroupIds.description',
                       )}
                       error={errors['allowedGroupIds']}
@@ -1918,7 +1946,7 @@ export function ChannelEditorDialog({
                         aria-invalid={Boolean(errors['allowedGroupIds'])}
                         placeholder={t(
                           repositoryOnly
-                            ? 'channels.editor.field.github.allowedRepos.placeholder'
+                            ? `${repositoryAllowlistKey}.placeholder`
                             : 'channels.editor.field.shared.allowedGroupIds.placeholder',
                         )}
                         onChange={(event) =>
