@@ -43,6 +43,17 @@ import type {
   DaemonWorkflowModeStatus,
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import { useWebShellPortalRoot } from '../portalRoot';
+import { useTheme } from '../themeContext';
+import type {
+  WebShellModelPickerContext,
+  WebShellModelPickerItemContext,
+  WebShellModelPickerOptions,
+} from '../model-picker';
+import {
+  isModelPickerOverlayEvent,
+  ModelPickerContent,
+  useModelPickerOverlays,
+} from './ModelPickerContent';
 import {
   useWebShellCustomization,
   type WebShellComposerInput,
@@ -307,6 +318,10 @@ interface ChatEditorProps {
   onOpenContextUsage?: () => void;
   contextUsageControls?: ContextCompressionControls;
   modelRefresh?: ModelRefreshState;
+  modelPickerScope?: Pick<
+    WebShellModelPickerContext,
+    'sessionId' | 'workspaceId' | 'workspaceCwd' | 'daemonBaseUrl'
+  >;
   availableModels?: Array<{ id: string; label?: string }>;
   unavailableModels?: readonly WebShellUnavailableModel[];
   mountUnavailableModelTooltip?: WebShellUnavailableModelTooltipMount;
@@ -812,6 +827,128 @@ function getModeListLabel(modeId: string, t: (key: string) => string): string {
   return labels[modeId] ?? getModeLabel(modeId, t);
 }
 
+type ModelPickerContext = Omit<WebShellModelPickerContext, 'overlayContainer'>;
+
+function ToolbarDropdownRow({
+  item,
+  activeId,
+  hasRichItems,
+  hasCheckItems,
+  onSelect,
+  itemTooltipMount,
+  modelPicker,
+  pickerContext,
+  overlayRoot,
+}: {
+  item: DropdownItem;
+  activeId: string;
+  hasRichItems: boolean;
+  hasCheckItems: boolean;
+  onSelect: (id: string) => void;
+  itemTooltipMount?: WebShellUnavailableModelTooltipMount;
+  modelPicker?: WebShellModelPickerOptions;
+  pickerContext?: ModelPickerContext;
+  overlayRoot: HTMLElement | null;
+}) {
+  const [rowElement, setRowElement] = useState<HTMLButtonElement | null>(null);
+  const [customActive, setCustomActive] = useState(false);
+  const selected = item.id === activeId && !item.disabled;
+  const entries = modelPicker?.displayContentByModelId;
+  const mount =
+    entries && Object.hasOwn(entries, item.id) ? entries[item.id] : undefined;
+  const context = useMemo(
+    () =>
+      pickerContext && rowElement
+        ? {
+            ...pickerContext,
+            model: {
+              id: item.id,
+              label: item.label,
+              disabled: Boolean(item.disabled),
+              tooltip: item.tooltip,
+            },
+            isSelected: selected,
+            rowElement,
+          }
+        : undefined,
+    [
+      pickerContext,
+      rowElement,
+      item.id,
+      item.label,
+      item.disabled,
+      item.tooltip,
+      selected,
+    ],
+  );
+  const nativeContent = hasCheckItems ? (
+    <>
+      {hasRichItems && (
+        <span className={styles.dropdownItemIcon}>{item.icon}</span>
+      )}
+      <span className={styles.dropdownItemContent}>
+        <span className={styles.dropdownItemLabel}>{item.label}</span>
+        {item.description && (
+          <span className={styles.dropdownItemDesc}>{item.description}</span>
+        )}
+      </span>
+    </>
+  ) : (
+    item.label
+  );
+  const button = (
+    <button
+      ref={setRowElement}
+      type="button"
+      className={`${styles.dropdownItem} ${selected ? styles.dropdownItemActive : ''} ${item.danger ? styles.dropdownItemDanger : ''} ${customActive ? styles.modelPickerRow : ''}`}
+      title={item.disabled || customActive ? undefined : item.label}
+      aria-label={customActive ? item.label : undefined}
+      aria-disabled={item.disabled || undefined}
+      data-disabled={item.disabled ? '' : undefined}
+      data-web-shell-unavailable-model={item.disabled ? '' : undefined}
+      data-model-id={item.id}
+      onClick={(event) => {
+        if (item.disabled) {
+          event.preventDefault();
+          event.stopPropagation();
+          return;
+        }
+        if (!event.defaultPrevented) onSelect(item.id);
+      }}
+    >
+      {context && (mount || customActive) ? (
+        <ModelPickerContent<WebShellModelPickerItemContext>
+          mount={mount}
+          context={context}
+          overlayRoot={overlayRoot}
+          revision={entries}
+          fallback={nativeContent}
+          className={styles.modelPickerContent}
+          onActiveChange={setCustomActive}
+        />
+      ) : (
+        nativeContent
+      )}
+      {hasCheckItems && (
+        <span className={styles.dropdownItemCheck}>
+          {item.disabled ? <LockIcon /> : selected ? <CheckIcon /> : null}
+        </span>
+      )}
+    </button>
+  );
+  return item.disabled ? (
+    <UnavailableModelTooltip
+      enabled={!customActive}
+      model={{ id: item.id, label: item.label, tooltip: item.tooltip }}
+      mount={itemTooltipMount}
+    >
+      {button}
+    </UnavailableModelTooltip>
+  ) : (
+    button
+  );
+}
+
 function ToolbarPopover({
   open,
   items,
@@ -831,6 +968,8 @@ function ToolbarPopover({
   compact = false,
   modePopover = false,
   itemTooltipMount,
+  modelPicker,
+  pickerContext,
 }: {
   open: boolean;
   items: DropdownItem[];
@@ -854,6 +993,8 @@ function ToolbarPopover({
   compact?: boolean;
   modePopover?: boolean;
   itemTooltipMount?: WebShellUnavailableModelTooltipMount;
+  modelPicker?: WebShellModelPickerOptions;
+  pickerContext?: ModelPickerContext;
 }) {
   const [searchQuery, setSearchQuery] = useState('');
   const [submenuOpen, setSubmenuOpen] = useState(false);
@@ -865,6 +1006,17 @@ function ToolbarPopover({
   const submenuTriggerRef = useRef<HTMLButtonElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const returningFromSubmenuRef = useRef(false);
+  const scopeKey = JSON.stringify([
+    pickerContext?.sessionId,
+    pickerContext?.workspaceId,
+    pickerContext?.workspaceCwd,
+    pickerContext?.daemonBaseUrl,
+  ]);
+  const overlayRoot = useModelPickerOverlays(
+    Boolean(modelPicker) && open && (!submenu || submenuOpen),
+  );
+  const isHostOverlayEvent = (event: Event) =>
+    isModelPickerOverlayEvent(overlayRoot, event);
   const hasRichItems = items.some((item) => item.description || item.icon);
   const visibleItems = searchable
     ? filterToolbarDropdownItems(items, searchQuery)
@@ -900,72 +1052,23 @@ function ToolbarPopover({
             : ''
       } ${searchable ? styles.dropdownListConstrained : ''}`}
     >
-      {visibleItems.map((item) => {
-        const button = (
-          <button
-            key={item.disabled ? undefined : item.id}
-            type="button"
-            className={`${styles.dropdownItem} ${
-              item.id === activeId && !item.disabled
-                ? styles.dropdownItemActive
-                : ''
-            } ${item.danger ? styles.dropdownItemDanger : ''}`}
-            title={item.disabled ? undefined : item.label}
-            aria-disabled={item.disabled || undefined}
-            data-disabled={item.disabled ? '' : undefined}
-            data-web-shell-unavailable-model={item.disabled ? '' : undefined}
-            data-model-id={item.id}
-            onClick={(event) => {
-              if (item.disabled) {
-                event.preventDefault();
-                event.stopPropagation();
-                return;
-              }
-              selectionRef.current = true;
-              onSelect(item.id);
-            }}
-          >
-            {hasCheckItems ? (
-              <>
-                {hasRichItems && (
-                  <span className={styles.dropdownItemIcon}>{item.icon}</span>
-                )}
-                <span className={styles.dropdownItemContent}>
-                  <span className={styles.dropdownItemLabel}>{item.label}</span>
-                  {item.description && (
-                    <span className={styles.dropdownItemDesc}>
-                      {item.description}
-                    </span>
-                  )}
-                </span>
-                <span className={styles.dropdownItemCheck}>
-                  {item.disabled ? (
-                    <LockIcon />
-                  ) : item.id === activeId ? (
-                    <CheckIcon />
-                  ) : null}
-                </span>
-              </>
-            ) : (
-              item.label
-            )}
-          </button>
-        );
-        if (!item.disabled) return button;
-        return (
-          <UnavailableModelTooltip
-            key={item.id}
-            model={{
-              id: item.id,
-              label: item.label,
-              tooltip: item.tooltip,
-            }}
-            mount={itemTooltipMount}
-          >
-            {button}
-          </UnavailableModelTooltip>
-        );
-      })}
+      {visibleItems.map((item) => (
+        <ToolbarDropdownRow
+          key={JSON.stringify([scopeKey, item.id])}
+          item={item}
+          activeId={activeId}
+          hasRichItems={hasRichItems}
+          hasCheckItems={hasCheckItems}
+          onSelect={(id) => {
+            selectionRef.current = true;
+            onSelect(id);
+          }}
+          itemTooltipMount={itemTooltipMount}
+          modelPicker={modelPicker}
+          pickerContext={pickerContext}
+          overlayRoot={overlayRoot}
+        />
+      ))}
       {visibleItems.length === 0 && noResultsLabel && (
         <div className={styles.dropdownEmpty} role="status">
           {noResultsLabel(searchQuery)}
@@ -992,6 +1095,16 @@ function ToolbarPopover({
   ) : null;
   const searchableItems = (
     <>
+      {pickerContext && modelPicker?.mountHeader && (
+        <ModelPickerContent
+          key={scopeKey}
+          mount={modelPicker.mountHeader}
+          context={pickerContext}
+          overlayRoot={overlayRoot}
+          revision={modelPicker}
+          className={styles.modelPickerContent}
+        />
+      )}
       {searchable &&
         (searchAction ? (
           <div className={styles.dropdownSearch}>
@@ -1049,12 +1162,19 @@ function ToolbarPopover({
         data-web-shell-reasoning-popover={submenu ? '' : undefined}
         data-web-shell-mode-popover={modePopover ? '' : undefined}
         onClick={(event) => event.stopPropagation()}
+        onEscapeKeyDown={(event) => {
+          if (isHostOverlayEvent(event)) event.preventDefault();
+        }}
         onOpenAutoFocus={(event) => {
           if (!submenu) return;
           event.preventDefault();
           submenuTriggerRef.current?.focus();
         }}
         onPointerDownOutside={(event) => {
+          if (isHostOverlayEvent(event.detail.originalEvent)) {
+            event.preventDefault();
+            return;
+          }
           const target = event.target;
           if (!(target instanceof Element)) return;
           if (target.closest('[data-web-shell-toolbar-popover-trigger]')) {
@@ -1065,6 +1185,10 @@ function ToolbarPopover({
           }
         }}
         onInteractOutside={(event) => {
+          if (isHostOverlayEvent(event.detail.originalEvent)) {
+            event.preventDefault();
+            return;
+          }
           const target = event.target;
           if (
             target instanceof Element &&
@@ -1136,7 +1260,14 @@ function ToolbarPopover({
                   data-web-shell-toolbar-popover
                   data-web-shell-model-submenu
                   onClick={(event) => event.stopPropagation()}
+                  onEscapeKeyDown={(event) => {
+                    if (isHostOverlayEvent(event)) event.preventDefault();
+                  }}
                   onPointerDownOutside={(event) => {
+                    if (isHostOverlayEvent(event.detail.originalEvent)) {
+                      event.preventDefault();
+                      return;
+                    }
                     const target = event.target;
                     if (
                       target instanceof Element &&
@@ -1148,6 +1279,10 @@ function ToolbarPopover({
                     }
                   }}
                   onInteractOutside={(event) => {
+                    if (isHostOverlayEvent(event.detail.originalEvent)) {
+                      event.preventDefault();
+                      return;
+                    }
                     const target = event.target;
                     if (
                       target instanceof Element &&
@@ -1640,6 +1775,7 @@ export const ChatEditor = memo(
       onOpenContextUsage,
       contextUsageControls,
       modelRefresh,
+      modelPickerScope,
       availableModels = [],
       unavailableModels,
       mountUnavailableModelTooltip,
@@ -1711,6 +1847,7 @@ export const ChatEditor = memo(
       fileUploadDirectory,
       fileDropAction,
       composerVariant = 'default',
+      modelPicker,
     } = useWebShellCustomization();
     const [advancedMode, setAdvancedMode] = useState(false);
     const simpleVariantEnabled = composerVariant === 'simple';
@@ -1887,6 +2024,30 @@ export const ChatEditor = memo(
     });
 
     const { t, language } = useI18n();
+    const theme = useTheme();
+    const composerId = useId();
+    const pickerContext = useMemo<ModelPickerContext>(
+      () => ({
+        composerId,
+        sessionId: modelPickerScope?.sessionId,
+        workspaceId: modelPickerScope?.workspaceId,
+        workspaceCwd: modelPickerScope?.workspaceCwd,
+        daemonBaseUrl: modelPickerScope?.daemonBaseUrl,
+        currentModelId: currentModel || undefined,
+        language,
+        theme,
+      }),
+      [
+        composerId,
+        modelPickerScope?.sessionId,
+        modelPickerScope?.workspaceId,
+        modelPickerScope?.workspaceCwd,
+        modelPickerScope?.daemonBaseUrl,
+        currentModel,
+        language,
+        theme,
+      ],
+    );
 
     useImperativeHandle(ref, () => core.handle, [core.handle]);
 
@@ -3511,6 +3672,8 @@ export const ChatEditor = memo(
                 }}
                 onSelect={handleModelSelect}
                 itemTooltipMount={mountUnavailableModelTooltip}
+                modelPicker={modelPicker}
+                pickerContext={pickerContext}
                 tooltip={modelLabel}
                 showCheck
                 searchable

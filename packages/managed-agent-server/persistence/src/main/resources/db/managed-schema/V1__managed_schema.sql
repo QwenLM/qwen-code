@@ -1248,6 +1248,7 @@ CREATE TABLE ma_delivery (
     source_revision BIGINT UNSIGNED COMMENT 'Source record revision captured by the delivery.',
     segment_id VARBINARY(512) COMMENT 'Identity of an external channel message segment.',
     segment_ordinal BIGINT UNSIGNED COMMENT 'Ordering position of a segment within the delivery.',
+    segment_count INT UNSIGNED COMMENT 'Immutable number of segments in the channel delivery plan, used by the reconcile gate to prove the segment ledger complete.',
     creation_key VARBINARY(2048) COMMENT 'Original child-Session creation identity for child-result recovery.',
     provider_id VARBINARY(2048) COMMENT 'External provider identity associated with the delivery.',
     provider_receipt_json LONGTEXT COMMENT 'Receipt returned by the external delivery provider.',

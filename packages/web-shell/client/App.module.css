@@ -753,6 +753,10 @@
   overflow: hidden;
 }
 
+.chatViewWithApproval {
+  position: relative;
+}
+
 .chatViewHidden {
   display: none;
 }
