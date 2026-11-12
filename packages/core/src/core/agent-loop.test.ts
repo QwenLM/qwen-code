@@ -14,6 +14,10 @@ import { ExecTool } from '../tools/exec.js';
 import { ToolRegistry } from '../tools/tool-registry.js';
 import { Kind } from '../tools/tools.js';
 import {
+  getRuntimeContentGenerator,
+  type RuntimeContentGeneratorView,
+} from '../agents/runtime/agent-context.js';
+import {
   createSchedulerExecutor,
   runAgentLoop,
   runToolBatch,
@@ -961,4 +965,74 @@ describe('createSchedulerExecutor', () => {
     );
     expect(outputs).toContainEqual(['exec-1', 'probing']);
   }, 20_000);
+
+  it('forwards scheduler options to the CoreToolScheduler', async () => {
+    const config = makeFakeConfig({
+      approvalMode: ApprovalMode.YOLO,
+      chatRecording: false,
+      targetDir: '/tmp',
+      cwd: '/tmp',
+    });
+    const registry = new ToolRegistry(config);
+    vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
+    registry.registerTool(
+      new MockTool({
+        name: 'probe',
+        kind: Kind.Read,
+        params: { type: 'object', additionalProperties: false },
+        execute: async () => ({ llmContent: 'ok', returnDisplay: 'ok' }),
+      }),
+    );
+    const onToolCallsUpdate = vi.fn();
+    const onAllToolCallsComplete = vi.fn();
+
+    const completed = await createSchedulerExecutor(config, {
+      onToolCallsUpdate,
+      onAllToolCallsComplete,
+    }).run([toolRequest('c1', 'probe')], new AbortController().signal, {
+      beforeLaunch: () => true,
+      output: () => {},
+    });
+
+    expect(completed.map((call) => call.status)).toEqual(['success']);
+    expect(completed.map((call) => call.request.callId)).toEqual(['c1']);
+    expect(onToolCallsUpdate).toHaveBeenCalled();
+    // The executor resolves with the same calls handed to the callback.
+    expect(onAllToolCallsComplete).toHaveBeenCalledOnce();
+  });
+
+  it('runs the batch under the provided runtimeView', async () => {
+    const config = makeFakeConfig({
+      approvalMode: ApprovalMode.YOLO,
+      chatRecording: false,
+      targetDir: '/tmp',
+      cwd: '/tmp',
+    });
+    const registry = new ToolRegistry(config);
+    vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
+    let seen: RuntimeContentGeneratorView | undefined;
+    registry.registerTool(
+      new MockTool({
+        name: 'probe',
+        kind: Kind.Read,
+        params: { type: 'object', additionalProperties: false },
+        execute: async () => {
+          seen = getRuntimeContentGenerator();
+          return { llmContent: 'ok', returnDisplay: 'ok' };
+        },
+      }),
+    );
+    const runtimeView = {
+      contentGenerator: { marker: 'runtime-view' },
+      contentGeneratorConfig: {},
+    } as unknown as RuntimeContentGeneratorView;
+
+    await createSchedulerExecutor(config, {}, runtimeView).run(
+      [toolRequest('c1', 'probe')],
+      new AbortController().signal,
+      { beforeLaunch: () => true, output: () => {} },
+    );
+
+    expect(seen).toBe(runtimeView);
+  });
 });
