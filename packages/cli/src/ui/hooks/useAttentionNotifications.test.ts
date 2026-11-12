@@ -437,4 +437,197 @@ describe('useAttentionNotifications', () => {
       expect(mockedSendNotification).toHaveBeenCalledTimes(1);
     });
   });
+
+  it.each([
+    {
+      description: 'names the foreground subagent tool waiting for approval',
+      awaitingToolsByAgent: [['grep_search']],
+      message: 'Qwen Code needs your permission to use grep_search',
+    },
+    {
+      description: 'uses a generic alert for parallel approvals in one agent',
+      awaitingToolsByAgent: [['read_file', 'grep_search']],
+      message: 'Qwen Code is waiting for your input',
+    },
+    {
+      description: 'uses a generic alert across foreground agents',
+      awaitingToolsByAgent: [['grep_search'], ['edit']],
+      message: 'Qwen Code is waiting for your input',
+    },
+  ])('$description', ({ awaitingToolsByAgent, message }) => {
+    const { rerender } = render();
+    const pendingToolCalls = awaitingToolsByAgent.map((toolNames, index) => ({
+      status: 'executing',
+      request: { name: 'agent', callId: `agent-${index}` },
+      liveOutput: {
+        type: 'task_execution',
+        pendingConfirmation: { type: 'info' },
+        toolCalls: [
+          { callId: 'done', name: 'list_directory', status: 'success' },
+          ...toolNames.map((name, callIndex) => ({
+            callId: `c${callIndex}`,
+            name,
+            status: 'awaiting_approval',
+          })),
+        ],
+      },
+    })) as unknown as TrackedToolCall[];
+
+    rerender({
+      hookProps: {
+        isFocused: false,
+        streamingState: StreamingState.WaitingForConfirmation,
+        elapsedTime: 0,
+        settings: mockSettings,
+        terminal: mockTerminal,
+        pendingToolCalls,
+      },
+    });
+
+    expect(mockedSendNotification).toHaveBeenCalledTimes(1);
+    expect(mockedSendNotification).toHaveBeenCalledWith(
+      expect.objectContaining({ message }),
+      mockTerminal,
+      true,
+    );
+  });
+
+  describe('background agent and workflow approvals (#16425)', () => {
+    const parked = (key: string, toolName: string, at = 0) => ({
+      key,
+      toolName,
+      at,
+    });
+    const unfocused = (
+      backgroundApprovals: Array<ReturnType<typeof parked>>,
+      overrides: Partial<Parameters<typeof useAttentionNotifications>[0]> = {},
+    ) => ({
+      hookProps: {
+        isFocused: false,
+        streamingState: StreamingState.Idle,
+        elapsedTime: 0,
+        settings: mockSettings,
+        terminal: mockTerminal,
+        backgroundApprovals,
+        ...overrides,
+      },
+    });
+
+    it('notifies when a background approval is parked while unfocused', () => {
+      const { rerender } = render();
+
+      rerender(unfocused([parked('workflow:ap-1', 'grep_search')]));
+
+      expect(mockedSendNotification).toHaveBeenCalledTimes(1);
+      expect(mockedSendNotification).toHaveBeenCalledWith(
+        {
+          message: 'Qwen Code needs your permission to use grep_search',
+          title: 'Qwen Code',
+        },
+        mockTerminal,
+        true,
+      );
+    });
+
+    it('notifies once per approval, and again for a new one', () => {
+      const { rerender } = render();
+      const first = parked('agent:a:c1', 'run_shell_command', 1);
+
+      rerender(unfocused([first]));
+      // A fresh array with the same approval is a snapshot refresh, not news.
+      rerender(unfocused([{ ...first }]));
+      expect(mockedSendNotification).toHaveBeenCalledTimes(1);
+
+      rerender(unfocused([first, parked('workflow:ap-2', 'edit', 2)]));
+      expect(mockedSendNotification).toHaveBeenCalledTimes(2);
+      expect(mockedSendNotification).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          message: 'Qwen Code needs your permission to use edit',
+        }),
+        mockTerminal,
+        true,
+      );
+    });
+
+    it('notifies for every parked approval when focus is lost', () => {
+      const approvals = [
+        parked('workflow:ap-1', 'grep_search', 1),
+        parked('workflow:ap-2', 'edit', 2),
+      ];
+      const { rerender } = render({ backgroundApprovals: approvals });
+      expect(mockedSendNotification).not.toHaveBeenCalled();
+
+      rerender(unfocused(approvals));
+      expect(mockedSendNotification).toHaveBeenCalledTimes(2);
+      expect(mockedSendNotification).toHaveBeenNthCalledWith(
+        1,
+        expect.objectContaining({
+          message: 'Qwen Code needs your permission to use grep_search',
+        }),
+        mockTerminal,
+        true,
+      );
+      expect(mockedSendNotification).toHaveBeenNthCalledWith(
+        2,
+        expect.objectContaining({
+          message: 'Qwen Code needs your permission to use edit',
+        }),
+        mockTerminal,
+        true,
+      );
+
+      // Coming back and leaving again re-arms it, like the main prompt.
+      rerender(unfocused(approvals, { isFocused: true }));
+      rerender(unfocused(approvals));
+      expect(mockedSendNotification).toHaveBeenCalledTimes(4);
+    });
+
+    it('defers a background alert until the main prompt clears', () => {
+      const approvals = [parked('workflow:ap-1', 'grep_search')];
+      const { rerender } = render();
+
+      rerender(
+        unfocused(approvals, {
+          streamingState: StreamingState.WaitingForConfirmation,
+          pendingToolCalls: [
+            { status: 'awaiting_approval', request: { name: 'Bash' } },
+          ] as unknown as TrackedToolCall[],
+        }),
+      );
+
+      expect(mockedSendNotification).toHaveBeenCalledTimes(1);
+      expect(mockedSendNotification).toHaveBeenCalledWith(
+        expect.objectContaining({
+          message: 'Qwen Code needs your permission to use Bash',
+        }),
+        mockTerminal,
+        true,
+      );
+
+      rerender(unfocused(approvals));
+      expect(mockedSendNotification).toHaveBeenCalledTimes(2);
+      expect(mockedSendNotification).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          message: 'Qwen Code needs your permission to use grep_search',
+        }),
+        mockTerminal,
+        true,
+      );
+    });
+
+    it('respects notificationMode task-complete and a disabled bell', () => {
+      for (const settings of [
+        mockSettingsTaskCompleteOnly,
+        mockSettingsDisabled,
+      ]) {
+        const { rerender, unmount } = render({ settings });
+        rerender(
+          unfocused([parked('workflow:ap-1', 'grep_search')], { settings }),
+        );
+        unmount();
+      }
+
+      expect(mockedSendNotification).not.toHaveBeenCalled();
+    });
+  });
 });

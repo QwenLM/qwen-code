@@ -55,6 +55,7 @@ describe('Hosted Harness private contract', () => {
         'hosted_model_round_recovery_v1',
         'model-selection/1',
         'session-model-config/1',
+        'side-query/1',
         'session-memory/1',
         'context-compression/1',
         'user-message-queue/1',
@@ -90,6 +91,12 @@ describe('Hosted Harness private contract', () => {
       createHostedHarnessContract(DIGEST, BOOT_ID, ['hosted-workspace-shell/1'])
         .lifecycleV2Profiles,
     ).toEqual(['hosted-workspace-shell/1']);
+    // shell/3 (the self-paced loop revision) is a supported lifecycle-v2
+    // profile; the retired shell/2 below must stay refused.
+    expect(
+      createHostedHarnessContract(DIGEST, BOOT_ID, ['hosted-workspace-shell/3'])
+        .lifecycleV2Profiles,
+    ).toEqual(['hosted-workspace-shell/3']);
     expect(() =>
       createHostedHarnessContract(DIGEST, BOOT_ID, [
         'hosted-workspace-shell/2',
