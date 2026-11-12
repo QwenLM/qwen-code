@@ -257,7 +257,7 @@ com/alibaba/qwen/code/managedagent/persistence/LocalStorageOwners.java|SELECT 1 
 com/alibaba/qwen/code/managedagent/persistence/ManagedExtensionAgentLaunch.java|SELECT COALESCE(selected_approval_mode, approval_mode) AS mode, approval_revision FROM ma_session WHERE tenant_id=? AND session_id=? FOR UPDATE
 com/alibaba/qwen/code/managedagent/persistence/ManagedExtensionCommandVerifier.java|SELECT COALESCE(selected_approval_mode, approval_mode) FROM ma_session WHERE tenant_id=? AND session_id=?
 com/alibaba/qwen/code/managedagent/persistence/ManagedExtensionQueries.java|SELECT journal_revision FROM ma_session_head WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ? AND head_kind = 'MANAGED_SESSION'
-com/alibaba/qwen/code/managedagent/persistence/ManagedLegacySessionGuard.java|SELECT is_csi_guard FROM ma_session
+com/alibaba/qwen/code/managedagent/persistence/ManagedLegacySessionGuard.java|SELECT is_csi_guard FROM ma_session WHERE tenant_id = ? AND session_id = ?
 com/alibaba/qwen/code/managedagent/persistence/ManagedMemoryStore.java|SELECT COUNT(*) FROM ma_session WHERE tenant_id=? AND session_id=? AND memory_store_id IS NOT NULL
 com/alibaba/qwen/code/managedagent/persistence/ManagedMemoryStore.java|SELECT COUNT(*) FROM ma_turn WHERE tenant_id=? AND session_id=? AND prompt_id=?
 com/alibaba/qwen/code/managedagent/persistence/ManagedMemoryStore.java|SELECT m.memory_store_id,m.namespace FROM ma_session s JOIN ma_memory_store m ON m.tenant_id=s.tenant_id AND m.memory_store_id=s.memory_store_id AND m.owner_actor_key=COALESCE(s.owner_actor_key,s.creator_actor_key) WHERE s.tenant_id=? AND s.session_id=? AND s.owner_only=1
