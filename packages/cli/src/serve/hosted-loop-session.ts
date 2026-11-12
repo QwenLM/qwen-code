@@ -259,11 +259,7 @@ export class HostedLoopSession {
           // (expanded: false) — otherwise the next fire would send a dangling
           // short reminder for content the model never received.
           const rearmText = loopMode
-            ? resolver.buildTransientErrorTick(
-                loopMode,
-                false,
-                'classifier_unavailable',
-              ).modelText
+            ? resolver.buildClassifierOutageTick(loopMode).modelText
             : (() => {
                 // Match the autonomous family's pacing: a cron-paced loop must
                 // not be told to self-arm the dynamic sentinel (that would

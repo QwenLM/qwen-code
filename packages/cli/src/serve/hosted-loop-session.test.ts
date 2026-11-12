@@ -24,6 +24,7 @@ import {
 import {
   AUTONOMOUS_SENTINEL_DYNAMIC,
   AUTONOMOUS_SENTINEL_CRON,
+  LOOP_SENTINEL_DYNAMIC,
 } from '@qwen-code/qwen-code-core/skills/bundled/loop/loop-tick-resolver.js';
 
 // The self-paced loop funnel drives the real journal. The deployment gate
@@ -681,5 +682,46 @@ describe('HostedLoopSession fire-time sentinel expansion', () => {
       allow,
       outage,
     );
+  });
+
+  it('a loop.md classifier outage does not claim a read failure (D7)', async () => {
+    const harness = await createHarness();
+    // A home loop.md makes the sentinel resolve to a FULL delivery, which is
+    // what triggers the fire-time re-review (and thus the outage branch).
+    const home = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-loop-home-'));
+    temporaryDirectories.add(home);
+    const qwenHomeBefore = process.env['QWEN_HOME'];
+    process.env['QWEN_HOME'] = home;
+    await fs.writeFile(path.join(home, 'loop.md'), '- task one\n');
+    const outage: HostedLoopClassifier = async () => ({
+      allowed: false,
+      unavailable: true,
+      reason: 'classifier api timeout',
+    });
+    try {
+      await withLoop(
+        harness,
+        async (loops) => {
+          const tick = await loops.expandFireText(
+            'loop:md-outage',
+            LOOP_SENTINEL_DYNAMIC,
+          );
+          expect(tick).not.toBeNull();
+          // The read succeeded; only the re-review is down. The tick must not
+          // tell the model loop.md was unreadable (a false read failure).
+          expect(tick!.text).not.toContain('could not be read');
+          expect(tick!.text).toContain(
+            'fire-time classifier is temporarily unavailable',
+          );
+          expect(tick!.text).toContain(LOOP_SENTINEL_DYNAMIC);
+          expect(tick!.expanded).toBe(false);
+        },
+        allow,
+        outage,
+      );
+    } finally {
+      if (qwenHomeBefore === undefined) delete process.env['QWEN_HOME'];
+      else process.env['QWEN_HOME'] = qwenHomeBefore;
+    }
   });
 });
