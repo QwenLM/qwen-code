@@ -2929,6 +2929,104 @@ describe('readWorkspaceContext', () => {
     }
   });
 
+  it('keeps the Session own directory when a sibling is bound at its parent', async () => {
+    // `nodir: false` makes the search root itself a hit, so `glob '.'` collects
+    // `<mount>/team/app`. Judging it by its parent's realpath asks the
+    // ownership arm about `<mount>/team`, where a sibling binding lives, and
+    // the whole result set is then discarded — including the caller's own
+    // directory. The Session's own directory is never another Session's estate.
+    for (const siblingBound of [true, false]) {
+      const mount = await fs.promises.realpath(
+        await mkdtemp(path.join(os.tmpdir(), 'ctx-ownroot-')),
+      );
+      try {
+        const app = path.join(mount, 'team', 'app');
+        await mkdir(app, { recursive: true });
+        await writeFile(path.join(app, 'AGENTS.md'), 'own instructions');
+        await mkdir(path.join(app, 'plaindir'));
+
+        const config = new Config({
+          sessionId: 'session-app',
+          targetDir: app,
+          cwd: app,
+          includeDirectories: [app],
+          model: 'managed-runtime-worker',
+          debugMode: false,
+          usageStatisticsEnabled: false,
+          approvalMode: ApprovalMode.YOLO,
+          fileCheckpointingEnabled: false,
+          fileReadCacheDisabled: true,
+          todoWriteEnabled: true,
+          artifactRecordingSupported: false,
+        });
+        registerSessionProjectDir(
+          'session-app',
+          config.storage.getProjectDir(),
+        );
+        const contains = (directory: string, target: string): boolean => {
+          const relative = path.relative(directory, target);
+          return (
+            relative !== '..' &&
+            !relative.startsWith(`..${path.sep}`) &&
+            !path.isAbsolute(relative)
+          );
+        };
+        const teamReal = await fs.promises.realpath(path.join(mount, 'team'));
+        // Mirrors the supplier: a sibling bound at the ancestor is not the
+        // caller's own estate, and an unlocatable sibling cannot be resolved
+        // either way. Both leave the caller's own directory intact.
+        const ownsAnotherSessionDir = async (
+          _sessionId: string,
+          realPath: string,
+          ownDirectory: string,
+        ): Promise<boolean> => {
+          if (!siblingBound) return false;
+          const ownEstate =
+            contains(ownDirectory, realPath) && ownDirectory !== teamReal;
+          return contains(teamReal, realPath) && !ownEstate;
+        };
+        const tools: ManagedToolSet = {
+          sessionId: 'session-app',
+          directory: app,
+          workspaceRoot: app,
+          admitsDirectory: () => true,
+          tools: new Map([
+            ['glob', new GlobTool(config, { containmentRoot: app })],
+          ]),
+        };
+        const executor = new ManagedToolExecutor(
+          async () => tools,
+          undefined,
+          undefined,
+          undefined,
+          ownsAnotherSessionDir,
+        );
+        try {
+          const result = await executor.execute(
+            {
+              sessionId: 'session-app',
+              promptId: 'turn-app',
+              callId: 'glob-own-root',
+              argsDigest: managedToolDigest({ pattern: '.' }),
+            },
+            'glob',
+            { pattern: '.' },
+          );
+          expect(result.executionStatus).toBe('success');
+          // The caller's own directory is the collected hit; without the fix
+          // the whole set is discarded and this reports an error instead.
+          expect(JSON.stringify(result.responseParts)).toContain(
+            'Found 1 file(s) matching',
+          );
+        } finally {
+          await executor.close();
+        }
+      } finally {
+        await rm(mount, { recursive: true, force: true });
+      }
+    }
+  });
+
   it.skipIf(!hasMkfifo)(
     'skips a FIFO at an instruction name instead of blocking on it',
     async () => {

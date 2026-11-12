@@ -2718,11 +2718,12 @@ export class ManagedToolExecutor {
             const relative = path.relative(realRoot, effective);
             if (
               escapesSession(relative) ||
-              (await this.ownsAnotherSessionDir?.(
-                tools.sessionId,
-                realParent,
-                realRoot,
-              ))
+              (relative !== '' &&
+                (await this.ownsAnotherSessionDir?.(
+                  tools.sessionId,
+                  realParent,
+                  realRoot,
+                )))
             ) {
               // The sibling-ownership arm carries the same message: it names
               // no hit, and a root-bound caller's effective boundary excludes
