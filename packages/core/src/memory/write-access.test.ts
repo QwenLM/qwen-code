@@ -21,6 +21,7 @@ const configWith = (opts: {
   snapshot?: string[];
   denyRules?: string[];
   allowRules?: string[];
+  askRules?: string[];
 }): Config =>
   ({
     getPermissionsDeny: () => opts.snapshot ?? [],
@@ -28,6 +29,7 @@ const configWith = (opts: {
       listRules: () => [
         ...(opts.denyRules ?? []).map((raw) => denyEntry(raw)),
         ...(opts.allowRules ?? []).map((raw) => denyEntry(raw, 'allow')),
+        ...(opts.askRules ?? []).map((raw) => denyEntry(raw, 'ask')),
       ],
     }),
   }) as unknown as Config;
@@ -98,6 +100,19 @@ describe('blocksAllMemoryWritesForConfig', () => {
   it('falls back to the snapshot when no manager exists', () => {
     const config = { getPermissionsDeny: () => ['edit'] } as unknown as Config;
     expect(blocksAllMemoryWritesForConfig(config)).toBe(true);
+  });
+
+  it('ignores ask entries for the write tools', () => {
+    // An `ask` rule prompts instead of refusing, so it does not establish that
+    // a write is impossible. Reading it as a denial would report
+    // `writes_denied` on every turn and silently stop managed auto-memory for
+    // a user who only asked to be prompted.
+    const config = configWith({
+      snapshot: [],
+      denyRules: [],
+      askRules: ['Edit', 'WriteFile'],
+    });
+    expect(blocksAllMemoryWritesForConfig(config)).toBe(false);
   });
 
   it('ignores allow entries for the write tools', () => {
