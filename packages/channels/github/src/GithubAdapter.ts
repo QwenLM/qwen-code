@@ -3920,7 +3920,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         .join('\n');
     const summary =
       (omitted > 0
-        ? `[${omitted} earlier comment(s) omitted from this batch; list the PR comments to see them]\n`
+        ? `[${BOUND_DELIVERY_COPY.en.omittedNotice(omitted)}]\n`
         : '') + renderComments('en');
     const copy = BOUND_DELIVERY_COPY[this.locale];
     const boundText =
