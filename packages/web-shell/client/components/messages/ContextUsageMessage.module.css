@@ -2,7 +2,7 @@
   display: flex;
   box-sizing: border-box;
   min-width: 0;
-  width: min(100%, var(--chat-regular-content-width, 960px));
+  width: min(100%, var(--chat-regular-content-width, 1000px));
   flex-direction: column;
   gap: 6px;
   padding: 12px 16px;

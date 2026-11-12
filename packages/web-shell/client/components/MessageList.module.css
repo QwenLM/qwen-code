@@ -66,7 +66,7 @@
     100%,
     var(
       --chat-responsive-content-width,
-      var(--chat-content-width, var(--chat-regular-content-width, 960px))
+      var(--chat-content-width, var(--chat-regular-content-width, 1000px))
     )
   );
   margin-right: auto;
@@ -88,7 +88,7 @@
     100%,
     var(
       --chat-responsive-content-width,
-      var(--chat-content-width, var(--chat-regular-content-width, 960px))
+      var(--chat-content-width, var(--chat-regular-content-width, 1000px))
     )
   );
   margin-right: auto;
@@ -223,7 +223,7 @@
   left: 0;
   width: clamp(
     20px,
-    calc((100% - var(--chat-responsive-content-width, 960px)) / 2),
+    calc((100% - var(--chat-responsive-content-width, 1000px)) / 2),
     86px
   );
   padding-left: 5px;

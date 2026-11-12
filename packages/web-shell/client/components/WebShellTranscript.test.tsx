@@ -212,7 +212,7 @@ describe('WebShellTranscript contract', () => {
     expect(root?.style.getPropertyValue('--chat-content-width')).toBe('720px');
     expect(
       root?.style.getPropertyValue('--chat-responsive-content-width'),
-    ).toBe('min(85cqw, calc(100cqw - 128px), 720px)');
+    ).toBe('min(720px, clamp(440px, 85cqw, calc(100cqw - 128px)))');
   });
 
   it('uses the non-virtualized, expanded document boundary', () => {

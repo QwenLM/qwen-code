@@ -169,10 +169,25 @@ for (const navigation of [true, false]) {
         .poll(async () => {
           const viewportBox = await viewport.boundingBox();
           const messageBox = await message.boundingBox();
+          const availableWidth = await messageList.evaluate((element) => {
+            const style = getComputedStyle(element);
+            return (
+              element.clientWidth -
+              parseFloat(style.paddingLeft) -
+              parseFloat(style.paddingRight)
+            );
+          });
           if (!viewportBox || !messageBox) return Infinity;
           return Math.abs(
             messageBox.width -
-              Math.min(viewportBox.width * 0.85, viewportBox.width - 128, 960),
+              Math.min(
+                availableWidth,
+                1000,
+                Math.max(
+                  440,
+                  Math.min(viewportBox.width * 0.85, viewportBox.width - 128),
+                ),
+              ),
           );
         })
         .toBeLessThanOrEqual(1);

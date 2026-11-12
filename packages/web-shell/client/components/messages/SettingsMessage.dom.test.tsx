@@ -270,7 +270,7 @@ function renderPanel(
         onOutputLanguageChange={overrides.onOutputLanguageChange ?? noop}
         onThemeChange={overrides.onThemeChange ?? noop}
         onSubDialog={overrides.onSubDialog ?? noop}
-        chatWidthMode="960"
+        chatWidthMode="1000"
         onChatWidthModeChange={noop}
         modelManagementSectionProps={overrides.modelManagementSectionProps}
         connections={overrides.connections}
@@ -534,7 +534,7 @@ describe('SettingsMessage initialCategory', () => {
               onLanguageChange={noop}
               onThemeChange={noop}
               onSubDialog={noop}
-              chatWidthMode="960"
+              chatWidthMode="1000"
               onChatWidthModeChange={noop}
             />
           </I18nProvider>,
@@ -966,7 +966,7 @@ describe('SettingsMessage user-scope editing', () => {
             }}
             onThemeChange={noop}
             onSubDialog={noop}
-            chatWidthMode="960"
+            chatWidthMode="1000"
             onChatWidthModeChange={noop}
           />
         </I18nProvider>

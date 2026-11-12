@@ -54,7 +54,7 @@ import {
 import styles from '../App.module.css';
 import { McpAppHostContext } from '../mcpAppHostContext';
 
-const DEFAULT_CHAT_MAX_WIDTH = 960;
+const DEFAULT_CHAT_MAX_WIDTH = 1000;
 const CHAT_SHELL_HORIZONTAL_PADDING = 40;
 
 export interface WebShellTranscriptProps {
@@ -108,12 +108,13 @@ function getChatWidthStyle(chatMaxWidth: number | undefined): CSSProperties {
       ? chatMaxWidth
       : DEFAULT_CHAT_MAX_WIDTH;
   const contentWidth = `${width}px`;
-  // Reserve 56px per side plus up to 16px for a classic scrollbar.
-  const responsiveContentWidth = `min(85cqw, calc(100cqw - 128px), ${contentWidth})`;
+  // Reserve timeline gutters where they fit without over-shrinking phone layouts.
+  const responsiveContentWidth = `min(${contentWidth}, clamp(440px, 85cqw, calc(100cqw - 128px)))`;
+  const regularShellWidth = `calc(${contentWidth} + ${CHAT_SHELL_HORIZONTAL_PADDING}px)`;
   const shellWidth = `calc(${responsiveContentWidth} + ${CHAT_SHELL_HORIZONTAL_PADDING}px)`;
   return {
     '--chat-regular-content-width': contentWidth,
-    '--chat-regular-shell-width': shellWidth,
+    '--chat-regular-shell-width': regularShellWidth,
     '--chat-content-width': contentWidth,
     '--chat-responsive-content-width': responsiveContentWidth,
     '--chat-shell-width': shellWidth,

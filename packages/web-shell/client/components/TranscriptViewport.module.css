@@ -25,7 +25,7 @@
   z-index: 4;
   width: clamp(
     20px,
-    calc((100% - var(--chat-responsive-content-width, 960px)) / 2),
+    calc((100% - var(--chat-responsive-content-width, 1000px)) / 2),
     64px
   );
 }

@@ -1,11 +1,14 @@
 .app {
-  --chat-content-width: 960px;
-  --chat-responsive-content-width: min(85cqw, calc(100cqw - 128px), 960px);
-  --chat-shell-width: calc(min(85cqw, calc(100cqw - 128px), 960px) + 40px);
-  --chat-regular-content-width: 960px;
-  --chat-regular-shell-width: calc(
-    min(85cqw, calc(100cqw - 128px), 960px) + 40px
+  --chat-content-width: 1000px;
+  --chat-responsive-content-width: min(
+    1000px,
+    clamp(440px, 85cqw, calc(100cqw - 128px))
   );
+  --chat-shell-width: calc(
+    min(1000px, clamp(440px, 85cqw, calc(100cqw - 128px))) + 40px
+  );
+  --chat-regular-content-width: 1000px;
+  --chat-regular-shell-width: 1040px;
   --font-mono:
     'SF Mono', 'Fira Code', 'JetBrains Mono', 'Cascadia Code', monospace;
   --font-sans:
@@ -876,7 +879,7 @@
 .btwPanel {
   flex-shrink: 0;
   margin: 0 auto;
-  width: min(100%, var(--chat-regular-shell-width, 1000px));
+  width: min(100%, var(--chat-regular-shell-width, 1040px));
   padding: 4px 20px;
 }
 

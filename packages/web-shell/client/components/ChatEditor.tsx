@@ -293,7 +293,7 @@ interface ChatEditorProps {
    * from other panes' chips even when it collapses to an icon on a narrow split.
    */
   workspaceColor?: DaemonSessionGroupPresetColor;
-  chatWidthMode?: '960' | 'wide';
+  chatWidthMode?: '1000' | 'wide';
   showChatWidthToggle?: boolean;
   chatWidthToggleMin?: number;
   visibleToolbarActions?: readonly ComposerToolbarAction[];
@@ -366,7 +366,7 @@ interface ChatEditorProps {
   };
   persistFileReferences?: boolean;
   attachmentsEnabled?: boolean;
-  onChatWidthModeChange?: (mode: '960' | 'wide') => void;
+  onChatWidthModeChange?: (mode: '1000' | 'wide') => void;
   onFocusFooter?: () => boolean;
   dialogOpen?: boolean;
   followupState?: UseDaemonFollowupSuggestionReturn['followupState'];
@@ -664,7 +664,7 @@ function attachComposerGlow(glowRootEl: HTMLElement, inputEl: HTMLElement) {
   };
 }
 
-function WidthModeIcon({ mode }: { mode: '960' | 'wide' }) {
+function WidthModeIcon({ mode }: { mode: '1000' | 'wide' }) {
   if (mode === 'wide') {
     return (
       <svg viewBox="0 0 1024 1024" aria-hidden="true">
@@ -1761,7 +1761,7 @@ export const ChatEditor = memo(
       workspaceName,
       workspaceTitle,
       workspaceColor,
-      chatWidthMode = '960',
+      chatWidthMode = '1000',
       showChatWidthToggle = true,
       chatWidthToggleMin,
       visibleToolbarActions,
@@ -3770,7 +3770,7 @@ export const ChatEditor = memo(
               onClick={(e) => {
                 e.stopPropagation();
                 onChatWidthModeChange?.(
-                  chatWidthMode === 'wide' ? '960' : 'wide',
+                  chatWidthMode === 'wide' ? '1000' : 'wide',
                 );
               }}
               disabled={!onChatWidthModeChange}
