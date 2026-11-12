@@ -172,22 +172,27 @@ public final class ManagedRuntimeCoordinator implements RuntimeWarmer {
                             : ((Number) pin.get("settingsRevision")).longValue());
                     try {
                         var resolved = packages.resolvePin(tenant, binding.getRequest().getScope().getWorkspaceId(), parsed);
-                        var manifest = resolved.descriptor().manifest();
-                        java.util.Map<String, Object> metadata = new java.util.LinkedHashMap<>(java.util.Map.of(
-                                "schemaVersion", manifest.schemaVersion(), "compilerVersion", manifest.compilerVersion(),
-                                "name", manifest.name(), "version", manifest.version(),
-                                "target", java.util.Map.of("platform", manifest.target().platform(), "arch", manifest.target().arch()),
-                                "components", manifest.components()));
-                        if (manifest.sourceType() != null) {
-                            metadata.put("sourceType", manifest.sourceType());
-                            metadata.put("sourceRevision", manifest.sourceRevision());
+                        try {
+                            var manifest = resolved.descriptor().manifest();
+                            java.util.Map<String, Object> metadata = new java.util.LinkedHashMap<>(java.util.Map.of(
+                                    "schemaVersion", manifest.schemaVersion(), "compilerVersion", manifest.compilerVersion(),
+                                    "name", manifest.name(), "version", manifest.version(),
+                                    "target", java.util.Map.of("platform", manifest.target().platform(), "arch", manifest.target().arch()),
+                                    "components", manifest.components()));
+                            if (manifest.sourceType() != null) {
+                                metadata.put("sourceType", manifest.sourceType());
+                                metadata.put("sourceRevision", manifest.sourceRevision());
+                            }
+                            manifests.put(parsed.extensionId(), metadata);
+                            return installExtensionPackage(tenant, sessionId, binding, parsed.packageDigest(), resolved.archive())
+                                    .whenComplete((ignored, error) -> resolved.close()).thenApply(ignored -> {
+                                        settings.put(parsed.extensionId(), resolved.settings());
+                                        return settings;
+                                    });
+                        } catch (RuntimeException error) {
+                            resolved.close();
+                            throw error;
                         }
-                        manifests.put(parsed.extensionId(), metadata);
-                        return installExtensionPackage(tenant, sessionId, binding, parsed.packageDigest(), resolved.archive())
-                                .thenApply(ignored -> {
-                                    settings.put(parsed.extensionId(), resolved.settings());
-                                    return settings;
-                                });
                     } catch (IOException error) {
                         return CompletableFuture.failedFuture(error);
                     }
