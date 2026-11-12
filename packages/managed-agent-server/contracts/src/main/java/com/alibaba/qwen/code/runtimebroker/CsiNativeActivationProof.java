@@ -42,6 +42,16 @@ import java.util.function.Function;
 public final class CsiNativeActivationProof {
     private static final int MAX_TOOL_OUTCOME_BYTES = 4 * 1024 * 1024;
     private static final long MAX_SAFE = 9_007_199_254_740_990L;
+    /**
+     * The prepared retirement commit body and the two base64 fields it carries. Base64 expands by
+     * 4/3, so the two field limits must jointly fit inside the body budget, and the body's own
+     * base64 must fit the command envelope that carries it. Otherwise an outer cap becomes the real
+     * ceiling and a later raise of an inner limit fails without saying why.
+     */
+    public static final int TERMINAL_BODY_LIMIT = 256 * 1024;
+    public static final int TERMINAL_RECORD_LIMIT = 128 * 1024;
+    public static final int TERMINAL_CANDIDATE_LIMIT = 16 * 1024;
+    public static final int TERMINAL_COMMAND_LIMIT = 384 * 1024;
     private static final Set<String> ENVELOPE = Set.of("uuid", "parentUuid", "sessionId", "timestamp",
             "type", "subtype", "cwd", "version", "managedSession");
     private static final Set<String> MARKER = Set.of("transactionId", "commandId", "operation", "contentDigest",
@@ -1796,8 +1806,8 @@ public final class CsiNativeActivationProof {
         require(candidates.isArray() && candidates.size() == 1);
         JsonNode candidate = candidates.get(0);
         closed(candidate, Set.of("resourceId", "kind", "schemaVersion", "byteLength", "digest", "bytesBase64"));
-        byte[] resourceBytes = canonicalBase64(candidate, "bytesBase64", 16 * 1024);
-        byte[] raw = canonicalBase64(metadata, "recordBytesBase64", 128 * 1024);
+        byte[] resourceBytes = canonicalBase64(candidate, "bytesBase64", TERMINAL_CANDIDATE_LIMIT);
+        byte[] raw = canonicalBase64(metadata, "recordBytesBase64", TERMINAL_RECORD_LIMIT);
         require(sha256(raw).equals(text(metadata, "recordDigest")));
         var records = records(raw);
         require(records.size() == 2 && number(metadata.get("recordCount")) == records.size());

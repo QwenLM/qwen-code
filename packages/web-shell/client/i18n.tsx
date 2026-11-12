@@ -2134,6 +2134,14 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'scheduledTasks.group.nameRequired': 'Enter a name for the new group.',
   'scheduledTasks.routing.loading': 'Loading models and groups…',
   'scheduledTasks.delivery.channel': 'Delivery Channel',
+  'scheduledTasks.delivery.configuredGroupHint':
+    'Messages are sent to the group configured for this Channel.',
+  'scheduledTasks.delivery.configuredHint':
+    'Messages are sent to the destination configured for this Channel.',
+  'scheduledTasks.delivery.useConfiguredDestination':
+    'Use configured destination',
+  'scheduledTasks.delivery.differentConfiguredDestination':
+    'This saved destination differs from the Channel’s configured destination.',
   'scheduledTasks.delivery.off': 'Delivery off',
   'scheduledTasks.delivery.hint':
     'Send the final response of a successful scheduled run to this destination. Delivery depends on the Channel and does not guarantee receipt.',
@@ -4652,6 +4660,22 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'channels.platform.available': 'Available',
   'channels.platform.configure': 'Configure',
   'channels.platform.add': 'Add connection',
+  'channels.method.title': 'Choose a DingTalk connection',
+  'channels.method.description':
+    'Choose how this Channel connects to DingTalk.',
+  'channels.method.applicationBot': 'Application bot',
+  'channels.method.applicationBot.description':
+    'Receive messages and reply using an application bot.',
+  'channels.method.webhook': 'Webhook (send only)',
+  'channels.method.webhook.description':
+    'Send notifications to the group configured by a custom robot webhook.',
+  'channels.status.readyToSend': 'Ready to send',
+  'channels.statusDescription.readyToSend':
+    'Ready locally. Remote credentials are checked when sending.',
+  'channels.statusDescription.notReadyToSend':
+    'Not ready to send notifications.',
+  'channels.statusDescription.outbound':
+    'Sends notifications to the configured destination.',
   'channels.platform.configureNamed': (v) =>
     `Configure ${v?.platform ?? 'Channel'}`,
   'channels.status.stopped': 'Stopped',
@@ -4753,6 +4777,12 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'channels.qrLogin.error': 'Could not complete the QR binding.',
   'channels.editor.field.dingtalk.clientId': 'Client ID (AppKey)',
   'channels.editor.field.dingtalk.clientSecret': 'Client Secret (AppSecret)',
+  'channels.editor.field.dingtalkWebhook.webhookUrl': 'Webhook URL',
+  'channels.editor.field.dingtalkWebhook.webhookUrl.description':
+    'The secret webhook address of your DingTalk custom robot.',
+  'channels.editor.field.dingtalkWebhook.signingSecret': 'Signing secret',
+  'channels.editor.field.dingtalkWebhook.signingSecret.description':
+    'Required if signature verification is enabled for the custom robot.',
   'channels.editor.field.weixin.groupPolicy': 'Group policy',
   'channels.editor.field.weixin.groupPolicy.description':
     'WeChat iLink Bot only supports direct messages, so groups stay disabled.',
@@ -4799,6 +4829,10 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'channels.editor.field.github.allowedRepos.description':
     'Comma-separated repository full names, for example owner/repo.',
   'channels.editor.field.github.allowedRepos.placeholder': 'owner/repo',
+  'channels.editor.field.gitlab.allowedRepos': 'Allowed projects',
+  'channels.editor.field.gitlab.allowedRepos.description':
+    'Comma-separated project paths, for example group/subgroup/project.',
+  'channels.editor.field.gitlab.allowedRepos.placeholder': 'group/project',
   'channels.editor.field.github.useLocalGh':
     'Use local GitHub CLI authentication',
   'channels.editor.field.github.useLocalGh.description':
@@ -4832,6 +4866,10 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
     'GitHub logins allowed to start tasks in this repository. Empty means nobody.',
   'channels.editor.field.github.repositorySpeakers.inherited':
     'GitHub logins allowed in this repository. Leave empty to use the channel-wide list.',
+  'channels.editor.field.gitlab.repositorySpeakers.description':
+    'GitLab usernames allowed to start tasks in this project. Empty means nobody.',
+  'channels.editor.field.gitlab.repositorySpeakers.inherited':
+    'GitLab usernames allowed in this project. Leave empty to use the channel-wide list.',
   'channels.editor.field.github.retainedRepositorySettings.title':
     'Repository settings still apply',
   'channels.editor.field.github.retainedRepositorySettings.description': (v) =>
@@ -5156,8 +5194,12 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
     'Enter a group ID other than __proto__, constructor, or prototype.',
   'channels.editor.validation.invalidRepoId':
     'Enter each repository as owner/repo.',
+  'channels.editor.validation.invalidProjectPath':
+    'Enter each project as a path, for example group/subgroup/project.',
   'channels.editor.validation.conflictingRepoAliases':
     'This channel lists one repository twice with different settings, spelled differently (for example Owner/repo and owner/repo). Remove one of the entries from settings.json before saving.',
+  'channels.editor.validation.conflictingProjectAliases':
+    'This channel lists one project twice with different settings, spelled differently (for example Group/Project and group/project). Remove one of the entries from settings.json before saving.',
   'channels.editor.validation.invalidGroupEntry': (v) =>
     `This channel stores a group entry that is not an object: ${v?.repositories ?? ''}. The daemon refuses every save while it is there, and the form has no row for it. Fix or remove that entry in settings.json, then reload the channel.`,
   'channels.editor.validation.invalidOption':
@@ -7222,6 +7264,11 @@ const ZH: Messages = {
   'scheduledTasks.group.nameRequired': '请输入新分组名称。',
   'scheduledTasks.routing.loading': '正在加载模型和分组…',
   'scheduledTasks.delivery.channel': '投递频道',
+  'scheduledTasks.delivery.configuredGroupHint': '消息会发送到此频道配置的群。',
+  'scheduledTasks.delivery.configuredHint': '消息会发送到此频道配置的目标。',
+  'scheduledTasks.delivery.useConfiguredDestination': '使用已配置的目标',
+  'scheduledTasks.delivery.differentConfiguredDestination':
+    '已保存的目标与此频道配置的目标不同。',
   'scheduledTasks.delivery.off': '不投递',
   'scheduledTasks.delivery.hint':
     '将成功完成的定时任务的最终回复发送到此目标。投递依赖频道，不保证送达。',
@@ -9538,6 +9585,19 @@ const ZH: Messages = {
   'channels.platform.available': '已开放',
   'channels.platform.configure': '配置',
   'channels.platform.add': '添加连接',
+  'channels.method.title': '选择钉钉连接方式',
+  'channels.method.description': '选择此频道连接钉钉的方式。',
+  'channels.method.applicationBot': '应用机器人',
+  'channels.method.applicationBot.description':
+    '通过应用机器人接收消息并回复。',
+  'channels.method.webhook': 'Webhook（仅发送）',
+  'channels.method.webhook.description':
+    '通过自定义机器人 Webhook，向配置的群发送通知。',
+  'channels.status.readyToSend': '可发送',
+  'channels.statusDescription.readyToSend':
+    '本地已就绪，远程凭证会在发送时验证。',
+  'channels.statusDescription.notReadyToSend': '尚未就绪，暂时无法发送通知。',
+  'channels.statusDescription.outbound': '向配置的目标发送通知。',
   'channels.platform.configureNamed': (v) => `配置${v?.platform ?? '频道'}`,
   'channels.status.stopped': '已停止',
   'channels.status.starting': '启动中',
@@ -9628,6 +9688,12 @@ const ZH: Messages = {
   'channels.qrLogin.cancelled': '已取消绑定。',
   'channels.qrLogin.error': '无法完成扫码绑定。',
   'channels.editor.field.dingtalk.clientId': 'Client ID（原 AppKey）',
+  'channels.editor.field.dingtalkWebhook.webhookUrl': 'Webhook 地址',
+  'channels.editor.field.dingtalkWebhook.webhookUrl.description':
+    '钉钉自定义机器人的私密 Webhook 地址。',
+  'channels.editor.field.dingtalkWebhook.signingSecret': '加签密钥',
+  'channels.editor.field.dingtalkWebhook.signingSecret.description':
+    '自定义机器人启用加签验证时需填写。',
   'channels.editor.field.dingtalk.clientSecret':
     'Client Secret（原 AppSecret）',
   'channels.editor.field.weixin.groupPolicy': '群聊策略',
@@ -9676,6 +9742,10 @@ const ZH: Messages = {
   'channels.editor.field.github.allowedRepos.description':
     '逗号分隔的仓库全名，例如 owner/repo。',
   'channels.editor.field.github.allowedRepos.placeholder': 'owner/repo',
+  'channels.editor.field.gitlab.allowedRepos': '允许的项目',
+  'channels.editor.field.gitlab.allowedRepos.description':
+    '逗号分隔的项目路径，例如 group/subgroup/project。',
+  'channels.editor.field.gitlab.allowedRepos.placeholder': 'group/project',
   'channels.editor.field.github.useLocalGh': '使用本地 GitHub CLI 认证',
   'channels.editor.field.github.useLocalGh.description':
     '未配置令牌时，显式复用 daemon 主机上账户级的 gh 登录',
@@ -9707,6 +9777,10 @@ const ZH: Messages = {
     '可以在该仓库发起任务的 GitHub 登录名。留空表示没有人。',
   'channels.editor.field.github.repositorySpeakers.inherited':
     '可以在该仓库发言的 GitHub 登录名。留空则使用渠道级列表。',
+  'channels.editor.field.gitlab.repositorySpeakers.description':
+    '可以在该项目发起任务的 GitLab 用户名。留空表示没有人。',
+  'channels.editor.field.gitlab.repositorySpeakers.inherited':
+    '可以在该项目发言的 GitLab 用户名。留空则使用渠道级列表。',
   'channels.editor.field.github.retainedRepositorySettings.title':
     '按仓库设置仍然生效',
   'channels.editor.field.github.retainedRepositorySettings.description': (v) =>
@@ -10011,8 +10085,12 @@ const ZH: Messages = {
   'channels.editor.validation.invalidGroupId':
     '群聊 ID 不能是 __proto__、constructor 或 prototype。',
   'channels.editor.validation.invalidRepoId': '仓库需写成 owner/repo 形式。',
+  'channels.editor.validation.invalidProjectPath':
+    '项目需写成路径形式，例如 group/subgroup/project。',
   'channels.editor.validation.conflictingRepoAliases':
     '该渠道把同一个仓库以不同大小写写了两次且设置不同（例如 Owner/repo 与 owner/repo）。请先在 settings.json 里删掉其中一条再保存。',
+  'channels.editor.validation.conflictingProjectAliases':
+    '该渠道把同一个项目以不同大小写写了两次且设置不同（例如 Group/Project 与 group/project）。请先在 settings.json 里删掉其中一条再保存。',
   'channels.editor.validation.invalidGroupEntry': (v) =>
     `该渠道把以下群组条目存成了非对象：${v?.repositories ?? ''}。只要它还在，daemon 就会拒绝每次保存，而表单里没有对应的行。请在 settings.json 里修正或删除该条目，然后重新加载渠道。`,
   'channels.editor.validation.invalidOption': '请移除不在允许列表中的值。',

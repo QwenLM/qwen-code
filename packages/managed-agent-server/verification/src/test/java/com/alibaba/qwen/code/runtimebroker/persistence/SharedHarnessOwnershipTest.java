@@ -137,7 +137,7 @@ class SharedHarnessOwnershipTest {
         assertClosed(() -> bindings.requireHarnessAdmission(SHARED, SCOPE, "harness-a", authority));
         assertClosed(() -> bindings.requireHookAdmission(SHARED, SCOPE, "harness-a", authority));
         JdbcRepositorySupport.transaction(source, connection -> {
-            JdbcRuntimeBindingRepository.beginHarnessLifecycle(connection, "tenant", "harness-a", "close");
+            RuntimeAdmissionFences.beginHarnessLifecycle(connection, "tenant", "harness-a", "close");
             return null;
         });
         try (var connection = source.getConnection(); var statement = connection.prepareStatement(
@@ -166,7 +166,7 @@ class SharedHarnessOwnershipTest {
         // refuses a bound Workspace scope outright; the Harness claim fences it.
         assertClosed(() -> bindings.requireHarnessAdmission(SCOPE, "harness-a", authority));
         JdbcRepositorySupport.transaction(source, connection -> {
-            JdbcRuntimeBindingRepository.beginHarnessLifecycle(connection, "tenant", "harness-a", "close");
+            RuntimeAdmissionFences.beginHarnessLifecycle(connection, "tenant", "harness-a", "close");
             return null;
         });
         try (var connection = source.getConnection(); var statement = connection.prepareStatement(
