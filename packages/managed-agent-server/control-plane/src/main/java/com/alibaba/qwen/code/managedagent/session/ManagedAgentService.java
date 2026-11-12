@@ -1318,7 +1318,7 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
                 inputPolicy.requireSubmitterRole(session, principal);
             }
             if (session.workspace() == null
-                    || !recordedByCaller(recorded, rawActorId)) {
+                    || !recordedByCaller(recorded, principal, rawActorId)) {
                 if (principal == null) {
                     requireReplayCreator(session, rawActorId);
                 } else {
@@ -2924,7 +2924,7 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
         SessionRecord recordedSession = requireRecordedSessionGrant(command,
                 session, principal, rawActorId);
         if (recordedSession.workspace() == null
-                || !recordedByCaller(command, rawActorId)) {
+                || !recordedByCaller(command, principal, rawActorId)) {
             if (principal == null) {
                 requireReplayCreator(recordedSession, rawActorId);
             } else {
@@ -3051,8 +3051,10 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
     // the actor whose own retry the recorded outcome answers. An
     // unattributed or unstamped receipt leaves the creator gate in place.
     private boolean recordedByCaller(StoreModels.CommandRecord command,
-            String actorId) {
-        return command.admitsReplayBy(actorId);
+            SessionPrincipal principal, String actorId) {
+        return principal == null
+                ? command.admitsReplayBy(actorId)
+                : command.admitsReplayBy(principal);
     }
 
     private void requireHarness() {

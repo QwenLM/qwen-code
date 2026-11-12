@@ -4,7 +4,6 @@ import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.SessionPrincipal;
 import org.springframework.jdbc.core.JdbcTemplate;
 
-import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Objects;
 
@@ -100,11 +99,7 @@ public final class ManagedSessionPrincipal {
             // writes — rather than a structured principal key.
             return new byte[0];
         }
-        String joined = principal.userId()
-                + "\0" + (principal.actorPresent() ? "1" : "0")
-                + "\0" + (principal.actorSubjectId() == null ? ""
-                        : principal.actorSubjectId());
-        return joined.getBytes(StandardCharsets.UTF_8);
+        return principal.receiptActorKey();
     }
 
     /**

@@ -1226,6 +1226,86 @@ class ManagedWorkspaceAdmissionTest {
         });
     }
 
+    // A subject-bearing caller's receipt carries the principal encoding, so
+    // the recorded rename must answer that same caller through both replay
+    // comparisons (the service pre-read and the store's replay-owner gate)
+    // while a sibling — a different user, or a different business actor of
+    // the same user — stays refused.
+    @Test
+    void aBoundPrincipalRenameReplaysItsOwnKeyAndRefusesEverySibling() {
+        String tenant = "tenant-" + UUID.randomUUID();
+        register(tenant, "ws-a", "storage-a",
+                WorkspaceExecutionProfile.CONFIG_REF,
+                WorkspaceExecutionProfile.POLICY_REF);
+        grant(tenant, "ws-a", "actor-a", true);
+        grant(tenant, "ws-a", "actor-b", true);
+        String sessionId = store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                .tenantId(tenant)
+                .actorId("actor-a")
+                .idempotencyKey("create")
+                .requestDigest("sha256:" + "a".repeat(64))
+                .agentId("qwen-code")
+                .selection(new WorkspaceSelection("ws-a",
+                        "."))
+                .build())
+                .sessionId();
+        ManagedAgentProperties enabled = new ManagedAgentProperties();
+        enabled.getHarness().setWorkspaceFilesEnabled(true);
+        ManagedAgentStore gated = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, mapper,
+                Clock.systemUTC(), ignored -> {}, registry, enabled, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+        UnavailableHarnessConnector harness =
+                new UnavailableHarnessConnector() {
+                    @Override
+                    public boolean isAvailable() {
+                        return true;
+                    }
+
+                    @Override
+                    public boolean isWorkspaceFilesAvailable() {
+                        return true;
+                    }
+
+                    @Override
+                    public Attachment createOrLoad(String tenantId,
+                            String sessionId, boolean loadExisting) {
+                        return new Attachment("boot");
+                    }
+
+                    @Override
+                    public boolean supportsFencedTitles() {
+                        return true;
+                    }
+
+                    @Override
+                    public void rename(String tenantId, String sessionId,
+                            String title) {
+                    }
+                };
+        ManagedAgentService service = new ManagedAgentService(gated,
+                new RequestDigests(), mock(HarnessCoordinator.class), harness,
+                registry, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+        var recorder = com.alibaba.qwen.code.managedagent.model.SessionPrincipal
+                .of(tenant, "actor-a", "subject-a");
+        TransactionTemplate transaction = new TransactionTemplate(
+                transactionManager);
+        transaction.executeWithoutResult(status -> {
+            assertThat(service.renameSession(recorder, "rename", sessionId,
+                    "new title").replayed()).isFalse();
+            // The recorder's own retry replays, whichever arm answers it.
+            assertThat(service.renameSession(recorder, "rename", sessionId,
+                    "new title").replayed()).isTrue();
+            // A sibling user holding OPERATOR on the Workspace is not the
+            // recorder either: the recorded outcome stays creator-scoped.
+            assertThatThrownBy(() -> service.renameSession(
+                    com.alibaba.qwen.code.managedagent.model.SessionPrincipal
+                            .of(tenant, "actor-b", "subject-b"),
+                    "rename", sessionId, "new title"))
+                    .isInstanceOfSatisfying(ManagedAgentException.class, error ->
+                            assertThat(error.getCode()).isIn("session_not_found",
+                                    "workspace_unavailable"));
+        });
+    }
+
     // The grant-less arm of the rename replay gate: with the key recorded
     // as a completed rename of the Session, every title shape — over-long,
     // blank, control-bearing — must answer the same 404 a fresh key

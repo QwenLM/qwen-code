@@ -50,6 +50,19 @@ public record SessionPrincipal(String tenantId, String userId,
         return actorSubjectId != null;
     }
 
+    /**
+     * The receipt actor stamp for a principal-carried entry: the user, the
+     * actor-present flag and the subject, NUL-separated. The replay
+     * comparison must use this same encoding, never the raw Workspace actor
+     * key, or a principal-encoded receipt could not answer its recorder.
+     */
+    public byte[] receiptActorKey() {
+        String joined = userId
+                + "\0" + (actorPresent() ? "1" : "0")
+                + "\0" + (actorSubjectId == null ? "" : actorSubjectId);
+        return joined.getBytes(StandardCharsets.UTF_8);
+    }
+
     private static void checkComponent(String name, String value) {
         for (int index = 0; index < value.length(); index++) {
             char character = value.charAt(index);

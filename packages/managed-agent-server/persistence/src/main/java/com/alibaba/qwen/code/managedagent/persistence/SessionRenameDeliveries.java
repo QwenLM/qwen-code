@@ -69,7 +69,7 @@ final class SessionRenameDeliveries {
             }
             return;
         }
-        if (!previous.admitsReplayBy(actorId)
+        if (!admitsReplay(previous, actorId, principal)
                 && !workspaces.createdSession(session.tenantId(), actorId,
                         session.sessionId())) {
             if ("DELETED".equals(session.status())) {
@@ -79,6 +79,19 @@ final class SessionRenameDeliveries {
             throw new ManagedAgentException(409, "workspace_unavailable",
                     "Hosted Workspace execution is not available.");
         }
+    }
+
+    // A subject-bearing caller's receipt stores the principal encoding
+    // (userId\0actor-present\0subject), so comparing it to the raw workspace
+    // actor key would refuse the recorder's own retry. Compare the encoding
+    // the recording path used: the principal key when the caller carries one,
+    // otherwise the raw workspace actor key. A different caller matches
+    // neither and stays refused.
+    private static boolean admitsReplay(CommandRecord previous, String actorId,
+            SessionPrincipal principal) {
+        return principal == null
+                ? previous.admitsReplayBy(actorId)
+                : previous.admitsReplayBy(principal);
     }
 
     List<RenameDelivery> deliverableRenames(long now) {
