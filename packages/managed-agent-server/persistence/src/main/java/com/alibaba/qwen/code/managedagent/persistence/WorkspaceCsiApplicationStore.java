@@ -14,6 +14,7 @@ import com.alibaba.qwen.code.runtimebroker.persistence.JdbcCsiApplicationRetirem
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcCsiRetirementEvidence;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.alibaba.qwen.code.runtimebroker.transport.CsiFileFinalizeProtocol;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -46,7 +47,7 @@ public final class WorkspaceCsiApplicationStore {
     private static final String FORMAT = "qwen-csi-application-retirement/1";
     private static final int RECEIPT_LIMIT = 64 * 1024;
     static final int FROZEN_LIMIT = 32 * 1024 * 1024;
-    private static final int BODY_LIMIT = 128 * 1024;
+    private static final int BODY_LIMIT = com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof.TERMINAL_BODY_LIMIT;
     private static final Set<String> ENVELOPE_FIELDS = Set.of("format", "retirementId", "bindingId", "requestKey",
             "sealedBindingVersion", "bootSha256", "writerTokenSha256", "commitBodyBase64", "preparedCommitSha256",
             "preCutObservationBase64", "preCutObservationSha256", "workerObserveRequest");
@@ -78,7 +79,8 @@ public final class WorkspaceCsiApplicationStore {
     }
 
     public Status command(String tenant, String session, String token, String action, byte[] bytes) {
-        JsonNode request = WorkspaceCsiApplicationJson.object(bytes, 192 * 1024);
+        JsonNode request = WorkspaceCsiApplicationJson.object(bytes,
+                com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof.TERMINAL_COMMAND_LIMIT);
         String argument = switch (action) {
             case "freeze" -> "commitBodyBase64";
             case "cut" -> "frozenRequestSha256";
@@ -92,7 +94,7 @@ public final class WorkspaceCsiApplicationStore {
         String retirement = request.path("retirementId").textValue();
         return switch (action) {
             case "freeze" -> freeze(tenant, session, workspace, retirement, token,
-                    WorkspaceCsiApplicationJson.base64(request.path(argument), 128 * 1024));
+                    WorkspaceCsiApplicationJson.base64(request.path(argument), com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof.TERMINAL_BODY_LIMIT));
             case "cut" -> cut(tenant, session, workspace, retirement, token, request.path(argument).textValue());
             case "finalize" -> finalizeApplication(tenant, session, workspace, retirement, token, request.path(argument).textValue());
             default -> throw new IllegalArgumentException("Unknown CSI retirement command");
@@ -366,8 +368,8 @@ public final class WorkspaceCsiApplicationStore {
         String session = authority.original().request().getIsolationKey();
         try (PreparedStatement statement = target.prepareStatement("SELECT lease_token_hash FROM ma_session_head"
                 + " WHERE head_kind = 'MANAGED_SESSION' AND tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ?")) {
-            statement.setString(1, JdbcRuntimeBindingRepository.harnessDrainKey(tenant));
-            statement.setString(2, JdbcRuntimeBindingRepository.harnessDrainKey(session));
+            statement.setString(1, RuntimeAdmissionFences.harnessDrainKey(tenant));
+            statement.setString(2, RuntimeAdmissionFences.harnessDrainKey(session));
             statement.setBytes(3, ManagedSchemaKeys.identity(tenant));
             statement.setBytes(4, ManagedSchemaKeys.identity(session));
             try (var row = statement.executeQuery()) {
