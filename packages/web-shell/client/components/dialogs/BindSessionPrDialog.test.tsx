@@ -199,6 +199,26 @@ describe('BindSessionPrDialog', () => {
     );
   });
 
+  it('resets the resolving state on the failure arm so the form is usable again', async () => {
+    workspaceGitHubPullRequests.mockRejectedValue(new Error('boom'));
+    await render();
+    await type('16865');
+    await submit();
+    // The finally must clear resolving; otherwise the input stays disabled
+    // and the user cannot retry.
+    expect(input().disabled).toBe(false);
+  });
+
+  it('resets the resolving state on the success arm so the form is usable again', async () => {
+    await render();
+    await type('42'); // resolves, but not in the open list
+    await submit();
+    expect(input().disabled).toBe(false);
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain(
+      '#42',
+    );
+  });
+
   it('reports a non-git workspace as unavailable, not as a missing number', async () => {
     workspaceGitHubPullRequests.mockResolvedValue({
       ...LIST_RESPONSE,

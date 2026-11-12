@@ -22,23 +22,28 @@ import { CommandKind, type SlashCommand } from './types.js';
 // zeros keep number→url round-trips unambiguous.
 const BARE_PR_NUMBER_PATTERN = /^[1-9]\d{0,8}$/;
 
-// Best-effort archive resolution shared by the listing and binding paths:
-// a location-query failure keeps the default active location (mirrors the
-// shell binder).
+// Archive resolution shared by the listing and binding paths. A location
+// that cannot be resolved — a rejected head read, or an active/archived
+// conflict — is reported as 'unresolved': list mode must not turn it into an
+// authoritative "No PRs bound" (the archive transition may have moved the
+// sidecar), while the bind path keeps the active default, where writing to a
+// resurrected active sidecar mirrors the shell post-hook and is recoverable.
+// An absent head (undefined) is a session with no transcript yet and defaults
+// to active.
 async function resolveArchiveState(
   sessionService: {
     getSessionLocation(id: string): Promise<string | undefined>;
   },
   sessionId: string,
-): Promise<'active' | 'archived'> {
+): Promise<'active' | 'archived' | 'unresolved'> {
   try {
-    if ((await sessionService.getSessionLocation(sessionId)) === 'archived') {
-      return 'archived';
-    }
+    const location = await sessionService.getSessionLocation(sessionId);
+    if (location === 'archived') return 'archived';
+    if (location === 'conflict') return 'unresolved';
+    return 'active';
   } catch {
-    // Best-effort — keep the default active location.
+    return 'unresolved';
   }
-  return 'active';
 }
 
 /**
@@ -81,6 +86,8 @@ export const prCommand: SlashCommand = {
         messageType: 'error',
         content: `${t('Could not read the PR bindings for this session.')}\n${usage}`,
       } as const;
+      // An unresolved archive location is not an authoritative "no bindings".
+      if (archiveState === 'unresolved') return unreadable;
       try {
         const result = await readSessionPrsDetailed(
           sessionService.getPrSessionPathForArchiveState(
@@ -107,27 +114,35 @@ export const prCommand: SlashCommand = {
 
     let number: number;
     let inputUrl: string | undefined;
+    const invalidReference = {
+      type: 'message',
+      messageType: 'error',
+      content: t('Invalid PR reference. Usage: /pr <number | url>'),
+    } as const;
     if (BARE_PR_NUMBER_PATTERN.test(input)) {
       number = Number(input);
     } else {
       const parsed = GitWorktreeService.parsePRReference(input);
-      if (parsed === null) {
-        return {
-          type: 'message',
-          messageType: 'error',
-          content: t('Invalid PR reference. Usage: /pr <number | url>'),
-        };
-      }
+      if (parsed === null) return invalidReference;
       number = parsed;
-      if (/^https?:\/\//i.test(input)) inputUrl = input;
+      if (/^https?:\/\//i.test(input)) {
+        // Fail closed when the spelling cannot be canonicalized: the looser
+        // parsePRReference match accepts /PULL/ and percent-encoded owners
+        // that pullRequestViewUrl rejects, and forwarding the raw input would
+        // hand gh — and, on a gh failure, the sidecar, the reply text and the
+        // catalog notification — a URL that may carry credentials. Never fall
+        // back to the raw input.
+        const canonical = pullRequestViewUrl(input);
+        if (canonical === undefined) return invalidReference;
+        inputUrl = canonical;
+      }
     }
 
     const resolved = await fetchPullRequestByReference(
       config.getTargetDir(),
-      // Hand gh the rebuilt canonical URL, not the raw input: a /files,
-      // query, or credential-bearing spelling must not reach the child
-      // argv or its logs.
-      inputUrl ? (pullRequestViewUrl(inputUrl) ?? inputUrl) : String(number),
+      // inputUrl is already the rebuilt canonical URL, so no /files, query,
+      // or credential-bearing spelling reaches the child argv or its logs.
+      inputUrl ?? String(number),
     );
     let binding: { number: number; url: string; state?: SessionPrState };
     if (resolved.status === 'pr') {
@@ -137,10 +152,9 @@ export const prCommand: SlashCommand = {
         state: resolved.state,
       };
     } else if (inputUrl && isValidSessionPrUrl(inputUrl)) {
-      // Store the canonical /pull/<N> spelling so a later re-bind of the
-      // same PR matches the same sidecar key (a /files or query spelling
-      // would otherwise replace the entry as "another PR").
-      binding = { number, url: pullRequestViewUrl(inputUrl) ?? inputUrl };
+      // inputUrl is already the canonical /pull/<N> spelling, so a later
+      // re-bind of the same PR matches the same sidecar key.
+      binding = { number, url: inputUrl };
     } else {
       // Environmental failures (gh missing, timeout) get their own message:
       // advising a PR-specific remedy for them sends the user hunting for
@@ -167,12 +181,20 @@ export const prCommand: SlashCommand = {
       const archiveState = await resolveArchiveState(sessionService, sessionId);
       const prPath = sessionService.getPrSessionPathForArchiveState(
         sessionId,
-        archiveState,
+        // The bind path keeps the active default when the location could not
+        // be resolved (mirrors the shell post-hook; recoverable).
+        archiveState === 'unresolved' ? 'active' : archiveState,
       );
       const applied = await upsertSessionPrs(prPath, [
         { ...binding, source: 'create' },
       ]);
-      if (applied.added.includes(binding.number)) {
+      // Announce any applied write — a newly added binding OR an already-bound
+      // re-bind, which may have repaired a stale state in place. Without the
+      // already-bound arm a live client keeps rendering the stale badge.
+      if (
+        applied.added.includes(binding.number) ||
+        applied.alreadyBound.includes(binding.number)
+      ) {
         try {
           sessionService.emitSessionPrBound(sessionId, {
             number: binding.number,
@@ -183,6 +205,8 @@ export const prCommand: SlashCommand = {
           // catalog-mark failure must not read as a bind failure (mirrors
           // the shell binder). The next catalog refresh picks it up.
         }
+      }
+      if (applied.added.includes(binding.number)) {
         // The URL is part of the message: a bare number resolves in the
         // session's target-directory repository, so printing only the
         // number would hide a wrong-repository bind (there is no unbind).

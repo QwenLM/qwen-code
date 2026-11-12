@@ -3785,6 +3785,9 @@ describe('SessionOverviewPanel', () => {
         ),
     );
     await flushAsync();
+    // Pin the cwd the qualified client was opened for, not just "the last
+    // object": routing through the primary workspace must be caught.
+    expect(workspaceClient.workspaceByCwd).toHaveBeenCalledWith('/wsB');
     const qualified = workspaceClient.workspaceByCwd.mock.results.at(-1)!.value;
     expect(qualified.updateSessionMetadata).toHaveBeenCalledWith('b1', {
       pr: { number: 42, url },
@@ -3851,6 +3854,51 @@ describe('SessionOverviewPanel', () => {
     expect(
       document.querySelector('input[aria-label="Bind PR"]'),
     ).not.toBeNull();
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain(
+      'Bind PR failed',
+    );
+  });
+
+  it('reports a late bind failure on the panel notice after the dialog is dismissed', async () => {
+    connectionState.sessionId = 's1';
+    connectionState.capabilities = { features: [], workspaceCwd: '/w' };
+    sessionsState.sessions = [session('s1', { displayName: 'One' })];
+    let rejectBind!: (err: Error) => void;
+    workspaceActions.bindSessionPr.mockImplementation(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectBind = reject;
+        }),
+    );
+    render();
+    act(() => click(rowActionButton(rows()[0]!, 'Bind PR')));
+    const input = document.querySelector(
+      'input[aria-label="Bind PR"]',
+    ) as HTMLInputElement;
+    act(() =>
+      setInputValue(input, 'https://github.com/QwenLM/qwen-code/pull/1'),
+    );
+    act(() =>
+      input
+        .closest('form')!
+        .dispatchEvent(
+          new Event('submit', { bubbles: true, cancelable: true }),
+        ),
+    );
+    await flushAsync();
+    // Dismiss the dialog while the write is in flight.
+    const cancel = Array.from(
+      document.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((button) => button.textContent?.trim() === 'cancel');
+    act(() => click(cancel!));
+    await flushAsync();
+    expect(document.querySelector('input[aria-label="Bind PR"]')).toBeNull();
+    // The write now fails; with the dialog gone the panel notice is the only
+    // report path (the settle-time else arm), so it must carry the error.
+    await act(async () => {
+      rejectBind(new Error('locked'));
+    });
+    await flushAsync();
     expect(document.querySelector('[role="alert"]')?.textContent).toContain(
       'Bind PR failed',
     );

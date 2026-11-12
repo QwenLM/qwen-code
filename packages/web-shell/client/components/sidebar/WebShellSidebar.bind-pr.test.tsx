@@ -2,6 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
+import { STANDALONE_SESSIONS_CAPABILITY } from '@qwen-code/sdk/daemon';
 import {
   clickSidebarElement as click,
   createSidebarMocks,
@@ -35,6 +36,7 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   useWorkspace: () => mocks.workspace,
   useWorkspaceActions: () => mocks.workspaceActions,
   useChannels: () => mocks.channels,
+  useStreamingState: () => 'idle',
   useSessions: (options?: { archiveState?: string; group?: string }) =>
     sidebarSessionPage(mocks, options),
 }));
@@ -83,6 +85,7 @@ function renderSidebar(
     sessionActions?: React.ComponentProps<
       typeof WebShellSidebar
     >['sessionActions'];
+    standalone?: boolean;
   } = {},
 ): void {
   act(() => {
@@ -101,6 +104,10 @@ function renderSidebar(
           onLoadSession={loadSession}
           onError={() => {}}
           sessionActions={props.sessionActions}
+          onLoadStandaloneSession={
+            props.standalone ? async () => {} : undefined
+          }
+          onStandaloneNotice={props.standalone ? () => {} : undefined}
         />
       </I18nProvider>,
     );
@@ -303,6 +310,134 @@ describe('WebShellSidebar bind PR', () => {
     // DOM Radix leaves behind while the menu is closed.
     const menu = await openSessionMenu();
     expect(menuItem(menu, 'Delete')).not.toBeUndefined();
+    expect(menuItem(menu, 'Bind PR')).toBeUndefined();
+  });
+
+  it('reopening Bind PR after cancelling a pending write is not a dead form', async () => {
+    connection.sessionId = 's1';
+    active.sessions = [makeSession('s1')];
+    active.data = active.sessions;
+    let resolveBind!: (value: { prs: never[] }) => void;
+    mocks.actions.bindSessionPr.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveBind = resolve;
+        }),
+    );
+    renderSidebar();
+    await flushSidebar();
+
+    let menu = await openSessionMenu();
+    act(() => click(menuItem(menu, 'Bind PR')!));
+    await flushSidebar();
+    await typeAndSubmit(PR_URL);
+    // Cancel while the write is still in flight.
+    const cancel = Array.from(
+      document.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((button) => button.textContent?.trim() === 'cancel');
+    act(() => click(cancel!));
+    await flushSidebar();
+    expect(document.querySelector('input[aria-label="Bind PR"]')).toBeNull();
+
+    // Reopen: the submitting flag must not outlive the dismissed dialog.
+    menu = await openSessionMenu();
+    const reopenItem = menuItem(menu, 'Bind PR');
+    expect(reopenItem).not.toBeUndefined();
+    act(() => click(reopenItem!));
+    await flushSidebar();
+    expect(bindPrInput()).not.toBeNull();
+    expect(bindPrInput().disabled).toBe(false);
+    // The abandoned write settling must not touch the reopened dialog.
+    await act(async () => {
+      resolveBind({ prs: [] });
+    });
+    await flushSidebar();
+    expect(bindPrInput().disabled).toBe(false);
+  });
+
+  it('binds a cwd-less session through the top-level client', async () => {
+    connection.sessionId = 'current';
+    connection.workspaceCwd = '';
+    connection.capabilities = {
+      qwenCodeVersion: '1.2.3',
+      features: ['workspace_session_metadata'],
+    };
+    workspace.capabilities = connection.capabilities;
+    active.sessions = [makeSession('s1', { workspaceCwd: '' })];
+    active.data = active.sessions;
+    renderSidebar();
+    await flushSidebar();
+
+    const menu = await openSessionMenu();
+    act(() => click(menuItem(menu, 'Bind PR')!));
+    await flushSidebar();
+    await typeAndSubmit(PR_URL);
+    expect(workspace.client.updateSessionMetadata).toHaveBeenCalledWith('s1', {
+      pr: { number: 16865, url: PR_URL },
+    });
+    expect(mocks.actions.bindSessionPr).not.toHaveBeenCalled();
+  });
+
+  it('routes a second-workspace bind through that workspace, not the connection’s', async () => {
+    connection.sessionId = 'current';
+    connection.workspaceCwd = '/tmp/project';
+    const caps = {
+      qwenCodeVersion: '1.2.3',
+      features: ['workspace_session_metadata', 'workspace_qualified_rest_core'],
+      workspaces: [
+        { id: 'w0', cwd: '/tmp/project', primary: true, trusted: true },
+        { id: 'w1', cwd: '/tmp/other-ws', primary: false, trusted: true },
+      ],
+    };
+    connection.capabilities = caps;
+    workspace.capabilities = caps;
+    active.sessions = [makeSession('s1', { workspaceCwd: '/tmp/other-ws' })];
+    active.data = active.sessions;
+    renderSidebar();
+    await flushSidebar();
+
+    const menu = await openSessionMenu();
+    act(() => click(menuItem(menu, 'Bind PR')!));
+    await flushSidebar();
+    await typeAndSubmit(PR_URL);
+    expect(workspace.client.workspaceByCwd).toHaveBeenCalledWith(
+      '/tmp/other-ws',
+    );
+    const scoped = workspace.client.workspaceByCwd.mock.results.at(-1)!.value;
+    expect(scoped.updateSessionMetadata).toHaveBeenCalledWith('s1', {
+      pr: { number: 16865, url: PR_URL },
+    });
+    expect(workspace.client.updateSessionMetadata).not.toHaveBeenCalled();
+    expect(mocks.actions.bindSessionPr).not.toHaveBeenCalled();
+  });
+
+  it('hides Bind PR on a standalone recents row', async () => {
+    connection.sessionId = null;
+    const caps = {
+      qwenCodeVersion: '1.2.3',
+      features: [STANDALONE_SESSIONS_CAPABILITY, 'workspace_session_metadata'],
+    };
+    connection.capabilities = caps;
+    workspace.capabilities = caps;
+    workspace.client.listStandaloneSessionsPage.mockResolvedValue({
+      sessions: [
+        {
+          sessionId: 'solo1',
+          displayName: 'Solo',
+          workspaceCwd: '/private/standalone/solo1',
+          sourceType: 'standalone',
+          context: { kind: 'standalone' },
+          createdAt: '2026-11-11T00:00:00.000Z',
+          updatedAt: '2026-11-11T00:00:00.000Z',
+        },
+      ],
+    });
+    renderSidebar({ standalone: true });
+    await flushSidebar();
+
+    const menu = await openSessionMenu();
+    // A standalone row's metadata route only accepts displayName, so Bind PR
+    // must not be offered even with default items.
     expect(menuItem(menu, 'Bind PR')).toBeUndefined();
   });
 });

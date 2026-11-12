@@ -1432,6 +1432,23 @@ describe('fetchPullRequestByReference', () => {
     });
   });
 
+  it('walks up to the repository root when cwd is a subdirectory', async () => {
+    const repo = tmp.repo();
+    const subdir = path.join(repo, 'packages', 'sub');
+    fs.mkdirSync(subdir, { recursive: true });
+    mockGhSuccess({
+      number: 77,
+      url: 'https://github.com/o/r/pull/77',
+      state: 'OPEN',
+    });
+    await fetchPullRequestByReference(subdir, '77');
+    expect(mockExecFile).toHaveBeenCalledTimes(1);
+    // findGitRoot must walk the subdirectory up to the repo root, not spawn
+    // gh in the subdirectory itself.
+    const opts = mockExecFile.mock.calls[0][2] as { cwd: string };
+    expect(opts.cwd).toBe(repo);
+  });
+
   it('passes a URL reference through unchanged', async () => {
     const url = 'https://github.example.com/o/r/pull/5';
     mockGhSuccess({ number: 5, url, state: 'MERGED' }, [

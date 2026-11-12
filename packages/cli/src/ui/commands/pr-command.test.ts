@@ -278,21 +278,37 @@ describe('prCommand', () => {
     ]);
   });
 
-  it('keeps the original URL when canonicalization returns nothing', async () => {
-    // /PULL/5 is accepted by parsePRReference but rejected by the canonical
-    // helper, so the `?? inputUrl` fallback is load-bearing: without it the
-    // binding would carry url: undefined and the upsert would decline it.
-    mocks.fetchPullRequestByReference.mockResolvedValue({
-      status: 'error',
-      reason: 'failed',
-    });
+  it('fails closed when the URL spelling cannot be canonicalized', async () => {
+    // /PULL/5 is accepted by parsePRReference's looser /i match but rejected
+    // by the canonical helper; forwarding the raw input would leak it (and
+    // any credentials it carries) to gh and the sidecar, so refuse it.
     const { context } = createContext();
-    const input = 'https://github.com/o/r/PULL/5';
-    const result = await prCommand.action?.(context, input);
-    expect(mocks.upsertSessionPrs).toHaveBeenCalledWith(PR_PATH, [
-      { number: 5, url: input, source: 'create' },
-    ]);
-    expect((result as { messageType: string }).messageType).toBe('info');
+    const result = await prCommand.action?.(
+      context,
+      'https://github.com/o/r/PULL/5',
+    );
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'error',
+      content: expect.stringContaining('Invalid PR reference'),
+    });
+    expect(mocks.fetchPullRequestByReference).not.toHaveBeenCalled();
+    expect(mocks.upsertSessionPrs).not.toHaveBeenCalled();
+  });
+
+  it('never forwards a credential-bearing non-canonical URL to gh or the sidecar', async () => {
+    const { context } = createContext();
+    const result = await prCommand.action?.(
+      context,
+      'https://x-access-token:ghs_abc123@github.com/o/r/PULL/5',
+    );
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'error',
+      content: expect.stringContaining('Invalid PR reference'),
+    });
+    expect(mocks.fetchPullRequestByReference).not.toHaveBeenCalled();
+    expect(mocks.upsertSessionPrs).not.toHaveBeenCalled();
   });
 
   it('errors when gh fails on a bare number', async () => {
@@ -327,9 +343,11 @@ describe('prCommand', () => {
     }
   });
 
-  it('reports already-bound without notifying', async () => {
+  it('reports already-bound and notifies so a repaired state reaches live clients', async () => {
+    // An already-bound re-bind can repair a stale state in place; the catalog
+    // must be marked or a live client keeps rendering the stale badge.
     mocks.upsertSessionPrs.mockResolvedValue({
-      prs: [{ ...RESOLVED, createdAt: 'old' }],
+      prs: [{ ...RESOLVED, createdAt: 'old', state: 'merged' }],
       added: [],
       alreadyBound: [RESOLVED.number],
       unresolved: [],
@@ -341,7 +359,10 @@ describe('prCommand', () => {
     const content = (result as { content: string }).content;
     expect(content).toContain('already bound');
     expect(content).toContain(RESOLVED.url);
-    expect(sessionService.emitSessionPrBound).not.toHaveBeenCalled();
+    expect(sessionService.emitSessionPrBound).toHaveBeenCalledWith(SESSION_ID, {
+      number: RESOLVED.number,
+      url: RESOLVED.url,
+    });
   });
 
   it('writes to the archived sidecar when the session is archived', async () => {
@@ -434,6 +455,28 @@ describe('prCommand', () => {
     const { context } = createContext();
     const result = await prCommand.action?.(context, '');
     expect(result).toEqual({
+      type: 'message',
+      messageType: 'error',
+      content: expect.stringContaining('Could not read the PR bindings'),
+    });
+  });
+
+  it('reports an unresolved archive location in list mode instead of an empty list', async () => {
+    // A rejected head read or an active/archived conflict must not be turned
+    // into an authoritative "No PRs bound" — the sidecar may have moved.
+    const { context, sessionService } = createContext();
+    sessionService.getSessionLocation.mockRejectedValue(
+      new Error('head read failed'),
+    );
+    const rejected = await prCommand.action?.(context, '');
+    expect(rejected).toEqual({
+      type: 'message',
+      messageType: 'error',
+      content: expect.stringContaining('Could not read the PR bindings'),
+    });
+    sessionService.getSessionLocation.mockResolvedValue('conflict');
+    const conflicted = await prCommand.action?.(context, '');
+    expect(conflicted).toEqual({
       type: 'message',
       messageType: 'error',
       content: expect.stringContaining('Could not read the PR bindings'),

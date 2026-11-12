@@ -4008,6 +4008,10 @@ export function WebShellSidebar({
 
   const handleBindPrFromMenu = useCallback((session: DaemonSessionSummary) => {
     setBindPrError(undefined);
+    // A write left in flight by a dismissed dialog must not render the newly
+    // opened form dead; invalidate it and reset the flag for the new request.
+    bindPrRequestRef.current++;
+    setBindPrSubmitting(false);
     setBindPrCandidate(session);
   }, []);
 
@@ -4017,12 +4021,18 @@ export function WebShellSidebar({
   // saveRename there is no standalone branch: standalone rows (including
   // recents rows) never show the item, since their metadata route only
   // accepts displayName.
-  const bindPrCandidateRef = useRef(bindPrCandidate);
-  bindPrCandidateRef.current = bindPrCandidate;
+  // A monotonically increasing request token scopes the submitting flag and
+  // the settle-time writes to the request that owns them. Closing or reopening
+  // the dialog bumps it, so a write left in flight by a dismissed dialog can
+  // neither render a newly opened form dead nor close/error it when it settles
+  // (even if the same session is reopened). The catalog refresh still runs:
+  // the binding was persisted regardless of the dialog's fate.
+  const bindPrRequestRef = useRef(0);
   const submitBindPr = useCallback(
     (pr: BindSessionPrPayload) => {
       const session = bindPrCandidate;
       if (!session || bindPrSubmitting) return;
+      const request = ++bindPrRequestRef.current;
       const sessionId = session.sessionId;
       const workspaceCwd = getSessionWorkspaceCwd(session);
       setBindPrSubmitting(true);
@@ -4036,31 +4046,26 @@ export function WebShellSidebar({
           : workspace.client.updateSessionMetadata(sessionId, { pr });
       bind
         .then(() => {
-          // A late completion must not close a dialog the user has since
-          // opened for another session.
-          if (bindPrCandidateRef.current === session) {
-            setBindPrCandidate(null);
-          }
           if (workspaceCwd) {
             sessionCatalogController.refreshWorkspace(workspaceCwd);
           }
           bumpWorkspaceReload();
+          if (bindPrRequestRef.current !== request) return;
+          setBindPrCandidate(null);
+          setBindPrSubmitting(false);
         })
         .catch((err: unknown) => {
-          // Only surface the error on the still-open dialog; if the user
-          // dismissed it mid-write the failure is dropped (they cancelled).
-          if (bindPrCandidateRef.current === session) {
-            setBindPrError(
-              err instanceof Error
-                ? `${t('sessionsOverview.bindPrFailed')}: ${err.message}`
-                : t('sessionsOverview.bindPrFailed'),
-            );
-          }
           if (workspaceCwd) {
             sessionCatalogController.refreshWorkspace(workspaceCwd);
           }
-        })
-        .finally(() => {
+          // Only surface the error on the still-open dialog; if the user
+          // dismissed it mid-write the failure is dropped (they cancelled).
+          if (bindPrRequestRef.current !== request) return;
+          setBindPrError(
+            err instanceof Error
+              ? `${t('sessionsOverview.bindPrFailed')}: ${err.message}`
+              : t('sessionsOverview.bindPrFailed'),
+          );
           setBindPrSubmitting(false);
         });
     },
@@ -7510,7 +7515,12 @@ export function WebShellSidebar({
             busy={bindPrSubmitting}
             error={bindPrError}
             onSubmit={submitBindPr}
-            onClose={() => setBindPrCandidate(null)}
+            onClose={() => {
+              bindPrRequestRef.current++;
+              setBindPrCandidate(null);
+              setBindPrSubmitting(false);
+              setBindPrError(undefined);
+            }}
           />
         )}
         {workspaceRenameCandidate && (

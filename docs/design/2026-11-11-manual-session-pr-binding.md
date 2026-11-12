@@ -95,11 +95,19 @@ Behavior:
    authoritative "no bindings".
 2. **Argument parsing** — accept a bare number (`[1-9]\d{0,8}`, mirroring
    the backfill's bound), `#N`, or a full PR URL. `#N` and URL forms reuse
-   `GitWorktreeService.parsePRReference`; anything else is a usage error.
+   `GitWorktreeService.parsePRReference`; anything else is a usage error. A
+   URL is then rebuilt through `pullRequestViewUrl` into the canonical
+   `/pull/<N>` spelling (dropping userinfo, query, and subpath). A spelling
+   the canonicalizer rejects — e.g. `/PULL/` or a percent-encoded owner,
+   which `parsePRReference`'s looser case-insensitive match accepts — fails
+   closed as a usage error, so raw input (which may carry credentials) never
+   reaches the gh argv or the sidecar.
 3. **Resolution** — a new core helper
    `fetchPullRequestByReference(cwd, ref)` in `utils/github-prs.ts` runs
    `gh pr view <ref> --json number,url,state` (ref is the number or the
-   URL), reusing `resolveGhBinary`, `ghEnv`, and the existing timeout.
+   canonical URL), reusing `resolveGhBinary`, `ghEnv`, and the existing
+   timeout. A missing/unusable working directory is classified `failed`
+   (not `unavailable`, which is reserved for a missing gh binary).
    - gh resolves → bind gh's `{number, url, state}` (gh is canonical, also
      for URLs with `/files` subpaths, queries, or enterprise hosts).
    - gh fails and the input was a full URL → bind `{number, url}` without
@@ -111,16 +119,21 @@ Behavior:
      classifies the failure (`unavailable` for a missing gh binary,
      `timeout` for a killed child, `failed` otherwise); environmental
      failures get their own message instead of a PR-specific remedy.
-4. **Persistence** — mirrors the shell post-hook: best-effort
-   `getSessionLocation` (re-resolved after the gh round trip) →
-   `getPrSessionPathForArchiveState` →
-   `upsertSessionPrs([{number, url, state?, source: 'create'}])` →
-   `emitSessionPrBound` when the number was newly added. The notification
-   is best-effort in its own catch: the binding is already persisted, so a
+4. **Persistence** — mirrors the shell post-hook: `getSessionLocation`
+   (re-resolved after the gh round trip) → `getPrSessionPathForArchiveState`
+   → `upsertSessionPrs([{number, url, state?, source: 'create'}])` →
+   `emitSessionPrBound` for any applied write — a newly added binding OR an
+   already-bound re-bind, which may have repaired a stale state in place, so
+   a live client does not keep the stale badge. The notification is
+   best-effort in its own catch: the binding is already persisted, so a
    catalog-mark failure must not read as a bind failure. The ACP host
    already wires that callback to `qwen/notify/session/pr-binding`, so the
    daemon marks the session catalog and live-state clients refetch the
-   badge (~2s), identical to the automatic create binding.
+   badge (~2s), identical to the automatic create binding. An archive
+   location that cannot be resolved (a rejected head read or an
+   active/archived conflict) is not treated as an authoritative empty list:
+   list mode reports the unreadable error, while the bind path keeps the
+   active default (recoverable, mirrors the shell post-hook).
 5. **Result messages** — success (`Bound PR #N to this session: <url>`),
    already-bound (`PR #N is already bound to this session: <url>`; same URL
    keeps position and `createdAt`; an explicit gh-resolved state repairs a
@@ -159,23 +172,32 @@ error row + Cancel/Bind). The input accepts a PR number, `#N`, or URL:
 
 The dialog guards the in-flight resolution: a liveness ref checked after
 every await prevents a parent-unmounted dialog from submitting a binding
-the user cancelled, and `dismissible={!resolving}` blocks dismissal while
-the list request is pending. A double submit while resolving is absorbed
-by the pending flag (one fetch, one write). Local validation errors
-outrank the host's stale daemon error and clear on input change.
+the user cancelled. Both phases — the list resolution and the bind write —
+stay dismissible (trapping the user behind a slow request would be strictly
+worse), with `aria-busy` conveying the in-flight state; it is the liveness
+ref, not a dismissal gate, that prevents a cancelled dialog from submitting.
+A double submit while resolving is absorbed by the pending flag (one fetch,
+one write). Local validation errors outrank the host's stale daemon error
+and clear on input change.
 
 The dialog's non-redundant value over `/pr` is binding a session the user
 is NOT currently in: the command can only ever bind "this session", while
 the dialog binds any row in the overview panel or sidebar.
 
 Entry points: a `GitPullRequestIcon` ghost button in the
-`SessionOverviewPanel` actions column, next to Rename, gated by the same
-`canRenameCard` capability (metadata mutation); and a Bind PR item in the
-sidebar session dropdown (`WebShellSidebar`), gated by `showRename` plus
-the host's `sessionActionItems` whitelist (`bindPr` item) and hidden for
-standalone sessions (their metadata route only accepts `displayName`). A
-`bindPrTarget` / `bindPrCandidate` state drives the same dialog from
-either surface.
+`SessionOverviewPanel` actions column, next to Rename, rendered on
+`(isCurrentCard(card) || sessionMetadataEnabled) && !openSessionContext(card)`
+— its own predicate, not `canRenameCard` (which is true for standalone
+cards); and a Bind PR item in the sidebar session dropdown
+(`WebShellSidebar`), gated by the host's `sessionActionItems` whitelist
+(`bindPr` item) plus the metadata-mutation capability
+`canMutateSessionMetadata(session)` — deliberately not rename's key — and
+hidden for standalone sessions including recents rows
+(`!standalone && !recent?.isStandalone`; their metadata route only accepts
+`displayName`). A `bindPrTarget` / `bindPrCandidate` state drives the same
+dialog from either surface. The sidebar scopes its submitting flag and
+settle-time writes to a per-request token, so a write left in flight by a
+dismissed dialog neither dead-ends nor closes a reopened form.
 
 Submit routing mirrors `saveRename`'s three branches:
 

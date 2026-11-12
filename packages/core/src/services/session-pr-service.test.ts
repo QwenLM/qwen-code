@@ -582,6 +582,19 @@ describe('upsertSessionPrs', () => {
     expect(persisted?.[0]?.createdAt).toBe(entry(100).createdAt);
   });
 
+  it('repairs a stale same-URL state in place, keeping position and createdAt', async () => {
+    // The other half of the in-place repair: a persisted state that has gone
+    // stale (open → merged) is refreshed, not left as-is.
+    await seed({ ...entry(100), state: 'open' }, entry(101));
+    const result = await offer(cand(100, { state: 'merged' }));
+    expect(result.added).toEqual([]);
+    expect(result.alreadyBound).toEqual([100]);
+    const persisted = await read();
+    expect(numbers(persisted)).toEqual([100, 101]);
+    expect(persisted?.[0]?.state).toBe('merged');
+    expect(persisted?.[0]?.createdAt).toBe(entry(100).createdAt);
+  });
+
   it('re-binds a number whose persisted entry points at another repository', async () => {
     // Same number, other repo = another PR: a gh-verified create colliding
     // with another repo's binding must replace it (fresh createdAt, source

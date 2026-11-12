@@ -82,11 +82,16 @@ Shell 里的用户够不着这条路径，实践中总要提醒 agent 去跑。
    定」。
 2. **参数解析**——接受裸号（`[1-9]\d{0,8}`，与 backfill 的界一致）、`#N`、
    完整 PR URL。`#N` 与 URL 形态复用 `GitWorktreeService.parsePRReference`；
-   其余形状是用法错误。
+   其余形状是用法错误。URL 随后经 `pullRequestViewUrl` 重建为规范
+   `/pull/<N>` 拼写（剥离 userinfo、query、子路径）。归一化器拒绝的拼写
+   （如 `/PULL/`、百分号编码的 owner——`parsePRReference` 更宽松的大小写不
+   敏感匹配会接受）失效关闭为用法错误，因此原始输入（可能带凭据）绝不会到
+   达 gh 的 argv 或 sidecar。
 3. **解析**——`utils/github-prs.ts` 新增 core helper
    `fetchPullRequestByReference(cwd, ref)`，执行
-   `gh pr view <ref> --json number,url,state`（ref 为号或 URL），复用
-   `resolveGhBinary`、`ghEnv` 与既有超时。
+   `gh pr view <ref> --json number,url,state`（ref 为号或规范 URL），复用
+   `resolveGhBinary`、`ghEnv` 与既有超时。工作目录缺失/不可用归为 `failed`
+   （而非 `unavailable`，后者仅指 gh 二进制缺失）。
    - gh 解析成功 → 绑定 gh 的 `{number, url, state}`（gh 是规范来源，对带
      `/files` 子路径、query、enterprise host 的 URL 亦然）。
    - gh 失败且输入是完整 URL → 绑定 `{number, url}`、不带 state，并经
@@ -96,13 +101,17 @@ Shell 里的用户够不着这条路径，实践中总要提醒 agent 去跑。
    - gh 失败且输入是裸号 → 报错。helper 对失败分类（gh 二进制缺失为
      `unavailable`、子进程被杀为 `timeout`、其余为 `failed`）；环境性失败
      用专门的消息，而非 PR 层面的补救建议。
-4. **落盘**——与 shell post-hook 一致：best-effort `getSessionLocation`
-   （在 gh 往返之后重新解析）→ `getPrSessionPathForArchiveState` →
-   `upsertSessionPrs([{number, url, state?, source: 'create'}])` → 号是新增
-   时 `emitSessionPrBound`。通知在自己的 catch 里 best-effort：绑定已落盘，
-   catalog 标记失败不得读作绑定失败。ACP 宿主已把该回调接到
-   `qwen/notify/session/pr-binding`，daemon 据此标记 session catalog，
-   live-state 客户端 ~2s 内 refetch 到 badge——与自动创建绑定完全相同。
+4. **落盘**——与 shell post-hook 一致：`getSessionLocation`（在 gh 往返之
+   后重新解析）→ `getPrSessionPathForArchiveState` →
+   `upsertSessionPrs([{number, url, state?, source: 'create'}])` → 对任何实
+   际写入都 `emitSessionPrBound`——新增绑定，或已绑定重绑（后者可能原地修复
+   了过期 state），以免 live 客户端一直显示过期 badge。通知在自己的 catch
+   里 best-effort：绑定已落盘，catalog 标记失败不得读作绑定失败。ACP 宿主已
+   把该回调接到 `qwen/notify/session/pr-binding`，daemon 据此标记 session
+   catalog，live-state 客户端 ~2s 内 refetch 到 badge——与自动创建绑定完全
+   相同。无法解析的归档位置（head 读取被拒绝、或 active/archived 冲突）不
+   被当成权威的空列表：列表模式报「无法读取」错误，绑定路径保持 active 默认
+   （可恢复，与 shell post-hook 一致）。
 5. **结果消息**——成功（`Bound PR #N to this session: <url>`）、已绑定
    （`PR #N is already bound to this session: <url>`；同 URL 保持位置与
    `createdAt`；显式 gh 解析的 state 原地修复无 state 条目）、解析/用法错
@@ -133,19 +142,26 @@ Cancel/Bind）。输入框接受 PR 号、`#N` 或 URL：
   息，不做虚假查询。
 
 对话框守护进行中的解析：每个 await 之后检查存活性 ref，防止被父组件卸载的
-对话框提交用户已取消的绑定；`dismissible={!resolving}` 在列表请求期间禁止
-关闭。解析中的双击由 pending 标志吸收（一次请求、一次写入）。本地校验错误
-优先于宿主传入的过期 daemon 错误，并在输入变更时清除。
+对话框提交用户已取消的绑定。两个阶段——列表解析与绑定写入——都保持可关闭
+（把用户困在慢请求后面严格更糟），用 `aria-busy` 表达在途状态；真正防止「取
+消后仍提交」的是存活性 ref，而不是关闭门控。解析中的双击由 pending 标志吸收
+（一次请求、一次写入）。本地校验错误优先于宿主传入的过期 daemon 错误，并在
+输入变更时清除。
 
 对话框相对 `/pr` 的不冗余价值在于绑定用户当前不在其中的会话：命令只能绑
 「本会话」，对话框可绑总览面板或侧栏的任意行。
 
 入口：`SessionOverviewPanel` actions 列 Rename 旁加一个 `GitPullRequestIcon`
-ghost 按钮，用与 Rename 相同的 `canRenameCard` 能力门控（元数据变更）；
-侧栏会话下拉菜单（`WebShellSidebar`）加一个 Bind PR 项，用 `showRename`
-加宿主 `sessionActionItems` 白名单（`bindPr` 项）门控，standalone 会话隐藏
-（其元数据路由只接受 `displayName`）。`bindPrTarget` / `bindPrCandidate`
-state 从两个面驱动同一个对话框。
+ghost 按钮，渲染条件是它自己的谓词
+`(isCurrentCard(card) || sessionMetadataEnabled) && !openSessionContext(card)`
+——而非 `canRenameCard`（后者对 standalone 卡片为 true）；侧栏会话下拉菜单
+（`WebShellSidebar`）加一个 Bind PR 项，用宿主 `sessionActionItems` 白名单
+（`bindPr` 项）加元数据变更能力 `canMutateSessionMetadata(session)` 门控
+——刻意不用 rename 的 key——standalone 会话（含 recents 行，
+`!standalone && !recent?.isStandalone`）隐藏（其元数据路由只接受
+`displayName`）。`bindPrTarget` / `bindPrCandidate` state 从两个面驱动同一
+个对话框。侧栏把 submitting 标志与 settle 写入限定到按请求的令牌，被取消对话
+框遗留的在途写入既不会让重开的表单失效、也不会把它关闭。
 
 提交路由仿 `saveRename` 的三分支：
 
