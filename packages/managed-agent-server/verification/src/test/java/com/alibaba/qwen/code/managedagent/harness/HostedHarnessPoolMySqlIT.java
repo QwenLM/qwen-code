@@ -9,7 +9,7 @@ import com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPol
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcHarnessPlacementStore;
 import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
-import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
@@ -162,7 +162,7 @@ class HostedHarnessPoolMySqlIT {
         String id = UUID.randomUUID().toString();
         jdbc.update("INSERT INTO ma_session (tenant_id, session_id, agent_id, tenant_key, session_key, session_scope_key,"
                 + " gmt_create, gmt_modified) VALUES (?, ?, 'qwen-code', ?, ?, ?, 1, 1)", tenant, id,
-                JdbcRuntimeBindingRepository.harnessDrainKey(tenant), JdbcRuntimeBindingRepository.harnessDrainKey(id),
+                RuntimeAdmissionFences.harnessDrainKey(tenant), RuntimeAdmissionFences.harnessDrainKey(id),
                 ManagedSessionStore.sessionScopeKey(tenant, id));
         jdbc.update("INSERT INTO ma_event_stream (tenant_id, session_id, stream_kind, stream_id, gmt_modified)"
                 + " VALUES (?, ?, 'SESSION', X'', 1)", tenant, id);

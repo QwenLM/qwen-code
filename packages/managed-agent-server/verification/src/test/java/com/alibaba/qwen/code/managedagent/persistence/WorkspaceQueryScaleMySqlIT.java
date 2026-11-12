@@ -6,6 +6,7 @@ import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -75,7 +76,7 @@ class WorkspaceQueryScaleMySqlIT {
             ManagedSchema.initialize(database.source());
             var jdbc = new CapturingJdbc(database.source());
             WorkspaceTestStorage.register(jdbc, "other-tenant", "other-storage");
-            String alias = com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository.storageAliasKey("other-tenant", "other-storage");
+            String alias = RuntimeAdmissionFences.storageAliasKey("other-tenant", "other-storage");
             String tenantKey = ManagedSchemaKeys.key("other-tenant");
             jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation, storage_id, display_name, config_ref, policy_ref, state)"
                     + " VALUES ('other-tenant', 'other-workspace', 1, 'other-storage', 'Workspace', 'config', 'policy', 'ACTIVE')");
