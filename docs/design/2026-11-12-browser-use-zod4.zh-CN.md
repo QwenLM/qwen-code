@@ -119,9 +119,12 @@ scripts/tests/browser-use-assets.test.js` 验证新增的 pin 断言，并确认
 
 ### 已验证结果
 
-- `packages/browser-use` 套件（`npx vitest run`）：26 个文件、609 项通过、3 项跳过
-  （共 612），含两个子进程探针（`rejected`、`stable`）与 `errors.test.ts` 全部 9 项。
-  CI 以两个 shard 运行同一套件；shard 2/2 为 13 个文件、299 项通过、3 项跳过（共 302）。
+- `packages/browser-use` 套件（`npx vitest run`）：26 个文件、612 项通过（共 612），
+  含两个子进程探针（`rejected`、`stable`）与 `errors.test.ts` 全部 9 项。
+  CI 以两个 shard 运行同一套件；shard 2/2 为 13 个文件、302 项通过（共 302）。
+- 未构建 `packages/node-repl` 与 `packages/browser-use` 的 worktree 会跳过 3 个
+  `src/runtime-kernel.test.ts` 用例（609 项通过、3 项跳过，共 612）；CI 会构建这两个包，
+  因此全部 612 项都会运行。
 - `scripts/tests/browser-use-assets.test.js`：12 项通过。把 manifest 改回 `^3.25.76` 后，
   断言以 `expected '^3.25.76' to match /^\^4\./` 失败；声明 `^4.0.0` 且解析到 `4.0.0` 时
   在 `4.6.6` 下限上以 `expected false to be true` 失败；两者恢复后重新通过。

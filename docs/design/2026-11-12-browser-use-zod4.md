@@ -148,10 +148,13 @@ scripts/tests/browser-use-assets.test.js` for the new pin assertion, and
 
 ### Verified results
 
-- `packages/browser-use` suite (`npx vitest run`): 26 files, 609 passed, 3
-  skipped (612), including both child-process probes (`rejected`, `stable`) and
-  all 9 `errors.test.ts` cases. CI runs the same suite in two shards; shard 2/2
-  reports 13 files, 299 passed, 3 skipped (302).
+- `packages/browser-use` suite (`npx vitest run`): 26 files, 612 passed (612),
+  including both child-process probes (`rejected`, `stable`) and all 9
+  `errors.test.ts` cases. CI runs the same suite in two shards; shard 2/2
+  reports 13 files, 302 passed (302).
+- A worktree that has not built `packages/node-repl` and `packages/browser-use`
+  skips 3 `src/runtime-kernel.test.ts` cases (609 passed, 3 skipped of 612);
+  CI builds both packages, so all 612 run there.
 - `scripts/tests/browser-use-assets.test.js`: 12 passed. Reverting the manifest
   to `^3.25.76` fails the assertion with `expected '^3.25.76' to match /^\^4\./`;
   declaring `^4.0.0` and resolving `4.0.0` fails the `4.6.6` floor with
