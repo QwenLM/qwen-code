@@ -997,7 +997,7 @@ export abstract class BaseJsonOutputAdapter {
     this.ensureMessageStarted(state, parentToolUseId);
     this.finalizePendingBlocks(state, parentToolUseId);
 
-    const index = state.blocks.length;
+    const index = state.emittedBlockCount + state.blocks.length;
     const block: ToolUseBlock = {
       type: 'tool_use',
       id: request.callId,
@@ -1053,7 +1053,7 @@ export abstract class BaseJsonOutputAdapter {
     toolCall: NonNullable<AgentResultDisplay['toolCalls']>[number],
     _parentToolUseId: string,
   ): { block: ToolUseBlock; index: number } {
-    const index = state.blocks.length;
+    const index = state.emittedBlockCount + state.blocks.length;
     const block: ToolUseBlock = {
       type: 'tool_use',
       id: toolCall.callId,
