@@ -522,4 +522,77 @@ describe('useDaemonChannels', () => {
       '/workspace-b',
     );
   });
+
+  it('ignores a per-call client id on the workspace client', async () => {
+    // The contract still accepts a second argument, so this tab's id has to
+    // win: honouring a caller-supplied one would attribute the login to a peer
+    // tab and hand it that login's reattach and cancel rights.
+    let result: ReturnType<typeof useDaemonChannels> | undefined;
+
+    function TestComponent() {
+      result = useDaemonChannels({
+        workspaceCwd: '/workspace-b',
+        clientId: 'tab-a',
+      });
+      return null;
+    }
+
+    await act(async () => root.render((<TestComponent />) as ReactNode));
+
+    await act(async () => {
+      await result?.qrLogin.start('bot', 'tab-b');
+      await result?.qrLogin.state('login-1', 'tab-b');
+      await result?.qrLogin.cancel('login-1', 'tab-b');
+      await result?.qrLogin.release('login-1', 'tab-b');
+    });
+
+    expect(
+      qualifiedWorkspace.startWorkspaceChannelQrLogin,
+    ).toHaveBeenCalledWith('bot', { clientId: 'tab-a' });
+    expect(qualifiedWorkspace.workspaceChannelQrLogin).toHaveBeenCalledWith(
+      'login-1',
+      { clientId: 'tab-a' },
+    );
+    expect(
+      qualifiedWorkspace.cancelWorkspaceChannelQrLogin,
+    ).toHaveBeenCalledWith('login-1', { clientId: 'tab-a' });
+    expect(actions.channelQrLogin.release).toHaveBeenCalledWith(
+      'login-1',
+      'tab-a',
+      '/workspace-b',
+    );
+  });
+
+  it('ignores a per-call client id on the provider-workspace fallback', async () => {
+    let result: ReturnType<typeof useDaemonChannels> | undefined;
+
+    function TestComponent() {
+      result = useDaemonChannels({ clientId: 'tab-a' });
+      return null;
+    }
+
+    await act(async () => root.render((<TestComponent />) as ReactNode));
+
+    await act(async () => {
+      await result?.qrLogin.start('bot', 'tab-b');
+      await result?.qrLogin.state('login-1', 'tab-b');
+      await result?.qrLogin.cancel('login-1', 'tab-b');
+      await result?.qrLogin.release('login-1', 'tab-b');
+    });
+
+    expect(actions.channelQrLogin.start).toHaveBeenCalledWith('bot', 'tab-a');
+    expect(actions.channelQrLogin.state).toHaveBeenCalledWith(
+      'login-1',
+      'tab-a',
+    );
+    expect(actions.channelQrLogin.cancel).toHaveBeenCalledWith(
+      'login-1',
+      'tab-a',
+    );
+    expect(actions.channelQrLogin.release).toHaveBeenCalledWith(
+      'login-1',
+      'tab-a',
+      '/workspace-a',
+    );
+  });
 });
