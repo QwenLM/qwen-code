@@ -423,31 +423,36 @@ head commit` stay outside the slice. A `ref:` edit on its own is caught: the
 
 ## Test-suite accounting
 
-The suite is 1,422 lines and 69 cases. Review asked for a rewrite that removes the
+The suite is 1,438 lines and 69 cases. Review asked for a rewrite that removes the
 line model's spelling fixtures without touching behaviour coverage; this is the
 account of where it stopped, and why it is not smaller.
 
-| Part                                                            | Lines | Cases |
-| --------------------------------------------------------------- | ----- | ----- |
-| `ci.yml` gate document, its wiring, and the shared verdict pins | 436   | 22    |
-| `eslint.config.js` / `.prettierignore` scope narrowings         | 987   | 47    |
-| **Total, this revision**                                        | 1,422 | 69    |
-| Earlier revision of this PR (line model, spelling fixtures)     | 2,009 | 83    |
-| `main`, before this PR                                          | 962   | 47    |
+| Revision                                                    | Lines | Cases |
+| ----------------------------------------------------------- | ----- | ----- |
+| `main`, before this PR                                      | 962   | 47    |
+| Earlier revision of this PR (line model, spelling fixtures) | 2,009 | 83    |
+| **This revision**                                           | 1,438 | 69    |
+
+Of the 69 cases, 22 exercise the `ci.yml` gate document, its wiring and the
+shared verdict pins; the other 47 are the `eslint.config.js` and
+`.prettierignore` narrowing behaviour earlier review rounds required, which this
+rewrite does not touch. The two groups are interleaved in one file, so the
+removed lines cannot be attributed to one group — the case split is the part
+that is separable.
 
 The spelling fixtures are gone: the 17-row block-scalar modifier table, the six
 shape witnesses for the line-absorbing model (a bare `-` step, a comment between
 steps, a `#` line inside a run block, a job key after `steps:`, a lone CR hiding a
 changed flag, an anchor/alias pair), and the `[[dropped …]]` marker assertions
-went with the mechanism they tested. The `ci.yml` half now exists as a parsed-
-document model in 436 lines.
+went with the mechanism they tested. The script itself went from 975 lines to
+751, which is the parsed-document model plus the header explaining why a parser
+replaced the line scanner.
 
-**The total is −29% against the earlier revision, not −50%**, because the
-remainder is not spelling: 987 lines / 47 cases are the `eslint.config.js` and
-`.prettierignore` narrowing behaviour that earlier review rounds required, and
+**The total is −28%, not −50%**, because the remainder is not spelling: 47 of the
+69 cases are narrowing behaviour that earlier review rounds required, and
 deleting or merging them to reach a number would trade a model change for
 unrelated coverage loss. That cut needs its own review, so it is not made here.
-Against `main` the suite is +460 lines and +22 cases, all of it the `ci.yml`
+Against `main` the suite is +476 lines and +22 cases, all of it the `ci.yml`
 model, which `main` does not have.
 
 ## Validation plan
