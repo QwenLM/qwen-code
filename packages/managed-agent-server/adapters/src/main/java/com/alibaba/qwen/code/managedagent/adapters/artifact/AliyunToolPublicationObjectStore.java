@@ -117,15 +117,16 @@ public final class AliyunToolPublicationObjectStore implements ToolPublicationOb
         return open(key, () -> {});
     }
 
+    // Reads rely on the caller's length and SHA-256 verification and fail closed on
+    // mismatch; only put/delete re-probe versioning, where a bucket drifted after
+    // construction would break forbid-overwrite or turn deletion into a delete marker.
     @Override
     public InputStream open(String key, Runnable guard) {
-        validateConfiguration(guard);
         return read(() -> client.getObject(bucket, key), guard).getObjectContent();
     }
 
     @Override
     public InputStream openRange(String key, long offset, long length, Runnable guard) {
-        validateConfiguration(guard);
         if (offset < 0 || length < 0) {
             throw new IllegalArgumentException("Invalid object range");
         }

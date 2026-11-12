@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
+import com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObjectStore;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiRegistration;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
 import com.alibaba.qwen.code.runtimebroker.HarnessSessionResolver;
@@ -57,11 +58,13 @@ public final class WorkspaceCsiRuntimeAccess implements HarnessSessionResolver, 
     private final JdbcRuntimeBindingRepository bindings;
     private final JdbcRuntimeSessionRepository sessions;
     private final RuntimeTransport delegate;
+    private final JdbcJournalPacks packs;
 
     public WorkspaceCsiRuntimeAccess(JdbcTemplate jdbc, DataSourceTransactionManager manager,
             ObjectMapper json, ManagedAgentSettings properties, WorkspaceCsiRegistration registration,
             String sessionId, String requestKey, JdbcRuntimeBindingRepository bindings,
-            JdbcRuntimeSessionRepository sessions, RuntimeTransport delegate, com.alibaba.qwen.code.managedagent.harness.contracts.HarnessRules harnessRules) {
+            JdbcRuntimeSessionRepository sessions, RuntimeTransport delegate, com.alibaba.qwen.code.managedagent.harness.contracts.HarnessRules harnessRules,
+            ToolPublicationObjectStore objects) {
         if (jdbc == null || jdbc.getDataSource() == null || manager == null
                 || manager.getDataSource() != jdbc.getDataSource() || bindings == null || sessions == null
                 || !bindings.usesDataSource(jdbc.getDataSource()) || !sessions.usesDataSource(jdbc.getDataSource())
@@ -81,6 +84,7 @@ public final class WorkspaceCsiRuntimeAccess implements HarnessSessionResolver, 
         this.bindings = bindings;
         this.sessions = sessions;
         this.delegate = Objects.requireNonNull(delegate);
+        this.packs = new JdbcJournalPacks(jdbc, objects, null);
     }
 
     @Override
@@ -221,7 +225,7 @@ public final class WorkspaceCsiRuntimeAccess implements HarnessSessionResolver, 
                 throw new RuntimeBrokerException(401, "csi_native_readback_unauthorized", "Original Runtime authentication failed.", false);
             }
             var boot = WorkspaceCsiRuntimeIdentity.boot(binding);
-            var head = JdbcCsiActivationAdmission.lockNativeHead(original, guard);
+            var head = JdbcCsiActivationAdmission.lockNativeHead(original, guard, packs);
             Runnable retirementFence = () -> {
                 try {
                     progress.requireCurrentTime(original);
@@ -255,7 +259,7 @@ public final class WorkspaceCsiRuntimeAccess implements HarnessSessionResolver, 
             head.requireCurrentTime(original);
             if ("execute".equals(action)) {
                 evidence = JdbcCsiExecutionAdmission.readExecution(original, guard, head,
-                        (String) requestBody.get("subject"), expected);
+                        (String) requestBody.get("subject"), expected, packs);
             }
             head.requireCurrentTime(original);
             progress.requireCurrentTime(original);
