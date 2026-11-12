@@ -357,6 +357,30 @@ describe('channel policy and envelopes', () => {
     expect(pieces.join('')).toBe(text);
   });
 
+  it('keeps the nominal byte capacity when lines are longer than half a segment', () => {
+    const maxBytes = MANAGED_CHANNEL_LIMITS.maxSegmentBytes;
+    const capacity = maxBytes * MANAGED_CHANNEL_LIMITS.maxSegments;
+    // Long lines put each window's last newline far below the byte bound
+    // (a 24 KiB line halves every piece). An unconditional line-end cut
+    // would exhaust the 64-segment budget at a fraction of the capacity
+    // and drop a tail that fits; the cut must fall back to the byte bound
+    // whenever the remainder would no longer fit the remaining segments.
+    for (const lineBytes of [4_096, 8_192, 16_384, 24_576, 32_768]) {
+      const line = 'x'.repeat(lineBytes) + '\n';
+      const text = line
+        .repeat(Math.ceil(capacity / line.length))
+        .slice(0, capacity);
+      const pieces = planChannelSegments(text);
+      expect(pieces.join('')).toBe(text);
+      expect(pieces.length).toBeLessThanOrEqual(
+        MANAGED_CHANNEL_LIMITS.maxSegments,
+      );
+      expect(pieces[pieces.length - 1]!).not.toContain(
+        CHANNEL_TRUNCATION_NOTICE,
+      );
+    }
+  });
+
   it('keeps 64 segments past the count bound and marks the truncation', () => {
     const maxBytes = MANAGED_CHANNEL_LIMITS.maxSegmentBytes;
     const text = 'x'.repeat(

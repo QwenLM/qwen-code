@@ -29,9 +29,11 @@ are three separate concerns:
 - **Split.** `planChannelSegments(text)` returns up to `maxSegments` (64)
   pieces, each at most `maxSegmentBytes` (48 KiB) of UTF-8, cut on a code-point
   boundary. A reply that fits one segment returns a single piece with no notice
-  (today's short-reply behavior is byte-for-byte unchanged). A reply that would
-  exceed 64 segments keeps the first 64 and appends the existing truncation
-  notice to the last kept piece, so the overflow is visible, never silent.
+  (today's short-reply behavior is byte-for-byte unchanged). Any reply within
+  the nominal byte capacity (`maxSegments * maxSegmentBytes`) is kept whole; a
+  reply past that capacity keeps the first 64 pieces and appends the existing
+  truncation notice to the last kept piece, so the overflow is visible, never
+  silent.
 - **Plan.** The outbound path publishes one segment resource per piece and
   builds the `segments` array with `segmentId` `deliveryId:i` in ordinal order,
   replacing the hard-coded single element. The dispatcher, receipts and recovery
@@ -43,17 +45,22 @@ are three separate concerns:
   model completion and external delivery remain projected separately (H5c).
 
 The split prefers to break at the last newline within the byte budget so a
-segment boundary lands on a line end when one is available, falling back to the
-code-point boundary cut otherwise. This keeps segments readable without changing
-the byte bound or the concatenation.
+segment boundary lands on a line end when one is available, but only when the
+bytes after that newline still fit the remaining segment budget; otherwise it
+falls back to the code-point boundary cut at the full byte bound. Without that
+guard, long lines would put every piece far below the byte bound and spend the
+64-segment count at a fraction of the nominal capacity, dropping a tail that
+fits. The guard keeps segments readable when lines are short and keeps the whole
+byte capacity reachable when they are long.
 
 ### Concatenation invariant
 
-Joining the planned segment texts reproduces the input exactly when the input
-fits within 64 segments; when it does not, the join reproduces the kept prefix
-plus the truncation notice (the last kept piece yields room for the notice
-within the byte bound). No code-point is ever split, and no segment exceeds
-the byte bound. This is the property the regression witnesses pin.
+Joining the planned segment texts reproduces the input exactly when the input is
+at most `maxSegments * maxSegmentBytes`; past that byte capacity the join
+reproduces the kept prefix plus the truncation notice (the last kept piece yields
+room for the notice within the byte bound). No code-point is ever split, and no
+segment exceeds the byte bound. This is the property the regression witnesses
+pin.
 
 ## Files affected
 
@@ -81,8 +88,11 @@ the byte bound. This is the property the regression witnesses pin.
 
 - Unit witnesses for the split: short reply unchanged; multi-segment split
   concatenates back to the input; each piece within the byte bound and on a
-  code-point boundary; overflow keeps 64 pieces and appends the notice; removing
-  the split (back to truncate) or the notice reds the corresponding case.
+  code-point boundary; a reply at the nominal byte capacity stays whole even
+  when its lines are longer than half a segment (the line-end cut must not spend
+  the segment count below capacity); overflow keeps 64 pieces and appends the
+  notice; removing the split (back to truncate), the notice, or the capacity
+  guard reds the corresponding case.
 - The outbound plan witness: a long reply plans N segment resources with
   `deliveryId:i` ids in order; a short reply still plans one.
 - The existing multi-segment service/contract/MySQL suites remain the baseline

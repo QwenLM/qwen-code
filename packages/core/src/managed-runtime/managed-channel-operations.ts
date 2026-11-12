@@ -553,10 +553,12 @@ export function truncateChannelTextUtf8(
  * The email plan: ordered segments under the per-segment byte bound. A
  * reply that fits one segment plans one, unchanged; a longer reply splits
  * into up to maxSegments pieces, preferring a line end within the byte
- * budget and falling back to a code-point boundary. Past the segment-count
- * bound the tail is dropped and the last kept piece carries the truncation
- * notice. A provider with cards or threads supplies its own plan against the
- * same segment contract.
+ * budget when the remainder still fits the remaining segment budget and
+ * falling back to a code-point boundary otherwise. Any reply within
+ * maxSegments * maxSegmentBytes is therefore kept whole; only a reply past
+ * that byte capacity drops its tail, and the last kept piece then carries
+ * the truncation notice. A provider with cards or threads supplies its own
+ * plan against the same segment contract.
  */
 export function planChannelSegments(text: string): readonly string[] {
   const maxBytes = MANAGED_CHANNEL_LIMITS.maxSegmentBytes;
@@ -575,7 +577,14 @@ export function planChannelSegments(text: string): readonly string[] {
     }
     let end = offset + maxBytes;
     const newline = bytes.lastIndexOf(0x0a, end - 1);
-    if (newline >= offset) {
+    // A line-end cut is taken only when the bytes after it still fit the
+    // remaining segment budget. Long lines put the window's last newline
+    // far below the byte bound; cutting there unconditionally would spend
+    // the 64-segment count at a fraction of the nominal capacity and drop
+    // a tail that fits. Falling back to the full-width cut keeps the whole
+    // byte capacity reachable.
+    const roomForRest = (maxSegments - pieces.length - 1) * maxBytes;
+    if (newline >= offset && bytes.byteLength - (newline + 1) <= roomForRest) {
       end = newline + 1;
     } else {
       while (end > offset && (bytes[end]! & 0xc0) === 0x80) end -= 1;
