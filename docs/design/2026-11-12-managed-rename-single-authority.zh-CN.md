@@ -113,6 +113,10 @@ rename 不再因 Harness 不可用或未声明 title protocol version 1 而拒�
 授权调用者总是成功；通知仅在 Harness 支持 fenced titles 时发送，否则跳过（记日志）。这移除
 了一个仅为保护双存储保证而存在的可用性耦合。
 
+`rename` 能力通告（`capabilities.rename`）仍刻意绑定 Harness——`isAvailable() &&
+supportsFencedTitles()`——尽管变更在离线时也能成功。它报告的是 journal 副本能否保持同步，
+而非 SQL 改名能否成功；这种保守是有意为之，不是残留的准入门禁。
+
 ### 删除项
 
 - `control-plane/.../session/SessionRenameCoordinator.java`（整类）。

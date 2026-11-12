@@ -531,10 +531,18 @@ error) is logged and never fails the rename: the journal copy lags until a later
 rename carries a higher revision, the same divergence the system already tolerates
 for auto titles. The notification is sent only when the Harness advertises title
 protocol version 1 and is skipped otherwise; a rename is no longer refused before
-admission for an unavailable or unsupported Harness. Because rename holds no
-delivery, it blocks neither close, archive, delete and cwd changes nor workspace
-migration, and no recovery worker redelivers or reconciles a title. Plain private
-SDK title writes remain supported and preserve the watermark. See
+admission for an unavailable or unsupported Harness. The `rename` capability
+advertisement stays Harness-bound (available and fenced-title support) by design:
+it reports whether the journal copy can stay in sync, not whether the SQL rename
+can succeed. Because rename holds no delivery, it blocks neither close, archive,
+delete and cwd changes nor workspace migration, and no recovery worker redelivers
+or reconciles a title. A same-key retry settles a leftover `PENDING` or `FAILED`
+`RENAME_SESSION` receipt from a pre-upgrade binary under a new revision. Until
+retried, an orphaned `PENDING` receipt still counts toward the MCP-management and
+workspace-migration idle gates (which count any `PENDING` `SESSION_COMMAND`
+receipt), so those operations stay blocked for that Session; rename no longer has
+a background worker to drain it. Plain private SDK title writes remain supported
+and preserve the watermark. See
 [the single-authority design](../../docs/design/2026-11-12-managed-rename-single-authority.md). If the command store
 is unavailable during cleanup, the original API failure is preserved and the
 same key can resume its receipt when storage returns. Only an in-flight

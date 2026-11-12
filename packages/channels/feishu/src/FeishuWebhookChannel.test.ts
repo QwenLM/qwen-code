@@ -139,6 +139,21 @@ describe('Feishu webhook configuration', () => {
     );
   });
 
+  it('rejects an untrusted endpoint while connecting and stays unready', async () => {
+    const { channel } = make({
+      webhookUrl:
+        'https://open.feishu.cn.evil.test/open-apis/bot/v2/hook/private-token',
+    });
+    await expect(channel.connect()).rejects.toThrow(
+      'Feishu webhook URL must be https://open.feishu.cn/open-apis/bot/v2/hook/ with one URL-safe token path segment.',
+    );
+    await expect(channel.sendMessage('default', 'text')).rejects.toMatchObject({
+      disposition: 'permanent',
+      message: 'Feishu webhook Channel is not ready.',
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it.each(['', '   ', ' secret ', `${SIGNING_SECRET}\n`, 42, null])(
     'rejects an invalid optional signing secret',
     (signingSecret) => {
@@ -574,15 +589,27 @@ describe('Feishu webhook lifecycle', () => {
     expect(fetchMock).not.toHaveBeenCalled();
     await channel.connect();
     stall();
-    const result = expect(
-      channel.deliverProactive(TARGET, 'text'),
-    ).rejects.toMatchObject({
+    const pending = channel.deliverProactive(TARGET, 'text');
+    let settled = false;
+    void pending.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
+    await vi.advanceTimersByTimeAsync(14_999);
+    const signal = fetchMock.mock.calls[0]![1]?.signal;
+    expect(signal?.aborted).toBe(false);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(signal?.aborted).toBe(true);
+    await expect(pending).rejects.toMatchObject({
       disposition: 'transient',
       message:
         'Feishu webhook request timed out; delivery may have been accepted.',
     });
-    await Promise.all([result, vi.advanceTimersByTimeAsync(15_000)]);
-    expect(fetchMock.mock.calls[0]![1]?.signal?.aborted).toBe(true);
     expect(fetchMock).toHaveBeenCalledOnce();
   });
 
