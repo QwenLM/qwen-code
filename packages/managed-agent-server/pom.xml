@@ -32,9 +32,6 @@
     </developers>
     <properties>
         <java.version>21</java.version>
-        <managed.operator-tools.attach>true</managed.operator-tools.attach>
-        <managed.operator-tools.jar.phase>package</managed.operator-tools.jar.phase>
-        <managed.operator-tools.skip>false</managed.operator-tools.skip>
         <druid.version>1.2.25</druid.version>
         <qwencode-sdk.version>0.1.0-alpha</qwencode-sdk.version>
         <fastjson2.version>2.0.65</fastjson2.version>
@@ -222,25 +219,7 @@
     </build>
     <profiles>
         <profile>
-            <id>no-operator-tools</id>
-            <activation>
-                <property>
-                    <name>managed.operator-tools.attach</name>
-                    <value>false</value>
-                </property>
-            </activation>
-            <properties>
-                <managed.operator-tools.jar.phase>none</managed.operator-tools.jar.phase>
-                <managed.operator-tools.skip>true</managed.operator-tools.skip>
-            </properties>
-        </profile>
-        <profile>
             <id>central-release</id>
-            <properties>
-                <managed.operator-tools.attach>false</managed.operator-tools.attach>
-                <managed.operator-tools.jar.phase>none</managed.operator-tools.jar.phase>
-                <managed.operator-tools.skip>true</managed.operator-tools.skip>
-            </properties>
             <build>
                 <plugins>
                     <plugin>
