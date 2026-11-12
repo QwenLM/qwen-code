@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { compressCommand } from '../../ui/commands/compressCommand.js';
 import { removeFileHistorySnapshots } from '@qwen-code/qwen-code-core/utils/file-history-snapshots.js';
 import { getRequestModel } from '@qwen-code/qwen-code-core/core/request-model.js';
 import { resolveWorkflowIntent } from '@qwen-code/qwen-code-core/core/workflow-intent.js';
@@ -1255,6 +1256,9 @@ function formatCompressionDiagnostic(
   // API-reported figure on a different scale than a later banner.
   const formatCount = (count?: number, isEstimated?: boolean) =>
     count === undefined ? 'unknown' : isEstimated ? `~${count}` : String(count);
+  if (info.strategy === 'notes') {
+    return `Started a new context from local notes (${formatCount(info.originalTokenCount, info.originalTokenCountIsEstimated)} to ${formatCount(info.newTokenCount, info.newTokenCountIsEstimated)} tokens). Earlier evidence remains available in session history.${warningSuffix}`;
+  }
   return (
     `IMPORTANT: This conversation ${reasonClause}. ` +
     `A compressed context will be sent for future messages (compressed from: ` +
@@ -7025,6 +7029,8 @@ export class Session implements SessionContext {
     channelTurn = false,
   ): Promise<PromptResponse> {
     let managedMemoryRecallStarted = false;
+    let notesPromptRecorder: ChatRecordingService | undefined;
+    let notesPromptUuid: string | undefined;
     let strippedRetryEntries: Content[] = [];
     let retryHistoryReplaced = false;
     let retrySessionId: string | undefined;
@@ -7218,6 +7224,10 @@ export class Session implements SessionContext {
               !isRestoreAskUserQuestion &&
               isSlashCommand(inputText);
             const slashCommandName = getSlashCommandFirstToken(inputText);
+            const notesCompressionCommand =
+              this.config.getChatCompression?.()?.strategy === 'notes' &&
+              (slashCommandName === compressCommand.name ||
+                compressCommand.altNames?.includes(slashCommandName) === true);
             let continuationParts: Part[] | null = null;
             // For an `interrupted_prompt` continuation we strip the orphaned
             // user run from history before re-sending it. If the send then
@@ -7280,25 +7290,7 @@ export class Session implements SessionContext {
               void recordDaemonSessionApprovalModeFromConfig(this.config);
             }
 
-            if (goalTurn?.origin === 'runtime') {
-              // The automatic Goal turn was recorded above with its runtime
-              // provenance and must not also appear as real user input.
-            } else if (isContinue || isRestoreAskUserQuestion) {
-              // The orphaned content is already persisted; recording a new user
-              // message would duplicate the turn in the transcript.
-            } else if (isRetry) {
-              retrySessionId = this.config.getSessionId();
-              strippedRetryEntries =
-                this.config
-                  .getLlmClient()!
-                  .stripOrphanedUserEntriesFromHistory() ?? [];
-            } else if (!isSlashInput || slashCommandName !== 'advisor') {
-              // record user message for session management. Only `/advisor`
-              // defers its record to after command resolution below — a
-              // user-defined command shadowing the name must keep its record
-              // (R18-6) — while every other slash command records here,
-              // BEFORE its action runs: `/clear` swaps in a fresh recorder
-              // inside its action, so its record must land first (R20-9).
+            const recordPrompt = () => {
               const attachmentReferences = readDaemonAttachmentReferences(
                 promptMetadata?.[DAEMON_ATTACHMENT_REFERENCES_META_KEY],
               );
@@ -7306,7 +7298,9 @@ export class Session implements SessionContext {
                 .filter((block) => block.type === 'resource_link')
                 .map((block) => structuredClone(block));
               const recorder = this.config.getChatRecordingService();
-              recorder?.recordUserMessage(
+              if (this.config.getChatCompression?.()?.strategy === 'notes')
+                notesPromptRecorder = recorder;
+              notesPromptUuid = recorder?.recordUserMessage(
                 promptText,
                 goalTurn?.permit,
                 promptDisplayText !== undefined ||
@@ -7324,6 +7318,31 @@ export class Session implements SessionContext {
                 promptId,
                 daemonPromptId,
               );
+            };
+
+            if (goalTurn?.origin === 'runtime') {
+              // The automatic Goal turn was recorded above with its runtime
+              // provenance and must not also appear as real user input.
+            } else if (isContinue || isRestoreAskUserQuestion) {
+              // The orphaned content is already persisted; recording a new user
+              // message would duplicate the turn in the transcript.
+            } else if (isRetry) {
+              retrySessionId = this.config.getSessionId();
+              strippedRetryEntries =
+                this.config
+                  .getLlmClient()!
+                  .stripOrphanedUserEntriesFromHistory() ?? [];
+            } else if (
+              !isSlashInput ||
+              (slashCommandName !== 'advisor' && !notesCompressionCommand)
+            ) {
+              // `/advisor` and notes-mode `/compress` defer recording until
+              // command resolution below — a
+              // user-defined command shadowing the name must keep its record
+              // (R18-6) — while every other slash command records here,
+              // BEFORE its action runs: `/clear` swaps in a fresh recorder
+              // inside its action, so its record must land first (R20-9).
+              recordPrompt();
             }
 
             if (
@@ -7389,34 +7408,38 @@ export class Session implements SessionContext {
 
               // Classify by the RESOLVED command, not the raw token: a
               // custom command named `advisor` shadows the built-in and
-              // must keep its transcript records (R18-6). Only `/advisor`
-              // defers its user-message record to here — every other slash
-              // command was already recorded above, before its action ran.
+              // must keep its transcript records (R18-6). Notes-mode `/compress`
+              // also defers recording so the built-in command does not
+              // invalidate the checkpoint it is about to consume.
               const resolvedCommandInfo = slashCommandResult.resolvedCommand;
+              const builtInNotesCompression =
+                notesCompressionCommand &&
+                resolvedCommandInfo?.kind === CommandKind.BUILT_IN &&
+                resolvedCommandInfo.name === 'compress';
               const shouldRecordSlashCommand = !(
                 resolvedCommandInfo?.kind === CommandKind.BUILT_IN &&
                 resolvedCommandInfo.name === 'advisor'
               );
               if (
-                slashCommandName === 'advisor' &&
+                (slashCommandName === 'advisor' ||
+                  (notesCompressionCommand && !builtInNotesCompression)) &&
                 shouldRecordSlashCommand &&
                 goalTurn?.origin !== 'runtime' &&
                 !isRetry
               ) {
-                const recorder = this.config.getChatRecordingService();
-                recorder?.recordUserMessage(
-                  promptText,
-                  goalTurn?.permit,
-                  promptDisplayText !== undefined || inputAnnotations
-                    ? {
-                        displayText: promptDisplayText ?? promptText,
-                        hookContext: '',
-                        ...(inputAnnotations ? { inputAnnotations } : {}),
-                      }
-                    : undefined,
-                  promptId,
-                  daemonPromptId,
-                );
+                recordPrompt();
+              }
+
+              if (
+                builtInNotesCompression &&
+                !isRetry &&
+                goalTurn?.origin !== 'runtime'
+              ) {
+                this.config.getChatRecordingService()?.recordSlashCommand({
+                  phase: 'invocation',
+                  rawCommand: inputText,
+                  sentToModel: false,
+                });
               }
 
               try {
@@ -7942,6 +7965,8 @@ export class Session implements SessionContext {
             // this turn), but only this prompt entry starts it, and the
             // resolver treats that one as the turn's anchor.
             let nextMessage: Content | null = { role: 'user', parts };
+            if (notesPromptUuid)
+              notesPromptRecorder?.bindNotesInput(notesPromptUuid, nextMessage);
             markApiHistoryPrompt(nextMessage, historyPromptId);
             let turnCount = 0;
             // Puts a continue's stripped user run back while no request has
@@ -8777,6 +8802,8 @@ export class Session implements SessionContext {
         );
       },
     ).finally(() => {
+      if (notesPromptUuid)
+        notesPromptRecorder?.releaseNotesInput(notesPromptUuid);
       if (
         !retryHistoryReplaced &&
         retrySessionId === this.config.getSessionId()
@@ -11106,6 +11133,7 @@ export class Session implements SessionContext {
     // later compaction inside the same send keeps an owner.
     if (
       !options.skipCompression &&
+      this.config.getChatCompression?.()?.strategy !== 'notes' &&
       !(options.getModelOverride?.() ?? options.modelOverride)
     ) {
       try {
@@ -11743,6 +11771,7 @@ export class Session implements SessionContext {
     requestRouteKey: string,
   ): void {
     if (info.compressionStatus === CompressionStatus.COMPRESSED) {
+      this.loopTickResolver?.resetCache();
       this.#invalidateRouteTokenCountsForCompression(info, requestRouteKey);
       return;
     }

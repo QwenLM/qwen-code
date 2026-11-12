@@ -57,6 +57,7 @@ import { FILE_PATH_TOOLS } from '@qwen-code/qwen-code-core/services/microcompact
 import type { HumanPromptInput } from '@qwen-code/qwen-code-core/core/workflow-intent.js';
 import type { ModQueuedPrompt } from '@qwen-code/qwen-code-core/mods/types.js';
 import { appendFileSync } from 'node:fs';
+import { createUserContent } from '@qwen-code/qwen-code-core/core/genai-compat.js';
 import { randomUUID } from 'node:crypto';
 import { mapToDisplay } from '../hooks/useReactToolScheduler.js';
 import { writeToolCheckpoint } from './tool-checkpoint.js';
@@ -2034,6 +2035,11 @@ export async function* livePromptEvents(
                 recording.parts,
                 recording.message,
               );
+            }
+            if (config.getChatCompression?.()?.strategy === 'notes') {
+              client
+                .getChat()
+                .observeSessionNotesInput(createUserContent(responseParts));
             }
           },
           restore: () => {

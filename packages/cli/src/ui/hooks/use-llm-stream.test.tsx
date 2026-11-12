@@ -19884,6 +19884,40 @@ describe('useLlmStream', () => {
   });
 
   describe('ChatCompressed event', () => {
+    it('identifies a notes rollover without claiming a summary was generated', async () => {
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerLlmEventType.ChatCompressed,
+            value: {
+              strategy: 'notes',
+              originalTokenCount: 100,
+              newTokenCount: 50,
+              originalTokenCountIsEstimated: true,
+              newTokenCountIsEstimated: false,
+            },
+          };
+          yield {
+            type: ServerLlmEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+      const { result } = renderTestHook();
+      await act(async () => {
+        await result.current.submitQuery('notes rollover notice');
+      });
+      const infoItems = mockAddItem.mock.calls
+        .map(([item]) => item as HistoryItem)
+        .filter((item) => item.type === 'info');
+      expect(infoItems).toEqual([
+        expect.objectContaining({
+          type: 'info',
+          text: 'Started a new context from local notes (~100 to 50 tokens). Earlier evidence remains available in session history.',
+        }),
+      ]);
+    });
+
     it('starts a fresh prefixed text item after the status row', async () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {

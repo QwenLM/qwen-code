@@ -1698,6 +1698,58 @@ describe('loggers', () => {
       expect(new ToolCallEvent(call).started_at_ms).toBeUndefined();
     });
 
+    it.each(['success', 'error', 'cancelled'] as const)(
+      'redacts literal tool events before every sink on %s',
+      (status) => {
+        for (const functionName of [
+          'session_notes',
+          'session_history',
+          'structured_output',
+        ]) {
+          const recordUiTelemetryEvent = vi.fn();
+          const event = rawEvent({
+            function_name: functionName,
+            function_args: {
+              text: 'PRIVATE_CONTEXT_CANARY',
+              query: 'PRIVATE_QUERY_CANARY',
+            },
+            status,
+            duration_ms: 42,
+            success: status === 'success',
+            prompt_id: 'redaction-test',
+          });
+          const expected = {
+            __redacted:
+              functionName === 'structured_output'
+                ? 'structured_output payload (see stdout result)'
+                : 'local session context',
+          };
+          logToolCall(recordingConfig(recordUiTelemetryEvent), event);
+          const normalized = expect.objectContaining({
+            function_name: functionName,
+            function_args: expected,
+            duration_ms: 42,
+            status,
+          });
+          expect(
+            QwenLogger.prototype.logToolCallEvent,
+          ).toHaveBeenLastCalledWith(normalized);
+          expect(mockUiEvent.addEvent).toHaveBeenLastCalledWith(
+            normalized,
+            'test-session-id',
+          );
+          expect(recordUiTelemetryEvent).toHaveBeenLastCalledWith(normalized);
+          expect(
+            mockLogger.emit.mock.calls.at(-1)?.[0].attributes.function_args,
+          ).toBe(JSON.stringify(expected, null, 2));
+          expect(event.function_args).toHaveProperty(
+            'text',
+            'PRIVATE_CONTEXT_CANARY',
+          );
+        }
+      },
+    );
+
     it('clears call errors when cancellation is the final outcome', () => {
       const event = rawEvent({
         function_name: 'shell',

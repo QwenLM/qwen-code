@@ -53,7 +53,11 @@ import { BaseLlmClient } from './baseLlmClient.js';
 import { MemoryManager } from '../memory/manager.js';
 import { getAutoMemorySnapshot } from '../memory/request-context.js';
 import { buildAgentContentGeneratorConfig } from '../models/content-generator-config.js';
-import { LlmChat, userContentPushSnapshotKey } from './llm-chat.js';
+import {
+  LlmChat,
+  userContentPushSnapshotKey,
+  deferNotesInputObservationKey,
+} from './llm-chat.js';
 import { WorkflowModeContext } from './workflow-mode.js';
 import { DEFAULT_TOKEN_LIMIT } from './tokenLimits.js';
 import type { Config } from '../config/config.js';
@@ -1091,6 +1095,107 @@ describe('Gemini Client (client.ts)', () => {
     reg.preloadDeferredToolsWithinBudget.mockClear();
     return reg;
   };
+
+  it('adds notes guidance only when notes mode and all four direct tools are available', async () => {
+    const names = [
+      'session_notes',
+      'session_history',
+      'get_context_remaining',
+      'new_context',
+    ];
+    const reg = registryMock();
+    const setInstruction = vi.spyOn(client.getChat(), 'setSystemInstruction');
+    for (const [strategy, count, included] of [
+      ['notes', 4, true],
+      ['notes', 3, false],
+      ['summary', 4, false],
+    ] as const) {
+      vi.mocked(mockConfig.getChatCompression).mockReturnValue({ strategy });
+      reg.getFunctionDeclarations.mockReturnValue(
+        names.slice(0, count).map((name) => ({ name })),
+      );
+      await client.refreshSystemInstruction();
+      const instruction = setInstruction.mock.calls.at(-1)?.[0];
+      expect(
+        instruction?.includes(
+          'Maintain session_notes as a compact working checkpoint',
+        ),
+      ).toBe(included);
+    }
+  });
+
+  it('observes notes input once after the first event of a successful send', async () => {
+    vi.mocked(mockConfig.getChatCompression).mockReturnValue({
+      strategy: 'notes',
+    });
+    const observeInput = vi.spyOn(client.getChat(), 'observeSessionNotesInput');
+    const request: Part[] = [{ text: 'preserve the accepted request' }];
+    mockTurnRunFn.mockImplementation(async function* (
+      _model: string,
+      sentRequest: PartListUnion,
+    ) {
+      expect(
+        (sentRequest as unknown as Record<PropertyKey, unknown>)[
+          deferNotesInputObservationKey
+        ],
+      ).toBe(true);
+      expect(observeInput).not.toHaveBeenCalled();
+      yield { type: LlmEventType.Content, value: 'first response' };
+      expect(observeInput).toHaveBeenCalledOnce();
+      yield { type: LlmEventType.Content, value: ' more response' };
+      yield {
+        type: LlmEventType.Finished,
+        value: { reason: 'STOP', usageMetadata: undefined },
+      };
+    });
+    const events = await run(request, 'accepted-notes-input');
+    expect(
+      events.filter((event) => event.type === LlmEventType.Content),
+    ).toHaveLength(2);
+    expect(observeInput).toHaveBeenCalledExactlyOnceWith({
+      role: 'user',
+      parts: request,
+    });
+  });
+
+  it('releases the failed tool-result batch without claiming pending steering', async () => {
+    vi.mocked(mockConfig.getChatCompression).mockReturnValue({
+      strategy: 'notes',
+    });
+    const releaseNotesInput = vi.fn();
+    const releaseNotesInputs = vi.fn();
+    const recorder = {
+      getSessionNotesState: () => ({ sourceLeafUuid: 'unprocessed-steering' }),
+      releaseNotesInput,
+      releaseNotesInputs,
+      recordAttributionSnapshot: vi.fn(),
+    };
+    vi.mocked(mockConfig.getChatRecordingService).mockReturnValue(
+      recorder as unknown as ReturnType<Config['getChatRecordingService']>,
+    );
+    const failure = new UnauthorizedError(
+      'failure before the first response event',
+    );
+    mockTurnRunFn.mockImplementation(async function* () {
+      await Promise.reject(failure);
+      yield undefined;
+    });
+    const request: Part[] = ['read-a', 'read-b'].map((id) => ({
+      functionResponse: { id, name: 'read_file', response: { output: id } },
+    }));
+    await run(request, 'failed-tool-result', {
+      type: SendMessageType.ToolResult,
+    }).then(
+      (value) => value,
+      (error) => error,
+    );
+    expect(mockTurnRunFn).toHaveBeenCalled();
+    expect(releaseNotesInputs).toHaveBeenCalledWith({
+      role: 'user',
+      parts: request,
+    });
+    expect(releaseNotesInput).not.toHaveBeenCalled();
+  });
 
   describe('pending memory task ownership', () => {
     it('returns an independent snapshot without transferring queue ownership', () => {

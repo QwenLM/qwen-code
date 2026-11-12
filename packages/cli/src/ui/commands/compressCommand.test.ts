@@ -316,6 +316,33 @@ describe('compressCommand', () => {
     });
   });
 
+  it('sends a notes-specific notice and optional strategy to ACP hosts', async () => {
+    mockTryCompressChat.mockResolvedValue({
+      originalTokenCount: 200,
+      newTokenCount: 100,
+      compressionStatus: CompressionStatus.COMPRESSED,
+      strategy: 'notes',
+    });
+    const ctx = createMockCommandContext({
+      executionMode: 'acp',
+      services: {
+        config: {
+          getLlmClient: () =>
+            ({ tryCompressChat: mockTryCompressChat }) as unknown as LlmClient,
+        },
+      },
+    });
+    const result = await compressCommand.action!(ctx, '');
+    expect(result?.type).toBe('stream_messages');
+    const messages = [];
+    if (result?.type === 'stream_messages')
+      for await (const message of result.messages) messages.push(message);
+    expect(messages.at(-1)).toMatchObject({
+      content: 'Started a new context from local notes (200 -> 100).',
+      contextCompression: { phase: 'done', strategy: 'notes' },
+    });
+  });
+
   it('should mark estimated counts in the ACP stream_messages branch', async () => {
     // Asymmetric flags mirror the real post-/compress-fast scenario and catch
     // a swapped flag-argument mutation at the ACP formatTokenCount site.
