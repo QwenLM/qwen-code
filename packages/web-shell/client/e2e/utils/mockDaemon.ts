@@ -2316,10 +2316,11 @@ async function handleDaemonRoute(
           route,
           {
             // The real route answers { error, code, field } and the SDK reads
-            // `error` first; keep the same shape so a test asserting the
-            // production body is written against the route, not the fixture.
+            // `error` first; keep the same shape AND the route's verbatim text
+            // so a test asserting the production body is written against the
+            // route, not a fixture paraphrase.
             error:
-              '`pr` must be an object with a positive integer `number` and an http(s) `url` of at most 2048 characters, without control characters, an optional valid `state` and `role`.',
+              '`pr` must be an object with a positive integer `number` and an http(s) `url` of at most 2048 characters, without control characters, an optional `state` that is one of `open`, `merged`, or `closed`, and an optional `role` that is one of `review`, `verify`, `fix`, or null to clear',
             code: 'invalid_metadata',
             field: 'pr',
           },
@@ -2327,19 +2328,29 @@ async function handleDaemonRoute(
         );
         return;
       }
+      // Mirror upsertSessionPr's merge: an omitted state/role preserves the
+      // known entry's value (matched by number AND url), and role:null clears.
+      // The route matches on the canonical URL; the fixture uses exact equality
+      // because the bind URLs here are already canonical. A different URL is a
+      // different PR and carries nothing across (no known entry matches).
+      const known = prs.find((p) => p.number === number && p.url === url);
+      const mergedState =
+        state === 'open' || state === 'merged' || state === 'closed'
+          ? state
+          : known?.state;
+      const mergedRole =
+        role === undefined
+          ? known?.role
+          : role === 'review' || role === 'verify' || role === 'fix'
+            ? role
+            : undefined;
       const entry = {
         number,
         url,
-        ...(state === 'open' || state === 'merged' || state === 'closed'
-          ? { state }
-          : {}),
-        // The real route passes a valid role through to the upsert; keep it
-        // in the stored entry so a bound role reads back like production.
-        ...(role === 'review' || role === 'verify' || role === 'fix'
-          ? { role }
-          : {}),
+        ...(mergedState ? { state: mergedState } : {}),
+        ...(mergedRole ? { role: mergedRole } : {}),
       };
-      prs = [...prs.filter((p) => p.number !== entry.number), entry];
+      prs = [...prs.filter((p) => p.number !== number), entry];
     }
     scenario.sessions[index] = {
       ...summary,

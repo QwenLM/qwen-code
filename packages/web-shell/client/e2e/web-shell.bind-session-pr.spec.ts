@@ -214,11 +214,62 @@ test('rejects an invalid pr payload with invalid_metadata @smoke', async ({
   expect(result.status).toBe(400);
   expect(result.body.code).toBe('invalid_metadata');
   expect(result.body.field).toBe('pr');
-  expect(typeof result.body.error).toBe('string');
+  // Verbatim route text (parseSessionPrBody), not a fixture paraphrase.
+  expect(result.body.error).toBe(
+    '`pr` must be an object with a positive integer `number` and an http(s) `url` of at most 2048 characters, without control characters, an optional `state` that is one of `open`, `merged`, or `closed`, and an optional `role` that is one of `review`, `verify`, `fix`, or null to clear',
+  );
   const session = daemon.scenario.sessions.find(
     (s) => s.sessionId === 'bind-current',
   );
   expect(session?.prs ?? []).toHaveLength(0);
+});
+
+// The mock mirrors upsertSessionPr's merge, not a wholesale replace: a re-bind
+// that omits state/role preserves the known entry's values (matched by number
+// AND url), and role:null clears the role. Pins the fixture fidelity the real
+// route guarantees, so a future test asserting production merge behavior is
+// written against the route's semantics.
+test('preserves omitted state/role on re-bind and clears role:null @smoke', async ({
+  page,
+}) => {
+  const url = 'https://github.com/example/repo/pull/123';
+  const patch = (pr: Record<string, unknown>) =>
+    page.evaluate(
+      async ({ cwd, pr: payload }) => {
+        const res = await fetch(
+          `/workspaces/${encodeURIComponent(cwd)}/session/bind-current/metadata`,
+          {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ pr: payload }),
+          },
+        );
+        return { status: res.status, body: await res.json() };
+      },
+      { cwd: workspaceCwd, pr },
+    );
+  const readPrs = () =>
+    daemon.scenario.sessions.find((s) => s.sessionId === 'bind-current')?.prs ??
+    [];
+
+  // A: explicit state + role are stored.
+  await patch({ number: 123, url, state: 'open', role: 'review' });
+  expect(readPrs()).toMatchObject([
+    { number: 123, url, state: 'open', role: 'review' },
+  ]);
+
+  // B: omitting state/role preserves the known values.
+  await patch({ number: 123, url });
+  expect(readPrs()).toMatchObject([
+    { number: 123, url, state: 'open', role: 'review' },
+  ]);
+
+  // C: role:null clears the role; the omitted state is still preserved.
+  await patch({ number: 123, url, role: null });
+  const after = readPrs();
+  expect(after).toHaveLength(1);
+  expect(after[0]).toMatchObject({ number: 123, url, state: 'open' });
+  expect(after[0].role).toBeUndefined();
 });
 
 test('rejects a bind whose workspace segment cannot be decoded @smoke', async ({

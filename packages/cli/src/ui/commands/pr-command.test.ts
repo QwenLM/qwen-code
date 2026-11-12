@@ -106,6 +106,13 @@ describe('prCommand', () => {
     ]);
   });
 
+  it('advertises an optional argument since bare /pr lists bindings', () => {
+    // The hint feeds ACP available_commands, the OpenTUI suggestion line and
+    // terminal command metadata; square brackets mark the argument optional
+    // (bare /pr lists). Reverting to the required <number | url> reds this.
+    expect(prCommand.argumentHint).toBe('[number | url]');
+  });
+
   it('returns error when config is not loaded', async () => {
     const context = createMockCommandContext({ services: { config: null } });
     const result = await prCommand.action?.(context, '16865');
