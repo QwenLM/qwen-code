@@ -550,13 +550,47 @@ export function truncateChannelTextUtf8(
 }
 
 /**
- * The email plan: one segment, bounded. A provider with cards or threads
- * supplies its own plan against the same segment contract.
+ * The email plan: ordered segments under the per-segment byte bound. A
+ * reply that fits one segment plans one, unchanged; a longer reply splits
+ * into up to maxSegments pieces, preferring a line end within the byte
+ * budget and falling back to a code-point boundary. Past the segment-count
+ * bound the tail is dropped and the last kept piece carries the truncation
+ * notice. A provider with cards or threads supplies its own plan against the
+ * same segment contract.
  */
 export function planChannelSegments(text: string): readonly string[] {
-  return Object.freeze([
-    truncateChannelTextUtf8(text, MANAGED_CHANNEL_LIMITS.maxSegmentBytes),
-  ]);
+  const maxBytes = MANAGED_CHANNEL_LIMITS.maxSegmentBytes;
+  const maxSegments = MANAGED_CHANNEL_LIMITS.maxSegments;
+  const bytes = Buffer.from(text, 'utf8');
+  if (bytes.byteLength <= maxBytes) {
+    return Object.freeze([text]);
+  }
+  const pieces: string[] = [];
+  let offset = 0;
+  while (offset < bytes.byteLength && pieces.length < maxSegments) {
+    if (bytes.byteLength - offset <= maxBytes) {
+      pieces.push(bytes.subarray(offset).toString('utf8'));
+      offset = bytes.byteLength;
+      break;
+    }
+    let end = offset + maxBytes;
+    const newline = bytes.lastIndexOf(0x0a, end - 1);
+    if (newline >= offset) {
+      end = newline + 1;
+    } else {
+      while (end > offset && (bytes[end]! & 0xc0) === 0x80) end -= 1;
+    }
+    pieces.push(bytes.subarray(offset, end).toString('utf8'));
+    offset = end;
+  }
+  if (offset < bytes.byteLength) {
+    const last = pieces.length - 1;
+    pieces[last] = truncateChannelTextUtf8(
+      pieces[last]! + TRUNCATION_NOTICE,
+      maxBytes,
+    );
+  }
+  return Object.freeze(pieces);
 }
 
 function routeRun(routeId: string): ExtensionRun {

@@ -488,7 +488,7 @@ export class HostedChannelSession {
       .join('')
       .trim();
     if (text.length === 0) return undefined;
-    // Publish the planned segment text, not the raw turn output: the reply
+    // Publish the planned reply text, not the raw turn output: the reply
     // resource must satisfy the inline bound itself, or a long answer
     // would fail the publish before the truncation plan could truncate it.
     // And the envelope bound is measured on the serialized reply: JSON
@@ -496,7 +496,8 @@ export class HostedChannelSession {
     // after the raw text truncated at the segment bound. Every further
     // shrink re-runs a bounded cut — the truncation notice stays and the
     // cut always lands on a code-point boundary.
-    let replyText = planChannelSegments(text).join('');
+    const pieces = planChannelSegments(text);
+    let replyText = pieces.join('');
     let budget = MANAGED_CHANNEL_LIMITS.maxSegmentBytes / 2;
     for (let attempt = 0; attempt < 4; attempt++) {
       const candidate = encodeChannelReply({
@@ -529,16 +530,21 @@ export class HostedChannelSession {
       CHANNEL_RESOURCE_KINDS.reply,
       encodeChannelReply(reply),
     );
-    // The email plan is one segment, and it replies with the fitted text.
-    const segments = [
-      {
-        segmentId: `${deliveryId}:0`,
+    // One ledger segment per planned piece: the segments carry the full
+    // answer while the representative reply above stays envelope-fitted.
+    const segments: Array<{
+      segmentId: string;
+      contentRef: ManagedSessionDurableRef;
+    }> = [];
+    for (const [ordinal, piece] of pieces.entries()) {
+      segments.push({
+        segmentId: `${deliveryId}:${ordinal}`,
         contentRef: await this.store.resources.publish(
           CHANNEL_RESOURCE_KINDS.segment,
-          Buffer.from(replyText, 'utf8'),
+          Buffer.from(piece, 'utf8'),
         ),
-      },
-    ];
+      });
+    }
     const record = channelDeliveryPlanBody({
       deliveryId,
       routeId: envelope.routeId,

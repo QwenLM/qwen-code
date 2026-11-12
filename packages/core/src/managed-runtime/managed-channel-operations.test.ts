@@ -47,6 +47,8 @@ import {
 } from './managed-channel-operations.js';
 import { ManagedSessionRecordError } from './managed-session-records.js';
 
+const REPLACEMENT_CHARACTER = '\uFFFD';
+
 function ref(resourceId: string, bytes: string | Buffer, kind = 'k') {
   const buffer = Buffer.from(bytes);
   return {
@@ -300,17 +302,93 @@ describe('channel policy and envelopes', () => {
     ).not.toThrow();
   });
 
-  it('round-trips a reply and plans one bounded segment for email', () => {
+  it('round-trips a reply and plans ordered segments for a long answer', () => {
     const reply = { text: 'Done.', replyContext: { parent: '<a@b>' } };
     expect(decodeChannelReply(encodeChannelReply(reply))).toEqual(reply);
     expect(planChannelSegments('short')).toEqual(['short']);
+    expect(planChannelSegments('')).toEqual(['']);
+    // 3-byte code points: three full segments, no notice, no lost tail.
     const long = '€'.repeat(MANAGED_CHANNEL_LIMITS.maxSegmentBytes);
-    const [segment, ...rest] = planChannelSegments(long);
-    expect(rest).toEqual([]);
-    expect(Buffer.byteLength(segment!, 'utf8')).toBeLessThanOrEqual(
-      MANAGED_CHANNEL_LIMITS.maxSegmentBytes,
+    const pieces = planChannelSegments(long);
+    expect(pieces).toHaveLength(3);
+    expect(pieces.join('')).toBe(long);
+    for (const piece of pieces) {
+      expect(Buffer.byteLength(piece, 'utf8')).toBeLessThanOrEqual(
+        MANAGED_CHANNEL_LIMITS.maxSegmentBytes,
+      );
+      expect(piece).not.toContain(CHANNEL_TRUNCATION_NOTICE);
+      expect(piece).not.toContain(REPLACEMENT_CHARACTER);
+    }
+  });
+
+  it('splits a mixed reply on code-point boundaries and concatenates back', () => {
+    const text = 'answer 答案 🙂\n'.repeat(8_000);
+    const pieces = planChannelSegments(text);
+    expect(pieces.length).toBeGreaterThan(1);
+    expect(pieces.length).toBeLessThanOrEqual(
+      MANAGED_CHANNEL_LIMITS.maxSegments,
     );
-    expect(segment).toMatch(/€\n\n\[Reply truncated/);
+    expect(pieces.join('')).toBe(text);
+    for (const piece of pieces) {
+      expect(Buffer.byteLength(piece, 'utf8')).toBeLessThanOrEqual(
+        MANAGED_CHANNEL_LIMITS.maxSegmentBytes,
+      );
+      expect(piece).not.toContain(REPLACEMENT_CHARACTER);
+      expect(
+        /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(
+          piece,
+        ),
+      ).toBe(false);
+    }
+  });
+
+  it('prefers a line end within the byte budget for segment boundaries', () => {
+    const text =
+      'x'.repeat(40_000) +
+      '\n' +
+      'y'.repeat(40_000) +
+      '\n' +
+      'z'.repeat(20_000);
+    const pieces = planChannelSegments(text);
+    expect(pieces).toHaveLength(3);
+    expect(pieces[0]).toBe('x'.repeat(40_000) + '\n');
+    expect(pieces[1]).toBe('y'.repeat(40_000) + '\n');
+    expect(pieces[2]).toBe('z'.repeat(20_000));
+    expect(pieces.join('')).toBe(text);
+  });
+
+  it('keeps 64 segments past the count bound and marks the truncation', () => {
+    const maxBytes = MANAGED_CHANNEL_LIMITS.maxSegmentBytes;
+    const text = 'x'.repeat(
+      maxBytes * MANAGED_CHANNEL_LIMITS.maxSegments + 1_000,
+    );
+    const pieces = planChannelSegments(text);
+    expect(pieces).toHaveLength(MANAGED_CHANNEL_LIMITS.maxSegments);
+    for (const piece of pieces) {
+      expect(Buffer.byteLength(piece, 'utf8')).toBeLessThanOrEqual(maxBytes);
+    }
+    expect(
+      pieces
+        .slice(0, -1)
+        .every((piece) => !piece.includes(CHANNEL_TRUNCATION_NOTICE)),
+    ).toBe(true);
+    const last = pieces[pieces.length - 1]!;
+    expect(last.endsWith(CHANNEL_TRUNCATION_NOTICE)).toBe(true);
+    // The join is the kept prefix plus the notice — a strict prefix of the
+    // input, never a silent loss and never a mid-code-point cut.
+    const join = pieces.join('');
+    const kept = join.slice(0, join.length - CHANNEL_TRUNCATION_NOTICE.length);
+    expect(text.startsWith(kept)).toBe(true);
+    expect(kept.length).toBeLessThan(text.length);
+    expect(join).not.toContain(REPLACEMENT_CHARACTER);
+  });
+
+  it('drops an emoji at the cut point whole, never as a replacement character', () => {
+    // The leading byte shifts every 48 KiB cut into the middle of a 4-byte
+    // code point, so the boundary back-off must drop the emoji whole.
+    const text = 'x' + '🙂'.repeat(40_000);
+    const segment = planChannelSegments(text).join('');
+    expect(segment).toBe(text);
     expect(segment).not.toContain('�');
   });
 
