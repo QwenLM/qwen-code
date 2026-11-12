@@ -117,7 +117,7 @@ Preview routes by `queryId` and scopes rounds by a UUID `roundId`. Main's loop r
 
 Events marked _planned_ are in the vocabulary but not emitted by this slice; they arrive with streaming dispatch. Cancellation today flows through the signal into `runModelRound`/`runToolBatch`, not through a bus event.
 
-`llm.settled` carries the round's terminal classification (the `STOP_EVENTS` mapping that `runModelRound` does today) so Conversation remains the only place that maps a model outcome to an `AgentLoopStopReason`. Duplicate/replay bookkeeping stays in the Tool handler, using the existing `toolCallIdUtils` helpers, exactly where `runToolBatch` does it today. Event payloads carry only routing and decision data; the full model result and tool batch live in the run state under their owner's slot, so the bus never duplicates them.
+`llm.settled` is the round-end signal; the terminal classification (the `STOP_EVENTS` mapping that `runModelRound` does today) lives in run state (`state.model.stop`), and Conversation remains the only place that maps a model outcome to an `AgentLoopStopReason`. Duplicate/replay bookkeeping stays in the Tool handler, using the existing `toolCallIdUtils` helpers, exactly where `runToolBatch` does it today. Event payloads carry only routing and decision data; the full model result and tool batch live in the run state under their owner's slot, so the bus never duplicates them.
 
 ### State and ownership
 

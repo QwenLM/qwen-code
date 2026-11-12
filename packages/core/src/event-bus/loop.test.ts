@@ -79,10 +79,14 @@ function response(
   };
 }
 
-function makeClient(rounds: ServerLlmStreamEvent[][]): LlmClient {
+function makeClient(
+  rounds: ServerLlmStreamEvent[][],
+  sink?: unknown[],
+): LlmClient {
   let index = 0;
   return {
-    async *sendMessageStream() {
+    async *sendMessageStream(parts: unknown) {
+      if (sink) sink.push(parts);
       const events = rounds[index++] ?? [];
       for (const event of events) yield event;
       return {} as Turn;
@@ -441,6 +445,44 @@ describe('runAgentLoop event-bus parity', () => {
       useEventBus: true,
     });
     expect(duplicates.handled.has('c1')).toBe(true);
+  });
+
+  it('sends the tool-result parts, not the original prompt, on the continuation round', async () => {
+    const toolCall = {
+      type: LlmEventType.ToolCallRequest,
+      value: call('c1'),
+    } as ServerLlmStreamEvent;
+    const rounds = [[toolCall], [content]];
+    const sink: unknown[] = [];
+    await runAgentLoop({
+      ...options(rounds, makeHost().host, { client: makeClient(rounds, sink) }),
+      useEventBus: true,
+    });
+    expect(sink).toHaveLength(2);
+    expect(sink[0]).toBe('hi');
+    expect(sink[1]).not.toBe('hi');
+    expect(JSON.stringify(sink[1])).toContain('functionResponse');
+  });
+
+  it('rejects, not pending, when a host onToolResult callback throws', async () => {
+    const toolCall = {
+      type: LlmEventType.ToolCallRequest,
+      value: call('c1'),
+    } as ServerLlmStreamEvent;
+    const throwingHost = (): AgentLoopHost => ({
+      onToolResult: () => {
+        throw new Error('toolboom');
+      },
+    });
+    const procedural = runAgentLoop(
+      options([[toolCall], [content]], throwingHost()),
+    );
+    const bus = runAgentLoop({
+      ...options([[toolCall], [content]], throwingHost()),
+      useEventBus: true,
+    });
+    await expect(procedural).rejects.toThrow('toolboom');
+    await expect(bus).rejects.toThrow('toolboom');
   });
 
   it('proves the bus path runs by its event sequence, and the flag-off run publishes nothing', async () => {
