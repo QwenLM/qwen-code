@@ -110,9 +110,42 @@ const SCHEDULED_TASK_DELIVERY_KEYS = [
   'user',
   'chat',
   'cardPrefix',
+  'configuredGroupHint',
+  'configuredHint',
+  'useConfiguredDestination',
+  'differentConfiguredDestination',
 ].map((suffix) => `scheduledTasks.delivery.${suffix}`);
 
+const OUTBOUND_CHANNEL_KEYS = [
+  'method.title',
+  'method.description',
+  'method.applicationBot',
+  'method.applicationBot.description',
+  'method.webhook',
+  'method.webhook.description',
+  'status.readyToSend',
+  'statusDescription.readyToSend',
+  'statusDescription.notReadyToSend',
+  'statusDescription.outbound',
+  'editor.field.dingtalkWebhook.webhookUrl',
+  'editor.field.dingtalkWebhook.webhookUrl.description',
+  'editor.field.dingtalkWebhook.signingSecret',
+  'editor.field.dingtalkWebhook.signingSecret.description',
+].map((suffix) => `channels.${suffix}`);
+
 describe('web-shell i18n catalog', () => {
+  it('labels the incremental session expansion with its count in both locales', () => {
+    expect(getTranslator('en')('sidebar.showMoreSessions', { count: 10 })).toBe(
+      'Show 10 more',
+    );
+    expect(
+      getTranslator('zh-CN')('sidebar.showMoreSessions', { count: 10 }),
+    ).toBe('再显示 10 个');
+    expect(
+      getTranslator('zh-CN')('sidebar.showMoreSessions', { count: 3 }),
+    ).toBe('再显示 3 个');
+  });
+
   it('localizes the scheduled-task workspace host-lock hint', () => {
     expect(getTranslator('en')('scheduledTasks.workspaceFixedByHost')).toBe(
       'Fixed by host',
@@ -133,6 +166,16 @@ describe('web-shell i18n catalog', () => {
     expect(zh('scheduledTasks.delivery.perRun')).toContain(
       '每次新会话不支持频道投递',
     );
+  });
+
+  it('keeps the outbound Channel translations in both locales', () => {
+    const en = getTranslator('en');
+    const zh = getTranslator('zh-CN');
+    for (const key of OUTBOUND_CHANNEL_KEYS) {
+      expect(en(key)).not.toBe(key);
+      expect(zh(key)).not.toBe(key);
+      expect(zh(key)).not.toBe(en(key));
+    }
   });
 
   it('keeps the channel range message spacing in both locales', () => {

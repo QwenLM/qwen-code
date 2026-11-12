@@ -1,6 +1,5 @@
 package com.alibaba.qwen.code.runtimebroker.persistence;
 
-import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
@@ -70,8 +69,8 @@ public final class JdbcCsiExecutionAdmission {
         long revision;
         try (var statement = read.statement(connection,
                 "SELECT journal_revision FROM ma_session_head WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ? AND head_kind = 'MANAGED_SESSION'")) {
-            statement.setString(1, JdbcRuntimeBindingRepository.harnessDrainKey(original.request().getScope().getTenantId()));
-            statement.setString(2, JdbcRuntimeBindingRepository.harnessDrainKey(original.request().getIsolationKey()));
+            statement.setString(1, RuntimeAdmissionFences.harnessDrainKey(original.request().getScope().getTenantId()));
+            statement.setString(2, RuntimeAdmissionFences.harnessDrainKey(original.request().getIsolationKey()));
             JdbcRepositorySupport.setIdentity(statement, 3, original.request().getScope().getTenantId());
             JdbcRepositorySupport.setIdentity(statement, 4, original.request().getIsolationKey());
             try (var row = statement.executeQuery()) {
