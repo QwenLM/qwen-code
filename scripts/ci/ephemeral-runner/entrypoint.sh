@@ -19,7 +19,12 @@ if [ -n "${QWEN_CI_BAKED_RUNTIME_CACHE:-}" ] &&
   [ -d "${QWEN_CI_BAKED_RUNTIME_CACHE}" ]; then
   runtime_cache="${HOME}/.cache/qwen-code/standalone-runtimes"
   if mkdir -p "$runtime_cache" 2>/dev/null; then
-    for archive in "${QWEN_CI_BAKED_RUNTIME_CACHE}"/*.tgz; do
+    # Both suffixes, spelled out: Node's archive is `.tar.gz` and Bun's is
+    # `.tgz`, and `*.tgz` does not match the former. A single pattern here
+    # seeded Bun only and left every job downloading Node — silently, since a
+    # loop that visits one file looks exactly like a loop that visited two.
+    for archive in "${QWEN_CI_BAKED_RUNTIME_CACHE}"/*.tgz \
+      "${QWEN_CI_BAKED_RUNTIME_CACHE}"/*.tar.gz; do
       [ -f "$archive" ] || continue
       target="${runtime_cache}/$(basename "$archive")"
       [ -e "$target" ] && continue

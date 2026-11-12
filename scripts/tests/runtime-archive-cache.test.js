@@ -6,6 +6,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createHash } from 'node:crypto';
+import { execFileSync, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -475,5 +476,192 @@ describe('the ephemeral image seeds the runtime archives', () => {
         .join('\n')
         .trim(),
     ).toBe('');
+  });
+});
+
+// The cases above read the definitions as text, which pins their spelling and
+// not what they select. That distinction shipped a real defect: both selectors
+// matched `*.tgz` only, and Node's archive ends in `.tar.gz`, so the build's
+// count came up 1 instead of 2 and the entrypoint seeded Bun alone. All twenty
+// of them stayed green through both, measured. So these run the real selectors,
+// extracted from the shipped files, against the real filenames: the selection
+// itself is what has to come out right.
+describe('the archive selectors match both real filenames', () => {
+  const read = (file) => fs.readFileSync(path.join(ROOT, file), 'utf8');
+  // The names the cache lookup builds, from the same pins the image declares.
+  // Taken from the script's own expressions rather than retyped, so a change to
+  // either naming scheme moves the fixture with it.
+  const script = () => read('scripts/test-standalone-runtimes.mjs');
+  const filenames = (arch) => {
+    const source = script();
+    expect(source).toContain(
+      'const filename = `node-v${NODE_VERSION}-${process.platform}-${process.arch}.tar.gz`;',
+    );
+    expect(source).toContain(
+      "const name = `bun-${process.platform}-${process.arch === 'arm64' ? 'aarch64' : process.arch}`;",
+    );
+    expect(source).toContain('const filename = `${name}-${BUN_VERSION}.tgz`;');
+    const bunArch = arch === 'arm64' ? 'aarch64' : arch;
+    return [
+      `node-v${NODE_VERSION}-linux-${arch}.tar.gz`,
+      `bun-linux-${bunArch}-${BUN_VERSION}.tgz`,
+    ];
+  };
+
+  let seed;
+
+  beforeEach(() => {
+    seed = fs.mkdtempSync(path.join(os.tmpdir(), 'runtime-seed-'));
+    for (const name of filenames('arm64'))
+      fs.writeFileSync(path.join(seed, name), 'archive bytes\n');
+  });
+
+  afterEach(() => {
+    fs.rmSync(seed, { recursive: true, force: true });
+  });
+
+  // The count expression is lifted out of the last RUN and evaluated by find
+  // itself, so this asserts the number the build will compare against 2 — not
+  // that the Dockerfile contains a plausible-looking pattern.
+  it('counts both archives with the image build assertion', () => {
+    const last = read('scripts/ci/ephemeral-runner/Dockerfile')
+      .replace(/\\\n\s*/g, ' ')
+      .split('\n')
+      .filter((line) => /^RUN\s/.test(line))
+      .at(-1);
+    // Delimited by the pipe, not by a closing paren: the arguments contain a
+    // `\( … \)` group, and a paren-terminated capture stops inside it and
+    // silently feeds find a truncated argument list.
+    const assertion =
+      /test "\$\(find "([^"]+)" (.*?) \| wc -l\)" -eq (\d+)/.exec(last);
+    expect(assertion, 'the final layer must count the archives').not.toBe(null);
+    const [, cacheVar, findArgs, expected] = assertion;
+    expect(cacheVar).toBe('${QWEN_CI_BAKED_RUNTIME_CACHE}');
+    expect(Number(expected)).toBe(2);
+    // Run the shipped argument list verbatim through a shell, with the variable
+    // bound to the fixture. `-name '*.tgz'` alone yields 1 here.
+    const counted = execFileSync(
+      'bash',
+      [
+        '-c',
+        `find "${seed}" ${findArgs.replace(/\$\{QWEN_CI_BAKED_RUNTIME_CACHE\}/g, seed)} | wc -l`,
+      ],
+      { encoding: 'utf8' },
+    );
+    expect(Number(counted.trim())).toBe(Number(expected));
+  });
+
+  // The seeding block is extracted from the shipped entrypoint and run as a
+  // script against the fixture, so these assert which files land in the job's
+  // cache — the behaviour the block exists for. A loop over one pattern seeds
+  // one file and still exits 0, which is why reading the text was not enough.
+  const seedInto = (home, seedDir = seed) => {
+    const entrypoint = read('scripts/ci/ephemeral-runner/entrypoint.sh');
+    const start = entrypoint.indexOf(
+      'if [ -n "${QWEN_CI_BAKED_RUNTIME_CACHE:-}" ]',
+    );
+    const end = entrypoint.indexOf('cd /home/node/actions-runner');
+    expect(start, 'the seeding block must exist').toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const result = spawnSync(
+      'bash',
+      ['-euo', 'pipefail', '-c', entrypoint.slice(start, end)],
+      {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          HOME: home,
+          QWEN_CI_BAKED_RUNTIME_CACHE: seedDir,
+        },
+      },
+    );
+    return {
+      result,
+      dir: path.join(home, '.cache/qwen-code/standalone-runtimes'),
+    };
+  };
+
+  it('seeds both archives into the job cache', () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'runtime-home-'));
+    try {
+      const { result, dir } = seedInto(home);
+      expect(result.status, result.stderr).toBe(0);
+      // Both, by name: the whole point is that `.tar.gz` is not left behind.
+      expect(fs.readdirSync(dir).sort()).toEqual(filenames('arm64').sort());
+      for (const name of filenames('arm64'))
+        expect(fs.readFileSync(path.join(dir, name), 'utf8')).toBe(
+          'archive bytes\n',
+        );
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it('seeds the x64 filenames too', () => {
+    for (const name of fs.readdirSync(seed)) fs.rmSync(path.join(seed, name));
+    for (const name of filenames('x64'))
+      fs.writeFileSync(path.join(seed, name), 'archive bytes\n');
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'runtime-home-'));
+    try {
+      const { result, dir } = seedInto(home);
+      expect(result.status, result.stderr).toBe(0);
+      expect(fs.readdirSync(dir).sort()).toEqual(filenames('x64').sort());
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  // The non-fatal-copy claim, exercised rather than read: an unwritable
+  // destination must still exit 0 and say so, because the alternative is taking
+  // the whole runner down instead of degrading to a download.
+  it.skipIf(!arePermissionBitsEnforced())(
+    'still starts when the cache cannot be written',
+    () => {
+      const home = fs.mkdtempSync(path.join(os.tmpdir(), 'runtime-home-'));
+      const blocker = path.join(home, '.cache');
+      fs.mkdirSync(blocker);
+      fs.chmodSync(blocker, 0o500);
+      try {
+        const { result } = seedInto(home);
+        expect(result.status).toBe(0);
+        expect(result.stderr).toContain('the job will download');
+      } finally {
+        fs.chmodSync(blocker, 0o700);
+        fs.rmSync(home, { recursive: true, force: true });
+      }
+    },
+  );
+
+  // An existing entry is left alone, so a future image that mounts a real cache
+  // keeps whatever that cache verified rather than having it overwritten.
+  it('leaves an archive the cache already holds', () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'runtime-home-'));
+    try {
+      const dir = path.join(home, '.cache/qwen-code/standalone-runtimes');
+      fs.mkdirSync(dir, { recursive: true });
+      const [nodeArchive] = filenames('arm64');
+      fs.writeFileSync(path.join(dir, nodeArchive), 'already verified\n');
+      const seeded = seedInto(home);
+      expect(seeded.result.status, seeded.result.stderr).toBe(0);
+      expect(fs.readFileSync(path.join(dir, nodeArchive), 'utf8')).toBe(
+        'already verified\n',
+      );
+      expect(fs.readdirSync(dir).sort()).toEqual(filenames('arm64').sort());
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  // An image without the seed is the pre-change behaviour, and must stay valid:
+  // no directory, no error, nothing seeded.
+  it('does nothing when the image carries no seed', () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'runtime-home-'));
+    try {
+      const { result, dir } = seedInto(home, path.join(seed, 'absent'));
+      expect(result.status, result.stderr).toBe(0);
+      expect(fs.existsSync(dir)).toBe(false);
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
   });
 });

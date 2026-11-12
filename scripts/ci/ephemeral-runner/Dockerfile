@@ -188,7 +188,7 @@ RUN set -eu \
     && chrome="$(find /opt/ms-playwright -type f -name chrome -path '*chrome-linux*' | head -1)" \
     && test -n "${chrome}" \
     && "${chrome}" --version \
-    && test "$(find "${QWEN_CI_BAKED_RUNTIME_CACHE}" -maxdepth 1 -type f -name '*.tgz' | wc -l)" -eq 2 \
+    && test "$(find "${QWEN_CI_BAKED_RUNTIME_CACHE}" -maxdepth 1 -type f \( -name '*.tgz' -o -name '*.tar.gz' \) | wc -l)" -eq 2 \
     && tar -tzf "${QWEN_CI_BAKED_RUNTIME_CACHE}"/node-v*.tar.gz > /dev/null \
     && tar -tzf "${QWEN_CI_BAKED_RUNTIME_CACHE}"/bun-linux-*.tgz > /dev/null
 USER node

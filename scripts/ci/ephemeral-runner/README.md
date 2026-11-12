@@ -128,6 +128,13 @@ About 110 MB of archives for the two interpreters on one architecture — measur
 from the cached files on hz4 (57 MB Node, 53 MB Bun), against the 2 GB the
 browsers already cost.
 
+The two archives do not share a suffix: Node's is `.tar.gz` and Bun's is `.tgz`.
+Anything that selects them — the build's count, the entrypoint's copy loop — has
+to name both, because `*.tgz` matches only Bun. The suite therefore extracts
+those selectors and runs them against the real filenames instead of asserting
+that a pattern appears in the file: a loop that visits one archive exits 0
+exactly like one that visits two, so reading the text cannot tell them apart.
+
 For a real deployment, publish the image to a registry and configure its
 immutable `repository@sha256:...` digest. A local `sha256:...` image ID may be
 used for a trial. Runner and base versions need routine security updates.
