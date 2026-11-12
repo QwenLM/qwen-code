@@ -2,7 +2,7 @@
 
 [English](2026-11-12-loop-rollout-switches.md) | [简体中文](2026-11-12-loop-rollout-switches.zh-CN.md)
 
-- **Status**: proposed. Slice 1 (nightly legs) in implementation; slices 2–4 not started.
+- **Status**: slice 1 (nightly legs) delivered as draft PR #17050; slice 2 (per-surface defaults) in implementation; slices 3–4 not started.
 - **Tracker**: #17045, block B. The ladder, the rollout rules and the capability ledger belong to the unified-loop design (`2026-10-23-unified-agent-loop.md`), the event-bus design (`2026-11-11-event-bus-agent-loop.md`) and block A of #17045; this document designs only the switch mechanics and signals that block B owns.
 - **Checked at**: upstream `acc07c2eb0` (2026-11-12).
 
@@ -77,7 +77,7 @@ Tokens are trimmed; empty tokens are ignored; an unknown surface name is ignored
 
 **Getter shape.** `Config.isUnifiedAgentLoopEnabled(surface)` and `Config.isEventBusAgentLoopEnabled(surface)` take the surface identifier; every call site names its surface. AgentCore's `runtimeContext` hook passes `agent-core`. The speculation read site arriving in #17029 passes `speculation`; the two PRs coordinate on the shared getter signature (whoever lands second adapts). The kernel flag still does nothing where the shared loop is off — resolution is per-switch, and the kernel only applies inside `runAgentLoop`.
 
-**Setting becomes tri-state.** The CLI stops collapsing unset to `false` (`packages/cli/src/config/config.ts:2920` today does `?? false`); the core parameter becomes `boolean | undefined`. The schema entries lose `default: false` so the settings dialog and the merged settings can distinguish "not set" from "explicitly off", as the unified-loop design already prescribes ("the setting has no schema default"). The Web Shell and VS Code copies follow the schema. The settings loader does not inject schema defaults into the merged object (pinned at `packages/cli/src/config/settings.test.ts:4624`); the remaining verification item is that the dialog renders an unset boolean sensibly.
+**Setting becomes tri-state at runtime.** The CLI stops collapsing unset to `false` (`packages/cli/src/config/config.ts:2920` today does `?? false`); the core parameter becomes `boolean | undefined`. The merged settings already leave unset keys undefined — the loader does not materialize schema defaults (pinned at `packages/cli/src/config/settings.test.ts:4624`) — so the runtime distinguishes "not set" from "explicitly off" without any schema change. The schema entries **keep** `default: false` for now: `nextBooleanSettingValue` (`packages/cli/src/config/settingsUtils.ts:687`) writes `false` on the first toggle of an unset boolean when the schema default is undefined, which would flip today's first-toggle-enables behavior in both settings dialogs. The schema default is removed when the first surface's built-in default flips, together with a dialog treatment for the unset state; the Web Shell settings panel reads effective values, not schema defaults, and is unaffected either way.
 
 **Parity arms forced.** In the same PR: the ACP parity's off arm sets the env var to `'0'` instead of deleting it; the TUI parity's off arm sets `'0'` instead of omitting it. The headless parity keeps its explicit per-arm settings. With slice 2's force-off semantics, `'0'` pins the off arm regardless of any default; before slice 2 lands, `'0'` is inert (only `'1'` is read), so the parity change is safe to land together with the mechanism but not before it.
 
@@ -94,20 +94,21 @@ Tokens are trimmed; empty tokens are ignored; an unknown surface name is ignored
 
 ## Design decisions
 
-| Decision                                                    | Rationale                                                                                                                                                                                             |
-| ----------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Matrix value `kernel`, both env vars set on that leg        | The leg's contract is "both switches on", independent of which surfaces read the kernel flag today; no rework when a surface's step 3 lands                                                           |
-| Push keeps `current` only                                   | The unified leg already established that the switch legs are a scheduled signal; adding two more legs to every push would multiply pool and hosted load for a signal no default change reads mid-day  |
-| Env list grammar with `surface=0/1` tokens                  | The rollout rules need force-off per surface (the switch-back) and force-on per surface (a parity arm, a targeted canary); bare `1`/`0` keeps every existing script working                           |
-| Unknown env tokens ignored, not fatal                       | Forward compatibility: a list naming a surface an older CLI does not have must not break that CLI's startup                                                                                           |
-| One boolean setting stays one boolean                       | The unified-loop design prescribes setting-when-set, else surface default; per-surface settings would multiply the schema copies (Web Shell, VS Code) for a granularity the env list already provides |
-| Parity off arms switch to `'0'` in the same PR as force-off | Landing `'0'` earlier is inert but misleading; landing force-off without the parity fix leaves the off arms leaking the moment a default flips                                                        |
+| Decision                                                    | Rationale                                                                                                                                                                                                              |
+| ----------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Matrix value `kernel`, both env vars set on that leg        | The leg's contract is "both switches on", independent of which surfaces read the kernel flag today; no rework when a surface's step 3 lands                                                                            |
+| Push keeps `current` only                                   | The unified leg already established that the switch legs are a scheduled signal; adding two more legs to every push would multiply pool and hosted load for a signal no default change reads mid-day                   |
+| Env list grammar with `surface=0/1` tokens                  | The rollout rules need force-off per surface (the switch-back) and force-on per surface (a parity arm, a targeted canary); bare `1`/`0` keeps every existing script working                                            |
+| Unknown env tokens ignored, not fatal                       | Forward compatibility: a list naming a surface an older CLI does not have must not break that CLI's startup                                                                                                            |
+| One boolean setting stays one boolean                       | The unified-loop design prescribes setting-when-set, else surface default; per-surface settings would multiply the schema copies (Web Shell, VS Code) for a granularity the env list already provides                  |
+| Schema default stays until the first surface flip           | The runtime tri-state needs no schema change (merged settings leave unset keys undefined); removing `default: false` earlier would flip the dialogs' first toggle from enable to disable via `nextBooleanSettingValue` |
+| Parity off arms switch to `'0'` in the same PR as force-off | Landing `'0'` earlier is inert but misleading; landing force-off without the parity fix leaves the off arms leaking the moment a default flips                                                                         |
 
 ## Constraints and risks
 
 - The loop contract (`AgentLoopHost`, `runAgentLoop` options) has one owner at a time (#17045 block C); slice 2 changes the Config getters, not the contract, but the getter signature is shared with #17029 (speculation) — coordinate the landing order.
 - The kernel leg runs the headless kernel path nightly before block K's cancellation and bounded close land; a kernel-path failure there is a signal, not a regression of the default path, and must not block the other legs (`fail-fast: false` already guarantees that).
-- Removing the schema default changes what the settings dialog shows for an unset value; verify the dialog and the Web Shell settings panel before landing slice 2.
+- The schema default stays until the first surface default flip: removing it earlier would change the settings dialogs' first-toggle behavior (`nextBooleanSettingValue`), which is out of slice 2's scope.
 - Workflow size ratchet: any `e2e.yml` growth beyond the 4096-byte allowance needs a same-PR baseline bump.
 
 ## Validation plan

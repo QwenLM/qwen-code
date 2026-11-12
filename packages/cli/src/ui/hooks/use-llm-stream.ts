@@ -5060,7 +5060,7 @@ export const useLlmStream = (
                   }
                 : {}),
           };
-          const source = config.isUnifiedAgentLoopEnabled?.()
+          const source = config.isUnifiedAgentLoopEnabled?.('ink')
             ? {
                 client: llmClient,
                 signal: providerSignal,

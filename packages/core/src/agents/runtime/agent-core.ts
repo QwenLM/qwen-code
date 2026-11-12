@@ -1098,7 +1098,7 @@ export class AgentCore {
     // On the shared agent loop (`experimental.unifiedAgentLoop`), each model
     // round is the loop's round on a `Turn` over this agent's chat.
     const onSharedLoop =
-      this.runtimeContext.isUnifiedAgentLoopEnabled?.() === true;
+      this.runtimeContext.isUnifiedAgentLoopEnabled?.('agent-core') === true;
 
     while (true) {
       // Check abort before starting a new round — prevents unnecessary API
@@ -2379,7 +2379,9 @@ export class AgentCore {
     ) {
       await this.prepareTools();
     }
-    if (this.runtimeContext.isUnifiedAgentLoopEnabled?.() === true) {
+    if (
+      this.runtimeContext.isUnifiedAgentLoopEnabled?.('agent-core') === true
+    ) {
       return this.runSharedToolBatch({
         functionCalls,
         abortController,

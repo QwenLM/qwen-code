@@ -7556,7 +7556,7 @@ export class Session implements SessionContext {
             // and Agent Host sessions also keep ACP's tool executor and guards
             // instead of the shared tool batch.
             const sharedModelRound =
-              this.config.isUnifiedAgentLoopEnabled?.() === true;
+              this.config.isUnifiedAgentLoopEnabled?.('acp') === true;
             // A retry, a continue or a restore re-enters a turn: its first
             // round is a Retry.
             const firstRoundType = isRuntimeContinuation
@@ -13098,7 +13098,7 @@ export class Session implements SessionContext {
               // state, adds the system and todo reminders and recalls memory,
               // as for the other surfaces. The session records the prompt
               // once it reached history.
-              if (this.config.isUnifiedAgentLoopEnabled?.() === true) {
+              if (this.config.isUnifiedAgentLoopEnabled?.('acp') === true) {
                 const result = await this.#runAutomaticTurnOnSharedLoop({
                   message: { role: 'user', parts: [{ text: modelText }] },
                   type: SendMessageType.Cron,
@@ -14522,7 +14522,7 @@ export class Session implements SessionContext {
           // `LlmClient` as a Notification send. The session keeps the
           // notification's record and reminders, and shows each response
           // as one background message once it ended.
-          if (this.config.isUnifiedAgentLoopEnabled?.() === true) {
+          if (this.config.isUnifiedAgentLoopEnabled?.('acp') === true) {
             const result = await this.#runAutomaticTurnOnSharedLoop({
               message: nextMessage,
               type: SendMessageType.Notification,

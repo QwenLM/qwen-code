@@ -6,8 +6,8 @@
 
 /**
  * An ACP session runs each scripted scenario twice, with
- * `QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP` unset and set, and the two runs must
- * send the model the same requests, send the client the same
+ * `QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP` forced to `0` and to `1`, and the two
+ * runs must send the model the same requests, send the client the same
  * `session/update` notifications and end each prompt the same way.
  * Differences the shared loop makes on purpose are asserted separately below.
  */
@@ -328,8 +328,7 @@ const allowOnce = () => ({
         // scratch runtime outside the workspace.
         QWEN_RUNTIME_DIR: qwenHome,
       };
-      delete env['QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP'];
-      if (shared) env['QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP'] = '1';
+      env['QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP'] = shared ? '1' : '0';
       delete env[PRIVATE_ACP_CAPABILITY_ENV];
       if (scenario.trustedParent) {
         env[PRIVATE_ACP_CAPABILITY_ENV] = PARENT_CAPABILITY;

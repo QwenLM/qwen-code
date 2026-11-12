@@ -6,11 +6,10 @@
 
 /**
  * The TUI that `QWEN_E2E_RENDERER` selects, Ink or OpenTUI, runs each
- * scripted scenario twice, with
- * `QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP` unset and set, and the two runs must
- * send the model the same requests and record the same session. The screen is
- * not compared: it repaints on timers, and what it shows comes from the same
- * events the session records.
+ * scripted scenario twice, with `QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP` forced
+ * to `0` and to `1`, and the two runs must send the model the same requests
+ * and record the same session. The screen is not compared: it repaints on
+ * timers, and what it shows comes from the same events the session records.
  */
 
 import {
@@ -497,7 +496,7 @@ describeTui(SUITE, () => {
         NO_PROXY: 'localhost,127.0.0.1',
         no_proxy: 'localhost,127.0.0.1',
         ...scenario.env,
-        ...(shared ? { QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP: '1' } : {}),
+        QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP: shared ? '1' : '0',
       },
       args: [
         '--auth-type',

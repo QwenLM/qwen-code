@@ -1084,7 +1084,7 @@ export async function* livePromptEvents(
       try {
         // On the shared agent loop (`experimental.unifiedAgentLoop`),
         // `runModelRound` sends the round and collects its calls.
-        sharedRound = config.isUnifiedAgentLoopEnabled?.()
+        sharedRound = config.isUnifiedAgentLoopEnabled?.('opentui')
           ? sharedModelRound(
               client,
               { parts: nextPrompt, promptId, options: sendOptions },
