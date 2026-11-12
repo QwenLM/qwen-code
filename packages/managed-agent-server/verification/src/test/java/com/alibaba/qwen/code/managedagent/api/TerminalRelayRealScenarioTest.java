@@ -9,9 +9,10 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
 import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryRuntimeBindingRepository;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryRuntimeSessionRepository;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryToolExecutionRepository;
+import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerService;
 import jakarta.websocket.CloseReason;
 import jakarta.websocket.OnClose;
@@ -200,15 +201,19 @@ class TerminalRelayRealScenarioTest {
         URI workerEndpoint = URI.create("http://127.0.0.1:" + port);
 
         // A real broker with a real durable hold.
-        Clock clock = Clock.systemUTC();
         RuntimeScope scope = new RuntimeScope("tenant", "workspace", "1",
                 "/workspace", "capability", "session");
-        InMemoryRuntimeBindingRepository bindingRepository =
-                new InMemoryRuntimeBindingRepository(clock, () -> "binding-1");
-        InMemoryRuntimeSessionRepository sessionRepository =
-                new InMemoryRuntimeSessionRepository();
-        InMemoryToolExecutionRepository executionRepository =
-                new InMemoryToolExecutionRepository(clock);
+        org.h2.jdbcx.JdbcDataSource source = new org.h2.jdbcx.JdbcDataSource();
+        source.setURL("jdbc:h2:mem:terminal-real-" + java.util.UUID.randomUUID()
+                + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
+        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
+        JdbcRuntimeBindingRepository bindingRepository =
+                new JdbcRuntimeBindingRepository(source,
+                        new AesGcmSecretProtector("test", new byte[32]));
+        JdbcRuntimeSessionRepository sessionRepository =
+                new JdbcRuntimeSessionRepository(source);
+        JdbcToolExecutionRepository executionRepository =
+                new JdbcToolExecutionRepository(source);
         HarnessSessionResolver resolver =
                 harness -> CompletableFuture.completedFuture(scope);
         RuntimeBrokerService broker = new RuntimeBrokerService(resolver,
