@@ -253,7 +253,10 @@ export class HostedLoopSession {
         if (verdict.unavailable) {
           // A transient outage must not end the loop: deliver a no-op re-arm
           // tick so the next fire re-reviews and retries. The re-arm sentinel
-          // matches the loop's family (loop.md vs autonomous).
+          // matches the loop's family (loop.md vs autonomous). The guidance
+          // was NOT delivered, so the resolver cache must not be committed
+          // (expanded: false) — otherwise the next fire would send a dangling
+          // short reminder for content the model never received.
           const rearmText = loopMode
             ? resolver.buildTransientErrorTick(
                 loopMode,
@@ -263,7 +266,7 @@ export class HostedLoopSession {
             : `# Autonomous loop tick (dynamic pacing)\nThe fire-time classifier is temporarily unavailable. Treat this as a no-op tick. ${keepAliveRearm(
                 AUTONOMOUS_SENTINEL_DYNAMIC,
               )}`;
-          return { text: rearmText, expanded: true };
+          return { text: rearmText, expanded: false };
         }
         await this.settleLoopTurn(turnId, 'loop_admission_denied');
         return null;

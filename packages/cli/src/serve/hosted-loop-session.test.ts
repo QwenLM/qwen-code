@@ -611,30 +611,45 @@ describe('HostedLoopSession fire-time sentinel expansion', () => {
 
   it('a transient classifier outage delivers a no-op re-arm, not a dead loop (F8)', async () => {
     const harness = await createHarness();
-    const outage: HostedLoopClassifier = async () => ({
-      allowed: false,
-      unavailable: true,
-      reason: 'classifier api timeout',
-    });
+    let unavailable = true;
+    const classifyFire: HostedLoopClassifier = async () =>
+      unavailable
+        ? {
+            allowed: false,
+            unavailable: true,
+            reason: 'classifier api timeout',
+          }
+        : { allowed: true, reason: null };
     await withLoop(
       harness,
       async (loops, authority) => {
-        const expanded = await loops.expandFireText(
+        const outage = await loops.expandFireText(
           'loop:outage',
           AUTONOMOUS_SENTINEL_DYNAMIC,
         );
         // Not settled dead: the loop survives with a no-op re-arm tick.
-        expect(expanded).not.toBeNull();
-        expect(expanded!.expanded).toBe(true);
+        expect(outage).not.toBeNull();
         const settled = authority
           .eventsInSequenceRange(1, authority.committedSequence)
           .filter((event) => event.kind === 'turn.settled');
         expect(settled).toHaveLength(0);
         // The no-op tick carries the re-arm instruction so the loop continues.
-        expect(expanded!.text).toContain(AUTONOMOUS_SENTINEL_DYNAMIC);
+        expect(outage!.text).toContain(AUTONOMOUS_SENTINEL_DYNAMIC);
+        // The guidance was not delivered, so the delivery must not commit the
+        // resolver cache for this tick.
+        expect(outage!.expanded).toBe(false);
+        if (outage!.expanded) loops.markLoopDelivered();
+        // Once the classifier recovers, the next fire re-delivers the FULL
+        // preamble — not a dangling short reminder for content never received.
+        unavailable = false;
+        const recovery = await loops.expandFireText(
+          'loop:recovery',
+          AUTONOMOUS_SENTINEL_DYNAMIC,
+        );
+        expect(recovery!.text).toContain('# Autonomous loop check');
       },
       allow,
-      outage,
+      classifyFire,
     );
   });
 });
