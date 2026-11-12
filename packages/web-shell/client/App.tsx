@@ -25788,7 +25788,8 @@ export function App({
                       {/* Workspace-level hooks trust decision uses the same
                           approval slot and card as tool approvals; it is not
                           a session permission request. */}
-                      {!managedMode &&
+                      {workspaceContextActive &&
+                        !managedMode &&
                         !pendingToolApproval &&
                         mainView === 'chat' && (
                           <div className={styles.approvalOverlay}>

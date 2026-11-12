@@ -25,6 +25,9 @@ When no project features are available, omit the synthetic primary workspace
 folder rather than displaying an empty "Workspace" group. Keep that fallback for
 legacy daemons with project features, and keep the workspace creation header
 unless the host explicitly hides it.
+Project-hooks approval is mounted only for workspace session contexts; standalone
+chat must not probe a workspace-only hooks endpoint. Workspace sessions retain
+their existing approval checks.
 
 Affected areas are the shell's layout decision, the embedding README, and the
 existing browser navigation harness. Browser regressions cover Home-only hosts

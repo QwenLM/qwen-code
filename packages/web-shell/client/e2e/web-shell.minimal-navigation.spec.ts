@@ -99,6 +99,7 @@ test('hosts can hide workspace chrome when no workspaces are registered', async 
 }, info) => {
   const scenario = createWebShellDaemonScenario();
   scenario.capabilities.workspaces = [];
+  delete scenario.capabilities.workspaceCwd;
   scenario.capabilities.features.push('standalone_sessions_v1');
   const daemon = await installMockDaemon(page, scenario, { baseURL });
   await page.goto('/e2e/navigation-rail-harness.html?minimal');
@@ -137,7 +138,30 @@ test('hosts can hide workspace chrome when no workspaces are registered', async 
   expect(
     daemon.requests.filter((request) => request.method === 'POST'),
   ).toHaveLength(0);
+  expect(
+    daemon.requests.filter((request) => request.path.endsWith('/hooks')),
+  ).toHaveLength(0);
   await page.screenshot({ path: info.outputPath('no-workspace-ui.png') });
+});
+
+test('workspace-backed hosts retain project hooks checks', async ({
+  page,
+  baseURL,
+}) => {
+  const daemon = await installMockDaemon(page, createWebShellDaemonScenario(), {
+    baseURL,
+  });
+  await page.goto('/e2e/navigation-rail-harness.html?minimal');
+  await expect(
+    page.locator('[data-web-shell-composer-editor] .cm-content'),
+  ).toBeVisible();
+  await expect
+    .poll(
+      () =>
+        daemon.requests.filter((request) => request.path.endsWith('/hooks'))
+          .length,
+    )
+    .toBeGreaterThan(0);
 });
 
 test('minimal navigation keeps the narrow drawer usable @smoke', async ({
