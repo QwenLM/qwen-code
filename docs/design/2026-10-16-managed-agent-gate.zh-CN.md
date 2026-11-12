@@ -200,7 +200,9 @@ issue 交给人工分诊而不是 autofix：一条过期的临时报告只需关
 
   **失败几乎集中在一条泳道，而不是两条。** process-fault 失败 54 次、failover 失败
   8 次，而这 8 次 failover 失败全部发生在 process-fault 也失败的运行里 ——
-  failover 从未单独失败。分布是：46 次只有 process-fault 失败、8 次两条都失败、
+  failover 从未单独失败。这个「从未」只是关于该窗口，不是关于这条泳道本身：以同一
+  口径放宽到 2026-10-16 至 2026-11-11T13:44Z 的 170 次运行，`fo_only=3`，即更早的
+  窗口里 failover 确实单独失败过。分布是：46 次只有 process-fault 失败、8 次两条都失败、
   16 次两条都通过。本文档早前的版本写的是「process-fault 26 次、failover 26 次」，
   并据此认为两条泳道各自独立失败；那个计数复现不出来，结论也是反的。接 #14361 的
   人应当从 process-fault 这条泳道入手。
@@ -219,6 +221,7 @@ issue 交给人工分诊而不是 autofix：一条过期的临时报告只需关
   拒绝原因也换了形态：现在是 Runtime Broker 回
   `409 managed_runtime_identity_conflict`，而最初报告里是 Store 回
   `400 invalid_request`，但以同样方式冻结 turn。
+
 - **approve 时机。** 全量在首个 approve 时启动，合入最多要在其后等约两小时。reviewer
   可以更早 approve；approve 后的 push 会作废它并重新开始。
 - **分类漂移。** push 运行和 approve 运行各自对自己的 merge commit 分类；两次之间 base

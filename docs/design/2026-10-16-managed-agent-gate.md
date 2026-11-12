@@ -244,7 +244,10 @@ jobs, and move Java 17 to nightly only.
 
   **The failure is almost entirely one lane, not both.** Process-fault failed 54
   times and failover 8, and every one of those 8 failover failures was in a run
-  where process-fault had also failed — failover never failed on its own. The
+  where process-fault had also failed — failover never failed on its own. That
+  "never" is a claim about this window, not about the lane: widened to
+  2026-10-16 through 2026-11-11T13:44Z under the same counting rule, 170 runs,
+  `fo_only=3` — earlier windows do contain failover-only failures. The
   split is 46 runs with process-fault alone failing, 8 with both failing, and 16
   with both passing. An earlier revision of this note reported "26 process-fault,
   26 failover" and concluded the lanes fail independently; that count did not
@@ -267,6 +270,7 @@ jobs, and move Java 17 to nightly only.
   The refusal has also changed shape: the Runtime Broker now
   answers `409 managed_runtime_identity_conflict` where the original report had
   the Store answering `400 invalid_request`, freezing the turn the same way.
+
 - **Approval timing.** The full suite starts at the first approval, so merge
   waits up to about two hours after it. Reviewers can approve earlier; a push
   after approval dismisses it and restarts the cycle.
@@ -297,7 +301,7 @@ do not measure the Hosted lanes at all:
   Hosted lanes kept failing at the rate above.
 
 Only runs that actually executed `Hosted process fault gates` and `Hosted
-failover E2E` measure step 2. Filter on both jobs being present *and* not
+failover E2E` measure step 2. Filter on both jobs being present _and_ not
 `skipped` — the gate emits both names on scoped-out PRs and skips them — and
 exclude cancelled runs before reading a pass rate.
 
