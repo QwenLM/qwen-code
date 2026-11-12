@@ -1000,10 +1000,17 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
         StoreModels.SyncRename result = store.settleRenameSync(tenantId,
                 idempotencyKey, renameDigest(sessionId, title), sessionId,
                 effectiveTitle, actorId);
-        if (!result.replayed()) {
+        // Notify only when this call settled a new revision. A pure COMPLETED
+        // replay returns revision 0; a legacy FAILED/PENDING receipt re-settles
+        // under a new revision even though it reports replayed, and that fresh
+        // settlement must still notify.
+        if (result.revision() > 0) {
             try {
                 if (harness.supportsFencedTitles()) {
                     harness.rename(tenantId, sessionId, effectiveTitle, result.revision());
+                } else {
+                    LOG.debug("Session title journal notification skipped (unsupported) tenant={} session={}",
+                            tenantId, sessionId);
                 }
             } catch (RuntimeException error) {
                 // A lost notification only lags the transcript copy until a
@@ -1419,6 +1426,9 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
         var compressions = store.contextCompressionStates(tenantId, boundIds);
         Map<String, WebShellModelContext> modelContexts = store.findModelContexts(tenantId, boundIds);
         boolean modelSelectionSupported = !store.modelOptions().isEmpty() && harness.supportsModelSelection();
+        // Deliberately Harness-bound: the advertisement reports whether the
+        // journal copy can stay in sync, not whether the SQL rename can succeed
+        // (it succeeds offline too). Do not relax this to always-true.
         boolean renameSupported = harness.isAvailable() && harness.supportsFencedTitles();
         Set<String> closed = completedWorkspaceCloses(tenantId, sessions);
         boolean compressionSupported = harness.supportsContextCompression();
