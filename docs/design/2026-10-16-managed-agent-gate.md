@@ -246,8 +246,12 @@ jobs, and move Java 17 to nightly only.
   times and failover 8, and every one of those 8 failover failures was in a run
   where process-fault had also failed — failover never failed on its own. That
   "never" is a claim about this window, not about the lane: widened to
-  2026-10-16 through 2026-11-11T13:44Z under the same counting rule, 170 runs,
-  `fo_only=3` — earlier windows do contain failover-only failures. The
+  2026-10-16 through 2026-11-11T13:44Z under the same counting rule, 162 runs
+  executed both lanes and 3 of them failed failover while process-fault passed
+  (runs 39091025824 and 39097018288 on 2026-10-18, 39201677644 on 2026-10-19), so
+  earlier windows do contain failover-only failures. The wider split is 109
+  process-fault failures against 10 failover, so the asymmetry survives the
+  window change and only the absolute "never" does not. The
   split is 46 runs with process-fault alone failing, 8 with both failing, and 16
   with both passing. An earlier revision of this note reported "26 process-fault,
   26 failover" and concluded the lanes fail independently; that count did not
