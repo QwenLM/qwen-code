@@ -440,10 +440,14 @@ export class ManagedClientFilesBridge {
     if (!posted.ok) {
       // A refused answer must never be silently dropped: the queued request
       // would otherwise settle only at its TTL while the panel stays connected.
+      // The control plane's exception advice wraps the code as {error:{code}};
+      // accept that production envelope (and a bare top-level code as fallback).
       const refusal = (await posted.json().catch(() => ({}))) as {
         code?: string;
+        error?: { code?: string };
       };
-      if (refusal.code === 'client_files_payload_too_large') {
+      const refusalCode = refusal.code ?? refusal.error?.code;
+      if (refusalCode === 'client_files_payload_too_large') {
         // The result exceeded the relay's payload bound. Deliver a small
         // isError result so the model learns to page with offset/limit instead
         // of receiving nothing; the bound is server-side, so keep this tiny.

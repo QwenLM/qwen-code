@@ -9,6 +9,7 @@ import type { AddressInfo } from 'node:net';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  CLIENT_FILES_MAX_CATALOG_PAGES,
   CLIENT_FILES_MAX_RESULT_BYTES,
   HostedClientFilesSession,
 } from './hosted-client-files-session.js';
@@ -20,6 +21,9 @@ interface Script {
   listPages?: Array<{
     tools: Array<{ name: string; description?: string; inputSchema?: object }>;
   }>;
+  /** When set, every tools/list page answers this nextCursor, manufacturing a
+   * cursor cycle to exercise the discovery cycle guard. */
+  listCycleCursor?: string;
   resultText?: string;
   refuseInitialize?: boolean;
   /** JSON-RPC error answered to tools/call, e.g. the relay offline error. */
@@ -107,15 +111,19 @@ function startPeer(script: Script): Promise<{ server: Server; url: string }> {
             ?.cursor;
           const pageIndex = cursor ? Number.parseInt(cursor, 10) : 0;
           const page = script.listPages[pageIndex];
+          const nextCursor =
+            script.listCycleCursor !== undefined
+              ? script.listCycleCursor
+              : pageIndex + 1 < script.listPages.length
+                ? String(pageIndex + 1)
+                : undefined;
           reply({
             tools: (page?.tools ?? []).map((tool) => ({
               name: tool.name,
               description: tool.description,
               inputSchema: tool.inputSchema ?? { type: 'object' },
             })),
-            ...(pageIndex + 1 < script.listPages.length
-              ? { nextCursor: String(pageIndex + 1) }
-              : {}),
+            ...(nextCursor !== undefined ? { nextCursor } : {}),
           });
           return;
         }
@@ -250,6 +258,44 @@ describe('HostedClientFilesSession', () => {
         token: 't',
       }),
     ).rejects.toThrow('size bound');
+    expect(files.active).toBe(false);
+  });
+
+  it('refuses a catalog over the page bound instead of truncating it', async () => {
+    const url = await peer({
+      listPages: Array.from(
+        { length: CLIENT_FILES_MAX_CATALOG_PAGES + 1 },
+        (_, i) => ({
+          tools: [{ name: `tool_${i}` }],
+        }),
+      ),
+    });
+    const files = session();
+    await expect(
+      files.register({
+        serverId: 'local-files',
+        generation: 1,
+        url,
+        token: 't',
+      }),
+    ).rejects.toThrow('page bound');
+    expect(files.active).toBe(false);
+  });
+
+  it('refuses a tools/list cursor cycle instead of looping', async () => {
+    const url = await peer({
+      listPages: [{ tools: [{ name: 'read_file' }] }],
+      listCycleCursor: '0',
+    });
+    const files = session();
+    await expect(
+      files.register({
+        serverId: 'local-files',
+        generation: 1,
+        url,
+        token: 't',
+      }),
+    ).rejects.toThrow('cursor cycle');
     expect(files.active).toBe(false);
   });
 

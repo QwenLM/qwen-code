@@ -21,10 +21,12 @@ import type { FunctionDeclaration } from '@google/genai';
 export const CLIENT_FILES_CONNECT_TIMEOUT_MS = 25_000;
 export const CLIENT_FILES_REQUEST_TIMEOUT_MS = 600_000;
 export const CLIENT_FILES_MAX_RESULT_BYTES = 60 * 1024;
-// Mirror the durable MCP runtime's catalog bounds so a browser-registered
-// server cannot silently truncate a paginated tools/list or install an
-// unbounded catalog that every Turn re-advertises to the model.
-export const CLIENT_FILES_MAX_CATALOG_PAGES = 64;
+// Mirror the MCP client's catalog bounds so a browser-registered server cannot
+// silently truncate a paginated tools/list or install an unbounded catalog that
+// every Turn re-advertises to the model. The page cap matches core's
+// MCP_MAX_TOOL_LIST_PAGES (tools/mcp-client.ts); the byte cap matches the durable
+// MCP runtime's MAX_CATALOG_CATEGORY_BYTES.
+export const CLIENT_FILES_MAX_CATALOG_PAGES = 100;
 export const CLIENT_FILES_MAX_CATALOG_BYTES = 16 * 1024;
 
 export interface HostedClientFilesRegistration {

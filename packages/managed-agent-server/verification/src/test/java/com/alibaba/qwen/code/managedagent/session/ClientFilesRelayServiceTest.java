@@ -29,9 +29,12 @@ import java.util.concurrent.TimeUnit;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -586,29 +589,40 @@ class ClientFilesRelayServiceTest {
     }
 
     @Test
-    void refusedReRegisterDoesNotClobberAConcurrentReplacement() {
-        service.register(tenant, ACTOR, session, CONNECTION);
-        // During the re-register's dispatch a concurrent registration replaces
-        // the binding, then the dispatch is refused. The compensation (which
-        // restores the previous captured atomically by registerCapturingPrevious)
-        // is generation-fenced, so it must not clobber the concurrent winner.
+    void refusedReRegisterRestoresTheAtomicallyCapturedWinnerNotAStalePreLockRead() {
+        // The compensation must restore the binding registerCapturingPrevious
+        // atomically replaced, not a pre-lock read taken before a concurrent
+        // winner committed. Inject the winner's commit inside the loser's
+        // registerCapturingPrevious so a pre-lock relay.find would have seen the
+        // stale generation; a regression to the pre-lock read rewinds the accepted
+        // winner to generation 1 and turns this red.
+        String winnerHash = "w".repeat(64);
+        ClientFilesRelayStore spyStore = spy(store);
+        java.util.concurrent.atomic.AtomicInteger captures =
+                new java.util.concurrent.atomic.AtomicInteger();
+        doAnswer(invocation -> {
+            if (captures.incrementAndGet() == 2) {
+                // The loser's re-register: a concurrent winner commits gen 2
+                // before the loser's atomic capture reads the current binding.
+                store.register(tenant, session, ACTOR, "local-files", winnerHash,
+                        System.currentTimeMillis() + 60_000, System.currentTimeMillis(), "conn-winner");
+            }
+            return invocation.callRealMethod();
+        }).when(spyStore).registerCapturingPrevious(anyString(), anyString(), anyString(),
+                anyString(), anyString(), anyLong(), anyLong(), anyString());
+        ClientFilesRelayService svc = new ClientFilesRelayService(spyStore, agentService,
+                workspaces, properties, harness, new ObjectMapper());
+        svc.register(tenant, ACTOR, session, CONNECTION);
         when(harness.clientFilesOperation(anyString(), anyString(), any()))
-                .thenAnswer(invocation -> {
-                    Map<String, Object> payload = invocation.getArgument(2);
-                    if ("register".equals(payload.get("action"))) {
-                        store.register(tenant, session, ACTOR, "local-files", "c".repeat(64),
-                                System.currentTimeMillis() + 60_000, System.currentTimeMillis(), "conn-C");
-                        throw new UnsupportedOperationException("hosted_turn_active");
-                    }
-                    return Map.of("registered", true, "toolCount", 1);
-                });
-        assertThatThrownBy(() -> service.register(tenant, ACTOR, session, CONNECTION))
+                .thenThrow(new UnsupportedOperationException("hosted_turn_active"));
+        assertThatThrownBy(() -> svc.register(tenant, ACTOR, session, CONNECTION))
                 .hasFieldOrPropertyWithValue("code", "client_files_relay_unavailable");
         com.alibaba.qwen.code.managedagent.contracts.clientfiles.ClientFilesModels.Binding current =
                 store.find(tenant, session);
+        assertThat(current.generation()).isEqualTo(2L);
         assertThat(current.active()).isTrue();
-        assertThat(current.connectionId()).isEqualTo("conn-C");
-        assertThat(current.tokenHash()).isEqualTo("c".repeat(64));
+        assertThat(current.connectionId()).isEqualTo("conn-winner");
+        assertThat(current.tokenHash()).isEqualTo(winnerHash);
     }
 
     private void mcpInBackground(String token, String body) {

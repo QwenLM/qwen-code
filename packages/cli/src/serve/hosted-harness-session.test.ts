@@ -43301,6 +43301,57 @@ describe('client files registration route', () => {
     }
   });
 
+  it('refuses register for a memory-only Session that never declares client-files', async () => {
+    // A memory-only Session (no toolProfile) returns before the client-files
+    // declaration push, so register must refuse (409) while unregister stays
+    // admitted. Removing the !toolProfile half of the guard turns this red.
+    const { peer, url } = await relayPeer();
+    const sessionId = randomUUID();
+    const server = await app(true);
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+    });
+    expect(created.status).toBe(200);
+    const clientId = created.body.clientId as string;
+    try {
+      const dispatch = JSON.parse(
+        await readFile(
+          new URL(
+            '../../../managed-agent-server/verification/src/test/resources/clientfiles/dispatch-register.json',
+            import.meta.url,
+          ),
+          'utf8',
+        ),
+      ) as Record<string, unknown>;
+      const registered = await headers(
+        supertest(server).post(`/session/${sessionId}/client-files`),
+      )
+        .set('X-Qwen-Client-Id', clientId)
+        .send({ ...dispatch, url });
+      expect(registered.status).toBe(409);
+      expect(registered.body.code).toBe(
+        'hosted_client_files_profile_unsupported',
+      );
+      const unregistered = await headers(
+        supertest(server).post(`/session/${sessionId}/client-files`),
+      )
+        .set('X-Qwen-Client-Id', clientId)
+        .send({ action: 'unregister' });
+      expect(unregistered.status).toBe(200);
+    } finally {
+      await headers(supertest(server).delete(`/session/${sessionId}`)).set(
+        'X-Qwen-Client-Id',
+        clientId,
+      );
+      await new Promise<void>((resolve) => {
+        peer.close(() => resolve());
+        peer.closeAllConnections();
+      });
+    }
+  });
+
   it('registers a relay, reports the tool count, and unregisters', async () => {
     const { peer, url } = await relayPeer();
     const { server, sessionId, clientId } = await sessionWithClient();

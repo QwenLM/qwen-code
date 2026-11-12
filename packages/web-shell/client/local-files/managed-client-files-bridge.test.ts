@@ -38,6 +38,9 @@ interface PeerOptions {
   /** Refuse any /responses POST whose responseJson exceeds this many bytes with
    * 400 client_files_payload_too_large, mirroring the relay's requirePayloadSize. */
   payloadBound?: number;
+  /** Refuse every /responses POST with this status + code (production envelope),
+   * e.g. a 409 identity-fence refusal, to exercise the non-payload failure path. */
+  responseRefusal?: { status: number; code: string };
 }
 
 function startPeer(opts: PeerOptions = {}): Promise<Peer> {
@@ -140,6 +143,15 @@ function startPeer(opts: PeerOptions = {}): Promise<Peer> {
         responses.push(parsed);
         resolveFirst(parsed);
         resolveRegister?.();
+        if (opts.responseRefusal) {
+          res.writeHead(opts.responseRefusal.status, {
+            'Content-Type': 'application/json',
+          });
+          res.end(
+            JSON.stringify({ error: { code: opts.responseRefusal.code } }),
+          );
+          return;
+        }
         const responseJson = parsed.responseJson as string | undefined;
         if (
           opts.payloadBound !== undefined &&
@@ -147,7 +159,13 @@ function startPeer(opts: PeerOptions = {}): Promise<Peer> {
           responseJson.length > opts.payloadBound
         ) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ code: 'client_files_payload_too_large' }));
+          // The production envelope: ApiExceptionHandler wraps the code as
+          // {error:{code}}, so the committed case pins the real wire shape.
+          res.end(
+            JSON.stringify({
+              error: { code: 'client_files_payload_too_large' },
+            }),
+          );
           return;
         }
         res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -427,6 +445,41 @@ describe('ManagedClientFilesBridge', () => {
       result?: { isError?: boolean };
     };
     expect(bounded.result?.isError).toBe(true);
+  });
+
+  it('a non-payload refused answer surfaces as failed and unregisters', async () => {
+    // A 409 identity-fence refusal (not payload_too_large) must be thrown so the
+    // bridge enters failed and releases the registration, not stay connected.
+    // Replacing the other-refusal throw with a silent return turns this red.
+    const p = await peer({
+      responseRefusal: {
+        status: 409,
+        code: 'client_files_generation_conflict',
+      },
+    });
+    const b = bridge(p, {
+      async handle(message) {
+        return {
+          jsonrpc: '2.0',
+          id: message.id ?? null,
+          result: { content: [{ type: 'text', text: 'ok' }] },
+        };
+      },
+    });
+    void b.connect();
+    await vi.waitFor(() => expect(p.registered.length).toBe(1));
+    p.push('r1', {
+      jsonrpc: '2.0',
+      id: 'r1',
+      method: 'tools/call',
+      params: { name: 'read_file', arguments: { path: 'a.txt' } },
+    });
+    await vi.waitFor(() =>
+      expect(b.getState()).toMatchObject({ phase: 'failed' }),
+    );
+    await vi.waitFor(() =>
+      expect(p.unregistered.length).toBeGreaterThanOrEqual(1),
+    );
   });
 
   it('disconnect during a pending register ends stopped, not failed', async () => {
