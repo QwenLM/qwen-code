@@ -75,6 +75,7 @@ const mocks = vi.hoisted(() => {
         for (const name of ['content', 'internalBlockMode']) {
           if (source[name] !== undefined) dom[name] = source[name];
         }
+        dom['data-streaming'] = String(source['streaming']);
         return React.createElement('markdown', dom, children);
       }
       return React.createElement(
@@ -925,6 +926,7 @@ describe('OpenTuiTranscriptView', () => {
       'FIRST_BLOCK\n\nSECOND_BLOCK',
     );
     expect(elements[0].getAttribute('internalBlockMode')).toBeNull();
+    expect(elements[0].getAttribute('data-streaming')).toBe('true');
   });
 
   it('masks every URL in a streaming thought', () => {
@@ -966,6 +968,7 @@ describe('OpenTuiTranscriptView', () => {
       'see https://a.dev\n\nsee https://b.dev',
     );
     expect(markdown?.getAttribute('internalBlockMode')).toBeNull();
+    expect(markdown?.getAttribute('data-streaming')).toBe('false');
   });
 
   it('uses the coalesced default in both streaming and settled states', () => {
@@ -981,6 +984,9 @@ describe('OpenTuiTranscriptView', () => {
         .querySelector('markdown')
         ?.getAttribute('internalBlockMode'),
     ).toBeNull();
+    expect(
+      live.container.querySelector('markdown')?.getAttribute('data-streaming'),
+    ).toBe('true');
     live.unmount();
 
     const settled = render(<OpenTuiTranscriptView items={[item(false)]} />);
@@ -989,6 +995,11 @@ describe('OpenTuiTranscriptView', () => {
         .querySelector('markdown')
         ?.getAttribute('internalBlockMode'),
     ).toBeNull();
+    expect(
+      settled.container
+        .querySelector('markdown')
+        ?.getAttribute('data-streaming'),
+    ).toBe('false');
   });
 
   it('drops the click affordance from both hints when ui.mouseTracking is off (#172)', () => {

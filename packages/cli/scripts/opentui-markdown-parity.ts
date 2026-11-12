@@ -33,7 +33,10 @@ const CASES: Array<readonly [name: string, text: string]> = [
   // row and mis-renders a fence nested in a list; both differ from settle for
   // reasons outside this mask, so they are not pinned as URL-parity cases.
   ['three blank lines', 'p1\n\n\np2'],
-  ['lone CR', 'a\rb'],
+  ['table cell url', '| a | b |\n| --- | --- |\n| https://x.dev | x |'],
+  ['emphasis url', '**run https://x.dev**'],
+  ['ftp url', 'see ftp://ftp.gnu.org/gnu/emacs'],
+  ['list definition', '- [expr.add]: https://x.dev'],
   ['reference link', '[ref][1]'],
   ['non-ascii label', 'see [图1]'],
 ];
@@ -57,8 +60,26 @@ async function frame(content: string, streaming: boolean): Promise<string[]> {
     return preview.split('\n').map((line) => line.trimEnd());
   }
   await setup.flush();
-  await new Promise((resolve) => setTimeout(resolve, 900));
-  await setup.flush();
+  // The settled arm paints in stages: a blank preview frame, then the code
+  // block, then the paragraph above it. Poll until the captured frame has
+  // been stable for two consecutive checks instead of sleeping a fixed
+  // interval; this is the renderer's settle signal and does not capture the
+  // intermediate one-block frame.
+  let previous = '';
+  let stable = 0;
+  for (let attempt = 0; attempt < 60; attempt++) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await setup.renderOnce();
+    await setup.flush();
+    const current = setup.captureCharFrame();
+    if (current.trim().length > 0 && current === previous) {
+      stable += 1;
+    } else {
+      stable = 0;
+    }
+    previous = current;
+    if (stable >= 2) break;
+  }
   const text = setup.captureCharFrame();
   setup.renderer.destroy();
   return text.split('\n').map((line) => line.trimEnd());

@@ -64,6 +64,38 @@ describe('healStreamingMarkdown', () => {
     ).toBe('Bare URLs must be plain text, e.g. `https://x.dev/a.`');
   });
 
+  it('keeps emphasis and CJK punctuation outside the URL span', () => {
+    expect(healStreamingMarkdown('**run https://x.dev**')).toBe(
+      '**run `https://x.dev`**',
+    );
+    expect(healStreamingMarkdown('~~https://x.dev~~')).toBe(
+      '~~`https://x.dev`~~',
+    );
+    expect(healStreamingMarkdown('see https://x.dev。then')).toBe(
+      'see `https://x.dev`。then',
+    );
+  });
+
+  it('masks a URL that starts inside an emphasis or word run', () => {
+    expect(healStreamingMarkdown('see _https://x.dev_ now')).toBe(
+      'see _`https://x.dev`_ now',
+    );
+    expect(healStreamingMarkdown('see xhttps://x.dev now')).toBe(
+      'see x`https://x.dev` now',
+    );
+  });
+
+  it('masks ftp URLs', () => {
+    expect(healStreamingMarkdown('see ftp://ftp.gnu.org/gnu/emacs')).toBe(
+      'see `ftp://ftp.gnu.org/gnu/emacs`',
+    );
+  });
+
+  it('does not mask a URL in a GFM table cell', () => {
+    const table = '| a | b |\n| --- | --- |\n| https://x.dev | x |';
+    expect(healStreamingMarkdown(table)).toBe(table);
+  });
+
   it('wraps an unfinished trailing URL so the preview cannot append its href', () => {
     expect(healStreamingMarkdown('see https://www.bb')).toBe(
       'see `https://www.bb`',
@@ -165,15 +197,38 @@ describe('healStreamingMarkdown', () => {
     );
   });
 
+  it('strips a heading marker after a list marker', () => {
+    expect(healStreamingMarkdown('- ## Title')).toBe('- Title');
+    expect(healStreamingMarkdown('1. ## Title')).toBe('1. Title');
+  });
+
   it('does not close a fence with a shorter marker or non-empty rest', () => {
-    expect(healStreamingMarkdown('`````\nhttps://x.dev\n```')).not.toContain(
-      ZWSP,
-    );
-    expect(healStreamingMarkdown('```\nhttps://x.dev\n``` x')).not.toContain(
-      ZWSP,
-    );
-    expect(healStreamingMarkdown('````\nhttps://x.dev\n`````')).not.toContain(
-      ZWSP,
+    expect(
+      healStreamingMarkdown('`````\nhttps://a.dev\n```\nb https://b.dev'),
+    ).toBe('`````\nhttps://a.dev\n```\nb https://b.dev');
+    expect(
+      healStreamingMarkdown('```\nhttps://a.dev\n``` x\nb https://b.dev'),
+    ).toBe('```\nhttps://a.dev\n``` x\nb https://b.dev');
+    expect(
+      healStreamingMarkdown('````\nhttps://a.dev\n`````\nb https://b.dev'),
+    ).toBe('````\nhttps://a.dev\n`````\nb `https://b.dev`');
+  });
+
+  it('does not close a fence on a list-marker line', () => {
+    const text = '~~~\n1. ~~~\n# not a heading\nsee https://x.dev\n~~~';
+    expect(healStreamingMarkdown(text)).toBe(text);
+  });
+
+  it('treats document start and post-fence indentation as code boundaries', () => {
+    const documentStart = '    curl https://x.dev/a';
+    expect(healStreamingMarkdown(documentStart)).toBe(documentStart);
+    const afterFence = '```\ncode\n```\n    https://x.dev';
+    expect(healStreamingMarkdown(afterFence)).toBe(afterFence);
+  });
+
+  it('masks a list continuation paragraph indented four columns', () => {
+    expect(healStreamingMarkdown('1. Run:\n\n    see https://x.dev')).toBe(
+      '1. Run:\n\n    see `https://x.dev`',
     );
   });
 
@@ -196,6 +251,9 @@ describe('healStreamingMarkdown', () => {
     );
     expect(healStreamingMarkdown('> [expr.add]: https://x.dev')).toBe(
       `> [expr.add]: \`https://x.dev\``,
+    );
+    expect(healStreamingMarkdown('- [expr.add]: https://x.dev')).toBe(
+      '- [expr.add]: `https://x.dev`',
     );
   });
 

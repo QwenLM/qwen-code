@@ -63,13 +63,19 @@ function containerOf(line: string): ContainerLine {
 
 function fenceParts(
   line: string,
+  allowListMarker: boolean,
 ): { marker: string; length: number; rest: string; quoteDepth: number } | null {
   const { quoteDepth, rest } = containerOf(line);
   let body = rest;
-  const list = LIST_MARKER_PREFIX_REGEX.exec(body);
-  if (list) body = body.slice(list[0].length);
+  if (allowListMarker) {
+    const list = LIST_MARKER_PREFIX_REGEX.exec(body);
+    if (list) body = body.slice(list[0].length);
+  }
   const match = FENCE_MARKER_REGEX.exec(body);
   if (!match) return null;
+  // A backtick fence's info string may not contain a backtick (CommonMark);
+  // accepting one opens a fence that no line can close.
+  if (match[2][0] === '`' && match[3].includes('`')) return null;
   return {
     marker: match[2][0],
     length: match[2].length,
@@ -79,14 +85,14 @@ function fenceParts(
 }
 
 function fenceAtLineStart(line: string): Fence | null {
-  const parts = fenceParts(line);
+  const parts = fenceParts(line, true);
   return parts
     ? { char: parts.marker, length: parts.length, quoteDepth: parts.quoteDepth }
     : null;
 }
 
 function isFenceClose(line: string, fence: Fence): boolean {
-  const parts = fenceParts(line);
+  const parts = fenceParts(line, false);
   return (
     parts !== null &&
     parts.marker === fence.char &&
@@ -110,7 +116,7 @@ function fenceCloseKind(
   if (isFenceClose(line, fence)) return 'close';
   const { quoteDepth } = containerOf(line);
   if (quoteDepth >= fence.quoteDepth) return null;
-  const parts = fenceParts(line);
+  const parts = fenceParts(line, false);
   if (
     parts !== null &&
     parts.marker === fence.char &&
@@ -146,9 +152,12 @@ function indentationWidth(rest: string): number {
 function stripHeadingMarkers(line: string): string {
   const { rest } = containerOf(line);
   const prefix = line.slice(0, line.length - rest.length);
-  const match = /^( {0,3})(#{1,6})[ \t]+(.*?)(?:[ \t]+#+[ \t]*)?$/.exec(rest);
+  const list = LIST_MARKER_PREFIX_REGEX.exec(rest);
+  const marker = list ? list[0] : '';
+  const body = list ? rest.slice(marker.length) : rest;
+  const match = /^( {0,3})(#{1,6})[ \t]+(.*?)(?:[ \t]+#+[ \t]*)?$/.exec(body);
   if (!match) return line;
-  return `${prefix}${match[1]}${match[3]}`;
+  return `${prefix}${marker}${match[1]}${match[3]}`;
 }
 
 /** Whether the backtick at `index` is escaped by an odd backslash run. */
@@ -244,6 +253,9 @@ function linkDestinationRanges(line: string): Array<[number, number]> {
       }
     }
     if (end === -1) {
+      // No `)` remains on this line: no later `](` can close either, so stop
+      // instead of rescanning the tail for every unmatched pair.
+      if (line.indexOf(')', start) === -1) break;
       from = open + 2;
       continue;
     }
@@ -253,11 +265,14 @@ function linkDestinationRanges(line: string): Array<[number, number]> {
   return ranges;
 }
 
-const SCHEME_AT_INDEX_REGEX = /(https?):\/\//iy;
+const SCHEME_AT_INDEX_REGEX = /(https?|ftp):\/\//iy;
 const WWW_AT_INDEX_REGEX = /www\./y;
 const EMAIL_AT_INDEX_REGEX = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/y;
 const EMAIL_LOCAL_CHAR_REGEX = /[A-Za-z0-9._%+-]/;
-const URL_END_REGEX = /[\s<>"'`)\]},;]/;
+// ASCII sentence punctuation stays inside the span (the existing URL tests
+// pin it), but emphasis delimiters, underscores and CJK punctuation end it so
+// the surrounding markup is not swallowed.
+const URL_END_REGEX = /[\s<>"'`)\]},;*~_。，、；：！？）】」』》]/;
 
 function matchAt(regex: RegExp, line: string, index: number) {
   regex.lastIndex = index;
@@ -375,7 +390,8 @@ function maskAutolinksInProse(
           }
         }
         const before = line.slice(0, i).replace(BLOCKQUOTE_PREFIX_REGEX, '');
-        const atLineStart = before.trim() === '';
+        const atLineStart =
+          before.replace(LIST_MARKER_PREFIX_REGEX, '').trim() === '';
         const taskMarker =
           /^[ \t]*(?:[-+*]|\d{1,9}[.)])[ \t]+$/.test(before) &&
           /^[ xX]$/.test(label);
@@ -455,6 +471,23 @@ function maskAutolinksInProse(
       while (end < line.length && EMAIL_LOCAL_CHAR_REGEX.test(line[end])) {
         end += 1;
       }
+      // `_https://…_` / `xhttps://…`: the emphasis/word character joins the
+      // local-part run, but a scheme starts inside it. Find that boundary and
+      // let the scheme rule mask the URL instead of skipping the run.
+      if (line.slice(end, end + 3) === '://') {
+        let schemeStart = -1;
+        for (let position = i; position < end; position++) {
+          if (matchAt(SCHEME_AT_INDEX_REGEX, line, position)) {
+            schemeStart = position;
+            break;
+          }
+        }
+        if (schemeStart !== -1) {
+          out += line.slice(i, schemeStart);
+          i = schemeStart;
+          continue;
+        }
+      }
       out += line.slice(i, end);
       i = end;
       continue;
@@ -468,21 +501,31 @@ function maskAutolinksInProse(
 
 function maskStreamingText(text: string): string {
   const lines = text.split('\n');
+  const masked: string[] = [];
   let fence: Fence | null = null;
   let indentedCode = false;
-  let previousBlank = false;
+  // A document starts at a block boundary, and so does the line after a
+  // closing fence: indented code there must not be masked.
+  let previousBlank = true;
   let carriedCodeSpan: number | null = null;
-  const masked = lines.map((line) => {
+  let listColumn: number | null = null;
+  let table = false;
+
+  for (let index = 0; index < lines.length; index++) {
+    const line = lines[index];
+
     if (fence) {
       const kind = fenceCloseKind(line, fence);
       if (kind === 'close') {
         fence = null;
-        previousBlank = false;
-        return line;
+        previousBlank = true;
+        masked.push(line);
+        continue;
       }
       if (kind === null) {
         previousBlank = false;
-        return line;
+        masked.push(line);
+        continue;
       }
       // The blockquote ended without a marker: process this line as prose.
       fence = null;
@@ -492,17 +535,44 @@ function maskStreamingText(text: string): string {
     const blank = rest.trim() === '';
     const indent = indentationWidth(rest);
 
+    if (table) {
+      if (blank || !line.includes('|')) {
+        table = false;
+      } else {
+        masked.push(line);
+        previousBlank = false;
+        continue;
+      }
+    }
+
+    // Track a list's content column so a continuation paragraph indented by
+    // four columns is prose (and masked), while code indented four columns
+    // past the list content is indented code (and skipped).
+    if (!blank) {
+      const list = /^([ \t]*)([-+*]|\d{1,9}[.)])([ \t]+)/.exec(rest);
+      if (list) {
+        const markerIndent = indentationWidth(list[1]);
+        const markerSpaces = Math.max(1, list[3].replace(/\t/g, '    ').length);
+        listColumn = markerIndent + list[2].length + markerSpaces;
+      } else if (listColumn !== null && indent < listColumn) {
+        listColumn = null;
+      }
+    }
+
+    const codeIndent = (listColumn ?? 0) + 4;
     if (indentedCode) {
-      if (!blank && indent < 4) {
+      if (!blank && indent < codeIndent) {
         indentedCode = false;
       } else {
         previousBlank = blank;
-        return line;
+        masked.push(line);
+        continue;
       }
-    } else if (!blank && indent >= 4 && previousBlank) {
+    } else if (!blank && indent >= codeIndent && previousBlank) {
       indentedCode = true;
       previousBlank = false;
-      return line;
+      masked.push(line);
+      continue;
     }
 
     const next = fenceAtLineStart(line);
@@ -510,7 +580,23 @@ function maskStreamingText(text: string): string {
       fence = next;
       carriedCodeSpan = null;
       previousBlank = false;
-      return line;
+      masked.push(line);
+      continue;
+    }
+
+    // A GFM table cell is rendered through the inline renderer in BOTH the
+    // streaming preview and the settled pass, so it already shows
+    // `url (href)`; masking its URL would make the table shift at settle.
+    // Pass the header, delimiter and rows through unchanged.
+    if (line.includes('|') && isTableDelimiter(lines[index + 1] ?? '')) {
+      table = true;
+      masked.push(line);
+      if (index + 1 < lines.length) {
+        masked.push(lines[index + 1]);
+        index += 1;
+      }
+      previousBlank = false;
+      continue;
     }
 
     const result = maskAutolinksInProse(
@@ -519,9 +605,16 @@ function maskStreamingText(text: string): string {
     );
     carriedCodeSpan = result.carry;
     previousBlank = blank;
-    return result.text;
-  });
+    masked.push(result.text);
+  }
   return masked.join('\n');
+}
+
+/** GFM table delimiter row (`| --- | :---: |`). */
+function isTableDelimiter(line: string): boolean {
+  const trimmed = line.trim();
+  if (!trimmed.includes('|') || !trimmed.includes('-')) return false;
+  return /^\|?[ \t]*:?-+:?[ \t]*(?:\|[ \t]*:?-+:?[ \t]*)+\|?$/.test(trimmed);
 }
 
 /**
