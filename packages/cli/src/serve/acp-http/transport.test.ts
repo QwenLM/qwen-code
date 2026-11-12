@@ -2709,6 +2709,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     'disconnect',
     'observer RPC error',
     'forbidden vote',
+    'cross-connection vote',
     'originator RPC error',
   ] as const)(
     'handles workflow approval copies independently through %s',
@@ -2754,7 +2755,10 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         ownerQueue.push(permission);
         observerQueue.push(permission);
         const ownerFrame = (await ownerReader.next()) as { id: string };
-        await observerReader.next();
+        // Outbound request ids are minted per connection: each copy has
+        // its own.
+        const observerFrame = (await observerReader.next()) as { id: string };
+        expect(observerFrame.id).not.toBe(ownerFrame.id);
         expect(owner.pending.size).toBe(1);
         expect(observer.pending.size).toBe(1);
         const selected = {
@@ -2776,19 +2780,45 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
               );
             });
           }
+          const votes =
+            failure === 'forbidden vote' || failure === 'cross-connection vote';
           await post(
             failure === 'originator RPC error' ? ownerId : observerId,
             {
               jsonrpc: '2.0',
-              id: ownerFrame.id,
-              ...(failure === 'forbidden vote'
+              // A real observer answers its own copy; a co-owner may also
+              // answer the owner's copy by its id.
+              id:
+                failure === 'observer RPC error'
+                  ? observerFrame.id
+                  : ownerFrame.id,
+              ...(votes
                 ? { result: selected }
                 : { error: { code: -32603, message: 'Client failure' } }),
             },
           );
-          if (failure === 'forbidden vote') {
+          if (votes) {
             await waitUntil(() => vote.mock.calls.length > 0);
           }
+        }
+        if (failure === 'cross-connection vote') {
+          // The vote resolves the approval and drops only the voter's own
+          // copy; the owner's copy stays until the bridge reports it
+          // resolved.
+          expect(vote).toHaveBeenCalledExactlyOnceWith(
+            'sess-1',
+            'workflow-approval',
+            selected,
+            expect.any(Object),
+          );
+          expect(observer.pending.size).toBe(0);
+          expect(owner.pending.has(ownerFrame.id)).toBe(true);
+          ownerQueue.push({
+            type: 'permission_resolved',
+            data: { requestId: 'workflow-approval', sessionId: 'sess-1' },
+          });
+          await waitUntil(() => owner.pending.size === 0);
+          return;
         }
         if (failure !== 'originator RPC error') {
           expect(owner.pending.has(ownerFrame.id)).toBe(true);

@@ -1532,8 +1532,9 @@ export const IMAGE_ONLY_PROMPT_TEXT = '[image]';
 // (`sdk-typescript/src/daemon/ui/types.ts`) and already-written transcripts
 // pin the value, so it must stay `inputAnnotations`.
 export const DAEMON_INPUT_ANNOTATIONS_META_KEY = 'inputAnnotations';
-// Wire twin of channel-base's CHANNEL_PROMPT_META_KEY; the packages have no
-// dependency path between them, so a cross-package test pins the value.
+// Wire twins of channel-base's keys of the same names; the packages have no
+// dependency path between them, so a cross-package test
+// (`channel-prompt-wire-key.test.ts`) pins all three values.
 export const CHANNEL_PROMPT_META_KEY = 'qwen.channel.prompt';
 export const CHANNEL_OUTPUT_MODE_META_KEY = 'qwen.channel.outputMode';
 export const CHANNEL_WORKFLOW_ORIGIN_META_KEY = 'qwen.channel.workflowOrigin';

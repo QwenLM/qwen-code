@@ -3019,6 +3019,7 @@ describe('Session', () => {
         runId: 'wf_1',
         isBackgrounded: true,
         channelWorkflowOrigin,
+        sourceOriginatorClientId: 'launch-client',
       } as core.WorkflowTask,
       {
         approvalId: 'wfap_1',
@@ -3042,6 +3043,9 @@ describe('Session', () => {
     expect(mockClient.requestPermission).toHaveBeenCalledWith(
       expect.objectContaining({
         sessionId: 'test-session-id',
+        // Restricts the vote to the launching client under the
+        // designated permission policy.
+        _meta: { workflowOriginatorClientId: 'launch-client' },
         options: [
           expect.objectContaining({
             optionId: core.ToolConfirmationOutcome.ProceedOnce,
@@ -3071,12 +3075,120 @@ describe('Session', () => {
       core.ToolConfirmationOutcome.ProceedOnce,
       undefined,
     );
+    // The terminal update carries the request's meta: the bridge clears a
+    // background approval's pending entry only on this flag.
     expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
       sessionId: 'test-session-id',
-      update: expect.objectContaining({
+      update: {
         sessionUpdate: 'tool_call_update',
         toolCallId: 'workflow:test-session-id:wf_1:wfap_1',
         status: 'completed',
+        content: [],
+        _meta: {
+          toolName: 'run_shell_command',
+          workflowApproval: true,
+          backgroundWorkflowApproval: true,
+          [CHANNEL_WORKFLOW_ORIGIN_META_KEY]: channelWorkflowOrigin,
+          approvalOutcome: 'approved',
+        },
+      },
+    });
+  });
+
+  it.each([
+    [
+      'denied',
+      () =>
+        vi.mocked(mockClient.requestPermission).mockResolvedValueOnce({
+          outcome: {
+            outcome: 'selected',
+            optionId: core.ToolConfirmationOutcome.Cancel,
+          },
+        }),
+    ],
+    [
+      'failed',
+      () =>
+        vi
+          .mocked(mockClient.requestPermission)
+          .mockRejectedValueOnce(new Error('client gone')),
+    ],
+  ])(
+    'ends a %s background workflow approval with its background meta',
+    async (label, arrange) => {
+      arrange();
+      mockToolRegistry.getTool.mockReturnValue(undefined);
+      const callback = mockWorkflowRunRegistry.setApprovalRequestCallback.mock
+        .calls[0]?.[0] as core.WorkflowApprovalRequestCallback;
+
+      await callback(
+        { runId: 'wf_1', isBackgrounded: true } as core.WorkflowTask,
+        makeWorkflowApproval('wfap_2'),
+        { command: 'echo safe' },
+        new AbortController().signal,
+      );
+
+      expect(
+        mockWorkflowRunRegistry.resolvePendingApproval,
+      ).toHaveBeenCalledWith(
+        'wf_1',
+        'wfap_2',
+        core.ToolConfirmationOutcome.Cancel,
+        ...(label === 'denied' ? [undefined] : []),
+      );
+      expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+        sessionId: 'test-session-id',
+        update: {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'workflow:test-session-id:wf_1:wfap_2',
+          status: 'failed',
+          content: [],
+          _meta: {
+            toolName: 'run_shell_command',
+            workflowApproval: true,
+            backgroundWorkflowApproval: true,
+            approvalOutcome: 'denied',
+          },
+        },
+      });
+    },
+  );
+
+  // A run attached to a turn is approved by whoever drives that turn: no
+  // originator restriction, no background flag, no Channel launch target.
+  it('keeps attached workflow approvals free of background meta', async () => {
+    mockToolRegistry.getTool.mockReturnValue(undefined);
+    const callback = mockWorkflowRunRegistry.setApprovalRequestCallback.mock
+      .calls[0]?.[0] as core.WorkflowApprovalRequestCallback;
+
+    await callback(
+      {
+        runId: 'wf_1',
+        isBackgrounded: false,
+        channelWorkflowOrigin,
+        sourceOriginatorClientId: 'launch-client',
+      } as core.WorkflowTask,
+      makeWorkflowApproval('wfap_3'),
+      { command: 'echo safe' },
+      new AbortController().signal,
+    );
+
+    const [request] = vi.mocked(mockClient.requestPermission).mock.calls[0]!;
+    expect(request).not.toHaveProperty('_meta');
+    expect(request.toolCall._meta).toEqual({
+      toolName: 'run_shell_command',
+      workflowApproval: true,
+    });
+    expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+      sessionId: 'test-session-id',
+      update: expect.objectContaining({
+        toolCallId: 'workflow:test-session-id:wf_1:wfap_3',
+        status: 'completed',
+        _meta: {
+          toolName: 'run_shell_command',
+          workflowApproval: true,
+          approvalOutcome: 'approved',
+        },
       }),
     });
   });

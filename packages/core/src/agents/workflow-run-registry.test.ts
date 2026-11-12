@@ -913,6 +913,29 @@ describe('WorkflowRunRegistry', () => {
     expect(r.isStarting(runId)).toBe(false);
   });
 
+  it('cancelBackgroundRuns ends active background runs only', () => {
+    const r = new WorkflowRunRegistry();
+    const background = r.register(reg('wf_bg', { isBackgrounded: true }));
+    const pausedBackground = r.register(
+      reg('wf_bg_paused', { isBackgrounded: true, status: 'paused' }),
+    );
+    const foreground = r.register(reg('wf_fg'));
+    const settled = r.register(reg('wf_bg_done', { isBackgrounded: true }));
+    r.complete('wf_bg_done', 'done', 1_700_000_000_500);
+
+    expect(r.cancelBackgroundRuns(1_700_000_001_000).sort()).toEqual([
+      'wf_bg',
+      'wf_bg_paused',
+    ]);
+    expect(background.status).toBe('cancelled');
+    expect(background.abortController.signal.aborted).toBe(true);
+    expect(pausedBackground.status).toBe('cancelled');
+    expect(foreground.status).toBe('running');
+    expect(foreground.abortController.signal.aborted).toBe(false);
+    expect(settled.status).toBe('completed');
+    expect(r.cancelBackgroundRuns(1_700_000_002_000)).toEqual([]);
+  });
+
   it('aborts a workflow that has not registered yet', () => {
     const r = new WorkflowRunRegistry();
     const controller = new AbortController();
@@ -2272,6 +2295,44 @@ describe('WorkflowRunRegistry', () => {
     );
 
     expect(entry.sourceTurnId).toBe('caller-turn');
+  });
+
+  // A channel session's completion and approvals go back to the chat that
+  // launched the run, so the entry keeps the origin it registered under.
+  it('records the channel launch origin of the registering turn', () => {
+    const origin = {
+      channelName: 'dingtalk',
+      chatId: 'chat-1',
+      senderId: 'alice',
+      isGroup: true,
+      userInitiated: true as const,
+    };
+    const launched = runWithInvocationContext(
+      undefined,
+      () => registered('wf_channel').entry,
+      origin,
+    );
+    const plain = registered('wf_plain').entry;
+
+    expect(launched.channelWorkflowOrigin).toEqual(origin);
+    expect(plain.channelWorkflowOrigin).toBeUndefined();
+  });
+
+  // The originator decides who may vote on the run's approvals, so it is
+  // taken only from the invocation of the turn the run is attributed to.
+  it('takes no originator from an invocation of another turn', () => {
+    const entry = runWithInvocationContext(
+      {
+        version: 1,
+        sessionId: 's',
+        promptId: 'invocation-turn',
+        originatorClientId: 'workflow-client',
+      },
+      () => registered('wf_turn', { sourceTurnId: 'caller-turn' }).entry,
+    );
+
+    expect(entry.sourceTurnId).toBe('caller-turn');
+    expect(entry.sourceOriginatorClientId).toBeUndefined();
   });
 
   it('errors thrown by the notification callback do not break the call site', () => {

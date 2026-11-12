@@ -25911,6 +25911,66 @@ describe('createAcpSessionBridge', () => {
         options: [{ optionId: 'allow', name: 'Allow', kind: 'allow_once' }],
       });
 
+    // One client can hold a suspension per connection binding; releasing
+    // one must not lift another that is still live.
+    it('keeps detached workflow approvals suspended until every suspension of the client is released', async () => {
+      const { bridge, session, conn } = await setupForPermission({
+        permissionPolicy: 'designated',
+      });
+      const { sessionId, clientId } = session;
+      const request = (toolCallId: string) =>
+        requestDetachedWorkflowApproval(conn, sessionId, clientId, toolCallId);
+      try {
+        const resumeA = bridge.suspendClientWorkflowApprovals(
+          sessionId,
+          clientId!,
+        )!;
+        const resumeB = bridge.suspendClientWorkflowApprovals(
+          sessionId,
+          clientId!,
+        )!;
+
+        resumeA();
+        resumeA();
+        const stderrSpy = vi
+          .spyOn(process.stderr, 'write')
+          .mockImplementation(() => true);
+        try {
+          await expect(request('workflow-one-left')).resolves.toMatchObject({
+            outcome: { outcome: 'cancelled' },
+          });
+          // No permission_request is published, so the drop leaves a line.
+          expect(stderrSpy).toHaveBeenCalledWith(
+            expect.stringContaining(
+              `cancelled a background workflow approval: its launching client ${JSON.stringify(clientId)} is not connected`,
+            ),
+          );
+        } finally {
+          stderrSpy.mockRestore();
+        }
+        expect(bridge.pendingPermissionCount).toBe(0);
+
+        resumeB();
+        const delivered = request('workflow-all-released');
+        await vi.waitFor(() => expect(bridge.pendingPermissionCount).toBe(1));
+        const requestId =
+          bridge.getSessionSummary(sessionId)?.pendingInteractions?.[0]
+            ?.requestId;
+        const outcome = { outcome: 'selected' as const, optionId: 'allow' };
+        expect(
+          bridge.respondToSessionPermission(
+            sessionId,
+            requestId!,
+            { outcome },
+            { clientId },
+          ),
+        ).toBe(true);
+        await expect(delivered).resolves.toMatchObject({ outcome });
+      } finally {
+        await bridge.shutdown();
+      }
+    });
+
     it('keeps a foreground prompt while its detached ACP workflow approvals are suspended', async () => {
       const started = deferred<void>();
       const finished = deferred<PromptResponse>();

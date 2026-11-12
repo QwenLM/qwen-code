@@ -1019,6 +1019,39 @@ await agent('scan package.json')
     ).toMatchObject({ run_in_background: true });
   });
 
+  // The tool runs inside the turn's invocation context, so the Channel
+  // target is read again when the invocation executes, not only at build.
+  it('refuses at execute time a detached invocation for a Channel target that cannot receive it', async () => {
+    const { config, registry } = configWithRegistry({ ...ACP, ...QUIET });
+    registry.setCompletionCallback(vi.fn());
+    const invocation = new WorkflowTool(config).build({
+      script: 'return 1',
+      run_in_background: true,
+    });
+    const blocked = {
+      channelName: 'qq',
+      chatId: 'group',
+      senderId: 'member',
+      backgroundWorkflowBlocked: true as const,
+    };
+
+    await expect(
+      runWithInvocationContext(
+        undefined,
+        () => invocation.execute(live()),
+        blocked,
+      ),
+    ).resolves.toMatchObject({
+      error: {
+        message: expect.stringContaining(
+          'channel target cannot receive background results',
+        ),
+        type: ToolErrorType.EXECUTION_DENIED,
+      },
+    });
+    expect(registry.list()).toHaveLength(0);
+  });
+
   it('rechecks the workflow controls before executing a detached invocation', async () => {
     let enabled = true;
     const { config, registry } = configWithRegistry({

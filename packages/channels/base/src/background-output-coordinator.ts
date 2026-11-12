@@ -420,6 +420,9 @@ export class BackgroundOutputCoordinator {
       ) !== aggregation.target
     ) {
       if (aggregation.timeoutTimer) clearTimeout(aggregation.timeoutTimer);
+      this.options.log(
+        `background workflow response discarded: its launch target is no longer available (${aggregation.text.length} buffered char(s))\n`,
+      );
       this.removeBackgroundResponseAggregation(key, aggregation);
       return;
     }

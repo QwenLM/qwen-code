@@ -1104,6 +1104,15 @@ export class BridgeClient implements Client {
         this.mediator.policy === 'designated' &&
         !hasAvailableWorkflowApprovalClient(entry, workflowOriginatorClientId)
       ) {
+        // No permission_request is published for this one, so leave a line
+        // that tells it apart from an agent-side cancel. The client id comes
+        // from request meta: quote it rather than print it raw.
+        writeStderrLine(
+          `qwen serve: session ${entry.sessionId} cancelled a background ` +
+            `workflow approval: its launching client ` +
+            `${JSON.stringify(workflowOriginatorClientId.slice(0, 64))} ` +
+            `is not connected.`,
+        );
         return resolutionToAcpResponse({
           kind: 'cancelled',
           reason: 'agent_cancelled',

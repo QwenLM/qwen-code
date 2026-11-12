@@ -1487,6 +1487,95 @@ describe('DaemonChannelBridge', () => {
     bridge.stop();
   });
 
+  // A background workflow's approval belongs to no turn: it must not cut
+  // the turn's collected reply, and its terminal update is no tool card.
+  it('keeps background workflow approvals out of the turn and its tool cards', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+    });
+    const permissionRequest = vi.fn();
+    const responseBoundary = vi.fn();
+    const toolCalls: unknown[] = [];
+    bridge.on('permissionRequest', permissionRequest);
+    bridge.on('responseBoundary', responseBoundary);
+    bridge.on('toolCall', (event) => toolCalls.push(event));
+
+    await bridge.start();
+    await bridge.newSession('/repo');
+
+    const approval = (requestId: string, background: boolean) =>
+      ({
+        requestId,
+        sessionId: 'session-1',
+        toolCall: {
+          toolCallId: `${requestId}-tool`,
+          kind: 'execute',
+          title: 'Run command',
+          rawInput: {},
+          _meta: {
+            workflowApproval: true,
+            ...(background ? { backgroundWorkflowApproval: true } : {}),
+          },
+        },
+        options: [
+          { optionId: 'proceed_once', kind: 'allow_once', name: 'Allow' },
+        ],
+      }) as RequestPermissionRequest & { requestId: string };
+    const finished = (toolCallId: string, background: boolean) => ({
+      sessionId: 'session-1',
+      update: {
+        sessionUpdate: 'tool_call_update',
+        toolCallId,
+        kind: 'execute',
+        status: 'completed',
+        _meta: {
+          workflowApproval: true,
+          ...(background ? { backgroundWorkflowApproval: true } : {}),
+        },
+      },
+    });
+
+    events.push({
+      id: 1,
+      v: 1,
+      type: 'permission_request',
+      data: approval('req-bg', true),
+    });
+    events.push({
+      id: 2,
+      v: 1,
+      type: 'session_update',
+      data: finished('req-bg-tool', true),
+    });
+    await waitFor(() => expect(permissionRequest).toHaveBeenCalledTimes(1));
+    // The control pair: an attached approval does both.
+    events.push({
+      id: 3,
+      v: 1,
+      type: 'permission_request',
+      data: approval('req-fg', false),
+    });
+    events.push({
+      id: 4,
+      v: 1,
+      type: 'session_update',
+      data: finished('req-fg-tool', false),
+    });
+    await waitFor(() => expect(toolCalls).toHaveLength(1));
+
+    expect(permissionRequest).toHaveBeenCalledTimes(2);
+    expect(responseBoundary).toHaveBeenCalledOnce();
+    expect(toolCalls).toEqual([
+      expect.objectContaining({ toolCallId: 'req-fg-tool' }),
+    ]);
+
+    events.close();
+    bridge.stop();
+  });
+
   it('drops kind-less in_progress subagent progress without flagging the session as malformed', async () => {
     const events = new EventQueue();
     const session = createFakeSession(events);

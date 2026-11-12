@@ -31,6 +31,12 @@ Against the global `qwen` CLI (0.25.1), the daemon integration test below fails
 at the first check: the tool is refused with "`run_in_background` is available
 only in the interactive TUI", and no workflow task is registered.
 
+To reproduce it, point the root `dist/cli.js` at the baseline build first: the
+integration global setup always sets `TEST_CLI_PATH` to `<repo>/dist/cli.js`,
+so setting `TEST_CLI_PATH` yourself has no effect. For example, link
+`dist/cli.js` to the global install's `cli.js`, run the test, then remove the
+link and rebuild.
+
 ## Evidence
 
 - Gate (TUI, ACP, ACP with controls off, headless, no channel), abort of

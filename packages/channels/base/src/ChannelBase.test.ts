@@ -12639,11 +12639,18 @@ describe('ChannelBase', () => {
 
       await ch.handleInbound(envelope({ text: '/schedule list' }));
 
-      expect(bridge.prompt).toHaveBeenCalledWith(
-        's-1',
-        '/schedule list',
-        expect.objectContaining({ displayText: '/schedule list' }),
-      );
+      expect(bridge.prompt).toHaveBeenCalledWith('s-1', '/schedule list', {
+        displayText: '/schedule list',
+        imageBase64: undefined,
+        imageMimeType: undefined,
+        workflowOrigin: {
+          channelName: 'test-chan',
+          chatId: 'chat1',
+          senderId: 'user1',
+          isGroup: false,
+          userInitiated: true,
+        },
+      });
       expect(ch.sent).toEqual([{ chatId: 'chat1', text: 'agent response' }]);
     });
 
@@ -19216,11 +19223,18 @@ describe('ChannelBase', () => {
 
       await ch.handleInbound(envelope({ text: '!echo hello' }));
 
-      expect(bridge.prompt).toHaveBeenCalledWith(
-        's-1',
-        '!echo hello',
-        expect.objectContaining({ displayText: '!echo hello' }),
-      );
+      expect(bridge.prompt).toHaveBeenCalledWith('s-1', '!echo hello', {
+        displayText: '!echo hello',
+        imageBase64: undefined,
+        imageMimeType: undefined,
+        workflowOrigin: {
+          channelName: 'test-chan',
+          chatId: 'chat1',
+          senderId: 'user1',
+          isGroup: false,
+          userInitiated: true,
+        },
+      });
     });
 
     it('reports shell command failures without falling through to the agent', async () => {
@@ -25074,7 +25088,16 @@ describe('ChannelBase', () => {
       expect(bridge.prompt).toHaveBeenLastCalledWith(
         expect.any(String),
         'while loop runs',
-        expect.objectContaining({ displayText: 'while loop runs' }),
+        {
+          displayText: 'while loop runs',
+          workflowOrigin: {
+            channelName: 'test-chan',
+            chatId: 'chat1',
+            senderId: 'user1',
+            isGroup: false,
+            userInitiated: true,
+          },
+        },
       );
     });
 

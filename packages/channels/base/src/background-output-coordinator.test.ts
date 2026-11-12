@@ -177,6 +177,38 @@ describe('BackgroundOutputCoordinator', () => {
     options.getTarget.mockReturnValue(undefined);
     await coordinator.drain('session-1');
     expect(packets).toEqual([]);
+    expect(options.log).toHaveBeenCalledWith(
+      expect.stringContaining('launch target is no longer available'),
+    );
+    expectIdle(coordinator);
+  });
+
+  it('drains a held workflow result to its live launch chat', async () => {
+    const pending = deferred<BackgroundOutputTarget>();
+    const { coordinator, target, packets, options } = fixture({
+      resolveDelivery: () => pending.promise,
+    });
+    const launch = { ...target, chatId: 'launch-chat' };
+    const response = coordinator.dispatch(
+      'session-1',
+      'Held workflow result',
+      context({ kind: 'workflow', channelWorkflowOrigin: launch }),
+    );
+    await coordinator.drain('session-1');
+    expect(packets).toEqual([
+      expect.objectContaining({
+        text: 'Held workflow result',
+        partial: true,
+        turnComplete: true,
+      }),
+    ]);
+    expect(options.createDelivery).toHaveBeenCalledWith(
+      'session-1',
+      expect.objectContaining({ target: launch, workflowOrigin: launch }),
+    );
+    pending.resolve({ target: launch, workflowOrigin: launch });
+    await response;
+    expect(packets).toHaveLength(1);
     expectIdle(coordinator);
   });
 

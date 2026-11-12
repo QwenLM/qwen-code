@@ -38473,6 +38473,7 @@ describe('sessionLanguage multi-session propagation', () => {
     } as unknown as LoadedSettings;
     let workflowsEnabled: boolean | undefined = true;
     const registryCancel = vi.fn();
+    const cancelBackgroundRuns = vi.fn(() => ['wf_bg']);
     const cfg = makeConfig({
       getSessionId: vi.fn().mockReturnValue('s-wf-reload'),
       isWorkflowsEnabled: vi.fn(() => workflowsEnabled ?? false),
@@ -38487,6 +38488,7 @@ describe('sessionLanguage multi-session propagation', () => {
         get: vi.fn().mockReturnValue({ runId: 'wf_1', status: 'running' }),
         getHandle: vi.fn().mockReturnValue(undefined),
         cancel: registryCancel,
+        cancelBackgroundRuns,
       }),
     });
     const sendAvailableCommandsUpdate = vi.fn().mockResolvedValue(undefined);
@@ -38549,6 +38551,9 @@ describe('sessionLanguage multi-session propagation', () => {
     ).toHaveBeenCalledWith(false);
     // The `workflows` command left with the flag: the client is told.
     expect(sendAvailableCommandsUpdate).toHaveBeenCalledOnce();
+    // A background run admitted before the reload could no longer be seen
+    // or stopped, so turning workflows off ends it.
+    expect(cancelBackgroundRuns).toHaveBeenCalledOnce();
     // The existing session now answers with the reloaded value.
     await expect(cancelWorkflow()).resolves.toEqual({
       cancelled: false,
@@ -38571,8 +38576,11 @@ describe('sessionLanguage multi-session propagation', () => {
     reloadedSettings = { tools: { workflowsEnabled: true } };
     await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
     expect(workflowsEnabled).toBe(true);
+    // Turning workflows on (or leaving them off) cancels nothing.
+    expect(cancelBackgroundRuns).toHaveBeenCalledOnce();
     cfg.setImageModel.mockClear();
     sendAvailableCommandsUpdate.mockClear();
+    cancelBackgroundRuns.mockClear();
 
     isIdle.mockReturnValue(false);
     reloadedSettings = { tools: { workflowsEnabled: false } };
@@ -38586,6 +38594,8 @@ describe('sessionLanguage multi-session propagation', () => {
     });
     expect(workflowsEnabled).toBe(false);
     expect(sendAvailableCommandsUpdate).toHaveBeenCalledOnce();
+    // A busy session is the one most likely to hold such a run.
+    expect(cancelBackgroundRuns).toHaveBeenCalledOnce();
     expect(cfg.setImageModel).not.toHaveBeenCalled();
     await expect(cancelWorkflow()).resolves.toEqual({
       cancelled: false,

@@ -15792,6 +15792,19 @@ class QwenAgent implements Agent {
             const workflowsWereEnabled = config.isWorkflowsEnabled();
             config.setWorkflowsEnabled(newMerged.tools?.workflowsEnabled);
             if (config.isWorkflowsEnabled() !== workflowsWereEnabled) {
+              if (!config.isWorkflowsEnabled()) {
+                // With the controls off, the tasks view hides a background
+                // run and cancel answers `disabled`; one admitted before
+                // the reload would keep running unseen, so end it here.
+                const cancelled = config
+                  .getWorkflowRunRegistry()
+                  .cancelBackgroundRuns(Date.now());
+                if (cancelled.length > 0) {
+                  debugLogger.info(
+                    `reload: workflows turned off; cancelled background workflow runs ${cancelled.join(', ')} in session ${id}`,
+                  );
+                }
+              }
               try {
                 await session.sendAvailableCommandsUpdate();
               } catch (err) {

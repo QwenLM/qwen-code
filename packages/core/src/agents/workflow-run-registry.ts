@@ -1706,6 +1706,25 @@ export class WorkflowRunRegistry {
     return true;
   }
 
+  /**
+   * Cancel every active background run (running, pausing or paused) and
+   * return their ids. For a host that turns its workflow controls off
+   * while such runs exist: a background run has no turn the user could
+   * cancel, so once the controls are gone it could be neither seen nor
+   * stopped. Foreground runs belong to a turn and are left alone.
+   */
+  cancelBackgroundRuns(endTime: number): string[] {
+    const cancelled: string[] = [];
+    for (const entry of Array.from(this.entries.values())) {
+      if (!entry.isBackgrounded || !isActiveWorkflowStatus(entry.status)) {
+        continue;
+      }
+      this.cancel(entry.runId, endTime);
+      cancelled.push(entry.runId);
+    }
+    return cancelled;
+  }
+
   /** All entries (active + terminal, no filter). Iteration order = registration order. */
   list(): WorkflowTask[] {
     return Array.from(this.entries.values());

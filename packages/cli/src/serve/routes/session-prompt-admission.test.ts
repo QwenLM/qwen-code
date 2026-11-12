@@ -407,7 +407,34 @@ describe('admitSessionPrompt', () => {
       classification: { channelPrompt: true, requestedChannelPrompt: false },
     });
     expect(calls[0]!.context['channelPrompt']).toBe(true);
+    expect(calls[0]!.context).not.toHaveProperty('channelWorkflowOrigin');
     expect(mockBind).not.toHaveBeenCalled();
+  });
+
+  // The child records the origin on any workflow the turn starts; without
+  // it a detached workflow's result has no chat to go back to.
+  it('forwards the launch origin of a trusted channel turn to the bridge', () => {
+    const { runtime, calls } = fakeRuntime();
+    const channelWorkflowOrigin = {
+      channelName: 'dingtalk',
+      chatId: 'launch-chat',
+      senderId: 'alice',
+      userInitiated: true as const,
+    };
+    admitSessionPrompt(deps, {
+      runtime,
+      sessionId: freshSessionId(),
+      prompt: reviewPrompt,
+      request: {},
+      classification: {
+        channelPrompt: true,
+        channelWorkflowOrigin,
+        requestedChannelPrompt: false,
+      },
+    });
+    expect(calls[0]!.context['channelWorkflowOrigin']).toEqual(
+      channelWorkflowOrigin,
+    );
   });
 
   it.each([false, true])(
