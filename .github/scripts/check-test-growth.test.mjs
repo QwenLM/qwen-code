@@ -185,7 +185,11 @@ test('ci.yml runs the check in lint_and_static on pull requests', () => {
   // Advisory by contract (see the script header): the step reports and never
   // blocks. Dropping `continue-on-error` would leave the gate literal above
   // intact while turning a summary into a required-check failure.
-  assert.match(stepBlock, /^ {8}continue-on-error: true$/m);
+  assert.match(
+    stepBlock,
+    /^ {8}continue-on-error: true$/m,
+    'test growth step must stay advisory',
+  );
   for (const expected of [
     'github.event.pull_request.base.sha',
     'github.event.pull_request.head.sha',
