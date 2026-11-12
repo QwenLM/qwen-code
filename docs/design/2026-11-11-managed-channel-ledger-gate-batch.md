@@ -17,9 +17,11 @@ Two costs the groundwork left behind:
 - **A — the reconciler re-reads completed deliveries.** `reconcileClaim` reads
   and parses the whole delivery record (a LONGTEXT resource body) and re-plans
   its segments for every expired claim, including claims it cannot advance. A
-  delivered delivery whose claim lease lapsed is returned on every 30s sweep,
-  paying a LONGTEXT read + JSON parse + per-segment statements for zero useful
-  work (#16797 R3-1).
+  lagging `partial` (or `sending`) line whose claim lease lapsed is returned on
+  every 30s sweep — including the crash-window line whose ledger already holds
+  the whole receipted plan but whose final step to `delivered` failed — paying
+  a LONGTEXT read + JSON parse + per-segment statements for zero useful work
+  (#16797 R3-1).
 - **B — the segment plan is statement-per-segment.** `plan` writes one
   `INSERT IGNORE` per segment plus one backfill `UPDATE` per already-receipted
   segment, and `claimOne` re-plans on every claim poll of a `partial` delivery.
@@ -54,6 +56,12 @@ parse + re-plan entirely. The read is kept for:
   the record to backfill the plan);
 - any null receipt (a lost-answer receipt still needs converging).
 
+A terminal refusal keeps the read even when the ledger is complete and fully
+receipted: the gate looks up the record's `delivery_state` (a point query, not
+its LONGTEXT body) and falls through when it is `rejected` or `cancelled`, so
+the ledger mirrors the record instead of overriding a committed refusal from
+the receipts. This is the one added point lookup on the skip path.
+
 The case this matters for is the crash window where the final segment receipt
 landed but the ledger's `stepLedger` to `delivered` failed: the ledger holds the
 whole plan with every segment receipted but lags at `partial`, and the sweep
@@ -63,7 +71,7 @@ read would strand it at `partial`. Convergence stays ahead of the settle path:
 the gate runs before the existing record-read block, and the settle path that
 follows is unchanged. The delivery row is loaded once and threaded through the
 gate and the record-read block; whenever a step occurs its returned row is
-adopted, so the gate adds no extra point SELECT on the common sweep path.
+adopted, so the gate adds no extra delivery-row SELECT on the common sweep path.
 
 ### B. Batch the plan inserts and the list read
 
@@ -123,9 +131,12 @@ single-delivery `list` read.
   adapter surface, the segment ledger schema, the delivery state line, or the
   public read shape (`segments` array unchanged).
 - No contract version bump: the public API document is untouched.
-- The gate preserves the convergence outcome: a fully-receipted line ends
-  `delivered` whether converged from the record or from the ledger's own
-  receipts; it only removes the redundant read.
+- The gate preserves the convergence outcome for non-refused records: a
+  fully-receipted line ends `delivered` whether converged from the record or
+  from the ledger's own receipts; it only removes the redundant read.
+- A terminal refusal (`rejected` or `cancelled`) stays the record's decision:
+  the gate keeps the record read for it, and the ledger mirrors that state
+  instead of being closed `delivered` from the receipts.
 
 ## Verification plan
 
@@ -142,25 +153,35 @@ single-delivery `list` read.
   `delivered`) verify the read is kept and `planSegments` re-creates the missing
   row, closing on the plan's last receipt rather than the prefix's; removing the
   gate's plan-count completeness check reds both.
+- The terminal-refusal path is pinned by forcing the record's `delivery_state`
+  to `rejected` while the ledger holds the complete receipted plan and lags at
+  `partial`: the record read runs, the ledger ends `rejected`, and the segment
+  receipts remain. Removing the record-state check would close it `delivered`
+  without the read and red the case.
 - The batched plan is pinned by the existing backfill/idempotence cases plus a
   64-segment batch and a mixed batch whose pre-existing null-receipt row sits at
   a batch position different from its ordinal, so skipping count-0 rows or
   indexing the counts by ordinal both red. A stubbed insert batch returning
   `SUCCESS_NO_INFO` pins the no-per-row-count fallback. The backfill is batched,
   so a re-claim issues one guarded `UPDATE` batch rather than a statement per
-  receipted segment. The MySQL gate reruns these on a real database.
+  receipted segment. The resend path's persisted plan count is pinned by
+  asserting the resent row's `segmentCount` equals the carried plan size (three
+  for a full resend, two after a partial receipt); writing zero reds both. The
+  MySQL gate reruns these on a real database.
 - The grouped list read is pinned by a multi-delivery page (one delivery empty)
-  asserting per-delivery grouping and ordinal order, and maps through the same
-  `RowMapper` as `list`.
+  asserting per-delivery grouping and ordinal order over a twelve-segment plan
+  inserted in reverse ordinal order (the id and segment-id index orders both
+  differ from ordinal order), and maps through the same `RowMapper` as `list`.
 - Checkstyle passes on the changed modules; the real-MySQL concurrency leg and
   full CI suites remain the verification baseline.
 
 ## Open questions
 
 1. The common null-receipt `partial` still pays a delivery-row lookup plus a
-   segment query to decide the gate does not apply; if that sweep path grows,
-   a cheaper pre-check (e.g. a receipt count on the delivery row) could
-   short-circuit the segment query.
+   segment query to decide the gate does not apply, and a complete ledger adds
+   the record-state point lookup; if that sweep path grows, a cheaper pre-check
+   (e.g. a receipt count on the delivery row) could short-circuit the segment
+   query.
 2. Whether to enable Connector/J `rewriteBatchedStatements` (via the module's
    centralised driver properties, behind the existing operator-override gate)
    so the batched plan also cuts wire round trips, not just Java-side statement
