@@ -14,7 +14,11 @@ import {
   fetchVerifiedArchive,
   sweepRuntimeCache,
 } from '../lib/runtime-archive-cache.js';
-import { RUNTIME_ARCHIVE_DIGESTS } from '../lib/standalone-runtime-pins.js';
+import {
+  BUN_VERSION,
+  NODE_VERSION,
+  RUNTIME_ARCHIVE_DIGESTS,
+} from '../lib/standalone-runtime-pins.js';
 import { getWorkflowJob, getWorkflowStep } from './workflow-helpers.js';
 
 const ARCHIVE = Buffer.from('pinned archive bytes');
@@ -348,5 +352,128 @@ describe('pinned standalone runtime archives', () => {
     );
     // A row pasted over another platform's.
     expect(new Set(digests).size).toBe(digests.length);
+  });
+});
+
+// A disposable container starts with an empty cache, and the job's cache step
+// points at $HOME INSIDE that container, so the host's persistent cache is
+// never reached: on hz4 both archives sit on the host while the container's
+// directory does not exist. The fetch then gives each archive three 300 s
+// attempts and rethrows, and the standalone step's exit 1 becomes the side
+// lane's verdict after every workspace suite and the whole scripts suite have
+// passed — job 131062149608 reports `Side lane exited with 1` under 2786
+// passing script tests, with no failing test anywhere. So the image carries
+// both archives, exactly as it already carries the browsers.
+describe('the ephemeral image seeds the runtime archives', () => {
+  const read = (file) => fs.readFileSync(path.join(ROOT, file), 'utf8');
+  const dockerfile = () => read('scripts/ci/ephemeral-runner/Dockerfile');
+
+  it('bakes the versions the script pins', () => {
+    const declared = (name) => {
+      const match = new RegExp(`^ARG ${name}=(.+)$`, 'm').exec(dockerfile());
+      expect(match, `the Dockerfile must declare ${name}`).not.toBe(null);
+      return match[1];
+    };
+    expect(declared('NODE_RUNTIME_VERSION')).toBe(NODE_VERSION);
+    expect(declared('BUN_RUNTIME_VERSION')).toBe(BUN_VERSION);
+  });
+
+  // The digests are duplicated because the image's build context is its own
+  // directory and cannot read the pins module. Without this pin a version bump
+  // would seed an archive nothing verifies against, and the job would download
+  // it anyway — the cost this layer exists to remove, silently restored.
+  it('verifies the published digest of each architecture it bakes', () => {
+    const text = dockerfile();
+    // Scoped to the RUN that assigns the runtime digests first: the runner
+    // tarball has its own `case` with the same `amd64)`/`arm64)` labels, so
+    // matching a label against the whole file reads whichever layer comes
+    // first and would start comparing against the runner's sha if the two were
+    // ever reordered. A lookahead cannot fix that either — it reaches past the
+    // arm's own `;;` into the next layer (both measured).
+    const layer = text
+      .replace(/\\\n\s*/g, ' ')
+      .split('\n')
+      .find((line) => /^RUN\s/.test(line) && line.includes('bun_sha512='));
+    expect(layer, 'the image must verify a bun digest').toBeTruthy();
+    for (const [arch, digests] of Object.entries({
+      amd64: RUNTIME_ARCHIVE_DIGESTS['linux-x64'],
+      arm64: RUNTIME_ARCHIVE_DIGESTS['linux-arm64'],
+    })) {
+      const arm = new RegExp(`${arch}\\)([\\s\\S]*?);;`).exec(layer);
+      expect(arm, `the image must bake ${arch}`).not.toBe(null);
+      expect(arm[1], `${arch} node digest`).toContain(digests.node);
+      expect(arm[1], `${arch} bun digest`).toContain(
+        digests.bun.slice('sha512-'.length),
+      );
+    }
+    // Anchored on the archive being checked, not on the tool's name: the
+    // runner tarball two layers down is verified with the same `sha256sum -c -`
+    // spelling, so a bare substring assertion stays green when the Node
+    // archive's own verification is deleted (measured).
+    expect(text).toMatch(
+      /echo "\$\{node_sha\}\s+\$\{QWEN_CI_BAKED_RUNTIME_CACHE\}\/\$\{node_file\}" \| sha256sum -c -/,
+    );
+    // sha512 specifically: the npm integrity is a sha512 digest, and switching
+    // the hash would compare a sha256 against it and fail every build — or,
+    // with the comparison dropped, verify nothing.
+    expect(text).toContain('createHash("sha512")');
+    expect(text).toMatch(/if\s*\(got\s*!==\s*want\)/);
+  });
+
+  // A partial or corrupt archive must fail the build, not a job: the digest
+  // check already proves the bytes, and the listing proves they are an archive
+  // tar can read. Both live in the LAST RUN, so a later layer that removes or
+  // truncates them fails here rather than in the standalone step.
+  it('asserts both archives in the final image, after every layer', () => {
+    const runs = dockerfile()
+      .replace(/\\\n\s*/g, ' ')
+      .split('\n')
+      .filter((line) => /^RUN\s/.test(line));
+    const last = runs.at(-1);
+    expect(last).toContain('QWEN_CI_BAKED_RUNTIME_CACHE');
+    expect(last).toContain("-name '*.tgz'");
+    expect(last).toContain('-eq 2');
+    expect(last).toContain('tar -tzf');
+  });
+
+  // The seed cannot BE the cache: marking an archive used writes its mtime and
+  // the sweep removes entries, and both are wrapped in a catch, so a read-only
+  // directory would disable them silently. The entrypoint copies into the
+  // job's own directory instead, and a failed copy must not fail the runner —
+  // the fetch still falls back to downloading.
+  it('copies the seed into the job cache instead of pointing at it', () => {
+    const text = dockerfile();
+    const entrypoint = read('scripts/ci/ephemeral-runner/entrypoint.sh');
+    expect(text).toMatch(/^ENV QWEN_CI_BAKED_RUNTIME_CACHE=/m);
+    expect(text).not.toMatch(/^ENV QWEN_STANDALONE_RUNTIME_CACHE=/m);
+    expect(text).toContain('chmod -R a+rX "${QWEN_CI_BAKED_RUNTIME_CACHE}"');
+    expect(entrypoint).toContain(
+      'runtime_cache="${HOME}/.cache/qwen-code/standalone-runtimes"',
+    );
+    expect(entrypoint).toContain('mkdir -p "$runtime_cache"');
+    expect(entrypoint).toContain('[ -e "$target" ] && continue');
+    expect(entrypoint).toMatch(/cp "\$archive" "\$target" 2>\/dev\/null \|\|/);
+    // `exec` replaces the process, so anything after it never runs: seeding
+    // below it would ship an image that still downloads both archives while
+    // every assertion about the copy itself stayed green. Order alone is not
+    // enough to say that — a second exec appended after the block leaves the
+    // first comparison satisfied — so the tail is pinned empty too.
+    const lines = entrypoint.split('\n');
+    const execLine = lines.findIndex((line) => /^exec \.\/run\.sh/.test(line));
+    const seedLine = lines.findIndex((line) => line.includes('cp "$archive"'));
+    expect(execLine, 'the entrypoint must exec the runner').toBeGreaterThan(-1);
+    expect(seedLine, 'the entrypoint must seed the archives').toBeGreaterThan(
+      -1,
+    );
+    expect(seedLine).toBeLessThan(execLine);
+    // Exactly one exec, and nothing after it: a trailing block would be dead
+    // code the ordering check above cannot see.
+    expect(lines.filter((line) => /^exec /.test(line))).toHaveLength(1);
+    expect(
+      lines
+        .slice(execLine + 1)
+        .join('\n')
+        .trim(),
+    ).toBe('');
   });
 });
