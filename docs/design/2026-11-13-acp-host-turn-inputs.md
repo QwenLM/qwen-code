@@ -31,7 +31,7 @@ type UserTurnInput = {
 };
 ```
 
-`UserTurnRecord` is typed data for `user`, `goal`, `cron`, or `notification` records. It is not part of the input: the host passes it straight to `recordUserTurn` at its existing timing, and `userTurn.promptId` only tells core that the record is already written. A receipt on the input would be a value core never reads.
+`UserTurnRecord` is typed data for `user`, `goal`, `cron`, or `notification` records. It is not part of the input: the host writes it through `recordUserTurn` at the point its own semantics call for — before the send, or, for a deferred cron round, once the block reached history — and `userTurn.promptId` only tells core not to record the turn itself. A receipt on the input would be a value core never reads.
 
 ## Recording and phase ownership
 

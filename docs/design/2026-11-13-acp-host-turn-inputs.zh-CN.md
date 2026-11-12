@@ -31,7 +31,7 @@ type UserTurnInput = {
 };
 ```
 
-`UserTurnRecord` 是带类型的数据联合，覆盖 `user`、`goal`、`cron` 和 `notification` 记录。它不属于该输入：宿主在既有时间点直接把它交给 `recordUserTurn`，`userTurn.promptId` 只用来告知 core 该记录已经写完。输入上的回执会是 core 从不读取的值。
+`UserTurnRecord` 是带类型的数据联合，覆盖 `user`、`goal`、`cron` 和 `notification` 记录。它不属于该输入：宿主按自己的语义决定何时经 `recordUserTurn` 写入——发送前，或者对延迟的 cron 轮到该 block 到达历史之后——`userTurn.promptId` 只用来告知 core 不要自行记录该回合。输入上的回执会是 core 从不读取的值。
 
 ## 记录与阶段所有权
 
