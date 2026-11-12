@@ -163,4 +163,111 @@ class WorkspaceRuntimeWebTerminalTest {
         fixture.resolver().setBindingRepository(repository);
         assertThat(fixture.resolver().terminalCapable(session)).isFalse();
     }
+
+    private static com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord binding(
+            String id,
+            com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord.State state,
+            String digest, boolean drainRequested) {
+        var record = org.mockito.Mockito.mock(
+                com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord.class);
+        var request = org.mockito.Mockito.mock(
+                com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest.class);
+        org.mockito.Mockito.when(record.getBindingId()).thenReturn(id);
+        org.mockito.Mockito.when(record.getState()).thenReturn(state);
+        org.mockito.Mockito.when(record.isDrainRequested()).thenReturn(drainRequested);
+        org.mockito.Mockito.when(record.getRequest()).thenReturn(request);
+        org.mockito.Mockito.when(request.getScope()).thenReturn(
+                new com.alibaba.qwen.code.runtimebroker.RuntimeScope(
+                        TENANT, WS, "1", "/workspace", digest, "session"));
+        return record;
+    }
+
+    @Test
+    void capabilityHintAcceptsARecordedTerminalDigestBinding() throws Exception {
+        Fixture fixture = fixture(true, true);
+        var session = fixture.store().requireSession(TENANT, fixture.sessionId());
+        var repository = org.mockito.Mockito.mock(
+                com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository.class);
+        var terminalBinding = binding("b-1",
+                com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord.State.READY,
+                WorkspaceExecutionProfile.TERMINAL_CAPABILITY_DIGEST, false);
+        org.mockito.Mockito.when(repository.findByHarnessSession(
+                org.mockito.ArgumentMatchers.eq(TENANT),
+                org.mockito.ArgumentMatchers.eq(fixture.sessionId()),
+                org.mockito.ArgumentMatchers.isNull(),
+                org.mockito.ArgumentMatchers.anyInt()))
+                .thenReturn(List.of(terminalBinding));
+        fixture.resolver().setBindingRepository(repository);
+        assertThat(fixture.resolver().terminalCapable(session)).isTrue();
+    }
+
+    @Test
+    void capabilityHintReadsTheLastReadyRowNotAnyReadyRow() throws Exception {
+        Fixture fixture = fixture(true, true);
+        var session = fixture.store().requireSession(TENANT, fixture.sessionId());
+        var repository = org.mockito.Mockito.mock(
+                com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository.class);
+        fixture.resolver().setBindingRepository(repository);
+        var ready = com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord.State.READY;
+        var measured = binding("b-1", ready,
+                WorkspaceExecutionProfile.MEASURED_CAPABILITY_DIGEST, false);
+        var terminal = binding("b-2", ready,
+                WorkspaceExecutionProfile.TERMINAL_CAPABILITY_DIGEST, false);
+        // Ascending binding ids: the newer terminal row wins over the older
+        // measured row, so the hint is true.
+        org.mockito.Mockito.when(repository.findByHarnessSession(
+                org.mockito.ArgumentMatchers.eq(TENANT),
+                org.mockito.ArgumentMatchers.eq(fixture.sessionId()),
+                org.mockito.ArgumentMatchers.isNull(),
+                org.mockito.ArgumentMatchers.anyInt()))
+                .thenReturn(List.of(measured, terminal));
+        assertThat(fixture.resolver().terminalCapable(session)).isTrue();
+        // Reversed ids: the newest READY row is measured, so the hint is false
+        // even though an older terminal row exists.
+        var olderTerminal = binding("b-1", ready,
+                WorkspaceExecutionProfile.TERMINAL_CAPABILITY_DIGEST, false);
+        var newerMeasured = binding("b-2", ready,
+                WorkspaceExecutionProfile.MEASURED_CAPABILITY_DIGEST, false);
+        org.mockito.Mockito.when(repository.findByHarnessSession(
+                org.mockito.ArgumentMatchers.eq(TENANT),
+                org.mockito.ArgumentMatchers.eq(fixture.sessionId()),
+                org.mockito.ArgumentMatchers.isNull(),
+                org.mockito.ArgumentMatchers.anyInt()))
+                .thenReturn(List.of(olderTerminal, newerMeasured));
+        assertThat(fixture.resolver().terminalCapable(session)).isFalse();
+    }
+
+    @Test
+    void capabilityHintPagesPastTheFirstHundredRows() throws Exception {
+        Fixture fixture = fixture(true, true);
+        var session = fixture.store().requireSession(TENANT, fixture.sessionId());
+        var repository = org.mockito.Mockito.mock(
+                com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository.class);
+        var ready = com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord.State.READY;
+        // A full first page of measured rows, then a second page whose newest
+        // READY row carries the terminal digest. A single-page read would stop
+        // at the measured rows and answer false while admission succeeds.
+        var firstPage = new java.util.ArrayList<
+                com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord>();
+        for (int i = 0; i < 100; i++) {
+            firstPage.add(binding(String.format("b-%03d", i), ready,
+                    WorkspaceExecutionProfile.MEASURED_CAPABILITY_DIGEST, false));
+        }
+        var terminalBinding = binding("b-100", ready,
+                WorkspaceExecutionProfile.TERMINAL_CAPABILITY_DIGEST, false);
+        org.mockito.Mockito.when(repository.findByHarnessSession(
+                org.mockito.ArgumentMatchers.eq(TENANT),
+                org.mockito.ArgumentMatchers.eq(fixture.sessionId()),
+                org.mockito.ArgumentMatchers.isNull(),
+                org.mockito.ArgumentMatchers.anyInt()))
+                .thenReturn(firstPage);
+        org.mockito.Mockito.when(repository.findByHarnessSession(
+                org.mockito.ArgumentMatchers.eq(TENANT),
+                org.mockito.ArgumentMatchers.eq(fixture.sessionId()),
+                org.mockito.ArgumentMatchers.eq("b-099"),
+                org.mockito.ArgumentMatchers.anyInt()))
+                .thenReturn(List.of(terminalBinding));
+        fixture.resolver().setBindingRepository(repository);
+        assertThat(fixture.resolver().terminalCapable(session)).isTrue();
+    }
 }

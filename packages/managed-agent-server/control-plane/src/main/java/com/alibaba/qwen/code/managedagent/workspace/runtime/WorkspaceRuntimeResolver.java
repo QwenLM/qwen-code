@@ -192,15 +192,31 @@ public final class WorkspaceRuntimeResolver {
             return true;
         }
         try {
-            // findByHarnessSession is binding-id ascending; the last READY row
-            // is the latest READY binding the relay's admission would read.
+            // Page to exhaustion exactly like the relay's admission
+            // (RuntimeBindingRegistry.findLatestBindingByHarnessSession): the
+            // repository caps a page at 100 rows, so a single page would hide
+            // the newest READY binding of a long-lived Session and let the
+            // hint drift from admission in both directions.
             com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord latest = null;
-            for (var recorded : repository.findByHarnessSession(
-                    session.tenantId(), session.sessionId(), null, 100)) {
-                if (recorded.getState()
-                        == com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord.State.READY) {
-                    latest = recorded;
+            String after = null;
+            for (;;) {
+                var page = repository.findByHarnessSession(
+                        session.tenantId(), session.sessionId(), after, 100);
+                if (page.isEmpty()) {
+                    break;
                 }
+                for (var recorded : page) {
+                    if (recorded.getState()
+                            == com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord.State.READY
+                            && (latest == null
+                                    || recorded.getBindingId().compareTo(latest.getBindingId()) > 0)) {
+                        latest = recorded;
+                    }
+                }
+                if (page.size() < 100) {
+                    break;
+                }
+                after = page.get(page.size() - 1).getBindingId();
             }
             return latest != null
                     && !latest.isDrainRequested()
