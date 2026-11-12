@@ -256,6 +256,70 @@ export function hostedToolOutputBudget(cwd: string): number {
   );
 }
 
+/**
+ * A fire-time classifier for loop sentinel re-review (decision 5). The
+ * arm-time classifier reviewed the sentinel constant, not the resolved file
+ * text, so a full (first/changed) fire is re-reviewed before it runs. Unlike
+ * the arm-time review there is no active turn at pump-pick time, so this
+ * builds a short-lived Hosted config (the same trust-pinned construction the
+ * model turn uses) per fire, classifies the resolved content as a
+ * `loop_wakeup` continuation, and shuts the config down. Loop fires are
+ * clamped to >= 60 s, so the per-fire config cost is bounded. Fail closed: an
+ * unavailable classifier denies the fire.
+ */
+export function createHostedLoopFireClassifier(deps: {
+  cwd: string;
+  sessionId: string;
+}): HostedLoopClassifier {
+  return async ({ delaySeconds, prompt, reason }) => {
+    const settings = loadSettings(deps.cwd, {
+      skipLoadEnvironment: true,
+      skipWorkspaceSettings: true,
+      workspaceTrusted: false,
+    });
+    const argv = {
+      acp: true,
+      safeMode: true,
+      chatRecording: false,
+      sessionId: deps.sessionId,
+      sessionIdGenerated: true,
+    } as CliArgs;
+    const config = await loadCliConfig(
+      settings.merged,
+      argv,
+      deps.cwd,
+      undefined,
+      getSeparatedHookSettings(settings),
+      undefined,
+      undefined,
+      undefined,
+      true,
+      {
+        toolInvocationGuard: () => ({ allowed: false }),
+        lspDisabled: true,
+      },
+    );
+    try {
+      await applyHostedModelPin(config, undefined);
+      const result = await classifyAction({
+        toolName: 'loop_wakeup',
+        toolParams: { delaySeconds, prompt, reason },
+        messages: [{ role: 'user', parts: [{ text: prompt }] }],
+        config,
+        signal: new AbortController().signal,
+      });
+      return {
+        allowed: !result.shouldBlock && !result.unavailable,
+        reason: result.reason || null,
+      };
+    } finally {
+      await config
+        .shutdown({ shutdownTelemetry: false })
+        .catch(() => undefined);
+    }
+  };
+}
+
 export async function runHostedHarnessTextTurn(input: {
   sessionId: string;
   cwd: string;

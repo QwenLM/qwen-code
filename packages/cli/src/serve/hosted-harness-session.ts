@@ -238,6 +238,7 @@ import {
   HostedModelApiError,
   HOSTED_MODEL_API_ERROR_MESSAGES,
   runHostedHarnessTextTurn,
+  createHostedLoopFireClassifier,
   hostedToolOutputBudget,
 } from './hosted-harness-model.js';
 import { hostedToolProgress } from './hosted-tool-progress.js';
@@ -4224,6 +4225,9 @@ async function executeHostedTurn(
                         systemPayload: payload,
                       }),
                     );
+                    // A compaction is fresh context: the next loop fire must
+                    // re-deliver the full guidance, not a dangling reminder.
+                    session.loops?.resetResolverCache();
                   },
                   prompt: text,
                   attachmentParts: promptInput.attachments,
@@ -6848,6 +6852,10 @@ export function registerHostedHarnessSessionRoutes(
                   allowed: false,
                   reason: 'No active permission classifier for loop arming.',
                 }),
+          classifyFire: createHostedLoopFireClassifier({
+            cwd: session.cwd,
+            sessionId,
+          }),
         },
       );
       // H5b: every hosted Session owns its channel funnel — a channel input
@@ -7148,9 +7156,20 @@ export function registerHostedHarnessSessionRoutes(
             const body = object(JSON.parse(bytes.toString('utf8')));
             if (typeof body?.['text'] !== 'string')
               throw new Error('Wake input has no text.');
+            let text = body['text'];
+            if (first.source === LOOP_INPUT_SOURCE) {
+              // Fire-time sentinel expansion (decision 5): a denied re-review
+              // settles the input and ends the loop, so the pump skips it.
+              const expanded = await session.loops!.expandFireText(
+                first.turnId,
+                text,
+              );
+              if (expanded === null) return undefined;
+              text = expanded.text;
+            }
             return {
               turnId: first.turnId,
-              text: body['text'],
+              text,
               source: first.source,
             };
           },
@@ -7172,6 +7191,7 @@ export function registerHostedHarnessSessionRoutes(
                   abort,
                   brokerOptions,
                 ),
+              markLoopDelivered: () => session.loops?.markLoopDelivered(),
               busy: wakeBusy,
               held: (turn) => stoppedMessage(turn.source),
               cancelled: async (turn) =>
@@ -12010,6 +12030,9 @@ export function registerHostedHarnessSessionRoutes(
                   systemPayload: payload,
                 }),
               );
+              // A compaction is fresh context: the next loop fire must
+              // re-deliver the full guidance, not a dangling reminder.
+              session.loops?.resetResolverCache();
             },
             prompt: '',
             promptId,

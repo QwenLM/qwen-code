@@ -5,12 +5,21 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
+import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 import {
   clampWakeupSeconds,
   WAKEUP_MAX_SECONDS,
   WAKEUP_MIN_SECONDS,
 } from '@qwen-code/qwen-code-core/services/cronScheduler.js';
+import {
+  LoopTickResolver,
+  detectLoopSentinel,
+  detectAutonomousSentinel,
+  type LoopTickResult,
+} from '@qwen-code/qwen-code-core/skills/bundled/loop/loop-tick-resolver.js';
 import type {
   LocalManagedSessionAuthority,
   ManagedSessionInputRequest,
@@ -88,7 +97,28 @@ export interface HostedLoopSessionOptions {
   readonly classify: HostedLoopClassifier;
   readonly cwd: string;
   readonly now?: () => number;
+  /**
+   * Fire-time re-review of the resolved sentinel content (decision 5). The
+   * arm-time classifier reviewed the sentinel constant, not the file text, so
+   * a fire whose resolved content is a full (first/changed) delivery is
+   * re-reviewed before it runs; a denial settles the input
+   * `loop_admission_denied`. Omitted → a full delivery is refused rather than
+   * run unreviewed (fail closed). Steady-state short reminders are not
+   * re-reviewed.
+   */
+  readonly classifyFire?: HostedLoopClassifier;
 }
+
+/** Transient loop.md read failures that owe a no-op re-arm tick, not a thrown
+ * turn (mirrors the interactive resolver's transient set). */
+const LOOP_TRANSIENT_FS_CODES: readonly string[] = [
+  'EACCES',
+  'EIO',
+  'EBUSY',
+  'EPERM',
+  'EISDIR',
+  'ENOTDIR',
+];
 
 /** The outcome of a successful arm, mirroring the local tool's answer. */
 export interface LoopWakeupArm {
@@ -117,6 +147,10 @@ function digest(value: unknown): string {
 export class HostedLoopSession {
   private writes: Promise<void> = Promise.resolve();
   private readonly now: () => number;
+  // Per-Session fire-time resolver: its delivered-content cache scopes to this
+  // conversation, so a fresh Session (restart) re-delivers the full guidance
+  // and resetResolverCache() (compaction) does the same.
+  private loopResolver: LoopTickResolver | undefined;
 
   constructor(
     private readonly store: HostedLoopStore,
@@ -124,6 +158,93 @@ export class HostedLoopSession {
     private readonly options: HostedLoopSessionOptions,
   ) {
     this.now = options.now ?? Date.now;
+  }
+
+  private resolver(): LoopTickResolver {
+    if (!this.loopResolver) {
+      const homeQwenDir = Storage.getGlobalQwenDir();
+      const qwenHome = process.env['QWEN_HOME'];
+      const homeDir = os.homedir();
+      this.loopResolver = new LoopTickResolver({
+        projectRoot: this.options.cwd,
+        homeDir:
+          (qwenHome ? homeQwenDir : homeDir) || path.dirname(homeQwenDir),
+        homeQwenDir,
+        // A Hosted Workspace is not a trusted folder (the Hosted trust model
+        // pins workspaceTrusted false), so the repo-controlled project
+        // `.qwen/loop.md` is never read; only the user-owned home/global file
+        // or the absent-file tick. An untrusted workspace's project loop.md
+        // must not feed the model.
+        allowProjectFile: () => false,
+      });
+    }
+    return this.loopResolver;
+  }
+
+  /** Forget the delivered-content cache so the next fire re-delivers the full
+   * guidance — called when the Session history is compacted (fresh context). */
+  resetResolverCache(): void {
+    this.loopResolver?.resetCache();
+  }
+
+  /** Commit the last expanded tick once it has reached the model, so a tick
+   * aborted between expansion and delivery cannot poison the cache into a
+   * dangling short reminder. */
+  markLoopDelivered(): void {
+    this.loopResolver?.markDelivered();
+  }
+
+  /**
+   * Fire-time sentinel expansion (decision 5). A non-sentinel prompt passes
+   * through untouched. A `loop.md` / autonomous sentinel is expanded by the
+   * shared resolver (trust-gated, byte-capped, absent→autonomous,
+   * transient→no-op re-arm). A full (first/changed) delivery is re-reviewed
+   * by the fire-time classifier before it runs; a denial settles the input
+   * `loop_admission_denied` and returns null so the pump skips it (ending the
+   * loop) rather than running unreviewed content or re-picking forever.
+   */
+  async expandFireText(
+    turnId: string,
+    text: string,
+  ): Promise<{ text: string } | null> {
+    const loopMode = detectLoopSentinel(text);
+    const autonomousMode = loopMode ? null : detectAutonomousSentinel(text);
+    if (!loopMode && !autonomousMode) return { text };
+    const resolver = this.resolver();
+    let tick: LoopTickResult;
+    if (loopMode) {
+      try {
+        tick = await resolver.resolve(loopMode, false);
+      } catch (cause) {
+        const code = (cause as NodeJS.ErrnoException).code ?? 'unknown';
+        if (loopMode === 'dynamic' && LOOP_TRANSIENT_FS_CODES.includes(code)) {
+          tick = resolver.buildTransientErrorTick(loopMode, false, code);
+        } else {
+          throw cause;
+        }
+      }
+    } else {
+      tick = resolver.resolveAutonomous(autonomousMode!);
+    }
+    // Re-review only a full delivery: steady-state unchanged content (the
+    // short reminder) was already reviewed when it first delivered full.
+    if (tick.full) {
+      const verdict = this.options.classifyFire
+        ? await this.options.classifyFire({
+            delaySeconds: 0,
+            prompt: tick.modelText,
+            reason: 'loop fire-time sentinel re-review',
+          })
+        : {
+            allowed: false,
+            reason: 'No fire-time classifier for loop expansion.',
+          };
+      if (!verdict.allowed) {
+        await this.settleLoopTurn(turnId, 'loop_admission_denied');
+        return null;
+      }
+    }
+    return { text: tick.modelText };
   }
 
   /**

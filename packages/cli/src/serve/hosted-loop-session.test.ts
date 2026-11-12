@@ -21,6 +21,7 @@ import {
   LoopWakeupError,
   type HostedLoopClassifier,
 } from './hosted-loop-session.js';
+import { AUTONOMOUS_SENTINEL_DYNAMIC } from '@qwen-code/qwen-code-core/skills/bundled/loop/loop-tick-resolver.js';
 
 // The self-paced loop funnel drives the real journal. The deployment gate
 // gates arming, so these arming-semantics tests run with it on. See
@@ -89,6 +90,7 @@ async function withLoop<T>(
     authority: LocalManagedSessionAuthority,
   ) => Promise<T>,
   classify: HostedLoopClassifier = allow,
+  classifyFire?: HostedLoopClassifier,
 ): Promise<T> {
   const lease = await SessionWriterLease.acquire({
     runtimeBaseDir: harness.runtimeBaseDir,
@@ -125,7 +127,7 @@ async function withLoop<T>(
         sink: { project: async () => [...harness.records] },
       },
       sessionKey,
-      { classify, cwd: '/workspace', now: () => harness.now },
+      { classify, classifyFire, cwd: '/workspace', now: () => harness.now },
     );
     return await run(loops, authority);
   } finally {
@@ -436,5 +438,141 @@ describe('HostedLoopSession concurrency and restart', () => {
       ).rejects.toBeInstanceOf(LoopWakeupError);
       expect(loopPending(authority)).toHaveLength(0);
     });
+  });
+});
+
+describe('HostedLoopSession fire-time sentinel expansion', () => {
+  it('passes a non-sentinel prompt through untouched without re-review', async () => {
+    const harness = await createHarness();
+    let fireReviews = 0;
+    const classifyFire: HostedLoopClassifier = async () => {
+      fireReviews += 1;
+      return { allowed: true, reason: null };
+    };
+    await withLoop(
+      harness,
+      async (loops) => {
+        const expanded = await loops.expandFireText('loop:x', '/loop tick');
+        expect(expanded).toEqual({ text: '/loop tick' });
+        expect(fireReviews).toBe(0);
+      },
+      allow,
+      classifyFire,
+    );
+  });
+
+  it('expands an autonomous sentinel and re-reviews the full delivery', async () => {
+    const harness = await createHarness();
+    const reviewed: string[] = [];
+    const classifyFire: HostedLoopClassifier = async ({ prompt }) => {
+      reviewed.push(prompt);
+      return { allowed: true, reason: null };
+    };
+    await withLoop(
+      harness,
+      async (loops) => {
+        const expanded = await loops.expandFireText(
+          'loop:x',
+          AUTONOMOUS_SENTINEL_DYNAMIC,
+        );
+        expect(expanded).not.toBeNull();
+        // The literal sentinel is gone; the autonomous preamble is delivered.
+        expect(expanded!.text).not.toBe(AUTONOMOUS_SENTINEL_DYNAMIC);
+        expect(expanded!.text.length).toBeGreaterThan(
+          AUTONOMOUS_SENTINEL_DYNAMIC.length,
+        );
+        expect(reviewed).toHaveLength(1);
+        expect(reviewed[0]).toBe(expanded!.text);
+      },
+      allow,
+      classifyFire,
+    );
+  });
+
+  it('a denied re-review settles loop_admission_denied and skips the fire', async () => {
+    const harness = await createHarness();
+    const deny: HostedLoopClassifier = async () => ({
+      allowed: false,
+      reason: 'deny rule',
+    });
+    await withLoop(
+      harness,
+      async (loops, authority) => {
+        const expanded = await loops.expandFireText(
+          'loop:denied',
+          AUTONOMOUS_SENTINEL_DYNAMIC,
+        );
+        expect(expanded).toBeNull();
+        const settled = authority
+          .eventsInSequenceRange(1, authority.committedSequence)
+          .filter((event) => event.kind === 'turn.settled');
+        expect(settled).toHaveLength(1);
+        expect(settled[0].payload).toMatchObject({
+          turnId: 'loop:denied',
+          outcome: 'cancelled',
+          stopReason: 'loop_admission_denied',
+        });
+      },
+      allow,
+      deny,
+    );
+  });
+
+  it('without a fire-time classifier a full delivery is refused (fail closed)', async () => {
+    const harness = await createHarness();
+    await withLoop(harness, async (loops, authority) => {
+      const expanded = await loops.expandFireText(
+        'loop:noclass',
+        AUTONOMOUS_SENTINEL_DYNAMIC,
+      );
+      expect(expanded).toBeNull();
+      const settled = authority
+        .eventsInSequenceRange(1, authority.committedSequence)
+        .filter((event) => event.kind === 'turn.settled');
+      expect(settled[0].payload).toMatchObject({
+        stopReason: 'loop_admission_denied',
+      });
+    });
+  });
+
+  it('steady-state unchanged content delivers a short reminder without re-review', async () => {
+    const harness = await createHarness();
+    let fireReviews = 0;
+    const classifyFire: HostedLoopClassifier = async () => {
+      fireReviews += 1;
+      return { allowed: true, reason: null };
+    };
+    await withLoop(
+      harness,
+      async (loops) => {
+        const first = await loops.expandFireText(
+          'loop:1',
+          AUTONOMOUS_SENTINEL_DYNAMIC,
+        );
+        expect(first).not.toBeNull();
+        expect(fireReviews).toBe(1);
+        loops.markLoopDelivered();
+        const second = await loops.expandFireText(
+          'loop:2',
+          AUTONOMOUS_SENTINEL_DYNAMIC,
+        );
+        expect(second).not.toBeNull();
+        // The unchanged second fire is a short reminder, not re-reviewed.
+        expect(fireReviews).toBe(1);
+        expect(second!.text.length).toBeLessThan(first!.text.length);
+        // A compaction resets the cache: the next fire re-delivers full and
+        // is re-reviewed again.
+        loops.resetResolverCache();
+        const third = await loops.expandFireText(
+          'loop:3',
+          AUTONOMOUS_SENTINEL_DYNAMIC,
+        );
+        expect(third).not.toBeNull();
+        expect(fireReviews).toBe(2);
+        expect(third!.text).toBe(first!.text);
+      },
+      allow,
+      classifyFire,
+    );
   });
 });

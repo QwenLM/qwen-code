@@ -14,6 +14,7 @@ import {
   MonitorWakeTransientReadError,
 } from './hosted-monitor-wake.js';
 import type { HostedChildAgentSession } from './hosted-child-agent-session.js';
+import { LOOP_INPUT_SOURCE } from './hosted-loop-session.js';
 import { HostedToolRecoveryRequiredError } from './hosted-workspace-tool-turn.js';
 import { HostedMcpRecoveryRequiredError } from './hosted-mcp-session.js';
 import { HostedHookRecoveryRequiredError } from './hosted-hook-session.js';
@@ -70,6 +71,9 @@ export function createMonitorWakeRunTurn(params: {
     text: string,
     abort: AbortController,
   ) => Promise<unknown>;
+  /** Commits a loop tick's expanded content once the turn delivered it, so an
+   * aborted tick cannot poison the resolver's full-vs-reminder cache. */
+  readonly markLoopDelivered?: () => void;
   readonly busy: () => boolean;
   /** A turn its source no longer runs (H4d-b: a stopped run's message),
    * re-read with the busy verdict right before the turn starts. */
@@ -212,6 +216,7 @@ export function createMonitorWakeRunTurn(params: {
         turn.text,
         abort,
       )) as { systemPayload?: Record<string, unknown> } | null;
+      if (turn.source === LOOP_INPUT_SOURCE) params.markLoopDelivered?.();
     } catch (cause) {
       if (params.needsRecovery(cause)) {
         // Something parked mid-turn: a later settle or takeover consumes
