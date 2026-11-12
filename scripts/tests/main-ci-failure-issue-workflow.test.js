@@ -2769,7 +2769,7 @@ printf '%s\\n' '{"jobs":[]}'
     });
 
     it('does not let the handoff signature swallow a hung test or install step', () => {
-      // The signature is anchored to the two handoff step names, not to
+      // The signature is anchored to the retry's step name, not to
       // 'has timed out after'. Widening it to the bare phrase would reclassify
       // every step timeout as infrastructure: a test that genuinely hangs
       // would be re-run instead of reported, and on a PR autofix would chase a

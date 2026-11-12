@@ -98,9 +98,12 @@ env:
   # Checks the settle gate skips: 'review-pr' carries nothing the loop acts on. → qwen-autofix.md#af-160
   NON_BLOCKING_CHECKS: '["review-pr"]'
   # Failed-check patterns that mean INFRASTRUCTURE died, not the code. → qwen-autofix.md#af-076
-  # The built-tree handoff is anchored to its two step names on purpose: the
+  # The built-tree handoff is anchored to the RETRY step's name on purpose: the
   # artifact fetch expiring is a routing fault on the host, not the PR's code,
-  # and a re-run lands on a different host (#16927). A bare
+  # and a re-run lands on a different host (#16927). The first attempt is
+  # continue-on-error and the retry covers it on failure, so its annotation
+  # stays on the check run after a recovery — admitting it would classify a
+  # real failure carrying that residue as infrastructure. A bare
   # 'has timed out after' would also swallow a genuinely hung test or install
   # step, which must keep filing.
   INFRA_FAILURE_SIGNATURES: "lost communication with the server|No space left on device|ENOSPC|received a shutdown signal|The runner has received|Failed to initialize container|runner (was|has been) (lost|terminated)|invalid index-pack output|RPC failed|failed to be acquired|lock not acquired within|QWEN_CI_RPC_RETRY must be a non-negative integer|Host load gate breached|The action 'Retry downloading the built tree' has timed out"

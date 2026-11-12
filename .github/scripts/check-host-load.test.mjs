@@ -102,11 +102,23 @@ function withoutAwk() {
 // configuration class is autofix-only: main-ci deliberately files those.
 function scalarValue(workflow, key, name) {
   const match = new RegExp(
-    `^([ \\t]*)${key}:[ \\t]*(.*?)[ \\t]*(?:#.*)?$`,
+    `^([ \\t]*)${key}:[ \\t]*(.*?)[ \\t]*(?:[ \\t]+#.*)?$`,
     'm',
   ).exec(workflow);
   assert.ok(match, `${name}: ${key} not found`);
-  const [, indent, raw] = match;
+  const [, indent, stripped] = match;
+  // The marker above starts a comment only at a `#` behind whitespace, so a
+  // plain `a#b` keeps its `#`. That same boundary can sit INSIDE a quoted value
+  // (`"a # b"`), which the regex cannot tell apart: a quote it left open means
+  // the `#` was data, so fall back to the line with only trailing whitespace
+  // removed and let the quoted-scalar branch below decide.
+  const lineValue = match[0]
+    .replace(new RegExp(`^[ \\t]*${key}:[ \\t]*`), '')
+    .trimEnd();
+  const raw =
+    /^['"]/.test(stripped) && !stripped.endsWith(stripped[0])
+      ? lineValue
+      : stripped;
   // A value opening with a block-scalar indicator, an anchor, an alias or a
   // tag keeps its text somewhere this reader cannot follow. Returning the
   // indicator would pin a one-character "pattern" that matches nothing while
@@ -523,6 +535,36 @@ describe('check-host-load', () => {
         'f.yml',
       ),
       'a|b',
+    );
+    // A `#` with no whitespace before it is part of the value: YAML only starts
+    // a comment at a token boundary. Reading it as one truncates `a#b` to `a`,
+    // which is the fail-open this marker used to have.
+    assert.equal(
+      scalarValue(`env:\n  ${key}: a#b\n`, key, 'f.yml'),
+      'a#b',
+      'a plain value may contain #',
+    );
+    assert.equal(
+      scalarValue(`env:\n  ${key}: 'a#b'\n`, key, 'f.yml'),
+      'a#b',
+      'a single-quoted # is data',
+    );
+    assert.equal(
+      scalarValue(`env:\n  ${key}: "a # b"\n`, key, 'f.yml'),
+      'a # b',
+      'a quoted value keeps its # even behind a space',
+    );
+    // The two remaining arms of the same branch: a double-quoted scalar YAML
+    // accepts and JSON does not, and a quote that never closes on the line.
+    // Each must surface as this reader's diagnostic, not a bare SyntaxError and
+    // not a value.
+    assert.throws(
+      () => scalarValue(`env:\n  ${key}: "a\\x41"\n`, key, 'f.yml'),
+      /could not decode/,
+    );
+    assert.throws(
+      () => scalarValue(`env:\n  ${key}: "a\n`, key, 'f.yml'),
+      /opens a quote it does not close on the same line/,
     );
   });
 
