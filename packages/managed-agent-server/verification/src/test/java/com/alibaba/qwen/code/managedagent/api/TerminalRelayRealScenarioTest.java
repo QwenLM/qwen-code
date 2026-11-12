@@ -288,6 +288,87 @@ class TerminalRelayRealScenarioTest {
     }
 
     @Test
+    void killingTheRealWorkerClosesTheBrowserLegWithTheTerminalLostCode() throws Exception {
+        Tomcat tomcat = new Tomcat();
+        tomcat.setPort(0);
+        tomcat.getConnector();
+        File docBase = java.nio.file.Files.createTempDirectory("mwt-worker-loss").toFile();
+        Context ctx = tomcat.addWebapp("", docBase.getAbsolutePath());
+        ctx.addServletContainerInitializer(new org.apache.tomcat.websocket.server.WsSci(), null);
+        ctx.addApplicationListener(EndpointRegistrar.class.getName());
+        tomcat.start();
+        int port = tomcat.getConnector().getLocalPort();
+        URI workerEndpoint = URI.create("http://127.0.0.1:" + port);
+
+        RuntimeScope scope = new RuntimeScope("tenant", "workspace", "1",
+                "/workspace", "capability", "session");
+        org.h2.jdbcx.JdbcDataSource source = new org.h2.jdbcx.JdbcDataSource();
+        source.setURL("jdbc:h2:mem:terminal-loss-" + java.util.UUID.randomUUID()
+                + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
+        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
+        JdbcRuntimeBindingRepository bindingRepository =
+                new JdbcRuntimeBindingRepository(source,
+                        new AesGcmSecretProtector("test", new byte[32]));
+        JdbcRuntimeSessionRepository sessionRepository =
+                new JdbcRuntimeSessionRepository(source);
+        JdbcToolExecutionRepository executionRepository =
+                new JdbcToolExecutionRepository(source);
+        HarnessSessionResolver resolver =
+                harness -> CompletableFuture.completedFuture(scope);
+        RuntimeBrokerService broker = new RuntimeBrokerService(resolver,
+                new WorkerProvisioner(workerEndpoint), new TerminalTransport(),
+                bindingRepository, sessionRepository, executionRepository,
+                "broker", Duration.ofSeconds(30), Duration.ofSeconds(30));
+
+        WebSocketSession browser = mock(WebSocketSession.class);
+        Map<String, Object> attributes = new HashMap<>();
+        RuntimeBindingRecord binding = brokerBinding(broker);
+        attributes.put(TerminalRelayHandshakeInterceptor.BINDING_ATTRIBUTE, binding);
+        attributes.put(TerminalRelayHandshakeInterceptor.SESSION_ATTRIBUTE, "session-a");
+        attributes.put(TerminalRelayHandshakeInterceptor.TERMINAL_ATTRIBUTE, "term-loss");
+        when(browser.getAttributes()).thenReturn(attributes);
+        when(browser.isOpen()).thenReturn(true);
+        List<CloseStatus> closes = new CopyOnWriteArrayList<>();
+        doAnswer(invocation -> {
+            closes.add(invocation.getArgument(0));
+            return null;
+        }).when(browser).close(any(CloseStatus.class));
+
+        TerminalRelayHandler handler =
+                new TerminalRelayHandler(broker, HttpClient.newHttpClient());
+        try {
+            handler.afterConnectionEstablished(browser);
+            // Wait for the real worker connection to be open (the shared opened
+            // latch may already be spent by a sibling test, so poll the session).
+            long deadline = System.currentTimeMillis() + 10_000;
+            while (System.currentTimeMillis() < deadline
+                    && (EchoWorker.last == null || !EchoWorker.last.isOpen())) {
+                Thread.sleep(20);
+            }
+            assertThat(EchoWorker.last).isNotNull();
+            assertThat(EchoWorker.last.isOpen()).isTrue();
+
+            // Kill the real worker abruptly (no graceful WebSocket Close frame),
+            // simulating a killed worker process: the JDK client then reports the
+            // reserved abnormal-close code 1006, which the relay must map to the
+            // non-retryable terminal-lost code 4003, not forward verbatim.
+            tomcat.getConnector().getProtocolHandler().destroy();
+            long closeDeadline = System.currentTimeMillis() + 10_000;
+            while (System.currentTimeMillis() < closeDeadline && closes.isEmpty()) {
+                Thread.sleep(20);
+            }
+            assertThat(closes).isNotEmpty();
+            assertThat(closes.get(0).getCode())
+                    .as("worker loss must surface the terminal-lost code, not a retryable one")
+                    .isEqualTo(4003);
+        } finally {
+            broker.close();
+            tomcat.stop();
+            tomcat.destroy();
+        }
+    }
+
+    @Test
     void browserLegAcceptsAWholePasteBeyondTheTomcatDefault() throws Exception {
         Tomcat tomcat = new Tomcat();
         tomcat.setPort(0);
