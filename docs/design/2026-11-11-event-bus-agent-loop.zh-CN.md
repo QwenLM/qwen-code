@@ -2,7 +2,7 @@
 
 [English](2026-11-11-event-bus-agent-loop.md) | [简体中文](2026-11-11-event-bus-agent-loop.zh-CN.md)
 
-- **状态**：提议中。实现从 PR 1（总线原语）开始；不改变任何 surface 的默认行为。
+- **状态**：PR 1–3 已合入（#16935 原语、#16938 handler、#16949 流式评估）。PR 4 增加 headless opt-in 设置；不改变任何 surface 的默认行为。
 - **日期**：2026-11-11，基于 `origin/main` `da270e434957`。
 - **关联**：
   - [Unified agent loop](2026-10-23-unified-agent-loop.zh-CN.md) —— 本设计对其做内部架构升级的已批准设计；跟踪 issue #15327，#15343 批准，headless 已在 #15369 合入，ACP 模型轮已在 #15509 合入；
@@ -155,7 +155,8 @@ handler 按今天的方式读取 run 的 `signal` 与 `toolSignal` 并传给 `ru
 1. **PR 1 —— 原语。** `event-bus/{bus,events,state}.ts` + 单元测试（移植 preview 的 `bus.test.ts`；新增串行投递、跨 run 隔离、失败重发布、迟到轮次测试）。尚无消费方；零行为变化。本设计文档随此 PR 落地。`runtime.ts`（handler 接线）与 `handler-support.ts` 随 PR 2 的 handler 一起到来。
 2. **PR 2 —— opt-in 标志后的 handler。** 把 `runAgentLoop` 内部重新表达为 Conversation/Llm/Tool handler 加 host 适配器，由新增的 `AgentLoopOptions.useEventBus` 标志选择（默认关，因此在统一循环内过程式路径仍是默认，直到 parity 被证明）。`runModelRound`/`runToolBatch` 保留导出与签名（ACP #15509 依赖它们），并被 handler 原样复用。一个等价测试对脚本化场景同时跑两条路径，断言结果与 host 回调顺序完全一致；headless parity 套件与 ACP 轮测试是验收门。
 3. **PR 3 —— 流式派发评估（可选，独立门控）。** preview 在流仍在运行时执行 `tool_use` 块。main 在轮结束后跑批次，且审批按批排序；流式派发改变审批时机与输出交错。此切片先写下 parity 差异并取得明确决定；架构移植本身不依赖它。
-4. **后续 —— surface 收敛**继续在 unified-agent-loop 计划下进行（TUI、OpenTUI、AgentCore、speculation、Hosted）。总线让循环级挂接（hooks、Mods、保护、录制）成为单点，这正是该计划的既定目标；这里不排任何 surface 工作。
+4. **PR 4 —— headless opt-in。** 新增 `experimental.eventBusAgentLoop` 设置（环境变量覆盖 `QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP=1`，由 `Config.isEventBusAgentLoopEnabled()` 读取），让 headless 的共享循环路径传入 `useEventBus`。该标志只在完整共享循环运行处生效：headless 是今天唯一的 `runAgentLoop` 调用方，而 ACP、Ink TUI 与 OpenTUI 直接使用 `runModelRound`，不受影响。适配器经 `debugLogger` 记录一条 `[EVENT_BUS]` 执行标记，因此开启 `QWEN_DEBUG_LOG_FILE` 后，一次 run 走哪条路径可由调试日志证明而非假设。默认关；过程式路径仍是默认，且单独开启该标志（不开 `experimental.unifiedAgentLoop`）不改变任何行为。
+5. **后续 —— surface 收敛**继续在 unified-agent-loop 计划下进行（TUI、OpenTUI、AgentCore、speculation、Hosted）。总线让循环级挂接（hooks、Mods、保护、录制）成为单点，这正是该计划的既定目标；这里不排任何 surface 工作。
 
 ## 测试
 
@@ -163,12 +164,32 @@ handler 按今天的方式读取 run 的 `signal` 与 `toolSignal` 并传给 `ru
 - Parity：统一循环套件（headless 已合入；ACP 轮已合入）对 PR 2 原样运行 —— 它们是 surface 无感知的证明。
 - E2E：按 feat-dev 流程在 `.qwen/e2e-tests/` 下写计划，覆盖设置开/关两种状态的 headless 与 ACP prompt 轮；实现前先做基线 dry-run。
 
+### 真实场景证据（PR 4）
+
+headless 对确定性 mock OpenAI 端点的运行（真实工具执行、真实重试、真实 SIGINT 取消）：off = 过程式共享循环，on = 总线共享循环，两臂均开启 `experimental.unifiedAgentLoop`。总线路径由适配器的 `[EVENT_BUS] runAgentLoopOnBus started` 调试标记确认（`QWEN_DEBUG_LOG_FILE=1`）——每个 off run 记录 0 条标记，每个 on run 至少一条——因此 parity 不是假绿。输出在规范化运行身份与时延字段后完全一致。
+
+| 场景                      | 结果（off = on）               | 标记 off/on |
+| ------------------------- | ------------------------------ | ----------- |
+| G1 单轮                   | MOCK_OK                        | 0 / 1       |
+| G2 工具循环（glob）       | TOOL_LOOP_DONE，1 个工具结果   | 0 / 2       |
+| G3 重试（500 → ok）       | RETRY_OK                       | 0 / 1       |
+| G4 模型流中取消           | exit 130，无挂起               | 0 / 1       |
+| G5 设置文件启用（无 env） | MOCK_OK                        | 0 / 1       |
+| G6 多工具批 + 两个工具轮  | MULTI_ROUND_DONE，3 个工具结果 | 0 / 3       |
+| G7 工具错误收尾           | TOOL_ERROR_DONE，错误结果      | 0 / 2       |
+| G8 stream-json 输出       | 信封流完全一致                 | 0 / 1       |
+| G9 工具执行中取消         | exit 130，无挂起               | 0 / 1       |
+| G10 同批重复调用          | DUPLICATE_DONE，重放响应       | 0 / 2       |
+
+G5 通过隔离的用户设置文件启用两个标志、不用任何环境变量，证明设置到标志的链路。G9 在前台工具运行时取消（toolSignal 路径），与 G4 的流中取消互补。标记数大于 1 反映 headless 每轮调用一次循环。
+
 ## 验收标准
 
 - PR 1（原语）：bus/state/events 模块带单测落地、无运行时消费方、零行为变化（在无消费方时循环路径不变）；`tsc --build`、ESLint、Prettier 干净。
 - PR 2（handler，opt-in）：等价套件证明总线与过程式两条路径在脚本化场景下结果与有序回调日志完全一致，且既有 agent-loop 测试保持全绿；标志默认关，任何 surface 行为不变；`tsc --build`、ESLint、Prettier 干净。
 - 每个切片都把它的实现与测试放进同一个 PR，且双语设计文档保持同步（结构、决策、约束与本验收标准节）。
-- 真实 headless 场景（单轮、工具循环、重试、取消）在标志开/关下两路径 parity 成立，且总线路径由执行标记确认而非假设。（归属后续切片：本 PR 没有 surface 开启该标志。）
+- PR 4（headless opt-in）：设置默认关，不改变任何 surface 默认行为；两个实验标志同时开启时，headless run 走总线路径，由适配器的 `[EVENT_BUS]` 调试标记确认；下述真实场景 parity 成立；`tsc --build`、ESLint、Prettier 干净。
+- 真实 headless 场景（单轮、工具循环、重试、取消）在标志开/关下两路径 parity 成立，且总线路径由执行标记确认而非假设。PR 4 交付启用与标记；场景证据汇总于上方「测试」节（完整日志在 `.qwen/e2e-tests/` 下的本地 E2E 计划中）。
 
 ## 风险与未决问题
 
@@ -182,4 +203,5 @@ handler 按今天的方式读取 run 的 `signal` 与 `toolSignal` 并传给 `ru
 
 - 新增：`packages/core/src/event-bus/{bus,events,state}.ts` 及同置测试（PR 1）；`runtime.ts`、`handler-support.ts`、`conversation.ts`、`llm.ts`、`tool.ts`、`adapter.ts`（PR 2）。
 - 修改：`packages/core/src/core/agent-loop.ts` 内部（PR 2）；其公共类型与导出不变。
+- PR 4：`packages/core/src/config/config.ts`（参数 + `isEventBusAgentLoopEnabled`）、`packages/core/src/event-bus/adapter.ts`（调试执行标记）、`packages/cli/src/config/config.ts` 与 `settingsSchema.ts`（设置 + 接线）、`packages/cli/src/nonInteractiveCli.ts`（`useEventBus`）、`packages/web-shell/client/settings.ts` 与 `settings/messages.ts`（公开别名 + 中文条目），以及重新生成的 `packages/vscode-ide-companion/schemas/settings.schema.json`；测试与各改动同置。
 - 文档：本双语对；PR 2 落地后 unified-agent-loop 文档增加交叉引用。
