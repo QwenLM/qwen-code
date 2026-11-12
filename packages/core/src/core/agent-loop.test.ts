@@ -20,13 +20,17 @@ import {
 import {
   createSchedulerExecutor,
   runAgentLoop,
+  runModelRound,
   runToolBatch,
+  turnModelRound,
   type AgentLoopDuplicateState,
   type AgentLoopHost,
   type AgentLoopSettledCall,
   type AgentLoopToolExecutor,
   type AgentLoopToolResult,
+  type ModelRoundSource,
 } from './agent-loop.js';
+import type { LlmChat } from './llm-chat.js';
 import { SendMessageType } from './client.js';
 import { PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE } from './plan-mode-entry-policy.js';
 import type { LlmClient, SendMessageOptions } from './client.js';
@@ -39,7 +43,7 @@ import {
   type ServerLlmStreamEvent,
   type ToolCallRequestInfo,
   type ToolCallResponseInfo,
-  type Turn,
+  Turn,
 } from './turn.js';
 
 function toolRequest(
@@ -1034,5 +1038,131 @@ describe('createSchedulerExecutor', () => {
     );
 
     expect(seen).toBe(runtimeView);
+  });
+});
+
+describe('runModelRound on a round source', () => {
+  const round = {
+    parts: [{ text: 'go' }],
+    promptId: 'agent-prompt',
+    options: { type: SendMessageType.UserQuery },
+  };
+
+  it("sends the round on a Turn over the agent's chat, with its request fields", async () => {
+    const call = { id: 'call-1', name: 'read_file', args: { path: 'a' } };
+    const onStreamReady = vi.fn();
+    const onChunk = vi.fn();
+    const chat = {
+      sendMessageStream: vi.fn(async () =>
+        (async function* () {
+          yield {
+            type: 'chunk',
+            value: {
+              functionCalls: [call],
+              responseId: 'response-1',
+              usageMetadata: { totalTokenCount: 3 },
+            },
+          };
+          yield { type: 'retry', maxOutputTokensEscalated: 8_192 };
+          yield { type: 'chunk', value: { functionCalls: [call] } };
+        })(),
+      ),
+    } as unknown as LlmChat;
+    const tools = [{ functionDeclarations: [{ name: 'read_file' }] }];
+    const events: ServerLlmStreamEvent[] = [];
+
+    const result = await runModelRound(
+      turnModelRound(chat, 'agent-model', {
+        requestConfig: { tools, maxOutputTokens: 4_096 },
+        onStreamReady,
+        onChunk,
+      }),
+      round,
+      new AbortController().signal,
+      { onModelEvent: (event) => void events.push(event) },
+    );
+
+    expect(chat.sendMessageStream).toHaveBeenCalledWith(
+      'agent-model',
+      {
+        message: round.parts,
+        config: {
+          abortSignal: expect.any(AbortSignal),
+          tools,
+          maxOutputTokens: 4_096,
+        },
+      },
+      'agent-prompt',
+      undefined,
+      undefined,
+    );
+    expect(result.turn).toBeInstanceOf(Turn);
+    // The attempt the retry replaced is dropped.
+    expect(result.calls.map((request) => request.callId)).toEqual(['call-1']);
+    expect(result.stop).toBeUndefined();
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: LlmEventType.Retry,
+        maxOutputTokensEscalated: 8_192,
+      }),
+    );
+    expect(
+      events.find((event) => event.type === LlmEventType.ToolCallRequest),
+    ).toMatchObject({ functionCall: call });
+    expect(onStreamReady).toHaveBeenCalledOnce();
+    expect(onChunk).toHaveBeenCalledTimes(2);
+    expect(onChunk).toHaveBeenNthCalledWith(1, {
+      text: '',
+      thoughtText: '',
+      responseId: 'response-1',
+      usageMetadata: { totalTokenCount: 3 },
+    });
+  });
+
+  it('throws a failed request as it came when asked to', async () => {
+    const failure = new Error('upstream exploded');
+    const chat = {
+      sendMessageStream: vi.fn(async () => {
+        throw failure;
+      }),
+    } as unknown as LlmChat;
+
+    await expect(
+      runModelRound(
+        turnModelRound(chat, 'agent-model', { throwErrors: true }),
+        round,
+        new AbortController().signal,
+        {},
+      ),
+    ).rejects.toBe(failure);
+  });
+
+  it("ends the round at the surface's stop and closes the source's stream", async () => {
+    let closed = false;
+    let read = 0;
+    const source: ModelRoundSource = {
+      sendRound: () =>
+        (async function* () {
+          try {
+            for (;;) {
+              read++;
+              yield content;
+            }
+          } finally {
+            closed = true;
+          }
+        })(),
+    };
+
+    const result = await runModelRound(
+      source,
+      round,
+      new AbortController().signal,
+      { onModelEvent: () => 'loop_detected' },
+    );
+
+    expect(result).toEqual({ calls: [], stop: 'loop_detected' });
+    expect(read).toBe(1);
+    expect(closed).toBe(true);
   });
 });
