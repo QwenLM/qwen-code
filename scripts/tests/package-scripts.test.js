@@ -1833,6 +1833,11 @@ describe('package scripts', () => {
         'fi',
         'echo "npm $* heap=$NODE_OPTIONS workers=$VITEST_MAX_FORKS/$VITEST_MAX_THREADS" >> "$STUB_CALLS"',
         'echo "output of npm $*"',
+        // A re-run named alone on the command line is the lane's retry (the
+        // batch always names acp-bridge first); STUB_SLEEP_SECONDS lets a case
+        // spend real wall time inside that retry, which is the only way the
+        // lane's own clock can cross a budget threshold between two rounds.
+        'if [ -n "$STUB_SLEEP_SECONDS" ] && [ "$3" = "--workspace=@qwen-code/web-shell" ]; then sleep "$STUB_SLEEP_SECONDS"; fi',
         'if [ -n "$STUB_REPORT" ] && echo "$*" | grep -qF -- "$STUB_REPORT_MATCH"; then',
         '  if [ -z "$STUB_REPORT_ONCE" ] || ! grep -qxF -- "$STUB_REPORT_MATCH" "$STUB_REPORT_SAW" 2>/dev/null; then',
         '    echo "$STUB_REPORT_MATCH" >> "$STUB_REPORT_SAW"',
@@ -1902,6 +1907,7 @@ describe('package scripts', () => {
           STUB_REPORT_RC: reportRc,
           STUB_REPORT_ONCE: reportOnce ? '1' : '',
           STUB_REPORT_SAW: path.join(dir, `${name}.report-saw`),
+          STUB_SLEEP_SECONDS: '',
           QWEN_CI_RPC_RETRY: rpcRetry,
           ...extraEnv,
         },
@@ -2481,6 +2487,29 @@ describe('package scripts', () => {
             call.includes('--workspace=@qwen-code/web-shell'),
           ).length,
         ).toBe(3);
+        // The loop's own budget break. Round 1 is admitted (about 1 s of a
+        // 12 s step, under the 6 s half-budget), and the re-run it issues
+        // spends 8 s of real time, so by the time round 2 would start the
+        // guard refuses it: the workspace is attempted twice, not three
+        // times. The wait is wall time on purpose — the guard reads the
+        // lane's own clock, so a frozen clock would test nothing.
+        const roundTwoBlocked = run('workspace-round-two-budget', {
+          report: rpcReport('@qwen-code/web-shell'),
+          reportOnce: false,
+          rpcRetry: '2',
+          budget: '12',
+          extraEnv: {
+            SCRIPT_START_OVERRIDE: '-1',
+            STUB_SLEEP_SECONDS: '8',
+          },
+        });
+        expect(roundTwoBlocked.rc, roundTwoBlocked.stdout).toBe('1');
+        expect(roundTwoBlocked.stdout).toContain('Every test passed');
+        expect(
+          roundTwoBlocked.calls.filter((call) =>
+            call.includes('--workspace=@qwen-code/web-shell'),
+          ).length,
+        ).toBe(2);
       } finally {
         harness.dispose();
       }
