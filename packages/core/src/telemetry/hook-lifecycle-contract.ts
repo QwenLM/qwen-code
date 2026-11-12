@@ -241,16 +241,19 @@ export function mergeHookExecution(
 
 export function reduceHookLifecycle(
   state: HookLifecycleState,
-  event: HookLifecycleEvent,
+  event: HookLifecycleEvent | readonly HookLifecycleEvent[],
   options: { source: 'live' | 'replay' },
 ): HookLifecycleState {
-  const key = JSON.stringify([event.sessionId, event.executionId]);
-  const prior = state.entries.get(key);
-  const entry = mergeHookExecution(prior, event, options.source);
-  if (entry === prior) return state;
-  const entries = new Map(state.entries);
-  entries.set(key, entry);
-  return { entries };
+  let entries: Map<string, HookExecutionEntry> | undefined;
+  for (const next of 'phase' in event ? [event] : event) {
+    const key = JSON.stringify([next.sessionId, next.executionId]);
+    const prior = (entries ?? state.entries).get(key);
+    const entry = mergeHookExecution(prior, next, options.source);
+    if (entry === prior) continue;
+    entries ??= new Map(state.entries);
+    entries.set(key, entry);
+  }
+  return entries ? { entries } : state;
 }
 
 export function summarizeHookExecutions(

@@ -98,13 +98,16 @@ export function extractHookLifecycle(
 export function createHookLifecycleState(): HookLifecycleState {
   return create();
 }
+/** Pass an array of updates to replay history with at most one Map copy. */
 export function reduceHookLifecycle(
   state: HookLifecycleState,
   update: unknown,
   options: { source: 'live' | 'replay' },
 ): HookLifecycleState {
-  const event = extractHookLifecycle(update);
-  return event ? reduce(state, event, options) : state;
+  const events = (Array.isArray(update) ? update : [update])
+    .map(extractHookLifecycle)
+    .filter((event) => event !== undefined);
+  return reduce(state, events, options);
 }
 export function summarizeHookExecutions(
   entries: Iterable<HookExecutionEntry>,

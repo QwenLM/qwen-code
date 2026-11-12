@@ -114,6 +114,30 @@ describe('hook lifecycle contract', () => {
       counts: { dispatched: 1, success: 0 },
     });
   });
+  it('reduces a batch in order without changing previous states', () => {
+    const initial = reduceHookLifecycle(createHookLifecycleState(), start, {
+      source: 'live',
+    });
+    const events = [
+      end,
+      start,
+      { ...end, executionId: 'other' },
+      { ...end, executionId: 'other', runtimeId: 'conflict' },
+    ];
+    const expected = events.reduce(
+      (state, event) => reduceHookLifecycle(state, event, { source: 'replay' }),
+      initial,
+    );
+    const result = reduceHookLifecycle(initial, events, { source: 'replay' });
+    expect(result).toEqual(expected);
+    expect([...initial.entries.values()]).toEqual([
+      { event: start, status: 'running', conflicted: false },
+    ]);
+    expect(reduceHookLifecycle(result, [], { source: 'replay' })).toBe(result);
+    expect(
+      reduceHookLifecycle(result, [end, start], { source: 'replay' }),
+    ).toBe(result);
+  });
   it('keeps conflicting owners separate from another session and marks incomplete data', () => {
     let state = reduceHookLifecycle(createHookLifecycleState(), end, {
       source: 'live',

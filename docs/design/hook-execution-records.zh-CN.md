@@ -18,11 +18,13 @@ HookProgress 已描述本地执行，但没有安全、持久化的轮次统计�
 
 复用 system/ui_telemetry，event.name 为 hook_lifecycle。沿用删除身份，分支复制重映射 session/prompt ID。提问前的 Hook 纳入该轮回退边界，完整／按需恢复重建同一边界，并拒绝已回退执行的晚到终态记录。诊断记录排除于模型历史和普通遥测恢复。bridge 压缩和生命周期恢复必须保留元数据。ACP 观察 MessageBus 替换和销毁，用空 agent_message_chunk 携带 \_meta.hookLifecycle。
 
-纯 Core 契约提供浏览器可用的解析、归并和汇总，供 reader、bridge 与打包后的 SDK 共用。各输入边界解析一次，之后共享接收已验证类型的单次执行归并规则。reader 直接更新请求内的 Map；SDK reducer 保持状态不可变。SDK 声明不依赖 Core。重复开始不能覆盖终态，所选轮次内的身份冲突标记数据不完整。
+纯 Core 契约提供浏览器可用的解析、归并和汇总，供 reader、bridge 与打包后的 SDK 共用。各输入边界解析一次，之后共享接收已验证类型的单次执行归并规则。reader 直接更新请求内的 Map；SDK reducer 保持状态不可变，并接受更新数组进行历史重放，每批最多复制一次 Map。SDK 声明不依赖 Core。重复开始不能覆盖终态，所选轮次内的身份冲突标记数据不完整。VS Code 历史和 usage 重建与 request/tool 生命周期事件一样排除 Hook 诊断。
 
 ## 轮次查询
 
 GET /session/:id/turns/:promptId/hooks 及工作区限定形式返回 sessionId、promptId、snapshot、start、totalExecutions、summary、executions、nextStart 和 coverage。SDK 提供 getSessionTurnHooksPage。默认 limit 为 50，范围 1–500；start 必须携带签名 transcript snapshot。利用已有 Hook 轮次提示，仅读取所选 active branch 中目标轮次的生命周期记录。先归并该轮次的全部已记录执行，再按 startedAt 和 executionId 排序分页；本查询不承担跨轮执行 ID 审计。
+
+解析和校验快照时不生成导航预览。每轮排序后的执行、汇总和 coverage 附着在已有 transcript 索引缓存项上，计入共享 64 MiB 预算并沿用五分钟有效期。结果无法容纳时正常返回但不缓存。冻结页复用归并结果；追加后的新快照使用不同缓存项。只复制当前页的执行和汇总后返回，避免调用方修改缓存。文件截断、替换或等长改写后，冻结快照失效。
 
 两个路由均为 persisted-workspace scoped，复用 transcript 运行时解析、归档锁、generation 检查和存储上下文。live 首屏用现有 transcript barrier 刷盘，冻结页不重复刷盘。冷会话无需加载即可读取。未知、歧义或已移除运行时不回退到主运行时。旧轮次无记录为 unrecorded，托管会话为 unsupported，已知缺失为 partial。汇总表示已记录执行，不证明历史采集完整。
 

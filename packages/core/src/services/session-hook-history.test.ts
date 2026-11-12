@@ -6,13 +6,17 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Storage } from '../config/storage.js';
 import {
   SessionTranscriptReader,
   InvalidSessionTranscriptCursorError,
   resetSessionTranscriptIndexCacheForTest,
   SessionTranscriptSnapshotUnavailableError,
+  getSessionTranscriptIndexCacheStatsForTest,
+  setSessionTranscriptIndexCacheMaxBytesForTest,
+  setSessionTranscriptSelectedLineReadHookForTest,
+  setSessionTranscriptIndexBuildCompleteHookForTest,
 } from './session-transcript-reader.js';
 import type { ChatRecord } from './chatRecordingService.js';
 import type { HookLifecycleEvent } from '../telemetry/hook-lifecycle-contract.js';
@@ -142,6 +146,104 @@ describe('persisted hook turn pages', () => {
     await expect(
       reader.readTurnHooksPage(sessionId, promptId, { limit: 501 }),
     ).rejects.toThrow(RangeError);
+  });
+  it('reuses frozen aggregation across readers and pages without reading unrelated previews', async () => {
+    for (let i = 0; i < 101; i++) append(event(String(i).padStart(3, '0')));
+    append().promptId = `${sessionId}########2`;
+    records.push({
+      ...records.at(-1)!,
+      uuid: 'unrelated-answer',
+      parentUuid: records.at(-1)!.uuid,
+      type: 'assistant',
+      message: { role: 'model', parts: [{ text: 'x'.repeat(8192) }] },
+    });
+    await write();
+    const read = vi.fn();
+    setSessionTranscriptSelectedLineReadHookForTest(read);
+    const first = (await new SessionTranscriptReader(cwd).readTurnHooksPage(
+      sessionId,
+      promptId,
+    ))!;
+    expect(read).toHaveBeenCalledTimes(101);
+    read.mockClear();
+    const originalSummary = structuredClone(first.summary);
+    first.executions[0]!.event.name = 'changed by caller';
+    first.summary!.counts.success = 0;
+    for (const start of [0, 50, 100]) {
+      const page = (await new SessionTranscriptReader(cwd).readTurnHooksPage(
+        sessionId,
+        promptId,
+        { snapshot: first.snapshot, start },
+      ))!;
+      expect(page.summary).toEqual(originalSummary);
+      expect(
+        page.executions.every((entry) => entry.event.name === 'safe'),
+      ).toBe(true);
+      expect(page.executions).toHaveLength(start === 100 ? 1 : 50);
+    }
+    expect(read).not.toHaveBeenCalled();
+  });
+  it('accounts aggregation in the existing byte budget and rebuilds once when uncached', async () => {
+    append(event('one'));
+    await write();
+    const reader = new SessionTranscriptReader(cwd);
+    const anchor = await reader.readTurnIndexPage(sessionId);
+    const indexBytes = getSessionTranscriptIndexCacheStatsForTest().byteSize;
+    setSessionTranscriptIndexCacheMaxBytesForTest(indexBytes);
+    const read = vi.fn();
+    setSessionTranscriptSelectedLineReadHookForTest(read);
+    for (let i = 0; i < 2; i++) {
+      expect(
+        await reader.readTurnHooksPage(sessionId, promptId, {
+          snapshot: anchor.snapshot,
+        }),
+      ).toMatchObject({ totalExecutions: 1, coverage: 'recorded' });
+    }
+    expect(read).toHaveBeenCalledTimes(2);
+    expect(getSessionTranscriptIndexCacheStatsForTest().byteSize).toBe(
+      indexBytes,
+    );
+    setSessionTranscriptIndexCacheMaxBytesForTest(64 * 1024 * 1024);
+    await reader.readTurnHooksPage(sessionId, promptId);
+    expect(
+      getSessionTranscriptIndexCacheStatsForTest().byteSize,
+    ).toBeGreaterThan(indexBytes);
+    read.mockClear();
+    await reader.readTurnHooksPage(sessionId, promptId, {
+      snapshot: anchor.snapshot,
+    });
+    expect(read).not.toHaveBeenCalled();
+    setSessionTranscriptIndexCacheMaxBytesForTest(1);
+    const build = vi.fn();
+    setSessionTranscriptIndexBuildCompleteHookForTest(build);
+    for (let i = 0; i < 2; i++) {
+      await reader.readTurnHooksPage(sessionId, promptId, {
+        snapshot: anchor.snapshot,
+      });
+      expect(build).toHaveBeenCalledTimes(i + 1);
+    }
+    expect(getSessionTranscriptIndexCacheStatsForTest().byteSize).toBe(0);
+  });
+  it('rejects a cached frozen aggregate after an equal-length rewrite', async () => {
+    append(event('old'));
+    await write();
+    const reader = new SessionTranscriptReader(cwd);
+    const first = (await reader.readTurnHooksPage(sessionId, promptId))!;
+    const before = await fs.stat(file);
+    records[1]!.systemPayload = {
+      uiEvent: { ...event('new'), 'event.name': 'hook_lifecycle' },
+    };
+    await write();
+    await fs.utimes(file, before.atime, new Date(before.mtimeMs + 1000));
+    expect((await fs.stat(file)).size).toBe(before.size);
+    await expect(
+      reader.readTurnHooksPage(sessionId, promptId, {
+        snapshot: first.snapshot,
+      }),
+    ).rejects.toThrow(SessionTranscriptSnapshotUnavailableError);
+    expect(await reader.readTurnHooksPage(sessionId, promptId)).toMatchObject({
+      executions: [{ event: { executionId: 'new' } }],
+    });
   });
   it('limits aggregation and identity conflicts to the requested history turn', async () => {
     append(event('conflicting'));

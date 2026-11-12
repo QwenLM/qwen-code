@@ -589,6 +589,10 @@ interface CacheEntry {
   byteSize?: number;
   value?: TranscriptIndex;
   pending?: Promise<TranscriptIndex>;
+  hookTurns?: Map<
+    string,
+    Pick<HookTurnPage, 'executions' | 'summary' | 'coverage'>
+  >;
 }
 
 const INDEX_CACHE_MAX_ENTRIES = 32;
@@ -3198,24 +3202,14 @@ export class SessionTranscriptReader {
     );
   }
 
-  async readTurnIndexPage(
+  private async readTurnIndexSnapshot(
     sessionId: string,
-    options: SessionTranscriptReadTurnIndexOptions = {},
-  ): Promise<SessionTranscriptTurnIndexPage> {
-    const limit = normalizeLimit(options.limit);
-    if (options.start !== undefined && options.snapshot === undefined) {
-      throw new InvalidSessionTranscriptCursorError();
-    }
-    if (
-      options.start !== undefined &&
-      !isFiniteNonNegativeInteger(options.start)
-    ) {
-      throw new RangeError('Transcript turn index start must be non-negative');
-    }
+    encodedSnapshot?: string,
+  ) {
     const snapshot =
-      options.snapshot === undefined
+      encodedSnapshot === undefined
         ? undefined
-        : this.decodeSnapshot(options.snapshot);
+        : this.decodeSnapshot(encodedSnapshot);
     if (snapshot && snapshot.sessionId !== sessionId) {
       throw new InvalidSessionTranscriptCursorError();
     }
@@ -3227,7 +3221,10 @@ export class SessionTranscriptReader {
     const fileIdentity = snapshot?.fileIdentity ?? currentIdentity;
     if (
       stats.size < snapshotSize ||
-      !sameFileIdentity(currentIdentity, fileIdentity)
+      !sameFileIdentity(currentIdentity, fileIdentity) ||
+      (snapshot &&
+        stats.size === snapshotSize &&
+        new Date(stats.mtimeMs).toISOString() !== snapshot.lastUpdated)
     ) {
       throw new SessionTranscriptSnapshotUnavailableError(sessionId);
     }
@@ -3260,6 +3257,28 @@ export class SessionTranscriptReader {
       startTime,
       lastUpdated,
     };
+    return { index, snapshotState };
+  }
+
+  async readTurnIndexPage(
+    sessionId: string,
+    options: SessionTranscriptReadTurnIndexOptions = {},
+  ): Promise<SessionTranscriptTurnIndexPage> {
+    const limit = normalizeLimit(options.limit);
+    if (options.start !== undefined && options.snapshot === undefined) {
+      throw new InvalidSessionTranscriptCursorError();
+    }
+    if (
+      options.start !== undefined &&
+      !isFiniteNonNegativeInteger(options.start)
+    ) {
+      throw new RangeError('Transcript turn index start must be non-negative');
+    }
+    const { index, snapshotState } = await this.readTurnIndexSnapshot(
+      sessionId,
+      options.snapshot,
+    );
+    const { startTime, lastUpdated } = snapshotState;
     const projected =
       index !== undefined && indexHasManagedHeader(index)
         ? await this.readManagedRecords(sessionId, index, {})
@@ -3359,18 +3378,17 @@ export class SessionTranscriptReader {
       !isFiniteNonNegativeInteger(start)
     )
       throw new InvalidSessionTranscriptCursorError();
-    const anchor = await this.readTurnIndexPage(sessionId, {
-      ...(options.snapshot !== undefined ? { snapshot: options.snapshot } : {}),
-      limit: 1,
-    });
-    const snapshot = this.decodeSnapshot(anchor.snapshot);
-    const index = await getCachedIndex({
-      filePath: this.getSessionFilePath(sessionId),
-      fileIdentity: snapshot.fileIdentity,
-      snapshotSize: snapshot.snapshotSize,
-      lastUpdated: snapshot.lastUpdated,
-    });
-    const base = { sessionId, promptId, snapshot: anchor.snapshot, start };
+    const { index, snapshotState } = await this.readTurnIndexSnapshot(
+      sessionId,
+      options.snapshot,
+    );
+    if (!index) return undefined;
+    const base = {
+      sessionId,
+      promptId,
+      snapshot: this.encodeSnapshot(snapshotState),
+      start,
+    };
     if (indexHasManagedHeader(index)) {
       return {
         ...base,
@@ -3380,68 +3398,102 @@ export class SessionTranscriptReader {
         coverage: 'unsupported',
       };
     }
-    const executionsById = new Map<string, HookExecutionEntry>();
-    let partial = !index.sourceReadComplete || index.gaps.length > 0;
-    await forEachAggregatedRecord(
-      index,
-      index.replayUuids.filter(
-        (uuid) =>
-          index.byUuid.get(uuid)?.turnHint.hookTurn?.promptId === promptId,
-      ),
-      (record) => {
-        const value = (
-          record.systemPayload as UiTelemetryRecordPayload | undefined
-        )?.uiEvent;
-        if (value?.['event.name'] !== 'hook_lifecycle') return;
-        const event = parseHookLifecycle(value);
-        if (!event) {
-          partial = true;
-          return;
-        }
-        if (event.sessionId !== sessionId || event.promptId !== promptId) {
-          partial = true;
-          return;
-        }
-        executionsById.set(
-          event.executionId,
-          mergeHookExecution(
-            executionsById.get(event.executionId),
-            event,
-            'replay',
-          ),
-        );
-      },
+    const cacheKey = makeCacheKey(
+      index.filePath,
+      index.fileIdentity,
+      index.snapshotSize,
+      index.lastUpdated,
     );
-    if (
-      executionsById.size === 0 &&
-      !index.replayUuids.some(
-        (uuid) => index.byUuid.get(uuid)?.turnHint.turnPromptId === promptId,
+    const cached = indexCache.get(cacheKey);
+    let turn =
+      cached?.value === index ? cached.hookTurns?.get(promptId) : undefined;
+    if (!turn) {
+      const executionsById = new Map<string, HookExecutionEntry>();
+      let partial = !index.sourceReadComplete || index.gaps.length > 0;
+      await forEachAggregatedRecord(
+        index,
+        index.replayUuids.filter(
+          (uuid) =>
+            index.byUuid.get(uuid)?.turnHint.hookTurn?.promptId === promptId,
+        ),
+        (record) => {
+          const value = (
+            record.systemPayload as UiTelemetryRecordPayload | undefined
+          )?.uiEvent;
+          if (value?.['event.name'] !== 'hook_lifecycle') return;
+          const event = parseHookLifecycle(value);
+          if (!event) {
+            partial = true;
+            return;
+          }
+          if (event.sessionId !== sessionId || event.promptId !== promptId) {
+            partial = true;
+            return;
+          }
+          executionsById.set(
+            event.executionId,
+            mergeHookExecution(
+              executionsById.get(event.executionId),
+              event,
+              'replay',
+            ),
+          );
+        },
+      );
+      if (
+        executionsById.size === 0 &&
+        !index.replayUuids.some(
+          (uuid) => index.byUuid.get(uuid)?.turnHint.turnPromptId === promptId,
+        )
       )
-    )
-      return undefined;
-    const entries = [...executionsById.values()].sort(
-      (a, b) =>
-        a.event.startedAt - b.event.startedAt ||
-        a.event.executionId.localeCompare(b.event.executionId),
-    );
+        return undefined;
+      const entries = [...executionsById.values()].sort(
+        (a, b) =>
+          a.event.startedAt - b.event.startedAt ||
+          a.event.executionId.localeCompare(b.event.executionId),
+      );
+      partial ||= entries.some(
+        (entry) => entry.conflicted || entry.status === 'unknown',
+      );
+      turn = {
+        executions: entries,
+        summary: entries.length > 0 ? summarizeHookExecutions(entries) : null,
+        coverage: partial
+          ? 'partial'
+          : entries.length > 0
+            ? 'recorded'
+            : 'unrecorded',
+      };
+      if (
+        cached?.value === index &&
+        indexCache.get(cacheKey) === cached &&
+        !cached.hookTurns?.has(promptId)
+      ) {
+        const byteSize =
+          INDEX_CONTAINER_BASE_BYTES +
+          INDEX_MAP_ENTRY_BYTES +
+          entries.length *
+            (INDEX_ENTRY_BASE_BYTES + INDEX_CONTAINER_SLOT_BYTES) +
+          estimateStringBytes(promptId) +
+          estimateStringBytes(JSON.stringify(turn));
+        if (getIndexCacheBytes() + byteSize <= getIndexCacheMaxBytes()) {
+          cached.hookTurns ??= new Map();
+          cached.hookTurns.set(promptId, turn);
+          cached.byteSize = (cached.byteSize ?? 0) + byteSize;
+        }
+      }
+    }
+    const entries = turn.executions;
     if (start > entries.length) throw new InvalidSessionTranscriptCursorError();
-    partial ||= entries.some(
-      (entry) => entry.conflicted || entry.status === 'unknown',
-    );
     const executions = entries.slice(start, start + limit);
     return {
       ...base,
       totalExecutions: entries.length,
-      executions,
-      summary: entries.length > 0 ? summarizeHookExecutions(entries) : null,
+      ...structuredClone({ executions, summary: turn.summary }),
       ...(start + executions.length < entries.length
         ? { nextStart: start + executions.length }
         : {}),
-      coverage: partial
-        ? 'partial'
-        : entries.length > 0
-          ? 'recorded'
-          : 'unrecorded',
+      coverage: turn.coverage,
     };
   }
 

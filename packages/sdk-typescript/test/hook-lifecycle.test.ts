@@ -87,4 +87,50 @@ describe('SDK hook lifecycle', () => {
       { event: start, status: 'running', conflicted: false },
     ]);
   });
+  it('replays batches through the public reducer without mutating prior state', () => {
+    const initial = reduceHookLifecycle(
+      createHookLifecycleState(),
+      frame(start),
+      {
+        source: 'live',
+      },
+    );
+    const updates = [
+      {},
+      frame({ ...start, promptId: '' }),
+      frame({
+        ...start,
+        phase: 'ended',
+        endedAt: 120,
+        durationMs: 20,
+        outcome: 'success',
+        command: 'SECRET',
+      }),
+      frame(start),
+      frame({ ...start, executionId: 'other' }),
+    ];
+    const batched = reduceHookLifecycle(initial, updates, { source: 'replay' });
+    expect(batched).toEqual(
+      updates.reduce(
+        (state, update) =>
+          reduceHookLifecycle(state, update, { source: 'replay' }),
+        initial,
+      ),
+    );
+    expect([...initial.entries.values()][0]?.status).toBe('running');
+    expect(JSON.stringify([...batched.entries.values()])).not.toContain(
+      'SECRET',
+    );
+    expect(summarizeHookExecutions(batched.entries.values())).toMatchObject({
+      totalExecutions: 2,
+      counts: { success: 1, unknown: 1 },
+      durationComplete: false,
+    });
+    expect(reduceHookLifecycle(batched, updates, { source: 'replay' })).toBe(
+      batched,
+    );
+    expect(
+      reduceHookLifecycle(initial, [{}, undefined], { source: 'live' }),
+    ).toBe(initial);
+  });
 });
