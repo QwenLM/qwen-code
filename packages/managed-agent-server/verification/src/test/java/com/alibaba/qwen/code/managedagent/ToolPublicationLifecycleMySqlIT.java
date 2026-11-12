@@ -47,6 +47,7 @@ import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.COMMI
 import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.PUBLICATION_TOKEN;
 import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.WRITER_TOKEN;
 import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.digest;
+import static com.alibaba.qwen.code.managedagent.persistence.PublicationVerification.verified;
 import static org.assertj.core.api.Assertions.assertThat;
 
 class ToolPublicationLifecycleMySqlIT {
@@ -74,6 +75,16 @@ class ToolPublicationLifecycleMySqlIT {
             var transaction = new TransactionTemplate(new DataSourceTransactionManager(source));
             ToolPublicationObjectStore objects = new ToolPublicationObjectStore() {
                 @Override
+                public InputStream openRange(String key, long offset, long length, Runnable guard) {
+                    guard.run();
+                    try (InputStream full = open(key)) {
+                        byte[] bytes = full.readAllBytes();
+                        return new java.io.ByteArrayInputStream(bytes, (int) offset, (int) length);
+                    } catch (java.io.IOException error) {
+                        throw new IllegalStateException(error);
+                    }
+                }
+                @Override
                 public void putIfAbsent(String key, byte[] bytes) {
                     throw new AssertionError("Inline fixture expected");
                 }
@@ -93,7 +104,7 @@ class ToolPublicationLifecycleMySqlIT {
             envelope.set("capture", JSON.createObjectNode().put("captureStatus", "unavailable")
                     .put("captureReason", "storage_failed").put("previewTruncated", false)
                     .put("deliveryStatus", "pending").putNull("manifest"));
-            data.finish(key, "pub-1", PUBLICATION_TOKEN, "finish", envelope.toString().getBytes(StandardCharsets.UTF_8));
+            verified(data).finish(key, "pub-1", PUBLICATION_TOKEN, "finish", envelope.toString().getBytes(StandardCharsets.UTF_8));
             var outcome = JSON.createObjectNode().put("schemaVersion", 1).put("decision", "blocked").putNull("manifestRef");
             outcome.set("envelope", envelope);
             var history = JSON.createObjectNode().put("messageId", "11111111-1111-4111-8111-111111111111")

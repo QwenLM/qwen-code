@@ -43997,6 +43997,76 @@ describe('Session', () => {
       expect(addToolCallResultAttributesSpy).not.toHaveBeenCalled();
     });
 
+    it.each([
+      { askRule: true, prompted: true },
+      { askRule: false, prompted: false },
+    ])(
+      'AUTO_EDIT honours a permissions.ask rule (askRule=$askRule) (#16795)',
+      async ({ askRule, prompted }) => {
+        const executeSpy = vi.fn().mockResolvedValue({
+          llmContent: 'contents',
+          returnDisplay: 'contents',
+        });
+        const invocation = {
+          params: { path: '/home/u/.qwen/settings.json' },
+          getDefaultPermission: vi.fn().mockResolvedValue('ask'),
+          getConfirmationDetails: vi.fn().mockResolvedValue({
+            type: 'info',
+            title: 'Read file',
+            prompt: 'Allow?',
+            onConfirm: vi.fn(),
+          }),
+          getDescription: vi.fn().mockReturnValue('Read settings'),
+          toolLocations: vi.fn().mockReturnValue([]),
+          execute: executeSpy,
+        };
+        mockToolRegistry.getTool.mockReturnValue({
+          name: 'read_file',
+          kind: core.Kind.Read,
+          build: vi.fn().mockReturnValue(invocation),
+        });
+        mockConfig.getApprovalMode = vi
+          .fn()
+          .mockReturnValue(ApprovalMode.AUTO_EDIT);
+        mockConfig.getPermissionManager = vi.fn().mockReturnValue({
+          isToolEnabled: vi.fn().mockResolvedValue(true),
+          hasRelevantRules: vi.fn().mockReturnValue(true),
+          evaluate: vi.fn().mockResolvedValue('ask'),
+          hasMatchingAskRule: vi.fn().mockReturnValue(askRule),
+          findMatchingDenyRule: vi.fn(),
+        });
+        mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
+        mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                functionCalls: [
+                  {
+                    id: 'call-auto-edit-ask',
+                    name: 'read_file',
+                    args: { path: '/home/u/.qwen/settings.json' },
+                  },
+                ],
+              },
+            },
+          ]),
+        );
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'read settings' }],
+        });
+
+        if (prompted) {
+          expect(mockClient.requestPermission).toHaveBeenCalledOnce();
+        } else {
+          expect(mockClient.requestPermission).not.toHaveBeenCalled();
+          expect(executeSpy).toHaveBeenCalledOnce();
+        }
+      },
+    );
+
     it('threads MCP permission aliases into the L1 isToolEnabled gate', async () => {
       // A legacy-spelled MCP deny can only name the registered provider-safe
       // tool through the tool's advertised permissionAliases. The ACP L1 gate

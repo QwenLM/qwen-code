@@ -140,6 +140,7 @@ export const MainContent = ({
 }: MainContentProps) => {
   const { version } = useAppContext();
   const uiState = useUIState();
+  const transcriptSessionId = uiState.historyManager.sessionId;
   const { allExpanded: fullDetail } = useThoughtExpanded();
   const streamingState = uiState.streamingState;
   const showScrollbar = uiState.showScrollbar ?? true;
@@ -508,6 +509,7 @@ export const MainContent = ({
           sourceCopyIndexOffsets={sourceCopyIndexOffsets}
           thoughtHeadId={thoughtHeadIdByItemRef.current.get(item)}
           fullDetail={fullDetail}
+          modSessionId={transcriptSessionId}
         />
       );
     },
@@ -521,6 +523,7 @@ export const MainContent = ({
       fullDetail,
       pendingAvailableTerminalHeight,
       uiState.constrainHeight,
+      transcriptSessionId,
     ],
   );
 
