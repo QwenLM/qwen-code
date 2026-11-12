@@ -1105,6 +1105,12 @@ describe('speculation shared-round event semantics', () => {
       messages: state.messages,
       status: state.status,
       toolUseCount: state.toolUseCount,
+      requests: forkedAgentMocks.sendMessageStream.mock.calls.map((call) => ({
+        message: call[1]?.message as Part[] | undefined,
+        abortSignal: call[1]?.config?.abortSignal as AbortSignal | undefined,
+        promptId: call[2] as string | undefined,
+      })),
+      stateSignal: state.abortController?.signal,
     };
     await abortSpeculation(state);
     return snapshot;
@@ -1177,5 +1183,98 @@ describe('speculation shared-round event semantics', () => {
     expect(off.status).toBe('completed');
     expect(on.status).toBe('completed');
     expect(on.toolUseCount).toBe(0);
+  });
+
+  const modelCalls = (messages: Content[]) =>
+    (messages.find((m) => m.role === 'model')?.parts ?? [])
+      .filter((p) => p.functionCall)
+      .map((p) => p.functionCall!);
+  const responseIds = (messages: Content[]) =>
+    messages
+      .filter((m) => m.role === 'user')
+      .flatMap((m) => m.parts ?? [])
+      .filter((p) => p.functionResponse)
+      .map((p) => p.functionResponse!.id);
+
+  it('the next round sends the tool results, under the speculation prompt id', async () => {
+    const call = {
+      parts: [fnCall('read_file', { path: 'a.ts' }, 'call-req')],
+      functionCalls: [
+        { id: 'call-req', name: 'read_file', args: { path: 'a.ts' } },
+      ],
+    };
+    const off = await runEventRound(false, [
+      chunk(call.parts, call.functionCalls),
+    ]);
+    const on = await runEventRound(true, [
+      chunk(call.parts, call.functionCalls),
+    ]);
+    for (const arm of [off, on]) {
+      expect(arm.requests.length).toBeGreaterThanOrEqual(2);
+      expect(arm.requests[0].promptId).toBe('speculation');
+      expect(arm.requests[1].promptId).toBe('speculation');
+      // Round 2 carries the call's functionResponse, not the original prompt.
+      expect(arm.requests[1].message?.some((p) => p.functionResponse)).toBe(
+        true,
+      );
+      expect(arm.requests[1].message?.some((p) => p.text === 'read a.ts')).toBe(
+        false,
+      );
+    }
+  });
+
+  it('the shared round sends the run abort signal in the request', async () => {
+    const on = await runEventRound(true, [chunk([{ text: 'done' }])]);
+    expect(on.requests[0].abortSignal).toBe(on.stateSignal);
+    // abortSpeculation ran, so the very signal the request carries is aborted.
+    expect(on.requests[0].abortSignal?.aborted).toBe(true);
+    const off = await runEventRound(false, [chunk([{ text: 'done' }])]);
+    expect(off.requests[0].abortSignal).toBeUndefined();
+  });
+
+  it('an id-less named call gains a generated id shared by call and response', async () => {
+    const on = await runEventRound(true, [
+      chunk(
+        [{ functionCall: { name: 'read_file', args: { path: 'a.ts' } } }],
+        [{ name: 'read_file', args: { path: 'a.ts' } }],
+      ),
+    ]);
+    expect(on.status).toBe('completed');
+    const calls = modelCalls(on.messages);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].id).toBeTruthy();
+    expect(responseIds(on.messages)).toEqual([calls[0].id]);
+  });
+
+  it.each([
+    { name: 'a fresh retry', event: { type: 'retry', isContinuation: false } },
+    {
+      name: 'a model fallback',
+      event: {
+        type: 'model_fallback',
+        info: {
+          fromModel: 'm1',
+          toModel: 'm2',
+          statusCode: 429,
+          fallbackIndex: 1,
+        },
+      },
+    },
+  ])('$name drops an abandoned call, not only text', async ({ event }) => {
+    const on = await runEventRound(true, [
+      chunk(
+        [fnCall('read_file', { path: 'a.ts' }, 'call-abandoned')],
+        [{ id: 'call-abandoned', name: 'read_file', args: { path: 'a.ts' } }],
+      ),
+      event,
+      chunk(
+        [fnCall('read_file', { path: 'b.ts' }, 'call-kept')],
+        [{ id: 'call-kept', name: 'read_file', args: { path: 'b.ts' } }],
+      ),
+    ]);
+    expect(on.status).toBe('completed');
+    expect(modelCalls(on.messages).map((c) => c.id)).toEqual(['call-kept']);
+    expect(on.toolUseCount).toBe(1);
+    expect(responseIds(on.messages)).toEqual(['call-kept']);
   });
 });

@@ -2,7 +2,7 @@
 
 [English](2026-10-23-unified-agent-loop.md) | [简体中文](2026-10-23-unified-agent-loop.zh-CN.md)
 
-- **Status**: accepted in #15343. The headless (PR 1, #15369), ACP (PR 2, #15509–#16190), Ink TUI (PR 3, #16206–#16704), OpenTUI (PR 4, #16743–#16820) and AgentCore (PR 5, #16880) migrations are merged; each surface's default flip waits on the nightly unified-loop E2E gate (#16192). PR 6a (speculation's model round, #17029) is in review.
+- **Status**: accepted in #15343. The headless (PR 1, #15369), ACP (PR 2, #15509–#16190), Ink TUI (PR 3, #16206–#16704) and OpenTUI (PR 4, #16743–#16820) migrations are merged; AgentCore has its model round and tool batch on the loop (PR 5a #16880, 5b #17035) with the run itself (5c) and its default flip left; each moved surface's default flip waits on the nightly unified-loop E2E gate (#16192). PR 6a (speculation's model round, #17029) is in review.
 - **Date**: 2026-10-23, against upstream `779a4d5d0d`.
 - **Related**:
   - tracking issue #15327;
