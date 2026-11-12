@@ -2634,6 +2634,7 @@ describe('release workflow', () => {
     preLoopSeconds = 0,
     postGateFailAt = 2,
     dockerPsFails = false,
+    dockerPsIds = '',
     aptDefaultRate,
     aptAliyunRate,
     aptTunaRate,
@@ -2671,6 +2672,10 @@ echo $(( \${STUB_DATE_START:-1000000} + offset ))`,
 if [ "$1" = 'ps' ] && [ "$DOCKER_PS_FAILS" = '1' ]; then
   echo 'ERROR: cannot connect to the Docker daemon' >&2
   exit 1
+fi
+if [ "$1" = 'ps' ] && [ -n "$DOCKER_PS_IDS" ]; then
+  printf '%s\n' "$DOCKER_PS_IDS"
+  exit 0
 fi
 if [ "$1" = 'image' ] && [ "$2" = 'inspect' ]; then
   if [ "$3" = '--format' ]; then
@@ -2795,6 +2800,7 @@ esac`,
         BUILD_SECONDS: String(preLoopSeconds),
         POST_GATE_FAIL_AT: String(postGateFailAt),
         DOCKER_PS_FAILS: dockerPsFails ? '1' : '0',
+        DOCKER_PS_IDS: dockerPsIds,
         CURL_DEFAULT_RATE: String(aptDefaultRate ?? 10000),
         CURL_ALIYUN_RATE: String(aptAliyunRate ?? 5000000),
         CURL_TUNA_RATE: String(aptTunaRate ?? 0),
@@ -2923,6 +2929,7 @@ esac`,
     () => {
       const { result, calls } = runDockerIntegrationScript({
         suiteFailures: 1,
+        dockerPsIds: 'cid-alpha\ncid-beta',
       });
       expect(result.status, result.stderr).toBe(0);
       expect(result.stdout).toContain('retrying once');
@@ -2938,8 +2945,8 @@ esac`,
       expect(
         lines
           .slice(firstCli, secondCli)
-          .some((line) => line.startsWith('docker ps -aq')),
-      ).toBe(true);
+          .filter((line) => line.startsWith('docker rm -f')),
+      ).toEqual(['docker rm -f cid-alpha cid-beta']);
       expect(
         lines.filter(
           (line) =>
@@ -3132,6 +3139,31 @@ esac`,
       expect(result.stdout).toContain('failed after 120s; retrying once');
       // pre-suite 472s + failed cli 120s + the 1272s retry + interactive 120s.
       expect(modelledSeconds).toBe(1984);
+      expect(
+        calls
+          .trim()
+          .split('\n')
+          .filter(
+            (line) => line.startsWith('npx vitest') && line.endsWith(' cli'),
+          ),
+      ).toHaveLength(2);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'admits a retry that exactly fits the step budget',
+    () => {
+      // 540s of pre-suite work plus a 2400s cli failure leaves 2940s spent;
+      // the 2400s retry charge and the 1260s interactive reserve then model
+      // the step at exactly 6600s. Equality fits; only a strict overrun is
+      // refused.
+      const { result, calls } = runDockerIntegrationScript({
+        suiteFailures: 1,
+        suiteSeconds: 2400,
+        preLoopSeconds: 540,
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout).toContain('failed after 2400s; retrying once');
       expect(
         calls
           .trim()
