@@ -455,7 +455,14 @@ describe('the ephemeral image seeds the runtime archives', () => {
     // the hash would compare a sha256 against it and fail every build — or,
     // with the comparison dropped, verify nothing.
     expect(text).toContain('createHash("sha512")');
-    expect(text).toMatch(/if\s*\(got\s*!==\s*want\)/);
+    // The comparison alone is not the guard: with the exit dropped the layer
+    // prints the mismatch and exits 0, so the image ships unverified bytes while
+    // this assertion stays green (measured). Pin the exit inside the branch.
+    expect(text).toMatch(
+      // `[\s\S]` and a bounded window: the branch's own console.error is a
+      // template literal, so its `${...}` braces defeat a `[^}]*` scan.
+      /if\s*\(got\s*!==\s*want\)\s*\{[\s\S]{0,400}?process\.exit\(1\)/,
+    );
   });
 
   // A partial or corrupt archive must fail the build, not a job: the digest
@@ -470,8 +477,17 @@ describe('the ephemeral image seeds the runtime archives', () => {
     const last = runs.at(-1);
     expect(last).toContain('QWEN_CI_BAKED_RUNTIME_CACHE');
     expect(last).toContain("-name '*.tgz'");
+    expect(last).toContain("-name '*.tar.gz'");
     expect(last).toContain('-eq 2');
-    expect(last).toContain('tar -tzf');
+    // Both listings, named: a single `tar -tzf` substring stayed green with the
+    // Node line deleted (measured), which is the half that would ship an image
+    // whose Node archive nobody ever unpacked.
+    expect(last).toContain(
+      'tar -tzf "${QWEN_CI_BAKED_RUNTIME_CACHE}"/node-v*.tar.gz > /dev/null',
+    );
+    expect(last).toContain(
+      'tar -tzf "${QWEN_CI_BAKED_RUNTIME_CACHE}"/bun-linux-*.tgz > /dev/null',
+    );
   });
 
   // The seed cannot BE the cache: marking an archive used writes its mtime and
@@ -490,7 +506,12 @@ describe('the ephemeral image seeds the runtime archives', () => {
     );
     expect(entrypoint).toContain('mkdir -p "$runtime_cache"');
     expect(entrypoint).toContain('[ -e "$target" ] && continue');
-    expect(entrypoint).toMatch(/cp "\$archive" "\$target" 2>\/dev\/null \|\|/);
+    // No `2>/dev/null` on the copy: cp's own message is the only thing that
+    // tells a full writable layer apart from an unreachable registry, and those
+    // two need opposite responses. `||` must stay — under `set -euo pipefail`
+    // it is what keeps a failed seed from taking the runner down.
+    expect(entrypoint).toMatch(/cp "\$archive" "\$target" \|\|/);
+    expect(entrypoint).not.toContain('cp "$archive" "$target" 2>/dev/null');
     // `exec` replaces the process, so anything after it never runs: seeding
     // below it would ship an image that still downloads both archives while
     // every assertion about the copy itself stayed green. Order alone is not
@@ -670,6 +691,79 @@ describe('the archive selectors match both real filenames', () => {
       }
     },
   );
+
+  // The `.cache`-level case above fails at `mkdir -p`, so the copy never runs
+  // and both branches print the same sentence. This one creates the destination
+  // first and makes only the write fail, which is the branch the message is
+  // supposed to distinguish — and cp's own error must survive to stderr.
+  it.skipIf(!arePermissionBitsEnforced())(
+    'says the copy failed, with the reason, when only the copy fails',
+    () => {
+      const home = fs.mkdtempSync(path.join(os.tmpdir(), 'runtime-home-'));
+      const { dir } = seedInto(home);
+      // Empty the destination first: an archive already in place is skipped by
+      // the `[ -e "$target" ] && continue` guard, so the copy would never run.
+      for (const name of fs.readdirSync(dir)) {
+        fs.rmSync(path.join(dir, name));
+      }
+      fs.chmodSync(dir, 0o500);
+      try {
+        const { result } = seedInto(home);
+        expect(result.status).toBe(0);
+        expect(result.stderr).toContain('could not seed');
+        // cp's diagnostic, not ours: with `2>/dev/null` restored this is empty.
+        expect(result.stderr).toMatch(
+          /Permission denied|Operation not permitted/,
+        );
+      } finally {
+        fs.chmodSync(dir, 0o700);
+        fs.rmSync(home, { recursive: true, force: true });
+      }
+    },
+  );
+
+  // The image spells the filenames in its own shell, the script in its own
+  // template literals. Version, digest and cache path already have cross-site
+  // assertions; the FILENAMES had none, and that is the half that fails
+  // silently: rename one in the image and the build bakes a file the script
+  // never looks for, so every job downloads anyway and nothing reds.
+  it('spells the archive filenames the way the standalone script does', () => {
+    const docker = read('scripts/ci/ephemeral-runner/Dockerfile');
+    const arg = (name) =>
+      new RegExp(`^ARG ${name}=(.+)$`, 'm').exec(docker)?.[1];
+    const nodeVersion = arg('NODE_RUNTIME_VERSION');
+    const bunVersion = arg('BUN_RUNTIME_VERSION');
+    expect(nodeVersion, 'NODE_RUNTIME_VERSION ARG').toBeTruthy();
+    expect(bunVersion, 'BUN_RUNTIME_VERSION ARG').toBeTruthy();
+    // Both sides' naming rules, pinned as the source of truth they are: the
+    // image's file templates and arch mapping here, the script's expressions
+    // inside filenames() below.
+    expect(docker).toContain(
+      'node_file="node-v${NODE_RUNTIME_VERSION}-linux-${node_arch}.tar.gz"',
+    );
+    expect(docker).toContain(
+      'bun_file="bun-linux-${bun_arch}-${BUN_RUNTIME_VERSION}.tgz"',
+    );
+    const arms = Object.fromEntries(
+      [
+        ...docker.matchAll(/(amd64|arm64)\) node_arch=(\S+); bun_arch=(\S+);/g),
+      ].map(([, arch, nodeArch, bunArch]) => [arch, { nodeArch, bunArch }]),
+    );
+    expect(Object.keys(arms).sort()).toEqual(['amd64', 'arm64']);
+    for (const [imageArch, scriptArch] of [
+      ['amd64', 'x64'],
+      ['arm64', 'arm64'],
+    ]) {
+      const { nodeArch, bunArch } = arms[imageArch];
+      expect(
+        [
+          `node-v${nodeVersion}-linux-${nodeArch}.tar.gz`,
+          `bun-linux-${bunArch}-${bunVersion}.tgz`,
+        ],
+        `${imageArch}: the image and the script must name the same archives`,
+      ).toEqual(filenames(scriptArch));
+    }
+  });
 
   // An existing entry is left alone, so a future image that mounts a real cache
   // keeps whatever that cache verified rather than having it overwritten.

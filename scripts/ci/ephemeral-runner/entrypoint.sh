@@ -28,7 +28,12 @@ if [ -n "${QWEN_CI_BAKED_RUNTIME_CACHE:-}" ] &&
       [ -f "$archive" ] || continue
       target="${runtime_cache}/$(basename "$archive")"
       [ -e "$target" ] && continue
-      cp "$archive" "$target" 2>/dev/null ||
+      # No `2>/dev/null`: cp's own error is the only thing that distinguishes a
+      # full writable layer or an unwritable $HOME from a network failure, and
+      # the two diagnoses are opposite. `||` stays — under `set -euo pipefail` it
+      # is what keeps a failed seed from failing the runner; the fetch falls
+      # back to downloading.
+      cp "$archive" "$target" ||
         echo "could not seed ${target}; the job will download it" >&2
     done
   else

@@ -101,10 +101,13 @@ When that download fails, no test fails. Each archive gets three attempts at
 side lane's verdict — after every workspace suite and the whole scripts suite
 have already passed. Job
 [131062149608](https://github.com/QwenLM/qwen-code/actions/runs/43168498988/job/131062149608)
-reads exactly that: the Node archive came from the cache, Bun timed out three
-times against `registry.npmjs.org`, and the lane reported `Side lane exited with
-1` under 2786 passing script tests. The unit lane's RPC retry cannot help,
-because the failure is not inside a suite.
+reads exactly that: both archives were downloaded — `runtime archive cached:` is
+logged after the fetch writes the file back, not on a hit (a hit logs
+`runtime archive reused from cache:`) — and then Bun timed out three times against
+`registry.npmjs.org`, so the lane reported `Side lane exited with 1` under 2786
+passing script tests. That is roughly 110 MB of downloads per job with nothing
+reused. The unit lane's RPC retry cannot help, because the failure is not inside a
+suite.
 
 The archives are verified during the build against the published digests the
 script already checks: Node's `SHASUMS256.txt` entry and Bun's npm

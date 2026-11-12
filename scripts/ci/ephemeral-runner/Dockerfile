@@ -100,11 +100,14 @@ RUN set -eu \
 # The cost is not just time. `fetchVerifiedArchive` gives each archive three
 # attempts at 300 s each, then rethrows, and the side lane's standalone step
 # exits 1 — after every workspace suite and the whole scripts suite have
-# already passed. Job 131062149608 (#16895) reads exactly that: the Node
-# archive was cached, Bun timed out three times on registry.npmjs.org, and the
-# lane reported `Side lane exited with 1` under 2786 passing script tests. A
-# transport timeout there reddens a required check with no test failing, which
-# no retry of a suite can fix because the failure is not in a suite.
+# already passed. Job 131062149608 (#16895) reads exactly that: both archives
+# were downloaded and then written back to the cache — `runtime archive cached:`
+# is logged after the fetch, while a hit logs `runtime archive reused from
+# cache:` — so the job paid ~110 MB with nothing reused, and Bun then timed out
+# three times on registry.npmjs.org. The lane reported `Side lane exited with 1`
+# under 2786 passing script tests. A transport timeout there reddens a required
+# check with no test failing, which no retry of a suite can fix because the
+# failure is not in a suite.
 #
 # Seeded, not baked over the env var: the cache directory must stay writable,
 # because `markUsed` refreshes each archive's mtime and `sweepRuntimeCache`
