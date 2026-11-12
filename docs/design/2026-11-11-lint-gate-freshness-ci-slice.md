@@ -121,6 +121,17 @@ two steps in `.github/workflows/ci.yml`, the two workflow meta-tests that pin
 where those steps sit (`scripts/tests/sdk-java-workflow.test.js`,
 `scripts/tests/ci-platform-lanes.test.js`), and this document pair.
 
+Also in scope, and folded in rather than landed separately: the wiring pins on
+the `Report test growth` step in the same job
+(`.github/scripts/check-test-growth.test.mjs`), which closes #16991 and
+supersedes #16993. It edits assertions about a gate this document already
+describes, so keeping it in its own PR meant two PRs racing on the same
+literals. Three more follow-ups are folded in for the same reason: the freshness
+step's exit-status pin (was #17007), ESLint on the `github_ci_only` profile
+(was #17004), and the corrected rationale for the no-AK typecheck heap cap
+(was #17008). The PR description carries the detail; the validation plan below
+carries the evidence.
+
 `ci.yml` **is** edited, unlike earlier revisions of this change. Two edits, both
 forced by the parser, neither changing what the gate checks:
 
@@ -528,10 +539,48 @@ model, which `main` does not have.
 6. Live API on the branch that motivated the report (#16939 at `07d89196bd21`):
    it must stay stale, because #16920 really did change the Prettier lane.
 
+7. The folded test-growth pins (#16991):
+   `node --test .github/scripts/check-test-growth.test.mjs` — **7 cases, all
+   green**, unchanged in count. This suite stays in `HELPER_TESTS_DEP_FREE`, so
+   it imports `node:` builtins only and reads the workflow as text rather than
+   parsing it. Thirteen mutations were applied one at a time to the real
+   `ci.yml` at `42254a95`, each run and reverted; every one leaves 6 pass / 1
+   fail with the message named below, and the restored file is 7/7:
+
+   | Mutation on `Report test growth`                             | Failing assertion                      |
+   | ------------------------------------------------------------ | -------------------------------------- |
+   | append `&& … != 'docs_only'` to its gate                     | `test growth gate drifted`             |
+   | drop the `skip_ci != 'true'` arm                             | `test growth gate drifted`             |
+   | exclude `github_ci_only` instead of having no profile arm    | `test growth gate drifted`             |
+   | comment the gate out                                         | `test growth gate drifted`             |
+   | remove `continue-on-error: true`                             | `test growth step must stay advisory`  |
+   | replace it with a same-indent comment saying the same thing  | `test growth step must stay advisory`  |
+   | rename the script it runs                                    | `step must run the test growth script` |
+   | empty `GITHUB_TOKEN`, `BASE_SHA` or `HEAD_SHA` (three runs)  | `test growth step must pass …`         |
+   | rename those three keys with a `TEST_GROWTH_` prefix (three) | `test growth step must pass …`         |
+
+   The env rows are pinned as whole lines rather than as keys or values because
+   the script returns early — one warning, exit 0, no summary — when any of the
+   three names is absent. A key-only pin accepts an empty value and a value-only
+   pin accepts a renamed key; either leaves the report a permanent no-op behind
+   a green check, since the step is `continue-on-error`. The commented-out gate
+   is caught even though the identical literal survives in the step's trailing
+   prose, because the regex anchors on the field's indent rather than the text.
+
+   Severity here is deliberately lower than the freshness gate's: this step is
+   advisory by contract and publishes no output any other step or job consumes,
+   and the report only counts paths inside `packages/{core,cli,web-shell}/`. The
+   case for pinning it is that the gate is intentionally profile-free, so an
+   appended profile clause could only narrow it, and the day the step stops
+   being advisory or grows an output that narrowing starts to matter with no
+   test having gone red.
+
 ## Acceptance criteria
 
-- The suite passes, and all thirteen mutations redden it — the eight on the
-  model and the five on the suite step's wiring.
+- The freshness suite passes, and all thirteen mutations redden it — the eight
+  on the model and the five on the suite step's wiring.
+- The folded test-growth suite passes at 7 cases, and its thirteen mutations each
+  redden it with the assertion named in item 7 of the validation plan.
 - Thirteen of thirteen historical `ci.yml` commits receive the same stale-or-fresh
   decision from the parser as from the line model it replaces, with neither side
   refusing a pair.

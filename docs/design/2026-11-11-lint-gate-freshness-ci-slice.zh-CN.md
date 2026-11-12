@@ -57,6 +57,8 @@
 
 范围内：`.github/scripts/check-lint-gate-freshness.mjs`、其同目录测试、`.github/workflows/ci.yml` 中的两个步骤、钉住这两个步骤位置的两个 workflow 元测试（`scripts/tests/sdk-java-workflow.test.js`、`scripts/tests/ci-platform-lanes.test.js`），以及这份双语文档。
 
+同样在范围内、且是并入而非单独合入的：同一个 job 里 `Report test growth` 步骤的接线断言（`.github/scripts/check-test-growth.test.mjs`），它关闭 #16991 并取代 #16993。它断言的是本文档已经在描述的那个闸门，单独开 PR 就意味着两个 PR 在同一批字面量上互相打架。另有三个后续改动出于同样原因并入：freshness 步骤的退出码断言（原 #17007）、`github_ci_only` profile 上也跑 ESLint（原 #17004）、以及 no-AK typecheck 堆上限依据的纠正（原 #17008）。细节在 PR 正文，证据在下面的验证计划。
+
 与早期修订不同，`ci.yml` **确实被修改**。两处改动都由解析器逼出来，都不改变闸门检查什么：
 
 - `Check lint gate freshness` 从 `Install dependencies` 之前移到之后。它用 `yaml` 包解析文件，而该包要等依赖安装完才存在。它的 `if:` 表达式、profile 门控与 `::warning::` 文案一律不变——**只改位置**。
@@ -245,9 +247,28 @@ merge base 取自该检查**已经做过**的包含比较，因此 narrowing 不
 5. 针对真实 workflow 的切片完整性：每个 `scripts/lint.js` lane 参数与两个 `HELPER_TESTS` 清单都必须在切片中存活，且每个 plumbing 名称都存在于两个闸门 job 中。
 6. 真实 API 验证触发本次报告的那个分支（#16939 在 `07d89196bd21`）：它必须保持 stale，因为 #16920 确实改了 Prettier lane。
 
+7. 并入的 test-growth 断言（#16991）：`node --test .github/scripts/check-test-growth.test.mjs` —— **7 个用例全绿**，用例数不变。该套件仍在 `HELPER_TESTS_DEP_FREE`，因此只能 import `node:` 内置模块，并按文本而不是解析的方式读 workflow。在 `42254a95` 上对真实 `ci.yml` 逐个施加十三处变异，每次跑完即还原；逐一得到 6 通过 / 1 失败并报出下表命名的消息，还原后 7/7：
+
+   | 对 `Report test growth` 的变异                           | 失败的断言                             |
+   | -------------------------------------------------------- | -------------------------------------- |
+   | 给它的 gate 追加 `&& … != 'docs_only'`                   | `test growth gate drifted`             |
+   | 去掉 `skip_ci != 'true'` 那一臂                          | `test growth gate drifted`             |
+   | 改为排除 `github_ci_only`，而不是不带 profile 分支       | `test growth gate drifted`             |
+   | 把 gate 注释掉                                           | `test growth gate drifted`             |
+   | 删掉 `continue-on-error: true`                           | `test growth step must stay advisory`  |
+   | 换成同缩进、写着同样内容的注释行                         | `test growth step must stay advisory`  |
+   | 给它运行的脚本改名                                       | `step must run the test growth script` |
+   | 把 `GITHUB_TOKEN`、`BASE_SHA` 或 `HEAD_SHA` 置空（3 次） | `test growth step must pass …`         |
+   | 给这三个 key 加 `TEST_GROWTH_` 前缀改名（3 次）          | `test growth step must pass …`         |
+
+   env 三行按整行钉住、而不是按 key 或 value，是因为只要这三个名字缺任何一个，脚本就提前返回——一条 warning、exit 0、没有摘要。只钉 key 会接受空值，只钉 value 会接受被改名的 key；两种情况都会让这份报告在一个绿勾后面永久空转，因为这一步是 `continue-on-error`。gate 被注释掉仍会被抓到——即使完全相同的字面量还留在该步骤后面的说明文字里，因为正则锚的是字段的缩进而不是文本。
+
+   这里的严重性刻意低于 freshness 闸门：这一步按约定是 advisory，且不发布任何被其他步骤或 job 消费的输出，报告也只统计 `packages/{core,cli,web-shell}/` 内的路径。钉住它的理由是：这个 gate 有意不带 profile 条件，所以追加一个 profile 子句只能收窄它；而在这一步不再是 advisory、或者长出一个输出的那天，那种收窄就开始有意义，却不会有任何测试变红。
+
 ## 验收标准
 
-- 测试通过，且十三个 mutation 都能让它变红——模型上的八个，加上套件步骤接线上的五个。
+- freshness 套件通过，且十三个 mutation 都能让它变红——模型上的八个，加上套件步骤接线上的五个。
+- 并入的 test-growth 套件在 7 个用例上通过，且它的十三处变异逐一让它变红，报出验证计划第 7 项命名的断言。
 - 十三个历史 `ci.yml` 提交中，十三个都从解析器得到的 stale-or-fresh 判定与被替换的行模型相同，且两侧都没有拒绝任何一对。
 - 在 `main` `2a9c4f8732` 上，其中七次不再要求 rebase，另外六次仍然要求。这七次全部属于纯 plumbing，那六次全部都改变了闸门。
 - #16939 的失败被保留。
