@@ -195,11 +195,15 @@ resolve below `4.6.6`.
 
 ## Validation plan
 
-- Run the package's whole suite: `cd packages/browser-use && npx vitest run`.
-  It collects `src/core/schemas.test.ts` — including the two bounded
-  child-process probes that fail fast rather than hang if the second-parse
-  defect returns — and `src/core/errors.test.ts`, which owns the model-facing
-  argument-error contract.
+- Run the package's whole suite with the parameters CI uses:
+  `cd packages/browser-use && RUNNER_NAME=ecs-qwen-local npx vitest run --retry=2
+--maxWorkers=2`. It collects `src/core/schemas.test.ts` — including the two
+  bounded child-process probes that fail fast rather than hang if the
+  second-parse defect returns — and `src/core/errors.test.ts`, which owns the
+  model-facing argument-error contract. Build `packages/node-repl` first if you
+  want the 3 `runtime-kernel` cases to run rather than skip. The bare
+  `npx vitest run` leaves three subprocess-heavy files on Vitest's 5 s default
+  and reports failures unrelated to this change; see Verified results.
 - Run `npx vitest run --config ./scripts/tests/vitest.config.ts
 scripts/tests/browser-use-assets.test.js` for the new pin assertion, and
   confirm it fails when the manifest is moved back to `^3.25.76`.
@@ -220,13 +224,34 @@ scripts/tests/browser-use-assets.test.js` for the new pin assertion, and
 
 ### Verified results
 
-- `packages/browser-use` suite (`npx vitest run`): 26 files, 612 passed (612),
-  including both child-process probes (`rejected`, `stable`) and all 9
-  `errors.test.ts` cases. CI runs the same suite in two shards; shard 2/2
-  reports 13 files, 302 passed (302).
+- `packages/browser-use` suite under CI's own parameters: 26 files, 612 passed
+  (612), including both child-process probes (`rejected`, `stable`), all 9
+  `errors.test.ts` cases, and the 3 `runtime-kernel` cases that load the emitted
+  `dist/index.js` through the real node_repl kernel. CI runs the same suite in
+  two shards; shard 1/2 reports 13 files, 310 passed (310) and shard 2/2 reports
+  13 files, 302 passed (302) — 612 between them.
+- **Reproducing that needs CI's parameters, not the bare command.** This suite
+  spawns child processes and Unix-socket servers, and three of its files do it
+  heavily enough to exceed Vitest's 5 s default on a loaded host. The package's
+  `vitest.config.ts` raises `testTimeout` to 60 s only when `RUNNER_NAME` starts
+  with `ecs-qwen-`, and CI additionally passes `--retry=2` and caps the side
+  lane's workers at half of 4. So the reproducible invocation is
+  `RUNNER_NAME=ecs-qwen-local npx vitest run --retry=2 --maxWorkers=2`. Plain
+  `npx vitest run` on the same tree reports 2 failed / 607 passed / 3 skipped,
+  and the failures are `scripts/smoke-checks.test.ts` (whose own `spawnSync`
+  budget is 20 s, four times the test timeout it is charged against),
+  `src/bridge/native-host/index.test.ts` and `src/bridge/discovery.test.ts`.
+  None of those three files imports Zod, none differs from `main`, and all pass
+  under the invocation above — this is a pre-existing property of the suite on
+  a loaded host, not something the upgrade introduced. It is recorded here
+  because the first round of this PR reported those same failures as host load
+  without naming the mechanism, which left a reviewer following the written
+  command with a red suite and no explanation.
 - A worktree that has not built `packages/node-repl` and `packages/browser-use`
   skips 3 `src/runtime-kernel.test.ts` cases (609 passed, 3 skipped of 612);
-  CI builds both packages, so all 612 run there.
+  CI builds both packages, so all 612 run there. Building `packages/node-repl`
+  alone is enough to un-skip them locally, since `packages/browser-use/dist` is
+  produced by the same `node build.mjs` used for the size measurement.
 - `scripts/tests/browser-use-assets.test.js`: 12 passed. Reverting the manifest
   to `^3.25.76` fails the assertion with `expected '^3.25.76' to match /^\^4\./`;
   declaring `^4.0.0` and resolving `4.0.0` fails the `4.6.6` floor with

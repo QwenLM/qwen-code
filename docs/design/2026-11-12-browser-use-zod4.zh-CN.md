@@ -158,9 +158,13 @@ GHSA-mrhx-c7xc-m3w5 的版本），并要求 lockfile 中该 importer 解析出�
 
 ## 验证计划
 
-- 运行本包的完整套件：`cd packages/browser-use && npx vitest run`。它会收集
+- 用 CI 所用的参数运行本包完整套件：`cd packages/browser-use &&
+RUNNER_NAME=ecs-qwen-local npx vitest run --retry=2 --maxWorkers=2`。它会收集
   `src/core/schemas.test.ts`（含两个有界子进程探针，若第二次 parse 的缺陷回归会
-  快速失败而不是挂起）与 `src/core/errors.test.ts`（面向模型的参数错误契约）。
+  快速失败而不是挂起）与 `src/core/errors.test.ts`（面向模型的参数错误契约）。若希望那
+  3 个 `runtime-kernel` 用例真正运行而不是跳过，请先构建 `packages/node-repl`。裸的
+  `npx vitest run` 会让三个重度依赖子进程的文件停在 Vitest 的 5 s 默认值上，并报出与本次
+  改动无关的失败；详见「已验证结果」。
 - 运行 `npx vitest run --config ./scripts/tests/vitest.config.ts
 scripts/tests/browser-use-assets.test.js` 验证新增的 pin 断言，并确认把 manifest 改回
   `^3.25.76` 时它会失败。
@@ -177,12 +181,26 @@ scripts/tests/browser-use-assets.test.js` 验证新增的 pin 断言，并确认
 
 ### 已验证结果
 
-- `packages/browser-use` 套件（`npx vitest run`）：26 个文件、612 项通过（共 612），
-  含两个子进程探针（`rejected`、`stable`）与 `errors.test.ts` 全部 9 项。
-  CI 以两个 shard 运行同一套件；shard 2/2 为 13 个文件、302 项通过（共 302）。
+- 按 CI 自身参数运行 `packages/browser-use` 套件：26 个文件、612 项通过（共 612），
+  含两个子进程探针（`rejected`、`stable`）、`errors.test.ts` 全部 9 项，以及通过真实
+  node_repl kernel 加载产出的 `dist/index.js` 的 3 个 `runtime-kernel` 用例。CI 以两个
+  shard 运行同一套件；shard 1/2 为 13 个文件、310 项通过（共 310），shard 2/2 为 13 个
+  文件、302 项通过（共 302）—— 两者合计 612。
+- **要复现它需要 CI 的参数，而不是那条裸命令。** 本套件会 spawn 子进程与 Unix socket
+  服务端，其中三个文件的用量足以在高负载机器上超过 Vitest 的 5 s 默认值。本包的
+  `vitest.config.ts` 只在 `RUNNER_NAME` 以 `ecs-qwen-` 开头时把 `testTimeout` 提到 60 s，
+  而 CI 还额外传入 `--retry=2`，并把 side lane 的 worker 数限制为 4 的一半。因此可复现的
+  调用方式是 `RUNNER_NAME=ecs-qwen-local npx vitest run --retry=2 --maxWorkers=2`。
+  在同一棵树上跑裸的 `npx vitest run` 会得到 2 失败 / 607 通过 / 3 跳过，失败来自
+  `scripts/smoke-checks.test.ts`（它自己的 `spawnSync` 预算是 20 s，是所在用例超时的
+  四倍）、`src/bridge/native-host/index.test.ts` 与 `src/bridge/discovery.test.ts`。
+  这三个文件都不引入 Zod，都与 `main` 无差异，且在上述调用方式下全部通过 —— 这是本套件
+  在高负载机器上早已存在的性质，不是本次升级引入的。之所以记在这里：本 PR 第一轮把同样
+  这些失败报为「主机负载」却没点明机制，让照着文档命令跑的评审拿到一个红套件而无从解释。
 - 未构建 `packages/node-repl` 与 `packages/browser-use` 的 worktree 会跳过 3 个
   `src/runtime-kernel.test.ts` 用例（609 项通过、3 项跳过，共 612）；CI 会构建这两个包，
-  因此全部 612 项都会运行。
+  因此全部 612 项都会运行。本地只构建 `packages/node-repl` 就足以让它们不再跳过，因为
+  `packages/browser-use/dist` 由体积测量所用的同一个 `node build.mjs` 产出。
 - `scripts/tests/browser-use-assets.test.js`：12 项通过。把 manifest 改回 `^3.25.76` 后，
   断言以 `expected '^3.25.76' to match /^\^4\./` 失败；声明 `^4.0.0` 且解析到 `4.0.0` 时
   在 `4.6.6` 下限上以 `expected false to be true` 失败；两者恢复后重新通过。
