@@ -267,11 +267,11 @@ jobs, and move Java 17 to nightly only.
 
   The gate's own full tier is too young to give a rate, and it is a separate run
   list. `managed-agent-gate.yml` runs the lanes through reusable-workflow calls
-  whose job names carry a `SDK Java (full) /` prefix. Of the 40
+  whose job names carry a `SDK Java (full) /` prefix. Of the 133
   `pull_request_review` runs of that workflow that finished success or failure
-  during 2026-11-11 (13:46Z → 23:43Z), 14 executed both Hosted lanes, and all 14
-  failed process-fault while passing failover — the same shape as above, on far
-  too small a sample to quote a percentage.
+  on 2026-11-11, 38 executed both Hosted lanes, and every one of the 38 failed
+  process-fault while passing failover — the same shape as above, and not one
+  full-tier run that day had both lanes pass.
 
   The refusal itself has changed shape: the Runtime Broker now
   answers `409 managed_runtime_identity_conflict` where the original report had

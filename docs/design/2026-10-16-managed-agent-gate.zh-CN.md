@@ -219,10 +219,10 @@ issue 交给人工分诊而不是 autofix：一条过期的临时报告只需关
 
   门禁自己的全量档还太新，给不出比率，而且它是另一份运行列表。
   `managed-agent-gate.yml` 通过可复用工作流调用这两条泳道，job 名带
-  `SDK Java (full) /` 前缀。该 workflow 在 2026-11-11 当天（13:46Z → 23:43Z）以
-  success 或 failure 结束的 40 次 `pull_request_review` 运行里，有 14 次执行了两条
-  Hosted 泳道，这 14 次全部是 process-fault 失败、failover 通过 —— 与上面同一形态，
-  但样本太小，不足以引用百分比。
+  `SDK Java (full) /` 前缀。该 workflow 在 2026-11-11 全天以 success 或 failure
+  结束的 133 次 `pull_request_review` 运行里，有 38 次执行了两条 Hosted 泳道，
+  这 38 次全部是 process-fault 失败、failover 通过 —— 与上面同一形态，而且当天
+  没有一次全量档运行是两条泳道都通过的。
 
   拒绝原因本身也换了形态：现在是 Runtime Broker 回
   `409 managed_runtime_identity_conflict`，而最初报告里是 Store 回
