@@ -1480,7 +1480,6 @@ describe('package scripts', () => {
             reportRc = '1',
             reportOnce = true,
             rpcRetry = '',
-            budget = '',
           } = {},
         ) => {
           const calls = path.join(dir, `${name}.calls`);
@@ -1518,7 +1517,6 @@ describe('package scripts', () => {
               STUB_REPORT_ONCE: reportOnce ? '1' : '',
               STUB_REPORT_SAW: path.join(dir, `${name}.report-saw`),
               QWEN_CI_RPC_RETRY: rpcRetry,
-              UNIT_LANE_BUDGET_SECONDS: budget,
             },
           });
           // The replayed side log is removed once printed.
@@ -1833,11 +1831,6 @@ describe('package scripts', () => {
         'fi',
         'echo "npm $* heap=$NODE_OPTIONS workers=$VITEST_MAX_FORKS/$VITEST_MAX_THREADS" >> "$STUB_CALLS"',
         'echo "output of npm $*"',
-        // A re-run named alone on the command line is the lane's retry (the
-        // batch always names acp-bridge first); STUB_SLEEP_SECONDS lets a case
-        // spend real wall time inside that retry, which is the only way the
-        // lane's own clock can cross a budget threshold between two rounds.
-        'if [ -n "$STUB_SLEEP_SECONDS" ] && [ "$3" = "--workspace=@qwen-code/web-shell" ]; then sleep "$STUB_SLEEP_SECONDS"; fi',
         'if [ -n "$STUB_REPORT" ] && echo "$*" | grep -qF -- "$STUB_REPORT_MATCH"; then',
         '  if [ -z "$STUB_REPORT_ONCE" ] || ! grep -qxF -- "$STUB_REPORT_MATCH" "$STUB_REPORT_SAW" 2>/dev/null; then',
         '    echo "$STUB_REPORT_MATCH" >> "$STUB_REPORT_SAW"',
@@ -1880,7 +1873,6 @@ describe('package scripts', () => {
         reportRc = '1',
         reportOnce = true,
         rpcRetry = '',
-        budget = '',
         fail = '',
         extraEnv = {},
       } = {},
@@ -1898,7 +1890,6 @@ describe('package scripts', () => {
           VITEST_MAX_THREADS: '6',
           SIDE_LANE_LOG: '',
           QWEN_CI_SKIP_STANDALONE_RUNTIMES: '',
-          UNIT_LANE_BUDGET_SECONDS: budget,
           STUB_CALLS: calls,
           STUB_WORKSPACES: JSON.stringify(allWorkspaces),
           STUB_FAIL: fail,
@@ -1907,7 +1898,6 @@ describe('package scripts', () => {
           STUB_REPORT_RC: reportRc,
           STUB_REPORT_ONCE: reportOnce ? '1' : '',
           STUB_REPORT_SAW: path.join(dir, `${name}.report-saw`),
-          STUB_SLEEP_SECONDS: '',
           QWEN_CI_RPC_RETRY: rpcRetry,
           ...extraEnv,
         },
@@ -2009,19 +1999,6 @@ describe('package scripts', () => {
           [...passing.calls].sort(),
         );
 
-        // A retry that cannot fit in what is left of the step would be killed
-        // by the step timeout, replacing the first attempt's report with a
-        // truncated one. Keep the first failure instead.
-        const noBudget = run('rpc-retry-budget', {
-          report: rpcReport('@qwen-code/web-shell'),
-          budget: '1',
-        });
-        expect(noBudget.rc).toBe('1');
-        expect(noBudget.stdout).toContain('Skipping the RPC re-run');
-        expect(
-          noBudget.calls.filter((call) => call.includes('web-shell')).length,
-        ).toBe(1);
-
         // A workspace killed by a signal must not be retried on the strength
         // of a later workspace's status: npm exits with the LAST failing
         // workspace, so the batch status attributes the kill to the wrong
@@ -2107,12 +2084,14 @@ describe('package scripts', () => {
     },
   );
 
-  // The three levers this suite owns — how many times the scripts lane
-  // re-runs, whether the count is validated, and what the step budget allows —
-  // are separate cases. They shared one body while the review measured the
-  // whole file at 44 s per worker on the shared pool; each case here stays in
-  // the low single digits of lane spawns, so a 5x slower host cannot push one
-  // past the worker's 60 s RPC budget.
+  // The two levers this suite owns — how many times the scripts lane re-runs,
+  // and whether that count is validated — are separate cases. They shared one
+  // body while the review measured the whole file at 44 s per worker on the
+  // shared pool; each case here stays in the low single digits of lane spawns,
+  // so a 5x slower host cannot push one past the worker's 60 s RPC budget.
+  //
+  // There is no time condition on a re-run: the guard that skipped one on a
+  // spent step budget was removed (see the script's header).
   it.runIf(process.platform === 'linux')(
     'retries the scripts suite the configured number of times',
     () => {
@@ -2209,97 +2188,6 @@ describe('package scripts', () => {
   );
 
   it.runIf(process.platform === 'linux')(
-    'consults the step budget, including the reserve, before re-running',
-    () => {
-      const harness = laneRetryHarness();
-      try {
-        const { run, rpcReport } = harness;
-        // The scripts lane is the side lane's last work, so its re-run must
-        // consult the same budget the workspace lane does.
-        const scriptsBudget = run('rpc-retry-scripts-budget', {
-          report: rpcReport('@qwen-code/qwen-code-scripts'),
-          reportMatch: 'test:scripts:unit',
-          budget: '1',
-        });
-        expect(scriptsBudget.rc).toBe('1');
-        expect(scriptsBudget.stdout).toContain('Skipping the RPC re-run');
-        expect(
-          scriptsBudget.calls.filter((call) =>
-            call.includes('test:scripts:unit'),
-          ).length,
-        ).toBe(1);
-
-        // The reserve is the work the side lane still owes, derived from its
-        // own start against the clock at the moment of the decision — nothing
-        // here injects the reserve itself, so the production arithmetic
-        // `SECONDS - since` is what the guard reads. Starting the clock 1000 s
-        // back and the side lane 300 s back leaves ~1300 s of a 2700 s step,
-        // under the 1350 s half-budget guard, so the re-run is admitted; the
-        // side lane started 400 s back puts ~1400 s on the clock, over the
-        // guard, so it refuses rather than squeezing one more pass in. The
-        // figures sit tens of seconds either side of the threshold, not on it:
-        // with a live clock a one-second boundary would be a flake, not a test.
-        const reserveFits = run('rpc-retry-reserve-fits', {
-          report: rpcReport('@qwen-code/web-shell'),
-          budget: '2700',
-          extraEnv: {
-            SCRIPT_START_OVERRIDE: '-1000',
-            SIDE_LANE_STARTED_OVERRIDE: '-300',
-          },
-        });
-        expect(reserveFits.rc, reserveFits.stdout).toBe('0');
-        expect(
-          reserveFits.calls.filter((call) =>
-            call.includes('--workspace=@qwen-code/web-shell'),
-          ).length,
-        ).toBe(2);
-        const reserveOverflows = run('rpc-retry-reserve-overflows', {
-          report: rpcReport('@qwen-code/web-shell'),
-          budget: '2700',
-          extraEnv: {
-            SCRIPT_START_OVERRIDE: '-1000',
-            SIDE_LANE_STARTED_OVERRIDE: '-400',
-          },
-        });
-        expect(reserveOverflows.rc).toBe('1');
-        expect(reserveOverflows.stdout).toContain('Skipping the RPC re-run');
-        expect(
-          reserveOverflows.calls.filter((call) =>
-            call.includes('--workspace=@qwen-code/web-shell'),
-          ).length,
-        ).toBe(1);
-        // The main lane has nothing after its batch, so its reserve is empty
-        // and that must not read as an exhausted budget.
-        const mainNoReserve = run('rpc-retry-main-no-reserve', {
-          report: rpcReport('@qwen-code/qwen-code-core'),
-          reportMatch: '--workspace=@qwen-code/qwen-code-core',
-          budget: '2700',
-          extraEnv: { SCRIPT_START_OVERRIDE: '-1000' },
-        });
-        expect(mainNoReserve.rc, mainNoReserve.stdout).toBe('0');
-        expect(mainNoReserve.stdout).toContain('Every test passed');
-
-        // An armed budget whose threshold is comfortably above the stub's wall
-        // time still permits the re-run; with `1` the threshold degenerates to
-        // zero and this branch is never observed.
-        const budgetAllows = run('rpc-retry-budget-armed', {
-          report: rpcReport('@qwen-code/web-shell'),
-          budget: '4',
-        });
-        expect(budgetAllows.rc, budgetAllows.stdout).toBe('0');
-        expect(budgetAllows.stdout).toContain('Every test passed');
-        expect(
-          budgetAllows.calls.filter((call) =>
-            call.includes('--workspace=@qwen-code/web-shell'),
-          ).length,
-        ).toBe(2);
-      } finally {
-        harness.dispose();
-      }
-    },
-  );
-
-  it.runIf(process.platform === 'linux')(
     'ignores a printed near-miss of the unhandled-error header',
     () => {
       const harness = laneRetryHarness();
@@ -2370,6 +2258,24 @@ describe('package scripts', () => {
               'Error: [vitest-worker]: Timeout calling "onTaskUpdate"',
               'TypeError: cannot read properties of undefined',
             ),
+          ],
+          // The section's message, stack and code frames are producer-controlled.
+          // A frame that merely quotes the transport prefix used to count as a
+          // timeout, so one real error plus one quoting frame made the two
+          // figures agree and bought a retry. Only the error's own header line
+          // counts now.
+          [
+            'a code frame that quotes the transport prefix',
+            rpcReport('@qwen-code/web-shell')
+              .replace(
+                'Error: [vitest-worker]: Timeout calling "onTaskUpdate"',
+                'Error: boom',
+              )
+              .replace(
+                // the stack line under the header, i.e. a frame, not a header
+                ' ❯ Object.onTimeoutError ../../../node_modules/vitest/dist/chunks/rpc.js:53:10',
+                ' ❯ Object.onTimeoutError ../../../node_modules/vitest/dist/chunks/rpc.js:53:10\n   [vitest-worker]: Timeout calling "onTaskUpdate"',
+              ),
           ],
           [
             'a process that died before reporting anything',
@@ -2537,29 +2443,6 @@ describe('package scripts', () => {
             call.includes('--workspace=@qwen-code/web-shell'),
           ).length,
         ).toBe(3);
-        // The loop's own budget break. Round 1 is admitted (about 1 s of a
-        // 12 s step, under the 6 s half-budget), and the re-run it issues
-        // spends 8 s of real time, so by the time round 2 would start the
-        // guard refuses it: the workspace is attempted twice, not three
-        // times. The wait is wall time on purpose — the guard reads the
-        // lane's own clock, so a frozen clock would test nothing.
-        const roundTwoBlocked = run('workspace-round-two-budget', {
-          report: rpcReport('@qwen-code/web-shell'),
-          reportOnce: false,
-          rpcRetry: '2',
-          budget: '12',
-          extraEnv: {
-            SCRIPT_START_OVERRIDE: '-1',
-            STUB_SLEEP_SECONDS: '8',
-          },
-        });
-        expect(roundTwoBlocked.rc, roundTwoBlocked.stdout).toBe('1');
-        expect(roundTwoBlocked.stdout).toContain('Every test passed');
-        expect(
-          roundTwoBlocked.calls.filter((call) =>
-            call.includes('--workspace=@qwen-code/web-shell'),
-          ).length,
-        ).toBe(2);
       } finally {
         harness.dispose();
       }

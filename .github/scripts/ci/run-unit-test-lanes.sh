@@ -59,9 +59,6 @@ case "$RPC_RETRY" in
     ;;
   *) RPC_RETRY=$((10#${RPC_RETRY})) ;;
 esac
-# The step's own start, so the budget below covers both retry paths.
-SCRIPT_START=${SCRIPT_START_OVERRIDE:-$SECONDS}
-
 # The main lane's workspaces, the CLI suite and core.
 main_workspaces=('@qwen-code/qwen-code' '@qwen-code/qwen-code-core')
 # The heap cap `npm run test:ci:workspaces` gives each workspace suite.
@@ -114,33 +111,6 @@ fi
 unset SIDE_LANE_LOG
 
 # Half a Vitest worker cap, at least 1; 2 where the cap is unset or not a count.
-# True when less than half the step's budget is left. A retry costs about what
-# the first attempt cost, so issuing one here would be killed by the step
-# timeout and replace the first attempt's report with a truncated run.
-# `reserve` is what the caller still owes after the retry: the side lane runs
-# the standalone regression and the scripts suite after its workspace batch,
-# so admitting a retry that leaves no room for them buys a truncated step.
-retry_budget_exhausted() {
-  local reserve="${1:-0}"
-  [ "${UNIT_LANE_BUDGET_SECONDS:-0}" -gt 0 ] &&
-    [ $((SECONDS - SCRIPT_START + reserve)) -ge $((UNIT_LANE_BUDGET_SECONDS / 2)) ]
-}
-
-# The reserve the side lane has already spent: its own start read against the
-# clock NOW. The proxy is the workspace batch's elapsed time, which stands in
-# for the standalone regression and the scripts suite that follow it (an
-# estimate, not a measurement). Read here, never at run_lane_suites' entry: at
-# entry nothing has been spent, so the figure would be zero on every production
-# run and the guard would behave as if there were no reserve at all. Called
-# again before each extra round for the same reason.
-retry_reserve_owed() {
-  [ -n "${RETRY_RESERVE_SINCE:-}" ] || {
-    echo 0
-    return
-  }
-  echo $((SECONDS - RETRY_RESERVE_SINCE))
-}
-
 half_cap() {
   case "$1" in
     '' | *[!0-9]*) echo 2 ;;
@@ -150,6 +120,18 @@ half_cap() {
 side_forks="$(half_cap "${VITEST_MAX_FORKS:-}")"
 side_threads="$(half_cap "${VITEST_MAX_THREADS:-}")"
 
+# A re-run is bounded by the count in QWEN_CI_RPC_RETRY (default 1) and by
+# nothing else: no time condition survives here. A late re-run can be killed by
+# the step's `timeout-minutes: 45`, and when that happens the job fails with the
+# first attempt's report still teed to the suite log. That is an accepted
+# degradation, and it is deliberately the whole of the behaviour: the guard that
+# skipped a re-run once less than half the step budget remained refused one at
+# 74% of the budget, because it added the same batch-elapsed figure twice, and
+# no fix was possible from inside this script — the step starts before it does
+# (`chown -R`, `mktemp`, the disk sampler), so `SECONDS` here is not the step's
+# clock. Making that guard correct would mean threading the step's real start in
+# from ci.yml, more new surface than the one truncation it would avoid.
+#
 # Run one suite command and re-run it once when its own log proves the run was
 # all-green and the only failure was the RPC budget. Used for
 # `npm run test:scripts:unit`, a single suite whose whole log is its own report;
@@ -169,11 +151,6 @@ run_suite() {
   rc="${PIPESTATUS[0]}"
   if [ "$rc" -ne 0 ] && [ "$RPC_RETRY" -gt 0 ] &&
     rpc_only_failure_text "$rc" < "$log"; then
-    if retry_budget_exhausted 0; then
-      echo "::warning::Skipping the RPC re-run: ${SECONDS} s of the ${UNIT_LANE_BUDGET_SECONDS} s step budget used; the first failure stands."
-      rm -f "$log"
-      return "$rc"
-    fi
     local attempt
     for ((attempt = 1; attempt <= RPC_RETRY; attempt++)); do
       echo "::warning::Every test passed but Vitest reported the worker RPC timeout as an unhandled error; re-running this suite (attempt ${attempt} of ${RPC_RETRY})."
@@ -181,7 +158,6 @@ run_suite() {
       "$@"
       rc=$?
       [ "$rc" -eq 0 ] && return 0
-      retry_budget_exhausted && return "$rc"
     done
     return "$rc"
   fi
@@ -272,11 +248,6 @@ run_lane_suites() {
     rm -f "$log"
     return "$rc"
   fi
-  if retry_budget_exhausted "$(retry_reserve_owed)"; then
-    echo "::warning::Skipping the RPC re-run: ${SECONDS} s of the ${UNIT_LANE_BUDGET_SECONDS} s step budget used, too little left for another pass."
-    rm -f "$log"
-    return "$rc"
-  fi
   rm -f "$log"
   echo "::warning::Every test passed but Vitest reported the worker RPC timeout as an unhandled error; re-running the affected workspace suites once."
   local status=0 attempt pass round
@@ -290,7 +261,6 @@ run_lane_suites() {
       fi
     done
     [ "$status" -eq 0 ] && break
-    retry_budget_exhausted "$(retry_reserve_owed)" && break
   done
   # A workspace whose failure was not the transport was not re-run; its
   # failure is the lane's verdict even when every retry passed.
@@ -311,10 +281,13 @@ run_lane_suites() {
 #
 # The two figures are sums over the whole block, so a passing tally in one
 # attempt cannot cover a later one's crash. Every pattern is anchored on the
-# section-line shape and the transport message is matched on Vitest's own
-# `[vitest-worker]: Timeout calling` prefix, because a test's console output is
-# echoed at column 0 and a test that prints summary-shaped fixture data — or
-# the words `Timeout calling` — must not move either figure.
+# section-line shape, and the transport is counted from the error's OWN header
+# line — a column-zero `Error: [vitest-worker]: Timeout calling` — not from any
+# line carrying the prefix: inside the section the message, the stack and the
+# code frames are producer-controlled, so a frame that quotes the prefix could
+# otherwise stand in for a second timeout and make the two figures agree. A
+# test's console output is echoed at column 0 too, and neither a printed copy of
+# the words nor summary-shaped fixture data may move either figure.
 rpc_only_failure_text() {
   local text
   text="$(cat)"
@@ -345,7 +318,7 @@ rpc_only_failure_text() {
   timeouts="$(awk '
     /^[^[:alnum:]]+Unhandled Errors[^[:alnum:]]+$/ { inside = 1; next }
     inside && /^[[:space:]]*(Test Files|Tests|Errors)[[:space:]]/ { inside = 0 }
-    inside && /\[vitest-worker\]: Timeout calling/ { count++ }
+    inside && /^Error: \[vitest-worker\]: Timeout calling/ { count++ }
     END { print count + 0 }
   ' <<< "$text")"
   [ "$timeouts" -eq "$reported" ]
@@ -354,9 +327,7 @@ rpc_only_failure_text() {
 suite_args=("$@")
 
 (
-  side_started=$SECONDS
-  RETRY_RESERVE_SINCE=${SIDE_LANE_STARTED_OVERRIDE:-$side_started} \
-    NODE_OPTIONS="$workspace_node_options" VITEST_MAX_FORKS="$side_forks" \
+  NODE_OPTIONS="$workspace_node_options" VITEST_MAX_FORKS="$side_forks" \
     VITEST_MAX_THREADS="$side_threads" \
     run_lane_suites "${side_workspaces[@]}"
   workspaces_rc=$?
@@ -377,7 +348,7 @@ suite_args=("$@")
 ) > "$side_log" 2>&1 &
 side_pid=$!
 
-RETRY_RESERVE_SINCE='' NODE_OPTIONS="$workspace_node_options" \
+NODE_OPTIONS="$workspace_node_options" \
   run_lane_suites "${main_workspaces[@]/#/--workspace=}"
 rc=$?
 

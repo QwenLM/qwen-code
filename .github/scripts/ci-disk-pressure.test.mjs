@@ -499,17 +499,29 @@ describe('ci.yml host load gate', () => {
   it('runs after the unpack and before the suites it protects', () => {
     // The load that matters is the load the suites will run under; a reading
     // taken before the install is minutes stale by the time they start.
-    const names = testSteps.map((candidate) => candidate.name);
-    const gate = names.indexOf('Host load gate (self-hosted)');
-    assert.ok(gate > names.indexOf('Unpack the built tree'));
+    //
+    // Order comes from `step()`, which throws when a name is missing, not from
+    // `names.indexOf(...)`: a renamed step made indexOf return -1, every
+    // `gate > -1` comparison true, and the test green with the step gone.
+    const position = (name) => testSteps.indexOf(step(name));
     // The two provisioning steps are apt/network installs whose duration
     // follows the contention this gate measures, so a sample taken above them
     // can be minutes stale when the suites start.
     assert.ok(
-      gate > names.indexOf('Provision linters for real-binary tests'),
+      position('Unpack the built tree') <
+        position('Host load gate (self-hosted)'),
+      'the load gate must sample after the unpack',
+    );
+    assert.ok(
+      position('Provision linters for real-binary tests') <
+        position('Host load gate (self-hosted)'),
       'the load gate must sample after the tooling provisioning',
     );
-    assert.ok(gate < names.indexOf('Run tests and generate reports'));
+    assert.ok(
+      position('Host load gate (self-hosted)') <
+        position('Run tests and generate reports'),
+      'the load gate must sample before the suites it protects',
+    );
   });
 
   it('lets the lane re-run an all-green suite the RPC budget failed', () => {

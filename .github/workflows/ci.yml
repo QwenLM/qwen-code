@@ -1374,9 +1374,6 @@ jobs:
           # the lane script reads the report and re-runs only that shape. '0'
           # disables it without a PR.
           QWEN_CI_RPC_RETRY: "${{ vars.QWEN_CI_RPC_RETRY || '1' }}"
-          # The step's own cap: the lane skips an RPC re-run once less than a
-          # first pass remains, so a doomed retry cannot truncate the report.
-          UNIT_LANE_BUDGET_SECONDS: '2700'
           # Coverage is collected only on the post-merge main run: nothing
           # read the pull-request reports, and v8 instrumentation cost about
           # a fifth of the suite's wall time on every push. The vitest configs
