@@ -7674,6 +7674,10 @@ async function runQwenServeImpl(
             prWatchDeps = createPrWatchDeps({
               ...prWatchSources,
               hostedChannelBaseUrls: () => urls,
+              // Keep the registry across rebuilds: a channel committing
+              // between the observation's and the drain's read must not hand
+              // them different locks for the same files.
+              ...(prWatchDeps ? { locks: prWatchDeps.watch.locks } : {}),
             });
             return prWatchDeps;
           };

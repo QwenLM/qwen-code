@@ -76,6 +76,13 @@ export interface PrWatchDepsSources {
   daemonLog?: DaemonLogger;
   log?: (message: string) => void;
   now?: () => number;
+  /**
+   * Reuse an existing registry when rebuilding after the hosted channels
+   * change. A fresh one would give the observation and the drain different
+   * in-process locks for the same files if a rebuild lands between their two
+   * reads (master §2).
+   */
+  locks?: PathMutexRegistry;
 }
 
 export interface PrWatchDeps {
@@ -110,7 +117,7 @@ function isGone(error: unknown): boolean {
 export function createPrWatchDeps(sources: PrWatchDepsSources): PrWatchDeps {
   const log = sources.log ?? (() => {});
   const watchDir = defaultPrWatchDir();
-  const locks = new PathMutexRegistry();
+  const locks = sources.locks ?? new PathMutexRegistry();
   const allowedHosts = new Set<string>(['github.com']);
   for (const host of readGhConfiguredHosts(process.env, log)) {
     allowedHosts.add(host);

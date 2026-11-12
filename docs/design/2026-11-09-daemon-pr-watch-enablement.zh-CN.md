@@ -68,7 +68,7 @@ drain 已完整但不可达。`runPrWatchDrainTick` 把 restore、准入、regis
 
 接缝是路由侧的 `onSessionRestored` 依赖，在 `restoreSessionCore` 返回已恢复会话之后触发。早先的稿子把 `onRestored` 回调放在核心内；改为路由在 await 之后触发是等价且更小的做法——那时核心的 `finally` 已释放 reservation 与 worktree 锁，而每条非成功退出（cancelled、抛错）都会跳过钩子，与核心内标志位的效果完全一致。给核心加选项属单次使用的抽象。**真正要紧的调用方是路由，不是 drain。** 若只由 drain 自己的 `wakeSession` 填充传钩子，它只会在 `wakeDormant: true` 路径（drain 自己恢复会话）上触发，永远不会在用户 resume 时触发，也就覆盖不了本节存在的理由。因此接线需要一个路由→drain 的接缝：给会话路由注入一个 `onSessionRestored` 式依赖，由与 drain deps 相同的 late-bound getter 填充，为该会话所绑定的 PR 调度一次 drain。在该接缝存在之前这个回调没有调用方，所以它要么与接缝一起落地，要么不落。
 
-钩子**绝不能在 restore 内被 await**。`PathMutexRegistry.runExclusive` 不可重入，而 drain 自己的 `restoreAndAdmit` 在 wake 之后会重新取同一把 per-PR 锁。从「由 drain 派发的 restore」内部 await 一个 drain 会反转 await 方向并可能死锁。因此钩子不等待地触发 drain（`void`，自带失败日志），正如 drain 已经不等待地触发 restore。因为它在核心返回之后才触发，两处释放都已完成，因此重新进入同一会话 restore 的 drain 不会撞上 pending reservation 计数。
+定向 drain 与 tick 受**同一个关闭开关**门控：watch 关闭时 resume 根本不读 drain deps，因此不会从上一个 owner 留下的 watch 文件里投递。钩子**绝不能在 restore 内被 await**。`PathMutexRegistry.runExclusive` 不可重入，而 drain 自己的 `restoreAndAdmit` 在 wake 之后会重新取同一把 per-PR 锁。从「由 drain 派发的 restore」内部 await 一个 drain 会反转 await 方向并可能死锁。因此钩子不等待地触发 drain（`void`，自带失败日志），正如 drain 已经不等待地触发 restore。因为它在核心返回之后才触发，两处释放都已完成，因此重新进入同一会话 restore 的 drain 不会撞上 pending reservation 计数。
 
 ### 3. lifecycle close 重排（已落地于 #16732）
 

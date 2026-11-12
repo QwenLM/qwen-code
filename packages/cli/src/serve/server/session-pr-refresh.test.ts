@@ -2684,6 +2684,26 @@ describe('startSessionPrRefreshTimer', () => {
     }
   });
 
+  it('drainNow reads no drain deps while the observation switch is off', async () => {
+    const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
+    const registry = createWorkspaceRegistry([trustedRuntime]);
+    const getPrDrainDeps = vi.fn(() => undefined);
+    // No observationEnabled: production is governed by the internal constant,
+    // which is off. A resume must not deliver from watch files a previous
+    // owner left behind.
+    const handle = startSessionPrRefreshTimer({
+      workspaceRegistry: registry,
+      env: {},
+      getPrDrainDeps,
+    });
+    try {
+      await handle?.drainNow(trustedCwd);
+      expect(getPrDrainDeps).not.toHaveBeenCalled();
+    } finally {
+      handle?.dispose();
+    }
+  });
+
   it('drainNow is inert without drain deps or a registered workspace', async () => {
     const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
     const registry = createWorkspaceRegistry([trustedRuntime]);

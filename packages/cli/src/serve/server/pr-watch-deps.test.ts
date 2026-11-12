@@ -28,6 +28,7 @@ vi.mock('../routes/autofix-pr-watches.js', () => ({
 }));
 
 import { createPrWatchDeps } from './pr-watch-deps.js';
+import { PathMutexRegistry } from '../fs/path-mutex-registry.js';
 import {
   autofixPrPaths,
   type AutofixPrState,
@@ -136,6 +137,22 @@ describe('createPrWatchDeps', () => {
     const { watch, drain } = build();
     expect(drain.watchDir).toBe(watch.watchDir);
     expect(drain.locks).toBe(watch.locks);
+  });
+
+  it('reuses an injected lock registry across both seams', () => {
+    // A rebuild after the hosted channels change must keep the registry, or a
+    // channel committing between the observation's and the drain's read hands
+    // them different in-process locks for the same files.
+    const locks = new PathMutexRegistry();
+    const { watch, drain } = createPrWatchDeps({
+      workspaceRegistry: { listAll: () => [runtime()] } as never,
+      archiveCoordinator: () => coordinator,
+      restore: restore as never,
+      hostedChannelBaseUrls: () => [],
+      locks,
+    });
+    expect(watch.locks).toBe(locks);
+    expect(drain.locks).toBe(locks);
   });
 
   it('reports a session live only when the bridge lists it', () => {

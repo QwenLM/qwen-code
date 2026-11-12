@@ -968,6 +968,11 @@ export function startSessionPrRefreshTimer(deps: {
      * scan would let the drain delete their watch files as unbound.
      */
     async drainNow(workspaceCwd: string): Promise<void> {
+      // Same gate as the tick: with the switch off the watch is inert, and a
+      // resume must not deliver from watch files a previous owner left behind.
+      if (!(deps.observationEnabled ?? SESSION_PR_WATCH_OBSERVATION_ENABLED)) {
+        return;
+      }
       const drainDeps = deps.getPrDrainDeps?.();
       if (!drainDeps) return;
       const runtime = deps.workspaceRegistry
