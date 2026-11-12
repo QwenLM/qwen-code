@@ -311,17 +311,17 @@ export abstract class BaseJsonOutputAdapter {
     }
 
     const blockIndex = state.blocks.length - 1;
-    if (!state.openBlocks.has(blockIndex)) {
+    // `openBlocks` holds stream indexes, which carry the running offset after
+    // a block-type transition; probing it with the array position would miss
+    // and leave the block unclosed until finalization.
+    const streamIndex = state.emittedBlockCount + blockIndex;
+    if (!state.openBlocks.has(streamIndex)) {
       return;
     }
 
     if (lastBlock.type === 'text' || lastBlock.type === 'thinking') {
-      this.onBlockClosed(
-        state,
-        state.emittedBlockCount + blockIndex,
-        actualParentToolUseId,
-      );
-      this.closeBlock(state, blockIndex);
+      this.onBlockClosed(state, streamIndex, actualParentToolUseId);
+      this.closeBlock(state, streamIndex);
     }
   }
 
@@ -386,7 +386,9 @@ export abstract class BaseJsonOutputAdapter {
     state.emittedBlockCount += state.blocks.length;
     state.blocks = [];
     state.openBlocks = new Set<number>();
-    state.usage = this.createUsage();
+    // Usage accumulates on `Finished` and belongs to the message, which now
+    // spans every snapshot under one id; resetting it here would let the last
+    // frame of a message report zeros after an earlier frame reported totals.
     state.messageStarted = false;
     state.finalized = false;
     state.currentBlockType = targetType;
@@ -656,8 +658,8 @@ export abstract class BaseJsonOutputAdapter {
           }
           const retainedIndex = retainedBlocks.length;
           retainedBlocks.push(block);
-          if (state.openBlocks.has(index)) {
-            retainedOpenBlocks.add(retainedIndex);
+          if (state.openBlocks.has(state.emittedBlockCount + index)) {
+            retainedOpenBlocks.add(state.emittedBlockCount + retainedIndex);
           }
         }
         state.blocks = retainedBlocks;
