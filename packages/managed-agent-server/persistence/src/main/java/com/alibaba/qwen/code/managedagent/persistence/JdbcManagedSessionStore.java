@@ -98,18 +98,18 @@ public class JdbcManagedSessionStore
         ToolPublicationRetentionStore outputRetention = new ToolPublicationRetentionStore(jdbc, manager);
         var ownerReads = new org.springframework.transaction.support.TransactionTemplate(manager);
         ownerReads.setTimeout(10);
-        this.storeRows = new JournalStoreRows(readerVersion, jdbc);
-        this.jdbc = jdbc;
-        this.publicationObjects = publicationObjects;
-        this.fencing = new JournalFencing(storeRows, jdbc, journalEventTransport, credentials, csiBindings);
         this.journalPacks = sessionResourceSettings == null ? null
                 : new JdbcJournalPacks(jdbc, publicationObjects, sessionResourceSettings);
+        this.storeRows = new JournalStoreRows(readerVersion, jdbc, publicationObjects);
+        this.jdbc = jdbc;
+        this.publicationObjects = publicationObjects;
+        this.fencing = new JournalFencing(storeRows, jdbc, journalEventTransport, credentials, csiBindings, journalPacks);
         this.historyQueries = new JournalHistoryQueries(fencing, storeRows, jdbc, journalPacks);
         this.lifecycleAuthorization = new JournalLifecycleAuthorization(fencing, storeRows, harnessRules, jdbc, extensionRecords, lifecycleExecution, lifecycleSessions);
         this.resourceReads = new JournalResourceReads(fencing, storeRows, jdbc, publicationObjects, outputRetention, ownerReads);
         this.resourceWrites = new JournalResourceWrites(fencing, storeRows, jdbc, sessionResourceSettings);
-        this.writerLifecycle = new JournalWriterLifecycle(fencing, storeRows, readerVersion, jdbc, credentials, csiBindings, extensionRecords);
-        this.commits = new JournalCommit(fencing, lifecycleAuthorization, resourceWrites, storeRows, readerVersion, jdbc, toolResults, journalEventTransport, extensionRecords, actions);
+        this.writerLifecycle = new JournalWriterLifecycle(fencing, storeRows, readerVersion, jdbc, credentials, csiBindings, extensionRecords, journalPacks);
+        this.commits = new JournalCommit(fencing, lifecycleAuthorization, resourceWrites, storeRows, readerVersion, jdbc, toolResults, journalEventTransport, extensionRecords, actions, journalPacks);
     }
 
     static final int GUARD_ACQUIRE_TIMEOUT_SECONDS = JournalFencing.GUARD_ACQUIRE_TIMEOUT_SECONDS;

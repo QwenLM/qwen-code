@@ -2,6 +2,8 @@
 
 [English](2026-10-08-managed-session-rename-delivery.md)
 
+状态：已被 [2026-11-12-managed-rename-single-authority](2026-11-12-managed-rename-single-authority.zh-CN.md) 取代。手动改名现在在单个 SQL 事务内同步结算，以单一显示权威为准；本文描述的投递 saga（认领/租约、重投、停放对账）已删除。
+
 ## 问题与范围
 
 同一幂等键的一份请求可能失败，而另一份仍在 Harness 内执行。公共回执被退休后，新改名可以继续，但旧远端写入可能最后才完成。SQL 完成检查无法撤销这个私有写入。远端已接受、HTTP 回包丢失还会造成相反的缺口：私有标题已持久化，公共标题仍未更新。本次 #13163 后续修复同时覆盖绑定与未绑定 Workspace 的 Session，以及远程或本地 Harness journal 存储。
