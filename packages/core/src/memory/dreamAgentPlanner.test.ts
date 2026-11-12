@@ -394,11 +394,11 @@ describe('dreamAgentPlanner', () => {
   });
 
   it('names the loop detector when the dream agent stops on a loop', async () => {
-    // The gate that makes this reachable is the writes-denied pre-check in
-    // #15597; this pins the other half: the message an operator actually
-    // reads names the detector instead of the generic LOOP_DETECTED label.
-    // Reverting the `result.loopType` argument at the call site leaves the
-    // sentence generic and turns this case red.
+    // ACTION_STAGNATION only stops the turn under `model.loopProtection:
+    // 'stop'`; the default `warn` merely reminds. This pins what an operator
+    // reads when it does stop: the detector's name rather than the generic
+    // loop wording. Reverting the `result.loopType` argument at the call site
+    // leaves the sentence generic and turns this case red.
     vi.mocked(runForkedAgent).mockResolvedValue({
       status: 'failed',
       terminateReason: 'LOOP_DETECTED',
