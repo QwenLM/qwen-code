@@ -132,4 +132,93 @@ describe('PromptRegistry', () => {
       expect(registry.getAllPrompts()).toHaveLength(1);
     });
   });
+
+  describe('SystemPromptLayer management & assembleLayeredPrompt', () => {
+    it('should register and retrieve a system prompt layer', () => {
+      registry.registerPromptLayer({
+        id: 'core-base',
+        category: 'core_instructions',
+        priority: 1,
+        content: 'You are an AI coding assistant.',
+      });
+
+      const layer = registry.getPromptLayer('core-base');
+      expect(layer).toBeDefined();
+      expect(layer?.content).toBe('You are an AI coding assistant.');
+    });
+
+    it('should throw an error when registering empty or invalid layers', () => {
+      expect(() =>
+        registry.registerPromptLayer({
+          id: '',
+          category: 'persona',
+          priority: 1,
+          content: 'valid',
+        }),
+      ).toThrow();
+
+      expect(() =>
+        registry.registerPromptLayer({
+          id: 'invalid-content',
+          category: 'persona',
+          priority: 1,
+          content: '   ',
+        }),
+      ).toThrow();
+    });
+
+    it('should correctly assemble layered prompts ordering by category then priority', () => {
+      registry.registerPromptLayer({
+        id: 'volatile-mem',
+        category: 'volatile_context',
+        priority: 1,
+        content: '[Volatile Memory Context]',
+      });
+      registry.registerPromptLayer({
+        id: 'core-base',
+        category: 'core_instructions',
+        priority: 10,
+        content: '[Core Base Instructions]',
+      });
+      registry.registerPromptLayer({
+        id: 'skills-layer',
+        category: 'skills',
+        priority: 5,
+        content: '[Loaded Skills List]',
+      });
+      registry.registerPromptLayer({
+        id: 'persona-layer',
+        category: 'persona',
+        priority: 1,
+        content: '[Agent Persona Persona]',
+      });
+
+      const assembled = registry.assembleLayeredPrompt();
+
+      // Expected category order: core_instructions (10) -> persona (20) -> skills (40) -> volatile_context (60)
+      expect(assembled).toBe(
+        '[Core Base Instructions]\n\n[Agent Persona Persona]\n\n[Loaded Skills List]\n\n[Volatile Memory Context]',
+      );
+    });
+
+    it('should delete specified layers and reset upon clear', () => {
+      registry.registerPromptLayer({
+        id: 'layer-1',
+        category: 'core_instructions',
+        priority: 1,
+        content: 'Layer 1',
+      });
+      expect(registry.removePromptLayer('layer-1')).toBe(true);
+      expect(registry.getPromptLayer('layer-1')).toBeUndefined();
+
+      registry.registerPromptLayer({
+        id: 'layer-2',
+        category: 'persona',
+        priority: 2,
+        content: 'Layer 2',
+      });
+      registry.clear();
+      expect(registry.assembleLayeredPrompt()).toBe('');
+    });
+  });
 });
