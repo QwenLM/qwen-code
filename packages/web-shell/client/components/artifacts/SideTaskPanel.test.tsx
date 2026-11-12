@@ -628,6 +628,62 @@ it('truncates the first-prompt title by code point, not code unit', async () => 
   );
 });
 
+it('folds line breaks so the tab title and the daemon rename stay in sync', async () => {
+  connection.sessionId = 'side-session-1';
+  connection.displayName = 'Side task';
+  connection.status = 'connected';
+  container = document.createElement('div');
+  document.body.appendChild(container);
+  root = createRoot(container);
+
+  const onTitleChange = vi.fn();
+  act(() => {
+    renderSideTask({ onTitleChange });
+  });
+
+  const expected = 'Investigate the restored task with the failing test';
+  await act(async () => {
+    (
+      latestChatPaneProps.current?.['onFirstPromptAdmitted'] as (
+        text: string,
+      ) => void
+    )('Investigate the restored task\nwith the failing test');
+    await Promise.resolve();
+  });
+
+  expect(renameSession).toHaveBeenCalledWith(expected);
+  expect(onTitleChange).toHaveBeenCalledWith(
+    'side-task:side-session-1',
+    expected,
+    true,
+  );
+});
+
+it('does not name the side task from a blank first prompt', async () => {
+  connection.sessionId = 'side-session-1';
+  connection.status = 'connected';
+  container = document.createElement('div');
+  document.body.appendChild(container);
+  root = createRoot(container);
+
+  const onTitleChange = vi.fn();
+  act(() => {
+    renderSideTask({ onTitleChange });
+  });
+
+  await act(async () => {
+    (
+      latestChatPaneProps.current?.['onFirstPromptAdmitted'] as (
+        text: string,
+      ) => void
+    )('\n\n  \n');
+    await Promise.resolve();
+  });
+
+  expect(renameSession).not.toHaveBeenCalled();
+  expect(onTitleChange).not.toHaveBeenCalled();
+});
+
 it('sends the /btw question as the first side-task prompt', async () => {
   connection.sessionId = 'side-session-1';
   connection.displayName = 'Side task';
