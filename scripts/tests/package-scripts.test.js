@@ -2107,8 +2107,14 @@ describe('package scripts', () => {
     },
   );
 
+  // The three levers this suite owns — how many times the scripts lane
+  // re-runs, whether the count is validated, and what the step budget allows —
+  // are separate cases. They shared one body while the review measured the
+  // whole file at 44 s per worker on the shared pool; each case here stays in
+  // the low single digits of lane spawns, so a 5x slower host cannot push one
+  // past the worker's 60 s RPC budget.
   it.runIf(process.platform === 'linux')(
-    'honours the RPC retry count, its budget and its validation',
+    'retries the scripts suite the configured number of times',
     () => {
       const harness = laneRetryHarness();
       try {
@@ -2134,8 +2140,7 @@ describe('package scripts', () => {
         expect(scriptsStuck.rc).toBe('1');
         expect(scriptsStuck.stdout).toContain('Every test passed');
         // The lever is a count, like VITEST_RETRY next to it: two re-runs when
-        // set to 2, and a configuration error (not a silent fall-through) for
-        // anything that is neither a count nor `off`.
+        // set to 2.
         const scriptsTwo = run('rpc-retry-scripts-two', {
           report: rpcReport('@qwen-code/qwen-code-scripts'),
           reportMatch: 'test:scripts:unit',
@@ -2146,6 +2151,49 @@ describe('package scripts', () => {
           scriptsTwo.calls.filter((call) => call.includes('test:scripts:unit'))
             .length,
         ).toBe(3);
+        const scriptsOff = run('rpc-retry-scripts-off', {
+          report: rpcReport('@qwen-code/qwen-code-scripts'),
+          reportMatch: 'test:scripts:unit',
+          rpcRetry: '0',
+        });
+        expect(scriptsOff.rc).toBe('1');
+        expect(
+          scriptsOff.calls.filter((call) => call.includes('test:scripts:unit'))
+            .length,
+        ).toBe(1);
+      } finally {
+        harness.dispose();
+      }
+    },
+  );
+
+  it.runIf(process.platform === 'linux')(
+    'fails when a stall outlives every configured attempt',
+    () => {
+      const harness = laneRetryHarness();
+      try {
+        const { run, rpcReport } = harness;
+        // The retry is a bounded count, not a loop that launders a permanent
+        // break into green: a stall that outlives every attempt still fails.
+        const retryStuck = run('rpc-retry-stuck', {
+          report: rpcReport('@qwen-code/web-shell'),
+          reportOnce: false,
+        });
+        expect(retryStuck.rc).toBe('1');
+        expect(retryStuck.stdout).toContain('Every test passed');
+      } finally {
+        harness.dispose();
+      }
+    },
+  );
+
+  it.runIf(process.platform === 'linux')(
+    'rejects an RPC retry count that is neither a count nor off',
+    () => {
+      const harness = laneRetryHarness();
+      try {
+        const { run, rpcReport } = harness;
+        // A configuration error, not a silent fall-through to the default.
         const retryInvalid = run('rpc-retry-invalid', {
           report: rpcReport('@qwen-code/web-shell'),
           rpcRetry: 'false',
@@ -2154,7 +2202,18 @@ describe('package scripts', () => {
         expect(retryInvalid.stdout).toContain(
           'QWEN_CI_RPC_RETRY must be a non-negative integer',
         );
+      } finally {
+        harness.dispose();
+      }
+    },
+  );
 
+  it.runIf(process.platform === 'linux')(
+    'consults the step budget, including the reserve, before re-running',
+    () => {
+      const harness = laneRetryHarness();
+      try {
+        const { run, rpcReport } = harness;
         // The scripts lane is the side lane's last work, so its re-run must
         // consult the same budget the workspace lane does.
         const scriptsBudget = run('rpc-retry-scripts-budget', {
@@ -2234,7 +2293,18 @@ describe('package scripts', () => {
             call.includes('--workspace=@qwen-code/web-shell'),
           ).length,
         ).toBe(2);
+      } finally {
+        harness.dispose();
+      }
+    },
+  );
 
+  it.runIf(process.platform === 'linux')(
+    'ignores a printed near-miss of the unhandled-error header',
+    () => {
+      const harness = laneRetryHarness();
+      try {
+        const { run, rpcReport } = harness;
         // A printed near-miss of the section header must not open a
         // pseudo-section: the opener matches Vitest's ruler-shaped line, not
         // any line containing the words.
@@ -2245,26 +2315,6 @@ describe('package scripts', () => {
         });
         expect(printedHeader.rc, printedHeader.stdout).toBe('0');
         expect(printedHeader.stdout).toContain('Every test passed');
-
-        const scriptsOff = run('rpc-retry-scripts-off', {
-          report: rpcReport('@qwen-code/qwen-code-scripts'),
-          reportMatch: 'test:scripts:unit',
-          rpcRetry: '0',
-        });
-        expect(scriptsOff.rc).toBe('1');
-        expect(
-          scriptsOff.calls.filter((call) => call.includes('test:scripts:unit'))
-            .length,
-        ).toBe(1);
-
-        // A stall that outlives both attempts still fails: the retry is one
-        // re-run, not a loop that launders a permanent break into green.
-        const retryStuck = run('rpc-retry-stuck', {
-          report: rpcReport('@qwen-code/web-shell'),
-          reportOnce: false,
-        });
-        expect(retryStuck.rc).toBe('1');
-        expect(retryStuck.stdout).toContain('Every test passed');
       } finally {
         harness.dispose();
       }
