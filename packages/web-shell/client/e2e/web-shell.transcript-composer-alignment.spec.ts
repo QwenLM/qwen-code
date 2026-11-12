@@ -182,7 +182,7 @@ for (const navigation of [true, false]) {
         messageBox!.x - viewportBox!.x,
         viewportBox!.x + viewportBox!.width - messageBox!.x - messageBox!.width,
       );
-      if (gutter >= 56 && messageBox!.width >= 480) {
+      if (gutter >= 56 && messageBox!.width >= 440) {
         await expect(
           rail,
           `rail at ${width}px with ${gutter}px gutters and ${messageBox!.width}px content`,
@@ -254,6 +254,15 @@ for (const navigation of [true, false]) {
       await expect
         .poll(async () => (await message.boundingBox())?.width ?? 0)
         .toBeCloseTo(580, 0);
+      await page.setViewportSize({ width: 865, height: 743 });
+      await expect
+        .poll(async () => (await viewport.boundingBox())?.width ?? 0)
+        .toBe(589);
+      await expect(rail).toBeVisible();
+      await expectSameEdges(message, composer);
+      await expect
+        .poll(async () => (await message.boundingBox())?.width ?? 0)
+        .toBeCloseTo(461, 0);
     }
     {
       await page.setViewportSize({ width: 1600, height: 900 });

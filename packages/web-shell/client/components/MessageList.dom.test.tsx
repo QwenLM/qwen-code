@@ -5274,7 +5274,7 @@ describe('MessageList — turn collapse (DOM)', () => {
   });
 
   it('hides the session timeline below the minimum content width', async () => {
-    const rectSpy = mockMessageListWidth(600);
+    const rectSpy = mockMessageListWidth(560);
 
     const c = mount(simpleTurns(4));
     await nextFrame();

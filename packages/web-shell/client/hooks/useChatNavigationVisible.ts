@@ -26,11 +26,11 @@ export function useChatNavigationVisible(
       }
       const containerRect = container.getBoundingClientRect();
       const contentRect = content?.getBoundingClientRect();
-      // Reserve rail space and keep at least 480px for transcript text.
+      // Reserve rail space and keep at least 440px for transcript text.
       setVisible(
         style.getPropertyValue('--chat-content-width').trim() !== '100%' &&
           contentRect !== undefined &&
-          contentRect.width >= 480 &&
+          contentRect.width >= 440 &&
           contentRect.left - containerRect.left >= 56 &&
           containerRect.right - contentRect.right >= 56,
       );
