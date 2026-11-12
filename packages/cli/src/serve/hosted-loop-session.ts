@@ -22,6 +22,7 @@ import {
 } from '@qwen-code/qwen-code-core/skills/bundled/loop/loop-tick-resolver.js';
 import {
   keepAliveRearm,
+  CRON_REARM,
   AUTONOMOUS_SENTINEL_DYNAMIC,
 } from '@qwen-code/qwen-code-core/skills/bundled/loop/autonomous-loop.js';
 import type {
@@ -263,9 +264,19 @@ export class HostedLoopSession {
                 false,
                 'classifier_unavailable',
               ).modelText
-            : `# Autonomous loop tick (dynamic pacing)\nThe fire-time classifier is temporarily unavailable. Treat this as a no-op tick. ${keepAliveRearm(
-                AUTONOMOUS_SENTINEL_DYNAMIC,
-              )}`;
+            : (() => {
+                // Match the autonomous family's pacing: a cron-paced loop must
+                // not be told to self-arm the dynamic sentinel (that would
+                // change its pacing); the recurring cron fires the next tick.
+                const heading = `# Autonomous loop tick${
+                  autonomousMode === 'dynamic' ? ' (dynamic pacing)' : ''
+                }`;
+                const rearm =
+                  autonomousMode === 'cron'
+                    ? CRON_REARM
+                    : keepAliveRearm(AUTONOMOUS_SENTINEL_DYNAMIC);
+                return `${heading}\nThe fire-time classifier is temporarily unavailable. Treat this as a no-op tick. ${rearm}`;
+              })();
           return { text: rearmText, expanded: false };
         }
         await this.settleLoopTurn(turnId, 'loop_admission_denied');

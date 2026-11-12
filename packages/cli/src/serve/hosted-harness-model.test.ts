@@ -30,13 +30,14 @@ import type { ManagedHookDispatcher } from '@qwen-code/qwen-code-core/hooks/hook
 import type { HostedHookSession } from './hosted-hook-session.js';
 import { HostedHookRecoveryRequiredError } from './hosted-hook-session.js';
 import { SendMessageType } from '@qwen-code/qwen-code-core/core/client.js';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { loadCliConfig } from '../config/config.js';
 import {
   HostedModelRoundLimitError,
   applyHostedPublicChildModelPin,
   HostedImageInputUnsupportedError,
   runHostedHarnessTextTurn,
+  createHostedLoopFireClassifier,
 } from './hosted-harness-model.js';
 import { HostedModelUnavailableError } from './hosted-agent-definition.js';
 import { HostedSkillCatalog } from './hosted-skill-catalog.js';
@@ -3545,4 +3546,71 @@ it('uses saved Skill results on continuation without loading the selection again
   });
   expect(toolTurn.execute).not.toHaveBeenCalled();
   expect(mocks.requests[0]).toEqual(result);
+});
+
+describe('createHostedLoopFireClassifier', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    state.config = {
+      shutdown: vi.fn(async () => undefined),
+    } as unknown as typeof state.config;
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  const fireInput = {
+    delaySeconds: 0,
+    prompt: '# Autonomous loop check\nthe guidance',
+    reason: 'loop fire-time sentinel re-review',
+  };
+
+  it('classifies on the Session model (M6)', async () => {
+    const classify = vi.spyOn(classifier, 'classifyAction').mockResolvedValue({
+      shouldBlock: false,
+      reason: '',
+      model: 'classifier',
+      stage: 'fast',
+      durationMs: 1,
+    });
+    const sessionModelConfig = { model: 'session-model' };
+    const classifyFire = createHostedLoopFireClassifier({
+      cwd: '/workspace',
+      sessionId: input.sessionId,
+      modelConfig: async () => sessionModelConfig as never,
+    });
+    const verdict = await classifyFire(fireInput);
+    expect(verdict.allowed).toBe(true);
+    expect(vi.mocked(loadCliConfig).mock.calls.at(-1)?.[9]).toMatchObject({
+      modelConfiguration: sessionModelConfig,
+    });
+    expect(classify).toHaveBeenCalledOnce();
+  });
+
+  it('a classifier that cannot be built reports unavailable, not a denial (M12)', async () => {
+    vi.mocked(loadCliConfig).mockRejectedValueOnce(new Error('config boom'));
+    const classifyFire = createHostedLoopFireClassifier({
+      cwd: '/workspace',
+      sessionId: input.sessionId,
+    });
+    const verdict = await classifyFire(fireInput);
+    expect(verdict.allowed).toBe(false);
+    expect(verdict.unavailable).toBe(true);
+  });
+
+  it('forwards the classifier unavailable flag on the success path (M13)', async () => {
+    vi.spyOn(classifier, 'classifyAction').mockResolvedValue({
+      shouldBlock: false,
+      unavailable: true,
+      reason: '',
+      model: 'classifier',
+      stage: 'fast',
+      durationMs: 1,
+    });
+    const classifyFire = createHostedLoopFireClassifier({
+      cwd: '/workspace',
+      sessionId: input.sessionId,
+    });
+    const verdict = await classifyFire(fireInput);
+    expect(verdict.allowed).toBe(false);
+    expect(verdict.unavailable).toBe(true);
+  });
 });

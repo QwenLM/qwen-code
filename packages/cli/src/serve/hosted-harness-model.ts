@@ -260,12 +260,14 @@ export function hostedToolOutputBudget(cwd: string): number {
  * A fire-time classifier for loop sentinel re-review (decision 5). The
  * arm-time classifier reviewed the sentinel constant, not the resolved file
  * text, so a full (first/changed) fire is re-reviewed before it runs. Unlike
- * the arm-time review there is no active turn at pump-pick time, so this
+ * the arm-time review there is no active turn at delivery time, so this
  * builds a short-lived Hosted config (the same trust-pinned construction the
  * model turn uses) per fire, classifies the resolved content as a
  * `loop_wakeup` continuation, and shuts the config down. Loop fires are
  * clamped to >= 60 s, so the per-fire config cost is bounded. Fail closed: an
- * unavailable classifier denies the fire.
+ * unavailable classifier reports `unavailable`, and the fire delivers a no-op
+ * re-arm tick (withholding the unreviewed guidance) rather than running it;
+ * only an explicit denial settles the loop dead.
  */
 export function createHostedLoopFireClassifier(deps: {
   cwd: string;

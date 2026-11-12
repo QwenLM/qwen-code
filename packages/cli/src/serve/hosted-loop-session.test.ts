@@ -21,7 +21,10 @@ import {
   LoopWakeupError,
   type HostedLoopClassifier,
 } from './hosted-loop-session.js';
-import { AUTONOMOUS_SENTINEL_DYNAMIC } from '@qwen-code/qwen-code-core/skills/bundled/loop/loop-tick-resolver.js';
+import {
+  AUTONOMOUS_SENTINEL_DYNAMIC,
+  AUTONOMOUS_SENTINEL_CRON,
+} from '@qwen-code/qwen-code-core/skills/bundled/loop/loop-tick-resolver.js';
 
 // The self-paced loop funnel drives the real journal. The deployment gate
 // gates arming, so these arming-semantics tests run with it on. See
@@ -650,6 +653,33 @@ describe('HostedLoopSession fire-time sentinel expansion', () => {
       },
       allow,
       classifyFire,
+    );
+  });
+
+  it('a cron autonomous outage tick keeps cron pacing, not self-arm (F1)', async () => {
+    const harness = await createHarness();
+    const outage: HostedLoopClassifier = async () => ({
+      allowed: false,
+      unavailable: true,
+      reason: 'classifier api timeout',
+    });
+    await withLoop(
+      harness,
+      async (loops) => {
+        const tick = await loops.expandFireText(
+          'loop:cron-outage',
+          AUTONOMOUS_SENTINEL_CRON,
+        );
+        expect(tick).not.toBeNull();
+        // A cron-paced loop must not be told to self-arm the dynamic sentinel
+        // (that would change its pacing); the recurring cron fires next.
+        expect(tick!.text).not.toContain(AUTONOMOUS_SENTINEL_DYNAMIC);
+        expect(tick!.text).toContain('do not call LoopWakeup');
+        expect(tick!.text).not.toContain('(dynamic pacing)');
+        expect(tick!.expanded).toBe(false);
+      },
+      allow,
+      outage,
     );
   });
 });
