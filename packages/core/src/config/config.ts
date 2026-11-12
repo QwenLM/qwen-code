@@ -10830,15 +10830,31 @@ export class Config {
     return this.agentTeamEnabled;
   }
 
+  /**
+   * Whether this session runs on the shared agent loop.
+   *
+   * `QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP` overrides in either direction ('0'
+   * forces off, '1' forces on) so CI and the parity suites can pin the arm
+   * they mean to run; unset falls back to `experimental.unifiedAgentLoop`.
+   */
   isUnifiedAgentLoopEnabled(): boolean {
-    if (process.env['QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP'] === '1') return true;
+    const override = process.env['QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP'];
+    if (override === '0' || override === 'false') return false;
+    if (override === '1' || override === 'true') return true;
     return this.unifiedAgentLoopEnabled;
   }
 
+  /**
+   * Whether this session runs the shared agent loop on the event-bus kernel.
+   *
+   * `QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP` overrides in either direction ('0'
+   * forces off, '1' forces on) so CI and the parity suites can pin the arm
+   * they mean to run; unset falls back to `experimental.eventBusAgentLoop`.
+   */
   isEventBusAgentLoopEnabled(): boolean {
-    if (process.env['QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP'] === '1') {
-      return true;
-    }
+    const override = process.env['QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP'];
+    if (override === '0' || override === 'false') return false;
+    if (override === '1' || override === 'true') return true;
     return this.eventBusAgentLoopEnabled;
   }
 
