@@ -346,8 +346,11 @@ export async function runModelRound(
   stop?: AgentLoopStopReason;
 }> {
   // Execution marker: with QWEN_DEBUG_LOG_FILE on, this line proves a round
-  // ran on the shared agent loop rather than a surface's legacy loop.
-  debugLogger.debug('model round on the shared agent loop');
+  // ran on the shared agent loop rather than a surface's legacy loop. The
+  // wording is deliberately distinct from the TUI surfaces' own "model round
+  // on the shared agent loop" marker so the TUI parity's count of that marker
+  // is not doubled by this one.
+  debugLogger.debug('runModelRound on the shared agent loop');
   const calls: ToolCallRequestInfo[] = [];
   let stop: AgentLoopStopReason | undefined;
   const stream: AsyncIterator<ServerLlmStreamEvent, Turn | undefined> =

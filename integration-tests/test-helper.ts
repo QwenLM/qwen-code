@@ -1114,9 +1114,12 @@ export async function runForcedToolCallScenario(options: {
 /**
  * The debug-log line `runModelRound` writes on the shared agent loop. Its
  * presence proves a round ran on the shared loop; a surface's legacy loop
- * never calls `runModelRound`, so the line is absent there.
+ * never calls `runModelRound`, so the line is absent there. The wording is
+ * distinct from the TUI surfaces' own "model round on the shared agent loop"
+ * marker so this count does not double-count the TUI parity's marker.
  */
-export const SHARED_LOOP_ROUND_MARKER = /model round on the shared agent loop/g;
+export const SHARED_LOOP_ROUND_MARKER =
+  /runModelRound on the shared agent loop/g;
 
 /**
  * Counts the shared-loop round markers in a runtime dir's debug logs. Run the
