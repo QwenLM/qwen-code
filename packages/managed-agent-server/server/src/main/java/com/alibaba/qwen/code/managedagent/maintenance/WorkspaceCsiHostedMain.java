@@ -57,67 +57,78 @@ final class WorkspaceCsiHostedMain {
         var credentials = new WriterCredentialPolicy(properties);
         var source = new DriverManagerDataSource(required("K2_JDBC_URL"), required("K2_JDBC_USER"),
                 required("K2_JDBC_PASSWORD"));
-        var bindings = new JdbcRuntimeBindingRepository(source, AesGcmSecretProtector.fromBase64(
-                required("QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY_ID"),
-                required("QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY")));
         var jdbc = new ManagedSchemaJdbcTemplate(source);
         var manager = new DataSourceTransactionManager(source);
-        var access = new WorkspaceCsiRuntimeAccess(jdbc, manager,
-                json, properties, request.registration(), request.sessionId(), request.runtimeRequestKey(),
-                bindings, new JdbcRuntimeSessionRepository(source), new HttpRuntimeTransport(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules(), null);
-        if (retiring) {
-            UUID.fromString(args[2]);
-            var ids = jdbc.queryForList("SELECT target_id FROM ma_operation WHERE operation_key = ?"
-                    + " AND operation_kind = 'CSI_RETIREMENT' AND tenant_id = ? AND operation_id = ?", String.class,
-                    com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key("CSI_RETIREMENT", request.registration().tenantId(), args[2]),
-                    request.registration().tenantId(), args[2]);
-            if (ids.size() != 1) {
-                throw new IllegalArgumentException("Original retirement is unavailable");
+        var protector = AesGcmSecretProtector.fromBase64(
+                required("QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY_ID"),
+                required("QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY"));
+        var oss = MaintenanceObjectStores.k2Oss();
+        try {
+            var objects = oss == null ? null
+                    : oss.objects(required("QWEN_MANAGED_AGENT_TOOL_PUBLICATION_OSS_BUCKET"));
+            var bindings = new JdbcRuntimeBindingRepository(source, protector,
+                    MaintenanceObjectStores.readPacks(jdbc, objects));
+            var access = new WorkspaceCsiRuntimeAccess(jdbc, manager,
+                    json, properties, request.registration(), request.sessionId(), request.runtimeRequestKey(),
+                    bindings, new JdbcRuntimeSessionRepository(source), new HttpRuntimeTransport(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules(), objects);
+            if (retiring) {
+                UUID.fromString(args[2]);
+                var ids = jdbc.queryForList("SELECT target_id FROM ma_operation WHERE operation_key = ?"
+                        + " AND operation_kind = 'CSI_RETIREMENT' AND tenant_id = ? AND operation_id = ?", String.class,
+                        com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key("CSI_RETIREMENT", request.registration().tenantId(), args[2]),
+                        request.registration().tenantId(), args[2]);
+                if (ids.size() != 1) {
+                    throw new IllegalArgumentException("Original retirement is unavailable");
+                }
+                var binding = bindings.findById(ids.getFirst());
+                WorkspaceCsiRuntimeMain.requireSelected(request, binding);
+                var intent = new WorkspaceCsiReservationStore(jdbc, manager, json).inspectRetirement(request.registration(), bindings, binding);
+                if (intent == null || !args[2].equals(intent.operationId())) {
+                    throw new IllegalArgumentException("Original retirement is unavailable");
+                }
+                URI baseUri = hostedUri(required("K2_HOSTED_URL"));
+                String token = required("K2_HOSTED_TOKEN");
+                try (var negotiation = new HarnessNegotiation(baseUri, token, required("QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST"));
+                        var client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).followRedirects(HttpClient.Redirect.NEVER).build()) {
+                    JsonNode result = post(client, baseUri.resolve("/session/" + request.sessionId() + "/internal-csi/retire"),
+                            token, negotiation.capabilities().getBootId(), Map.of("tenantId", request.registration().tenantId(),
+                                    "workspaceId", binding.getRequest().getScope().getWorkspaceId(), "bindingId", binding.getBindingId(), "retirementId", args[2]), json);
+                    if (!"qwen-csi-application-retirement/1".equals(result.path("format").textValue())
+                            || !"DRAINED".equals(result.path("stage").textValue()) || !args[2].equals(result.path("retirementId").textValue())) {
+                        throw new IllegalStateException("Original CSI application has not drained");
+                    }
+                    System.out.println(json.writeValueAsString(result));
+                }
+                return;
             }
-            var binding = bindings.findById(ids.getFirst());
-            WorkspaceCsiRuntimeMain.requireSelected(request, binding);
-            var intent = new WorkspaceCsiReservationStore(jdbc, manager, json).inspectRetirement(request.registration(), bindings, binding);
-            if (intent == null || !args[2].equals(intent.operationId())) {
-                throw new IllegalArgumentException("Original retirement is unavailable");
-            }
+            var scope = access.resolve(request.sessionId()).toCompletableFuture().join();
             URI baseUri = hostedUri(required("K2_HOSTED_URL"));
             String token = required("K2_HOSTED_TOKEN");
             try (var negotiation = new HarnessNegotiation(baseUri, token, required("QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST"));
-                    var client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).followRedirects(HttpClient.Redirect.NEVER).build()) {
-                JsonNode result = post(client, baseUri.resolve("/session/" + request.sessionId() + "/internal-csi/retire"),
-                        token, negotiation.capabilities().getBootId(), Map.of("tenantId", request.registration().tenantId(),
-                                "workspaceId", binding.getRequest().getScope().getWorkspaceId(), "bindingId", binding.getBindingId(), "retirementId", args[2]), json);
-                if (!"qwen-csi-application-retirement/1".equals(result.path("format").textValue())
-                        || !"DRAINED".equals(result.path("stage").textValue()) || !args[2].equals(result.path("retirementId").textValue())) {
-                    throw new IllegalStateException("Original CSI application has not drained");
+                    var client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10))
+                            .followRedirects(HttpClient.Redirect.NEVER).build()) {
+                String boot = negotiation.capabilities().getBootId();
+                URI route = baseUri.resolve("/session/" + request.sessionId() + "/internal-csi/");
+                JsonNode attached = post(client, route.resolve("attach"), token, boot,
+                        Map.of("tenantId", scope.getTenantId(), "workspaceId", scope.getWorkspaceId(),
+                                "writerToken", credentials.issue(scope.getTenantId(), scope.getWorkspaceId(),
+                                        request.sessionId())), json);
+                if (!attached.path("attached").asBoolean() || !request.sessionId().equals(
+                        attached.path("sessionId").textValue()) || !boot.equals(attached.path("bootId").textValue())) {
+                    throw new IllegalStateException("Private CSI attachment response conflicts");
+                }
+                JsonNode result = post(client, route.resolve("text"), token, boot, text, json);
+                if (!request.sessionId().equals(result.path("sessionId").textValue())
+                        || !"turn_result".equals(result.path("subtype").textValue())
+                        || !text.promptId().equals(result.path("systemPayload").path("promptId").textValue())) {
+                    throw new IllegalStateException("Private CSI text response conflicts");
                 }
                 System.out.println(json.writeValueAsString(result));
             }
-            return;
-        }
-        var scope = access.resolve(request.sessionId()).toCompletableFuture().join();
-        URI baseUri = hostedUri(required("K2_HOSTED_URL"));
-        String token = required("K2_HOSTED_TOKEN");
-        try (var negotiation = new HarnessNegotiation(baseUri, token, required("QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST"));
-                var client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10))
-                        .followRedirects(HttpClient.Redirect.NEVER).build()) {
-            String boot = negotiation.capabilities().getBootId();
-            URI route = baseUri.resolve("/session/" + request.sessionId() + "/internal-csi/");
-            JsonNode attached = post(client, route.resolve("attach"), token, boot,
-                    Map.of("tenantId", scope.getTenantId(), "workspaceId", scope.getWorkspaceId(),
-                            "writerToken", credentials.issue(scope.getTenantId(), scope.getWorkspaceId(),
-                                    request.sessionId())), json);
-            if (!attached.path("attached").asBoolean() || !request.sessionId().equals(
-                    attached.path("sessionId").textValue()) || !boot.equals(attached.path("bootId").textValue())) {
-                throw new IllegalStateException("Private CSI attachment response conflicts");
+        } finally {
+            if (oss != null) {
+                oss.shutdown();
             }
-            JsonNode result = post(client, route.resolve("text"), token, boot, text, json);
-            if (!request.sessionId().equals(result.path("sessionId").textValue())
-                    || !"turn_result".equals(result.path("subtype").textValue())
-                    || !text.promptId().equals(result.path("systemPayload").path("promptId").textValue())) {
-                throw new IllegalStateException("Private CSI text response conflicts");
-            }
-            System.out.println(json.writeValueAsString(result));
         }
     }
 

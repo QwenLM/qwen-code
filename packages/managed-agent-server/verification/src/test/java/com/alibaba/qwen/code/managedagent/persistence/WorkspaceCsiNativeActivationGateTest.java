@@ -6,6 +6,7 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiRegistration;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.maintenance.WorkspaceCsiRuntimeMain;
 import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
 import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
@@ -669,6 +670,39 @@ class WorkspaceCsiNativeActivationGateTest {
                 "csi_execution_continuation_unavailable");
         rejected(() -> packBindings.authorizeDispatch(sessions, packExecutions, expected, "owner", 1),
                 "csi_file_dispatch_unavailable");
+    }
+
+    /**
+     * R1-1 regression: the graph is built through {@link WorkspaceCsiRuntimeMain#csiRuntimeGraph},
+     * the exact construction {@code serve()} uses (not a hand-built pack-aware repository). Once the
+     * prefix is packed and its SQL blobs deleted, admission through that graph must resolve the
+     * evicted record_bytes via activeHistoryThrough and reach the same journal-independent gate it
+     * reaches on a SQL-hot journal; with a null object store (the pre-fix serve() wiring, or OSS not
+     * configured) the same read fails closed. This exercises the extracted serve() construction with
+     * an in-memory store, not the full Kubernetes serve() loop.
+     */
+    @Test
+    void serveStyleGraphResolvesEvictedJournalBytesFromThePack() throws Exception {
+        ready();
+        var objects = new PublicationProbeWiring.InMemoryObjectStore();
+        var source = jdbc.getDataSource();
+        var manager = new DataSourceTransactionManager(source);
+        var protector = new AesGcmSecretProtector("test", new byte[32]);
+        var properties = new ManagedAgentProperties();
+        properties.setAgentRevision("reviewed-agent/1");
+        var sweeper = new JdbcJournalPacks(jdbc, objects, packSettings());
+        assertThat(sweeper.compactOnce("tenant", "workspace", sessionId)).isTrue();
+        assertThat(sweeper.deleteCoveredBlobs()).isGreaterThan(0);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_journal_tx WHERE record_bytes IS NULL",
+                Integer.class)).isEqualTo(2);
+        var graph = WorkspaceCsiRuntimeMain.csiRuntimeGraph(source, jdbc, manager, protector, JSON, properties,
+                registration, sessionId, request.requestKey(), objects);
+        var graphExecutions = new JdbcToolExecutionRepository(source, graph.bindings());
+        rejected(() -> admit("serve-packed", graph.bindings(), graphExecutions), "csi_native_resources_required");
+        var nullGraph = WorkspaceCsiRuntimeMain.csiRuntimeGraph(source, jdbc, manager, protector, JSON, properties,
+                registration, sessionId, request.requestKey(), null);
+        var nullExecutions = new JdbcToolExecutionRepository(source, nullGraph.bindings());
+        rejected(() -> admit("serve-null", nullGraph.bindings(), nullExecutions), "csi_original_activation_unavailable");
     }
 
     // A legacy-shape deferred execution row inserted directly: CSI admitExecution refuses native

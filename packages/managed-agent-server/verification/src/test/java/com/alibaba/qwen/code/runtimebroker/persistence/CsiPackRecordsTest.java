@@ -116,6 +116,14 @@ class CsiPackRecordsTest {
     }
 
     @Test
+    void failsClosedWhenTheBundleHasNoObjectStore() {
+        compactAndDelete();
+        // A bundle constructed without a store must yield null, not the 501 that resolveBytes'
+        // store() throws, so the admission caller raises its own fail-closed exception.
+        assertThat(resolve(new JdbcJournalPacks(jdbc, null, null), 1)).isNull();
+    }
+
+    @Test
     void failsClosedWhenNoPackCoversTheEvictedRange() {
         // Evict the blob without publishing a pack: the resolver must not invent bytes.
         jdbc.update("UPDATE ma_session_journal_tx SET record_bytes = NULL WHERE journal_revision = 1");
