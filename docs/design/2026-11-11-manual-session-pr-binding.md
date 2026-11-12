@@ -29,7 +29,7 @@ When none of them fires, the binding is missed. Real recurring cases:
 
 Today the only recovery is a manual REST call:
 `PATCH /session/:id/metadata` with a bearer token, the session id, and a
-complete `{number, url, state}` body. That is out of reach for a user in the
+`{number, url}` body (`state` optional). That is out of reach for a user in the
 TUI or the Web Shell, and in practice the agent has to be reminded to run it.
 
 ## Current state
@@ -316,8 +316,8 @@ language instead of the daemon's process language).
   incl. catalog propagation and idempotent re-bind); the Playwright spec
   ran 5/5 on chromium. The maintainer's independent A/B rig additionally
   verified the real-sidecar central claim against the merge-base control
-  (87/87 assertions, 8/8 mutations killed). Logs:
-  `.qwen/e2e-tests/manual-session-pr-binding.md`.
+  (87/87 assertions, 8/8 mutations killed). Logs: the local working record
+  `.qwen/e2e-tests/manual-session-pr-binding.md` (git-ignored, not committed).
 
 ## Acceptance criteria
 

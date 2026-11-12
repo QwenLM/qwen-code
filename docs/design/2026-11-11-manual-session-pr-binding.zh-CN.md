@@ -24,8 +24,8 @@ transcript 文本作为来源，因为打印出的 URL 无法归因到 gh 自身
   `/review <N>`。
 - 后台运行或被 promote 的 `gh pr create`——post-hook 刻意不绑定这类运行。
 
-目前唯一的补救是手动 REST 调用：带 bearer token、会话 id 与完整
-`{number, url, state}` body 的 `PATCH /session/:id/metadata`。TUI 与 Web
+目前唯一的补救是手动 REST 调用：带 bearer token、会话 id 与
+`{number, url}` body（`state` 可选）的 `PATCH /session/:id/metadata`。TUI 与 Web
 Shell 里的用户够不着这条路径，实践中总要提醒 agent 去跑。
 
 ## 现状
@@ -255,7 +255,8 @@ i18n：`client/i18n.tsx` 的 EN 与 ZH 两份字典各加 `sessionsOverview.bind
   本地 bundle 手动跑通（headless 8/8 格，含降级与错误路径；daemon 6/6 格，
   含 catalog 传播与幂等重绑）；Playwright spec 在 chromium 跑 5/5。维护者
   的独立 A/B 装置另对 merge-base 对照验证了真实 sidecar 的中央主张（87/87
-  断言、8/8 变异被杀）。日志：`.qwen/e2e-tests/manual-session-pr-binding.md`。
+  断言、8/8 变异被杀）。日志：本地工作记录
+  `.qwen/e2e-tests/manual-session-pr-binding.md`（git-ignored，不入提交）。
 
 ## 验收标准
 

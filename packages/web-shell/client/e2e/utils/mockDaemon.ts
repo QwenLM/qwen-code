@@ -2315,10 +2315,13 @@ async function handleDaemonRoute(
         await json(
           route,
           {
+            // The real route answers { error, code, field } and the SDK reads
+            // `error` first; keep the same shape so a test asserting the
+            // production body is written against the route, not the fixture.
+            error:
+              '`pr` must be an object with a positive integer `number` and an http(s) `url` of at most 2048 characters, without control characters, an optional valid `state` and `role`.',
             code: 'invalid_metadata',
             field: 'pr',
-            message:
-              '`pr` must be an object with a positive integer `number` and an http(s) `url` of at most 2048 characters, without control characters, an optional valid `state` and `role`.',
           },
           400,
         );
@@ -2329,6 +2332,11 @@ async function handleDaemonRoute(
         url,
         ...(state === 'open' || state === 'merged' || state === 'closed'
           ? { state }
+          : {}),
+        // The real route passes a valid role through to the upsert; keep it
+        // in the stored entry so a bound role reads back like production.
+        ...(role === 'review' || role === 'verify' || role === 'fix'
+          ? { role }
           : {}),
       };
       prs = [...prs.filter((p) => p.number !== entry.number), entry];

@@ -311,6 +311,40 @@ describe('BindSessionPrDialog', () => {
     expect(onSubmit).not.toHaveBeenCalled();
   });
 
+  it('disables the submit button while the input is empty', async () => {
+    // The !value.trim() arm of the disabled computation: an empty input must
+    // not offer a submit. Removing that arm reds this test.
+    await render();
+    const submitButton = document.querySelector<HTMLButtonElement>(
+      'button[type="submit"]',
+    );
+    expect(submitButton).not.toBeNull();
+    expect(submitButton!.disabled).toBe(true);
+    await type('16865');
+    expect(submitButton!.disabled).toBe(false);
+  });
+
+  it('marks the form aria-busy while the list resolves', async () => {
+    // The resolving half of aria-busy (the busy half is pinned above): a slow
+    // list fetch must convey the in-flight state. Removing resolving from the
+    // aria-busy expression reds this test.
+    let resolveList!: (value: typeof LIST_RESPONSE) => void;
+    workspaceGitHubPullRequests.mockReturnValue(
+      new Promise<typeof LIST_RESPONSE>((resolve) => {
+        resolveList = resolve;
+      }),
+    );
+    await render();
+    await type('16865');
+    expect(input().form!.getAttribute('aria-busy')).toBe('false');
+    await submit();
+    expect(input().form!.getAttribute('aria-busy')).toBe('true');
+    await act(async () => {
+      resolveList(LIST_RESPONSE);
+    });
+    expect(input().form!.getAttribute('aria-busy')).toBe('false');
+  });
+
   it('prefers a fresh local validation error over the stale host error', async () => {
     await render({ error: 'daemon says no' });
     await type('not-a-pr');
@@ -458,5 +492,25 @@ describe('BindSessionPrDialog', () => {
       number: 16865,
       url: 'https://github.com/QwenLM/qwen-code/pull/16865',
     });
+  });
+
+  it('does not submit an Enter reported via the legacy keyCode 229 IME arm', async () => {
+    // Some IMEs flag composition with keyCode 229 rather than isComposing;
+    // the guard's second disjunct must catch it. Removing that disjunct reds
+    // this test.
+    const { onSubmit } = await render();
+    await type('16865');
+    const event = new KeyboardEvent('keydown', {
+      key: 'Enter',
+      isComposing: false,
+      bubbles: true,
+      cancelable: true,
+    });
+    Object.defineProperty(event, 'keyCode', { value: 229 });
+    await act(async () => {
+      input().dispatchEvent(event);
+    });
+    expect(event.defaultPrevented).toBe(true);
+    expect(onSubmit).not.toHaveBeenCalled();
   });
 });

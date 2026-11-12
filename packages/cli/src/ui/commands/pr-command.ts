@@ -61,7 +61,8 @@ export const prCommand: SlashCommand = {
   },
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
-  argumentHint: '<number | url>',
+  // Optional: bare /pr lists the session's bindings.
+  argumentHint: '[number | url]',
   action: async (context, args) => {
     const config = context.services.config;
     if (!config) {

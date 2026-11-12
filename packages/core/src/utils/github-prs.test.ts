@@ -1532,8 +1532,10 @@ describe('fetchPullRequestByReference', () => {
   it('refuses a file cwd inside a surviving repository (the deleted-cwd sibling)', async () => {
     // Same root cause one spelling over: a cwd that exists but is a regular
     // file under a surviving repo. findGitRoot still resolves the ancestor,
-    // so the pre-check must reject the caller-named path itself. Reordering
-    // the check back after findGitRoot reds this too.
+    // so the pre-check must reject the caller-named path itself. The killing
+    // mutant is reverting the pre-check's subject to the resolved root
+    // (viewWorkingDirectoryProblem(runDir)); a mere reorder that keeps cwd as
+    // the subject survives.
     const repo = tmp.repo();
     const filePath = path.join(repo, 'not-a-dir');
     fs.writeFileSync(filePath, 'x');

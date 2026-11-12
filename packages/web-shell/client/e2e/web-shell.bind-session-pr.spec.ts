@@ -190,6 +190,37 @@ test('rejects a bind routed through the wrong workspace @smoke', async ({
   expect(session?.prs ?? []).toHaveLength(0);
 });
 
+// The mock mirrors the real route's parseSessionPrBody: an invalid pr must be
+// rejected with 400 invalid_metadata and leave the bindings untouched. Driven
+// with a raw PATCH because the UI's own validation never sends an invalid pr.
+// Pins the rejection branch (a 400→200 flip reds this) and the route-shaped
+// { error, code, field } body the SDK reads.
+test('rejects an invalid pr payload with invalid_metadata @smoke', async ({
+  page,
+}) => {
+  const result = await page.evaluate(async (cwd: string) => {
+    const res = await fetch(
+      `/workspaces/${encodeURIComponent(cwd)}/session/bind-current/metadata`,
+      {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          pr: { number: 0, url: 'https://github.com/example/repo/pull/1' },
+        }),
+      },
+    );
+    return { status: res.status, body: await res.json() };
+  }, workspaceCwd);
+  expect(result.status).toBe(400);
+  expect(result.body.code).toBe('invalid_metadata');
+  expect(result.body.field).toBe('pr');
+  expect(typeof result.body.error).toBe('string');
+  const session = daemon.scenario.sessions.find(
+    (s) => s.sessionId === 'bind-current',
+  );
+  expect(session?.prs ?? []).toHaveLength(0);
+});
+
 test('rejects a bind whose workspace segment cannot be decoded @smoke', async ({
   page,
 }) => {
