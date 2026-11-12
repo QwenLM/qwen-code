@@ -96,6 +96,9 @@
 
 .summary,
 .selection {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
@@ -113,20 +116,16 @@
   font-weight: 600;
 }
 
-.selectionStats,
-.selectionStatsSecondary {
-  display: flex;
-  flex-wrap: nowrap;
-  gap: 4px 10px;
-  align-items: center;
+.selectionStats {
+  display: contents;
   color: var(--muted-foreground);
 }
 
-.selectionStats {
-  flex-shrink: 0;
-}
-
 .selectionStatsSecondary {
+  display: flex;
+  gap: 4px 10px;
+  align-items: center;
+  color: var(--muted-foreground);
   min-width: 0;
   align-self: stretch;
   overflow: auto hidden;
@@ -141,6 +140,13 @@
 .selectionMetric {
   flex: 0 0 auto;
   white-space: nowrap;
+}
+
+.selectionStats > .selectionMetric {
+  flex-shrink: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .selectionMetricValue {
@@ -642,7 +648,7 @@ tr:hover .frozenCell.selectedCell {
     }
   }
 
-  @container table-toolbar (500px < width <= 1200px) {
+  @container table-toolbar (620px < width <= 1200px) {
     .selectionStats
       ~ .compactToolbarControl
       :is(.compactToolbarLabel, .toolbarChevron) {
@@ -655,10 +661,9 @@ tr:hover .frozenCell.selectedCell {
     }
   }
 
-  @container table-toolbar (max-width: 500px) {
+  @container table-toolbar (max-width: 620px) {
     .compactToolbarLabel,
-    .toolbarChevron,
-    .selectionMetric:not(:first-child) {
+    .toolbarChevron {
       display: none;
     }
 
@@ -667,6 +672,12 @@ tr:hover .frozenCell.selectedCell {
       justify-content: center;
       gap: 0;
       padding-inline: 0;
+    }
+  }
+
+  @container table-toolbar (max-width: 550px) {
+    .selectionStats > .selectionMetric:not(:first-child) {
+      display: none;
     }
   }
 

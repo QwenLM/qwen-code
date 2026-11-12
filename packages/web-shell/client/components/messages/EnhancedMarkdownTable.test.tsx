@@ -3276,6 +3276,9 @@ describe('EnhancedMarkdownTable', () => {
 
     dragCells(dataCell(container, 0, 1), dataCell(container, 2, 1));
 
+    const statistics = container.querySelector<HTMLElement>('[role="group"]');
+    expect(statistics?.getAttribute('aria-label')).toBe('数值选区统计');
+    expect(statistics?.tabIndex).toBe(0);
     expect(container.textContent).toContain('已选 3');
     expect(container.textContent).toContain('非空 3');
     expect(container.textContent).toContain('数值 3');

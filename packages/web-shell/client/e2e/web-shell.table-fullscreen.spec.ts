@@ -79,7 +79,9 @@ async function openFixture(
     exact: true,
   });
   await expect(copy).toBeVisible();
-  await copy.scrollIntoViewIfNeeded();
+  await page
+    .locator('[data-selection-copy-table] > [data-selection-copy-ignore]')
+    .scrollIntoViewIfNeeded();
   return { daemon, scenario };
 }
 
@@ -364,6 +366,56 @@ test.describe('enhanced table fullscreen', () => {
     await expect(copyTable).toBeInViewport({ ratio: 1 });
   });
 
+  test('@smoke keeps English numeric selection actions visible in a narrow window', async ({
+    page,
+  }, testInfo) => {
+    await openFixture(page, testInfo, { width: 570, theme: 'light' });
+    const table = page.locator('[data-selection-copy-table]');
+    const toolbar = table.locator(':scope > [data-selection-copy-ignore]');
+    const statistics = toolbar.getByRole('group', {
+      name: 'Numeric selection statistics',
+      includeHidden: true,
+    });
+
+    await table.getByRole('cell', { name: '80', exact: true }).click();
+
+    for (const width of [570, 600]) {
+      await test.step(`check the toolbar at ${width} px`, async () => {
+        await page.setViewportSize({ width, height: 844 });
+        await toolbar.scrollIntoViewIfNeeded();
+        await expect(
+          toolbar.getByRole('button', { name: 'Copy text', exact: true }),
+        ).toBeInViewport({ ratio: 1 });
+        await expect(
+          toolbar.getByRole('button', { name: 'Copy', exact: true }),
+        ).toBeInViewport({ ratio: 1 });
+        expect(
+          await toolbar.evaluate((el) => el.scrollWidth - el.clientWidth),
+        ).toBe(0);
+        await expect(statistics).toHaveCount(1);
+        await expect(statistics).toBeHidden();
+      });
+    }
+  });
+
+  test('@smoke keeps the English toolbar actions in view without a selection', async ({
+    page,
+  }, testInfo) => {
+    await openFixture(page, testInfo, { width: 1010, theme: 'light' });
+    const table = page.locator('[data-selection-copy-table]');
+    const toolbar = table.locator(':scope > [data-selection-copy-ignore]');
+
+    await expect(
+      toolbar.getByRole('button', { name: 'Copy text', exact: true }),
+    ).toHaveCount(0);
+    await expect(
+      toolbar.getByRole('button', { name: 'Copy', exact: true }),
+    ).toBeInViewport({ ratio: 1 });
+    expect(
+      await toolbar.evaluate((el) => el.scrollWidth - el.clientWidth),
+    ).toBe(0);
+  });
+
   test('@smoke keeps every toolbar action in view after selecting a numeric cell at desktop width', async ({
     page,
   }, testInfo) => {
@@ -405,6 +457,15 @@ test.describe('enhanced table fullscreen', () => {
       .poll(() => statistics.evaluate((element) => element.scrollLeft))
       .toBeGreaterThan(0);
     await expectActionsInView();
+
+    await table
+      .getByRole('button', { name: 'Fullscreen', exact: true })
+      .click();
+    await expect(
+      page.getByRole('dialog', { name: 'Fullscreen' }).getByText('Copy', {
+        exact: true,
+      }),
+    ).toBeVisible();
   });
 
   test('keeps narrow-screen controls and Shadow DOM portals usable', async ({

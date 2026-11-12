@@ -27,11 +27,14 @@ details, full-value dialogs, copying, and first-column freezing.
   Markdown preserves the table structure and literal cell text, not inline
   formatting or link destinations. Escape Markdown punctuation and HTML-like
   text, and encode CRLF, CR and LF as table-cell line breaks.
-- At toolbar widths up to 500px, copying and expanding text use icons only,
-  with accessible button names. Copy success is announced by a polite status.
-  When cells are selected, table actions use icons at toolbar widths up to
-  1200px. Above 720px, secondary numeric statistics can scroll independently
-  when they exceed the space available beside the table actions.
+- Row and selection summaries stay on one line and truncate as needed to keep
+  table actions visible. Table actions use icons at toolbar widths up to 620px,
+  or up to 1200px when cells are selected. The buttons retain accessible names,
+  and a polite status announces successful copying.
+- At toolbar widths up to 550px, the selection summary shows the selected count
+  and Copy text. Sum, Average, Min, and Max are hidden at widths up to 720px.
+  Above 720px, they scroll independently when they exceed the space beside the
+  table actions.
 - Keep a single sort icon, with color and opacity identifying its direction
   so the visual state does not rely on color alone.
 - Drag selection scrolls at the edges, including the left action gutter and
