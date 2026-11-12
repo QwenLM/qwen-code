@@ -38,12 +38,17 @@ public class JdbcManagedToolResultStore
     private final TransactionTemplate transactions;
     private final EventProjectionStore sessions;
 
+    private JdbcJournalPacks packs;
+
     public JdbcManagedToolResultStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc, @Qualifier("managedAgentTransactionManager") PlatformTransactionManager manager,
             EventProjectionStore sessions) {
         this.jdbc = jdbc;
         this.transactions = new TransactionTemplate(manager);
         this.sessions = sessions;
     }
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    void setJournalPacks(JdbcJournalPacks packs) { this.packs = packs; }
 
     void captureEvents(String tenant, String workspace, String session, long revision, List<JsonNode> events) {
         Map<String, Source> sources = new LinkedHashMap<>();
@@ -280,7 +285,7 @@ public class JdbcManagedToolResultStore
     public void verifySource(Source source) {
         var rows =
                 jdbc.query(
-                        "SELECT record_bytes, record_digest FROM ma_session_journal_tx WHERE"
+                        "SELECT record_bytes, record_digest, byte_length FROM ma_session_journal_tx WHERE"
                                 + " tenant_id = ? AND workspace_id = ? AND session_id = ? AND"
                                 + " journal_revision = ?",
                         (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow),
@@ -290,6 +295,12 @@ public class JdbcManagedToolResultStore
                         source.journalRevision());
         require(rows.size() == 1, "Original receipt journal is missing");
         byte[] bytes = (byte[]) rows.getFirst().get("record_bytes");
+        if (bytes == null && packs != null) {
+            bytes = packs.resolveBytes(source.tenantId(), source.sessionId(),
+                    source.journalRevision(), (String) rows.getFirst().get("record_digest"),
+                    ((Number) rows.getFirst().get("byte_length")).longValue());
+        }
+        require(bytes != null, "Original receipt journal is missing");
         require(ToolPublicationContract.sha256(bytes).equals(rows.getFirst().get("record_digest")),
                 "Original receipt journal changed");
         int matches = 0;

@@ -84,6 +84,16 @@ public class O4OssGate extends O4MySqlGate {
         try (var real = new OssFixture(client())) {
             String objectKey = ownedPrefix() + "one";
             var uncertain = new ToolPublicationObjectStore() {
+                @Override
+                public InputStream openRange(String key, long offset, long length, Runnable guard) {
+                    guard.run();
+                    try (InputStream full = open(key)) {
+                        byte[] bytes = full.readAllBytes();
+                        return new java.io.ByteArrayInputStream(bytes, (int) offset, (int) length);
+                    } catch (java.io.IOException error) {
+                        throw new IllegalStateException(error);
+                    }
+                }
                 private boolean first = true;
                 @Override public void putIfAbsent(String key, byte[] bytes) { real.putIfAbsent(key, bytes); }
                 @Override public InputStream open(String key) { return real.open(key); }
@@ -113,7 +123,8 @@ public class O4OssGate extends O4MySqlGate {
 
     @Test
     void realPermissionFailurePreservesQuotaUntilAuthorizedRetry() throws Exception {
-        try (var restricted = new OssFixture(deniedClient()); var real = new OssFixture(client())) {
+        try (var restricted = new OssFixture(deniedClient(), false);
+                var real = new OssFixture(client())) {
             String objectKey = ownedPrefix() + "denied";
             retention.put(key, scope, "pub-1", objectKey, new byte[] {7}, real);
             addObject("one", objectKey, null);
@@ -139,8 +150,8 @@ public class O4OssGate extends O4MySqlGate {
         try (var objects = new OssFixture(client())) {
             String prefix = ownedPrefix();
             collectCapacity(objects, bytes, prefix);
-            List<String> keys = jdbc.queryForList("SELECT object_key FROM qwen_tool_publication_object"
-                    + " WHERE scope_key = ? AND object_key IS NOT NULL", String.class, scope);
+            List<String> keys = jdbc.queryForList("SELECT object_key FROM ma_resource"
+                    + " WHERE session_scope_key = ? AND object_key IS NOT NULL", String.class, scope);
             for (String objectKey : keys) {
                 assertThat(objects.client.doesObjectExist(bucket(), objectKey)).isFalse();
             }
@@ -158,8 +169,13 @@ public class O4OssGate extends O4MySqlGate {
         private final OSS client;
         private final AliyunToolPublicationObjectStore objects;
         private final Set<String> keys = new HashSet<>();
+        private final boolean probeConfiguration;
         private OssFixture(OSS client) {
+            this(client, true);
+        }
+        private OssFixture(OSS client, boolean probeConfiguration) {
             this.client = client;
+            this.probeConfiguration = probeConfiguration;
             try {
                 objects = new AliyunToolPublicationObjectStore(client, bucket());
             } catch (RuntimeException error) {
@@ -172,11 +188,20 @@ public class O4OssGate extends O4MySqlGate {
             objects.putIfAbsent(key, bytes);
         }
         @Override public InputStream open(String key) { return objects.open(key); }
+        @Override public InputStream openRange(String key, long offset, long length, Runnable guard) {
+            return objects.openRange(key, offset, length, guard);
+        }
         @Override public void deleteIfPresent(String key) {
             objects.deleteIfPresent(key);
             keys.remove(key);
         }
-        @Override public void validateConfiguration() { objects.validateConfiguration(); }
+        @Override public void validateConfiguration() {
+            // A denied identity is expected to fail storage operations; the configuration
+            // probe is itself an operation, so it is skipped for the restricted fixture.
+            if (probeConfiguration) {
+                objects.validateConfiguration();
+            }
+        }
         @Override public void close() {
             RuntimeException failure = null;
             try {
