@@ -220,6 +220,7 @@ function streamFrames(stdout: string, dir: string): unknown[] {
               subtype: frame['subtype'],
               is_error: frame['is_error'],
               result: frame['result'],
+              error: frame['error'],
               num_turns: frame['num_turns'],
             },
             dir,
