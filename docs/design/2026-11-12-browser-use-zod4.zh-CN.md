@@ -62,8 +62,9 @@ Web Shell 的使用者依赖树，GHSA-mrhx-c7xc-m3w5（high，影响 `zod < 4.6
 增加一条无用的安装边，并不改变实际交付的内容。
 
 在 `scripts/tests/browser-use-assets.test.js` 中，紧邻已有的 pinned-Playwright 断言处
-新增一条断言：要求 manifest 声明 `^4.` 范围，并要求 lockfile 中该 importer 解析出的版本
-与之一致、是 4.x 版本，且存在于 lockfile 快照中。
+新增一条断言：要求 manifest 声明 `^4.` 范围且其下界不低于 `4.6.6`（修复
+GHSA-mrhx-c7xc-m3w5 的版本），并要求 lockfile 中该 importer 解析出的版本与之一致、
+是 4.x 版本、存在于 lockfile 快照中，且解析结果不低于 `4.6.6`。
 
 ## 设计决策与理由
 
@@ -87,17 +88,27 @@ Web Shell 的使用者依赖树，GHSA-mrhx-c7xc-m3w5（high，影响 `zod < 4.6
 
 ## 风险
 
-- Zod 4 改变了 issue 文案并新增了 issue 字段。`invalidArguments` 只读取 `code`、`path`
-  与 `message`，三者都保留，因此运行时错误载荷保持原有形状，个别文案可能不同。
+- Zod 4 改变了 issue 文案、新增了 issue 字段，并重命名了 issue code。
+  `invalidArguments`（`src/core/errors.ts`）原样透传 `issue.code`、`issue.path`
+  与 `issue.message`，因此载荷仍是三字段形状，但 `code` 的**取值**随库变化：
+  `invalid_string` → `invalid_format`，`invalid_enum_value` 与
+  `invalid_literal` → `invalid_value`，`invalid_union_discriminator` →
+  `invalid_union`。本包的 command schema 能触达上述全部被改名的族：畸形的
+  `dom_cua.*` snapshot ref 报 `invalid_format`，非法的 `button`/`modifiers` 选项报
+  `invalid_value`，未知的 locator step `kind` 报 `invalid_union`——因此任何按
+  `details.issues[].code` 分支的消费者都必须跟上新名字。本仓库没有这样的消费者：
+  `invalidArguments` 只做字段映射，本包唯一的 code 字面量是 `errors.test.ts` 中对
+  `invalid_type` 的断言，而 Zod 4 保留该 code。文案同样会变，这也是该测试改为从
+  error 里读取句子、而不是复述的原因。
 - 对非常宽的 plan，单节点开销会上升，这在任何校验器上都一样：8 层 × 8 子节点
   （2,097,152 个节点、约 131 MB JSON）的 plan 约 1 s 完成解析。开销随输入体积线性增长，
   并未被 schema 放大，且 32 层深度上限仍会直接拒绝更深的链。
 
 ## 验证计划
 
-- 运行本包的 schema 测试：`cd packages/browser-use && npx vitest run
-src/core/schemas.test.ts`。其中包含两个有界子进程探针，若第二次 parse 的缺陷回归会
-  快速失败而不是挂起。
+- 运行本包的完整套件：`cd packages/browser-use && npx vitest run`。它会收集
+  `src/core/schemas.test.ts`（含两个有界子进程探针，若第二次 parse 的缺陷回归会
+  快速失败而不是挂起）与 `src/core/errors.test.ts`（面向模型的参数错误契约）。
 - 运行 `npx vitest run --config ./scripts/tests/vitest.config.ts
 scripts/tests/browser-use-assets.test.js` 验证新增的 pin 断言，并确认把 manifest 改回
   `^3.25.76` 时它会失败。
@@ -106,9 +117,12 @@ scripts/tests/browser-use-assets.test.js` 验证新增的 pin 断言，并确认
 
 ### 已验证结果
 
-- `packages/browser-use` schema 测试：22 项通过，含两个子进程探针（`rejected`、`stable`）。
+- `packages/browser-use` 套件（`npx vitest run`）：26 个文件、609 项通过、3 项跳过
+  （共 612），含两个子进程探针（`rejected`、`stable`）与 `errors.test.ts` 全部 9 项。
+  CI 以两个 shard 运行同一套件；shard 2/2 为 13 个文件、299 项通过、3 项跳过（共 302）。
 - `scripts/tests/browser-use-assets.test.js`：12 项通过。把 manifest 改回 `^3.25.76` 后，
-  新断言以 `expected '^3.25.76' to match /^\^4\./` 失败；恢复后重新通过。
+  断言以 `expected '^3.25.76' to match /^\^4\./` 失败；声明 `^4.0.0` 且解析到 `4.0.0` 时
+  在 `4.6.6` 下限上以 `expected false to be true` 失败；两者恢复后重新通过。
 - `packages/browser-use` 中 `tsc --noEmit`：无报错。
 - `pnpm install --filter @qwen-code/browser-use --frozen-lockfile`：成功；从本包
   `require.resolve('zod/package.json')` 解析到 4.6.6。

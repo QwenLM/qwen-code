@@ -7,6 +7,7 @@
 import fs from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import semver from 'semver';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { parse } from 'yaml';
 import { copyBrowserUseAssets } from '../copy-browser-use-assets.js';
@@ -21,6 +22,9 @@ const runtimeFiles = [
   'scripts/native-host-setup.js',
 ];
 const playwrightPath = 'packages/browser-use/node_modules/playwright-core';
+// GHSA-mrhx-c7xc-m3w5 (high) affects zod < 4.6.6; the pin below must not
+// resolve, or declare a range that starts, below this floor.
+const zodAdvisoryFloor = '4.6.6';
 
 describe('isolated browser runtime fixtures', () => {
   let root;
@@ -263,10 +267,19 @@ describe('isolated browser runtime fixtures', () => {
     const declared =
       manifest.devDependencies?.zod ?? manifest.dependencies?.zod;
     const zod = importer.devDependencies?.zod ?? importer.dependencies?.zod;
+    const declaredFloor = semver.minVersion(declared ?? '0.0.0');
 
     expect(declared ?? '').toMatch(/^\^4\./);
     expect(zod?.specifier).toBe(declared);
     expect(zod?.version ?? '').toMatch(/^4\./);
+    // GHSA-mrhx-c7xc-m3w5 affects zod < 4.6.6, so the major check alone would
+    // pass a `^4.0.0` range and a 4.0.0 resolve that both reopen the advisory.
+    expect(
+      declaredFloor === null
+        ? null
+        : semver.gte(declaredFloor, zodAdvisoryFloor),
+    ).toBe(true);
+    expect(semver.gte(zod?.version ?? '0.0.0', zodAdvisoryFloor)).toBe(true);
     expect(lock.packages[`zod@${zod?.version}`]).toBeDefined();
   });
 

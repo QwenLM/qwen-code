@@ -75,8 +75,10 @@ unused install edge without changing what ships.
 
 Add one assertion to `scripts/tests/browser-use-assets.test.js`, beside the
 existing pinned-Playwright assertion, requiring the manifest to declare a `^4.`
-range and requiring the lockfile's resolved version for this importer to agree
-and to be a 4.x release present in the lockfile.
+range whose lower bound is at least `4.6.6` — the release that fixes
+GHSA-mrhx-c7xc-m3w5 — and requiring the lockfile's resolved version for this
+importer to agree, to be a 4.x release present in the lockfile, and not to
+resolve below `4.6.6`.
 
 ## Design decisions and rationale
 
@@ -106,9 +108,22 @@ and to be a 4.x release present in the lockfile.
 
 ## Risks
 
-- Zod 4 changes issue text and adds fields to issue objects. `invalidArguments`
-  reads only `code`, `path`, and `message`, all of which remain, so the runtime's
-  error payloads keep their shape while individual messages may differ.
+- Zod 4 changes issue text, adds fields to issue objects, and renames issue
+  codes. `invalidArguments` (`src/core/errors.ts`) republishes `issue.code`,
+  `issue.path`, and `issue.message` verbatim, so the payload keeps its
+  three-key shape while the `code` **values** move with the library:
+  `invalid_string` → `invalid_format`, `invalid_enum_value` and
+  `invalid_literal` → `invalid_value`, `invalid_union_discriminator` →
+  `invalid_union`. Every renamed family is reachable from this package's
+  command schemas — a malformed `dom_cua.*` snapshot ref reports
+  `invalid_format`, an illegal `button`/`modifiers` option reports
+  `invalid_value`, an unknown locator step `kind` reports `invalid_union` — so a
+  consumer that branches on `details.issues[].code` has to learn the new names.
+  Nothing in this repository does: `invalidArguments` only maps the fields
+  through, and the package's single code literal is the `invalid_type`
+  expectation in `errors.test.ts`, a code Zod 4 keeps. Messages differ too,
+  which is why that test now reads the sentence out of the error instead of
+  restating it.
 - Cost per node rises for very wide plans, as it does on any validator: a plan
   of 8 levels × 8 children (2,097,152 nodes, ~131 MB of JSON) parses in about
   1 s. Work scales with input size rather than being amplified by the schema,
@@ -116,9 +131,11 @@ and to be a 4.x release present in the lockfile.
 
 ## Validation plan
 
-- Run the package's schema suite: `cd packages/browser-use && npx vitest run
-src/core/schemas.test.ts`. It includes the two bounded child-process probes
-  that fail fast rather than hang if the second-parse defect returns.
+- Run the package's whole suite: `cd packages/browser-use && npx vitest run`.
+  It collects `src/core/schemas.test.ts` — including the two bounded
+  child-process probes that fail fast rather than hang if the second-parse
+  defect returns — and `src/core/errors.test.ts`, which owns the model-facing
+  argument-error contract.
 - Run `npx vitest run --config ./scripts/tests/vitest.config.ts
 scripts/tests/browser-use-assets.test.js` for the new pin assertion, and
   confirm it fails when the manifest is moved back to `^3.25.76`.
@@ -128,11 +145,14 @@ scripts/tests/browser-use-assets.test.js` for the new pin assertion, and
 
 ### Verified results
 
-- `packages/browser-use` schema suite: 22 passed, including both child-process
-  probes (`rejected`, `stable`).
+- `packages/browser-use` suite (`npx vitest run`): 26 files, 609 passed, 3
+  skipped (612), including both child-process probes (`rejected`, `stable`) and
+  all 9 `errors.test.ts` cases. CI runs the same suite in two shards; shard 2/2
+  reports 13 files, 299 passed, 3 skipped (302).
 - `scripts/tests/browser-use-assets.test.js`: 12 passed. Reverting the manifest
-  to `^3.25.76` fails the new assertion with `expected '^3.25.76' to match
-/^\^4\./`, and restoring it passes again.
+  to `^3.25.76` fails the assertion with `expected '^3.25.76' to match /^\^4\./`;
+  declaring `^4.0.0` and resolving `4.0.0` fails the `4.6.6` floor with
+  `expected false to be true`, and restoring both passes again.
 - `tsc --noEmit` in `packages/browser-use`: clean.
 - `pnpm install --filter @qwen-code/browser-use --frozen-lockfile`: succeeds;
   `require.resolve('zod/package.json')` from the package resolves 4.6.6.
