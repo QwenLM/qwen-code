@@ -50,6 +50,7 @@ const plainOutsidePath = path.join(temporaryRoot, 'elsewhere', 'checkout');
 const cmdPath = (value: string): string =>
   process.platform === 'win32' ? value.replaceAll('\\', '/') : value;
 mkdirSync(path.join(outsideRepo, '.git'), { recursive: true });
+mkdirSync(path.join(plainOutsidePath, '.git'), { recursive: true });
 mkdirSync(insideNested, { recursive: true });
 
 function request(
@@ -796,6 +797,171 @@ describe('createDaemonToolGuard', () => {
         allowed: false,
         reason: expect.stringContaining('unquoted heredoc body'),
       });
+    },
+  );
+
+  it
+    .runIf(bashSemanticsLane)
+    .each([
+      () =>
+        `cat <<$'E\\x4fF'\nbody\nEOF\ngit -C ${cmdPath(outsideRepo)} reset --hard`,
+      () =>
+        `cat <<$'E\\117F'\nbody\nEOF\ngit -C ${cmdPath(outsideRepo)} reset --hard`,
+      () => `echo \`cat <<EOF\`\ngit -C ${cmdPath(outsideRepo)} reset --hard`,
+      () => `echo \`# <<EOF\`\ngit -C ${cmdPath(outsideRepo)} reset --hard`,
+      () => `echo $[a[1] << 2]\ngit -C ${cmdPath(outsideRepo)} reset --hard`,
+      () => `cat <<EOF\nE\\\nOF\ngit -C ${cmdPath(outsideRepo)} reset --hard`,
+      () =>
+        `cd ${cmdPath(plainOutsidePath)}; cat <<''\ncd ${cmdPath(effectiveCwd)}\n\ngit reset --hard`,
+      () =>
+        `cd ${cmdPath(plainOutsidePath)}; cat <<A; cat <<B\nx\nA\ncd ${cmdPath(effectiveCwd)}\nB\ngit reset --hard`,
+      () =>
+        `cd ${cmdPath(plainOutsidePath)}; cat <<EOF\nEOF\r\ncd ${cmdPath(effectiveCwd)}\nEOF\ngit reset --hard`,
+      () =>
+        `out=$(cat <<EOF\nbody\nEOF\ngit -C ${cmdPath(outsideRepo)} reset --hard\n)`,
+      () =>
+        `f() {\ncat <<'EOF.txt'\nbody\nEOF.txt\ngit -C ${cmdPath(outsideRepo)} reset --hard\n}\nf`,
+      () =>
+        `f() {\ncat <<-'EOF.txt'\n\tbody\n\tEOF.txt\ngit -C ${cmdPath(outsideRepo)} reset --hard\n}\nf`,
+      () =>
+        `eval "cat <<'EOF.txt'\nbody\nEOF.txt\ngit -C ${cmdPath(outsideRepo)} reset --hard"`,
+      () =>
+        `cd ${cmdPath(plainOutsidePath)}; cat <<'cd ${cmdPath(effectiveCwd)}'\nbody\ncd ${cmdPath(effectiveCwd)}\ngit reset --hard`,
+    ])('keeps heredoc syntax from hiding later commands %#', async (build) => {
+    const guard = createDaemonToolGuard();
+
+    await expect(guard(request(build()))).resolves.toMatchObject({
+      allowed: false,
+      reason: expect.stringContaining('outside the session working directory'),
+    });
+  });
+
+  it.runIf(bashSemanticsLane)(
+    'checks expansion in the second heredoc but respects its quoting',
+    async () => {
+      const guard = createDaemonToolGuard();
+
+      await expect(
+        guard(
+          request(
+            `export GIT_DIR\nread -r line <<A <<B\nx\nA\n\${GIT_DIR=${cmdPath(outsideRepo)}/.git}\nB\ngit reset --hard`,
+          ),
+        ),
+      ).resolves.toMatchObject({
+        allowed: false,
+        reason: expect.stringContaining('unquoted heredoc body'),
+      });
+      await expect(
+        guard(
+          request(
+            `cat <<A <<'B'\nx\nA\n$(git -C ${cmdPath(outsideRepo)} reset --hard)\nB\ngit status`,
+          ),
+        ),
+      ).resolves.toEqual({ allowed: true });
+    },
+  );
+
+  it.runIf(bashSemanticsLane).each(['reset --hard', 'clean -fdx'])(
+    'keeps a foreground cwd after a background command: git %s',
+    async (mutation) => {
+      const guard = createDaemonToolGuard();
+
+      await expect(
+        guard(
+          request(
+            `cd ${cmdPath(plainOutsidePath)}\necho hi # <<EOF\necho x &\ngit ${mutation}`,
+          ),
+        ),
+      ).resolves.toMatchObject({
+        allowed: false,
+        reason: expect.stringContaining(
+          'outside the session working directory',
+        ),
+      });
+    },
+  );
+
+  it.runIf(bashSemanticsLane)(
+    'fails closed when a heredoc header continues into the next line',
+    async () => {
+      const guard = createDaemonToolGuard();
+
+      await expect(
+        guard(
+          request(
+            `cat <<EOF \\\n; git -C ${cmdPath(outsideRepo)} reset --hard\nEOF`,
+          ),
+        ),
+      ).resolves.toMatchObject({
+        allowed: false,
+        reason: expect.stringContaining('could not be parsed'),
+      });
+      await expect(
+        guard(request(`cat <<EOF # comment \\\nbody\nEOF`)),
+      ).resolves.toEqual({ allowed: true });
+    },
+  );
+
+  it.runIf(bashSemanticsLane)(
+    'fails closed on a parameter word the guard cannot parse',
+    async () => {
+      const guard = createDaemonToolGuard();
+
+      await expect(
+        guard(
+          request(
+            `echo \${x//<<*/}\ngit -C ${cmdPath(outsideRepo)} reset --hard`,
+          ),
+        ),
+      ).resolves.toMatchObject({
+        allowed: false,
+        reason: expect.stringContaining('could not be parsed'),
+      });
+    },
+  );
+
+  it.runIf(bashSemanticsLane)(
+    'refuses ambiguous separator ownership instead of reverting a foreground cwd',
+    async () => {
+      const guard = createDaemonToolGuard();
+
+      await expect(
+        guard(
+          request(
+            `cd ${cmdPath(plainOutsidePath)}\necho hi # | <<EOF\necho x &\ngit reset --hard`,
+          ),
+        ),
+      ).resolves.toMatchObject({
+        allowed: false,
+        reason: expect.stringContaining('could not be parsed'),
+      });
+    },
+  );
+
+  it.runIf(bashSemanticsLane)(
+    'does not scope a foreground cd because of a pipe in its comment',
+    async () => {
+      const guard = createDaemonToolGuard();
+
+      await expect(
+        guard(
+          request(
+            `cd ${cmdPath(plainOutsidePath)} # | <<EOF\ngit reset --hard`,
+          ),
+        ),
+      ).resolves.toMatchObject({
+        allowed: false,
+        reason: expect.stringContaining(
+          'outside the session working directory',
+        ),
+      });
+      await expect(
+        guard(
+          request(
+            `echo a#b | cd ${cmdPath(plainOutsidePath)}\ngit reset --hard`,
+          ),
+        ),
+      ).resolves.toEqual({ allowed: true });
     },
   );
 

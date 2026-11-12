@@ -16,6 +16,10 @@ import {
 } from '@qwen-code/qwen-code-core';
 import type { ShellType } from '@qwen-code/qwen-code-core';
 import {
+  decodeAnsiCBytes,
+  decodeAnsiCEscape,
+} from '@qwen-code/qwen-code-core/utils/shell-utils.js';
+import {
   EXTERNAL_TOOL_GUARD_MAX_DENIAL_REASON_CHARS,
   SHELL_EXECUTING_TOOL_NAMES as SHELL_EXECUTING_TOOLS,
 } from '@qwen-code/acp-bridge/externalToolGuard';
@@ -2289,20 +2293,20 @@ interface EvaluationScope {
  * (`bash <<'EOF'`) even a literal body executes there, a gap predating this
  * helper and tracked separately.
  *
- * Best-effort: only the first heredoc on a line is handled, which is the
- * shape a model emits. A body that never reaches its delimiter runs to the
- * end of the text, exactly what bash feeds to the receiver after its
- * end-of-file warning; those lines never execute as commands, so they strip
- * like any other body.
+ * Bodies are consumed in opening order. A body that never reaches its
+ * delimiter runs to the end of the text, exactly what bash feeds to the
+ * receiver after its end-of-file warning.
  */
 type HeredocStrip =
   | { readonly kind: 'ok'; readonly text: string }
-  | { readonly kind: 'expanding' };
+  | { readonly kind: 'expanding' | 'unresolved' };
 
 interface HeredocMarker {
   readonly delimiter: string;
   readonly quoted: boolean;
   readonly stripTabs: boolean;
+  readonly startIndex: number;
+  readonly endIndex: number;
 }
 
 interface HeredocScanState {
@@ -2312,7 +2316,7 @@ interface HeredocScanState {
   ansiC: boolean;
   substitution: number;
   arithmeticDepth: number;
-  legacyArithmetic: boolean;
+  legacyArithmeticDepth: number;
   readonly quoteStack: Array<[boolean, boolean]>;
   readonly backtickQuoteStack: Array<[boolean, boolean]>;
 }
@@ -2325,7 +2329,7 @@ function createHeredocScanState(): HeredocScanState {
     ansiC: false,
     substitution: 0,
     arithmeticDepth: 0,
-    legacyArithmetic: false,
+    legacyArithmeticDepth: 0,
     quoteStack: [],
     backtickQuoteStack: [],
   };
@@ -2360,16 +2364,18 @@ function skipLegacyArithmetic(
   start: number,
   state: HeredocScanState,
 ): number {
-  let cursor = state.legacyArithmetic ? start : start + 2;
+  let depth = state.legacyArithmeticDepth || 1;
+  let cursor = state.legacyArithmeticDepth ? start : start + 2;
   while (cursor < line.length) {
     if (line[cursor] === '\\') {
       cursor += 2;
       continue;
     }
-    if (line[cursor] === ']') break;
+    if (line[cursor] === '[') depth++;
+    else if (line[cursor] === ']' && --depth === 0) break;
     cursor++;
   }
-  state.legacyArithmetic = cursor >= line.length;
+  state.legacyArithmeticDepth = depth;
   return cursor;
 }
 
@@ -2389,9 +2395,30 @@ function parseHeredocDelimiter(
   while (cursor < line.length) {
     const character = line[cursor]!;
     if (!single && !double) {
-      if (' \t\r;&|<>()'.includes(character)) break;
-      if (character === '$' && ["'", '"'].includes(line[cursor + 1] ?? '')) {
-        // Quote removal also removes the dollar from $'…' and $"…".
+      if (' \t;&|<>()'.includes(character)) break;
+      if (character === '$' && line[cursor + 1] === "'") {
+        const end = skipAnsiCQuote(line, cursor);
+        if (end > line.length) return null;
+        const body = line.slice(cursor + 2, end - 1);
+        const bytes: number[] = [];
+        for (let index = 0; index < body.length; ) {
+          const escape = decodeAnsiCEscape(body, index);
+          if (escape) {
+            if (escape.bytes.includes(0)) break;
+            bytes.push(...escape.bytes);
+            index += escape.length;
+          } else {
+            const literal = String.fromCodePoint(body.codePointAt(index)!);
+            bytes.push(...Buffer.from(literal));
+            index += literal.length;
+          }
+        }
+        delimiter += decodeAnsiCBytes(bytes);
+        quoted = true;
+        cursor = end;
+        continue;
+      }
+      if (character === '$' && line[cursor + 1] === '"') {
         cursor++;
         continue;
       }
@@ -2441,24 +2468,31 @@ function parseHeredocDelimiter(
     delimiter += character;
     cursor++;
   }
-  if (single || double || delimiter === '') return null;
+  if (
+    single ||
+    double ||
+    (delimiter === '' && !quoted) ||
+    /[\uD800-\uDFFF]/u.test(delimiter) ||
+    /[\uD800-\uDFFF]/u.test(line.slice(start, cursor))
+  ) {
+    return null;
+  }
   return { delimiter, quoted, nextIndex: cursor };
 }
 
 /**
- * Finds the first real `<<[-]WORD` marker on a line, or null. The scanner
+ * Finds every real `<<[-]WORD` marker on a line. The scanner
  * carries shell quote state across lines and skips arithmetic, herestrings,
- * comments and quoted text. Command substitutions and backticks get their own
- * quote scope, so a heredoc inside one is still a marker only when it is not
- * quoted there.
+ * comments and quoted text. Backtick payloads are left to their recursive
+ * evaluation, where a closing backtick cannot become part of the delimiter.
  */
-function findHeredocMarker(
+function findHeredocMarkers(
   line: string,
   state: HeredocScanState,
-): HeredocMarker | null {
+): HeredocMarker[] | null {
   // Whether a `#` here would open a comment: only at a word boundary.
   let wordStart = true;
-  let found: HeredocMarker | null = null;
+  const found: HeredocMarker[] = [];
   for (let index = 0; index < line.length; index++) {
     const character = line[index]!;
     const next = line[index + 1];
@@ -2467,7 +2501,7 @@ function findHeredocMarker(
       wordStart = false;
       continue;
     }
-    if (state.legacyArithmetic) {
+    if (state.legacyArithmeticDepth) {
       index = skipLegacyArithmetic(line, index, state);
       wordStart = false;
       continue;
@@ -2478,7 +2512,8 @@ function findHeredocMarker(
       wordStart = false;
       continue;
     }
-    if (!state.single && character === '\\' && index + 1 < line.length) {
+    if (!state.single && character === '\\') {
+      if (index + 1 === line.length) return found.length > 0 ? null : found;
       index++;
       wordStart = false;
       continue;
@@ -2501,6 +2536,13 @@ function findHeredocMarker(
         state.double = false;
         state.backtick = true;
       }
+      wordStart = false;
+      continue;
+    }
+    if (!state.single && !state.double && character === '$' && next === '{') {
+      const end = matchingBrace(line, index + 2);
+      if (end === -1) return null;
+      index = end;
       wordStart = false;
       continue;
     }
@@ -2561,7 +2603,13 @@ function findHeredocMarker(
       // The rest of the line is a comment; no later marker can start.
       return found;
     }
-    if (character === '<' && next === '<' && !state.single && !state.double) {
+    if (
+      character === '<' &&
+      next === '<' &&
+      !state.single &&
+      !state.double &&
+      !state.backtick
+    ) {
       // `<<<` is a herestring: the word after it is data, not a delimiter.
       if (line[index + 2] === '<') {
         index += 2;
@@ -2576,16 +2624,14 @@ function findHeredocMarker(
       }
       while (line[cursor] === ' ' || line[cursor] === '\t') cursor++;
       const parsed = parseHeredocDelimiter(line, cursor);
-      if (!parsed) {
-        index++;
-        wordStart = false;
-        continue;
-      }
-      found ??= {
+      if (!parsed) return null;
+      found.push({
         delimiter: parsed.delimiter,
         quoted: parsed.quoted,
         stripTabs,
-      };
+        startIndex: index,
+        endIndex: parsed.nextIndex,
+      });
       index = parsed.nextIndex - 1;
       wordStart = false;
       continue;
@@ -2736,50 +2782,72 @@ function stripHeredocBodies(command: string): HeredocStrip {
   const scanState = createHeredocScanState();
   for (let index = 0; index < lines.length; index++) {
     const line = lines[index]!;
-    out.push(line);
-    const marker = findHeredocMarker(line, scanState);
-    if (!marker) continue;
-    const bodyLines: string[] = [];
-    // Consume the body up to the delimiter line, dropping it from the
-    // output. A body that never reaches its delimiter runs to the end of the
-    // text, which is what bash does too: it warns and feeds the partial body
-    // to the receiver as stdin, so those lines never execute as commands.
-    while (index + 1 < lines.length) {
-      index++;
-      const body = lines[index]!;
-      const trimmed = marker.stripTabs ? body.replace(/^\t+/, '') : body;
-      // CRLF input carries the carriage return into every line; bash folds
-      // it into the delimiter word itself, so tolerate it on the terminator.
-      const peeled = trimmed.endsWith('\r') ? trimmed.slice(0, -1) : trimmed;
-      if (peeled === marker.delimiter) break;
-      bodyLines.push(body);
+    const markers = findHeredocMarkers(line, scanState);
+    if (markers === null) return { kind: 'unresolved' };
+    let rewritten = '';
+    let cursor = 0;
+    for (const marker of markers) {
+      // Nested evaluation must not see a dangling heredoc or its delimiter
+      // as a command. Keep the redirect, but retire the consumed syntax.
+      rewritten += line.slice(cursor, marker.startIndex) + '< /dev/null';
+      cursor = marker.endIndex;
     }
-    if (
-      !marker.quoted &&
-      expansionCanExecute(joinContinuations(bodyLines.join('\n')))
-    ) {
-      return { kind: 'expanding' };
+    out.push(rewritten + line.slice(cursor));
+    for (const marker of markers) {
+      const bodyLines: string[] = [];
+      while (index + 1 < lines.length) {
+        let body = lines[++index]!;
+        if (marker.stripTabs) body = body.replace(/^\t+/, '');
+        if (!marker.quoted) {
+          while (index + 1 < lines.length) {
+            const slashes = /\\+$/.exec(body)?.[0].length ?? 0;
+            if (slashes % 2 === 0) break;
+            let next = lines[++index]!;
+            if (marker.stripTabs) next = next.replace(/^\t+/, '');
+            body = body.slice(0, -1) + next;
+          }
+        }
+        if (body === marker.delimiter) break;
+        bodyLines.push(body);
+      }
+      if (
+        !marker.quoted &&
+        expansionCanExecute(joinContinuations(bodyLines.join('\n')))
+      ) {
+        return { kind: 'expanding' };
+      }
     }
   }
   return { kind: 'ok', text: out.join('\n') };
 }
 
-function readTopLevelSeparators(command: string): string[] {
+function readTopLevelSeparators(
+  command: string,
+  bashComments: boolean,
+): string[] {
   const separators: string[] = [];
   let single = false;
   let double = false;
   let backtick = false;
   let substitution = 0;
+  let wordStart = true;
+  let segmentStart = 0;
   const quoteStack: Array<[boolean, boolean]> = [];
+  const addSeparator = (separator: string, index: number, length = 1) => {
+    if (command.slice(segmentStart, index).trim()) separators.push(separator);
+    segmentStart = index + length;
+  };
   for (let index = 0; index < command.length; index++) {
     const character = command[index]!;
     const next = command[index + 1];
     if (!single && character === '\\' && index + 1 < command.length) {
       index++;
+      wordStart = false;
       continue;
     }
     if (!single && character === '`') {
       backtick = !backtick;
+      wordStart = false;
       continue;
     }
     if (!single && !backtick && character === '$' && next === '(') {
@@ -2788,6 +2856,7 @@ function readTopLevelSeparators(command: string): string[] {
       double = false;
       substitution++;
       index++;
+      wordStart = false;
       continue;
     }
     if (
@@ -2801,19 +2870,28 @@ function readTopLevelSeparators(command: string): string[] {
       single = enclosing?.[0] ?? false;
       double = enclosing?.[1] ?? false;
       substitution--;
+      wordStart = false;
       continue;
     }
     if (!backtick && character === "'" && !double) {
       single = !single;
+      wordStart = false;
       continue;
     }
     if (!backtick && character === '"' && !single) {
       double = !double;
+      wordStart = false;
       continue;
     }
     if (single || double || backtick || substitution > 0) continue;
+    if (bashComments && character === '#' && wordStart) {
+      const newline = command.indexOf('\n', index);
+      if (newline === -1) break;
+      index = newline - 1;
+      continue;
+    }
     if (character === '&' && next === '&') {
-      separators.push('&&');
+      addSeparator('&&', index, 2);
       index++;
     } else if (character === '&' && next === '>') {
       // `&>` / `&>>` redirects stdout+stderr; the `&` is not a separator.
@@ -2825,19 +2903,21 @@ function readTopLevelSeparators(command: string): string[] {
       // `>&2` / `<&fd` — the `&` is part of a file-descriptor redirect.
     } else if (character === '&') {
       // A lone `&` backgrounds the command in its own subshell.
-      separators.push('&');
+      addSeparator('&', index);
     } else if (character === '|' && next === '|') {
-      separators.push('||');
+      addSeparator('||', index, 2);
+      index++;
+    } else if (character === '|' && next === '&') {
+      addSeparator('|', index, 2);
       index++;
     } else if (character === '|') {
-      // `>|` is the clobber redirect, not a pipe.
-      separators.push(command[index - 1] === '>' ? '>|' : '|');
-    } else if (character === ';') {
-      separators.push(';');
-    } else if (character === '\n') {
-      separators.push('\n');
+      if (command[index - 1] !== '>') addSeparator('|', index);
+    } else if (character === ';' || character === '\n') {
+      addSeparator(character, index);
     }
+    wordStart = ' \t;&|()<>\n'.includes(character);
   }
+  if (!command.slice(segmentStart).trim()) separators.pop();
   return separators;
 }
 
@@ -3009,7 +3089,13 @@ async function evaluateCommandWithCwd(
     : stripHeredocBodies(command);
   if (heredocStrip.kind !== 'ok') {
     return {
-      denial: { allowed: false, reason: EXPANDING_HEREDOC_DENIAL },
+      denial: {
+        allowed: false,
+        reason:
+          heredocStrip.kind === 'expanding'
+            ? EXPANDING_HEREDOC_DENIAL
+            : UNPARSEABLE_COMMAND_DENIAL,
+      },
       cwdAfter: trackedCwd,
     };
   }
@@ -3039,10 +3125,18 @@ async function evaluateCommandWithCwd(
     shellNow,
   );
   const segments = splitCommands(normalizedCommand);
-  const separators = readTopLevelSeparators(normalizedCommand);
-  // On any disagreement with `splitCommands`, treat every segment of a piped
-  // command as a pipeline component rather than guessing.
+  const separators = readTopLevelSeparators(normalizedCommand, !windowsNative);
   const separatorsMatch = separators.length === segments.length - 1;
+  if (
+    !windowsNative &&
+    !separatorsMatch &&
+    separators.some((separator) => separator === '|' || separator === '&')
+  ) {
+    return {
+      denial: { allowed: false, reason: UNPARSEABLE_COMMAND_DENIAL },
+      cwdAfter: trackedCwd,
+    };
+  }
   const isPipeComponent = (index: number): boolean =>
     // A PowerShell pipeline runs every stage in the one session — a `cd` on
     // either side outlives the pipe — so no segment is scoped there.
