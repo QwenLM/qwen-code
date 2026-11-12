@@ -649,7 +649,8 @@ public final class JdbcCsiActivationAdmission {
         JsonNode frozen = JSON.valueToTree(ManagedCsiFilesProtocol.parse(frozenBytes, 32 * 1024 * 1024));
         require(frozen.path("commitBodyBase64").isTextual());
         byte[] body = java.util.Base64.getDecoder().decode(frozen.path("commitBodyBase64").textValue());
-        require(java.util.Base64.getEncoder().encodeToString(body).equals(frozen.path("commitBodyBase64").textValue())
+        require(body.length <= CsiNativeActivationProof.TERMINAL_BODY_LIMIT
+                && java.util.Base64.getEncoder().encodeToString(body).equals(frozen.path("commitBodyBase64").textValue())
                 && CsiNativeActivationProof.sha256(body).equals(frozen.path("preparedCommitSha256").textValue()));
         JsonNode metadata = CsiNativeActivationProof.readObject(body);
         long predecessorRevision = CsiNativeActivationProof.number(metadata.get("expectedJournalRevision"));
