@@ -107,8 +107,8 @@ export class ConversationHandler {
           });
           return;
         }
-        const next = host.nextRound?.(rounds, batch.parts) ?? {
-          parts: batch.parts,
+        const next = host.nextRound?.(rounds, parts, responses) ?? {
+          parts,
           promptId: state.current.promptId,
           options: { type: SendMessageType.ToolResult },
         };

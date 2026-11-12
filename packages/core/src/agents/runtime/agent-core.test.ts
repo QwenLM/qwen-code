@@ -1114,6 +1114,57 @@ describe.each(LOOPS)(
       },
     );
 
+    it('schedules an MCP tool that recovers before the batch starts', async () => {
+      const name = 'mcp__catalog__lookup';
+      let available = false;
+      const { core } = buildCore(
+        'mcp-reconnect',
+        { tools: [name], executionAllowedTools: ['mcp__catalog__look*'] },
+        {
+          getToolRegistry: () => ({
+            getTool: (toolName: string) =>
+              available && toolName === name
+                ? { serverName: 'catalog', serverToolName: 'lookup' }
+                : undefined,
+          }),
+          getSkipLoopDetection: () => true,
+          getMaxToolCallsPerTurn: () => 100,
+          isMaxToolCallsPerTurnExplicit: () => false,
+        },
+      );
+      const chat = {
+        sendMessageStream: async () =>
+          (async function* () {
+            yield {
+              type: 'chunk',
+              value: { functionCalls: [{ id: 'lookup', name, args: {} }] },
+            };
+            available = true;
+          })(),
+        getHistoryToolCallFingerprints: () => new Map(),
+      } as unknown as LlmChat;
+      const schedule = vi
+        .spyOn(CoreToolScheduler.prototype, 'schedule')
+        .mockImplementation(async function (this: CoreToolScheduler) {
+          await (this as unknown as Scheduler).onAllToolCallsComplete?.([]);
+        });
+      try {
+        await core.runReasoningLoop(
+          chat,
+          [],
+          [{ name }],
+          new AbortController(),
+          { maxTurns: 1 },
+        );
+        expect(schedule).toHaveBeenCalledOnce();
+        expect(schedule.mock.calls[0]?.[0]).toEqual([
+          expect.objectContaining({ callId: 'lookup', name }),
+        ]);
+      } finally {
+        schedule.mockRestore();
+      }
+    });
+
     it("keeps the agent's results out of the session's transcript", async () => {
       const recordToolResult = vi.fn();
       const { core } = buildCore(

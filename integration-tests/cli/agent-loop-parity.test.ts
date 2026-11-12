@@ -247,6 +247,7 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
     vi.stubEnv('NO_PROXY', noProxy);
     vi.stubEnv('no_proxy', noProxy);
     vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', undefined);
+    vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', undefined);
   });
 
   afterEach(async () => {

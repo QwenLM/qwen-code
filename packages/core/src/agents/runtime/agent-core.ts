@@ -332,7 +332,7 @@ interface SharedToolStep {
   reset(): void;
   /** Gives the requests the round's final response id and truncation. */
   settle(round: { responseId?: string; wasOutputTruncated: boolean }): void;
-  requests(): readonly ToolCallRequestInfo[];
+  requestCount(): number;
   options: Pick<
     AgentLoopOptions,
     | 'duplicates'
@@ -2062,7 +2062,7 @@ export class AgentCore {
             model.timedOut = true;
             return 'surface_ended';
           }
-          const calls = step.requests().length;
+          const calls = step.requestCount();
           if (calls > 0) {
             debugLogger.debug(
               `[AgentCore] subagent ${this.subagentId} round ${round} tool batch on the shared loop (prompt ${promptId}, ${calls} call(s))`,
@@ -2102,9 +2102,9 @@ export class AgentCore {
     const debugLogger = this.runtimeContext.getDebugLogger();
     const declaredToolNames = new Set(params.toolsList.map((t) => t.name));
     const generatedCallIdBase = randomUUID();
-    let requests: ToolCallRequestInfo[] = [];
+    const declaredNames = new Map<ToolCallRequestInfo, string | undefined>();
     const callIds = new Set<string>();
-    const refusals = new Map<ToolCallRequestInfo, string>();
+    const refusals = new Map<ToolCallRequestInfo, string | undefined>();
     const durations = new Map<string, number>();
     let replayIndex = 0;
     return {
@@ -2118,32 +2118,42 @@ export class AgentCore {
         const request = this.buildToolCallRequest(
           fc,
           fc.id ??
-            `${fc.name ?? 'tool'}-${generatedCallIdBase}-${requests.length}`,
+            `${fc.name ?? 'tool'}-${generatedCallIdBase}-${declaredNames.size}`,
           promptId,
           undefined,
           false,
         );
-        const refusal = this.toolCallRefusal(fc.name, declaredToolNames);
-        if (refusal) refusals.set(request, refusal);
-        requests.push(request);
+        declaredNames.set(request, fc.name);
         return request;
       },
       reset: () => {
-        requests = [];
+        declaredNames.clear();
         callIds.clear();
-        refusals.clear();
       },
       settle: ({ responseId, wasOutputTruncated }) => {
-        for (const request of requests) {
+        for (const request of declaredNames.keys()) {
           request.response_id = responseId;
           request.wasOutputTruncated = wasOutputTruncated;
         }
       },
-      requests: () => requests,
+      requestCount: () => declaredNames.size,
       options: {
         duplicates: params.duplicates,
-        duplicateStateForCall: (request) =>
-          refusals.has(request) ? params.refusedDuplicates : params.duplicates,
+        duplicateStateForCall: (request) => {
+          // MCP registrations can change while the model is still streaming.
+          if (!refusals.has(request)) {
+            refusals.set(
+              request,
+              this.toolCallRefusal(
+                declaredNames.get(request),
+                declaredToolNames,
+              ),
+            );
+          }
+          return refusals.get(request)
+            ? params.refusedDuplicates
+            : params.duplicates;
+        },
         // The results of an aborted batch stay; the run ends at the next
         // round's abort check, as on the current tool step.
         keepCancelledResults: true,
@@ -2257,7 +2267,10 @@ export class AgentCore {
           timestamp: Date.now(),
         });
         const requestByCallId = new Map(
-          requests.map((request) => [request.callId, request]),
+          Array.from(declaredNames.keys(), (request) => [
+            request.callId,
+            request,
+          ]),
         );
         return {
           messages: [{ role: 'user', parts: batch.parts ?? [] }],

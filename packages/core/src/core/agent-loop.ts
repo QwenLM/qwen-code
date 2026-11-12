@@ -183,8 +183,15 @@ export interface AgentLoopHost {
    * ends the loop there; a stop of the round itself takes precedence.
    */
   onRoundEnd?(round: number): AgentLoopStopReason | void;
-  /** The request for a round after the first; defaults to the tool results. */
-  nextRound?(round: number, parts: Part[]): AgentLoopRound;
+  /**
+   * Builds the next request, which defaults to the previous batch's parts.
+   * When recording was deferred, `responses` carries the recording callbacks.
+   */
+  nextRound?(
+    round: number,
+    parts: Part[],
+    responses?: ToolBatchResult['responses'],
+  ): AgentLoopRound;
   /**
    * The calls of a batch that run; the rest get `skippedOutput`. `batch`
    * holds every call of the batch, including replays and repeated ids.
@@ -260,6 +267,7 @@ export interface AgentLoopOptions {
   /** Passed to each tool batch; see {@link ToolBatchOptions}. */
   duplicateStateForCall?: ToolBatchOptions['duplicateStateForCall'];
   keepCancelledResults?: boolean;
+  /** Leave recording to the host via `nextRound` or the loop result. */
   deferRecording?: boolean;
   /**
    * Run the loop on the event-bus implementation instead of the procedural
@@ -311,8 +319,8 @@ export async function runAgentLoop(
     if (options.maxRounds !== undefined && rounds >= options.maxRounds) {
       return { reason: 'next_round', rounds, turn, parts, responses };
     }
-    round = host.nextRound?.(rounds, batch.parts) ?? {
-      parts: batch.parts,
+    round = host.nextRound?.(rounds, parts, responses) ?? {
+      parts,
       promptId: round.promptId,
       options: { type: SendMessageType.ToolResult },
     };

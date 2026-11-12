@@ -595,6 +595,51 @@ describe('runAgentLoop event-bus parity', () => {
     expect(bus.isolated).toEqual(['c2']);
   });
 
+  it.each([false, true])(
+    'exposes deferred recordings before the next round (event bus: %s)',
+    async (useEventBus) => {
+      const recorded: string[] = [];
+      const nextRound: AgentLoopHost['nextRound'] = (
+        round,
+        parts,
+        responses,
+      ) => {
+        expect(recorded).toHaveLength(round - 1);
+        expect(responses).toHaveLength(1);
+        responses?.[0]?.record?.();
+        return {
+          parts,
+          promptId: 'p0',
+          options: { type: SendMessageType.ToolResult },
+        };
+      };
+      const result = await runAgentLoop({
+        ...options(
+          [
+            [{ type: LlmEventType.ToolCallRequest, value: call('c1') }],
+            [{ type: LlmEventType.ToolCallRequest, value: call('c2') }],
+            [content],
+          ],
+          { nextRound },
+          {
+            config: {
+              getChatRecordingService: () => ({
+                recordToolResult: (
+                  _parts: Part[],
+                  { callId }: { callId: string },
+                ) => recorded.push(callId),
+              }),
+            } as unknown as Config,
+            deferRecording: true,
+          },
+        ),
+        useEventBus,
+      });
+      expect(result).toMatchObject({ reason: 'completed', rounds: 3 });
+      expect(recorded).toEqual(['c1', 'c2']);
+    },
+  );
+
   it('matches on a round source and counts no calls toward a client', async () => {
     const toolCall = {
       type: LlmEventType.ToolCallRequest,
