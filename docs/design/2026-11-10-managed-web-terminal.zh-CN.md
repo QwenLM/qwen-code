@@ -143,7 +143,8 @@ close 与 delete 遵循现有的 release 顺序 drain：停止终端（杀掉 PT
 结算。
 
 空闲回收无需用户动作即释放 PTY 并结算 hold。worker 替换会丢失全部终端：
-registry 是内存态，中继报告显式的 terminal-lost 控制帧。终端绝不在替换
+registry 是内存态，中继把 worker 的不可重试关闭码转发给浏览器腿，由其渲染
+显式的 terminal-lost 通知。终端绝不在替换
 worker 上重放，与 Broker「歧义工作只能凭原 Runtime 的证据结算」的规则
 一致。hold 遵循现有的 lost-Runtime 恢复语义；本设计不新增恢复路径。
 
@@ -190,8 +191,9 @@ Session id 的 Java WebShell WS URL，以铸造的一次性 ticket 作为 bearer
 协议）。入口由 `capabilities.terminal` 门控。重连铸造新 ticket，并通过
 registry 重放 scrollback 与退出状态，与本地一致。页面刷新丢失内存中的
 terminal id，因此 detach 的终端被空闲回收而非恢复——与本地生命周期完全
-相同。terminal-lost 控制帧渲染显式通知，而不是静默重连循环。Escape 与
-外部交互关闭被阻止，以免释放存活 PTY；面板在瞬态 UI/能力波动期间保持挂载。
+相同。worker 的不可重试关闭码渲染显式 terminal-lost 通知，而不是静默重连
+循环。Escape 与外部交互关闭被阻止，以免释放存活 PTY；面板在瞬态 UI/能力波动
+期间保持挂载。
 
 ## 设计决策与理由
 

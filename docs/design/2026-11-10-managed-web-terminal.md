@@ -170,7 +170,8 @@ the hold active and blocks retirement, matching the existing wedge semantics
 
 Idle reclaim releases the PTY and settles the hold without user action. A
 worker replacement loses every terminal: the registry is in-memory state, and
-the relay reports an explicit terminal-lost control frame. Terminals are never
+the relay forwards the worker's non-retryable close code to the browser leg,
+which renders the explicit terminal-lost notice. Terminals are never
 replayed on a replacement worker, consistent with the Broker rule that
 ambiguous work is settled only on the original Runtime's evidence. The hold
 follows the existing lost-Runtime recovery semantics; this design adds no new
@@ -227,8 +228,9 @@ from the local daemon connection. The entry is gated by
 `capabilities.terminal`. Reconnect mints a fresh ticket and replays
 scrollback and exit state through the registry, as locally. A page reload
 loses the in-memory terminal id, so the detached terminal is idle-reclaimed
-rather than restored — identical to the local lifecycle. A terminal-lost
-control frame renders an explicit notice instead of a silent reconnect loop.
+rather than restored — identical to the local lifecycle. A non-retryable
+worker close code renders an explicit terminal-lost notice instead of a silent
+reconnect loop.
 Escape and outside-interaction dismissal are prevented so they cannot release
 a live PTY, and the panel stays mounted across transient UI/capability dips.
 
