@@ -290,6 +290,7 @@ CREATE TABLE ma_journal_pack (
     state VARCHAR(16) NOT NULL COMMENT 'Pack lifecycle: BUILDING, VERIFIED, PUBLISHED, EVICTED, or RETIRED.',
     byte_length BIGINT UNSIGNED NOT NULL COMMENT 'Compressed pack length in bytes.',
     sha256 CHAR(64) NOT NULL COMMENT 'SHA-256 digest of the complete pack object.',
+    builder_id VARBINARY(144) NOT NULL COMMENT 'Replica-scoped builder identity that owns a BUILDING row, used to reclaim only own or expired builds.',
     gmt_create BIGINT UNSIGNED NOT NULL COMMENT 'Record creation time in Unix epoch milliseconds.',
     gmt_modified BIGINT UNSIGNED NOT NULL COMMENT 'Last record update time in Unix epoch milliseconds.',
     CONSTRAINT uk_ma_journal_pack_scope_from UNIQUE (session_scope_key, from_revision),

@@ -359,8 +359,21 @@ public class ManagedChannelService {
         deliveries.find(tenantId, channelId, resentId).ifPresent(existing -> {
             if (!existing.segmentId().equals(String.valueOf(first.get("segmentId")))
                     || existing.ordinal() != ((Number) first.get("ordinal")).intValue()) {
-                throw new IllegalStateException(
-                        "delivery id already belongs to another segment");
+                // A matching-chain replay converges by design, so reaching
+                // here is a real Harness/ledger divergence. Name the
+                // identities only — never the request body (see
+                // ApiExceptionHandler.logInternalRefusal). Both ordinals are
+                // logged: an ordinal-only divergence keeps the segment ids
+                // identical, so the ids alone would not say what diverged.
+                LOG.warn("channel resend identity conflict tenant={}"
+                        + " channel={} delivery={} resent={} storedSegment={}"
+                        + " storedOrdinal={} resentSegment={} resentOrdinal={}",
+                        tenantId, channelId, deliveryId, resentId,
+                        existing.segmentId(), existing.ordinal(),
+                        String.valueOf(first.get("segmentId")),
+                        ((Number) first.get("ordinal")).intValue());
+                throw new ManagedAgentException(409, "channel_delivery_conflict",
+                        "The resent delivery id already names a different stored chain.");
             }
         });
         // The new chain carries only the segments proven unsent, so none of
@@ -372,6 +385,38 @@ public class ManagedChannelService {
             plan.add(new SegmentLedger(String.valueOf(segment.get("segmentId")),
                     ((Number) segment.get("ordinal")).intValue(), null));
         }
+        // The first-segment guard above only proves the chain's head matches.
+        // A stored chain that shares segment 0 but diverges later would slip
+        // through it, and INSERT IGNORE (unique on (delivery_key, segment_id),
+        // not on ordinal) would splice the divergent segment in beside the old
+        // one — a mixed chain with two rows at one ordinal. Compare the full
+        // (segmentId, ordinal) chain before planning so any divergence is
+        // refused rather than spliced (review 5853133846). A stored chain that
+        // is only a PREFIX of the plan is a valid transient — plan() inserts
+        // row by row and the claim sweep may have materialized segment 0
+        // already — so it converges instead of conflicting (review 5855558143).
+        List<SegmentLedger> stored = segments.list(tenantId, channelId, resentId);
+        int divergence = stored.isEmpty() ? -1 : firstChainDivergence(stored, plan);
+        if (divergence >= 0) {
+            SegmentLedger storedSegment = divergence < stored.size()
+                    ? stored.get(divergence) : null;
+            SegmentLedger resentSegment = divergence < plan.size()
+                    ? plan.get(divergence) : null;
+            // Name the diverging position and both segment identities — the
+            // counts alone are equal in an equal-length divergence and say
+            // nothing. Identities only, never the request body.
+            LOG.warn("channel resend chain conflict tenant={} channel={}"
+                    + " delivery={} resent={} position={}"
+                    + " storedSegment={} storedOrdinal={}"
+                    + " resentSegment={} resentOrdinal={}",
+                    tenantId, channelId, deliveryId, resentId, divergence,
+                    storedSegment == null ? null : storedSegment.segmentId(),
+                    storedSegment == null ? null : storedSegment.ordinal(),
+                    resentSegment == null ? null : resentSegment.segmentId(),
+                    resentSegment == null ? null : resentSegment.ordinal());
+            throw new ManagedAgentException(409, "channel_delivery_conflict",
+                    "The resent delivery id already names a different stored chain.");
+        }
         segments.plan(tenantId, channelId, resentId, plan);
         ChannelDelivery row = deliveries.findOrCreate(new ChannelDelivery(
                 tenantId, channelId, resentId,
@@ -381,6 +426,29 @@ public class ManagedChannelService {
         instances.claim(tenantId, channelId, resentId, claim.sessionId());
         return new ResendResponse(resentId, deliveryId, true,
                 view(row, claim.sessionId()));
+    }
+
+    /** The first position where the stored chain and the resent plan disagree,
+     * or -1 when the stored chain is a compatible prefix of the plan — equal,
+     * or shorter with every stored segment matching (a partly materialized
+     * chain the plan will complete). Both are ordered by ordinal; receipts are
+     * ignored — a replayed resend carries none while the stored chain may
+     * already hold some. A stored chain longer than the plan diverges at the
+     * plan's end, so the caller never indexes past the plan. */
+    private static int firstChainDivergence(List<SegmentLedger> stored,
+            List<SegmentLedger> resent) {
+        if (stored.size() > resent.size()) {
+            return resent.size();
+        }
+        for (int index = 0; index < stored.size(); index++) {
+            SegmentLedger left = stored.get(index);
+            SegmentLedger right = resent.get(index);
+            if (left.ordinal() != right.ordinal()
+                    || !left.segmentId().equals(right.segmentId())) {
+                return index;
+            }
+        }
+        return -1;
     }
 
     /**
@@ -615,6 +683,22 @@ public class ManagedChannelService {
             throw new IllegalStateException(
                     "delivery id already belongs to another segment");
         }
+        // The head check only proves the chain's head matches. A stored chain
+        // that diverges at a later segment would be spliced by planSegments
+        // (INSERT IGNORE, unique on segment_id, not ordinal). Guard the full
+        // chain at the import site too: a resend refusal alone is not durable,
+        // because the funnel already committed this record as planned and the
+        // sweep discovers pending work from the journal, not from claim rows.
+        // Settle the record so it leaves the pending set instead of being
+        // re-imported on every sweep (review R7-1).
+        List<SegmentLedger> storedChain = segments.list(tenantId, channelId,
+                pending.deliveryId());
+        if (!storedChain.isEmpty()
+                && firstChainDivergence(storedChain, recordPlan(record)) >= 0) {
+            settleConflictingChain(tenantId, pending);
+            throw new IllegalStateException(
+                    "delivery id already belongs to another chain");
+        }
         planSegments(tenantId, channelId, pending.deliveryId(), record);
         // The delivery-level identity is the record's first segment, stable
         // across a resumed partial: naming the first unsent segment here
@@ -663,6 +747,11 @@ public class ManagedChannelService {
      */
     private void planSegments(String tenantId, String channelId,
             String deliveryId, JsonNode record) {
+        segments.plan(tenantId, channelId, deliveryId, recordPlan(record));
+    }
+
+    /** The (segmentId, ordinal, receipt) plan a delivery record names. */
+    private static List<SegmentLedger> recordPlan(JsonNode record) {
         List<SegmentLedger> plan = new ArrayList<>();
         for (JsonNode segment : record.required("segments")) {
             plan.add(new SegmentLedger(
@@ -670,7 +759,30 @@ public class ManagedChannelService {
                     segment.required("ordinal").asInt(),
                     segmentReceipt(segment)));
         }
-        segments.plan(tenantId, channelId, deliveryId, plan);
+        return plan;
+    }
+
+    /** Retires a pending record whose chain conflicts with the stored one, so
+     * the claim sweep stops re-importing it. The journal record's state is the
+     * Harness's to move, and the delivery line admits no planned/partial ->
+     * rejected step: a planned chain that never dispatched cancels, a partial
+     * one settles unknown (no provider refusal a never-dispatched chain never
+     * received). Both leave the pending set the sweep selects from. */
+    private void settleConflictingChain(String tenantId, PendingDelivery pending) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("operationId", UUID.randomUUID().toString());
+        body.put("deliveryId", pending.deliveryId());
+        if ("partial".equals(pending.deliveryState())) {
+            body.put("kind", "settle_delivery");
+            body.put("outcome", "unknown");
+        } else {
+            body.put("kind", "cancel_delivery");
+        }
+        try {
+            harness.runChannelOperation(tenantId, pending.sessionId(), body);
+        } catch (HarnessFailure error) {
+            throw translate(error);
+        }
     }
 
     /** The provider message id a record segment's receipt holds, when any. */

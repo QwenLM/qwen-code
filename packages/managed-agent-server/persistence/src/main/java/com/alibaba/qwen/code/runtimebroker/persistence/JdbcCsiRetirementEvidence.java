@@ -22,7 +22,7 @@ import java.util.function.Function;
 public final class JdbcCsiRetirementEvidence {
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final int FROZEN_LIMIT = 32 * 1024 * 1024;
-    private static final int BODY_LIMIT = 128 * 1024;
+    private static final int BODY_LIMIT = CsiNativeActivationProof.TERMINAL_BODY_LIMIT;
 
     private JdbcCsiRetirementEvidence() {
     }
