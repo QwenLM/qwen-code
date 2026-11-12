@@ -4517,14 +4517,20 @@ const SETTINGS_SCHEMA = {
             showInDialog: false,
           },
           turnDetection: {
-            type: 'string',
+            type: 'enum',
             label: 'Turn Detection',
             category: 'Experimental',
             requiresRestart: false,
-            default: undefined as string | undefined,
+            default: undefined,
             description:
-              'Realtime turn detection type. One of: server_vad, smart_turn, smart_turn_v2, semantic_vad, or null for push-to-talk. Defaults to server_vad for qwen-audio realtime models and semantic_vad for all others.',
+              'Realtime turn detection type. Unset or empty defaults to server_vad for qwen-audio realtime models and semantic_vad for all others. An invalid value prevents Live Voice from starting while the daemon keeps running.',
             showInDialog: false,
+            options: [
+              { value: 'server_vad', label: 'Server VAD' },
+              { value: 'smart_turn', label: 'Smart Turn' },
+              { value: 'smart_turn_v2', label: 'Smart Turn V2' },
+              { value: 'semantic_vad', label: 'Semantic VAD' },
+            ],
           },
         },
       },

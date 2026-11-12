@@ -120,6 +120,16 @@ Two rules are deliberate:
   `experimental.liveVoice.endpoint` are unused, and the setup API refuses to
   store new ones.
 
+On the free-standing path the Web Shell's Qwen Live settings set the endpoint
+and model directly. Enter the OpenAI-compatible base URL of the region or
+dedicated domain your key belongs to, such as
+`https://dashscope-intl.aliyuncs.com/compatible-mode/v1`; left empty, Live uses
+Beijing (`https://dashscope.aliyuncs.com/compatible-mode/v1`), and a key from
+elsewhere is rejected with `401`. The base URL is stored as entered and
+converted to `wss://<host>/api-ws/v1/realtime` when a call starts; the host must
+be a DashScope or `*.maas.aliyuncs.com` endpoint. While Live Voice is on, a new
+endpoint is checked with a Realtime handshake before it is saved.
+
 ### Turn detection
 
 Set `experimental.liveVoice.turnDetection` to override the turn detection mode
@@ -131,7 +141,6 @@ sent in the Realtime `session.update`:
 - `smart_turn_v2` — second-generation smart turn (qwen-audio realtime)
 - `semantic_vad` — semantic voice activity detection (used by omni realtime
   models)
-- `null` — push-to-talk mode (no automatic turn detection)
 
 ```json
 {
@@ -143,20 +152,12 @@ sent in the Realtime `session.update`:
 }
 ```
 
-When `turnDetection` is unset the default is model-aware: models whose id
-starts with `qwen-audio` default to `server_vad`; all other models default to
-`semantic_vad`, preserving the existing omni realtime behavior.
-
-
-On the free-standing path the Web Shell's Qwen Live settings set the endpoint
-and model directly. Enter the OpenAI-compatible base URL of the region or
-dedicated domain your key belongs to, such as
-`https://dashscope-intl.aliyuncs.com/compatible-mode/v1`; left empty, Live uses
-Beijing (`https://dashscope.aliyuncs.com/compatible-mode/v1`), and a key from
-elsewhere is rejected with `401`. The base URL is stored as entered and
-converted to `wss://<host>/api-ws/v1/realtime` when a call starts; the host must
-be a DashScope or `*.maas.aliyuncs.com` endpoint. While Live Voice is on, a new
-endpoint is checked with a Realtime handshake before it is saved.
+When `turnDetection` is unset or empty the default is model-aware, keyed off
+the effective realtime model (including through `provider:modelId` selectors):
+models whose id starts with `qwen-audio` default to `server_vad`; all other
+models default to `semantic_vad`, preserving the existing omni realtime
+behavior. An invalid value produces a configuration error — Live Voice becomes
+unavailable while the daemon keeps running.
 
 ## Override reasoning capabilities
 

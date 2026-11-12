@@ -40,7 +40,7 @@ describe('Live provider credentials', () => {
       endpoint: DEFAULT_LIVE_ENDPOINT,
       voice: DEFAULT_LIVE_VOICE,
       shortcut: DEFAULT_LIVE_SHORTCUT,
-      turnDetection: 'semantic_vad',
+      turnDetection: undefined,
     });
     expect(DEFAULT_LIVE_SHORTCUT).toBe('Command+E');
   });
@@ -364,20 +364,20 @@ describe('Live provider credentials', () => {
   });
 
   describe('turnDetection', () => {
-    it('defaults to semantic_vad for omni realtime models', () => {
+    it('returns undefined for unset (default resolved at credential time)', () => {
       expect(
         readLiveVoiceConfiguration({
           experimental: { liveVoice: { model: 'qwen3.5-omni-plus-realtime' } },
         } as Settings).turnDetection,
-      ).toBe('semantic_vad');
+      ).toBeUndefined();
     });
 
-    it('defaults to server_vad for qwen-audio realtime models', () => {
+    it('returns undefined for empty string', () => {
       expect(
         readLiveVoiceConfiguration({
-          experimental: { liveVoice: { model: 'qwen-audio-3.0-realtime-plus' } },
-        } as Settings).turnDetection,
-      ).toBe('server_vad');
+          experimental: { liveVoice: { turnDetection: '' } },
+        } as unknown as Settings).turnDetection,
+      ).toBeUndefined();
     });
 
     it('accepts explicit values', () => {
@@ -395,27 +395,19 @@ describe('Live provider credentials', () => {
       }
     });
 
-    it('accepts null for push-to-talk', () => {
-      expect(
+    it('rejects null', () => {
+      expect(() =>
         readLiveVoiceConfiguration({
           experimental: { liveVoice: { turnDetection: null } },
-        } as Settings).turnDetection,
-      ).toBeNull();
-    });
-
-    it('treats an empty string as null (push-to-talk)', () => {
-      expect(
-        readLiveVoiceConfiguration({
-          experimental: { liveVoice: { turnDetection: '' } },
-        } as Settings).turnDetection,
-      ).toBeNull();
+        } as unknown as Settings),
+      ).toThrow(LiveProviderConfigError);
     });
 
     it('rejects an unknown value', () => {
       expect(() =>
         readLiveVoiceConfiguration({
           experimental: { liveVoice: { turnDetection: 'garbage' } },
-        } as Settings),
+        } as unknown as Settings),
       ).toThrow(LiveProviderConfigError);
     });
 
@@ -433,8 +425,65 @@ describe('Live provider credentials', () => {
       );
       expect(resolved.turnDetection).toBe('smart_turn_v2');
     });
-  });
 
+    describe('resolveTurnDetection', () => {
+      it('resolves model-aware default for omni models', () => {
+        expect(
+          resolveTurnDetection(undefined, 'qwen3.5-omni-plus-realtime'),
+        ).toBe('semantic_vad');
+      });
+
+      it('resolves model-aware default for qwen-audio models', () => {
+        expect(
+          resolveTurnDetection(undefined, 'qwen-audio-3.0-realtime-plus'),
+        ).toBe('server_vad');
+      });
+
+      it('empty string means model-aware default', () => {
+        expect(resolveTurnDetection('', 'qwen-audio-3.0-realtime-plus')).toBe(
+          'server_vad',
+        );
+      });
+
+      it('explicit value overrides the default', () => {
+        expect(
+          resolveTurnDetection('smart_turn_v2', 'qwen3.5-omni-plus-realtime'),
+        ).toBe('smart_turn_v2');
+      });
+
+      it('null is invalid', () => {
+        expect(() => resolveTurnDetection(null, 'any-model')).toThrow(
+          LiveProviderConfigError,
+        );
+      });
+    });
+
+    it('resolves the default from the effective route model when using provider:modelId', () => {
+      // When live.model is a selector like "dashscope:qwen-audio-3.0-realtime-plus",
+      // the default should key off the route's id (qwen-audio-3.0-realtime-plus),
+      // not the selector string which does not start with "qwen-audio".
+      const route = {
+        id: 'qwen-audio-3.0-realtime-plus',
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        envKey: 'DASHSCOPE_API_KEY',
+        realtimeOnly: true,
+      };
+      const credential = resolveLiveProviderCredential(
+        {
+          experimental: {
+            liveVoice: {
+              enabled: true,
+              model: 'dashscope:qwen-audio-3.0-realtime-plus',
+              turnDetection: undefined,
+            },
+          },
+          modelProviders: { dashscope: [route] },
+        } as unknown as Settings,
+        { env: { DASHSCOPE_API_KEY: 'env-secret' } },
+      );
+      expect(credential.turnDetection).toBe('server_vad');
+    });
+  });
 
   describe('normalizeLiveRealtimeEndpoint', () => {
     it.each([

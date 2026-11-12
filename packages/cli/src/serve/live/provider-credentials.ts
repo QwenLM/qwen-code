@@ -18,8 +18,7 @@ export type TurnDetection =
   | 'server_vad'
   | 'smart_turn'
   | 'smart_turn_v2'
-  | 'semantic_vad'
-  | null;
+  | 'semantic_vad';
 
 const TURN_DETECTION_VALUES: ReadonlySet<string> = new Set([
   'server_vad',
@@ -28,23 +27,18 @@ const TURN_DETECTION_VALUES: ReadonlySet<string> = new Set([
   'semantic_vad',
 ]);
 
-function isTurnDetection(value: unknown): value is TurnDetection {
-  return value === null || TURN_DETECTION_VALUES.has(value as string);
-}
-
 export function resolveTurnDetection(
   configured: unknown,
   model: string,
 ): TurnDetection {
-  if (configured === null || configured === '') return null;
+  if (configured === undefined || configured === '') {
+    return model.startsWith('qwen-audio') ? 'server_vad' : 'semantic_vad';
+  }
   if (typeof configured === 'string' && TURN_DETECTION_VALUES.has(configured)) {
     return configured as TurnDetection;
   }
-  if (configured === undefined) {
-    return model.startsWith('qwen-audio') ? 'server_vad' : 'semantic_vad';
-  }
   throw new LiveProviderConfigError(
-    `experimental.liveVoice.turnDetection must be one of: server_vad, smart_turn, smart_turn_v2, semantic_vad, or null. Got: ${JSON.stringify(configured)}`,
+    `experimental.liveVoice.turnDetection must be one of: server_vad, smart_turn, smart_turn_v2, semantic_vad. Got: ${JSON.stringify(configured)}`,
   );
 }
 
@@ -54,7 +48,7 @@ export interface LiveVoiceConfiguration {
   endpoint: string;
   voice: string;
   shortcut: string;
-  turnDetection: TurnDetection;
+  turnDetection: TurnDetection | undefined;
 }
 
 /** A `modelProviders` entry that Live Voice may use as its upstream. */
@@ -104,6 +98,16 @@ function readShortcut(value: unknown): string {
   return shortcut.length <= 128 ? shortcut : DEFAULT_LIVE_SHORTCUT;
 }
 
+function validateTurnDetection(configured: unknown): TurnDetection | undefined {
+  if (configured === undefined || configured === '') return undefined;
+  if (typeof configured === 'string' && TURN_DETECTION_VALUES.has(configured)) {
+    return configured as TurnDetection;
+  }
+  throw new LiveProviderConfigError(
+    `experimental.liveVoice.turnDetection must be one of: server_vad, smart_turn, smart_turn_v2, semantic_vad. Got: ${JSON.stringify(configured)}`,
+  );
+}
+
 export function readLiveVoiceConfiguration(
   settings: Settings,
 ): LiveVoiceConfiguration {
@@ -115,7 +119,7 @@ export function readLiveVoiceConfiguration(
     endpoint: readNonEmpty(raw?.endpoint, DEFAULT_LIVE_ENDPOINT),
     voice: readNonEmpty(raw?.voice, DEFAULT_LIVE_VOICE),
     shortcut: readShortcut(raw?.shortcut),
-    turnDetection: resolveTurnDetection(raw?.turnDetection, model),
+    turnDetection: validateTurnDetection(raw?.turnDetection),
   };
 }
 
@@ -398,7 +402,10 @@ export function resolveLiveProviderCredential(
     endpoint,
     realtimeModel: route?.id ?? live.model,
     voice: live.voice,
-    turnDetection: live.turnDetection,
+    turnDetection: resolveTurnDetection(
+      live.turnDetection,
+      route?.id ?? live.model,
+    ),
   } as LiveProviderCredential;
   Object.defineProperty(credential, 'apiKey', {
     configurable: false,

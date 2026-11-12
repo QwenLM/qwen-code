@@ -1754,9 +1754,14 @@ export function createServeApp(
           isAgentCollaborationEnabledFor(runtime.workspaceCwd),
       );
 
-  const liveConfigAtBoot = liveSettingsAtBoot
-    ? readLiveVoiceConfiguration(liveSettingsAtBoot)
-    : undefined;
+  const liveConfigAtBoot = (() => {
+    if (!liveSettingsAtBoot) return undefined;
+    try {
+      return readLiveVoiceConfiguration(liveSettingsAtBoot);
+    } catch {
+      return undefined;
+    }
+  })();
   let liveVoiceEnabled =
     liveVoiceSurfaceAvailable && liveConfigAtBoot?.enabled === true;
   (
