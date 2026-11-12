@@ -172,14 +172,49 @@ test('ci.yml runs the check in lint_and_static on pull requests', () => {
   const step = job.indexOf("- name: 'Report test growth'");
   assert.ok(step > 0, 'test growth step missing');
   const stepBlock = job.slice(step, job.indexOf('\n      - name:', step + 1));
-  for (const expected of [
-    "github.event_name == 'pull_request'",
-    "skip_ci != 'true'",
-    'github.event.pull_request.base.sha',
-    'github.event.pull_request.head.sha',
-    'node .github/scripts/check-test-growth.mjs',
+  // Whole literal, not the `pull_request`/`skip_ci` substrings this used to
+  // check: appending `&& ... != 'docs_only'` keeps both tokens in place while
+  // narrowing the gate, and no suite asserted the literal (#16991, the third
+  // step sharing it after #16918). No profile arm: the report is meant to
+  // cover every PR, so keying this gate on the profile could only narrow it.
+  assert.equal(
+    stepBlock.match(/^ {8}if: "(.*)"$/m)?.[1],
+    "${{ needs.classify_pr.outputs.skip_ci != 'true' && github.event_name == 'pull_request' }}",
+    'test growth gate drifted',
+  );
+  // Advisory by contract (see the script header): the step reports and never
+  // blocks. Dropping `continue-on-error` would leave the gate literal above
+  // intact while turning a summary into a required-check failure.
+  assert.match(
+    stepBlock,
+    /^ {8}continue-on-error: true$/m,
+    'test growth step must stay advisory',
+  );
+  assert.ok(
+    stepBlock.includes('node .github/scripts/check-test-growth.mjs'),
+    'step must run the test growth script',
+  );
+  // Whole lines, not keys or values: the script destructures these three names
+  // from process.env and returns early — one warning, exit 0, no summary — if
+  // any is missing. A key-only pin accepts an empty value or a mistyped secret;
+  // a value-only pin accepts a renamed key (`BASE_SHA` → `TEST_GROWTH_BASE_SHA`,
+  // a prefix this job already uses for LINT_BASE_SHA). Either keeps the report a
+  // permanent no-op behind a green check, since the step is continue-on-error.
+  for (const [line, label] of [
+    [
+      /^ {10}GITHUB_TOKEN: '\$\{\{ secrets\.GITHUB_TOKEN \}\}'$/m,
+      'the GitHub token',
+    ],
+    [
+      /^ {10}BASE_SHA: '\$\{\{ github\.event\.pull_request\.base\.sha \}\}'$/m,
+      'BASE_SHA',
+    ],
+    [
+      /^ {10}HEAD_SHA: '\$\{\{ github\.event\.pull_request\.head\.sha \}\}'$/m,
+      'HEAD_SHA',
+    ],
   ]) {
-    assert.ok(stepBlock.includes(expected), `step must include ${expected}`);
+    assert.match(stepBlock, line, `test growth step must pass ${label}`);
   }
   assert.ok(
     step < job.indexOf("- name: 'Install dependencies'"),

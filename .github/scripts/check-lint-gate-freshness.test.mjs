@@ -197,15 +197,26 @@ test('ci.yml wires the check into lint_and_static before the lint lanes', () => 
     null,
     'freshness gate must stay fatal',
   );
-  // Nor may the run line swallow the exit code. `|| true` and `|| :` leave
-  // every literal above intact while the step exits 0 on a stale gate, which
-  // re-opens the same class. The job-level key is checked separately below:
-  // it sits outside stepBlock and would swallow every step's failure.
+  // Nor may the run line swallow the exit code. Mutation witness: `run: 'node
+  // .github/scripts/check-lint-gate-freshness.mjs || true'` keeps the `if`
+  // literal, the command containment and the continue-on-error pin above all
+  // intact, and both this suite and ci-platform-lanes stayed green on the
+  // merged head — while the gate exits 0 on a stale lint configuration,
+  // re-opening the post-merge breakage class it exists to catch (#16872,
+  // #16918). Containment proves the command is present, not that its failure
+  // reaches the job; this is the body half of that pair, mirroring the
+  // convention the load-bearing lint gates already use in
+  // scripts/tests/ci-platform-lanes.test.js. `|| :` is the same hole spelled
+  // differently. A bare `||` is not matched: `|| {` is a legitimate retry shape
+  // elsewhere in this job.
   assert.doesNotMatch(
     stepBlock,
     /\|\|\s*(true|:)(\s|'|$)/,
     'the freshness run must not swallow its exit code',
   );
+  // Checked across the whole job, not just the head above `steps:`: a
+  // job-level key sits outside every step slice and swallows every step's
+  // failure, including this gate's.
   assert.equal(
     job.match(/^ {4}continue-on-error:/m),
     null,
