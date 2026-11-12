@@ -415,4 +415,24 @@ describe('loop fire-time delivery path', () => {
     );
     expect(markLoopDelivered).not.toHaveBeenCalled();
   });
+
+  it.each(['cancelled', 'error'] as const)(
+    'a %s turn does not commit the resolver cache (R8-1)',
+    async (state) => {
+      const { session } = world();
+      const expandLoopFire = vi.fn(async () => ({
+        text: '# Autonomous loop check',
+        expanded: true,
+      }));
+      const markLoopDelivered = vi.fn();
+      const turn = loopHarness(session, {
+        expandLoopFire,
+        markLoopDelivered,
+        run: async () => ({ systemPayload: { state } }),
+      });
+      await expect(turn(LOOP_TURN)).resolves.toBe('settled_incomplete');
+      expect(expandLoopFire).toHaveBeenCalledOnce();
+      expect(markLoopDelivered).not.toHaveBeenCalled();
+    },
+  );
 });

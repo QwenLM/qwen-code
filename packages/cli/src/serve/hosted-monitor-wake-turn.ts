@@ -235,10 +235,17 @@ export function createMonitorWakeRunTurn(params: {
         turnText,
         abort,
       )) as { systemPayload?: Record<string, unknown> } | null;
-      // Commit the resolver cache only for a turn that actually expanded a
-      // sentinel: a non-sentinel loop turn must not commit an orphaned
-      // expansion left pending by an earlier held/aborted/denied fire.
-      if (didExpand) params.markLoopDelivered?.();
+      // Commit the resolver cache only for a completed turn that actually
+      // expanded a sentinel: a non-sentinel loop turn must not commit an
+      // orphaned expansion left pending by an earlier held/aborted/denied
+      // fire, and a cancelled/errored turn's user record is stripped from
+      // every later turn's history — committing it would leave each later
+      // fire on a short reminder for guidance the model never received
+      // (R8-1). executeHostedTurn settles those outcomes by returning the
+      // record, not by throwing, so the guard cannot live in the catch.
+      if (didExpand && turnResult?.systemPayload?.['state'] === 'completed') {
+        params.markLoopDelivered?.();
+      }
     } catch (cause) {
       if (params.needsRecovery(cause)) {
         // Something parked mid-turn: a later settle or takeover consumes
