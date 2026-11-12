@@ -396,6 +396,24 @@ describe('isDestructiveCommand — git commit --amend', () => {
     // The previous entry here was `git commit --amend -m x`, which asserted a
     // different thing while claiming to cover this one.
     'git com\\\nmit --amend',
+    // R16-1: bash keeps CR, VT, FF, NBSP and the ideographic space inside the
+    // word, so the `#` after one is data and the amend after it really runs.
+    // `\s` matched them as blanks, the scanner cut the tail as a comment and
+    // the raw backstop could not see the quote-split `com''mit`.
+    "echo hi\r#x; git com''mit --amend",
+    "echo hi\u00a0#x; git com''mit --amend",
+    "echo hi\u3000#x; git com''mit --amend",
+    // R16-1: `<<<` is a here-string. Re-entering the opener scan on its second
+    // `<` registered the operand as a heredoc delimiter and deleted the amend
+    // line after it as body.
+    'x=amend; git commit -m x <<< "EOF"\ngit commit --$x --allow-empty --no-edit -m amended\nEOF',
+    // R16-1: an IFS slice expands to the same space `${IFS}` does.
+    'git${IFS:0:1}commit${IFS:0:1}--amend',
+    // R16-1: a git GLOBAL `-c` value is data, and an alias it defines can be
+    // the commit subcommand itself — bash amends through it (verified against
+    // a real repository's reflog).
+    "git -c alias.z='commit --amend' z --no-edit",
+    "git -c alias.z='commit' z --amend",
   ])('routes the %s spelling to approval', (command) => {
     expectNeedsApproval(command);
   });
@@ -437,6 +455,13 @@ describe('isDestructiveCommand — git commit --amend', () => {
       'git push $BRANCH; git commit -m x',
       '$X commit -m x',
       'git push $BRANCH; echo commit $msg',
+      // R16-1 negative space: a global option's value is data. Neither a
+      // config assignment that merely mentions an amend nor an alias that
+      // runs another subcommand makes this call an amend.
+      'git -c user.name=x commit -m y',
+      "git -c alias.z='commit --amend' status",
+      "git -c alias.z='log --oneline' z",
+      'git -C /elsewhere status',
     ]) {
       expect(amendNeedsApproval(command)).toBe(false);
     }

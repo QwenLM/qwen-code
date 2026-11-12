@@ -208,16 +208,37 @@ function mentionsGitCommitAmendInSegment(command: string): boolean {
   // one, `git push origin $BRANCH` and `$X commit -m x` cannot amend, and
   // asking would be the false positive #13570 is about.
   let dollarCanAssemble = false;
+  // A git alias defined by a global `-c` can BE the commit subcommand
+  // (`git -c alias.z='commit --amend' z`). The alias body is data the guard
+  // must not scan as structure, but the alias it names may carry the amend
+  // itself, so remember which aliases resolve to a commit and treat a call of
+  // one as the commit word (R16-1).
+  const commitAliases = new Map<string, string>();
   // `${IFS}`/`$IFS` expand to whitespace at run time, so a command that
   // assembles `git`, `commit` and `--amend` this way cannot be read from the
   // text; treat the expansion as whitespace so the words are seen (R25-2).
+  // A slice of IFS expands to the same space (`${IFS:0:1}`), and the general
+  // `${IFS…}` form is not enumerable, so any braced IFS reference is treated
+  // the same way rather than left as a `$` inside one word (R16-1).
   for (const token of shellWords(command)) {
-    const expanded = token.replace(/\$(?:\{IFS\}|IFS)/g, ' ');
+    const expanded = token.replace(/\$(?:\{IFS[^}]*\}|IFS)/g, ' ');
+    const globalValue = !inCommit && isGitGlobalValueFlag(previousToken);
+    if (globalValue && previousToken === '-c') {
+      const alias = /^alias\.([^\s=]+)=(.*)$/.exec(token);
+      if (alias && aliasBodyStartsCommit(alias[2]!)) {
+        commitAliases.set(alias[1]!, alias[2]!);
+      }
+    }
     // A whole token that is the value of a mandatory-value flag is an argument
     // value: its internal `$` and spaces cannot change the command structure
-    // (`-m "fix: $issue"`, `--author="$a"`).
+    // (`-m "fix: $issue"`, `--author="$a"`). A git global option's value is the
+    // same kind of data: `git -c alias.z='commit --amend' z` amends through the
+    // alias, not through words in the value, and reading the value as the
+    // subcommand consumed the real one (R16-1).
     const valueToken =
-      isGitCommitValueFlag(previousToken) || isValueFlagToken(token);
+      isGitCommitValueFlag(previousToken) ||
+      isValueFlagToken(token) ||
+      globalValue;
     let tokenBare: string | undefined;
     // A redirect glued to a word still splits it in bash (`git>|/dev/null`),
     // so split it here too before deciding what the word is (R25-2).
@@ -225,7 +246,12 @@ function mentionsGitCommitAmendInSegment(command: string): boolean {
       for (const word of piece.split(/\s+/).filter(Boolean)) {
         const bare = bareShellWord(word);
         if (!bare) continue;
-        tokenBare ??= bare;
+        // The token's own first word decides what the NEXT token is a value
+        // of. Deriving it from the first word that survived `bareShellWord`
+        // instead lost a flag whose value was consumed whole, so
+        // `git -c alias.z=…` never marked its value as data (R16-1).
+        tokenBare ??=
+          expanded.split(/[<>|]/)[0]!.trim().split(/\s+/)[0] || bare;
         if (inCommit) {
           if (isAmendFlag(bare)) return true;
           if (!valueToken) {
@@ -245,9 +271,21 @@ function mentionsGitCommitAmendInSegment(command: string): boolean {
         } else if (!valueToken && bare.includes('$')) {
           dollarBeforeCommit = true;
         }
-        if (isGitWord(bare)) seenGit = true;
-        else if (seenGit && bare === 'commit') inCommit = true;
-        else if (dollarBeforeCommit && isAmendFlag(bare)) {
+        if (isGitWord(bare)) {
+          seenGit = true;
+        } else if (seenGit && !valueToken && commitAliases.has(bare)) {
+          // The amend may live in the alias body rather than in the words
+          // after the call, so the body is scanned as the commit invocation
+          // it expands to.
+          if (
+            mentionsGitCommitAmendInSegment(`git ${commitAliases.get(bare)}`)
+          ) {
+            return true;
+          }
+          inCommit = true;
+        } else if (seenGit && bare === 'commit') {
+          inCommit = true;
+        } else if (dollarBeforeCommit && isAmendFlag(bare)) {
           dollarCanAssemble = true;
         }
         previousWord = bare;
@@ -293,6 +331,36 @@ function isGitCommitValueFlag(word: string | undefined): boolean {
   // `-am "$msg"` / `-avm "$msg"` consume it, while `-ma "$msg"` carries `a` as
   // the value of `m` and leaves `$msg` a bare argument.
   return /^-[A-Za-z]*m$/.test(word);
+}
+
+/**
+ * A git global option whose next word is its value, so that word is neither
+ * the subcommand nor a flag of it.
+ */
+function isGitGlobalValueFlag(word: string | undefined): boolean {
+  return (
+    word === '-c' ||
+    word === '-C' ||
+    word === '--config-env' ||
+    word === '--git-dir' ||
+    word === '--work-tree' ||
+    word === '--namespace' ||
+    word === '--super-prefix' ||
+    word === '--exec-path'
+  );
+}
+
+/**
+ * Whether a `-c alias.name=…` body runs `git commit`, so calling that alias is
+ * calling the commit subcommand.
+ *
+ * Git expands an alias by prepending `git` to its body, so only a body whose
+ * first word is `commit` can reach an amend through the alias name. A body
+ * starting with `!` runs a shell command instead, and any other subcommand
+ * cannot amend; neither needs the alias recorded.
+ */
+function aliasBodyStartsCommit(body: string): boolean {
+  return body.trimStart().split(/\s+/, 1)[0] === 'commit';
 }
 
 /** Marker left where an executed substitution was removed from the skeleton. */
@@ -539,9 +607,16 @@ function applyEdits(text: string, edits: Edit[]): string {
   return skeleton + text.slice(cursor);
 }
 
-/** True when the `#` at `index` starts a word, the only place bash comments. */
+/**
+ * True when the `#` at `index` starts a word, the only place bash comments.
+ *
+ * `\s` also matches `\r`, `\v`, `\f`, `\u00a0` and `\u3000`, none of which bash
+ * treats as a blank: the `#` after one stays inside the word, and cutting the
+ * line there deleted an executed command from the skeleton (R16-1). The same
+ * narrow set is what `rule-parser.ts` uses for segment boundaries.
+ */
 function isCommentStart(text: string, index: number): boolean {
-  return index === 0 || /[\s;&|()]/.test(text[index - 1]!);
+  return index === 0 || /[ \t\n;&|()]/.test(text[index - 1]!);
 }
 
 interface HeredocOpener {
@@ -554,6 +629,11 @@ interface HeredocOpener {
 function readHeredocOpener(text: string, start: number): HeredocOpener | null {
   let index = start + 2;
   if (text[index] === '<') return null; // here-string
+  // `<<<` is a here-string, not a heredoc. The check above only rejects the
+  // operator at its FIRST `<`; re-entering on the second one registered the
+  // here-string operand as a delimiter and deleted the amend line after it as
+  // body (R16-1).
+  if (start > 0 && text[start - 1] === '<') return null;
   let stripTabs = false;
   if (text[index] === '-') {
     stripTabs = true;

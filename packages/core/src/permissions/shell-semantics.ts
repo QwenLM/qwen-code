@@ -487,13 +487,30 @@ function fdRedirectFile(word: string): string | undefined {
  * descriptor with an unquoted `-` and pass the rest of the word on.
  */
 /**
- * True when a token is a here-string operator glued to the text that follows
- * it (`<<<x`, `<<<x>out.txt`). `bare` marks which characters were typed
- * unquoted; without it the raw prefix decides.
+ * Index of the unquoted `<<<` that bash reads inside a word, or -1.
+ *
+ * Bash splits a word at an unquoted redirection operator, so the operator can
+ * be glued to the word before it (`cat<<<x`) as well as to the operand after
+ * it. A quoted or escaped `<` stays inside the word (`cat'<x'`).
  */
-function isGluedHereString(token: string, bare: string | undefined): boolean {
-  if (!token.startsWith('<<<') || token.length === 3) return false;
-  return bare === undefined || bare.startsWith('111');
+function hereStringOperatorIndex(
+  token: string,
+  bare: string | undefined,
+): number {
+  for (let index = 0; index + 2 < token.length; index++) {
+    if (!token.startsWith('<<<', index)) continue;
+    if (bare === undefined) {
+      let backslashes = 0;
+      for (let back = index - 1; back >= 0 && token[back] === '\\'; back--) {
+        backslashes++;
+      }
+      if (backslashes % 2 === 1) continue;
+    } else if (bare.slice(index, index + 3) !== '111') {
+      continue;
+    }
+    return index;
+  }
+  return -1;
 }
 
 /** Index of the first unquoted `<` or `>` in a word, or -1 when there is none. */
@@ -529,23 +546,70 @@ function extractRedirects(
   const writeFiles: string[] = [];
   const toRemove = new Set<number>();
 
-  // A here-string operator can be glued to its operand (`<<<x`) or to a
-  // redirect that follows it (`<<<x>out.txt`). Bash reads `<<<`, then the
-  // operand word, then the redirect, so split the operator off and let the
-  // loop treat the remainder as the ordinary words it is.
-  if (tokens.some((tok, index) => isGluedHereString(tok, bares?.[index]))) {
+  // A here-string operator can be glued to the word before it (`cat<<<x`), to
+  // its operand (`<<<x`) or to a redirect after that operand (`<<<x>out.txt`).
+  // Bash reads the word, then `<<<`, then the operand word, then the redirect,
+  // so split the operator off and let the loop treat the pieces as the
+  // ordinary words they are.
+  //
+  // Splitting grows the token array, and `fdRedirects`/`fdCloses` are keyed by
+  // token POSITION: rebuilding the array without remapping both sets makes
+  // every later `>&`/`<&` miss its branch and be read as a file path whose name
+  // starts with `&` (R26-3). Map each old index to the index of its first piece
+  // and rebuild copies of both sets through that map.
+  let fdRedirectIndices = fdRedirects;
+  let fdCloseIndices = fdCloses;
+  if (
+    tokens.some(
+      (tok, index) => hereStringOperatorIndex(tok, bares?.[index]) !== -1,
+    )
+  ) {
     const splitTokens: string[] = [];
     const splitBares: string[] = [];
+    const remappedRedirects = new Set<number>();
+    const remappedCloses = new Set<number>();
     for (let index = 0; index < tokens.length; index++) {
       const tok = tokens[index]!;
       const mark = bares?.[index];
-      if (isGluedHereString(tok, mark)) {
-        splitTokens.push('<<<', tok.slice(3));
-        const marks = mark ?? '1'.repeat(tok.length);
-        splitBares.push(marks.slice(0, 3), marks.slice(3));
-      } else {
-        splitTokens.push(tok);
-        splitBares.push(mark ?? '');
+      const marks = mark ?? '1'.repeat(tok.length);
+      const glueAt = hereStringOperatorIndex(tok, mark);
+      // Cuts are the offsets bash splits the word at: before the operator when
+      // it is glued to the preceding word, and after it when an operand
+      // follows. A bare `<<<` has no operand and stays one token, so the loop
+      // reads the next token as that operand.
+      const cuts =
+        glueAt === -1
+          ? []
+          : glueAt === 0
+            ? tok.length === 3
+              ? []
+              : [3]
+            : [glueAt, glueAt + 3];
+      const pieces: string[] = [];
+      const pieceMarks: string[] = [];
+      let cutStart = 0;
+      for (const cut of [...cuts, tok.length]) {
+        pieces.push(tok.slice(cutStart, cut));
+        pieceMarks.push(marks.slice(cutStart, cut));
+        cutStart = cut;
+      }
+      for (let piece = 0; piece < pieces.length; piece++) {
+        const text = pieces[piece]!;
+        // Only the first piece inherits the old token's marking: it is the
+        // one that starts where that token started. A later piece may itself
+        // open with an unquoted descriptor duplication, which the loop reads
+        // through these sets just like `tokenize` reported it.
+        if (piece === 0) {
+          if (fdRedirects.has(index)) remappedRedirects.add(splitTokens.length);
+          if (fdCloses.has(index)) remappedCloses.add(splitTokens.length);
+        } else if (
+          /^(?:[12]?>&|<&)/.test(text) &&
+          pieceMarks[piece]!.slice(0, 2) === '11'
+        ) {
+          remappedRedirects.add(splitTokens.length);
+        }
+        splitTokens.push(text);
+        splitBares.push(pieceMarks[piece]!);
       }
     }
     tokens.length = 0;
@@ -554,6 +618,8 @@ function extractRedirects(
       bares.length = 0;
       bares.push(...splitBares);
     }
+    fdRedirectIndices = remappedRedirects;
+    fdCloseIndices = remappedCloses;
   }
 
   for (let i = 0; i < tokens.length; i++) {
@@ -573,7 +639,7 @@ function extractRedirects(
     const targetBare = (index: number): string | undefined => bares?.[index];
 
     // ── `>&word`, `N>&word`, `<&word` with an unquoted `>&`/`<&` ─────────
-    const fdOp = fdRedirects.has(i)
+    const fdOp = fdRedirectIndices.has(i)
       ? /^(?:[12]?>&|<&)/.exec(tok)?.[0]
       : undefined;
     if (fdOp) {
@@ -583,7 +649,7 @@ function extractRedirects(
       // and drops numbers and `$` words as arguments (`tee >&-2` writes
       // `2`), so the whole word also stays a file operation, as it was
       // before `-` was split off.
-      const file = fdCloses.has(i)
+      const file = fdCloseIndices.has(i)
         ? `&${tok.slice(fdOp.length)}`
         : fdRedirectFile(tok.slice(fdOp.length));
       if (file !== undefined) {
@@ -2799,6 +2865,8 @@ class HeredocLexer {
   private arithmeticIsWord: boolean[] = [];
   /** Inside a backtick command substitution, where `#` is data. */
   private backtick = false;
+  /** Inside an ANSI-C `$'…'` word, where `\'` is an escape, not the close. */
+  private ansiC = false;
 
   /** Offset where a definite comment starts on the last scanned line. */
   takeCommentStart(): number | null {
@@ -2829,6 +2897,18 @@ class HeredocLexer {
         this.escaped = false;
         continue;
       }
+      if (this.ansiC) {
+        // `$'a\' #x'` is one word: the escaped quote does not close it, so the
+        // `#` that follows is inside the word and bash opens no comment. The
+        // ordinary quote state read `\'` as the close and then proved a
+        // comment, discarding a redirect bash performs (R25-1).
+        if (char === '\\') {
+          this.escaped = true;
+          continue;
+        }
+        if (char === "'") this.ansiC = false;
+        continue;
+      }
       if (char === '\\' && this.quote !== "'") {
         this.escaped = true;
         continue;
@@ -2843,6 +2923,11 @@ class HeredocLexer {
       }
       if (char === '`') {
         this.backtick = !this.backtick;
+        continue;
+      }
+      if (char === '$' && line[index + 1] === "'") {
+        this.ansiC = true;
+        index++;
         continue;
       }
       if (char === '"' || char === "'") {
@@ -2950,8 +3035,13 @@ class HeredocLexer {
       if (delimiter === null) {
         // Keep what this line already found instead of discarding it
         // (R25-1); the caller analyses the remaining text rather than
-        // swallowing it (fail-closed).
-        break;
+        // swallowing it (fail-closed). bash may instead have read those lines
+        // as this opener's body, so the cwd the paths resolve against cannot
+        // be vouched for — the same escalation an ambiguous `#` tail raises
+        // (R27-3).
+        this.openerRefused = true;
+        index++;
+        continue;
       }
       delimiters.push(delimiter.text);
       index = delimiter.end;
@@ -2978,8 +3068,11 @@ class HeredocLexer {
       return continuedFromPreviousLine;
     }
     const previous = line[index - 1];
-    if (previous !== undefined && /[\r\v\f]/.test(previous)) {
-      // Word boundaries this lexer does not model: keep the text.
+    if (previous !== undefined && /[\r\v\f\u00a0\u3000]/.test(previous)) {
+      // `\s` matched these as blanks, but bash keeps them inside the word, so
+      // the `#` is data and cutting the line hid a redirect bash performs.
+      // CR/VT/FF were already handled; NBSP and the ideographic space are the
+      // same class (R25-1).
       return true;
     }
     if (previous === ' ' || previous === '\t') {
@@ -2994,6 +3087,12 @@ class HeredocLexer {
       return backslashes % 2 === 1;
     }
     if (previous === ')') {
+      // An escaped `)` is word data (`echo hi\)#1`), so it never closes a
+      // subshell and the `#` stays inside the word — the same test the `;`,
+      // `&`, `|` and `(` branch above already makes (R25-1).
+      let backslashes = 0;
+      for (let i = index - 2; i >= 0 && line[i] === '\\'; i--) backslashes++;
+      if (backslashes % 2 === 1) return true;
       // `(true)#` closes a subshell, where `#` really is a comment. A `)`
       // that closes `$(…)`, `<(…)`/`>(…)` or `$((…))` leaves the word open,
       // so a `#` there is data. Anything the scan cannot classify is treated
@@ -3009,36 +3108,98 @@ class HeredocLexer {
   ): { text: string; end: number } | null {
     if (line[start] === '-') start++;
     while (line[start] === ' ' || line[start] === '\t') start++;
-    if (
-      line[start] === '$' &&
-      (line[start + 1] === "'" || line[start + 1] === '"')
-    ) {
-      // `<<$'EOF'` names a delimiter bash decodes; this lexer would record
-      // `$EOF`, never match the terminator and swallow the following script.
-      return null;
-    }
-    let text = '';
-    let quote: '"' | "'" | '' = '';
-    let index = start;
-    while (index < line.length) {
-      const char = line[index]!;
-      if (char === '\\') {
-        if (index + 1 === line.length) return null;
-        text += line[++index];
-      } else if (quote) {
-        if (char === quote) quote = '';
-        else text += char;
-      } else if (char === '"' || char === "'") {
-        quote = char;
-      } else if (/[\s;&|<>)]/.test(char)) {
-        break;
-      } else {
-        text += char;
-      }
-      index++;
-    }
-    return quote || !text ? null : { text, end: index - 1 };
+    // Bash ends the delimiter word at an unquoted metacharacter, then removes
+    // the quoting before it compares the terminator. Hand-decoding applied the
+    // unquoted backslash rule inside quotes too, so `<<'E\F'` recorded `EF`,
+    // the terminator line `E\F` never matched and the rest of an executed
+    // script was discarded as body (R25-1). `tokenize` already does quote
+    // removal and ANSI-C decoding bash-faithfully, so read the word through it
+    // — `'E\F'`, `$'EOF'`, `\EOF` and `E'OF'` all resolve once.
+    const span = readDelimiterWord(line, start);
+    if (span === null) return null;
+    const [text] = tokenize(span.word);
+    if (text === undefined || text === '') return null;
+    return { text, end: span.end - 1 };
   }
+}
+
+/**
+ * The raw heredoc delimiter word and the index just past it, or null when
+ * {@link tokenize}'s decode of it is not what bash compares the terminator
+ * line against.
+ *
+ * Bash ends the word at an unquoted blank or metacharacter; inside quotes
+ * those characters are part of the delimiter. The quoting is then removed by
+ * the tokenizer, which is bash-faithful except for two shapes that are refused
+ * here rather than guessed — a wrong delimiter never matches the terminator
+ * and the rest of an executed script would be discarded as body (R25-1):
+ *   - inside double quotes bash keeps a backslash that does not precede `$`,
+ *     `` ` ``, `"`, `\` or a newline (`<<"E\OF"` names `E\OF`), while the
+ *     tokenizer drops every backslash there;
+ *   - a `$` or backtick bash expands (`<<$X`, ``<<`x` ``, `<<"E$F"`) names a
+ *     terminator that is not in the text at all.
+ *
+ * Single quotes and `$'…'` make both literal, and an escaped `$`/backtick is
+ * data, so those decode faithfully.
+ */
+function readDelimiterWord(
+  line: string,
+  start: number,
+): { word: string; end: number } | null {
+  let quote: '"' | "'" | '' = '';
+  let ansiC = false;
+  let index = start;
+  while (index < line.length) {
+    const char = line[index]!;
+    if (ansiC) {
+      if (char === '\\') index += 2;
+      else {
+        if (char === "'") ansiC = false;
+        index++;
+      }
+      continue;
+    }
+    if (quote === "'") {
+      if (char === "'") quote = '';
+      index++;
+      continue;
+    }
+    if (char === '\\') {
+      const next = line[index + 1];
+      if (next === undefined) return null;
+      // Inside double quotes bash keeps a backslash that does not precede one
+      // of these five characters; the escaped character itself becomes data,
+      // so `<<"E\$F"` names the fixed terminator `E$F`.
+      if (quote === '"' && !/[$`"\\\n]/.test(next)) return null;
+      index += 2;
+      continue;
+    }
+    if (quote === '"') {
+      if (char === '$' || char === '`') return null;
+      if (char === '"') quote = '';
+      index++;
+      continue;
+    }
+    // `$'…'` is an ANSI-C word the tokenizer decodes; a bare `$` or a backtick
+    // expands at run time and names no terminator that is in the text.
+    if (char === '$' && line[index + 1] === "'") {
+      ansiC = true;
+      index += 2;
+      continue;
+    }
+    if (char === '$' || char === '`') return null;
+    if (char === '"' || char === "'") {
+      quote = char;
+      index++;
+      continue;
+    }
+    // bash ends the word here. `#` is not a metacharacter, so `<<EOF#c` names
+    // the delimiter `EOF#c`, which is what bash compares too.
+    if (/[ \t\n;&|<>()]/.test(char)) break;
+    index++;
+  }
+  if (quote || ansiC) return null;
+  return { word: line.slice(start, index), end: index };
 }
 
 function walkCompoundCommand(
@@ -3091,7 +3252,10 @@ function walkCompoundCommand(
             subUnwrapped,
             effectiveCwd,
             depth + 1,
-            cwdUnknown,
+            // The recursive call re-strips the wrapper text alone, which holds
+            // no `<<`, so a refusal on this level would be lost and the inner
+            // segment would resolve its paths with confidence (R27-3).
+            cwdUnknown || refusedOpener,
           ),
         );
         continue;

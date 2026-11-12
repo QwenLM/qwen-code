@@ -835,6 +835,35 @@ describe('extractShellOperationsAcrossCommand', () => {
       [uncertainWrite('/tmp/out.txt')],
     ],
     [
+      // R27-3 (1): an undecodable delimiter refuses the opener too, so the
+      // following `cd /tmp` may be body and the cwd cannot be vouched for.
+      // Without the escalation the write was reported at /tmp with no flags,
+      // and a `/tmp/**` allow rule greenlit a write into the repository.
+      'marks a relocated write cwd-unknown after an undecodable delimiter',
+      'cat <<$X\ncd /tmp\n$X\necho hi > out.txt',
+      [uncertainWrite('/tmp/out.txt')],
+    ],
+    [
+      // R27-3 (2): the wrapper recursion re-strips the wrapper text alone,
+      // which holds no `<<`; the refusal has to travel with it or the inner
+      // segment resolves its paths with confidence.
+      'carries a refused opener into a shell wrapper',
+      "echo a\\ # <<EOF\ncd /tmp\nEOF\nbash -c 'echo hi > out.txt'",
+      [uncertainWrite('/tmp/out.txt')],
+    ],
+    [
+      'carries an undecodable delimiter into a shell wrapper',
+      "cat <<$X\ncd /tmp\n$X\nbash -c 'echo hi > out.txt'",
+      [uncertainWrite('/tmp/out.txt')],
+    ],
+    [
+      // The refusal is sticky for the whole command, so a `cd` after it must
+      // not clear the marking again.
+      'keeps the marking after a static cd following a refused opener',
+      'echo a\\ # <<EOF\ncd /tmp\nEOF\ncd /tmp\necho hi > out.txt',
+      [uncertainWrite('/tmp/out.txt')],
+    ],
+    [
       // A definite comment tail is never executed, so its `>` is not a write.
       'drops a redirect inside a definite comment',
       'echo a # x > evil.txt',
@@ -1121,16 +1150,20 @@ describe('ANSI-C bytes that are not valid UTF-8', () => {
 
 describe('unprovable boundary fail-closed (B4)', () => {
   it.each([
-    // An ANSI-C delimiter (`<<$'EOF'`) is decoded by bash; this lexer kept it as
-    // `$EOF`, never matched the terminator and swallowed the rest of the script.
-    ['an ANSI-C heredoc delimiter', "cat <<$'EOF'\nbody\necho hi > out.txt"],
     // CR/VT/FF are word boundaries to the character class but not modeled by
     // the ambiguity check, so the `#` truncated the line.
     ['a CR before the hash', 'echo a\r#x > out.txt'],
+    ['an NBSP before the hash', 'echo hi\u00a0#x > out.txt'],
+    ['an ideographic space before the hash', 'echo hi\u3000#x > out.txt'],
     ['an escaped semicolon before the hash', 'echo a\\;#x > out.txt'],
     // A `)` with no matching opener: the scan cannot tell word data from a
     // comment, so it must keep the text.
     ['an unmatched closing paren', 'echo hi)#x > out.txt'],
+    // An escaped `)` closes nothing, so the `#` stays inside the word.
+    ['an escaped closing paren', 'echo hi\\)#1; echo x > out.txt'],
+    // `$'a\' #x'` is one ANSI-C word: `\'` does not close it, so the `#` is
+    // word data and bash performs the redirect (measured: it creates the file).
+    ['an ANSI-C escaped quote before the hash', "echo $'a\\' #x' > out.txt"],
     // The lexer does not model backticks, so a `#` inside one truncated the
     // rest of the line.
     ['a hash inside backticks', 'echo `a # b`; echo hi > out.txt'],
@@ -1141,6 +1174,103 @@ describe('unprovable boundary fail-closed (B4)', () => {
         filePath: '/repo/out.txt',
       }),
     );
+  });
+
+  it('keeps a write inside an ANSI-C word out of a comment cut', () => {
+    // The protected-path floor reads this path, so it must be the real one.
+    expect(across("echo $'a\\' #x' > .qwen/settings.json")).toEqual([
+      write(REPO_SETTINGS),
+    ]);
+  });
+});
+
+// R25-1: the delimiter is the word bash compares the terminator line against
+// after quote removal. A backslash inside quotes is data, so decoding it with
+// the unquoted escape rule named a delimiter that never matched and discarded
+// every following line as body — a real write vanished from the operation set.
+// Each row below was measured with bash in a fresh temp dir: it creates
+// ./out.txt in all of them.
+describe('heredoc delimiters after quote removal', () => {
+  it.each<Row>([
+    [
+      'a single-quoted backslash',
+      "cat <<'E\\F'\nbody\nE\\F\necho hi > out.txt",
+      [write('/repo/out.txt')],
+    ],
+    [
+      'an ANSI-C decoded backslash',
+      String.raw`cat <<$'E\\F'` +
+        '\nbody\n' +
+        String.raw`E\F` +
+        '\necho hi > out.txt',
+      [write('/repo/out.txt')],
+    ],
+    [
+      'an ANSI-C hex escape',
+      String.raw`cat <<$'\x45OF'` + '\nbody\nEOF\necho hi > out.txt',
+      [write('/repo/out.txt')],
+    ],
+    [
+      'an escaped backslash',
+      'cat <<\\EOF\nbody\nEOF\necho hi > out.txt',
+      [write('/repo/out.txt')],
+    ],
+    [
+      'a quoted dollar sign',
+      "cat <<'E$F'\nbody\nE$F\necho hi > out.txt",
+      [write('/repo/out.txt')],
+    ],
+    [
+      'a quoted backtick',
+      "cat <<'E`F'\nbody\nE`F\necho hi > out.txt",
+      [write('/repo/out.txt')],
+    ],
+    [
+      'a metacharacter inside quotes',
+      "cat <<'E;F'\nbody\nE;F\necho hi > out.txt",
+      [write('/repo/out.txt')],
+    ],
+    [
+      'a brace inside quotes',
+      "cat <<'{x}'\nbody\n{x}\necho hi > out.txt",
+      [write('/repo/out.txt')],
+    ],
+  ])('reads %s as the terminator', (_title, command, expected) => {
+    expect(across(command)).toEqual(expected);
+  });
+
+  it.each<Row>([
+    [
+      // bash keeps a backslash inside double quotes unless it precedes `$`,
+      // `` ` ``, `"`, `\` or a newline, so this names `E\OF`. The tokenizer
+      // drops it; the opener is refused and the write stays visible with the
+      // cwd marked unknown rather than swallowed as body.
+      'a retained backslash inside double quotes',
+      'cat <<"E\\OF"\nbody\nE\\OF\necho hi > out.txt',
+      [uncertainWrite('/repo/out.txt')],
+    ],
+    [
+      // An expansion is resolved at run time, so no terminator is in the text.
+      'an expanding delimiter',
+      'cat <<$X\nbody\n$X\necho hi > out.txt',
+      [uncertainWrite('/repo/out.txt')],
+    ],
+  ])('escalates rather than guessing %s', (_title, command, expected) => {
+    expect(across(command)).toEqual(expected);
+  });
+
+  it('reads the body of an ANSI-C delimiter that does terminate', () => {
+    // bash decodes `$'EOF'` to `EOF`, keeps `cd /tmp` as body and writes
+    // ./out.txt. Guessing `$EOF` instead relocated the write to /tmp.
+    expect(across("cat <<$'EOF'\ncd /tmp\nEOF\necho hi > out.txt")).toEqual([
+      write('/repo/out.txt'),
+    ]);
+  });
+
+  it('reports no write when an ANSI-C heredoc never terminates', () => {
+    // Measured with bash: with no `EOF` line the rest is unterminated body and
+    // no file is created, so the analysis must not advertise a write.
+    expect(across("cat <<$'EOF'\nbody\necho hi > out.txt")).toEqual([]);
   });
 });
 
@@ -1310,5 +1440,61 @@ describe('clobber-override and here-string redirects', () => {
     expect(across("cat <<< '{}' > .qwen/settings.json")).toEqual([
       write('/repo/.qwen/settings.json'),
     ]);
+  });
+
+  // R26-3: splitting a glued here-string grows the token array, and
+  // `fdRedirects`/`fdCloses` are keyed by token position. Without remapping
+  // both sets every later `>&`/`<&` missed its branch and was read as a path
+  // beginning with `&`, inventing a write or moving a real one outside the
+  // working directory. Each row is measured with bash.
+  it.each<Row>([
+    [
+      'a descriptor duplication after a glued here-string',
+      'cat <<<x >&out.log',
+      [write('/repo/out.log')],
+    ],
+    ['a descriptor close after a glued here-string', 'cat <<<x 2>&1', []],
+    [
+      'an absolute target after a glued here-string',
+      'cat <<<x >&/tmp/secret.txt',
+      [write('/tmp/secret.txt')],
+    ],
+    [
+      'a here-string glued to the preceding word',
+      'cat<<<x>out.txt',
+      [write('/repo/out.txt')],
+    ],
+    [
+      'a here-string glued to the word with a descriptor duplication',
+      'cat<<<x >&out.log',
+      [write('/repo/out.log')],
+    ],
+    [
+      'two glued here-strings before a descriptor duplication',
+      'cat <<<x <<<y >&out.log',
+      [write('/repo/out.log')],
+    ],
+    [
+      'two redirects after a word-glued here-string',
+      'cat<<<x>out.txt 2>err.txt',
+      [write('/repo/out.txt'), write('/repo/err.txt')],
+    ],
+    [
+      'a descriptor duplication before a glued here-string',
+      'cat >&out.log <<<x',
+      [write('/repo/out.log')],
+    ],
+    [
+      'a numeric descriptor duplication after a glued here-string',
+      'cat <<<x >&2',
+      [],
+    ],
+    [
+      'a quoted here-string operator, which is only a word',
+      "cat '<<<x' > out.txt",
+      [read('/repo/<<<x'), write('/repo/out.txt')],
+    ],
+  ])('attributes %s', (_title, command, expected) => {
+    expect(across(command)).toEqual(expected);
   });
 });
