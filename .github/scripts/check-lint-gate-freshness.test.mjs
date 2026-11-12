@@ -1119,19 +1119,30 @@ test('the depth guarantee that makes excluding Checkout safe stays in the slice'
     "'Fetch incremental lint history' is the only guard of the depth guarantee that makes excluding 'Checkout' safe — it must stay in the slice",
   );
   // Membership in the list is not the claim; what matters is that the step's
-  // own body reaches the compared text. Assert that, on the slice.
+  // own BODY reaches the compared text. The previous version of this pin edited
+  // the `- name:` line, which `splitSteps` refuses — the extraction returned
+  // null, and `notEqual(null, slice)` passes for any slice at all. Edit the
+  // body instead, and assert on the body text.
   const slice = extractLintGateSlice(realCi);
+  assert.ok(slice, 'the real workflow must extract');
   assert.ok(
-    slice.includes("      - name: 'Fetch incremental lint history'"),
-    'the depth guarantee must be compared, not merely unlisted',
+    slice.includes('--depth=100'),
+    'the depth guarantee body must be compared',
   );
   const depthEdit = withStepText(
     'Fetch incremental lint history',
-    "      - name: 'Fetch incremental lint history'",
-    "      - name: 'Fetch incremental lint history' # narrowed",
+    'git "${partial[@]}" fetch --no-tags --depth=100 --filter=blob:none',
+    'git "${partial[@]}" fetch --no-tags --depth=50 --filter=blob:none',
+  );
+  const edited = extractLintGateSlice(depthEdit);
+  assert.notEqual(depthEdit, realCi, 'the depth fixture must apply');
+  assert.ok(edited, 'the edited workflow must still extract');
+  assert.ok(
+    edited.includes('--depth=50'),
+    'a body edit must reach the compared text',
   );
   assert.notEqual(
-    extractLintGateSlice(depthEdit),
+    edited,
     slice,
     'a base-side edit to the depth guarantee must change the compared text',
   );
@@ -1509,6 +1520,52 @@ test('a scalar opened with | or > is content in either modifier order', () => {
     'node scripts/lint.js --prettier',
   ]);
   assert.notEqual(extractLintGateSlice(other), slash);
+});
+
+test('a block scalar the key line does not carry refuses the narrowing', () => {
+  // Three legal YAML spellings put the indicator somewhere the opener pattern
+  // cannot see it: on the line below the key, on a sequence item, behind a tag.
+  // Read as structure, their bodies reprice `#` lines as prose — the deletion
+  // SCALAR_VALUE_START closes for `|2+-`, reached by three other spellings.
+  const shapes = {
+    'indicator below the key': [
+      'run:',
+      '  |-',
+      '    # lane: DIRECTIVE',
+      '    node scripts/lint.js --prettier',
+    ],
+    "a sequence item's scalar": [
+      'with:',
+      '  items:',
+      '    - |',
+      '      # lane: DIRECTIVE',
+      '      node scripts/lint.js --prettier',
+    ],
+    'a tagged value': [
+      'run: !!str |',
+      '  # lane: DIRECTIVE',
+      '  node scripts/lint.js --prettier',
+    ],
+  };
+  for (const [label, template] of Object.entries(shapes)) {
+    const render = (directive) =>
+      lintJobEdit((job) =>
+        job.replace(
+          /^ {8}run: 'node scripts\/lint\.js --prettier'$/m,
+          template
+            .map((line) => `        ${line.replace('DIRECTIVE', directive)}`)
+            .join('\n'),
+        ),
+      );
+    const one = render('prettier');
+    const two = render('eslint');
+    assert.notEqual(one, realCi, `${label}: fixture did not apply`);
+    // Both refuse, so the two versions can never compare equal through the
+    // narrowing; the whole-file rule — which is what a refusal falls back to —
+    // still sees the difference.
+    assert.equal(extractLintGateSlice(one), null, `${label} must refuse`);
+    assert.equal(extractLintGateSlice(two), null, `${label} must refuse`);
+  }
 });
 
 test('a multi-line quoted scalar refuses the narrowing', () => {

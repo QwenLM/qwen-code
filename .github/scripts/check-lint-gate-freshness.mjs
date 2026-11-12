@@ -360,6 +360,16 @@ function blockScalarIndent(line) {
 // then dropped as prose.
 const SCALAR_VALUE_START = /^(?:\s*)(?:-\s+)?[^\s#][^:]*:\s*[|>]/;
 
+// Legal YAML that puts a block scalar somewhere the key line does not carry it,
+// or behind a tag. None of these is modelled: the indicator sits on a line of
+// its own (`key:` then `|-`), the value is a sequence item's scalar (`- |`), or
+// the value carries a tag (`run: !!str |`). Read as structure, their bodies
+// would reprice `#` lines as prose — the same deletion SCALAR_VALUE_START
+// closes for `|2+-`. Refuse instead of enumerating three more spellings.
+const SCALAR_INDICATOR_ALONE =
+  /^\s*(?:-\s+)?[|>](?:[+-]?\d*|\d+[+-])\s*(?:#.*)?$/;
+const TAGGED_SCALAR_VALUE = /^(?:\s*)(?:-\s+)?[^\s#][^:]*:\s*![^\s]*\s+[|>]/;
+
 function indentOf(line) {
   return /^ */.exec(line)[0].length;
 }
@@ -434,6 +444,10 @@ function structuralLines(text) {
     // The value opens with `|`/`>` but the opener did not accept it: an
     // unenumerated modifier. Refuse; never fall through to the structural path.
     if (scalar === null && SCALAR_VALUE_START.test(line)) return null;
+    // A block scalar whose indicator the key line does not carry, a sequence
+    // item's scalar, or a tagged value: refusals, for the same reason.
+    if (SCALAR_INDICATOR_ALONE.test(line) || TAGGED_SCALAR_VALUE.test(line))
+      return null;
     lines.push(line);
     content.push(false);
   }

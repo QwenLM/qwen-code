@@ -352,6 +352,24 @@ head commit` stay outside the slice. A `ref:` edit on its own is caught: the
   which is itself in the slice — and adding one would make this hole live, so the
   list of gate jobs and the lane's `needs:` have to be read together.
 
+- **Accepted residual: legal YAML the model refuses, and the narrowing then
+  stops firing.** Four structural anchors are exact-match — `jobs:`, the
+  two-space job key, `steps:`, and `- name: '<name>'` — and prose removal only
+  drops whole-line comments. A trailing comment on any of them (`steps: # lane`,
+  `- name: 'Checkout' # pinned`) therefore returns null, and so does a plain
+  scalar carrying an unmatched quote (`run: echo it's fine`). Both are legal
+  YAML the runner loads. On a base-side commit that makes
+  `narrowsToUnchangedLintSlice` throw for every stale `ci.yml` verdict, the catch
+  emits one `::warning::`, and the narrowing stops applying: every base-side
+  `ci.yml` commit — including the plumbing-only churn this change exists to
+  absorb — asks in-flight PRs to rebase again. The direction is fail-safe, not a
+  false green: the stale verdict is kept and the cost is over-rejection. But the
+  feature does revert silently for that shape, and the suite cannot see it
+  because the suite reads the branch's copy while these lines are main's.
+  **Not handled**: accepting a `#`-introduced comment on those four anchors (and
+  opening a quote only in value position) is a follow-up, not something this
+  revision does.
+
 ## Validation plan
 
 1. `node --test .github/scripts/check-lint-gate-freshness.test.mjs` — 81 cases,

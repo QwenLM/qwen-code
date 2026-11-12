@@ -155,6 +155,8 @@ merge base 取自该检查**已经做过**的包含比较，因此 narrowing 不
 - **接受的过度拒绝：job 名单。** 每个非闸门 job 都会在比对文本中留下名字，因此 base 侧新增、删除或改名一个 job 都会拒绝 narrowing，哪怕它的内容碰不到 lint 闸门。另一种做法——不加痕迹地丢弃这些 job——正是标记要消除的暴露面：把安装前置步骤拆进新 job 时，两个闸门 job 看起来完全相同。job 名单的变动比步骤变动稀少，所以代价是偶尔一次 rebase，而不是本 narrowing 要消除的每周跑步机。
 - **残余风险：依赖闭包。** `needs:` 会被比对，因此 base 侧改动「这条 lane 依赖哪些 job」可见。但提取器不走依赖图：若 lint job 将来 `needs:` 某个非闸门 job，那个 job 的内容会被丢弃，而它的名字与 `needs:` 条目却完全相同。今天不存在这样的边——lint job 只依赖 `classify_pr`，它本身在切片内——一旦新增这种依赖，这个洞就会生效，因此闸门 job 名单与这条 lane 的 `needs:` 必须一起读。
 
+- **接受的残余：模型会拒绝的合法 YAML，且收窄随即失效。** 四个结构锚点是精确匹配——`jobs:`、两空格的 job key、`steps:`、`- name: '<name>'`——而 prose 只丢整行注释。因此任一锚点带行尾注释（`steps: # lane`、`- name: 'Checkout' # pinned`）都会返回 null，普通标量里带一个未配对引号（`run: echo it's fine`）同样返回 null；两者都是 runner 能正常加载的合法 YAML。若这类写法出现在 base 侧提交里，`narrowsToUnchangedLintSlice` 会对每个 stale 的 `ci.yml` 判定抛错，catch 只打一条 `::warning::`，收窄就此停止生效：每个 base 侧 `ci.yml` 提交——包括本次改动要吸收的纯 plumbing 变更——又会要求所有在途 PR rebase。方向是 fail-safe 而非造绿：stale 判定被保留，代价是过度拒绝。但对该形态而言功能确实是静默回退，且测试看不见它——测试读的是分支的副本，这些行在 main 上。**未处理**：让这四个锚点接受以 `#` 引入的注释（并让引号只在值位置开启）是 follow-up，本修订并不声称已经做到。
+
 ## 验证计划
 
 1. `node --test .github/scripts/check-lint-gate-freshness.test.mjs`——81 个用例全绿，数字取自本修订上 `node --test` 的运行时计数（`main` 为 47，本 PR 增加 34）。CI 通过 `Run .github/scripts helper tests` 在 Linux 上佐证这一点，该步骤从 `${{ env.HELPER_TESTS }}` 收集本测试。此处的计数一律是「某个具名修订上的运行时计数」，不是跨评审轮累加的账。
