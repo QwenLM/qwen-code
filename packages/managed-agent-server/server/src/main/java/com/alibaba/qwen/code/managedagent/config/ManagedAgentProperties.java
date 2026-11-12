@@ -66,6 +66,7 @@ public class ManagedAgentProperties
     private final SessionStore sessionStore = new SessionStore();
     private final Memory memory = new Memory();
     private final ToolPublication toolPublication = new ToolPublication();
+    private final SessionResources sessionResources = new SessionResources();
     private final Artifacts artifacts = new Artifacts();
     private final Extensions extensions = new Extensions();
     private final ManagedExtensions managedExtensions = new ManagedExtensions();
@@ -78,6 +79,7 @@ public class ManagedAgentProperties
     private final Channels channels = new Channels();
     private final EventTransport eventTransport = new EventTransport();
     private String agentRevision = "1";
+    private boolean sideQueriesEnabled;
     // The tool profiles a stored AgentDefinition may select (D8c-1).
     // hosted-workspace-files/2 joins only after the #13166 glob rollout.
     private List<String> definitionToolProfiles =
@@ -755,10 +757,24 @@ public class ManagedAgentProperties
         @DurationUnit(ChronoUnit.SECONDS)
         private Duration maxVerificationTimeout;
         private boolean gcEnabled;
-        private boolean asyncVerificationEnabled;
         private int verificationConcurrency = 2;
         @DurationUnit(ChronoUnit.SECONDS)
         private Duration deletionGrace = Duration.ofHours(24);
+    }
+
+    @Getter
+    @Setter
+    public static class SessionResources
+            implements com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings
+                    .SessionResources {
+        private boolean enabled;
+        private String ossKeyPrefix = "session-resources/";
+        private boolean packJobEnabled;
+        private boolean deletionEnabled;
+        private long packTargetBytes = 16L * 1024 * 1024;
+        private int packMaxTransactions = 4096;
+        @DurationUnit(ChronoUnit.SECONDS)
+        private Duration deletionGrace = Duration.ofHours(72);
     }
 
     @Getter

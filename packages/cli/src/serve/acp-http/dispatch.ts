@@ -4738,25 +4738,7 @@ export class AcpDispatcher {
             return;
           }
           try {
-            const available =
-              await this.bridge.isWorkspaceMemoryRememberAvailable();
             assertGenerationOpen?.();
-            if (!available) {
-              if (id !== undefined) {
-                conn.sendConn(
-                  error(
-                    id,
-                    -32009,
-                    'Managed memory is unavailable for this daemon workspace',
-                    {
-                      errorKind: 'managed_memory_unavailable',
-                      httpStatus: 409,
-                    },
-                  ),
-                );
-              }
-              return;
-            }
             const task = this.workspaceRememberLane.enqueueForget({
               query: trimmedQuery,
               ...(rawScope ? { scope: rawScope } : {}),
