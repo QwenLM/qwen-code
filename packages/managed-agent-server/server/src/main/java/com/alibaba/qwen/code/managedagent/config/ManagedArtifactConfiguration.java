@@ -100,6 +100,19 @@ public class ManagedArtifactConfiguration {
         return builder.poolSize(1).threadNamePrefix("message-relay-").build();
     }
 
+    /**
+     * The journal compaction sweep's own tick: building and publishing packs does blocking
+     * object-storage IO (a PUT plus a verifying read-back per pack, then grace eviction and
+     * orphan collection), which must not hold the shared one-thread default pool that drives
+     * the message materializer and the dispatch and lifecycle recovery ticks. Unconditional —
+     * the @Scheduled wiring binds by name at context refresh even when session-resource OSS
+     * storage is off and every pass is a no-op.
+     */
+    @Bean(defaultCandidate = false)
+    public ThreadPoolTaskScheduler journalCompactionScheduler(ThreadPoolTaskSchedulerBuilder builder) {
+        return builder.poolSize(1).threadNamePrefix("journal-compaction-").build();
+    }
+
     @Bean(defaultCandidate = false)
     public ThreadPoolTaskScheduler wakeRecoveryScheduler(ThreadPoolTaskSchedulerBuilder builder) {
         return builder.poolSize(1).threadNamePrefix("wake-recovery-").build();

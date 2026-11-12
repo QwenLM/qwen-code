@@ -10,7 +10,7 @@ import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationAdmissionSt
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationDataStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
-import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
@@ -182,6 +182,16 @@ class ToolPublicationStorageMySqlIT {
         }
         ToolPublicationObjectStore objects = new ToolPublicationObjectStore() {
             @Override
+            public InputStream openRange(String key, long offset, long length, Runnable guard) {
+                guard.run();
+                try (InputStream full = open(key)) {
+                    byte[] bytes = full.readAllBytes();
+                    return new java.io.ByteArrayInputStream(bytes, (int) offset, (int) length);
+                } catch (java.io.IOException error) {
+                    throw new IllegalStateException(error);
+                }
+            }
+            @Override
             public void putIfAbsent(String key, byte[] bytes) {
                 throw new AssertionError("Inline fixture expected");
             }
@@ -294,9 +304,9 @@ class ToolPublicationStorageMySqlIT {
         journal.jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key, tenant_id, storage_id, physical_key,"
                         + " storage_kind, registration_state, registration_revision, registration_json)"
                         + " VALUES (?, ?, ?, 'tenant-1', 'storage', ?, 'LOCAL', 'REGISTERED', 1, '{}')",
-                JdbcRuntimeBindingRepository.storageAliasKey("tenant-1", "storage"),
-                JdbcRuntimeBindingRepository.storageFenceKey("tenant-1"),
-                JdbcRuntimeBindingRepository.storageFenceKey("storage"), PHYSICAL);
+                RuntimeAdmissionFences.storageAliasKey("tenant-1", "storage"),
+                RuntimeAdmissionFences.storageFenceKey("tenant-1"),
+                RuntimeAdmissionFences.storageFenceKey("storage"), PHYSICAL);
         journal.jdbc.update("INSERT INTO ma_storage_owner (storage_key, physical_key, storage_kind, tenant_id, storage_id, mount_state)"
                 + " VALUES (?, ?, 'LOCAL', 'tenant-1', 'storage', 'READY')", PHYSICAL, PHYSICAL);
         journal.jdbc.update("UPDATE ma_session SET workspace_storage_id = 'storage' WHERE tenant_id = 'tenant-1'");
@@ -307,7 +317,7 @@ class ToolPublicationStorageMySqlIT {
                 : "SELECT storage_key FROM ma_storage_owner WHERE storage_key = ? FOR UPDATE";
         try (var statement = connection.prepareStatement(sql)) {
             statement.setString(1, "alias".equals(row)
-                    ? JdbcRuntimeBindingRepository.storageAliasKey("tenant-1", "storage") : PHYSICAL);
+                    ? RuntimeAdmissionFences.storageAliasKey("tenant-1", "storage") : PHYSICAL);
             try (var result = statement.executeQuery()) {
                 assertThat(result.next()).isTrue();
                 assertThat(result.next()).isFalse();
