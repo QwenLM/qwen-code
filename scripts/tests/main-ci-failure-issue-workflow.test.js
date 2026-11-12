@@ -2753,10 +2753,14 @@ printf '%s\\n' '{"jobs":[]}'
 
     it('files a recovered first download instead of calling the run infrastructure', () => {
       // The retry-only narrowing, as a blob: check run 131031419699 reports
-      // both handoff steps `success`, nine genuine AssertionErrors, and one
-      // stale `Download the built tree` timeout from the attempt the retry
-      // recovered. Matching that line classified a real failure as
-      // infrastructure and suppressed the issue record. Two annotation lines
+      // both handoff steps `success`, and its nine annotations are six
+      // AssertionErrors, one `Process completed with exit code 1.`, one warning
+      // about a 502 while creating the deflake issue, and one stale `Download
+      // the built tree` timeout from the attempt the retry recovered. The base
+      // list carried no handoff branch at all, so that blob matched none of its
+      // signatures and was never infrastructure there — and on that event this
+      // workflow did not run: the run is a pull request, which its `analyze`
+      // gate excludes, so nothing was filed or suppressed. Two annotation lines
       // stand in for the blob; the run must stay a code failure, which here is
       // "does not match" — this workflow files instead of rerunning.
       // Derived, not typed: renaming the first download's step in ci.yml has
