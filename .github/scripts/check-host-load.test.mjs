@@ -98,14 +98,15 @@ function withoutAwk() {
 }
 
 // The two workflows promise their INFRA_FAILURE_SIGNATURES lists stay equal;
-// read them from the workflows themselves instead of restating them.
-function readSignatures(name) {
+// read them from the workflows themselves instead of restating them. The
+// configuration class is autofix-only: main-ci deliberately files those.
+function readSignatures(name, key = 'INFRA_FAILURE_SIGNATURES') {
   const workflow = readFileSync(
     fileURLToPath(new URL(`../workflows/${name}`, import.meta.url)),
     'utf8',
   );
-  const signatures = /INFRA_FAILURE_SIGNATURES: '([^']*)'/.exec(workflow)?.[1];
-  assert.ok(signatures, `${name}: INFRA_FAILURE_SIGNATURES not found`);
+  const signatures = new RegExp(`${key}: '([^']*)'`).exec(workflow)?.[1];
+  assert.ok(signatures, `${name}: ${key} not found`);
   return signatures;
 }
 
@@ -259,7 +260,8 @@ describe('check-host-load', () => {
 
   it('admits with a warning when awk is missing instead of blaming the threshold', () => {
     // A stripped image: the zero test used to go through awk, so a missing
-    // tool read as a bad HOST_LOAD_MAX_RATIO, which the infra signatures claim.
+    // tool read as a bad HOST_LOAD_MAX_RATIO, which the configuration
+    // signatures claim.
     const bin = withoutAwk();
     const result = runGate({ env: { PATH: bin } });
     rmSync(bin, { recursive: true, force: true });
@@ -454,11 +456,15 @@ describe('check-host-load', () => {
     assert.equal(issueSignatures, signatures);
   });
 
-  it('prints configuration errors that both classifiers claim', () => {
+  it('prints configuration errors that qwen-autofix claims without rerunning them', () => {
     // R2-1: these annotations were pinned as literals copied into another
     // file, so renaming one in the gate passed unseen. Read what the gate
-    // actually prints, match it against each classifier's own list, and
-    // require one printed line per knob.
+    // actually prints and require one printed line per knob. R1-1 then split
+    // them out of the rerun class: qwen-autofix's CONFIG_FAILURE_SIGNATURES
+    // must claim every line, so the scan skips the PR instead of addressing a
+    // variable typo, and neither INFRA list may claim one — a re-run cannot
+    // change a repository variable, so main-ci-failure-issue files instead of
+    // rerunning.
     const envs = [
       { HOST_LOAD_MAX_RATIO: '0' },
       { HOST_LOAD_MAX_RATIO: '2,0' },
@@ -483,15 +489,26 @@ describe('check-host-load', () => {
       return errors[0];
     });
 
+    const config = new RegExp(
+      readSignatures('qwen-autofix.yml', 'CONFIG_FAILURE_SIGNATURES'),
+      'i',
+    );
+    for (const line of emitted) {
+      assert.match(
+        line,
+        config,
+        `qwen-autofix CONFIG_FAILURE_SIGNATURES does not classify: ${line}`,
+      );
+    }
     for (const name of ['qwen-autofix.yml', 'main-ci-failure-issue.yml']) {
       const pattern = new RegExp(readSignatures(name), 'i');
       for (const line of emitted) {
-        assert.match(line, pattern, `${name} does not classify: ${line}`);
+        assert.doesNotMatch(line, pattern, `${name} still reruns: ${line}`);
       }
     }
 
-    // One printed line per knob, so dropping a token from either list reds
-    // here rather than leaving the knob silently unclassified.
+    // One printed line per knob, so dropping a token from the configuration
+    // class reds here rather than leaving the knob silently unclassified.
     for (const knob of [
       'HOST_LOAD_MAX_RATIO must be a positive number',
       'HOST_LOAD_MAX_WAIT_TRIES must be a positive integer',

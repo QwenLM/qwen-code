@@ -2642,15 +2642,21 @@ printf '%s\\n' '{"jobs":[]}'
       );
     });
 
-    it('recognises the host load gate annotations as infrastructure', () => {
-      // A refusal is the one failure whose whole purpose is "re-run me", and a
-      // mistyped threshold fails before any suite runs. Both classifiers must
-      // see either as infrastructure, or a refusal files a code-failure issue
-      // and a variable typo sends autofix after the wrong thing. These are the
-      // strings the gate actually emits; its own suite pins the breach against
-      // both lists.
+    it('reruns on a host load refusal but files on a deterministic configuration error', () => {
+      // A refusal is the one failure whose whole purpose is "re-run me": a
+      // re-run can land the job on another host, so both classifiers must see
+      // it as infrastructure. A mistyped threshold is the opposite — the
+      // repository variable cannot change between attempts, so a re-run fails
+      // identically and this workflow must file the record instead. These are
+      // the strings the gate actually emits; its own suite pins the breach
+      // against both lists.
+      const breach =
+        '::error::Host load gate breached on ecs-qwen-hk1-4: five-minute load 145.00 on 64 CPUs';
+      expect(
+        new RegExp(infraStep.env.INFRA_FAILURE_SIGNATURES, 'i').test(breach),
+        breach,
+      ).toBe(true);
       for (const annotation of [
-        '::error::Host load gate breached on ecs-qwen-hk1-4: five-minute load 145.00 on 64 CPUs',
         "::error::HOST_LOAD_MAX_RATIO must be a positive number or 'off', got '0'",
         "::error::HOST_LOAD_MAX_WAIT_TRIES must be a positive integer, got '0'",
         "::error::HOST_LOAD_WAIT_SECONDS must be a positive integer, got 'many'",
@@ -2660,8 +2666,20 @@ printf '%s\\n' '{"jobs":[]}'
             annotation,
           ),
           annotation,
-        ).toBe(true);
+        ).toBe(false);
       }
+      // The equality pin above still holds: qwen-autofix keeps the same rerun
+      // class and routes these three through its own CONFIG_FAILURE_SIGNATURES
+      // (no rerun, no agent round, PR skipped for a human).
+      const autofix = parse(
+        readFileSync('.github/workflows/qwen-autofix.yml', 'utf8'),
+      );
+      expect(autofix.env.CONFIG_FAILURE_SIGNATURES).toContain(
+        'HOST_LOAD_MAX_RATIO must be a positive number',
+      );
+      expect(autofix.env.INFRA_FAILURE_SIGNATURES).not.toContain(
+        'HOST_LOAD_MAX_RATIO must be a positive number',
+      );
     });
 
     it('recognises the CI configuration errors as infrastructure', () => {
