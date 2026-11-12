@@ -558,6 +558,35 @@ describe('ManagedSessionsPage', () => {
         webSocketUrl: () => 'ws://managed-test/terminal',
       },
     };
+    // Drive a REAL summary refetch: the hook refreshes the summary on a
+    // context_changed event. Without emitting one, the dip mock below is never
+    // applied to currentSummary and the survival assertion stays vacuous.
+    let emitContextChanged!: () => void;
+    const contextChanged = new Promise<void>((resolve) => {
+      emitContextChanged = resolve;
+    });
+    mocks.client.subscribeEvents.mockImplementation(async function* (
+      _id: string,
+      opts: { signal: AbortSignal },
+    ) {
+      await contextChanged;
+      if (opts.signal.aborted) return;
+      yield {
+        id: 3,
+        at: 3,
+        type: 'context_changed',
+        sessionId: 's1',
+        turnId: 'p1',
+        data: {},
+      };
+      await new Promise<void>((resolve) => {
+        if (opts.signal.aborted) resolve();
+        else
+          opts.signal.addEventListener('abort', () => resolve(), {
+            once: true,
+          });
+      });
+    });
     mocks.client.getSession.mockResolvedValue(
       summary('s1', {
         capabilities: { canSend: false, canCancel: false, terminal: true },
@@ -576,9 +605,15 @@ describe('ManagedSessionsPage', () => {
     // not unmount (that would send the release frame and SIGTERM the PTY).
     await render('s1', 'en', provider, null, false);
     expect(document.querySelector('[role="dialog"]')).not.toBeNull();
-    // A reload briefly clears the summary; the terminal must still survive.
+    // A real summary refetch applies a capability dip (terminal absent). The
+    // panel must stay mounted: unmounting would send the release frame and
+    // SIGKILL the live PTY. Emitting context_changed drives refreshSummary so
+    // the dip is actually applied to currentSummary, not just mocked.
     mocks.client.getSession.mockResolvedValue(summary('s1', {}));
-    await render('s1', 'en', provider, null, true);
+    await act(async () => {
+      emitContextChanged();
+      await flush();
+    });
     expect(document.querySelector('[role="dialog"]')).not.toBeNull();
     // Positive witness that the socket was constructed and opened: the onopen
     // handler sends a resize control frame. Without it the no-release assertion

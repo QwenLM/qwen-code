@@ -486,7 +486,6 @@ function ManagedSessionsContent({
   const taskPanelOpen = !!sessionId && taskPanelSession === sessionId;
   const terminalTriggerRef = useRef<HTMLButtonElement>(null);
   const [terminalSession, setTerminalSession] = useState<string>();
-  const [terminalLost, setTerminalLost] = useState(false);
   const terminalIds = useRef(new Map<string, string>());
   const terminalOpen = !!sessionId && terminalSession === sessionId;
   const publicChildren = detail.summary?.capabilities.childAgents === true;
@@ -539,7 +538,6 @@ function ManagedSessionsContent({
   useEffect(() => setTaskPanelSession(undefined), [provider, sessionId]);
   useEffect(() => {
     setTerminalSession(undefined);
-    setTerminalLost(false);
   }, [provider, sessionId]);
   const [sessions, setSessions] = useState<ManagedAgentSessionSummary[]>([]);
   const [archivedSummaries, setArchivedSummaries] = useState<
@@ -1455,17 +1453,13 @@ function ManagedSessionsContent({
   const terminalId = sessionId
     ? terminalIds.current.get(`${provider.storageKey}:${sessionId}`)
     : undefined;
-  useEffect(() => {
-    if (!terminalOpen || !currentSummary) return;
-    if (currentSummary.capabilities.terminal === true && provider.terminal) {
-      // The capability recovered (e.g. after a runtime restart): drop any stale
-      // "no longer available" notice left by an earlier dip.
-      setTerminalLost(false);
-      return;
-    }
-    setTerminalSession(undefined);
-    setTerminalLost(true);
-  }, [terminalOpen, currentSummary, provider.terminal]);
+  // A non-true capabilities.terminal reading is transient server state (a DB
+  // or filesystem blip in a session-list poll), not proof the terminal died.
+  // The panel therefore stays mounted across capability dips: unmounting would
+  // send the release frame and SIGKILL a live PTY. The relay is the authority
+  // on loss — it maps worker loss to a non-retryable close code that renders
+  // the terminal-lost notice. Genuine close still unmounts via onClose and
+  // session change below.
   function toggleTerminal() {
     if (terminalPanelOpen) {
       setTerminalSession(undefined);
@@ -1476,7 +1470,6 @@ function ManagedSessionsContent({
     if (!terminalIds.current.has(key)) {
       terminalIds.current.set(key, newManagedTerminalId());
     }
-    setTerminalLost(false);
     setTerminalSession(sessionId);
   }
   const terminalButton =
@@ -1978,11 +1971,6 @@ function ManagedSessionsContent({
           {message}
         </p>
       ))}
-      {terminalLost && (
-        <p role="status" className="text-sm text-muted-foreground">
-          {t('terminal.notice.lost')}
-        </p>
-      )}
       {pendingRestoreFailed && (
         <div>
           <p role="alert" className="text-sm text-destructive">
