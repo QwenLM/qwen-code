@@ -55,7 +55,7 @@ import type {
  * needs (admission, replay modes, telemetry). Injected rather than rebuilt
  * here so this module never has to know how the route parses a request.
  */
-export type PrWatchRestore = (input: {
+type PrWatchRestore = (input: {
   runtime: WorkspaceRuntime;
   workspaceCwd: string;
   sessionId: string;
