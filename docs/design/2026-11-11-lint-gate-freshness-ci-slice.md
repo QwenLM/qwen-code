@@ -142,7 +142,9 @@ stay in the slice and stale the branch like any other gate change.
 At the job level only `runs-on` and `timeout-minutes` are dropped, with their
 region. `env`, `if`, `needs`, `outputs`, `permissions` and `steps` stay: they
 decide what runs, not where. `needs` in particular stays, so a base-side change
-to which jobs the lane waits for is compared.
+to which jobs the lane waits for is compared — and an edge to a job outside the
+gate-job list refuses the narrowing rather than being followed, since the
+extractor does not walk the dependency graph.
 
 Nothing is dropped silently. Each excluded region — every non-gate job, every
 plumbing step, every dropped job key — leaves a `[[dropped ...]]` marker in the
@@ -189,7 +191,12 @@ asymmetry is deliberate, and two guards back it:
   pattern covers the way the lanes are actually reached: `npm run`, `pnpm run`,
   `corepack pnpm run`, a bare `pnpm lint`, `npx`/`pnpx`. Anchoring on `npm run`
   alone missed every `pnpm` spelling, since `pnpm` has no word boundary before
-  `npm`; a manager followed by `config`/`set` is configuration and still passes.
+  `npm`. Flags between the manager and its subcommand are skipped for the same
+  reason: `pnpm -w run lint` and `pnpm --filter ./packages/core run lint` reach
+  the same lane, and anchoring the subcommand directly after the manager let
+  both through. A manager followed by `config`/`set` is configuration and still
+  passes — `npm config set fetch-retries 5` is a real plumbing step, so refusing
+  it would disable the narrowing for every PR.
 - The suite reads the real workflow and requires every plumbing name to exist in
   the two gate jobs, so a renamed step cannot leave a stale entry silently
   excluding nothing. Scoping matters: a whole-file inventory can be kept alive
@@ -344,13 +351,21 @@ head commit` stay outside the slice. A `ref:` edit on its own is caught: the
   removes: relocating the install prelude into a new job left the two gate jobs
   identical. Job-list churn is rarer than step churn, so the cost is an
   occasional rebase rather than the weekly treadmill this narrowing removes.
-- **Residual risk, dependency closure.** `needs:` is compared, so a base-side
-  change to WHICH jobs the lane depends on is seen. The extractor does not walk
-  that dependency graph: if the lint job ever needed a non-gate job, that job's
-  content would be dropped while its name and its `needs:` entry stayed
-  identical. No such edge exists today — the lint job needs only `classify_pr`,
-  which is itself in the slice — and adding one would make this hole live, so the
-  list of gate jobs and the lane's `needs:` have to be read together.
+- **Accepted over-rejection: dependency closure.** `needs:` is compared, so a
+  base-side change to WHICH jobs the lane depends on is seen. The extractor still
+  does not walk that dependency graph, so instead of following the edge it
+  refuses it: a gate job that `needs:` anything outside the gate-job list returns
+  null and keeps whole-file containment. Without that refusal the hole was
+  silent and permanent — splitting the install prelude into a new job stales
+  everyone once, correctly, and every later edit inside that job then compares
+  equal, because the job is dropped while its name and its `needs:` entry stay
+  identical. No such edge exists today (the lint job needs only `classify_pr`,
+  which is itself in the slice), so the refusal costs nothing now and fires
+  exactly when the slice would stop being the whole gate. All three YAML
+  spellings of the list are covered — inline, single-quoted and block — because a
+  guard that read only one would leave the others open. Extending the gate-job
+  list and reading the lane's `needs:` still have to happen together; the
+  difference is that forgetting now over-rejects instead of certifying falsely.
 
 - **Accepted residual: legal YAML the model refuses, and the narrowing then
   stops firing.** Four structural anchors are exact-match — `jobs:`, the
@@ -372,9 +387,9 @@ head commit` stay outside the slice. A `ref:` edit on its own is caught: the
 
 ## Validation plan
 
-1. `node --test .github/scripts/check-lint-gate-freshness.test.mjs` — 81 cases,
+1. `node --test .github/scripts/check-lint-gate-freshness.test.mjs` — 83 cases,
    all green, as reported by `node --test` on this revision (`main` runs 47; the
-   PR adds 34). CI corroborates this on Linux through
+   PR adds 36). CI corroborates this on Linux through
    `Run .github/scripts helper tests`, which collects the suite from
    `${{ env.HELPER_TESTS }}`. Counts here are the runtime count at a named
    revision, not a tally carried across review rounds.
@@ -392,6 +407,12 @@ head commit` stay outside the slice. A `ref:` edit on its own is caught: the
 4. The job roster is part of the compared text: adding a job on the base side
    changes the slice, so the `needs:`-relocation shape (install prelude split
    into a new job the gate job then depends on) refuses the narrowing.
+   Reading the edge itself is pinned too, in all three YAML spellings of the
+   list — inline, single-quoted and block — because the roster marker alone
+   only catches the commit that ADDS the job, not the later edits inside it.
+   Removing that refusal reddens the case; so does removing the flag skip in
+   `LINTER_INVOCATION`, which is what let `pnpm -w run lint` through a
+   whitelisted step.
 5. Slice completeness against the real workflow: every `scripts/lint.js` lane
    flag must survive in the slice.
 6. Live API, thirteen historical base tips with a fork point one commit behind

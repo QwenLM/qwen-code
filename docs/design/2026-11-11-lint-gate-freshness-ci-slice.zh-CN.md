@@ -83,7 +83,7 @@ Checkout trusted CI classifier                   Disk floor gate (self-hosted)
 
 有两个「加固被 lint 的树」的步骤刻意**不在**名单里：`Restore workspace ownership` 与 `Clean stale .qwen before checkout` 在 checkout 之前清理工作区，而该 job 会运行不可信的 fork 代码。base 侧对其中任一步的加固属于安全修复，必须传导到在途分支；而它们因事故而改、不因路由调整而改，因此留在切片里，像其他闸门改动一样让分支变 stale。
 
-在 job 层面只丢弃 `runs-on` 与 `timeout-minutes`，并连带丢弃它们的整段区域。`env`、`if`、`needs`、`outputs`、`permissions` 与 `steps` 保留：它们决定运行什么，而不是在哪里运行。`needs` 尤其保留，因此 base 侧改动「这条 lane 依赖哪些 job」会被比对到。
+在 job 层面只丢弃 `runs-on` 与 `timeout-minutes`，并连带丢弃它们的整段区域。`env`、`if`、`needs`、`outputs`、`permissions` 与 `steps` 保留：它们决定运行什么，而不是在哪里运行。`needs` 尤其保留，因此 base 侧改动「这条 lane 依赖哪些 job」会被比对到——而指向闸门 job 名单之外的边会拒绝 narrowing，而不是被跟随，因为提取器不走依赖图。
 
 **没有任何区域被静默丢弃。** 每一块被排除的内容——每个非闸门 job、每个 plumbing 步骤、每个被丢弃的 job key——都会在比对文本中留下一个 `[[dropped ...]]` 标记，携带类别与名称，并留在该区域原本的位置。`[[...]]` 不是 YAML 注释，因此标记既不会被误当作 prose，也不会与真实行冲突。这才让比对成为**完整**模型而不是「记得建模的部分」的抽样：base 侧把内容挪进被丢弃区域的改动（安装前置步骤拆进新 job、步骤改名成 plumbing 名单里的名字）会改变标记序列，从而拒绝 narrowing。
 
@@ -99,7 +99,7 @@ block scalar 正文正好相反：`run: |` 的内容是 runner 实际执行的�
 
 白名单列出的是**可以被忽略**的部分，而不是重要的部分。漏掉对某个新闸门步骤的分类，会让它留在切片里，代价最多是今天的过度拒绝；而白名单里的错误条目会隐藏真实的闸门改动。这种不对称是刻意的，并由两道保护支撑：
 
-- 若白名单中某个步骤的正文调用了 linter，则直接拒绝 narrowing。标签本身不被信任——一个仍在运行 `scripts/lint.js` 的步骤被移入白名单是矛盾，而不是通过。匹配覆盖实际调用的写法：`npm run`、`pnpm run`、`corepack pnpm run`、裸 `pnpm lint`、`npx`/`pnpx`。只锚定 `npm run` 会漏掉所有 `pnpm` 写法，因为 `pnpm` 里 `npm` 前面没有词边界；而管理器后面跟 `config`/`set` 属于配置，仍然通过。
+- 若白名单中某个步骤的正文调用了 linter，则直接拒绝 narrowing。标签本身不被信任——一个仍在运行 `scripts/lint.js` 的步骤被移入白名单是矛盾，而不是通过。匹配覆盖实际调用的写法：`npm run`、`pnpm run`、`corepack pnpm run`、裸 `pnpm lint`、`npx`/`pnpx`。只锚定 `npm run` 会漏掉所有 `pnpm` 写法，因为 `pnpm` 里 `npm` 前面没有词边界。管理器与子命令之间的参数同样被跳过，理由相同：`pnpm -w run lint` 与 `pnpm --filter ./packages/core run lint` 走的是同一条 lane，而把子命令直接锚在管理器之后会把这两种都放过去。管理器后面跟 `config`/`set` 属于配置，仍然通过——`npm config set fetch-retries 5` 是真实的白名单步骤，拒绝它会让 narrowing 对每个 PR 都失效。
 - 测试会读取真实 workflow，要求每个 plumbing 名称都存在于**两个闸门 job** 中，因此步骤改名不会留下一个「静默地什么都没排除」的过期条目。限定范围是必要的：全文件清单会被某个 test lane 里的同名步骤续命，即使闸门 job 里那份已经改名。
 
 Node 供给相关步骤（`setup-node`、pnpm store action、self-hosted Node action）刻意**保留**在切片中：它们决定 linter 运行所用的工具链，因此版本升级可能改变 lint 语义。只排除缓存位置与 npm 重试设置。
@@ -153,16 +153,16 @@ merge base 取自该检查**已经做过**的包含比较，因此 narrowing 不
 - **接受的残余过度拒绝：** `jobs:` 之上的内容整体保留，因此 base 侧对 `on:` 或 `concurrency:` 的改动仍会让所有在途 PR 变 stale，尽管它不可能改变 lint 检查什么。把这段前置内容收窄到只有 `env` 也能消掉这些红，但它同时承载 `permissions` 与 `defaults.run.shell`，而这两者确实会改变每个步骤的行为。刻意留在安全方向。
 
 - **接受的过度拒绝：job 名单。** 每个非闸门 job 都会在比对文本中留下名字，因此 base 侧新增、删除或改名一个 job 都会拒绝 narrowing，哪怕它的内容碰不到 lint 闸门。另一种做法——不加痕迹地丢弃这些 job——正是标记要消除的暴露面：把安装前置步骤拆进新 job 时，两个闸门 job 看起来完全相同。job 名单的变动比步骤变动稀少，所以代价是偶尔一次 rebase，而不是本 narrowing 要消除的每周跑步机。
-- **残余风险：依赖闭包。** `needs:` 会被比对，因此 base 侧改动「这条 lane 依赖哪些 job」可见。但提取器不走依赖图：若 lint job 将来 `needs:` 某个非闸门 job，那个 job 的内容会被丢弃，而它的名字与 `needs:` 条目却完全相同。今天不存在这样的边——lint job 只依赖 `classify_pr`，它本身在切片内——一旦新增这种依赖，这个洞就会生效，因此闸门 job 名单与这条 lane 的 `needs:` 必须一起读。
+- **接受的过度拒绝：依赖闭包。** `needs:` 会被比对，因此 base 侧改动「这条 lane 依赖哪些 job」可见。提取器仍然不走依赖图，但改为拒绝这条边而不是跟随它：闸门 job 一旦 `needs:` 闸门名单之外的任何 job，就返回 null、保留整文件包含判定。没有这条拒绝时，那个洞是静默且永久的——把安装前置拆进新 job 会让所有在途 PR stale 一次（这是对的），此后该 job 内部的每次改动都比对相等，因为 job 被丢弃、而它的名字与 `needs:` 条目完全相同。今天不存在这样的边（lint job 只依赖 `classify_pr`，它本身在切片内），所以这条拒绝当前零成本，并且恰好在切片不再等于整个闸门时触发。列表的三种 YAML 写法——内联、单引号、块式——都被覆盖，因为只读其中一种会把另外两种留着。扩充闸门 job 名单与读这条 lane 的 `needs:` 仍然必须一起做；区别在于现在忘记了是过度拒绝，而不是错误认证。
 
 - **接受的残余：模型会拒绝的合法 YAML，且收窄随即失效。** 四个结构锚点是精确匹配——`jobs:`、两空格的 job key、`steps:`、`- name: '<name>'`——而 prose 只丢整行注释。因此任一锚点带行尾注释（`steps: # lane`、`- name: 'Checkout' # pinned`）都会返回 null，普通标量里带一个未配对引号（`run: echo it's fine`）同样返回 null；两者都是 runner 能正常加载的合法 YAML。若这类写法出现在 base 侧提交里，`narrowsToUnchangedLintSlice` 会对每个 stale 的 `ci.yml` 判定抛错，catch 只打一条 `::warning::`，收窄就此停止生效：每个 base 侧 `ci.yml` 提交——包括本次改动要吸收的纯 plumbing 变更——又会要求所有在途 PR rebase。方向是 fail-safe 而非造绿：stale 判定被保留，代价是过度拒绝。但对该形态而言功能确实是静默回退，且测试看不见它——测试读的是分支的副本，这些行在 main 上。**未处理**：让这四个锚点接受以 `#` 引入的注释（并让引号只在值位置开启）是 follow-up，本修订并不声称已经做到。
 
 ## 验证计划
 
-1. `node --test .github/scripts/check-lint-gate-freshness.test.mjs`——81 个用例全绿，数字取自本修订上 `node --test` 的运行时计数（`main` 为 47，本 PR 增加 34）。CI 通过 `Run .github/scripts helper tests` 在 Linux 上佐证这一点，该步骤从 `${{ env.HELPER_TESTS }}` 收集本测试。此处的计数一律是「某个具名修订上的运行时计数」，不是跨评审轮累加的账。
+1. `node --test .github/scripts/check-lint-gate-freshness.test.mjs`——83 个用例全绿，数字取自本修订上 `node --test` 的运行时计数（`main` 为 47，本 PR 增加 36）。CI 通过 `Run .github/scripts helper tests` 在 Linux 上佐证这一点，该步骤从 `${{ env.HELPER_TESTS }}` 收集本测试。此处的计数一律是「某个具名修订上的运行时计数」，不是跨评审轮累加的账。
 2. mutation witness：八个刻意植入的缺陷都必须让测试变红——从 `NARROWINGS` 移除 `ci.yml`、把整个文件当作切片返回、只保留 header、比对 head 而非 merge base、吸收未命名步骤、把缺失 merge base 当作 fresh、去掉 linter 检查而只信任 plumbing 标签，以及把 job `env` 从切片中移除。
 3. 模型完备性 witness，每个对应一种「旧的行吸收模型会比对成相同」的形态：裸 `-` 步骤、步骤清单头部与步骤之间的注释、`run: |` 正文里以 `#` 开头的行、放在 `steps:` 之后的 job 级 key、只用一个 CR 隐藏被改 flag 的换行、以及锚点定义在被丢弃 job 而别名被保留步骤引用。每一例都必须返回 `null` 或不同的切片，且去掉对应守卫时该例变红。
-4. job 名单本身进入比对：base 侧新增一个 job 会改变切片，因此「把安装前置步骤拆进新 job、再让闸门 job `needs:` 它」这种形态会拒绝 narrowing。
+4. job 名单本身进入比对：base 侧新增一个 job 会改变切片，因此「把安装前置步骤拆进新 job、再让闸门 job `needs:` 它」这种形态会拒绝 narrowing。读这条边本身也被钉住，覆盖列表的三种 YAML 写法——内联、单引号、块式——因为只靠名单标记只能抓住**新增** job 的那一次提交，抓不住此后该 job 内部的改动。去掉这条拒绝会让该用例变红；去掉 `LINTER_INVOCATION` 里的参数跳过也一样，正是它让 `pnpm -w run lint` 从白名单步骤里走了过去。
 5. 针对真实 workflow 的切片完整性：每个 `scripts/lint.js` lane 参数都必须在切片中存活。
 6. 真实 API：取十三个历史 base tip，各自的分叉点落后一个提交，内容按真实 ref 读取——六个纯 plumbing 提交必须通过，七个改变闸门的提交必须保持 stale。
 7. 真实 API 验证触发本次报告的那个分支（#16939 在 `07d89196bd21`）：它必须保持 stale，因为 #16920 确实改了 Prettier lane。

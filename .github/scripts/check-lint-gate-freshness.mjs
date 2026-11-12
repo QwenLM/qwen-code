@@ -317,10 +317,14 @@ const CI_GATE_JOBS = ['classify_pr', 'lint_and_static'];
 // `pnpm run lint`, `corepack pnpm run lint`, a bare `pnpm lint`, `npx`. A bare
 // `\bnpm run\b` matched none of the `pnpm` spellings (`pnpm` has no word
 // boundary before `npm`), so the refusal could be stepped around by changing
-// the manager. A manager followed by `config`/`set` is configuration, not an
-// invocation, so the form is anchored on the command that follows.
+// the manager. Flags between the manager and its subcommand are skipped for the
+// same reason: `pnpm -w run lint` and `pnpm --filter ./packages/core run lint`
+// reach the same lanes, and anchoring the subcommand directly after the manager
+// let both through. A manager followed by `config`/`set` is configuration, not
+// an invocation — `npm config set fetch-retries 5` must keep parsing — so the
+// form is anchored on the subcommand, not on the manager's name.
 const LINTER_INVOCATION =
-  /scripts\/lint\.js|node --test|\b(?:npx|pnpx|bunx)\b|(?:corepack\s+)?(?:npm|pnpm|yarn|bun)\s+(?:run|run-script|exec|dlx|test|ci|install|i|x|lint|prettier|eslint|format)\b|prettier|eslint|actionlint|shellcheck|yamllint/;
+  /scripts\/lint\.js|node --test|\b(?:npx|pnpx|bunx)\b|(?:corepack\s+)?(?:npm|pnpm|yarn|bun)\s+(?:(?:--?[A-Za-z][A-Za-z0-9-]*(?:[= ]\S+)?|--)\s+)*(?:run|run-script|exec|dlx|test|ci|install|i|x|lint|prettier|eslint|format)\b|prettier|eslint|actionlint|shellcheck|yamllint/;
 
 // Every YAML line terminator, `\r\n` first so a CRLF pair counts once. A lone
 // `\r` terminates a line in YAML too, and the earlier `split('\n')` read a
@@ -550,6 +554,20 @@ function gateJobSlice(name, lines, content) {
     } else if (CI_PLUMBING_JOB_KEYS.has(key[1])) {
       kept.push(dropped(`job-key '${key[1]}'`));
     } else {
+      // `needs:` is compared but not followed, so a dependency on a job
+      // outside CI_GATE_JOBS would put gate-defining content in a dropped
+      // region: the edge itself stales everyone once, and every later edit
+      // inside that job then compares equal. Refuse instead — the whole-file
+      // verdict is the safe one, and reading the edge costs nothing. The
+      // lint job needs only `classify_pr` today, so this never fires on the
+      // real workflow; it fires the day someone splits the install prelude
+      // into its own job, which is exactly when the slice stops being the
+      // whole gate.
+      if (key[1] === 'needs') {
+        for (const edge of chunk.join('\n').matchAll(/'([A-Za-z0-9_-]+)'/g)) {
+          if (!CI_GATE_JOBS.includes(edge[1])) return null;
+        }
+      }
       kept.push(...chunk);
     }
     i = end;

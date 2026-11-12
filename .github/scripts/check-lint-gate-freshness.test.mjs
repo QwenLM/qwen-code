@@ -1802,12 +1802,22 @@ test('a plumbing step that reaches a linter through a package manager refuses', 
   // The label is not trusted: a plumbing step whose body invokes a linter is a
   // contradiction. The guard used to anchor on `npm run`, which no `pnpm`
   // spelling contains a word boundary for, so `pnpm run lint` — and
-  // `corepack pnpm run lint` — walked straight through.
+  // `corepack pnpm run lint` — walked straight through. Anchoring the
+  // subcommand directly after the manager then let the flag-carrying spellings
+  // through: `pnpm -w run lint` reaches the same lane and is how a workspace
+  // run is normally written.
   for (const invocation of [
     'pnpm run lint',
     'corepack pnpm run lint',
     'pnpm lint',
     'npx eslint .',
+    'pnpm -w run lint',
+    'corepack pnpm -w run lint',
+    'pnpm --filter ./packages/core run lint',
+    'pnpm -r --filter ./packages/core run lint',
+    'pnpm --silent run lint',
+    'yarn --cwd packages/core run lint',
+    'pnpm -r exec prettier --check .',
   ]) {
     const patched = withStepText(
       'Disk floor gate (self-hosted)',
@@ -1822,6 +1832,57 @@ test('a plumbing step that reaches a linter through a package manager refuses', 
   }
   // Configuration is not an invocation: the real workflow's npm config step
   // must keep parsing, or the narrowing would be dead on arrival.
+  assert.ok(extractLintGateSlice(realCi));
+  // And the flag skip must not turn configuration into an invocation: these
+  // are the shapes the real plumbing steps carry, so a refusal here would
+  // disable the narrowing for every PR.
+  for (const configuration of [
+    'npm config set fetch-retries 5',
+    'npm config get cache',
+    'corepack enable',
+  ]) {
+    const patched = withStepText(
+      'Disk floor gate (self-hosted)',
+      "run: 'bash .github/scripts/check-disk-floor.sh",
+      `run: '${configuration} && bash .github/scripts/check-disk-floor.sh`,
+    );
+    assert.ok(
+      extractLintGateSlice(patched),
+      `${configuration} is configuration, not a linter invocation`,
+    );
+  }
+});
+
+test('a needs edge outside the gate jobs refuses the narrowing', async () => {
+  // `needs:` is compared but not followed. Splitting the install prelude into
+  // its own job stales everyone once — correct — but every later edit INSIDE
+  // that job then compares equal, because the job is dropped and only the edge
+  // is kept. That is gate-defining content leaving the slice permanently and
+  // silently. Reading the edge costs nothing, so refuse instead and keep the
+  // whole-file verdict. All three YAML spellings of the list are covered: a
+  // guard that read only the inline form would leave the other two open.
+  for (const [label, needs] of [
+    ['inline list', "    needs: ['classify_pr', 'lint_prelude']"],
+    ['single quoted', "    needs: 'lint_prelude'"],
+    ['block list', "    needs:\n      - 'classify_pr'\n      - 'lint_prelude'"],
+  ]) {
+    const base = lintJobEdit((job) =>
+      job.replace("    needs: 'classify_pr'", needs),
+    );
+    assert.notEqual(base, realCi, `${label} fixture did not apply`);
+    assert.equal(
+      extractLintGateSlice(base),
+      null,
+      `${label}: a non-gate dependency must refuse the narrowing`,
+    );
+    // And the refusal must reach the verdict, not just the extractor.
+    const stale = await findStaleGateFiles({
+      ...CI_OPTS,
+      ...ciFetch(base, realCi),
+    });
+    assert.equal(stale.length, 1, `${label}: the stale verdict must stand`);
+  }
+  // The real edge is inside the gate jobs, so the narrowing stays usable.
   assert.ok(extractLintGateSlice(realCi));
 });
 
