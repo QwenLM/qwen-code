@@ -490,12 +490,16 @@ public class ClientFilesRelayService {
     }
 
     private void enqueue(Binding binding, String requestId, String body, long now) {
-        if (relay.queuedCount(binding.tenantId(), binding.sessionId(), binding.generation(), now)
-                >= settings.getClientFiles().getQueueDepth()) {
+        // The depth check and the insert must be one atomic step: a bare
+        // count-then-insert lets concurrent admissions all read the same count
+        // and over-admit the bound. The store locks the binding row for it.
+        boolean admitted = relay.enqueueBounded(binding.tenantId(), binding.sessionId(),
+                binding.generation(), requestId, body,
+                now + settings.getClientFiles().getRequestTtl().toMillis(), now,
+                settings.getClientFiles().getQueueDepth());
+        if (!admitted) {
             throw error(409, "client_files_queue_full");
         }
-        relay.enqueue(binding.tenantId(), binding.sessionId(), binding.generation(), requestId,
-                body, now + settings.getClientFiles().getRequestTtl().toMillis(), now);
     }
 
     private SessionRecord requireExecutionAuthority(String tenant, String actor, String session) {

@@ -30,6 +30,11 @@ interface PeerOptions {
   /** Force the binding's connection identity to this value, simulating a
    * concurrent tab that replaced this bridge's registration. */
   hijackConnectionId?: string;
+  /** Override only the connection identity the STATUS route reports, while the
+   * register reply still names this bridge. Simulates a concurrent tab that
+   * replaces the binding after register settled, so only the poll-time identity
+   * fence (not the reply-time one) can catch it. */
+  statusConnectionId?: string;
 }
 
 function startPeer(opts: PeerOptions = {}): Promise<Peer> {
@@ -73,7 +78,8 @@ function startPeer(opts: PeerOptions = {}): Promise<Peer> {
         };
         if (
           opts.streamStatus === undefined &&
-          opts.hijackConnectionId === undefined
+          opts.hijackConnectionId === undefined &&
+          opts.statusConnectionId === undefined
         )
           await registerDone;
         res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -88,7 +94,11 @@ function startPeer(opts: PeerOptions = {}): Promise<Peer> {
       }
       if (path.endsWith('/client-files/status')) {
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(binding ? JSON.stringify(binding) : '');
+        const reported =
+          binding && opts.statusConnectionId !== undefined
+            ? { ...binding, connectionId: opts.statusConnectionId }
+            : binding;
+        res.end(reported ? JSON.stringify(reported) : '');
         return;
       }
       if (path.endsWith('/client-files/unregister')) {
@@ -347,6 +357,27 @@ describe('ManagedClientFilesBridge', () => {
     // The poll-time identity fence must refuse the hijacked binding before any
     // downlink opens; the reply-time check alone would also land on `failed`
     // with empty lists, so only the stream count separates the two paths.
+    expect(p.streamOpens).toBe(0);
+  });
+
+  it('the poll-time identity fence refuses a binding replaced after register settled', async () => {
+    // The register reply names this bridge, so the reply-time fence passes; but
+    // the status poll reports another tab's identity. Only the poll-time
+    // connectionId clause in waitForBinding can refuse it. Deleting that clause
+    // lets the bridge adopt the foreign generation and open a downlink, so this
+    // case (failed + zero stream opens) turns red.
+    const p = await peer({ statusConnectionId: 'other-tab' });
+    const handled: JsonRpcRequest[] = [];
+    const b = bridge(p, {
+      async handle(message) {
+        handled.push(message);
+        return { jsonrpc: '2.0', id: message.id ?? null, result: {} };
+      },
+    });
+    await b.connect();
+    expect(b.getState()).toMatchObject({ phase: 'failed' });
+    expect(handled).toEqual([]);
+    expect(p.responses).toEqual([]);
     expect(p.streamOpens).toBe(0);
   });
 

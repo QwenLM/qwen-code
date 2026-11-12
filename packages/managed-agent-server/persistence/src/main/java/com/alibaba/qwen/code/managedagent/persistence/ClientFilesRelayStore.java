@@ -154,6 +154,21 @@ public class ClientFilesRelayStore implements ClientFilesRelay {
     }
 
     @Override
+    public boolean enqueueBounded(String tenantId, String sessionId, long generation,
+            String requestId, String payloadJson, long expiresAt, long now, int queueDepth) {
+        // Lock the binding row so concurrent admissions serialize: a bare
+        // count-then-insert lets every caller read the same count and insert,
+        // over-admitting the depth bound. The lock is held to commit (the store
+        // is transactional), so the count and the insert are one atomic step.
+        findByScopeForUpdate(ManagedSchemaKeys.key(tenantId, sessionId));
+        if (queuedCount(tenantId, sessionId, generation, now) >= queueDepth) {
+            return false;
+        }
+        enqueue(tenantId, sessionId, generation, requestId, payloadJson, expiresAt, now);
+        return true;
+    }
+
+    @Override
     public int queuedCount(String tenantId, String sessionId, long generation, long now) {
         // An expired-but-unwalked row must not occupy a queue slot, so the
         // depth check excludes rows past their deadline as well as settled ones.

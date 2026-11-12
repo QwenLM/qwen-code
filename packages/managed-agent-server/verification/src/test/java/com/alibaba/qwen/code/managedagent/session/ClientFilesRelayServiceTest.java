@@ -40,6 +40,7 @@ class ClientFilesRelayServiceTest {
     private static final String ACTOR = "operator";
     private JdbcTemplate jdbc;
     private ClientFilesRelayStore store;
+    private org.springframework.transaction.support.TransactionTemplate transactions;
     private ManagedAgentProperties properties;
     private ManagedAgentService agentService;
     private ManagedWorkspaceRegistry workspaces;
@@ -56,6 +57,8 @@ class ClientFilesRelayServiceTest {
         ManagedSchema.initialize(source);
         jdbc = new ManagedSchemaJdbcTemplate(source);
         store = new ClientFilesRelayStore(jdbc);
+        transactions = new org.springframework.transaction.support.TransactionTemplate(
+                new org.springframework.jdbc.datasource.DataSourceTransactionManager(source));
         properties = new ManagedAgentProperties();
         properties.getClientFiles().setEnabled(true);
         properties.getClientFiles().setRequestTtl(Duration.ofMillis(300));
@@ -415,12 +418,66 @@ class ClientFilesRelayServiceTest {
 
     @Test
     void queueDepthIsBounded() throws Exception {
+        // A long TTL keeps the first row queued for the whole assertion: with the
+        // old 300 ms TTL a slow machine expired the row before the second call,
+        // so the refusal never happened (a speed-correlated failure, not flake).
+        properties.getClientFiles().setRequestTtl(Duration.ofSeconds(60));
         properties.getClientFiles().setQueueDepth(1);
         Registration registration = service.register(tenant, ACTOR, session, CONNECTION);
         mcpInBackground(registration.token(), request("1"));
         awaitQueue(registration.generation(), 1);
         assertThatThrownBy(() -> service.mcp(tenant, session, registration.token(), request("2")))
                 .hasFieldOrPropertyWithValue("code", "client_files_queue_full");
+    }
+
+    @Test
+    void queueDepthBoundHoldsUnderConcurrentAdmission() throws Exception {
+        // The depth check and the insert must be atomic: a bare count-then-insert
+        // lets every concurrent caller read the same count and all insert,
+        // over-admitting the bound. Removing the binding-row lock in
+        // enqueueBounded turns this red (8 admitted at depth 2).
+        properties.getClientFiles().setRequestTtl(Duration.ofSeconds(60));
+        properties.getClientFiles().setQueueDepth(2);
+        Registration registration = service.register(tenant, ACTOR, session, CONNECTION);
+        int threads = 8;
+        java.util.concurrent.CountDownLatch start = new java.util.concurrent.CountDownLatch(1);
+        java.util.concurrent.CountDownLatch done = new java.util.concurrent.CountDownLatch(threads);
+        java.util.concurrent.atomic.AtomicInteger admitted = new java.util.concurrent.atomic.AtomicInteger();
+        java.util.concurrent.atomic.AtomicInteger refused = new java.util.concurrent.atomic.AtomicInteger();
+        List<Throwable> errors = java.util.Collections.synchronizedList(new java.util.ArrayList<>());
+        for (int i = 0; i < threads; i++) {
+            String id = "req-" + i;
+            Thread.startVirtualThread(() -> {
+                try {
+                    start.await();
+                    // The production store is a transactional proxy, so the
+                    // binding-row lock in enqueueBounded is held to commit; the
+                    // bare test store needs the surrounding transaction to
+                    // reproduce that atomicity.
+                    transactions.execute(status ->
+                            service.mcp(tenant, session, registration.token(), request(id)));
+                    admitted.incrementAndGet();
+                } catch (com.alibaba.qwen.code.managedagent.exception.ManagedAgentException full) {
+                    if ("client_files_queue_full".equals(full.getCode())) {
+                        refused.incrementAndGet();
+                    } else {
+                        errors.add(full);
+                    }
+                } catch (Throwable error) {
+                    errors.add(error);
+                } finally {
+                    done.countDown();
+                }
+            });
+        }
+        start.countDown();
+        assertThat(done.await(30, TimeUnit.SECONDS)).isTrue();
+        assertThat(errors).isEmpty();
+        assertThat(admitted.get()).isEqualTo(2);
+        assertThat(refused.get()).isEqualTo(threads - 2);
+        assertThat(jdbc.queryForObject(
+                "SELECT COUNT(*) FROM ma_client_files_request WHERE state='queued'", Integer.class))
+                .isEqualTo(2);
     }
 
     @Test
@@ -483,6 +540,68 @@ class ClientFilesRelayServiceTest {
         // binding-ttl with nothing able to drain it.
         assertThat(jdbc.queryForObject("SELECT state FROM ma_client_files_binding", String.class))
                 .isEqualTo("closed");
+    }
+
+    @Test
+    void unregisterDispatchesTheGenerationFencedTeardown() {
+        Registration registration = service.register(tenant, ACTOR, session, CONNECTION);
+        service.unregister(tenant, ACTOR, session, CONNECTION);
+        // The payload must carry the generation: a replacement catalog installed
+        // between the close and this dispatch must not be dropped. Removing
+        // "generation" from the payload turns this red.
+        verify(harness).clientFilesOperation(eq(tenant), eq(session),
+                eq(Map.of("action", "unregister", "generation", registration.generation())));
+    }
+
+    @Test
+    void closeForSessionClosesTheBindingAndFailsQueuedRequests() throws Exception {
+        Registration registration = service.register(tenant, ACTOR, session, CONNECTION);
+        mcpInBackground(registration.token(), request("1"));
+        awaitQueue(registration.generation(), 1);
+        // The method's own close/fail-queue work (the coordinator test exercises
+        // it only through a mock relay). Emptying the body leaves state=active.
+        service.closeForSession(tenant, session);
+        assertThat(jdbc.queryForObject("SELECT state FROM ma_client_files_binding", String.class))
+                .isEqualTo("closed");
+        assertThat(jdbc.queryForObject("SELECT state FROM ma_client_files_request WHERE request_id='1'",
+                String.class)).isEqualTo("failed");
+    }
+
+    @Test
+    void mcpAsyncTimeoutOutlivesTheRequestTtl() {
+        // The DeferredResult ceiling is derived from the request TTL so it always
+        // outlives the TTL that settles the future, even when the operator raises
+        // request-ttl past a fixed safety net.
+        properties.getClientFiles().setRequestTtl(Duration.ofMillis(250));
+        assertThat(service.mcpAsyncTimeoutMillis()).isEqualTo(60_250L);
+        properties.getClientFiles().setRequestTtl(Duration.ofSeconds(120));
+        assertThat(service.mcpAsyncTimeoutMillis()).isEqualTo(180_000L);
+    }
+
+    @Test
+    void refusedReRegisterDoesNotClobberAConcurrentReplacement() {
+        service.register(tenant, ACTOR, session, CONNECTION);
+        // During the re-register's dispatch a concurrent registration replaces
+        // the binding, then the dispatch is refused. The compensation (which
+        // restores the previous captured atomically by registerCapturingPrevious)
+        // is generation-fenced, so it must not clobber the concurrent winner.
+        when(harness.clientFilesOperation(anyString(), anyString(), any()))
+                .thenAnswer(invocation -> {
+                    Map<String, Object> payload = invocation.getArgument(2);
+                    if ("register".equals(payload.get("action"))) {
+                        store.register(tenant, session, ACTOR, "local-files", "c".repeat(64),
+                                System.currentTimeMillis() + 60_000, System.currentTimeMillis(), "conn-C");
+                        throw new UnsupportedOperationException("hosted_turn_active");
+                    }
+                    return Map.of("registered", true, "toolCount", 1);
+                });
+        assertThatThrownBy(() -> service.register(tenant, ACTOR, session, CONNECTION))
+                .hasFieldOrPropertyWithValue("code", "client_files_relay_unavailable");
+        com.alibaba.qwen.code.managedagent.contracts.clientfiles.ClientFilesModels.Binding current =
+                store.find(tenant, session);
+        assertThat(current.active()).isTrue();
+        assertThat(current.connectionId()).isEqualTo("conn-C");
+        assertThat(current.tokenHash()).isEqualTo("c".repeat(64));
     }
 
     private void mcpInBackground(String token, String body) {

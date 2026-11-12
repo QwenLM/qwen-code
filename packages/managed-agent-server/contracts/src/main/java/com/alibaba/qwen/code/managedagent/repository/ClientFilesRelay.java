@@ -51,6 +51,15 @@ public interface ClientFilesRelay {
     void enqueue(String tenantId, String sessionId, long generation, String requestId,
             String payloadJson, long expiresAt, long now);
 
+    /**
+     * Atomically admits a request only while the live queue is below the depth
+     * bound. The binding row is locked so concurrent admissions serialize their
+     * count-then-insert; without the lock each caller reads the same count and
+     * they all insert, over-admitting the bound. Returns false when full.
+     */
+    boolean enqueueBounded(String tenantId, String sessionId, long generation, String requestId,
+            String payloadJson, long expiresAt, long now, int queueDepth);
+
     int queuedCount(String tenantId, String sessionId, long generation, long now);
 
     List<QueuedRequest> queued(String tenantId, String sessionId, long generation, int limit,
