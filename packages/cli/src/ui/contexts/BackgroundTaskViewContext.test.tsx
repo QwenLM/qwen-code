@@ -380,11 +380,7 @@ describe('BackgroundTaskViewProvider approval surfacing', () => {
             workflows = [first, second, unrelated];
             break;
           case 'finishes':
-            workflows = [
-              first,
-              second,
-              { ...unrelated, status: 'completed' },
-            ];
+            workflows = [first, second, { ...unrelated, status: 'completed' }];
             break;
           case 'is removed':
             workflows = [first, second];
@@ -395,6 +391,8 @@ describe('BackgroundTaskViewProvider approval surfacing', () => {
           case 'drains':
             workflows = [workflowEntry([], 'wf-a', 300), second];
             break;
+          default:
+            throw new Error('Unexpected task change');
         }
         fireStatusChange();
       });
@@ -402,10 +400,7 @@ describe('BackgroundTaskViewProvider approval surfacing', () => {
       expect(result.current.state.autoOpened).toBe(false);
 
       act(() => {
-        workflows = [
-          ...workflows,
-          workflowEntry(['wfap-new'], 'wf-new', 10),
-        ];
+        workflows = [...workflows, workflowEntry(['wfap-new'], 'wf-new', 10)];
         fireApprovalRequest();
       });
       expect(result.current.state.dialogMode).toBe('list');
