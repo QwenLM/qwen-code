@@ -49,7 +49,7 @@ npm run test:release:workspaces -- --shard="${shard}/3" --passWithNoTests "${ret
     # the CI unit lane applies (.github/scripts/ci/run-unit-test-lanes.sh).
     errors=$(awk '/^[[:space:]]*Errors[[:space:]]+[0-9]+ errors?$/ { total += $2 } END { print total + 0 }' "${log}")
     timeouts=$(awk '
-      /^[^[:alnum:]]*Unhandled Errors[^[:alnum:]]*$/ { inside = 1; next }
+      /^[^[:alnum:]]+Unhandled Errors[^[:alnum:]]+$/ { inside = 1; next }
       inside && /^[[:space:]]*(Test Files|Tests|Errors)[[:space:]]/ { inside = 0 }
       inside && /\[vitest-worker\]: Timeout calling/ { count++ }
       END { print count + 0 }

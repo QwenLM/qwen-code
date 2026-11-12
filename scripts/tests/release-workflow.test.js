@@ -1786,6 +1786,15 @@ describe('release workflow', () => {
         1,
         stands,
       ],
+      // The opener needs Vitest's ruler on both sides: the bare words are a
+      // phrase a test can print, not the section header.
+      [
+        'transport timeout, and the bare section words printed',
+        `Unhandled Errors\n${timeout}\n${unhandled}\n${timeout}\n${tally}\n     Errors  1 error`,
+        1,
+        passedThrough,
+        0,
+      ],
       // A test can print a line that merely starts with the section header.
       // The opener must match Vitest's ruler-shaped line, not any line that
       // contains the words, or the printed copy opens a pseudo-section and the

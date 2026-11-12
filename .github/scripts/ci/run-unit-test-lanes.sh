@@ -60,7 +60,7 @@ case "$RPC_RETRY" in
   *) RPC_RETRY=$((10#${RPC_RETRY})) ;;
 esac
 # The step's own start, so the budget below covers both retry paths.
-SCRIPT_START=$SECONDS
+SCRIPT_START=${SCRIPT_START_OVERRIDE:-$SECONDS}
 
 # The main lane's workspaces, the CLI suite and core.
 main_workspaces=('@qwen-code/qwen-code' '@qwen-code/qwen-code-core')
@@ -117,9 +117,13 @@ unset SIDE_LANE_LOG
 # True when less than half the step's budget is left. A retry costs about what
 # the first attempt cost, so issuing one here would be killed by the step
 # timeout and replace the first attempt's report with a truncated run.
+# `reserve` is what the caller still owes after the retry: the side lane runs
+# the standalone regression and the scripts suite after its workspace batch,
+# so admitting a retry that leaves no room for them buys a truncated step.
 retry_budget_exhausted() {
+  local reserve="${1:-0}"
   [ "${UNIT_LANE_BUDGET_SECONDS:-0}" -gt 0 ] &&
-    [ $((SECONDS - SCRIPT_START)) -ge $((UNIT_LANE_BUDGET_SECONDS / 2)) ]
+    [ $((SECONDS - SCRIPT_START + reserve)) -ge $((UNIT_LANE_BUDGET_SECONDS / 2)) ]
 }
 
 half_cap() {
@@ -150,7 +154,7 @@ run_suite() {
   rc="${PIPESTATUS[0]}"
   if [ "$rc" -ne 0 ] && [ "$RPC_RETRY" -gt 0 ] &&
     rpc_only_failure_text "$rc" < "$log"; then
-    if retry_budget_exhausted; then
+    if retry_budget_exhausted 0; then
       echo "::warning::Skipping the RPC re-run: ${SECONDS} s of the ${UNIT_LANE_BUDGET_SECONDS} s step budget used; the first failure stands."
       rm -f "$log"
       return "$rc"
@@ -181,6 +185,13 @@ run_suite() {
 # holds every workspace's summary, so judging the whole log — or just its last
 # summary — would let one workspace's green report license another's retry.
 run_lane_suites() {
+  # What this lane still owes after a retry: the side lane names its own start
+  # so the workspace batch's elapsed time (its proxy for the standalone run and
+  # the scripts suite that follow) is reserved before admitting a re-run.
+  local reserve=0
+  if [ -n "${RETRY_RESERVE_SINCE:-}" ]; then
+    reserve=${RETRY_RESERVE_OVERRIDE:-$((SECONDS - RETRY_RESERVE_SINCE))}
+  fi
   local log rc failed name block block_rc
   log="$(mktemp "${TMPDIR:-/tmp}/unit-lane-suite.XXXXXX")" || {
     echo "::error::Could not create a suite log under ${TMPDIR:-/tmp}."
@@ -254,7 +265,7 @@ run_lane_suites() {
     rm -f "$log"
     return "$rc"
   fi
-  if retry_budget_exhausted; then
+  if retry_budget_exhausted "$reserve"; then
     echo "::warning::Skipping the RPC re-run: ${SECONDS} s of the ${UNIT_LANE_BUDGET_SECONDS} s step budget used, too little left for another pass."
     rm -f "$log"
     return "$rc"
@@ -325,7 +336,7 @@ rpc_only_failure_text() {
   # retry for an unrelated unhandled error, or deny the retry a real transport
   # report had earned.
   timeouts="$(awk '
-    /^[^[:alnum:]]*Unhandled Errors[^[:alnum:]]*$/ { inside = 1; next }
+    /^[^[:alnum:]]+Unhandled Errors[^[:alnum:]]+$/ { inside = 1; next }
     inside && /^[[:space:]]*(Test Files|Tests|Errors)[[:space:]]/ { inside = 0 }
     inside && /\[vitest-worker\]: Timeout calling/ { count++ }
     END { print count + 0 }
@@ -336,7 +347,9 @@ rpc_only_failure_text() {
 suite_args=("$@")
 
 (
-  NODE_OPTIONS="$workspace_node_options" VITEST_MAX_FORKS="$side_forks" \
+  side_started=$SECONDS
+  RETRY_RESERVE_SINCE=$side_started \
+    NODE_OPTIONS="$workspace_node_options" VITEST_MAX_FORKS="$side_forks" \
     VITEST_MAX_THREADS="$side_threads" \
     run_lane_suites "${side_workspaces[@]}"
   workspaces_rc=$?
@@ -357,7 +370,7 @@ suite_args=("$@")
 ) > "$side_log" 2>&1 &
 side_pid=$!
 
-NODE_OPTIONS="$workspace_node_options" \
+RETRY_RESERVE_SINCE='' NODE_OPTIONS="$workspace_node_options" \
   run_lane_suites "${main_workspaces[@]/#/--workspace=}"
 rc=$?
 
