@@ -50,6 +50,13 @@ import {
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
 import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from '../ui/dialog';
+import {
   Card,
   CardAction,
   CardContent,
@@ -84,6 +91,14 @@ import {
 import { Switch } from '../ui/switch';
 import { workspaceLabel } from '../../utils/workspace';
 import { ChannelEditorDialog } from './ChannelEditorDialog';
+import type { WeixinLoginApi } from './WeixinLoginPanel';
+import {
+  cancelWeixinLoginFlow,
+  getWeixinAccountStatus,
+  getWeixinLoginFlow,
+  revokeWeixinLogin,
+  startWeixinLogin,
+} from './weixin-auth-api';
 import styles from './ChannelsManagerPage.module.css';
 import {
   isChannelPlatformAvailable,
@@ -135,6 +150,22 @@ export function ChannelsManagerPage({
 }: ChannelsManagerPageProps) {
   const { t } = useI18n();
   const workspace = useWorkspace();
+  // WeChat login is process-global, so it uses the root client rather than the
+  // workspace-scoped one the channel management calls go through.
+  const weixinLogin = useMemo<WeixinLoginApi>(() => {
+    const target = {
+      baseUrl: workspace.baseUrl,
+      token: workspace.token,
+      client: workspace.client,
+    };
+    return {
+      status: () => getWeixinAccountStatus(target),
+      start: () => startWeixinLogin(target),
+      poll: (id) => getWeixinLoginFlow(target, id),
+      cancel: (id) => cancelWeixinLoginFlow(target, id),
+      revoke: () => revokeWeixinLogin(target),
+    };
+  }, [workspace.baseUrl, workspace.token, workspace.client]);
   const supportsManagement =
     workspace.capabilities?.features.includes('channel_management') === true;
   const bearerConfigured = Boolean(workspace.token);
@@ -178,6 +209,8 @@ export function ChannelsManagerPage({
     descriptor: DaemonChannelTypeDescriptor;
     instance?: DaemonChannelInstanceSnapshot;
   }>();
+  const [methodChoices, setMethodChoices] =
+    useState<DaemonChannelTypeDescriptor[]>();
   const editorRef = useRef(editor);
   useEffect(() => {
     editorRef.current = editor;
@@ -201,6 +234,7 @@ export function ChannelsManagerPage({
     stop,
     restart,
     pairing,
+    qrLogin,
   } = useChannels({
     autoLoad: supportsManagement,
     enabled: supportsManagement,
@@ -233,6 +267,7 @@ export function ChannelsManagerPage({
   const [deleting, setDeleting] = useState(false);
 
   useEffect(() => {
+    setMethodChoices(undefined);
     setDeleteTarget(undefined);
     setDeleteError(undefined);
     setDeleting(false);
@@ -259,6 +294,32 @@ export function ChannelsManagerPage({
     () => catalog.filter(isChannelPlatformAvailable),
     [catalog],
   );
+  const platformGroups = useMemo(() => {
+    const groups = new Map<
+      string,
+      {
+        type: string;
+        displayName: string;
+        methods: DaemonChannelTypeDescriptor[];
+      }
+    >();
+    for (const descriptor of availablePlatforms) {
+      const type =
+        descriptor.type === 'dingtalk-webhook' ? 'dingtalk' : descriptor.type;
+      const group = groups.get(type);
+      if (group) {
+        group.methods.push(descriptor);
+      } else {
+        groups.set(type, {
+          type,
+          displayName:
+            type === 'dingtalk' ? 'DingTalk' : descriptor.displayName,
+          methods: [descriptor],
+        });
+      }
+    }
+    return [...groups.values()];
+  }, [availablePlatforms]);
   const instances = useMemo(
     () =>
       Object.values(channels)
@@ -613,7 +674,12 @@ export function ChannelsManagerPage({
                               className={styles.runtimeBadge}
                               data-runtime-state={channel.runtime.state}
                             >
-                              {t(STATUS_KEYS[channel.runtime.state])}
+                              {t(
+                                descriptor?.outboundOnly &&
+                                  channel.runtime.state === 'connected'
+                                  ? 'channels.status.readyToSend'
+                                  : STATUS_KEYS[channel.runtime.state],
+                              )}
                             </Badge>
                           </CardTitle>
                           <CardDescription className={styles.channelMeta}>
@@ -621,7 +687,13 @@ export function ChannelsManagerPage({
                             <span aria-hidden="true">·</span>
                             <span>
                               {t(
-                                STATUS_DESCRIPTION_KEYS[channel.runtime.state],
+                                descriptor?.outboundOnly
+                                  ? channel.runtime.state === 'connected'
+                                    ? 'channels.statusDescription.readyToSend'
+                                    : 'channels.statusDescription.notReadyToSend'
+                                  : STATUS_DESCRIPTION_KEYS[
+                                      channel.runtime.state
+                                    ],
                               )}
                             </span>
                           </CardDescription>
@@ -767,7 +839,7 @@ export function ChannelsManagerPage({
               </p>
             </div>
             <div className={styles.platformGrid}>
-              {availablePlatforms.map((platform) => (
+              {platformGroups.map((platform) => (
                 <button
                   key={platform.type}
                   type="button"
@@ -777,12 +849,16 @@ export function ChannelsManagerPage({
                   aria-label={t('channels.platform.configureNamed', {
                     platform: platform.displayName,
                   })}
-                  onClick={() =>
-                    setEditor({
-                      workspaceCwd: activeWorkspaceCwd!,
-                      descriptor: platform,
-                    })
-                  }
+                  onClick={() => {
+                    if (platform.methods.length > 1) {
+                      setMethodChoices(platform.methods);
+                    } else {
+                      setEditor({
+                        workspaceCwd: activeWorkspaceCwd!,
+                        descriptor: platform.methods[0],
+                      });
+                    }
+                  }}
                 >
                   <span className={styles.platformMark} aria-hidden="true">
                     {PLATFORM_MARKS[platform.type] ??
@@ -807,6 +883,50 @@ export function ChannelsManagerPage({
         ) : null}
       </div>
 
+      <Dialog
+        open={Boolean(methodChoices)}
+        onOpenChange={(open) => {
+          if (!open) setMethodChoices(undefined);
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{t('channels.method.title')}</DialogTitle>
+            <DialogDescription>
+              {t('channels.method.description')}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex flex-col gap-3">
+            {methodChoices?.map((descriptor) => (
+              <Button
+                key={descriptor.type}
+                variant="outline"
+                className="h-auto flex-col items-start gap-1 whitespace-normal py-3 text-left"
+                onClick={() => {
+                  setEditor({ workspaceCwd: activeWorkspaceCwd!, descriptor });
+                  setMethodChoices(undefined);
+                }}
+              >
+                <span>
+                  {t(
+                    descriptor.outboundOnly
+                      ? 'channels.method.webhook'
+                      : 'channels.method.applicationBot',
+                  )}
+                </span>
+                <span className="text-xs font-normal text-muted-foreground">
+                  {t(
+                    descriptor.outboundOnly
+                      ? 'channels.method.webhook.description'
+                      : 'channels.method.applicationBot.description',
+                  )}
+                </span>
+              </Button>
+            ))}
+          </div>
+        </DialogContent>
+      </Dialog>
+
       {editor ? (
         <ChannelEditorDialog
           open
@@ -829,10 +949,12 @@ export function ChannelsManagerPage({
           }}
           onSave={saveChannel}
           onReload={reload}
+          qrLoginActions={qrLogin}
           listPairingRequests={pairing.list}
           approvePairingRequest={pairing.approve}
           listPairingApprovals={pairing.approvals}
           revokePairingApproval={pairing.revoke}
+          weixinLogin={weixinLogin}
         />
       ) : null}
 

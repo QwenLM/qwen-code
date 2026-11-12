@@ -34,29 +34,29 @@ begin 在原 binding seal 和 holder 转移的同一事务内写入 SETTLING，�
 
 现有 operator 认证的 Session Store 前缀暴露私有 status 和 freeze/cut/finalize 命令，始终限定 workspace 与 retirement ID。输入采用封闭、有界 JSON 和规范 base64，不包含裸 bearer token。Spring 与私有测试/runtime 组合使用同一生产应用 store。
 
-freeze 首先在有界事务内验证完整原 SQL 库存和拟议终止后缀，不写入。事务外请求原 worker 锁存接纳、等待工作并返回绑定 retirement 与精确 prepared commit body SHA-256 的 pre-cut 库存。第二个全新事务重新验证当前 authority、完整成员、期限、终止证明和 worker 观察，然后持久化 FROZEN 与完整不可变 envelope。envelope 包含精确 commit body 字节/摘要、独立推导的原身份/token hash/pins、typed baseline，以及精确 worker 观察字节/摘要。frozen envelope 摘要与 prepared commit 摘要分别保存。
+freeze 首先在有界事务内验证当前退役 authority 和拟议终止后缀，不写入。事务外请求原 worker 锁存接纳、等待工作并返回绑定 retirement 与精确 prepared commit body SHA-256 的 pre-cut 观察。第二个全新事务重新验证当前 authority、本 Session 的执行与资源成员、期限、终止证明和 worker 观察，然后持久化 FROZEN 与完整不可变 envelope。envelope 包含精确 commit body 字节/摘要、独立推导的原身份/token hash/pins，以及精确 worker 观察字节/摘要。frozen envelope 摘要与 prepared commit 摘要分别保存。
 
 cut 只消费该持久 envelope。它验证 active 前序和唯一原 release 后缀，插入精确 resource/ref/transaction，保留 checkpoint 身份，并原子持久化 CUT 和 SEALED head。声明的终止 delta 使用当前 schema 精确的 BIGINT epoch-millisecond 时间单元格。保留原数据库毫秒值，不经 DATETIME/时区转换；该值不作为租约 authority。native live history 继续只接受 active。
 
-finalization 读取不可变 cut，在 SQL 外调用原 worker，然后验证精确原响应和未改变的完整库存，再持久化 DRAINED 并释放唯一逻辑 Runtime Session。worker 双向比较 execution、grant、result、receipt、history、保留 backup/preimage 和当前文件，关闭接纳与原描述符，返回精确清理事实。cut/receipt 重试对 live authority 只读，不 acquire、renew、execute、发布 ACK 或创建新 worker。
+finalization 读取不可变 cut，在 SQL 外调用原 worker，然后验证精确原响应和未改变的本 Session 证据，再持久化 DRAINED 并释放唯一逻辑 Runtime Session。worker 双向比较 execution、grant、result、receipt、history、保留 backup/preimage 和当前文件，关闭接纳与原描述符，返回精确清理事实。cut/receipt 重试对 live authority 只读，不 acquire、renew、execute、发布 ACK 或创建新 worker。
 
-## 完整库存与插入屏障
+## Session 范围证据与插入屏障
 
-显式规范 typed 库存覆盖本次增量迁移后的全部 32 表、736 列：原始身份、创建 receipt、workspace/config/request pin、registration/holder/intent/slot/binding/control、逻辑 runtime session、所有 native execution/grant/result/receipt/history、journal/resource/ref、publication/read/output 状态及不支持的次级 ledger。它用跨全部状态的独立 OR 发现，对间接关联载体进行有界全表发现，引用扩展至固定点，并使用完整排序主键。未知关联、格式错误/孤儿行及 schema drift 均阻断，不能用父 join 或 live 状态过滤隐藏候选。
+退役证据只按本次 Session 自己的键读取：binding control、reservation、storage registration/holder、retirement seal、`ma_operation` 进度行、native head 与 journal 历史，以及按 binding/session scope 索引的 execution、grant、result、receipt 与 resource。不做跨表全库发现，也不读取或锁定其他 tenant 的行。journal 的 revision/digest 链、binding version 与 operation progress version 共同围栏并发写入，因此不再取数据库级 typed 镜像。
 
-预算为每个完整事务十秒、4096 个唯一行、32 MiB 聚合 typed 证据。重复相同观察共享计数，冲突字节拒绝。每个支持为空的集合都有真实 producer 屏障。通用修改和收集在原 tenant/session 锁下排除私有 session；native 路径消费同 Connection 进度。binding control 遵循 placement → retention → 完整排序原 slot/binding → 私有 pin/context → registration → holder → intent/progress → native head/history/resource → session/execution → publication/read/次级库存。原始 owner 在同一 Connection 上遵循该父锁顺序；RPC 与文件系统工作留在 cut 事务外。其他 owner 的归属检查仍可能在扫描其子行后取得它的父锁。
+预算为每个完整事务十秒。冻结 envelope 与 worker 观察各自上限 32 MiB，观察内每个数组上限 4096 项，native journal 历史读取沿用既有的 4096 修订/64 MiB 上限。冲突字节拒绝。每个支持为空的集合都有真实 producer 屏障。通用修改和收集在原生 tenant/session 锁下排除私有 session；native 路径消费同 Connection 进度。binding control 遵循 placement → retention → 原 slot/binding → reservation → registration/holder → retirement seal/progress → native head/history/resource → session head → runtime session。原始 owner 在同一 Connection 上遵循该父锁顺序；RPC 与文件系统工作留在 cut 事务外。其余 context 与 writer 凭证读取是对已加锁行、或私有 guard Session 不可变行的非加锁读取。
 
-保留的 native file history 沿真实 journal/resource/嵌入投影链验证。其他 owner 的 snapshot manifest/page/旧 body revision 与 agent instructions/skills 使用真实 producer schema、完整归属和引用验证，不能做字节子串匹配或虚构空集合。这不新增历史物理释放 authority。
+保留的 native file history 沿真实 journal/resource/嵌入投影链验证，范围限定本 Session。退役不再检查其他 owner 的 snapshot manifest/page/旧 body revision 与 agent instructions/skills：这些行既不被读取也不被加锁，仍由其各自 producer 负责。这不新增历史物理释放 authority。
 
-历史 status 与 retry 的只读固定主键镜像保留原 DRAINING holder；不存在无 holder 或 released-history 资格。保留 main 真实的 `hosted_context_usage/latest` producer。唯一的封闭 typed Session record 必须与首次和最新已提交 native `model.attempt/output_committed` 事件完全相符，包括 scope、key、usage resource、sequence 和事件时间单元格；其余单元格保持 NULL。只允许该最新投影的精确 `SESSION_RECORD` 引用与 native JOURNAL 引用并存。该引用的 SQL 创建时间单独限制在对应 journal 的数据库取时与固定结算期限之间，不能当作事件时间。缺失、重复、陈旧、伪造或未知投影及引用均拒绝。native proof 重放继续只消费独立验证的 JOURNAL resource 成员关系。
+历史 status 与 retry 的只读固定主键读取保留原 DRAINING holder；不存在无 holder 或 released-history 资格。main 真实的 `hosted_context_usage/latest` producer 仍然活跃，但退役不再复核其封闭 typed Session record 与精确 `SESSION_RECORD` 引用；该被移除的校验记录在「待明确事项」。native proof 重放继续只消费独立验证的 JOURNAL resource 成员关系。
 
 已安装 JournalEventTransport 时不支持私有 CREATE/request 解析/live authority 和退役，包括配置 flag 为 false 时安装的自定义 port。普通 main transport 保持支持。关闭曾经安装的 transport 不能证明旧远端工作已经消失。
 
 ## Main 兼容与文件
 
-保留 main 已发布的 V11 wake migration，新增只包含十一项 `ma_operation` 进度/唯一 target 字段的 V12。不添加 node-source/physical 表，不改变 32 表 contract。库存保留四项 wake 字段，包括生成的 scan 谓词。精确 terminal head 更新遵守 main 的 wake-revision producer contract；验证生成单元格而不忽略。保留严格 UTF-8 VARBINARY 身份解码、opaque actor 字节、非 Managed broker 兼容，以及当前 main 的未知 commit 对账和查询预算行为。
+保留 main 已发布的 V11 wake migration，新增只包含十一项 `ma_operation` 进度/唯一 target 字段的 V12。不添加 node-source/physical 表，不改变 32 表 contract。退役进度行保留四项 wake 字段。精确 terminal head 更新遵守 main 的 wake-revision producer contract；验证生成单元格而不忽略。保留严格 UTF-8 VARBINARY 身份解码、opaque actor 字节、非 Managed broker 兼容，以及当前 main 的未知 commit 对账和查询预算行为。
 
-变更涉及 Hosted CSI owner、core HTTP/authority 准备、worker finalization/协议/backend/mount 观察、Java application store/inventory/image/proof/progress、原 SQL 修改屏障和私有 controller/组合。新增 finalizer boot 6/resource handle 4 显式接线，保留 boot 4/5 兼容。排除 node source、安装字节策略、physical coordinator、stop intent 和公开 selector。
+变更涉及 Hosted CSI owner、core HTTP/authority 准备、worker finalization/协议/backend/mount 观察、Java application store/evidence/proof/progress、原 SQL 修改屏障和私有 controller/组合。新增 finalizer boot 6/resource handle 4 显式接线，保留 boot 4/5 兼容。排除 node source、安装字节策略、physical coordinator、stop intent 和公开 selector。
 
 ## 验证与验收
 
@@ -68,6 +68,8 @@ finalization 读取不可变 cut，在 SQL 外调用原 worker，然后验证精
 
 ## 待明确事项
 
-OTHER owner 的归属验证保留在有界全表子行扫描后取得 foreign parent 锁的路径。与该 owner 的普通写入竞争可能产生 deadlock 或 timeout；有界事务回滚，调用者需要重试。跨 tenant race 尚未验证。维护者必须在生产资格验收前明确评审此锁顺序问题；本次提取不自行发明跨 tenant 锁协议。
+原先的 OTHER owner 锁顺序问题已由构造消解：退役不再扫描其他 owner 的子行，也不再取得 foreign parent 锁，因此它描述的跨 tenant deadlock/timeout 路径已不存在。
+
+移除 typed 库存的同时也移除了它承担的 Session 范围诊断校验：封闭的 `hosted_context_usage/latest` Session record 及其精确 `SESSION_RECORD` 引用、以及 hosted activity-statistics 引用，不再在退役时复核。其 producer 仍会写入这些行，native journal 重放也仍验证 JOURNAL resource 成员关系，但伪造或陈旧的投影不再被退役路径拒绝。以 Session 范围读取器（不带全库镜像）恢复这些校验是一项待决后续，必须在生产资格验收前拍板。
 
 不能把新架构选择交给 runtime 默认值。source 候选与当前 main 的不可变 history/schema/producer contract 有任何不一致，必须先理解真实消费者，才继续提取。物理退役和恢复后退役的资格验收继续单独推进。

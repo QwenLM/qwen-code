@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Qwen Managed Agent Public and WebShell API",
-    "version": "1.108.0",
-    "description": "Canonical first-release contract for the public Managed Agent resources and the WebShell adapter. Implemented routes and fields describe the current matching Server, Broker, Harness and WebShell build. Partial entries have remaining implementation or contract-test work; planned entries are not current server capabilities and must be excluded from production SDKs. Turn submission and cancellation always return the durable operation identifier and its persisted admission and delivery state. Session-list cursors are bound to the normalized archive state and title query. Earlier development API shapes, checkpoints and database catalogs are unsupported; initialize fresh state for this build. Runtime feature capabilities and deployment policy still govern optional execution modes. Public conversation history reads directly from mutable message projections; persisted conversation snapshots and fixed-content paging are no longer provided."
+    "version": "1.114.0",
+    "description": "Canonical first-release contract for the public Managed Agent resources and the WebShell adapter. Implemented routes and fields describe the current matching Server, Broker, Harness and WebShell build. Partial entries have remaining implementation or contract-test work; planned entries are not current server capabilities and must be excluded from production SDKs. Turn submission and cancellation always return the durable operation identifier and its persisted admission and delivery state. Session-list cursors are bound to the normalized archive state and title query. Earlier development API shapes, checkpoints and database catalogs are unsupported; initialize fresh state for this build. Runtime feature capabilities and deployment policy still govern optional execution modes. Public conversation history reads directly from mutable message projections; persisted conversation snapshots and fixed-content paging are no longer provided. Retained removed MCP-management entries stay in the response snapshot: only non-removed entries count toward the 32-server selection capacity, so the servers array may exceed 32 while preserving tombstones."
   },
   "servers": [
     {
@@ -3878,7 +3878,7 @@
         "tags": ["WebShell"],
         "operationId": "changeWebShellSessionModel",
         "x-qwen-implementation-status": "implemented",
-        "description": "Change the model of an idle Workspace Session for later Turns. The actor-scoped idempotency key replays an earlier completed change before current admission checks; expectedRevision prevents overwriting a concurrent selection.",
+        "description": "Change the model selection of a Workspace Session for later Turns, including while a Turn or approval is active. Already admitted Turns keep their immutable model snapshot. Lifecycle, recovery and unsettled context changes remain guarded. The actor-scoped idempotency key replays an earlier completed change before current admission checks; expectedRevision prevents overwriting a concurrent selection.",
         "requestBody": {
           "required": true,
           "content": {
@@ -8255,6 +8255,176 @@
         }
       }
     },
+    "/v1/agents/workspaces/{workspaceId}/extensions/source-imports": {
+      "post": {
+        "tags": ["Public Resources"],
+        "operationId": "importWorkspaceExtensionSource",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Trusted business services select an exact Skill or Extension revision. Authorizes the source outside SQL transactions, compiles through managed-package-preparation/1, and publishes without installing. The request contains no storage location or credentials. Same key and request replay the original completed receipt without resolving the business source.",
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512
+            }
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ManagedExtensionSourceImport"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The original source import receipt, including its immutable Managed Pin.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedExtensionSourceImportResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      },
+      "get": {
+        "tags": ["Public Resources"],
+        "operationId": "lookupWorkspaceExtensionSourceImport",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Lookup by the original Idempotency-Key, including intents admitted before a source read failed. A pending result has no Pin until compilation and publication finish.",
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512
+            }
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Original import intent or publication receipt.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedExtensionSourceImportResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/v1/agents/workspaces/{workspaceId}/extensions/source-imports/{operationId}": {
+      "get": {
+        "tags": ["Public Resources"],
+        "operationId": "getWorkspaceExtensionSourceImport",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Returns the actor-scoped durable import receipt under current Workspace access, including pending publication. Does not resolve or download the business source.",
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512
+            }
+          },
+          {
+            "name": "operationId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 128
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The original source import receipt, including its immutable Managed Pin.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedExtensionSourceImportResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
     "/v1/agents/workspaces/{workspaceId}/extensions/imports": {
       "post": {
         "tags": ["Public Resources"],
@@ -11928,7 +12098,7 @@
           },
           "modelChange": {
             "type": "boolean",
-            "description": "The caller may request an idle Session model change using the server model catalog. Missing means unsupported; authorization and revision admission still apply."
+            "description": "The caller may change the Session model selection for later Turns using the server model catalog, including while a Turn or approval is active. Missing means unsupported; authorization, recovery and revision admission still apply."
           },
           "approvalModeChange": {
             "type": "boolean",
@@ -15914,6 +16084,7 @@
           "segment_id",
           "ordinal",
           "state",
+          "segments",
           "created_at",
           "updated_at"
         ],
@@ -15935,12 +16106,12 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 128,
-            "description": "Stable identity of the card or reply segment this delivery carries; only segments proven unsent are sent again, and an explicit resend keeps this identity under a new deliveryId."
+            "description": "Stable identity of the delivery's first segment, the first entry of segments; only segments proven unsent are sent again, and an explicit resend keeps each carried identity under a new deliveryId. The authoritative per-segment view is segments."
           },
           "ordinal": {
             "type": "integer",
             "minimum": 0,
-            "description": "Position of the segment inside its segmentId sequence."
+            "description": "Position of the first segment (the singular segment_id) within the delivery, contiguous from 0."
           },
           "state": {
             "$ref": "#/components/schemas/ChannelDeliveryState"
@@ -15949,7 +16120,16 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 512,
-            "description": "Opaque receipt the provider returned for this delivery; absent while the provider returned none, including a delivery reconciled out of unknown."
+            "description": "Representative opaque receipt the provider returned for this delivery; absent while the provider returned none, including a delivery reconciled out of unknown. The per-segment receipts are in segments."
+          },
+          "segments": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 64,
+            "items": {
+              "$ref": "#/components/schemas/PublicChannelDeliverySegment"
+            },
+            "description": "Every segment of the delivery in ordinal order, each with its own write-once provider receipt. The singular segment_id and ordinal name the first segment; this array is the authoritative per-segment view."
           },
           "created_at": {
             "type": "integer",
@@ -15960,6 +16140,31 @@
             "type": "integer",
             "format": "int64",
             "description": "Unix epoch milliseconds, unlike the seconds that the public Session, turn, event and item resources report."
+          }
+        },
+        "x-qwen-implementation-status": "partial"
+      },
+      "PublicChannelDeliverySegment": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["segment_id", "ordinal"],
+        "properties": {
+          "segment_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "description": "Stable identity of this segment; an explicit resend keeps it under a new deliveryId."
+          },
+          "ordinal": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Position of the segment within the delivery, contiguous from 0."
+          },
+          "provider_receipt": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512,
+            "description": "Opaque receipt the provider returned for this segment; absent until the segment is receipted."
           }
         },
         "x-qwen-implementation-status": "partial"
@@ -18031,7 +18236,19 @@
           },
           "servers": {
             "type": "array",
-            "maxItems": 32,
+            "description": "The selected MCP server snapshot, including retained removed entries. Only non-removed entries count toward the 32-server live capacity, and the retained snapshot is capped at 96 total entries.",
+            "maxItems": 96,
+            "contains": {
+              "type": "object",
+              "required": ["state"],
+              "properties": {
+                "state": {
+                  "enum": ["enabled", "disabled"]
+                }
+              }
+            },
+            "minContains": 0,
+            "maxContains": 32,
             "items": {
               "$ref": "#/components/schemas/ManagedMcpManagementServer"
             }
@@ -18671,6 +18888,96 @@
           "components"
         ]
       },
+      "ManagedExtensionSourceReference": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "providerId": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]{0,63}$"
+          },
+          "kind": {
+            "type": "string",
+            "enum": ["skill", "extension"]
+          },
+          "resourceId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "revision": {
+            "type": "string",
+            "pattern": "^(?![Ll][Aa][Tt][Ee][Ss][Tt]$)[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+            "description": "Exact immutable business revision. Dynamic selectors must be resolved by the business entry point."
+          }
+        },
+        "required": ["providerId", "kind", "resourceId", "revision"]
+      },
+      "ManagedExtensionSourceOrigin": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "reference": {
+            "$ref": "#/components/schemas/ManagedExtensionSourceReference"
+          },
+          "sourceDigest": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$",
+            "description": "SHA-256 of the actual raw archive bytes, distinct from packageDigest."
+          },
+          "requestDigest": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          }
+        },
+        "required": ["reference", "sourceDigest", "requestDigest"]
+      },
+      "ManagedExtensionSourceImport": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "reference": {
+            "$ref": "#/components/schemas/ManagedExtensionSourceReference"
+          },
+          "target": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "platform": {
+                "type": "string",
+                "enum": ["linux", "darwin"]
+              },
+              "arch": {
+                "type": "string",
+                "enum": ["x64", "arm64", "any"]
+              }
+            },
+            "required": ["platform", "arch"]
+          }
+        },
+        "required": ["reference", "target"]
+      },
+      "ManagedExtensionSourceImportResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "operationId": { "type": "string", "maxLength": 128 },
+          "state": { "type": "string", "enum": ["pending", "settled"] },
+          "reference": {
+            "$ref": "#/components/schemas/ManagedExtensionSourceReference"
+          },
+          "operation": {
+            "$ref": "#/components/schemas/ManagedExtensionPackageOperation"
+          },
+          "source": {
+            "$ref": "#/components/schemas/ManagedExtensionSourceOrigin"
+          },
+          "pin": {
+            "$ref": "#/components/schemas/ManagedExtensionPackagePin"
+          }
+        },
+        "required": ["operationId", "state", "reference"]
+      },
       "ManagedExtensionPackage": {
         "type": "object",
         "additionalProperties": false,
@@ -18686,6 +18993,9 @@
             "format": "int64",
             "minimum": 1,
             "maximum": 104857600
+          },
+          "source": {
+            "$ref": "#/components/schemas/ManagedExtensionSourceOrigin"
           }
         },
         "required": ["pin", "manifest", "byteLength"]
@@ -22072,7 +22382,7 @@
         "properties": {
           "kind": {
             "type": "string",
-            "enum": ["publish", "settings"]
+            "enum": ["publish", "settings", "source-import"]
           },
           "idempotencyKey": {
             "type": "string",

@@ -31,6 +31,7 @@ import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryToolExecutionRepo
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcToolExecutionRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeBrokerTestAccess;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerService;
 import org.h2.jdbcx.JdbcDataSource;
@@ -84,7 +85,7 @@ public class RuntimeHarnessDrainTest {
     @Test
     void lifecycleUpsertsAdvanceModificationTimeOnlyWhenValuesChange() throws Exception {
         RuntimeBrokerTestAccess.transaction(source, connection -> {
-            JdbcRuntimeBindingRepository.beginHarnessLifecycle(connection, "tenant", "harness", "first");
+            RuntimeAdmissionFences.beginHarnessLifecycle(connection, "tenant", "harness", "first");
             return null;
         });
         try (var connection = source.getConnection(); var statement = connection.createStatement()) {
@@ -95,7 +96,7 @@ public class RuntimeHarnessDrainTest {
             }
             statement.executeUpdate("UPDATE ma_session_head SET gmt_modified = 1");
             RuntimeBrokerTestAccess.transaction(source, transaction -> {
-                JdbcRuntimeBindingRepository.beginHarnessLifecycle(transaction, "tenant", "harness", "first");
+                RuntimeAdmissionFences.beginHarnessLifecycle(transaction, "tenant", "harness", "first");
                 return null;
             });
             try (var row = statement.executeQuery("SELECT gmt_modified FROM ma_session_head")) {
@@ -103,7 +104,7 @@ public class RuntimeHarnessDrainTest {
                 assertEquals(1, row.getLong(1));
             }
             RuntimeBrokerTestAccess.transaction(source, transaction -> {
-                JdbcRuntimeBindingRepository.beginHarnessLifecycle(transaction, "tenant", "harness", "second");
+                RuntimeAdmissionFences.beginHarnessLifecycle(transaction, "tenant", "harness", "second");
                 return null;
             });
             try (var row = statement.executeQuery("SELECT gmt_modified FROM ma_session_head")) {
