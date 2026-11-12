@@ -1527,6 +1527,10 @@ test('every legal spelling of continue-on-error is refused', () => {
     '    continue-on-error: true\n',
     '    continue-on-error : true\n',
     '    "continue-on-error": true\n',
+    // An expression is a non-empty string, so it must be refused as set. A pin
+    // that only rejects the literal `true` accepts this one — and a job-level
+    // expression is exactly the conditional gate the check forbids.
+    "    continue-on-error: ${{ github.actor == 'bot' }}\n",
   ]) {
     const patched = realCi.replace(
       '\n  lint_and_static:\n',
@@ -1584,6 +1588,20 @@ test('an explicitly fatal gate still passes', () => {
       'Run lint gate freshness tests',
     );
   }
+  // The key's presence at job level is not itself the offence: `false` is the
+  // default there too, so a pin that refused the key rather than its truth
+  // would demand its absence instead of the behaviour it names.
+  const jobLevel = realCi.replace(
+    '\n  lint_and_static:\n',
+    '\n  lint_and_static:\n    continue-on-error: false\n',
+  );
+  assert.notEqual(jobLevel, realCi, 'job-level fixture did not apply');
+  assertNoContinueOnError(
+    jobLevel,
+    'lint_and_static',
+    'Check lint gate freshness',
+    'Run lint gate freshness tests',
+  );
 });
 
 test('a renamed or duplicated gate step is refused, not skipped', () => {
