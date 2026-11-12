@@ -50,8 +50,15 @@ public final class PublicSurface {
 
     // Compiled once: both header filters call this on every request, and
     // String.matches would recompile the pattern each time.
+    /** The terminal upgrade route template (Ant {@code *} wildcard), shared
+     * by the handler registration, the header-filter exemption regex below,
+     * and the handshake interceptor's capture regex, so the three cannot
+     * drift apart. */
+    public static final String TERMINAL_UPGRADE_PATH =
+            "/api/agent/web-shell/v1/sessions/*/terminal";
+
     private static final Pattern TERMINAL_UPGRADE =
-            Pattern.compile("/api/agent/web-shell/v1/sessions/[^/]+/terminal");
+            Pattern.compile(TERMINAL_UPGRADE_PATH.replace("*", "[^/]+"));
 
     /**
      * The terminal WebSocket upgrade authenticates with the single-use ticket

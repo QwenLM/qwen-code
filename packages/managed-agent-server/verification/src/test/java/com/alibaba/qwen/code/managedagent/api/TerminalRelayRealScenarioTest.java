@@ -250,13 +250,23 @@ class TerminalRelayRealScenarioTest {
                         + "/internal/managed-runtime/v3/terminal"),
                         new java.net.http.WebSocket.Listener() {})
                 .get(10, TimeUnit.SECONDS);
-        probe.sendClose(java.net.http.WebSocket.NORMAL_CLOSURE, "");
+        probe.sendClose(java.net.http.WebSocket.NORMAL_CLOSURE, "")
+                .get(10, TimeUnit.SECONDS);
 
         TerminalRelayHandler handler =
                 new TerminalRelayHandler(broker, HttpClient.newHttpClient());
         try {
             handler.afterConnectionEstablished(browser);
-            assertThat(EchoWorker.opened.await(10, TimeUnit.SECONDS))
+            // The static opened latch is already spent by the sanity probe, so
+            // awaiting it would pass even if the relay never opened a worker.
+            // Poll for the relay's own live worker session instead (the probe
+            // is fully closed above, so an open 'last' can only be the relay's).
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+            while ((EchoWorker.last == null || !EchoWorker.last.isOpen())
+                    && System.nanoTime() < deadline) {
+                Thread.sleep(20);
+            }
+            assertThat(EchoWorker.last != null && EchoWorker.last.isOpen())
                     .as("relay opened a real worker connection; browser closes=%s", closes)
                     .isTrue();
             // The durable hold was really admitted before the worker opened.

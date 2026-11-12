@@ -335,6 +335,67 @@ describe('dedicated Managed Web gateway', () => {
     peerSocket?.destroy();
   });
 
+  it('tears down the upstream tunnel when the browser drops abruptly after the 101', async () => {
+    let peerSocket: import('node:stream').Duplex | undefined;
+    peer.on('upgrade', (_req, socket) => {
+      peerSocket = socket;
+      socket.write(
+        'HTTP/1.1 101 Switching Protocols\r\n' +
+          'Upgrade: websocket\r\n' +
+          'Connection: Upgrade\r\n' +
+          'Sec-WebSocket-Accept: test-accept\r\n' +
+          'Sec-WebSocket-Protocol: qwen-ws\r\n\r\n',
+      );
+      socket.on('data', (chunk) => socket.write(chunk));
+    });
+    await start();
+    const clientSocket = await new Promise<import('node:net').Socket>(
+      (resolve, reject) => {
+        const upgrade = request(
+          `${gateway!.url}/api/agent/web-shell/v1/sessions/sess-1/terminal?terminalId=t1&replay=1`,
+          {
+            headers: {
+              Connection: 'Upgrade',
+              Upgrade: 'websocket',
+              'Sec-WebSocket-Key': 'dGhlIHNhbXBsZSBub25jZQ==',
+              'Sec-WebSocket-Version': '13',
+              'Sec-WebSocket-Protocol': 'qwen-ws, qwen-bearer.ticket-abc',
+              Authorization: `Bearer ${browserToken}`,
+            },
+          },
+        );
+        upgrade.on('upgrade', (_res, socket) => resolve(socket));
+        upgrade.on('response', (res) =>
+          reject(new Error(`upgrade refused: ${res.statusCode}`)),
+        );
+        upgrade.on('error', reject);
+        upgrade.end();
+      },
+    );
+    expect(peerSocket).toBeDefined();
+    // The control-plane relay reads EOF on its browser leg as 'end' (a full
+    // 'close' needs the peer's writable side closed too); either proves the
+    // tunnel was torn down rather than left half-open.
+    const peerClosed = new Promise<void>((resolve) => {
+      peerSocket!.once('close', () => resolve());
+      peerSocket!.once('end', () => resolve());
+    });
+    const timeout = (message: string) =>
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error(message)), 5_000).unref(),
+      );
+    // An abrupt browser teardown (RST) emits 'close' without 'end'; after the
+    // 101 Node has detached the socket from the ClientRequest, so the tunnel
+    // must be destroyed explicitly or the control-plane relay never sees EOF
+    // and the PTY plus its durable hold leak.
+    clientSocket.resetAndDestroy();
+    await Promise.race([
+      peerClosed,
+      timeout('upstream tunnel survived an abrupt browser teardown'),
+    ]);
+    peerSocket?.destroy();
+  });
+
   it('shutdown destroys an attached terminal instead of hanging', async () => {
     let peerSocket: import('node:stream').Duplex | undefined;
     peer.on('upgrade', (_req, socket) => {

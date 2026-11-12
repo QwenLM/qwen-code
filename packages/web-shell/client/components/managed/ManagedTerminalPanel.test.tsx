@@ -396,4 +396,172 @@ describe('ManagedTerminalPanel', () => {
     expect(onClose).not.toHaveBeenCalled();
     expect(ws.send).not.toHaveBeenCalledWith('\x00{"type":"release"}');
   });
+
+  it('delivers the release through the handshake when unmounted while CONNECTING', async () => {
+    // Closing the dialog mid-handshake must not abort the socket: the
+    // worker only releases the PTY on an explicit release frame, so the
+    // completed handshake delivers it instead of leaking the shell.
+    const ticketFn = vi
+      .fn()
+      .mockResolvedValue({ ticket: 'ticket-one', expiresInSeconds: 30 });
+    await render(ticketFn);
+    const ws = FakeWebSocket.instances[0]!;
+    expect(ws.readyState).toBe(FakeWebSocket.CONNECTING);
+    const current = root;
+    act(() => current!.unmount());
+    root = undefined;
+    expect(ws.close).not.toHaveBeenCalled();
+    act(() => ws.open());
+    expect(ws.send).toHaveBeenCalledWith('\x00{"type":"release"}');
+    expect(ws.close).toHaveBeenCalled();
+  });
+
+  it('releases through a dedicated connection when unmounted during reconnect backoff', async () => {
+    // In backoff there is no live socket to carry the release frame; a
+    // plain unmount would leave the PTY and its durable hold alive.
+    const ticketFn = vi
+      .fn()
+      .mockResolvedValueOnce({ ticket: 'ticket-one', expiresInSeconds: 30 })
+      .mockResolvedValueOnce({
+        ticket: 'release-ticket',
+        expiresInSeconds: 30,
+      });
+    await render(ticketFn);
+    const first = FakeWebSocket.instances[0]!;
+    first.open();
+    first.closeWith(1006);
+    const current = root;
+    act(() => current!.unmount());
+    root = undefined;
+    await flush();
+    expect(FakeWebSocket.instances).toHaveLength(2);
+    const release = FakeWebSocket.instances[1]!;
+    expect(release.protocols).toEqual([
+      'qwen-ws',
+      'qwen-bearer.release-ticket',
+    ]);
+    act(() => release.open());
+    expect(release.send).toHaveBeenCalledWith('\x00{"type":"release"}');
+    // 4004 is the worker's release confirmation: no further attempts.
+    act(() => release.closeWith(4004));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+    expect(ticketFn).toHaveBeenCalledTimes(2);
+  });
+
+  it('releases through a dedicated connection when unmounted before the first socket exists', async () => {
+    let resolveFirst:
+      | ((value: { ticket: string; expiresInSeconds: number }) => void)
+      | undefined;
+    const ticketFn = vi
+      .fn()
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveFirst = resolve;
+          }),
+      )
+      .mockResolvedValueOnce({
+        ticket: 'release-ticket',
+        expiresInSeconds: 30,
+      });
+    await render(ticketFn);
+    expect(FakeWebSocket.instances).toHaveLength(0);
+    const current = root;
+    act(() => current!.unmount());
+    root = undefined;
+    await flush();
+    // The in-flight ticket was aborted; the fallback minted its own.
+    resolveFirst?.({ ticket: 'stale-ticket', expiresInSeconds: 30 });
+    await flush();
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    const release = FakeWebSocket.instances[0]!;
+    expect(release.protocols).toEqual([
+      'qwen-ws',
+      'qwen-bearer.release-ticket',
+    ]);
+    act(() => release.open());
+    expect(release.send).toHaveBeenCalledWith('\x00{"type":"release"}');
+  });
+
+  it('retries the dedicated release until the worker confirms 4004', async () => {
+    const ticketFn = vi
+      .fn()
+      .mockResolvedValueOnce({ ticket: 'ticket-one', expiresInSeconds: 30 })
+      .mockResolvedValueOnce({ ticket: 'release-1', expiresInSeconds: 30 })
+      .mockResolvedValueOnce({ ticket: 'release-2', expiresInSeconds: 30 });
+    await render(ticketFn);
+    const first = FakeWebSocket.instances[0]!;
+    first.open();
+    first.closeWith(1006);
+    const current = root;
+    act(() => current!.unmount());
+    root = undefined;
+    await flush();
+    const attempt1 = FakeWebSocket.instances[1]!;
+    act(() => attempt1.open());
+    expect(attempt1.send).toHaveBeenCalledWith('\x00{"type":"release"}');
+    // A non-confirmation close means the frame may not have landed.
+    act(() => attempt1.closeWith(1006));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+    });
+    expect(FakeWebSocket.instances).toHaveLength(3);
+    const attempt2 = FakeWebSocket.instances[2]!;
+    expect(attempt2.protocols).toEqual(['qwen-ws', 'qwen-bearer.release-2']);
+    act(() => attempt2.open());
+    act(() => attempt2.closeWith(4004));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+    expect(ticketFn).toHaveBeenCalledTimes(3);
+  });
+
+  it('keeps the replayed screen and exit notice when the worker closes right after the replay', async () => {
+    // xterm defers the write callback to a later macrotask. The worker's
+    // normal post-replay sequence (exit frame, then 4000 close) lands
+    // first and nulls wsRef; the swap must still mount the replayed
+    // screen instead of leaving it on a detached terminal.
+    const syncWrite = terminalMock.write.getMockImplementation()!;
+    terminalMock.write.mockImplementation((_text: string, cb?: () => void) => {
+      if (cb) setTimeout(cb, 0);
+    });
+    try {
+      const ticketFn = vi
+        .fn()
+        .mockResolvedValue({ ticket: 'ticket-one', expiresInSeconds: 30 });
+      await render(ticketFn);
+      const ws = FakeWebSocket.instances[0]!;
+      ws.open();
+      act(() => {
+        ws.onmessage?.({
+          data: '\x00{"type":"snapshot","replay":true,"handlesPrimaryDa":false}',
+        } as MessageEvent);
+      });
+      act(() => {
+        ws.onmessage?.({
+          data: new TextEncoder().encode('replayed-scrollback').buffer,
+        } as MessageEvent);
+      });
+      act(() => {
+        ws.onmessage?.({
+          data: '\x00{"type":"exit","exitCode":0}',
+        } as MessageEvent);
+      });
+      act(() => ws.closeWith(4000));
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      const surface = document.querySelector('[data-managed-terminal]')!;
+      const secondHost = terminalMock.open.mock.calls[1]![0];
+      expect(surface.firstElementChild).toBe(secondHost);
+      expect(terminalMock.dispose).toHaveBeenCalledTimes(1);
+      expect(terminalMock.writeln).toHaveBeenCalledWith(
+        expect.stringContaining('Process exited with code 0'),
+      );
+    } finally {
+      terminalMock.write.mockImplementation(syncWrite);
+    }
+  });
 });

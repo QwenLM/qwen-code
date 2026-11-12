@@ -270,4 +270,52 @@ class WorkspaceRuntimeWebTerminalTest {
         fixture.resolver().setBindingRepository(repository);
         assertThat(fixture.resolver().terminalCapable(session)).isTrue();
     }
+
+    @Test
+    void capabilityHintRefusesADrainingTerminalBinding() throws Exception {
+        Fixture fixture = fixture(true, true);
+        var session = fixture.store().requireSession(TENANT, fixture.sessionId());
+        var repository = org.mockito.Mockito.mock(
+                com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository.class);
+        // A READY terminal-digest row that is draining must not advertise a
+        // terminal: the relay would attach to a runtime on its way out.
+        var draining = binding("b-1",
+                com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord.State.READY,
+                WorkspaceExecutionProfile.TERMINAL_CAPABILITY_DIGEST, true);
+        org.mockito.Mockito.when(repository.findByHarnessSession(
+                org.mockito.ArgumentMatchers.eq(TENANT),
+                org.mockito.ArgumentMatchers.eq(fixture.sessionId()),
+                org.mockito.ArgumentMatchers.isNull(),
+                org.mockito.ArgumentMatchers.anyInt()))
+                .thenReturn(List.of(draining));
+        fixture.resolver().setBindingRepository(repository);
+        assertThat(fixture.resolver().terminalCapable(session)).isFalse();
+    }
+
+    @Test
+    void capabilityHintPagesWithTheRepositoryBoundLimit() throws Exception {
+        Fixture fixture = fixture(true, true);
+        var session = fixture.store().requireSession(TENANT, fixture.sessionId());
+        var repository = org.mockito.Mockito.mock(
+                com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository.class);
+        var terminalBinding = binding("b-1",
+                com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord.State.READY,
+                WorkspaceExecutionProfile.TERMINAL_CAPABILITY_DIGEST, false);
+        // Pin the page size to the repository's 1-100 bound: a limit outside it
+        // would be rejected by the real repository, so anyInt() alone hides a
+        // production page size that drifts past the bound.
+        org.mockito.Mockito.when(repository.findByHarnessSession(
+                org.mockito.ArgumentMatchers.eq(TENANT),
+                org.mockito.ArgumentMatchers.eq(fixture.sessionId()),
+                org.mockito.ArgumentMatchers.isNull(),
+                org.mockito.ArgumentMatchers.eq(100)))
+                .thenReturn(List.of(terminalBinding));
+        fixture.resolver().setBindingRepository(repository);
+        assertThat(fixture.resolver().terminalCapable(session)).isTrue();
+        org.mockito.Mockito.verify(repository).findByHarnessSession(
+                org.mockito.ArgumentMatchers.eq(TENANT),
+                org.mockito.ArgumentMatchers.eq(fixture.sessionId()),
+                org.mockito.ArgumentMatchers.isNull(),
+                org.mockito.ArgumentMatchers.eq(100));
+    }
 }

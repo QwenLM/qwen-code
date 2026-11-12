@@ -3231,8 +3231,9 @@ function ManagedSessionsContent({
         {/* Keep the panel mounted while the user has it open, independent of
             transient dips: `interactive` goes false when a side panel opens and
             the summary is briefly absent during a reload. Unmounting here would
-            send the release frame and SIGTERM the live PTY. A genuine capability
-            loss clears terminalSession via the effect below, which unmounts. */}
+            send the release frame and SIGTERM the live PTY. The relay is the
+            authority on loss (a non-retryable close renders the terminal-lost
+            notice); genuine close unmounts via onClose and session change. */}
         {terminalOpen && sessionId && terminalId && provider.terminal && (
           <ManagedTerminalPanel
             key={`${provider.storageKey}:${sessionId}:${terminalId}`}
@@ -3241,7 +3242,11 @@ function ManagedSessionsContent({
             terminalId={terminalId}
             clientId={clientId}
             onClose={() => setTerminalSession(undefined)}
-            restoreFocus={() => terminalTriggerRef.current?.focus()}
+            restoreFocus={() => {
+              if (terminalTriggerRef.current?.isConnected)
+                terminalTriggerRef.current.focus();
+              else (sessionsNavRef.current ?? pageRef.current)?.focus();
+            }}
           />
         )}
         {provider.sideQueries && (

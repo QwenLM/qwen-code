@@ -123,6 +123,8 @@ function ManagedTerminalSurface({
     let snapshot: { replay: boolean; handlesPrimaryDa: boolean } | undefined;
     let restoring: ReturnType<typeof createTerminal> | undefined;
     let ticketRequest: AbortController | undefined;
+    let releaseRequested = false;
+    let releaseFallbackStarted = false;
 
     function writeNotice(message: string, color: '31' | '33') {
       term.writeln(`\r\n\x1b[${color}m[${message}]\x1b[0m`);
@@ -136,9 +138,57 @@ function ManagedTerminalSurface({
 
     function writeLostNotice() {
       // The lost notice is the terminal state: it must replace a stale
-      // "reconnecting" notice, not be swallowed by the shared latch.
-      writeNotice(tRef.current('terminal.notice.lost'), '31');
+      // "reconnecting" notice, not be swallowed by the shared latch. It goes
+      // to the restoring terminal when one is pending so the post-replay
+      // swap keeps it on screen instead of leaving it on the disposed one.
+      (restoring?.term ?? term).writeln(
+        `\r\n\x1b[31m[${tRef.current('terminal.notice.lost')}]\x1b[0m`,
+      );
       noticeWritten = true;
+    }
+
+    // The worker releases a PTY only on an explicit release frame (the
+    // release=1 upgrade is not forwarded by the relay), so when the live
+    // socket cannot carry the frame — never created, still CONNECTING, or
+    // already closed — a dedicated short-lived connection must deliver it,
+    // or the shell and its durable hold outlive the dialog. Mirrors the
+    // daemon panel's releaseTerminal: 4004 confirms the release; any other
+    // answer retries, bounded at three attempts.
+    function startReleaseFallback() {
+      if (releaseFallbackStarted) return;
+      releaseFallbackStarted = true;
+      let attempts = 0;
+      const deliver = async () => {
+        attempts += 1;
+        let ticket: string;
+        try {
+          const result = await terminal.ticket(sessionId, terminalId, {
+            clientId,
+          });
+          ticket = result.ticket;
+          if (typeof ticket !== 'string' || !ticket) {
+            throw new Error('Terminal ticket is missing');
+          }
+        } catch {
+          if (attempts < 3) {
+            setTimeout(() => void deliver(), RECONNECT_INITIAL_MS);
+          }
+          return;
+        }
+        const ws = new WebSocket(
+          terminal.webSocketUrl(sessionId, terminalId),
+          managedTerminalProtocols(ticket),
+        );
+        ws.onopen = () => {
+          ws.send(CONTROL_FRAME_PREFIX + JSON.stringify({ type: 'release' }));
+        };
+        ws.onerror = () => ws.close();
+        ws.onclose = (event) => {
+          if (event.code === 4004 || attempts >= 3) return;
+          setTimeout(() => void deliver(), RECONNECT_INITIAL_MS);
+        };
+      };
+      void deliver();
     }
 
     function scheduleReconnect() {
@@ -168,7 +218,15 @@ function ManagedTerminalSurface({
       // A new PTY's buffered output has never been answered. Reconnect history has.
       const liveInput = replay ? undefined : next.term.onData(sendInput);
       next.term.write(text, () => {
-        if (disposed || wsRef.current !== ws || restoring !== next) {
+        // A null socket means no successor replaced this one: the close that
+        // produced it may be the worker's normal post-replay close (snapshot
+        // → replay → exit → 4000), whose replayed screen and exit notice must
+        // still reach the container. Only a different live socket rejects.
+        if (
+          disposed ||
+          (wsRef.current !== null && wsRef.current !== ws) ||
+          restoring !== next
+        ) {
           liveInput?.dispose();
           return;
         }
@@ -297,6 +355,13 @@ function ManagedTerminalSurface({
       wsRef.current = ws;
 
       ws.onopen = () => {
+        if (releaseRequested) {
+          // The dialog closed while this handshake was in flight; deliver
+          // the release now that the socket can carry it.
+          ws.send(CONTROL_FRAME_PREFIX + JSON.stringify({ type: 'release' }));
+          ws.close();
+          return;
+        }
         if (disposed) {
           ws.close();
           return;
@@ -324,6 +389,16 @@ function ManagedTerminalSurface({
 
       ws.onclose = (event) => {
         if (wsRef.current === ws) wsRef.current = null;
+        if (releaseRequested) {
+          // 4004 confirms the worker released the PTY; any other answer
+          // means the frame may not have landed, so the dedicated
+          // connection retries. Non-retryable codes other than 4004 mean
+          // the terminal is already gone — nothing left to release.
+          if (!NON_RETRYABLE_CLOSE_CODES.has(event.code)) {
+            startReleaseFallback();
+          }
+          return;
+        }
         if (disposed || wsRef.current !== null) return;
         if (ended) return;
         restoring?.term.dispose();
@@ -376,13 +451,20 @@ function ManagedTerminalSurface({
       resizeObserver.disconnect();
       disposable.dispose();
       restoring?.term.dispose();
+      releaseRequested = true;
       const ws = wsRef.current;
-      if (ws) {
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(CONTROL_FRAME_PREFIX + JSON.stringify({ type: 'release' }));
-        }
+      if (ws?.readyState === WebSocket.OPEN) {
+        ws.send(CONTROL_FRAME_PREFIX + JSON.stringify({ type: 'release' }));
         ws.close();
+      } else if (!ws || ws.readyState !== WebSocket.CONNECTING) {
+        // No live socket can carry the release frame (ticket still in
+        // flight, reconnect backoff, or an already-closed socket). A plain
+        // close only detaches the worker's listeners, so the dedicated
+        // connection must deliver the release instead.
+        startReleaseFallback();
       }
+      // A CONNECTING socket is deliberately left open: closing it would
+      // abort the handshake, and its onopen delivers the release instead.
       term.dispose();
       termRef.current = null;
       fitRef.current = null;

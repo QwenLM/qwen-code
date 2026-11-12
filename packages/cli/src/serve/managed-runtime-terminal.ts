@@ -255,7 +255,10 @@ export class ManagedRuntimeTerminals {
       );
       return;
     }
-    const snapshot = this.registry.readSnapshot(terminalId);
+    // Admission only needs to know whether a session exists; readState
+    // answers that without joining the whole scrollback (O(scrollback) per
+    // upgrade otherwise).
+    const state = this.registry.readState(terminalId);
     const owner = this.owners.get(terminalId);
     // Ownership is recorded before the asynchronous create completes and is
     // retained after the terminal ends, so the guard must not depend on a live
@@ -270,10 +273,7 @@ export class ManagedRuntimeTerminals {
       );
       return;
     }
-    if (
-      !snapshot &&
-      this.liveCount(selector) >= MAX_MANAGED_SESSION_TERMINALS
-    ) {
+    if (!state && this.liveCount(selector) >= MAX_MANAGED_SESSION_TERMINALS) {
       refuseUpgrade(
         socket,
         429,

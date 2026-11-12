@@ -53,6 +53,11 @@ public final class TerminalRelayHandler extends AbstractWebSocketHandler
      */
     private static final int TERMINAL_LOST_CLOSE_CODE = 4003;
 
+    /** The terminal's whole-message ceiling (8 MiB), shared by the container
+     * buffer configuration and the relay's pending-byte accounting so the
+     * two cannot drift apart. */
+    public static final int MAX_TERMINAL_MESSAGE_BYTES = 8 * 1024 * 1024;
+
     private final HttpClient client;
     private final RuntimeBrokerOperations broker;
 
@@ -165,7 +170,7 @@ public final class TerminalRelayHandler extends AbstractWebSocketHandler
     }
 
     private static URI workerUri(URI endpoint, String sessionId, String terminalId) {
-        String scheme = "https".equals(endpoint.getScheme()) ? "wss" : "ws";
+        String scheme = "https".equalsIgnoreCase(endpoint.getScheme()) ? "wss" : "ws";
         String query = "terminalId=" + encode(terminalId)
                 + "&cwd=" + encode(sessionId) + "&replay=1";
         return URI.create(scheme + "://" + endpoint.getRawAuthority()
@@ -238,7 +243,11 @@ public final class TerminalRelayHandler extends AbstractWebSocketHandler
     /** One browser connection's pipe to its worker terminal. */
     private static final class Relay implements WebSocket.Listener {
         /** Mirrors the worker's 8 MiB socket backpressure ceiling. */
-        private static final long MAX_PENDING_BYTES = 8L * 1024 * 1024;
+        private static final long MAX_PENDING_BYTES = MAX_TERMINAL_MESSAGE_BYTES;
+        /** The byte ceiling alone lets tiny frames amplify heap ~124x per
+         * queued entry; bound the entry count too so the pre-attach queue
+         * cannot exhaust memory under a flood of 1-byte frames. */
+        private static final int MAX_PENDING_ENTRIES = 8192;
         private final WebSocketSession browser;
         private final AtomicReference<WebSocket> worker = new AtomicReference<>();
         private final java.util.concurrent.atomic.AtomicLong pendingBytes =
@@ -279,7 +288,28 @@ public final class TerminalRelayHandler extends AbstractWebSocketHandler
                 // The browser may have closed while the worker upgrade was in
                 // flight; do not pin a worker terminal to a dead browser.
                 if (failed || !browser.isOpen()) {
-                    webSocket.sendClose(WebSocket.NORMAL_CLOSURE, "");
+                    // The worker just opened, so it is alive: drain the frames
+                    // the browser already delivered — notably a release sent
+                    // just before its close — before closing the worker leg,
+                    // or the PTY and its durable hold leak. chainSend skips
+                    // when failed, so chain the accepted ops directly here.
+                    long flushedBytes = 0;
+                    CompletionStage<WebSocket> tail =
+                            CompletableFuture.completedFuture(webSocket);
+                    for (PendingSend pending : preAttach) {
+                        flushedBytes += pending.bytes();
+                        tail = tail.thenCompose(pending.op());
+                    }
+                    preAttach.clear();
+                    final long accounted = flushedBytes;
+                    tail.whenComplete((ignored, error) -> {
+                        pendingBytes.addAndGet(-accounted);
+                        try {
+                            webSocket.sendClose(WebSocket.NORMAL_CLOSURE, "");
+                        } catch (RuntimeException ignoredClose) {
+                            // The worker leg is already gone.
+                        }
+                    });
                     return;
                 }
                 worker.set(webSocket);
@@ -358,7 +388,13 @@ public final class TerminalRelayHandler extends AbstractWebSocketHandler
 
         void toWorkerBinary(ByteBuffer payload) {
             int bytes = payload.remaining();
-            send(webSocket -> webSocket.sendBinary(payload, true), bytes);
+            // The container owns the incoming buffer and may reuse it once
+            // handleBinaryMessage returns; a queued (pre-attach or chained)
+            // send runs later, so snapshot the bytes now.
+            byte[] copy = new byte[bytes];
+            payload.get(copy);
+            ByteBuffer owned = ByteBuffer.wrap(copy);
+            send(webSocket -> webSocket.sendBinary(owned, true), bytes);
         }
 
         /** Bounds the browser-to-worker queue at the worker's ceiling and
@@ -382,6 +418,13 @@ public final class TerminalRelayHandler extends AbstractWebSocketHandler
                 if (webSocket == null) {
                     // The worker upgrade is still in flight; hold the frame
                     // (already accounted) until onOpen flushes the queue.
+                    if (preAttach.size() >= MAX_PENDING_ENTRIES) {
+                        pendingBytes.addAndGet(-bytes);
+                        fail();
+                        closeWorker();
+                        closeQuietly(browser, CloseStatus.TOO_BIG_TO_PROCESS);
+                        return;
+                    }
                     preAttach.add(new PendingSend(op, bytes));
                     return;
                 }

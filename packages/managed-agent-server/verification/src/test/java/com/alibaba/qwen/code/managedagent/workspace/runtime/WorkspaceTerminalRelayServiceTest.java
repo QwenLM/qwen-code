@@ -74,6 +74,13 @@ class WorkspaceTerminalRelayServiceTest {
     @Test
     void optInOffRefuses() {
         when(brokerSettings.isWebTerminal()).thenReturn(false);
+        // A terminal-capable READY binding is present, so only the opt-in guard
+        // can refuse: without this stub the missing-binding refusal would mask
+        // a deleted opt-in check and the test could never go red.
+        when(broker.findLatestBindingByHarnessSession(TENANT, SESSION))
+                .thenReturn(binding(
+                        WorkspaceExecutionProfile.TERMINAL_CAPABILITY_DIGEST,
+                        RuntimeBindingRecord.State.READY, false));
         assertThatThrownBy(() -> relay.admit(TENANT, ACTOR, SESSION))
                 .isInstanceOfSatisfying(ManagedAgentException.class,
                         error -> assertThat(error.getStatus()).isEqualTo(409));

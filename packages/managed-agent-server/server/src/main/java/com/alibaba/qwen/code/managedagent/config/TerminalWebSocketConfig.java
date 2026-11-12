@@ -62,7 +62,7 @@ public class TerminalWebSocketConfig implements WebSocketConfigurer {
     public ServletServerContainerFactoryBean terminalWebSocketContainer() {
         ServletServerContainerFactoryBean container =
                 new ServletServerContainerFactoryBean();
-        int maxMessageBytes = 8 * 1024 * 1024;
+        int maxMessageBytes = TerminalRelayHandler.MAX_TERMINAL_MESSAGE_BYTES;
         container.setMaxBinaryMessageBufferSize(maxMessageBytes);
         container.setMaxTextMessageBufferSize(maxMessageBytes);
         return container;
@@ -73,7 +73,8 @@ public class TerminalWebSocketConfig implements WebSocketConfigurer {
         // The intercepted @Bean call returns the singleton the ticket
         // controller also injects; mint and consume must share one store.
         registry.addHandler(new TerminalRelayHandler(broker),
-                        "/api/agent/web-shell/v1/sessions/*/terminal")
+                        com.alibaba.qwen.code.managedagent.security.PublicSurface
+                                .TERMINAL_UPGRADE_PATH)
                 .addInterceptors(
                         new TerminalRelayHandshakeInterceptor(terminalTicketStore()));
     }

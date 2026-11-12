@@ -114,6 +114,12 @@ function forwardTerminalUpgrade(
     upstreamSocket.on('error', () => socket.destroy());
     upstreamSocket.pipe(socket);
     socket.pipe(upstreamSocket);
+    // After the 101 Node detaches the socket from the ClientRequest, so the
+    // outer upstream.destroy() on browser close is a no-op on this leg. An
+    // abrupt browser teardown (RST) emits 'close' without 'end', which pipe
+    // does not forward; destroy the tunnel explicitly or the control-plane
+    // relay never sees EOF and the PTY plus its durable hold leak.
+    socket.once('close', () => upstreamSocket.destroy());
   });
   upstream.on('response', (res) => {
     socket.write(

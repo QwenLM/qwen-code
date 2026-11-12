@@ -30,7 +30,8 @@ public final class TerminalRelayHandshakeInterceptor implements HandshakeInterce
     /** Keep in sync with the Web Shell's bearer subprotocol prefix. */
     public static final String BEARER_SUBPROTOCOL_PREFIX = "qwen-bearer.";
     private static final Pattern SESSION_PATH = Pattern.compile(
-            "^/api/agent/web-shell/v1/sessions/([^/]+)/terminal$");
+            "^" + com.alibaba.qwen.code.managedagent.security.PublicSurface
+                    .TERMINAL_UPGRADE_PATH.replace("*", "([^/]+)") + "$");
     private static final Pattern PATH_SAFE = Pattern.compile("[A-Za-z0-9._-]{1,256}");
 
     private final TerminalTicketStore tickets;
@@ -48,11 +49,11 @@ public final class TerminalRelayHandshakeInterceptor implements HandshakeInterce
             return false;
         }
         HttpServletRequest http = servletRequest.getServletRequest();
-        String path = http.getRequestURI();
-        String context = http.getContextPath();
-        if (context != null && !context.isEmpty() && path.startsWith(context)) {
-            path = path.substring(context.length());
-        }
+        // The router's own normalized path (decoded, matrix-stripped), the
+        // same derivation the header filters exempt on — a hand-rolled
+        // context-strip could disagree with them on an encoded spelling.
+        String path = com.alibaba.qwen.code.managedagent.security.PublicSurface
+                .pathWithinApplication(http);
         Matcher matcher = SESSION_PATH.matcher(path);
         if (!matcher.matches()) {
             response.setStatusCode(HttpStatus.NOT_FOUND);

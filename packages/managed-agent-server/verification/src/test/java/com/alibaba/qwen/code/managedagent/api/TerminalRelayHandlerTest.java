@@ -464,6 +464,168 @@ class TerminalRelayHandlerTest {
         assertThat(bytes).isEqualTo(frame);
     }
 
+    @Test
+    void snapshotsQueuedBinaryFramesAgainstContainerBufferReuse() throws Exception {
+        // The container may reuse the incoming ByteBuffer once the handler
+        // callback returns; a pre-attach send runs later, so the relay must
+        // snapshot the bytes at acceptance, not read the buffer at send time.
+        RuntimeBrokerOperations broker = mock(RuntimeBrokerOperations.class);
+        when(broker.admitTerminalHold("session-a", "term-1"))
+                .thenReturn(CompletableFuture.completedFuture(
+                        new TerminalHoldAdmission(
+                                hold("terminal-attach:term-1:process"), true)));
+        HttpClient client = mock(HttpClient.class);
+        WebSocket.Builder builder = mock(WebSocket.Builder.class);
+        when(client.newWebSocketBuilder()).thenReturn(builder);
+        when(builder.header(anyString(), anyString())).thenReturn(builder);
+        when(builder.connectTimeout(any())).thenReturn(builder);
+        WebSocket worker = mock(WebSocket.class);
+        when(worker.sendBinary(any(ByteBuffer.class), eq(true)))
+                .thenReturn(CompletableFuture.completedFuture(worker));
+        AtomicReference<WebSocket.Listener> relayRef = new AtomicReference<>();
+        when(builder.buildAsync(any(URI.class), any(WebSocket.Listener.class)))
+                .thenAnswer(invocation -> {
+                    relayRef.set(invocation.getArgument(1));
+                    return CompletableFuture.completedFuture(worker);
+                });
+        WebSocketSession browser = session();
+        TerminalRelayHandler handler = new TerminalRelayHandler(broker, client);
+        handler.afterConnectionEstablished(browser);
+
+        byte[] frame = "original".getBytes(StandardCharsets.UTF_8);
+        handler.handleBinaryMessage(browser, new BinaryMessage(frame));
+        // The container reuses the buffer for the next frame before the worker
+        // attaches; the queued send must still deliver the original bytes.
+        Arrays.fill(frame, (byte) 'X');
+        relayRef.get().onOpen(worker);
+        ArgumentCaptor<ByteBuffer> captor = ArgumentCaptor.forClass(ByteBuffer.class);
+        verify(worker).sendBinary(captor.capture(), eq(true));
+        ByteBuffer delivered = captor.getValue();
+        byte[] bytes = new byte[delivered.remaining()];
+        delivered.get(bytes);
+        assertThat(bytes).isEqualTo("original".getBytes(StandardCharsets.UTF_8));
+    }
+
+    @Test
+    void boundsThePreAttachQueueByEntryCountNotOnlyBytes() throws Exception {
+        // A flood of 1-byte frames stays under the 8 MiB byte ceiling but each
+        // queued entry costs ~124 bytes of heap; the entry cap must close the
+        // browser before the queue exhausts memory.
+        RuntimeBrokerOperations broker = mock(RuntimeBrokerOperations.class);
+        when(broker.admitTerminalHold("session-a", "term-1"))
+                .thenReturn(CompletableFuture.completedFuture(
+                        new TerminalHoldAdmission(
+                                hold("terminal-attach:term-1:process"), true)));
+        HttpClient client = mock(HttpClient.class);
+        WebSocket.Builder builder = mock(WebSocket.Builder.class);
+        when(client.newWebSocketBuilder()).thenReturn(builder);
+        when(builder.header(anyString(), anyString())).thenReturn(builder);
+        when(builder.connectTimeout(any())).thenReturn(builder);
+        WebSocket worker = mock(WebSocket.class);
+        AtomicReference<WebSocket.Listener> relayRef = new AtomicReference<>();
+        when(builder.buildAsync(any(URI.class), any(WebSocket.Listener.class)))
+                .thenAnswer(invocation -> {
+                    relayRef.set(invocation.getArgument(1));
+                    return CompletableFuture.completedFuture(worker);
+                });
+        WebSocketSession browser = session();
+        TerminalRelayHandler handler = new TerminalRelayHandler(broker, client);
+        handler.afterConnectionEstablished(browser);
+
+        for (int i = 0; i < 8192; i++) {
+            handler.handleBinaryMessage(browser, new BinaryMessage(new byte[] {1}));
+        }
+        verify(browser, never()).close(any(CloseStatus.class));
+        // The 8193rd entry crosses the cap.
+        handler.handleBinaryMessage(browser, new BinaryMessage(new byte[] {1}));
+        verify(browser).close(argThat(status ->
+                status.getCode() == CloseStatus.TOO_BIG_TO_PROCESS.getCode()));
+    }
+
+    @Test
+    void flushesAnAcceptedReleaseToTheWorkerWhenTheBrowserClosedDuringAttach() throws Exception {
+        // The browser sent a release just before closing while the worker
+        // upgrade was in flight. The abort path must deliver that accepted
+        // frame to the live worker before closing it, or the PTY and its
+        // durable hold leak.
+        RuntimeBrokerOperations broker = mock(RuntimeBrokerOperations.class);
+        when(broker.admitTerminalHold("session-a", "term-1"))
+                .thenReturn(CompletableFuture.completedFuture(
+                        new TerminalHoldAdmission(
+                                hold("terminal-attach:term-1:process"), true)));
+        HttpClient client = mock(HttpClient.class);
+        WebSocket.Builder builder = mock(WebSocket.Builder.class);
+        when(client.newWebSocketBuilder()).thenReturn(builder);
+        when(builder.header(anyString(), anyString())).thenReturn(builder);
+        when(builder.connectTimeout(any())).thenReturn(builder);
+        WebSocket worker = mock(WebSocket.class);
+        when(worker.sendText(anyString(), eq(true)))
+                .thenReturn(CompletableFuture.completedFuture(worker));
+        AtomicReference<WebSocket.Listener> relayRef = new AtomicReference<>();
+        when(builder.buildAsync(any(URI.class), any(WebSocket.Listener.class)))
+                .thenAnswer(invocation -> {
+                    relayRef.set(invocation.getArgument(1));
+                    return CompletableFuture.completedFuture(worker);
+                });
+        WebSocketSession browser = session();
+        TerminalRelayHandler handler = new TerminalRelayHandler(broker, client);
+        handler.afterConnectionEstablished(browser);
+
+        String release = "\u0000{\"type\":\"release\"}";
+        handler.handleTextMessage(browser, new org.springframework.web.socket.TextMessage(release));
+        // The browser closes before the worker attaches.
+        handler.afterConnectionClosed(browser, CloseStatus.NORMAL);
+        relayRef.get().onOpen(worker);
+
+        verify(worker, org.mockito.Mockito.timeout(2000)).sendText(eq(release), eq(true));
+        verify(worker, org.mockito.Mockito.timeout(2000))
+                .sendClose(eq(WebSocket.NORMAL_CLOSURE), anyString());
+    }
+
+    @Test
+    void picksTheWssSchemeForAnHttpsLeaseEndpointCaseInsensitively() throws Exception {
+        RuntimeBrokerOperations broker = mock(RuntimeBrokerOperations.class);
+        when(broker.admitTerminalHold("session-a", "term-1"))
+                .thenReturn(CompletableFuture.completedFuture(
+                        new TerminalHoldAdmission(
+                                hold("terminal-attach:term-1:process"), true)));
+        HttpClient client = mock(HttpClient.class);
+        WebSocket.Builder builder = mock(WebSocket.Builder.class);
+        when(client.newWebSocketBuilder()).thenReturn(builder);
+        when(builder.header(anyString(), anyString())).thenReturn(builder);
+        when(builder.connectTimeout(any())).thenReturn(builder);
+        AtomicReference<URI> uriRef = new AtomicReference<>();
+        when(builder.buildAsync(any(URI.class), any(WebSocket.Listener.class)))
+                .thenAnswer(invocation -> {
+                    uriRef.set(invocation.getArgument(0));
+                    return CompletableFuture.completedFuture(mock(WebSocket.class));
+                });
+        RuntimeScope scope = new RuntimeScope("tenant", "workspace", "1",
+                "/workspace", "capability", "session");
+        RuntimeProvisionRequest request = new RuntimeProvisionRequest(scope,
+                "iso", "static", null);
+        // java.net.URI preserves the scheme's case, so a case-sensitive equals
+        // would pick ws for an HTTPS endpoint; the relay must map it to wss.
+        RuntimeLease lease = new RuntimeLease("runtime-1",
+                URI.create("HTTPS://secure.example:443"), "token", "lease-1", 7);
+        RuntimeBindingRecord httpsBinding = new RuntimeBindingRecord("binding-1",
+                request, 1, RuntimeBindingRecord.State.READY, lease, false, null,
+                null, 0, 1, Instant.now(), Instant.now());
+        WebSocketSession browser = mock(WebSocketSession.class);
+        Map<String, Object> attributes = new HashMap<>();
+        attributes.put(TerminalRelayHandshakeInterceptor.BINDING_ATTRIBUTE, httpsBinding);
+        attributes.put(TerminalRelayHandshakeInterceptor.SESSION_ATTRIBUTE, "session-a");
+        attributes.put(TerminalRelayHandshakeInterceptor.TERMINAL_ATTRIBUTE, "term-1");
+        when(browser.getAttributes()).thenReturn(attributes);
+        when(browser.isOpen()).thenReturn(true);
+        TerminalRelayHandler handler = new TerminalRelayHandler(broker, client);
+
+        handler.afterConnectionEstablished(browser);
+
+        assertThat(uriRef.get().getScheme()).isEqualTo("wss");
+        assertThat(uriRef.get().getRawAuthority()).isEqualTo("secure.example:443");
+    }
+
     /** A relay attached to a mock worker, exposing the JDK listener the relay
      * registers so fragment and backpressure behavior can be driven directly. */
     private static final class Attached {
