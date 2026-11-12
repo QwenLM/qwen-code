@@ -96,6 +96,8 @@ interface Scenario {
   rounds: number;
   /** The tool batches the TUI runs, one per round that calls tools. */
   batches: number;
+  /** The tool batches its subagents run. */
+  subagentBatches?: number;
   /**
    * Text both runs must show at the end, for a scenario that sends and
    * records nothing.
@@ -139,6 +141,8 @@ interface Run {
   sharedRounds: number;
   /** How many tool batches the debug log says ran on the shared loop. */
   sharedBatches: number;
+  /** How many subagent tool batches the debug log says ran on it. */
+  sharedSubagentBatches: number;
 }
 
 /**
@@ -154,6 +158,9 @@ const APPROVAL_PROMPT = 'Yes, allow once';
 
 /** What the TUI logs for each tool batch it runs on the shared loop. */
 const SHARED_BATCH_LOG = 'tool batch on the shared agent loop';
+/** What a subagent logs for each tool batch it runs on the shared loop. */
+const SHARED_SUBAGENT_BATCH_LOG =
+  /subagent \S+ round \d+ tool batch on the shared loop/g;
 
 const sleep = (ms: number) => new Promise<void>((done) => setTimeout(done, ms));
 
@@ -618,6 +625,8 @@ describeTui(SUITE, () => {
       screen,
       sharedRounds: debugLog.split(SHARED_ROUND_LOG).length - 1,
       sharedBatches: debugLog.split(SHARED_BATCH_LOG).length - 1,
+      sharedSubagentBatches:
+        debugLog.match(SHARED_SUBAGENT_BATCH_LOG)?.length ?? 0,
     };
   }
 
@@ -768,6 +777,48 @@ describeTui(SUITE, () => {
                 toolCalls: [write(join(dir, 'b.txt'), 'b body\n', 'call_b')],
               }
             : { content: 'Should not be asked.' },
+    },
+    {
+      // A foreground subagent's write waits for approval; the TUI answers it
+      // from outside the subagent's frames, which the approval restores.
+      name: "a subagent's write approved in the TUI",
+      requests: 4,
+      rounds: 2,
+      batches: 1,
+      subagentBatches: 1,
+      approvalMode: 'default',
+      approvals: [
+        {
+          answer: 'allow',
+          settled: (dir) =>
+            existsSync(join(dir, 'a.txt')) &&
+            readFileSync(join(dir, 'a.txt'), 'utf8') === 'a body\n',
+        },
+      ],
+      prompts: ['Have a helper write a.'],
+      agent: (messages) => (isHelper(messages) ? 'helper' : 'leader'),
+      recorded: 'The helper wrote a.',
+      reply: (messages, dir) =>
+        isHelper(messages)
+          ? toolResults(messages) === 0
+            ? { toolCalls: [write(join(dir, 'a.txt'), 'a body\n', 'call_a')] }
+            : { content: 'Wrote a.' }
+          : toolResults(messages) === 0
+            ? {
+                toolCalls: [
+                  fakeToolCall(
+                    'agent',
+                    {
+                      subagent_type: 'general-purpose',
+                      description: 'Write a',
+                      prompt: `${HELPER_TASK} Write a.`,
+                      run_in_background: false,
+                    },
+                    'call_helper',
+                  ),
+                ],
+              }
+            : { content: 'The helper wrote a.' },
     },
     {
       // Esc while the command runs cancels it and ends the turn.
@@ -1150,6 +1201,8 @@ describeTui(SUITE, () => {
     expect(shared.sharedRounds).toBe(scenario.rounds);
     expect(current.sharedBatches).toBe(0);
     expect(shared.sharedBatches).toBe(scenario.batches);
+    expect(current.sharedSubagentBatches).toBe(0);
+    expect(shared.sharedSubagentBatches).toBe(scenario.subagentBatches ?? 0);
     for (const run of [current, shared]) {
       expect(run.requests).toHaveLength(scenario.requests);
       if (scenario.sideRequests !== undefined)
