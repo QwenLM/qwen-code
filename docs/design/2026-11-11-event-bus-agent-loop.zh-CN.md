@@ -117,7 +117,7 @@ preview 按 `queryId` 路由、用 UUID `roundId` 标记轮次。main 的循环�
 
 标记*规划中*的事件已在词汇表中，但本切片不发射；它们随流式派发到来。今天的取消经 signal 流入 `runModelRound`/`runToolBatch`，而非总线事件。
 
-`llm.settled` 是轮结束信号；终止分类（今天 `runModelRound` 做的 `STOP_EVENTS` 映射）存于 run 状态（`state.model.stop`），Conversation 仍是把模型结局映射为 `AgentLoopStopReason` 的唯一位置。去重/replay 记账留在 Tool handler，使用现有 `toolCallIdUtils` 助手，位置与今天 `runToolBatch` 完全一致。事件载荷只携带路由与决策数据；完整的模型结果与工具批按所有权存于 run 状态的对应槽位，总线不重复承载它们。
+`llm.settled` 是轮结束信号；终止分类（今天 `runModelRound` 做的 `STOP_EVENTS` 映射）存于 run 状态（`state.model.stop`），Conversation 是把该轮末状态转成循环结果的唯一位置。去重/replay 记账留在 Tool handler，使用现有 `toolCallIdUtils` 助手，位置与今天 `runToolBatch` 完全一致。事件载荷只携带路由与决策数据；完整的模型结果与工具批按所有权存于 run 状态的对应槽位，总线不重复承载它们。
 
 ### 状态与所有权
 
