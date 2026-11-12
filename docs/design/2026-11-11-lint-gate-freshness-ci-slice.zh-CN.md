@@ -213,8 +213,8 @@ merge base 取自该检查**已经做过**的包含比较，因此 narrowing 不
 
    另有四条 witness 针对本修订新增的套件步骤。每条都单独施加在真实 `ci.yml` 上，先确认本修订变红、上一修订仍绿，再还原：
 
-   | 对 `Run lint gate freshness tests` 的变异 | 结果        |
-   | ----------------------------------------- | ----------- |
+   | 对 `Run lint gate freshness tests` 的变异 | 结果         |
+   | ----------------------------------------- | ------------ |
    | 去掉 `github_ci_only` 这个 profile 分支   | 红，1 个失败 |
    | 把 run 行指向另一个套件                   | 红，1        |
    | 加上 `continue-on-error: true`            | 红，1        |
