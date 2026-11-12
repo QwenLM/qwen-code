@@ -74,6 +74,15 @@ describe('resolveForkExecutionAllowedTools', () => {
     ).toEqual([ToolNames.READ_FILE, ToolNames.EDIT, ToolNames.GLOB]);
   });
 
+  it('filters display_image from an explicit allowlist the parent does not advertise', () => {
+    expect(
+      resolveForkExecutionAllowedTools(
+        [ToolNames.READ_FILE],
+        [ToolNames.DISPLAY_IMAGE, ToolNames.READ_FILE],
+      ),
+    ).toEqual([ToolNames.READ_FILE]);
+  });
+
   it('cannot re-enable display_image through fork_tools', () => {
     expect(
       resolveForkExecutionAllowedTools(parentTools, [

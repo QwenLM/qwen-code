@@ -2125,7 +2125,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             getCurrentCodeModeAllowedNames() ?? defaultExecutionToolNames,
             true,
           ).filter(
-            (toolName) => getToolExposure(toolName) === 'code-mode-callable',
+            (toolName) =>
+              toolName !== ToolNames.DISPLAY_IMAGE &&
+              getToolExposure(toolName) === 'code-mode-callable',
           )
         : undefined;
     const requestedExecutionAllowedTools =

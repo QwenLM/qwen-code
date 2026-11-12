@@ -73,19 +73,22 @@ export function resolveForkExecutionAllowedTools(
   advertisedToolNames: readonly string[],
   requestedToolNames: readonly string[] | undefined,
 ): string[] | undefined {
+  // display_image is main-session-only, so an explicit list must never keep
+  // it executable, whether or not the parent advertises it.
+  const executableToolNames = requestedToolNames?.filter(
+    (name) => name !== ToolNames.DISPLAY_IMAGE,
+  );
   if (!advertisedToolNames.includes(ToolNames.DISPLAY_IMAGE)) {
-    return requestedToolNames ? [...requestedToolNames] : undefined;
+    return executableToolNames;
   }
 
-  // display_image is main-session-only. "Unrestricted" (undefined) minus
-  // display_image cannot be written as a finite allowlist, so fail closed to
-  // deny-all instead of returning undefined — that would hand the fork
-  // unrestricted execution, including the very tool this strips. Every live
-  // caller passes a concrete list (buildForkExecutionAllowlist always returns
-  // an array); DisplayImageInvocation.execute() also enforces this locally.
-  return (
-    requestedToolNames?.filter((name) => name !== ToolNames.DISPLAY_IMAGE) ?? []
-  );
+  // "Unrestricted" (undefined) minus display_image cannot be written as a
+  // finite allowlist, so fail closed to deny-all instead of returning
+  // undefined — that would hand the fork unrestricted execution, including
+  // the very tool this strips. Every live caller passes a concrete list
+  // (buildForkExecutionAllowlist always returns an array);
+  // DisplayImageInvocation.execute() also enforces this locally.
+  return executableToolNames ?? [];
 }
 
 /**

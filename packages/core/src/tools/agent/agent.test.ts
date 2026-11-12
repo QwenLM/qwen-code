@@ -4368,18 +4368,32 @@ describe('AgentTool', () => {
       expect(allowed()).toEqual([]);
     });
 
-    it.each([ToolMode.CodeMode, ToolMode.CodeModeOnly])(
-      'deny-all fork_tools closes the exec route in %s',
-      async (mode) => {
+    it.each([
+      { mode: ToolMode.CodeMode, forkTools: [] as string[] },
+      { mode: ToolMode.CodeMode, forkTools: [ToolNames.DISPLAY_IMAGE] },
+      { mode: ToolMode.CodeModeOnly, forkTools: [] as string[] },
+      { mode: ToolMode.CodeModeOnly, forkTools: [ToolNames.DISPLAY_IMAGE] },
+    ])(
+      'deny-all fork_tools closes the exec route in $mode ($forkTools)',
+      async ({ mode, forkTools }) => {
         config.getToolMode = vi.fn().mockReturnValue(mode);
-        parentTools(readSearchCall, [...bridged()]);
+        parentTools(
+          forkTools.length === 0
+            ? readSearchCall
+            : [
+                [ToolNames.READ_FILE, 'Read a file'],
+                [ToolNames.DISPLAY_IMAGE, 'Display an image'],
+              ],
+          [...bridged(), ToolNames.DISPLAY_IMAGE],
+        );
         await runFork(
           forkParams('deny all tools', {
             prompt: 'reason without tools',
-            fork_tools: [],
+            fork_tools: forkTools,
           }),
         );
         expect(allowed()).toEqual([]);
+        expect(toolConfig()?.nestedExecutionAllowedTools).toEqual([]);
         // Drive the captured child toolConfig through a real AgentCore: the
         // empty execution allowlist must close the exec route in both code
         // modes, at the declaration surface and at the admission gate.
