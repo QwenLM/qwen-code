@@ -109,6 +109,15 @@ import {
 interface ChannelsManagerPageProps {
   onClose?: () => void;
   initialFocusRef?: Ref<HTMLHeadingElement>;
+  /** This tab's daemon-registered client id, for QR-login attribution. */
+  clientId?: string;
+  /**
+   * The workspace this tab's session belongs to. The client id is registered
+   * with that workspace's bridge only, and the daemon validates the header
+   * against the *target* workspace's bridge — so sending it while managing a
+   * different workspace is a hard `400 invalid_client_id`.
+   */
+  sessionWorkspaceCwd?: string;
 }
 
 type ChannelAction = 'start' | 'stop' | 'restart' | 'startup';
@@ -147,6 +156,8 @@ function badgeVariant(
 export function ChannelsManagerPage({
   onClose,
   initialFocusRef,
+  clientId,
+  sessionWorkspaceCwd,
 }: ChannelsManagerPageProps) {
   const { t } = useI18n();
   const workspace = useWorkspace();
@@ -239,6 +250,15 @@ export function ChannelsManagerPage({
     autoLoad: supportsManagement,
     enabled: supportsManagement,
     workspaceCwd: activeWorkspaceCwd,
+    // Attribute only when managing the workspace this tab's session lives on.
+    // Every managed workspace owns its own bridge, and the daemon checks the
+    // header against the target's — a foreign id is a hard 400, which would
+    // break a flow that worked while no header was sent at all.
+    clientId:
+      activeWorkspaceCwd !== undefined &&
+      activeWorkspaceCwd === sessionWorkspaceCwd
+        ? clientId
+        : undefined,
   });
   const canManage =
     supportsManagement &&
