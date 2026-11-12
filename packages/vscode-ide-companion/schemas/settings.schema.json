@@ -4731,6 +4731,11 @@
           "type": "boolean",
           "default": false
         },
+        "eventBusAgentLoop": {
+          "description": "Run the shared agent loop on the event-bus architecture (experimental). Applies to headless sessions (`-p` and stream-json) when experimental.unifiedAgentLoop is also enabled; other surfaces keep their current loop internals. Can also be enabled via QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP=1 environment variable.",
+          "type": "boolean",
+          "default": false
+        },
         "agentCollaboration": {
           "description": "Enable persistent workspace Agents that you can @-mention in a chat session (experimental). Each mentioned Agent answers in the same session from its own native session. Independent of Agent Team: neither flag implies the other. Enabling permits collaboration; opening an Agent to outside callers, trusting a connection and registering a host each still require their own explicit configuration. Can also be enabled via QWEN_CODE_ENABLE_AGENT_COLLABORATION=1.",
           "type": "boolean",
