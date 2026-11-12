@@ -51,6 +51,8 @@ Linux 矩阵增加第三个 `agent-loop` 值 `kernel`，OpenTUI 任务加上它�
 
 **内核组今天实际跑什么。**内核开关目前只到达 headless，所以 Linux 内核组让 headless 跑事件总线路径、其他入口跑共享过程式路径；OpenTUI 内核组让 OpenTUI 跑共享 loop（内核开关在第 3 步落地前对它无效）。这些组现在就存在，是为了让 nightly 计数开始累积，并在任何入口的第 3 步落地之前先验证接线。
 
+**隔离的交互套件能收到开关。**约一半交互套件从零构建子进程环境（`inheritEnv: false`）以排除操作者环境，因此各组导出的开关到不了它们，它们在每个臂上都跑默认 loop。`InteractiveSession.start` 现在只把这两个 loop 变量转发进隔离环境（测试自己的 `options.env` 仍可覆盖），于是开关组真正让整个交互套件跑到共享 loop；一个真实 spawn 用例钉住开关到达、而操作者变量不会泄漏。
+
 **元测试。**`scripts/tests/e2e-workflow.test.js` 新增一个 describe 块，像并发 pin 求值自己的表达式那样，对 `push`、`schedule`、`workflow_dispatch` 求值真实的矩阵与环境变量表达式：push 在两个任务上都只产生 `current`；schedule/dispatch 产生全部三个值；docker 排除两个开关组；每个矩阵值在两个任务上映射到期望的一对环境变量值。既有的任务结构 pin（install 重试清单、artifact 时限、单一 build）不变，因为没有增删任务。
 
 **headless 对拍的内核维度也被强制。**headless 对拍会 stub `QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP` 并用按臂设置强制两臂，但把 `QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP` 留给了环境。在新的内核组里这个变量是 `1`，共享臂就会悄悄跑内核，套件对比的就和其他组不是同一对了。套件现在把内核变量也 stub 成 undefined，让它在每个组里都测量「旧路径 vs 共享过程式路径」；内核路径仍由套件里继承组环境的其他用例跑到。ACP 与 TUI 对拍的 off 臂把 unified 变量强制为 `0`（切片 2）而不是留空，因此默认值开启后仍对比「旧路径 vs 共享路径」；ACP 对拍不读内核变量，TUI 对拍从零构建子进程环境（`inheritEnv: false`）——两者都不泄漏内核维度。
