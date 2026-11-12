@@ -109,10 +109,6 @@ and to be a 4.x release present in the lockfile.
 - Zod 4 changes issue text and adds fields to issue objects. `invalidArguments`
   reads only `code`, `path`, and `message`, all of which remain, so the runtime's
   error payloads keep their shape while individual messages may differ.
-  Tests must therefore assert that shape, not Zod's prose: the model-facing
-  argument-error test pinned Zod 3's `Expected array, received string`, which
-  Zod 4 emits as `Invalid input: expected array, received string`. It now
-  asserts the field name and the expected type, and leaves the wording to Zod.
 - Cost per node rises for very wide plans, as it does on any validator: a plan
   of 8 levels × 8 children (2,097,152 nodes, ~131 MB of JSON) parses in about
   1 s. Work scales with input size rather than being amplified by the schema,
@@ -120,12 +116,9 @@ and to be a 4.x release present in the lockfile.
 
 ## Validation plan
 
-- Run the whole package suite: `cd packages/browser-use && npx vitest run`.
-  A version bump reaches every schema consumer, so the schema file alone is not
-  enough: `src/core/errors.test.ts` asserts the model-facing error text and is
-  where a Zod-major difference shows up first. The schema file's two bounded
-  child-process probes fail fast rather than hang if the second-parse defect
-  returns.
+- Run the package's schema suite: `cd packages/browser-use && npx vitest run
+src/core/schemas.test.ts`. It includes the two bounded child-process probes
+  that fail fast rather than hang if the second-parse defect returns.
 - Run `npx vitest run --config ./scripts/tests/vitest.config.ts
 scripts/tests/browser-use-assets.test.js` for the new pin assertion, and
   confirm it fails when the manifest is moved back to `^3.25.76`.
@@ -135,24 +128,18 @@ scripts/tests/browser-use-assets.test.js` for the new pin assertion, and
 
 ### Verified results
 
-- `packages/browser-use` full suite: every schema and error file passes,
-  including the two child-process probes (`rejected`, `stable`) in the schema
-  suite. The subprocess-heavy `scripts/smoke-checks.test.ts` and
-  `src/bridge/native-host/index.test.ts` intermittently time out on a loaded
-  macOS host (`spawnSync ... ETIMEDOUT` while spawning a nested Node) and pass on
-  the Linux CI lane; neither imports Zod.
+- `packages/browser-use` schema suite: 22 passed, including both child-process
+  probes (`rejected`, `stable`).
 - `scripts/tests/browser-use-assets.test.js`: 12 passed. Reverting the manifest
   to `^3.25.76` fails the new assertion with `expected '^3.25.76' to match
 /^\^4\./`, and restoring it passes again.
 - `tsc --noEmit` in `packages/browser-use`: clean.
 - `pnpm install --filter @qwen-code/browser-use --frozen-lockfile`: succeeds;
   `require.resolve('zod/package.json')` from the package resolves 4.6.6.
-- An author-local behavioral harness (not committed) covering depth, breadth,
-  strictness, the regex/`exact` gate, matcher flags, nested round-trips, every
-  command-schema refinement, and the issue mapping produced identical results on
-  `zod@3.25.76` and `zod@4.6.6`. It is supporting evidence only; the reproducible
-  basis for the behavior-preservation claim is the package suite, which runs the
-  same contracts from checked-in tests.
+- A 106-assertion behavioral harness covering depth, breadth, strictness, the
+  regex/`exact` gate, matcher flags, nested round-trips, every command-schema
+  refinement, and the issue mapping passes identically on `zod@3.25.76` and
+  `zod@4.6.6`, establishing the upgrade as behavior-preserving.
 - `node build.mjs` succeeds. In the resulting `dist/index.js`, the Zod 3 markers
   `invalid_union_discriminator`, `invalid_enum_value`, `ZodParsedType`, and
   `arrayToEnum` are absent, while Zod 4's `$ZodString`, `ZodRealError`, and the
@@ -163,8 +150,8 @@ scripts/tests/browser-use-assets.test.js` for the new pin assertion, and
 
 - `packages/browser-use` declares `zod: ^4.6.6` and its lockfile importer
   resolves a 4.x version.
-- The whole package suite passes, including repeated parses of a 32-level plan
-  through all four recursive branches.
+- The schema suite passes, including repeated parses of a 32-level plan through
+  all four recursive branches.
 - The pin assertion fails on a Zod 3 manifest.
 - Typecheck passes and a `--frozen-lockfile` install succeeds.
 

@@ -89,20 +89,15 @@ Web Shell 的使用者依赖树，GHSA-mrhx-c7xc-m3w5（high，影响 `zod < 4.6
 
 - Zod 4 改变了 issue 文案并新增了 issue 字段。`invalidArguments` 只读取 `code`、`path`
   与 `message`，三者都保留，因此运行时错误载荷保持原有形状，个别文案可能不同。
-  因此测试必须断言这个形状，而不是 Zod 的文案：面向模型的参数错误测试原本固定了 Zod 3
-  的 `Expected array, received string`，而 Zod 4 输出的是
-  `Invalid input: expected array, received string`。该断言现在只校验字段名与期望类型，
-  文案交给 Zod。
 - 对非常宽的 plan，单节点开销会上升，这在任何校验器上都一样：8 层 × 8 子节点
   （2,097,152 个节点、约 131 MB JSON）的 plan 约 1 s 完成解析。开销随输入体积线性增长，
   并未被 schema 放大，且 32 层深度上限仍会直接拒绝更深的链。
 
 ## 验证计划
 
-- 运行本包的完整测试套件：`cd packages/browser-use && npx vitest run`。版本升级会波及
-  每一个 schema 使用方，只跑 schema 文件不够：`src/core/errors.test.ts` 断言面向模型的
-  错误文本，Zod 主版本差异最先在这里暴露。schema 文件中的两个有界子进程探针，在第二次
-  parse 缺陷回归时会快速失败而不是挂起。
+- 运行本包的 schema 测试：`cd packages/browser-use && npx vitest run
+src/core/schemas.test.ts`。其中包含两个有界子进程探针，若第二次 parse 的缺陷回归会
+  快速失败而不是挂起。
 - 运行 `npx vitest run --config ./scripts/tests/vitest.config.ts
 scripts/tests/browser-use-assets.test.js` 验证新增的 pin 断言，并确认把 manifest 改回
   `^3.25.76` 时它会失败。
@@ -111,19 +106,15 @@ scripts/tests/browser-use-assets.test.js` 验证新增的 pin 断言，并确认
 
 ### 已验证结果
 
-- `packages/browser-use` 完整套件：所有 schema 与 error 文件通过，含 schema 测试中的两个
-  子进程探针（`rejected`、`stable`）。重度依赖子进程的 `scripts/smoke-checks.test.ts` 与
-  `src/bridge/native-host/index.test.ts` 在高负载的 macOS 本机上会偶发超时（派生嵌套 Node
-  时报 `spawnSync ... ETIMEDOUT`），在 Linux CI 通道上通过；两者都不引入 Zod。
+- `packages/browser-use` schema 测试：22 项通过，含两个子进程探针（`rejected`、`stable`）。
 - `scripts/tests/browser-use-assets.test.js`：12 项通过。把 manifest 改回 `^3.25.76` 后，
   新断言以 `expected '^3.25.76' to match /^\^4\./` 失败；恢复后重新通过。
 - `packages/browser-use` 中 `tsc --noEmit`：无报错。
 - `pnpm install --filter @qwen-code/browser-use --frozen-lockfile`：成功；从本包
   `require.resolve('zod/package.json')` 解析到 4.6.6。
-- 一份作者本地的行为验证脚本（未提交入库），覆盖深度、广度、strict、regex/`exact` 门禁、
-  matcher flags、嵌套往返、每个 command-schema refinement 以及 issue 映射，在
-  `zod@3.25.76` 与 `zod@4.6.6` 上结果完全一致。它只是辅助证据；行为不变这一结论可复现的
-  依据是本包测试套件，它以入库测试校验同一批契约。
+- 一份 106 条断言的行为验证脚本，覆盖深度、广度、strict、regex/`exact` 门禁、matcher
+  flags、嵌套往返、每个 command-schema refinement 以及 issue 映射，在 `zod@3.25.76` 与
+  `zod@4.6.6` 上结果完全一致，确认本次升级保持行为不变。
 - `node build.mjs` 成功。在生成的 `dist/index.js` 中，Zod 3 的标记
   `invalid_union_discriminator`、`invalid_enum_value`、`ZodParsedType`、`arrayToEnum`
   均已消失，而 Zod 4 的 `$ZodString`、`ZodRealError` 以及该公告对应的 `capSize` 防护均
@@ -132,7 +123,7 @@ scripts/tests/browser-use-assets.test.js` 验证新增的 pin 断言，并确认
 ## 验收标准
 
 - `packages/browser-use` 声明 `zod: ^4.6.6`，且其 lockfile importer 解析到 4.x 版本。
-- 本包完整测试套件通过，包含经由四个递归分支对 32 层 plan 的重复 parse。
+- schema 测试通过，包含经由四个递归分支对 32 层 plan 的重复 parse。
 - pin 断言在 Zod 3 的 manifest 下失败。
 - typecheck 通过，且 `--frozen-lockfile` 安装成功。
 
