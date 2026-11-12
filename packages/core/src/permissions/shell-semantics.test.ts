@@ -184,6 +184,91 @@ describe('extractShellOperations', () => {
       'date >> /var/log/app.log',
       [write('/var/log/app.log')],
     ],
+    // `>|` is the clobber override: the same write as `>`, spelled to defeat
+    // `noclobber`. Not reading it loses a write to a protected path.
+    [
+      'redirect >|: write_file',
+      'echo hello >| /tmp/out.txt',
+      [write('/tmp/out.txt')],
+    ],
+    [
+      'redirect >| without space: write_file',
+      'echo hello >|/tmp/out.txt',
+      [write('/tmp/out.txt')],
+    ],
+    [
+      'redirect 1>|: write_file',
+      'echo hello 1>| /tmp/out.txt',
+      [write('/tmp/out.txt')],
+    ],
+    [
+      'redirect 1>| without space: write_file',
+      'echo hello 1>|/tmp/out.txt',
+      [write('/tmp/out.txt')],
+    ],
+    [
+      'redirect 2>|: write_file',
+      'echo hi 2>| /tmp/err.txt',
+      [write('/tmp/err.txt')],
+    ],
+    [
+      'redirect 2>| without space: write_file',
+      'echo hi 2>|/tmp/err.txt',
+      [write('/tmp/err.txt')],
+    ],
+    [
+      'redirect >|: quoted target',
+      "echo hello >| '/tmp/my file.txt'",
+      [write('/tmp/my file.txt')],
+    ],
+    [
+      'redirect >|: network pseudo-device opens no file',
+      'echo hello >| /dev/tcp/example.com/80',
+      [],
+    ],
+    [
+      'redirect >|: a quoted operator stays a literal argument',
+      'echo "hi >| nope.txt"',
+      [],
+    ],
+    // A `|` inside the operator is a literal filename character, not a shell
+    // pipe: `>"|"file` writes a file called `|file`, and `>"|" out.txt` writes a
+    // file called `|`. Masking `|` along with `<>&` keeps the quoted forms on
+    // the plain `>` branch (base parity) instead of reading them as `>|` and
+    // dropping the leading `|` from the reported target.
+    [
+      'redirect: a quoted pipe in the target is part of the filename',
+      'echo \'{}\' >"|"file',
+      [write(`${CWD}/|file`)],
+    ],
+    [
+      'redirect: a quoted pipe standing alone names the file',
+      'echo hi >"|" out.txt',
+      [write(`${CWD}/|`)],
+    ],
+    [
+      'redirect: an escaped pipe in the target is part of the filename',
+      'echo hi >\\|file',
+      [write(`${CWD}/|file`)],
+    ],
+    [
+      'redirect: a quoted pipe plus .. cannot climb out of a denied path',
+      'echo \'{}\' >"|/../".qwen/settings.json',
+      [write(SETTINGS)],
+    ],
+    // The other spellings: a single-quoted `|` keeps `|x/` in the resolved
+    // path, and a quoted word ending in `>` must not turn the plain redirect
+    // that follows it into a clobber.
+    [
+      'redirect: a single-quoted pipe is part of the filename',
+      "echo '{}' >'|x/'.qwen/settings.json",
+      [write(`${CWD}/|x/.qwen/settings.json`)],
+    ],
+    [
+      'redirect: a quoted word before the redirect does not invent a clobber',
+      'echo hi \'>\'>"|/../".qwen/settings.json',
+      [write(SETTINGS)],
+    ],
     [
       'curl: extracts domain',
       'curl https://api.example.com/data',
@@ -605,6 +690,13 @@ describe('extractShellOperations', () => {
     ["echo x $'\\x26'>out8.txt", 'out8.txt'],
     ["echo x '>'&>out9.txt", 'out9.txt'],
     ['echo x "&"&>out10.txt', 'out10.txt'],
+    // `|` belongs to the same set: a quoted or escaped pipe ends the word and
+    // the adjacent unquoted `>` is still a redirect. Without it bash wrote the
+    // file while the analysis reported nothing at all.
+    ['echo x "|">out11.txt', 'out11.txt'],
+    ["echo x '|'>out12.txt", 'out12.txt'],
+    ['echo x \\|>out13.txt', 'out13.txt'],
+    ['echo \'{}\' "|">.qwen/settings.json', '.qwen/settings.json'],
   ])(
     'a quoted operator before a real redirect keeps the write: %s',
     (command, file) => {
@@ -920,6 +1012,57 @@ describe('extractShellOperationsAcrossCommand', () => {
       'cd .qwen && cd ..',
       [],
     ],
+    // bash runs `echo … >| file` as ONE command. Splitting at the `|` of the
+    // clobber override handed the permission path two segments and neither
+    // carried the write, so a protected-path write went unseen.
+    [
+      'reports the clobber redirect as a write to a protected path',
+      "echo '{}' >| .qwen/settings.json",
+      [write(REPO_SETTINGS)],
+    ],
+    [
+      'reports the clobber redirect without a space before the target',
+      "echo '{}' >|.qwen/settings.json",
+      [write(REPO_SETTINGS)],
+    ],
+    [
+      'tracks literal `cd` before a clobber redirect',
+      "cd .qwen && echo '{}' >| settings.json",
+      [write(REPO_SETTINGS)],
+    ],
+    // A lone CR right after the clobber operator is the whole redirect target:
+    // bash writes a file named `\r`, so it must not be trimmed as a line
+    // ending. `1>|` and `2>|` name it exactly as `>|` does.
+    [
+      'reports the CR target behind `>|` as a write',
+      'cat >|\r\necho hi',
+      [write('/repo/\r')],
+    ],
+    [
+      'reports the CR target behind `1>|` as a write',
+      'cat 1>|\r\necho hi',
+      [write('/repo/\r')],
+    ],
+    [
+      'reports the CR target behind `2>|` as a write',
+      'cat 2>|\r\necho hi',
+      [write('/repo/\r')],
+    ],
+    [
+      'still splits the real pipe that follows a clobber redirect',
+      'echo hi >| out.txt | cat',
+      [write('/repo/out.txt')],
+    ],
+    [
+      'still splits the pipe after an escaped `>` (a literal argument)',
+      'echo hi \\>| cat',
+      [],
+    ],
+    [
+      'still splits the pipe after a quoted clobber operator',
+      "echo 'hi >| x' | cat",
+      [],
+    ],
   ])('%s', (_title, command, expected) => {
     expect(across(command)).toEqual(expected);
   });
@@ -950,6 +1093,13 @@ describe('extractShellOperationsAcrossCommand', () => {
       'cd "$QWEN_HOME" && echo hi 1>/tmp/out.txt',
       'cd "$QWEN_HOME" && echo hi >&/tmp/out.txt',
       'cd "$QWEN_HOME" && echo hi 1>&/tmp/out.txt',
+      // `>|` is the same write as `>`, so it must reach the same verdict: the
+      // bare `>` alternative matched first here and left `|/tmp/out.txt`
+      // behind, which is not shell-absolute, so this form alone came out
+      // `pathMayDependOnCwd: true`.
+      'cd "$QWEN_HOME" && echo hi >|/tmp/out.txt',
+      'cd "$QWEN_HOME" && echo hi 1>|/tmp/out.txt',
+      'cd "$QWEN_HOME" && echo hi 2>|/tmp/out.txt',
     ]) {
       expect(across(command)).toEqual([uncertainWrite('/tmp/out.txt', false)]);
     }
