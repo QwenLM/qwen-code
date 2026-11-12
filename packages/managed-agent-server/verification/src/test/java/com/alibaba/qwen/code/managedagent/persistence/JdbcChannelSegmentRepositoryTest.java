@@ -246,9 +246,14 @@ class JdbcChannelSegmentRepositoryTest {
 
     @Test
     void listByDeliveryReadsTheWholePageGroupedByDelivery() {
-        segments.plan(tenant, channel, "d1", List.of(
-                new SegmentLedger("d1:1", 1, null),
-                new SegmentLedger("d1:0", 0, "m0")));
+        // Plan twelve segments in reverse ordinal order: the id order is
+        // 11..0 and the segment-id index order is 0,1,10,11,2,..., so only an
+        // ordinal-ordered page read returns 0..11.
+        segments.plan(tenant, channel, "d1",
+                java.util.stream.IntStream.range(0, 12)
+                        .mapToObj(i -> new SegmentLedger("d1:" + (11 - i),
+                                11 - i, (11 - i) == 0 ? "m0" : null))
+                        .toList());
         segments.plan(tenant, channel, "d3",
                 List.of(new SegmentLedger("d3:0", 0, null)));
         var byDelivery = segments.listByDelivery(tenant, channel,
@@ -256,7 +261,7 @@ class JdbcChannelSegmentRepositoryTest {
         assertThat(byDelivery.keySet()).containsExactly("d1", "d2", "d3");
         assertThat(byDelivery.get("d1"))
                 .extracting(SegmentLedger::ordinal)
-                .containsExactly(0, 1);
+                .containsExactly(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11);
         assertThat(byDelivery.get("d1").get(0).providerReceipt()).isEqualTo("m0");
         // A delivery with no segments keeps an empty entry, not a missing key.
         assertThat(byDelivery.get("d2")).isEmpty();

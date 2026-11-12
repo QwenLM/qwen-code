@@ -753,7 +753,7 @@ class ManagedChannelServiceTest {
                 .containsExactly(deliveryId + ":0", deliveryId + ":1",
                         deliveryId + ":2");
         assertThat(service.ledger(TENANT, channel, deliveryId)).get()
-                .extracting(row -> row.state()).isNotEqualTo("delivered");
+                .extracting(row -> row.state()).isEqualTo("partial");
     }
 
     @Test
@@ -832,6 +832,53 @@ class ManagedChannelServiceTest {
                 .state()).isEqualTo("delivered");
         // The receipts are durable on the re-planned rows even though the
         // delivery reached a terminal state the reconciler will not revisit.
+        assertThat(segmentLedger.list(TENANT, channel, deliveryId))
+                .extracting(SegmentLedger::providerReceipt)
+                .containsExactly("<m0@example.com>", "<m1@example.com>",
+                        "<m2@example.com>");
+    }
+
+    @Test
+    void aCompleteReceiptedLedgerKeepsTheReadForATerminalRecordRefusal() {
+        InboundAdmission admitted = service.submitInbound(TENANT, channel,
+                event(1, "1700:118", "please reply"));
+        String deliveryId = admitted.inputId() + ":reply";
+        plannedDelivery(admitted.sessionId(), deliveryId, admitted.routeId(),
+                "The build is green.", 3);
+        service.claimDeliveries(TENANT, channel, 16);
+        service.receipt(TENANT, channel, deliveryId,
+                new ReceiptRequest("accepted", 0, "<m0@example.com>", null));
+        service.receipt(TENANT, channel, deliveryId,
+                new ReceiptRequest("accepted", 1, "<m1@example.com>", null));
+        service.receipt(TENANT, channel, deliveryId,
+                new ReceiptRequest("accepted", 2, "<m2@example.com>", null));
+        // The crash window with a terminal refusal: every segment receipt
+        // landed and the ledger lags at partial, but the record's own settle
+        // committed rejected. The record stays the authority.
+        jdbc.update("UPDATE ma_delivery SET transport_state = 'partial',"
+                        + " provider_receipt_json = NULL"
+                        + " WHERE tenant_id = ? AND delivery_id = ?",
+                TENANT, deliveryId);
+        jdbc.update("UPDATE ma_session_record SET delivery_state = 'rejected'"
+                        + " WHERE tenant_id = ? AND session_id = ? AND record_id = ?",
+                TENANT, admitted.sessionId(), deliveryId);
+        expire(deliveryId);
+        JdbcChannelInstanceStore observing = org.mockito.Mockito.spy(
+                new JdbcChannelInstanceStore(jdbc));
+        ManagedChannelService observingService = new ManagedChannelService(
+                observing, new JdbcChannelRouteRepository(jdbc),
+                new JdbcChannelDeliveryRepository(jdbc), segmentLedger,
+                sessions, workspaces, harness, mapper, Duration.ofMinutes(10),
+                clock::get);
+        observingService.reconcile();
+        // A complete receipted ledger does not outrank a terminal refusal: the
+        // record read runs and the ledger mirrors rejected, not delivered.
+        org.mockito.Mockito.verify(observing, org.mockito.Mockito.atLeastOnce())
+                .readResource(org.mockito.ArgumentMatchers.eq(TENANT),
+                        org.mockito.ArgumentMatchers.eq(admitted.sessionId()),
+                        org.mockito.ArgumentMatchers.anyString());
+        assertThat(service.ledger(TENANT, channel, deliveryId)).get()
+                .extracting(row -> row.state()).isEqualTo("rejected");
         assertThat(segmentLedger.list(TENANT, channel, deliveryId))
                 .extracting(SegmentLedger::providerReceipt)
                 .containsExactly("<m0@example.com>", "<m1@example.com>",
@@ -971,6 +1018,11 @@ class ManagedChannelServiceTest {
         assertThat(segmentLedger.list(TENANT, channel, resent.deliveryId()))
                 .extracting(SegmentLedger::providerReceipt)
                 .containsExactly(null, null, null);
+        // The persisted plan size is the gate's completeness proof, so the
+        // resend path must write the carried count, not zero or the original
+        // chain's length.
+        assertThat(service.ledger(TENANT, channel, resent.deliveryId())).get()
+                .extracting(row -> row.segmentCount()).isEqualTo(3);
         // A replayed resend under the same id matches the stored row and
         // converges rather than conflicting or appending.
         ResendResponse replayed = service.resend(TENANT, channel, deliveryId);
@@ -1015,6 +1067,8 @@ class ManagedChannelServiceTest {
         assertThat(segmentLedger.list(TENANT, channel, resent.deliveryId()))
                 .extracting(SegmentLedger::providerReceipt)
                 .containsExactly(null, null);
+        assertThat(service.ledger(TENANT, channel, resent.deliveryId())).get()
+                .extracting(row -> row.segmentCount()).isEqualTo(2);
         // The resent chain's settle threshold is the carried count, not the
         // original chain's length: receipting both carried segments steps
         // partial then delivered. A threshold reading the original chain's

@@ -494,11 +494,13 @@ public class ManagedChannelService {
         // a record of any state — keeps the read so planSegments heals the
         // missing tail (R5-1). The delivery row is loaded once and threaded
         // through; whenever a step occurs its returned row is adopted so the
-        // state acted on below stays fresh without a second point SELECT.
+        // state acted on below stays fresh without a second delivery-row
+        // SELECT.
         Optional<ChannelDelivery> ledger = deliveries.find(tenantId,
                 channelId, deliveryId);
         Optional<ChannelDelivery> converged = convergeFullyReceiptedFromLedger(
-                ledger, tenantId, channelId, deliveryId, claim.claimGeneration());
+                ledger, tenantId, claim.sessionId(), channelId, deliveryId,
+                claim.claimGeneration());
         if (converged.isPresent()) {
             ledger = converged;
         } else {
@@ -568,11 +570,14 @@ public class ManagedChannelService {
      * skip; a short ledger keeps the read, whose planSegments heals the missing
      * tail instead of closing the line on a truncated chain. A missing ledger
      * row or any null receipt also returns empty. The caller passes the row it
-     * already loaded, so the gate adds no extra point SELECT. Convergence stays
-     * ahead of the settle path.
+     * already loaded; the only extra lookup on the skip path is the record's
+     * state (a point query, not its LONGTEXT body). A terminal refusal
+     * (rejected or cancelled) keeps the read so the ledger mirrors the record
+     * instead of overriding it from the receipts. Convergence stays ahead of
+     * the settle path.
      */
     private Optional<ChannelDelivery> convergeFullyReceiptedFromLedger(
-            Optional<ChannelDelivery> ledger, String tenantId,
+            Optional<ChannelDelivery> ledger, String tenantId, String sessionId,
             String channelId, String deliveryId, Long claimGeneration) {
         if (ledger.isEmpty()) {
             return Optional.empty();
@@ -587,6 +592,18 @@ public class ManagedChannelService {
             return Optional.empty();
         }
         if (!"delivered".equals(ledger.get().state())) {
+            // The record still owns a terminal refusal: a rejection or
+            // cancellation that committed after the last receipt but before
+            // the ledger step must not be overwritten from the receipts. Only
+            // the record's state is looked up here; its body stays unread.
+            var record = instances.findDeliveryRecord(tenantId, sessionId,
+                    deliveryId);
+            if (record.isPresent()
+                    && ("rejected".equals(record.get().deliveryState())
+                            || "cancelled".equals(
+                                    record.get().deliveryState()))) {
+                return Optional.empty();
+            }
             return Optional.of(stepLedger(tenantId, channelId, deliveryId,
                     "delivered", ledgerSegments.getLast().providerReceipt(),
                     claimGeneration));
