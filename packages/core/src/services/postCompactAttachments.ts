@@ -19,11 +19,11 @@ import type { Content, Part } from '@google/genai';
 import { readFile, stat } from 'node:fs/promises';
 import { realpathSync } from 'node:fs';
 import { resolve as resolvePath, sep as pathSep } from 'node:path';
+import { CHARS_PER_TOKEN, estimateCjkTextTokens } from './tokenEstimation.js';
 import {
-  CHARS_PER_TOKEN,
-  estimateContextTextTokens,
-} from './tokenEstimation.js';
-import { getFunctionResponseParts } from './compactionInputSlimming.js';
+  DEFAULT_IMAGE_TOKEN_ESTIMATE,
+  getFunctionResponseParts,
+} from './compactionInputSlimming.js';
 import { escapeXml } from '../utils/xml.js';
 import { ToolNames } from '../tools/tool-names.js';
 
@@ -408,7 +408,7 @@ export async function buildFileRestorationBlocks(
       continue;
     }
     // embed — check global budget; downgrade to reference if over.
-    const fileTokens = estimateContextTextTokens(result.content);
+    const fileTokens = estimateCjkTextTokens(result.content);
     if (usedTokens + fileTokens > tokenBudget) {
       references.push(filePath);
       continue;
@@ -612,8 +612,10 @@ export interface ComposePostCompactOptions {
    * `QWEN_COMPACT_MAX_RECENT_FILES`).
    */
   maxFiles?: number;
-  /** Total token budget for embedded file contents. */
+  /** Maximum file-content budget, shared with restored images. */
   fileTokenBudget?: number;
+  /** Per-image cost shared with compression token accounting. */
+  imageTokenEstimate?: number;
   /**
    * Max recent images to restore. Defaults to
    * `POST_COMPACT_MAX_IMAGES_TO_RESTORE`. Configurable via
@@ -813,6 +815,7 @@ export async function composePostCompactHistory(
     signal,
     maxFiles = POST_COMPACT_MAX_FILES_TO_RESTORE,
     fileTokenBudget = POST_COMPACT_TOKEN_BUDGET,
+    imageTokenEstimate = DEFAULT_IMAGE_TOKEN_ESTIMATE,
     maxImages = POST_COMPACT_MAX_IMAGES_TO_RESTORE,
     planModeActive,
     runningSubagents,
@@ -822,13 +825,13 @@ export async function composePostCompactHistory(
   const filePaths = extractRecentFilePaths(history, maxFiles).filter((p) =>
     isInsideWorkspace(p, workspaceRoot),
   );
+  const images = extractRecentImages(history, maxImages);
   const fileBlocks = await buildFileRestorationBlocks(
     filePaths,
     signal,
-    fileTokenBudget,
+    Math.max(0, fileTokenBudget - images.length * imageTokenEstimate),
   );
 
-  const images = extractRecentImages(history, maxImages);
   const imageBlock = buildImageRestorationBlock(images);
 
   // Merge every file restoration block AND the image block into a

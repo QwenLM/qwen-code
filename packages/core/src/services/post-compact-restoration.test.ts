@@ -331,7 +331,7 @@ it.each([true, false])(
       trigger: 'auto',
       config,
       consecutiveFailures: 0,
-      originalTokenCount: 18_000,
+      originalTokenCount: 19_000,
     });
     expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
     expect(result.info.newTokenCount).toBeLessThan(
@@ -386,22 +386,35 @@ function compressionFixture(
   return { files, history, config, logger, summary, run };
 }
 
-it('bounds file restoration against a server-reported total window', async () => {
-  const { files, summary, run } = compressionFixture(200_000, 9);
-  summary.mockResolvedValue({
-    text: '<state_snapshot>Completed file inspections.</state_snapshot>',
-    usage: { promptTokenCount: 35_000, candidatesTokenCount: 100 },
-  } as never);
-  const result = await run({
-    originalTokenCount: 40_000,
-    observedServerCeiling: 16_384,
-    observedServerCeilingKind: 'total',
-  });
-  expect(files.filter((file) => result.text.includes(file.body))).toHaveLength(
-    2,
-  );
-  for (const file of files) expect(result.text).toContain(file.path);
-});
+it.each([
+  ['total', 'test-model'],
+  ['input', 'test-model'],
+  ['total', 'compact-model'],
+  ['input', 'compact-model'],
+] as const)(
+  'bounds restoration against a server %s ceiling with summary model %s',
+  async (observedServerCeilingKind, compactionModel) => {
+    const { files, config, summary, run } = compressionFixture(200_000, 9);
+    Object.assign(config, { getCompactionModel: () => compactionModel });
+    summary.mockResolvedValue({
+      text: '<state_snapshot>Completed file inspections.</state_snapshot>',
+      usage: { promptTokenCount: 35_000, candidatesTokenCount: 100 },
+    } as never);
+    const result = await run({
+      originalTokenCount: 40_000,
+      observedServerCeiling: 16_384,
+      observedServerCeilingKind,
+    });
+    expect(
+      files.filter((file) => result.text.includes(file.body)),
+    ).toHaveLength(2);
+    expect(result.info.newTokenCount).toBeLessThan(
+      computeThresholds(16_384).auto,
+    );
+    expect(summary.mock.calls[0][1].model).toBe(compactionModel);
+    for (const file of files) expect(result.text).toContain(file.path);
+  },
+);
 
 it('drops restored images against a server-reported total window', async () => {
   const { history, summary, run } = compressionFixture(200_000, 2);
@@ -428,15 +441,9 @@ it('drops restored images against a server-reported total window', async () => {
   expect(JSON.stringify(result.newHistory)).not.toContain('screenshot-bytes');
 });
 
-it.each([
-  { observedServerCeilingKind: 'input' as const },
-  {
-    observedServerCeilingKind: 'total' as const,
-    requestRouteKey: 'other-route',
-  },
-])(
-  'ignores ceilings outside the active total-window scope %j',
-  async (scope) => {
+it.each(['input', 'total'] as const)(
+  'ignores a server %s ceiling from another request route',
+  async (observedServerCeilingKind) => {
     const { files, summary, run } = compressionFixture(200_000, 9);
     summary.mockResolvedValue({
       text: '<state_snapshot>Completed file inspections.</state_snapshot>',
@@ -445,43 +452,83 @@ it.each([
     const result = await run({
       originalTokenCount: 40_000,
       observedServerCeiling: 16_384,
-      ...scope,
+      observedServerCeilingKind,
+      requestRouteKey: 'other-route',
     });
     for (const file of files) expect(result.text).toContain(file.body);
   },
 );
 
-it('reserves room for the pending tool result when testing restoration overflow', async () => {
-  const { files, history, summary, run } = compressionFixture();
-  history[0] = userText('Earlier conversation '.repeat(1000));
-  history.push(content('model', fnCall('pending_tool', {}, 'pending-call')));
-  const pendingUserMessage = content(
-    'user',
-    fnResponse(
-      'pending_tool',
-      {
-        output: 'x'.repeat(20_000),
-      },
-      'pending-call',
-    ),
-  );
-  summary.mockResolvedValue({
-    text: '<state_snapshot>Completed file inspections.</state_snapshot>',
-    usage: { promptTokenCount: 18_000, candidatesTokenCount: 100 },
-  } as never);
-  const result = await run({ trigger: 'auto', pendingUserMessage });
-  expect(result.info.newTokenCount).toBeGreaterThan(6000);
-  expect(result.info.newTokenCount).toBeLessThan(6600);
-  expect(
-    result.info.newTokenCount + estimateContentTokens([pendingUserMessage]),
-  ).toBeLessThan(computeThresholds(16_000).auto);
-  for (const file of files) expect(result.text).not.toContain(file.body);
-  expect(result.newHistory?.at(-1)?.parts).toContainEqual(
-    expect.objectContaining({
-      functionCall: expect.objectContaining({ id: 'pending-call' }),
-    }),
-  );
-});
+it.each([
+  { character: 'x', length: 20_000, original: 18_000, kept: true },
+  { character: '中', length: 4_000, original: 24_000, kept: false },
+])(
+  'counts a pending $character tool result once with a CJK correction',
+  async ({ character, length, original, kept }) => {
+    const { files, history, summary, run } = compressionFixture();
+    history[0] = userText('Earlier conversation '.repeat(1000));
+    history.push(content('model', fnCall('pending_tool', {}, 'pending-call')));
+    const pendingUserMessage = content(
+      'user',
+      fnResponse(
+        'pending_tool',
+        { output: character.repeat(length) },
+        'pending-call',
+      ),
+    );
+    summary.mockResolvedValue({
+      text: '<state_snapshot>Completed file inspections.</state_snapshot>',
+      usage: { promptTokenCount: 18_000, candidatesTokenCount: 100 },
+    } as never);
+    const result = await run({
+      trigger: 'auto',
+      pendingUserMessage,
+      originalTokenCount: original,
+    });
+    expect(result.info.newTokenCount).toBeLessThan(
+      computeThresholds(16_000).auto,
+    );
+    expect(
+      files.filter((file) => result.text.includes(file.body)),
+    ).toHaveLength(kept ? 2 : 0);
+    for (const file of files)
+      expect(result.text.includes(file.path)).toBe(kept);
+    expect(result.newHistory?.at(-1)?.parts).toContainEqual(
+      expect.objectContaining({
+        functionCall: expect.objectContaining({ id: 'pending-call' }),
+      }),
+    );
+  },
+);
+
+it.each(['x', '中'])(
+  'counts a pending %s tool result once when summary usage is missing',
+  async (character) => {
+    const { files, history, summary, run } = compressionFixture();
+    history[0] = userText('Earlier conversation '.repeat(1000));
+    history.push(content('model', fnCall('pending_tool', {}, 'pending-call')));
+    const pendingUserMessage = content(
+      'user',
+      fnResponse(
+        'pending_tool',
+        { output: character.repeat(character === 'x' ? 20_000 : 4_000) },
+        'pending-call',
+      ),
+    );
+    summary.mockResolvedValue({
+      text: '<state_snapshot>Completed file inspections.</state_snapshot>',
+    } as never);
+    const result = await run({
+      trigger: 'auto',
+      pendingUserMessage,
+      originalTokenCount:
+        estimateContentTokens(history) + (character === 'x' ? 6000 : 8000),
+    });
+    expect(
+      files.filter((file) => result.text.includes(file.body)),
+    ).toHaveLength(character === 'x' ? 2 : 0);
+  },
+);
 
 it('charges CJK content against the token restoration budget', async () => {
   const { files, run } = compressionFixture(16_000, 5, '中');
@@ -506,11 +553,11 @@ it('keeps a substantial summary in the count when removing restoration', async (
     text: `<state_snapshot>${'s'.repeat(16_000)}</state_snapshot>`,
     usage: { promptTokenCount: 15_000, candidatesTokenCount: 4_000 },
   } as never);
-  const result = await run();
+  const result = await run({ originalTokenCount: 19_000 });
   expect(result.text).toContain('s'.repeat(16_000));
   expect(JSON.stringify(result.newHistory)).not.toContain('screenshot-bytes');
-  expect(result.info.newTokenCount).toBeGreaterThan(7_800);
-  expect(result.info.newTokenCount).toBeLessThan(8_300);
+  expect(result.info.newTokenCount).toBeGreaterThan(8_800);
+  expect(result.info.newTokenCount).toBeLessThan(9_300);
 });
 
 it('preserves summary accounting for CJK history when usage is missing', async () => {
@@ -541,17 +588,125 @@ it.each([undefined, 0.5])(
   },
 );
 
-it('logs attachment removal after the overflow gate fires', async () => {
+it.each(['error', 'nested'])(
+  'corrects CJK in a pending tool %s payload',
+  async (carrier) => {
+    const { files, history, summary, run } = compressionFixture();
+    history.push(content('model', fnCall('pending_tool', {}, 'pending-call')));
+    const response = fnResponse('pending_tool', {}, 'pending-call');
+    if (carrier === 'error') {
+      response.functionResponse!.response = { error: '中'.repeat(4000) };
+    } else {
+      Object.assign(response.functionResponse!, {
+        parts: [
+          { text: '中'.repeat(4000) },
+          { inlineData: { mimeType: 'image/png', data: 'bytes' } },
+        ],
+      });
+    }
+    summary.mockResolvedValue({
+      text: '<state_snapshot>Completed file inspections.</state_snapshot>',
+      usage: { promptTokenCount: 18_000, candidatesTokenCount: 100 },
+    } as never);
+    const result = await run({
+      trigger: 'auto',
+      originalTokenCount: carrier === 'nested' ? 22_400 : 24_000,
+      pendingUserMessage: content('user', response),
+    });
+    for (const file of files) expect(result.text).not.toContain(file.body);
+  },
+);
+
+it('logs the threshold, pending correction, and counts on attachment removal', async () => {
   const { history, logger, run } = compressionFixture();
-  history.push(
-    content(
+  history.push(content('model', fnCall('pending_tool', {}, 'pending-call')));
+  const result = await run({
+    trigger: 'auto',
+    pendingUserMessage: content(
       'user',
-      ...Array.from({ length: 3 }, () => ({
-        inlineData: { mimeType: 'image/png', data: 'screenshot-bytes' },
-      })),
+      fnResponse('pending_tool', { output: '中'.repeat(4000) }, 'pending-call'),
     ),
+  });
+  expect(logger.debug).toHaveBeenCalledWith(
+    expect.stringContaining('reached the auto threshold 13600'),
   );
-  const result = await run();
-  expect(JSON.stringify(result.newHistory)).not.toContain('screenshot-bytes');
-  expect(logger.debug).toHaveBeenCalledWith(expect.stringMatching(/restor/i));
+  expect(logger.debug).toHaveBeenCalledWith(
+    expect.stringContaining('5000 pending CJK correction'),
+  );
+  expect(logger.debug).toHaveBeenCalledWith(
+    expect.stringMatching(/post-compression count \d+ -> \d+/),
+  );
+  expect(logger.debug).toHaveBeenCalledWith(
+    expect.stringContaining(`-> ${result.info.newTokenCount}`),
+  );
 });
+
+it('accepts shrinking CJK restoration when summary usage is missing', async () => {
+  const { history, files, config, chat } = restorationFixture(
+    200_000,
+    1,
+    20_000,
+    '中',
+  );
+  history[0] = userText('x'.repeat(30_000));
+  vi.spyOn(sideQuery, 'runSideQuery').mockResolvedValue({
+    text: '<state_snapshot>Completed file inspections.</state_snapshot>',
+  } as never);
+  const result = await new ChatCompressionService().compress(chat, {
+    promptId: 'cjk-restoration-accounting',
+    force: true,
+    config,
+    consecutiveFailures: 0,
+    originalTokenCount: 55_000,
+  });
+  expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+  expect(result.info.newTokenCount).toBeLessThan(55_000);
+  expect(historyText(result.newHistory)).toContain(files[0].body);
+});
+
+it.each(['я', 'é', 'α', 'א', 'ท'])(
+  'restores non-CJK %s text within its character-based budget',
+  async (character) => {
+    const { files } = restorationFixture(16_000, 1, 6000, character);
+    const blocks = await buildFileRestorationBlocks(
+      files.map((file) => file.path),
+      undefined,
+      4000,
+    );
+    expect(historyText(blocks)).toContain(files[0].body);
+  },
+);
+
+it.each([
+  { maxImages: 0, imageTokenEstimate: 1600, embedded: 2 },
+  { maxImages: 3, imageTokenEstimate: 1600, embedded: 0 },
+  { maxImages: 3, imageTokenEstimate: 500, embedded: 1 },
+])(
+  'reserves $imageTokenEstimate tokens for each of $maxImages restored images',
+  async ({ maxImages, imageTokenEstimate, embedded }) => {
+    const { history, files, config, run } = compressionFixture();
+    vi.spyOn(config, 'getChatCompression').mockReturnValue({
+      imageTokenEstimate,
+      maxRecentImagesToRetain: maxImages,
+    });
+    history.push(
+      content(
+        'user',
+        ...Array.from({ length: 3 }, () => ({
+          inlineData: { mimeType: 'image/png', data: 'screenshot-bytes' },
+        })),
+      ),
+    );
+    const result = await run();
+    const text = result.text;
+    expect(files.filter((file) => text.includes(file.body))).toHaveLength(
+      embedded,
+    );
+    for (const file of files) expect(text).toContain(file.path);
+    expect(
+      (result.newHistory ?? [])
+        .flatMap((entry) => entry.parts ?? [])
+        .filter((part) => part.inlineData),
+    ).toHaveLength(maxImages);
+  },
+);

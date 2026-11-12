@@ -28,6 +28,7 @@ import { makeChatCompressionEvent } from '../telemetry/types.js';
 import { PreCompactTrigger, PostCompactTrigger } from '../hooks/types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
+  getFunctionResponseParts,
   resolveCompactionTuning,
   resolveSlimmingConfig,
   slimCompactionInput,
@@ -35,7 +36,7 @@ import {
 import {
   CHARS_PER_TOKEN,
   estimateContentTokens,
-  estimateContextTextTokens,
+  estimateCjkTextTokens,
   estimatePromptTokens,
 } from './tokenEstimation.js';
 import {
@@ -145,43 +146,32 @@ export const HARD_BUFFER = 3_000;
  */
 export const MAX_CONSECUTIVE_FAILURES = 3;
 
-const CJK_CHAR_TOKEN_MULTIPLIER = 1.5;
-const CJK_CHAR_PATTERN =
-  /[\u3040-\u30ff\u3400-\u9fff\uf900-\ufaff\uac00-\ud7af]/g;
-
 function estimatePostCompactTokens(
   contents: Content[],
   imageTokenEstimate: number,
 ): number {
-  const text = contents
-    .flatMap((content) => content.parts ?? [])
-    .map((part) => part.text ?? '')
-    .join('');
+  const texts: string[] = [];
+  const parts = contents.flatMap((content) => content.parts ?? []);
+  for (const part of parts) {
+    if (part.inlineData || part.fileData) continue;
+    if (typeof part.text === 'string') {
+      texts.push(part.text);
+    } else if (part.functionResponse) {
+      const output = part.functionResponse.response?.['output'];
+      const error = part.functionResponse.response?.['error'];
+      if (typeof output === 'string') texts.push(output);
+      else if (typeof error === 'string') texts.push(error);
+      parts.push(...(getFunctionResponseParts(part) ?? []));
+    } else {
+      texts.push(JSON.stringify(part));
+    }
+  }
+  const text = texts.join('');
   return (
     estimateContentTokens(contents, imageTokenEstimate) +
-    estimateContextTextTokens(text) -
+    estimateCjkTextTokens(text) -
     Math.ceil(text.length / CHARS_PER_TOKEN)
   );
-}
-
-function estimateSummaryOutputTokens(
-  summary: string,
-  imageTokenEstimate: number,
-): number {
-  const genericEstimate = estimateContentTokens(
-    [{ role: 'model', parts: [{ text: summary }] }],
-    imageTokenEstimate,
-  );
-  const cjkCharCount = summary.match(CJK_CHAR_PATTERN)?.length ?? 0;
-  if (cjkCharCount === 0) {
-    return genericEstimate;
-  }
-
-  const nonCjkCharCount = Math.max(0, summary.length - cjkCharCount);
-  const cjkAwareEstimate =
-    Math.ceil(nonCjkCharCount / CHARS_PER_TOKEN) +
-    Math.ceil(cjkCharCount * CJK_CHAR_TOKEN_MULTIPLIER);
-  return Math.max(genericEstimate, cjkAwareEstimate);
 }
 
 /**
@@ -1171,10 +1161,7 @@ export class ChatCompressionService {
     }
     if (compressionOutputTokenCount === undefined && !isSummaryEmpty) {
       outputCountIsEstimated = true;
-      compressionOutputTokenCount = estimateSummaryOutputTokens(
-        summary,
-        slimmingConfig.imageTokenEstimate,
-      );
+      compressionOutputTokenCount = estimateCjkTextTokens(summary);
       config
         .getDebugLogger()
         .warn(
@@ -1304,8 +1291,16 @@ export class ChatCompressionService {
         lastCurated.parts?.some((p) => !!p.functionCall)
           ? curatedHistory.slice(0, -1)
           : curatedHistory;
+      // Restoration goes back to the main request, including when its
+      // summary used another model or the server limited only prompt input.
+      const restorationContextCeiling =
+        opts.observedServerCeiling &&
+        (opts.requestRouteKey === undefined ||
+          opts.requestRouteKey === config.getModelRouteIdentity())
+          ? Math.min(contextLimit, opts.observedServerCeiling)
+          : contextLimit;
       const restorationThreshold = computeThresholds(
-        reactiveContextCeiling,
+        restorationContextCeiling,
         config.getAutoCompactThreshold(),
       ).auto;
 
@@ -1320,7 +1315,7 @@ export class ChatCompressionService {
             signal,
             fileTokenBudget: Math.min(
               POST_COMPACT_TOKEN_BUDGET,
-              Math.floor(reactiveContextCeiling / 4),
+              Math.floor(restorationContextCeiling / 4),
               Math.floor(restorationThreshold / 2),
             ),
             // A payload-overflow compaction (#10380) exists because the
@@ -1336,6 +1331,7 @@ export class ChatCompressionService {
                 ? 0
                 : tuning.maxRecentFiles,
             maxImages: opts.requestPayloadTooLarge ? 0 : tuning.maxRecentImages,
+            imageTokenEstimate: slimmingConfig.imageTokenEstimate,
             // Restore plan-mode reminder + running-subagent snapshot so the
             // post-compact agent does not lose either piece of mid-session
             // state. Both reduce to no-ops when the corresponding source is
@@ -1390,7 +1386,7 @@ export class ChatCompressionService {
       }
 
       const restoredHistory = extraHistory.slice(2); // skip [summary, model ack]
-      const restorationTokenCount = estimatePostCompactTokens(
+      const restorationTokenCount = estimateContentTokens(
         restoredHistory,
         slimmingConfig.imageTokenEstimate,
       );
@@ -1448,18 +1444,10 @@ export class ChatCompressionService {
           curatedHistory,
           slimmingConfig.imageTokenEstimate,
         );
-        // Correct restored text while keeping the summary/history delta on
-        // its existing basis, including when the summary contains CJK text.
-        const estimatedNewVisibleTokenCount =
-          estimateContentTokens(
-            extraHistory,
-            slimmingConfig.imageTokenEstimate,
-          ) +
-          restorationTokenCount -
-          estimateContentTokens(
-            restoredHistory,
-            slimmingConfig.imageTokenEstimate,
-          );
+        const estimatedNewVisibleTokenCount = estimateContentTokens(
+          extraHistory,
+          slimmingConfig.imageTokenEstimate,
+        );
         if (
           estimatedOriginalVisibleTokenCount > 0 &&
           estimatedNewVisibleTokenCount > 0
@@ -1492,10 +1480,24 @@ export class ChatCompressionService {
         }
       }
 
+      // The published count already carries pending results at char/4.
+      // Apply CJK corrections only to this gate so the inflation guard keeps
+      // comparing counts on the same basis as originalTokenCount.
+      const pendingTokenCorrection =
+        estimatePostCompactTokens(
+          visiblePendingHistory,
+          slimmingConfig.imageTokenEstimate,
+        ) - pendingToolResultTokenCount;
+      const restorationTokenCorrection =
+        estimatePostCompactTokens(
+          restoredHistory,
+          slimmingConfig.imageTokenEstimate,
+        ) - restorationTokenCount;
       if (
         canCalculateNewTokenCount &&
         extraHistory.length > 2 &&
-        newTokenCount + pendingToolResultTokenCount >= restorationThreshold
+        newTokenCount + pendingTokenCorrection + restorationTokenCorrection >=
+          restorationThreshold
       ) {
         // Zero attachment limits make this composition free of disk I/O.
         const withoutRestoration = await composePostCompactHistory(
@@ -1516,11 +1518,11 @@ export class ChatCompressionService {
         newTokenCount = Math.max(
           0,
           newTokenCount +
-            estimatePostCompactTokens(
+            estimateContentTokens(
               withoutRestoration,
               slimmingConfig.imageTokenEstimate,
             ) -
-            estimatePostCompactTokens(
+            estimateContentTokens(
               extraHistory,
               slimmingConfig.imageTokenEstimate,
             ),
@@ -1529,7 +1531,8 @@ export class ChatCompressionService {
           .getDebugLogger()
           .debug(
             `[chat-compression] dropped restored files and images: ` +
-              `${tokenCountBeforeDroppingRestoration} + ${pendingToolResultTokenCount} pending tokens ` +
+              `${tokenCountBeforeDroppingRestoration} + ${pendingTokenCorrection} pending CJK correction ` +
+              `+ ${restorationTokenCorrection} restoration CJK correction ` +
               `reached the auto threshold ${restorationThreshold}; ` +
               `post-compression count ${tokenCountBeforeDroppingRestoration} -> ${newTokenCount}`,
           );
