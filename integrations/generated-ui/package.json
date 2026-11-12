@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/generated-ui",
-  "version": "0.27.1",
+  "version": "0.27.2",
   "private": true,
   "description": "Bounded locally interactive HTML and JavaScript views over MCP Apps",
   "repository": {
@@ -41,6 +41,6 @@
     "quickjs-emscripten-core": "0.32.0",
     "typescript": "^5.4.5",
     "vitest": "^3.2.4",
-    "zod": "^3.25.0"
+    "zod": "^4.6.6"
   }
 }

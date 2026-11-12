@@ -451,6 +451,18 @@ describe('Composer', () => {
       expect(output).not.toContain('Esc to cancel');
     });
 
+    it('hides the narrow cancel hint while command cancellation is blocked', () => {
+      const uiState = createMockUIState({
+        streamingState: StreamingState.Responding,
+        terminalWidth: 25,
+        commandCancellationBlocked: true,
+      });
+
+      expect(renderComposer(uiState).lastFrame()).not.toContain(
+        'Esc to cancel',
+      );
+    });
+
     it('shows LoadingIndicator when Responding on a 31-col terminal', () => {
       const uiState = createMockUIState({
         streamingState: StreamingState.Responding,

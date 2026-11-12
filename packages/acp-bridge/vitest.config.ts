@@ -50,7 +50,10 @@ export default defineConfig({
     hookTimeout: process.env['RUNNER_NAME']?.startsWith('ecs-qwen-')
       ? 60_000
       : undefined,
-    reporters: ['default'],
+    reporters: ['default', 'junit'],
+    outputFile: {
+      junit: 'junit.xml',
+    },
     silent: true,
     // RPC-timeout exemption; see scripts/tests/unit-vitest-configs.test.ts.
     dangerouslyIgnoreUnhandledErrors: process.platform !== 'linux',

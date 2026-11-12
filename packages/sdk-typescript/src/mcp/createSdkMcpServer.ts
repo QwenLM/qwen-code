@@ -9,6 +9,7 @@
  */
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { makeListableToolSchema } from './listable-tool-schema.js';
 import type { SdkMcpToolDefinition } from './tool.js';
 import { validateToolName } from './tool.js';
 
@@ -94,10 +95,12 @@ export function createSdkMcpServer(
 
   if (tools) {
     tools.forEach((toolDef) => {
-      server.tool(
+      server.registerTool(
         toolDef.name,
-        toolDef.description,
-        toolDef.inputSchema,
+        {
+          description: toolDef.description,
+          inputSchema: makeListableToolSchema(toolDef.inputSchema),
+        },
         toolDef.handler,
       );
     });
