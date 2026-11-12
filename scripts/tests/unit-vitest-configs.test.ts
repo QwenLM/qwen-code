@@ -5,7 +5,7 @@
  */
 
 import { readFileSync, readdirSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { join, matchesGlob, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 import { parse } from 'yaml';
@@ -49,11 +49,52 @@ type ExemptionConfig = {
   test?: {
     dangerouslyIgnoreUnhandledErrors?: boolean;
     outputFile?: { junit?: string };
+    reporters?: (string | [string, unknown])[];
     testTimeout?: number;
     pool?: 'threads' | 'forks' | 'vmThreads';
     poolOptions?: { threads?: { maxThreads?: number } };
   };
 };
+
+/**
+ * Workspace directories declared by `pnpm-workspace.yaml` and `package.json`,
+ * expanded through their single `*` segment and minus the `!` exclusions. The
+ * two files are kept in lockstep by the repo, so a mismatch is a config bug
+ * and the union below is the workspace set a report can appear in.
+ */
+function declaredWorkspaceDirs(repoRoot: string): string[] {
+  const pnpm = parse(
+    readFileSync(join(repoRoot, 'pnpm-workspace.yaml'), 'utf8'),
+  ) as { packages?: string[] };
+  const pkg = JSON.parse(
+    readFileSync(join(repoRoot, 'package.json'), 'utf8'),
+  ) as { workspaces?: string[] };
+  const patterns = new Set([
+    ...(pnpm.packages ?? []),
+    ...(pkg.workspaces ?? []),
+  ]);
+  const dirs = new Set<string>();
+  const excluded = new Set<string>();
+  for (const pattern of patterns) {
+    if (pattern.startsWith('!')) {
+      excluded.add(pattern.slice(1).replace(/\/$/, ''));
+      continue;
+    }
+    if (!pattern.includes('*')) {
+      dirs.add(pattern.replace(/\/$/, ''));
+      continue;
+    }
+    const [head, tail] = pattern.split('*');
+    const base = head.replace(/\/$/, '');
+    for (const entry of readdirSync(join(repoRoot, base), {
+      withFileTypes: true,
+    })) {
+      if (!entry.isDirectory()) continue;
+      dirs.add(`${base}/${entry.name}${tail}`.replace(/\/$/, ''));
+    }
+  }
+  return [...dirs].filter((dir) => !excluded.has(dir)).sort();
+}
 
 const configs: Record<string, ExemptionConfig> = {
   'integrations/external-context': externalContextConfig,
@@ -95,6 +136,14 @@ describe('unhandled-error exemption on the platform lanes', () => {
   }
 });
 
+// The unit-test job's report steps collect every lane workspace's `junit.xml`
+// (ci.yml) relative to the repo root, and `if-no-files-found: ignore` turns a
+// wrong path into a silent no-op: the suite still runs, the artifact is just
+// empty. Pin each reporter's output to the package root so a relocated output
+// fails here, not silently in CI, and pin that every lane workspace reports at
+// all: a suite without a junit reporter stays invisible to the badge however
+// red it runs (on run 42994647525 the badge counted only the three workspaces
+// that reported).
 describe('JUnit report upload paths', () => {
   const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
   const junitConfigs = Object.entries(configs).filter(
@@ -102,7 +151,7 @@ describe('JUnit report upload paths', () => {
   );
 
   it.each(junitConfigs)(
-    '%s writes inside the package upload glob',
+    '%s writes its report at the package root',
     (name, config) => {
       expect(
         resolve(
@@ -114,6 +163,107 @@ describe('JUnit report upload paths', () => {
       ).toBe(resolve(repoRoot, name, 'junit.xml'));
     },
   );
+
+  it('every lane workspace beside scripts/tests emits a badge-visible report', async () => {
+    // configModules is cross-checked below to cover every test:ci workspace,
+    // so a new lane workspace cannot join without a report. scripts/tests is
+    // the documented exception: its report would land outside both globs,
+    // and extending the badge to the scripts suite is a separate decision.
+    for (const [name, load] of Object.entries(configModules)) {
+      if (name === 'scripts/tests') continue;
+      const config = (await load()).default;
+      const test = config.test ?? {};
+      expect(name).toMatch(/^(packages|integrations)\//);
+      const junit = test.outputFile?.junit;
+      expect(junit, `${name} emits no JUnit report`).toBeTruthy();
+      expect(
+        resolve(repoRoot, name, config.root ?? '.', junit!),
+        `${name} writes its report outside its own root`,
+      ).toBe(resolve(repoRoot, name, 'junit.xml'));
+      const reporters = test.reporters ?? ['default'];
+      expect(
+        reporters.some(
+          (reporter) =>
+            (Array.isArray(reporter) ? reporter[0] : reporter) === 'junit',
+        ),
+        `${name} does not enable the junit reporter`,
+      ).toBe(true);
+    }
+  });
+
+  it('matches every lane report with a positive glob at a bounded depth', () => {
+    // The publisher (dorny/test-reporter) splits `path` on commas and globs
+    // each segment on its own (`src/main.ts` -> `local-file-provider.ts`) with
+    // `followSymbolicLinks` on by default. Two consequences, both blockers:
+    // a `!` segment has no positive set to subtract from and matches nothing,
+    // and `**` walks through pnpm's workspace link copies, counting one
+    // report once per dependent. So the publisher lists each workspace depth
+    // explicitly, and the coupling is pinned here in both directions.
+    const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
+    const ci = parse(
+      readFileSync(join(repoRoot, '.github/workflows/ci.yml'), 'utf8'),
+    ) as {
+      jobs: Record<
+        string,
+        { steps: { name?: string; with?: { path?: string } }[] }
+      >;
+    };
+    const publisher = ci.jobs['test']?.steps.find(
+      (step) => step.name === 'Publish Test Report (for non-forks)',
+    );
+    const segments = String(publisher?.with?.path).split(',');
+    expect(
+      segments.filter((segment) => segment.startsWith('!')),
+      'a negation segment matches nothing in this action',
+    ).toEqual([]);
+    expect(
+      segments.filter((segment) => segment.includes('**')),
+      'a `**` segment follows pnpm link copies',
+    ).toEqual([]);
+
+    // Expected reports come from the workspace declarations, not from the
+    // pattern list: a workspace added at any depth joins this set and turns
+    // the coverage assertion below red until the publisher learns its depth.
+    const laneWorkspaces = Object.keys(configModules).filter(
+      (name) => name !== 'scripts/tests',
+    );
+    const declared = declaredWorkspaceDirs(repoRoot);
+    expect(
+      laneWorkspaces.filter((name) => !declared.includes(name)),
+      'lane workspace missing from pnpm-workspace.yaml/package.json',
+    ).toEqual([]);
+    const laneReports = laneWorkspaces.map((name) => `${name}/junit.xml`);
+    const declaredReports = declared.map((dir) => `${dir}/junit.xml`);
+    // Cover the whole declared workspace set, not only the lane ones: the
+    // artifact step reaches all of them through `packages/**`, so the badge
+    // must agree with the raw evidence a workspace reports into.
+    expect(
+      declaredReports.filter(
+        (path) => !segments.some((segment) => matchesGlob(path, segment)),
+      ),
+      'workspace report no publisher glob reaches',
+    ).toEqual([]);
+    expect(laneReports.length, 'lane workspace list is empty').toBeGreaterThan(
+      0,
+    );
+
+    // The other direction: every segment must reach at least one lane report,
+    // and none may reach a pnpm link copy (`packages/**` used to return 7
+    // matches for 4 reports on exactly this shape).
+    for (const segment of segments) {
+      expect(
+        declaredReports.some((path) => matchesGlob(path, segment)),
+        `${segment} matches no workspace report`,
+      ).toBe(true);
+      expect(
+        matchesGlob(
+          'packages/cli/node_modules/@qwen-code/core/junit.xml',
+          segment,
+        ),
+        `${segment} reaches a pnpm link copy`,
+      ).toBe(false);
+    }
+  });
 });
 
 // Every workspace that `npm run test:ci --workspaces` runs lands on the same

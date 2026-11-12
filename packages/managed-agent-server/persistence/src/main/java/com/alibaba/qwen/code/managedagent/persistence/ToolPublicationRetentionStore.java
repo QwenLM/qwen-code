@@ -146,12 +146,7 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
     }
 
     static Map<String, Object> lockSessionHead(JdbcTemplate jdbc, String tenant, String session) {
-        return lockSessionHead(jdbc, tenant, session, false);
-    }
-
-    private static Map<String, Object> lockSessionHead(
-            JdbcTemplate jdbc, String tenant, String session, boolean legacyMutation) {
-        return lockSessionHead(jdbc, tenant, session, legacyMutation, true);
+        return lockSessionHead(jdbc, tenant, session, false, true);
     }
 
     private static Map<String, Object> lockSessionHead(
@@ -199,6 +194,7 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
     }
 
     static void retire(JdbcTemplate jdbc, String tenant, String session, String operation) {
+        ManagedSideQueryStore.cancelSession(jdbc, tenant, session);
         var existing =
                 jdbc.query(
                         "SELECT retirement_operation_id AS operation_id FROM ma_session WHERE"
@@ -268,7 +264,7 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
 
     static Map<String, Object> lockGenericSession(
             JdbcTemplate jdbc, String tenant, String session) {
-        return lockSessionHead(jdbc, tenant, session, true);
+        return lockSessionHead(jdbc, tenant, session, true, true);
     }
 
     void lockRetainedPublication(String scope, String publication) {
@@ -433,7 +429,7 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
     }
 
     public final class ReadLease implements com.alibaba.qwen.code.managedagent.contracts.artifact.ArtifactReadLease {
-        private final String id;
+        final String id;
         private final String tenant;
         private final String session;
         private final long generation;
