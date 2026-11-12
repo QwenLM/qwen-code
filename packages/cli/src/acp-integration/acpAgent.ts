@@ -9100,8 +9100,11 @@ class QwenAgent implements Agent {
             // Cursor/anchor pages never consulted writer health.
             // The barrier refuses before touching the tail when the
             // recorder is lifecycle-inactive, so that fallback drains
-            // via flush().catch then reads. A latched writeFailure
-            // still fails the read. The #9704 dangling placeholder is
+            // via flush() then reads. A writeFailure already latched
+            // at barrier admission still fails the read. A writeFailure
+            // that latches while flush drains the queued tail also
+            // fails the read — do not serve a truncated page. The
+            // #9704 dangling placeholder is
             // decided below by ANDing the activePromptCalls sample with
             // finalizeDanglingForRestore (ignoreClosing active-turn
             // sample), not by this drain — tool results are recorded
@@ -9122,7 +9125,7 @@ class QwenAgent implements Agent {
                       debugLogger.debug(
                         `[ACP] sessionTranscript lifecycle fallback session=${sessionId} error=${reason}`,
                       );
-                      await recording.flush().catch(() => undefined);
+                      await recording.flush();
                       return readPersistedPage();
                     })
                 : await readPersistedPage();

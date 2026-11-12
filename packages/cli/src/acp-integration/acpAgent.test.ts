@@ -17270,6 +17270,57 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('refuses a latest transcript page when flush latches a writeFailure during lifecycle drain', async () => {
+    const innerConfig = await setupSessionMocks(VALID_SESSION_ID);
+    const recording = innerConfig.getChatRecordingService();
+    const writeFailure = new SessionWriterUnavailableError();
+    Object.assign(recording, {
+      acceptingWrites: false,
+      state: 'closing',
+    });
+    recording.runWithWriteBarrier.mockRejectedValue(
+      new SessionWriterUnavailableError(),
+    );
+    recording.flush.mockImplementation(async () => {
+      Object.assign(recording, { writeFailure });
+      throw writeFailure;
+    });
+    const readPage = vi.fn().mockResolvedValue({
+      sessionId: VALID_SESSION_ID,
+      records: [{ uuid: 'truncated-missing-tool-result' }],
+      hasMore: false,
+      startTime: 'start',
+      lastUpdated: 'end',
+    });
+    vi.mocked(SessionTranscriptReader).mockImplementation(
+      () =>
+        ({
+          readPage,
+        }) as unknown as InstanceType<typeof SessionTranscriptReader>,
+    );
+    mockHistoryReplayPage.mockResolvedValue({ pendingToolCalls: [] });
+    const { agent, agentPromise } = await bootAcpAgent();
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    await expect(
+      agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionTranscript, {
+        sessionId: VALID_SESSION_ID,
+        direction: 'backward',
+        limit: 1,
+      }),
+    ).rejects.toMatchObject({
+      code: -32023,
+      data: { errorKind: 'session_writer_unavailable' },
+    });
+
+    expect(recording.runWithWriteBarrier).toHaveBeenCalledOnce();
+    expect(recording.flush).toHaveBeenCalledOnce();
+    expect(readPage).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('does not retry a latest transcript page when the barriered read itself fails', async () => {
     const innerConfig = await setupSessionMocks(VALID_SESSION_ID);
     const recording = innerConfig.getChatRecordingService();
