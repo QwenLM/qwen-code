@@ -3233,7 +3233,8 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
                   echo 'PROBE_SAYS_NO' >&2
                   return 1
                 fi
-                [[ "$3" == sh && "$5" == *'SET GLOBAL max_allowed_packet=134217728'* ]] ;;
+                [[ "$3" == sh && ( "$5" == *'SET GLOBAL max_allowed_packet=134217728'* \
+                  || "$5" == *'CREATE DATABASE IF NOT EXISTS qwen_o4_ci'* ) ]] ;;
               inspect)
                 if [[ "$3" == *State.Running* ]]; then
                   [[ "$MODE" == dead || ( "$MODE" == dead-second && "$4" == *-2 ) ]] && echo false || echo true
@@ -3282,6 +3283,7 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
         }
         if (mode === 'ready') {
           expect(result.status, result.stderr).toBe(0);
+          expect(trace).toContain('CREATE DATABASE IF NOT EXISTS qwen_o4_ci');
           expect(readFileSync(join(dir, 'env'), 'utf8')).toBe(
             'MYSQL_PORT_1=43219\nMYSQL_PORT_2=43220\n',
           );

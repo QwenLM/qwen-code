@@ -945,6 +945,10 @@ jobs:
           for fork in 1 2; do
             docker exec "${MYSQL_CONTAINER}-${fork}" sh -c 'MYSQL_PWD="${MYSQL_ROOT_PASSWORD}" mysql --user=root --execute="SET GLOBAL max_allowed_packet=134217728; SELECT @@GLOBAL.max_allowed_packet"'
           done
+          # SessionOssStorageMySqlIT takes a dedicated qwen_o4_ database from
+          # qwen.o4.mysql.url; its validator rejects createDatabaseIfNotExist,
+          # so create the database before Maven connects.
+          docker exec "${MYSQL_CONTAINER}-1" sh -c 'MYSQL_PWD="${MYSQL_ROOT_PASSWORD}" mysql --user=root --execute="CREATE DATABASE IF NOT EXISTS qwen_o4_ci"'
       - name: 'Set up Node.js 22 (hosted)'
         if: "${{ runner.environment == 'github-hosted' }}"
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
@@ -1039,7 +1043,7 @@ jobs:
                 -Dmysql.url.1="jdbc:mysql://127.0.0.1:${MYSQL_PORT_1}/managed_agent_test?createDatabaseIfNotExist=true&allowPublicKeyRetrieval=true&useSSL=false" \
                 -Dmysql.url.2="jdbc:mysql://127.0.0.1:${MYSQL_PORT_2}/managed_agent_test?createDatabaseIfNotExist=true&allowPublicKeyRetrieval=true&useSSL=false" \
                 -Dmysql.user=root -Dmysql.password=runtime-broker \
-                -Dqwen.o4.mysql.url="jdbc:mysql://127.0.0.1:${MYSQL_PORT_1}/managed_agent_test?createDatabaseIfNotExist=true&allowPublicKeyRetrieval=true&useSSL=false" \
+                -Dqwen.o4.mysql.url="jdbc:mysql://127.0.0.1:${MYSQL_PORT_1}/qwen_o4_ci?allowPublicKeyRetrieval=true&useSSL=false" \
                 -Dqwen.o4.mysql.user=root clean verify checkstyle:check || mvn_status=$?
             fi
           fi
