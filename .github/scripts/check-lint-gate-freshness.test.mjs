@@ -162,9 +162,9 @@ test('report names the file, the commit, and the remedy', () => {
 test('ci.yml wires the check into lint_and_static before the lint lanes', () => {
   const ci = readFileSync(join(repoRoot, '.github/workflows/ci.yml'), 'utf8');
   // Slice out the lint_and_static job: from its key to the next job key.
-  const jobStart = ci.indexOf('\n  lint_and_static:');
-  const jobEnd = ci.indexOf('\n  test_macos:', jobStart);
-  assert.ok(jobStart > 0 && jobEnd > jobStart, 'lint_and_static job not found');
+  // Bounded by the next job KEY, not by a named neighbour: `test_macos` is an
+  // unrelated lane, and renaming it would leave this bound at -1.
+  const { start: jobStart, end: jobEnd } = jobSpan(ci, 'lint_and_static');
   const job = ci.slice(jobStart, jobEnd);
 
   const step = job.indexOf("- name: 'Check lint gate freshness'");
@@ -193,6 +193,20 @@ test('ci.yml wires the check into lint_and_static before the lint lanes', () => 
     stepBlock.match(/^ {8}continue-on-error:/m),
     null,
     'freshness gate must stay fatal',
+  );
+  // Nor may the run line swallow the exit code. `|| true` and `|| :` leave
+  // every literal above intact while the step exits 0 on a stale gate, which
+  // re-opens the same class. The job-level key is checked separately below:
+  // it sits outside stepBlock and would swallow every step's failure.
+  assert.doesNotMatch(
+    stepBlock,
+    /\|\|\s*(true|:)(\s|'|$)/,
+    'the freshness run must not swallow its exit code',
+  );
+  assert.equal(
+    job.match(/^ {4}continue-on-error:/m),
+    null,
+    'a job-level continue-on-error would swallow the freshness failure too',
   );
   assert.ok(
     stepBlock.includes('node .github/scripts/check-lint-gate-freshness.mjs'),
@@ -1004,8 +1018,12 @@ function ciFetch(baseText, branchText, calls = [], mergeBase = MERGE_BASE_SHA) {
 // that job because several plumbing names repeat across jobs — the first match
 // in the file is usually a test lane, which the slice drops.
 function withStepText(name, from, to) {
-  const jobAt = realCi.indexOf('\n  lint_and_static:');
-  const jobEnd = realCi.indexOf('\n  web_shell_e2e_smoke:', jobAt);
+  // The job's own span, not a named neighbour: `web_shell_e2e_smoke` is an
+  // unrelated lane whose rename is exactly the ci.yml churn this narrowing
+  // exists to make irrelevant. With the literal, that rename left jobEnd at
+  // -1 — eight fixtures reddened with "step not found" for steps that are
+  // present, and two kept slicing a wrong span without failing.
+  const { start: jobAt, end: jobEnd } = jobSpan(realCi, 'lint_and_static');
   const offset = realCi.indexOf(`      - name: '${name}'`, jobAt);
   assert.ok(
     offset > jobAt && offset < jobEnd,
@@ -1122,8 +1140,7 @@ test('every lint job step is classified, and no plumbing name is stale', () => {
       `plumbing step '${name}' is not in ci.yml any more — drop the entry`,
     );
   }
-  const lintStart = realCi.indexOf('\n  lint_and_static:');
-  const lintEnd = realCi.indexOf('\n  web_shell_e2e_smoke:', lintStart);
+  const { start: lintStart, end: lintEnd } = jobSpan(realCi, 'lint_and_static');
   const lintJob = realCi.slice(lintStart, lintEnd);
   const blocks = lintJob.split(/\n(?= {6}- name: ')/);
   for (const block of blocks) {
@@ -1325,9 +1342,11 @@ test('moving a plumbing step changes the compared text', () => {
     const at = job.indexOf("      - name: 'Checkout'\n");
     assert.ok(at > 0, 'Checkout step not found in the lint job');
     const end = job.indexOf("\n      - name: '", at + 1);
+    assert.ok(end > at, 'the step after Checkout was not found');
     const block = job.slice(at, end + 1);
     const rest = job.slice(0, at) + job.slice(end + 1);
     const insertAt = rest.indexOf("      - name: 'Create isolated HOME'");
+    assert.ok(insertAt > 0, 'the insertion anchor was not found');
     return rest.slice(0, insertAt) + block + rest.slice(insertAt);
   });
   const slice = extractLintGateSlice(moved);
@@ -1834,8 +1853,7 @@ test('a dropped job key takes its block-scalar body with it', () => {
   // by only two spaces. A fixed six-space continuation test leaves that body
   // orphaned under the preceding key — and a blank-line-swallowing scan runs
   // past the NEXT key and drops gate content with it.
-  const jobAt = realCi.indexOf('\n  lint_and_static:');
-  const jobEnd = realCi.indexOf('\n  web_shell_e2e_smoke:', jobAt);
+  const { start: jobAt, end: jobEnd } = jobSpan(realCi, 'lint_and_static');
   const job = realCi.slice(jobAt, jobEnd);
   const patched = job.replace(
     /^ {4}timeout-minutes: .*$/m,
