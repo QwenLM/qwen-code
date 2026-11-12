@@ -1,9 +1,11 @@
 .app {
   --chat-content-width: 960px;
-  --chat-responsive-content-width: min(85cqw, 960px);
-  --chat-shell-width: calc(min(85cqw, 960px) + 40px);
+  --chat-responsive-content-width: min(85cqw, calc(100cqw - 128px), 960px);
+  --chat-shell-width: calc(min(85cqw, calc(100cqw - 128px), 960px) + 40px);
   --chat-regular-content-width: 960px;
-  --chat-regular-shell-width: calc(min(85cqw, 960px) + 40px);
+  --chat-regular-shell-width: calc(
+    min(85cqw, calc(100cqw - 128px), 960px) + 40px
+  );
   --font-mono:
     'SF Mono', 'Fira Code', 'JetBrains Mono', 'Cascadia Code', monospace;
   --font-sans:

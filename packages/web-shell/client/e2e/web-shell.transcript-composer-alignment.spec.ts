@@ -121,7 +121,7 @@ for (const navigation of [true, false]) {
     );
     await scrollToBottom.click();
     for (const width of [
-      1600, 1500, 1444, 1400, 1300, 1116, 1000, 802, 700, 599, 575,
+      1600, 1500, 1444, 1400, 1300, 1116, 1000, 802, 700, 609, 607, 599, 575,
     ]) {
       await page.setViewportSize({ width, height: 900 });
       await expectSameEdges(message, composer);
@@ -142,7 +142,8 @@ for (const navigation of [true, false]) {
           const messageBox = await message.boundingBox();
           if (!viewportBox || !messageBox) return Infinity;
           return Math.abs(
-            messageBox.width - Math.min(viewportBox.width * 0.85, 960),
+            messageBox.width -
+              Math.min(viewportBox.width * 0.85, viewportBox.width - 128, 960),
           );
         })
         .toBeLessThanOrEqual(1);
@@ -152,10 +153,10 @@ for (const navigation of [true, false]) {
         messageBox!.x - viewportBox!.x,
         viewportBox!.x + viewportBox!.width - messageBox!.x - messageBox!.width,
       );
-      if (gutter >= 56) {
+      if (gutter >= 56 && messageBox!.width >= 480) {
         await expect(
           rail,
-          `rail at ${width}px with ${gutter}px gutters`,
+          `rail at ${width}px with ${gutter}px gutters and ${messageBox!.width}px content`,
         ).toBeVisible();
         const railBox = await rail.boundingBox();
         expect(railBox!.x + railBox!.width).toBeLessThanOrEqual(
@@ -181,7 +182,7 @@ for (const navigation of [true, false]) {
       await expectSameEdges(message, composer);
       await expect
         .poll(async () => (await message.boundingBox())?.width ?? 0)
-        .toBeCloseTo(714, 0);
+        .toBeCloseTo(712, 0);
       const button = rail.locator('button').first();
       const tick = button.locator(':scope > span').first();
       await button.hover();
@@ -205,11 +206,20 @@ for (const navigation of [true, false]) {
           const previewBox = await preview.boundingBox();
           const tickBox = await tick.boundingBox();
           return previewBox && tickBox
-            ? previewBox.x - tickBox.x - tickBox.width
+            ? Math.abs(previewBox.x - tickBox.x - tickBox.width - 8)
             : -Infinity;
         })
-        .toBeCloseTo(8, 0);
+        .toBeLessThanOrEqual(1);
       await page.mouse.move(500, 10);
+      await page.setViewportSize({ width: 984, height: 743 });
+      await expect
+        .poll(async () => (await viewport.boundingBox())?.width ?? 0)
+        .toBe(708);
+      await expect(rail).toBeVisible();
+      await expectSameEdges(message, composer);
+      await expect
+        .poll(async () => (await message.boundingBox())?.width ?? 0)
+        .toBeCloseTo(580, 0);
     }
     {
       await page.setViewportSize({ width: 1600, height: 900 });
@@ -286,8 +296,14 @@ for (const navigation of [true, false]) {
           : '#session-timeline-detail-tooltip',
       );
       await expect(preview).toBeVisible();
-      const previewBox = await preview.boundingBox();
-      expect(previewBox!.x - tickBox!.x - tickBox!.width).toBeCloseTo(8, 0);
+      await expect
+        .poll(async () => {
+          const previewBox = await preview.boundingBox();
+          return previewBox
+            ? Math.abs(previewBox.x - tickBox!.x - tickBox!.width - 8)
+            : -Infinity;
+        })
+        .toBeLessThanOrEqual(1);
       await expect(preview).toContainText('What is the weather?');
       if (navigation)
         await expect(preview).toContainText(

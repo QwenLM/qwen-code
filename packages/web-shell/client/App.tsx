@@ -2883,7 +2883,8 @@ function getChatWidthStyle(
   chatMaxWidth: number | undefined,
 ): CSSProperties {
   const contentWidth = `${getChatMaxWidth(chatMaxWidth)}px`;
-  const responsiveContentWidth = `min(85cqw, ${contentWidth})`;
+  // Reserve 56px per side plus up to 16px for a classic scrollbar.
+  const responsiveContentWidth = `min(85cqw, calc(100cqw - 128px), ${contentWidth})`;
   const shellWidth = `calc(${responsiveContentWidth} + ${CHAT_SHELL_HORIZONTAL_PADDING}px)`;
   return {
     '--chat-regular-content-width': contentWidth,
