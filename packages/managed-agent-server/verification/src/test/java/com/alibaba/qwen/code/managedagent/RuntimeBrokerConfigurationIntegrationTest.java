@@ -10,16 +10,22 @@ import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingReposit
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.security.SecretProtector;
+import jakarta.websocket.server.ServerContainer;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.context.ApplicationContextInitializer;
+import org.springframework.context.ConfigurableApplicationContext;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.test.context.ContextConfiguration;
+import org.springframework.web.context.ConfigurableWebApplicationContext;
 
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.mock;
 
 @SpringBootTest(properties = {
         "spring.datasource.url=jdbc:h2:mem:runtime-broker-config;MODE=MySQL;"
@@ -48,6 +54,8 @@ import static org.assertj.core.api.Assertions.assertThat;
         "qwen.managed-agent.runtime-broker.static-endpoint=http://127.0.0.1:9",
         "qwen.managed-agent.runtime-broker.static-token=runtime-token"
 })
+@ContextConfiguration(initializers =
+        RuntimeBrokerConfigurationIntegrationTest.PublishWebSocketContainer.class)
 class RuntimeBrokerConfigurationIntegrationTest {
     @Autowired
     private RuntimeWarmer runtimeWarmer;
@@ -130,5 +138,24 @@ class RuntimeBrokerConfigurationIntegrationTest {
                         + "WHERE table_name = 'ma_runtime_binding' "
                         + "AND column_name = ?",
                 Integer.class, columnName);
+    }
+
+    /**
+     * The mock servlet context never runs the container's WebSocket
+     * initializer, so the terminal {@code ServletServerContainerFactoryBean}
+     * finds no {@code ServerContainer} to bind its buffer ceiling to. Publish
+     * a stub before the context refreshes; the wiring under test is untouched.
+     */
+    static class PublishWebSocketContainer
+            implements ApplicationContextInitializer<ConfigurableApplicationContext> {
+        @Override
+        public void initialize(ConfigurableApplicationContext context) {
+            if (context instanceof ConfigurableWebApplicationContext webContext
+                    && webContext.getServletContext() != null) {
+                webContext.getServletContext().setAttribute(
+                        "jakarta.websocket.server.ServerContainer",
+                        mock(ServerContainer.class));
+            }
+        }
     }
 }

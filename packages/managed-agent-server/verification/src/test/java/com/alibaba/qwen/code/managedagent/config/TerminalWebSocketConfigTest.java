@@ -5,6 +5,7 @@ import com.alibaba.qwen.code.managedagent.api.TerminalTicketStore;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerService;
+import jakarta.websocket.server.ServerContainer;
 import org.junit.jupiter.api.Test;
 import org.springframework.core.env.MapPropertySource;
 import org.springframework.mock.web.MockServletContext;
@@ -28,7 +29,12 @@ class TerminalWebSocketConfigTest {
             Class<?>... extra) {
         AnnotationConfigWebApplicationContext ctx =
                 new AnnotationConfigWebApplicationContext();
-        ctx.setServletContext(new MockServletContext());
+        // ServletServerContainerFactoryBean reads the container the servlet
+        // initializer would have published; a bare MockServletContext has none.
+        MockServletContext servletContext = new MockServletContext();
+        servletContext.setAttribute("jakarta.websocket.server.ServerContainer",
+                mock(ServerContainer.class));
+        ctx.setServletContext(servletContext);
         ctx.getEnvironment().getPropertySources().addFirst(new MapPropertySource(
                 "terminal-test",
                 Map.of("qwen.managed-agent.runtime-broker.enabled", "true")));

@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.config.runtime.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.RuntimeWarmer;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
+import jakarta.websocket.server.ServerContainer;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledOnOs;
 import org.junit.jupiter.api.condition.OS;
@@ -14,11 +15,13 @@ import org.springframework.context.ConfigurableApplicationContext;
 import org.springframework.core.env.MapPropertySource;
 import org.springframework.test.context.ContextConfiguration;
 import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
+import org.springframework.web.context.ConfigurableWebApplicationContext;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 
 /**
@@ -90,6 +93,23 @@ class RuntimeBrokerDefaultOnTest {
             });
             context.getEnvironment().getPropertySources().replace(
                     "systemEnvironment", new MapPropertySource("systemEnvironment", filtered));
+            publishWebSocketContainer(context);
+        }
+    }
+
+    /**
+     * The mock servlet context never runs the container's WebSocket
+     * initializer, so the terminal {@code ServletServerContainerFactoryBean}
+     * finds no {@code ServerContainer} to bind its buffer ceiling to. Publish
+     * a stub before the context refreshes; the production defaults under test
+     * are untouched.
+     */
+    static void publishWebSocketContainer(ConfigurableApplicationContext context) {
+        if (context instanceof ConfigurableWebApplicationContext webContext
+                && webContext.getServletContext() != null) {
+            webContext.getServletContext().setAttribute(
+                    "jakarta.websocket.server.ServerContainer",
+                    mock(ServerContainer.class));
         }
     }
 }
