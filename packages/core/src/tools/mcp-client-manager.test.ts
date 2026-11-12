@@ -848,16 +848,12 @@ describe('McpClientManager', () => {
     'rejects an unsuccessful pooled repair (%j)',
     async ({ result }) => {
       let serverConfig = { command: 'node' };
-      const acquireSpy = vi.fn().mockResolvedValue({
-        release: vi.fn(),
-        updateConfig: vi.fn(),
-        replaySnapshot: vi.fn(),
-        transportId: connectionIdOf('srv', serverConfig),
-        on: vi.fn(),
-        id: 'srv::abc',
-        serverName: 'srv',
-        entryIndex: 0,
-      });
+      const acquireSpy = vi.fn().mockResolvedValue(
+        mkConn('srv', {
+          updateConfig: vi.fn(),
+          transportId: connectionIdOf('srv', serverConfig),
+        }),
+      );
       const restartByName = vi.fn().mockResolvedValue(result);
       const fakePool = {
         restartByName,
@@ -896,15 +892,14 @@ describe('McpClientManager', () => {
       expect(acquireSpy).toHaveBeenCalledTimes(1);
       expect(McpClient).not.toHaveBeenCalled();
       serverConfig = { command: 'different' };
-      acquireSpy.mockResolvedValueOnce({
-        release: vi.fn(),
-        updateConfig: vi.fn(),
-        transportId: connectionIdOf('srv', serverConfig),
-        on: vi.fn(),
-        id: 'srv::replacement',
-        serverName: 'srv',
-        entryIndex: 1,
-      });
+      acquireSpy.mockResolvedValueOnce(
+        mkConn('srv', {
+          updateConfig: vi.fn(),
+          transportId: connectionIdOf('srv', serverConfig),
+          id: 'srv::replacement',
+          entryIndex: 1,
+        }),
+      );
       await manager.discoverMcpToolsForServer('srv', mockConfig, true);
       expect(acquireSpy).toHaveBeenCalledTimes(2);
       expect(restartByName).toHaveBeenCalledOnce();

@@ -114,6 +114,61 @@ const clearSpies = (r: Registries) => {
   for (const spy of Object.values(r.spies)) spy.mockClear();
 };
 
+function mkSession(
+  pool: McpTransportPool,
+  sessionId: string,
+  extra: Pick<Config, 'getMcpServers'> & Record<string, unknown>,
+) {
+  const prompts = new PromptRegistry();
+  const resources = new ResourceRegistry();
+  const config = {
+    isTrustedFolder: () => true,
+    getMcpServerCommand: () => undefined,
+    getToolDiscoveryCommand: () => undefined,
+    getTargetDir: () => process.cwd(),
+    getResourceRegistry: () => resources,
+    getPromptRegistry: () => prompts,
+    getWorkspaceContext: () => ({}),
+    getDebugMode: () => false,
+    getSessionId: () => sessionId,
+    isMcpServerDisabled: () => false,
+    getMcpToolIdleTimeoutMs: () => 0,
+    getDisabledTools: () => new Set<string>(),
+    getPermissionManager: () => ({
+      isEagerToolAllowListActive: () => false,
+    }),
+    getEagerTools: () => [],
+    getMcpTransportPool: () => pool,
+    getToolRegistry: () => registry,
+    ...extra,
+  } as unknown as Config;
+  const registry = new ToolRegistry(config);
+  return {
+    config,
+    registry,
+    prompts,
+    resources,
+    manager: registry.getMcpClientManager(),
+  };
+}
+
+const discoveryModes = [
+  'single server',
+  'MCP catalog',
+  'all discovered tools',
+] as const;
+function discoverInMode(
+  mode: (typeof discoveryModes)[number],
+  registry: ToolRegistry,
+): Promise<void> {
+  const discover: Record<typeof mode, () => Promise<void>> = {
+    'single server': () => registry.discoverToolsForServer('srv'),
+    'MCP catalog': () => registry.discoverMcpTools(),
+    'all discovered tools': () => registry.discoverAllTools(),
+  };
+  return discover[mode]();
+}
+
 /**
  * Set up the MCP SDK mocks to simulate a successfully-connecting
  * stdio server with the given tool, prompt and resource names.
@@ -387,7 +442,7 @@ describe('McpTransportPool', () => {
     }
   });
 
-  it.each(['single server', 'MCP catalog', 'all discovered tools'])(
+  it.each(discoveryModes)(
     'restores the session catalog without reconnecting or false eager warnings (%s)',
     async (mode) => {
       vi.useRealTimers();
@@ -399,35 +454,15 @@ describe('McpTransportPool', () => {
       });
       let cfg = new MCPServerConfig('node');
       const pool = mkPool({ drainDelayMs: 0 });
-      function session(sessionId: string) {
-        const prompts = new PromptRegistry();
-        const resources = new ResourceRegistry();
-        const config = {
-          isTrustedFolder: () => true,
-          getMcpServers: () => ({ srv: cfg, sibling: argCfg('sibling') }),
-          getMcpServerCommand: () => undefined,
-          getToolDiscoveryCommand: () => undefined,
-          getTargetDir: () => process.cwd(),
-          getResourceRegistry: () => resources,
-          getPromptRegistry: () => prompts,
-          getWorkspaceContext: () => ({}),
-          getDebugMode: () => false,
-          getSessionId: () => sessionId,
-          isMcpServerDisabled: () => false,
-          getMcpToolIdleTimeoutMs: () => 0,
-          getDisabledTools: () => new Set<string>(),
-          getPermissionManager: () => ({
-            isEagerToolAllowListActive: () => true,
-          }),
-          getEagerTools: () => ['mcp__srv__alpha'],
-          getMcpTransportPool: () => pool,
-          getToolRegistry: () => registry,
-        } as unknown as Config;
-        const registry = new ToolRegistry(config);
-        return { config, registry, prompts, resources };
-      }
-      const first = session('first');
-      const second = session('second');
+      const extra = {
+        getMcpServers: () => ({ srv: cfg, sibling: argCfg('sibling') }),
+        getPermissionManager: () => ({
+          isEagerToolAllowListActive: () => true,
+        }),
+        getEagerTools: () => ['mcp__srv__alpha'],
+      };
+      const first = mkSession(pool, 'first', extra);
+      const second = mkSession(pool, 'second', extra);
       try {
         await first.registry
           .getMcpClientManager()
@@ -453,12 +488,7 @@ describe('McpTransportPool', () => {
                   .getMcpClientManager()
                   .discoverAllMcpTools(first.config)
               : Promise.resolve();
-          const rediscovery =
-            mode === 'single server'
-              ? first.registry.discoverToolsForServer('srv')
-              : mode === 'MCP catalog'
-                ? first.registry.discoverMcpTools()
-                : first.registry.discoverAllTools();
+          const rediscovery = discoverInMode(mode, first.registry);
           await Promise.all([reconciliation, rediscovery]);
 
           expect(
@@ -509,7 +539,7 @@ describe('McpTransportPool', () => {
   );
 
   it.each(
-    ['single server', 'MCP catalog', 'all discovered tools'].flatMap((mode) =>
+    discoveryModes.flatMap((mode) =>
       ['failed', 'closed', 'restart'].map((transition) => ({
         mode,
         transition,
@@ -526,34 +556,20 @@ describe('McpTransportPool', () => {
       });
       const pool = mkPool({ drainDelayMs: 0 });
       const runtime: Record<string, MCPServerConfig> = {};
-      const prompts = new PromptRegistry();
-      const resources = new ResourceRegistry();
-      const config = {
-        isTrustedFolder: () => true,
-        getMcpServers: () => runtime,
-        getSettingsMcpServers: () => ({}),
-        getRuntimeMcpServers: () => runtime,
-        addRuntimeMcpServer: (name: string, cfg: MCPServerConfig) => {
-          runtime[name] = cfg;
+      const { registry, prompts, resources, manager } = mkSession(
+        pool,
+        'runtime-session',
+        {
+          getMcpServers: () => runtime,
+          getSettingsMcpServers: () => ({}),
+          getRuntimeMcpServers: () => runtime,
+          addRuntimeMcpServer: (name: string, cfg: MCPServerConfig) => {
+            runtime[name] = cfg;
+          },
+          removeRuntimeMcpServer: (name: string) => delete runtime[name],
+          assertGeneratedUiServerNotReplaced: () => {},
         },
-        removeRuntimeMcpServer: (name: string) => delete runtime[name],
-        assertGeneratedUiServerNotReplaced: () => {},
-        getMcpServerCommand: () => undefined,
-        getToolDiscoveryCommand: () => undefined,
-        getTargetDir: () => process.cwd(),
-        getResourceRegistry: () => resources,
-        getPromptRegistry: () => prompts,
-        getWorkspaceContext: () => ({}),
-        getDebugMode: () => false,
-        getSessionId: () => 'runtime-session',
-        isMcpServerDisabled: () => false,
-        getMcpToolIdleTimeoutMs: () => 0,
-        getDisabledTools: () => new Set<string>(),
-        getMcpTransportPool: () => pool,
-        getToolRegistry: () => registry,
-      } as unknown as Config;
-      const registry = new ToolRegistry(config);
-      const manager = registry.getMcpClientManager();
+      );
       const cfg = { command: 'node', cwd: process.cwd() } as MCPServerConfig;
       try {
         await manager.addRuntimeMcpServer('srv', cfg, 'client');
@@ -593,12 +609,7 @@ describe('McpTransportPool', () => {
           expect(registry.getToolsByServer('srv')).toEqual([]);
         }
 
-        const rediscovery =
-          mode === 'single server'
-            ? registry.discoverToolsForServer('srv')
-            : mode === 'MCP catalog'
-              ? registry.discoverMcpTools()
-              : registry.discoverAllTools();
+        const rediscovery = discoverInMode(mode, registry);
         await expect(rediscovery).resolves.toBeUndefined();
         expect(registry.getToolsByServer('srv')).toHaveLength(1);
         expect(prompts.getPromptsByServer('srv')).toHaveLength(1);
@@ -618,7 +629,7 @@ describe('McpTransportPool', () => {
   );
 
   it.each(
-    ['single server', 'MCP catalog', 'all discovered tools'].flatMap((mode) =>
+    discoveryModes.flatMap((mode) =>
       [false, true].map((reattach) => ({ mode, reattach })),
     ),
   )(
@@ -628,32 +639,10 @@ describe('McpTransportPool', () => {
       mockMcpSuccess({ toolNames: ['alpha'] });
       const pool = mkPool({ drainDelayMs: 0 });
       const cfg = new MCPServerConfig('node');
-      function session(sessionId: string) {
-        const prompts = new PromptRegistry();
-        const resources = new ResourceRegistry();
-        const config = {
-          isTrustedFolder: () => true,
-          getMcpServers: () => ({ srv: cfg }),
-          getMcpServerCommand: () => undefined,
-          getToolDiscoveryCommand: () => undefined,
-          getTargetDir: () => process.cwd(),
-          getResourceRegistry: () => resources,
-          getPromptRegistry: () => prompts,
-          getWorkspaceContext: () => ({}),
-          getDebugMode: () => false,
-          getSessionId: () => sessionId,
-          isMcpServerDisabled: () => false,
-          getMcpToolIdleTimeoutMs: () => 0,
-          getDisabledTools: () => new Set<string>(),
-          getMcpTransportPool: () => pool,
-          getToolRegistry: () => registry,
-        } as unknown as Config;
-        const registry = new ToolRegistry(config);
-        return { config, registry, manager: registry.getMcpClientManager() };
-      }
-      const first = session('first');
-      const sibling = session('sibling');
-      const replacement = session('first');
+      const extra = { getMcpServers: () => ({ srv: cfg }) };
+      const first = mkSession(pool, 'first', extra);
+      const sibling = mkSession(pool, 'sibling', extra);
+      const replacement = mkSession(pool, 'first', extra);
       let replacementDiscovery: Promise<void> | undefined;
       let failReplay = false;
       try {
@@ -683,12 +672,7 @@ describe('McpTransportPool', () => {
             },
           );
         }
-        const rediscovery =
-          mode === 'single server'
-            ? first.registry.discoverToolsForServer('srv')
-            : mode === 'MCP catalog'
-              ? first.registry.discoverMcpTools()
-              : first.registry.discoverAllTools();
+        const rediscovery = discoverInMode(mode, first.registry);
         if (reattach) failReplay = true;
         else pool.releaseSession('first');
         await expect(rediscovery).resolves.toBeUndefined();
