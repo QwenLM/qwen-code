@@ -24,8 +24,10 @@ const history: HistoryItem[] = [
 const items = buildVirtualItems(history, []);
 // Viewport indexes of the three matches: 1, 3, 4.
 
-function makeScrollActions(topIndex: number | null, supported = true) {
+function makeScrollActions(initialTopIndex: number | null, supported = true) {
+  let topIndex = initialTopIndex;
   const jumps: number[] = [];
+  const anchorReads: number[] = [];
   const actions: ScrollActions = {
     scrollBy: () => {},
     hasScrollableTranscript: () => true,
@@ -34,9 +36,20 @@ function makeScrollActions(topIndex: number | null, supported = true) {
       return supported;
     },
     scrollToEnd: () => {},
-    getScrollIndex: () => topIndex,
+    getScrollIndex: () => {
+      anchorReads.push(1);
+      return topIndex;
+    },
   };
-  return { actions, jumps };
+  return {
+    actions,
+    jumps,
+    anchorReads,
+    // Tests can move the reader so "clamp" and "re-pick" disagree.
+    setTop: (index: number | null) => {
+      topIndex = index;
+    },
+  };
 }
 
 describe('pickInitialMatchPosition', () => {
@@ -115,17 +128,23 @@ describe('useTranscriptSearch', () => {
     expect(jumps).toEqual([4, 1, 3, 1]);
   });
 
-  it('re-centres when the query changes and clears the match when nothing matches', () => {
-    const { actions } = makeScrollActions(4);
+  it('re-picks on a real query change even when clamping would keep an older match', () => {
+    const { actions, setTop } = makeScrollActions(4);
     const { result, rerender } = renderHook(
       (props: { isActive: boolean; query: string }) =>
         useTranscriptSearch({ ...props, items, scrollActions: actions }),
       { initialProps: { isActive: true, query: 'ports' } },
     );
-    expect(result.current.matches).toHaveLength(3);
-    rerender({ isActive: true, query: 'second' });
-    expect(result.current.matches).toHaveLength(1);
-    expect(result.current.activeMatch?.index).toBe(3);
+    expect(result.current.activeMatch?.index).toBe(4);
+
+    // Move the reader above every match: clamping would keep position 1 of
+    // the two 'prompt' hits (index 3), while a genuine re-pick must choose
+    // index 1. Deleting the render-phase reset turns this assertion red.
+    setTop(0);
+    rerender({ isActive: true, query: 'prompt' });
+    expect(result.current.matches).toHaveLength(2);
+    expect(result.current.activeMatch?.index).toBe(1);
+
     rerender({ isActive: true, query: 'zzz-no-such-text' });
     expect(result.current.matches).toHaveLength(0);
     expect(result.current.activeMatch).toBeNull();
@@ -145,7 +164,7 @@ describe('useTranscriptSearch', () => {
     expect(result.current.jumpUnsupported).toBe(true);
   });
 
-  it('clamps the cursor when history grows instead of re-centring', () => {
+  it('keeps the already-chosen match when history grows', () => {
     const { actions } = makeScrollActions(1);
     const { result, rerender } = renderHook(
       (props: { isActive: boolean; query: string; itemCount: number }) =>
@@ -158,11 +177,64 @@ describe('useTranscriptSearch', () => {
       { initialProps: { isActive: true, query: 'ports', itemCount: 3 } },
     );
     expect(result.current.matches).toHaveLength(2);
-    expect(result.current.activeMatch?.index).toBe(1);
-    // A new matching message arrives mid-search: the user stays on the match
-    // they already chose rather than being teleported to the newest hit.
+
+    // Navigate first: a re-pick on growth would teleport the user back to the
+    // oldest hit, which the previous version of this test could not see.
+    act(() => result.current.previousMatch());
+    expect(result.current.activeMatch?.index).toBe(3);
+
     rerender({ isActive: true, query: 'ports', itemCount: 4 });
     expect(result.current.matches).toHaveLength(3);
+    expect(result.current.activeMatch?.index).toBe(3);
+  });
+
+  it('steps from the clamped match after an empty result set gains matches', () => {
+    const { actions } = makeScrollActions(0);
+    const { result, rerender } = renderHook(
+      (props: { isActive: boolean; withHistory: boolean }) =>
+        useTranscriptSearch({
+          isActive: props.isActive,
+          query: 'ports',
+          items: props.withHistory ? items : buildVirtualItems([], []),
+          scrollActions: actions,
+        }),
+      { initialProps: { isActive: true, withHistory: false } },
+    );
+    expect(result.current.activeMatchPosition).toBe(-1);
+
+    rerender({ isActive: true, withHistory: true });
+    // The stored -1 sentinel must not become a dead key or an off-by-one.
     expect(result.current.activeMatch?.index).toBe(1);
+    act(() => result.current.nextMatch());
+    expect(result.current.activeMatch?.index).toBe(3);
+    act(() => result.current.previousMatch());
+    expect(result.current.activeMatch?.index).toBe(1);
+    act(() => result.current.previousMatch());
+    // From the first match, previous wraps to the last one.
+    expect(result.current.activeMatch?.index).toBe(4);
+  });
+
+  it('does not re-anchor on keystrokes while the search is closed', () => {
+    const { actions, anchorReads } = makeScrollActions(4);
+    const { rerender } = renderHook(
+      (props: { isActive: boolean; query: string }) =>
+        useTranscriptSearch({ ...props, items, scrollActions: actions }),
+      { initialProps: { isActive: false, query: 'ports' } },
+    );
+    // Never opened: no reset and no anchor read yet.
+    expect(anchorReads.length).toBe(0);
+
+    rerender({ isActive: false, query: 'ports and more text' });
+    expect(anchorReads.length).toBe(0);
+
+    // Opening re-anchors through the isActive transition; closing is also a
+    // transition, so only the actual typing-while-closed window is guarded.
+    rerender({ isActive: true, query: 'ports and more text' });
+    expect(anchorReads.length).toBe(1);
+
+    rerender({ isActive: false, query: 'ports and more text again' });
+    const readsAfterClose = anchorReads.length;
+    rerender({ isActive: false, query: 'ports and more text again, typed' });
+    expect(anchorReads.length).toBe(readsAfterClose);
   });
 });

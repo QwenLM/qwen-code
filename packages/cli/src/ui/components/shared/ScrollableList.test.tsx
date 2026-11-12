@@ -697,4 +697,43 @@ describe('<ScrollableList /> structure navigation', () => {
     });
     expect(onUserScroll).toHaveBeenCalledTimes(2);
   });
+
+  it('cancels a queued wheel flush when a structure jump lands', async () => {
+    const listRef = createRef<ScrollableListRef<Item>>();
+    const onUserScroll = vi.fn();
+    const Wrapper = () => (
+      <ScrollableList<Item>
+        ref={listRef}
+        hasFocus
+        data={makeItems(50)}
+        renderItem={renderItem}
+        estimatedItemHeight={estimatedItemHeight}
+        keyExtractor={keyExtractor}
+        initialScrollIndex={10}
+        containerHeight={5}
+        width={40}
+        showScrollbar
+        onNavigateStructure={() =>
+          listRef.current?.scrollToIndex({ index: 30 })
+        }
+        onUserScroll={onUserScroll}
+      />
+    );
+
+    const { stdin, rerender } = render(withKeypress(<Wrapper />));
+    rerender(withKeypress(<Wrapper />));
+    await act(async () => {});
+
+    // Queue a wheel burst, then request a structure jump in the same frame.
+    await act(async () => {
+      stdin.write(wheelDown(10, 5));
+      stdin.write(ALT_PAGE_UP);
+    });
+    // Give any erroneously-armed flush time to fire: the jump must still win
+    // instead of being displaced to `30 + wheelDelta`.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 80));
+    });
+    expect(listRef.current?.getScrollIndex()).toBe(30);
+  });
 });

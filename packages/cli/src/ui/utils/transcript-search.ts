@@ -120,7 +120,12 @@ export function searchTranscriptItems(
   }
   const matches: TranscriptSearchMatch[] = [];
   let truncated = false;
-  for (let index = 0; index < items.length; index += 1) {
+  // Scan backwards so the cap keeps the NEWEST matches. The search starts
+  // from the reader's live tail, and a forward-limited result would make the
+  // most recent occurrences unsearchable in a long session while pretending
+  // everything matched. The result is reversed below to stay in ascending
+  // viewport order, and the scan still stops as soon as the cap is hit.
+  for (let index = items.length - 1; index >= 0; index -= 1) {
     const item = items[index];
     if (item.type === 'vp-banner') continue;
     const text = getSearchableText(item);
@@ -137,5 +142,6 @@ export function searchTranscriptItems(
       break;
     }
   }
+  matches.reverse();
   return { matches, truncated };
 }

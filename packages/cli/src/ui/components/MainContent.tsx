@@ -379,10 +379,17 @@ export const MainContent = ({
   const allVirtualItemsRef = useRef(allVirtualItems);
   allVirtualItemsRef.current = allVirtualItems;
 
-  // New output moves the reading position (auto-follow), so a later jump must
-  // start from there rather than from a stale navigation target.
+  // New output moves the reading position only when auto-follow actually
+  // re-anchors it. Resetting on EVERY append would instead replay a clamped
+  // jump mid-stream: the next keypress would fall back to the live anchor and
+  // choose the same target again. So compare the anchor before/after.
+  const navLastSeenAnchorRef = useRef<number | null>(null);
   useEffect(() => {
-    resetNavCursor();
+    const anchor = scrollRef.current?.getScrollIndex() ?? null;
+    if (anchor !== navLastSeenAnchorRef.current) {
+      navLastSeenAnchorRef.current = anchor;
+      resetNavCursor();
+    }
   }, [allVirtualItems.length, resetNavCursor]);
 
   // Transient "Turn 12/48" / "At first turn" notice shown under the viewport.

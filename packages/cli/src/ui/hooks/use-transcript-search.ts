@@ -95,7 +95,13 @@ export function useTranscriptSearch({
   // history arriving mid-search merely reclamps the cursor (below) so
   // streaming output cannot yank the user away from the match they are on.
   const [resetKey, setResetKey] = useState({ isActive, query });
-  if (resetKey.isActive !== isActive || resetKey.query !== query) {
+  // Gate the query half on the search actually being open: the caller passes
+  // the live composer buffer unconditionally, so otherwise every ordinary
+  // keystroke would re-run this reset (and the whole InputPrompt render).
+  if (
+    resetKey.isActive !== isActive ||
+    (isActive && resetKey.query !== query)
+  ) {
     setResetKey({ isActive, query });
     setRequestedPosition(
       pickInitialMatchPosition(
@@ -126,15 +132,21 @@ export function useTranscriptSearch({
     truncated,
     activeMatchPosition,
     activeMatch,
+    // The stored position can still be the -1 "no matches" sentinel from an
+    // empty result set that has since gained matches. Step from the clamped
+    // position so next/previous move relative to the match on screen instead
+    // of becoming a dead key or landing one match off.
     nextMatch: () =>
       setRequestedPosition((position) =>
-        matches.length === 0 ? -1 : (position + 1) % matches.length,
+        matches.length === 0
+          ? -1
+          : (Math.max(0, position) + 1) % matches.length,
       ),
     previousMatch: () =>
       setRequestedPosition((position) =>
         matches.length === 0
           ? -1
-          : (position - 1 + matches.length) % matches.length,
+          : (Math.max(0, position) - 1 + matches.length) % matches.length,
       ),
     jumpUnsupported,
   };

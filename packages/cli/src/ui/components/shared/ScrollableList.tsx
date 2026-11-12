@@ -71,6 +71,10 @@ function ScrollableList<T>(
   } = props;
   const virtualizedListRef = useRef<VirtualizedListRef<T>>(null);
   const isDraggingScrollbar = useRef(false);
+  // Ref mirror of cancelPendingScroll (declared below the keypress handler):
+  // a structure jump must cancel a coalesced wheel/drag flush, but naming the
+  // function in the handler's dependency array would hit its TDZ at render.
+  const cancelPendingScrollRef = useRef<() => void>(() => {});
 
   useImperativeHandle(
     ref,
@@ -116,6 +120,17 @@ function ScrollableList<T>(
         // ignore modifiers, so Alt+PageUp ALSO matches Command.PAGE_UP. When
         // no structure handler is supplied these branches are skipped and
         // Alt+PageUp keeps its historical page-up behavior.
+        if (
+          onNavigateStructure &&
+          (keyMatchers[Command.PREV_TURN](key) ||
+            keyMatchers[Command.NEXT_TURN](key) ||
+            keyMatchers[Command.PREV_TOOL_OUTPUT](key) ||
+            keyMatchers[Command.NEXT_TOOL_OUTPUT](key))
+        ) {
+          // A wheel burst or drag queued in the same frame would otherwise
+          // flush AFTER the jump and displace it.
+          cancelPendingScrollRef.current();
+        }
         if (onNavigateStructure && keyMatchers[Command.PREV_TURN](key)) {
           onNavigateStructure('previous', 'turn');
         } else if (onNavigateStructure && keyMatchers[Command.NEXT_TURN](key)) {
@@ -202,6 +217,7 @@ function ScrollableList<T>(
     pendingDragRow.current = null;
     cancelScrollFlush();
   }, [cancelScrollFlush]);
+  cancelPendingScrollRef.current = cancelPendingScroll;
 
   // Losing focus unsubscribes the keypress and mouse handlers, so a still-armed
   // flush belongs to a gesture the user can no longer steer. Letting it fire

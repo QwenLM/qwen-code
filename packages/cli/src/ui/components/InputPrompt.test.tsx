@@ -1647,6 +1647,33 @@ describe('InputPrompt', () => {
     unmount();
   });
 
+  it('does not run prompt history on Ctrl+Alt+arrows (transcript tool-output keys)', async () => {
+    props.buffer.setText('some text');
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    await wait();
+
+    mockBuffer.visualCursor = [0, 0];
+    stdin.write('\x1b[1;7A'); // Ctrl+Alt+Up
+    await wait();
+    stdin.write('\x1b[1;7B'); // Ctrl+Alt+Down
+    await wait();
+
+    expect(mockInputHistory.navigateUp).not.toHaveBeenCalled();
+    expect(mockInputHistory.navigateDown).not.toHaveBeenCalled();
+
+    // The unmodified arrows must keep doing prompt history, proving only the
+    // transcript chords are swallowed.
+    mockBuffer.visualCursor = [0, 0];
+    stdin.write('[A');
+    await wait();
+    mockBuffer.visualCursor = [0, 'some text'.length];
+    stdin.write('[B');
+    await wait();
+    expect(mockInputHistory.navigateUp).toHaveBeenCalled();
+    expect(mockInputHistory.navigateDown).toHaveBeenCalled();
+    unmount();
+  });
+
   it('should call completion.navigateUp for up arrow when suggestions are showing', async () => {
     mockedUseCommandCompletion.mockReturnValue({
       ...mockCommandCompletion,

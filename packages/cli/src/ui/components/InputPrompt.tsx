@@ -1265,6 +1265,17 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         return true;
       };
 
+      // Ctrl+Alt+Arrow is the transcript's tool-output jump. The arrow
+      // matchers below ignore modifiers, and KeypressContext fans every key
+      // out to all subscribers, so without this guard one keypress would both
+      // jump the transcript AND recall an older prompt into the composer.
+      if (
+        keyMatchers[Command.PREV_TOOL_OUTPUT](key) ||
+        keyMatchers[Command.NEXT_TOOL_OUTPUT](key)
+      ) {
+        return true;
+      }
+
       // Reset ESC count and hide prompt on any non-ESC key
       if (key.name !== 'escape') {
         if (escPressCount > 0 || showEscapePrompt) {

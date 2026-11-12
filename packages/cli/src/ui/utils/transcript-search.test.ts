@@ -137,15 +137,27 @@ describe('searchTranscriptItems', () => {
     expect(matches.map((match) => match.index)).toEqual([1, 2]);
   });
 
-  it('caps the result set and reports truncation', () => {
+  it('caps the result set to the NEWEST matches, in ascending order', () => {
     const items = buildVirtualItems(
       [user(1, 'alpha'), user(2, 'alpha'), user(3, 'alpha')],
       [],
     );
     const { matches, truncated } = searchTranscriptItems(items, 'alpha', 2);
-    expect(matches).toHaveLength(2);
+    // Forward-limiting would keep 1 and 2 and make the newest hit unreachable.
+    expect(matches.map((match) => match.index)).toEqual([2, 3]);
     expect(truncated).toBe(true);
-    expect(MAX_TRANSCRIPT_SEARCH_MATCHES).toBeGreaterThan(0);
+  });
+
+  it('keeps the newest occurrence reachable across the 500-match boundary', () => {
+    const history = Array.from({ length: 501 }, (_, i) => user(i + 1, 'alpha'));
+    const items = buildVirtualItems(history, []);
+    const { matches, truncated } = searchTranscriptItems(items, 'alpha');
+    expect(truncated).toBe(true);
+    expect(matches).toHaveLength(MAX_TRANSCRIPT_SEARCH_MATCHES);
+    expect(matches[matches.length - 1].index).toBe(501);
+    expect(matches[0].index).toBe(2);
+    const indexes = matches.map((match) => match.index);
+    expect(indexes).toEqual([...indexes].sort((a, b) => a - b));
   });
 
   it('produces single-line snippets with ellipses around long matches', () => {
