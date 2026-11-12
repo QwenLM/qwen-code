@@ -7380,8 +7380,12 @@ describe('Server Config (config.ts)', () => {
       });
 
       it('ignores other env values', () => {
-        vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', '0');
-        expect(makeConfig().isEventBusAgentLoopEnabled()).toBe(false);
+        vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', 'yes');
+        expect(
+          makeConfig({
+            eventBusAgentLoopEnabled: true,
+          }).isEventBusAgentLoopEnabled(),
+        ).toBe(true);
       });
 
       it('is disabled by QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP=0 even when the parameter is on', () => {
@@ -7391,6 +7395,24 @@ describe('Server Config (config.ts)', () => {
             eventBusAgentLoopEnabled: true,
           }).isEventBusAgentLoopEnabled(),
         ).toBe(false);
+      });
+
+      it('is disabled by QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP=false even when the parameter is on', () => {
+        vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', 'false');
+        expect(
+          makeConfig({
+            eventBusAgentLoopEnabled: true,
+          }).isEventBusAgentLoopEnabled(),
+        ).toBe(false);
+      });
+
+      it('is enabled by QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP=true even when the parameter is off', () => {
+        vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', 'true');
+        expect(
+          makeConfig({
+            eventBusAgentLoopEnabled: false,
+          }).isEventBusAgentLoopEnabled(),
+        ).toBe(true);
       });
     });
 
@@ -7431,10 +7453,28 @@ describe('Server Config (config.ts)', () => {
       });
 
       it('ignores other env values', () => {
-        vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', '');
+        vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', 'yes');
         expect(
           makeConfig({
             unifiedAgentLoopEnabled: true,
+          }).isUnifiedAgentLoopEnabled(),
+        ).toBe(true);
+      });
+
+      it('is disabled by QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP=false even when the parameter is on', () => {
+        vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', 'false');
+        expect(
+          makeConfig({
+            unifiedAgentLoopEnabled: true,
+          }).isUnifiedAgentLoopEnabled(),
+        ).toBe(false);
+      });
+
+      it('is enabled by QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP=true even when the parameter is off', () => {
+        vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', 'true');
+        expect(
+          makeConfig({
+            unifiedAgentLoopEnabled: false,
           }).isUnifiedAgentLoopEnabled(),
         ).toBe(true);
       });

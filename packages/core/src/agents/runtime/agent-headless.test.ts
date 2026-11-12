@@ -2849,7 +2849,7 @@ describe('subagent.ts', () => {
             const { scope, emitter } = await createScope({ max_turns: 3 });
             vi.stubEnv(
               'QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP',
-              shared ? '1' : undefined,
+              shared ? '1' : '0',
             );
             const controller = new AbortController();
             vi.useFakeTimers();
@@ -3606,7 +3606,7 @@ describe('subagent.ts', () => {
           for (const shared of [false, true]) {
             vi.stubEnv(
               'QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP',
-              shared ? '1' : undefined,
+              shared ? '1' : '0',
             );
             mockSendMessageStream.mockReset();
             const run = new AbortController();

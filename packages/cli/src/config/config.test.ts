@@ -1575,6 +1575,26 @@ describe('loadCliConfig', () => {
     expect(provider).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ['unifiedAgentLoop', 'isUnifiedAgentLoopEnabled'],
+    ['eventBusAgentLoop', 'isEventBusAgentLoopEnabled'],
+  ] as const)(
+    'derives %s from settings with the override variable unset',
+    async (setting, getter) => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', undefined);
+      vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', undefined);
+      const defaults = await loadCliConfig({}, argv);
+      expect(defaults[getter]()).toBe(false);
+      const enabled = await loadCliConfig(
+        { experimental: { [setting]: true } },
+        argv,
+      );
+      expect(enabled[getter]()).toBe(true);
+    },
+  );
+
   it('derives folderTrust from settings and defaults it to false', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();

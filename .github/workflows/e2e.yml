@@ -461,7 +461,7 @@ jobs:
           QWEN_SANDBOX: "${{ matrix.sandbox == 'sandbox:docker' && 'docker' || 'false' }}"
           # Read by Config.isUnifiedAgentLoopEnabled in every CLI the tests
           # spawn; the parity suites still set it per run themselves.
-          QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP: "${{ matrix.agent-loop == 'unified' && '1' || '' }}"
+          QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP: "${{ matrix.agent-loop == 'unified' && '1' || '0' }}"
           BUILD_SANDBOX_FLAGS: '--label org.qwen-code.ci.sandbox=true'
           SANDBOX_FLAGS: '--label org.qwen-code.ci.owner=${E2E_CONTAINER_OWNER}'
         run: |-

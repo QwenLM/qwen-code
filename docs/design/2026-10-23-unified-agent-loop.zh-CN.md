@@ -203,7 +203,7 @@ ACP 只传入一个策略：Todo Stop Guard。当前轮次的后台结果和中�
 
 ### 设置
 
-`experimental.unifiedAgentLoop` 是布尔值，默认 `false`，重启后生效。`QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP=1` 可以覆盖它，便于 CI 和脚本在共享 loop 下运行测试。两者沿用 `experimental.agentTeam` / `QWEN_CODE_ENABLE_AGENT_TEAM` 的写法。
+`experimental.unifiedAgentLoop` 是布尔值，默认 `false`，重启后生效。`QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP` 可双向覆盖它（`1` 强制开启，`0` 强制关闭），便于 CI 和脚本固定一次运行要覆盖的 loop。两者沿用 `experimental.agentTeam` / `QWEN_CODE_ENABLE_AGENT_TEAM` 的写法。
 
 由 `Config.isUnifiedAgentLoopEnabled()` 暴露该设置。每个入口在其 loop 的启动处读取它：
 
@@ -558,7 +558,7 @@ PR 6 之后同样跟随默认开启和删除旧 loop 两步。
 
 `integration-tests/fake-openai-server.ts` 已经会记录每个请求体。
 
-**运行方式。** 对拍测试把每个脚本化场景在同一入口上跑两次：一次不设置 `QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP`，一次设为 `1`。比较两样东西：
+**运行方式。** 对拍测试把每个脚本化场景在同一入口上跑两次：一次把 `QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP` 设为 `0`，一次设为 `1` —— 绝不靠不设置变量，否则 current loop 那一臂会依赖设置仍然默认关闭。比较两样东西：
 
 - 模型看到的请求序列，比较前去掉时间戳、日期提醒、各类 id 和耗时；
 - 入口的输出：headless 是 stream-json 帧；ACP 是 `session/update` 通知和每个 prompt 的停止原因，但不含按自己时机到达的 `available_commands_update`。

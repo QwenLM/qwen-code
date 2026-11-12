@@ -203,7 +203,7 @@ ACP passes one policy, the Todo Stop Guard. The current turn's background result
 
 ### The setting
 
-`experimental.unifiedAgentLoop` is a boolean, `false` by default, and takes effect after a restart. `QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP=1` overrides it, which lets CI and scripts run the suites with the shared loop. Both follow the pattern of `experimental.agentTeam` / `QWEN_CODE_ENABLE_AGENT_TEAM`.
+`experimental.unifiedAgentLoop` is a boolean, `false` by default, and takes effect after a restart. `QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP` overrides it in either direction (`1` forces it on, `0` forces it off), which lets CI and scripts pin the loop a run means to exercise. Both follow the pattern of `experimental.agentTeam` / `QWEN_CODE_ENABLE_AGENT_TEAM`.
 
 `Config.isUnifiedAgentLoopEnabled()` exposes it. Each surface reads it at its loop's entry point:
 
@@ -558,7 +558,7 @@ Its current loop is removed one release after its default changed. Until then, s
 
 `integration-tests/fake-openai-server.ts` already records every request body.
 
-**How it runs.** The suite runs each scripted scenario on a surface twice, once with `QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP` unset and once with it set to `1`. It compares:
+**How it runs.** The suite runs each scripted scenario on a surface twice, once with `QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP` set to `0` and once with it set to `1` — never by leaving it unset, because the current-loop arm would otherwise depend on the setting still defaulting off. It compares:
 
 - the request sequence the model saw, normalized by removing timestamps, the date reminder, ids and durations;
 - the surface's output: the stream-json frames for headless; for ACP the `session/update` notifications and each prompt's stop reason, without `available_commands_update`, which arrives on its own schedule.

@@ -57,7 +57,7 @@ describe.each([
       join(rig.testDir!, 'system.json'),
     );
     vi.stubEnv('QWEN_CODE_DISABLE_WORKFLOWS', '0');
-    vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', '0');
+    vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', shared ? '1' : '0');
     server = await startFakeOpenAIServer(
       () => ({ content: 'DW04_HEADLESS_DONE' }),
       fakeServerHostOptions(),
