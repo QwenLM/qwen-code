@@ -26,10 +26,116 @@ vi.mock('undici', async (importOriginal) => {
 afterEach(() => {
   vi.unstubAllEnvs();
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
   vi.clearAllMocks();
 });
 
 describe('Feishu webhook workspace proxy', () => {
+  it.each([false, true])(
+    'routes the HTTPS origin with workspace credentials (NO_PROXY bypass=%s)',
+    async (bypass) => {
+      vi.stubEnv('HTTP_PROXY', 'http://127.0.0.1:1');
+      vi.stubEnv('HTTPS_PROXY', 'http://127.0.0.1:1');
+      vi.stubEnv('http_proxy', undefined);
+      vi.stubEnv('https_proxy', undefined);
+      vi.stubEnv('NO_PROXY', bypass ? 'open.feishu.cn' : '');
+      vi.stubEnv('no_proxy', undefined);
+      const unproxiedFetch = vi
+        .fn()
+        .mockRejectedValue(new Error('Unexpected unproxied request'));
+      vi.stubGlobal('fetch', unproxiedFetch);
+      const realUndici =
+        await vi.importActual<typeof import('undici')>('undici');
+      const directConnections: Array<{ hostname: string; protocol: string }> =
+        [];
+      vi.spyOn(undici, 'EnvHttpProxyAgent').mockImplementation(
+        (options) =>
+          new realUndici.EnvHttpProxyAgent({
+            ...options,
+            // Preserve routing decisions, but stop direct sockets before external I/O.
+            connect: (target, callback) => {
+              directConnections.push({
+                hostname: target.hostname,
+                protocol: target.protocol,
+              });
+              callback(new Error('Direct socket blocked by fixture'), null);
+            },
+          }),
+      );
+      vi.mocked(undici.fetch).mockImplementation(realUndici.fetch);
+      const connects: Array<{ authority: string; authorization?: string }> = [];
+      const sockets = new Set<Socket>();
+      const proxy = createServer((_request, response) =>
+        response.writeHead(405).end(),
+      );
+      proxy.on('connection', (socket) => {
+        sockets.add(socket);
+        socket.on('close', () => sockets.delete(socket));
+      });
+      proxy.on('connect', (request, client) => {
+        connects.push({
+          authority: request.url!,
+          authorization: request.headers['proxy-authorization'],
+        });
+        client.end(
+          'HTTP/1.1 407 Proxy Authentication Required\r\nConnection: close\r\nContent-Length: 0\r\n\r\n',
+        );
+      });
+      let channel: FeishuWebhookChannel | undefined;
+      try {
+        proxy.listen(0, '127.0.0.1');
+        await once(proxy, 'listening');
+        channel = new FeishuWebhookChannel(
+          'robot',
+          {
+            type: 'feishu-webhook',
+            token: '',
+            privatePolicy: 'disabled',
+            groupPolicy: 'disabled',
+            allowedUsers: [],
+            groups: {},
+            sessionScope: 'user',
+            cwd: process.cwd(),
+            webhookUrl:
+              'https://open.feishu.cn/open-apis/bot/v2/hook/private-token',
+          },
+          new EventEmitter() as unknown as ChannelAgentBridge,
+          {
+            proxy: `http://proxy-user:proxy-password@127.0.0.1:${(proxy.address() as AddressInfo).port}`,
+          },
+        );
+        await channel.connect();
+        await expect(
+          channel.sendMessage('default', 'Routing probe'),
+        ).rejects.toMatchObject({
+          disposition: 'transient',
+          message:
+            'Feishu webhook request failed or returned an invalid response; delivery may have been accepted.',
+        });
+        expect(undici.fetch).toHaveBeenCalledOnce();
+        expect(unproxiedFetch).not.toHaveBeenCalled();
+        expect(connects).toEqual(
+          bypass
+            ? []
+            : [
+                {
+                  authority: 'open.feishu.cn:443',
+                  authorization: `Basic ${Buffer.from('proxy-user:proxy-password').toString('base64')}`,
+                },
+              ],
+        );
+        expect(directConnections).toEqual(
+          bypass ? [{ hostname: 'open.feishu.cn', protocol: 'https:' }] : [],
+        );
+      } finally {
+        channel?.disconnect();
+        await channel?.waitForDisconnect();
+        for (const socket of sockets) socket.destroy();
+        await new Promise<void>((resolve) => proxy.close(() => resolve()));
+      }
+    },
+  );
+
   it.each([
     { code: 0, bypass: false },
     { code: 19024, bypass: false },
@@ -119,7 +225,7 @@ describe('Feishu webhook workspace proxy', () => {
         channel = new FeishuWebhookChannel(
           'robot',
           config,
-          new EventEmitter() as ChannelAgentBridge,
+          new EventEmitter() as unknown as ChannelAgentBridge,
           { proxy: `http://proxy-user:proxy-password@127.0.0.1:${proxyPort}` },
         );
         await channel.connect();

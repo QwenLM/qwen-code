@@ -23,6 +23,11 @@ encoding, query parameters or fragment.
 
 ## Configure a Channel
 
+Until the Web integration in [PR #17013](https://github.com/QwenLM/qwen-code/pull/17013)
+is included in your build, use CLI/configuration management. Web Shell's Channels
+page omits both the Feishu Webhook create entry and existing instances; it cannot
+start, stop, edit or delete them during that interval.
+
 Add a named instance to the workspace's Channel settings:
 
 ```json

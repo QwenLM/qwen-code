@@ -193,18 +193,31 @@ resolve below `4.6.6`.
   on disk; omitting the banner understates both sides by 138 B and leaves the
   delta unchanged. The shares above are taken against that total.
 
-  Second, swap the resolved package rather than pointing esbuild at a directory.
+  Second, the absolute total depends on where the checkout lives. esbuild writes
+  a `// <path>` comment above every bundled module, and that path is relative to
+  the output directory, so a deeper checkout — or one whose `node_modules` is a
+  symlink resolving elsewhere — emits longer comments and a larger file for
+  byte-identical code. The same source and the same options produce 947,236 B in
+  a plain checkout and 954,646 B in a tree whose `node_modules` symlinks into
+  another checkout: both emit 251 comment lines, 8,273 B against 15,683 B, and
+  that 7,410 B difference is exactly the gap between the two files. Drop those
+  comment lines and the two artifacts are byte-identical — 938,963 B each,
+  banner included — so the non-Zod inputs resolved to exactly the same code
+  either way. The extra bytes are comment text, not different resolution, which
+  rules out the explanation an earlier pass of this section gave for 954,646 (a
+  tree without `packages/browser-use/node_modules`). Compare absolute totals
+  only within one tree; across trees use the comment-stripped artifact, which is
+  path-independent: 311,017 → 938,963 B, +627,946 B. Zod's per-module share is
+  unaffected, because `bytesInOutput` carries no paths.
+
+  Third, swap the resolved package rather than pointing esbuild at a directory.
   An `alias` bypasses `exports`, so aliasing the Zod 3 package root selects its
   CommonJS build and reports 343,689 B with 150,830 B of Zod across 10 files —
   not a like-for-like comparison. Aliasing its ESM entry (`zod/index.js`) gets
   the right Zod share but still emits 312,882 B, because the alias also changes
   how unrelated inputs resolve. Replacing `node_modules/zod` in place is the one
-  route that measures only the version change: 312,578 B against 947,236 B.
-
-  Third, build in a tree whose `packages/browser-use/node_modules` is installed.
-  Without it esbuild resolves some non-Zod inputs differently and reports about
-  7 KB more on both sides, which is how an earlier pass of this section arrived
-  at 954,646. Zod's own share is identical either way.
+  route that measures only the version change: 312,578 B against 947,236 B in
+  the same tree.
 
   The locales dominate, and they survive tree-shaking because
   `zod/v4/classic/external.js` ends with `export * as locales from
@@ -247,14 +260,15 @@ scripts/tests/browser-use-assets.test.js` for the new pin assertion, and
 - To re-measure the size cost in the Risks section, build this entry point with
   `metafile: true` and the same options as `build.mjs` (`packages: 'bundle'`,
   `external: ['playwright-core', 'playwright-core/*']`, `target: 'node22'`,
-  `format: 'esm'`, and its kernel banner), in a tree whose
-  `packages/browser-use/node_modules` is installed. Then sum `bytesInOutput`
-  over the metafile inputs under `node_modules/zod/`. For the Zod 3 side, replace
-  `node_modules/zod` with that version and rebuild — do not use an esbuild
-  `alias`. An alias to the package directory bypasses `exports` and picks the
-  CommonJS build; an alias to its ESM entry fixes the Zod share but still shifts
-  unrelated inputs. Restore the 4.6.6 copy afterwards, since the suite and the
-  guard both read the resolved version.
+  `format: 'esm'`, and its kernel banner). Then sum `bytesInOutput` over the
+  metafile inputs under `node_modules/zod/`. Build both versions in the same
+  tree, and drop the leading `// ` comment lines before comparing total bytes,
+  so a symlinked `node_modules` or a longer checkout path cannot move the
+  result. For the Zod 3 side, replace `node_modules/zod` with that version and
+  rebuild — do not use an esbuild `alias`. An alias to the package directory
+  bypasses `exports` and picks the CommonJS build; an alias to its ESM entry
+  fixes the Zod share but still shifts unrelated inputs. Restore the 4.6.6 copy
+  afterwards, since the suite and the guard both read the resolved version.
 
 ### Verified results
 

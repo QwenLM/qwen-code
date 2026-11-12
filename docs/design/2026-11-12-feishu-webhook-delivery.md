@@ -123,8 +123,9 @@ static envelope rather than changing that builder's output.
 
 Reuse the pure `splitByTables` logic through a small export, preserving the
 application-bot card structure and transport. Its fence recognition needs a
-small correction: only line-start backtick or tilde fences change code-block
-state, and closing fences must match the opener. This prevents table-like
+small correction: only backtick or tilde fences at the start of a line, allowing
+spaces or tabs before the marker, change code-block state. Closing fences must
+match the opener. This preserves nested list code blocks and prevents table-like
 content inside a tilde fence from being separated into broken card elements. This puts table
 segments and surrounding text in separate Markdown elements within the same
 card. It does not split delivery into multiple requests. The official schema 2.0
@@ -133,6 +134,11 @@ describes automatic pagination after five data rows; keeping one table per
 element fits that documented boundary. Preserve code-fenced table-like text and
 verify mixed prose/table/code cases. Do not use application-bot `splitChunks` or
 its character limit for webhook delivery.
+
+We considered shipping this formatter correction separately. It stays with the
+adapter because webhook cards reuse this helper and need to preserve fenced
+table-like text from their first release. Regression tests also exercise the
+existing application-bot card builder; its transport and card envelope stay unchanged.
 
 Plain text, headings, lists, links, fenced code, tables, Chinese and emoji remain
 valid input. Preserve their content without silent truncation or a general
@@ -210,7 +216,9 @@ Each delivery attempt performs at most one request, with a **15-second timeout**
 and a **16,384-byte response-body limit**. Bound reading before parsing JSON,
 cancel/release the reader when necessary, and clean up timeout and dispatcher
 resources on success, failure or cancellation. Do not follow redirects or echo
-response bodies in errors.
+response bodies in errors. Keep `redirect: 'error'`: fetch rejects redirects
+without exposing an HTTP response to the adapter, so they take the sanitized
+transient transport-failure path rather than the HTTP-status classifier.
 
 Only a successful HTTP response with a parsed object containing numeric
 `code === 0` succeeds. Do not accept a string `"0"`, missing code or legacy
@@ -221,6 +229,7 @@ through existing delivery results with bounded, sanitized reasons:
 | --------------------------------------------------------- | ---------------------------------------------------------- |
 | HTTP 408, 425, 429 or 5xx                                 | Transient                                                  |
 | Other non-success HTTP response                           | Permanent                                                  |
+| Fetch rejection, including a redirect rejected by fetch   | Transient; no automatic retry                              |
 | Feishu numeric business code `11232`                      | Transient; documented custom-bot rate limit                |
 | Other nonzero business code                               | Permanent unless endpoint-specific evidence says otherwise |
 | Malformed/missing business response or oversized response | Failure; do not infer success                              |
@@ -281,8 +290,13 @@ restrictions and manual user/chat destinations continue to apply.
 | 2   | `packages/web-shell/client/i18n.tsx`                                       | Neutral method copy and all supported locale entries            |
 | 2   | Channel/editor/task tests and Web E2E flows                                | Configuration, secret editing, readiness and configured targets |
 
-The backend PR remains usable through configuration and existing delivery APIs
-before the Web PR merges. No source changes are expected in ChannelBase, daemon
+The backend PR remains usable through CLI/configuration and existing delivery
+APIs before the Web PR merges. During that interval, Web Shell does not recognize
+`feishu-webhook`: it omits both the create entry and existing instances from the
+Channels manager. Those instances cannot be started, stopped, edited or deleted
+there until PR 2 merges. Use CLI/configuration management during the interval.
+
+No source changes are expected in ChannelBase, daemon
 routes, task persistence or SDK contracts. If implementation uncovers a required
 contract change, revisit this design rather than broadening the PR silently.
 
@@ -333,6 +347,12 @@ local implementation/review, but must not be reported as live acceptance.
 - The table helper is a small existing formatter, not a complete Markdown
   parser. Test its fence/table boundaries and keep the application-bot card
   structure and transport unchanged; deeper Markdown parsing is a separate change if needed.
+- Evaluate extracting the transport lifecycle now shared by DingTalk and Feishu
+  into `channel-base` separately, preserving request cancellation, drain,
+  timeout, response limits and workspace proxy behavior for both adapters.
+- Apply equivalent fence handling to the application-bot `splitChunks` and
+  collapsible-card split in a separate change. They still use backtick parity;
+  their chunking and collapse boundaries need their own regression coverage.
 - Current sources establish `11232` as rate limiting. Do not copy speculative
   transient-code lists from unrelated Feishu APIs or third-party SDKs.
 - Lark domains, other providers, Generic Webhook, richer cards and retry policies
