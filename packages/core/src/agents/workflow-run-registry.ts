@@ -44,7 +44,11 @@ import {
   type ToolConfirmationPayload,
 } from '../tools/tools.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import { getInvocationContext } from '../utils/invocation-context.js';
+import {
+  getChannelWorkflowOrigin,
+  getInvocationContext,
+  type ChannelWorkflowOrigin,
+} from '../utils/invocation-context.js';
 import {
   promptIdContext,
   todoWorkChainContext,
@@ -323,6 +327,9 @@ export type WorkflowEvent = WorkflowEventPayload & { id: string };
 export interface WorkflowTask extends TaskBase<WorkflowStatus> {
   /** Turn that registered this workflow run. */
   sourceTurnId?: string;
+  /** Live daemon client that originated the workflow's prompt, when known. */
+  sourceOriginatorClientId?: string;
+  channelWorkflowOrigin?: ChannelWorkflowOrigin;
   sourceRef?: WorkflowSourceRef;
   workflowCalls?: WorkflowCallTrace[];
   workflowCallsTruncated?: boolean;
@@ -581,6 +588,8 @@ export class WorkflowRunRegistry {
   private readonly entries = new Map<string, WorkflowTask>();
   private readonly handles = new Map<string, WorkflowRunHandle>();
   private readonly starting = new Map<string, AbortController>();
+  /** Reserved controllers of runs that start in the background. */
+  private readonly backgroundStarts = new WeakSet<AbortController>();
 
   private registerCallback: WorkflowRunRegisterCallback | undefined;
   private statusChangeCallback: WorkflowRunStatusChangeCallback | undefined;
@@ -811,11 +820,13 @@ export class WorkflowRunRegistry {
   reserveStart(
     runId: string,
     createController: () => AbortController,
+    options: { background?: boolean } = {},
   ): AbortController {
     const refusal = this.describeLiveRun(runId);
     if (refusal) throw new Error(refusal);
     const controller = createController();
     this.starting.set(runId, controller);
+    if (options.background) this.backgroundStarts.add(controller);
     return controller;
   }
 
@@ -915,8 +926,15 @@ export class WorkflowRunRegistry {
     entry.notified = false;
     entry.isBackgrounded = registration.isBackgrounded ?? false;
     entry.todoWorkChainId ??= todoWorkChainContext.getStore();
-    entry.sourceTurnId ??=
-      getInvocationContext()?.promptId ?? promptIdContext.getStore();
+    const invocation = getInvocationContext();
+    entry.channelWorkflowOrigin = getChannelWorkflowOrigin();
+    entry.sourceTurnId ??= invocation?.promptId ?? promptIdContext.getStore();
+    if (
+      invocation?.originatorClientId &&
+      invocation.promptId === entry.sourceTurnId
+    ) {
+      entry.sourceOriginatorClientId = invocation.originatorClientId;
+    }
     entry.currentPhase = null;
     entry.phases = [];
     entry.phaseVisits = [];
@@ -1690,6 +1708,31 @@ export class WorkflowRunRegistry {
     entry.startMode = startMode;
     this.emitStatusChange(entry);
     return true;
+  }
+
+  /**
+   * Cancel every active background run (running, pausing or paused) and
+   * every background run still starting, and return their ids. For a host
+   * that turns its workflow controls off while such runs exist: a
+   * background run has no turn the user could cancel, so once the controls
+   * are gone it could be neither seen nor stopped. Foreground runs belong
+   * to a turn and are left alone.
+   */
+  cancelBackgroundRuns(endTime: number): string[] {
+    const cancelled: string[] = [];
+    for (const [runId, controller] of Array.from(this.starting)) {
+      if (!this.backgroundStarts.has(controller)) continue;
+      this.cancelStarting(runId);
+      cancelled.push(runId);
+    }
+    for (const entry of Array.from(this.entries.values())) {
+      if (!entry.isBackgrounded || !isActiveWorkflowStatus(entry.status)) {
+        continue;
+      }
+      this.cancel(entry.runId, endTime);
+      cancelled.push(entry.runId);
+    }
+    return cancelled;
   }
 
   /** All entries (active + terminal, no filter). Iteration order = registration order. */
