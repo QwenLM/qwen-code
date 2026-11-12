@@ -6,6 +6,7 @@ import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.ResolvedBinding;
 import com.alibaba.qwen.code.managedagent.repository.SessionWorktreeStore;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -402,7 +403,7 @@ public class JdbcSessionWorktreeStore
     private String storageIdentity(ContextBinding binding, boolean lock) {
         var alias = jdbc.queryForList("SELECT physical_key, registration_revision, mount_revision, fence_operation_id"
                         + " FROM ma_storage WHERE alias_key = ?" + (lock ? " FOR UPDATE" : ""),
-                com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository.storageAliasKey(binding.getTenantId(), binding.getStorageId()));
+                RuntimeAdmissionFences.storageAliasKey(binding.getTenantId(), binding.getStorageId()));
         var owner = jdbc.queryForList("SELECT mount_revision, mount_registration_id, mount_state, mount_operation_id"
                         + " FROM ma_storage_owner WHERE storage_key = ?" + (lock ? " FOR UPDATE" : ""),
                 lock ? JdbcWorkspaceExecutionStore.storageKey(jdbc, binding)

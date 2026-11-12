@@ -8,6 +8,7 @@ import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.BeforeEach;
@@ -583,9 +584,9 @@ public class ManagedSchemaSessionStoreTest {
         String token = "a".repeat(32);
         jdbc.update(
                 "INSERT INTO ma_session_head (tenant_key, harness_key, tenant_id, harness_session_id, session_id, head_kind, gmt_create, gmt_modified) VALUES (?, ?, ?, ?, ?, 'HARNESS', " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ")",
-                com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository.harnessDrainKey(
+                RuntimeAdmissionFences.harnessDrainKey(
                         tenant),
-                com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository.harnessDrainKey(
+                RuntimeAdmissionFences.harnessDrainKey(
                         session),
                 tenant,
                 session,
