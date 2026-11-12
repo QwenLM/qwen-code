@@ -430,10 +430,18 @@ function isNetworkPseudoDevice(target: string): boolean {
 /**
  * Index where bash ends the word and starts an unquoted redirection operator.
  *
- * A quoted or escaped `<`, `>` or `&` stays inside the word, so `'>'>file`
+ * A quoted or escaped `<`, `>`, `&` or `|` stays inside the word, so `'>'>file`
  * is the word `>` followed by the redirect `>file`, and `'&'>file` is the
  * word `&` followed by the same redirect. The tokenizer keeps both in one
  * token, and the masked spelling alone would hide the real operator.
+ *
+ * The character set is the mask's, and has to stay in step with it: `|` joined
+ * that set when a quoted `|` stopped being read as the clobber operator, and
+ * leaving it out here kept the opposite hole open. `"|" >file` (spaced) was
+ * seen while `"|">file` was not, so bash wrote the file and no rule saw a
+ * write at all — `echo '{}' "|">.qwen/settings.json` overwrites the settings
+ * file under a `Write(.qwen/settings.json)` deny, measured on base as well as
+ * here. `&`, `>` and `<` never had the gap.
  */
 function operatorAfterMaskedOperator(
   token: string,
@@ -443,7 +451,7 @@ function operatorAfterMaskedOperator(
   for (let index = 1; index < token.length; index++) {
     if (bare[index] !== '1') continue;
     const previous = token[index - 1]!;
-    if (bare[index - 1] === '1' || !'<>&'.includes(previous)) continue;
+    if (bare[index - 1] === '1' || !'<>&|'.includes(previous)) continue;
     if (!/^(?:&>>|&>|>>|>|<<|<)/.test(token.slice(index))) continue;
     return index;
   }

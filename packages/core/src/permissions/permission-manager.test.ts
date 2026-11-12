@@ -3562,6 +3562,14 @@ describe('PermissionManager — compound shell write attribution', () => {
     ['printf TXT 2>|protected.txt', 'deny'],
     ['printf TXT >| other.txt', 'allow'],
     ['printf "TXT >| protected.txt"', 'allow'],
+    // A quoted or escaped `|` ends the word, so the `>` glued to it is a real
+    // redirect. bash writes the file, and the analysis has to report the same
+    // write or the deny below never fires.
+    ['echo hi "|">protected.txt', 'deny'],
+    ["echo hi '|'>protected.txt", 'deny'],
+    ['echo hi \\|>protected.txt', 'deny'],
+    ['echo hi "|" >protected.txt', 'deny'],
+    ['echo hi >"|"', 'allow'],
   ])('Bash(*) allow + file deny: %s → %s', async (command, expected) => {
     const pm = repoPm({
       permissionsAllow: ['Bash(*)'],

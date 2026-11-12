@@ -690,6 +690,13 @@ describe('extractShellOperations', () => {
     ["echo x $'\\x26'>out8.txt", 'out8.txt'],
     ["echo x '>'&>out9.txt", 'out9.txt'],
     ['echo x "&"&>out10.txt', 'out10.txt'],
+    // `|` belongs to the same set: a quoted or escaped pipe ends the word and
+    // the adjacent unquoted `>` is still a redirect. Without it bash wrote the
+    // file while the analysis reported nothing at all.
+    ['echo x "|">out11.txt', 'out11.txt'],
+    ["echo x '|'>out12.txt", 'out12.txt'],
+    ['echo x \\|>out13.txt', 'out13.txt'],
+    ['echo \'{}\' "|">.qwen/settings.json', '.qwen/settings.json'],
   ])(
     'a quoted operator before a real redirect keeps the write: %s',
     (command, file) => {
