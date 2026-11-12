@@ -129,12 +129,11 @@ A published verification comment ends with the same attribution shape
 - The model is the identity the round ran under, the CLI version is
   `qwen --version`, and the skill version is the first 12 characters of
   `git hash-object --no-filters .qwen/skills/verify-pr/SKILL.md`. A content
-  hash, not a commit: the lane's tree is depth-2 and its `.qwen` arrives by
-  `git archive`, so no history is reachable, and the hash names exactly the
-  instructions the round loaded — including uncommitted edits on a
-  workstation. `--no-filters` because prepare leaves `.git` node-owned,
-  and a planted clean filter would otherwise choose what gets hashed — or
-  run as root.
+  hash, not a commit: the hash stays the same while the base the skill
+  was archived from moves on, and it names exactly the instructions the
+  round loaded — including uncommitted edits on a workstation.
+  `--no-filters` because prepare leaves `.git` node-owned, and a planted
+  clean filter would otherwise choose what gets hashed — or run as root.
 - In the lane, all three values are workflow-owned outputs of the run step
   — the configured model, the runner's CLI, the re-pinned skill file —
   never read from the agent-writable artifact tree. They are collected

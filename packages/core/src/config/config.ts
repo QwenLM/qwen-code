@@ -1447,6 +1447,8 @@ export interface ConfigParameters {
   agentTeamEnabled?: boolean;
   /** Experimental: run migrated surfaces on the shared agent loop. */
   unifiedAgentLoopEnabled?: boolean;
+  /** Experimental: run the shared agent loop on the event bus. */
+  eventBusAgentLoopEnabled?: boolean;
   /**
    * Opt-in for persistent workspace Agents answering @-mentions in chat
    * sessions. Separate from `agentTeamEnabled`: neither implies the other.
@@ -3258,6 +3260,7 @@ export class Config {
   private readonly todoWriteEnabled: boolean = false;
   private readonly agentTeamEnabled: boolean = false;
   private readonly unifiedAgentLoopEnabled: boolean = false;
+  private readonly eventBusAgentLoopEnabled: boolean = false;
   private readonly agentCollaborationEnabled: boolean = false;
   private readonly artifactEnabled: boolean = true;
   private readonly artifactRecordingSupported: boolean = true;
@@ -3721,6 +3724,7 @@ export class Config {
     this.todoWriteEnabled = params.todoWriteEnabled ?? false;
     this.agentTeamEnabled = params.agentTeamEnabled ?? false;
     this.unifiedAgentLoopEnabled = params.unifiedAgentLoopEnabled ?? false;
+    this.eventBusAgentLoopEnabled = params.eventBusAgentLoopEnabled ?? false;
     this.agentCollaborationEnabled = params.agentCollaborationEnabled ?? false;
     this.artifactEnabled = params.artifactEnabled ?? true;
     this.artifactRecordingSupported = params.artifactRecordingSupported ?? true;
@@ -6157,12 +6161,14 @@ export class Config {
     authMethod: AuthType,
     isInitialAuth?: boolean,
     subscriptionFallbackModel?: string,
+    allowUnlistedSubscriptionModel?: boolean,
   ) {
     return this.rebuildContentGenerator(
       authMethod,
       isInitialAuth,
       true,
       subscriptionFallbackModel,
+      allowUnlistedSubscriptionModel,
     );
   }
 
@@ -6171,6 +6177,7 @@ export class Config {
     isInitialAuth: boolean | undefined,
     refreshSubscriptionModels: boolean,
     subscriptionFallbackModel?: string,
+    allowUnlistedSubscriptionModel?: boolean,
   ) {
     const hookOwner = captureHookExecutionOwner(this, null);
     if (!this.contentGenerator && authMethod === this.initialAuthType) {
@@ -6208,17 +6215,22 @@ export class Config {
       const selected = this.modelsConfig.getModel();
       if (selected && !models.includes(selected)) {
         if (
+          isInitialAuth &&
+          subscriptionFallbackModel &&
+          models.includes(subscriptionFallbackModel)
+        ) {
+          fallbackModel = subscriptionFallbackModel;
+        } else if (
           !isInitialAuth ||
-          !subscriptionFallbackModel ||
-          !models.includes(subscriptionFallbackModel)
+          !allowUnlistedSubscriptionModel ||
+          priorGeneration.authType !== authMethod
         ) {
           throw new Error(subscriptionModelUnavailable(selected));
         }
-        fallbackModel = subscriptionFallbackModel;
       }
     }
 
-    // Sync modelsConfig state for this auth refresh.
+    // The CLI's resolved subscription credentials preserve an unlisted model during sync.
     const modelId = fallbackModel ?? this.modelsConfig.getModel();
     this.modelsConfig.syncAfterAuthRefresh(authMethod, modelId);
 
@@ -7265,13 +7277,30 @@ export class Config {
    * model. Bare selectors stay bare and authType-qualified selectors keep their
    * authType prefix so selector-aware runtime paths can route cross-auth calls.
    */
-  getFastModel(): string | undefined {
+  getFastModel({ requirePinnedEndpoint = false } = {}): string | undefined {
     const selector = this.resolveFastModelSelector();
     if (!selector) return undefined;
 
     const available = selector.authType
       ? this.getAllConfiguredModels([selector.authType])
       : this.getAllConfiguredModels();
+    const pinnedEndpoint = this.fastModel?.trim().split('\0')[1];
+    if (
+      requirePinnedEndpoint &&
+      pinnedEndpoint !== undefined &&
+      !available.some(
+        (model) =>
+          model.id === selector.modelId &&
+          model.baseUrl === pinnedEndpoint &&
+          !model.voiceOnly &&
+          !model.imageOnly &&
+          !model.visionOnly,
+      )
+    ) {
+      throw new Error(
+        'Fast model is no longer configured at the selected endpoint',
+      );
+    }
     if (
       !available.some(
         (model) =>
@@ -10790,6 +10819,13 @@ export class Config {
   isUnifiedAgentLoopEnabled(): boolean {
     if (process.env['QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP'] === '1') return true;
     return this.unifiedAgentLoopEnabled;
+  }
+
+  isEventBusAgentLoopEnabled(): boolean {
+    if (process.env['QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP'] === '1') {
+      return true;
+    }
+    return this.eventBusAgentLoopEnabled;
   }
 
   /**

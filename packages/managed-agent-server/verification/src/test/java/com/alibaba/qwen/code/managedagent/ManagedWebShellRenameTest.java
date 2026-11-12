@@ -3,7 +3,6 @@ package com.alibaba.qwen.code.managedagent;
 import com.alibaba.qwen.code.managedagent.ManagedAgentServerIntegrationTest.FixtureHarness;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.session.SessionRenameCoordinator;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
@@ -17,7 +16,6 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.annotation.Import;
 import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.ResultActions;
 
@@ -46,7 +44,6 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 })
 @AutoConfigureMockMvc
 @Import(ManagedAgentServerIntegrationTest.FixtureConfiguration.class)
-@MockitoBean(types = SessionRenameCoordinator.class)
 class ManagedWebShellRenameTest {
     private static final String WEB_SHELL = "/api/agent/web-shell/v1";
     private static final String TENANT = TenantContextFilter.HEADER;
@@ -93,15 +90,24 @@ class ManagedWebShellRenameTest {
         rename(tenant, session, "first", "conflicting title").andExpect(status().isConflict())
                 .andExpect(jsonPath("$.error.code").value("idempotency_conflict"));
         rename(tenant, session, "second", "second title").andExpect(status().isOk());
+        assertThat(harness.renameCount()).isEqualTo(sends + 2);
 
+        // An offline Harness no longer refuses the rename: the SQL title is
+        // the display authority, so the mutation still answers 200. The
+        // capability advertisement stays conservative, and the best-effort
+        // journal notification is skipped while the Harness is unavailable.
         harness.setAvailable(false);
         get(tenant, session).andExpect(jsonPath("$.capabilities.rename").value(false));
-        rename(tenant, session, "offline", "third title").andExpect(status().isServiceUnavailable())
-                .andExpect(jsonPath("$.error.code").value("hosted_harness_disabled"));
+        rename(tenant, session, "offline", "third title")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.title").value("third title"))
+                .andExpect(jsonPath("$.replayed").value(false));
+        assertThat(store.requireSession(tenant, session).title()).isEqualTo("third title");
+        assertThat(harness.renameCount()).isEqualTo(sends + 2);
         rename(tenant, session, "first", "first title")
                 .andExpect(status().isOk())
                 .andExpect(header().string("X-Qwen-Idempotent-Replay", "true"))
-                .andExpect(jsonPath("$.title").value("second title"))
+                .andExpect(jsonPath("$.title").value("third title"))
                 .andExpect(jsonPath("$.replayed").value(true));
         assertThat(harness.renameCount()).isEqualTo(sends + 2);
 
@@ -109,7 +115,7 @@ class ManagedWebShellRenameTest {
                 System.currentTimeMillis(), tenant, session);
         get(tenant, session).andExpect(status().isNotFound());
         rename(tenant, session, "first", "first title")
-                .andExpect(status().isOk()).andExpect(jsonPath("$.title").value("second title"))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.title").value("third title"))
                 .andExpect(jsonPath("$.replayed").value(true));
         rename(tenant, session, "fresh", "third title").andExpect(status().isNotFound());
         assertThat(harness.renameCount()).isEqualTo(sends + 2);
@@ -128,19 +134,25 @@ class ManagedWebShellRenameTest {
     }
 
     @Test
-    void anUnknownHarnessOutcomeIsNeverACompletedResponseOrResent() throws Exception {
+    void aFailedTitleNotificationNeverFailsTheRenameOrResends() throws Exception {
         String tenant = tenant();
         String session = create(tenant, false);
-        harness.failNextRename();
-        rename(tenant, session, "unknown", "pending title")
-                .andExpect(status().isServiceUnavailable())
-                .andExpect(jsonPath("$.error.code").value("hosted_harness_unavailable"));
         int sends = harness.renameCount();
+        harness.failNextRename();
+        // The notification is best-effort: its failure is logged and swallowed,
+        // and the confirmed SQL title still answers 200.
         rename(tenant, session, "unknown", "pending title")
-                .andExpect(status().isConflict())
-                .andExpect(jsonPath("$.error.code").value("operation_outcome_unknown"));
-        assertThat(harness.renameCount()).isEqualTo(sends);
-        assertThat(store.requireSession(tenant, session).title()).isEqualTo("original");
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.title").value("pending title"))
+                .andExpect(jsonPath("$.replayed").value(false));
+        assertThat(store.requireSession(tenant, session).title()).isEqualTo("pending title");
+        assertThat(harness.renameCount()).isEqualTo(sends + 1);
+        // The same-key replay answers the recorded outcome without resending.
+        rename(tenant, session, "unknown", "pending title")
+                .andExpect(status().isOk())
+                .andExpect(header().string("X-Qwen-Idempotent-Replay", "true"))
+                .andExpect(jsonPath("$.replayed").value(true));
+        assertThat(harness.renameCount()).isEqualTo(sends + 1);
     }
 
     @Test
