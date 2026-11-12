@@ -72,7 +72,7 @@ class ActivationLeaseLookupMySqlIT {
 
     private static JournalStoreRows.HeadRow head(long journalRevision) {
         return new JournalStoreRows.HeadRow(TENANT, "workspace", SESSION, "ACTIVE", 1, 1, "worker", null, null,
-                journalRevision, journalRevision, "digest", 2, null, 0, "READY", null, "current", "active", 2L,
+                journalRevision, journalRevision, "digest", 2, null, 0, 0, "READY", null, "current", "active", 2L,
                 EXPIRES_AT, journalRevision);
     }
 

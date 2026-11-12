@@ -9,8 +9,10 @@ import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
+import { Semaphore } from 'async-mutex';
 import { resolveBundleDir } from '../utils/bundlePaths.js';
 import { ToolNames } from '../tools/tool-names.js';
+import type { ModStore } from './store.js';
 import type { AnyDeclarativeTool } from '../tools/tools.js';
 import {
   ModBudget,
@@ -22,6 +24,7 @@ import {
 import {
   ENGINE_NODE,
   adjustRenderTree,
+  invalidRenderText,
   validateRenderTree,
   type ModRenderElement,
   type ModRenderInput,
@@ -88,6 +91,12 @@ function workerEntry(): URL | string {
 
 export class ModRuntime {
   private readonly worker: Worker;
+  // The $.store calls the host is answering.
+  private readonly storeCalls = new Map<
+    number,
+    { controller: AbortController; task: Promise<void> }
+  >();
+  private readonly storeReadSlots = new Semaphore(4);
   private failure?: Error;
   private pending?: (reply: ModReply) => void;
   private commands: Array<ModCommand & { plugin: string }> = [];
@@ -97,7 +106,8 @@ export class ModRuntime {
     complete: [],
   };
   private prompts: string[] = [];
-  private renders: string[] = [];
+  // Per site the host draws, the plugins whose render hooks may hear it.
+  private renders: Partial<Record<ModRenderSite, string[]>> = {};
   // Asked for during the load, before the host knows which plugins draw.
   private early?: Set<string> = new Set();
   // Refusal lines are said once per load and reason, adjustment lines once
@@ -113,6 +123,7 @@ export class ModRuntime {
     refresh: () => void;
     // `$.model.complete` calls the host is running for the root.
     models: Map<number, AbortController>;
+    storeAbort: AbortController;
   };
   private tool?: {
     next: ModToolNext;
@@ -138,6 +149,7 @@ export class ModRuntime {
     private readonly renderHost?: ModRenderHost,
     private readonly queuePrompt?: ModPromptQueue,
     private readonly completeModel?: ModModelHost,
+    private readonly store?: ModStore,
   ) {
     this.worker = new Worker(workerEntry(), {
       stdout: true,
@@ -154,6 +166,7 @@ export class ModRuntime {
         for (const id of reply.ids) {
           this.tool?.operations.get(id)?.controller.abort();
           root.models.get(id)?.abort();
+          this.storeCalls.get(id)?.controller.abort();
         }
       } else if (reply.type === 'model-complete') this.answerModel(reply, root);
       else if (reply.type === 'check-result')
@@ -162,10 +175,24 @@ export class ModRuntime {
         this.answerTurnAbort(reply, root.id);
       else if (reply.type === 'prompt-queue')
         this.answerPromptQueue(reply, root.id);
-      else if (reply.type === 'invalidate') {
+      else if (reply.type === 'store') {
+        const remainingMs = reply.deadline - performance.now();
+        if (remainingMs <= 0) return;
+        const controller = new AbortController();
+        const signals = [root.storeAbort.signal, controller.signal];
+        if (Number.isFinite(remainingMs))
+          signals.push(AbortSignal.timeout(Math.ceil(remainingMs)));
+        const task = this.answerStore(reply, root.id, AbortSignal.any(signals));
+        this.storeCalls.set(reply.id, { controller, task });
+        void task.finally(() => this.storeCalls.delete(reply.id));
+      } else if (reply.type === 'invalidate') {
         if (reply.event !== 'ui.render' || this.failure) return;
         if (this.early) this.early.add(reply.plugin);
-        else if (this.renders.includes(reply.plugin))
+        else if (
+          Object.values(this.renders).some((names) =>
+            names.includes(reply.plugin),
+          )
+        )
           this.renderHost?.invalidate(reply.plugin);
       } else if (reply.type === 'activity') {
         if (
@@ -230,6 +257,8 @@ export class ModRuntime {
     queuePrompt?: ModPromptQueue,
     // Runs `$.model.complete`; absent, the host runs no model calls.
     completeModel?: ModModelHost,
+    // Where each plugin's `$.store` is kept; absent, the host keeps none.
+    store?: ModStore,
   ): Promise<ModRuntime> {
     if (
       plugins.length > 32 ||
@@ -260,6 +289,7 @@ export class ModRuntime {
       render,
       queuePrompt,
       completeModel,
+      store,
     );
     try {
       const result = await runtime.request(
@@ -273,6 +303,7 @@ export class ModRuntime {
           prompts,
           submits: queuePrompt !== undefined,
           models: completeModel !== undefined,
+          stores: store !== undefined,
         },
         signal,
         60_000,
@@ -289,7 +320,12 @@ export class ModRuntime {
         typeof result['turnStart'] !== 'boolean' ||
         !names(promptSubmit) ||
         !names(turnComplete) ||
-        !names(renders)
+        !record(renders) ||
+        Object.entries(renders).some(
+          ([site, plugins]) =>
+            !(render?.sites ?? []).includes(site as ModRenderSite) ||
+            !names(plugins),
+        )
       )
         throw new Error('Invalid Mod declarations.');
       const commands = result['commands'];
@@ -315,11 +351,16 @@ export class ModRuntime {
         complete: turnComplete,
       };
       runtime.prompts = promptSubmit;
-      runtime.renders = renders;
+      runtime.renders = renders as Partial<Record<ModRenderSite, string[]>>;
       const early = runtime.early!;
       runtime.early = undefined;
       for (const plugin of early)
-        if (renders.includes(plugin)) render?.invalidate(plugin);
+        if (
+          Object.values(runtime.renders).some((plugins) =>
+            plugins.includes(plugin),
+          )
+        )
+          render?.invalidate(plugin);
       return runtime;
     } catch (error) {
       await runtime.dispose();
@@ -350,9 +391,9 @@ export class ModRuntime {
     return this.prompts;
   }
 
-  /** The plugins whose `ui.render` hooks may draw where this host draws. */
-  get renderHooks(): readonly string[] {
-    return this.renders;
+  /** The plugins whose `ui.render` hooks may hear a site this host draws. */
+  renderHooksFor(site: ModRenderSite): readonly string[] {
+    return this.renders[site] ?? [];
   }
 
   /**
@@ -364,9 +405,18 @@ export class ModRuntime {
   async render(
     input: ModRenderInput,
     signal: AbortSignal,
-  ): Promise<{ tree: ModRenderElement; notes: string[] }> {
-    const settled = await this.request({ type: 'render', input }, signal);
-    const owner = this.renders.length === 1 ? this.renders[0] : 'hooks';
+  ): Promise<{
+    tree: ModRenderElement;
+    notes: string[];
+    /** At a row, the props the engine draws with: what last reached it. */
+    props?: ModRenderInput['props'];
+  }> {
+    const answer = await this.request({ type: 'render', input }, signal);
+    let settled = answer;
+    if (input.component === 'AssistantMessage')
+      settled = record(answer) ? answer['tree'] : undefined;
+    const hooks = this.renderHooksFor(input.component);
+    const owner = hooks.length === 1 ? hooks[0] : 'hooks';
     const notes: string[] = [];
     const note = (line: string, key = line) => {
       if (this.noted.has(key)) return;
@@ -380,6 +430,33 @@ export class ModRuntime {
         `ui.render (${input.component}) refused: ${error instanceof Error ? error.message : String(error)}; nothing was drawn`,
       );
       return { tree: ENGINE_NODE, notes };
+    }
+    if (input.component === 'AssistantMessage') {
+      // A row draws the engine's own message, with the props that reached it.
+      if (
+        !record(settled) ||
+        settled['type'] !== 'engine' ||
+        settled['ref'] !== 0
+      ) {
+        note(
+          `ui.render (${input.component}) answered a tree; this host draws only a rewrite of the row's props, so the row was left as it was`,
+        );
+        return { tree: ENGINE_NODE, notes, props: input.props };
+      }
+      const props = record(answer) ? answer['props'] : undefined;
+      const text = record(props) ? props['text'] : undefined;
+      if (
+        !record(props) ||
+        typeof text !== 'string' ||
+        (text !== input.props.text && invalidRenderText(text) !== undefined) ||
+        props['isFirstOfReply'] !== input.props.isFirstOfReply
+      )
+        return { tree: ENGINE_NODE, notes, props: input.props };
+      return {
+        tree: ENGINE_NODE,
+        notes,
+        props: { ...input.props, text },
+      };
     }
     const adjusted = adjustRenderTree(
       settled as ModRenderElement,
@@ -733,6 +810,61 @@ export class ModRuntime {
     this.post({ type: 'prompt-queue-result', id: reply.id, refused }, root);
   }
 
+  private async answerStore(
+    reply: Extract<ModReply, { type: 'store' }>,
+    root: number,
+    signal: AbortSignal,
+  ): Promise<void> {
+    const { operation } = reply;
+    let value: unknown;
+    let error: string | undefined;
+    try {
+      signal.throwIfAborted();
+      const store = this.store;
+      if (!store) throw new Error('This host keeps no Mod store.');
+      if (
+        operation.method === 'store.get' ||
+        operation.method === 'store.keys'
+      ) {
+        value = await this.storeReadSlots.runExclusive(() => {
+          signal.throwIfAborted();
+          return operation.method === 'store.get'
+            ? store.get(operation.plugin, operation.key)
+            : store.keys(operation.plugin);
+        });
+      } else if (operation.method === 'store.set')
+        await store.set(
+          operation.plugin,
+          operation.key,
+          operation.value,
+          signal,
+        );
+      else await store.delete(operation.plugin, operation.key, signal);
+    } catch (caught) {
+      error = (caught instanceof Error ? caught.message : String(caught)).slice(
+        0,
+        4000,
+      );
+    }
+    if (signal.aborted) return;
+    try {
+      this.post({ type: 'store-result', id: reply.id, value, error }, root);
+    } catch (caught) {
+      // A value too large to hand back fails the call, not the session.
+      this.post(
+        {
+          type: 'store-result',
+          id: reply.id,
+          error: (caught instanceof Error
+            ? caught.message
+            : String(caught)
+          ).slice(0, 4000),
+        },
+        root,
+      );
+    }
+  }
+
   async end(
     sessionId: string,
     reason: 'clear' | 'resume' | 'other',
@@ -748,16 +880,19 @@ export class ModRuntime {
   async dispose(): Promise<void> {
     this.fail(new Error('Mod runtime is closed.'));
     await this.worker.terminate();
-    await Promise.allSettled(
-      [...(this.tool?.operations.values() ?? [])].map(
+    await Promise.allSettled([
+      ...[...(this.tool?.operations.values() ?? [])].map(
         (operation) => operation.task,
       ),
-    );
+      // Let a store update that acquired its lock finish before closing.
+      ...[...this.storeCalls.values()].map(({ task }) => task),
+    ]);
   }
 
   private fail(error: Error): void {
     this.failure ??= error;
     this.tool?.controller.abort();
+    this.root?.storeAbort.abort();
     this.pending?.({ type: 'error', message: this.failure.message });
   }
 
@@ -794,6 +929,7 @@ export class ModRuntime {
       revision: 0,
       phase: 0,
       models: new Map(),
+      storeAbort: new AbortController(),
       refresh: () => {
         if (aborted || this.root !== root) return;
         const lending =
@@ -811,12 +947,19 @@ export class ModRuntime {
         if (!budget.lending) timer = setTimeout(stop, budget.remainingMs);
       },
     };
+    // Roots run sequentially, so only this root can have queued reads.
+    root.storeAbort.signal.addEventListener(
+      'abort',
+      () => this.storeReadSlots.cancel(),
+      { once: true },
+    );
     this.root = root;
     const onAbort = () => {
       aborted = true;
       Atomics.store(this.cancelled, 0, 1);
       this.tool?.controller.abort();
       for (const model of root.models.values()) model.abort();
+      root.storeAbort.abort();
       if (timer) clearTimeout(timer);
       cancelTimer = setTimeout(stop, 250);
     };
@@ -847,6 +990,7 @@ export class ModRuntime {
       });
     } finally {
       this.root = undefined;
+      root.storeAbort.abort();
       for (const model of root.models.values()) model.abort();
       root.models.clear();
       if (timer) clearTimeout(timer);

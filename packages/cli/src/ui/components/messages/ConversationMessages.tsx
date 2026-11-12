@@ -51,6 +51,7 @@ interface AssistantMessageProps {
   availableTerminalHeight?: number;
   contentWidth: number;
   sourceCopyIndexOffsets?: MarkdownSourceCopyIndexOffsets;
+  sourceCopyText?: string;
 }
 
 interface AssistantMessageContentProps {
@@ -61,6 +62,7 @@ interface AssistantMessageContentProps {
   availableTerminalHeight?: number;
   contentWidth: number;
   sourceCopyIndexOffsets?: MarkdownSourceCopyIndexOffsets;
+  sourceCopyText?: string;
 }
 
 interface ThinkMessageProps {
@@ -109,6 +111,7 @@ interface PrefixedMarkdownMessageProps {
   ariaLabel?: string;
   textColor?: string;
   sourceCopyIndexOffsets?: MarkdownSourceCopyIndexOffsets;
+  sourceCopyText?: string;
 }
 
 interface ContinuationMarkdownMessageProps {
@@ -121,6 +124,7 @@ interface ContinuationMarkdownMessageProps {
   basePrefix: string;
   textColor?: string;
   sourceCopyIndexOffsets?: MarkdownSourceCopyIndexOffsets;
+  sourceCopyText?: string;
 }
 
 function getPrefixWidth(prefix: string): number {
@@ -174,6 +178,7 @@ const PrefixedMarkdownMessage: React.FC<PrefixedMarkdownMessageProps> = ({
   ariaLabel,
   textColor,
   sourceCopyIndexOffsets,
+  sourceCopyText,
 }) => {
   const prefixWidth = getPrefixWidth(prefix);
   const imageHeightBudget =
@@ -204,6 +209,7 @@ const PrefixedMarkdownMessage: React.FC<PrefixedMarkdownMessageProps> = ({
             constrainBlockWidth
             textColor={textColor}
             sourceCopyIndexOffsets={sourceCopyIndexOffsets}
+            sourceCopyText={sourceCopyText}
           />
         )}
         {images?.map((image, index) => (
@@ -234,6 +240,7 @@ const ContinuationMarkdownMessage: React.FC<
   basePrefix,
   textColor,
   sourceCopyIndexOffsets,
+  sourceCopyText,
 }) => {
   const prefixWidth = getPrefixWidth(basePrefix);
   const imageHeightBudget =
@@ -258,6 +265,7 @@ const ContinuationMarkdownMessage: React.FC<
           constrainBlockWidth
           textColor={textColor}
           sourceCopyIndexOffsets={sourceCopyIndexOffsets}
+          sourceCopyText={sourceCopyText}
         />
       )}
       {images?.map((image, index) => (
@@ -318,6 +326,7 @@ export const AssistantMessage: React.FC<AssistantMessageProps> = ({
   availableTerminalHeight,
   contentWidth,
   sourceCopyIndexOffsets,
+  sourceCopyText,
 }) => (
   <PrefixedMarkdownMessage
     text={text}
@@ -330,6 +339,7 @@ export const AssistantMessage: React.FC<AssistantMessageProps> = ({
     availableTerminalHeight={availableTerminalHeight}
     contentWidth={contentWidth}
     sourceCopyIndexOffsets={sourceCopyIndexOffsets}
+    sourceCopyText={sourceCopyText}
   />
 );
 
@@ -343,6 +353,7 @@ export const AssistantMessageContent: React.FC<
   availableTerminalHeight,
   contentWidth,
   sourceCopyIndexOffsets,
+  sourceCopyText,
 }) => (
   <ContinuationMarkdownMessage
     text={text}
@@ -353,6 +364,7 @@ export const AssistantMessageContent: React.FC<
     contentWidth={contentWidth}
     basePrefix={ICON.DIAMOND}
     sourceCopyIndexOffsets={sourceCopyIndexOffsets}
+    sourceCopyText={sourceCopyText}
   />
 );
 

@@ -34,6 +34,7 @@ this page in the same change.
 | Variable                                 | Default | Used in                 | Controls                                                                                  |
 | ---------------------------------------- | ------- | ----------------------- | ----------------------------------------------------------------------------------------- |
 | `QWEN_CI_VITEST_RETRY`                   | `2`     | `ci.yml`                | Retry count for the main CI workspace and script test step                                |
+| `QWEN_CI_RPC_RETRY`                      | `1`     | `ci.yml`                | Re-runs of an all-green workspace suite that failed only on Vitest's worker RPC timeout   |
 | `QWEN_RELEASE_VITEST_RETRY`              | `2`     | `release.yml`           | Retry count for the release workspace test shards                                         |
 | `QWEN_RELEASE_WORKSPACE_TIMEOUT_MINUTES` | `45`    | `release.yml`           | Job timeout of each release workspace test shard                                          |
 | `QWEN_CI_VITEST_MAX_WORKERS`             | `4`     | `ci.yml`, `release.yml` | Worker cap for main CI unit tests and release workspace/quality tests on reserved runners |
@@ -55,6 +56,50 @@ variables also accept the literal value `off`, which omits
 the `--retry` flag entirely instead of passing `--retry=0` (a command-line
 `--retry=0` outranks a workspace's own Vitest config and would disable a
 deliberate retry policy).
+
+### Worker RPC timeouts on a contended host
+
+`QWEN_CI_RPC_RETRY` is a different lever from `--retry`: it re-runs a whole
+workspace suite, and only when that suite's own report shows no failed test and
+Vitest's worker-to-main RPC budget (`Timeout calling "onTaskUpdate"`) was the
+only unhandled error. On this pool that shape is host contention rather than a
+regression — main runs 43018456551 and 43016357976 both went red with 902 of 902
+tests passing in `packages/channels/github`. The first attempt keeps npm's own
+batched call; only the workspaces npm names as failed are re-run, each alone.
+
+The release lane already grants this same pass on its own shards
+(`.github/scripts/run-release-workspace-tests.sh`), and the evidence rules are
+the ones `scripts/tests/release-workflow.test.js` pins there: the run must have
+reached a passing tally, it must not have been killed by a signal, and Vitest's
+own count of unhandled errors must equal how many transport timeouts the report
+contains. A count, not the crash header — the header is producer-chosen, so any
+pattern over headers is incomplete. The `Errors` figure is a sum over the whole
+report, while the transport figure counts only inside Vitest's `Unhandled
+Errors` sections — a test's console output is echoed at column 0 too, so a
+printed copy must not move it — and inside those sections it matches the error's
+own header line (a column-zero `Error: [vitest-worker]: Timeout calling`), never
+a message, stack or code frame that merely quotes the prefix. One attempt's
+green tally therefore cannot cover a later attempt's crash.
+
+The Linux lanes deliberately keep unhandled errors fatal
+(`scripts/tests/unit-vitest-configs.test.ts`, #10438), so this does not ignore
+them: any failed test, any second unhandled error, or a process that died before
+reporting declines the retry. A stall that outlives both attempts still fails.
+Set `0` to make the first failure stand.
+
+**The count is the only bound.** A re-run has no time condition: an earlier
+revision of this lane skipped a re-run once less than half the test step's
+budget remained, and that guard was removed rather than repaired. It refused a
+re-run at 74% of the budget because it added the batch's elapsed time twice, and
+a correct version is not available from inside the lane script — the step starts
+before the script does (`chown -R`, `mktemp`, the disk sampler), so the script's
+own `SECONDS` is not the step's clock, and passing the step's start in from the
+workflow would be more new surface than the one truncation it would avoid. The
+accepted cost: a re-run issued late enough can be killed by the step's
+`timeout-minutes: 45`. When that happens the job fails and the first attempt's
+log is still there, because the first attempt is teed to a file — a truncation
+that keeps the evidence, rather than a refusal that throws away a retry while a
+quarter of the budget is unused.
 
 ### Workspace test timeout
 
