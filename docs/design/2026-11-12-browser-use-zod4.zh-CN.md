@@ -110,16 +110,22 @@ GHSA-mrhx-c7xc-m3w5 的版本），并要求 lockfile 中该 importer 解析出�
 
   | `dist/index.js` | Zod 3.25.76        | Zod 4.6.6           |
   | --------------- | ------------------ | ------------------- |
-  | 总字节数        | 312,690            | 954,646             |
+  | 总字节数        | 312,440            | 947,098             |
   | 其中 Zod 占比   | 120,808 / 9 个文件 | 751,128 / 95 个文件 |
 
-  即增加 641,956 B（约 627 KB），其中 630,320 B 来自 Zod 本身。产出的运行时有一半是
+  即增加 634,658 B（约 620 KB），其中 630,320 B 来自 Zod 本身。产出的运行时有一半是
   本包从不执行的代码：
 
   | 本包从不调用                   | 产物中的字节数 | 占比 |
   | ------------------------------ | -------------- | ---- |
-  | 全部 64 个 `v4/locales/*` 翻译 | 366,095        | 38%  |
-  | `compile` + JSON-Schema 转换   | 109,630        | 11%  |
+  | 全部 64 个 `v4/locales/*` 翻译 | 366,095        | 39%  |
+  | `compile` + JSON-Schema 转换   | 129,361        | 14%  |
+
+  转换这一行涵盖实现它的全部六个输入：`core/compile.js` 58,860、
+  `core/json-schema-processors.js` 25,437、`classic/from-json-schema.js` 25,333、
+  `core/to-json-schema.js` 17,389、`core/json-schema-generator.js` 2,312，以及
+  `core/json-schema.js` 30。只统计前三个会少算 19,731 B。总字节数取 metafile 自身的
+  `outputs['index.js'].bytes`；`build.mjs` 会多写 138 B，因为它在前面加了 kernel banner。
 
   其中 locale 占主导，而它们之所以没被 tree-shaking 去掉，是因为
   `zod/v4/classic/external.js` 末尾有 `export * as locales from
@@ -191,6 +197,6 @@ scripts/tests/browser-use-assets.test.js` 验证新增的 pin 断言，并确认
 - 是否把 `z.lazy()` 第二次 parse 的行为上报给上游 `colinhacks/zod`。仓库内的缓解已经到位，
   本次改动不依赖上游修复。
 - `shadcn` 开发路径是否也应移出 Zod 3。这与本次改动所解决的发布产物问题相互独立。
-- 本包从不执行的那约 465 KB 打包 Zod（64 个 locale 以及 compile/JSON-Schema 路径）
+- 本包从不执行的那约 484 KB 打包 Zod（64 个 locale 以及 compile/JSON-Schema 路径）
   是否值得回收，以及用什么机制。任何方案都必须保留公开入口，而不是深导入 Zod 内部
   路径，且需要自己的测量。

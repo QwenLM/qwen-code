@@ -136,16 +136,23 @@ resolve below `4.6.6`.
 
   | `dist/index.js`   | Zod 3.25.76       | Zod 4.6.6          |
   | ----------------- | ----------------- | ------------------ |
-  | total bytes       | 312,690           | 954,646            |
+  | total bytes       | 312,440           | 947,098            |
   | Zod's share of it | 120,808 / 9 files | 751,128 / 95 files |
 
-  That is +641,956 B (~627 KB), of which 630,320 B is Zod itself. Half the
+  That is +634,658 B (~620 KB), of which 630,320 B is Zod itself. Half the
   emitted runtime is code this package never executes:
 
   | never called from here             | bytes in the output | share |
   | ---------------------------------- | ------------------- | ----- |
-  | all 64 `v4/locales/*` translations | 366,095             | 38%   |
-  | `compile` + JSON-Schema conversion | 109,630             | 11%   |
+  | all 64 `v4/locales/*` translations | 366,095             | 39%   |
+  | `compile` + JSON-Schema conversion | 129,361             | 14%   |
+
+  The conversion row covers all six inputs that implement it: `core/compile.js`
+  58,860, `core/json-schema-processors.js` 25,437, `classic/from-json-schema.js`
+  25,333, `core/to-json-schema.js` 17,389, `core/json-schema-generator.js` 2,312,
+  and `core/json-schema.js` 30. Counting only the first three understates it by
+  19,731 B. Total bytes are the metafile's own `outputs['index.js'].bytes`;
+  `build.mjs` writes 138 B more because it prepends the kernel banner.
 
   The locales dominate, and they survive tree-shaking because
   `zod/v4/classic/external.js` ends with `export * as locales from
@@ -237,7 +244,7 @@ scripts/tests/browser-use-assets.test.js` for the new pin assertion, and
   depend on an upstream fix.
 - Whether the `shadcn` development path should also move off Zod 3. That is
   separate from the shipped-artifact concern this change addresses.
-- Whether the ~465 KB of bundled Zod that this package never executes (the 64
+- Whether the ~484 KB of bundled Zod that this package never executes (the 64
   locales and the compile/JSON-Schema paths) is worth reclaiming, and by what
   mechanism. Any answer has to keep a public entry point rather than
   deep-importing Zod internals, and needs its own measurement.
