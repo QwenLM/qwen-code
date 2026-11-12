@@ -389,6 +389,8 @@ export default {
     'Open the skills panel (browse, search, toggle, pick).',
   'Move this session to a new working directory':
     'Move this session to a new working directory',
+  'Wait for background agents to finish or stop them in /tasks before changing directories.':
+    'Wait for background agents to finish or stop them in /tasks before changing directories.',
   // SkillsManagerDialog (the panel `/skills` opens)
   'Manage Skills': 'Manage Skills',
   'Skills configuration saved.': 'Skills configuration saved.',
@@ -1434,6 +1436,26 @@ export default {
     'Usage: /forget <memory text to remove>',
   'No managed auto-memory entries matched: {{query}}':
     'No managed auto-memory entries matched: {{query}}',
+  'Bind a GitHub pull request to this session':
+    'Bind a GitHub pull request to this session',
+  'Usage: /pr <number | url>': 'Usage: /pr <number | url>',
+  'No PRs bound to this session.': 'No PRs bound to this session.',
+  'Bound PRs: {{list}}': 'Bound PRs: {{list}}',
+  'Invalid PR reference. Usage: /pr <number | url>':
+    'Invalid PR reference. Usage: /pr <number | url>',
+  'Could not resolve PR #{{number}} via gh. Pass the full PR URL instead.':
+    'Could not resolve PR #{{number}} via gh. Pass the full PR URL instead.',
+  'Bound PR #{{number}} to this session: {{url}}':
+    'Bound PR #{{number}} to this session: {{url}}',
+  'PR #{{number}} is already bound to this session: {{url}}':
+    'PR #{{number}} is already bound to this session: {{url}}',
+  'Failed to bind PR #{{number}}.': 'Failed to bind PR #{{number}}.',
+  'Failed to bind PR #{{number}}: {{message}}':
+    'Failed to bind PR #{{number}}: {{message}}',
+  'Could not read the PR bindings for this session.':
+    'Could not read the PR bindings for this session.',
+  'GitHub CLI (gh) is unavailable or timed out. Pass the full PR URL to bind without it.':
+    'GitHub CLI (gh) is unavailable or timed out. Pass the full PR URL to bind without it.',
   'Consolidate managed auto-memory topic files.':
     'Consolidate managed auto-memory topic files.',
   'Import MCP servers from Claude configs':

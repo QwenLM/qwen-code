@@ -1346,7 +1346,9 @@ describe('MessageList — turn collapse (DOM)', () => {
     await act(async () => vi.advanceTimersByTimeAsync(15_000));
     expect(reloadSignal?.aborted).toBe(false);
 
-    const list = container.firstElementChild as HTMLElement;
+    const list = container.querySelector<HTMLElement>(
+      '[data-web-shell-message-list]',
+    )!;
     list.scrollTop = 400;
     act(() => list.dispatchEvent(new Event('scroll', { bubbles: true })));
     expect(reloadSignal?.aborted).toBe(true);
@@ -4787,6 +4789,7 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(buttons[0]?.getAttribute('aria-label')).toBe(
       'Turn 1: q. Current turn',
     );
+    expect(c.querySelector('button')).toBe(buttons[0]);
     expect(buttons[0]?.hasAttribute('title')).toBe(false);
     expect(entries[0]?.getAttribute('data-in-current-range')).toBe('true');
     expect(entries[1]?.getAttribute('data-in-current-range')).toBe('true');
@@ -6880,7 +6883,9 @@ describe('MessageList — turn collapse (DOM)', () => {
     });
     await nextFrame();
 
-    const list = container.firstElementChild as HTMLElement;
+    const list = container.querySelector<HTMLElement>(
+      '[data-web-shell-message-list]',
+    )!;
     list.scrollTop = 600;
     act(() => list.dispatchEvent(new Event('scroll', { bubbles: true })));
     await nextFrame();
@@ -6920,7 +6925,9 @@ describe('MessageList — turn collapse (DOM)', () => {
       isResponding: true,
       onCanScrollToBottomChange,
     });
-    const list = container.firstElementChild as HTMLElement;
+    const list = container.querySelector<HTMLElement>(
+      '[data-web-shell-message-list]',
+    )!;
 
     act(() => {
       list.dispatchEvent(new WheelEvent('wheel', { deltaY: -8 }));
@@ -7108,7 +7115,7 @@ describe('MessageList — turn collapse (DOM)', () => {
     await nextFrame();
     await nextFrame();
 
-    const list = c.firstElementChild as HTMLElement;
+    const list = c.querySelector<HTMLElement>('[data-web-shell-message-list]')!;
     scrollTop = 0;
     act(() => list.dispatchEvent(new Event('scroll', { bubbles: true })));
     await nextFrame();

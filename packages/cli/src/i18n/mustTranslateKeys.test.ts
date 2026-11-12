@@ -42,6 +42,21 @@ const TOOL_MODE_TRANSLATION_KEYS = [
   'Code Mode Only',
 ] as const;
 
+const PR_COMMAND_REQUIRED_KEYS = [
+  'Bind a GitHub pull request to this session',
+  'Usage: /pr <number | url>',
+  'No PRs bound to this session.',
+  'Bound PRs: {{list}}',
+  'Invalid PR reference. Usage: /pr <number | url>',
+  'Could not resolve PR #{{number}} via gh. Pass the full PR URL instead.',
+  'Bound PR #{{number}} to this session: {{url}}',
+  'PR #{{number}} is already bound to this session: {{url}}',
+  'Failed to bind PR #{{number}}.',
+  'Failed to bind PR #{{number}}: {{message}}',
+  'Could not read the PR bindings for this session.',
+  'GitHub CLI (gh) is unavailable or timed out. Pass the full PR URL to bind without it.',
+] as const;
+
 const NON_ENGLISH_LANGUAGES = SUPPORTED_LANGUAGES.filter(
   (language) => language.code !== 'en',
 );
@@ -111,6 +126,12 @@ describe('must-translate locale coverage', () => {
   it('requires translation coverage for /fork user-facing strings', () => {
     expect(MUST_TRANSLATE_KEYS).toEqual(
       expect.arrayContaining([...FORK_COMMAND_REQUIRED_KEYS]),
+    );
+  });
+
+  it('requires translation coverage for /pr user-facing strings', () => {
+    expect(MUST_TRANSLATE_KEYS).toEqual(
+      expect.arrayContaining([...PR_COMMAND_REQUIRED_KEYS]),
     );
   });
 

@@ -35,7 +35,10 @@ import {
 } from './config.js';
 import { LoadedSettings, type Settings } from './settings.js';
 import * as ServerConfig from '@qwen-code/qwen-code-core';
-import { isWorkspaceTrusted } from './trustedFolders.js';
+import {
+  getTrustFileDecisionBelowIdeRoot,
+  isWorkspaceTrusted,
+} from './trustedFolders.js';
 import { resetMcpApprovalsForTesting } from './mcpApprovals.js';
 import { getProjectHooksApprovalState } from './hook-approvals.js';
 import { addCommand } from '../commands/mcp/add.js';
@@ -161,6 +164,7 @@ const createNativeLspServiceInstance = () => ({
 
 vi.mock('./trustedFolders.js', () => ({
   isWorkspaceTrusted: vi.fn(() => ({ isTrusted: true, source: 'file' })), // Default to trusted
+  getTrustFileDecisionBelowIdeRoot: vi.fn(() => undefined),
 }));
 
 const nativeLspServiceMock = vi.mocked(NativeLspService);
@@ -3301,6 +3305,32 @@ describe('loadCliConfig', () => {
     );
   });
 
+  it('keeps the event-bus agent loop disabled by default', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+
+    await loadCliConfig({}, argv);
+
+    expect(mockConfigConstructorParams).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventBusAgentLoopEnabled: false,
+      }),
+    );
+  });
+
+  it('propagates the event-bus agent loop opt-in', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+
+    await loadCliConfig({ experimental: { eventBusAgentLoop: true } }, argv);
+
+    expect(mockConfigConstructorParams).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventBusAgentLoopEnabled: true,
+      }),
+    );
+  });
+
   it('should not enable the session writer lease for invalid truthy values', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
@@ -6058,6 +6088,7 @@ describe('loadCliConfig folderTrust', () => {
     process.argv = originalArgv;
     vi.unstubAllEnvs();
     vi.restoreAllMocks();
+    ServerConfig.ideContextStore.clear();
   });
 
   it('should be false when folderTrust is false', async () => {
@@ -6094,6 +6125,131 @@ describe('loadCliConfig folderTrust', () => {
     const settings: Settings = {};
     const config = await loadCliConfig(settings, argv, undefined, []);
     expect(config.getFolderTrust()).toBe(false);
+  });
+
+  it.each([undefined, false])(
+    'uses the ACP session workspace trust when launch-directory IDE trust is %s',
+    async (ideTrust) => {
+      process.argv = ['node', 'script.js', '--acp'];
+      const argv = await parseArguments();
+      const sessionCwd = path.join(process.cwd(), 'other-workspace');
+      vi.mocked(isWorkspaceTrusted).mockImplementation(
+        (_settings, _trustConfig, workspacePath) => ({
+          isTrusted: workspacePath === sessionCwd,
+          source: 'file',
+        }),
+      );
+      vi.spyOn(ServerConfig.ideContextStore, 'get').mockReturnValue({
+        workspaceState: { isTrusted: ideTrust },
+      });
+
+      const config = await loadCliConfig(
+        { security: { folderTrust: { enabled: true } } },
+        argv,
+        sessionCwd,
+        [],
+      );
+
+      expect(config.isTrustedFolder()).toBe(true);
+      expect(config.isExplicitlyTrustedFolder()).toBe(true);
+    },
+  );
+
+  it('does not turn implicit trust into explicit trust for a foreign ACP workspace', async () => {
+    process.argv = ['node', 'script.js', '--acp'];
+    const argv = await parseArguments();
+    const sessionCwd = path.dirname(process.cwd());
+    ServerConfig.ideContextStore.set({ workspaceState: { isTrusted: true } }, [
+      process.cwd(),
+    ]);
+
+    const config = await loadCliConfig(
+      { hooks: { Stop: [{ hooks: [{ type: 'command', command: 'x' }] }] } },
+      argv,
+      sessionCwd,
+      [],
+    );
+
+    expect(config.isTrustedFolder()).toBe(true);
+    expect(config.isExplicitlyTrustedFolder()).toBe(false);
+    expect(config.isProjectHooksPendingApproval()).toBe(true);
+  });
+
+  it('honors IDE trust for an ACP session at the connected workspace root', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      '--acp',
+      '--approval-mode',
+      'auto-edit',
+    ];
+    const argv = await parseArguments();
+    const sessionCwd = path.dirname(process.cwd());
+    const { isWorkspaceTrusted: actualIsWorkspaceTrusted } =
+      await vi.importActual<typeof import('./trustedFolders.js')>(
+        './trustedFolders.js',
+      );
+    vi.mocked(isWorkspaceTrusted).mockImplementation(actualIsWorkspaceTrusted);
+    ServerConfig.ideContextStore.set({ workspaceState: { isTrusted: true } }, [
+      sessionCwd,
+    ]);
+
+    const config = await loadCliConfig(
+      { security: { folderTrust: { enabled: true } } },
+      argv,
+      sessionCwd,
+      [],
+    );
+
+    expect(config.getApprovalMode()).toBe(ServerConfig.ApprovalMode.AUTO_EDIT);
+    expect(config.isTrustedFolder()).toBe(true);
+    expect(config.isExplicitlyTrustedFolder()).toBe(true);
+
+    ServerConfig.ideContextStore.set({ workspaceState: { isTrusted: false } }, [
+      sessionCwd,
+    ]);
+    expect(config.isTrustedFolder()).toBe(false);
+  });
+
+  it.each([
+    ['an ACP session', ['--acp']],
+    ['an interactive session', []],
+  ])(
+    'lets a trust rule below the IDE root decide the runtime trust of %s',
+    async (_label, flags) => {
+      process.argv = ['node', 'script.js', ...flags];
+      const argv = await parseArguments();
+      const ideRoot = path.dirname(process.cwd());
+      vi.mocked(getTrustFileDecisionBelowIdeRoot).mockImplementation(
+        (_settings, location, root) =>
+          location === process.cwd() && root === ideRoot ? false : undefined,
+      );
+      ServerConfig.ideContextStore.set(
+        { workspaceState: { isTrusted: true } },
+        [ideRoot],
+      );
+
+      const config = await loadCliConfig(
+        { security: { folderTrust: { enabled: true } } },
+        argv,
+        process.cwd(),
+        [],
+      );
+
+      expect(config.isTrustedFolder()).toBe(false);
+      expect(config.isExplicitlyTrustedFolder()).toBe(false);
+    },
+  );
+
+  it('honors live IDE trust for an ACP session in the process workspace', async () => {
+    process.argv = ['node', 'script.js', '--acp'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig({}, argv, process.cwd(), []);
+    vi.spyOn(ServerConfig.ideContextStore, 'get').mockReturnValue({
+      workspaceState: { isTrusted: false },
+    });
+
+    expect(config.isTrustedFolder()).toBe(false);
   });
 });
 

@@ -807,6 +807,7 @@ export * from './utils/btwUtils.js';
 export * from './agents/btw-session.js';
 export * from './agents/forkedAgent.js';
 export * from './utils/sideQuery.js';
+export * from './utils/output-language-table.js';
 
 // ============================================================================
 // OAuth & Authentication
