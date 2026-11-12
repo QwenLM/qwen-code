@@ -161,6 +161,36 @@ describe('<HistoryItemDisplay />', () => {
     },
   );
 
+  // A definite block width wider than the column the row is laid out in is
+  // clipped instead of wrapped. Screen-reader mode puts the transcript in a
+  // 90% column under an overflow-hidden ancestor, so the width has to yield to
+  // a narrower parent.
+  it.each(['gemini', 'gemini_content'] as const)(
+    'keeps every %s word inside a column narrower than the terminal',
+    (type) => {
+      const item = {
+        id: 1,
+        type,
+        text: "This is a long paragraph about the history of computing from the earliest mechanical counting machines and Babbage's analytic engine through vacuum tube and transistor computers, integrated circuits and modern processors with many cores and caches.",
+      } as HistoryItem;
+      const { lastFrame } = renderWithProviders(
+        <Box width={90} overflow="hidden">
+          <HistoryItemDisplay
+            item={item}
+            terminalWidth={100}
+            mainAreaWidth={96}
+            isPending={false}
+          />
+        </Box>,
+      );
+
+      const frame = stripAnsi(lastFrame() ?? '');
+      // Guards the check below: a blank frame would make it pass vacuously.
+      expect(frame).toContain('This is a long paragraph');
+      expect(frame).toContain('counting machines');
+    },
+  );
+
   it('keeps markdown list items inside the right margin on the static path', () => {
     const item = {
       id: 1,
