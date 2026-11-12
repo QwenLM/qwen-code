@@ -1,9 +1,9 @@
 // Runs from `prepublishOnly`: a published version cannot be replaced, so refuse
 // to pack artifacts that consumers could not resolve.
-import { execSync } from 'node:child_process';
+import { execSync, spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { dirname, join, relative, resolve, sep } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { isBuiltin } from 'node:module';
 import pkg from '../package.json' with { type: 'json' };
 
@@ -139,6 +139,30 @@ for (const [key, entry] of entryPoints) {
         `${entry} imports ${specifier}, which is not included in the npm package`,
       );
     }
+  }
+}
+
+for (const key of ['.', './transcript']) {
+  const exported = pkg.exports[key];
+  const entry = typeof exported === 'string' ? exported : exported?.import;
+  if (!entry?.startsWith('./') || entry.includes('*')) continue;
+  const target = join(root, entry);
+  if (!existsSync(target) || (packed && !packed.has(packPath(target))))
+    continue;
+  const imported = spawnSync(
+    process.execPath,
+    [
+      '--input-type=module',
+      '--eval',
+      `await import(${JSON.stringify(pathToFileURL(target).href)})`,
+    ],
+    { cwd: root, encoding: 'utf8', timeout: 30_000 },
+  );
+  if (imported.status !== 0) {
+    const detail = imported.stderr.trim().split('\n').at(-1);
+    problems.push(
+      `${key} cannot be imported by Node without DOM globals${detail ? `: ${detail}` : ''}`,
+    );
   }
 }
 

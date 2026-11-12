@@ -11,15 +11,17 @@ import com.alibaba.qwen.code.managedagent.workspace.SshWorkspaceService;
 import com.alibaba.qwen.code.managedagent.workspace.runtime.WorkspaceRuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisioner;
+import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryRuntimeBindingRepository;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryRuntimeSessionRepository;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryToolExecutionRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.provisioning.ssh.SshConnectionManager;
 import com.alibaba.qwen.code.runtimebroker.provisioning.ssh.SshRuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.spi.RuntimeProviderFactory;
 import com.alibaba.qwen.code.runtimebroker.spi.SshConnections;
 import com.alibaba.qwen.code.runtimebroker.spi.SshRuntimeStorage;
+import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.DisabledOnOs;
 import org.junit.jupiter.api.condition.OS;
@@ -180,9 +182,14 @@ class SshRuntimeWiringTest {
         when(storage.runtimeStorage("tenant", "ssh-storage")).thenReturn(new SshRuntimeStorage("worker", "ssh-storage",
                 "/remote/workspace", Map.of("identity", Map.of("root", "/remote/workspace"),
                         "marker", Map.of("root", "/remote/workspace", "storageId", "ssh-storage"), "qwenVersion", "0.26.4")));
+        var source = new JdbcDataSource();
+        source.setURL("jdbc:h2:mem:ssh-wiring-" + UUID.randomUUID()
+                + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
+        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
         try (var ssh = new SshWorkspaceService(settings, storage, connections, Clock.systemUTC());
-                var broker = new EmbeddedRuntimeBroker(sessions, settings, new InMemoryRuntimeBindingRepository(),
-                        new InMemoryRuntimeSessionRepository(), new InMemoryToolExecutionRepository(),
+                var broker = new EmbeddedRuntimeBroker(sessions, settings,
+                        new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("test", new byte[32])),
+                        new JdbcRuntimeSessionRepository(source), new JdbcToolExecutionRepository(source),
                         authority, null, null, ssh)) {
             var primary = (RuntimeProvisioner) ReflectionTestUtils.getField(broker, "primaryProvisioner");
             assertThat(primary).isInstanceOf(SshRuntimeProvisioner.class);
