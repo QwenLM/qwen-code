@@ -29,17 +29,20 @@ final class JournalFencing {
     private final JournalEventTransport journalEventTransport;
     private final WriterCredentialPolicy credentials;
     private final JdbcRuntimeBindingRepository csiBindings;
+    private final JdbcJournalPacks packs;
 
     JournalFencing(JournalStoreRows storeRows,
             JdbcTemplate jdbc,
             JournalEventTransport journalEventTransport,
             WriterCredentialPolicy credentials,
-            JdbcRuntimeBindingRepository csiBindings) {
+            JdbcRuntimeBindingRepository csiBindings,
+            JdbcJournalPacks packs) {
         this.storeRows = storeRows;
         this.jdbc = jdbc;
         this.journalEventTransport = journalEventTransport;
         this.credentials = credentials;
         this.csiBindings = csiBindings;
+        this.packs = packs;
     }
 
     // Hot paths touch the tenant-wide guard rows only on admission, and
@@ -494,7 +497,7 @@ final class JournalFencing {
             jdbc.execute(
                     (org.springframework.jdbc.core.ConnectionCallback<Void>)
                             connection -> {
-                                JdbcCsiActivationAdmission.lockNativeHead(connection, original);
+                                JdbcCsiActivationAdmission.lockNativeHead(connection, original, packs);
                                 return null;
                             });
         }
