@@ -480,13 +480,13 @@ model, which `main` does not have.
    applied to the real `ci.yml` alone, confirmed red here and green on the
    previous revision, then reverted:
 
-   | Mutation on `Run lint gate freshness tests` | Result         |
-   | ------------------------------------------- | -------------- |
-   | drop the `github_ci_only` profile arm       | red, 1 failure |
-   | point the run line at another suite         | red, 1         |
-   | add `continue-on-error: true`               | red, 1         |
-   | move it back before `Install dependencies`  | red, 1         |
-   | append `\|\| true` (or `\|\| :`) to its run line | red, 1    |
+   | Mutation on `Run lint gate freshness tests`      | Result         |
+   | ------------------------------------------------ | -------------- |
+   | drop the `github_ci_only` profile arm            | red, 1 failure |
+   | point the run line at another suite              | red, 1         |
+   | add `continue-on-error: true`                    | red, 1         |
+   | move it back before `Install dependencies`       | red, 1         |
+   | append `\|\| true` (or `\|\| :`) to its run line | red, 1         |
 
 3. Equivalence against the line model this replaces, on thirteen historical
    `ci.yml` commits with their parents as fork points, content read at real refs.
