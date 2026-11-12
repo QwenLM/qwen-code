@@ -105,8 +105,25 @@ function readSignatures(name, key = 'INFRA_FAILURE_SIGNATURES') {
     fileURLToPath(new URL(`../workflows/${name}`, import.meta.url)),
     'utf8',
   );
-  const signatures = new RegExp(`${key}: '([^']*)'`).exec(workflow)?.[1];
-  assert.ok(signatures, `${name}: ${key} not found`);
+  // Read the scalar in either quoting style. `yaml` is not importable here:
+  // this suite runs in the dependency-free helper battery
+  // (`HELPER_TESTS_DEP_FREE`, before `npm ci`), whose import closure must stay
+  // `node:` builtins. Both styles have to be accepted because one signature now
+  // contains a single quote, which forces the workflow to double quotes — a
+  // matcher pinned to one style reads that legal edit as "not found" and reds
+  // every lane that runs this suite.
+  const scalar = new RegExp(
+    `^\\s*${key}:[ \\t]*('[^']*'|"[^"]*"|[^\\s#][^\\n#]*?)[ \\t]*$`,
+    'm',
+  ).exec(workflow)?.[1];
+  assert.ok(scalar, `${name}: ${key} not found`);
+  const signatures =
+    scalar.startsWith("'") && scalar.endsWith("'")
+      ? scalar.slice(1, -1).replaceAll("''", "'")
+      : scalar.startsWith('"') && scalar.endsWith('"')
+        ? JSON.parse(scalar)
+        : scalar;
+  assert.ok(signatures, `${name}: ${key} is empty`);
   return signatures;
 }
 
