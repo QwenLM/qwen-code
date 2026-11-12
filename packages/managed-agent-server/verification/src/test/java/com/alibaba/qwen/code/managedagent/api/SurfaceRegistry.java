@@ -984,8 +984,10 @@ public enum SurfaceRegistry {
          * Client files registration and teardown: the read grant ({@code 404
          * session_not_found} below it) plus current execution authority on the
          * bound ACTIVE Workspace ({@code 403 client_files_execution_forbidden}
-         * below it). Registration is refused with {@code 503
-         * client_files_disabled} while the deployment opt-in is off.
+         * below it). The {@code 503 client_files_disabled} refusal while the
+         * deployment opt-in is off is a service-layer flag check
+         * ({@code requireEnabled}), not an admission arm of this rule class, so
+         * the anonymous admission probes never reach it.
          */
         CLIENT_FILES_OPERATOR,
         /**

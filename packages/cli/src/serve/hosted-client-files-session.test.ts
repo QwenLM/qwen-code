@@ -364,8 +364,9 @@ describe('HostedClientFilesSession', () => {
     expect(files.generation).toBe(2);
     expect(files.resolve(files.tools()[0]!.name!)?.name).toBe('write_file');
     expect(count).toBe(1);
-    // The stale registration's transport was terminated, not orphaned.
-    expect(closes).toHaveBeenCalled();
+    // The stale registration's transport was terminated, not orphaned — and
+    // exactly one close: the surviving newer transport must not be closed too.
+    expect(closes).toHaveBeenCalledTimes(1);
     closes.mockRestore();
   });
 
@@ -390,8 +391,9 @@ describe('HostedClientFilesSession', () => {
     ]);
     expect(files.generation).toBe(2);
     expect(files.resolve(files.tools()[0]!.name!)?.name).toBe('write_file');
-    // The first registration's transport was terminated when the second won.
-    expect(closes).toHaveBeenCalled();
+    // The first registration's transport was terminated when the second won —
+    // exactly one close: the winning transport must not be closed too.
+    expect(closes).toHaveBeenCalledTimes(1);
     closes.mockRestore();
   });
 

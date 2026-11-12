@@ -42095,8 +42095,14 @@ describe('client files registration route', () => {
     });
   });
 
-  async function relayPeer() {
-    const peer = createServer((req, res) => {
+  function relayPeerServer(
+    tools: Array<{
+      name: string;
+      description: string;
+      inputSchema: { type: string };
+    }>,
+  ) {
+    return createServer((req, res) => {
       if (req.method !== 'POST') {
         res.writeHead(req.method === 'DELETE' ? 200 : 405);
         res.end();
@@ -42119,20 +42125,22 @@ describe('client files registration route', () => {
                 serverInfo: { name: 'relay', version: '1.0.0' },
               }
             : message.method === 'tools/list'
-              ? {
-                  tools: [
-                    {
-                      name: 'read_file',
-                      description: 'Read a client file',
-                      inputSchema: { type: 'object' },
-                    },
-                  ],
-                }
+              ? { tools }
               : { content: [{ type: 'text', text: 'ok' }] };
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ jsonrpc: '2.0', id: message.id, result }));
       });
     });
+  }
+
+  async function relayPeer() {
+    const peer = relayPeerServer([
+      {
+        name: 'read_file',
+        description: 'Read a client file',
+        inputSchema: { type: 'object' },
+      },
+    ]);
     await new Promise<void>((resolve) => peer.listen(0, '127.0.0.1', resolve));
     const port = (peer.address() as { port: number }).port;
     return { peer, url: `http://127.0.0.1:${port}/mcp` };
@@ -42205,44 +42213,14 @@ describe('client files registration route', () => {
     // registration leaves installed is observable through the toolCount a
     // later lower-generation register reports: a no-op downgrade returns the
     // current catalog's count, while a fresh install returns the new peer's.
-    const toolsPeer = (toolCount: number) => {
-      const peer = createServer((req, res) => {
-        if (req.method !== 'POST') {
-          res.writeHead(req.method === 'DELETE' ? 200 : 405);
-          res.end();
-          return;
-        }
-        let body = '';
-        req.on('data', (chunk) => (body += chunk));
-        req.on('end', () => {
-          const message = JSON.parse(body) as { id?: unknown; method?: string };
-          if (message.id === undefined) {
-            res.writeHead(202);
-            res.end();
-            return;
-          }
-          const result =
-            message.method === 'initialize'
-              ? {
-                  protocolVersion: '2024-11-05',
-                  capabilities: { tools: {} },
-                  serverInfo: { name: 'relay', version: '1.0.0' },
-                }
-              : message.method === 'tools/list'
-                ? {
-                    tools: Array.from({ length: toolCount }, (_, i) => ({
-                      name: `read_file_${i}`,
-                      description: 'Read a client file',
-                      inputSchema: { type: 'object' },
-                    })),
-                  }
-                : { content: [{ type: 'text', text: 'ok' }] };
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ jsonrpc: '2.0', id: message.id, result }));
-        });
-      });
-      return peer;
-    };
+    const toolsPeer = (toolCount: number) =>
+      relayPeerServer(
+        Array.from({ length: toolCount }, (_, i) => ({
+          name: `read_file_${i}`,
+          description: 'Read a client file',
+          inputSchema: { type: 'object' },
+        })),
+      );
     const peerOne = toolsPeer(1);
     const peerTwo = toolsPeer(2);
     await new Promise<void>((resolve) =>

@@ -122,8 +122,11 @@ class HostedClientFilesRelayIT {
                 .isGreaterThanOrEqualTo(2L);
         second.stop();
 
-        // Unregister closes the binding; the old credential no longer opens
-        // the Runtime MCP leg.
+        // Unregister closes the binding; the CURRENT credential no longer opens
+        // the Runtime MCP leg. Probe with the gen-2 token (not the gen-1 token,
+        // which re-registration already rotated away): only the unregister
+        // fence can invalidate the credential that was live immediately before
+        // it, so a regression that skips the fence turns this red.
         assertThat(webShell("POST", "/unregister",
                 Map.of("sessionId", session), 200).path("state").asText())
                 .isEqualTo("closed");
@@ -132,7 +135,7 @@ class HostedClientFilesRelayIT {
                         + "/internal/managed-client-files/v1/sessions/"
                         + session + "/mcp"))
                         .timeout(Duration.ofSeconds(10))
-                        .header("Authorization", "Bearer " + token)
+                        .header("Authorization", "Bearer " + replaced.path("token").asText())
                         .header("Content-Type", "application/json")
                         .POST(HttpRequest.BodyPublishers.ofString(
                                 "{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"method\":\"tools/list\"}"))
@@ -184,6 +187,22 @@ class HostedClientFilesRelayIT {
         assertThat(modelToolMessages)
                 .anySatisfy(message -> assertThat(message).contains("client file content"));
         assertThat(transcript.toString()).contains("turn.completed");
+        // durableResult: the client-files tool call is durably recorded as
+        // completed in the journal-backed transcript projection, not merely
+        // streamed to the model. (The result content follows the normal durable
+        // tool-result policy and is witnessed reaching the model above; the
+        // projection references it rather than inlining it in the tool_call.)
+        JsonNode toolCallItem = null;
+        for (JsonNode item : transcript.path("items")) {
+            if ("tool_call".equals(item.path("type").asText())) {
+                toolCallItem = item;
+                break;
+            }
+        }
+        assertThat(toolCallItem).isNotNull();
+        assertThat(toolCallItem.path("status").asText()).isEqualTo("completed");
+        assertThat(toolCallItem.path("attributes").path("name").asText())
+                .startsWith("mcp_");
         assertThat(browserMethods).contains("tools/call");
         assertThat(callArgs).anySatisfy(args -> assertThat(args).contains("a.txt"));
         drain.stop();

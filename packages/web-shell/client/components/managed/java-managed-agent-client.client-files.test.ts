@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { JavaManagedAgentClient } from './java-managed-agent-client.js';
 
 describe('JavaManagedAgentClient.clientFilesTransport', () => {
-  it('builds the WebShell base and attaches auth headers per call', async () => {
+  it('builds the WebShell base and resolves auth headers per call', async () => {
     const calls: Array<{ url: string; init?: RequestInit }> = [];
     const fetchImpl = vi.fn(async (url: string, init?: RequestInit) => {
       calls.push({ url, init });
@@ -11,10 +11,14 @@ describe('JavaManagedAgentClient.clientFilesTransport', () => {
         headers: { 'content-type': 'application/json' },
       });
     });
+    // A fresh credential on every resolution: a single fetch could not tell
+    // per-call resolution from a header cached at construction, so issue a
+    // different token per call and fetch twice.
+    let issued = 0;
     const client = new JavaManagedAgentClient({
       baseUrl: 'http://control-plane.test',
       fetch: fetchImpl as unknown as typeof fetch,
-      getHeaders: async () => ({ Authorization: 'Bearer token-1' }),
+      getHeaders: async () => ({ Authorization: `Bearer token-${++issued}` }),
     });
     const transport = client.clientFilesTransport();
     expect(transport.baseUrl).toBe(
@@ -25,12 +29,23 @@ describe('JavaManagedAgentClient.clientFilesTransport', () => {
       { method: 'POST', body: '{"sessionId":"s"}' },
     );
     expect(response.ok).toBe(true);
+    await transport.fetch(`${transport.baseUrl}/client-files/status`, {
+      method: 'POST',
+      body: '{"sessionId":"s"}',
+    });
+    expect(calls).toHaveLength(2);
     expect(calls[0].url).toBe(
       'http://control-plane.test/api/agent/web-shell/v1/client-files/register',
     );
-    const headers = new Headers(calls[0].init?.headers);
-    expect(headers.get('authorization')).toBe('Bearer token-1');
-    expect(headers.get('content-type')).toBe('application/json');
+    expect(new Headers(calls[0].init?.headers).get('authorization')).toBe(
+      'Bearer token-1',
+    );
+    expect(new Headers(calls[1].init?.headers).get('authorization')).toBe(
+      'Bearer token-2',
+    );
+    expect(new Headers(calls[0].init?.headers).get('content-type')).toBe(
+      'application/json',
+    );
   });
 
   it('preserves caller-supplied headers', async () => {

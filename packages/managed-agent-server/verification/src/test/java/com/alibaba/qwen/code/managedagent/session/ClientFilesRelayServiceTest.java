@@ -72,6 +72,13 @@ class ClientFilesRelayServiceTest {
         tenant = "tenant-" + UUID.randomUUID();
     }
 
+    @org.junit.jupiter.api.AfterEach
+    void tearDown() {
+        // The constructor starts the waiter poller; stop it so each test does
+        // not leak a scheduled executor thread.
+        service.shutdown();
+    }
+
     @Test
     void registerIssuesOneTimeCredentialAndPersistsOnlyItsDigest() {
         Registration registration = service.register(tenant, ACTOR, session, CONNECTION);
@@ -315,6 +322,23 @@ class ClientFilesRelayServiceTest {
         service.respond(tenant, ACTOR, session, generation, CONNECTION, "1",
                 "{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"result\":{\"ok\":true}}", null);
         assertThat(call.get(5, TimeUnit.SECONDS)).contains("\"ok\":true");
+    }
+
+    @Test
+    void streamRequiresTheOwnedConnectionIdentity() {
+        Registration registration = service.register(tenant, ACTOR, session, CONNECTION);
+        long generation = registration.generation();
+        // The owning connection attaches.
+        service.requireStreamConnection(tenant, ACTOR, session, generation, CONNECTION);
+        // An omitted or foreign identity is refused, not short-circuited: a
+        // second client of the same actor must not attach to this queue.
+        assertThatThrownBy(() -> service.requireStreamConnection(tenant, ACTOR, session, generation, null))
+                .hasFieldOrPropertyWithValue("code", "client_files_generation_conflict");
+        assertThatThrownBy(() -> service.requireStreamConnection(tenant, ACTOR, session, generation, "other-tab"))
+                .hasFieldOrPropertyWithValue("code", "client_files_generation_conflict");
+        // A stale generation is refused as well.
+        assertThatThrownBy(() -> service.requireStreamConnection(tenant, ACTOR, session, generation + 1, CONNECTION))
+                .hasFieldOrPropertyWithValue("code", "client_files_generation_conflict");
     }
 
     @Test
