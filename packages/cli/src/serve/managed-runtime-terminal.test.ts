@@ -178,12 +178,19 @@ describe('ManagedRuntimeTerminals', () => {
     );
     sockets.push(ws);
     await new Promise<void>((resolve, reject) => {
+      let refused = false;
       ws.once('unexpected-response', (_req, res) => {
         expect(res.statusCode).toBe(404);
+        refused = true;
         resolve();
       });
       ws.once('open', () => reject(new Error('unknown path upgraded')));
-      ws.once('error', () => resolve());
+      // A client error only settles the test once the 404 refusal was asserted;
+      // an error alone would otherwise pass without verifying the refusal.
+      ws.once('error', () => {
+        if (refused) resolve();
+        else reject(new Error('upgrade failed without a 404 refusal'));
+      });
     });
   });
 
