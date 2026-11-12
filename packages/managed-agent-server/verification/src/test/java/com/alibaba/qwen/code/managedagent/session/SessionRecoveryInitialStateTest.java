@@ -41,11 +41,9 @@ import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.clearInvocations;
-import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -92,14 +90,11 @@ class SessionRecoveryInitialStateTest {
 
     @Test
     void aPersistedEmptySessionRenameRemainsSendableAfterHarnessCacheLoss() throws Exception {
-        when(harness.createOrLoad(TENANT, sessionId, false, true)).thenAnswer(call -> {
-            genesis();
-            return new HarnessConnector.Attachment("boot", null, 0L, "epoch");
-        });
-        doAnswer(call -> {
-            rename();
-            return null;
-        }).when(harness).rename(eq(TENANT), eq(sessionId), eq("Renamed"), anyLong());
+        // Rename settles in SQL and no longer attaches the Harness, so the
+        // journal evidence is seeded directly instead of riding a createOrLoad
+        // notification the service never sends.
+        genesis();
+        rename();
         sessions.renameSession(TENANT, "actor", "rename", sessionId, "Renamed");
         assertThat(store.requireSession(TENANT, sessionId).title()).isEqualTo("Renamed");
         assertThat(store.findLatestTurns(TENANT, List.of(sessionId))).isEmpty();
