@@ -2711,6 +2711,12 @@ function ManagedSessionsContent({
                     : []
                 }
                 currentModel={displayedModel}
+                modelPickerScope={{
+                  sessionId,
+                  workspaceId: sessionId
+                    ? (sessionWorkspaceId ?? undefined)
+                    : workspaceId,
+                }}
                 availableModels={
                   modelChange.options?.supported
                     ? modelChange.options.models.map((model) => ({
