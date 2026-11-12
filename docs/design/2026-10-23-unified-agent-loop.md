@@ -502,11 +502,11 @@ Both paths emit `ROUND_START` after stream preparation so the workflow watchdog 
 
 PR 5b runs a round's calls as one batch of the loop's `runToolBatch` on the agent's own scheduler, as the Ink TUI and OpenTUI run theirs on their own schedulers. The batch's `client` becomes optional: it counts the executed calls toward the main session's tool calls, which an agent's calls do not count toward today. What moves:
 
-| AgentCore today                                                       | With the setting on                                                                               |
-| --------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
-| it answers a provider replay and stops at a repeated one              | the batch does, and the agent emits the replay's events from its result                           |
-| it refuses a call it did not declare or may not run before scheduling | its executor refuses the call with the same error, after the batch remembered the call as handled |
-| it orders and finalizes the results                                   | the batch does, and the agent emits `TOOL_RESPONSES_FINALIZED` from them                          |
+| AgentCore today                                                       | With the setting on                                                                         |
+| --------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| it answers a provider replay and stops at a repeated one              | the batch does, and the agent emits the replay's events from its result                     |
+| it refuses a call it did not declare or may not run before scheduling | its executor refuses the call with the same error, after the batch remembered it as refused |
+| it orders and finalizes the results                                   | the batch does, and the agent emits `TOOL_RESPONSES_FINALIZED` from them                    |
 
 The scheduler, with its events, approvals and hooks, stays the agent's own, so a deferred approval restores the agent's four async-local frames as it does today. The batch leaves the results unrecorded, since they go to the agent's chat and not to the session's transcript. It keeps the results of an aborted batch, so the run ends at the next round's abort check as it does today. A call id the stream repeats still runs and is answered once. The headless suite counts each subagent batch on the shared loop in the debug log, and the TUI suite answers a subagent's approval in the TUI.
 
@@ -699,7 +699,7 @@ The suites run in the integration job, the TUI suite on Ink; the OpenTUI interac
 - With the setting on, AgentCore differs from today in these intended ways:
   - from PR 5a, a model fallback drops what the failed model streamed, its calls, text and thought text, so the round's answer carries only the fallback model's output, as on the other surfaces ([#15327](https://github.com/QwenLM/qwen-code/issues/15327)).
   - from PR 5a, a streamed text event carries a chunk's thought text or its visible text ([#15327](https://github.com/QwenLM/qwen-code/issues/15327)).
-  - from PR 5b, a call the agent may not run is remembered as handled, so a replay of its id is answered as a duplicate instead of refused again, and a replay's events come before the refusals in its batch ([#15327](https://github.com/QwenLM/qwen-code/issues/15327)).
+  - from PR 5b, within a reasoning run the batch tracks calls the agent may not run separately from executable calls, including when they share a provider ID. The first exact replay gets a duplicate response and a further replay stops the batch. Replay events come before refusals in the batch ([#15327](https://github.com/QwenLM/qwen-code/issues/15327)).
 
 - Later surfaces bring their own fixes: #15324 (ACP), #15326 (OpenTUI), #14114 and #12209 (ACP).
 

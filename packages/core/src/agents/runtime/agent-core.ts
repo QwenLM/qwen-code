@@ -1072,6 +1072,10 @@ export class AgentCore {
     // Scoped to this reasoning loop. A second duplicate response for the same
     // provider id would keep deterministic providers in a tool-result loop.
     const duplicateProviderToolCallResponseIds = new Set<string>();
+    const refusedDuplicates: AgentLoopDuplicateState = {
+      handled: new Map(),
+      responded: new Set(),
+    };
     let stickyMaxOutputTokens: number | undefined;
     // Whether THIS round's stream produced a chunk (model acceptance). The
     // round finally uses it to tell a pre-acceptance failure apart from the
@@ -1463,6 +1467,7 @@ export class AgentCore {
             wasOutputTruncated,
             handledToolCallFingerprints,
             duplicateProviderToolCallResponseIds,
+            refusedDuplicates,
           );
           if (toolCallResult.repeatedDuplicateProviderToolCall) {
             terminateMode = AgentTerminateMode.LOOP_DETECTED;
@@ -2363,6 +2368,10 @@ export class AgentCore {
     wasOutputTruncated = false,
     handledToolCallFingerprints = new Map<string, string>(),
     duplicateProviderToolCallResponseIds = new Set<string>(),
+    refusedDuplicates: AgentLoopDuplicateState = {
+      handled: new Map(),
+      responded: new Set(),
+    },
   ): Promise<ToolStepResult> {
     if (
       this.codeModeAllowedToolNames === undefined &&
@@ -2383,6 +2392,7 @@ export class AgentCore {
           handled: handledToolCallFingerprints,
           responded: duplicateProviderToolCallResponseIds,
         },
+        refusedDuplicates,
       });
     }
     const responseByCallId = new Map<
@@ -2450,11 +2460,7 @@ export class AgentCore {
       const toolName = String(fc.name);
       const args = (fc.args ?? {}) as Record<string, unknown>;
 
-      const errorMessage = this.toolCallRefusal(
-        fc.name,
-        toolName,
-        declaredToolNames,
-      );
+      const errorMessage = this.toolCallRefusal(fc.name, declaredToolNames);
 
       if (errorMessage) {
         const functionResponsePart = {
@@ -2659,6 +2665,7 @@ export class AgentCore {
     responseId?: string;
     wasOutputTruncated: boolean;
     duplicates: AgentLoopDuplicateState;
+    refusedDuplicates: AgentLoopDuplicateState;
   }): Promise<ToolStepResult> {
     const { abortController, promptId, currentRound } = params;
     const debugLogger = this.runtimeContext.getDebugLogger();
@@ -2666,15 +2673,20 @@ export class AgentCore {
     // A provider may stream one call id twice; the agent runs it once and
     // answers it once.
     const generatedCallIdBase = randomUUID();
+    const refusals = new Map<ToolCallRequestInfo, string>();
     const requests = dedupeToolCallsById(params.functionCalls).map(
-      (fc, index) =>
-        this.buildToolCallRequest(
+      (fc, index) => {
+        const refusal = this.toolCallRefusal(fc.name, declaredToolNames);
+        const request = this.buildToolCallRequest(
           fc,
           fc.id ?? `${fc.name ?? 'tool'}-${generatedCallIdBase}-${index}`,
           promptId,
           params.responseId,
           params.wasOutputTruncated,
-        ),
+        );
+        if (refusal) refusals.set(request, refusal);
+        return request;
+      },
     );
     debugLogger.debug(
       `[AgentCore] subagent ${this.subagentId} round ${currentRound} tool batch on the shared loop (prompt ${promptId}, ${requests.length} call(s))`,
@@ -2686,6 +2698,8 @@ export class AgentCore {
       config: this.runtimeContext,
       signal: abortController.signal,
       duplicates: params.duplicates,
+      duplicateStateForCall: (request) =>
+        refusals.has(request) ? params.refusedDuplicates : params.duplicates,
       // The results of an aborted batch stay; the run ends at the next
       // round's abort check, as on the current tool step.
       keepCancelledResults: true,
@@ -2697,11 +2711,7 @@ export class AgentCore {
           const launched: ToolCallRequestInfo[] = [];
           for (const request of calls) {
             const { callId, name, args } = request;
-            const refusal = this.toolCallRefusal(
-              name,
-              name,
-              declaredToolNames,
-            );
+            const refusal = refusals.get(request);
             if (!refusal) {
               if (hooks.beforeLaunch(request, [])) launched.push(request);
               continue;
@@ -2829,10 +2839,10 @@ export class AgentCore {
    */
   private toolCallRefusal(
     declaredName: string | undefined,
-    toolName: string,
     declaredToolNames: ReadonlySet<string | undefined>,
   ): string | undefined {
-    if (!declaredToolNames.has(declaredName)) {
+    const toolName = String(declaredName);
+    if (!declaredName || !declaredToolNames.has(declaredName)) {
       return isPlanLifecycleToolUnavailableInSubagent(toolName)
         ? getSubagentPlanToolUnavailableMessage(toolName)
         : isLeaderOnlyToolUnavailableInSubagent(toolName)
@@ -3416,7 +3426,6 @@ export class AgentCore {
         abortController.signal.removeEventListener('abort', onAbort);
       }
     }
-
   }
 
   /** The request of a call the model made, as the scheduler runs it. */
@@ -3427,7 +3436,7 @@ export class AgentCore {
     responseId: string | undefined,
     wasOutputTruncated: boolean,
   ): ToolCallRequestInfo {
-    const toolName = String(fc.name || 'unknown');
+    const toolName = String(fc.name);
     const providerCallId = getProviderToolCallId(fc) ?? fc.id;
     const args = (fc.args ?? {}) as Record<string, unknown>;
     return {
@@ -3445,8 +3454,7 @@ export class AgentCore {
       ...(toolCallArgumentsWereIncomplete(fc)
         ? { hadIncompleteArguments: true }
         : {}),
-      ...((toolName === ToolNames.EXEC ||
-        toolName === ToolNames.TOOL_SEARCH) &&
+      ...((toolName === ToolNames.EXEC || toolName === ToolNames.TOOL_SEARCH) &&
       this.runtimeContext.getToolMode?.() === ToolMode.CodeModeOnly
         ? {
             codeModeAllowedToolNames: this.codeModeAllowedToolNames ?? [],

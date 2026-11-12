@@ -2187,6 +2187,54 @@ describe('subagent.ts', () => {
           expect(scope.getTerminateMode()).toBe(AgentTerminateMode.GOAL);
         });
 
+        it('should track refused and allowed replays independently when they reuse an id', async () => {
+          const { config, inv, toolConfig } = await setupListFiles();
+          const usedIds = new Set<string>();
+          const denied = () =>
+            normalizeModelToolCallIds(
+              [fnCall('write_file', { file_path: 'x.txt' }, 'call_1')],
+              usedIds,
+              new Set<string>(),
+            )[0]!.functionCall!;
+          respond(
+            [denied()],
+            [collidingCall({ path: '.' }, usedIds)],
+            [denied()],
+            [collidingCall({ path: '.' }, usedIds)],
+            'stop',
+          );
+          const scope = await runAgent(config, { tools: toolConfig });
+
+          expect(inv.execute).toHaveBeenCalledOnce();
+          expect(errorFor(sentParts(1), 'call_1')).toContain(
+            'Tool "write_file" not found',
+          );
+          if (shared) {
+            expectDuplicateResponse(3, 'call_1__qwen_dup_3');
+          } else {
+            expect(errorFor(sentParts(3), 'call_1__qwen_dup_3')).toContain(
+              'Tool "write_file" not found',
+            );
+          }
+          expectDuplicateResponse(4, 'call_1__qwen_dup_4');
+          expect(scope.getTerminateMode()).toBe(AgentTerminateMode.GOAL);
+        });
+
+        it('should refuse a missing tool name even when a tool is named unknown', async () => {
+          const toolDef = decl('unknown', 'A custom tool');
+          const tool = mockTool(toolDef);
+          const responses = await runFork(
+            () => tool,
+            [{ id: 'call_missing', args: {} }],
+            { tools: [toolDef], executionAllowedTools: ['unknown'] },
+          );
+
+          expect(tool.build).not.toHaveBeenCalled();
+          expect(errorFor(responses, 'call_missing')).toContain(
+            'Tool "undefined" not found',
+          );
+        });
+
         it('should execute only the first duplicate functionCall id in one model turn', async () => {
           const { config, inv, toolConfig } = await setupListFiles(
             { path: 'a' },
