@@ -2058,11 +2058,21 @@ describe('GitHub helper tests', () => {
           String(step.if ?? '').includes("ci_profile == 'github_ci_only'") &&
           String(step.run ?? '').includes('node --test'),
       );
-    // One job owns the fast lane; a second copy is duplicated lint bootstrap
-    // and, when it shares the name, a byte-identity break against the shared
-    // prelude guard above.
-    expect(fastLaneSteps).toHaveLength(1);
-    for (const { jobName, step } of fastLaneSteps) {
+    // The fast lane has two steps of its own now, with different contracts.
+    // Before the install it runs the dependency-free battery and nothing else;
+    // after the install it may run suites that import npm packages, but must
+    // name them rather than fall back to the whole list.
+    const depFreeSteps = fastLaneSteps.filter(({ step }) =>
+      String(step.run).includes('env.HELPER_TESTS_DEP_FREE'),
+    );
+    const installedSteps = fastLaneSteps.filter(
+      ({ step }) => !String(step.run).includes('env.HELPER_TESTS_DEP_FREE'),
+    );
+    // One job owns the fast lane's pre-install battery; a second copy is
+    // duplicated lint bootstrap and, when it shares the name, a byte-identity
+    // break against the shared prelude guard above.
+    expect(depFreeSteps).toHaveLength(1);
+    for (const { jobName, step } of depFreeSteps) {
       const where = `${jobName}/${step.name}`;
       expect(String(step.run), where).toContain('env.HELPER_TESTS_DEP_FREE');
       // Strip the dep-free name first: `env.HELPER_TESTS` is a substring of
@@ -2071,6 +2081,25 @@ describe('GitHub helper tests', () => {
         String(step.run).replaceAll('HELPER_TESTS_DEP_FREE', ''),
         where,
       ).not.toContain('env.HELPER_TESTS');
+    }
+    // The post-install additions name their suites. `check-lint-gate-freshness`
+    // is one of them: it parses ci.yml with `yaml`, so it cannot run on the
+    // dependency-free path, and the profile that most often selects this lane
+    // is exactly the one a PR editing that script receives.
+    expect(installedSteps).toHaveLength(1);
+    for (const { jobName, step } of installedSteps) {
+      const where = `${jobName}/${step.name}`;
+      expect(String(step.run), where).toContain(
+        '.github/scripts/check-lint-gate-freshness.test.mjs',
+      );
+      expect(String(step.run), where).not.toContain('HELPER_TESTS_DEP_FREE');
+      expect(String(step.run), where).not.toContain('env.HELPER_TESTS');
+      const job = ci.jobs[jobName];
+      const names = job.steps.map((candidate) => candidate.name);
+      expect(
+        names.indexOf(step.name),
+        `${where}: the suite needs the install, so it must run after it`,
+      ).toBeGreaterThan(names.indexOf('Install dependencies'));
     }
   });
 });

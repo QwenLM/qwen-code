@@ -56,11 +56,37 @@ branches chosen, not of the approach. The dominant trigger in that sample,
 `#16200`'s global ignore addition, remains the other design's subject.
 
 That count is a measurement at a named revision, not a constant: the window
-slides as `main` moves. At `22ed7e77ca385` it is seven pass / six stale, where the
-earlier revision measured six / seven — #16945's RPC-retry commit entered the
-window and is plumbing-only, while #16351's corepack-cache commit left it. Both
-totals are reported with the revision they were taken at rather than carried
-forward.
+slides as `main` moves. Two revisions of this document reported six and then
+seven plumbing-only passes for exactly that reason, without any change to the
+comparison — the corpus was re-taken at a later `main` tip, losing a
+gate-changing commit and gaining a plumbing-only one. The corpus behind every
+number below is re-taken at `main` `2a9c4f8732` and reported with that anchor,
+rather than carried forward from an earlier revision.
+
+## Revision note: the line model has been replaced
+
+Earlier revisions of this change compared a **line slice** of `ci.yml`: an
+exact-match table for four structural anchors (`jobs:`, the two-space job key,
+`steps:`, `- name: '<name>'`), then a walk over the job that appended or dropped
+each line, with `[[dropped …]]` markers standing in for the regions it excluded.
+
+Review found the class that model cannot close. YAML's legal spellings are not a
+finite list — a block-scalar indicator on the line **after** its key, under a tag
+(`run: !!str |`), or in the `|2-` order rather than `|-2`; a sequence item whose
+scalar is a block (`- |`); a multi-line flow scalar; a comment after any
+structural token; an anchor cited across the file. Each review round named one
+more spelling, and every one had the same consequence: content the runner reads
+fell through to the "prose" branch and was **deleted from the compared text**, so
+a real gate change compared equal, the stale verdict was dropped, and the branch
+was certified fresh — the `#11117 → #11216` shape this check exists to prevent,
+reached through a different spelling.
+
+Adding a refusal per spelling does not converge, because the input is a grammar
+and the model was a line scanner. This revision parses the file instead and
+compares the parsed gate, so the comparison is over **meaning** rather than
+spelling. What the model refuses is now a short list of structural facts about
+the gate (a missing job, an unnamed step, a dependency edge outside the gate),
+not a list of ways to spell YAML.
 
 ## Current state
 
@@ -80,27 +106,38 @@ every other gate file's verdict too.
 ## Goals
 
 - Stop failing a branch when the base-side `ci.yml` change left the lint gate
-  this file defines byte-identical.
+  this file defines structurally identical.
 - Keep failing every base-side change that could make the branch's green
   insufficient, including a lane flag, a profile classifier change, a linter
   version, and a `HELPER_TESTS` list change.
 - Never manufacture a green that whole-file containment would have denied: any
-  shape the extractor cannot classify falls back to today's verdict.
+  document the parser rejects, or that is not shaped like the gate this model
+  describes, falls back to today's verdict.
 
 ## Scope boundaries
 
 In scope: `.github/scripts/check-lint-gate-freshness.mjs`, its collocated suite,
-and this document pair.
+two steps in `.github/workflows/ci.yml`, the two workflow meta-tests that pin
+where those steps sit (`scripts/tests/sdk-java-workflow.test.js`,
+`scripts/tests/ci-platform-lanes.test.js`), and this document pair.
+
+`ci.yml` **is** edited, unlike earlier revisions of this change. Two edits, both
+forced by the parser, neither changing what the gate checks:
+
+- `Check lint gate freshness` moves from before `Install dependencies` to after
+  it. It parses the file with the `yaml` package, which only exists once
+  dependencies are installed. Its `if:` expression, its profile gating and its
+  `::warning::` text are unchanged — **position only**.
+- A new `Run lint gate freshness tests` step runs the collocated suite on the
+  `github_ci_only` profile, whose pre-install helper battery can no longer carry
+  it (see "Where the suite runs").
 
 Explicitly out of scope:
 
-- `ci.yml` itself is **not edited**. The slice is computed from the file's
-  existing structure, so this change adds no workflow bytes, touches no
-  `.size-baseline`, and needs no workflow meta-test update.
 - `GATE_FILES` is unchanged; `ci.yml` stays on the list, and its containment
   verdict is still computed first.
 - The other eight gate files keep their existing behavior, including the two
-  scope narrowings.
+  scope narrowings. Their tests are not touched by this revision.
 - The `HELPER_TESTS` treadmill is not addressed, and unlike the plumbing it is
   not a false positive. Appending a suite adds work the lane must do; a branch
   that lacks the entry never ran that suite, so its green really is weaker.
@@ -111,21 +148,24 @@ Explicitly out of scope:
 
 ## Proposed solution
 
-Add a third `NARROWINGS` entry, `narrowsToUnchangedLintSlice`, which compares an
-extracted slice instead of an ordering of ignore entries.
+Add a third `NARROWINGS` entry, `narrowsToUnchangedLintSlice`, which compares a
+parsed gate document instead of an ordering of ignore entries.
 
-### The slice
+### The gate document
 
-`extractLintGateSlice(text)` keeps:
+`lintGateDocument(text)` parses with
+`parseDocument(text, { uniqueKeys: true })` and returns a plain object holding:
 
-1. Every line above `jobs:` — triggers, `concurrency`, `permissions`,
+1. Every top-level key except `jobs:` — triggers, `concurrency`, `permissions`,
    `defaults`, and the workflow `env`, which is where `ACTIONLINT_VERSION`,
    `SHELLCHECK_VERSION`, `YAMLLINT_VERSION` and both `HELPER_TESTS` lists live.
 2. All of `classify_pr`. It selects the CI profile, and the profile selects which
-   linters run, so it is gate-defining even though it is a different job.
-3. `lint_and_static`, minus the plumbing below.
+   linters run, so it is gate-defining even though it is a different job. Four of
+   its steps are kept (its checkouts are plumbing).
+3. `lint_and_static`, minus the plumbing below: 32 of its 43 steps survive.
 
-Everything else — every test, build and E2E job — is dropped.
+Everything else — 11 of the workflow's 13 jobs, every test, build and E2E lane —
+is dropped.
 
 Plumbing is a whitelist of **step names**, not a guess about content:
 
@@ -146,68 +186,68 @@ A base-side hardening of either is a security fix that has to reach in-flight
 branches, and both are edited on incidents rather than on routing churn, so they
 stay in the slice and stale the branch like any other gate change.
 
-At the job level only `runs-on` and `timeout-minutes` are dropped, with their
-region. `env`, `if`, `needs`, `outputs`, `permissions` and `steps` stay: they
-decide what runs, not where. `needs` in particular stays, so a base-side change
-to which jobs the lane waits for is compared — and an edge to a job outside the
-gate-job list refuses the narrowing rather than being followed, since the
-extractor does not walk the dependency graph.
+At the job level only `runs-on` and `timeout-minutes` are dropped. `env`, `if`,
+`needs`, `outputs`, `permissions` and `steps` stay: they decide what runs, not
+where. `needs` in particular stays, so a base-side change to which jobs the lane
+waits for is compared — and an edge to a job outside the gate-job list refuses
+the narrowing rather than being followed, since the model does not walk the
+dependency graph.
 
-Nothing is dropped silently. Each excluded region — every non-gate job, every
-plumbing step, every dropped job key — leaves a `[[dropped ...]]` marker in the
-compared text, carrying the kind and the name at the position the region
-occupied. `[[...]]` is not a YAML comment, so a marker can never be mistaken for
-prose or collide with a real line. This is what makes the comparison complete
-rather than a survey of the parts someone remembered to model: a base-side edit
-that moves content into a dropped region — the install prelude relocated into a
-new job, a step renamed into the plumbing list — changes the markers and refuses
-the narrowing.
+### What is refused
 
-The one class left out of the comparison is prose: blank lines and whole-line
-comments outside a block scalar. That is this narrowing's premise — most of
-`ci.yml`'s traffic is commentary — and prose can carry no gate semantics, because
-the runner never reads it. It is removed in a single up-front pass, before any
-structure is read, so it cannot open a step, be absorbed into one, or truncate a
-job.
+`lintGateDocument` returns `null` — and the caller keeps the whole-file verdict —
+when the document is not a gate it will stand behind:
 
-Block-scalar content is the opposite case: `run: |` bodies are what the runner
-executes, so they are compared verbatim — blank lines excepted — including lines
-that begin with `#`, which are shell comments rather than YAML comments. The
-earlier model dropped them while the header claimed it "never removes a line the
-runner would read"; the claim was false and the line is now kept.
+- the parser reports an error, including a duplicate key (`uniqueKeys`);
+- there is no `jobs:` mapping, or either gate job is missing or not a mapping, so
+  renaming the lint job cannot read as "no gate to compare";
+- a step is not a mapping, or has no `name` — an unnamed step cannot be matched
+  against the whitelist, so what it does cannot be stated;
+- two steps in one job share a name, so the dropped/kept distinction is
+  ambiguous;
+- a plumbing step's own content invokes a linter: the label contradicts the body,
+  which is a refusal rather than a pass (see below);
+- a gate job's `needs:` names anything outside the gate-job list.
 
-Line breaks are `\r\n`, `\n`, a lone `\r`, and the Unicode separators
-`\u2028`/`\u2029`. Splitting on `\n` alone read a CR-terminated file as one line
-and dropped whatever followed a `#` on the far side of the CR — the
-`#11117 → #11216` shape, with the flag flipped on the base and the branch
-certified fresh.
+`null` throws rather than returning `false`, so the existing fail-closed catch
+emits its `::warning::`. A silent `false` would disable the narrowing for every
+PR and leave no trace beyond a stale verdict nobody can explain.
 
-Measured on the current file, the slice is 624 lines of 3560, 28 of them markers
-for the jobs and plumbing steps it excludes.
+The two sides are compared as text: `extractLintGateSlice` renders the gate with
+a `canonical()` serializer that sorts object keys and writes no whitespace, so
+two documents compare equal exactly when their gates are structurally equal. For
+the current file the compared payload is 34,534 bytes.
 
 ### Why the default is "keep"
 
 The whitelist names what may be **ignored**, not what matters. Forgetting to
 classify a new gate step leaves it in the slice and costs at most today's
 over-rejection; a wrong entry in the list would hide a real gate change. The
-asymmetry is deliberate, and two guards back it:
+asymmetry is deliberate, and three guards back it:
 
-- A step in the plumbing list whose body invokes a linter refuses the narrowing
-  outright. The label is not trusted on its own — a step moved into the list
-  while still running `scripts/lint.js` is a contradiction, not a pass. The
+- A step in the plumbing list whose content invokes a linter refuses the
+  narrowing outright. The label is not trusted on its own — a step moved into the
+  list while still running `scripts/lint.js` is a contradiction, not a pass. The
   pattern covers the way the lanes are actually reached: `npm run`, `pnpm run`,
-  `corepack pnpm run`, a bare `pnpm lint`, `npx`/`pnpx`. Anchoring on `npm run`
-  alone missed every `pnpm` spelling, since `pnpm` has no word boundary before
-  `npm`. Flags between the manager and its subcommand are skipped for the same
-  reason: `pnpm -w run lint` and `pnpm --filter ./packages/core run lint` reach
-  the same lane, and anchoring the subcommand directly after the manager let
-  both through. A manager followed by `config`/`set` is configuration and still
-  passes — `npm config set fetch-retries 5` is a real plumbing step, so refusing
-  it would disable the narrowing for every PR.
+  `corepack pnpm run`, a bare `pnpm lint`, `npx`/`pnpx`, and `node --test`, which
+  is itself a gate. Anchoring on `npm run` alone missed every `pnpm` spelling,
+  since `pnpm` has no word boundary before `npm`. Flags between the manager and
+  its subcommand are skipped for the same reason: `pnpm -w run lint` and
+  `pnpm --filter ./packages/core run lint` reach the same lane. A manager followed
+  by `config`/`set` is configuration and still passes — `npm config set
+fetch-retries 5` is a real plumbing step, so refusing it would disable the
+  narrowing for every PR. The test is over the step's **canonical form**, so it
+  sees the content however it is spelled or laid out.
 - The suite reads the real workflow and requires every plumbing name to exist in
   the two gate jobs, so a renamed step cannot leave a stale entry silently
-  excluding nothing. Scoping matters: a whole-file inventory can be kept alive
-  by a same-named step in a test lane after the gate job's copy is renamed.
+  excluding nothing. Scoping matters: a whole-file inventory can be kept alive by
+  a same-named step in a test lane after the gate job's copy is renamed.
+- Dropping a non-gate job removes it from the compared text, so this model no
+  longer needs the roster markers the line model used. The protection they
+  carried is now the pipeline itself: reclassifying a job as non-gate is a
+  one-line change to `CI_GATE_JOBS` that a review sees, and the `needs:` refusal
+  catches the case the markers were introduced for — the install prelude split
+  into a new job that the gate job then depends on.
 
 Node provisioning (`setup-node`, the pnpm store action, the self-hosted Node
 action) deliberately stays **in** the slice: those decide the toolchain the
@@ -218,49 +258,45 @@ The install prelude also stays in. #16900 and #16920 widened exactly that prelud
 to close a post-merge lint gap: an install a profile skips is a linter that
 profile never runs.
 
-### Fail-closed extraction
+### Why a parser, and what it costs
 
-The model is a whitelist: a line is either enumerated (and compared, or replaced
-by a marker) or the extraction refuses. "Not recognised, so delete it" does not
-exist here. `extractLintGateSlice` returns `null` — and the caller keeps the
-whole-file verdict — for any shape it does not model:
+The claim this narrowing makes is an **equality** claim about a YAML document.
+Any line-based model has to enumerate the document's spellings to make it, and
+that enumeration is open-ended — which is how four review rounds produced four
+different spellings that all compared equal. A parser removes the class rather
+than the instances: anchors resolve, flow scalars join, block scalars carry their
+content, and comments and layout stop existing at the point of comparison. Two
+documents then compare equal exactly when a runner would see the same gate.
 
-- a sequence item that is not `      - name: '<single-quoted name>'`, including
-  an unnamed `- uses:` step and a bare `      -` whose name sits on the next
-  line. The item is refused before any body is appended, so it cannot be
-  absorbed as the previous step's content and vanish from the slice;
-- a duplicated job key, where YAML would take the last copy and a `Map` would
-  silently keep whichever the parser reached;
-- a missing `jobs:`, `classify_pr`, or `lint_and_static`, so renaming the lint job
-  cannot read as "no gate to compare";
-- a job key off indent 2, a job body line outside a key's region, or content
-  after `jobs:` at column zero — shapes this line model cannot place;
-- a tab in the indent;
-- a value that opens with `|` or `>` but whose modifier is not one of the
-  enumerated forms. Both orders are legal YAML and both are accepted — `|`, `|-`,
-  `|+`, `|2`, `|2-`, `|+2` and the `>` family. Anything else (`|2+-`) refuses
-  rather than letting the body fall into the structural path, where its `#` lines
-  would be dropped as prose;
-- a quoted scalar that does not close on its own line. The continuation of a
-  multi-line flow scalar is data the runner reads, and a one-line model cannot
-  tell a `#` there from a comment, so it refuses;
-- an anchor (`&name`) or an alias (`*name`) anywhere on a structural line. The
-  model is one line at a time and cannot follow a cross-reference: with the
-  anchor on a dropped step, `&lintcmd 'node scripts/lint.js --prettier'` and the
-  `--write` value render the same slice wherever `*lintcmd` is cited.
+Three costs, all accepted:
 
-`null` throws rather than returning `false`, so the existing fail-closed catch
-emits its `::warning::`. A silent `false` would disable the narrowing for every
-PR and leave no trace beyond a stale verdict nobody can explain.
+- **The suite needs `yaml`.** It leaves `HELPER_TESTS_DEP_FREE`, whose import
+  closure must stay `node:` builtins, and joins `HELPER_TESTS`. On the `full`
+  profile that is the same battery it ran in before, only after the install.
+- **The check runs after `Install dependencies`.** A stale branch now pays one
+  install before being told to rebase. That is a latency cost, not a correctness
+  one: the install runs on every profile anyway, so no profile gains or loses
+  coverage, and the check still precedes the lint lanes it can make pointless.
+- **`docs_only` still does not run the suite.** That is unchanged — the pre-install
+  battery it used to sit in was already `github_ci_only`-only.
 
-This is line-anchored, with no YAML parser: the suite runs in
-`HELPER_TESTS_DEP_FREE`, whose import closure must stay `node:` builtins, and the
-step runs before any dependency install.
+### Where the suite runs
+
+| Profile          | Before                                                    | After                                          |
+| ---------------- | --------------------------------------------------------- | ---------------------------------------------- |
+| `full`           | `Run .github/scripts helper tests` (post-install)         | same step, `HELPER_TESTS` (post-install)       |
+| `github_ci_only` | `GitHub CI helper checks` (pre-install, dep-free battery) | `Run lint gate freshness tests` (post-install) |
+| `docs_only`      | never                                                     | never                                          |
+
+The middle row is the point of the new step: a PR that edits this script is most
+often classified `github_ci_only`, and the pre-install battery can no longer
+carry a suite that imports `yaml`. Without the dedicated step the most relevant
+profile would have stopped executing the suite.
 
 ### The comparison baseline is the merge base
 
 The two sides are the **base tip** and the **merge base**, not the head.
-Comparing the head's slice would flag a branch for its own gate edit and keep
+Comparing the head's gate would flag a branch for its own gate edit and keep
 flagging it after the rebase it asks for, because `main` will not carry that edit
 until the branch merges. The question is whether the gate moved _under_ this
 branch, so the branch's own version never enters the comparison.
@@ -287,8 +323,9 @@ over-rejects, which is the safe direction.
 
 ## Constraints
 
-- Node builtins only; no YAML parser, and no evaluation of branch-controlled
-  text.
+- Node builtins plus the `yaml` package, which is already a root dependency
+  (`^2.8.1`, resolving to `2.9.0` in the lockfile); no evaluation of
+  branch-controlled text, and no new dependency.
 - No new API call per PR beyond the two content reads, and those only on a
   verdict that already came back stale.
 - The verdict object's shape is unchanged, so the report and the existing
@@ -299,14 +336,32 @@ over-rejects, which is the safe direction.
 
 - **Misclassification is the real risk.** A gate-defining step wrongly listed as
   plumbing would hide a base-side gate change. Mitigated by the keep-by-default
-  rule, the linter-invocation refusal, and the suite's anchor-drift guards. It is
-  not eliminated: a reviewer must check the list on any PR that edits it.
+  rule, the linter-invocation refusal, the `needs:` refusal and the suite's
+  anchor-drift guards. It is not eliminated: a reviewer must check the list on
+  any PR that edits it.
+- **The gate-job roster is a single constant.** `CI_GATE_JOBS` names the two jobs
+  compared. Adding a job that also defines the gate — a second lint job, a
+  profile classifier split in two — is invisible until that list is updated.
+  Accepted: the list is one line next to the plumbing whitelist, and a base-side
+  edit to it is itself a `GATE_FILES` change.
+- **A parser dependency enters a required check.** A `yaml` regression, or a
+  lockfile state where the module is absent, makes `extractLintGateSlice` throw
+  and the catch emit its `::warning::` — the narrowing stops applying and every
+  base-side `ci.yml` commit asks for a rebase again. Fail-safe, not a false
+  green, and the lane reddens on the import itself rather than passing silently.
+- **Comparing parsed values drops layout from the claim.** A base-side commit
+  that only reformats `ci.yml`, or reorders keys or `HELPER_TESTS` entries,
+  compares equal and passes. That is the intent: the runner reads none of it.
+  The cost is that a reviewer cannot use this check to learn that the file was
+  touched, only that its gate was.
+- **YAML merge keys (`<<`) are compared as written, not expanded.** No such
+  spelling exists in `ci.yml`; if one appeared, the anchored map would still be
+  part of the compared text (through the key's value), so a base-side edit inside
+  it is seen, but the merge itself is not modelled. Left as stated rather than
+  handled.
 - **Landing this PR asks every in-flight PR to rebase once.** The check watches
   its own file with whole-file containment, so this edit is itself a base-side
   gate change — the same one-time wave its introduction caused.
-- **Anchor drift.** A reformat that defeats the line anchors disables the
-  narrowing. It fails closed and annotates, and the suite reads the real file so
-  the drift reddens here first.
 - The slice covers the `Lint & Static` lane's gate only. `test_build` carries two
   static checks of its own (`check-serve-fast-path-bundle.js`,
   `check:core-subpath-exports`). Whole-file containment covered a base-side change
@@ -350,95 +405,142 @@ head commit` stay outside the slice. A `ref:` edit on its own is caught: the
   prelude to `env` alone would remove those reds too, but the prelude also carries
   `permissions` and `defaults.run.shell`, which do change how every step behaves.
   Left in the safe direction deliberately.
-
-- **Accepted over-rejection: the job roster.** Every non-gate job is named in the
-  compared text, so a base-side job added, removed or renamed refuses the
-  narrowing even when its content cannot touch the lint gate. The alternative —
-  dropping those jobs without a trace — is exactly the exposure the marker
-  removes: relocating the install prelude into a new job left the two gate jobs
-  identical. Job-list churn is rarer than step churn, so the cost is an
-  occasional rebase rather than the weekly treadmill this narrowing removes.
 - **Accepted over-rejection: dependency closure.** `needs:` is compared, so a
-  base-side change to WHICH jobs the lane depends on is seen. The extractor still
-  does not walk that dependency graph, so instead of following the edge it
-  refuses it: a gate job that `needs:` anything outside the gate-job list returns
-  null and keeps whole-file containment. Without that refusal the hole was
-  silent and permanent — splitting the install prelude into a new job stales
-  everyone once, correctly, and every later edit inside that job then compares
-  equal, because the job is dropped while its name and its `needs:` entry stay
-  identical. No such edge exists today (the lint job needs only `classify_pr`,
-  which is itself in the slice), so the refusal costs nothing now and fires
-  exactly when the slice would stop being the whole gate. All three YAML
-  spellings of the list are covered — inline, single-quoted and block — because a
-  guard that read only one would leave the others open. Extending the gate-job
-  list and reading the lane's `needs:` still have to happen together; the
-  difference is that forgetting now over-rejects instead of certifying falsely.
+  base-side change to WHICH jobs the lane depends on is seen. The model still does
+  not walk that dependency graph, so instead of following the edge it refuses it:
+  a gate job that `needs:` anything outside the gate-job list returns null and
+  keeps whole-file containment. Without that refusal the hole was silent and
+  permanent — splitting the install prelude into a new job stales everyone once,
+  correctly, and every later edit inside that job then compares equal, because the
+  job is dropped while its name and its `needs:` entry stay identical. No such
+  edge exists today (the lint job needs only `classify_pr`, which is itself in the
+  slice), so the refusal costs nothing now and fires exactly when the slice would
+  stop being the whole gate. All three YAML spellings of the list are covered —
+  inline, single-quoted and block — because the parse normalises them to the same
+  value. Extending the gate-job list and reading the lane's `needs:` still have to
+  happen together; the difference is that forgetting now over-rejects instead of
+  certifying falsely.
 
-- **Accepted residual: legal YAML the model refuses, and the narrowing then
-  stops firing.** Four structural anchors are exact-match — `jobs:`, the
-  two-space job key, `steps:`, and `- name: '<name>'` — and prose removal only
-  drops whole-line comments. A trailing comment on any of them (`steps: # lane`,
-  `- name: 'Checkout' # pinned`) therefore returns null, and so does a plain
-  scalar carrying an unmatched quote (`run: echo it's fine`). Both are legal
-  YAML the runner loads. On a base-side commit that makes
-  `narrowsToUnchangedLintSlice` throw for every stale `ci.yml` verdict, the catch
-  emits one `::warning::`, and the narrowing stops applying: every base-side
-  `ci.yml` commit — including the plumbing-only churn this change exists to
-  absorb — asks in-flight PRs to rebase again. The direction is fail-safe, not a
-  false green: the stale verdict is kept and the cost is over-rejection. But the
-  feature does revert silently for that shape, and the suite cannot see it
-  because the suite reads the branch's copy while these lines are main's.
-  **Not handled**: accepting a `#`-introduced comment on those four anchors (and
-  opening a quote only in value position) is a follow-up, not something this
-  revision does.
+## Test-suite accounting
+
+The suite is 1,422 lines and 69 cases. Review asked for a rewrite that removes the
+line model's spelling fixtures without touching behaviour coverage; this is the
+account of where it stopped, and why it is not smaller.
+
+| Part                                                            | Lines | Cases |
+| --------------------------------------------------------------- | ----- | ----- |
+| `ci.yml` gate document, its wiring, and the shared verdict pins | 436   | 22    |
+| `eslint.config.js` / `.prettierignore` scope narrowings         | 987   | 47    |
+| **Total, this revision**                                        | 1,422 | 69    |
+| Earlier revision of this PR (line model, spelling fixtures)     | 2,009 | 83    |
+| `main`, before this PR                                          | 962   | 47    |
+
+The spelling fixtures are gone: the 17-row block-scalar modifier table, the six
+shape witnesses for the line-absorbing model (a bare `-` step, a comment between
+steps, a `#` line inside a run block, a job key after `steps:`, a lone CR hiding a
+changed flag, an anchor/alias pair), and the `[[dropped …]]` marker assertions
+went with the mechanism they tested. The `ci.yml` half now exists as a parsed-
+document model in 436 lines.
+
+**The total is −29% against the earlier revision, not −50%**, because the
+remainder is not spelling: 987 lines / 47 cases are the `eslint.config.js` and
+`.prettierignore` narrowing behaviour that earlier review rounds required, and
+deleting or merging them to reach a number would trade a model change for
+unrelated coverage loss. That cut needs its own review, so it is not made here.
+Against `main` the suite is +460 lines and +22 cases, all of it the `ci.yml`
+model, which `main` does not have.
 
 ## Validation plan
 
-1. `node --test .github/scripts/check-lint-gate-freshness.test.mjs` — 83 cases,
-   all green, as reported by `node --test` on this revision (`main` runs 47; the
-   PR adds 36). CI corroborates this on Linux through
-   `Run .github/scripts helper tests`, which collects the suite from
-   `${{ env.HELPER_TESTS }}`. Counts here are the runtime count at a named
-   revision, not a tally carried across review rounds.
-2. Mutation witnesses: each of eight deliberate defects must redden the suite —
-   dropping `ci.yml` from `NARROWINGS`, returning the whole file as the slice,
-   keeping headers only, comparing the head instead of the merge base, absorbing
-   an unnamed step, treating a missing merge base as fresh, trusting the plumbing
-   label without the linter check, and dropping the job `env` from the slice.
-3. Model-completeness witnesses, one per shape the line-absorbing model used to
-   compare as identical: a bare `-` step, a comment at the head of the step list
-   and between steps, a `#` line inside a `run: |` body, a job-level key placed
-   after `steps:`, a lone-CR line break hiding a changed flag, and an anchor
-   defined in a dropped job with its alias cited in a kept step. Each returns
-   `null` or a different slice, and removing the corresponding guard reddens it.
-4. The job roster is part of the compared text: adding a job on the base side
-   changes the slice, so the `needs:`-relocation shape (install prelude split
-   into a new job the gate job then depends on) refuses the narrowing.
-   Reading the edge itself is pinned too, in all three YAML spellings of the
-   list — inline, single-quoted and block — because the roster marker alone
-   only catches the commit that ADDS the job, not the later edits inside it.
-   Removing that refusal reddens the case; so does removing the flag skip in
-   `LINTER_INVOCATION`, which is what let `pnpm -w run lint` through a
-   whitelisted step.
-5. Slice completeness against the real workflow: every `scripts/lint.js` lane
-   flag must survive in the slice.
-6. Live API, thirteen historical base tips with a fork point one commit behind
-   each, content read at real refs. At `22ed7e77ca385`: seven plumbing-only
-   commits pass and six gate-changing commits stay stale. The split moves with
-   the window — an earlier revision measured six / seven — so the check is that
-   every plumbing-only commit passes and every gate-changing one stays stale,
-   not that the totals match a number written down earlier.
-7. Live API on the branch that motivated the report (#16939 at `07d89196bd21`):
+1. `node --test .github/scripts/check-lint-gate-freshness.test.mjs` — **69 cases,
+   all green** on this revision (`main` runs 47; the PR adds 22). CI corroborates
+   it on Linux through `Run .github/scripts helper tests` (`full`) and
+   `Run lint gate freshness tests` (`github_ci_only`). Counts here are the runtime
+   count at a named revision, not a tally carried across review rounds.
+2. Mutation witnesses: each of eight deliberate defects must redden the suite.
+   Measured on this revision, each mutation applied alone:
+
+   | Mutation                                          | Result          |
+   | ------------------------------------------------- | --------------- |
+   | drop `ci.yml` from `NARROWINGS`                   | red, 5 failures |
+   | return the whole file as the slice                | red, 12         |
+   | keep step headers only                            | red, 7          |
+   | compare the head instead of the merge base        | red, 5          |
+   | absorb an unnamed step instead of refusing        | red, 2          |
+   | treat a missing merge base as fresh               | red, 1          |
+   | trust the plumbing label without the linter check | red, 1          |
+   | drop the workflow `env` from the slice            | red, 2          |
+
+3. Equivalence against the line model this replaces, on thirteen historical
+   `ci.yml` commits with their parents as fork points, content read at real refs.
+   Both models run on the same pair; `old`/`new` are the stale-or-fresh decision,
+   and the two refusal columns show whether either side returned `null` for that
+   pair:
+
+   | tip          | parent       | line model | parser | old refused | new refused |
+   | ------------ | ------------ | ---------- | ------ | ----------- | ----------- |
+   | `4a03945f9a` | `441bd9abe1` | fresh      | fresh  | no          | no          |
+   | `51c8b617c0` | `e58bf09add` | fresh      | fresh  | no          | no          |
+   | `e58bf09add` | `92b9f6df3b` | fresh      | fresh  | no          | no          |
+   | `71193fe367` | `6a999b20b7` | stale      | stale  | no          | no          |
+   | `4a69cf2eb5` | `031c6e80af` | stale      | stale  | no          | no          |
+   | `e8061d4937` | `138185d781` | fresh      | fresh  | no          | no          |
+   | `2aac39a17b` | `2a191acfce` | fresh      | fresh  | no          | no          |
+   | `0dd106d42f` | `c73a98951f` | stale      | stale  | no          | no          |
+   | `65e1f1aeaa` | `1feab51dd7` | fresh      | fresh  | no          | no          |
+   | `708ba347d3` | `d85e911c78` | stale      | stale  | no          | no          |
+   | `8660f75430` | `ad83860092` | fresh      | fresh  | no          | no          |
+   | `7cb46d9fed` | `e61ad3959e` | stale      | stale  | no          | no          |
+   | `1b1f4455d9` | `1d64177286` | stale      | stale  | no          | no          |
+
+   Summary: **13/13 decisions match, seven fresh and six stale, neither side
+   refused a pair.** The corpus is re-taken at `main` `2a9c4f8732` rather than
+   reused from an earlier revision of this document, which is why the seven/six
+   split differs from the six/seven reported there: the window gained #16945's
+   plumbing-only retry commit and lost a gate-changing one. The decisions agree
+   point-for-point on the same tips, so the difference is corpus drift, not a
+   disagreement between the models.
+
+4. Model-completeness witnesses, one per refusal: a duplicated step name, a
+   duplicated job key, a missing gate job, a `needs:` edge outside the gate jobs,
+   unparsable YAML, an unnamed step, and a plumbing step that invokes a linter.
+   Removing the corresponding guard reddens the case.
+5. Slice completeness against the real workflow: every `scripts/lint.js` lane flag
+   and both `HELPER_TESTS` lists survive in the slice, and every plumbing name
+   exists in the two gate jobs.
+6. Live API on the branch that motivated the report (#16939 at `07d89196bd21`):
    it must stay stale, because #16920 really did change the Prettier lane.
 
 ## Acceptance criteria
 
 - The suite passes, and all eight mutations redden it.
-- Seven of the thirteen most recent `ci.yml` commits no longer ask for a rebase
-  at `22ed7e77ca385`; the other six still do. Every one of the seven is
-  plumbing-only and every one of the six changes the gate.
+- Thirteen of thirteen historical `ci.yml` commits receive the same stale-or-fresh
+  decision from the parser as from the line model it replaces, with neither side
+  refusing a pair.
+- Seven of the thirteen no longer ask for a rebase at `main` `2a9c4f8732`; the
+  other six still do. Every one of the seven is plumbing-only and every one of the
+  six changes the gate.
 - #16939's red is preserved.
-- No `ci.yml` edit, no `.size-baseline` change, no workflow meta-test change.
+- `ci.yml` gains one step and one relocation, and its gate — the compared
+  document — is unchanged by either. Its freshness step keeps its `if:`, its
+  profile gating and its `::warning::` text.
+
+## Rollback
+
+The pre-rewrite head is `fc5d814aca`: the line model, its spelling fixtures, the
+`[[dropped …]]` markers, and a `ci.yml` with the freshness step before the
+install. This revision is a single commit on top of it, so the rollback is a
+revert rather than a rebase:
+
+```
+git revert <the rewrite commit>
+git push
+```
+
+That restores the line model exactly, including the `ci.yml` wiring this
+revision moved, and the branch's checks are computed against the reverted tree.
+No tag or branch is created for the rollback, so nothing repo-wide points at a
+superseded model; the SHA above and this paragraph are the record.
 
 ## Open questions
 

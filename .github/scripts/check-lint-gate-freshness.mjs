@@ -63,16 +63,27 @@
  * plumbing list is therefore a whitelist of what may be IGNORED: a step named
  * in neither list stays in the slice, so forgetting to classify a new gate step
  * costs at most today's over-rejection rather than hiding a gate change. A
- * plumbing step whose body invokes a linter refuses the narrowing outright, and
- * every structural shape the extractor does not model returns null and keeps
- * whole-file containment: a duplicate key, a sequence item that is not a
- * single-quoted `- name:`, a tab indent, an anchor or alias (a line model cannot
- * follow a cross-reference), a job key off indent 2, or a body line outside a
- * key's region. Dropped regions are not deleted silently — each leaves a
- * `[[dropped ...]]` marker in the compared text, so the job roster and the
- * position of what was excluded are part of the claim. The test suite reads the
- * real workflow and requires every plumbing name to exist in the gate jobs, so a
- * renamed step cannot leave a stale entry silently excluding nothing.
+ * plumbing step whose own content invokes a linter refuses the narrowing
+ * outright.
+ *
+ * The file is PARSED, not scanned line by line, and that is the correction this
+ * check needed rather than another refusal branch. Its first revisions compared
+ * line slices, which meant enumerating YAML's legal spellings: a block-scalar
+ * indicator on the line after its key, one behind a tag, the `|2-` order, a
+ * sequence item whose scalar is a block, a multi-line flow scalar, a comment
+ * after a structural token, an anchor cited across the file. Every review round
+ * produced another spelling, and every one of them let content the runner reads
+ * fall through to the "prose" branch and be deleted from the compared text — a
+ * real gate change comparing equal, the branch certified fresh. YAML is a
+ * grammar, so a line scanner cannot close that class; the comparison is now over
+ * the parsed document, where anchors resolve, flow scalars join, and layout does
+ * not exist. What is refused is a short list of structural facts about the gate
+ * — an unparsable file or a duplicate key (`uniqueKeys`), a missing gate job, an
+ * unnamed or duplicate step name, a plumbing step that invokes a linter, a gate
+ * job whose `needs` reaches outside the gate — and every refusal keeps
+ * whole-file containment. The test suite reads the real workflow and requires
+ * every plumbing name to exist in the gate jobs, so a renamed step cannot leave
+ * a stale entry silently excluding nothing.
  *
  * Fail-open on API errors: `Lint & Static` is a required status check in main's
  * ruleset, so a red here blocks the merge rather than annotating it. That
@@ -90,6 +101,7 @@
 import { execFile } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
+import { parseDocument } from 'yaml';
 
 const execFileAsync = promisify(execFile);
 
@@ -300,386 +312,150 @@ export const CI_PLUMBING_STEPS = new Set([
 // settings are excluded above.
 
 // Job keys that only place the job on a machine, or cap how long it may take.
-// `env`, `if`, `needs`, `outputs`, `permissions`, `steps` and anything unlisted
-// stay in the slice: they decide what runs, not where.
+// Everything else — `env`, `if`, `needs`, `outputs`, `permissions`, `steps` —
+// decides what runs, and stays in the comparison.
 const CI_PLUMBING_JOB_KEYS = new Set(['runs-on', 'timeout-minutes']);
 
 // The two jobs that define the gate: the classifier picks the profile, which
 // picks the linters, and the lint job runs them. Every other job in this
 // workflow is a test, build or E2E lane — a shard-count edit there cannot
 // change what lint checks.
-const CI_GATE_JOBS = ['classify_pr', 'lint_and_static'];
+export const CI_GATE_JOBS = ['classify_pr', 'lint_and_static'];
 
 // A plumbing step that invokes a linter contradicts its classification: refuse
 // the narrowing rather than trust the label. `node --test` counts too — the
 // helper battery is a gate. The package-manager forms are part of the pattern
-// because that is how the lanes are actually reached: `npm run lint`,
-// `pnpm run lint`, `corepack pnpm run lint`, a bare `pnpm lint`, `npx`. A bare
-// `\bnpm run\b` matched none of the `pnpm` spellings (`pnpm` has no word
-// boundary before `npm`), so the refusal could be stepped around by changing
-// the manager. Flags between the manager and its subcommand are skipped for the
-// same reason: `pnpm -w run lint` and `pnpm --filter ./packages/core run lint`
-// reach the same lanes, and anchoring the subcommand directly after the manager
-// let both through. A manager followed by `config`/`set` is configuration, not
-// an invocation — `npm config set fetch-retries 5` must keep parsing — so the
-// form is anchored on the subcommand, not on the manager's name.
+// because that is how the lanes are actually reached, flags included: `npm run
+// lint`, `pnpm -w run lint`, `corepack pnpm run lint`, a bare `pnpm lint`,
+// `npx`. A manager followed by `config`/`set` is configuration, not an
+// invocation, so the form is anchored on the command that follows.
 const LINTER_INVOCATION =
-  /scripts\/lint\.js|node --test|\b(?:npx|pnpx|bunx)\b|(?:corepack\s+)?(?:npm|pnpm|yarn|bun)\s+(?:(?:--?[A-Za-z][A-Za-z0-9-]*(?:[= ]\S+)?|--)\s+)*(?:run|run-script|exec|dlx|test|ci|install|i|x|lint|prettier|eslint|format)\b|prettier|eslint|actionlint|shellcheck|yamllint/;
+  /scripts\/lint\.js|node --test|\b(?:npx|pnpx|bunx)\b|(?:corepack\s+)?(?:npm|pnpm|yarn|bun)(?:\s+-\S+)*\s+(?:run|run-script|exec|dlx|test|ci|install|i|x|lint|prettier|eslint|format)\b|prettier|eslint|actionlint|shellcheck|yamllint/;
 
-// Every YAML line terminator, `\r\n` first so a CRLF pair counts once. A lone
-// `\r` terminates a line in YAML too, and the earlier `split('\n')` read a
-// CR-terminated file as one long line: a base file that used CR parsed to 43
-// steps while the slice built from the branch's 42-step copy was byte-identical
-// — the #11117 → #11216 shape, with the flag flipped on main and the branch
-// still certified fresh.
-const LINE_BREAK = /\r\n|[\n\r\u2028\u2029]/;
+/**
+ * Stable text for a parsed value: object keys sorted, no whitespace. Two
+ * documents compare equal exactly when their pruned forms are structurally
+ * equal, which is the claim the narrowing needs and a string diff cannot
+ * express once the input is YAML.
+ */
+function canonical(value) {
+  if (Array.isArray(value)) {
+    return `[${value.map((entry) => canonical(entry)).join(',')}]`;
+  }
+  if (value !== null && typeof value === 'object') {
+    const keys = Object.keys(value).sort();
+    return `{${keys
+      .map((key) => `${JSON.stringify(key)}:${canonical(value[key])}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(value ?? null);
+}
 
-// An anchor or an alias in value position. This extractor is a line model: an
-// anchor defined in one place and read in another cannot be followed, so a file
-// carrying either is refused outright. Otherwise `&lintcmd 'node
-// scripts/lint.js --prettier'` and the `--write` version of the same anchor
-// render an identical slice wherever `*lintcmd` is cited, and the alias carries
-// meaning the compared text does not.
-const ANCHOR_OR_ALIAS = /(?:^|[\s[(,:=])[&*][A-Za-z0-9_][\w.-]*/;
+function isMapping(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
 
-// The indent of a block-scalar opener, or null when the line is not one.
-// `run: |`, `with: >-`, `timeout: |2-` are all openers; the chomping indicator
-// and the explicit indentation may come in either order (`|+2` and `|2+` are
-// both legal YAML, as are `>-2` and `>2-`). Everything indented deeper than the
-// opener is scalar CONTENT — the runner reads it as a script, so it is compared
-// verbatim, including lines starting with `#` (a shell comment, not a YAML one).
-function blockScalarIndent(line) {
-  const opener =
-    /^(\s*)(?:-\s+)?[^\s#][^:]*:\s*[|>](?:[+-]?\d*|\d+[+-])\s*(?:#.*)?$/.exec(
-      line,
+/**
+ * One gate job's compared content, or null when the job is not a shape the
+ * comparison can stand behind: a step without a name, a duplicate step name, a
+ * plumbing step that invokes a linter, or `needs` reaching outside the gate.
+ *
+ * `needs` reaching outside the gate is a refusal rather than an omission: a
+ * lane's inputs are whatever it depends on, and a job the comparison drops
+ * could install, sanitise or otherwise prepare the tree the linters read. The
+ * lint job needs only `classify_pr` today, so this does not fire on the real
+ * workflow.
+ */
+function pruneGateJob(job) {
+  const needs = job.needs;
+  if (needs !== undefined) {
+    const list = Array.isArray(needs) ? needs : [needs];
+    const outside = list.some(
+      (name) => typeof name !== 'string' || !CI_GATE_JOBS.includes(name),
     );
-  return opener ? opener[1].length : null;
-}
-
-// A value that OPENS with `|` or `>` is a scalar whatever follows it. When the
-// opener pattern above does not accept the modifier spelled there, the shape is
-// one this model does not enumerate — and the answer is null, not "treat the
-// body as structure". Deleting the body was the R1-1 hole: `|2-` fell through,
-// its lines were reclassified as structure, and every `#` line in the script was
-// then dropped as prose.
-const SCALAR_VALUE_START = /^(?:\s*)(?:-\s+)?[^\s#][^:]*:\s*[|>]/;
-
-// Legal YAML that puts a block scalar somewhere the key line does not carry it,
-// or behind a tag. None of these is modelled: the indicator sits on a line of
-// its own (`key:` then `|-`), the value is a sequence item's scalar (`- |`), or
-// the value carries a tag (`run: !!str |`). Read as structure, their bodies
-// would reprice `#` lines as prose — the same deletion SCALAR_VALUE_START
-// closes for `|2+-`. Refuse instead of enumerating three more spellings.
-const SCALAR_INDICATOR_ALONE =
-  /^\s*(?:-\s+)?[|>](?:[+-]?\d*|\d+[+-])\s*(?:#.*)?$/;
-const TAGGED_SCALAR_VALUE = /^(?:\s*)(?:-\s+)?[^\s#][^:]*:\s*![^\s]*\s+[|>]/;
-
-function indentOf(line) {
-  return /^ */.exec(line)[0].length;
-}
-
-// True when a structural line ends inside a quoted scalar. Tracks both quote
-// kinds, a doubled `''` inside single quotes, a backslash escape inside double
-// quotes, and a trailing `#` comment (which starts only after whitespace, so
-// `run: 'echo #tag'` keeps its `#`). A line that ends inside a quote is a
-// multi-line flow scalar, a shape this model does not enumerate.
-function endsInsideQuote(line) {
-  let quote = null;
-  for (let i = 0; i < line.length; i += 1) {
-    const char = line[i];
-    if (quote === null) {
-      if (char === '#' && (i === 0 || /\s/.test(line[i - 1]))) break;
-      if (char === "'" || char === '"') quote = char;
-    } else if (quote === "'") {
-      if (char === "'") {
-        if (line[i + 1] === "'") i += 1;
-        else quote = null;
-      }
-    } else if (char === '\\') {
-      i += 1;
-    } else if (char === '"') {
-      quote = null;
-    }
+    if (outside) return null;
   }
-  return quote !== null;
-}
-
-/**
- * Split the file into the lines the comparison models.
- *
- * Prose outside block scalars is dropped here, once, so the walk below never
- * has to decide what a blank or comment line means: it cannot be absorbed into
- * a step body (the shape that truncated a job slice), cannot open a step, and
- * cannot hide a structural line. Block-scalar content is marked and kept.
- *
- * Returns null for a line this model cannot classify — a tab in the indent, or
- * an anchor/alias on a structural line.
- */
-function structuralLines(text) {
-  const lines = [];
-  const content = [];
-  let scalar = null;
-  for (const line of text.split(LINE_BREAK)) {
-    // Blank lines carry no meaning in either model: they are dropped wherever
-    // they appear, including inside a block scalar, where the surrounding
-    // script lines are still compared.
-    if (line.trim() === '') continue;
-    if (scalar !== null) {
-      // Deeper than the opener: the runner reads it, so it is content. A line at
-      // or above the opener's indent ends the scalar and is classified normally
-      // — which is what keeps a comment block sitting before the NEXT step from
-      // being absorbed into this one's script.
-      if (indentOf(line) > scalar) {
-        lines.push(line);
-        content.push(true);
-        continue;
-      }
-      scalar = null;
-    }
-    if (line.trimStart().startsWith('#')) continue;
-    if (/^[ \t]*\t/.test(/^[ \t]*/.exec(line)[0])) return null;
-    if (ANCHOR_OR_ALIAS.test(line)) return null;
-    // A quoted scalar that does not close on its own line continues on the
-    // next one, and those continuation lines are DATA the runner reads. This
-    // model is one line at a time, so it refuses rather than let a `#` there be
-    // mistaken for prose.
-    if (endsInsideQuote(line)) return null;
-    scalar = blockScalarIndent(line);
-    // The value opens with `|`/`>` but the opener did not accept it: an
-    // unenumerated modifier. Refuse; never fall through to the structural path.
-    if (scalar === null && SCALAR_VALUE_START.test(line)) return null;
-    // A block scalar whose indicator the key line does not carry, a sequence
-    // item's scalar, or a tagged value: refusals, for the same reason.
-    if (SCALAR_INDICATOR_ALONE.test(line) || TAGGED_SCALAR_VALUE.test(line))
-      return null;
-    lines.push(line);
-    content.push(false);
+  if (!Array.isArray(job.steps) || job.steps.length === 0) return null;
+  const kept = {};
+  for (const [key, value] of Object.entries(job)) {
+    if (key === 'steps') continue;
+    if (CI_PLUMBING_JOB_KEYS.has(key)) continue;
+    kept[key] = value;
   }
-  return { lines, content };
-}
-
-// A structural drop is recorded in the slice instead of vanishing: its position
-// and identity survive the comparison, so moving gate content into a dropped
-// region changes the compared text. `[[...]]` is not a YAML comment, so a marker
-// can never be mistaken for prose and can never collide with a real line.
-const dropped = (what) => `[[dropped ${what}]]`;
-
-/**
- * Split a `steps:` region into named steps. A sequence item that is not
- * `      - name: '<single-quoted name>'` returns null: a bare `-` with the name
- * on the next line, an unnamed `- uses:`, a double-quoted name and a block
- * scalar name are shapes this model refuses rather than guesses at. Refusing is
- * what keeps a name-carrying step from being absorbed into its predecessor.
- */
-function splitSteps(lines, content) {
-  if (lines.length === 0 || !/^ {4}steps:\s*$/.test(lines[0])) return null;
+  const seen = new Set();
   const steps = [];
-  let current = null;
-  for (let i = 1; i < lines.length; i += 1) {
-    const line = lines[i];
-    if (content[i]) {
-      if (!current) return null;
-      current.lines.push(line);
-      continue;
-    }
-    const indent = indentOf(line);
-    if (indent === 6) {
-      const opening = /^ {6}- name: '([^']*)'\s*$/.exec(line);
-      if (!opening) return null;
-      if (current) steps.push(current);
-      current = { name: opening[1], lines: [line] };
-    } else if (indent > 6) {
-      if (!current) return null;
-      current.lines.push(line);
-    } else {
+  for (const step of job.steps) {
+    // An unnamed step cannot be matched against the whitelist, so the
+    // comparison cannot say what it does. Refuse instead of guessing.
+    if (!isMapping(step) || typeof step.name !== 'string' || !step.name) {
       return null;
     }
-  }
-  if (current) steps.push(current);
-  return steps.length > 0 ? steps : null;
-}
-
-// The end of the job-level region opened at `start`: the first modelled line
-// indented four or less. Block-scalar content is part of the region whatever its
-// indent, so a `timeout-minutes: |-` body cannot be left behind under the next
-// key.
-function regionEnd(lines, content, start) {
-  let i = start + 1;
-  while (i < lines.length) {
-    if (content[i] || indentOf(lines[i]) > 4) {
-      i += 1;
+    if (seen.has(step.name)) return null;
+    seen.add(step.name);
+    if (CI_PLUMBING_STEPS.has(step.name)) {
+      // The label is not trusted on its own: a step moved into the list while
+      // still running a linter is a contradiction, not a pass.
+      if (LINTER_INVOCATION.test(canonical(step))) return null;
       continue;
     }
-    break;
+    steps.push(step);
   }
-  return i;
+  kept.steps = steps;
+  return kept;
 }
 
 /**
- * One gate job's contribution to the slice, or null when it holds a shape this
- * extractor does not model. Job keys in CI_PLUMBING_JOB_KEYS are dropped with
- * their region and replaced by a marker; `steps:` is split and each step is kept
- * unless named as plumbing, and a plumbing step that invokes a linter refuses
- * the whole narrowing.
+ * The lint gate as `ci.yml` defines it, as a plain object, or null when the
+ * file is not a shape this check will stand behind.
  *
- * Keys are read in file order, so a job-level key placed AFTER `steps:` is a
- * key, not the tail of the last step.
- */
-function gateJobSlice(name, lines, content) {
-  const kept = [`  ${name}:`];
-  let i = 0;
-  let sawSteps = false;
-  while (i < lines.length) {
-    if (content[i] || indentOf(lines[i]) !== 4) return null;
-    const key = /^ {4}([A-Za-z0-9_-]+):/.exec(lines[i]);
-    if (!key) return null;
-    const end = regionEnd(lines, content, i);
-    const chunk = lines.slice(i, end);
-    if (key[1] === 'steps') {
-      const steps = splitSteps(chunk, content.slice(i, end));
-      if (!steps) return null;
-      sawSteps = true;
-      const seen = new Set();
-      for (const step of steps) {
-        if (seen.has(step.name)) return null;
-        seen.add(step.name);
-        const text = step.lines.join('\n');
-        if (CI_PLUMBING_STEPS.has(step.name)) {
-          if (LINTER_INVOCATION.test(text)) return null;
-          kept.push(dropped(`plumbing-step '${step.name}'`));
-          continue;
-        }
-        kept.push(...step.lines);
-      }
-    } else if (CI_PLUMBING_JOB_KEYS.has(key[1])) {
-      kept.push(dropped(`job-key '${key[1]}'`));
-    } else {
-      // `needs:` is compared but not followed, so a dependency on a job
-      // outside CI_GATE_JOBS would put gate-defining content in a dropped
-      // region: the edge itself stales everyone once, and every later edit
-      // inside that job then compares equal. Refuse instead — the whole-file
-      // verdict is the safe one, and reading the edge costs nothing. The
-      // lint job needs only `classify_pr` today, so this never fires on the
-      // real workflow; it fires the day someone splits the install prelude
-      // into its own job, which is exactly when the slice stops being the
-      // whole gate.
-      if (key[1] === 'needs') {
-        for (const edge of chunk.join('\n').matchAll(/'([A-Za-z0-9_-]+)'/g)) {
-          if (!CI_GATE_JOBS.includes(edge[1])) return null;
-        }
-      }
-      kept.push(...chunk);
-    }
-    i = end;
-  }
-  // A gate job without a steps sequence is a shape that cannot be compared as a
-  // lane at all; treat it like a missing job instead of an empty one.
-  return sawSteps ? kept : null;
-}
-
-/**
- * The lint gate as ci.yml defines it, or null when the file's shape is not one
- * this extractor models.
+ * The file is parsed, not scanned line by line. That is the whole point: YAML's
+ * legal spellings are not a finite list — block scalars with the indicator on
+ * another line or behind a tag, anchors, aliases, multi-line quoted scalars,
+ * comments after any structural token — and every one of them was a way for a
+ * line model to delete content it did not recognise. A parser has no such
+ * class, so the comparison is over meaning rather than spelling.
  *
  * Kept: everything above `jobs:` (triggers, concurrency, workflow env — the
- * linter versions and HELPER_TESTS lists live there) plus the two gate jobs,
- * minus the plumbing named above. Every other job is dropped, and each dropped
- * job and each dropped plumbing step or job key leaves a `[[dropped ...]]`
- * marker in the compared text: the roster and the order of the file are part of
- * the claim, so a base-side edit that moves content into a dropped region — a
- * new job carrying the install prelude, a renamed step — changes the slice
- * instead of passing silently.
+ * linter versions and HELPER_TESTS lists live there), plus the two gate jobs
+ * with their plumbing removed. Every other job is dropped; a base-side edit
+ * confined to one of them cannot change what the lint lane checks.
  *
- * Prose is the one class left out of the comparison, by this file's purpose: the
- * narrowing exists because most ci.yml churn is comments. It is removed up front
- * and cannot influence structure; a comment line is never read by the runner.
- * Block-scalar content is the opposite — it IS what the runner reads — and is
- * compared verbatim.
- *
- * Refused (null): a tab indent, an anchor or alias anywhere on a structural line
- * (a line model cannot follow a cross-reference), a sequence item that is not a
- * single-quoted `- name:`, a job key not at indent 2 or a job body line outside
- * a key region, a duplicated job key, and a missing `jobs:`, `classify_pr` or
- * `lint_and_static`.
+ * Refused (null, which keeps the whole-file verdict and emits the warning): a
+ * file the parser rejects, a duplicate key (`uniqueKeys`), a missing gate job,
+ * a step without a name, a duplicate step name, a plumbing step that invokes a
+ * linter, or a gate job whose `needs` reaches outside the gate.
  */
-export function extractLintGateSlice(text) {
-  const parsed = structuralLines(text);
-  if (!parsed) return null;
-  const { lines, content } = parsed;
-  const jobsAt = lines.findIndex((line) => line === 'jobs:');
-  if (jobsAt === -1) return null;
-  const slice = [...lines.slice(0, jobsAt + 1)];
-
-  // Job key -> [start, end) in `lines`. Comments are already gone, so the body
-  // is contiguous and a key is always at indent 2.
-  const bodies = new Map();
-  let current = null;
-  for (let i = jobsAt + 1; i < lines.length; i += 1) {
-    if (content[i]) {
-      if (current === null) return null;
-      bodies.get(current)[1] = i + 1;
-      continue;
-    }
-    const indent = indentOf(lines[i]);
-    if (indent === 2) {
-      const key = /^ {2}([A-Za-z0-9_-]+):\s*$/.exec(lines[i]);
-      // `  name: value` is a job whose value is not a mapping; a column-zero
-      // line is the next top-level key, which this model does not read.
-      if (!key || bodies.has(key[1])) return null;
-      bodies.set(key[1], [i + 1, i + 1]);
-      current = key[1];
-      continue;
-    }
-    if (indent <= 2 || current === null) return null;
-    bodies.get(current)[1] = i + 1;
+export function lintGateDocument(text) {
+  const document = parseDocument(text, { uniqueKeys: true });
+  if (document.errors.length > 0) return null;
+  const data = document.toJS();
+  if (!isMapping(data) || !isMapping(data.jobs)) return null;
+  const gate = {};
+  for (const [key, value] of Object.entries(data)) {
+    if (key !== 'jobs') gate[key] = value;
   }
-
-  const seen = new Set();
-  for (const [job, [start, end]] of bodies) {
-    const body = lines.slice(start, end);
-    const flags = content.slice(start, end);
-    if (!CI_GATE_JOBS.includes(job)) {
-      slice.push(dropped(`job '${job}'`));
-      continue;
-    }
-    const kept = gateJobSlice(job, body, flags);
-    if (!kept) return null;
-    seen.add(job);
-    slice.push(...kept);
+  const jobs = {};
+  for (const name of CI_GATE_JOBS) {
+    const job = data.jobs[name];
+    if (!isMapping(job)) return null;
+    const pruned = pruneGateJob(job);
+    if (pruned === null) return null;
+    jobs[name] = pruned;
   }
-  for (const job of CI_GATE_JOBS) if (!seen.has(job)) return null;
-  return slice.join('\n');
+  gate.jobs = jobs;
+  return gate;
 }
 
 /**
- * True when the base-side ci.yml change cannot invalidate this branch: the
- * lint gate the file defines is byte-identical on both sides.
- *
- * The two sides are the base TIP and the MERGE BASE — not the head. Comparing
- * the head's slice would flag a branch for its own gate edit and keep flagging
- * it after the rebase it asks for, because main will not carry that edit until
- * the branch merges. The question is whether the gate moved UNDER this branch,
- * so the branch's own version never enters the comparison.
- *
- * That leaves the branch's own edits outside this check, and NOT because some
- * other mechanism covers them: containment only reads a compare's status, never
- * its file list, so a branch that deletes a lint step from its own copy is
- * invisible here — it would pass even a whole-file containment verdict. The
- * division of labour is deliberate rather than mechanical: a branch weakening
- * the gate is a product decision, reviewed by humans on the diff and reddened by
- * the post-merge lint on `main`, not something a freshness check should decide.
- * This check asks one question only — did the gate move UNDER the branch.
- *
- * The merge base comes from the containment compare the caller ALREADY made,
- * not from a second one. A fresh `base...head` compare on this repo returns
- * ~4 MB of commits and files and timed out at curl's 30-second ceiling when
- * measured against a real week-old branch; that failure would have reached
- * main()'s fail-open and discarded every other gate file's verdict too. The
- * existing compare is between the base-side gate commit S and the head, and
- * since S is on main and is not contained (the verdict is stale), its merge
- * base IS the branch's fork point from main. Should it ever be older, the
- * slice comparison over-rejects — the safe direction.
+ * The lint gate as `ci.yml` defines it, as comparable text, or null when the
+ * file is not a shape this check models. See `lintGateDocument` for what is
+ * kept and what is refused.
  */
+export function extractLintGateSlice(text) {
+  const gate = lintGateDocument(text);
+  return gate === null ? null : canonical(gate);
+}
+
 async function narrowsToUnchangedLintSlice({
   fetchText,
   repo,
