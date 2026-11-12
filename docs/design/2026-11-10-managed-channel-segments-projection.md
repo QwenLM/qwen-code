@@ -49,7 +49,7 @@ and the claim sweep discovers pending work from the journal, so `claimOne`
 applies the same full-chain comparison and settles a conflicting record out
 of the pending set instead of re-importing it on every sweep.
 
-The contract version bumps from 1.108.0 to 1.109.0. The Java record and the
+The contract version bumps from 1.113.0 to 1.114.0. The Java record and the
 OpenAPI schema change together, enforced by the record-to-schema contract
 gate; the channel route gate keeps the three routes and the schemas
 `partial`.

@@ -859,6 +859,42 @@ class ManagedChannelServiceTest {
         assertThat(segmentLedger.list(TENANT, channel, deliveryId))
                 .extracting(SegmentLedger::segmentId)
                 .containsExactly("other:0");
+        // The refusal must be durable: the first-segment pre-check settles the
+        // record out of the pending set, so a later sweep does not re-import it
+        // (verify-pr F1). Removing the pre-check's settle call reds here.
+        assertThat(jdbc.queryForObject("SELECT delivery_state FROM ma_session_record"
+                        + " WHERE tenant_id = ? AND session_id = ? AND record_id = ?",
+                String.class, TENANT, admitted.sessionId(), deliveryId))
+                .isEqualTo("cancelled");
+    }
+
+    @Test
+    void aConflictingPartialRecordIsSettledUnknownNotCancelled() {
+        InboundAdmission admitted = service.submitInbound(TENANT, channel,
+                event(1, "1700:116", "please reply"));
+        String deliveryId = admitted.inputId() + ":reply";
+        plannedDelivery(admitted.sessionId(), deliveryId, admitted.routeId(),
+                "The build is green.", 2);
+        // The record is partial (segment 0 receipted) while a stored delivery
+        // row names a different first segment, so the claim sweep's pre-check
+        // refuses it. The partial arm must settle unknown, not cancel.
+        mirrorSegmentReceipts(admitted.sessionId(), deliveryId, 1);
+        jdbc.update("UPDATE ma_session_record SET delivery_state = 'partial'"
+                        + " WHERE tenant_id = ? AND session_id = ? AND record_id = ?",
+                TENANT, admitted.sessionId(), deliveryId);
+        new JdbcChannelDeliveryRepository(jdbc).findOrCreate(
+                new ChannelDeliveryRepository.ChannelDelivery(TENANT, channel,
+                        deliveryId, "other:0", 0, "planned", null, 0, 0, 2));
+        segmentLedger.plan(TENANT, channel, deliveryId,
+                List.of(new SegmentLedger("other:0", 0, null)));
+        service.claimDeliveries(TENANT, channel, 16);
+        // partial -> unknown is the admitted step; partial -> cancelled is not
+        // in the delivery table. Collapsing the partial arm to cancel_delivery
+        // reds here (verify-pr F4).
+        assertThat(jdbc.queryForObject("SELECT delivery_state FROM ma_session_record"
+                        + " WHERE tenant_id = ? AND session_id = ? AND record_id = ?",
+                String.class, TENANT, admitted.sessionId(), deliveryId))
+                .isEqualTo("unknown");
     }
 
     @Test
@@ -1261,6 +1297,9 @@ class ManagedChannelServiceTest {
         // as planned, and the sweep discovers pending work from the journal, so
         // it would otherwise re-import the record and splice the divergent
         // segment. The sweep must refuse it and settle it out of the pending set.
+        // Assert the named retirement state, not merely "not pending": a
+        // claim_delivery would also leave the pending set but is not the step
+        // the authority admits for a never-dispatched chain (verify-pr F6).
         service.claimDeliveries(TENANT, channel, 16);
         assertThat(segmentLedger.list(TENANT, channel, resentId))
                 .extracting(SegmentLedger::segmentId)
@@ -1268,7 +1307,37 @@ class ManagedChannelServiceTest {
         assertThat(jdbc.queryForObject("SELECT delivery_state FROM ma_session_record"
                         + " WHERE tenant_id = ? AND session_id = ? AND record_id = ?",
                 String.class, TENANT, admitted.sessionId(), resentId))
-                .isNotIn("planned", "partial");
+                .isEqualTo("cancelled");
+    }
+
+    @Test
+    void aResendWhoseStoredChainKeepsIdsButShiftsAnOrdinalIsRejected() {
+        InboundAdmission admitted = service.submitInbound(TENANT, channel,
+                event(1, "1700:117", "please reply"));
+        String deliveryId = admitted.inputId() + ":reply";
+        plannedDelivery(admitted.sessionId(), deliveryId, admitted.routeId(),
+                "The build is green.", 2);
+        service.claimDeliveries(TENANT, channel, 16);
+        // The stored chain keeps both carried segment ids but places the second
+        // at ordinal 5: the segmentId comparison alone matches at every position,
+        // so the ordinal half of firstChainDivergence must reject. Dropping the
+        // ordinal comparison reds here (verify-pr F5).
+        String resentId = deliveryId + ":r1";
+        new JdbcChannelDeliveryRepository(jdbc).findOrCreate(
+                new ChannelDeliveryRepository.ChannelDelivery(TENANT, channel,
+                        resentId, deliveryId + ":0", 0, "planned", null, 0, 0, 2));
+        segmentLedger.plan(TENANT, channel, resentId, List.of(
+                new SegmentLedger(deliveryId + ":0", 0, null),
+                new SegmentLedger(deliveryId + ":1", 5, null)));
+        assertThatThrownBy(() -> service.resend(TENANT, channel, deliveryId))
+                .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
+                    assertThat(error.getStatus()).isEqualTo(409);
+                    assertThat(error.getCode())
+                            .isEqualTo("channel_delivery_conflict");
+                });
+        assertThat(segmentLedger.list(TENANT, channel, resentId))
+                .extracting(SegmentLedger::segmentId)
+                .containsExactly(deliveryId + ":0", deliveryId + ":1");
     }
 
     @Test

@@ -734,11 +734,15 @@ public class ManagedChannelService {
         // Identity pre-check before planning: a pending record whose first
         // segment differs from a stored delivery row is a conflicting chain;
         // refuse it before any segment row is written, so no orphan rows
-        // persist under the key for the public projection to publish.
+        // persist under the key for the public projection to publish. Settle
+        // the record here as well: this pre-check fires before the full-chain
+        // block below, so without its own retirement the refused record would
+        // stay planned and be re-imported on every sweep (verify-pr F1).
         Optional<ChannelDelivery> stored = deliveries.find(tenantId, channelId,
                 pending.deliveryId());
         if (stored.isPresent() && (!stored.get().segmentId().equals(firstSegmentId)
                 || stored.get().ordinal() != firstOrdinal)) {
+            settleConflictingChain(tenantId, pending);
             throw new IllegalStateException(
                     "delivery id already belongs to another segment");
         }
