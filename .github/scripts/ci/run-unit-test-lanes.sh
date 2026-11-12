@@ -169,7 +169,8 @@ run_suite() {
 # only the workspaces npm names as failed when each of their reports shows no
 # failed test and only the RPC error. The first attempt keeps npm's own
 # batching: it runs every listed workspace even after one fails and exits with
-# the first failure's status, and the lane has always relied on both.
+# the LAST failing workspace's status, not the first (npm 10.9.9: workspaces
+# exiting 3 then 7 give 7; reversed, 3).
 #
 # The retry reads npm's `workspace <name>` failure lines to learn WHICH
 # workspaces failed, and each one's own report block to learn WHY. A batch log
@@ -250,7 +251,7 @@ run_lane_suites() {
   fi
   rm -f "$log"
   echo "::warning::Every test passed but Vitest reported the worker RPC timeout as an unhandled error; re-running the affected workspace suites once."
-  local status=0 attempt pass round
+  local status=0 attempt round
   for ((round = 1; round <= RPC_RETRY; round++)); do
     status=0
     for name in "${retryable[@]}"; do

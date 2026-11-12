@@ -2347,13 +2347,6 @@ describe('package scripts', () => {
             );
           }
         }
-
-        // One workspace's green report must not license another's retry: the
-        // batch log holds every workspace's summary, and npm names the one
-        // that actually failed. Judging per workspace still re-runs the
-        // transport-only one — that retry is its own and cannot turn the lane
-        // green — while the workspace with a real failed test is never re-run
-        // and its failure keeps the lane red.
       } finally {
         harness.dispose();
       }
@@ -2366,6 +2359,12 @@ describe('package scripts', () => {
       const harness = laneRetryHarness();
       try {
         const { run, rpcReport } = harness;
+        // One workspace's green report must not license another's retry: the
+        // batch log holds every workspace's summary, and npm names the one
+        // that actually failed. Judging per workspace still re-runs the
+        // transport-only one — that retry is its own and cannot turn the lane
+        // green — while the workspace with a real failed test is never re-run
+        // and its failure keeps the lane red.
         const mixed = run('no-retry-mixed', {
           report: [
             rpcReport('@qwen-code/web-shell'),
