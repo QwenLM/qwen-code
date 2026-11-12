@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import ReactDOM from 'react-dom/client';
 import '../styles/standalone.css';
 import { WebShellWithProviders } from '../index';
@@ -6,6 +6,9 @@ import { WebShellWithProviders } from '../index';
 const params = new URLSearchParams(location.search);
 function Harness() {
   const custom = params.has('custom');
+  const [theme, setTheme] = useState<'dark' | 'light'>(
+    params.has('light') ? 'light' : 'dark',
+  );
   return (
     <div style={{ padding: 24, height: '100vh', boxSizing: 'border-box' }}>
       <div
@@ -22,7 +25,13 @@ function Harness() {
       >
         <WebShellWithProviders
           language="en-US"
-          theme={params.has('light') ? 'light' : 'dark'}
+          theme={theme}
+          onThemeChange={setTheme}
+          composerToolbarActions={
+            params.has('hide-workspace-ui')
+              ? ['approvalMode', 'model']
+              : undefined
+          }
           lockWorkspaceCwd={
             params.has('locked') ? '/tmp/qwen-web-shell-e2e' : undefined
           }
@@ -32,6 +41,8 @@ function Harness() {
               : params.has('default')
                 ? undefined
                 : {
+                    hideProjectHeader: params.has('hide-workspace-ui'),
+                    showSessionSourceSwitch: !params.has('hide-source-switch'),
                     branding: params.has('hide-branding')
                       ? false
                       : params.has('hide-compact-branding')
@@ -39,7 +50,9 @@ function Harness() {
                         : undefined,
                     primaryNav: {
                       items:
-                        params.has('single') || params.has('split-only')
+                        params.has('single') ||
+                        params.has('split-only') ||
+                        params.has('minimal')
                           ? ['newTask']
                           : params.has('plugin-only')
                             ? ['newTask', 'plugins']
@@ -55,24 +68,25 @@ function Harness() {
                               ],
                     },
                     footer: {
-                      items: params.has('split-only')
-                        ? ['splitView', 'collapse']
-                        : params.has('single') || params.has('plugin-only')
-                          ? ['collapse']
-                          : [
-                              'settings',
-                              'update',
-                              'version',
-                              'theme',
-                              'sessionsOverview',
-                              'splitView',
-                              'daemonStatus',
-                              'localFiles',
-                              'collapse',
-                            ],
+                      items: params.has('minimal')
+                        ? ['settings', 'theme', 'daemonStatus', 'collapse']
+                        : params.has('split-only')
+                          ? ['splitView', 'collapse']
+                          : params.has('single') || params.has('plugin-only')
+                            ? ['collapse']
+                            : [
+                                'settings',
+                                'update',
+                                'version',
+                                'theme',
+                                'sessionsOverview',
+                                'splitView',
+                                'daemonStatus',
+                                'localFiles',
+                                'collapse',
+                              ],
                     },
                     showLive: params.has('live'),
-                    showSessionSourceSwitch: !params.has('hide-source-switch'),
                     ...(custom
                       ? {
                           branding: { render: () => <div>Host brand</div> },

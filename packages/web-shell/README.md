@@ -938,10 +938,35 @@ daemon 不净化它读到的文件。该配置只从 User / System / SystemDefau
 侧栏采用自动布局，不需要配置 `layout`。宿主不传 `sidebar`、传 `true` 或空配置时，
 默认仅首页：展示 300px 二级栏，不展示一级图标栏。显式配置其他可用导航项后，
 自动展示首页及这些一级入口。`sidebar: false` 或 `enabled: false` 仍完全隐藏侧栏。
+底部设置、主题、状态等工具不触发一级栏；仅首页时直接显示在会话列表底部，
+右下角保留展开／收起，也不会出现「更多」。
 `primaryNav.items` 默认仅 `['newTask']`，`footer.items` 默认仅 `['collapse']`；
 独立 Web Shell 显式开启现有完整入口。宿主例如配置
 `sidebar={{ primaryNav: { items: ['newTask', 'plugins'] } }}` 即显示首页和插件的一级栏。
 未配置列表不再默认开放所有功能；宿主原有显式列表及 renderer 继续生效。
+
+仅需会话与聊天的宿主可以按需开启底部工具，并复用现有开关隐藏工作区相关控件：
+
+```tsx
+<WebShellWithProviders
+  sidebar={{
+    primaryNav: { items: ['newTask'] },
+    footer: { items: ['settings', 'collapse'] },
+    hideProjectHeader: true,
+    showSessionSourceSwitch: false,
+  }}
+  composerToolbarActions={['approvalMode', 'model']}
+/>
+```
+
+`hideProjectHeader` 隐藏工作区管理标题，输入框工具列表不含 `workspace` 时隐藏
+工作区选择器（包括「无工作区」行）。这两个选项只控制展示，不改变会话工作区，
+也不会隐藏已有工作区的会话分组。需要分组但没有工作区可选时，可按宿主实际能力
+设置这些开关，保留独立 Web Shell 的添加工作区入口。
+没有可用项目工作区时，侧栏不再显示合成的空「工作区」文件夹。
+主题可通过 `footer.items` 中的 `theme` 显示为底部按钮；若宿主希望把主题放入自己的
+设置，省略该项，在宿主设置中更新受控的 `theme` 属性，并通过 `onThemeChange`
+接收 WebShell 内的主题切换。
 
 双栏模式下，桌面端左侧包含常驻图标栏和可收起的首页栏。
 首页保留新建会话、置顶和工作区会话；
