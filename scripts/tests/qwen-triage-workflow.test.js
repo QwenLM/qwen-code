@@ -9504,6 +9504,29 @@ describe('qwen-triage pnpm store producer', () => {
     expect(cacheProducerWorkflow).toMatch(/branches:\s*\['main'\]/);
   });
 
+  it('resolves the pinned pnpm from a job-owned corepack cache', () => {
+    // The container inherits the HOST runner's home, so the default
+    // COREPACK_HOME outlives the job. corepack never re-verifies an existing
+    // pinned entry, and one left with pnpm.mjs missing fails every later run
+    // instantly with MODULE_NOT_FOUND — run 43016357930 died that way in 21s.
+    // The isolation step must precede the install that needs the binary.
+    const isolateIndex = cacheProducerWorkflow.indexOf(
+      "- name: 'Isolate the corepack cache'",
+    );
+    const installIndex = cacheProducerWorkflow.indexOf(
+      "- name: 'Populate pnpm store'",
+    );
+    expect(isolateIndex).toBeGreaterThan(-1);
+    expect(installIndex).toBeGreaterThan(isolateIndex);
+    expect(cacheProducerWorkflow).toContain(
+      'corepack_home="$RUNNER_TEMP/qwen-corepack"',
+    );
+    expect(cacheProducerWorkflow).toContain('rm -rf -- "$corepack_home"');
+    expect(cacheProducerWorkflow).toContain(
+      'echo "COREPACK_HOME=$corepack_home" >> "$GITHUB_ENV"',
+    );
+  });
+
   it('runs on the same target as the consumers so the cache version matches', () => {
     // actions/cache scopes an entry by a hash of the literal cache path plus
     // the compression method, so a producer on a different runner or outside

@@ -25,6 +25,7 @@ import com.alibaba.qwen.code.managedagent.session.HarnessCoordinator;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
 import com.alibaba.qwen.code.managedagent.session.SessionEventHub;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
@@ -3538,7 +3539,7 @@ class ManagedAgentServerIntegrationTest {
                 bindings, sessions, executions, "cleanup-probe", Duration.ofMinutes(1), Duration.ofMinutes(1))) {
             var binding = broker.warm(harnessSession).toCompletableFuture().join();
             jdbc.execute((org.springframework.jdbc.core.ConnectionCallback<Void>) connection -> {
-                com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository.beginHarnessLifecycle(connection, tenant, harnessSession, operation);
+                RuntimeAdmissionFences.beginHarnessLifecycle(connection, tenant, harnessSession, operation);
                 return null;
             });
             jdbc.update("UPDATE ma_session_head SET claim_generation = 7, claim_lease_until = ? WHERE tenant_id = ? AND harness_session_id = ?",

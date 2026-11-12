@@ -1758,6 +1758,9 @@ importers:
       browserify:
         specifier: 17.0.1
         version: 17.0.1
+      cross-env:
+        specifier: ^7.0.3
+        version: 7.0.3
       exceljs:
         specifier: 4.4.0
         version: 4.4.0
