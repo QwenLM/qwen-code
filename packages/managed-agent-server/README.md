@@ -229,7 +229,7 @@ See the complete design:
 
 ## Tool publication storage
 
-Tool publication depends on `ToolPublicationObjectStore`; Aliyun OSS is its default implementation. Publication remains disabled unless `qwen.managed-agent.tool-publication.enabled=true`. To use another backend, register one application `@Bean` returning `ToolPublicationObjectStore` from a configuration imported into the Spring server. The default OSS auto-configuration then backs off, and no OSS endpoint, region, bucket or credentials are needed. Common publication service URL, capacities and verification deadlines remain required. Without a custom store, existing OSS configuration and client lifecycle are unchanged.
+Tool publication depends on `ToolPublicationObjectStore`; Aliyun OSS is its default implementation. Publication remains disabled unless `qwen.managed-agent.tool-publication.enabled=true`. The generic OSS object-store auto-configuration is gated on `qwen.managed-agent.object-storage.enabled`, which defaults to follow `tool-publication.enabled`; set it true with `tool-publication.enabled=false` to back Session resources and journal cold storage without enabling publication. To use another backend, register one application `@Bean` returning `ToolPublicationObjectStore` from a configuration imported into the Spring server. The default OSS auto-configuration then backs off, and no OSS endpoint, region, bucket or credentials are needed. Common publication service URL, capacities and verification deadlines remain required. Without a custom store, existing OSS configuration and client lifecycle are unchanged.
 
 Oversized private Session resources and closed-Session journal cold storage use the same object store through `qwen.managed-agent.session-resources.*`. All controls default off: `enabled` admits allocate/upload/finalize for over-cap resources (while off they are refused with HTTP 501 `managed_session_oss_disabled`); `pack-job-enabled` builds and publishes immutable journal packs without deleting SQL bodies; `deletion-enabled` evicts covered SQL bodies only after `deletion-grace` (default 72h, must exceed backup replication lag) and only once pack-only mode is qualified. `oss-key-prefix`, `pack-target-bytes`, `pack-max-transactions` and `scan-delay` tune placement and the background sweeper. Deploy compatible readers before enabling writes, qualify pack-only mode before enabling eviction; rollback disables writes/eviction but keeps readers, hydration and reconciliation.
 
@@ -332,16 +332,17 @@ MariaDB solely by product name or introduce a catalog migration.
 
 MySQL and MariaDB require `STRICT_TRANS_TABLES` or `STRICT_ALL_TABLES` in each
 application connection's session `sql_mode`. Schema admission and validation
-reject non-strict connections before schema writes. The embedded default Managed
-pool adds `STRICT_TRANS_TABLES` when creating every physical connection,
-preserving the other session modes. A non-strict global default is accepted.
+reject non-strict connections before schema writes. Every managed pool —
+standalone, embedded and maintenance — adds `STRICT_TRANS_TABLES` when creating
+every physical connection, preserving the other session modes. A non-strict
+global default is accepted.
 Strict mode prevents ordinary writes to unsigned counters from silently clamping
 negative values to zero; `IGNORE` writes can downgrade these errors to warnings.
-Standalone, maintenance and custom DataSource callers must configure every
-application connection to retain strict mode throughout operation; a startup
-check does not police later administrative or connection-mode changes. The
-application does not change the server's global SQL mode. MariaDB CHECK
-enforcement still requires both global and session settings to be enabled.
+A custom DataSource must configure every application connection to retain strict
+mode throughout operation; a startup check does not police later administrative
+or connection-mode changes. The application does not change the server's global
+SQL mode. MariaDB CHECK enforcement still requires both global and session
+settings to be enabled.
 
 Run the packaged CLI with `qwen serve --profile hosted-harness` as a separate
 process (the credentialed launch is spelled out in the Full WebShell

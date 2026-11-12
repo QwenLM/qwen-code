@@ -231,6 +231,14 @@ Workspace 扩展包的发布与管理，以及哪些 actor 有权执行这些操
 | `enabled` | — | 布尔 | `false` | 是否提供个人记忆，默认为 false。仅在验证专用 Mem0 服务并关闭跨服务共享后启用。要求开启 Session Store 且 Hosted 声明 session-memory/1 能力；Session 必须在创建时明确选择 Store。 |
 | `endpoint` | — | 字符串 | — | 专用 Mem0 服务的基础 URL，仅在开启记忆时读取。除回环 HTTP 测试外要求 HTTPS；拒绝内嵌凭据、查询参数和片段。该地址仅保留在 Control Plane。 |
 
+## `qwen.managed-agent.object-storage`
+
+tool publication 与 Session 资源 / journal 冷存储共用的通用 Aliyun OSS 对象存储。
+
+| 属性 | 环境变量 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- | --- |
+| `enabled` | `QWEN_MANAGED_AGENT_OBJECT_STORAGE_ENABLED` | 布尔 | 跟随 `tool-publication.enabled` | 通用 OSS 对象存储自动装配是否启用。默认跟随 `qwen.managed-agent.tool-publication.enabled`；在关闭 tool publication 时设为 true，可在不启用发布的情况下支撑 Session 资源与 journal 冷存储。OSS endpoint、region、bucket 仍从 `qwen.managed-agent.tool-publication.oss-*` 读取。 |
+
 ## `qwen.managed-agent.runtime-broker`
 
 内嵌 Runtime Broker：包括面向 Hosted Harness 的私有 HTTP 监听器、放置并恢复执行 Hosted 工具的 Runtime worker 的 provisioner、worker 的 Workspace 挂载与隔离方式，以及加密其持久化 Runtime 凭据的密钥。

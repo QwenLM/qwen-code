@@ -82,6 +82,10 @@
     }
   },
   "properties": {
+    "qwen.managed-agent.object-storage.enabled": {
+      "en": "Whether the generic Aliyun OSS object-store auto-configuration is active. Defaults to follow `qwen.managed-agent.tool-publication.enabled`; set it true with tool publication disabled to back Session resources and journal cold storage without enabling publication. The OSS endpoint, region and bucket are still read from `qwen.managed-agent.tool-publication.oss-*`.",
+      "zh": "通用 Aliyun OSS 对象存储自动装配是否启用。默认跟随 `qwen.managed-agent.tool-publication.enabled`；在关闭 tool publication 时设为 true，可在不启用发布的情况下支撑 Session 资源与 journal 冷存储。OSS endpoint、region、bucket 仍从 `qwen.managed-agent.tool-publication.oss-*` 读取。"
+    },
     "qwen.managed-agent.session-resources.enabled": {
       "en": "Whether oversized private Session resources may be externalized to immutable object storage (allocate/upload/finalize before journal commit). While false, over-cap resources are refused with HTTP 501 `managed_session_oss_disabled`; already-externalized resources remain readable.",
       "zh": "是否允许把超大的私有 Session 资源外置到不可变对象存储（journal 提交前 allocate/upload/finalize）。为 false 时超上限资源返回 HTTP 501 `managed_session_oss_disabled`；已外置资源仍可读取。"
