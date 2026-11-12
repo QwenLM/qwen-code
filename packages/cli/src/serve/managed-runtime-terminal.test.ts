@@ -159,6 +159,12 @@ describe('ManagedRuntimeTerminals', () => {
     await expect(
       connect(port, 't1', 'session-a', {
         ...AUTH_HEADERS,
+        'X-Qwen-Managed-Lease-Id': 'other-lease',
+      }),
+    ).rejects.toMatchObject({ status: 409 });
+    await expect(
+      connect(port, 't1', 'session-a', {
+        ...AUTH_HEADERS,
         'Cache-Control': 'max-age=0',
       }),
     ).rejects.toMatchObject({ status: 400 });
@@ -327,6 +333,24 @@ describe('ManagedRuntimeTerminals control', () => {
       operationId: 'ctl-1',
       state: 'exited',
       evidence: { exitCode: TERMINAL_RELEASE_EXIT_CODE, exitSignal: null },
+    });
+    ws.terminate();
+  });
+
+  it('settles a natively exited terminal with its own exit code', async () => {
+    const port = await start();
+    const ws = await attachAndEcho(port, 'native-exit', 'session-a');
+    // Let the shell exit natively with a distinct code; the native-exit arm of
+    // control() must report that code, not the synthetic release receipt.
+    ws.send('exit 7\r');
+    await vi.waitFor(() => {
+      expect(
+        terminals!.control(op('terminal-status', 'native-exit', 'session-a')),
+      ).toEqual({
+        operationId: 'native-exit',
+        state: 'exited',
+        evidence: { exitCode: 7, exitSignal: null },
+      });
     });
     ws.terminate();
   });
