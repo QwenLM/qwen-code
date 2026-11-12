@@ -95,6 +95,30 @@ class TerminalRelayHandlerTest {
     }
 
     @Test
+    void browserGoneDuringAdmissionAbandonsTheCreatedHoldWithoutOpeningAWorker() {
+        RuntimeBrokerOperations broker = mock(RuntimeBrokerOperations.class);
+        HttpClient client = mock(HttpClient.class);
+        CompletableFuture<TerminalHoldAdmission> admission = new CompletableFuture<>();
+        when(broker.admitTerminalHold("session-a", "term-1")).thenReturn(admission);
+        when(broker.abandonTerminalHold(eq("session-a"), eq("term-1"), anyString()))
+                .thenReturn(CompletableFuture.completedFuture(null));
+        TerminalRelayHandler handler = new TerminalRelayHandler(broker, client);
+        WebSocketSession session = session();
+        // The browser closes while admission is still in flight.
+        when(session.isOpen()).thenReturn(false);
+
+        handler.afterConnectionEstablished(session);
+        admission.complete(new TerminalHoldAdmission(
+                hold("terminal-attach:term-1:process"), true));
+
+        // The hold this attempt created must be discharged, and no worker
+        // terminal may be opened for a client that no longer exists.
+        verify(broker).abandonTerminalHold(eq("session-a"), eq("term-1"),
+                eq("terminal-attach:term-1:process"));
+        verify(client, never()).newWebSocketBuilder();
+    }
+
+    @Test
     void presentsTheLeaseIdentityAndTerminalTargetOnTheWorkerUpgrade() throws Exception {
         RuntimeBrokerOperations broker = mock(RuntimeBrokerOperations.class);
         HttpClient client = mock(HttpClient.class);

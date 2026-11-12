@@ -83,6 +83,19 @@ public final class TerminalRelayHandler extends AbstractWebSocketHandler
                     closeQuietly(session, CloseStatus.SERVER_ERROR);
                     return;
                 }
+                // The browser may have closed while admission was in flight; do
+                // not open a worker terminal for a gone client, and discharge the
+                // hold this attempt created so it never wedges. A reconnect's
+                // reused hold (created=false) belongs to the live PTY and stays.
+                if (!session.isOpen()) {
+                    relay.fail();
+                    if (admission.created()) {
+                        broker.abandonTerminalHold(sessionId, terminalId,
+                                admission.hold().getExecutionCallId());
+                    }
+                    closeQuietly(session, CloseStatus.SERVER_ERROR);
+                    return;
+                }
                 openWorker(session, relay, lease, workerUri, sessionId, terminalId,
                         admission.created(), admission.hold().getExecutionCallId());
             });
@@ -235,13 +248,17 @@ public final class TerminalRelayHandler extends AbstractWebSocketHandler
 
         @Override
         public void onOpen(WebSocket webSocket) {
-            // The browser may have closed while the worker upgrade was in
-            // flight; do not pin a worker terminal to a dead browser.
-            if (failed || !browser.isOpen()) {
-                webSocket.sendClose(WebSocket.NORMAL_CLOSURE, "");
-                return;
-            }
+            // The liveness test and the registration must share one critical
+            // section with closeWorker(): a browser close landing between the
+            // test and the store would otherwise pin a worker socket that
+            // nothing ever closes.
             synchronized (sendLock) {
+                // The browser may have closed while the worker upgrade was in
+                // flight; do not pin a worker terminal to a dead browser.
+                if (failed || !browser.isOpen()) {
+                    webSocket.sendClose(WebSocket.NORMAL_CLOSURE, "");
+                    return;
+                }
                 worker.set(webSocket);
                 for (PendingSend pending : preAttach) {
                     chainSend(webSocket, pending.op(), pending.bytes());
@@ -383,9 +400,14 @@ public final class TerminalRelayHandler extends AbstractWebSocketHandler
         }
 
         void closeWorker() {
-            WebSocket webSocket = worker.get();
-            if (webSocket != null) {
-                webSocket.sendClose(WebSocket.NORMAL_CLOSURE, "");
+            // Same monitor as onOpen's registration so a close can never slip
+            // between the liveness test and the store (reentrant: send() already
+            // holds sendLock when it calls this).
+            synchronized (sendLock) {
+                WebSocket webSocket = worker.get();
+                if (webSocket != null) {
+                    webSocket.sendClose(WebSocket.NORMAL_CLOSURE, "");
+                }
             }
         }
     }
