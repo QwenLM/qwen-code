@@ -266,9 +266,10 @@ describe('OpenTuiPermissionsDialog rule rows', () => {
 
     const row = screen.getByText(/Project settings/);
     // 58 area columns, less the frame (4), the marker box (2) and the number
-    // box (3), leave the label 49; the clip cuts without an ellipsis.
+    // box (3), leave the label 49. The description is budgeted before the
+    // renderer sees it, so the file name survives the clip.
     expect(getCachedStringWidth(row.textContent ?? '')).toBeLessThanOrEqual(49);
-    expect(row.textContent ?? '').not.toContain('.json');
+    expect(row.textContent ?? '').toContain('.json');
     expect(screen.getByText(/Enter to confirm/)).toBeTruthy();
   });
 

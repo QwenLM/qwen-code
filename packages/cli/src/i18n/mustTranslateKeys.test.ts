@@ -107,6 +107,12 @@ describe('must-translate locale coverage', () => {
     );
   });
 
+  it('requires translation coverage for the permissions settings path row', () => {
+    expect(MUST_TRANSLATE_KEYS).toEqual(
+      expect.arrayContaining(['Saved in {{path}}']),
+    );
+  });
+
   it.each(NON_ENGLISH_LANGUAGES)(
     'does not fall back to English for required keys in %s',
     async (language) => {

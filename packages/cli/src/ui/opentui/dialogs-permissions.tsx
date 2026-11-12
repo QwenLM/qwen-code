@@ -25,7 +25,7 @@ import { decodePasteBytes } from '@opentui/core';
 import { useKeyboard, usePaste, useTerminalDimensions } from '@opentui/react';
 import { C } from './theme.js';
 import { t } from '../../i18n/index.js';
-import { SettingScope } from '../../config/settings.js';
+import type { SettingScope } from '../../config/settings.js';
 import { Command, keyMatchers } from '../keyMatchers.js';
 import { parseRule } from '@qwen-code/qwen-code-core/permissions/rule-parser.js';
 import { isPathWithinRoot } from '@qwen-code/qwen-code-core/utils/workspaceContext.js';
@@ -50,7 +50,11 @@ import {
 import { clampDialogHeight } from '../utils/layoutUtils.js';
 
 import {
-  clipToWidth,
+  SCOPE_LABEL_GAP,
+  permissionScopeItems,
+  scopeRowWidth,
+} from '../utils/permission-scope-row.js';
+import {
   getCachedStringWidth,
   sanitizeTerminalLine,
   truncateToWidth,
@@ -170,27 +174,15 @@ export function permissionScopeLabel(scope: string): string {
   }
 }
 
-/** Parity of getPermScopeItems in PermissionsDialog.tsx. */
-export function getPermissionScopeItems(): Array<{
-  label: string;
-  description: string;
-  value: SettingScope;
-  key: string;
-}> {
-  return [
-    {
-      label: t('Project settings'),
-      description: t('Checked in at .qwen/settings.json'),
-      value: SettingScope.Workspace,
-      key: 'project',
-    },
-    {
-      label: t('User settings'),
-      description: t('Saved in at ~/.qwen/settings.json'),
-      value: SettingScope.User,
-      key: 'user',
-    },
-  ];
+/** One scope row, clipped with an ellipsis when it cannot fit the column budget. */
+export function formatScopeRow(
+  item: { label: string; description: string },
+  width: number,
+): string {
+  return truncateToWidth(
+    `${item.label}${' '.repeat(SCOPE_LABEL_GAP)}${item.description}`,
+    width,
+  );
 }
 
 export interface PermissionRuleEntry {
@@ -500,19 +492,21 @@ export function OpenTuiPermissionsDialog(props: OpenTuiPermissionsDialogProps) {
     },
   });
 
-  const scopeItems = getPermissionScopeItems().map((s) => ({
-    ...s,
-    key: s.key,
-    value: s.value,
-  }));
+  // The scope step's DialogFrame pays its border and padding first, so the row
+  // budget is four columns narrower than the region.
+  const scopeItems = permissionScopeItems(scopeRowWidth(areaWidth - 4, 2)).map(
+    (s) => ({
+      ...s,
+      key: s.key,
+      value: s.value,
+    }),
+  );
   // ink gives every row `wrap="truncate"`; an unclipped rule or path wraps
   // its row into two physical rows the window charged as one. DialogSelect
   // sizes the number box from the full list's length, so the label's budget
   // is the container's width minus the `›` box (2) and that box — the bare
   // region's width for the list views, four columns less for the scope step,
   // whose DialogFrame pays border and padding first.
-  const rowLabelWidth = (containerWidth: number, itemCount: number) =>
-    Math.max(0, containerWidth - 2 - (String(itemCount).length + 2));
   // The scope step's chrome: the frame (4), the two spacer rows (2) and the
   // footer's margin row (1) are the rows no run can wrap into; the title,
   // the question and the footer are charged the rows they wrap into at the
@@ -907,7 +901,7 @@ export function OpenTuiPermissionsDialog(props: OpenTuiPermissionsDialogProps) {
             <text fg={titleColor}>
               {truncateToWidth(
                 sanitizeTerminalLine(item.label),
-                rowLabelWidth(areaWidth, dirListItems.length),
+                scopeRowWidth(areaWidth, dirListItems.length),
               )}
             </text>
           )}
@@ -992,9 +986,9 @@ export function OpenTuiPermissionsDialog(props: OpenTuiPermissionsDialogProps) {
             onSelectIndex={scopeList.selectIndex}
             renderLabel={(item, { titleColor }) => (
               <text fg={titleColor}>
-                {clipToWidth(
-                  `${item.label}    ${item.description}`,
-                  rowLabelWidth(areaWidth - 4, scopeItems.length),
+                {formatScopeRow(
+                  item,
+                  scopeRowWidth(areaWidth - 4, scopeItems.length),
                 )}
               </text>
             )}
@@ -1103,7 +1097,7 @@ export function OpenTuiPermissionsDialog(props: OpenTuiPermissionsDialogProps) {
           <text fg={titleColor}>
             {truncateToWidth(
               sanitizeTerminalLine(item.label),
-              rowLabelWidth(areaWidth, ruleListItems.length),
+              scopeRowWidth(areaWidth, ruleListItems.length),
             )}
           </text>
         )}
