@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { buildCardContent, extractTitle, splitChunks } from './markdown.js';
+import {
+  buildCardContent,
+  extractTitle,
+  splitByTables,
+  splitChunks,
+} from './markdown.js';
 
 interface CardElement {
   tag: string;
@@ -15,6 +20,65 @@ interface CardStructure {
 }
 
 describe('Feishu markdown utilities', () => {
+  describe('table splitting around code fences', () => {
+    const table = '| A | B |\n| --- | --- |\n| 1 | 2 |';
+
+    it.each(['```', '~~~', '````', '~~~~'])(
+      'keeps %s code intact between real tables',
+      (fence) => {
+        const code = `${fence}text\n${table}\n${fence}`;
+        expect(splitByTables(`${table}\n${code}\n${table}`)).toEqual([
+          table,
+          code,
+          table,
+        ]);
+        const card = buildCardContent(code) as unknown as CardStructure;
+        expect(card.body.elements).toEqual([
+          { tag: 'markdown', content: code },
+        ]);
+      },
+    );
+
+    it('does not treat inline triple backticks as an opening fence', () => {
+      expect(splitByTables(`Use \`\`\` literally.\n${table}\nAfter`)).toEqual([
+        'Use ``` literally.',
+        table,
+        'After',
+      ]);
+    });
+
+    it('closes only with the same fence marker and sufficient length', () => {
+      const code = ['````markdown', '```', '~~~', table, '`````'].join('\n');
+      expect(splitByTables(`${code}\n${table}`)).toEqual([code, table]);
+    });
+
+    it('accepts up to three indentation spaces and closing whitespace', () => {
+      const code = `   ~~~text\n${table}\n   ~~~~  `;
+      expect(splitByTables(`${code}\n${table}`)).toEqual([code, table]);
+    });
+
+    it.each(['```', '~~~'])(
+      'preserves %s fences and table-like text with CRLF line endings',
+      (fence) => {
+        const code = `${fence}text\r\n${table.replaceAll('\n', '\r\n')}\r\n${fence}\r`;
+        expect(splitByTables(code)).toEqual([code]);
+        const card = buildCardContent(code) as unknown as CardStructure;
+        expect(card.body.elements).toEqual([
+          { tag: 'markdown', content: code },
+        ]);
+      },
+    );
+
+    it('recognizes a closing fence before a table with mixed line endings', () => {
+      const code = `~~~text\r\n${table}\n~~~\r`;
+      expect(splitByTables(`${code}\n${table}\nAfter`)).toEqual([
+        code,
+        table,
+        'After',
+      ]);
+    });
+  });
+
   describe('buildCardContent', () => {
     it('returns a valid card structure', () => {
       const card = buildCardContent('Hello world') as unknown as CardStructure;

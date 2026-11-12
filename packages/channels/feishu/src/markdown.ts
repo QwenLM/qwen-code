@@ -14,22 +14,34 @@ export const FEISHU_CHUNK_LIMIT = 4000;
  * This avoids Feishu card rendering issues when a single markdown element
  * contains a table followed by other content.
  */
-function splitByTables(text: string): string[] {
+export function splitByTables(text: string): string[] {
   const lines = text.split('\n');
   const segments: string[] = [];
   let current: string[] = [];
   let inTable = false;
-  let inCode = false;
+  let codeFence: { marker: string; length: number } | undefined;
 
   for (const line of lines) {
-    // Track code fences (parity-based to handle inline code on same line)
-    if ((line.match(/```/g) || []).length % 2 === 1) {
-      inCode = !inCode;
+    const fence = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line.replace(/\r$/, ''));
+    if (codeFence) {
+      if (
+        fence &&
+        fence[1]![0] === codeFence.marker &&
+        fence[1]!.length >= codeFence.length &&
+        !fence[2]!.trim()
+      ) {
+        codeFence = undefined;
+      }
       current.push(line);
       continue;
     }
-
-    if (inCode) {
+    if (fence && (fence[1]![0] === '~' || !fence[2]!.includes('`'))) {
+      if (inTable) {
+        segments.push(current.join('\n'));
+        current = [];
+        inTable = false;
+      }
+      codeFence = { marker: fence[1]![0]!, length: fence[1]!.length };
       current.push(line);
       continue;
     }

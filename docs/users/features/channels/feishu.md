@@ -2,6 +2,10 @@
 
 This guide covers setting up a Qwen Code channel on Feishu (飞书) / Lark.
 
+To send task results to a group without an application bot, use
+[Feishu Webhook Sending](./feishu-webhook). That custom-bot integration is
+separate from this guide's inbound webhook connection mode.
+
 ## Prerequisites
 
 - A Feishu organization account
