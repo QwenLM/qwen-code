@@ -313,7 +313,7 @@ SSH Runtime 节点：服务端通过 SSH 访问的主机，用户可以在这些
 
 | 属性 | 环境变量 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- | --- |
-| `deletion-enabled` | — | 布尔 | `false` | 是否允许在删除宽限期后腾空被 pack 覆盖的 SQL journal 正文。需先完成只打包模式的资格验证；腾空受 head 水位与宽限期围栏保护。前提：直读 record_bytes 的 JournalStoreRows.activationLeaseRow、WorkspaceCsiCheckpointSnapshotStore、JdbcCsiActivationAdmission、JdbcCsiExecutionAdmission 尚未 pack-aware，覆盖区间被腾空后即失败关闭；启用前须将其迁移到 pack 解析（或确认不会读到被腾空的区间）。 |
+| `deletion-enabled` | — | 布尔 | `false` | 是否允许在删除宽限期后腾空被 pack 覆盖的 SQL journal 正文。需先完成只打包模式的资格验证；腾空受 head 水位与宽限期围栏保护。前提：直读 record_bytes 的 JournalStoreRows.activationLeaseRow、JdbcCsiActivationAdmission、JdbcCsiExecutionAdmission 尚未 pack-aware，覆盖区间被腾空后即失败关闭；启用前须将其迁移到 pack 解析（或确认不会读到被腾空的区间）。 |
 | `deletion-grace` | — | 时长 | `72h` | pack 发布且发布者被围栏后、到可腾空被覆盖 SQL 正文之间的宽限期；必须大于备份复制 lag。纯数字按秒解析。 |
 | `enabled` | — | 布尔 | `false` | 是否允许把超大的私有 Session 资源外置到不可变对象存储（journal 提交前 allocate/upload/finalize）。为 false 时超上限资源返回 HTTP 501 `managed_session_oss_disabled`；已外置资源仍可读取。 |
 | `oss-key-prefix` | — | 字符串 | `session-resources/` | 已配置对象存储 bucket 中用于外置 Session 资源与 journal pack 的 key 前缀。 |
