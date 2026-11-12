@@ -602,6 +602,17 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     },
   ],
   [
+    'packages/cli/src/serve/server/pr-watch-deps.ts',
+    {
+      reason:
+        'The watch reads the daemon’s own gh configuration, whose directory ' +
+        'precedence (GH_CONFIG_DIR, XDG_CONFIG_HOME, APPDATA, HOME) is ' +
+        'process-scoped: it describes the daemon’s gh login, not any one ' +
+        'workspace’s overlay.',
+      accesses: { whole: 1 },
+    },
+  ],
+  [
     'packages/cli/src/serve/live/live-host-coordinator.ts',
     {
       reason: 'Live Host diagnostics are enabled for the whole daemon process.',
