@@ -29,7 +29,8 @@ const PRIVACY_NOTICE_URL =
   'https://qwenlm.github.io/qwen-code-docs/en/users/support/tos-privacy/';
 
 export const USAGE_STATISTICS_NOTICE =
-  `Qwen Code sends usage statistics (no prompts, code, or file contents) to ` +
+  `Qwen Code sends usage statistics, tagged with a random per-install ID ` +
+  `(no prompts, code, or file contents), to ` +
   `${USAGE_STATS_HOSTNAME}. To opt out, set ${USAGE_STATISTICS_ENV}=false or ` +
   `"privacy": { "usageStatisticsEnabled": false } in settings; this also ` +
   `stops the models.dev catalog refresh. Shown once. Details: ` +

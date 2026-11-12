@@ -43,6 +43,9 @@ describe('consumeUsageStatisticsNotice', () => {
       'QWEN_USAGE_STATISTICS_ENABLED=false',
     );
     expect(USAGE_STATISTICS_NOTICE).toContain('usageStatisticsEnabled');
+    // The install ID is a stable identifier; the disclosure must not imply
+    // that nothing identifying is sent (#17052).
+    expect(USAGE_STATISTICS_NOTICE).toContain('random per-install ID');
   });
 
   it('shows once for a user on the default, then records a marker', () => {

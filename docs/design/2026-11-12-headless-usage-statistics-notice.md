@@ -8,7 +8,7 @@ Usage statistics are on by default. Interactive sessions disclose them through t
 
 ## Decision
 
-At the start of a headless run, right after the session initialization system message, show a one-time notice that names the usage statistics host (`USAGE_STATS_HOSTNAME`, now shared from the core telemetry constants), states that prompts, code, and file contents are not collected, gives the environment-variable and settings opt-outs, notes that opting out also stops the models.dev catalog refresh, and links to the privacy notice.
+At the start of a headless run, right after the session initialization system message, show a one-time notice that names the usage statistics host (`USAGE_STATS_HOSTNAME`, now shared from the core telemetry constants), states that events carry a random per-install ID (the stable pseudonym derived from the local installation ID) while prompts, code, and file contents are not collected, gives the environment-variable and settings opt-outs, notes that opting out also stops the models.dev catalog refresh, and links to the privacy notice.
 
 Follow the existing headless notice convention: in text mode, write the notice to stderr so stdout stays clean for scripts; in JSON and stream-JSON modes, emit a system message with subtype `usage_statistics_notice` and `data.notice`. Skipping JSON modes would hide the disclosure in exactly the automated runs that need it, and consumers that ignore unknown system subtypes are unaffected.
 

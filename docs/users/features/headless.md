@@ -247,7 +247,7 @@ qwen -p "Write a Python script" --output-format stream-json --include-partial-me
 
 ### Usage Statistics Notice
 
-Headless runs show no setup dialog, so the first headless run on an installation that relies on the default usage statistics setting prints a one-time notice naming the collection host and how to opt out. In text mode it is written to stderr, so stdout stays clean. In JSON and stream-JSON modes it is a system message with subtype `usage_statistics_notice` and a `data.notice` string, emitted after the session initialization message; consumers that ignore unknown subtypes need no change.
+Headless runs show no setup dialog, so the first headless run on an installation that relies on the default usage statistics setting prints a one-time notice naming the collection host, stating that events carry a random per-install ID but no prompts, code, or file contents, and explaining how to opt out. In text mode it is written to stderr, so stdout stays clean. In JSON and stream-JSON modes it is a system message with subtype `usage_statistics_notice` and a `data.notice` string, emitted after the session initialization message; consumers that ignore unknown subtypes need no change.
 
 The notice is recorded in `~/.qwen/usage-statistics-notice-shown` and not repeated. It never appears when `QWEN_USAGE_STATISTICS_ENABLED` or `privacy.usageStatisticsEnabled` is set to any value. If the marker cannot be written (for example, a read-only home directory), the notice is shown again on the next run. See [Usage Statistics](../configuration/settings.md#usage-statistics).
 
