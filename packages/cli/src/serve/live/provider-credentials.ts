@@ -14,12 +14,47 @@ const REALTIME_PATH = '/api-ws/v1/realtime';
 export const DEFAULT_LIVE_VOICE = 'Tina';
 export const DEFAULT_LIVE_SHORTCUT = 'Command+E';
 
+export type TurnDetection =
+  | 'server_vad'
+  | 'smart_turn'
+  | 'smart_turn_v2'
+  | 'semantic_vad'
+  | null;
+
+const TURN_DETECTION_VALUES: ReadonlySet<string> = new Set([
+  'server_vad',
+  'smart_turn',
+  'smart_turn_v2',
+  'semantic_vad',
+]);
+
+function isTurnDetection(value: unknown): value is TurnDetection {
+  return value === null || TURN_DETECTION_VALUES.has(value as string);
+}
+
+export function resolveTurnDetection(
+  configured: unknown,
+  model: string,
+): TurnDetection {
+  if (configured === null || configured === '') return null;
+  if (typeof configured === 'string' && TURN_DETECTION_VALUES.has(configured)) {
+    return configured as TurnDetection;
+  }
+  if (configured === undefined) {
+    return model.startsWith('qwen-audio') ? 'server_vad' : 'semantic_vad';
+  }
+  throw new LiveProviderConfigError(
+    `experimental.liveVoice.turnDetection must be one of: server_vad, smart_turn, smart_turn_v2, semantic_vad, or null. Got: ${JSON.stringify(configured)}`,
+  );
+}
+
 export interface LiveVoiceConfiguration {
   enabled: boolean;
   model: string;
   endpoint: string;
   voice: string;
   shortcut: string;
+  turnDetection: TurnDetection;
 }
 
 /** A `modelProviders` entry that Live Voice may use as its upstream. */
@@ -38,6 +73,7 @@ export interface LiveProviderCredential {
   voice: string;
   /** Non-enumerable so routine JSON/log serialization cannot expose it. */
   apiKey: string;
+  turnDetection: TurnDetection;
 }
 
 export class LiveProviderConfigError extends Error {
@@ -72,12 +108,14 @@ export function readLiveVoiceConfiguration(
   settings: Settings,
 ): LiveVoiceConfiguration {
   const raw = settings.experimental?.liveVoice;
+  const model = readNonEmpty(raw?.model, DEFAULT_LIVE_VOICE_MODEL);
   return {
     enabled: raw?.enabled === true,
-    model: readNonEmpty(raw?.model, DEFAULT_LIVE_VOICE_MODEL),
+    model,
     endpoint: readNonEmpty(raw?.endpoint, DEFAULT_LIVE_ENDPOINT),
     voice: readNonEmpty(raw?.voice, DEFAULT_LIVE_VOICE),
     shortcut: readShortcut(raw?.shortcut),
+    turnDetection: resolveTurnDetection(raw?.turnDetection, model),
   };
 }
 
@@ -360,6 +398,7 @@ export function resolveLiveProviderCredential(
     endpoint,
     realtimeModel: route?.id ?? live.model,
     voice: live.voice,
+    turnDetection: live.turnDetection,
   } as LiveProviderCredential;
   Object.defineProperty(credential, 'apiKey', {
     configurable: false,

@@ -157,6 +157,7 @@ export interface QwenRealtimeConfig {
   callEpoch: RealtimeCallEpoch;
   voice?: string;
   instructions?: string;
+  turnDetection?: 'server_vad' | 'smart_turn' | 'smart_turn_v2' | 'semantic_vad' | null;
 }
 
 export interface QwenRealtimeDeps {
@@ -1495,6 +1496,15 @@ export function openQwenRealtimeSession(
     const sendSessionUpdate = () => {
       if (sessionUpdateSent) return;
       sessionUpdateSent = true;
+      const td = config.turnDetection;
+      const turnDetection =
+        td === null
+          ? null
+          : {
+              type: td ?? 'semantic_vad',
+              create_response: true,
+              interrupt_response: true,
+            };
       sendJson({
         type: 'session.update',
         session: {
@@ -1506,11 +1516,7 @@ export function openQwenRealtimeSession(
             model: 'qwen3-asr-flash-realtime',
           },
           instructions: config.instructions ?? buildQwenRealtimeInstructions(),
-          turn_detection: {
-            type: 'semantic_vad',
-            create_response: true,
-            interrupt_response: true,
-          },
+          turn_detection: turnDetection,
           tools: [BACKGROUND_AGENT_TOOL, REMAIN_SILENT_TOOL],
           tool_choice: 'auto',
         },

@@ -4516,6 +4516,16 @@ const SETTINGS_SCHEMA = {
               'Electron accelerator registered globally by Qwen Live Host.',
             showInDialog: false,
           },
+          turnDetection: {
+            type: 'string',
+            label: 'Turn Detection',
+            category: 'Experimental',
+            requiresRestart: false,
+            default: undefined as string | undefined,
+            description:
+              'Realtime turn detection type. One of: server_vad, smart_turn, smart_turn_v2, semantic_vad, or null for push-to-talk. Defaults to server_vad for qwen-audio realtime models and semantic_vad for all others.',
+            showInDialog: false,
+          },
         },
       },
       sessionWorkflow: {

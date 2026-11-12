@@ -120,6 +120,34 @@ Two rules are deliberate:
   `experimental.liveVoice.endpoint` are unused, and the setup API refuses to
   store new ones.
 
+### Turn detection
+
+Set `experimental.liveVoice.turnDetection` to override the turn detection mode
+sent in the Realtime `session.update`:
+
+- `server_vad` — server-side voice activity detection (supported by qwen-audio
+  realtime models)
+- `smart_turn` — smart turn handling (qwen-audio realtime)
+- `smart_turn_v2` — second-generation smart turn (qwen-audio realtime)
+- `semantic_vad` — semantic voice activity detection (used by omni realtime
+  models)
+- `null` — push-to-talk mode (no automatic turn detection)
+
+```json
+{
+  "experimental": {
+    "liveVoice": {
+      "turnDetection": "server_vad"
+    }
+  }
+}
+```
+
+When `turnDetection` is unset the default is model-aware: models whose id
+starts with `qwen-audio` default to `server_vad`; all other models default to
+`semantic_vad`, preserving the existing omni realtime behavior.
+
+
 On the free-standing path the Web Shell's Qwen Live settings set the endpoint
 and model directly. Enter the OpenAI-compatible base URL of the region or
 dedicated domain your key belongs to, such as

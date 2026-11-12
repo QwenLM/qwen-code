@@ -138,6 +138,7 @@ async function validateCredential(
     apiKey: credential.apiKey,
     model: credential.realtimeModel,
     voice: credential.voice,
+    turnDetection: credential.turnDetection,
     callEpoch: `setup-${randomUUID()}`,
   });
   session.close({ discardPendingInput: true });

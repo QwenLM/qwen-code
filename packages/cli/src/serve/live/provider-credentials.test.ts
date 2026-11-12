@@ -7,6 +7,7 @@
 import { describe, expect, it } from 'vitest';
 import type { Settings } from '../../config/settings.js';
 import {
+  resolveTurnDetection,
   DEFAULT_LIVE_ENDPOINT,
   DEFAULT_LIVE_SHORTCUT,
   DEFAULT_LIVE_VOICE,
@@ -39,6 +40,7 @@ describe('Live provider credentials', () => {
       endpoint: DEFAULT_LIVE_ENDPOINT,
       voice: DEFAULT_LIVE_VOICE,
       shortcut: DEFAULT_LIVE_SHORTCUT,
+      turnDetection: 'semantic_vad',
     });
     expect(DEFAULT_LIVE_SHORTCUT).toBe('Command+E');
   });
@@ -54,6 +56,7 @@ describe('Live provider credentials', () => {
   it('resolves the dedicated Realtime credential', () => {
     const resolved = resolveLiveProviderCredential(settings());
 
+    expect(resolved.turnDetection).toBe('semantic_vad');
     expect(resolved).toMatchObject({
       realtimeModel: DEFAULT_LIVE_VOICE_MODEL,
       endpoint: DEFAULT_LIVE_ENDPOINT,
@@ -167,6 +170,7 @@ describe('Live provider credentials', () => {
         endpoint: DEFAULT_LIVE_ENDPOINT,
         realtimeModel: route.id,
         voice: DEFAULT_LIVE_VOICE,
+        turnDetection: 'semantic_vad',
       });
       expect(credential.apiKey).toBe('env-secret');
     });
@@ -358,6 +362,79 @@ describe('Live provider credentials', () => {
       'wss://dashscope-intl.aliyuncs.com/api-ws/v1/realtime',
     );
   });
+
+  describe('turnDetection', () => {
+    it('defaults to semantic_vad for omni realtime models', () => {
+      expect(
+        readLiveVoiceConfiguration({
+          experimental: { liveVoice: { model: 'qwen3.5-omni-plus-realtime' } },
+        } as Settings).turnDetection,
+      ).toBe('semantic_vad');
+    });
+
+    it('defaults to server_vad for qwen-audio realtime models', () => {
+      expect(
+        readLiveVoiceConfiguration({
+          experimental: { liveVoice: { model: 'qwen-audio-3.0-realtime-plus' } },
+        } as Settings).turnDetection,
+      ).toBe('server_vad');
+    });
+
+    it('accepts explicit values', () => {
+      for (const value of [
+        'server_vad',
+        'smart_turn',
+        'smart_turn_v2',
+        'semantic_vad',
+      ] as const) {
+        expect(
+          readLiveVoiceConfiguration({
+            experimental: { liveVoice: { turnDetection: value } },
+          } as Settings).turnDetection,
+        ).toBe(value);
+      }
+    });
+
+    it('accepts null for push-to-talk', () => {
+      expect(
+        readLiveVoiceConfiguration({
+          experimental: { liveVoice: { turnDetection: null } },
+        } as Settings).turnDetection,
+      ).toBeNull();
+    });
+
+    it('treats an empty string as null (push-to-talk)', () => {
+      expect(
+        readLiveVoiceConfiguration({
+          experimental: { liveVoice: { turnDetection: '' } },
+        } as Settings).turnDetection,
+      ).toBeNull();
+    });
+
+    it('rejects an unknown value', () => {
+      expect(() =>
+        readLiveVoiceConfiguration({
+          experimental: { liveVoice: { turnDetection: 'garbage' } },
+        } as Settings),
+      ).toThrow(LiveProviderConfigError);
+    });
+
+    it('returns the resolved turnDetection in the provider credential', () => {
+      const resolved = resolveLiveProviderCredential(
+        settings({
+          experimental: {
+            liveVoice: {
+              enabled: true,
+              apiKey: 'settings-secret',
+              turnDetection: 'smart_turn_v2',
+            },
+          },
+        } as Partial<Settings>),
+      );
+      expect(resolved.turnDetection).toBe('smart_turn_v2');
+    });
+  });
+
 
   describe('normalizeLiveRealtimeEndpoint', () => {
     it.each([
