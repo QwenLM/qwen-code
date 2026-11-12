@@ -42,6 +42,16 @@ import java.util.function.Function;
 public final class CsiNativeActivationProof {
     private static final int MAX_TOOL_OUTCOME_BYTES = 4 * 1024 * 1024;
     private static final long MAX_SAFE = 9_007_199_254_740_990L;
+    /**
+     * The prepared retirement commit body and the two base64 fields it carries. Base64 expands by
+     * 4/3, so the two field limits must jointly fit inside the body budget, and the body's own
+     * base64 must fit the command envelope that carries it. Otherwise an outer cap becomes the real
+     * ceiling and a later raise of an inner limit fails without saying why.
+     */
+    public static final int TERMINAL_BODY_LIMIT = 256 * 1024;
+    public static final int TERMINAL_RECORD_LIMIT = 128 * 1024;
+    public static final int TERMINAL_CANDIDATE_LIMIT = 16 * 1024;
+    public static final int TERMINAL_COMMAND_LIMIT = 384 * 1024;
     private static final Set<String> ENVELOPE = Set.of("uuid", "parentUuid", "sessionId", "timestamp",
             "type", "subtype", "cwd", "version", "managedSession");
     private static final Set<String> MARKER = Set.of("transactionId", "commandId", "operation", "contentDigest",
@@ -82,14 +92,14 @@ public final class CsiNativeActivationProof {
             long predecessorSequence, String predecessorLastRecordUuid, String predecessorCommitDigest,
             long terminalSequence, String lastRecordUuid) {
         public TerminalProof {
-            predecessorActivation = snapshot(predecessorActivation, Activation.class);
+            predecessorActivation = copyActivation(predecessorActivation);
             predecessorPrefix = snapshot(predecessorPrefix, Prefix.class);
             boundaryRef = boundaryRef.deepCopy();
         }
 
         @Override
         public Activation predecessorActivation() {
-            return snapshot(predecessorActivation, Activation.class);
+            return copyActivation(predecessorActivation);
         }
 
         @Override
@@ -100,6 +110,16 @@ public final class CsiNativeActivationProof {
         @Override
         public JsonNode boundaryRef() {
             return boundaryRef.deepCopy();
+        }
+
+        // Activation is a flat record, so a field-wise copy with a deep-copied
+        // installRef gives the same fresh, deeply-immutable instance as a JSON
+        // round trip without serializing the whole proof on every read.
+        private static Activation copyActivation(Activation value) {
+            return value == null ? null : new Activation(value.activationId(), value.workerId(),
+                    value.installRef() == null ? null : value.installRef().deepCopy(),
+                    value.leaseDurationMs(), value.expiresAt(), value.renewalSequence(),
+                    value.epoch(), value.writerGeneration());
         }
 
         private static <T> T snapshot(T value, Class<T> type) {
@@ -1786,8 +1806,8 @@ public final class CsiNativeActivationProof {
         require(candidates.isArray() && candidates.size() == 1);
         JsonNode candidate = candidates.get(0);
         closed(candidate, Set.of("resourceId", "kind", "schemaVersion", "byteLength", "digest", "bytesBase64"));
-        byte[] resourceBytes = canonicalBase64(candidate, "bytesBase64", 16 * 1024);
-        byte[] raw = canonicalBase64(metadata, "recordBytesBase64", 128 * 1024);
+        byte[] resourceBytes = canonicalBase64(candidate, "bytesBase64", TERMINAL_CANDIDATE_LIMIT);
+        byte[] raw = canonicalBase64(metadata, "recordBytesBase64", TERMINAL_RECORD_LIMIT);
         require(sha256(raw).equals(text(metadata, "recordDigest")));
         var records = records(raw);
         require(records.size() == 2 && number(metadata.get("recordCount")) == records.size());
@@ -1800,8 +1820,12 @@ public final class CsiNativeActivationProof {
                 });
     }
 
-    private static byte[] canonicalBase64(JsonNode value, String field, int limit) {
-        String encoded = text(value, field);
+    static byte[] canonicalBase64(JsonNode value, String field, int limit) {
+        // Read the text directly: text() caps a field at 4096 characters, which would silently
+        // clamp every caller's declared limit to 3072 decoded bytes.
+        JsonNode node = value.get(field);
+        require(node != null && node.isTextual() && !node.textValue().isEmpty());
+        String encoded = node.textValue();
         require(encoded.length() <= ((limit + 2) / 3) * 4);
         try {
             byte[] bytes = Base64.getDecoder().decode(encoded);

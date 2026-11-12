@@ -22,6 +22,7 @@ import { AuthType } from '../core/contentGenerator.js';
 import type { ContentGeneratorConfig } from '../core/contentGenerator.js';
 import { DEFAULT_QWEN_MODEL } from '../config/models.js';
 import {
+  QWEN_OAUTH_TOKEN_PLACEHOLDER,
   QWEN_SUBSCRIPTION_BASE_URL,
   QWEN_SUBSCRIPTION_MODEL,
   QWEN_SUBSCRIPTION_TOKEN_PLACEHOLDER,
@@ -420,7 +421,7 @@ function resolveQwenOAuthConfig(
   const config: ContentGeneratorConfig = {
     authType: AuthType.QWEN_OAUTH,
     model: resolvedModel,
-    apiKey: 'QWEN_OAUTH_DYNAMIC_TOKEN',
+    apiKey: QWEN_OAUTH_TOKEN_PLACEHOLDER,
     proxy,
     ...generationConfig,
   };

@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.managedagent.config.runtime.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.session.HarnessEventProjector;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpServer;
@@ -141,7 +142,7 @@ final class HostedSseGapProbe implements AutoCloseable {
                 + " WHERE s.alias_key = ? AND s.tenant_id = ? AND s.storage_id = ?"
                 + " AND m.harness_session_id = ? AND m.binding_id = ?"
                 + " AND m.runtime_generation = ? AND m.runtime_session_id = ?",
-                com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository.storageAliasKey(tenant, storage),
+                RuntimeAdmissionFences.storageAliasKey(tenant, storage),
                 tenant, storage, session, execution.get("binding_id"), execution.get("runtime_generation"), promptId);
         assertThat(member.get("physical_key")).isNotNull();
         assertThat(member.get("execution_storage_key")).isEqualTo(finished ? null : member.get("physical_key"));
