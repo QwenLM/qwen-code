@@ -246,6 +246,7 @@ import {
 import { bridgeToolResultImages } from '../services/visionBridge/tool-result-vision-bridge.js';
 import {
   getChannelWorkflowOrigin,
+  isBackgroundWorkflowBlocked,
   getInvocationContext,
   runWithInvocationContext,
 } from '../utils/invocation-context.js';
@@ -4803,6 +4804,7 @@ export class CoreToolScheduler {
             const originalOnConfirm = confirmationDetails.onConfirm;
             const invocationContext = getInvocationContext();
             const channelWorkflowOrigin = getChannelWorkflowOrigin();
+            const backgroundWorkflowBlocked = isBackgroundWorkflowBlocked();
             let planShellResponseClaimed = false;
             const wrappedConfirmationDetails: ToolCallConfirmationDetails = {
               ...confirmationDetails,
@@ -4860,6 +4862,7 @@ export class CoreToolScheduler {
                     });
                   },
                   channelWorkflowOrigin,
+                  backgroundWorkflowBlocked,
                 ),
             };
             this.setStatusInternal(

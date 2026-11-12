@@ -22,6 +22,15 @@ model for a long workflow run and let it call the Workflow tool with
   an ACP session whose workflow controls are off (workflows disabled, also
   by a settings reload mid-session; bare mode; or an untrusted workspace, as
   resolved by `isTrustedFolder`), or one without a completion channel.
+- In a session a Channel drives, a turn with no Channel launch origin also
+  rejects it and keeps the workflow in the foreground: a channel prompt
+  without a usable origin, and the cron, background-report and runtime goal
+  turns of that session. A Channel drops an origin-less workflow result and
+  leaves its approvals unanswered, so a background run there would report
+  nowhere. A user's own prompt from another client in that session keeps
+  background runs. The session learns it is Channel-driven from its first
+  channel prompt; until then, after a reload, its automatic turns are not
+  blocked.
 - A call without `run_in_background` behaves exactly as before: the tool waits
   for the run and returns its result inline.
 
@@ -42,6 +51,10 @@ link and rebuild.
 - Gate (TUI, ACP, ACP with controls off, headless, no channel), abort of
   the starting turn, single completion:
   `packages/core/src/tools/workflow/workflow.test.ts`.
+- Channel turns without a launch origin, at build, at execute and across
+  an approval: `packages/core/src/tools/workflow/workflow.test.ts`,
+  `packages/core/src/core/coreToolScheduler.test.ts`; which Session turns
+  carry the block: `packages/cli/src/acp-integration/session/Session.test.ts`.
 - Resume-in-background flag per host:
   `packages/core/src/agents/runtime/workflow-runner.test.ts`.
 - Real daemon with the fake model server, with and without the unified agent

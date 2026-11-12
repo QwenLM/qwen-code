@@ -41,6 +41,7 @@ const invocationContextKeys = new Set([
 const invocationContextStorage = new AsyncLocalStorage<{
   invocation?: InvocationContextV1;
   channelWorkflowOrigin?: ChannelWorkflowOrigin;
+  backgroundWorkflowBlocked?: true;
 }>();
 
 function isNonBlankString(value: unknown): value is string {
@@ -91,13 +92,28 @@ export function parseInvocationContext(
   });
 }
 
+/**
+ * `backgroundWorkflowBlocked` marks a Channel session turn that has no
+ * launch origin (an origin-less channel prompt, or a cron, notification or
+ * runtime goal turn of a session a channel drives). Its background workflow
+ * would have no chat to report to or ask approvals in, so it must run in
+ * the foreground. It is kept apart from the origin on purpose: the workflow
+ * registry records the origin as a run's delivery target.
+ */
 export function runWithInvocationContext<T>(
   context: InvocationContextV1 | undefined,
   callback: () => T,
   channelWorkflowOrigin?: ChannelWorkflowOrigin,
+  backgroundWorkflowBlocked = false,
 ): T {
   return invocationContextStorage.run(
-    { invocation: context, channelWorkflowOrigin },
+    {
+      invocation: context,
+      channelWorkflowOrigin,
+      ...(backgroundWorkflowBlocked
+        ? { backgroundWorkflowBlocked: true as const }
+        : {}),
+    },
     callback,
   );
 }
@@ -108,4 +124,17 @@ export function getInvocationContext(): InvocationContextV1 | undefined {
 
 export function getChannelWorkflowOrigin(): ChannelWorkflowOrigin | undefined {
   return invocationContextStorage.getStore()?.channelWorkflowOrigin;
+}
+
+/**
+ * Whether this turn must keep workflows in the foreground: its Channel
+ * origin cannot receive a background result, or it is a Channel session
+ * turn with no origin at all.
+ */
+export function isBackgroundWorkflowBlocked(): boolean {
+  const store = invocationContextStorage.getStore();
+  return (
+    store?.backgroundWorkflowBlocked === true ||
+    store?.channelWorkflowOrigin?.backgroundWorkflowBlocked === true
+  );
 }

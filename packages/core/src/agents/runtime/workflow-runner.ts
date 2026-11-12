@@ -20,7 +20,7 @@ import {
   createAbortController,
   createChildAbortController,
 } from '../../utils/abortController.js';
-import { getChannelWorkflowOrigin } from '../../utils/invocation-context.js';
+import { isBackgroundWorkflowBlocked } from '../../utils/invocation-context.js';
 import {
   getWorkflowTaskMutationKey,
   isTerminalWorkflowStatus,
@@ -174,7 +174,8 @@ export type WorkflowRunSettlement =
  * background run could be neither seen nor stopped. Trust is the resolved
  * workspace decision (`isTrustedFolder`), the one the serve layer applies
  * to the tasks view and cancel; a mock or host that cannot answer counts
- * as off.
+ * as off. A Channel turn that cannot deliver a background result
+ * (`isBackgroundWorkflowBlocked`) keeps its workflows in the foreground.
  */
 export function hostSupportsBackgroundWorkflows(
   config: Pick<
@@ -193,7 +194,7 @@ export function hostSupportsBackgroundWorkflows(
       config.isWorkflowsEnabled?.() === true &&
       config.getBareMode?.() !== true &&
       config.isTrustedFolder?.() === true &&
-      getChannelWorkflowOrigin()?.backgroundWorkflowBlocked !== true
+      !isBackgroundWorkflowBlocked()
     );
   }
   return config.isInteractive?.() === true;

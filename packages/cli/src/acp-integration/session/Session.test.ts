@@ -7649,6 +7649,71 @@ describe('Session', () => {
     );
   });
 
+  it.each([
+    ['a session a channel drives', true],
+    ['a session no channel drives', false],
+  ])(
+    'blocks background workflows in an agent report turn of %s: %s',
+    async (_label, servesChannel) => {
+      const observeBlocked = vi.fn();
+      mockChat.sendMessageStream = vi.fn().mockImplementation(async () => {
+        observeBlocked(
+          core.isBackgroundWorkflowBlocked(),
+          core.getChannelWorkflowOrigin(),
+        );
+        return createEmptyStream();
+      });
+      (session as unknown as { servesChannel: boolean }).servesChannel =
+        servesChannel;
+      const callback = mockBackgroundTaskRegistry.setNotificationCallback.mock
+        .calls[0][0] as (
+        displayText: string,
+        modelText: string,
+        meta: { agentId: string; status: string },
+      ) => void;
+
+      callback('Background task completed.', '<task-notification/>', {
+        agentId: 'agent-1',
+        status: 'completed',
+      });
+
+      await vi.waitFor(() =>
+        expect(observeBlocked).toHaveBeenCalledWith(servesChannel, undefined),
+      );
+    },
+  );
+
+  it('marks the session as channel-driven on a channel prompt and blocks an origin-less one', async () => {
+    const observeBlocked = vi.fn();
+    mockChat.sendMessageStream = vi.fn().mockImplementation(async () => {
+      observeBlocked(core.isBackgroundWorkflowBlocked());
+      return createEmptyStream();
+    });
+
+    await session.prompt({
+      sessionId: 'test-session-id',
+      prompt: [{ type: 'text', text: 'from Web Shell' }],
+    });
+    await session.prompt({
+      sessionId: 'test-session-id',
+      prompt: [{ type: 'text', text: 'from a channel, no origin' }],
+      _meta: { [CHANNEL_PROMPT_META_KEY]: true },
+    });
+    await session.prompt({
+      sessionId: 'test-session-id',
+      prompt: [{ type: 'text', text: 'from a channel chat' }],
+      _meta: {
+        [CHANNEL_PROMPT_META_KEY]: true,
+        [CHANNEL_WORKFLOW_ORIGIN_META_KEY]: channelWorkflowOrigin,
+      },
+    });
+
+    expect(observeBlocked.mock.calls).toEqual([[false], [true], [false]]);
+    expect(
+      (session as unknown as { servesChannel: boolean }).servesChannel,
+    ).toBe(true);
+  });
+
   it('adds terminal workflow status changes to the session history cache', () => {
     const callback = mockWorkflowRunRegistry.setStatusChangeCallback.mock
       .calls[0][0] as (entry: core.WorkflowTask) => void;

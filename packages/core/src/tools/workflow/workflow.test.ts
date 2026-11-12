@@ -1019,6 +1019,43 @@ await agent('scan package.json')
     ).toMatchObject({ run_in_background: true });
   });
 
+  // A cron, notification or runtime goal turn of a Channel session has no
+  // launch origin; a background result there would reach no chat.
+  it('keeps workflows in the foreground in a Channel turn with no launch origin', async () => {
+    const { config, registry } = configWithRegistry({ ...ACP, ...QUIET });
+    registry.setCompletionCallback(vi.fn());
+    const tool = new WorkflowTool(config);
+    const detached = tool.build({
+      script: 'return 1',
+      run_in_background: true,
+    });
+    runWithInvocationContext(
+      undefined,
+      () => {
+        expect(() => tool.build({ script: 'return 1' })).not.toThrow();
+        expect(() =>
+          tool.build({ script: 'return 1', run_in_background: true }),
+        ).toThrow(/no channel chat to report a background result to/i);
+      },
+      undefined,
+      true,
+    );
+    await expect(
+      runWithInvocationContext(
+        undefined,
+        () => detached.execute(live()),
+        undefined,
+        true,
+      ),
+    ).resolves.toMatchObject({
+      error: {
+        message: expect.stringContaining('no channel chat'),
+        type: ToolErrorType.EXECUTION_DENIED,
+      },
+    });
+    expect(registry.list()).toHaveLength(0);
+  });
+
   // The tool runs inside the turn's invocation context, so the Channel
   // target is read again when the invocation executes, not only at build.
   it('refuses at execute time a detached invocation for a Channel target that cannot receive it', async () => {

@@ -112,6 +112,7 @@ import {
 } from '../tools/tool-call.js';
 import {
   getChannelWorkflowOrigin,
+  isBackgroundWorkflowBlocked,
   getInvocationContext,
   runWithInvocationContext,
   type InvocationContextV1,
@@ -2373,6 +2374,7 @@ describe('CoreToolScheduler', () => {
       };
       let observedContext: InvocationContextV1 | undefined;
       let observedWorkflowOrigin: ReturnType<typeof getChannelWorkflowOrigin>;
+      let observedBackgroundWorkflowBlocked: boolean | undefined;
       let observedPromptId: string | undefined;
       let observedTodoWorkChainId: string | undefined;
       const tool = new MockTool({
@@ -2388,6 +2390,7 @@ describe('CoreToolScheduler', () => {
           expect(getHookExecutionOwner()).toEqual(hookOwner);
           observedContext = getInvocationContext();
           observedWorkflowOrigin = getChannelWorkflowOrigin();
+          observedBackgroundWorkflowBlocked = isBackgroundWorkflowBlocked();
           observedPromptId = promptIdContext.getStore();
           observedTodoWorkChainId = todoWorkChainContext.getStore();
           return textResult('ok');
@@ -2418,6 +2421,7 @@ describe('CoreToolScheduler', () => {
               ),
             ),
           workflowOrigin,
+          true,
         ),
       );
       const waiting = await waitForApproval(onToolCallsUpdate);
@@ -2434,6 +2438,7 @@ describe('CoreToolScheduler', () => {
 
       expect(observedContext).toEqual(invocationContext);
       expect(observedWorkflowOrigin).toEqual(workflowOrigin);
+      expect(observedBackgroundWorkflowBlocked).toBe(true);
       expect(observedPromptId).toBe('prompt-context');
       expect(observedTodoWorkChainId).toBe('mapped-work-chain');
     },

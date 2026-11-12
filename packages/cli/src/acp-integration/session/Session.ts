@@ -2797,6 +2797,15 @@ export class Session implements SessionContext {
   private currentShellNotificationActive = false;
   private currentNotificationWorkChainId?: string;
   private readonly channelTaskCaptures = new Set<ChannelTaskResponseCapture>();
+  /**
+   * Set by this session's first authenticated channel prompt. A cron,
+   * background-notification or runtime goal turn of such a session has no
+   * Channel launch origin, and a Channel drops a background workflow result
+   * without one, so those turns keep their workflows in the foreground.
+   * In memory only: a reloaded session relearns it on its next channel
+   * prompt.
+   */
+  private servesChannel = false;
   private readonly persistedBackgroundNotificationTaskIds = new Set<string>();
   private readonly backgroundNotificationAcceptances = new Map<
     string,
@@ -6928,6 +6937,14 @@ export class Session implements SessionContext {
           params._meta?.[CHANNEL_WORKFLOW_ORIGIN_META_KEY],
         )
       : undefined;
+    if (channelTurn) this.servesChannel = true;
+    // A channel prompt without a usable origin has no chat to report a
+    // background workflow to; neither has a runtime goal turn of a session
+    // a channel drives. A user's own prompt from another client keeps
+    // background runs: that client receives their results.
+    const backgroundWorkflowBlocked = channelTurn
+      ? !channelWorkflowOrigin
+      : this.servesChannel && goalTurn?.origin === 'runtime';
     const execute = () =>
       runWithInvocationContext(
         invocationContext,
@@ -6948,6 +6965,7 @@ export class Session implements SessionContext {
             }
           }),
         channelWorkflowOrigin,
+        backgroundWorkflowBlocked,
       );
     return goalTurn
       ? goalTurnContext.run(goalTurn.permit, execute)
@@ -12898,10 +12916,14 @@ export class Session implements SessionContext {
     // reason to leave the Goal store as the notification drain: a cron turn
     // is never a Goal turn, whatever lineage it was scheduled from.
     return goalTurnContext.exit(() =>
-      runWithInvocationContext(undefined, () =>
-        sessionIdContext.run(this.config.getSessionId(), () =>
-          this.#executeCronPromptInner(item),
-        ),
+      runWithInvocationContext(
+        undefined,
+        () =>
+          sessionIdContext.run(this.config.getSessionId(), () =>
+            this.#executeCronPromptInner(item),
+          ),
+        undefined,
+        this.servesChannel,
       ),
     );
   }
@@ -14252,6 +14274,9 @@ export class Session implements SessionContext {
                         ),
                       ),
                     item.channelWorkflowOrigin,
+                    // A workflow's own report turn reuses its launch
+                    // origin; any other report has none to give.
+                    this.servesChannel && !item.channelWorkflowOrigin,
                   ),
                 ),
               );

@@ -43,7 +43,10 @@ import { ToolNames, ToolDisplayNames } from '../tool-names.js';
 // error code rather than an ad-hoc bare `{ message }` object.
 import { ToolErrorType } from '../tool-error.js';
 import type { Config } from '../../config/config.js';
-import { getChannelWorkflowOrigin } from '../../utils/invocation-context.js';
+import {
+  getChannelWorkflowOrigin,
+  isBackgroundWorkflowBlocked,
+} from '../../utils/invocation-context.js';
 import type { WorkflowAgentDispatch } from '../../agents/runtime/workflow-orchestrator.js';
 import {
   DEFAULT_MAX_AGENTS_PER_RUN,
@@ -982,6 +985,9 @@ function getBackgroundWorkflowError(config: Config): string | null {
     }
     if (getChannelWorkflowOrigin()?.backgroundWorkflowBlocked === true) {
       return 'WorkflowTool: this channel target cannot receive background results. Omit `run_in_background` to run the workflow in the foreground.';
+    }
+    if (isBackgroundWorkflowBlocked()) {
+      return 'WorkflowTool: this turn has no channel chat to report a background result to. Omit `run_in_background` to run the workflow in the foreground.';
     }
     return config.getExperimentalZedIntegration?.() === true
       ? 'WorkflowTool: `run_in_background` is not available in this session: its workflow controls are off (workflows disabled, bare mode, or an untrusted workspace), so a background run could not be watched or stopped.'
