@@ -92,6 +92,12 @@ describe('Hosted Harness private contract', () => {
       createHostedHarnessContract(DIGEST, BOOT_ID, ['hosted-workspace-shell/1'])
         .lifecycleV2Profiles,
     ).toEqual(['hosted-workspace-shell/1']);
+    // shell/3 (the self-paced loop revision) is a supported lifecycle-v2
+    // profile; the retired shell/2 below must stay refused.
+    expect(
+      createHostedHarnessContract(DIGEST, BOOT_ID, ['hosted-workspace-shell/3'])
+        .lifecycleV2Profiles,
+    ).toEqual(['hosted-workspace-shell/3']);
     expect(() =>
       createHostedHarnessContract(DIGEST, BOOT_ID, [
         'hosted-workspace-shell/2',

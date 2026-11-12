@@ -205,7 +205,6 @@
                             </includes>
                             <systemPropertyVariables>
                                 <managed.artifact.version>${project.version}</managed.artifact.version>
-                                <managed.operator.tools.enabled>${managed.operator-tools.attach}</managed.operator.tools.enabled>
                                 <managed.artifact.directory>${managed.module.root}/server/target</managed.artifact.directory>
                             </systemPropertyVariables>
                         </configuration>

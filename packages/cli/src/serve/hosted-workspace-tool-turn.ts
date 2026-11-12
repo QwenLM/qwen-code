@@ -70,6 +70,7 @@ import {
 import {
   HOSTED_WORKSPACE_FILE_PROFILE,
   HOSTED_WORKSPACE_SHELL_PROFILE,
+  HOSTED_WORKSPACE_SHELL_PROFILE_V3,
   HOSTED_WORKSPACE_FILE_PROFILE_V2,
   HOSTED_WORKSPACE_FILE_PROFILE_V3,
   HOSTED_WORKSPACE_READ_PROFILE,
@@ -80,6 +81,10 @@ import {
   isHostedWorkspaceReadProfile,
   type HostedWorkspaceToolProfile,
 } from './hosted-workspace-profiles.js';
+import {
+  LoopWakeupError,
+  type HostedLoopSession,
+} from './hosted-loop-session.js';
 import type { FunctionDeclaration, Part } from '@google/genai';
 import {
   HOSTED_PUBLIC_PLAN_TOOL,
@@ -790,6 +795,66 @@ export const HOSTED_TODO_WRITE_TOOL: FunctionDeclaration = {
     additionalProperties: false,
   },
 };
+// Self-paced /loop: schedule the next wakeup of a self-paced loop. The
+// continuation is future model input, so the arm is vetted by the turn's
+// permission classifier and gated by qwen.managed-agent.loop.enabled.
+export const HOSTED_LOOP_WAKEUP_TOOL: FunctionDeclaration = {
+  name: 'loop_wakeup',
+  description:
+    'Schedule when to resume work in a self-paced loop iteration (always pass the `prompt` arg). Call this before ending the turn to keep the loop alive; omit the call to end the loop. One-shot and durable — it survives a Harness restart. A self-paced wakeup chain may run for at most 24h. When a background task you started will wake you on its own, keep this wakeup as a long fallback heartbeat rather than a poll.',
+  parametersJsonSchema: {
+    type: 'object',
+    properties: {
+      delaySeconds: {
+        type: 'number',
+        description:
+          'Seconds from now to wake up. Clamped to [60, 3600]. Use 60-270s only when actively polling external state that nothing else reports; when a background task will wake you via a notification, use 1200-1800s as a fallback. With no specific signal to watch, default to 1200s+.',
+      },
+      prompt: {
+        type: 'string',
+        maxLength: 10000,
+        description:
+          'Continuation prompt to enqueue when the wakeup fires. Prefix with `/loop` so the next firing re-invokes the loop skill.',
+      },
+      reason: {
+        type: 'string',
+        description:
+          'One short sentence explaining the chosen delay. Shown to the user. Be specific.',
+      },
+    },
+    required: ['delaySeconds', 'prompt'],
+    additionalProperties: false,
+  },
+};
+// The union cron list/cancel surface (decision 8), shared with the
+// fixed-interval sibling: this slice lists and cancels the pending loop
+// wakeup; the sibling's cron jobs join the same two tools when it lands.
+export const HOSTED_CRON_LIST_TOOL: FunctionDeclaration = {
+  name: 'cron_list',
+  description:
+    'List the pending loop wakeups scheduled via loop_wakeup (and, once available, cron jobs). Shows each wakeup’s id, fire time, and continuation prompt.',
+  parametersJsonSchema: {
+    type: 'object',
+    properties: {},
+    additionalProperties: false,
+  },
+};
+export const HOSTED_CRON_DELETE_TOOL: FunctionDeclaration = {
+  name: 'cron_delete',
+  description:
+    'Cancel a pending loop wakeup scheduled via loop_wakeup (or, once available, a cron job) by its id. A wakeup whose turn already started cannot be cancelled.',
+  parametersJsonSchema: {
+    type: 'object',
+    properties: {
+      id: {
+        type: 'string',
+        description: 'The id returned by loop_wakeup (loop:<wakeupId>).',
+      },
+    },
+    required: ['id'],
+    additionalProperties: false,
+  },
+};
 // #13753 I3: the read profile of a snapshot child, which reads a frozen copy
 // of its parent's Workspace. Nothing here writes, and the turn refuses any
 // call it does not declare.
@@ -816,6 +881,9 @@ export const HOSTED_INPUT_PREVIEW_TOOLS: readonly string[] = [
   'edit',
   'run_shell_command',
   'todo_write',
+  'loop_wakeup',
+  'cron_list',
+  'cron_delete',
   ...HOSTED_MEMORY_TOOLS,
   'agent',
   'send_message',
@@ -1859,6 +1927,9 @@ interface HostedPreparedRequest {
   planExit?: boolean;
   question?: boolean;
   todo?: boolean;
+  loop?: boolean;
+  cronList?: boolean;
+  cronDelete?: boolean;
   memory?: boolean;
 }
 
@@ -1872,6 +1943,9 @@ function skipsRuntimeBroker(request: HostedPreparedRequest): boolean {
       request.question ||
       request.skill ||
       request.todo ||
+      request.loop ||
+      request.cronList ||
+      request.cronDelete ||
       request.memory ||
       request.workflow ||
       request.clientFiles,
@@ -2012,6 +2086,8 @@ export class HostedWorkspaceToolTurn {
   private readonly foregroundOnly: boolean;
   private readonly childRuns?: HostedChildRunSession;
   private readonly monitors?: HostedMonitorSession;
+  private readonly loops?: HostedLoopSession;
+  private readonly wakeKick?: () => void;
   private readonly backgroundLane?: HostedShellTurnOptions;
   private readonly childAgents?: HostedChildAgentSession;
   private childModelRoute?: { modelId: string; route: PublicChildModelRoute };
@@ -2100,6 +2176,8 @@ export class HostedWorkspaceToolTurn {
       childDepth?: number;
       childRuns?: HostedChildRunSession;
       monitors?: HostedMonitorSession;
+      loops?: HostedLoopSession;
+      wakeKick?: () => void;
       backgroundLane?: HostedShellTurnOptions;
       childAgents?: {
         readonly funnel: HostedChildAgentSession;
@@ -2154,6 +2232,8 @@ export class HostedWorkspaceToolTurn {
     this.context = extras?.context;
     this.childRuns = this.foregroundOnly ? undefined : extras?.childRuns;
     this.monitors = this.foregroundOnly ? undefined : extras?.monitors;
+    this.loops = this.foregroundOnly ? undefined : extras?.loops;
+    this.wakeKick = this.foregroundOnly ? undefined : extras?.wakeKick;
     this.backgroundLane = this.foregroundOnly
       ? undefined
       : extras?.backgroundLane;
@@ -2188,9 +2268,11 @@ export class HostedWorkspaceToolTurn {
         this.mcp ||
         this.memberPlanMode ||
         this.childDepth !== 0 ||
-        !['hosted-workspace-files/1', 'hosted-workspace-shell/1'].includes(
-          this.profile ?? '',
-        ))
+        ![
+          'hosted-workspace-files/1',
+          'hosted-workspace-shell/1',
+          'hosted-workspace-shell/3',
+        ].includes(this.profile ?? ''))
     )
       throw new Error('Public Plan mode is unavailable for this Session.');
     this.publication =
@@ -2237,14 +2319,27 @@ export class HostedWorkspaceToolTurn {
   }
 
   private get fileBackupsEnabled(): boolean {
-    return !this.mcp || this.profile === 'hosted-workspace-shell/1';
+    return (
+      !this.mcp ||
+      this.profile === HOSTED_WORKSPACE_SHELL_PROFILE ||
+      this.profile === HOSTED_WORKSPACE_SHELL_PROFILE_V3
+    );
   }
 
   private declaresTodoTool(): boolean {
     return (
       this.profile === HOSTED_WORKSPACE_FILE_PROFILE_V3 ||
-      this.profile === HOSTED_WORKSPACE_SHELL_PROFILE
+      this.profile === HOSTED_WORKSPACE_SHELL_PROFILE ||
+      this.profile === HOSTED_WORKSPACE_SHELL_PROFILE_V3
     );
+  }
+
+  private declaresLoopTool(): boolean {
+    return this.profile === HOSTED_WORKSPACE_SHELL_PROFILE_V3;
+  }
+
+  private declaresCronTools(): boolean {
+    return this.profile === HOSTED_WORKSPACE_SHELL_PROFILE_V3;
   }
 
   private questionsAdmitted(): boolean {
@@ -2264,6 +2359,7 @@ export class HostedWorkspaceToolTurn {
         HOSTED_WORKSPACE_FILE_PROFILE_V2,
         HOSTED_WORKSPACE_FILE_PROFILE_V3,
         HOSTED_WORKSPACE_SHELL_PROFILE,
+        HOSTED_WORKSPACE_SHELL_PROFILE_V3,
       ].includes(this.profile ?? HOSTED_WORKSPACE_FILE_PROFILE)
     );
   }
@@ -2434,6 +2530,8 @@ export class HostedWorkspaceToolTurn {
     const skill = this.skills?.declaration();
     const todoTool = this.declaresTodoTool();
     const clientFilesTools = this.clientFilesDeclarations();
+    const loopTool = this.declaresLoopTool();
+    const cronTools = this.declaresCronTools();
     this.advertised = [
       ...[
         ...(this.publication || this.shell
@@ -2441,6 +2539,8 @@ export class HostedWorkspaceToolTurn {
           : [...HOSTED_WORKSPACE_FILE_TOOLS, HOSTED_WEB_FETCH_TOOL]),
         ...(search ? [HOSTED_GLOB_TOOL] : []),
         ...(todoTool ? [HOSTED_TODO_WRITE_TOOL] : []),
+        ...(loopTool ? [HOSTED_LOOP_WAKEUP_TOOL] : []),
+        ...(cronTools ? [HOSTED_CRON_LIST_TOOL, HOSTED_CRON_DELETE_TOOL] : []),
       ]
         .filter((tool) => tool.name !== 'monitor' || this.monitorsAdmitted())
         .map((declaration) => {
@@ -3402,6 +3502,9 @@ export class HostedWorkspaceToolTurn {
         // its error, so its committed answer is its own dispatch evidence.
         (((call.name === 'skill' && this.skills !== undefined) ||
           (call.name === 'todo_write' && this.declaresTodoTool()) ||
+          (call.name === 'loop_wakeup' && this.declaresLoopTool()) ||
+          (call.name === 'cron_list' && this.declaresCronTools()) ||
+          (call.name === 'cron_delete' && this.declaresCronTools()) ||
           (this.memory !== undefined && isHostedMemoryTool(call.name)) ||
           HOSTED_TEAM_TOOL_NAMES.includes(call.name) ||
           (call.name === 'exit_plan_mode' &&
@@ -4609,6 +4712,35 @@ export class HostedWorkspaceToolTurn {
           const check = checkHostedTodoWriteInput(call.args);
           input = check.input;
           if (check.error) validationError = check.error;
+        } else if (call.name === 'loop_wakeup') {
+          const args = call.args;
+          const delaySeconds = args['delaySeconds'];
+          const prompt = args['prompt'];
+          const reason = args['reason'];
+          if (typeof delaySeconds !== 'number') {
+            validationError = 'loop_wakeup requires a numeric delaySeconds.';
+          } else if (typeof prompt !== 'string' || !prompt.trim()) {
+            validationError = 'loop_wakeup requires a nonempty prompt.';
+          } else if (reason !== undefined && typeof reason !== 'string') {
+            validationError = 'loop_wakeup reason must be a string.';
+          }
+          // canonicalJson refuses undefined values, so an absent reason must
+          // be omitted, not carried as `reason: undefined`.
+          input = {
+            delaySeconds,
+            prompt,
+            ...(reason === undefined ? {} : { reason }),
+          };
+        } else if (call.name === 'cron_list') {
+          input = {};
+        } else if (call.name === 'cron_delete') {
+          const id = call.args['id'];
+          if (typeof id !== 'string' || !id.trim()) {
+            validationError = 'cron_delete requires a nonempty id.';
+          }
+          // The funnel cancels by exact id, so dispatch the trimmed id the
+          // nonempty check validated — a padded id must not silently no-op.
+          input = { id: typeof id === 'string' ? id.trim() : id };
         } else if (call.name === 'monitor') {
           const args = call.args;
           const unsupportedKey = Object.keys(args).find(
@@ -5137,6 +5269,9 @@ export class HostedWorkspaceToolTurn {
           planExit,
           question: call.name === 'ask_user_question',
           todo: call.name === 'todo_write',
+          loop: mcpInput === undefined && call.name === 'loop_wakeup',
+          cronList: mcpInput === undefined && call.name === 'cron_list',
+          cronDelete: mcpInput === undefined && call.name === 'cron_delete',
           memory: this.memory !== undefined && isHostedMemoryTool(call.name),
         };
       });
@@ -5246,7 +5381,10 @@ export class HostedWorkspaceToolTurn {
           !request.skill &&
           !request.todo &&
           !request.memory &&
-          !request.clientFiles,
+          !request.clientFiles &&
+          !request.loop &&
+          !request.cronList &&
+          !request.cronDelete,
       )
     )
       await waitForTurn(this.warmed, signal);
@@ -5271,7 +5409,10 @@ export class HostedWorkspaceToolTurn {
           !request.skill &&
           !request.todo &&
           !request.memory &&
-          request.clientFiles !== true,
+          request.clientFiles !== true &&
+          !request.loop &&
+          !request.cronList &&
+          !request.cronDelete,
       )
     ) {
       // Acquisition may have taken effect even when its reply is lost.
@@ -6232,6 +6373,115 @@ export class HostedWorkspaceToolTurn {
           if (!this.messageFitsInline('tool_result', converted, model))
             throw new Error(
               'Hosted Todo result exceeds the inline Session Store limit.',
+            );
+          await this.commit('tool_result', converted, model);
+          responses.push(...converted);
+          continue;
+        }
+        if (request.loop) {
+          let converted: Part[];
+          try {
+            const arm = await this.loops!.arm({
+              delaySeconds: request.input['delaySeconds'] as number,
+              prompt: request.input['prompt'] as string,
+              reason: request.input['reason'] as string | undefined,
+            });
+            this.wakeKick?.();
+            converted = convertToFunctionResponse(
+              request.call.name,
+              request.call.callId,
+              [
+                {
+                  text: `Loop wakeup ${arm.id} scheduled for ${new Date(arm.fireAt).toISOString()} (in ${arm.clampedDelaySeconds}s).`,
+                },
+              ],
+            );
+            const response = converted[0]?.functionResponse;
+            if (!response)
+              throw new Error('Hosted loop wakeup result is missing.');
+            response.response = {
+              ...response.response,
+              ...arm,
+              executionStatus: 'success',
+            };
+          } catch (cause) {
+            if (!(cause instanceof LoopWakeupError)) throw cause;
+            converted = convertToFunctionErrorResponse(
+              request.call.name,
+              request.call.callId,
+              [],
+              cause.message,
+            );
+          }
+          if (!this.messageFitsInline('tool_result', converted, model))
+            throw new Error(
+              'Hosted loop wakeup result exceeds the inline Session Store limit.',
+            );
+          await this.commit('tool_result', converted, model);
+          responses.push(...converted);
+          continue;
+        }
+        if (request.cronList) {
+          const wakeups = await this.loops!.list();
+          const text =
+            wakeups.length === 0
+              ? 'No active cron jobs or loop wakeups.'
+              : wakeups
+                  .map(
+                    (wakeup) =>
+                      `${wakeup.id} — wakeup at ${
+                        wakeup.fireAt === null
+                          ? 'now'
+                          : new Date(wakeup.fireAt).toISOString()
+                      } (one-shot) [durable]: ${wakeup.prompt}`,
+                  )
+                  .join('\n');
+          const converted = convertToFunctionResponse(
+            request.call.name,
+            request.call.callId,
+            [{ text }],
+          );
+          const response = converted[0]?.functionResponse;
+          if (!response) throw new Error('Hosted cron_list result is missing.');
+          response.response = {
+            ...response.response,
+            wakeups,
+            executionStatus: 'success',
+          };
+          if (!this.messageFitsInline('tool_result', converted, model))
+            throw new Error(
+              'Hosted cron_list result exceeds the inline Session Store limit.',
+            );
+          await this.commit('tool_result', converted, model);
+          responses.push(...converted);
+          continue;
+        }
+        if (request.cronDelete) {
+          const id = request.input['id'] as string;
+          const cancelled = await this.loops!.cancel(id);
+          this.wakeKick?.();
+          const converted = convertToFunctionResponse(
+            request.call.name,
+            request.call.callId,
+            [
+              {
+                text: cancelled
+                  ? `Cancelled ${id}.`
+                  : `No pending wakeup ${id} to cancel.`,
+              },
+            ],
+          );
+          const response = converted[0]?.functionResponse;
+          if (!response)
+            throw new Error('Hosted cron_delete result is missing.');
+          response.response = {
+            ...response.response,
+            cancelled,
+            executionStatus: 'success',
+          };
+          if (!this.messageFitsInline('tool_result', converted, model))
+            throw new Error(
+              'Hosted cron_delete result exceeds the inline Session Store limit.',
             );
           await this.commit('tool_result', converted, model);
           responses.push(...converted);
@@ -9329,6 +9579,10 @@ export class HostedWorkspaceToolTurn {
           (request.call.name === 'skill' && this.skills !== undefined) ||
           (request.memory && HOSTED_MEMORY_READS.has(request.call.name)) ||
           this.hookAllowed.has(request.call.callId) ||
+          // The arm's funnel admission review is the single classification
+          // (decision 9 replaces the interactive dialog); classifying here too
+          // would double-gate every tick and lose the durable admission record.
+          request.loop ||
           !hostedApprovalAsks(settings, request.call.name, globProfile)
         )
           continue;

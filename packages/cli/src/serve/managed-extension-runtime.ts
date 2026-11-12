@@ -1018,6 +1018,7 @@ function validateExtensionToolProfile(
   if (profile === undefined) return;
   const shell =
     profile === 'hosted-workspace-shell/1' ||
+    profile === 'hosted-workspace-shell/3' ||
     profile === 'hosted-workspace-team-lead/1';
   const mcp = shell || profile === 'hosted-workspace-mcp/1';
   if (!mcp && Object.keys(value.mcpServers).length)

@@ -624,7 +624,7 @@ class HostedHarnessClientTest {
     @org.junit.jupiter.params.provider.ValueSource(strings = {"effects", "prepare_resources", "settle_resources"})
     void lifecycleV2RequiresExactCapabilityAndReceiptIdentity(String phase) {
         capabilitiesBody.set(capabilitiesJson(DIGEST, BOOT_ID).replace("\"hostedHarness\":{",
-                "\"hostedHarness\":{\"lifecycleProtocolVersion\":1,\"lifecycleV2Profiles\":[\"hosted-workspace-shell/1\"],"));
+                "\"hostedHarness\":{\"lifecycleProtocolVersion\":1,\"lifecycleV2Profiles\":[\"hosted-workspace-shell/1\",\"hosted-workspace-shell/3\"],"));
         createSessionRoute();
         AtomicInteger calls = new AtomicInteger();
         AtomicBoolean wrongPhase = new AtomicBoolean();
@@ -644,6 +644,10 @@ class HostedHarnessClientTest {
                     "sessionKey", Map.of("tenantId", "tenant", "workspaceId", "workspace", "sessionId", SESSION_ID),
                     "authority", Map.of("operationId", "close-2", "claimGeneration", 3));
             assertEquals("close-2", client.settleLifecycle(session, request).get("operationId"));
+            // The loop revision shell/3 is a public Shell on lifecycle v2 too.
+            var shell3 = new java.util.LinkedHashMap<>(request);
+            shell3.put("toolProfile", "hosted-workspace-shell/3");
+            assertEquals("close-2", client.settleLifecycle(session, shell3).get("operationId"));
             wrongPhase.set(true);
             // The Harness answered 200 with a mismatched receipt: a
             // post-answer failure, not a pre-send protocol refusal.
@@ -653,7 +657,7 @@ class HostedHarnessClientTest {
             assertThrows(DaemonProtocolException.class, () -> client.settleLifecycle(session, unsupported));
             unsupported.put("protocolVersion", 3);
             assertThrows(DaemonProtocolException.class, () -> client.settleLifecycle(session, unsupported));
-            assertEquals(2, calls.get());
+            assertEquals(3, calls.get());
         }
     }
 

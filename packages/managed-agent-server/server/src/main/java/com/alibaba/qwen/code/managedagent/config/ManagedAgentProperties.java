@@ -68,6 +68,7 @@ public class ManagedAgentProperties
     private final Memory memory = new Memory();
     private final ToolPublication toolPublication = new ToolPublication();
     private final SessionResources sessionResources = new SessionResources();
+    private final ObjectStorage objectStorage = new ObjectStorage();
     private final Artifacts artifacts = new Artifacts();
     private final Extensions extensions = new Extensions();
     private final ManagedExtensions managedExtensions = new ManagedExtensions();
@@ -828,6 +829,12 @@ public class ManagedAgentProperties
         private int packMaxTransactions = 4096;
         @DurationUnit(ChronoUnit.SECONDS)
         private Duration deletionGrace = Duration.ofHours(72);
+    }
+
+    @Getter
+    @Setter
+    public static class ObjectStorage {
+        private boolean enabled;
     }
 
     @Getter
