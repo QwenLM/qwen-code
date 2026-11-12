@@ -1120,7 +1120,7 @@ describe('ci flaky rerun patrol', () => {
     // before redactLog would concatenate `x` onto the token and leak it. The
     // strip must also cover backspace and friends, not just CR.
     const evidence = skillLog(
-      '##[error]Downloading pkg 42% x\rnpm_ABCDEFGHIJKLMNOPQRSTUV0123 installed\b\bSPOOFED\x0b\n',
+      '##[error]Downloading pkg 42% x\rnpm_ABCDEFGHIJKLMNOPQRSTUV0123 installed\b\bSPOOFED\x0b\u202E\n',
     );
     expect(evidence).toContain('[redacted]');
     expect(evidence).not.toContain('npm_ABCDEFGHIJKLMNOPQRSTUV0123');
@@ -1128,6 +1128,18 @@ describe('ci flaky rerun patrol', () => {
     expect(evidence).not.toContain('\r');
     expect(evidence).not.toContain('\b');
     expect(evidence).not.toContain('\x0b');
+    expect(evidence).not.toContain('\u202E');
+  });
+
+  it('redacts a credential split by a control byte once the strip rejoins it', () => {
+    // A control INSIDE the token defeats \bnpm_… on the first pass (only the
+    // short prefix precedes it); deleting the control welds the fragments into
+    // a contiguous token, so a second redaction pass must still scrub it.
+    const evidence = skillLog(
+      '##[error]npm_\rABCDEFGHIJKLMNOPQRSTUV0123 done\n',
+    );
+    expect(evidence).toContain('[redacted]');
+    expect(evidence).not.toContain('npm_ABCDEFGHIJKLMNOPQRSTUV0123');
   });
 
   it('keeps fallback errors', () => {

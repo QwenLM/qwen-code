@@ -94,17 +94,23 @@ job id 直接来自检查的 `detailsUrl`（`…/actions/runs/<run>/job/<job>`�
    的假 `gh` 会复现该拒绝，因此缺标志即变红。同样的修复也落到巡逻自己的
    `GhClient.jobLog`（`.github/scripts/ci-flaky-rerun.mjs`）——它在当前 `gh` 下
    同样对日志盲；在此一并处理而非延后，使被复用的脱敏器的抓取真正可用。
-8. **终端控制字符在脱敏之后、于共享脱敏器内剥离。** `stripVTControlCharacters`
-   去掉转义序列却留下裸的 C0/C1 控制字符：由 fork 控制的日志行可借 `\r` 在终端
-   里视觉覆盖某一行开头，`\b`、`\x0b`、`\x0c`、DEL 与 C1 区间同样能重绘该行。
-   因此 `skillLog` 剥离 `[\x00-\x08\x0b-\x1f\x7f-\x9f]`（除 `\n` 与 `\t` 外的
-   全部）——但只在 `redactLog` 之后：锚定的密钥模式（`\bnpm_…`、`\bsk-…`、
-   `\beyJ…`、`\b<scheme>://`）需要裸 `\r` 提供的词边界，先剥离会把 `x\rnpm_…`
-   拼接成任何锚点都匹配不到的 token，让它在承诺已脱敏的前言下泄露。剥离位于
-   `skillLog`，因此同时覆盖采集器摘要与巡逻渲染的证据（巡逻唯一的 `jobLog`
-   调用方经过 `skillLog`）。两个兄弟抓取本身不变：`ci-log.ts` 的 `jobLog` 仍会
-   把裸控制字符写进 `.qwen/tmp/autofix-pr-<n>-ci-<run>.log`，巡逻的
-   `GhClient.jobLog` 也仍把它们返回给调用方。
+8. **终端控制字符在两遍脱敏之间、于共享脱敏器内剥离。** `stripVTControlCharacters`
+   去掉转义序列却留下裸的 C0/C1 控制字符与 Unicode Bidi 覆盖字符：由 fork 控制
+   的日志行可借 `\r` 在终端里视觉覆盖某一行开头，`\b`、`\x0b`、`\x0c`、DEL 与
+   C1 区间同样能重绘该行，Bidi*Control 集则能重排该行。因此 `skillLog` 剥离
+   `[\x00-\x08\x0b-\x1f\x7f-\x9f\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]`
+   （C0/DEL/C1 加上 `safeReason` 已在剥离的完整 Bidi_Control 集，保留 `\n` 与
+   `\t`）——置于两遍 `redactLog` 之间。第一遍在剥离之前：锚定的密钥模式
+   （`\bnpm*…`、`\bsk-…`、`\beyJ…`、`\b<scheme>://`）需要裸 `\r`提供的词边界，
+先剥离会把`x\rnpm*…` 拼接成任何锚点都匹配不到的 token。第二遍在剥离之后：
+凭据内部的控制字节（`npm*\rABC…`）会让第一遍的所有锚点失配，删除它又把碎片
+拼回成连续 token，仍须清理。剥离位于 `skillLog`，因此同时覆盖采集器摘要与
+巡逻渲染的证据（巡逻唯一的 `jobLog`调用方经过`skillLog`）。两个兄弟抓取
+本身不变：`ci-log.ts`的`jobLog`仍会把裸控制字符写进`.qwen/tmp/autofix-pr-<n>-ci-<run>.log`，巡逻的 `GhClient.jobLog`也仍把它们
+返回给调用方。一次性过渡成本：巡逻还把标记评论的键基于`skillLog` 的输出
+（`scan`里的`fingerprint(target, log)`），而 `alreadyHandled` 精确比对该键，
+   因此删除控制字符会重键 fingerprint——本次上线前写入的标记会失配一次，巡逻
+   重新分流该失败并发一条新标记，从下一条标记起自愈。
 9. **围栏不会被日志闭合。** 摘要的 Markdown 围栏长度大于其内部最长的反引号串，
    因此含反引号的日志行无法提前闭合围栏、把余下内容作为标记溢入
    `feedback.md`。
@@ -127,13 +133,14 @@ job id 直接来自检查的 `detailsUrl`（`…/actions/runs/<run>/job/<job>`�
   标记清洗、每个参数缺失的 usage 守卫，以及通过 PATH 上的假 `gh` 覆盖每条退化
   路径。假 `gh` 复现当前 gh 的转义序列拒绝（不传标志即 exit 1）与旧 gh 的
   `unknown flag`，因此渲染摘要的用例同时见证标志与脱 ANSI。另有用例端到端钉住
-  控制字符剥离：裸 `\r` 之后的密钥仍被脱敏（剥离在 `redactLog` 之后）、
-  backspace/C0/C1 被剥离而 tab 与换行保留、首个控制字符之后的文本被保留
-  （截断实现保持红）。
+  控制字符剥离：裸 `\r` 之后的密钥仍被脱敏（第一遍 `redactLog` 在剥离之前）、
+  backspace/C0/C1 与 Bidi 被剥离而 tab 与换行保留、首个控制字符之后的文本被
+  保留（截断实现保持红）。
 - `scripts/tests/ci-flaky-rerun.test.js`（vitest）：巡逻的 `GhClient.jobLog` 传
   标志、仅在 `unknown flag` 时回退、脱去 VT 控制字符，并向上抛出非拒绝类错误；
-  `skillLog` 在脱敏后剥离终端控制字符（裸 CR 后的密钥仍被脱敏，backspace 与
-  纵向制表符消失）。
+  `skillLog` 在两遍脱敏之间剥离终端控制字符与 Bidi 覆盖字符（裸 CR 后的密钥仍
+  被脱敏，backspace、纵向制表符与 Bidi 消失，被控制字符拆分的凭据在剥离拼合后
+  仍被脱敏）。
 - `scripts/tests/qwen-autofix-workflow.test.js`（vitest）：调用先于 checkout 且
   使用工作树路径；容错回退与 stderr 去向；段落位于仅名称列表与 gate rejection
   之间、且在去毒 echo 之前；两个 helper 测试列表的 CI 成员资格；af-161 指针与
@@ -143,16 +150,19 @@ job id 直接来自检查的 `detailsUrl`（`…/actions/runs/<run>/job/<job>`�
   workflow 钉子变红；去掉标志、脱 ANSI、脱控制字符、旧 gh 回退、把行数上限改回
   60、把围栏定长四反引号、把 usage 守卫收窄为 `&&`、渲染原始日志、去掉自车道
   排除、job 上限、去重，或加入 `CANCELLED`，都会让采集器测试变红；把控制字符
-  剥离移到脱敏之前、收窄为仅 `\r`、在首个控制字符处截断、或放宽到吞掉
-  `\n`/`\t`，都会让采集器或巡逻见证变红；去掉巡逻的标志会让其见证变红。
+  剥离移到第一遍脱敏之前、收窄为仅 `\r`、去掉 Bidi 区间、去掉第二遍脱敏、在
+  首个控制字符处截断、或放宽到吞掉 `\n`/`\t`，都会让采集器或巡逻见证变红；
+  去掉巡逻的标志会让其见证变红。
 - 因为改了 `ci.yml`，复跑 `scripts/tests/ci-platform-lanes.test.js`。
 
 ## 验收标准
 
 - 红 PR 的 `feedback.md` 带有失败步骤名，以及最多三个失败 job 的已脱敏摘要；
-  摘要在当前 `gh` 下确实渲染（传了标志），且没有原始 ANSI 或终端控制字符
-  （裸 CR、backspace、C0/C1）到达 `feedback.md` 或 step stdout。
-- job 日志中的任何密钥都不会到达 `feedback.md` 或 step stdout。
+  摘要在当前 `gh` 下确实渲染（传了标志），且没有原始 ANSI、终端控制字符
+  （裸 CR、backspace、C0/C1）或 Bidi 覆盖字符到达 `feedback.md` 或 step
+  stdout。
+- job 日志中的任何密钥都不会到达 `feedback.md` 或 step stdout，包括被控制字节
+  拆分、经剥离拼回成 token 的凭据。
 - 脚本缺失、rollup 不可读或 API 读取失败，绝不会让一轮失败。
 - 采集器及其导入的 helper 在切到 PR 分支之前、从可信 base 执行。
 - 两个 helper 测试列表都运行该行为套件；workflow 钉子、采集器测试与巡逻测试

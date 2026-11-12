@@ -419,21 +419,30 @@ describe('CLI', () => {
     assert.ok(!result.stdout.includes('npm_ABCDEFGHIJKLMNOPQRSTUV0123'));
   });
 
-  it('strips backspace and other C0/C1 controls, keeping tab and newline', () => {
+  it('strips backspace, C0/C1 and Bidi controls, keeping tab and newline', () => {
     // A \r-only strip leaves \b, \x0b, \x0c, DEL and the C1 range, which a
-    // terminal still applies to repaint the line. The wider class closes the
-    // whole family; \n and \t must survive (line structure and layout).
+    // terminal still applies to repaint the line, and the Bidi overrides that
+    // reorder it. The wider class closes both families; \n and \t must survive
+    // (line structure and layout).
     const result = runCli(
       { statusCheckRollup: [failedCheck()] },
       {
-        log: '##[error]AssertionError: real failure\b\b\bSPOOFED\ttail\x0b\x0c\x7f\x9f\n',
+        log: '##[error]AssertionError: real failure\b\b\bSPOOFED\ttail\x0b\x0c\x7f\x9f\u202E\u2066\n',
       },
     );
     assert.equal(result.status, 0, result.stderr);
     assert.ok(result.stdout.includes('real failure'));
     assert.ok(result.stdout.includes('SPOOFED'));
     assert.ok(result.stdout.includes('\ttail'));
-    for (const control of ['\b', '\x0b', '\x0c', '\x7f', '\x9f']) {
+    for (const control of [
+      '\b',
+      '\x0b',
+      '\x0c',
+      '\x7f',
+      '\x9f',
+      '\u202E',
+      '\u2066',
+    ]) {
       assert.ok(!result.stdout.includes(control));
     }
   });

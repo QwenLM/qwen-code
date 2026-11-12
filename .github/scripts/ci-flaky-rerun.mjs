@@ -225,14 +225,22 @@ function redactLog(log) {
 }
 
 export function skillLog(log) {
-  // Strip AFTER redaction: a bare \r supplies the word boundary redactLog's
-  // anchored patterns (\bnpm_…, \bsk-…, \beyJ…) need; stripping first would
-  // concatenate `x\rnpm_…` into a token no anchor matches. Keep \n (line
-  // selection) and \t; the rest of C0/DEL/C1 can repaint a terminal line.
-  const lines = redactLog(log)
-    // eslint-disable-next-line no-control-regex -- log text must not control the terminal
-    .replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, '')
-    .split('\n');
+  // Redact, strip, then redact again. The first pass runs BEFORE the strip so
+  // a bare \r still supplies the word boundary the anchored patterns
+  // (\bnpm_…, \bsk-…, \beyJ…) need (`x\rnpm_…` redacts). The strip drops the
+  // terminal controls (C0/DEL/C1, keeping \n and \t) plus the full Unicode
+  // Bidi_Control set — the same class safeReason drops — so a fork-controlled
+  // line can neither repaint nor reorder the excerpt. The second pass runs
+  // AFTER the strip: a control byte INSIDE a credential (`npm_\rABC…`) defeats
+  // every anchor on the first pass, and deleting it welds the fragments into a
+  // contiguous token that must still be scrubbed.
+  const lines = redactLog(
+    redactLog(log).replace(
+      // eslint-disable-next-line no-control-regex -- log text must not control the terminal
+      /[\x00-\x08\x0b-\x1f\x7f-\x9f\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]/g,
+      '',
+    ),
+  ).split('\n');
   const selected = new Set();
   const primary = new Set();
   const summary =
