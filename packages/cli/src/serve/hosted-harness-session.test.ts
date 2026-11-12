@@ -8,6 +8,11 @@ import { createHash, randomUUID } from 'node:crypto';
 import { getApiHistoryPromptId } from '@qwen-code/qwen-code-core/utils/api-history-metadata.js';
 import { CompressionStatus } from '@qwen-code/qwen-code-core/core/turn.js';
 import {
+  filterHostedTurnHistory,
+  normalizeHostedTurnRecords,
+} from './hosted-turn-history.js';
+import { buildSessionHistoryFromConversation } from '@qwen-code/qwen-code-core/services/session-api-history.js';
+import {
   mkdir,
   mkdtemp,
   readdir,
@@ -1020,6 +1025,24 @@ async function writeCancelledGroupWithLegacySnapshot(
     },
   });
   return snapshotId;
+}
+
+/** Rebuilds the api history the real runner would hand the model from the
+ * mocked runner's input (hosted-harness-model.ts initialMessages pipeline), so
+ * a witness can inspect the actual request rather than the raw record list. */
+function runnerApiHistory(input: {
+  history?: ChatRecord[];
+  excludedPromptIds?: ReadonlySet<string>;
+}) {
+  return filterHostedTurnHistory(
+    buildSessionHistoryFromConversation({
+      messages: normalizeHostedTurnRecords(
+        input.history ?? [],
+        input.excludedPromptIds,
+      ),
+    }).apiHistory,
+    input.excludedPromptIds,
+  );
 }
 
 describe('attributeShellReceipts', () => {
@@ -39535,7 +39558,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
     expect(created.status).toBe(200);
     const managed = (wakeDeps.last as { session: { managed: ManagedSession } })
       .session.managed;
-    const snapshotId = await writeCancelledGroupWithLegacySnapshot(managed);
+    await writeCancelledGroupWithLegacySnapshot(managed);
     const CALL_A = {
       name: 'write_file',
       callId: 'call-a',
@@ -39647,18 +39670,17 @@ describe('Hosted Harness Runtime turn takeover', () => {
           .resumeFromToolResults !== undefined,
     );
     expect(continuedCall).toBeDefined();
-    const input = continuedCall![0] as unknown as { history: ChatRecord[] };
-    // The cancelled group's raw records are dropped, and the snapshot's marks
-    // are bridged to journal turn ids so the runner excludes that group. A
-    // continue route that skips normalization leaves the legacy marks in place.
-    expect(
-      input.history.some((entry) => entry.daemonPromptId === 'prior-cancel'),
-    ).toBe(false);
-    expect(
-      input.history.find((entry) => entry.uuid === snapshotId)?.systemPayload,
-    ).toMatchObject({
-      promptIds: expect.arrayContaining(['prior-cancel', 'prior-complete']),
-    });
+    const input = continuedCall![0] as unknown as {
+      history: ChatRecord[];
+      excludedPromptIds?: ReadonlySet<string>;
+    };
+    // Inspect the api history the runner would actually send: the cancelled
+    // group's compressed copy must be absent while the completed group survives.
+    // Skipping the continue route's normalization leaves the snapshot's legacy
+    // marks unbridged, so the cancelled copy leaks into the request.
+    const api = JSON.stringify(runnerApiHistory(input));
+    expect(api).not.toContain('prior-cancel:background-agent');
+    expect(api).toContain('prior-complete:background-agent');
     await replacementHeaders(
       supertest(replacement).delete(`/session/${SESSION_ID}`),
     );
@@ -39695,7 +39717,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
       const managed = (
         wakeDeps.last as { session: { managed: ManagedSession } }
       ).session.managed;
-      const snapshotId = await writeCancelledGroupWithLegacySnapshot(managed);
+      await writeCancelledGroupWithLegacySnapshot(managed);
       const originalWrite = ManagedSessionRecordSink.prototype.write;
       let killed = false;
       vi.spyOn(ManagedSessionRecordSink.prototype, 'write').mockImplementation(
@@ -39780,11 +39802,14 @@ describe('Hosted Harness Runtime turn takeover', () => {
       const recovery = loaded.body._meta?.[
         'qwen.daemon.managedRuntimeRecovery'
       ] as { checkpointId: string; activationId: string };
-      let resumedHistory: ChatRecord[] | undefined;
+      let resumedInput:
+        | { history?: ChatRecord[]; excludedPromptIds?: ReadonlySet<string> }
+        | undefined;
       state.model.mockImplementationOnce(async (input) => {
-        resumedHistory = [
-          ...((input as { history?: ChatRecord[] }).history ?? []),
-        ];
+        resumedInput = input as {
+          history?: ChatRecord[];
+          excludedPromptIds?: ReadonlySet<string>;
+        };
         return { text: 'continued', model: 'test-model' };
       });
       const continued = await replacementHeaders(
@@ -39799,22 +39824,15 @@ describe('Hosted Harness Runtime turn takeover', () => {
           activationId: recovery.activationId,
         });
       expect(continued.status).toBe(200);
-      await vi.waitFor(() => expect(resumedHistory).toBeDefined(), {
+      await vi.waitFor(() => expect(resumedInput).toBeDefined(), {
         timeout: settleTimeoutMs(),
       });
       // Answering the team sibling re-derives the history; that refresh must
-      // bridge the snapshot's legacy marks just like the initial derivation.
-      expect(
-        resumedHistory!.some(
-          (entry) => entry.daemonPromptId === 'prior-cancel',
-        ),
-      ).toBe(false);
-      expect(
-        resumedHistory!.find((entry) => entry.uuid === snapshotId)
-          ?.systemPayload,
-      ).toMatchObject({
-        promptIds: expect.arrayContaining(['prior-cancel', 'prior-complete']),
-      });
+      // bridge the snapshot's legacy marks so the cancelled group's compressed
+      // copy stays out of the api history the runner would send.
+      const api = JSON.stringify(runnerApiHistory(resumedInput!));
+      expect(api).not.toContain('prior-cancel:background-agent');
+      expect(api).toContain('prior-complete:background-agent');
       await vi.waitFor(
         async () => {
           const status = await replacementHeaders(
