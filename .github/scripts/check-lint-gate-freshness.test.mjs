@@ -1121,19 +1121,24 @@ test('the depth guarantee that makes excluding Checkout safe stays in the slice'
 });
 
 test('a base-side runner-routing edit does not stale the branch', async () => {
-  // Mutation witness: removing ci.yml from NARROWINGS leaves this stale. This
-  // is the measured shape — 6 of 13 recent ci.yml commits were plumbing churn
-  // that asked every in-flight PR to rebase.
+  // Mutation witness: removing ci.yml from NARROWINGS leaves this stale, and so
+  // does dropping `runs-on` from CI_PLUMBING_JOB_KEYS. This is the measured
+  // shape — 6 of 13 recent ci.yml commits were plumbing churn that asked every
+  // in-flight PR to rebase. The edit is a REAL routing change: this case used to
+  // rewrite a step body instead, leaving the routing half of the headline
+  // benefit unpinned.
   const calls = [];
-  const branch = realCi;
-  const base = withStepText(
-    'Restore workspace ownership',
-    'sudo -n chown',
-    'sudo -n -E chown',
+  const { start, end } = jobSpan(realCi, 'lint_and_static');
+  const job = realCi.slice(start, end);
+  const patched = job.replace(
+    /^ {4}runs-on: .*$/m,
+    "    runs-on: 'ubuntu-22.04'",
   );
+  assert.notEqual(patched, job, 'runs-on anchor not found in lint_and_static');
+  const base = realCi.slice(0, start) + patched + realCi.slice(end);
   const stale = await findStaleGateFiles({
     ...CI_OPTS,
-    ...ciFetch(base, branch, calls),
+    ...ciFetch(base, realCi, calls),
   });
   assert.deepEqual(stale, []);
   // The containment lookup and its compare, then the two content reads — no
@@ -1146,6 +1151,128 @@ test('a base-side runner-routing edit does not stale the branch', async () => {
     1,
     'the narrowing must reuse the containment compare, not fetch a second one',
   );
+});
+
+test('a base-side hardening of a trust-boundary step stales the branch', async () => {
+  // `Restore workspace ownership` and `Clean stale .qwen before checkout`
+  // sanitise the workspace before checkout, and untrusted fork code runs in the
+  // job. They are deliberately NOT plumbing: a base-side hardening has to reach
+  // in-flight branches. A base-side edit to one of them must therefore keep the
+  // stale verdict — the case above used to assert the opposite on one of these
+  // two steps' bodies.
+  for (const [name, from, to] of [
+    ['Restore workspace ownership', 'sudo -n chown', 'sudo -n -E chown'],
+    [
+      'Clean stale .qwen before checkout',
+      'for stale_qwen in ',
+      'for stale_qwen in "$GITHUB_WORKSPACE/.qwen.root-orig2" ',
+    ],
+  ]) {
+    const base = withStepText(name, from, to);
+    assert.notEqual(base, realCi, `${name} fixture did not apply`);
+    const stale = await findStaleGateFiles({
+      ...CI_OPTS,
+      ...ciFetch(base, realCi),
+    });
+    assert.equal(stale.length, 1, `${name} hardening must stale the branch`);
+  }
+});
+
+test('trust-boundary steps stay out of the plumbing whitelist', () => {
+  for (const name of [
+    'Restore workspace ownership',
+    'Clean stale .qwen before checkout',
+  ]) {
+    assert.ok(!CI_PLUMBING_STEPS.has(name), `${name} must not be plumbing`);
+    assert.ok(
+      extractLintGateSlice(realCi).includes(name),
+      `${name} must be compared`,
+    );
+  }
+});
+
+test('the install prelude stays in the slice', () => {
+  // The whitelist is a list of what may be ignored, and the install prelude is
+  // not on it: an install a profile skips is a linter that profile never runs,
+  // and #16900/#16920 widened exactly that prelude. Adding its name to the
+  // whitelist would drop the body from the slice and no linter pattern would
+  // notice; this case is what reddens.
+  const slice = extractLintGateSlice(realCi);
+  assert.ok(!CI_PLUMBING_STEPS.has('Install dependencies'));
+  assert.ok(
+    slice.includes('DISK_SAMPLES="${RUNNER_TEMP}/disk-pressure-samples.log"'),
+    'the install prelude body must stay in the compared text',
+  );
+});
+
+test('a duplicated step name refuses the narrowing', () => {
+  // Two steps with one name make "which step is this" unanswerable, and the
+  // name is the only handle the whitelist has. YAML accepts the duplicate.
+  const patched = lintJobEdit((job) =>
+    job.replace(
+      "      - name: 'Run Prettier'",
+      "      - name: 'Checkout'\n        run: 'true'\n      - name: 'Run Prettier'",
+    ),
+  );
+  assert.notEqual(patched, realCi, 'fixture did not apply');
+  assert.equal(extractLintGateSlice(patched), null);
+});
+
+test('a base-side edit inside a non-gate job does not stale the branch', async () => {
+  // Mutation witness: adding `test_build` to CI_GATE_JOBS keeps every other
+  // case green while the slice grows by that whole lane. A non-gate job cannot
+  // change what lint checks, so an edit inside it must not ask for a rebase.
+  const { start, end } = jobSpan(realCi, 'test_build');
+  const job = realCi.slice(start, end);
+  // A KEPT step's body, not a dropped job key: if `test_build` ever entered
+  // CI_GATE_JOBS this edit would reach the slice and the verdict would go stale.
+  const patched = job.replace(
+    'echo "key=$(node scripts/ci-build-cache.mjs key)"',
+    'echo "key=$(node scripts/ci-build-cache.mjs --key)"',
+  );
+  assert.notEqual(patched, job, 'build-key anchor not found in test_build');
+  const base = realCi.slice(0, start) + patched + realCi.slice(end);
+  const stale = await findStaleGateFiles({
+    ...CI_OPTS,
+    ...ciFetch(base, realCi),
+  });
+  assert.deepEqual(stale, []);
+});
+
+test('a plumbing step name reused in the lint job cannot hide a new step', () => {
+  // `Select Linux runner` exists only in classify_pr and the duplicate-name
+  // guard is per job, so the lint job accepts a step under that name and the
+  // whitelist then elides its body. With `actions/checkout` and a `ref:`, the
+  // linted tree becomes main's while an unmarked slice stays identical.
+  const patched = lintJobEdit(
+    (job) =>
+      `${job}      - name: 'Select Linux runner'\n        uses: 'actions/checkout@v4'\n        with:\n          ref: 'refs/heads/main'\n`,
+  );
+  const slice = extractLintGateSlice(patched);
+  assert.ok(slice);
+  assert.notEqual(slice, extractLintGateSlice(realCi));
+  assert.ok(
+    slice.includes("[[dropped plumbing-step 'Select Linux runner']]"),
+    'the elided step must leave its name and position behind',
+  );
+});
+
+test('moving a plumbing step changes the compared text', () => {
+  // Position is part of the claim: the step that exports COREPACK_HOME and
+  // XDG_CACHE_HOME runs before the install, and a base-side move must not read
+  // as "nothing happened".
+  const moved = lintJobEdit((job) => {
+    const at = job.indexOf("      - name: 'Checkout'\n");
+    assert.ok(at > 0, 'Checkout step not found in the lint job');
+    const end = job.indexOf("\n      - name: '", at + 1);
+    const block = job.slice(at, end + 1);
+    const rest = job.slice(0, at) + job.slice(end + 1);
+    const insertAt = rest.indexOf("      - name: 'Create isolated HOME'");
+    return rest.slice(0, insertAt) + block + rest.slice(insertAt);
+  });
+  const slice = extractLintGateSlice(moved);
+  assert.ok(slice);
+  assert.notEqual(slice, extractLintGateSlice(realCi));
 });
 
 test('a base-side lint lane edit still stales the branch', async () => {

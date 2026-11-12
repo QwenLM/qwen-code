@@ -253,6 +253,13 @@ export function ignoreLines(text) {
  * prelude to close a post-merge lint gap. An install a profile skips is a
  * linter that profile never runs.
  *
+ * Two steps that harden the tree the linters read are deliberately NOT here:
+ * `Restore workspace ownership` and `Clean stale .qwen before checkout` sanitise
+ * the workspace before checkout, and untrusted fork code runs in this job. A
+ * base-side hardening of either is a security fix that must reach in-flight
+ * branches, and they are edited on incidents rather than on routing churn, so
+ * they stay in the slice and stale the branch like any other gate change.
+ *
  * So the list is a whitelist of what may be IGNORED, not of what matters:
  * forgetting to classify a new gate step keeps it in the slice and costs at
  * most today's over-rejection, while a wrong entry here would hide a real gate
@@ -272,8 +279,6 @@ export function ignoreLines(text) {
  */
 export const CI_PLUMBING_STEPS = new Set([
   'Create isolated HOME',
-  'Restore workspace ownership',
-  'Clean stale .qwen before checkout',
   'Recreate runner Git metadata',
   'Checkout',
   'Verify checkout includes expected head commit',

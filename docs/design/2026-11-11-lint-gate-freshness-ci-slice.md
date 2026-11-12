@@ -124,15 +124,20 @@ Plumbing is a whitelist of **step names**, not a guess about content:
 
 ```
 Create isolated HOME                            Configure persistent npm cache (self-hosted)
-Restore workspace ownership                     Configure npm for rate limiting
-Clean stale .qwen before checkout                Report npm cache usage (self-hosted)
-Recreate runner Git metadata                     Clean isolated HOME
-Checkout                                         Dump disk state on failure
-Verify checkout includes expected head commit    Upload disk-pressure samples
-Select Linux runner                              Disk floor gate (self-hosted)
-Verify trusted classifier checkout is clean
-Checkout trusted CI classifier
+Recreate runner Git metadata                     Configure npm for rate limiting
+Checkout                                         Report npm cache usage (self-hosted)
+Verify checkout includes expected head commit    Clean isolated HOME
+Select Linux runner                              Dump disk state on failure
+Verify trusted classifier checkout is clean      Upload disk-pressure samples
+Checkout trusted CI classifier                   Disk floor gate (self-hosted)
 ```
+
+Two steps that harden the tree the linters read are deliberately **not** on that
+list: `Restore workspace ownership` and `Clean stale .qwen before checkout`
+sanitise the workspace before checkout, and untrusted fork code runs in this job.
+A base-side hardening of either is a security fix that has to reach in-flight
+branches, and both are edited on incidents rather than on routing churn, so they
+stay in the slice and stale the branch like any other gate change.
 
 At the job level only `runs-on` and `timeout-minutes` are dropped, with their
 region. `env`, `if`, `needs`, `outputs`, `permissions` and `steps` stay: they
@@ -167,9 +172,8 @@ Line breaks are `\r\n`, `\n`, a lone `\r`, and the Unicode separators
 and dropped whatever followed a `#` on the far side of the CR — the #11117 →
 #11216 shape, with the flag flipped on the base and the branch certified fresh.
 
-Measured on the current file, the slice is 428 lines of 3560, 32 of them markers
-for the jobs and plumbing it excludes. The lint job's 42 steps contribute 29 (13
-are plumbing).
+Measured on the current file, the slice is 624 lines of 3560, 28 of them markers
+for the jobs and plumbing steps it excludes.
 
 ### Why the default is "keep"
 
@@ -339,8 +343,8 @@ head commit` stay outside the slice. A `ref:` edit on its own is caught: the
 
 ## Validation plan
 
-1. `node --test .github/scripts/check-lint-gate-freshness.test.mjs` — 71 cases,
-   including the 9 added by this revision. CI corroborates this on Linux through
+1. `node --test .github/scripts/check-lint-gate-freshness.test.mjs` — 78 cases,
+   including the 16 added by this revision. CI corroborates this on Linux through
    `Run .github/scripts helper tests`, which collects the suite from
    `${{ env.HELPER_TESTS }}`.
 2. Mutation witnesses: each of eight deliberate defects must redden the suite —

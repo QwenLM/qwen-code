@@ -73,15 +73,15 @@ plumbing 是**步骤名**白名单，而不是对内容的猜测：
 
 ```
 Create isolated HOME                            Configure persistent npm cache (self-hosted)
-Restore workspace ownership                     Configure npm for rate limiting
-Clean stale .qwen before checkout                Report npm cache usage (self-hosted)
-Recreate runner Git metadata                     Clean isolated HOME
-Checkout                                         Dump disk state on failure
-Verify checkout includes expected head commit    Upload disk-pressure samples
-Select Linux runner                              Disk floor gate (self-hosted)
-Verify trusted classifier checkout is clean
-Checkout trusted CI classifier
+Recreate runner Git metadata                     Configure npm for rate limiting
+Checkout                                         Report npm cache usage (self-hosted)
+Verify checkout includes expected head commit    Clean isolated HOME
+Select Linux runner                              Dump disk state on failure
+Verify trusted classifier checkout is clean      Upload disk-pressure samples
+Checkout trusted CI classifier                   Disk floor gate (self-hosted)
 ```
+
+有两个「加固被 lint 的树」的步骤刻意**不在**名单里：`Restore workspace ownership` 与 `Clean stale .qwen before checkout` 在 checkout 之前清理工作区，而该 job 会运行不可信的 fork 代码。base 侧对其中任一步的加固属于安全修复，必须传导到在途分支；而它们因事故而改、不因路由调整而改，因此留在切片里，像其他闸门改动一样让分支变 stale。
 
 在 job 层面只丢弃 `runs-on` 与 `timeout-minutes`，并连带丢弃它们的整段区域。`env`、`if`、`needs`、`outputs`、`permissions` 与 `steps` 保留：它们决定运行什么，而不是在哪里运行。`needs` 尤其保留，因此 base 侧改动「这条 lane 依赖哪些 job」会被比对到。
 
@@ -93,7 +93,7 @@ block scalar 正文正好相反：`run: |` 的内容是 runner 实际执行的�
 
 行分隔符为 `\r\n`、`\n`、单独的 `\r`，以及 Unicode 分隔符 `\u2028`/`\u2029`。只按 `\n` 切分会把 CR 结尾的文件读成一行，并丢掉 CR 另一侧 `#` 之后的所有内容——这正是 #11117 → #11216 的形态：base 上 flag 被改，分支却被认证为 fresh。
 
-在当前文件上测量，切片为 3560 行中的 428 行，其中 32 行是被排除的 job 与 plumbing 的标记。lint job 的 42 个步骤中贡献 29 个（13 个属 plumbing）。
+在当前文件上测量，切片为 3560 行中的 624 行，其中 28 行是被排除的 job 与 plumbing 步骤的标记。
 
 ### 为什么默认是「保留」
 
@@ -155,7 +155,7 @@ merge base 取自该检查**已经做过**的包含比较，因此 narrowing 不
 
 ## 验证计划
 
-1. `node --test .github/scripts/check-lint-gate-freshness.test.mjs`——71 个用例，含本次修订新增的 9 个。CI 通过 `Run .github/scripts helper tests` 在 Linux 上佐证这一点，该步骤从 `${{ env.HELPER_TESTS }}` 收集本测试。
+1. `node --test .github/scripts/check-lint-gate-freshness.test.mjs`——78 个用例，含本次修订新增的 16 个。CI 通过 `Run .github/scripts helper tests` 在 Linux 上佐证这一点，该步骤从 `${{ env.HELPER_TESTS }}` 收集本测试。
 2. mutation witness：八个刻意植入的缺陷都必须让测试变红——从 `NARROWINGS` 移除 `ci.yml`、把整个文件当作切片返回、只保留 header、比对 head 而非 merge base、吸收未命名步骤、把缺失 merge base 当作 fresh、去掉 linter 检查而只信任 plumbing 标签，以及把 job `env` 从切片中移除。
 3. 模型完备性 witness，每个对应一种「旧的行吸收模型会比对成相同」的形态：裸 `-` 步骤、步骤清单头部与步骤之间的注释、`run: |` 正文里以 `#` 开头的行、放在 `steps:` 之后的 job 级 key、只用一个 CR 隐藏被改 flag 的换行、以及锚点定义在被丢弃 job 而别名被保留步骤引用。每一例都必须返回 `null` 或不同的切片，且去掉对应守卫时该例变红。
 4. job 名单本身进入比对：base 侧新增一个 job 会改变切片，因此「把安装前置步骤拆进新 job、再让闸门 job `needs:` 它」这种形态会拒绝 narrowing。
