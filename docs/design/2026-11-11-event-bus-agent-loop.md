@@ -2,11 +2,11 @@
 
 [English](2026-11-11-event-bus-agent-loop.md) | [简体中文](2026-11-11-event-bus-agent-loop.zh-CN.md)
 
-- **Status**: PRs 1–3 merged (#16935 primitives, #16938 handlers, #16949 streaming evaluation). PR 4 adds the headless opt-in setting; no surface default changes.
+- **Status**: PRs 1–3 merged (#16935 primitives, #16938 handlers, #16949 streaming evaluation); PR 4 (headless opt-in setting) merged in #16994; no surface default changes.
 - **Date**: 2026-11-11, against `origin/main` `da270e434957`.
 - **Related**:
   - [Unified agent loop](2026-10-23-unified-agent-loop.md) — the accepted design this one re-architects internally; tracking issue #15327, accepted in #15343, headless merged in #15369, ACP model round merged in #15509;
-  - source of the ported architecture: the `v1.0.0-preview` branch at `587e3429cabf`, `packages/core/src/event-bus/` (19 files, 6,237 lines);
+  - source of the ported architecture: the `v1.0.0-preview` branch at `587e3429cabf`, `packages/core/src/event-bus/` (20 files, 6,237 lines);
   - the preview-port pilot issue #16896 (file-history hardening) — a separate, smaller track.
 
 ## Problem
