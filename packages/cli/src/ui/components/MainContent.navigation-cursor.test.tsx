@@ -10,7 +10,10 @@ import { act, render } from '@testing-library/react';
 import { forwardRef, useImperativeHandle } from 'react';
 import { MainContent } from './MainContent.js';
 import { AppContext } from '../contexts/AppContext.js';
-import { UIActionsContext } from '../contexts/UIActionsContext.js';
+import {
+  UIActionsContext,
+  type UIActions,
+} from '../contexts/UIActionsContext.js';
 import { UIStateContext, type UIState } from '../contexts/UIStateContext.js';
 import { OverflowProvider } from '../contexts/OverflowContext.js';
 import { KeypressProvider } from '../contexts/KeypressContext.js';
@@ -90,7 +93,9 @@ const makeUIState = (history: UIState['history']): UIState =>
 
 const mainContentTree = (uiState: UIState) => (
   <AppContext.Provider value={{ version: '1.2.3', startupWarnings: [] }}>
-    <UIActionsContext.Provider value={{ refreshStatic: vi.fn() }}>
+    <UIActionsContext.Provider
+      value={{ refreshStatic: vi.fn() } as unknown as UIActions}
+    >
       <UIStateContext.Provider value={uiState}>
         <KeypressProvider kittyProtocolEnabled={false}>
           <OverflowProvider>
