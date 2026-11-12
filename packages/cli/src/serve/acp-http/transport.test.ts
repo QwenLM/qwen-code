@@ -214,6 +214,8 @@ class FakeBridge {
   honorRequestedSessionId = true;
   spawnAttached = false;
   spawnClientId: string | undefined = 'client-1';
+  suspendClientWorkflowApprovals =
+    vi.fn<HttpAcpBridge['suspendClientWorkflowApprovals']>();
   loadRequests: Array<{
     sessionId: string;
     historyReplay?: string;
@@ -2651,6 +2653,252 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       });
     } finally {
       reader.close();
+    }
+  });
+
+  it('suspends the designated workflow voter after remote grace while its prompt runs', async () => {
+    const connId = await initialize();
+    await newSession(connId);
+    const conn = acpHandle!.registry.get(connId)!;
+    conn.preserveRunningPromptsOnDisconnect = true;
+    const originalStream = await openStream(connId, 'sess-1');
+    await waitUntil(() => bridge.subscribeCalls.length === 1);
+    const binding = conn.sessions.get('sess-1')!;
+    const resume = vi.fn();
+    bridge.suspendClientWorkflowApprovals.mockReturnValue(resume);
+    let finishPrompt!: () => void;
+    const promptFinished = new Promise<void>((resolve) => {
+      finishPrompt = resolve;
+    });
+    bridge.promptBehavior = async () => {
+      await promptFinished;
+      return { stopReason: 'end_turn' };
+    };
+    try {
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 5,
+        method: 'session/prompt',
+        params: {
+          sessionId: 'sess-1',
+          prompt: [{ type: 'text', text: 'Follow-up' }],
+        },
+      });
+      await waitUntil(() => binding.promptAbort !== undefined);
+      conn.detachSessionStream('sess-1', binding.stream!, 1);
+      await originalStream.body?.cancel().catch(() => {});
+      await waitUntil(
+        () => bridge.suspendClientWorkflowApprovals.mock.calls.length > 0,
+      );
+      expect(
+        bridge.suspendClientWorkflowApprovals,
+      ).toHaveBeenCalledExactlyOnceWith('sess-1', 'client-1');
+      expect(binding.promptAbort?.signal.aborted).toBe(false);
+      expect(conn.ownsSession('sess-1')).toBe(true);
+      expect(conn.pending.size).toBe(0);
+      const resumed = await openStream(connId, 'sess-1');
+      expect(resume).toHaveBeenCalledTimes(1);
+      await resumed.body?.cancel().catch(() => {});
+    } finally {
+      finishPrompt();
+      await originalStream.body?.cancel().catch(() => {});
+    }
+  });
+
+  it.each([
+    'disconnect',
+    'observer RPC error',
+    'forbidden vote',
+    'cross-connection vote',
+    'originator RPC error',
+  ] as const)(
+    'handles workflow approval copies independently through %s',
+    async (failure) => {
+      const vote = vi
+        .spyOn(bridge, 'respondToSessionPermission')
+        .mockReturnValue(true);
+      const ownerId = await initialize();
+      await newSession(ownerId);
+      const owner = acpHandle!.registry.get(ownerId)!;
+      const ownerReader = frameReader(await openStream(ownerId, 'sess-1'));
+      await waitUntil(() => bridge.queues.has('sess-1'));
+      const ownerQueue = bridge.queues.get('sess-1')!;
+      const originatorClientId = owner.sessions.get('sess-1')!.clientId;
+      expect(originatorClientId).toBe('client-1');
+      const observerId = await initialize();
+      bridge.spawnClientId = 'observer-client';
+      await newSession(observerId);
+      const observer = acpHandle!.registry.get(observerId)!;
+      const observerReader = frameReader(
+        await openStream(observerId, 'sess-1'),
+      );
+      try {
+        await waitUntil(() => bridge.queues.get('sess-1') !== ownerQueue);
+        const observerQueue = bridge.queues.get('sess-1')!;
+        const permission = {
+          type: 'permission_request',
+          originatorClientId,
+          data: {
+            requestId: 'workflow-approval',
+            sessionId: 'sess-1',
+            toolCall: {
+              toolCallId: 'workflow-tool',
+              title: 'Edit fixture',
+              _meta: {
+                workflowApproval: true,
+                backgroundWorkflowApproval: true,
+              },
+            },
+            options: [{ optionId: 'allow', name: 'Allow' }],
+          },
+        } as const;
+        ownerQueue.push(permission);
+        observerQueue.push(permission);
+        const ownerFrame = (await ownerReader.next()) as { id: string };
+        // Outbound request ids are minted per connection: each copy has
+        // its own.
+        const observerFrame = (await observerReader.next()) as { id: string };
+        expect(observerFrame.id).not.toBe(ownerFrame.id);
+        expect(owner.pending.size).toBe(1);
+        expect(observer.pending.size).toBe(1);
+        const selected = {
+          outcome: { outcome: 'selected', optionId: 'allow' },
+        };
+        if (failure === 'disconnect') {
+          await fetch(`${base}/acp`, {
+            method: 'DELETE',
+            headers: { 'acp-connection-id': observerId },
+          });
+          await waitUntil(() => observer.pending.size === 0);
+        } else {
+          if (failure === 'forbidden vote') {
+            vote.mockImplementationOnce(() => {
+              throw new PermissionForbiddenError(
+                'workflow-approval',
+                'sess-1',
+                'designated_mismatch',
+              );
+            });
+          }
+          const votes =
+            failure === 'forbidden vote' || failure === 'cross-connection vote';
+          await post(
+            failure === 'originator RPC error' ? ownerId : observerId,
+            {
+              jsonrpc: '2.0',
+              // A real observer answers its own copy; a co-owner may also
+              // answer the owner's copy by its id.
+              id:
+                failure === 'observer RPC error'
+                  ? observerFrame.id
+                  : ownerFrame.id,
+              ...(votes
+                ? { result: selected }
+                : { error: { code: -32603, message: 'Client failure' } }),
+            },
+          );
+          if (votes) {
+            await waitUntil(() => vote.mock.calls.length > 0);
+          }
+        }
+        if (failure === 'cross-connection vote') {
+          // The vote resolves the approval and drops only the voter's own
+          // copy; the owner's copy stays until the bridge reports it
+          // resolved.
+          expect(vote).toHaveBeenCalledExactlyOnceWith(
+            'sess-1',
+            'workflow-approval',
+            selected,
+            expect.any(Object),
+          );
+          expect(observer.pending.size).toBe(0);
+          expect(owner.pending.has(ownerFrame.id)).toBe(true);
+          ownerQueue.push({
+            type: 'permission_resolved',
+            data: { requestId: 'workflow-approval', sessionId: 'sess-1' },
+          });
+          await waitUntil(() => owner.pending.size === 0);
+          return;
+        }
+        if (failure !== 'originator RPC error') {
+          expect(owner.pending.has(ownerFrame.id)).toBe(true);
+          expect(vote).toHaveBeenCalledTimes(
+            failure === 'forbidden vote' ? 1 : 0,
+          );
+          await post(ownerId, {
+            jsonrpc: '2.0',
+            id: ownerFrame.id,
+            result: selected,
+          });
+        }
+        await waitUntil(() => owner.pending.size === 0);
+        expect(vote).toHaveBeenCalledTimes(
+          failure === 'forbidden vote' ? 2 : 1,
+        );
+        expect(vote.mock.calls.at(-1)).toEqual([
+          'sess-1',
+          'workflow-approval',
+          failure === 'originator RPC error'
+            ? { outcome: { outcome: 'cancelled' } }
+            : selected,
+          expect.any(Object),
+        ]);
+        if (failure !== 'disconnect') {
+          expect(observer.pending.size).toBe(1);
+          observerQueue.push({
+            type: 'permission_resolved',
+            data: { requestId: 'workflow-approval', sessionId: 'sess-1' },
+          });
+          await waitUntil(() => observer.pending.size === 0);
+        }
+      } finally {
+        ownerReader.close();
+        observerReader.close();
+      }
+    },
+  );
+
+  it('ends an origin-less background workflow approval on the holding connection RPC error', async () => {
+    // A cron or runtime-goal turn has no originator, so its run's approval
+    // carries none: the holder's error must still settle it.
+    const vote = vi
+      .spyOn(bridge, 'respondToSessionPermission')
+      .mockReturnValue(true);
+    const ownerId = await initialize();
+    await newSession(ownerId);
+    const owner = acpHandle!.registry.get(ownerId)!;
+    const ownerReader = frameReader(await openStream(ownerId, 'sess-1'));
+    try {
+      await waitUntil(() => bridge.queues.has('sess-1'));
+      bridge.queues.get('sess-1')!.push({
+        type: 'permission_request',
+        data: {
+          requestId: 'workflow-approval',
+          sessionId: 'sess-1',
+          toolCall: {
+            toolCallId: 'workflow-tool',
+            title: 'Edit fixture',
+            _meta: { workflowApproval: true, backgroundWorkflowApproval: true },
+          },
+          options: [{ optionId: 'allow', name: 'Allow' }],
+        },
+      });
+      const frame = (await ownerReader.next()) as { id: string };
+      expect(owner.pending.size).toBe(1);
+      await post(ownerId, {
+        jsonrpc: '2.0',
+        id: frame.id,
+        error: { code: -32603, message: 'Client failure' },
+      });
+      await waitUntil(() => owner.pending.size === 0);
+      expect(vote).toHaveBeenCalledExactlyOnceWith(
+        'sess-1',
+        'workflow-approval',
+        { outcome: { outcome: 'cancelled' } },
+        expect.any(Object),
+      );
+    } finally {
+      ownerReader.close();
     }
   });
 
