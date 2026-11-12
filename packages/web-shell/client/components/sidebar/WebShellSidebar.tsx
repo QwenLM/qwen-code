@@ -1574,14 +1574,16 @@ export function WebShellSidebar({
     const availableWorkspaces =
       workspaces.length > 0
         ? workspaces
-        : [
-            {
-              id: 'primary',
-              cwd: connection.workspaceCwd || projectName,
-              primary: true,
-              trusted: true,
-            },
-          ];
+        : projectFeaturesEnabled
+          ? [
+              {
+                id: 'primary',
+                cwd: connection.workspaceCwd || projectName,
+                primary: true,
+                trusted: true,
+              },
+            ]
+          : [];
     const visibleWorkspaces = showLive
       ? availableWorkspaces
       : availableWorkspaces.filter((entry) => entry.kind !== 'live');
@@ -1592,6 +1594,7 @@ export function WebShellSidebar({
     connection.workspaceCwd,
     lockedWorkspaceCwd,
     projectName,
+    projectFeaturesEnabled,
     showLive,
     workspaces,
   ]);
@@ -7043,6 +7046,7 @@ export function WebShellSidebar({
   );
   const footerContent = (footer !== false || mobileOpen) && (
     <div
+      data-web-shell-sidebar-footer
       className={cx(
         styles.footer,
         !railLayout && footerCompact && styles.footerCompact,
@@ -7970,6 +7974,7 @@ export function WebShellSidebar({
           <div
             ref={sidebarBodyRef}
             className={styles.body}
+            data-web-shell-sidebar-body
             onScroll={(event) =>
               setBodyScrolled(event.currentTarget.scrollTop > 0)
             }
