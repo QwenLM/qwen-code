@@ -20,6 +20,10 @@ import {
   detectAutonomousSentinel,
   type LoopTickResult,
 } from '@qwen-code/qwen-code-core/skills/bundled/loop/loop-tick-resolver.js';
+import {
+  keepAliveRearm,
+  AUTONOMOUS_SENTINEL_DYNAMIC,
+} from '@qwen-code/qwen-code-core/skills/bundled/loop/autonomous-loop.js';
 import type {
   LocalManagedSessionAuthority,
   ManagedSessionInputRequest,
@@ -69,6 +73,10 @@ export interface HostedLoopClassifierInput {
 export interface HostedLoopClassifierVerdict {
   readonly allowed: boolean;
   readonly reason: string | null;
+  /** A transient classifier outage, distinct from an explicit denial: a
+   * fire-time re-review treats it as a no-op re-arm tick (the loop survives)
+   * rather than settling the loop dead. */
+  readonly unavailable?: boolean;
 }
 export type HostedLoopClassifier = (
   input: HostedLoopClassifierInput,
@@ -196,20 +204,22 @@ export class HostedLoopSession {
 
   /**
    * Fire-time sentinel expansion (decision 5). A non-sentinel prompt passes
-   * through untouched. A `loop.md` / autonomous sentinel is expanded by the
+   * through untouched (`expanded: false`, so the delivery does not commit the
+   * resolver cache). A `loop.md` / autonomous sentinel is expanded by the
    * shared resolver (trust-gated, byte-capped, absent→autonomous,
    * transient→no-op re-arm). A full (first/changed) delivery is re-reviewed
-   * by the fire-time classifier before it runs; a denial settles the input
-   * `loop_admission_denied` and returns null so the pump skips it (ending the
-   * loop) rather than running unreviewed content or re-picking forever.
+   * by the fire-time classifier before it runs: an explicit denial settles
+   * the input `loop_admission_denied` and returns null so the pump skips it
+   * (ending the loop), while a transient classifier outage delivers a no-op
+   * re-arm tick so the loop survives to retry on the next fire.
    */
   async expandFireText(
     turnId: string,
     text: string,
-  ): Promise<{ text: string } | null> {
+  ): Promise<{ text: string; expanded: boolean } | null> {
     const loopMode = detectLoopSentinel(text);
     const autonomousMode = loopMode ? null : detectAutonomousSentinel(text);
-    if (!loopMode && !autonomousMode) return { text };
+    if (!loopMode && !autonomousMode) return { text, expanded: false };
     const resolver = this.resolver();
     let tick: LoopTickResult;
     if (loopMode) {
@@ -240,11 +250,26 @@ export class HostedLoopSession {
             reason: 'No fire-time classifier for loop expansion.',
           };
       if (!verdict.allowed) {
+        if (verdict.unavailable) {
+          // A transient outage must not end the loop: deliver a no-op re-arm
+          // tick so the next fire re-reviews and retries. The re-arm sentinel
+          // matches the loop's family (loop.md vs autonomous).
+          const rearmText = loopMode
+            ? resolver.buildTransientErrorTick(
+                loopMode,
+                false,
+                'classifier_unavailable',
+              ).modelText
+            : `# Autonomous loop tick (dynamic pacing)\nThe fire-time classifier is temporarily unavailable. Treat this as a no-op tick. ${keepAliveRearm(
+                AUTONOMOUS_SENTINEL_DYNAMIC,
+              )}`;
+          return { text: rearmText, expanded: true };
+        }
         await this.settleLoopTurn(turnId, 'loop_admission_denied');
         return null;
       }
     }
-    return { text: tick.modelText };
+    return { text: tick.modelText, expanded: true };
   }
 
   /**

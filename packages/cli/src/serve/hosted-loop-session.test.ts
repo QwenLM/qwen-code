@@ -453,7 +453,7 @@ describe('HostedLoopSession fire-time sentinel expansion', () => {
       harness,
       async (loops) => {
         const expanded = await loops.expandFireText('loop:x', '/loop tick');
-        expect(expanded).toEqual({ text: '/loop tick' });
+        expect(expanded).toEqual({ text: '/loop tick', expanded: false });
         expect(fireReviews).toBe(0);
       },
       allow,
@@ -573,6 +573,68 @@ describe('HostedLoopSession fire-time sentinel expansion', () => {
       },
       allow,
       classifyFire,
+    );
+  });
+
+  it('a non-sentinel turn does not commit an orphaned expansion (F7)', async () => {
+    const harness = await createHarness();
+    const classifyFire: HostedLoopClassifier = async () => ({
+      allowed: true,
+      reason: null,
+    });
+    await withLoop(
+      harness,
+      async (loops) => {
+        // A sentinel resolved but never delivered (held/aborted): pending set.
+        const first = await loops.expandFireText(
+          'loop:a',
+          AUTONOMOUS_SENTINEL_DYNAMIC,
+        );
+        expect(first!.expanded).toBe(true);
+        // A non-sentinel loop turn passes through; the delivery commits the
+        // cache only when expanded, so the orphaned pending is not committed.
+        const second = await loops.expandFireText('loop:b', '/loop tick');
+        expect(second!.expanded).toBe(false);
+        if (second!.expanded) loops.markLoopDelivered();
+        // The next sentinel still delivers the full preamble, not a dangling
+        // short reminder referencing content the model never received.
+        const third = await loops.expandFireText(
+          'loop:c',
+          AUTONOMOUS_SENTINEL_DYNAMIC,
+        );
+        expect(third!.text).toBe(first!.text);
+      },
+      allow,
+      classifyFire,
+    );
+  });
+
+  it('a transient classifier outage delivers a no-op re-arm, not a dead loop (F8)', async () => {
+    const harness = await createHarness();
+    const outage: HostedLoopClassifier = async () => ({
+      allowed: false,
+      unavailable: true,
+      reason: 'classifier api timeout',
+    });
+    await withLoop(
+      harness,
+      async (loops, authority) => {
+        const expanded = await loops.expandFireText(
+          'loop:outage',
+          AUTONOMOUS_SENTINEL_DYNAMIC,
+        );
+        // Not settled dead: the loop survives with a no-op re-arm tick.
+        expect(expanded).not.toBeNull();
+        expect(expanded!.expanded).toBe(true);
+        const settled = authority
+          .eventsInSequenceRange(1, authority.committedSequence)
+          .filter((event) => event.kind === 'turn.settled');
+        expect(settled).toHaveLength(0);
+        // The no-op tick carries the re-arm instruction so the loop continues.
+        expect(expanded!.text).toContain(AUTONOMOUS_SENTINEL_DYNAMIC);
+      },
+      allow,
+      outage,
     );
   });
 });

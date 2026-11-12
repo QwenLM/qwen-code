@@ -7186,7 +7186,7 @@ export function registerHostedHarnessSessionRoutes(
               expandLoopFire: (turnId, text) =>
                 session.loops
                   ? session.loops.expandFireText(turnId, text)
-                  : Promise.resolve({ text }),
+                  : Promise.resolve({ text, expanded: false }),
               busy: wakeBusy,
               held: (turn) => stoppedMessage(turn.source),
               cancelled: async (turn) =>

@@ -74,12 +74,13 @@ export function createMonitorWakeRunTurn(params: {
   /** Commits a loop tick's expanded content once the turn delivered it, so an
    * aborted tick cannot poison the resolver's full-vs-reminder cache. */
   readonly markLoopDelivered?: () => void;
-  /** Fire-time sentinel expansion at delivery. Returns the expanded text, or
+  /** Fire-time sentinel expansion at delivery. Returns the text plus whether
+   * a sentinel was expanded (only then is the resolver cache committed), or
    * null when a denied re-review settled the input (the loop ends). */
   readonly expandLoopFire?: (
     turnId: string,
     text: string,
-  ) => Promise<{ text: string } | null>;
+  ) => Promise<{ text: string; expanded: boolean } | null>;
   readonly busy: () => boolean;
   /** A turn its source no longer runs (H4d-b: a stopped run's message),
    * re-read with the busy verdict right before the turn starts. */
@@ -222,17 +223,22 @@ export function createMonitorWakeRunTurn(params: {
       // every retry, and a denied re-review settles the input and lets the
       // pump advance to the next pending input instead of stranding it.
       let turnText = turn.text;
+      let didExpand = false;
       if (turn.source === LOOP_INPUT_SOURCE && params.expandLoopFire) {
         const expanded = await params.expandLoopFire(turn.turnId, turn.text);
         if (expanded === null) return 'settled';
         turnText = expanded.text;
+        didExpand = expanded.expanded;
       }
       turnResult = (await params.executeHostedTurn(
         turn.turnId,
         turnText,
         abort,
       )) as { systemPayload?: Record<string, unknown> } | null;
-      if (turn.source === LOOP_INPUT_SOURCE) params.markLoopDelivered?.();
+      // Commit the resolver cache only for a turn that actually expanded a
+      // sentinel: a non-sentinel loop turn must not commit an orphaned
+      // expansion left pending by an earlier held/aborted/denied fire.
+      if (didExpand) params.markLoopDelivered?.();
     } catch (cause) {
       if (params.needsRecovery(cause)) {
         // Something parked mid-turn: a later settle or takeover consumes

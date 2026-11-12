@@ -320,13 +320,17 @@ export function createHostedLoopFireClassifier(deps: {
       return {
         allowed: !result.shouldBlock && !result.unavailable,
         reason: result.reason || null,
+        // A transient outage is not a denial: the fire delivers a no-op re-arm
+        // tick and the loop survives to retry, instead of settling dead.
+        unavailable: result.unavailable,
       };
     } catch {
-      // Fail closed without throwing into the pump's pick: a classifier that
-      // cannot be built denies the fire (settled loop_admission_denied) rather
-      // than stranding the input on a transient read error.
+      // Fail closed without throwing into the pump's pick, but treat a
+      // classifier that cannot be built as a transient outage (no-op re-arm),
+      // not a permanent denial that would end the loop.
       return {
         allowed: false,
+        unavailable: true,
         reason: 'Loop fire-time classifier unavailable.',
       };
     } finally {
