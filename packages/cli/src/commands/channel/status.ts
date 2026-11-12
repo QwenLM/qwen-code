@@ -1,9 +1,9 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import * as path from 'node:path';
 import { Storage } from '@qwen-code/qwen-code-core';
 import type { CommandModule } from 'yargs';
 import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
-import { readServiceInfo } from './pidfile.js';
+import { readServiceInfo, type ServiceInfo } from './pidfile.js';
 import type { SessionTarget } from '@qwen-code/channel-base';
 import {
   QWEN_DAEMON_TOKEN_ENV,
@@ -37,6 +37,25 @@ function formatUptime(startedAt: string): string {
   if (hours > 0) return `${hours}h ${minutes % 60}m`;
   if (minutes > 0) return `${minutes}m ${seconds % 60}s`;
   return `${seconds}s`;
+}
+
+/**
+ * Standalone `qwen channel start` persists one shared sessions.json, while a
+ * `qwen serve` worker persists routes per workspace under channels/daemon/.
+ * A single-workspace serve pidfile carries no workspaceCwd, so enumerate that
+ * directory instead of resolving a workspace.
+ */
+function sessionRouteFiles(owner: ServiceInfo['owner']): string[] {
+  const channelsDir = path.join(Storage.getGlobalQwenDir(), 'channels');
+  if (owner !== 'serve') return [path.join(channelsDir, 'sessions.json')];
+  const daemonDir = path.join(channelsDir, 'daemon');
+  try {
+    return readdirSync(daemonDir, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => path.join(daemonDir, entry.name, 'routes.json'));
+  } catch {
+    return [];
+  }
 }
 
 export const statusCommand: CommandModule<unknown, StatusArgs> = {
@@ -139,17 +158,12 @@ export const statusCommand: CommandModule<unknown, StatusArgs> = {
     writeStdoutLine('');
 
     // Read session data for per-channel counts
-    const sessionsPath = path.join(
-      Storage.getGlobalQwenDir(),
-      'channels',
-      'sessions.json',
-    );
-
     const sessionCounts = new Map<string, number>();
-    if (existsSync(sessionsPath)) {
+    for (const routeFile of sessionRouteFiles(info.owner)) {
+      if (!existsSync(routeFile)) continue;
       try {
         const entries: Record<string, PersistedEntry> = JSON.parse(
-          readFileSync(sessionsPath, 'utf-8'),
+          readFileSync(routeFile, 'utf-8'),
         );
         for (const entry of Object.values(entries)) {
           const name = entry.target.channelName;

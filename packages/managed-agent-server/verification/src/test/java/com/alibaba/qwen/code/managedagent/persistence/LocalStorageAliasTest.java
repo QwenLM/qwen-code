@@ -11,6 +11,7 @@ import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -86,7 +87,7 @@ class LocalStorageAliasTest {
         String physical = LocalStorageOwners.key(jdbc, "tenant", "storage");
         assertThat(LocalStorageOwners.key(jdbc, "other-tenant", "other-storage")).isEqualTo(physical);
         var owner = jdbc.queryForMap("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns() + " FROM ma_storage_owner");
-        String aliasKey = JdbcRuntimeBindingRepository.storageAliasKey("tenant", "storage");
+        String aliasKey = RuntimeAdmissionFences.storageAliasKey("tenant", "storage");
         assertThat(jdbc.queryForObject("SELECT gmt_create FROM ma_storage WHERE alias_key = ?",
                 Long.class, aliasKey)).isPositive();
         String registrationOperation = com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceRecoveryProtocol.parse(jdbc.queryForObject(
@@ -108,7 +109,7 @@ class LocalStorageAliasTest {
         guard.verify(binding("tenant", "storage"));
         guard.verify(binding("other-tenant", "other-storage"));
         jdbc.update("UPDATE ma_storage SET fence_operation_id = ? WHERE alias_key = ?", UUID.randomUUID().toString(),
-                JdbcRuntimeBindingRepository.storageAliasKey("tenant", "storage"));
+                RuntimeAdmissionFences.storageAliasKey("tenant", "storage"));
         assertThatThrownBy(() -> guard.verify(binding("tenant", "storage"))).isInstanceOf(RuntimeBrokerException.class);
         guard.verify(binding("other-tenant", "other-storage"));
         assertThat(Files.readAllBytes(root.resolve(".qwen-managed-storage.json"))).isEqualTo(marker);
@@ -288,7 +289,7 @@ class LocalStorageAliasTest {
         });
         var before = jdbc.queryForMap("SELECT writer_generation, journal_revision, committed_sequence, activation_epoch, last_commit_digest"
                 + " FROM ma_session_head WHERE tenant_key = ? AND harness_key = ?",
-                JdbcRuntimeBindingRepository.harnessDrainKey(tenant), JdbcRuntimeBindingRepository.harnessDrainKey(session));
+                RuntimeAdmissionFences.harnessDrainKey(tenant), RuntimeAdmissionFences.harnessDrainKey(session));
         assertUncovered(() -> guard.fence("tenant", "storage", 1, UUID.randomUUID().toString()));
         var config = new ManagedAgentProperties();
         config.getToolPublication().setGcEnabled(true);
@@ -302,7 +303,7 @@ class LocalStorageAliasTest {
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_journal_tx", Integer.class)).isZero();
         assertThat(jdbc.queryForMap("SELECT writer_generation, journal_revision, committed_sequence, activation_epoch, last_commit_digest"
                 + " FROM ma_session_head WHERE tenant_key = ? AND harness_key = ?",
-                JdbcRuntimeBindingRepository.harnessDrainKey(tenant), JdbcRuntimeBindingRepository.harnessDrainKey(session))).isEqualTo(before);
+                RuntimeAdmissionFences.harnessDrainKey(tenant), RuntimeAdmissionFences.harnessDrainKey(session))).isEqualTo(before);
         guard.fence("tenant", "storage", 1, UUID.randomUUID().toString());
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session", Integer.class)).isEqualTo(1);
     }
@@ -362,7 +363,7 @@ class LocalStorageAliasTest {
     private void session(String tenant, String storage, String session) {
         jdbc.update("INSERT INTO ma_session (tenant_id, session_id, session_kind, workspace_storage_id, tenant_key, session_key, session_scope_key, gmt_create, gmt_modified)"
                 + " VALUES (?, ?, 'CONTROL', ?, ?, ?, ?, 1, 1)", tenant, session, storage,
-                JdbcRuntimeBindingRepository.harnessDrainKey(tenant), JdbcRuntimeBindingRepository.harnessDrainKey(session), ManagedSessionStore.sessionScopeKey(tenant, session));
+                RuntimeAdmissionFences.harnessDrainKey(tenant), RuntimeAdmissionFences.harnessDrainKey(session), ManagedSessionStore.sessionScopeKey(tenant, session));
     }
 
     private static void assertUncovered(Runnable action) {

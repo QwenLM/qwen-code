@@ -2,7 +2,9 @@
 
 [English](managed-tool-execution-state.md) | [简体中文](managed-tool-execution-state.zh-CN.md)
 
-Status: Implemented at the in-memory repository boundary
+Status: Implemented by `JdbcToolExecutionRepository`. The original in-memory
+reference implementation was retired in
+[2026-11-11-retire-inmemory-runtime-repositories.md](2026-11-11-retire-inmemory-runtime-repositories.md).
 
 ## Problem
 
@@ -20,8 +22,6 @@ must be able to query the original execution while its outcome is unknown.
 - Protect updates with optimistic compare-and-set versions.
 - Preserve cancellation intent, ambiguous outcomes, ordered result progress,
   and the final result.
-- Provide a synchronized in-memory repository for tests and single-process
-  prototypes.
 
 ## Non-goals
 
@@ -110,11 +110,9 @@ settled records.
 
 ## Concurrency boundary
 
-`InMemoryToolExecutionRepository` synchronizes every compound operation. It is
-a reference implementation for one process, not a multi-JVM coordination
-mechanism. `JdbcToolExecutionRepository` preserves the same identity,
-idempotency, version, lease, transition-legality, and fencing semantics through
-database constraints and row locking.
+`JdbcToolExecutionRepository` is the only implementation. It enforces the
+identity, idempotency, version, lease, transition-legality, and fencing
+semantics through database constraints and row locking.
 
 ## Security and tenancy
 
@@ -163,8 +161,8 @@ redaction contract.
 - Immutable execution identity cannot be replaced through compare-and-set.
 - A settled execution cannot be changed or reactivated.
 - Result status, sequence, and settlement invariants fail closed.
-- The in-memory repository boundary introduces no JDBC, Runtime transport,
-  Hosted Harness, Spring, or public API dependency.
+- The `ToolExecutionRepository` contract itself introduces no JDBC, Runtime
+  transport, Hosted Harness, Spring, or public API dependency.
 
 ## Follow-up work
 

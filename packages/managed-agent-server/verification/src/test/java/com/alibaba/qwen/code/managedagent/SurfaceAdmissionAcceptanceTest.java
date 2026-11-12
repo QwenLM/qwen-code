@@ -369,6 +369,22 @@ public class SurfaceAdmissionAcceptanceTest {
             belowReadAndBelowFamilyProbesFollowTheRuleClass(SurfaceRegistry entry)
                     throws Exception {
         switch (entry.ruleClass()) {
+            case SIDE_QUERY_OPERATOR -> {
+                expect(entry, null, 401, "actor_required");
+                expect(entry, STRANGER, 404, "session_not_found");
+                expect(entry, READER, 403, "side_query_execution_forbidden");
+            }
+            case SIDE_QUERY_ACTOR -> {
+                expect(entry, null, 401, "actor_required");
+                expect(entry, STRANGER, 404, "session_not_found");
+                if (entry.capabilities().contains(Capability.SIDE_QUERY_LIST)
+                        || entry.capabilities().contains(Capability.SIDE_QUERY_CONTEXT)) {
+                    expect(entry, READER, 200, null);
+                } else {
+                    expect(entry, READER, 404, "side_query_not_found");
+                }
+            }
+            case INTERNAL_SIDE_QUERY -> expect(entry, null, 404, "side_query_not_found");
             case PERSONAL_MEMORY -> {
                 expect(entry, null, 401, "actor_required");
                 expect(entry, STRANGER, 503, "memory_disabled");
@@ -1475,6 +1491,7 @@ public class SurfaceAdmissionAcceptanceTest {
         String session = artifactArm ? ARTIFACT_SESSION : bound;
         Map<String, String> variables = new LinkedHashMap<>();
         variables.put("sessionId", session);
+        variables.put("queryId", "11111111-1111-4111-8111-111111111111");
         variables.put("operationId", (entry.capabilities().contains(Capability.MCP_MANAGEMENT) || entry.capabilities().contains(Capability.EXTENSION_CONFIG_GET)
                 || entry.capabilities().contains(Capability.EXTENSION_CONFIG_APPLY))
                 ? "11111111-1111-4111-8111-111111111111" : "op_0000000000000000");
@@ -1530,7 +1547,8 @@ public class SurfaceAdmissionAcceptanceTest {
             query.add("expectedScopeRevision=" + digest());
             query.add("uploadId=11111111-1111-4111-8111-111111111111");
         }
-        if (entry.capabilities().contains(Capability.EXTENSION_PUBLISH)) {
+        if (entry.capabilities().contains(Capability.EXTENSION_PUBLISH)
+                && entry != SurfaceRegistry.PUBLIC_EXTENSION_SOURCE_IMPORT) {
             if (entry.template().contains("/imports")) {
                 String metadata = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(
                         ("{\"sourceKind\":\"skill\",\"sourceDigest\":\"" + digest() + "\",\"compilerVersion\":1,"
@@ -1579,10 +1597,14 @@ public class SurfaceAdmissionAcceptanceTest {
             default -> post(path);
         };
         request.header(TenantContextFilter.HEADER, headerTenant);
+        if (entry == SurfaceRegistry.PUBLIC_EXTENSION_SOURCE_LOOKUP) {
+            request.header("Idempotency-Key", nextKey());
+        }
         if ("POST".equals(entry.method()) || "PATCH".equals(entry.method()) || "PUT".equals(entry.method())) {
             boolean octets = entry.capabilities().contains(
                     Capability.PUB_SEGMENT) || entry.capabilities().contains(
-                    Capability.PUB_RESOURCE) || entry.capabilities().contains(Capability.EXTENSION_PUBLISH)
+                    Capability.PUB_RESOURCE) || (entry.capabilities().contains(Capability.EXTENSION_PUBLISH)
+                    && entry != SurfaceRegistry.PUBLIC_EXTENSION_SOURCE_IMPORT)
                     || entry.capabilities().contains(Capability.WORKSPACE_FILES_UPLOAD);
             request.contentType(octets ? MediaType.APPLICATION_OCTET_STREAM
                     : MediaType.APPLICATION_JSON);
@@ -1616,6 +1638,10 @@ public class SurfaceAdmissionAcceptanceTest {
 
     private String bodyFor(SurfaceRegistry entry, String tenant,
             String session) {
+        if (entry == SurfaceRegistry.PUBLIC_EXTENSION_SOURCE_IMPORT) {
+            return "{\"reference\":{\"providerId\":\"test\",\"kind\":\"skill\",\"resourceId\":\"source\",\"revision\":\"1\"},"
+                    + "\"target\":{\"platform\":\"linux\",\"arch\":\"any\"}}";
+        }
         if (entry == SurfaceRegistry.INTERNAL_WRITER_QUIESCE_OWNERSHIP
                 || entry == SurfaceRegistry.INTERNAL_WRITER_RELEASE_OWNERSHIP) {
             String scope = "\"workspaceId\":\"ws\",\"writerId\":\"boot-probe\",\"writerGeneration\":1,"
@@ -1627,6 +1653,20 @@ public class SurfaceAdmissionAcceptanceTest {
         Capability capability = entry.capabilities().iterator().next();
         boolean publicSurface = entry.surface() == Surface.PUBLIC;
         return switch (capability) {
+            case SIDE_QUERY_CREATE -> publicSurface ? "{\"kind\":\"btw\",\"question\":\"probe\"}"
+                    : "{\"sessionId\":\"" + session + "\",\"kind\":\"btw\",\"question\":\"probe\",\"idempotencyKey\":\"" + nextKey() + "\"}";
+            case SIDE_QUERY_LIST, SIDE_QUERY_CONTEXT -> "{\"sessionId\":\"" + session + "\"}";
+            case SIDE_QUERY_GET, SIDE_QUERY_STREAM, SIDE_QUERY_CANCEL -> "{\"sessionId\":\"" + session
+                    + "\",\"queryId\":\"11111111-1111-4111-8111-111111111111\"}";
+            case STORE_SIDE_QUERY -> {
+                String claim = "\"claim\":{\"instanceId\":\"missing\",\"bootId\":\"missing\",\"generation\":1,\"token\":\"wrong\"}";
+                String path = entry.template();
+                yield "{" + claim + (path.endsWith("/resources/stage") ? ",\"resource\":{\"resourceId\":\"missing\",\"kind\":\"managed-side-query-input\",\"schemaVersion\":1,\"byteLength\":1,\"digest\":\"" + "a".repeat(64) + "\",\"bytesBase64\":\"eA==\"}"
+                        : path.endsWith("/input-ready") ? ",\"publication\":{\"resourceId\":\"missing\",\"digest\":\"" + "a".repeat(64) + "\",\"resourceIds\":[]}"
+                        : path.endsWith("/result") ? ",\"update\":{\"status\":\"failed\",\"outcome\":\"error\",\"text\":\"\",\"usage\":{},\"errorCode\":\"failed\"}"
+                        : path.endsWith("/transactions") ? ",\"afterRevision\":0,\"limit\":1"
+                        : path.endsWith("/resources/read") ? ",\"resourceId\":\"missing\"" : "") + "}";
+            }
             case MEMORY_STORE_CREATE, MEMORY_STORE_LIST -> "{}";
             case STORE_MEMORY_QUERY -> "{\"workspaceId\":\"ws\",\"writerId\":\"writer-probe\",\"writerGeneration\":1,\"operation\":\"binding\"}";
             case SESSION_WORKTREE -> "{\"workspaceId\":\"ws\",\"cwdRelative\":\".\",\"worktreeId\":\"worktree-probe\",\"idempotencyKey\":\"cleanup-probe\"}";

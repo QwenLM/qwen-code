@@ -53,7 +53,9 @@ class AliyunToolPublicationObjectStoreTest {
         try (var input = store.open("key", checks::incrementAndGet)) {
             assertThat(input.readAllBytes()).containsExactly(1, 2, 3);
         }
-        assertThat(checks.get()).isEqualTo(3);
+        // Two guard runs: one before each getObject attempt. The read path no
+        // longer issues a versioning probe, which used to add a third guard run.
+        assertThat(checks.get()).isEqualTo(2);
         verify(client, times(2)).getObject("bucket", "key");
     }
 
