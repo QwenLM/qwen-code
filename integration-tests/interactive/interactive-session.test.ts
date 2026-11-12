@@ -171,4 +171,34 @@ setTimeout(() => process.exit(3), 500);`,
     await settled;
     expect(Date.now() - startedAt).toBeLessThan(5_000);
   });
+
+  it('forwards only the loop switches into the isolated child env', async () => {
+    // The nightly loop arms export the two switches; an inheritEnv:false suite
+    // must still receive them, but not the rest of the operator environment.
+    // Removing the pass-through reds the two switch assertions.
+    vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', '1');
+    vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', '1');
+    vi.stubEnv('QWEN_LOOP_PROBE_OPERATOR_VAR', 'should-not-leak');
+    const dir = mkdtempSync(join(tmpdir(), 'qwen-interactive-session-'));
+    const envFile = join(dir, 'env.json');
+    const stub = `require('node:fs').writeFileSync(${JSON.stringify(envFile)}, JSON.stringify({
+  unified: process.env.QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP ?? null,
+  kernel: process.env.QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP ?? null,
+  operator: process.env.QWEN_LOOP_PROBE_OPERATOR_VAR ?? null,
+}));
+console.log('Type your message');
+setTimeout(() => {}, 120_000);`;
+    try {
+      session = await InteractiveSession.start({
+        command: { bin: process.execPath, args: ['-e', stub] },
+        inheritEnv: false,
+      });
+      const captured = JSON.parse(readFileSync(envFile, 'utf8'));
+      expect(captured.unified).toBe('1');
+      expect(captured.kernel).toBe('1');
+      expect(captured.operator).toBeNull();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
