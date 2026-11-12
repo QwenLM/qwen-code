@@ -9504,6 +9504,29 @@ describe('qwen-triage pnpm store producer', () => {
     expect(cacheProducerWorkflow).toMatch(/branches:\s*\['main'\]/);
   });
 
+  it('resolves the pinned pnpm from a job-owned corepack cache', () => {
+    // The container inherits the HOST runner's home, so the default
+    // COREPACK_HOME outlives the job. corepack never re-verifies an existing
+    // pinned entry, and one left with pnpm.mjs missing fails every later run
+    // instantly with MODULE_NOT_FOUND — run 43016357930 died that way in 21s.
+    // The isolation step must precede the install that needs the binary.
+    const isolateIndex = cacheProducerWorkflow.indexOf(
+      "- name: 'Isolate the corepack cache'",
+    );
+    const installIndex = cacheProducerWorkflow.indexOf(
+      "- name: 'Populate pnpm store'",
+    );
+    expect(isolateIndex).toBeGreaterThan(-1);
+    expect(installIndex).toBeGreaterThan(isolateIndex);
+    expect(cacheProducerWorkflow).toContain(
+      'corepack_home="$RUNNER_TEMP/qwen-corepack"',
+    );
+    expect(cacheProducerWorkflow).toContain('rm -rf -- "$corepack_home"');
+    expect(cacheProducerWorkflow).toContain(
+      'echo "COREPACK_HOME=$corepack_home" >> "$GITHUB_ENV"',
+    );
+  });
+
   it('runs on the same target as the consumers so the cache version matches', () => {
     // actions/cache scopes an entry by a hash of the literal cache path plus
     // the compression method, so a producer on a different runner or outside
@@ -10187,6 +10210,10 @@ describe('triage agent-state ownership hand-back (#16616)', () => {
     const run = restoreStep().run;
     for (const dir of [
       '"$QWEN_HOME"',
+      // A review quarantines a foreign-owned home instead of failing; that
+      // copy keeps the owner that made it unremovable, and this root
+      // container is the only body that can ever hand it back.
+      '"$RUNNER_TEMP"/qwen-home.stale-*',
       '"$RUNNER_TEMP/triage-drafts"',
       '"$RUNNER_TEMP/triage-results"',
       '"$RUNNER_TEMP/triage-context"',
@@ -10195,5 +10222,22 @@ describe('triage agent-state ownership hand-back (#16616)', () => {
     }
     expect(run).toContain('QWEN_HOME="${RUNNER_TEMP:?}/qwen-home"');
     expect(run).toContain('chown -R "$RUNNER_UID:$RUNNER_GID" "$handback"');
+  });
+
+  it('takes the quarantine prefix from the workflow that mints it', () => {
+    // The prefix is spelled three times — the producer and the sweep in the
+    // review workflow, and this hand-back glob. Renaming it on the review
+    // side updates that suite's own pins, so both suites would stay green
+    // while this glob matched nothing: every quarantine would then strand
+    // permanently, with one warning as the only trace. Read the producer.
+    const review = readFileSync(
+      '.github/workflows/qwen-code-pr-review.yml',
+      'utf8',
+    );
+    const home = review.match(/QWEN_HOME="\$\{RUNNER_TEMP:\?\}\/([^"]+)"/)?.[1];
+    const suffix = review.match(/quarantine="\$\{QWEN_HOME\}\.([^"$]+)/)?.[1];
+    expect(home).toBeTruthy();
+    expect(suffix).toBeTruthy();
+    expect(restoreStep().run).toContain(`"$RUNNER_TEMP"/${home}.${suffix}*`);
   });
 });

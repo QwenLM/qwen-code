@@ -744,6 +744,7 @@ interface DropdownItem extends ToolbarDropdownItem {
   icon?: ReactNode;
   disabled?: boolean;
   tooltip?: string;
+  danger?: boolean;
 }
 
 function CheckIcon() {
@@ -908,7 +909,7 @@ function ToolbarPopover({
               item.id === activeId && !item.disabled
                 ? styles.dropdownItemActive
                 : ''
-            }`}
+            } ${item.danger ? styles.dropdownItemDanger : ''}`}
             title={item.disabled ? undefined : item.label}
             aria-disabled={item.disabled || undefined}
             data-disabled={item.disabled ? '' : undefined}
@@ -1699,6 +1700,7 @@ export const ChatEditor = memo(
       renderComposerToolbarStart: ToolbarStart,
       renderComposerToolbarEnd: ToolbarEnd,
       renderComposerToolbarRight: ToolbarRight,
+      hostOwnsAddMenu = false,
       renderComposerTag,
       renderComposerTagTooltip,
       onComposerTagClick,
@@ -2070,7 +2072,8 @@ export const ChatEditor = memo(
     ]);
     // -- Composer add menu (`+`) ---------------------------------------------
     const showAddMenuAction =
-      isSimple || visibleToolbarActions?.includes('addMenu');
+      !hostOwnsAddMenu &&
+      (isSimple || visibleToolbarActions?.includes('addMenu'));
     const getAddMenuWorkspaceActions = useCallback(
       () => core.workspaceActionsRef.current,
       [core.workspaceActionsRef],
@@ -2219,6 +2222,7 @@ export const ChatEditor = memo(
 
     const planDescriptionId = useId();
     const workflowChipDescriptionId = useId();
+    const workflowSwitchDescriptionId = useId();
     const modeItems = useMemo<DropdownItem[]>(
       () =>
         EXECUTION_APPROVAL_MODES.filter((id) =>
@@ -2228,6 +2232,7 @@ export const ChatEditor = memo(
           label: getModeListLabel(id, t),
           description: t(`mode.desc.${id}`),
           icon: <ModeIcon mode={id} />,
+          danger: id === 'yolo',
         })),
       [availableModes, t],
     );
@@ -2529,19 +2534,27 @@ export const ChatEditor = memo(
     // Workflow, like Plan, is toggled from the add menu, so the toolbar shows
     // a dismissible chip while the saved preference is on — including while
     // it cannot take effect, since that is when turning it off matters most.
-    const workflowControl =
-      showAddMenuAction && showToolbarAction('workflowMode')
-        ? getWorkflowModeControlState(
-            {
-              workflowMode,
-              workflowModeStatus,
-              workflowModePending,
-              onWorkflowModeChange,
-            },
-            language,
-          )
-        : null;
-    const showWorkflowChip = Boolean(workflowControl?.mode?.requested);
+    // A composer whose host takes the add menu away has no menu to hold the
+    // entry and keeps a toolbar switch instead, so the saved preference can
+    // still be turned both ways.
+    const showWorkflowAction = showToolbarAction('workflowMode');
+    const showWorkflowInAddMenu =
+      showWorkflowAction && Boolean(showAddMenuAction);
+    const workflowControl = showWorkflowAction
+      ? getWorkflowModeControlState(
+          {
+            workflowMode,
+            workflowModeStatus,
+            workflowModePending,
+            onWorkflowModeChange,
+          },
+          language,
+        )
+      : null;
+    const showWorkflowChip =
+      showWorkflowInAddMenu && Boolean(workflowControl?.mode?.requested);
+    const showWorkflowSwitch =
+      showWorkflowAction && !showWorkflowInAddMenu && workflowControl !== null;
     const workflowChipUnavailable =
       showWorkflowChip && workflowControl?.mode?.effective === false;
     const workflowChipTooltip = workflowControl
@@ -2958,7 +2971,7 @@ export const ChatEditor = memo(
           ...(showPlanToolbarControl
             ? [{ id: 'plan', expansionWidth: expansionWidth('plan') }]
             : []),
-          ...(showWorkflowChip
+          ...(showWorkflowChip || showWorkflowSwitch
             ? [{ id: 'workflow', expansionWidth: expansionWidth('workflow') }]
             : []),
           ...(showModelAction
@@ -3075,6 +3088,7 @@ export const ChatEditor = memo(
       showModeAction,
       showPlanToolbarControl,
       showWorkflowChip,
+      showWorkflowSwitch,
       workspaceChipInToolbar,
       workspaceIndicatorVisible,
       workspaceName,
@@ -3108,7 +3122,10 @@ export const ChatEditor = memo(
 
     const renderAddMenu = () =>
       (showAddMenuAction ||
-        (isMobile && showCommandAction && !core.shellMode)) && (
+        (isMobile &&
+          !hostOwnsAddMenu &&
+          showCommandAction &&
+          !core.shellMode)) && (
         <AddMenu
           simpleMode={isSimple}
           key={JSON.stringify([sessionId, atWorkspaceCwd, Boolean(disabled)])}
@@ -3160,7 +3177,7 @@ export const ChatEditor = memo(
           skillsLoadError={skillsLoadError}
           skillsLoaded={skillsLoaded}
           workflow={
-            showAddMenuAction && showToolbarAction('workflowMode')
+            showWorkflowInAddMenu
               ? {
                   workflowMode,
                   workflowModeStatus,
@@ -3395,6 +3412,43 @@ export const ChatEditor = memo(
                 </span>
                 <TooltipContent side="top">
                   {workflowChipTooltip}
+                </TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
+          )}
+          {showWorkflowSwitch && workflowControl && (
+            <TooltipProvider delayDuration={300}>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <label
+                    className={`${styles.toolBtn} ${styles.planControl}`}
+                    data-web-shell-workflow-switch
+                    data-workflow-state={workflowControl.status}
+                    data-disabled={workflowControl.disabled ? '' : undefined}
+                  >
+                    {showWorkflowLabel ? (
+                      <span className={styles.toolBtnText}>Workflow</span>
+                    ) : (
+                      <span className={styles.toolBtnModeIcon}>
+                        <GitBranchIcon />
+                      </span>
+                    )}
+                    <Switch
+                      size="sm"
+                      className="after:inset-x-0"
+                      aria-label={workflowControl.messages.label}
+                      aria-describedby={workflowSwitchDescriptionId}
+                      checked={Boolean(workflowControl.mode?.requested)}
+                      disabled={workflowControl.disabled}
+                      onCheckedChange={(next) => onWorkflowModeChange?.(next)}
+                    />
+                  </label>
+                </TooltipTrigger>
+                <span id={workflowSwitchDescriptionId} className="sr-only">
+                  {workflowControl.description}
+                </span>
+                <TooltipContent side="top">
+                  {workflowControl.description}
                 </TooltipContent>
               </Tooltip>
             </TooltipProvider>
@@ -4607,6 +4661,34 @@ export const ChatEditor = memo(
                       <GitBranchIcon />
                     </span>
                     <span className={styles.toolBtnText}>Workflow</span>
+                  </span>
+                </>
+              )}
+              {showWorkflowSwitch && (
+                <>
+                  <span
+                    data-toolbar-measure="workflow:collapsed"
+                    className={`${styles.toolBtn} ${styles.planControl}`}
+                  >
+                    <span className={styles.toolBtnModeIcon}>
+                      <GitBranchIcon />
+                    </span>
+                    <Switch
+                      size="sm"
+                      tabIndex={-1}
+                      checked={Boolean(workflowControl?.mode?.requested)}
+                    />
+                  </span>
+                  <span
+                    data-toolbar-measure="workflow:expanded"
+                    className={`${styles.toolBtn} ${styles.planControl}`}
+                  >
+                    <span className={styles.toolBtnText}>Workflow</span>
+                    <Switch
+                      size="sm"
+                      tabIndex={-1}
+                      checked={Boolean(workflowControl?.mode?.requested)}
+                    />
                   </span>
                 </>
               )}

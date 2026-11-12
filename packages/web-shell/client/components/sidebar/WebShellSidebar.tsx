@@ -1,3 +1,9 @@
+import {
+  SessionSortMenu,
+  readSessionSort,
+  writeSessionSort,
+  type SessionSort,
+} from './SessionSortMenu';
 import { useDaemonAvailability } from '../../daemon/availability-context.js';
 import {
   Fragment,
@@ -36,6 +42,9 @@ import {
 import type { ManagedArchivedSessionsStatus } from '../managed/ManagedArchivedSessions';
 import {
   HouseIcon,
+  CheckIcon,
+  ListChecksIcon,
+  XIcon,
   BellIcon,
   InboxIcon,
   BlocksIcon,
@@ -170,6 +179,7 @@ import {
 import {
   SESSION_LIST_PAGE_SIZE,
   SESSION_ORGANIZATION_FEATURE,
+  SIDEBAR_SESSION_EXPAND_STEP,
   SIDEBAR_SESSION_PREVIEW_LIMIT,
   WEB_SHELL_SESSION_SOURCE_TYPE,
 } from '../../constants/sessions';
@@ -226,6 +236,58 @@ const GROUP_MENU_MARGIN = 8;
 const CUSTOM_GROUP_COLOR_OPTION = '__custom__';
 const DEFAULT_CUSTOM_GROUP_COLOR: DaemonSessionGroupHexColor = '#416ef5';
 type SidebarSessionSource = 'default' | 'channel';
+
+function SelectableSessionRow({
+  session,
+  identity,
+  checked,
+  disabled,
+  onToggle,
+  onRefresh,
+}: {
+  session: DaemonSessionSummary;
+  identity: string;
+  checked: boolean;
+  disabled: boolean;
+  onToggle: () => void;
+  onRefresh: (
+    identity: string,
+    state: Pick<
+      DaemonSessionSummary,
+      'isPinned' | 'hasActivePrompt' | 'activeWorkState'
+    >,
+  ) => void;
+}) {
+  const { t } = useI18n();
+  const { isPinned, hasActivePrompt, activeWorkState } = session;
+  useEffect(() => {
+    onRefresh(identity, { isPinned, hasActivePrompt, activeWorkState });
+  }, [identity, isPinned, hasActivePrompt, activeWorkState, onRefresh]);
+  const label = getSessionLabel(session);
+  return (
+    <button
+      type="button"
+      role="checkbox"
+      aria-checked={checked}
+      aria-label={t('sessionsOverview.selectSession', { name: label })}
+      disabled={disabled}
+      className={cx(
+        styles.sessionRow,
+        styles.selectionRow,
+        checked && styles.selectionRowChecked,
+      )}
+      onClick={onToggle}
+    >
+      <span className={styles.selectionCircle} aria-hidden="true">
+        {checked && <CheckIcon size={12} strokeWidth={2.5} />}
+      </span>
+      <span className={styles.sessionText} data-web-shell-session-title>
+        <span className={styles.sessionTextInner}>{label}</span>
+      </span>
+      <span className={styles.sessionMetaSlot} aria-hidden="true" />
+    </button>
+  );
+}
 
 interface StandaloneSessionRowAdapter {
   active: boolean;
@@ -1320,6 +1382,24 @@ export function WebShellSidebar({
     sessionContent === undefined &&
       connection.capabilities?.features?.includes(SESSION_ORGANIZATION_FEATURE),
   );
+  const questionSortSupported =
+    connection.capabilities?.features?.includes(
+      'session_last_user_prompt_sort',
+    ) === true;
+  const sortHost = focusedHostOrigin.replace(/\/+$/, '');
+  const [sortPreference, setSortPreference] = useState(() => ({
+    host: sortHost,
+    value: readSessionSort(sortHost),
+  }));
+  const sessionSort = questionSortSupported
+    ? sortPreference.host === sortHost
+      ? sortPreference.value
+      : readSessionSort(sortHost)
+    : 'updatedAt';
+  const changeSessionSort = (value: SessionSort) => {
+    writeSessionSort(sortHost, value);
+    setSortPreference({ host: sortHost, value });
+  };
   const sourceMetadataEnabled = Boolean(
     connection.capabilities?.features?.includes('session_source_metadata'),
   );
@@ -1584,6 +1664,7 @@ export function WebShellSidebar({
     enabled: includePrimaryWorkspaceSessions,
     pageSize: SESSION_LIST_PAGE_SIZE,
     archiveState: 'active',
+    ...(questionSortSupported ? { sortBy: sessionSort } : {}),
     ...(selectedSessionSource ? { sourceType: selectedSessionSource } : {}),
     ...(organizationEnabled
       ? { view: 'organized' as const, group: 'all' }
@@ -1681,6 +1762,7 @@ export function WebShellSidebar({
       includePrimaryWorkspaceSessions,
     pageSize: SESSION_LIST_PAGE_SIZE,
     archiveState: 'archived',
+    ...(questionSortSupported ? { sortBy: sessionSort } : {}),
     ...(archiveSourceType ? { sourceType: archiveSourceType } : {}),
     ...(organizationEnabled
       ? { view: 'organized' as const, group: 'all' }
@@ -1723,6 +1805,63 @@ export function WebShellSidebar({
   );
   const [deleteCandidate, setDeleteCandidate] =
     useState<DaemonSessionSummary | null>(null);
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectedSessions, setSelectedSessions] = useState(
+    () => new Map<string, DaemonSessionSummary>(),
+  );
+  const [bulkWorking, setBulkWorking] = useState(false);
+  const selectionGeneration = useRef(0);
+  const selectedSessionsRef = useRef(selectedSessions);
+  useLayoutEffect(() => {
+    selectedSessionsRef.current = selectedSessions;
+  }, [selectedSessions]);
+  const refreshSelectedSession = useCallback(
+    (
+      identity: string,
+      state: Pick<
+        DaemonSessionSummary,
+        'isPinned' | 'hasActivePrompt' | 'activeWorkState'
+      >,
+    ) => {
+      setSelectedSessions((previous) => {
+        const selected = previous.get(identity);
+        if (
+          !selected ||
+          (selected.isPinned === state.isPinned &&
+            selected.hasActivePrompt === state.hasActivePrompt &&
+            selected.activeWorkState === state.activeWorkState)
+        )
+          return previous;
+        return new Map(previous).set(identity, { ...selected, ...state });
+      });
+    },
+    [],
+  );
+  const exitSelection = useCallback(() => {
+    selectionGeneration.current += 1;
+    setSelectionMode(false);
+    setSelectedSessions(new Map());
+  }, []);
+  useEffect(() => {
+    exitSelection();
+  }, [
+    primaryWorkspaceCwd,
+    collapsed,
+    sectionView,
+    workspace.client,
+    focusedHostOrigin,
+    lockedWorkspaceCwd,
+    sessionContent,
+    exitSelection,
+  ]);
+  useEffect(() => {
+    if (!selectionMode || bulkWorking) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') exitSelection();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [selectionMode, bulkWorking, exitSelection]);
   const [groupMenu, setGroupMenu] = useState<GroupMenuState | null>(null);
   const groupMenuOpenRef = useRef(groupMenu !== null);
   useEffect(() => {
@@ -1812,7 +1951,9 @@ export function WebShellSidebar({
   const [projectExpanded, setProjectExpanded] = useState(() =>
     readPrimaryExpanded(),
   );
-  const [showAllProjectSessions, setShowAllProjectSessions] = useState(false);
+  const [projectSessionVisibleCount, setProjectSessionVisibleCount] = useState(
+    SIDEBAR_SESSION_PREVIEW_LIMIT,
+  );
   const [workspaceExpansionRequest, setWorkspaceExpansionRequest] = useState<{
     scope: string;
     expanded: boolean;
@@ -1878,8 +2019,8 @@ export function WebShellSidebar({
 
   useEffect(() => {
     // The five-row preview is scoped per source and per primary workspace;
-    // reset the one-shot show-all when either changes, not only on collapse.
-    setShowAllProjectSessions(false);
+    // reset the expanded count when either changes, not only on collapse.
+    setProjectSessionVisibleCount(SIDEBAR_SESSION_PREVIEW_LIMIT);
   }, [projectExpanded, primaryWorkspaceExpansionId, selectedSessionSource]);
 
   const previousPrimaryExpansionRef = useRef({
@@ -2274,13 +2415,20 @@ export function WebShellSidebar({
         options: {
           pageSize: SESSION_LIST_PAGE_SIZE,
           archiveState: 'archived',
+          ...(questionSortSupported ? { sortBy: sessionSort } : {}),
           ...(archiveSourceType ? { sourceType: archiveSourceType } : {}),
           ...(organizationEnabled
             ? { view: 'organized' as const, group: 'all' }
             : {}),
         },
       })),
-    [organizationEnabled, secondaryWorkspaceCwds, archiveSourceType],
+    [
+      organizationEnabled,
+      secondaryWorkspaceCwds,
+      archiveSourceType,
+      questionSortSupported,
+      sessionSort,
+    ],
   );
   const secondaryArchivedSnapshots = useSessionCatalogQueries(
     workspace.client,
@@ -2389,7 +2537,7 @@ export function WebShellSidebar({
       ),
     );
     setProjectExpanded(expanded);
-    setShowAllProjectSessions(false);
+    setProjectSessionVisibleCount(SIDEBAR_SESSION_PREVIEW_LIMIT);
     writeWorkspaceExpanded(primaryWorkspaceExpansionId, expanded);
     if (registeredPrimaryWorkspace) {
       writeWorkspaceExpanded(registeredPrimaryWorkspace.id, expanded);
@@ -4304,14 +4452,14 @@ export function WebShellSidebar({
   }, [canOrganizeWorkspace, deleteGroupCandidate]);
 
   const handleTogglePin = useCallback(
-    (session: DaemonSessionSummary) => {
+    async (session: DaemonSessionSummary) => {
       const sessionId = session.sessionId;
       const sessionIdentity = getIdentityForSession(session);
       if (
         !canOrganizeSession(session, 'pin') ||
         busySessionIdsRef.current.has(sessionIdentity)
       ) {
-        return;
+        return false;
       }
       const targetPinned = !session.isPinned;
       const workspaceCwd = session.workspaceCwd ?? primaryWorkspaceCwd;
@@ -4364,20 +4512,22 @@ export function WebShellSidebar({
         rollbackOptimistic();
         storeToggle(!targetPinned, session.pinnedAt);
         setSessionBusy(sessionId, false, session.workspaceCwd);
-        return;
+        return false;
       }
-      sessionActions
+      return sessionActions
         .updateSessionOrganization(sessionId, {
           isPinned: targetPinned,
         })
         .then(() => {
           rpcSucceeded = true;
           bumpWorkspaceReload();
+          return true;
         })
         .catch((err: unknown) => {
           rollbackOptimistic();
           storeToggle(!targetPinned, session.pinnedAt);
           onError(err, t('sidebar.organizationFailed'));
+          return false;
         })
         .finally(() => {
           if (workspaceCwd) {
@@ -4453,6 +4603,92 @@ export function WebShellSidebar({
       workspace.client,
     ],
   );
+
+  const archiveSelectedSession = useCallback(
+    async (session: DaemonSessionSummary) => {
+      if (
+        !connection.capabilities?.features?.includes(
+          'session_archive_idle_guard',
+        )
+      )
+        return false;
+      if (!canArchiveSession(session)) return false;
+      const identity = getIdentityForSession(session);
+      if (busySessionIdsRef.current.has(identity)) return false;
+      const scope = resolveSessionWorkspaceScope(session);
+      if (
+        scope.kind !== 'primary' &&
+        scope.kind !== 'locked' &&
+        scope.kind !== 'restricted'
+      )
+        return false;
+      setSessionBusy(session.sessionId, true, session.workspaceCwd);
+      try {
+        const client =
+          scope.kind === 'primary'
+            ? workspace.client
+            : workspace.client.workspaceByCwd(scope.cwd);
+        const result = await client.archiveSessionsData([session.sessionId], {
+          requireIdle: true,
+        });
+        const error = result.errors.find(
+          (entry) => entry.sessionId === session.sessionId,
+        );
+        if (error) throw new Error(error.error);
+        if (
+          !result.archived.includes(session.sessionId) &&
+          !result.alreadyArchived.includes(session.sessionId)
+        )
+          throw new Error(t('sidebar.archiveFailed'));
+        return true;
+      } catch (error) {
+        onError(error, t('sidebar.archiveFailed'));
+        return false;
+      } finally {
+        bumpWorkspaceReload();
+        sessionCatalogController.refreshWorkspace(scope.cwd);
+        setSessionBusy(session.sessionId, false, session.workspaceCwd);
+      }
+    },
+    [
+      canArchiveSession,
+      getIdentityForSession,
+      resolveSessionWorkspaceScope,
+      connection.capabilities,
+      setSessionBusy,
+      workspace.client,
+      onError,
+      t,
+      bumpWorkspaceReload,
+      sessionCatalogController,
+    ],
+  );
+  const selectionActionsRef = useRef({
+    pin: handleTogglePin,
+    archive: archiveSelectedSession,
+  });
+  useLayoutEffect(() => {
+    selectionActionsRef.current = {
+      pin: handleTogglePin,
+      archive: archiveSelectedSession,
+    };
+  }, [handleTogglePin, archiveSelectedSession]);
+  const runSelectionAction = async (action: 'pin' | 'archive') => {
+    const generation = selectionGeneration.current;
+    setBulkWorking(true);
+    const failed = new Map<string, DaemonSessionSummary>();
+    for (const [identity, session] of selectedSessions) {
+      if (generation !== selectionGeneration.current) break;
+      const latest = selectedSessionsRef.current.get(identity) ?? session;
+      if (action === 'pin' && latest.isPinned) continue;
+      if (!(await selectionActionsRef.current[action](latest)))
+        failed.set(identity, latest);
+    }
+    setBulkWorking(false);
+    if (generation !== selectionGeneration.current) return;
+    setSelectedSessions(failed);
+    if (failed.size === 0) exitSelection();
+  };
 
   const handleUnarchive = useCallback(
     (session: DaemonSessionSummary) => {
@@ -4723,7 +4959,7 @@ export function WebShellSidebar({
               !session.isPinned || searchGhostIds.has(session.sessionId),
           );
     const nextSessions = unpinnedSessions.slice();
-    if (organizationEnabled) {
+    if (organizationEnabled || sessionSort === 'lastUserPromptAt') {
       return nextSessions;
     }
     const createdTimeById = new Map(
@@ -4738,6 +4974,7 @@ export function WebShellSidebar({
         (createdTimeById.get(a.sessionId) ?? 0),
     );
   }, [
+    sessionSort,
     organizationEnabled,
     searchGhostIds,
     searchedSessions,
@@ -5373,6 +5610,32 @@ export function WebShellSidebar({
         );
       }
 
+      if (selectionMode && !standalone && !recent?.isStandalone) {
+        const checked = selectedSessions.has(sessionIdentity);
+        const disabled =
+          busy ||
+          bulkWorking ||
+          (!canArchiveSession(session) && !canOrganizeSession(session, 'pin'));
+        return (
+          <SelectableSessionRow
+            key={sessionIdentity}
+            session={session}
+            identity={sessionIdentity}
+            checked={checked}
+            disabled={disabled}
+            onRefresh={refreshSelectedSession}
+            onToggle={() =>
+              setSelectedSessions((previous) => {
+                const next = new Map(previous);
+                if (next.has(sessionIdentity)) next.delete(sessionIdentity);
+                else next.set(sessionIdentity, session);
+                return next;
+              })
+            }
+          />
+        );
+      }
+
       const isCurrent =
         recent?.isCurrent ?? standalone?.active ?? isCurrentSession(session);
       const rowIdentity =
@@ -5930,6 +6193,11 @@ export function WebShellSidebar({
       );
     },
     [
+      selectionMode,
+      refreshSelectedSession,
+      selectedSessions,
+      bulkWorking,
+      canArchiveSession,
       busySessionIds,
       canDeleteSession,
       canShowDeleteSession,
@@ -6032,24 +6300,43 @@ export function WebShellSidebar({
   const body = useMemo(() => {
     // Rename only has to reveal the edited row. Expanding the whole catalog —
     // or even the whole section — mounted hundreds of rows exactly when the
-    // rename editor opened, which is what made typing lag.
+    // rename editor opened, which is what made typing lag. The shared index
+    // test below is measured in whichever sequence the caller slices: group
+    // sections pass the raw catalog against the fixed preview bound (their own
+    // expansion count lives inside SessionGroupSection), while the flat list
+    // passes rendered tree rows against its live visible count.
+    const editingIndexBeyond = (index: number, bound: number): boolean =>
+      !pinnedSectionHostsEditing &&
+      editingSessionIdentity !== null &&
+      index >= bound;
     const editingSessionBeyondPreview = (
       items: readonly DaemonSessionSummary[],
     ): boolean =>
-      !pinnedSectionHostsEditing &&
-      editingSessionIdentity !== null &&
-      items.findIndex(
-        (session) => getIdentityForSession(session) === editingSessionIdentity,
-      ) >= SIDEBAR_SESSION_PREVIEW_LIMIT;
+      editingIndexBeyond(
+        items.findIndex(
+          (session) =>
+            getIdentityForSession(session) === editingSessionIdentity,
+        ),
+        SIDEBAR_SESSION_PREVIEW_LIMIT,
+      );
     const renderFlatSessions = () => {
-      const showAll =
-        showAllProjectSessions ||
-        Boolean(searchQuery.trim()) ||
-        editingSessionBeyondPreview(filteredSessions);
       const treeRows = sessionTree.buildRows(filteredSessions);
-      const displayedRows = showAll
-        ? treeRows
-        : treeRows.slice(0, SIDEBAR_SESSION_PREVIEW_LIMIT);
+      // Measure the edited row in the rendered tree-row sequence (the one
+      // actually sliced), not the raw catalog: collapsed parents hide their
+      // children, so a raw-array index diverges from the rendered row count.
+      const editingRowBeyondBound = editingIndexBeyond(
+        treeRows.findIndex(
+          (row) =>
+            getIdentityForSession(row.session) === editingSessionIdentity,
+        ),
+        projectSessionVisibleCount,
+      );
+      const unlimited = Boolean(searchQuery.trim()) || editingRowBeyondBound;
+      const previewLimited =
+        !unlimited && treeRows.length > projectSessionVisibleCount;
+      const displayedRows = previewLimited
+        ? treeRows.slice(0, projectSessionVisibleCount)
+        : treeRows;
       return (
         <>
           {displayedRows.map((row) => (
@@ -6059,13 +6346,22 @@ export function WebShellSidebar({
               })}
             </Fragment>
           ))}
-          {!showAll && treeRows.length > SIDEBAR_SESSION_PREVIEW_LIMIT && (
+          {previewLimited && (
             <button
               type="button"
               className={styles.showAllSessions}
-              onClick={() => setShowAllProjectSessions(true)}
+              onClick={() =>
+                setProjectSessionVisibleCount(
+                  (count) => count + SIDEBAR_SESSION_EXPAND_STEP,
+                )
+              }
             >
-              {t('sidebar.showAllSessions')}
+              {t('sidebar.showMoreSessions', {
+                count: Math.min(
+                  SIDEBAR_SESSION_EXPAND_STEP,
+                  treeRows.length - projectSessionVisibleCount,
+                ),
+              })}
             </button>
           )}
         </>
@@ -6210,7 +6506,7 @@ export function WebShellSidebar({
     selectedSessionSource,
     sessionSections,
     sessionsPage,
-    showAllProjectSessions,
+    projectSessionVisibleCount,
     t,
     toggleSessionSection,
   ]);
@@ -6388,6 +6684,7 @@ export function WebShellSidebar({
           onLoadStandaloneSession &&
           onStandaloneNotice && (
             <StandaloneRecents
+              sortBy={questionSortSupported ? sessionSort : undefined}
               archiveState="archived"
               currentSessionId={connection.sessionId}
               currentSessionReady={
@@ -6442,6 +6739,8 @@ export function WebShellSidebar({
       archivedSessionsTarget,
     );
   }, [
+    questionSortSupported,
+    sessionSort,
     archivedSessionsTarget,
     archivedWorkspaceGroups,
     archiveSessionSource,
@@ -6474,6 +6773,10 @@ export function WebShellSidebar({
     standaloneSessionsVisible,
     t,
   ]);
+  const sessionActionControlsVisible =
+    !sectionView && sessionContent === undefined && (!collapsed || mobileOpen);
+  const sessionActionButtonClassName =
+    'size-8 shrink-0 cursor-pointer rounded-lg p-[7px] hover:bg-accent';
   const searchEnabled = !liveView && !hideProjectHeader;
   // The activity panel replaces the session list, so a query typed there
   // filters rows the panel never shows.
@@ -7588,30 +7891,82 @@ export function WebShellSidebar({
               )}
             </>
           )}
-          {!sectionView && primaryNavItems.has('newTask') && (
-            <div
-              className={cx(
-                styles.newTaskNav,
-                bodyScrolled && styles.newTaskNavScrolled,
-              )}
-            >
-              <button
-                className={styles.newChatButton}
-                type="button"
-                title={t('sidebar.newTask')}
-                aria-label={t('sidebar.newTask')}
-                disabled={newSessionDisabled}
-                onClick={() => handleNewSession()}
-              >
-                <span className={styles.navIcon}>
-                  <SquarePenIcon size={16} strokeWidth={1.2} />
-                </span>
-                {(!collapsed || homePreviewOpen) && (
-                  <span>{t('sidebar.newTask')}</span>
+          {!sectionView &&
+            (selectionMode ||
+              primaryNavItems.has('newTask') ||
+              (questionSortSupported && sessionActionControlsVisible)) && (
+              <div
+                className={cx(
+                  styles.newTaskNav,
+                  bodyScrolled && styles.newTaskNavScrolled,
                 )}
-              </button>
-            </div>
-          )}
+              >
+                {selectionMode ? (
+                  <div className={styles.selectionHeader}>
+                    <span role="status">
+                      {t('sidebar.selectedSessions', {
+                        count: selectedSessions.size,
+                      })}
+                    </span>
+                    <button
+                      type="button"
+                      className={styles.projectsHeaderAction}
+                      aria-label={t('sidebar.exitSelection')}
+                      disabled={bulkWorking}
+                      onClick={exitSelection}
+                    >
+                      <XIcon size={18} />
+                    </button>
+                  </div>
+                ) : primaryNavItems.has('newTask') ? (
+                  <button
+                    className={styles.newChatButton}
+                    type="button"
+                    title={t('sidebar.newTask')}
+                    aria-label={t('sidebar.newTask')}
+                    disabled={newSessionDisabled}
+                    onClick={() => handleNewSession()}
+                  >
+                    <span className={styles.navIcon}>
+                      <SquarePenIcon size={16} strokeWidth={1.2} />
+                    </span>
+                    {(!collapsed || homePreviewOpen) && (
+                      <span>{t('sidebar.newTask')}</span>
+                    )}
+                  </button>
+                ) : null}
+                {sessionActionControlsVisible && (
+                  <div className="ml-auto flex shrink-0 items-center gap-1">
+                    {questionSortSupported && (
+                      <SessionSortMenu
+                        value={sessionSort}
+                        onChange={changeSessionSort}
+                        triggerClassName={sessionActionButtonClassName}
+                      />
+                    )}
+                    {(selectionMode || primaryNavItems.has('newTask')) && (
+                      <button
+                        className={cx(
+                          sessionActionButtonClassName,
+                          styles.activityToggle,
+                        )}
+                        type="button"
+                        title={t('sidebar.selectSessions')}
+                        aria-label={t('sidebar.selectSessions')}
+                        aria-pressed={selectionMode}
+                        disabled={bulkWorking}
+                        onClick={() => {
+                          if (selectionMode) exitSelection();
+                          else setSelectionMode(true);
+                        }}
+                      >
+                        <ListChecksIcon size={18} strokeWidth={1.5} />
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
           <div
             ref={sidebarBodyRef}
             className={styles.body}
@@ -7748,6 +8103,7 @@ export function WebShellSidebar({
                 (!liveNavigationEnabled || liveView) &&
                 liveWorkspaces.map((ws) => (
                   <WorkspaceSection
+                    sortBy={questionSortSupported ? sessionSort : undefined}
                     key={ws.id}
                     workspace={ws}
                     hideHeader={liveView}
@@ -7868,6 +8224,17 @@ export function WebShellSidebar({
                     <IconChevron expanded={projectsExpanded} />
                   </button>
                   <div className={styles.projectsHeaderActions}>
+                    {searchInProjectHeader &&
+                      !sessionActionControlsVisible &&
+                      !sectionView &&
+                      questionSortSupported &&
+                      sessionContent === undefined && (
+                        <SessionSortMenu
+                          value={sessionSort}
+                          onChange={changeSessionSort}
+                          triggerClassName={styles.projectsHeaderAction}
+                        />
+                      )}
                     {managedWorkspaces === undefined &&
                       projectWorkspaces.length > 0 && (
                         <button
@@ -8016,6 +8383,9 @@ export function WebShellSidebar({
                           }}
                         >
                           <WorkspaceSection
+                            sortBy={
+                              questionSortSupported ? sessionSort : undefined
+                            }
                             workspace={ws}
                             expansionRequest={
                               workspaceExpansionRequest?.scope ===
@@ -8488,6 +8858,7 @@ export function WebShellSidebar({
                 onLoadStandaloneSession &&
                 onStandaloneNotice && (
                   <StandaloneRecents
+                    sortBy={questionSortSupported ? sessionSort : undefined}
                     archiveState="active"
                     currentSessionId={connection.sessionId}
                     currentSessionReady={
@@ -8524,6 +8895,7 @@ export function WebShellSidebar({
                 !hideProjectHeader &&
                 workspaceQualifiedRestCoreEnabled && (
                   <RecentSessions
+                    sortBy={questionSortSupported ? sessionSort : undefined}
                     client={workspace.client}
                     onVisibleRowsChange={setVisibleRecentRows}
                     onNewSession={() => handleNewSession(undefined, true)}
@@ -8650,6 +9022,48 @@ export function WebShellSidebar({
             </SidebarSessionSurface>
           </div>
 
+          {selectionMode && (
+            <div className={styles.selectionActions}>
+              <button
+                type="button"
+                disabled={
+                  bulkWorking ||
+                  selectedSessions.size === 0 ||
+                  [...selectedSessions.values()].every(
+                    (session) => session.isPinned,
+                  ) ||
+                  [...selectedSessions.values()].some(
+                    (session) =>
+                      !canOrganizeSession(session, 'pin') ||
+                      busySessionIds.has(getIdentityForSession(session)),
+                  )
+                }
+                onClick={() => void runSelectionAction('pin')}
+              >
+                <PinIcon size={18} />
+                {t('sidebar.pin')}
+              </button>
+              <button
+                type="button"
+                disabled={
+                  bulkWorking ||
+                  !connection.capabilities?.features?.includes(
+                    'session_archive_idle_guard',
+                  ) ||
+                  selectedSessions.size === 0 ||
+                  [...selectedSessions.values()].some(
+                    (session) =>
+                      !canArchiveSession(session) ||
+                      busySessionIds.has(getIdentityForSession(session)),
+                  )
+                }
+                onClick={() => void runSelectionAction('archive')}
+              >
+                <ArchiveIcon size={18} />
+                {t('sidebar.archive')}
+              </button>
+            </div>
+          )}
           {railLayout &&
             footer &&
             typeof footer === 'object' &&

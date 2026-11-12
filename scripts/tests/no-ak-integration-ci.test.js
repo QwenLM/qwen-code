@@ -201,6 +201,10 @@ describe('no-AK integration CI wiring', () => {
     );
     const expectedFiles = [
       './fake-openai-server.test.ts',
+      './generated-ui-acceptance/fixtures.test.ts',
+      './generated-ui-acceptance/harness.test.ts',
+      './generated-ui-acceptance/live-case.test.ts',
+      './generated-ui-acceptance/live-config.test.ts',
       './test-helper.test.ts',
       './chat-transcript-contract.test.ts',
       './skill-hooks-invocation-parity.test.ts',
@@ -241,10 +245,11 @@ describe('no-AK integration CI wiring', () => {
       './interactive/workflow-mode.test.ts',
       './interactive/mods-tool-middleware.test.ts',
       './interactive/mods-prompt-submit.test.ts',
+      './interactive/mods-assistant-message.test.ts',
       './interactive/statusline-parity.test.ts',
       './interactive/tui-editor-parity.test.ts',
       './interactive/tui-input-ownership.test.ts',
-      './interactive/ink-agent-loop-parity.test.ts',
+      './interactive/tui-agent-loop-parity.test.ts',
       './sdk-typescript/abort-and-lifecycle.test.ts',
       './sdk-typescript/permission-control.test.ts',
       './sdk-typescript/sdk-mcp-server.test.ts',
@@ -362,6 +367,12 @@ describe('no-AK integration CI wiring', () => {
       'cli/utf-bom-encoding.test.ts': 'Runtime budget',
       'cli/write_file.test.ts': 'Real model required',
       'export-artifact-contract.test.ts': 'Runtime budget',
+      'generated-ui-acceptance/cases.test.ts':
+        'Opt-in Chromium evaluator tests',
+      'generated-ui-acceptance/live.test.ts':
+        'Real model and Chromium required',
+      'generated-ui-acceptance/replay.test.ts':
+        'Opt-in Chromium replay; runtime budget',
       'globalSetup.test.ts': 'Runtime budget',
       'helpers/hosted-relay-headers.test.ts': 'Runtime budget',
       'helpers/wire-rows.test.ts': 'Runtime budget',
@@ -440,18 +451,18 @@ describe('no-AK integration CI wiring', () => {
       );
     }
 
-    // The gate runs as three shards over test_build's tree; the aggregate
+    // The gate runs as two shards over test_build's tree; the aggregate
     // job carries the required check name and fails when the build or any
     // shard fails.
     expect(gateJob).toContain(
-      "    name: 'Integration Tests (no-AK, shard ${{ matrix.shard }}/3)'",
+      "    name: 'Integration Tests (no-AK, shard ${{ matrix.shard }}/2)'",
     );
     expect(gateJob).toContain(
       "    needs:\n      - 'classify_pr'\n      - 'test_build'\n",
     );
-    expect(gateJob).toContain('        shard: [1, 2, 3]');
+    expect(gateJob).toContain('        shard: [1, 2]');
     expect(gateJob).toContain(
-      `npm run ${NO_AK_SCRIPT} -- --shard=\${{ matrix.shard }}/3`,
+      `npm run ${NO_AK_SCRIPT} -- --shard=\${{ matrix.shard }}/2`,
     );
     const resultJob = getWorkflowJob(workflow, 'integration_no_ak_result');
     expect(resultJob).toContain(
@@ -640,6 +651,27 @@ describe('no-AK integration CI wiring', () => {
       "QWEN_HOME: '${{ runner.temp }}/qwen-no-ak-home-${{ github.run_id }}-${{ github.run_attempt }}/.qwen'",
     );
     expect(gateStep).toContain('timeout-minutes: 20');
+    // The typecheck carries no heap cap of its own, unlike the workspace test
+    // scripts, so it inherits Node's default old-space — sized from the memory
+    // Node can see, not from the container's limit. On 2026-11-11 it died at
+    // ~2040 MB on a disposable runner whose host reported 181 GB available
+    // (job 130506292678), so Node's own default was the cap and no host pressure
+    // was involved. The containers get 8 GiB (config.example.json), enough for
+    // 4096; the hosted lane keeps the default it has always passed with, under
+    // the same fleet predicate as the worker caps.
+    //
+    // Through `env` on that one command, NOT the step's env block: the
+    // zero-secrets contract above requires every value there but QWEN_HOME to
+    // be the empty string, and is enforced by value on purpose so a credential
+    // under an unanticipated name cannot ship green. A heap flag has no
+    // business joining that exemption list.
+    expect(gateStep).toContain(
+      "ecs-qwen-*) typecheck_heap=('NODE_OPTIONS=--max-old-space-size=4096') ;;",
+    );
+    expect(gateStep).toContain(
+      'env "${typecheck_heap[@]}" npm run typecheck:integration',
+    );
+    expect(gateStep).not.toContain('\n          NODE_OPTIONS: ');
     // HOME/USERPROFILE are job-wide now (first-step GITHUB_ENV), so the
     // gate must not re-pin them step-locally.
     expect(gateStep).not.toContain('\n          HOME: ');
@@ -1143,6 +1175,15 @@ describe('no-AK integration CI wiring', () => {
         "nested_cli='node_modules/@playwright/test/node_modules/playwright/cli.js'",
       );
       expect(step).toContain('node "${nested_cli}" install chromium webkit');
+      // The disposable pool image bakes Chromium and its system libraries and
+      // is what sets PLAYWRIGHT_BROWSERS_PATH; its root-owned tree cannot even
+      // be verified by a job's own install (playwright writes a lock and a
+      // `.links` entry before it checks what is present), so every install
+      // site skips on that env instead of failing.
+      expect(step).toContain('if [ -n "${PLAYWRIGHT_BROWSERS_PATH:-}" ]; then');
+      expect(step).toContain(
+        "echo 'browsers baked into the image, skipping install'",
+      );
     }
   });
 

@@ -100,7 +100,7 @@ class WorkspaceReadScopeMySqlIT extends WorkspaceFileStoreTest {
                         case "read" -> files.read("tenant", "actor", workspace, ".", "a.txt", null);
                         case "scope" -> files.readScope("tenant", "actor", new WorkspaceFileStore.Locator(null, workspace, "."));
                         case "directory" -> creation().directories("tenant", "actor", workspace, ".");
-                        case "worktree" -> new SessionWorktreeStore(jdbc, registry, guard)
+                        case "worktree" -> new JdbcSessionWorktreeStore(jdbc, registry, guard)
                                 .source("tenant", "actor", new WorkspaceSelection(workspace, "."));
                         default -> throw new AssertionError(route);
                     }
@@ -240,7 +240,7 @@ class WorkspaceReadScopeMySqlIT extends WorkspaceFileStoreTest {
             writer.setAutoCommit(false);
             JdbcRuntimeBindingRepository.lockPlacementDomain(writer, "tenant");
             try {
-                var source = pool.submit(() -> new SessionWorktreeStore(jdbc, registry, guard)
+                var source = pool.submit(() -> new JdbcSessionWorktreeStore(jdbc, registry, guard)
                         .source("tenant", "actor", new WorkspaceSelection(workspace, ".")));
                 assertThat(source.get(5, TimeUnit.SECONDS).resolved().binding().getWorkspaceId()).isEqualTo(workspace);
             } finally {
@@ -254,7 +254,7 @@ class WorkspaceReadScopeMySqlIT extends WorkspaceFileStoreTest {
             assertThat(creation().directories("tenant", "actor", workspace, ".").directories())
                     .extracting(WorkspaceCreationStore.Directory::name).containsExactly("src");
         } else if ("worktree".equals(route)) {
-            var source = new SessionWorktreeStore(jdbc, registry, guard)
+            var source = new JdbcSessionWorktreeStore(jdbc, registry, guard)
                     .source("tenant", "actor", new WorkspaceSelection(workspace, "."));
             assertThat(source.resolved().binding().getWorkspaceId()).isEqualTo(workspace);
         } else {

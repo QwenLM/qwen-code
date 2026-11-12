@@ -24,7 +24,19 @@ public final class StoreModels {
             long replayFloorSequence, long createdAt, long updatedAt,
             Long deletedAt, long version, ContextBinding workspace,
             String approvalMode, String toolProfile,
-            String agentDefinitionDigest, int publicChildAgentsVersion, String modelConfigDigest) {
+            String agentDefinitionDigest, int publicChildAgentsVersion, String modelConfigDigest,
+            String memoryStoreId, boolean ownerOnly, String preview, Long lastActivity) {
+        public SessionRecord(String tenantId, String sessionId, String agentId, String agentRevision,
+                String title, String status, String harnessBootId, String harnessEventEpoch,
+                long harnessLastEventId, long lastSequence, long replayFloorSequence,
+                long createdAt, long updatedAt, Long deletedAt, long version, ContextBinding workspace,
+                String approvalMode, String toolProfile, String agentDefinitionDigest, int publicChildAgentsVersion,
+                String modelConfigDigest) {
+            this(tenantId, sessionId, agentId, agentRevision, title, status, harnessBootId, harnessEventEpoch,
+                    harnessLastEventId, lastSequence, replayFloorSequence, createdAt, updatedAt, deletedAt, version,
+                    workspace, approvalMode, toolProfile, agentDefinitionDigest, publicChildAgentsVersion, modelConfigDigest,
+                    null, false, null, null);
+        }
         public SessionRecord(String tenantId, String sessionId, String agentId, String agentRevision,
                 String title, String status, String harnessBootId, String harnessEventEpoch,
                 long harnessLastEventId, long lastSequence, long replayFloorSequence,
@@ -75,7 +87,8 @@ public final class StoreModels {
                     harnessEventEpoch, harnessLastEventId, lastSequence,
                     replayFloorSequence, createdAt, updatedAt, deletedAt,
                     version, workspace, approvalMode, toolProfile,
-                    agentDefinitionDigest, publicChildAgentsVersion, modelConfigDigest);
+                    agentDefinitionDigest, publicChildAgentsVersion, modelConfigDigest, memoryStoreId, ownerOnly,
+                    preview, lastActivity);
         }
     }
 

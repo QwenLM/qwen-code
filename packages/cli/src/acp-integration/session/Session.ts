@@ -5413,6 +5413,9 @@ export class Session implements SessionContext {
         .clearStatusChangeCallback(this.#workflowStatusChangeCallback);
       this.#workflowStatusChangeCallback = undefined;
     }
+    this.config
+      .getChatRecordingService()
+      ?.setLastUserPromptRecordedCallback?.(undefined);
     this.config.getChatRecordingService()?.setTitleRecordedCallback(undefined);
     this.config.getSessionService().setSessionPrBoundCallback(undefined);
     this.unsubscribeChatRecordingFailure?.();
@@ -13551,6 +13554,18 @@ export class Session implements SessionContext {
       });
     });
 
+    this.config
+      .getChatRecordingService()
+      ?.setLastUserPromptRecordedCallback?.((timestamp, sessionId) => {
+        void this.client
+          .extNotification('qwen/notify/session/last-user-prompt', {
+            v: 1,
+            sessionId,
+            timestamp: timestamp ?? null,
+          })
+          .catch(() => undefined);
+      });
+
     // Session title recorded (auto-generated after a turn, or an in-process
     // /rename) → notify attached clients. Keep the Qwen notification for the
     // bridge's HTTP session metadata event, and also emit the standard ACP
@@ -15152,7 +15167,8 @@ export class Session implements SessionContext {
     }
 
     if (
-      this.requiresManagedConversationBinding &&
+      (this.requiresManagedConversationBinding ||
+        options.persistDefault === false) &&
       selectedAuthType === AuthType.QWEN_SUBSCRIPTION &&
       !resolvedRoute
     ) {
@@ -18493,9 +18509,11 @@ export class Session implements SessionContext {
             }
 
             // AUTO_EDIT mode: auto-approve edit and info tools
-            // (same as coreToolScheduler L5 — NOT delegated to the extension)
+            // (same as coreToolScheduler L5 — NOT delegated to the extension),
+            // except a call matching a user `permissions.ask` rule.
             if (
               !requiresUserInteraction &&
+              !pmForcedAsk &&
               approvalMode === ApprovalMode.AUTO_EDIT &&
               (confirmationDetails.type === 'edit' ||
                 confirmationDetails.type === 'info')

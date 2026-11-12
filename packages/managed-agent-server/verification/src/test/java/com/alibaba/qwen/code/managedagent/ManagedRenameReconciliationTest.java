@@ -8,11 +8,11 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.ParkedOperation;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.RenameDelivery;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionMutationCommand;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
-import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.h2.jdbcx.JdbcDataSource;
@@ -100,7 +100,7 @@ class ManagedRenameReconciliationTest {
             }
         };
         store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, new ObjectMapper(), clock,
-                ignored -> {}, new ManagedWorkspaceRegistry(jdbc),
+                ignored -> {}, new JdbcManagedWorkspaceRegistry(jdbc),
                 new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         ProxyFactory proxy = new ProxyFactory(store);
         proxy.setInterfaces(AgentStateStore.class);
@@ -436,8 +436,8 @@ class ManagedRenameReconciliationTest {
                         + " compacted_through_revision, gmt_create, gmt_modified)"
                         + " VALUES (?, ?, ?, ?, ?, 'MANAGED_SESSION', ?, 1, 1, 1, 1, 0,"
                         + " ?, 0, 0)",
-                JdbcRuntimeBindingRepository.harnessDrainKey(TENANT),
-                JdbcRuntimeBindingRepository.harnessDrainKey(sessionId), TENANT,
+                RuntimeAdmissionFences.harnessDrainKey(TENANT),
+                RuntimeAdmissionFences.harnessDrainKey(sessionId), TENANT,
                 sessionId, sessionId, state, compactedThrough);
     }
 

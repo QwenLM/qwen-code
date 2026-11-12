@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.RuntimeBroker.WorkspaceMount;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiRegistration;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.StorageIdentityReader;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
@@ -13,6 +14,7 @@ import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerService;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.BeforeEach;
@@ -287,7 +289,7 @@ class WorkspaceMigrationStoreTest {
                 assertThat(receipt.path("lastErrorCode").isNull()).isTrue();
                 assertThat(receipt.path("result_json").path("contentVerified").asBoolean()).isTrue();
                 assertThat(receipt.path("result_json").path("activation").asBoolean()).isFalse();
-                assertThat(jdbc.queryForObject("SELECT mount_revision FROM ma_storage_owner WHERE storage_key = (SELECT physical_key FROM ma_storage WHERE alias_key = ?)", Long.class, JdbcRuntimeBindingRepository.storageAliasKey("tenant", "storage")))
+                assertThat(jdbc.queryForObject("SELECT mount_revision FROM ma_storage_owner WHERE storage_key = (SELECT physical_key FROM ma_storage WHERE alias_key = ?)", Long.class, RuntimeAdmissionFences.storageAliasKey("tenant", "storage")))
                         .isEqualTo(promote ? 2 : 1);
                 operation.verify(promote);
                 assertThat(operation.inspect()).isEqualTo(receipt);
@@ -355,7 +357,7 @@ class WorkspaceMigrationStoreTest {
                 + " VALUES ('tenant', 'session', 'qwen-code', 'ACTIVE', 1, 1, 'workspace', 1, 'storage', '.', ?, 1, ?, ?)",
                 WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, WorkspaceExecutionProfile.CONFIG_REF,
                 WorkspaceExecutionProfile.POLICY_REF);
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey("tenant", "session");
+        String scope = ManagedSessionStore.sessionScopeKey("tenant", "session");
         jdbc.update("UPDATE ma_session SET tenant_key = ?, session_key = ?, session_scope_key = ? WHERE tenant_id = X'74656e616e74' AND session_id = X'73657373696f6e'",
                 WorkspaceOperations.hash("tenant"), WorkspaceOperations.hash("session"), scope);
         ManagedReceipts.insertCommand(jdbc, "tenant", "RENAME_SESSION", "rename", "digest", "session", null, "FAILED", null, 1);
@@ -412,7 +414,7 @@ class WorkspaceMigrationStoreTest {
                 + " VALUES ('tenant', 'session', 'qwen-code', 'ACTIVE', 1, 1, 'workspace', 1, 'storage', '.', ?, 1, ?, ?)",
                 WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, WorkspaceExecutionProfile.CONFIG_REF,
                 WorkspaceExecutionProfile.POLICY_REF);
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey("tenant", "session");
+        String scope = ManagedSessionStore.sessionScopeKey("tenant", "session");
         jdbc.update("UPDATE ma_session SET tenant_key = ?, session_key = ?, session_scope_key = ? WHERE tenant_id = X'74656e616e74' AND session_id = X'73657373696f6e'",
                 WorkspaceOperations.hash("tenant"), WorkspaceOperations.hash("session"), scope);
         jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, session_scope_key, operation_kind, operation_id, tenant_id, session_id,"
@@ -436,7 +438,7 @@ class WorkspaceMigrationStoreTest {
                 + " VALUES ('tenant', 'session', 'qwen-code', 'ACTIVE', 1, 1, 'workspace', 1, 'storage', '.', ?, 1, ?, ?)",
                 WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, WorkspaceExecutionProfile.CONFIG_REF,
                 WorkspaceExecutionProfile.POLICY_REF);
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey("tenant", "session");
+        String scope = ManagedSessionStore.sessionScopeKey("tenant", "session");
         jdbc.update("UPDATE ma_session SET tenant_key = ?, session_key = ?, session_scope_key = ? WHERE tenant_id = X'74656e616e74' AND session_id = X'73657373696f6e'",
                 WorkspaceOperations.hash("tenant"), WorkspaceOperations.hash("session"), scope);
         jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, session_scope_key, operation_kind, operation_id, tenant_id, session_id,"
@@ -563,7 +565,7 @@ class WorkspaceMigrationStoreTest {
         assertThat(Files.readAllBytes(target.resolve(".qwen-managed-storage.json"))).isEqualTo(marker);
         assertThat(Files.readString(source.resolve(".qwen-managed-storage.json"))).contains(source.toString());
         guard.promoteMigration(original, identity, registration, request.path("migrationOperationId").asText());
-        assertThat(jdbc.queryForObject("SELECT mount_revision FROM ma_storage_owner WHERE storage_key = (SELECT physical_key FROM ma_storage WHERE alias_key = ?)", Long.class, JdbcRuntimeBindingRepository.storageAliasKey("tenant", "storage"))).isEqualTo(2);
+        assertThat(jdbc.queryForObject("SELECT mount_revision FROM ma_storage_owner WHERE storage_key = (SELECT physical_key FROM ma_storage WHERE alias_key = ?)", Long.class, RuntimeAdmissionFences.storageAliasKey("tenant", "storage"))).isEqualTo(2);
         assertThatThrownBy(() -> guard.promoteMigration(original, identity, registration, request.path("migrationOperationId").asText()));
     }
 }

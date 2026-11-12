@@ -140,7 +140,7 @@ class JdbcRuntimeRetentionTest {
                 "other-tenant", "other-harness", "other-harness");
         fixture.execute("INSERT INTO ma_storage (alias_key, tenant_key, storage_key, tenant_id, storage_id, fence_operation_id)"
                 + " VALUES (?, ?, ?, ?, ?, ?)",
-                JdbcRuntimeBindingRepository.storageAliasKey("other-tenant", "other-storage"),
+                RuntimeAdmissionFences.storageAliasKey("other-tenant", "other-storage"),
                 JdbcRepositorySupport.valueKey("other-tenant"), JdbcRepositorySupport.valueKey("other-storage"),
                 "other-tenant", "other-storage", UUID.randomUUID().toString());
 

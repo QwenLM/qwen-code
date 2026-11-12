@@ -22,6 +22,8 @@ import type {
   DaemonChannelPairingApprovalResult,
   DaemonChannelPairingApprovalsSnapshot,
   DaemonChannelPairingRequestsSnapshot,
+  DaemonChannelQrLoginStartResult,
+  DaemonChannelQrLoginView,
   DaemonChannelPairingRevocationRequest,
   DaemonChannelPairingRevocationResult,
   DaemonChannelsSnapshot,
@@ -266,6 +268,12 @@ export interface DaemonChannelObservedContacts {
     label: string;
     lastObservedAt: string;
   }>;
+}
+
+export interface DaemonChannelQrLoginActions {
+  start(name: string): Promise<DaemonChannelQrLoginStartResult>;
+  state(loginId: string): Promise<DaemonChannelQrLoginView>;
+  cancel(loginId: string): Promise<DaemonChannelQrLoginView>;
 }
 
 export interface DaemonChannelPairingActions {
@@ -553,6 +561,7 @@ export interface DaemonWorkspaceActions
   activateSubscription(options?: {
     workspaceCwd?: string;
     signal?: AbortSignal;
+    settingsScope?: 'provider' | 'user';
   }): Promise<DaemonSubscriptionActivation>;
   setUiLanguage(
     language: string,
@@ -620,6 +629,7 @@ export interface DaemonWorkspaceActions
   stopChannel(name: string): Promise<DaemonChannelMutationResult>;
   restartChannel(name: string): Promise<DaemonChannelMutationResult>;
   channelPairing: DaemonChannelPairingActions;
+  channelQrLogin: DaemonChannelQrLoginActions;
 
   // MCP
   ensureRuntime(): Promise<DaemonWorkspaceRuntimeStatus>;
@@ -905,3 +915,8 @@ export interface DaemonWorkspaceActions
     options?: { force?: boolean; timeoutMs?: number },
   ): Promise<DaemonWorkspaceRemovalResult>;
 }
+
+export type {
+  DaemonChannelQrLoginStartResult,
+  DaemonChannelQrLoginView,
+} from '@qwen-code/sdk/daemon';

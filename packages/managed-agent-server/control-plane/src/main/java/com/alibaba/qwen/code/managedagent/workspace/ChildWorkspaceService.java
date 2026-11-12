@@ -3,7 +3,7 @@ package com.alibaba.qwen.code.managedagent.workspace;
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionQueryStore;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.ChildWorkspaceException;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.ChildWorkspaceProvider;
-import com.alibaba.qwen.code.managedagent.contracts.workspace.ChildWorktreeGit;
+import com.alibaba.qwen.code.managedagent.contracts.workspace.ChildWorktreeOperations;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.RuntimeWarmer;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
@@ -307,13 +307,13 @@ public class ChildWorkspaceService {
     }
 
     private void prepareStep(ChildWorkspaceProvider provider, Row claimed) {
-        ChildWorktreeGit git = provider.git();
+        ChildWorktreeOperations git = provider.git();
         held(provider, claimed, root -> {
             String base = claimed.baseCommit();
             String childCwd = claimed.childCwdRelative();
-            ChildWorktreeGit.Repository repository;
+            ChildWorktreeOperations.Repository repository;
             if (base == null) {
-                ChildWorktreeGit.Layout layout = git.layout(root, claimed.parentCwdRelative());
+                ChildWorktreeOperations.Layout layout = git.layout(root, claimed.parentCwdRelative());
                 childCwd = childCwd(claimed.childWorkspaceId(), layout.offset());
                 repository = git.open(root, layout.repositoryRelative());
                 base = git.base(root, repository, claimed.childWorkspaceId());
@@ -342,7 +342,7 @@ public class ChildWorkspaceService {
      * directory past its 1024 code points, and that is a layout refusal.
      */
     static String childCwd(String childWorkspaceId, String offset) {
-        String cwd = ChildWorktreeGit.childCwd(childWorkspaceId, offset);
+        String cwd = ChildWorktreeOperations.childCwd(childWorkspaceId, offset);
         try {
             if (!WorkspaceRelativePath.normalize(cwd).equals(cwd)) {
                 throw new ChildWorkspaceException(ChildWorkspaceException.LAYOUT, false,
@@ -356,16 +356,16 @@ public class ChildWorkspaceService {
     }
 
     private void mergeStep(ChildWorkspaceProvider provider, Row claimed) {
-        ChildWorktreeGit git = provider.git();
+        ChildWorktreeOperations git = provider.git();
         String id = claimed.childWorkspaceId();
         held(provider, claimed, root -> {
-            ChildWorktreeGit.Repository repository = git.open(root, claimed.repositoryRelative());
+            ChildWorktreeOperations.Repository repository = git.open(root, claimed.repositoryRelative());
             String result = claimed.resultCommit();
             if (result == null) {
                 result = pinResult(git, root, repository, claimed);
                 advance(claimed, MERGING, columns("result_commit", result));
             }
-            ChildWorktreeGit.Merge merge = git.merge(root, repository, claimed.baseCommit(), result);
+            ChildWorktreeOperations.Merge merge = git.merge(root, repository, claimed.baseCommit(), result);
             if (merge.clean()) {
                 advance(claimed, APPLYING, columns("parent_tree", merge.parentTree(),
                         "merged_tree", merge.mergedTree()));
@@ -377,8 +377,8 @@ public class ChildWorkspaceService {
             }
             // The child's result stays pinned: a conflict never loses work.
             git.discard(root, claimed.repositoryRelative(), id, true);
-            List<String> conflicts = merge.conflicts().size() > ChildWorktreeGit.MAX_CONFLICT_PATHS
-                    ? merge.conflicts().subList(0, ChildWorktreeGit.MAX_CONFLICT_PATHS) : merge.conflicts();
+            List<String> conflicts = merge.conflicts().size() > ChildWorktreeOperations.MAX_CONFLICT_PATHS
+                    ? merge.conflicts().subList(0, ChildWorktreeOperations.MAX_CONFLICT_PATHS) : merge.conflicts();
             advance(claimed, CONFLICTED, columns("parent_tree", merge.parentTree(),
                     "outcome_code", "conflicted", "conflict_paths", conflicts));
             return null;
@@ -386,7 +386,7 @@ public class ChildWorkspaceService {
     }
 
     private void applyStep(ChildWorkspaceProvider provider, Row claimed) {
-        ChildWorktreeGit git = provider.git();
+        ChildWorktreeOperations git = provider.git();
         held(provider, claimed, root -> {
             land(git, root, git.open(root, claimed.repositoryRelative()), claimed);
             return null;
@@ -400,7 +400,7 @@ public class ChildWorkspaceService {
      * pins remain to remove.
      */
     private void appliedStep(ChildWorkspaceProvider provider, Row claimed) {
-        ChildWorktreeGit git = provider.git();
+        ChildWorktreeOperations git = provider.git();
         held(provider, claimed, root -> {
             settle(git, root, claimed);
             return null;
@@ -412,13 +412,13 @@ public class ChildWorkspaceService {
      * the same hold, that it landed, then removes the worktree and both
      * pins.
      */
-    private void land(ChildWorktreeGit git, Path root, ChildWorktreeGit.Repository repository, Row applying) {
+    private void land(ChildWorktreeOperations git, Path root, ChildWorktreeOperations.Repository repository, Row applying) {
         git.apply(root, repository, applying.parentTree(), applying.mergedTree());
         advance(applying, APPLIED, columns());
         settle(git, root, find(applying));
     }
 
-    private void settle(ChildWorktreeGit git, Path root, Row applied) {
+    private void settle(ChildWorktreeOperations git, Path root, Row applied) {
         git.discard(root, applied.repositoryRelative(), applied.childWorkspaceId(), false);
         advance(applied, MERGED, columns("outcome_code", "merged"));
     }
@@ -429,8 +429,8 @@ public class ChildWorkspaceService {
      * refs/qwen/child-workspaces/&lt;id&gt;/result both name. The caller
      * keeps the repository it opened: a merge goes on to use it.
      */
-    private static String pinResult(ChildWorktreeGit git, Path root,
-            ChildWorktreeGit.Repository repository, Row claimed) {
+    private static String pinResult(ChildWorktreeOperations git, Path root,
+            ChildWorktreeOperations.Repository repository, Row claimed) {
         String result = git.result(root, repository, claimed.childWorkspaceId(),
                 claimed.baseCommit());
         git.pin(root, repository, claimed.childWorkspaceId(), "result", result);
@@ -443,7 +443,7 @@ public class ChildWorkspaceService {
         boolean merged = "merged".equals(claimed.outcomeCode());
         AtomicReference<String> pinFailure = new AtomicReference<>();
         held(provider, claimed, root -> {
-            ChildWorktreeGit git = provider.git();
+            ChildWorktreeOperations git = provider.git();
             String result = claimed.resultCommit();
             if (result == null && !merged && DISCARD_PINNED.equals(claimed.finishRequest())) {
                 // The discard replaced the merge of a child that completed:
@@ -454,7 +454,7 @@ public class ChildWorkspaceService {
                 // a failure that outlasts the retries) leaves an ordinary
                 // discard, which is what the discard was before the pin.
                 try {
-                    ChildWorktreeGit.Repository repository = git.open(root, claimed.repositoryRelative());
+                    ChildWorktreeOperations.Repository repository = git.open(root, claimed.repositoryRelative());
                     result = pinResult(git, root, repository, claimed);
                 } catch (ChildWorkspaceException error) {
                     if (error.retryable() && claimed.attempts() + 1 < MAX_ATTEMPTS) {
