@@ -2398,6 +2398,12 @@ export function extractShellOperations(
 const MAX_SHELL_UNWRAP_DEPTH = 4;
 
 /**
+ * Longest cd/pushd target worth scanning for a brace group. Past this the
+ * scan bails to "expands", which only widens the cwd marking.
+ */
+const MAX_BRACE_SCAN_LENGTH = 4096;
+
+/**
  * Classify a literal `cd` command and resolve its target cwd when static.
  * Dynamic targets (command substitutions, variable expansions, `cd -`) are
  * reported separately so callers can mark subsequent relative paths as
@@ -2478,14 +2484,16 @@ function resolveCdTargetCwd(
         (target === '~' || target.startsWith('~/')))) &&
     !isShellAbsolutePath(target);
 
-  // Bash expands a brace list before the builtin sees its arguments: for
-  // `cd {a,b}` the two expanded words make bash report "too many arguments"
-  // and exit 1, so the cd never happens and the segment keeps the cwd it
-  // started in. Resolving the literal `{a,b}` publishes a phantom directory
-  // that a relative write later in the segment is then attributed to, which
-  // is exactly where a deny rule for a protected relative path would miss.
-  // There is no static cwd to derive, so keep the target static-loop-inert
-  // and mark the rest of the segment cwd-unknown.
+  // Bash expands a brace list before the builtin sees its arguments. A
+  // multi-word list (`cd {a,b}`) makes bash report "too many arguments" and
+  // exit 1; a single-result range (`sub{1..1}` -> `sub1`) makes the cd succeed
+  // into a directory that is not statically derivable here. Either way the
+  // segment's cwd is not the literal target. Resolving the literal `{a,b}`
+  // would publish a phantom directory that a relative write later in the
+  // segment is then attributed to, which is exactly where a deny rule for a
+  // protected relative path would miss. There is no static cwd to derive, so
+  // keep the target static-loop-inert and mark the rest of the segment
+  // cwd-unknown.
   if (canBraceExpand(target, targetBare)) {
     return {
       kind: 'static',
@@ -2509,6 +2517,10 @@ function resolveCdTargetCwd(
  * Only an unquoted, unescaped `{` opens a brace list, and a list needs a comma
  * or a `..` range between the braces. `{a}` therefore stays literal and so does
  * a quoted `'{a,b}'`, which is a real directory name a static cd can resolve.
+ *
+ * The separator test is cardinality-blind on purpose: `{1..1}` expands to one
+ * word, so treating a single-result range as inert would publish a cwd the
+ * expansion does not actually produce.
  *
  * A target can carry several brace groups, so every `{` is considered: in
  * `x{a}y{b,c}` the first group is inert but the second still expands into two
@@ -2538,6 +2550,11 @@ function canBraceExpand(target: string, bare: string | undefined): boolean {
       break;
     }
   }
+  // `lastClose` does not bound the inner walk when the target ends in `}`, so a
+  // long target is still quadratic. No real cd target comes near this length,
+  // and bailing only widens the marking to `cwdUnknown` — which escalates to
+  // `ask` — so it can never narrow it.
+  if (target.length > MAX_BRACE_SCAN_LENGTH) return true;
   for (
     let opening = target.indexOf('{');
     opening !== -1;

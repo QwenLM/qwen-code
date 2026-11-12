@@ -986,6 +986,11 @@ describe('extractShellOperationsAcrossCommand', () => {
       'pushd {a,b} && echo x > settings.json',
       [uncertainWrite('/repo/settings.json')],
     ],
+    [
+      'marks a single-result brace range cd target as cwd-unknown',
+      'cd sub{1..1} && echo x > settings.json',
+      [uncertainWrite('/repo/settings.json')],
+    ],
     // Keep the guessed path, but mark it unsafe to trust as final.
     [
       'marks relative writes after dynamic `cd` targets as cwd-unknown',
@@ -1115,6 +1120,17 @@ describe('extractShellOperationsAcrossCommand', () => {
     expect(across('cd "$QWEN_HOME" && echo hi >"&"/tmp/out.txt')).toEqual([
       uncertainWrite('/repo/&/tmp/out.txt'),
     ]);
+  });
+
+  it('does not scan a pathological brace target past the length bound', () => {
+    // Every `{` re-walks to its close, so this shape is quadratic without the
+    // bound. The bound may only widen the marking, never resolve a path.
+    const target = '{'.repeat(20_000) + '}'.repeat(20_000);
+    const started = Date.now();
+    expect(across(`cd ${target} && echo x > settings.json`)).toEqual([
+      uncertainWrite('/repo/settings.json'),
+    ]);
+    expect(Date.now() - started).toBeLessThan(1_000);
   });
 
   it('falls back gracefully on excessively deep wrapper nesting', () => {
