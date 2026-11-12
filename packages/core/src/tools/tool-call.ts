@@ -104,10 +104,10 @@ export async function resolveDeferredToolCall(
       ToolCallParams,
       ToolResult
     >;
-  } catch (error) {
+  } catch {
     return {
       error: bridgeRefusal(
-        error instanceof Error ? error.message : String(error),
+        `tool_call rejected its envelope. Pass "name" (the deferred tool's exact name) and "arguments" (an object containing its parameters) as the only top-level fields of the tool_call invocation; received top-level keys: [${Object.keys(envelope).join(', ')}].`,
       ),
       errorType: ToolErrorType.INVALID_TOOL_PARAMS,
     };
