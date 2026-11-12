@@ -14,7 +14,7 @@ import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
 import com.alibaba.qwen.code.managedagent.persistence.evidence.CancelEvidence;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
-import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.h2.jdbcx.JdbcDataSource;
@@ -773,8 +773,8 @@ class ManagedTurnCommandOperationTest {
                         + " compacted_through_revision, gmt_create, gmt_modified)"
                         + " VALUES (?, ?, ?, ?, ?, 'MANAGED_SESSION', ?, 1, 1, 1, 1, 0,"
                         + " ?, 0, 0)",
-                JdbcRuntimeBindingRepository.harnessDrainKey(TENANT),
-                JdbcRuntimeBindingRepository.harnessDrainKey(sessionId), TENANT,
+                RuntimeAdmissionFences.harnessDrainKey(TENANT),
+                RuntimeAdmissionFences.harnessDrainKey(sessionId), TENANT,
                 sessionId, sessionId, state, compactedThrough);
     }
 

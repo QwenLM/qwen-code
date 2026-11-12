@@ -201,13 +201,27 @@ when the reset already looks past, which means the local clock is ahead). If it
 still fails, or the channel stops during the wait, the channel stores the
 final reply in
 `~/.qwen/channels/<workspace-scope>/<channel>-<name-hash>-github-pending-deliveries.json`
-with private file permissions and retries it on the next channel start. That
-retry stops sending at the first stored reply GitHub still rate-limits and
-keeps the later ones for the following start, together with that reply when
-GitHub's headers prove it was not posted; replies the audit already records as
-posted are dropped. The corresponding inbound task
-remains in `reply_pending` state until that delivery succeeds or reaches a
-definite terminal failure. Ambiguous delivery failures are not retried
+with private file permissions and retries it in the background without
+rerunning the agent: while the channel runs, and again at the next channel
+start. While it runs, the first poll whose notification check succeeds after
+the wait starts a retry; a channel that delivers to bound sessions makes no
+such check until a binding snapshot arrives that is complete or lists a
+binding, or for 30 binding scans after an empty partial one. The wait is the
+`retry-after` of the refusal, or of the answer that stopped the previous retry,
+or the budget reset when the hourly budget is exhausted, but at least five
+minutes after the refusal or the previous retry (doubled after each retry that
+leaves replies behind, an unreadable pending file included, and five minutes
+again once a retry leaves none) and at most an hour. Such a retry makes one
+attempt per reply; the one at start waits as above. Each retry, the one at
+start included, stops sending at the first answer that would turn the later
+replies away too and keeps those for the next retry: a refusal proven by
+GitHub's headers or a credential GitHub does not accept (401) keeps that reply
+as well, while another rate limit or a server or network failure drops that
+reply as ambiguous. Replies the audit already records as posted are dropped,
+and so are replies the running channel already posted or sent with an
+ambiguous answer, even if it could not record that. The corresponding inbound
+task remains in `reply_pending` state until that delivery succeeds or the reply
+is dropped. Ambiguous delivery failures are not retried
 automatically because GitHub may have created the comment: the audit records
 `failed_ambiguous` and the reply is not kept. A rate-limit answer without a
 numeric `x-ratelimit-remaining` header, such as a 429 with only `retry-after`

@@ -113,8 +113,19 @@ jobs:
       - name: 'Install dependencies'
         run: 'corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only'
 
+      # The pool image bakes Chromium and its system libraries, and it keeps
+      # that tree root-owned so a job cannot rewrite a browser. A job's own
+      # `playwright install` therefore cannot even verify there: playwright
+      # writes a lock and a `.links` entry into the registry before it checks
+      # what is present. The pool image is what sets PLAYWRIGHT_BROWSERS_PATH,
+      # so it selects the skip.
       - name: 'Install Playwright Chromium'
-        run: 'npx playwright install --with-deps chromium'
+        run: |-
+          if [ -n "${PLAYWRIGHT_BROWSERS_PATH:-}" ]; then
+            echo 'browsers baked into the image, skipping install'
+          else
+            npx playwright install --with-deps chromium
+          fi
 
       # The slim pool image lacks the DejaVu baseline (#15383) and ffmpeg.
       # One best-effort apt step supplies both: without the fonts the shots

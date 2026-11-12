@@ -19,7 +19,7 @@ import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceAccess;
-import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -123,7 +123,7 @@ final class AgentSessionPolicies {
 
     boolean isSshWorkspace(ContextBinding binding) {
         return jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage WHERE alias_key = ? AND storage_kind = 'SSH_LOCAL'",
-                Long.class, JdbcRuntimeBindingRepository.storageAliasKey(binding.getTenantId(), binding.getStorageId())) == 1;
+                Long.class, RuntimeAdmissionFences.storageAliasKey(binding.getTenantId(), binding.getStorageId())) == 1;
     }
 
     static void requireSshToolProfile(String profile) {
@@ -573,7 +573,8 @@ final class AgentSessionPolicies {
         if (modelCatalog.stream().noneMatch(option -> option.modelId().equals(modelId))) {
             throw new ManagedAgentException(400, "unsupported_model", "The model is not published by this host");
         }
-        requirePolicyChange(session, false);
+        // 模型选择只影响后续受理，已受理回合继续使用自己的不可变模型快照。
+        requirePolicyChange(session, true);
         long current = jdbc.queryForObject("SELECT model_revision FROM ma_session WHERE tenant_id = ?"
                 + " AND session_id = ?", Long.class, tenantId, sessionId);
         if (current != expectedRevision || current >= 9_007_199_254_740_991L) {
