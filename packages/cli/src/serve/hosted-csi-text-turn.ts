@@ -71,16 +71,16 @@ export async function runHostedCsiTextTurn(
     async (modelScope) =>
       harness.run(async () => {
         const projected = await managed.sink.project();
+        const events = authority.eventsInSequenceRange(
+          1,
+          authority.committedSequence,
+        );
         const settled = new Set(
-          authority
-            .eventsInSequenceRange(1, authority.committedSequence)
+          events
             .filter((event) => event.kind === 'turn.settled')
             .map((event) => event.payload['turnId']),
         );
-        const excluded = excludedHostedPrompts(
-          authority.eventsInSequenceRange(1, authority.committedSequence),
-          projected,
-        );
+        const excluded = excludedHostedPrompts(events, projected);
         if (resumeFromToolResults !== undefined) excluded.delete(promptId);
         const history = projected.filter(
           (entry) =>

@@ -264,6 +264,11 @@ describe('private CSI native text turn', () => {
           .filter((entry) => entry.daemonPromptId === PROMPT_A && entry.message)
           .map((entry) => entry.type),
       ).toEqual(expectedTypes);
+      // The exclusion set itself must reach the runner: the local history
+      // predicate already filters, so only this argument pins the hand-off.
+      expect(input.excludedPromptIds?.has(PROMPT_A)).toBe(
+        expectedTypes.length === 0,
+      );
     },
   );
 

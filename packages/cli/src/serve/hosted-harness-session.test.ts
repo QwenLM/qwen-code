@@ -976,6 +976,52 @@ async function writeSettledToolHistory(
   } as ChatRecord);
 }
 
+/** A settled cancelled group beside a completed one, covered by an old-format
+ * compression snapshot whose promptIds are legacy rewind marks (not journal
+ * turn ids). Returns the snapshot record's uuid. */
+async function writeCancelledGroupWithLegacySnapshot(
+  managed: ManagedSession,
+): Promise<string> {
+  await writeSettledToolHistory(
+    managed,
+    'prior-cancel',
+    'cancelled',
+    'cancelled',
+  );
+  await writeSettledToolHistory(
+    managed,
+    'prior-complete',
+    'completed',
+    'end_turn',
+  );
+  const projected = await managed.sink.projectModelHistory();
+  const savedIds = projected.apiHistory.map(
+    (entry) => getApiHistoryPromptId(entry) ?? null,
+  );
+  const snapshotId = randomUUID();
+  await managed.sink.write({
+    uuid: snapshotId,
+    parentUuid: null,
+    sessionId: SESSION_ID,
+    timestamp: new Date().toISOString(),
+    cwd: state.root,
+    version: 'hosted-harness/1',
+    type: 'system',
+    subtype: 'chat_compression',
+    systemPayload: {
+      info: {
+        compressionStatus: CompressionStatus.COMPRESSED,
+        originalTokenCount: 100,
+        newTokenCount: 50,
+      },
+      compressedHistory: projected.apiHistory,
+      promptIds: savedIds,
+      summaryPrefixLength: 0,
+    },
+  });
+  return snapshotId;
+}
+
 describe('attributeShellReceipts', () => {
   const input = (turnId: string, source = 'hosted-harness') =>
     ({
@@ -39450,6 +39496,341 @@ describe('Hosted Harness Runtime turn takeover', () => {
       supertest(replacement).delete(`/session/${SESSION_ID}`),
     );
   });
+
+  it('excludes a cancelled group from a legacy snapshot on the continue route (PR #15959 R3-3)', async () => {
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockResolvedValue();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'cancel').mockResolvedValue();
+    const EXEC_A = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    const EXEC_B = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'prepare')
+      .mockResolvedValueOnce(EXEC_A)
+      .mockResolvedValue(EXEC_B);
+    const execute = vi
+      .spyOn(HostedWorkspaceBroker.prototype, 'execute')
+      .mockImplementation((id, _payload, signal) => {
+        if (id === EXEC_A) {
+          return Promise.resolve({
+            executionStatus: 'success',
+            responseParts: [{ text: 'a written' }],
+          }) as never;
+        }
+        return signal?.aborted
+          ? Promise.reject(new Error('aborted'))
+          : new Promise((_, reject) =>
+              signal?.addEventListener(
+                'abort',
+                () => reject(new Error('aborted')),
+                { once: true },
+              ),
+            );
+      });
+    const server = await app(true);
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+      toolProfile: FILE_PROFILE,
+    });
+    expect(created.status).toBe(200);
+    const managed = (wakeDeps.last as { session: { managed: ManagedSession } })
+      .session.managed;
+    const snapshotId = await writeCancelledGroupWithLegacySnapshot(managed);
+    const CALL_A = {
+      name: 'write_file',
+      callId: 'call-a',
+      args: { file_path: 'a.txt', content: 'a' },
+      isClientInitiated: false,
+      prompt_id: PROMPT_ID,
+    };
+    const CALL_B = {
+      ...CALL_A,
+      callId: 'call-b',
+      args: { file_path: 'b.txt', content: 'b' },
+    };
+    state.model.mockImplementationOnce(async ({ toolTurn, signal }) => {
+      await toolTurn!.execute(
+        [CALL_A],
+        [
+          {
+            functionCall: {
+              id: CALL_A.callId,
+              name: CALL_A.name,
+              args: CALL_A.args,
+            },
+          },
+        ],
+        'test-model',
+        signal,
+      );
+      await toolTurn!.execute(
+        [CALL_B],
+        [
+          {
+            functionCall: {
+              id: CALL_B.callId,
+              name: CALL_B.name,
+              args: CALL_B.args,
+            },
+          },
+        ],
+        'test-model',
+        signal,
+      );
+      return { text: 'unreached', model: 'test-model' };
+    });
+    const prompt = [{ type: 'text', text: 'write two files' }];
+    const payloadDigest = `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`;
+    const admitted = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/prompt`),
+    )
+      .set('X-Qwen-Client-Id', created.body.clientId as string)
+      .send({ prompt, promptId: PROMPT_ID, payloadDigest });
+    expect(admitted.status).toBe(202);
+    await vi.waitFor(
+      () =>
+        expect(execute.mock.calls.some((call) => call[0] === EXEC_B)).toBe(
+          true,
+        ),
+      { timeout: settleTimeoutMs() },
+    );
+    await headers(supertest(server).post(`/session/${SESSION_ID}/cancel`)).set(
+      'X-Qwen-Client-Id',
+      created.body.clientId as string,
+    );
+    await vi.waitFor(
+      async () => {
+        const status = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', created.body.clientId as string);
+        expect(status.body.hasActivePrompt).toBe(false);
+        expect(status.body.recoveryBlocked).toBe(true);
+      },
+      { timeout: settleTimeoutMs() },
+    );
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`));
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'execute').mockResolvedValue({
+      executionStatus: 'success',
+      responseParts: [{ text: 'b written' }],
+    } as never);
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'release').mockResolvedValue();
+    const { server: replacement, loaded } = await loadReplacement();
+    expect(loaded.status).toBe(200);
+    const recovery = loaded.body._meta?.[
+      'qwen.daemon.managedRuntimeRecovery'
+    ] as { checkpointId: string; activationId: string };
+    const clientId = loaded.body.clientId as string;
+    const continued = await replacementHeaders(
+      supertest(replacement).post(
+        `/session/${SESSION_ID}/managed-runtime/continue`,
+      ),
+    )
+      .set('X-Qwen-Client-Id', clientId)
+      .send({
+        promptId: PROMPT_ID,
+        checkpointId: recovery.checkpointId,
+        activationId: recovery.activationId,
+      });
+    expect(continued.status).toBe(200);
+    await vi.waitFor(
+      async () => {
+        const status = await replacementHeaders(
+          supertest(replacement).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', clientId);
+        expect(status.body.hasActivePrompt).toBe(false);
+      },
+      { timeout: settleTimeoutMs() },
+    );
+    const continuedCall = state.model.mock.calls.find(
+      (call) =>
+        (call[0] as { resumeFromToolResults?: unknown })
+          .resumeFromToolResults !== undefined,
+    );
+    expect(continuedCall).toBeDefined();
+    const input = continuedCall![0] as unknown as { history: ChatRecord[] };
+    // The cancelled group's raw records are dropped, and the snapshot's marks
+    // are bridged to journal turn ids so the runner excludes that group. A
+    // continue route that skips normalization leaves the legacy marks in place.
+    expect(
+      input.history.some((entry) => entry.daemonPromptId === 'prior-cancel'),
+    ).toBe(false);
+    expect(
+      input.history.find((entry) => entry.uuid === snapshotId)?.systemPayload,
+    ).toMatchObject({
+      promptIds: expect.arrayContaining(['prior-cancel', 'prior-complete']),
+    });
+    await replacementHeaders(
+      supertest(replacement).delete(`/session/${SESSION_ID}`),
+    );
+  });
+
+  it('bridges a legacy snapshot when the continue route answers a team sibling (PR #15959 R3-3)', async () => {
+    domainEnablement.childRun = true;
+    try {
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
+      acquireSpy = vi
+        .spyOn(HostedWorkspaceBroker.prototype, 'acquire')
+        .mockImplementation(async function (this: HostedWorkspaceBroker) {
+          this.runtime = {
+            bindingId: 'binding',
+            generation: '1',
+            workspaceGeneration: '1',
+          };
+        });
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'prepare').mockResolvedValue(
+        '66666666-6666-4666-8666-666666666666',
+      );
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'release').mockResolvedValue();
+      const server = await app(true);
+      const created = await headers(supertest(server).post('/session'))
+        .send({
+          sessionId: SESSION_ID,
+          sessionScope: 'thread',
+          managedSessionStore: store(),
+          toolProfile: 'hosted-workspace-shell/1',
+          captureBytes: 1024 * 1024,
+        })
+        .expect(200);
+      const clientId = created.body.clientId as string;
+      const managed = (
+        wakeDeps.last as { session: { managed: ManagedSession } }
+      ).session.managed;
+      const snapshotId = await writeCancelledGroupWithLegacySnapshot(managed);
+      const originalWrite = ManagedSessionRecordSink.prototype.write;
+      let killed = false;
+      vi.spyOn(ManagedSessionRecordSink.prototype, 'write').mockImplementation(
+        async function (this: ManagedSessionRecordSink, item) {
+          if (
+            !killed &&
+            item.type === 'tool_result' &&
+            JSON.stringify(item.message).includes('"team_create"')
+          ) {
+            killed = true;
+            throw new Error('Harness killed');
+          }
+          return originalWrite.call(this, item);
+        },
+      );
+      const later = {
+        name: 'task_create',
+        callId: 'call-2',
+        args: { subject: 'Audit', description: 'a' },
+        isClientInitiated: false,
+        prompt_id: PROMPT_ID,
+      };
+      const team = {
+        name: 'team_create',
+        callId: 'call-0',
+        args: { team_name: 'review' },
+        isClientInitiated: false,
+        prompt_id: PROMPT_ID,
+      };
+      state.model.mockImplementationOnce(
+        async ({ toolTurn, signal }) =>
+          toolTurn!.execute(
+            [team, CALL, later],
+            [team, CALL, later].map((call) => ({
+              functionCall: {
+                id: call.callId,
+                name: call.name,
+                args: call.args,
+              },
+            })),
+            'test-model',
+            signal,
+          ) as never,
+      );
+      const prompt = [{ type: 'text', text: 'team and a file' }];
+      await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+        .set('X-Qwen-Client-Id', clientId)
+        .send({
+          prompt,
+          promptId: PROMPT_ID,
+          payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+        })
+        .expect(202);
+      await vi.waitFor(
+        async () => {
+          const status = await headers(
+            supertest(server).get(`/session/${SESSION_ID}/status`),
+          ).set('X-Qwen-Client-Id', clientId);
+          expect(status.body.hasActivePrompt).toBe(false);
+          expect(status.body.recoveryBlocked).toBe(true);
+        },
+        { timeout: settleTimeoutMs() },
+      );
+      vi.mocked(ManagedSessionRecordSink.prototype.write).mockRestore();
+      expect(
+        (await headers(supertest(server).delete(`/session/${SESSION_ID}`)))
+          .status,
+      ).toBe(204);
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'execute').mockResolvedValue({
+        executionStatus: 'success',
+        responseParts: [{ text: 'written' }],
+      } as never);
+      vi.spyOn(
+        HostedWorkspaceBroker.prototype,
+        'workspaceContext',
+      ).mockResolvedValue([]);
+      const { server: replacement, loaded } = await loadReplacement(
+        false,
+        'hosted-workspace-shell/1',
+      );
+      expect(loaded.status).toBe(200);
+      const recovery = loaded.body._meta?.[
+        'qwen.daemon.managedRuntimeRecovery'
+      ] as { checkpointId: string; activationId: string };
+      let resumedHistory: ChatRecord[] | undefined;
+      state.model.mockImplementationOnce(async (input) => {
+        resumedHistory = [
+          ...((input as { history?: ChatRecord[] }).history ?? []),
+        ];
+        return { text: 'continued', model: 'test-model' };
+      });
+      const continued = await replacementHeaders(
+        supertest(replacement).post(
+          `/session/${SESSION_ID}/managed-runtime/continue`,
+        ),
+      )
+        .set('X-Qwen-Client-Id', loaded.body.clientId as string)
+        .send({
+          promptId: PROMPT_ID,
+          checkpointId: recovery.checkpointId,
+          activationId: recovery.activationId,
+        });
+      expect(continued.status).toBe(200);
+      await vi.waitFor(() => expect(resumedHistory).toBeDefined(), {
+        timeout: settleTimeoutMs(),
+      });
+      // Answering the team sibling re-derives the history; that refresh must
+      // bridge the snapshot's legacy marks just like the initial derivation.
+      expect(
+        resumedHistory!.some(
+          (entry) => entry.daemonPromptId === 'prior-cancel',
+        ),
+      ).toBe(false);
+      expect(
+        resumedHistory!.find((entry) => entry.uuid === snapshotId)
+          ?.systemPayload,
+      ).toMatchObject({
+        promptIds: expect.arrayContaining(['prior-cancel', 'prior-complete']),
+      });
+      await vi.waitFor(
+        async () => {
+          const status = await replacementHeaders(
+            supertest(replacement).get(`/session/${SESSION_ID}/status`),
+          ).set('X-Qwen-Client-Id', loaded.body.clientId as string);
+          expect(status.body.hasActivePrompt).toBe(false);
+        },
+        { timeout: settleTimeoutMs() },
+      );
+      await replacementHeaders(
+        supertest(replacement).delete(`/session/${SESSION_ID}`),
+      );
+    } finally {
+      domainEnablement.childRun = true;
+    }
+  }, 30_000);
 
   it('refuses the load with a retryable refusal when the takeover drive fails', async () => {
     await parkToolTurn();

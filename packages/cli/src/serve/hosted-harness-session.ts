@@ -3995,9 +3995,12 @@ async function executeHostedTurn(
     async (modelScope) =>
       harness.run(async () => {
         const projected = await session.managed.sink.project();
+        const rawModelRecords =
+          await session.managed.sink.projectModelRecords();
+        const unanswered = unansweredPrompts(session, projected);
         const modelRecords = normalizeHostedTurnRecords(
-          await session.managed.sink.projectModelRecords(),
-          unansweredPrompts(session, projected),
+          rawModelRecords,
+          unanswered,
         );
         const settledPrompts = new Set(
           authority
@@ -4005,7 +4008,6 @@ async function executeHostedTurn(
             .filter((event) => event.kind === 'turn.settled')
             .map((event) => event.payload['turnId']),
         );
-        const unanswered = unansweredPrompts(session, projected);
         const history = (
           session.toolProfile
             ? modelRecords.filter(
@@ -11648,9 +11650,12 @@ export function registerHostedHarnessSessionRoutes(
       try {
         const harness = createManagedHarnessHandle(session.managed);
         let projected = await session.managed.sink.project();
+        const initialRawRecords =
+          await session.managed.sink.projectModelRecords();
+        let unanswered = unansweredPrompts(session, projected);
         let modelRecords = normalizeHostedTurnRecords(
-          await session.managed.sink.projectModelRecords(),
-          unansweredPrompts(session, projected),
+          initialRawRecords,
+          unanswered,
         );
         const settledPrompts = new Set(
           session.managed.authority
@@ -11665,7 +11670,7 @@ export function registerHostedHarnessSessionRoutes(
         // tool rounds stay in history, and only the parked round's results
         // become the resume request. Otherwise a turn that parked after two
         // tool rounds would resume with an unanswered call in between.
-        const deriveRound = () => {
+        const deriveRound = (unanswered: ReadonlySet<string>) => {
           const turnRecords = projected.filter(
             (entry) => entry.daemonPromptId === promptId,
           );
@@ -11686,7 +11691,6 @@ export function registerHostedHarnessSessionRoutes(
           const parkedRound = new Set(
             turnRecords.slice(lastCallIndex + 1).map((entry) => entry.uuid),
           );
-          const unanswered = unansweredPrompts(session, projected);
           const history = modelRecords.filter(
             (entry) =>
               (entry.type === 'system' ||
@@ -11704,7 +11708,7 @@ export function registerHostedHarnessSessionRoutes(
         // An agent wait that never folded may legitimately hold no tool
         // result yet (#13708) — the fold itself produces it below, so the
         // no-results guard runs only after the resume arm has had its say.
-        let { history, resumeParts } = deriveRound();
+        let { history, resumeParts } = deriveRound(unanswered);
         let parentUuid = projected.at(-1)?.uuid ?? null;
         const messageRecord = (
           type: 'assistant' | 'tool_result',
@@ -11862,11 +11866,11 @@ export function registerHostedHarnessSessionRoutes(
             });
             if (outstanding.length > 0 || filled > 0) {
               projected = await session.managed.sink.project();
-              modelRecords = normalizeHostedTurnRecords(
-                await session.managed.sink.projectModelRecords(),
-                unansweredPrompts(session, projected),
-              );
-              ({ history, resumeParts } = deriveRound());
+              const rawRecords =
+                await session.managed.sink.projectModelRecords();
+              unanswered = unansweredPrompts(session, projected);
+              modelRecords = normalizeHostedTurnRecords(rawRecords, unanswered);
+              ({ history, resumeParts } = deriveRound(unanswered));
             }
           }
           // H4e-b3: the command wait resumes exactly like the agent wait —
@@ -11920,11 +11924,11 @@ export function registerHostedHarnessSessionRoutes(
             });
             if (outstanding.length > 0 || filled > 0) {
               projected = await session.managed.sink.project();
-              modelRecords = normalizeHostedTurnRecords(
-                await session.managed.sink.projectModelRecords(),
-                unansweredPrompts(session, projected),
-              );
-              ({ history, resumeParts } = deriveRound());
+              const rawRecords =
+                await session.managed.sink.projectModelRecords();
+              unanswered = unansweredPrompts(session, projected);
+              modelRecords = normalizeHostedTurnRecords(rawRecords, unanswered);
+              ({ history, resumeParts } = deriveRound(unanswered));
             }
           }
           // A sibling the Runtime reconciliation does not own (a team
@@ -11947,11 +11951,10 @@ export function registerHostedHarnessSessionRoutes(
           });
           if (answered > 0) {
             projected = await session.managed.sink.project();
-            modelRecords = normalizeHostedTurnRecords(
-              await session.managed.sink.projectModelRecords(),
-              unansweredPrompts(session, projected),
-            );
-            ({ history, resumeParts } = deriveRound());
+            const rawRecords = await session.managed.sink.projectModelRecords();
+            unanswered = unansweredPrompts(session, projected);
+            modelRecords = normalizeHostedTurnRecords(rawRecords, unanswered);
+            ({ history, resumeParts } = deriveRound(unanswered));
           }
           if (resumeParts.length === 0) {
             throw new Error(

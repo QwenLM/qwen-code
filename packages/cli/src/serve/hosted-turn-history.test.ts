@@ -51,6 +51,54 @@ describe('Hosted committed-work exclusions', () => {
       );
     },
   );
+
+  it('scopes committed work to the interrupted turn, not the whole session', () => {
+    const envelope = {
+      parentUuid: null,
+      sessionId: 'session',
+      timestamp: '2026-11-12T00:00:00.000Z',
+      cwd: '/workspace',
+      version: 'test',
+    };
+    const events = [
+      {
+        kind: 'turn.settled',
+        payload: {
+          turnId: 'turn-a',
+          outcome: 'cancelled',
+          stopReason: 'harness_interruption',
+        },
+      },
+      {
+        kind: 'turn.settled',
+        payload: {
+          turnId: 'turn-b',
+          outcome: 'completed',
+          stopReason: 'end_turn',
+        },
+      },
+    ] as unknown as ManagedSessionEvent[];
+    const records = [
+      {
+        ...envelope,
+        uuid: 'a-user',
+        daemonPromptId: 'turn-a',
+        type: 'user',
+        message: { role: 'user', parts: [{ text: 'abandoned input' }] },
+      },
+      {
+        ...envelope,
+        uuid: 'b-assistant',
+        daemonPromptId: 'turn-b',
+        type: 'assistant',
+        message: { role: 'model', parts: [{ text: 'committed work' }] },
+      },
+    ] satisfies ChatRecord[];
+    const excluded = excludedHostedPrompts(events, records);
+    // turn-b's committed work must not exempt turn-a's bare interrupted input.
+    expect(excluded.has('turn-a')).toBe(true);
+    expect(excluded.has('turn-b')).toBe(false);
+  });
 });
 
 describe('Hosted snapshot turn identities', () => {
