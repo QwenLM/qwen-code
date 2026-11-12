@@ -973,4 +973,35 @@ The full output has been saved to: not a header, just text`;
     expect(isPersistedOutputStub(quoted)).toBe(false);
     expect(isPersistedOutputStub('ordinary tool output')).toBe(false);
   });
+
+  // The predicate is positional: the saved-path header must be line 2 of the
+  // envelope. Hand-built bodies above cannot catch a producer that stops
+  // emitting it there, so assert against what the producers actually write.
+  it('classifies the output the real producers emit', async () => {
+    mockWriteFile.mockResolvedValue(undefined);
+    mockMkdir.mockResolvedValue(undefined);
+    atomicWriteFile.mockResolvedValue(undefined);
+
+    const saved = await truncateAndSaveToFile(
+      'the saved spill\n'.repeat(20000),
+      '/tmp/tool-results',
+      'shell',
+      { maxChars: 2000, maxLines: 20 },
+    );
+    expect(saved.outputFile).toBeDefined();
+    expect(isPersistedOutputStub(saved.content)).toBe(true);
+
+    const unsaved = await persistAndTruncateToolResult(
+      'json',
+      'mcp',
+      JSON.stringify({
+        rows: Array.from({ length: 1000 }, (_, index) => ({ index })),
+      }),
+      {
+        getToolResultBytesWritten: () => Number.MAX_SAFE_INTEGER,
+      } as unknown as Config,
+    );
+    expect(unsaved.content).toContain('session disk budget exhausted');
+    expect(isPersistedOutputStub(unsaved.content)).toBe(false);
+  });
 });
