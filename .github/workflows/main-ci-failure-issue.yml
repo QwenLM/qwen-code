@@ -390,7 +390,7 @@ jobs:
           # test pins the equality. There the same annotation class auto-reruns
           # a PR's red check; here it suppresses the issue failure record.
           # Full rationale → qwen-autofix.md#af-076
-          INFRA_FAILURE_SIGNATURES: 'lost communication with the server|No space left on device|ENOSPC|received a shutdown signal|The runner has received|Failed to initialize container|runner (was|has been) (lost|terminated)|invalid index-pack output|RPC failed|failed to be acquired|lock not acquired within'
+          INFRA_FAILURE_SIGNATURES: 'lost communication with the server|No space left on device|ENOSPC|received a shutdown signal|The runner has received|Failed to initialize container|runner (was|has been) (lost|terminated)|invalid index-pack output|RPC failed|failed to be acquired|lock not acquired within|Host load gate breached|HOST_LOAD_MAX_RATIO must be a positive number|HOST_LOAD_MAX_WAIT_TRIES must be a positive integer|HOST_LOAD_WAIT_SECONDS must be a positive integer'
         run: |-
           jobs_json="${RUNNER_TEMP}/run-jobs.json"
 
