@@ -2164,16 +2164,22 @@ describe('package scripts', () => {
           ).length,
         ).toBe(1);
 
-        // The reserve is the work the side lane still owes. Elapsed 1000 s of
-        // a 2700 s step leaves 1700 s, and the half-budget guard (1350 s)
-        // admits a 300 s reserve but not a 400 s one: the guard refuses rather
-        // than squeezing one more re-run in.
+        // The reserve is the work the side lane still owes, derived from its
+        // own start against the clock at the moment of the decision — nothing
+        // here injects the reserve itself, so the production arithmetic
+        // `SECONDS - since` is what the guard reads. Starting the clock 1000 s
+        // back and the side lane 300 s back leaves ~1300 s of a 2700 s step,
+        // under the 1350 s half-budget guard, so the re-run is admitted; the
+        // side lane started 400 s back puts ~1400 s on the clock, over the
+        // guard, so it refuses rather than squeezing one more pass in. The
+        // figures sit tens of seconds either side of the threshold, not on it:
+        // with a live clock a one-second boundary would be a flake, not a test.
         const reserveFits = run('rpc-retry-reserve-fits', {
           report: rpcReport('@qwen-code/web-shell'),
           budget: '2700',
           extraEnv: {
             SCRIPT_START_OVERRIDE: '-1000',
-            RETRY_RESERVE_OVERRIDE: '300',
+            SIDE_LANE_STARTED_OVERRIDE: '-300',
           },
         });
         expect(reserveFits.rc, reserveFits.stdout).toBe('0');
@@ -2187,7 +2193,7 @@ describe('package scripts', () => {
           budget: '2700',
           extraEnv: {
             SCRIPT_START_OVERRIDE: '-1000',
-            RETRY_RESERVE_OVERRIDE: '400',
+            SIDE_LANE_STARTED_OVERRIDE: '-400',
           },
         });
         expect(reserveOverflows.rc).toBe('1');

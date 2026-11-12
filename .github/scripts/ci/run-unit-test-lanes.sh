@@ -126,6 +126,21 @@ retry_budget_exhausted() {
     [ $((SECONDS - SCRIPT_START + reserve)) -ge $((UNIT_LANE_BUDGET_SECONDS / 2)) ]
 }
 
+# The reserve the side lane has already spent: its own start read against the
+# clock NOW. The proxy is the workspace batch's elapsed time, which stands in
+# for the standalone regression and the scripts suite that follow it (an
+# estimate, not a measurement). Read here, never at run_lane_suites' entry: at
+# entry nothing has been spent, so the figure would be zero on every production
+# run and the guard would behave as if there were no reserve at all. Called
+# again before each extra round for the same reason.
+retry_reserve_owed() {
+  [ -n "${RETRY_RESERVE_SINCE:-}" ] || {
+    echo 0
+    return
+  }
+  echo $((SECONDS - RETRY_RESERVE_SINCE))
+}
+
 half_cap() {
   case "$1" in
     '' | *[!0-9]*) echo 2 ;;
@@ -185,19 +200,11 @@ run_suite() {
 # holds every workspace's summary, so judging the whole log — or just its last
 # summary — would let one workspace's green report license another's retry.
 run_lane_suites() {
-  # What this lane still owes after a retry: the side lane names its own start
-  # so the workspace batch's elapsed time (its proxy for the standalone run and
-  # the scripts suite that follow) is reserved before admitting a re-run.
-  local reserve=0
-  if [ -n "${RETRY_RESERVE_SINCE:-}" ]; then
-    reserve=${RETRY_RESERVE_OVERRIDE:-$((SECONDS - RETRY_RESERVE_SINCE))}
-  fi
   local log rc failed name block block_rc
   log="$(mktemp "${TMPDIR:-/tmp}/unit-lane-suite.XXXXXX")" || {
     echo "::error::Could not create a suite log under ${TMPDIR:-/tmp}."
     return 1
   }
-  local started=$SECONDS
   npm run test:ci "$@" -- "${suite_args[@]}" 2>&1 | tee "$log"
   rc="${PIPESTATUS[0]}"
   if [ "$rc" -eq 0 ] || [ "$RPC_RETRY" = '0' ]; then
@@ -265,7 +272,7 @@ run_lane_suites() {
     rm -f "$log"
     return "$rc"
   fi
-  if retry_budget_exhausted "$reserve"; then
+  if retry_budget_exhausted "$(retry_reserve_owed)"; then
     echo "::warning::Skipping the RPC re-run: ${SECONDS} s of the ${UNIT_LANE_BUDGET_SECONDS} s step budget used, too little left for another pass."
     rm -f "$log"
     return "$rc"
@@ -283,7 +290,7 @@ run_lane_suites() {
       fi
     done
     [ "$status" -eq 0 ] && break
-    retry_budget_exhausted && break
+    retry_budget_exhausted "$(retry_reserve_owed)" && break
   done
   # A workspace whose failure was not the transport was not re-run; its
   # failure is the lane's verdict even when every retry passed.
@@ -348,7 +355,7 @@ suite_args=("$@")
 
 (
   side_started=$SECONDS
-  RETRY_RESERVE_SINCE=$side_started \
+  RETRY_RESERVE_SINCE=${SIDE_LANE_STARTED_OVERRIDE:-$side_started} \
     NODE_OPTIONS="$workspace_node_options" VITEST_MAX_FORKS="$side_forks" \
     VITEST_MAX_THREADS="$side_threads" \
     run_lane_suites "${side_workspaces[@]}"
