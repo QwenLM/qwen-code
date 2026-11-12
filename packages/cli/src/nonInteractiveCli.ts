@@ -206,6 +206,10 @@ import {
   insertAfterFunctionResponses,
 } from './nonInteractive/nonInteractiveHelpers.js';
 import { LoopReason } from '@qwen-code/qwen-code-core/telemetry/types.js';
+import {
+  USAGE_STATISTICS_NOTICE_SUBTYPE,
+  consumeUsageStatisticsNotice,
+} from './nonInteractive/usage-statistics-notice.js';
 import { formatLoopDetectedMessage } from './utils/loop-detected-message.js';
 import type { LoopStop } from './utils/loop-detected-message.js';
 
@@ -1262,6 +1266,22 @@ export async function runNonInteractive(
       );
       adapter.emitMessage(systemMessage);
       modSession?.flushLogs();
+
+      // Headless runs render no auth dialog, so they never see the privacy
+      // notice link; disclose default-on usage statistics once per install.
+      const usageStatisticsNotice = consumeUsageStatisticsNotice({
+        usageStatisticsEnabled: config.getUsageStatisticsEnabled(),
+        settingsValue: settings.merged.privacy?.usageStatisticsEnabled,
+      });
+      if (usageStatisticsNotice) {
+        if (outputFormat === OutputFormat.TEXT) {
+          process.stderr.write(`${usageStatisticsNotice}\n`);
+        } else {
+          adapter.emitSystemMessage(USAGE_STATISTICS_NOTICE_SUBTYPE, {
+            notice: usageStatisticsNotice,
+          });
+        }
+      }
 
       const resumedSessionData = config.getResumedSessionData();
       if (resumedSessionData) {

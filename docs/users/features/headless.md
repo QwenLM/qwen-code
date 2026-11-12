@@ -245,6 +245,12 @@ session, JSONL event, tool input, or partial message.
 qwen -p "Write a Python script" --output-format stream-json --include-partial-messages
 ```
 
+### Usage Statistics Notice
+
+Headless runs show no setup dialog, so the first headless run on an installation that relies on the default usage statistics setting prints a one-time notice naming the collection host and how to opt out. In text mode it is written to stderr, so stdout stays clean. In JSON and stream-JSON modes it is a system message with subtype `usage_statistics_notice` and a `data.notice` string, emitted after the session initialization message; consumers that ignore unknown subtypes need no change.
+
+The notice is recorded in `~/.qwen/usage-statistics-notice-shown` and not repeated. It never appears when `QWEN_USAGE_STATISTICS_ENABLED` or `privacy.usageStatisticsEnabled` is set to any value. If the marker cannot be written (for example, a read-only home directory), the notice is shown again on the next run. See [Usage Statistics](../configuration/settings.md#usage-statistics).
+
 ### Managed Memory Completion
 
 Pending managed memory work does not delay the terminal `result` message in JSON or stream-JSON output. After writing its terminal output (a result message in JSON formats, or the final response or error in text output), the CLI normally waits for tracked extraction, dreaming, and scheduled skill-review tasks before finishing the invocation. A one-shot process may therefore remain running after its output is written. In a reusable stream-JSON session, the next serialized turn can also wait for those tasks while stdin remains open.

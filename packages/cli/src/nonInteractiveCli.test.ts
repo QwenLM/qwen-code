@@ -143,6 +143,19 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   };
 });
 
+const mockConsumeUsageStatisticsNotice = vi.hoisted(() =>
+  vi.fn().mockReturnValue(null),
+);
+vi.mock(
+  './nonInteractive/usage-statistics-notice.js',
+  async (importOriginal) => ({
+    ...(await importOriginal<
+      typeof import('./nonInteractive/usage-statistics-notice.js')
+    >()),
+    consumeUsageStatisticsNotice: mockConsumeUsageStatisticsNotice,
+  }),
+);
+
 const mockGetCommands = vi.hoisted(() => vi.fn());
 const mockGetCommandsForMode = vi.hoisted(() => vi.fn());
 const mockCommandServiceCreate = vi.hoisted(() => vi.fn());
@@ -405,6 +418,7 @@ describe('runNonInteractive', () => {
       getContentGeneratorConfig: vi.fn().mockReturnValue({}),
       getDebugMode: vi.fn().mockReturnValue(false),
       getOutputFormat: vi.fn().mockReturnValue('text'),
+      getUsageStatisticsEnabled: vi.fn().mockReturnValue(true),
       getJsonSchema: vi.fn().mockReturnValue(undefined),
       getFolderTrustFeature: vi.fn().mockReturnValue(false),
       getFolderTrust: vi.fn().mockReturnValue(false),
@@ -1226,6 +1240,78 @@ describe('runNonInteractive', () => {
       }
     },
   );
+
+  describe('usage statistics notice', () => {
+    const notice = 'usage statistics notice text';
+    const finished: ServerLlmStreamEvent = {
+      type: LlmEventType.Finished,
+      value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
+    };
+
+    beforeEach(() => {
+      setupMetricsMock();
+      mockLlmClient.sendMessageStream.mockReturnValue(
+        createStreamFromEvents([finished]),
+      );
+    });
+
+    it('passes the resolved state and the unresolved setting', async () => {
+      vi.mocked(mockConfig.getUsageStatisticsEnabled).mockReturnValue(false);
+      await runNonInteractive(mockConfig, mockSettings, 'test', 'notice-args');
+      expect(mockConsumeUsageStatisticsNotice).toHaveBeenCalledWith({
+        usageStatisticsEnabled: false,
+        settingsValue: mockSettings.merged.privacy?.usageStatisticsEnabled,
+      });
+    });
+
+    it('writes the notice to stderr in text mode', async () => {
+      mockConsumeUsageStatisticsNotice.mockReturnValueOnce(notice);
+      await runNonInteractive(mockConfig, mockSettings, 'test', 'notice-text');
+      expect(processStderrSpy).toHaveBeenCalledWith(`${notice}\n`);
+      const stdout = processStdoutSpy.mock.calls
+        .map((call) => String(call[0]))
+        .join('');
+      expect(stdout).not.toContain(notice);
+    });
+
+    it.each([OutputFormat.JSON, OutputFormat.STREAM_JSON])(
+      'emits the notice as a system message after init in %s mode',
+      async (format) => {
+        vi.mocked(mockConfig.getOutputFormat).mockReturnValue(format);
+        mockConsumeUsageStatisticsNotice.mockReturnValueOnce(notice);
+        await runNonInteractive(
+          mockConfig,
+          mockSettings,
+          'test',
+          'notice-json',
+        );
+        expect(processStderrSpy).not.toHaveBeenCalledWith(`${notice}\n`);
+        const stdout = processStdoutSpy.mock.calls
+          .map((call) => String(call[0]))
+          .join('');
+        const messages: Array<{
+          type?: string;
+          subtype?: string;
+          data?: unknown;
+        }> =
+          format === OutputFormat.JSON
+            ? JSON.parse(stdout)
+            : stdout
+                .trim()
+                .split('\n')
+                .map((line) => JSON.parse(line));
+        const initIndex = messages.findIndex(
+          (m) => m.type === 'system' && m.subtype === 'init',
+        );
+        const noticeIndex = messages.findIndex(
+          (m) => m.type === 'system' && m.subtype === 'usage_statistics_notice',
+        );
+        expect(initIndex).toBe(0);
+        expect(noticeIndex).toBeGreaterThan(initIndex);
+        expect(messages[noticeIndex].data).toEqual({ notice });
+      },
+    );
+  });
 
   it('repairs a discarded tool when a drain attempt falls back models', async () => {
     vi.mocked(mockConfig.getOutputFormat).mockReturnValue(OutputFormat.JSON);
