@@ -16580,6 +16580,40 @@ Other open files:
     });
 
     /**
+     * The skill-review gate is split out so a host can run it without the
+     * memory tasks, which puts it on its own shutdown path: a review is still
+     * scheduled before shutdown and none after, independently of Extract and
+     * Dream.
+     */
+    it('skips the managed skill review after shutdown is requested', () => {
+      const scheduleSkillReviewSpy = vi
+        .fn()
+        .mockReturnValue({ status: 'scheduled' });
+      const config = makeMockConfigForShutdown(
+        memoryManager({ scheduleSkillReview: scheduleSkillReviewSpy }),
+      );
+      // The gate returns early on its own when auto-skill is off, which would
+      // make the shutdown check unreachable here.
+      vi.mocked(config.getAutoSkillEnabled).mockReturnValue(true);
+      const withConfirm = config as unknown as {
+        getAutoSkillConfirmEnabled: () => boolean;
+      };
+      withConfirm.getAutoSkillConfirmEnabled = () => false;
+      const client = new LlmClient(config);
+      (
+        client as unknown as { getHistoryShallow: () => unknown[] }
+      ).getHistoryShallow = () => [];
+
+      client.runManagedAutoSkillReview();
+      expect(scheduleSkillReviewSpy).toHaveBeenCalledTimes(1);
+
+      scheduleSkillReviewSpy.mockClear();
+      client.requestShutdown();
+      client.runManagedAutoSkillReview();
+      expect(scheduleSkillReviewSpy).not.toHaveBeenCalled();
+    });
+
+    /**
      * C2: requestShutdown() is idempotent — calling it multiple times
      * should not throw or have side effects.
      */
