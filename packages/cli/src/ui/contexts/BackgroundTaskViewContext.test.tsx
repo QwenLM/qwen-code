@@ -16,15 +16,19 @@ import {
   useBackgroundTaskViewState,
 } from './BackgroundTaskViewContext.js';
 
-const workflowEntry = (pendingApprovalIds: string[] = []): WorkflowTask =>
+const workflowEntry = (
+  pendingApprovalIds: string[] = [],
+  runId = 'wf-1',
+  startTime = 100,
+): WorkflowTask =>
   ({
-    id: 'wf-1',
+    id: runId,
     kind: 'workflow',
-    runId: 'wf-1',
+    runId,
     description: 'demo',
     meta: null,
     status: 'running',
-    startTime: 100,
+    startTime,
     pendingApprovals: pendingApprovalIds.map((approvalId) => ({
       approvalId,
       subagentId: 'sub-1',
@@ -52,10 +56,13 @@ const agentTask = () =>
   }) as unknown as Record<string, unknown>;
 
 function makeConfig(workflows: () => WorkflowTask[]) {
+  let statusChangeCb: (() => void) | undefined;
   let approvalRequestCb: (() => void) | undefined;
   let approvalChangeCb: (() => void) | undefined;
   const workflowReg = {
-    setStatusChangeCallback: vi.fn(),
+    setStatusChangeCallback: vi.fn((next: (() => void) | undefined) => {
+      statusChangeCb = next;
+    }),
     setApprovalChangeCallback: vi.fn((next: (() => void) | undefined) => {
       approvalChangeCb = next;
     }),
@@ -85,6 +92,7 @@ function makeConfig(workflows: () => WorkflowTask[]) {
   } as unknown as Config;
   return {
     config,
+    fireStatusChange: () => statusChangeCb?.(),
     fireApprovalRequest: () => approvalRequestCb?.(),
     fireApprovalChange: () => approvalChangeCb?.(),
   };
@@ -334,6 +342,79 @@ describe('BackgroundTaskViewProvider approval surfacing', () => {
     act(() => fireApprovalChange());
     expect(result.current.state.dialogMode).toBe('closed');
   });
+
+  it.each(['starts', 'finishes', 'is removed', 'reorders', 'drains'] as const)(
+    'keeps dismissed heads suppressed when another task %s',
+    (change) => {
+      const first = workflowEntry(['wfap-a'], 'wf-a', 300);
+      const second = workflowEntry(['wfap-b'], 'wf-b', 100);
+      const unrelated = workflowEntry([], 'wf-unrelated', 400);
+      let workflows =
+        change === 'finishes' || change === 'is removed'
+          ? [first, second, unrelated]
+          : [first, second];
+      const { config, fireStatusChange, fireApprovalRequest } = makeConfig(
+        () => workflows,
+      );
+      const wrapper = ({ children }: { children: React.ReactNode }) => (
+        <BackgroundTaskViewProvider config={config}>
+          {children}
+        </BackgroundTaskViewProvider>
+      );
+      const { result } = renderHook(
+        () => ({
+          state: useBackgroundTaskViewState(),
+          actions: useBackgroundTaskViewActions(),
+        }),
+        { wrapper },
+      );
+
+      expect(result.current.state.dialogMode).toBe('list');
+      act(() => result.current.actions.acknowledgeAutoOpen());
+      act(() => result.current.actions.closeDialog());
+      expect(result.current.state.dialogMode).toBe('closed');
+
+      act(() => {
+        switch (change) {
+          case 'starts':
+            workflows = [first, second, unrelated];
+            break;
+          case 'finishes':
+            workflows = [
+              first,
+              second,
+              { ...unrelated, status: 'completed' },
+            ];
+            break;
+          case 'is removed':
+            workflows = [first, second];
+            break;
+          case 'reorders':
+            workflows = [{ ...first, startTime: 50 }, second];
+            break;
+          case 'drains':
+            workflows = [workflowEntry([], 'wf-a', 300), second];
+            break;
+        }
+        fireStatusChange();
+      });
+      expect(result.current.state.dialogMode).toBe('closed');
+      expect(result.current.state.autoOpened).toBe(false);
+
+      act(() => {
+        workflows = [
+          ...workflows,
+          workflowEntry(['wfap-new'], 'wf-new', 10),
+        ];
+        fireApprovalRequest();
+      });
+      expect(result.current.state.dialogMode).toBe('list');
+      expect(result.current.state.autoOpened).toBe(true);
+      expect(
+        result.current.state.entries[result.current.state.selectedIndex],
+      ).toMatchObject({ kind: 'workflow', runId: 'wf-new' });
+    },
+  );
 
   it('leaves an open detail view alone when a new approval parks', () => {
     // R2-3: pin the `dialogMode !== 'closed'` guard. Without it, any
