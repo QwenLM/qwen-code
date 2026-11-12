@@ -6782,22 +6782,26 @@ describe('Session', () => {
       mockChat.sendMessageStream = vi
         .fn()
         .mockResolvedValue(createEmptyStream());
-      // A real promise, so the drain loop's body runs instead of awaiting an
-      // empty array.
-      let drained = false;
+      // Blocking work that never settles on its own: if the ACP branch drops
+      // the drain promise instead of awaiting it, the turn still completes and
+      // the race below sees 'turn-finished'.
       mockLlmClient.consumePendingMemoryTaskPromises.mockReturnValue([
-        Promise.resolve(1).then(() => {
-          drained = true;
-          return 1;
-        }),
+        new Promise<number>(() => {}),
       ]);
 
-      await session.prompt({
-        sessionId: 'test-session-id',
-        prompt: [{ type: 'text', text: 'hello' }],
-      });
+      const outcome = await Promise.race([
+        session
+          .prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          })
+          .then(() => 'turn-finished'),
+        new Promise<string>((resolve) =>
+          setTimeout(() => resolve('turn-still-waiting'), 50),
+        ),
+      ]);
+      expect(outcome).toBe('turn-still-waiting');
 
-      expect(drained).toBe(true);
       // The ACP-side branch owns the memory tasks, so it owns the skill
       // review too: nothing else in the legacy round would schedule it.
       expect(mockLlmClient.runManagedAutoSkillReview).toHaveBeenCalledOnce();
