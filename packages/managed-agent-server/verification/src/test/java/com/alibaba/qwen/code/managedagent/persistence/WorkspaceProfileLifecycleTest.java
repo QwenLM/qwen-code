@@ -44,8 +44,17 @@ class WorkspaceProfileLifecycleTest {
         return f.transactions.execute(ignored -> f.store.claimOperation("tenant", f.session, id, "server-1", Duration.ofSeconds(30)).orElseThrow());
     }
 
+    @Test
+    void loopShellRevisionIsPublicShellOnLifecycleV2() {
+        assertThat(WorkspaceToolProfiles.isPublicShell(WorkspaceToolProfiles.SHELL_V3)).isTrue();
+        assertThat(WorkspaceToolProfiles.lifecycleProtocol(WorkspaceToolProfiles.SHELL_V3)).isEqualTo(2);
+        // The retired shell/2 stays refused by the canonical vocabulary.
+        assertThat(WorkspaceToolProfiles.isPublicShell("hosted-workspace-shell/2")).isFalse();
+        assertThat(WorkspaceToolProfiles.lifecycleProtocol("hosted-workspace-shell/2")).isEqualTo(0);
+    }
+
     @ParameterizedTest
-    @ValueSource(strings = {WorkspaceToolProfiles.SHELL, WorkspaceToolProfiles.MCP})
+    @ValueSource(strings = {WorkspaceToolProfiles.SHELL, WorkspaceToolProfiles.SHELL_V3, WorkspaceToolProfiles.MCP})
     void closesWithoutResourcesAndDeletesAtomicallyWithPrivateRetirement(String profile) {
         var f = fixture();
         var op = admit(f, profile, OperationKind.DELETE);

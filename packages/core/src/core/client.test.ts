@@ -114,6 +114,7 @@ vi.mock('../utils/retry.js', () => ({
 }));
 import {
   getCoreSystemPrompt,
+  loadCoreSystemPromptSource,
   getCustomSystemPrompt,
   getPlanModeSystemReminder,
 } from './prompts.js';
@@ -222,6 +223,7 @@ vi.mock('./prompts', async (importOriginal) => {
     ...actual,
     getCustomSystemPrompt: vi.fn(),
     getCoreSystemPrompt: vi.fn(),
+    loadCoreSystemPromptSource: vi.fn(),
     getCompressionPrompt: vi.fn(),
     getProjectSummaryPrompt: vi.fn(),
     getPlanModeSystemReminder: vi.fn(),
@@ -780,6 +782,10 @@ describe('Gemini Client (client.ts)', () => {
     // The client concatenates these with the auto-memory suffix, so the
     // default mock must return a string, not undefined.
     vi.mocked(getCoreSystemPrompt).mockReturnValue('');
+    vi.mocked(loadCoreSystemPromptSource).mockReturnValue({
+      systemMdPath: '/tmp/system.md',
+      identity: null,
+    });
     vi.mocked(getCustomSystemPrompt).mockReturnValue('');
     sessionStartProfilerMocks.profilers.length = 0;
     sessionStartProfilerMocks.createSessionStartProfiler.mockImplementation(
@@ -15529,6 +15535,34 @@ Other open files:
   });
 
   describe('generateContent', () => {
+    it('builds a default instruction after resolving the target wire model', async () => {
+      vi.spyOn(
+        mockConfig.getBaseLlmClient(),
+        'resolveForModel',
+      ).mockResolvedValueOnce({
+        contentGenerator: mockContentGenerator,
+        contentGeneratorConfig: {
+          authType: AuthType.USE_OPENAI,
+          model: 'qwen3-vl',
+          extra_body: { model: 'qwen-vl-max' },
+        },
+        model: 'qwen3-vl',
+        retryAuthType: AuthType.USE_OPENAI,
+        retryErrorCodes: undefined,
+      });
+      vi.mocked(getCoreSystemPrompt).mockImplementation(
+        (_memory, model) => `prompt for ${model}`,
+      );
+      await generate({}, 'vision');
+      const request = vi
+        .mocked(mockContentGenerator.generateContent)
+        .mock.calls.at(-1)?.[0];
+      expect(request?.config?.systemInstruction).toContain(
+        'prompt for qwen-vl-max',
+      );
+      expect(mockConfig.getModel()).toBe('test-model');
+    });
+
     /** The positional args generateContent hands getCoreSystemPrompt. */
     const corePromptArgs = (
       mode = 'headless',
@@ -15537,7 +15571,7 @@ Other open files:
     ) =>
       [
         undefined,
-        'test-model',
+        DEFAULT_QWEN_FLASH_MODEL,
         undefined,
         mode,
         outputStyle,
@@ -15551,6 +15585,8 @@ Other open files:
           agentReachable: false,
           executionSandboxFilesystem: undefined,
           executionSandboxBackend: undefined,
+          executionSandboxNetwork: undefined,
+          source: expect.objectContaining({ identity: null }),
         },
       ] as const;
     /** generateContent args whose config carries `systemInstruction`. */

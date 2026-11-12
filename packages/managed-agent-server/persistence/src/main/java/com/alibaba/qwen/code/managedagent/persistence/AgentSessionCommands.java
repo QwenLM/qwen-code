@@ -5,22 +5,19 @@ import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.Admission;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.CommandRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
-import com.alibaba.qwen.code.managedagent.model.StoreModels.RenameDelivery;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionMutationCommand;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionMutationKind;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.SyncRename;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnRecord;
 import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
-import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
-import java.time.Duration;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -137,8 +134,8 @@ final class AgentSessionCommands {
         // The W2 handshake: an open execution operation on a bound Session
         // is the busy barrier the settlement re-verifies at commit; a
         // later Turn must not slide in underneath it. Narrower than
-        // requireNoOpenOperation on purpose: a stuck display mutation
-        // (PENDING rename command) or an in-flight ACTION_RESPONSE would
+        // requireNoOpenOperation on purpose: a stuck mutation receipt
+        // (a PENDING SESSION_COMMAND) or an in-flight ACTION_RESPONSE would
         // otherwise wedge every Turn admission without any recovery scan
         // reading those tables — while the operation-ledger barriers that
         // intentionally cover them stay untouched.
@@ -221,129 +218,13 @@ final class AgentSessionCommands {
                 operationId);
     }
 
-    SessionMutationCommand beginSessionRename(String tenantId, String key,
-            String digest, String sessionId, String title, String actorId) {
-        // Empty operation ranges can share an InnoDB gap even across Session scopes.
-        WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
-        SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
-        // The Session lock serializes this Session's admissions without gap-locking missing index
-        // entries. A different Session reusing the tenant-scoped key loses on the receipt's unique
-        // key in beginSessionMutation and answers idempotency_conflict.
-        Optional<CommandRecord> previous = findCommand(tenantId, "RENAME_SESSION", key, false);
-        if (previous.isPresent()
-                && sessionId.equals(previous.get().sessionId())) {
-            requireRenameReplayOwner(session, previous.get(), actorId);
-        }
-        var retained =
-                jdbc.queryForList(
-                        "SELECT " + ManagedSchemaProjection.OPERATION.columns() + " FROM ma_operation WHERE operation_kind = 'RENAME' AND target_key"
-                            + " = ? AND idempotency_digest = ? AND tenant_id = ? AND session_id = ?"
-                            + " ORDER BY target_revision DESC LIMIT 1 FOR UPDATE",
-                        AgentStoreRows.renameTarget(tenantId, sessionId),
-                        com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(
-                                key),
-                        tenantId,
-                        sessionId);
-        if (!retained.isEmpty()) {
-            Map<String, Object> row = retained.getFirst();
-            if (!key.equals(row.get("idempotency_key")) || !digest.equals(row.get("request_digest"))
-                    || !title.equals(storeRows.readMap((String) row.get("request_json")).get("title"))) {
-                throw new ManagedAgentException(
-                        409,
-                        "idempotency_conflict",
-                        "The idempotency key was reused with different content.");
-            }
-            if ("SUPERSEDED".equals(row.get("state"))) {
-                throw new ManagedAgentException(
-                        409,
-                        "session_mutation_superseded",
-                        "A later Session title attempt has been admitted.");
-            }
-            // A parked delivery awaits the reconciler and is never re-sent.
-            if ("RECOVERY_BLOCKED".equals(row.get("state"))) {
-                throw new ManagedAgentException(
-                        409,
-                        "operation_outcome_unknown",
-                        "The original title delivery is awaiting reconciliation.");
-            }
-        }
-        // A delivery the reconciler proved never landed is FAILED: the key
-        // retries under a new revision, as any failed title key does.
-        if (!retained.isEmpty() && !"FAILED".equals(retained.getFirst().get("state"))) {
-            Map<String, Object> row = retained.getFirst();
-            return new SessionMutationCommand(
-                    sessionId,
-                    "COMPLETED".equals(row.get("state")) ? "COMPLETED" : "PENDING",
-                    true,
-                    ((Number) row.get("target_revision")).longValue());
-        }
-        SessionMutationCommand command =
-                beginSessionMutation(
-                        tenantId,
-                        "RENAME_SESSION",
-                        key,
-                        digest,
-                        sessionId,
-                        SessionMutationKind.RENAME,
-                        actorId);
-        if ("COMPLETED".equals(command.status())) {
-            return command;
-        }
-        Long revision =
-                jdbc.queryForObject(
-                        "SELECT title_revision FROM ma_session WHERE tenant_id = ?"
-                                + " AND session_id = ? AND session_kind = 'PUBLIC'",
-                        Long.class,
-                        tenantId,
-                        sessionId);
-        long next = Math.addExact(revision, 1);
-        long now = clock.millis();
-        jdbc.update(
-                "UPDATE ma_session SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", title_revision = ? WHERE tenant_id = ? AND session_id = ?",
-                next,
-                tenantId,
-                sessionId);
-        jdbc.update(
-                "UPDATE ma_operation SET state = 'SUPERSEDED', delivery_state = 'COMPLETED', phase"
-                    + " = 'SUPERSEDED', gmt_modified = ? WHERE operation_kind = 'RENAME' AND"
-                    + " target_key = ? AND target_revision < ? AND state IN ('PENDING', 'RUNNING',"
-                    + " 'RECOVERY_BLOCKED')",
-                now,
-                AgentStoreRows.renameTarget(tenantId, sessionId),
-                next);
-        jdbc.update(
-                "INSERT INTO ma_operation (operation_key, scope_key, session_scope_key,"
-                    + " operation_id, operation_kind, tenant_id, session_id, target_kind,"
-                    + " target_key, target_revision, idempotency_key, idempotency_digest,"
-                    + " request_digest, request_json, state, phase, delivery_state, available_at,"
-                    + " gmt_create, gmt_modified) VALUES (?, ?, ?, ?, 'RENAME', ?, ?, 'SESSION', ?,"
-                    + " ?, ?, ?, ?, ?, 'PENDING', 'ADMITTED', 'PENDING', ?, ?, ?)",
-                renameKey(tenantId, sessionId, next),
-                ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
-                ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
-                "rename:" + next,
-                tenantId,
-                sessionId,
-                AgentStoreRows.renameTarget(tenantId, sessionId),
-                next,
-                key,
-                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(key),
-                digest,
-                storeRows.writeJson(Map.of("title", title)),
-                now,
-                now,
-                now);
-        return new SessionMutationCommand(sessionId, "PENDING", command.replayed(), next);
-    }
-
     // The discovery arm of the replay's recorder/creator rule: once this
     // method finds an existing RENAME command receipt under the Session
     // lock, the request may only reuse it when the caller is its recorder
     // (the receipt's actor) or the Session's creator. The alternatives —
-    // claiming a still-claimable delivery for the recorder, or failing a
-    // digest comparison against a different title — would hand the
-    // recorder's pending work to the racer or name the live key before
-    // authorization.
+    // replaying the recorder's receipt, or failing a digest comparison
+    // against a different title — would hand the recorder's recorded
+    // outcome to the racer or name the live key before authorization.
     // A legacy Session has no per-actor mutation gate at all; its key's
     // outcome stays answerable through the same contract as the pre-read
     // probe. A tombstoned Session answers the reads' 404 instead of the
@@ -361,217 +242,40 @@ final class AgentSessionCommands {
         }
     }
 
-    SessionRecord completeSessionRename(String tenantId, String key, String sessionId,
-            String title, String bootId, long revision) {
-        return settleRename(new RenameDelivery(tenantId, sessionId, key, title, revision, 0), null, bootId);
-    }
-
-    SessionRecord completeSessionRename(RenameDelivery delivery, String owner, String bootId) {
-        return settleRename(delivery, owner, bootId);
-    }
-
-    SessionRecord settleRename(RenameDelivery delivery, String owner, String bootId) {
-        String tenantId = delivery.tenantId();
-        String sessionId = delivery.sessionId();
-        storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
-        var rows =
-                jdbc.queryForList(
-                        "SELECT " + ManagedSchemaProjection.OPERATION.columns() + " FROM ma_operation WHERE operation_key = ? AND operation_kind ="
-                            + " 'RENAME' AND tenant_id = ? AND session_id = ? FOR UPDATE",
-                        renameKey(tenantId, sessionId, delivery.revision()),
-                        tenantId,
-                        sessionId);
-        Long currentRevision =
-                jdbc.queryForObject(
-                        "SELECT title_revision FROM ma_session WHERE tenant_id = ?"
-                                + " AND session_id = ?",
-                        Long.class,
-                        tenantId,
-                        sessionId);
-        if (rows.size() != 1
-                || currentRevision != delivery.revision()
-                || !delivery.idempotencyKey().equals(rows.getFirst().get("idempotency_key"))
-                || !delivery.title()
-                        .equals(
-                                storeRows.readMap((String) rows.getFirst().get("request_json"))
-                                        .get("title"))) {
-            throw new ManagedAgentException(
-                    409,
-                    "session_mutation_superseded",
-                    "A later Session title attempt has been admitted.");
+    /**
+     * Synchronous rename settlement. The SQL row is the public display
+     * authority; this reuses the shared command receipt and mutation events
+     * without a delivery row, claim or lease. The returned revision orders the
+     * best-effort journal notification the caller sends after this transaction
+     * commits. A replayed command returns its recorded outcome unchanged.
+     */
+    SyncRename settleRenameSync(String tenantId, String key, String digest,
+            String sessionId, String title, String actorId) {
+        // Empty operation ranges can share an InnoDB gap even across Session scopes.
+        WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
+        SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
+        Optional<CommandRecord> previous = findCommand(tenantId, "RENAME_SESSION", key, false);
+        if (previous.isPresent() && sessionId.equals(previous.get().sessionId())) {
+            requireRenameReplayOwner(session, previous.get(), actorId);
         }
-        Map<String, Object> operation = rows.getFirst();
-        if (owner == null
-                ? !"PENDING".equals(operation.get("state"))
-                : !owner.equals(operation.get("claim_owner"))
-                        || delivery.claimGeneration()
-                                != ((Number) operation.get("claim_generation")).longValue()
-                        || !List.of("RUNNING", "RECOVERY_BLOCKED")
-                                .contains(operation.get("state"))) {
-            throw new ManagedAgentException(
-                    409,
-                    "operation_claim_lost",
-                    "The title delivery claim was lost.");
+        SessionMutationCommand command = beginSessionMutation(tenantId, "RENAME_SESSION",
+                key, digest, sessionId, SessionMutationKind.RENAME, actorId);
+        if ("COMPLETED".equals(command.status())) {
+            // A replay sends no journal notification, so its revision is unused.
+            return new SyncRename(storeRows.requireSessionForUpdate(tenantId, sessionId),
+                    0, true);
         }
-        jdbc.update(
-                "UPDATE ma_request_receipt SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", state = 'PENDING' WHERE receipt_key = ? AND namespace = 'SESSION_COMMAND' AND state = 'FAILED'",
-                ManagedReceipts.commandKey(tenantId, "RENAME_SESSION", delivery.idempotencyKey()));
-        SessionRecord session =
-                completeSessionMutation(
-                        tenantId,
-                        "RENAME_SESSION",
-                        delivery.idempotencyKey(),
-                        sessionId,
-                        SessionMutationKind.RENAME,
-                        delivery.title(),
-                        bootId);
-        // A parked delivery answered late by its own claim was confirmed by
-        // the Harness after all.
-        boolean parked = !"RUNNING".equals(operation.get("state"))
-                && !"PENDING".equals(operation.get("state"));
-        jdbc.update(
-                "UPDATE ma_operation SET state = 'COMPLETED', phase = 'COMPLETED', delivery_state ="
-                    + " 'COMPLETED', claim_owner = NULL, claim_until = NULL, gmt_modified = ?,"
-                    + " completed_at = ?"
-                    + (parked ? ", admission_stage = 'HARNESS_CONFIRMED', failure_code = NULL" : "")
-                    + " WHERE operation_key = ?",
-                clock.millis(),
-                clock.millis(),
-                renameKey(tenantId, sessionId, delivery.revision()));
-        return session;
-    }
-
-    void abandonSessionRename(String tenantId, String key, String sessionId, long revision, String owner) {
-        storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
-        if (jdbc.queryForObject(
-                        "SELECT COUNT(*) FROM ma_operation WHERE operation_key = ? AND operation_kind = 'RENAME' AND state = 'RUNNING' AND claim_owner = ? AND claim_until > " + ManagedSchemaTime.SQL_NOW + "",
-                        Integer.class,
-                        renameKey(tenantId, sessionId, revision),
-                        owner)
-                == 1) {
-            abandonSessionMutation(tenantId, "RENAME_SESSION", key, sessionId);
-        }
-    }
-
-    List<RenameDelivery> deliverableRenames(long now) {
-        // A submitted delivery whose claim expired parks for the reconciler.
-        String unanswered = "(state = 'RUNNING' AND phase = 'SUBMITTED' AND claim_until <= "
-                + ManagedSchemaTime.SQL_NOW + ")";
-        for (Map<String, Object> row : jdbc.queryForList(
-                "SELECT operation_key, tenant_id, session_id, idempotency_key FROM ma_operation WHERE operation_kind = 'RENAME' AND " + unanswered + " AND EXISTS (SELECT 1 FROM ma_session private_scope WHERE private_scope.tenant_id = ma_operation.tenant_id AND private_scope.session_id = ma_operation.session_id AND private_scope.is_csi_guard = FALSE) LIMIT 100")) {
-            parkRename(row, unanswered);
-        }
-        jdbc.update(
-                "UPDATE ma_operation SET state = 'PENDING', delivery_state = 'PENDING', phase = 'ADMITTED', available_at = ?, claim_owner = NULL, claim_until = NULL, gmt_modified = ? WHERE operation_kind = 'RENAME' AND state = 'RUNNING' AND phase = 'PREPARING' AND claim_until <= " + ManagedSchemaTime.SQL_NOW + " AND EXISTS (SELECT 1 FROM ma_session private_scope WHERE private_scope.tenant_id = ma_operation.tenant_id AND private_scope.session_id = ma_operation.session_id AND private_scope.is_csi_guard = FALSE) LIMIT 100",
-                now,
-                now);
-        return jdbc.query(
-                "SELECT " + ManagedSchemaProjection.OPERATION.columns() + " FROM ma_operation WHERE operation_kind = 'RENAME' AND delivery_state = 'PENDING' AND state = 'PENDING' AND available_at <= ? AND EXISTS (SELECT 1 FROM ma_session private_scope WHERE private_scope.tenant_id = ma_operation.tenant_id AND private_scope.session_id = ma_operation.session_id AND private_scope.is_csi_guard = FALSE) ORDER BY available_at LIMIT 100",
-                this::renameDelivery,
-                now);
-    }
-
-    Optional<RenameDelivery> claimRename(RenameDelivery delivery, String owner, Duration lease) {
-        storeRows.requireLegacySessionForUpdate(delivery.tenantId(), delivery.sessionId());
-        long now = clock.millis();
-        int claimed =
-                jdbc.update(
-                        "UPDATE ma_operation SET state = 'RUNNING', delivery_state = 'LEASED', phase = 'PREPARING', claim_owner = ?, claim_until = (" + ManagedSchemaTime.SQL_NOW + " + ?), claim_generation = claim_generation + 1, attempt_count = attempt_count + 1, gmt_modified = ? WHERE operation_key = ? AND operation_kind = 'RENAME' AND ((state = 'PENDING' AND available_at <= ?) OR (state = 'RUNNING' AND phase = 'PREPARING' AND claim_until <= " + ManagedSchemaTime.SQL_NOW + "))",
-                        owner,
-                        lease.toMillis(),
-                        now,
-                        renameKey(delivery.tenantId(), delivery.sessionId(), delivery.revision()),
-                        now);
-        if (claimed == 0) {
-            return Optional.empty();
-        }
-        return jdbc
-                .query(
-                        "SELECT " + ManagedSchemaProjection.OPERATION.columns() + " FROM ma_operation WHERE operation_key = ? AND operation_kind ="
-                            + " 'RENAME'",
-                        this::renameDelivery,
-                        renameKey(delivery.tenantId(), delivery.sessionId(), delivery.revision()))
-                .stream()
-                .findFirst();
-    }
-
-    void markRenameSubmitted(RenameDelivery delivery, String owner) {
-        int changed =
-                jdbc.update(
-                        "UPDATE ma_operation SET phase = 'SUBMITTED', gmt_modified = ? WHERE operation_key = ? AND operation_kind = 'RENAME' AND state = 'RUNNING' AND phase = 'PREPARING' AND claim_owner = ? AND claim_generation = ? AND claim_until > " + ManagedSchemaTime.SQL_NOW + "",
-                        clock.millis(),
-                        renameKey(delivery.tenantId(), delivery.sessionId(), delivery.revision()),
-                        owner,
-                        delivery.claimGeneration());
-        if (changed != 1) {
-            throw new ManagedAgentException(
-                    409,
-                    "operation_claim_lost",
-                    "The title delivery claim was lost.");
-        }
-    }
-
-    void retryRename(RenameDelivery delivery, String owner, long availableAt) {
-        storeRows.requireLegacyMutation(delivery.tenantId(), delivery.sessionId());
-        String key = renameKey(delivery.tenantId(), delivery.sessionId(), delivery.revision());
-        parkRename(Map.of("operation_key", key, "tenant_id", delivery.tenantId(),
-                        "session_id", delivery.sessionId(), "idempotency_key", delivery.idempotencyKey()),
-                "state = 'RUNNING' AND phase = 'SUBMITTED' AND claim_owner = ? AND claim_generation = ?",
-                owner, delivery.claimGeneration());
-        jdbc.update(
-                "UPDATE ma_operation SET state = 'PENDING', delivery_state = 'PENDING', phase ="
-                    + " 'ADMITTED', available_at = ?, claim_owner = NULL, claim_until = NULL,"
-                    + " gmt_modified = ? WHERE operation_key = ? AND operation_kind = 'RENAME' AND"
-                    + " state = 'RUNNING' AND phase = 'PREPARING' AND claim_owner = ? AND"
-                    + " claim_generation = ?",
-                availableAt,
-                clock.millis(),
-                key,
-                owner,
-                delivery.claimGeneration());
-    }
-
-    // Parks one delivery whose submission went unanswered, if it still
-    // matches the guard. Its receipt retires as an abandoned delivery's
-    // does, so the parked title holds neither later titles nor the Session
-    // lifecycle hostage; the claim's own late reply and the reconciler both
-    // complete a retired receipt.
-    void parkRename(Map<String, Object> row, String guard, Object... guardArguments) {
-        List<Object> arguments = new ArrayList<>(List.of(storeRows.lifecycleDatabaseTime(), clock.millis(),
-                row.get("operation_key")));
-        arguments.addAll(List.of(guardArguments));
-        if (jdbc.update("UPDATE ma_operation SET " + PARK_RENAME + ", available_at = ?, gmt_modified = ?"
-                        + " WHERE operation_key = ? AND operation_kind = 'RENAME' AND " + guard,
-                arguments.toArray()) != 1) {
-            return;
-        }
-        String tenantId = (String) row.get("tenant_id");
-        jdbc.update(
-                "UPDATE ma_request_receipt SET state = 'FAILED', gmt_modified = ? WHERE receipt_key = ?"
-                    + " AND namespace = 'SESSION_COMMAND' AND session_id = ? AND state = 'PENDING'",
-                clock.millis(),
-                ManagedReceipts.commandKey(tenantId, "RENAME_SESSION", (String) row.get("idempotency_key")),
-                row.get("session_id"));
-    }
-
-    RenameDelivery renameDelivery(java.sql.ResultSet row, int index) throws java.sql.SQLException {
-        return new RenameDelivery(
-                row.getString("tenant_id"),
-                row.getString("session_id"),
-                row.getString("idempotency_key"),
-                (String) storeRows.readMap(row.getString("request_json")).get("title"),
-                row.getLong("target_revision"),
-                row.getInt("attempt_count"),
-                row.getLong("claim_generation"));
-    }
-
-    static String renameKey(String tenant, String session, long revision) {
-        return com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.operationKey(
-                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract
-                        .OperationKind.RENAME,
-                ManagedSessionStore.sessionScopeKey(tenant, session),
-                AgentStoreRows.renameTarget(tenant, session),
-                "rename:" + revision);
+        Long revision = jdbc.queryForObject(
+                "SELECT title_revision FROM ma_session WHERE tenant_id = ?"
+                        + " AND session_id = ? AND session_kind = 'PUBLIC'",
+                Long.class, tenantId, sessionId);
+        long next = Math.addExact(revision, 1);
+        jdbc.update("UPDATE ma_session SET title_revision = ?, gmt_modified = "
+                        + ManagedSchemaTime.SQL_NOW + " WHERE tenant_id = ? AND session_id = ?",
+                next, tenantId, sessionId);
+        SessionRecord settled = completeSessionMutation(tenantId, "RENAME_SESSION", key,
+                sessionId, SessionMutationKind.RENAME, title, null);
+        return new SyncRename(settled, next, command.replayed());
     }
 
     // Mutation receipts preserve the caller just as input receipts do.
@@ -746,17 +450,6 @@ final class AgentSessionCommands {
     /** A Turn cancel whose effect on an unobserved execution no Harness
      * answered (D7-2). */
     static final String CANCEL_UNCONFIRMED = "cancel_unconfirmed";
-
-    /** A Session title whose submitted delivery no Harness answered (D7-2). */
-    static final String SESSION_TITLE_UNCONFIRMED = "session_title_unconfirmed";
-
-    // A RENAME parks with the same columns either way: acceptance unknown,
-    // never re-sent, settled only by the reconciler or by the same claim's
-    // own late reply. Its claim fields stay, so that late reply still settles.
-    static final String PARK_RENAME = "state = 'RECOVERY_BLOCKED',"
-            + " phase = 'RECOVERY_BLOCKED', admission_stage = 'JAVA_DURABLE',"
-            + " delivery_state = 'BLOCKED', failure_code = '"
-            + SESSION_TITLE_UNCONFIRMED + "'";
 
     String insertTurnCommandOperation(String tenantId,
             String sessionId, String turnId, OperationKind kind,
@@ -953,22 +646,22 @@ final class AgentSessionCommands {
                         + " CASE WHEN ((agent_id=? AND agent_definition_digest IS NULL)"
                         + " OR (agent_id<>? AND agent_definition_digest IS NOT NULL))"
                         + " AND workspace_id IS NOT NULL AND tool_profile IN ('hosted-workspace-files/1',"
-                        + " 'hosted-workspace-shell/1','hosted-workspace-files/3')"
+                        + " 'hosted-workspace-shell/1','hosted-workspace-shell/3','hosted-workspace-files/3')"
                         + " THEN COALESCE(selected_approval_mode, approval_mode) ELSE NULL END,"
                         + " CASE WHEN ((agent_id=? AND agent_definition_digest IS NULL)"
                         + " OR (agent_id<>? AND agent_definition_digest IS NOT NULL))"
                         + " AND workspace_id IS NOT NULL AND tool_profile IN ('hosted-workspace-files/1',"
-                        + " 'hosted-workspace-shell/1','hosted-workspace-files/3')"
+                        + " 'hosted-workspace-shell/1','hosted-workspace-shell/3','hosted-workspace-files/3')"
                         + " THEN approval_revision ELSE NULL END,"
                         + " CASE WHEN ((agent_id=? AND agent_definition_digest IS NULL)"
                         + " OR (agent_id<>? AND agent_definition_digest IS NOT NULL))"
                         + " AND workspace_id IS NOT NULL AND tool_profile IN ('hosted-workspace-files/1',"
-                        + " 'hosted-workspace-shell/1','hosted-workspace-files/3')"
+                        + " 'hosted-workspace-shell/1','hosted-workspace-shell/3','hosted-workspace-files/3')"
                         + " THEN is_plan_enabled ELSE NULL END,"
                         + " CASE WHEN ((agent_id=? AND agent_definition_digest IS NULL)"
                         + " OR (agent_id<>? AND agent_definition_digest IS NOT NULL))"
                         + " AND workspace_id IS NOT NULL AND tool_profile IN ('hosted-workspace-files/1',"
-                        + " 'hosted-workspace-shell/1','hosted-workspace-files/3')"
+                        + " 'hosted-workspace-shell/1','hosted-workspace-shell/3','hosted-workspace-files/3')"
                         + " THEN permission_rules_json ELSE NULL END"
                         + " FROM ma_session WHERE tenant_id = ? AND session_id = ?",
                 tenantId, sessionId, turnId, promptId, storeRows.writeJson(input),

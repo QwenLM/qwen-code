@@ -90,6 +90,68 @@ RUN set -eu \
     && chmod -R a+rX /opt/ms-playwright \
     && rm -rf /root/.npm
 
+# The two interpreter archives the standalone regression runs under, for the
+# same reason as the browsers above: a disposable container starts with an
+# empty cache, and the job's own `Configure persistent standalone runtime
+# cache` step points at $HOME inside that container, so nothing is ever reused.
+# On hz4 the host's persistent runner has both archives on disk while the
+# container's directory does not exist at all.
+#
+# The cost is not just time. `fetchVerifiedArchive` gives each archive three
+# attempts at 300 s each, then rethrows, and the side lane's standalone step
+# exits 1 — after every workspace suite and the whole scripts suite have
+# already passed. Job 131062149608 (#16895) reads exactly that: both archives
+# were downloaded and then written back to the cache — `runtime archive cached:`
+# is logged after the fetch, while a hit logs `runtime archive reused from
+# cache:` — so the job paid ~110 MB with nothing reused, and Bun then timed out
+# three times on registry.npmjs.org. The lane reported `Side lane exited with 1`
+# under 2786 passing script tests. A transport timeout there reddens a required
+# check with no test failing, which no retry of a suite can fix because the
+# failure is not in a suite.
+#
+# Seeded, not baked over the env var: the cache directory must stay writable,
+# because `markUsed` refreshes each archive's mtime and `sweepRuntimeCache`
+# removes what no run has used for a week. A root-owned read-only directory
+# would make both fail silently (each is wrapped in a catch), so the seed is
+# copied into the job's own cache directory by the entrypoint instead.
+#
+# The digests are the published ones the script already verifies against, so a
+# mirror that serves different bytes fails the build here rather than in a job.
+# They are written here rather than read from scripts/lib/standalone-runtime-pins.js
+# because this image's build context is its own directory; the suite compares
+# the two, so a version bump fails a test instead of quietly seeding an archive
+# nothing pins.
+ARG NODE_RUNTIME_VERSION=24.19.0
+ARG BUN_RUNTIME_VERSION=1.4.4
+ARG NODE_RUNTIME_MIRROR=https://nodejs.org/dist
+ARG BUN_RUNTIME_MIRROR=https://registry.npmjs.org
+ENV QWEN_CI_BAKED_RUNTIME_CACHE=/opt/ci-runtimes
+RUN set -eu \
+    && case "${TARGETARCH}" in \
+         amd64) node_arch=x64; bun_arch=x64; \
+           node_sha=f625d97cd707df4ff96254916fbc5ff014f09c09effe5a1e0ca8f6d41a8789d4; \
+           bun_sha512=CHbbkmHVM28T1GFq+6GL4Ao4ujwwYwj1CxFFwEFzLanPfNsId9AhbIP0Q4reWuWBkGimUkoQygrK7Rgjtj3vog== ;; \
+         arm64) node_arch=arm64; bun_arch=aarch64; \
+           node_sha=d28c8a5bf0a808f0ed434a1dce8c54ae98f0371c0bd86ac58abc613f73e6643f; \
+           bun_sha512=ZTVtpf9zmHSBVPX1sBwe5agGb/rN34yPGg/Hby8e2Ax2uCUA2URZKlZH7qLntK7qaFJCMXh9v0GWNYN2zINz1w== ;; \
+         *) echo "Unsupported architecture: ${TARGETARCH}" >&2; exit 1 ;; \
+       esac \
+    && mkdir -p "${QWEN_CI_BAKED_RUNTIME_CACHE}" \
+    && node_file="node-v${NODE_RUNTIME_VERSION}-linux-${node_arch}.tar.gz" \
+    && bun_file="bun-linux-${bun_arch}-${BUN_RUNTIME_VERSION}.tgz" \
+    && curl -fsSL --retry 3 --connect-timeout 15 --max-time 600 \
+         -o "${QWEN_CI_BAKED_RUNTIME_CACHE}/${node_file}" \
+         "${NODE_RUNTIME_MIRROR}/v${NODE_RUNTIME_VERSION}/${node_file}" \
+    && echo "${node_sha}  ${QWEN_CI_BAKED_RUNTIME_CACHE}/${node_file}" | sha256sum -c - \
+    && curl -fsSL --retry 3 --connect-timeout 15 --max-time 600 \
+         -o "${QWEN_CI_BAKED_RUNTIME_CACHE}/${bun_file}" \
+         "${BUN_RUNTIME_MIRROR}/@oven/bun-linux-${bun_arch}/-/${bun_file}" \
+    && echo "${bun_sha512}  ${QWEN_CI_BAKED_RUNTIME_CACHE}/${bun_file}" \
+         | awk '{ print "sha512-" $1 "  " $2 }' > /tmp/bun.sha512 \
+    && node -e 'const fs=require("node:fs");const {createHash}=require("node:crypto");const [want,file]=fs.readFileSync("/tmp/bun.sha512","utf8").trim().split(/\s+/);const got="sha512-"+createHash("sha512").update(fs.readFileSync(file)).digest("base64");if(got!==want){console.error(`bun archive digest mismatch: ${got} != ${want}`);process.exit(1);}console.log(`${file}: OK`);' \
+    && rm /tmp/bun.sha512 \
+    && chmod -R a+rX "${QWEN_CI_BAKED_RUNTIME_CACHE}"
+
 WORKDIR /home/node/actions-runner
 RUN case "${TARGETARCH}" in \
       amd64) runner_arch=x64; runner_sha=baebf204307bac6193480852732f0aba2ae97b6c5597c244f4d5558390147c40 ;; \
@@ -128,6 +190,9 @@ RUN set -eu \
     && test "${browsers}" -ge "${expected}" \
     && chrome="$(find /opt/ms-playwright -type f -name chrome -path '*chrome-linux*' | head -1)" \
     && test -n "${chrome}" \
-    && "${chrome}" --version
+    && "${chrome}" --version \
+    && test "$(find "${QWEN_CI_BAKED_RUNTIME_CACHE}" -maxdepth 1 -type f \( -name '*.tgz' -o -name '*.tar.gz' \) | wc -l)" -eq 2 \
+    && tar -tzf "${QWEN_CI_BAKED_RUNTIME_CACHE}"/node-v*.tar.gz > /dev/null \
+    && tar -tzf "${QWEN_CI_BAKED_RUNTIME_CACHE}"/bun-linux-*.tgz > /dev/null
 USER node
 ENTRYPOINT ["/usr/local/bin/ephemeral-runner"]
