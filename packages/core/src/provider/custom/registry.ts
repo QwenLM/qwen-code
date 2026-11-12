@@ -8,6 +8,7 @@
 import {
   createImplicitCustomProviderModel,
   parseCustomProviderSettings,
+  withoutReservedProviderSettings,
 } from './parser.js';
 import {
   customProviderModelKey,
@@ -26,7 +27,9 @@ export class CustomProviderRegistry {
     settings: unknown,
     referencedModelKeys: readonly string[] = [],
   ): CustomProviderParseResult {
-    const parsed = parseCustomProviderSettings(settings);
+    const parsed = parseCustomProviderSettings(
+      withoutReservedProviderSettings(settings),
+    );
     const nextProviders = new Map<string, CustomProviderRuntime>();
     const nextModelToProvider = new Map<string, string>();
     for (const provider of parsed.providers) {

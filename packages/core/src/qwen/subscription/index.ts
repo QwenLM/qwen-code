@@ -15,6 +15,7 @@ export {
   QWEN_SUBSCRIPTION_PROVIDER_ID,
   QWEN_SUBSCRIPTION_TOKEN_PLACEHOLDER,
   type QwenOAuthConfig,
+  type QwenPaywallScene,
 } from './oauth-config.js';
 export {
   QwenSubscriptionOAuthClient,
@@ -28,14 +29,16 @@ export {
 } from './oauth-client.js';
 export { QwenSubscriptionSession } from './session.js';
 export {
-  buildQwenSubscriptionProviderEntry,
   orderSubscriptionModels,
+  QWEN_SUBSCRIPTION_MODELS_UNAVAILABLE,
   qwenSubscriptionModel,
   qwenSubscriptionModelKey,
   selectQwenSubscriptionModel,
+  type QwenSubscriptionModelCatalog,
+  type QwenSubscriptionModelMetadata,
 } from './models.js';
 export {
-  composeQwenSubscriptionProvider,
+  QwenSubscriptionProvider,
   QwenSubscriptionProviderConfig,
-  registerQwenSubscriptionProviderComposer,
+  type CreateQwenSubscriptionProviderOptions,
 } from './provider.js';

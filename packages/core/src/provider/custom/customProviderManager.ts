@@ -15,7 +15,11 @@ import {
   type SettingsService,
 } from '@qwen-code/resource';
 import { Storage } from '../../config/storage.js';
-import { parseCustomProviderSettings } from './parser.js';
+import {
+  isReservedProviderId,
+  parseCustomProviderSettings,
+  withoutReservedProviderSettings,
+} from './parser.js';
 import {
   supportsCustomProviderModelThinking,
   type CustomProviderRuntime,
@@ -207,6 +211,7 @@ export class CustomProviderManager {
   /** 主动读取最新 user 配置，生成不含凭据的单模型编辑快照。 */
   getModelEdit(modelKey: string): CustomProviderModelEdit | undefined {
     const providerId = modelKey.slice(0, modelKey.indexOf('/'));
+    if (isReservedProviderId(providerId)) return undefined;
     const providers = this.readUserProviders();
     const own = providers[providerId];
     const parsed = parseCustomProviderSettings(
@@ -422,7 +427,9 @@ function projectCustomProviders(
   value: unknown,
   log: CustomModelProviderConfigLog,
 ): CustomModelProviderConfigInfo[] {
-  const resolved = resolveEnvVarsInObject(value);
+  const resolved = withoutReservedProviderSettings(
+    resolveEnvVarsInObject(value),
+  );
   const parsed = parseCustomProviderSettings(resolved);
   for (const issue of parsed.issues) {
     log.warning('invalid_custom_provider_field', new Error(issue.message), {

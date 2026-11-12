@@ -10,89 +10,136 @@ import { describe, expect, it, vi } from 'vitest';
 import type { SettingsService } from '@qwen-code/resource';
 import type { ModelTransportManager } from '../../provider/transport/modelTransportManager.js';
 import { OPENAI_CHAT_COMPLETIONS } from '../../provider/transport/modelProtocol.js';
-import { buildQwenSubscriptionProviderEntry } from './models.js';
+import { buildChatCompletionsStreamReq } from '../../provider/transport/impl/chat-completions-factory/request/chatCompletionsStreamReqFactory.js';
 import {
-  composeQwenSubscriptionProvider,
+  qwenSubscriptionModel,
+  type QwenSubscriptionModelMetadata,
+} from './models.js';
+import {
+  QwenSubscriptionProvider,
   QwenSubscriptionProviderConfig,
+  resolveQwenSubscriptionStreamRequest,
 } from './provider.js';
 import type { QwenSubscriptionSession } from './session.js';
 
-function fakeSession(
-  signedIn = true,
-): QwenSubscriptionSession {
+const transportManager = {
+  resolve: () => ({ protocol: OPENAI_CHAT_COMPLETIONS }),
+} as unknown as ModelTransportManager;
+const settingsService = {} as SettingsService;
+
+function provider(session: QwenSubscriptionSession): QwenSubscriptionProvider {
+  return new QwenSubscriptionProvider({
+    transportManager,
+    settingsService,
+    session,
+  });
+}
+
+function fakeSession(options: {
+  signedIn?: boolean;
+  cached?: string[];
+  cachedMetadata?: QwenSubscriptionModelMetadata[];
+  gateway?: string[] | Promise<string[]>;
+  gatewayMetadata?: QwenSubscriptionModelMetadata[];
+  error?: Error;
+}): QwenSubscriptionSession {
   return {
-    isSignedIn: () => signedIn,
+    isSignedIn: () => options.signedIn ?? true,
+    getCachedModels: () => options.cached ?? [],
+    getCachedCatalog: () => ({
+      models: options.cached ?? [],
+      ...(options.cachedMetadata
+        ? { modelMetadata: options.cachedMetadata }
+        : {}),
+    }),
+    getModels: vi.fn(async () => {
+      if (options.error) throw options.error;
+      const models = await options.gateway;
+      return {
+        models: models ?? [],
+        ...(options.gatewayMetadata
+          ? { modelMetadata: options.gatewayMetadata }
+          : {}),
+        cached: false,
+      };
+    }),
     getAccessToken: vi.fn(async () => 'access-token'),
   } as unknown as QwenSubscriptionSession;
 }
 
-function context(value: unknown) {
-  return {
-    providerId: 'qwen-subscription',
-    value,
-    transportManager: {
-      resolve: () => ({ protocol: OPENAI_CHAT_COMPLETIONS }),
-    } as unknown as ModelTransportManager,
-    settingsService: {} as SettingsService,
-    scope: 'user' as const,
-  };
-}
+describe('QwenSubscriptionProvider', () => {
+  it('lists the account catalog in the order returned by the gateway and applies metadata', async () => {
+    const instance = provider(
+      fakeSession({
+        gateway: ['qwen4', 'qwen3.8-flash', 'qwen3.8-max'],
+        gatewayMetadata: [
+          {
+            id: 'qwen4',
+            modalities: { image: true },
+            contextWindowSize: 512_000,
+          },
+        ],
+      }),
+    );
 
-describe('buildQwenSubscriptionProviderEntry', () => {
-  it('persists the membership gateway and catalog with a placeholder key', () => {
-    const entry = buildQwenSubscriptionProviderEntry([
-      'qwen3.8-flash',
-      'custom-model',
+    const models = await instance.listModels();
+
+    expect(models.map((model) => model.key)).toEqual([
+      'qwen-subscription/qwen4',
+      'qwen-subscription/qwen3.8-flash',
+      'qwen-subscription/qwen3.8-max',
     ]);
-
-    expect(entry.providerId).toBe('qwen-subscription');
-    expect(entry.value).toMatchObject({
-      protocol: 'openai',
-      baseUrl: 'https://api.qwen.ai/compatible-mode/v1',
-      apiKey: 'QWEN_SUBSCRIPTION_DYNAMIC_TOKEN',
-      displayName: 'Qwen Account',
-      models: [
-        { model: 'qwen3.8-flash', displayName: 'Qwen 3.8 Flash' },
-        { model: 'custom-model' },
-      ],
+    expect(models[0]).toMatchObject({
+      key: 'qwen-subscription/qwen4',
+      capabilities: {
+        vision: true,
+        reasoning: {
+          supported: true,
+          supportedEfforts: ['none', 'low', 'medium', 'high'],
+        },
+        contextWindows: [{ tokens: 512_000 }],
+      },
+      limits: { maxContextTokens: 512_000 },
+      defaultModelConfig: {
+        reasoning: { effort: 'medium' },
+        context: { contextWindow: 512_000 },
+      },
     });
   });
-});
 
-describe('composeQwenSubscriptionProvider', () => {
-  it('builds a settings-backed provider when the account is signed in', async () => {
-    const provider = composeQwenSubscriptionProvider(
-      context({
-        baseUrl: 'https://api.qwen.ai/compatible-mode/v1',
-        models: [{ model: 'qwen3.8-flash' }, { model: 'qwen3.8-max' }],
-      }),
-      fakeSession(true),
+  it('lists nothing while signed out', async () => {
+    const instance = provider(fakeSession({ signedIn: false }));
+
+    await expect(instance.listModels()).resolves.toEqual([]);
+    await expect(
+      instance.getModel('qwen-subscription/qwen3.8-max'),
+    ).resolves.toBeUndefined();
+  });
+
+  it('uses the credential cache without waiting on the gateway', async () => {
+    const pending = new Promise<string[]>(() => {});
+    const instance = provider(
+      fakeSession({ cached: ['qwen3.8-max'], gateway: pending }),
     );
 
-    expect(provider?.providerId).toBe('qwen-subscription');
-    const models = await provider!.listModels();
+    const models = await instance.listModels();
+
     expect(models.map((model) => model.key)).toEqual([
       'qwen-subscription/qwen3.8-max',
-      'qwen-subscription/qwen3.8-flash',
     ]);
   });
 
-  it('builds nothing while signed out', () => {
-    const provider = composeQwenSubscriptionProvider(
-      context({ models: [{ model: 'qwen3.8-max' }] }),
-      fakeSession(false),
-    );
+  it('keeps the last good catalog when a refresh fails', async () => {
+    const session = fakeSession({ gateway: ['qwen3.8-max'] });
+    const instance = provider(session);
+    await instance.listModels();
 
-    expect(provider).toBeUndefined();
-  });
+    vi.mocked(session.getModels).mockRejectedValue(new Error('offline'));
+    const models = await instance.listModels({ skipCache: true });
 
-  it('ignores a malformed entry', () => {
-    expect(
-      composeQwenSubscriptionProvider(context({ models: [] }), fakeSession()),
-    ).toBeUndefined();
-    expect(
-      composeQwenSubscriptionProvider(context(undefined), fakeSession()),
-    ).toBeUndefined();
+    expect(models.map((model) => model.key)).toEqual([
+      'qwen-subscription/qwen3.8-max',
+    ]);
   });
 });
 
@@ -110,5 +157,32 @@ describe('QwenSubscriptionProviderConfig', () => {
 
     await config.refreshBearer('rejected-token');
     expect(getAccessToken).toHaveBeenLastCalledWith(undefined, 'rejected-token');
+  });
+
+  it('normalizes reasoning effort into thinking_budget within QwenSubscriptionProvider', () => {
+    const model = qwenSubscriptionModel('qwen3.8-max');
+    const enabled = buildChatCompletionsStreamReq(
+      resolveQwenSubscriptionStreamRequest({
+        resolution: { model, config: { reasoning: { effort: 'medium' } } },
+        prompt: { messages: [] },
+      }),
+    );
+    expect(enabled).toMatchObject({
+      model: 'qwen3.8-max',
+      enable_thinking: true,
+      thinking_budget: 16_384,
+    });
+    expect(enabled).not.toHaveProperty('reasoning_effort');
+
+    const disabled = buildChatCompletionsStreamReq(
+      resolveQwenSubscriptionStreamRequest({
+        resolution: { model, config: { reasoning: { effort: 'none' } } },
+        prompt: { messages: [] },
+      }),
+    );
+    expect(disabled).toMatchObject({
+      enable_thinking: false,
+    });
+    expect(disabled).not.toHaveProperty('thinking_budget');
   });
 });

@@ -834,7 +834,9 @@ export {
   REMOVED_GENERATION_FIELDS,
   REMOVED_PROVIDER_MODEL_FIELDS,
   REMOVED_MODEL_GENERATION_FIELDS,
+  RESERVED_PROVIDER_IDS,
   getRemovedCustomProviderFieldMessage,
+  isReservedProviderId,
   parseCustomProviderSettings,
 } from './provider/custom/parser.js';
 

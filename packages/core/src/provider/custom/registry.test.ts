@@ -291,6 +291,31 @@ describe('CustomProviderRegistry', () => {
     );
   });
 
+  it('ignores account-owned provider entries in settings', () => {
+    const registry = new CustomProviderRegistry();
+
+    const parsed = registry.replace({
+      'qwen-subscription': {
+        baseUrl: 'https://api.qwen.ai/compatible-mode/v1',
+        apiKey: 'placeholder',
+        models: [{ model: 'qwen3.8-max' }],
+      },
+      gateway: {
+        baseUrl: 'https://models.example.com/v1',
+        apiKey: 'top-secret-api-key',
+        model: 'main-model',
+      },
+    });
+
+    expect(parsed.issues).toEqual([]);
+    expect(parsed.providers.map((provider) => provider.providerId)).toEqual([
+      'gateway',
+    ]);
+    expect(
+      registry.isCustomProviderModel('qwen-subscription/qwen3.8-max'),
+    ).toBe(false);
+  });
+
   it('replaces state atomically and supports explicit clearing', () => {
     const registry = new CustomProviderRegistry();
     registry.replace({

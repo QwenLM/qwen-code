@@ -9,14 +9,27 @@ import {
   DEFAULT_CUSTOM_PROVIDER_CONTEXT_WINDOW,
   DEFAULT_CUSTOM_PROVIDER_MAX_OUTPUT_TOKENS,
 } from '../../provider/custom/builtins.js';
-import type { ProviderSettingsEntry } from '../../provider/presets/types.js';
 import type { Model } from '../../provider/model/model.js';
-import {
-  QWEN_SUBSCRIPTION_BASE_URL,
-  QWEN_SUBSCRIPTION_MODEL,
-  QWEN_SUBSCRIPTION_PROVIDER_ID,
-  QWEN_SUBSCRIPTION_TOKEN_PLACEHOLDER,
-} from './oauth-config.js';
+import { QWEN_SUBSCRIPTION_PROVIDER_ID } from './oauth-config.js';
+
+export const QWEN_SUBSCRIPTION_MODELS_UNAVAILABLE =
+  'Could not load Qwen Subscription models. Your account is still signed in. Please try again.';
+
+export interface QwenSubscriptionModelMetadata {
+  readonly id: string;
+  readonly modalities?: {
+    readonly image?: boolean;
+    readonly video?: boolean;
+    readonly audio?: boolean;
+    readonly pdf?: boolean;
+  };
+  readonly contextWindowSize?: number;
+}
+
+export interface QwenSubscriptionModelCatalog {
+  readonly models: string[];
+  readonly modelMetadata?: QwenSubscriptionModelMetadata[];
+}
 
 interface SubscriptionModelSpec {
   readonly id: string;
@@ -26,8 +39,8 @@ interface SubscriptionModelSpec {
 }
 
 /**
- * Gateway models with confirmed metadata. Other ids returned by `/models`
- * stay selectable with conservative text-only defaults.
+ * Gateway models with fallback display names and metadata when `/models`
+ * does not supply explicit `input_modalities` or `context_window_tokens`.
  */
 const KNOWN_MODELS: readonly SubscriptionModelSpec[] = [
   {
@@ -44,55 +57,18 @@ const KNOWN_MODELS: readonly SubscriptionModelSpec[] = [
   },
 ];
 
-/** Membership models lead the catalog in the order the product presents them. */
+/** Preserve the order returned by the subscription `/models` gateway. */
 export function orderSubscriptionModels(
   models: readonly string[],
 ): readonly string[] {
-  const leading = KNOWN_MODELS.map((model) => model.id).filter((id) =>
-    models.includes(id),
-  );
-  const rest = models.filter((id) => !leading.includes(id));
-  return [...leading, ...rest];
+  return [...models];
 }
 
-/** Explicit sign-in picks the flagship model, otherwise the first returned. */
+/** Explicit sign-in selects the first model returned by the gateway. */
 export function selectQwenSubscriptionModel(
   models: readonly string[],
 ): string | undefined {
-  if (models.length === 0) return undefined;
-  return models.includes(QWEN_SUBSCRIPTION_MODEL)
-    ? QWEN_SUBSCRIPTION_MODEL
-    : models[0];
-}
-
-/**
- * One `settings.providers` entry for the membership account. The stored key is
- * a placeholder: requests read the rotating token from the credential file.
- */
-export function buildQwenSubscriptionProviderEntry(
-  models: readonly string[],
-): ProviderSettingsEntry {
-  const ordered = orderSubscriptionModels(models);
-  return {
-    providerId: QWEN_SUBSCRIPTION_PROVIDER_ID,
-    value: {
-      protocol: 'openai',
-      baseUrl: QWEN_SUBSCRIPTION_BASE_URL,
-      apiKey: QWEN_SUBSCRIPTION_TOKEN_PLACEHOLDER,
-      displayName: 'Qwen Account',
-      models: ordered.map((id) => {
-        const known = KNOWN_MODELS.find((model) => model.id === id);
-        return {
-          model: id,
-          ...(known?.displayName ? { displayName: known.displayName } : {}),
-          ...(known?.contextWindow
-            ? { contextWindow: known.contextWindow }
-            : {}),
-          ...(known?.vision ? { capabilities: { vision: true } } : {}),
-        };
-      }),
-    },
-  };
+  return models[0];
 }
 
 export function qwenSubscriptionModelKey(modelId: string): string {
@@ -100,23 +76,39 @@ export function qwenSubscriptionModelKey(modelId: string): string {
 }
 
 /** Project one account catalog id into the neutral model contract. */
-export function qwenSubscriptionModel(modelId: string): Model {
+export function qwenSubscriptionModel(
+  modelId: string,
+  metadata?: QwenSubscriptionModelMetadata,
+): Model {
   const known = KNOWN_MODELS.find((model) => model.id === modelId);
   const contextWindow =
-    known?.contextWindow ?? DEFAULT_CUSTOM_PROVIDER_CONTEXT_WINDOW;
+    metadata?.contextWindowSize ??
+    known?.contextWindow ??
+    DEFAULT_CUSTOM_PROVIDER_CONTEXT_WINDOW;
+  const vision =
+    metadata?.modalities !== undefined
+      ? Boolean(metadata.modalities.image)
+      : (known?.vision ?? false);
   return {
     source: QWEN_SUBSCRIPTION_PROVIDER_ID,
     key: qwenSubscriptionModelKey(modelId),
     displayName: known?.displayName ?? modelId,
     capabilities: {
       tools: true,
-      vision: known?.vision ?? false,
-      reasoning: { supported: false, supportedEfforts: [] },
+      vision,
+      reasoning: {
+        supported: true,
+        supportedEfforts: ['none', 'low', 'medium', 'high'],
+      },
       contextWindows: [{ tokens: contextWindow }],
     },
     limits: {
       maxContextTokens: contextWindow,
       maxOutputTokens: DEFAULT_CUSTOM_PROVIDER_MAX_OUTPUT_TOKENS,
+    },
+    defaultModelConfig: {
+      reasoning: { effort: 'medium' },
+      context: { contextWindow },
     },
   };
 }

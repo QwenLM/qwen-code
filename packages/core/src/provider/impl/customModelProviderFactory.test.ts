@@ -5,12 +5,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 
 import type { SettingsService } from '@qwen-code/resource';
-import type { ModelProvider } from '../modelProvider.js';
 import type { ModelTransportManager } from '../transport/modelTransportManager.js';
-import { registerCustomProviderComposer } from './customProviderComposers.js';
 import { createCustomModelProviders } from './customModelProviderFactory.js';
 
 const transportManager = {
@@ -18,19 +16,15 @@ const transportManager = {
 } as unknown as ModelTransportManager;
 const settingsService = {} as SettingsService;
 
-afterEach(() => {
-  registerCustomProviderComposer('reserved', undefined);
-});
-
 describe('createCustomModelProviders', () => {
-  it('composes a reserved id before the generic parser', () => {
-    const composed = { providerId: 'reserved' } as unknown as ModelProvider;
-    const compose = vi.fn(() => composed);
-    registerCustomProviderComposer('reserved', compose);
-
+  it('ignores account-owned ids and keeps generic providers', () => {
     const providers = createCustomModelProviders(
       {
-        reserved: { anything: true },
+        'qwen-subscription': {
+          baseUrl: 'https://api.qwen.ai/compatible-mode/v1',
+          apiKey: 'placeholder',
+          models: [{ model: 'qwen3.8-max' }],
+        },
         normal: {
           baseUrl: 'https://gateway.example/v1',
           apiKey: 'secret',
@@ -42,18 +36,14 @@ describe('createCustomModelProviders', () => {
       'user',
     );
 
-    expect(compose).toHaveBeenCalledTimes(1);
     expect(providers.map((provider) => provider.providerId)).toEqual([
-      'reserved',
       'normal',
     ]);
   });
 
-  it('drops the reserved id when the composer declines', () => {
-    registerCustomProviderComposer('reserved', () => undefined);
-
+  it('returns nothing when only account-owned ids are configured', () => {
     const providers = createCustomModelProviders(
-      { reserved: { anything: true } },
+      { 'qwen-subscription': { anything: true } },
       transportManager,
       settingsService,
       'user',

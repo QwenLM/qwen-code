@@ -12,7 +12,13 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { setConfigHomeDirOverride } from '../../utils/paths.js';
-import { getQwenSubscriptionCredentialsPath } from './oauth-config.js';
+import {
+  getQwenSubscriptionAuthorizationUrl,
+  getQwenSubscriptionCredentialsPath,
+  getQwenSubscriptionPlansUrl,
+} from './oauth-config.js';
+import { QwenSubscriptionOAuthError } from './oauth-client.js';
+import { QWEN_SUBSCRIPTION_MODELS_UNAVAILABLE } from './models.js';
 import { QwenSubscriptionSession } from './session.js';
 
 const tokenPayload = {
@@ -152,7 +158,7 @@ describe('QwenSubscriptionSession', () => {
     expect(token).toBe('access-2');
   });
 
-  it('reloads the catalog once after an unauthorized models call', async () => {
+  it('reloads the catalog once after an unauthorized models call and persists modelMetadata', async () => {
     await writeCredentials();
     const fetch = fetchMock()
       .mockResolvedValueOnce(new Response(null, { status: 401 }))
@@ -161,15 +167,50 @@ describe('QwenSubscriptionSession', () => {
       )
       .mockResolvedValueOnce(
         jsonResponse({
-          data: [{ id: 'qwen3.8-max' }, { id: 'qwen3.8-flash' }],
+          data: [
+            {
+              id: 'qwen4',
+              input_modalities: ['text', 'image', 'pdf'],
+              context_window_tokens: 262_144,
+            },
+            { id: 'qwen3.8-flash' },
+          ],
         }),
       );
 
-    const result = await new QwenSubscriptionSession().getModels();
+    const session = new QwenSubscriptionSession();
+    const result = await session.getModels();
 
     expect(result).toEqual({
-      models: ['qwen3.8-max', 'qwen3.8-flash'],
+      models: ['qwen4', 'qwen3.8-flash'],
+      modelMetadata: [
+        {
+          id: 'qwen4',
+          modalities: {
+            image: true,
+            video: false,
+            audio: false,
+            pdf: true,
+          },
+          contextWindowSize: 262_144,
+        },
+      ],
       cached: false,
+    });
+    expect(session.getCachedCatalog()).toEqual({
+      models: ['qwen4', 'qwen3.8-flash'],
+      modelMetadata: [
+        {
+          id: 'qwen4',
+          modalities: {
+            image: true,
+            video: false,
+            audio: false,
+            pdf: true,
+          },
+          contextWindowSize: 262_144,
+        },
+      ],
     });
     expect(
       fetch.mock.calls.filter(([url]) => String(url).endsWith('/models')),
@@ -177,7 +218,105 @@ describe('QwenSubscriptionSession', () => {
     const stored = JSON.parse(
       await fs.readFile(getQwenSubscriptionCredentialsPath(), 'utf8'),
     );
-    expect(stored.models).toEqual(['qwen3.8-max', 'qwen3.8-flash']);
+    expect(stored.models).toEqual(['qwen4', 'qwen3.8-flash']);
+    expect(stored.modelMetadata).toEqual([
+      {
+        id: 'qwen4',
+        modalities: {
+          image: true,
+          video: false,
+          audio: false,
+          pdf: true,
+        },
+        contextWindowSize: 262_144,
+      },
+    ]);
+  });
+
+  it('surfaces gateway error details on 4xx /models responses without falling back to cache', async () => {
+    await writeCredentials({ models: ['qwen3.8-max'] });
+    fetchMock().mockResolvedValueOnce(
+      jsonResponse(
+        {
+          error: {
+            code: 'plan_required',
+            message: 'Your account cannot access this model catalog.',
+          },
+        },
+        403,
+      ),
+    );
+
+    await expect(new QwenSubscriptionSession().getModels()).rejects.toEqual(
+      new QwenSubscriptionOAuthError(
+        'plan_required',
+        403,
+        'Your account cannot access this model catalog.',
+      ),
+    );
+  });
+
+  it('throws models_unavailable with explicit copy when /models returns an empty list', async () => {
+    await writeCredentials();
+    fetchMock().mockResolvedValueOnce(jsonResponse({ data: [] }));
+
+    await expect(new QwenSubscriptionSession().getModels()).rejects.toEqual(
+      new QwenSubscriptionOAuthError(
+        'models_unavailable',
+        undefined,
+        QWEN_SUBSCRIPTION_MODELS_UNAVAILABLE,
+      ),
+    );
+  });
+
+  it('preserves signInAttempt when a concurrent refresh fails with invalid_grant', async () => {
+    await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(
+      getQwenSubscriptionCredentialsPath(),
+      JSON.stringify({
+        revision: 'revision-1',
+        signInAttempt: 'attempt-1',
+        baseUrl: 'https://auth.qwen.ai',
+        clientId: 'qwen-code-cli',
+        models: ['qwen3.8-max'],
+        tokens: {
+          access_token: 'access-1',
+          refresh_token: 'refresh-1',
+          token_type: 'Bearer',
+          scope: 'model:invoke profile:read',
+          expires_in: 3600,
+          expiresAt: Date.now() - 1_000,
+        },
+      }),
+      'utf8',
+    );
+    fetchMock().mockResolvedValueOnce(
+      jsonResponse({ error: 'invalid_grant' }, 400),
+    );
+
+    await expect(
+      new QwenSubscriptionSession().getAccessToken(),
+    ).rejects.toMatchObject({ code: 'invalid_grant' });
+
+    const stored = JSON.parse(
+      await fs.readFile(getQwenSubscriptionCredentialsPath(), 'utf8'),
+    );
+    expect(stored.signInAttempt).toBe('attempt-1');
+    expect(stored.tokens).toBeUndefined();
+    expect(stored.models).toBeUndefined();
+  });
+
+  it('formats chat.qwen.ai URLs with entry and paywallScene tracking params', () => {
+    expect(getQwenSubscriptionPlansUrl()).toBe(
+      'https://chat.qwen.ai/?memberPlan=qwen_code&entry=qwen_code&paywallScene=cli',
+    );
+    expect(
+      getQwenSubscriptionAuthorizationUrl({
+        user_code: 'ABCD-1234',
+      }),
+    ).toBe(
+      'https://chat.qwen.ai/authorize?user_code=ABCD-1234&client=cli&entry=qwen_code&paywallScene=cli',
+    );
   });
 
   it('falls back to the cached catalog on server errors', async () => {

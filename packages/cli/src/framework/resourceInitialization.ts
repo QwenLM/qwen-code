@@ -14,7 +14,6 @@ import {
   getDefaultAuthType,
   isQoderAccountRegion,
   QODER_ENV_ACCOUNT_REGION,
-  registerQwenSubscriptionProviderComposer,
   resolveEffectiveAuthType,
   Storage,
   runLogger,
@@ -36,6 +35,7 @@ import {
   isQoderAccountConfigured,
   resolveConfiguredQoderRegion,
 } from '../auth/qoderProviders.js';
+import { createQwenSubscriptionProviders } from '../auth/subscriptionProviders.js';
 
 export function createPublicTransports() {
   return [
@@ -70,7 +70,6 @@ export function createPublicProviders(
   selectedAuthType?: AuthType | string,
   qoderRegion?: string,
 ): readonly ModelProvider[] {
-  registerQwenSubscriptionProviderComposer();
   const providers: ModelProvider[] = [];
   try {
     const source = settings.peekUserSettingsSource(
@@ -87,6 +86,13 @@ export function createPublicProviders(
   } catch (error) {
     runLogger.warn(
       `[app-framework] build user-level custom providers failed: ${error}`,
+    );
+  }
+  try {
+    providers.push(...createQwenSubscriptionProviders(settings, transports));
+  } catch (error) {
+    runLogger.warn(
+      `[app-framework] build Qwen subscription provider failed: ${error}`,
     );
   }
 

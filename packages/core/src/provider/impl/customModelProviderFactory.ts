@@ -15,7 +15,10 @@ import type {
   CustomProviderModelRuntime,
   CustomProviderRuntime,
 } from '../custom/types.js';
-import { parseCustomProviderSettings } from '../custom/parser.js';
+import {
+  parseCustomProviderSettings,
+  withoutReservedProviderSettings,
+} from '../custom/parser.js';
 import { customProviderModelKey } from '../custom/types.js';
 import type { Model } from '../model/model.js';
 import type { ModelProvider } from '../modelProvider.js';
@@ -30,7 +33,6 @@ import type { ModelTransportManager } from '../transport/modelTransportManager.j
 import { CustomModelProvider } from './customModelProvider.js';
 import { CustomProviderConfig } from './customProviderConfig.js';
 import type { ModelConfigStoreScope } from './modelConfigStore.js';
-import { getCustomProviderComposer } from './customProviderComposers.js';
 
 /** adapter 即 wire 形态：按 adapter 定协议，与 parser 的 protocol 解析一一对应。 */
 const ADAPTER_PROTOCOLS: Record<
@@ -103,47 +105,16 @@ export function createCustomModelProviders(
   scope: ModelConfigStoreScope,
   cwd?: string,
 ): ModelProvider[] {
-  // Reserved ids (account-backed providers) are composed by their owner and
-  // filtered out before the generic parser, which intentionally rejects them.
-  const composed: ModelProvider[] = [];
-  let genericSettings = providersSettings;
-  if (
-    providersSettings &&
-    typeof providersSettings === 'object' &&
-    !Array.isArray(providersSettings)
-  ) {
-    const rest: Record<string, unknown> = {};
-    for (const [providerId, value] of Object.entries(providersSettings)) {
-      const composer = getCustomProviderComposer(providerId);
-      if (!composer) {
-        rest[providerId] = value;
-        continue;
-      }
-      try {
-        const provider = composer({
-          providerId,
-          value,
-          transportManager,
-          settingsService,
-          scope,
-          cwd,
-        });
-        if (provider) composed.push(provider);
-      } catch (error) {
-        runLogger.warn(
-          `[custom-provider] ${providerId}: compose failed: ${error}`,
-        );
-      }
-    }
-    genericSettings = rest;
-  }
-  const { providers, issues } = parseCustomProviderSettings(genericSettings);
+  // Account-owned ids are composed by their own provider classes, never here.
+  const { providers, issues } = parseCustomProviderSettings(
+    withoutReservedProviderSettings(providersSettings),
+  );
   for (const issue of issues) {
     runLogger.warn(
       `[custom-provider] ${issue.providerId}${issue.field ? `.${issue.field}` : ''}: ${issue.message}`,
     );
   }
-  return [...composed, ...providers.map((runtime) => {
+  return providers.map((runtime) => {
     const config = customProviderConfigFromRuntime(runtime);
     return new CustomModelProvider({
       transportManager,
@@ -153,7 +124,7 @@ export function createCustomModelProviders(
       scope,
       cwd,
     });
-  })];
+  });
 }
 
 /**
@@ -214,7 +185,9 @@ export function loadProjectCustomProviderConfigs(
       storage.getWorkspaceLocalSettingsPath(),
     );
     const { providers, issues } = parseCustomProviderSettings(
-      mergeProviderSettingsTexts([sources.project.read(), sources.local.read()]),
+      withoutReservedProviderSettings(
+        mergeProviderSettingsTexts([sources.project.read(), sources.local.read()]),
+      ),
     );
     for (const issue of issues) {
       runLogger.warn(
