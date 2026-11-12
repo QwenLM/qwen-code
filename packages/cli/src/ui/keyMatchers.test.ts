@@ -98,6 +98,13 @@ describe('keyMatchers', () => {
     [Command.PAGE_DOWN]: (key: Key) => key.name === 'pagedown',
     [Command.SCROLL_HOME]: (key: Key) => key.ctrl && key.name === 'home',
     [Command.SCROLL_END]: (key: Key) => key.ctrl && key.name === 'end',
+    [Command.PREV_TURN]: (key: Key) => key.meta && key.name === 'pageup',
+    [Command.NEXT_TURN]: (key: Key) => key.meta && key.name === 'pagedown',
+    [Command.PREV_TOOL_OUTPUT]: (key: Key) =>
+      key.ctrl && key.meta && key.name === 'up',
+    [Command.NEXT_TOOL_OUTPUT]: (key: Key) =>
+      key.ctrl && key.meta && key.name === 'down',
+    [Command.TRANSCRIPT_SEARCH]: (key: Key) => key.meta && key.name === 's',
     [Command.TOGGLE_THINKING_EXPANDED]: (key: Key) =>
       (key.ctrl && key.name === 'o') || (key.meta && key.name === 't'),
   };

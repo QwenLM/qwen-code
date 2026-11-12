@@ -97,6 +97,7 @@ export enum Command {
   NEXT_TURN = 'nextTurn',
   PREV_TOOL_OUTPUT = 'prevToolOutput',
   NEXT_TOOL_OUTPUT = 'nextToolOutput',
+  TRANSCRIPT_SEARCH = 'transcriptSearch',
 }
 
 /**
@@ -296,4 +297,8 @@ export const defaultKeyBindings: KeyBindingConfig = {
   [Command.NEXT_TURN]: [{ key: 'pagedown', meta: true }],
   [Command.PREV_TOOL_OUTPUT]: [{ key: 'up', ctrl: true, meta: true }],
   [Command.NEXT_TOOL_OUTPUT]: [{ key: 'down', ctrl: true, meta: true }],
+
+  // In-session transcript search. Ctrl+F toggles the embedded shell's input
+  // focus and Ctrl+R is prompt/shell reverse search, so this uses Alt+S.
+  [Command.TRANSCRIPT_SEARCH]: [{ key: 's', meta: true }],
 };

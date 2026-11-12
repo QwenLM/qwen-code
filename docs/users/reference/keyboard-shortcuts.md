@@ -106,6 +106,19 @@ Press `Ctrl+R` to search prompt history, or shell history while shell mode is ac
 | `Enter`                      | Submit the selected entry.                                 |
 | `Esc`                        | Close history search.                                      |
 
+## Transcript Search
+
+Press `Alt/Option+S` to search **inside the current session** instead of the prompt history. The query matches user prompts, assistant replies, thinking blocks, tool arguments and tool output (including text inside structured tool results). It requires `ui.useTerminalBuffer` (Virtualized History); in legacy host-scrollback mode a hint explains that the feature is unavailable.
+
+| Shortcut                  | Description                                                                                  |
+| ------------------------- | -------------------------------------------------------------------------------------------- |
+| `Alt/Option+S`            | Open transcript search. The composer becomes the query field and matches update as you type. |
+| `Up Arrow` / `Down Arrow` | Jump to the previous / next match, anchored at the top of the viewport.                      |
+| `Enter`                   | Close the search and keep the current match on screen.                                       |
+| `Esc`                     | Close the search and restore both the draft text and the viewport position you started from. |
+
+Matches are counted per transcript item (one per prompt, reply or tool group) and shown as `current/total` with a one-line snippet. A new query starts from the match closest above your current viewport position, so the most recent matching command output is usually one keystroke away.
+
 ## Radio Button Select
 
 | Shortcut                      | Description                                                                                                   |
