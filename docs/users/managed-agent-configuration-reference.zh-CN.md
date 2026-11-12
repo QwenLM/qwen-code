@@ -237,7 +237,7 @@ tool publication 与 Session 资源 / journal 冷存储共用的通用 Aliyun OS
 
 | 属性 | 环境变量 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- | --- |
-| `enabled` | `QWEN_MANAGED_AGENT_OBJECT_STORAGE_ENABLED` | 布尔 | 跟随 `tool-publication.enabled` | 通用 OSS 对象存储自动装配是否启用。默认跟随 `qwen.managed-agent.tool-publication.enabled`；在关闭 tool publication 时设为 true，可在不启用发布的情况下支撑 Session 资源与 journal 冷存储。OSS endpoint、region、bucket 仍从 `qwen.managed-agent.tool-publication.oss-*` 读取。 |
+| `enabled` | `QWEN_MANAGED_AGENT_OBJECT_STORAGE_ENABLED` | 布尔 | 同 `qwen.managed-agent.tool-publication.enabled` | 通用 Aliyun OSS 对象存储自动装配是否启用。默认跟随 `qwen.managed-agent.tool-publication.enabled`；在关闭 tool publication 时设为 true，可在不启用发布的情况下支撑 Session 资源与 journal 冷存储。OSS endpoint、region、bucket 仍从 `qwen.managed-agent.tool-publication.oss-*` 读取。 |
 
 ## `qwen.managed-agent.runtime-broker`
 

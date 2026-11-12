@@ -237,7 +237,7 @@ The generic Aliyun OSS object store shared by tool publication and Session resou
 
 | Property | Variable | Type | Default | Description |
 | --- | --- | --- | --- | --- |
-| `enabled` | `QWEN_MANAGED_AGENT_OBJECT_STORAGE_ENABLED` | boolean | follows `tool-publication.enabled` | Whether the generic OSS object-store auto-configuration is active. Defaults to follow `qwen.managed-agent.tool-publication.enabled`; set it true with tool publication disabled to back Session resources and journal cold storage without enabling publication. The OSS endpoint, region and bucket are still read from `qwen.managed-agent.tool-publication.oss-*`. |
+| `enabled` | `QWEN_MANAGED_AGENT_OBJECT_STORAGE_ENABLED` | boolean | follows `qwen.managed-agent.tool-publication.enabled` | Whether the generic Aliyun OSS object-store auto-configuration is active. Defaults to follow `qwen.managed-agent.tool-publication.enabled`; set it true with tool publication disabled to back Session resources and journal cold storage without enabling publication. The OSS endpoint, region and bucket are still read from `qwen.managed-agent.tool-publication.oss-*`. |
 
 ## `qwen.managed-agent.runtime-broker`
 
