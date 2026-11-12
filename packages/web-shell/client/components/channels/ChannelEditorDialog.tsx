@@ -104,6 +104,10 @@ const FIELD_LABEL_KEYS: Record<string, Record<string, string>> = {
     clientId: 'channels.editor.field.dingtalk.clientId',
     clientSecret: 'channels.editor.field.dingtalk.clientSecret',
   },
+  'dingtalk-webhook': {
+    webhookUrl: 'channels.editor.field.dingtalkWebhook.webhookUrl',
+    signingSecret: 'channels.editor.field.dingtalkWebhook.signingSecret',
+  },
   weixin: {
     groupPolicy: 'channels.editor.field.weixin.groupPolicy',
     allowedUsers: 'channels.editor.field.weixin.allowedUsers',
@@ -1560,9 +1564,11 @@ export function ChannelEditorDialog({
               </DialogTitle>
               <DialogDescription className="mt-1">
                 {t(
-                  instance
-                    ? 'channels.editor.editDescription'
-                    : 'channels.editor.addDescription',
+                  descriptor.outboundOnly
+                    ? 'channels.statusDescription.outbound'
+                    : instance
+                      ? 'channels.editor.editDescription'
+                      : 'channels.editor.addDescription',
                 )}
               </DialogDescription>
             </div>
@@ -1714,7 +1720,7 @@ export function ChannelEditorDialog({
               );
             })}
 
-            {boundSessionFields.length > 0 ? (
+            {!descriptor.outboundOnly && boundSessionFields.length > 0 ? (
               <section className={styles.settingsPanel}>
                 <div className={styles.settingsPanelHeader}>
                   <h3 className={styles.settingsPanelTitle}>
@@ -1728,7 +1734,7 @@ export function ChannelEditorDialog({
               </section>
             ) : null}
 
-            {sessionFields.length > 0 ? (
+            {!descriptor.outboundOnly && sessionFields.length > 0 ? (
               <section className={styles.settingsPanel}>
                 <h3 className={styles.settingsPanelTitle}>
                   {t('channels.editor.section.session')}
@@ -1800,6 +1806,7 @@ export function ChannelEditorDialog({
             ) : null}
 
             {(() => {
+              if (descriptor.outboundOnly) return null;
               const repositoryOnly = isRepositoryOnlyChannelType(
                 descriptor.type,
               );

@@ -1220,3 +1220,194 @@ test('lists a configured Email channel and hides its inert group controls @smoke
     editor.getByRole('combobox', { name: /Who can talk in groups/ }),
   ).toHaveCount(0);
 });
+
+test('configures and starts a DingTalk webhook method in the selected workspace', async ({
+  page,
+}, testInfo) => {
+  const primaryWorkspaceCwd = '/tmp/qwen-web-shell-e2e';
+  const workspaceCwd = '/tmp/qwen-outbound-webhook-secondary';
+  const scenario = createWebShellDaemonScenario({
+    channels: { revision: '7', instances: {} },
+    capabilities: {
+      features: [
+        'session_events',
+        'session_source_metadata',
+        'channel_management',
+        'channel_delivery',
+      ],
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: primaryWorkspaceCwd,
+          displayName: 'Main workspace',
+          primary: true,
+          trusted: true,
+        },
+        {
+          id: 'secondary',
+          cwd: workspaceCwd,
+          displayName: 'Notification workspace',
+          primary: false,
+          trusted: true,
+        },
+      ],
+    },
+    channelTypes: [
+      {
+        type: 'dingtalk',
+        displayName: 'DingTalk',
+        manageable: true,
+        fields: [],
+      },
+      {
+        type: 'dingtalk-webhook',
+        displayName: 'DingTalk Webhook',
+        manageable: true,
+        outboundOnly: true,
+        defaultDeliveryTarget: {
+          type: 'chat',
+          id: 'default',
+          label: 'Configured group',
+        },
+        fields: [
+          {
+            key: 'webhookUrl',
+            label: 'Webhook URL',
+            kind: 'secret',
+            required: true,
+            envResolvable: true,
+          },
+          {
+            key: 'signingSecret',
+            label: 'Signing secret',
+            kind: 'secret',
+            envResolvable: true,
+          },
+        ],
+      },
+    ],
+  });
+  const daemon = await installMockDaemon(page, scenario, {
+    baseURL: String(testInfo.project.use.baseURL),
+  });
+  await page.addInitScript(() => {
+    window.sessionStorage.setItem('qwen-daemon-token', 'e2e-token');
+  });
+  let primarySnapshotRequests = 0;
+  await page.route(
+    (url) =>
+      url.pathname ===
+      `/workspaces/${encodeURIComponent(primaryWorkspaceCwd)}/channels`,
+    async (route) => {
+      if (route.request().method() !== 'GET') {
+        await route.fallback();
+        return;
+      }
+      primarySnapshotRequests += 1;
+      await route.fulfill({ json: { revision: '1', instances: {} } });
+    },
+  );
+  await page.route(
+    /\/workspaces\/[^/]+\/channels\/notices\/start$/,
+    async (route) => {
+      expect(new URL(route.request().url()).pathname).toBe(
+        `/workspaces/${encodeURIComponent(workspaceCwd)}/channels/notices/start`,
+      );
+      const instance = scenario.channels.instances['notices'];
+      instance.runtime = { state: 'connected' };
+      await route.fulfill({ json: { snapshot: scenario.channels, instance } });
+    },
+  );
+
+  await page.goto(`/session/${encodeURIComponent(scenario.sessionId)}`);
+  await expect(
+    page.locator('[data-web-shell-root]:not([data-web-shell-gate])'),
+  ).toBeVisible();
+  const connection = await daemon.sse.waitForConnection(scenario.sessionId);
+  await daemon.sendEvent(
+    replayCompleteEvent({ sessionId: connection.sessionId }),
+  );
+  await expect(page.getByText('Loading...')).toHaveCount(0);
+  await page.getByRole('button', { name: 'Channels', exact: true }).click();
+  await expect(page.getByTestId('channel-platform-dingtalk')).toBeVisible();
+  await expect.poll(() => primarySnapshotRequests).toBeGreaterThan(0);
+  await expect(
+    page.getByTestId('channel-platform-dingtalk-webhook'),
+  ).toHaveCount(0);
+  await page
+    .getByRole('button', { name: 'Configure DingTalk', exact: true })
+    .click();
+  const methodDialog = page.getByRole('dialog');
+  await expect(
+    methodDialog.getByRole('button', { name: /^Application bot/ }),
+  ).toBeVisible();
+  await methodDialog
+    .getByRole('button', { name: /^Webhook \(send only\)/ })
+    .click();
+  const editor = page.getByRole('dialog');
+  await expect(
+    editor.getByRole('heading', { name: 'Configure DingTalk Webhook' }),
+  ).toBeVisible();
+  await expect(editor.getByText('Access control', { exact: true })).toHaveCount(
+    0,
+  );
+  await expect(
+    editor.getByText('Conversation management', { exact: true }),
+  ).toHaveCount(0);
+  await expect(editor.getByText('Pairing', { exact: true })).toHaveCount(0);
+  await editor.getByLabel('Workspace').click();
+  await page.getByRole('option', { name: 'Notification workspace' }).click();
+  await expect(editor.getByLabel('Workspace')).toContainText(
+    'Notification workspace',
+  );
+  await editor.getByLabel('Instance name').fill('notices');
+  await editor
+    .getByLabel('Webhook URL', { exact: false })
+    .fill('$DINGTALK_WEBHOOK_URL');
+  await editor
+    .getByLabel('Signing secret', { exact: false })
+    .fill('$DINGTALK_SIGNING_SECRET');
+  await page.screenshot({
+    path: testInfo.outputPath('outbound-channel-editor.png'),
+  });
+  await editor.getByRole('button', { name: 'Save', exact: true }).click();
+  await expect(editor).toHaveCount(0);
+  const upsert = daemon.requests.find(
+    (request) =>
+      request.method === 'PUT' && request.path.endsWith('/channels/notices'),
+  );
+  expect(upsert?.path).toBe(
+    `/workspaces/${encodeURIComponent(workspaceCwd)}/channels/notices`,
+  );
+  expect(upsert?.body).toEqual({
+    expectedRevision: '7',
+    config: { type: 'dingtalk-webhook' },
+    secrets: {
+      webhookUrl: { operation: 'replace', value: '$DINGTALK_WEBHOOK_URL' },
+      signingSecret: {
+        operation: 'replace',
+        value: '$DINGTALK_SIGNING_SECRET',
+      },
+    },
+  });
+  const card = page
+    .locator('[data-slot="card"]')
+    .filter({ has: page.getByText('notices', { exact: true }) });
+  await card.getByRole('button', { name: 'Start', exact: true }).click();
+  await expect(card.getByText('Ready to send', { exact: true })).toBeVisible();
+  expect(
+    daemon.requests.filter(
+      (request) =>
+        request.method === 'POST' &&
+        /\/session$|\/standalone\/sessions$|\/prompt$/.test(request.path),
+    ),
+  ).toHaveLength(0);
+  await page.screenshot({
+    path: testInfo.outputPath('outbound-channel-ready.png'),
+  });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await card.scrollIntoViewIfNeeded();
+  await page.screenshot({
+    path: testInfo.outputPath('outbound-channel-mobile.png'),
+  });
+});
