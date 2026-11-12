@@ -3613,7 +3613,9 @@ export async function runNonInteractive(
 
             turnCount++;
             // A drain turn keeps its own end-of-run path, so a refusal it
-            // records must not be mistaken for the main turn's.
+            // records must not be mistaken for the main turn's — but a
+            // refusal already recorded for the main turn still ends the run.
+            if (mainTurnRefusal) return;
             mainTurnRefusal = null;
             await enforceSessionTurnLimit(false);
 
@@ -3874,6 +3876,10 @@ export async function runNonInteractive(
             const p = (async () => {
               while ((pullModPrompts(), localQueue.length > 0)) {
                 if (loopDetected) return;
+                // A refused main turn ends the run with the refusal; drain
+                // items only carry the rest of a run that continues, and
+                // running one would clear the refusal before it is reported.
+                if (mainTurnRefusal) return;
                 // Stop draining once a queued item's structured_output
                 // call captured the terminal contract — no point running
                 // more queued prompts that can't influence the result.
