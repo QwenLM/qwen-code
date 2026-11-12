@@ -73,6 +73,58 @@ describe('forgetCommand', () => {
     });
   });
 
+  it('names files skipped for malformed frontmatter instead of no match', async () => {
+    const context = createMockCommandContext({
+      services: {
+        config: {
+          getProjectRoot: vi.fn().mockReturnValue('/tmp/test-project'),
+          getMemoryManager: vi.fn().mockReturnValue({
+            selectForgetCandidates: vi
+              .fn()
+              .mockResolvedValue({ matches: [{ id: '1' }] }),
+            forgetMatches: vi.fn().mockResolvedValue({
+              removedEntries: [],
+              skippedFiles: ['/tmp/test-project/memory.md'],
+            }),
+          }),
+        },
+      },
+    });
+    const result = await forgetCommand.action?.(context, 'old preference');
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content:
+        'Skipped files with unparseable frontmatter; matching entries were kept: /tmp/test-project/memory.md',
+    });
+  });
+
+  it('reports skipped files alongside removed entries', async () => {
+    const context = createMockCommandContext({
+      services: {
+        config: {
+          getProjectRoot: vi.fn().mockReturnValue('/tmp/test-project'),
+          getMemoryManager: vi.fn().mockReturnValue({
+            selectForgetCandidates: vi
+              .fn()
+              .mockResolvedValue({ matches: [{ id: '1' }, { id: '2' }] }),
+            forgetMatches: vi.fn().mockResolvedValue({
+              systemMessage: 'Forgot 1 entry.',
+              skippedFiles: ['/tmp/test-project/memory.md'],
+            }),
+          }),
+        },
+      },
+    });
+    const result = await forgetCommand.action?.(context, 'old preference');
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content:
+        'Forgot 1 entry.\nSkipped files with unparseable frontmatter; matching entries were kept: /tmp/test-project/memory.md',
+    });
+  });
+
   it('returns error message when memory manager throws', async () => {
     const context = createMockCommandContext({
       services: {

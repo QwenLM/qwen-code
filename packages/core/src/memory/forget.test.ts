@@ -841,6 +841,182 @@ describe('selectManagedAutoMemoryForgetCandidates', () => {
     );
   });
 
+  it('removes one entry from a CRLF file and keeps CRLF line endings', async () => {
+    await inTempDir(
+      'forget-crlf-',
+      async (tempDir, projectRoot) => {
+        const memoryFile = path.join(tempDir, 'memory.md');
+        // Windows checkouts hand the file back with CRLF line endings.
+        const contents = [
+          '---',
+          'title: Project memory',
+          '---',
+          '',
+          '# Project Memory',
+          '',
+          '- Keep this entry',
+          '  - Why: should stay',
+          '- Forget this entry',
+          '  - Why: should be removed',
+          '',
+        ].join('\r\n');
+        await fs.writeFile(memoryFile, contents, 'utf-8');
+        const forgotten = match('project', 'Forget this entry', memoryFile, 1);
+
+        const result = await forgetManagedAutoMemoryMatches(
+          projectRoot,
+          [forgotten],
+          NOW,
+        );
+
+        expect(result.removedEntries).toEqual([forgotten]);
+        const updated = await fs.readFile(memoryFile, 'utf-8');
+        expect(updated).toContain('title: Project memory');
+        expect(updated).toContain('Keep this entry');
+        expect(updated).toContain('should stay');
+        expect(updated).not.toContain('Forget this entry');
+        expect(updated).not.toContain('should be removed');
+        expect(updated).toContain('\r\n');
+        expect(updated).not.toMatch(/[^\r]\n/);
+      },
+      false,
+    );
+  });
+
+  it('is idempotent when the same CRLF match is forgotten twice', async () => {
+    await inTempDir(
+      'forget-crlf-twice-',
+      async (tempDir, projectRoot) => {
+        const memoryFile = path.join(tempDir, 'memory.md');
+        await fs.writeFile(
+          memoryFile,
+          [
+            '---',
+            'title: Project memory',
+            '---',
+            '',
+            '# Project Memory',
+            '',
+            '- Keep this entry',
+            '- Forget this entry',
+            '',
+          ].join('\r\n'),
+          'utf-8',
+        );
+        const forgotten = match('project', 'Forget this entry', memoryFile, 1);
+        await forgetManagedAutoMemoryMatches(projectRoot, [forgotten], NOW);
+        const afterFirst = await fs.readFile(memoryFile);
+        const mtimeAfterFirst = (await fs.stat(memoryFile)).mtimeMs;
+
+        const result = await forgetManagedAutoMemoryMatches(
+          projectRoot,
+          [forgotten],
+          NOW,
+        );
+
+        expect(result.removedEntries).toEqual([]);
+        expect((await fs.readFile(memoryFile)).equals(afterFirst)).toBe(true);
+        expect((await fs.stat(memoryFile)).mtimeMs).toBe(mtimeAfterFirst);
+      },
+      false,
+    );
+  });
+
+  it('keeps an LF file LF when its body has a stray CRLF', async () => {
+    await inTempDir(
+      'forget-stray-crlf-',
+      async (tempDir, projectRoot) => {
+        const memoryFile = path.join(tempDir, 'memory.md');
+        // LF frontmatter; one line in the body ends in CRLF.
+        const contents = [
+          '---',
+          'title: Project memory',
+          '---',
+          '',
+          '# Project Memory',
+          '',
+          '- Keep this entry',
+          '  - Why: should stay',
+          '- Forget this entry',
+          '  - Why: should be removed\r',
+          '- Also keep this entry',
+          '',
+        ].join('\n');
+        await fs.writeFile(memoryFile, contents, 'utf-8');
+        const forgotten = match('project', 'Forget this entry', memoryFile, 1);
+
+        const result = await forgetManagedAutoMemoryMatches(
+          projectRoot,
+          [forgotten],
+          NOW,
+        );
+
+        expect(result.removedEntries).toEqual([forgotten]);
+        await expect(fs.readFile(memoryFile, 'utf-8')).resolves.toBe(
+          '---\ntitle: Project memory\n---\n\n' +
+            'Keep this entry\n\nWhy: should stay\n\nAlso keep this entry\n',
+        );
+      },
+      false,
+    );
+  });
+
+  it('still deletes a file that has no frontmatter', async () => {
+    await inTempDir(
+      'forget-no-frontmatter-',
+      async (tempDir, projectRoot) => {
+        const memoryFile = path.join(tempDir, 'memory.md');
+        await fs.writeFile(
+          memoryFile,
+          '# Project Memory\n\n- Keep this entry\n- Forget this entry\n',
+          'utf-8',
+        );
+        const forgotten = match('project', 'Forget this entry', memoryFile, 1);
+
+        const result = await forgetManagedAutoMemoryMatches(
+          projectRoot,
+          [forgotten],
+          NOW,
+        );
+
+        expect(result.removedEntries).toEqual([forgotten]);
+        await expectGone(memoryFile);
+      },
+      false,
+    );
+  });
+
+  it.each([
+    ['a UTF-8 BOM', '\uFEFF---\ntitle: Project memory\n---\n'],
+    ['leading blank lines', '\n\n---\ntitle: Project memory\n---\n'],
+    ['an unclosed block', '---\ntitle: Project memory\n'],
+  ])(
+    'does not delete a file whose frontmatter has %s',
+    async (_label, head) => {
+      await inTempDir(
+        'forget-bad-frontmatter-',
+        async (tempDir, projectRoot) => {
+          const memoryFile = path.join(tempDir, 'memory.md');
+          const contents = `${head}\n# Project Memory\n\n- Keep this entry\n- Forget this entry\n`;
+          await fs.writeFile(memoryFile, contents, 'utf-8');
+
+          const result = await forgetManagedAutoMemoryMatches(
+            projectRoot,
+            [match('project', 'Forget this entry', memoryFile, 1)],
+            NOW,
+          );
+
+          expect(result.removedEntries).toEqual([]);
+          expect(result.skippedFiles).toEqual([memoryFile]);
+          await expect(fs.readFile(memoryFile, 'utf-8')).resolves.toBe(
+            contents,
+          );
+        },
+        false,
+      );
+    },
+  );
+
   it('deletes user-level memory and rebuilds only the user index', async () => {
     await inTempDir('forget-user-', async (_tempDir, projectRoot) => {
       const { userFile, result } = await forgetUserPreference(projectRoot);

@@ -56,7 +56,9 @@ export function parseAutoMemoryEntries(body: string): ManagedAutoMemoryEntry[] {
   const entries: ManagedAutoMemoryEntry[] = [];
   let current: ManagedAutoMemoryEntry | null = null;
 
-  for (const rawLine of body.split('\n')) {
+  // Normalize CRLF so indented field lines match and no `\r` leaks into
+  // entries.
+  for (const rawLine of body.replace(/\r\n/g, '\n').split('\n')) {
     const trimmed = rawLine.trim();
     if (
       !trimmed ||
