@@ -32,20 +32,6 @@
 # lane's when the main lane passed.
 set -uo pipefail
 
-# A Vitest run whose every test passed can still exit non-zero on an unhandled
-# error, and on this pool the error is usually the worker->main RPC budget
-# rather than anything the branch did: `Timeout calling "onTaskUpdate"` failed
-# main runs 43018456551 and 43016357976 with 902 of 902 tests passing in
-# packages/channels/github. The Linux lanes deliberately keep unhandled errors
-# fatal (scripts/tests/unit-vitest-configs.test.ts pins that, #10438), so the
-# answer is not to ignore them: re-run the workspace suites whose reports show
-# no failed test and only that RPC error. A real unhandled rejection still
-# fails the first time, and an RPC stall that outlives two whole runs still
-# fails.
-#
-# Set to 0 to disable, for an operator who wants the first failure to stand.
-RPC_RETRY="${QWEN_CI_RPC_RETRY:-1}"
-
 # The main lane's workspaces, the CLI suite and core.
 main_workspaces=('@qwen-code/qwen-code' '@qwen-code/qwen-code-core')
 # The heap cap `npm run test:ci:workspaces` gives each workspace suite.
@@ -107,143 +93,10 @@ half_cap() {
 side_forks="$(half_cap "${VITEST_MAX_FORKS:-}")"
 side_threads="$(half_cap "${VITEST_MAX_THREADS:-}")"
 
-# Run one suite command and re-run it once when its own log proves the run was
-# all-green and the only failure was the RPC budget. Used for
-# `npm run test:scripts:unit`, a single suite whose whole log is its own report;
-# the workspace lanes use run_lane_suites below, which has to tell one
-# workspace's report from another's.
-#
-# The first attempt is teed because the decision needs the text. The retry is
-# not: nothing reads its status but the lane's, so it streams straight through
-# exactly as this suite did before there was a retry.
-run_suite() {
-  local log rc
-  log="$(mktemp "${TMPDIR:-/tmp}/unit-lane-suite.XXXXXX")" || {
-    echo "::error::Could not create a suite log under ${TMPDIR:-/tmp}."
-    return 1
-  }
-  "$@" 2>&1 | tee "$log"
-  rc="${PIPESTATUS[0]}"
-  if [ "$rc" -ne 0 ] && [ "$RPC_RETRY" != '0' ] &&
-    rpc_only_failure_text "$rc" < "$log"; then
-    echo "::warning::Every test passed but Vitest reported the worker RPC timeout as an unhandled error; re-running this suite once."
-    rm -f "$log"
-    "$@"
-    return $?
-  fi
-  rm -f "$log"
-  return "$rc"
-}
-
-# Run a lane's workspace suites in ONE npm call, exactly as before, then re-run
-# only the workspaces npm names as failed when each of their reports shows no
-# failed test and only the RPC error. The first attempt keeps npm's own
-# batching: it runs every listed workspace even after one fails and exits with
-# the first failure's status, and the lane has always relied on both.
-#
-# The retry reads npm's `workspace <name>` failure lines to learn WHICH
-# workspaces failed, and each one's own report block to learn WHY. A batch log
-# holds every workspace's summary, so judging the whole log — or just its last
-# summary — would let one workspace's green report license another's retry.
-run_lane_suites() {
-  local log rc failed name block
-  log="$(mktemp "${TMPDIR:-/tmp}/unit-lane-suite.XXXXXX")" || {
-    echo "::error::Could not create a suite log under ${TMPDIR:-/tmp}."
-    return 1
-  }
-  npm run test:ci "$@" -- "${suite_args[@]}" 2>&1 | tee "$log"
-  rc="${PIPESTATUS[0]}"
-  if [ "$rc" -eq 0 ] || [ "$RPC_RETRY" = '0' ]; then
-    rm -f "$log"
-    return "$rc"
-  fi
-  # npm prints one of these per workspace whose script exited non-zero, as
-  # `npm error workspace @scope/name@1.2.3`. Strip the trailing version at the
-  # LAST `@`, not the first: every workspace here is scoped, so the name itself
-  # starts with one. No such line means the failure was npm's own (a bad
-  # workspace list, a missing script), which no retry of a suite can fix.
-  failed="$(grep -oE '^npm error workspace [^ ]+' "$log" |
-    awk '{ print $4 }' | sed 's/@[^@]*$//' | sort -u)"
-  if [ -z "$failed" ]; then
-    rm -f "$log"
-    return "$rc"
-  fi
-  while IFS= read -r name; do
-    [ -n "$name" ] || continue
-    # The block from this workspace's own header to the next workspace's
-    # header: its build output, its report, and nothing belonging to a
-    # neighbour. `index`, not a regex: every workspace here is scoped, so the
-    # name is full of characters a regex would read as syntax.
-    block="$(awk -v name="$name" '
-      /^> .*@[^ ]+ test:ci$/ { inside = (index($0, "> " name "@") == 1) }
-      inside { print }
-    ' "$log")"
-    if ! rpc_only_failure_text "$rc" <<< "$block"; then
-      rm -f "$log"
-      return "$rc"
-    fi
-  done <<< "$failed"
-  rm -f "$log"
-  echo "::warning::Every test passed but Vitest reported the worker RPC timeout as an unhandled error; re-running the affected workspace suites once."
-  local status=0 attempt
-  while IFS= read -r name; do
-    [ -n "$name" ] || continue
-    npm run test:ci "--workspace=${name}" -- "${suite_args[@]}"
-    attempt=$?
-    if [ "$attempt" -ne 0 ] && [ "$status" -eq 0 ]; then
-      status="$attempt"
-    fi
-  done <<< "$failed"
-  return "$status"
-}
-
-# True only for an all-green report whose unhandled errors are all the RPC
-# timeout. The release lane already grants exactly this pass on its own shards
-# (.github/scripts/run-release-workspace-tests.sh, run 33713579913), and its
-# evidence rules are pinned by scripts/tests/release-workflow.test.js; these
-# are those rules. The count is what proves the run, not the crash header: the
-# header is producer-chosen, so a pattern over headers is incomplete by
-# construction (26 of this repo's 293 Error subclasses carry no Error/Exception
-# suffix), while Vitest's own `Errors  N errors` needs no pattern.
-#
-# The two figures are sums over the whole block, so a passing tally in one
-# attempt cannot cover a later one's crash. Every pattern is anchored on the
-# section-line shape and the transport message is matched on Vitest's own
-# `[vitest-worker]: Timeout calling` prefix, because a test's console output is
-# echoed at column 0 and a test that prints summary-shaped fixture data — or
-# the words `Timeout calling` — must not move either figure.
-rpc_only_failure_text() {
-  local text
-  text="$(cat)"
-  # A signal death (>=128) is not the transport giving up: the process was
-  # killed, and whatever it printed before that says nothing about the rest.
-  # Both callers already know the run failed; the lower bound says so here too,
-  # so this cannot grant a retry to a status that was never a failure.
-  [ "$1" -ge 1 ] || return 1
-  [ "$1" -lt 128 ] || return 1
-  # No summary at all: the process died before reporting (OOM, a kill, a step
-  # timeout). Nothing here says the tests passed.
-  grep -qE '^[[:space:]]*Tests[[:space:]]+[0-9]+ passed' <<< "$text" || return 1
-  grep -qE '^[[:space:]]*(Tests|Test Files)[[:space:]]+[0-9]+ failed' <<< "$text" &&
-    return 1
-  grep -qE '^[[:space:]]*FAIL ' <<< "$text" && return 1
-  # Every reported error must be the RPC timeout. Vitest prints the count in
-  # the summary and the message once per error, so the totals have to agree;
-  # a second, different unhandled error would leave them apart, and the same
-  # message printed twice against one counted error leaves them apart too.
-  local reported timeouts
-  reported="$(awk '/^[[:space:]]*Errors[[:space:]]+[0-9]+ errors?$/ { total += $2 } END { print total + 0 }' <<< "$text")"
-  [ "$reported" -ge 1 ] || return 1
-  timeouts="$(grep -cE '\[vitest-worker\]: Timeout calling' <<< "$text" || true)"
-  [ "$timeouts" -eq "$reported" ]
-}
-
-suite_args=("$@")
-
 (
   NODE_OPTIONS="$workspace_node_options" VITEST_MAX_FORKS="$side_forks" \
     VITEST_MAX_THREADS="$side_threads" \
-    run_lane_suites "${side_workspaces[@]}"
+    npm run test:ci "${side_workspaces[@]}" -- "$@"
   workspaces_rc=$?
   standalone_rc=0
   # A sharded run skips it on every shard but one.
@@ -252,7 +105,7 @@ suite_args=("$@")
     standalone_rc=$?
   fi
   VITEST_MAX_FORKS="$side_forks" VITEST_MAX_THREADS="$side_threads" \
-    run_suite npm run test:scripts:unit -- "${suite_args[@]}"
+    npm run test:scripts:unit -- "$@"
   scripts_rc=$?
   for lane_rc in "$workspaces_rc" "$standalone_rc" "$scripts_rc"; do
     if [ "$lane_rc" -ne 0 ]; then
@@ -263,7 +116,7 @@ suite_args=("$@")
 side_pid=$!
 
 NODE_OPTIONS="$workspace_node_options" \
-  run_lane_suites "${main_workspaces[@]/#/--workspace=}"
+  npm run test:ci "${main_workspaces[@]/#/--workspace=}" -- "$@"
 rc=$?
 
 echo "Side lane output (other workspaces, standalone runtimes, scripts/tests):"
