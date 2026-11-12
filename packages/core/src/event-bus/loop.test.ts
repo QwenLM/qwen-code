@@ -12,6 +12,7 @@ import {
   type AgentLoopToolExecutor,
   type AgentLoopHost,
 } from '../core/agent-loop.js';
+import * as agentLoop from '../core/agent-loop.js';
 import { SendMessageType } from '../core/client.js';
 import { LoopEventBus } from './bus.js';
 import {
@@ -23,6 +24,7 @@ import {
 } from '../core/turn.js';
 import type { Config } from '../config/config.js';
 import type { LlmClient } from '../core/client.js';
+import type { RuntimeContentGeneratorView } from '../agents/runtime/agent-context.js';
 
 // The finalizer is a shared dependency of both loop paths; stubbing it here
 // keeps the two paths identical while avoiding its telemetry/config surface.
@@ -501,6 +503,44 @@ describe('runAgentLoop event-bus parity', () => {
       ]);
       spy.mockClear();
       await runAgentLoop(options([[content]], makeHost().host));
+      expect(spy).not.toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
+
+describe('runAgentLoop default executor wiring', () => {
+  it('forwards scheduler options and runtimeView to the default executor on the bus path', async () => {
+    const scheduler = { onAllToolCallsComplete: vi.fn() };
+    const runtimeView = {
+      contentGenerator: {},
+      contentGeneratorConfig: {},
+    } as unknown as RuntimeContentGeneratorView;
+    const spy = vi
+      .spyOn(agentLoop, 'createSchedulerExecutor')
+      .mockReturnValue(makeExecutor());
+    try {
+      await runAgentLoop({
+        ...options([[content]], makeHost().host),
+        executor: undefined,
+        scheduler,
+        runtimeView,
+        useEventBus: true,
+      });
+      expect(spy).toHaveBeenCalledWith(config, scheduler, runtimeView);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('does not create a default executor when one is injected', async () => {
+    const spy = vi.spyOn(agentLoop, 'createSchedulerExecutor');
+    try {
+      await runAgentLoop({
+        ...options([[content]], makeHost().host),
+        useEventBus: true,
+      });
       expect(spy).not.toHaveBeenCalled();
     } finally {
       spy.mockRestore();
