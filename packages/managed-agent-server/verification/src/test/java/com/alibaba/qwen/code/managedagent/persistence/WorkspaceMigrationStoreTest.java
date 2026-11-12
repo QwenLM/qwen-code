@@ -12,8 +12,8 @@ import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerService;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.BeforeEach;
@@ -86,7 +86,8 @@ class WorkspaceMigrationStoreTest {
     }
 
     private WorkspaceMigrationStore store(boolean create) {
-        return new WorkspaceMigrationStore(jdbc, manager, guard, new InMemoryRuntimeBindingRepository(),
+        return new WorkspaceMigrationStore(jdbc, manager, guard, new JdbcRuntimeBindingRepository(jdbc.getDataSource(),
+                new AesGcmSecretProtector("test", new byte[32])),
                 request.toString().getBytes(StandardCharsets.UTF_8), create, new com.alibaba.qwen.code.managedagent.adapters.workspace.LocalRecoveryWorker());
     }
 
@@ -288,7 +289,7 @@ class WorkspaceMigrationStoreTest {
                 assertThat(receipt.path("lastErrorCode").isNull()).isTrue();
                 assertThat(receipt.path("result_json").path("contentVerified").asBoolean()).isTrue();
                 assertThat(receipt.path("result_json").path("activation").asBoolean()).isFalse();
-                assertThat(jdbc.queryForObject("SELECT mount_revision FROM ma_storage_owner WHERE storage_key = (SELECT physical_key FROM ma_storage WHERE alias_key = ?)", Long.class, JdbcRuntimeBindingRepository.storageAliasKey("tenant", "storage")))
+                assertThat(jdbc.queryForObject("SELECT mount_revision FROM ma_storage_owner WHERE storage_key = (SELECT physical_key FROM ma_storage WHERE alias_key = ?)", Long.class, RuntimeAdmissionFences.storageAliasKey("tenant", "storage")))
                         .isEqualTo(promote ? 2 : 1);
                 operation.verify(promote);
                 assertThat(operation.inspect()).isEqualTo(receipt);
@@ -564,7 +565,7 @@ class WorkspaceMigrationStoreTest {
         assertThat(Files.readAllBytes(target.resolve(".qwen-managed-storage.json"))).isEqualTo(marker);
         assertThat(Files.readString(source.resolve(".qwen-managed-storage.json"))).contains(source.toString());
         guard.promoteMigration(original, identity, registration, request.path("migrationOperationId").asText());
-        assertThat(jdbc.queryForObject("SELECT mount_revision FROM ma_storage_owner WHERE storage_key = (SELECT physical_key FROM ma_storage WHERE alias_key = ?)", Long.class, JdbcRuntimeBindingRepository.storageAliasKey("tenant", "storage"))).isEqualTo(2);
+        assertThat(jdbc.queryForObject("SELECT mount_revision FROM ma_storage_owner WHERE storage_key = (SELECT physical_key FROM ma_storage WHERE alias_key = ?)", Long.class, RuntimeAdmissionFences.storageAliasKey("tenant", "storage"))).isEqualTo(2);
         assertThatThrownBy(() -> guard.promoteMigration(original, identity, registration, request.path("migrationOperationId").asText()));
     }
 }

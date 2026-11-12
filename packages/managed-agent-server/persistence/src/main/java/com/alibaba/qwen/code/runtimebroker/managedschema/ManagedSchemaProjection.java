@@ -34,7 +34,7 @@ public enum ManagedSchemaProjection {
     JOURNAL_PACK(
             "pack_id, session_scope_key, tenant_id, workspace_id, session_id, from_revision, "
                     + "through_revision, manifest_resource_key, object_key, state, byte_length, sha256, "
-                    + "gmt_create, gmt_modified"),
+                    + "builder_id, gmt_create, gmt_modified"),
     MESSAGE(
             "tenant_id, session_id, item_id, turn_id, item_type, item_role, item_status, "
                     + "attributes_json, first_sequence, last_sequence, gmt_create, gmt_modified, revision, "
