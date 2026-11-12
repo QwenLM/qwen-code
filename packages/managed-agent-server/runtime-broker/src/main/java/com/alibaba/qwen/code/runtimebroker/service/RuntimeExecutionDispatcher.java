@@ -309,7 +309,22 @@ final class RuntimeExecutionDispatcher {
                 }
             }
         };
-        scheduler.schedule(tick, 250, TimeUnit.MILLISECONDS);
+        try {
+            scheduler.schedule(tick, 250, TimeUnit.MILLISECONDS);
+        } catch (RuntimeException | Error rejected) {
+            // The dispatch between the null claim and this first schedule can
+            // race a closing broker: the scheduler is shut down, so the
+            // PREPARED row would otherwise stay active with no owner and fence
+            // the binding's release forever. Settle it before propagating,
+            // exactly like the tick's own exceptional exit.
+            try {
+                settleStrandedPrepared(prepared, "dispatch_failed",
+                        "Shared Workspace dispatch failed before claim");
+            } catch (RuntimeException | Error settleFailure) {
+                rejected.addSuppressed(settleFailure);
+            }
+            throw rejected;
+        }
         return queued;
     }
 
