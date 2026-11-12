@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
+import com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObjectStore;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiApplicationJson;
 import com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
@@ -14,6 +15,7 @@ import com.alibaba.qwen.code.runtimebroker.persistence.JdbcCsiApplicationRetirem
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcCsiRetirementEvidence;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.alibaba.qwen.code.runtimebroker.transport.CsiFileFinalizeProtocol;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -46,7 +48,7 @@ public final class WorkspaceCsiApplicationStore {
     private static final String FORMAT = "qwen-csi-application-retirement/1";
     private static final int RECEIPT_LIMIT = 64 * 1024;
     static final int FROZEN_LIMIT = 32 * 1024 * 1024;
-    private static final int BODY_LIMIT = 128 * 1024;
+    private static final int BODY_LIMIT = CsiNativeActivationProof.TERMINAL_BODY_LIMIT;
     private static final Set<String> ENVELOPE_FIELDS = Set.of("format", "retirementId", "bindingId", "requestKey",
             "sealedBindingVersion", "bootSha256", "writerTokenSha256", "commitBodyBase64", "preparedCommitSha256",
             "preCutObservationBase64", "preCutObservationSha256", "workerObserveRequest");
@@ -57,10 +59,11 @@ public final class WorkspaceCsiApplicationStore {
     private final JdbcRuntimeSessionRepository sessions;
     private final RuntimeTransport transport;
     private final WorkspaceCsiApplicationHistory history;
+    private final JdbcJournalPacks packs;
 
     public WorkspaceCsiApplicationStore(JdbcTemplate jdbc, PlatformTransactionManager manager,
             JdbcManagedSessionStore nativeStore, JdbcRuntimeBindingRepository bindings, JdbcRuntimeSessionRepository sessions,
-            RuntimeTransport transport) {
+            RuntimeTransport transport, ToolPublicationObjectStore objects) {
         require(jdbc != null && jdbc.getDataSource() != null && nativeStore != null && bindings != null && sessions != null
                 && bindings.usesDataSource(jdbc.getDataSource()) && sessions.usesDataSource(jdbc.getDataSource()) && transport != null);
         this.jdbc = jdbc;
@@ -70,7 +73,8 @@ public final class WorkspaceCsiApplicationStore {
         this.bindings = bindings;
         this.sessions = sessions;
         this.transport = transport;
-        this.history = new WorkspaceCsiApplicationHistory(jdbc, manager, bindings, nativeStore);
+        this.packs = new JdbcJournalPacks(jdbc, objects, null);
+        this.history = new WorkspaceCsiApplicationHistory(jdbc, manager, bindings, nativeStore, objects);
     }
 
     public record Status(String format, String retirementId, String stage, long progressVersion,
@@ -78,7 +82,7 @@ public final class WorkspaceCsiApplicationStore {
     }
 
     public Status command(String tenant, String session, String token, String action, byte[] bytes) {
-        JsonNode request = WorkspaceCsiApplicationJson.object(bytes, 192 * 1024);
+        JsonNode request = WorkspaceCsiApplicationJson.object(bytes, CsiNativeActivationProof.TERMINAL_COMMAND_LIMIT);
         String argument = switch (action) {
             case "freeze" -> "commitBodyBase64";
             case "cut" -> "frozenRequestSha256";
@@ -92,7 +96,7 @@ public final class WorkspaceCsiApplicationStore {
         String retirement = request.path("retirementId").textValue();
         return switch (action) {
             case "freeze" -> freeze(tenant, session, workspace, retirement, token,
-                    WorkspaceCsiApplicationJson.base64(request.path(argument), 128 * 1024));
+                    WorkspaceCsiApplicationJson.base64(request.path(argument), BODY_LIMIT));
             case "cut" -> cut(tenant, session, workspace, retirement, token, request.path(argument).textValue());
             case "finalize" -> finalizeApplication(tenant, session, workspace, retirement, token, request.path(argument).textValue());
             default -> throw new IllegalArgumentException("Unknown CSI retirement command");
@@ -191,7 +195,7 @@ public final class WorkspaceCsiApplicationStore {
                             + " AND progress_version = 2 AND frozen_request_sha256 = ? AND cut_bytes IS NULL",
                     cut, hash(cut), WorkspaceOperations.key(WorkspaceOperations.Kind.CSI_RETIREMENT, tenant, retirement), frozenDigest) == 1);
             authority.requireCurrentTime(target);
-            JdbcCsiApplicationRetirement.lock(target, tenant, session, authority.original().bindingId(), retirement);
+            JdbcCsiApplicationRetirement.lock(target, tenant, session, authority.original().bindingId(), retirement, packs);
             return new Status(FORMAT, retirement, "CUT", 3, frozenDigest, hash(cut), null);
         });
     }
@@ -237,7 +241,7 @@ public final class WorkspaceCsiApplicationStore {
             require(jdbc.update("UPDATE ma_operation SET progress_stage = 'DRAINED', progress_version = 4"
                             + " WHERE operation_key = ? AND operation_kind = 'CSI_RETIREMENT' AND progress_stage = 'CUT' AND progress_version = 3"
                             + " AND cut_sha256 = ? AND finalize_receipt_sha256 = ?", WorkspaceOperations.key(WorkspaceOperations.Kind.CSI_RETIREMENT, tenant, retirement), cutDigest, hash(receipt)) == 1);
-            JdbcCsiApplicationRetirement.lock(target, tenant, session, authority.original().bindingId(), retirement);
+            JdbcCsiApplicationRetirement.lock(target, tenant, session, authority.original().bindingId(), retirement, packs);
             return new Status(FORMAT, retirement, "DRAINED", 4, hash(authority.frozenBytes()), cutDigest, hash(receipt));
         });
     }
@@ -272,7 +276,7 @@ public final class WorkspaceCsiApplicationStore {
         var candidates = jdbc.queryForList("SELECT target_id FROM ma_operation WHERE operation_key = ? AND operation_kind = 'CSI_RETIREMENT' AND tenant_id = ? AND operation_id = ?",
                 String.class, WorkspaceOperations.key(WorkspaceOperations.Kind.CSI_RETIREMENT, tenant, retirement), tenant, retirement);
         require(candidates.size() == 1);
-        var authority = JdbcCsiApplicationRetirement.lock(target, tenant, session, candidates.getFirst(), retirement);
+        var authority = JdbcCsiApplicationRetirement.lock(target, tenant, session, candidates.getFirst(), retirement, packs);
         require(workspace.equals(authority.original().request().getScope().getWorkspaceId()));
         var binding = bindings.findByIdForUpdate(target, authority.original().bindingId());
         require(binding != null && binding.getGeneration() == 1 && binding.getVersion() == authority.original().version()
@@ -304,7 +308,7 @@ public final class WorkspaceCsiApplicationStore {
         if (authority.stage() == Stage.SETTLING) {
             return;
         }
-        var evidence = JdbcCsiRetirementEvidence.saved(target, authority, bindings);
+        var evidence = JdbcCsiRetirementEvidence.saved(target, authority, bindings, packs);
         var value = envelope(locked);
         requireSavedWriter(target, authority, value);
         WorkspaceCsiApplicationWorkerMatch.verify(evidence, savedObservation(value), savedRequest(locked, value));
@@ -366,8 +370,8 @@ public final class WorkspaceCsiApplicationStore {
         String session = authority.original().request().getIsolationKey();
         try (PreparedStatement statement = target.prepareStatement("SELECT lease_token_hash FROM ma_session_head"
                 + " WHERE head_kind = 'MANAGED_SESSION' AND tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ?")) {
-            statement.setString(1, JdbcRuntimeBindingRepository.harnessDrainKey(tenant));
-            statement.setString(2, JdbcRuntimeBindingRepository.harnessDrainKey(session));
+            statement.setString(1, RuntimeAdmissionFences.harnessDrainKey(tenant));
+            statement.setString(2, RuntimeAdmissionFences.harnessDrainKey(session));
             statement.setBytes(3, ManagedSchemaKeys.identity(tenant));
             statement.setBytes(4, ManagedSchemaKeys.identity(session));
             try (var row = statement.executeQuery()) {

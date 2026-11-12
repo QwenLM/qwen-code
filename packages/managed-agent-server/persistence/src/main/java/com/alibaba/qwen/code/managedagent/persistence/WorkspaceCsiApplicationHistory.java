@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
+import com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObjectStore;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiApplicationJson;
 import com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
@@ -36,14 +37,17 @@ final class WorkspaceCsiApplicationHistory {
     private final JdbcRuntimeBindingRepository bindings;
     private final JdbcManagedSessionStore nativeStore;
     private final TransactionTemplate transaction;
+    private final JdbcJournalPacks packs;
 
     WorkspaceCsiApplicationHistory(JdbcTemplate jdbc, PlatformTransactionManager manager,
-            JdbcRuntimeBindingRepository bindings, JdbcManagedSessionStore nativeStore) {
+            JdbcRuntimeBindingRepository bindings, JdbcManagedSessionStore nativeStore,
+            ToolPublicationObjectStore objects) {
         require(jdbc != null && jdbc.getDataSource() != null && manager != null && bindings != null && nativeStore != null
                 && bindings.usesDataSource(jdbc.getDataSource()) && nativeStore.usesDataSource(jdbc.getDataSource()));
         this.jdbc = jdbc;
         this.bindings = bindings;
         this.nativeStore = nativeStore;
+        this.packs = new JdbcJournalPacks(jdbc, objects, null);
         transaction = new TransactionTemplate(manager);
         transaction.setReadOnly(true);
         transaction.setIsolationLevel(TransactionDefinition.ISOLATION_REPEATABLE_READ);
@@ -64,11 +68,12 @@ final class WorkspaceCsiApplicationHistory {
             var envelope = WorkspaceCsiApplicationJson.object(saved.frozen(), WorkspaceCsiApplicationStore.FROZEN_LIMIT);
             nativeStore.requireCsiHistoricalCredential(tenant, workspace, session, token,
                     envelope.path("writerTokenSha256").textValue());
-            var evidence = JdbcCsiRetirementEvidence.historical(connection, saved.binding(), saved.frozen(), started);
+            var evidence = JdbcCsiRetirementEvidence.historical(connection, saved.binding(), saved.frozen(), started, packs);
             var context = context(connection, tenant, workspace, session);
             var value = WorkspaceCsiApplicationStore.savedEnvelope(saved.binding(), context, retirement,
                     evidence.sealedBindingVersion(), saved.frozen());
-            byte[] body = WorkspaceCsiApplicationJson.base64(value.path("commitBodyBase64"), 128 * 1024);
+            byte[] body = WorkspaceCsiApplicationJson.base64(value.path("commitBodyBase64"),
+                    CsiNativeActivationProof.TERMINAL_BODY_LIMIT);
             WorkspaceCsiApplicationWorkerMatch.verify(evidence, WorkspaceCsiApplicationStore.savedObservation(value),
                     WorkspaceCsiApplicationStore.workerRequest(saved.binding(), context, retirement, "observe", hash(body), null, null));
             var finalize = WorkspaceCsiApplicationStore.workerRequest(saved.binding(), context, retirement, "finalize",
