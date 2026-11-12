@@ -98,12 +98,20 @@ env:
   # Checks the settle gate skips: 'review-pr' carries nothing the loop acts on. → qwen-autofix.md#af-160
   NON_BLOCKING_CHECKS: '["review-pr"]'
   # Failed-check patterns that mean INFRASTRUCTURE died, not the code. → qwen-autofix.md#af-076
-  INFRA_FAILURE_SIGNATURES: 'lost communication with the server|No space left on device|ENOSPC|received a shutdown signal|The runner has received|Failed to initialize container|runner (was|has been) (lost|terminated)|invalid index-pack output|RPC failed|failed to be acquired|lock not acquired within|QWEN_CI_RPC_RETRY must be a non-negative integer|Host load gate breached'
+  # The built-tree handoff is anchored to the RETRY step's name on purpose: the
+  # artifact fetch expiring is a routing fault on the host, not the PR's code,
+  # and a re-run lands on a different host (#16927). The first attempt is
+  # continue-on-error and the retry covers it on failure, so its annotation
+  # stays on the check run after a recovery — admitting it would classify a
+  # real failure carrying that residue as infrastructure. A bare
+  # 'has timed out after' would also swallow a genuinely hung test or install
+  # step, which must keep filing.
+  INFRA_FAILURE_SIGNATURES: "lost communication with the server|No space left on device|ENOSPC|received a shutdown signal|The runner has received|Failed to initialize container|runner (was|has been) (lost|terminated)|invalid index-pack output|RPC failed|failed to be acquired|lock not acquired within|QWEN_CI_RPC_RETRY must be a non-negative integer|Host load gate breached|Disk floor breached|The action 'Retry downloading the built tree' has timed out"
   # Deterministic configuration errors: a repository variable cannot change
   # between attempts, so a re-run fails identically. Not infrastructure — the
   # scan skips the PR instead of re-paying the pre-suite cost and handing the
   # typo to an agent that cannot edit a repository variable. → qwen-autofix.md#af-076
-  CONFIG_FAILURE_SIGNATURES: 'HOST_LOAD_MAX_RATIO must be a positive number|HOST_LOAD_MAX_WAIT_TRIES must be a positive integer|HOST_LOAD_WAIT_SECONDS must be a positive integer'
+  CONFIG_FAILURE_SIGNATURES: 'HOST_LOAD_MAX_RATIO must be a positive number|HOST_LOAD_MAX_WAIT_TRIES must be a positive integer|HOST_LOAD_WAIT_SECONDS must be a positive integer|DISK_FLOOR_MIN_FREE_KB must be a non-negative integer|DISK_FLOOR_MIN_FREE_INODES must be a non-negative integer|DISK_FLOOR_MAX_USED_PCT must be a percentage'
   # Max review targets per scan (fan-out defense). → qwen-autofix.md#af-077
   MAX_TARGETS_PER_SCAN: '${{ vars.QWEN_AUTOFIX_MAX_TARGETS_PER_SCAN || 30 }}'
   # Upper bound on candidates INSPECTED per scan.
