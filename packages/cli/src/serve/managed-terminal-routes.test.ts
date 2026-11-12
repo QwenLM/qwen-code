@@ -233,6 +233,10 @@ describe('managed terminal control route envelope conformance', () => {
       { ...valid, operation: { ...operation, kind: 'terminal-reboot' } },
     ],
     [
+      'an extra operation key',
+      { ...valid, operation: { ...operation, extra: true } },
+    ],
+    [
       'a missing session key',
       {
         ...valid,

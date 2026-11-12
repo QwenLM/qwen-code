@@ -230,6 +230,24 @@ class TerminalRelayHandlerTest {
     }
 
     @Test
+    void synchronousAdmissionThrowIsContainedAndClosesTheBrowser() throws Exception {
+        RuntimeBrokerOperations broker = mock(RuntimeBrokerOperations.class);
+        HttpClient client = mock(HttpClient.class);
+        // admit validates synchronously (requireOpen / requirePathSafe); a
+        // throw here must not escape the container callback after the 101,
+        // which would leave the browser leg an abrupt 1006 with no close.
+        when(broker.admitTerminalHold("session-a", "term-1"))
+                .thenThrow(new IllegalStateException("runtime unavailable"));
+        TerminalRelayHandler handler = new TerminalRelayHandler(broker, client);
+        WebSocketSession session = session();
+
+        handler.afterConnectionEstablished(session);
+
+        verify(client, never()).newWebSocketBuilder();
+        verify(session).close(CloseStatus.SERVER_ERROR);
+    }
+
+    @Test
     void reassemblesWorkerFragmentsBeforeTheBrowserDecodesThem() throws Exception {
         WebSocket worker = mock(WebSocket.class);
         Attached attached = attach(worker);
