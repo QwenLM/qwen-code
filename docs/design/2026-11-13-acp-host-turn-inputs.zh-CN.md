@@ -2,7 +2,7 @@
 
 [English](2026-11-13-acp-host-turn-inputs.md) | [简体中文](2026-11-13-acp-host-turn-inputs.zh-CN.md)
 
-- **状态**：为 #17045 的 ACP 第二行准备了实现和测试更新。测试已新增/更新，但尚未执行。
+- **状态**：为 #17045 的 ACP 第二行准备了实现和测试更新。更新后的测试在本地通过。
 - **日期**：2026-11-13。
 - **关联**：#17045，以及 [统一 Agent loop 设计](2026-10-23-unified-agent-loop.md)。
 
@@ -53,6 +53,6 @@ type UserTurnInput = {
 
 ## 验证与验收
 
-实现和测试已新增/更新，但尚未执行。
+实现和测试均已就位，并在本地通过：core `client.test.ts` 640 passed、core `client-goal.test.ts` 59 passed、`Session.test.ts` 1447 个测试无失败。本次改动前的基线运行相同的测试数，因此不是靠删测试换绿。
 
-验收要求保留记录元数据，独立处理 recording/chain/snapshot 阶段，并证明外部 span 绝不会由 client 关闭。现有测试已针对这些行为更新；测试执行仍待进行。
+验收要求保留记录元数据，独立处理 recording/chain/snapshot 阶段，并证明外部 span 绝不会由 client 关闭。上述测试覆盖了这些行为。

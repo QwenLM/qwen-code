@@ -2,7 +2,7 @@
 
 [English](2026-11-13-acp-host-turn-inputs.md) | [简体中文](2026-11-13-acp-host-turn-inputs.zh-CN.md)
 
-- **Status**: Implementation and test updates are prepared for the ACP second row of #17045. Tests have been added/updated but not executed yet.
+- **Status**: Implementation and test updates are prepared for the ACP second row of #17045. The updated tests pass locally.
 - **Date**: 2026-11-13.
 - **Related**: #17045 and [Unified agent loop](2026-10-23-unified-agent-loop.md).
 
@@ -53,6 +53,6 @@ Removing `userTurnRecordedByHost` means two things: the host writes its record t
 
 ## Validation and acceptance
 
-Implementation and tests have been added/updated, but have not been executed yet.
+Implementation and tests are in place, and pass locally: core `client.test.ts` 640 passed, core `client-goal.test.ts` 59 passed, and `Session.test.ts` 1447 tests with no failures. The base before this change runs the same test counts, so the suite did not shrink to go green.
 
-Acceptance requires preserving record metadata, independent recording/chain/snapshot phase handling, and proof that an external span is never closed by the client. Existing tests are updated for these behaviors; their execution remains pending.
+Acceptance requires preserving record metadata, independent recording/chain/snapshot phase handling, and proof that an external span is never closed by the client. The tests cover these behaviors.

@@ -341,9 +341,10 @@ export type UserTurnRecord =
     };
 
 /**
- * What the host already recorded and set up for this turn. A matching
- * `promptId` says the host wrote the record through {@link recordUserTurn}, so
- * core records nothing itself.
+ * What the host already recorded and set up for this turn: either it wrote the
+ * record through {@link recordUserTurn} at its existing timing, or the message
+ * is already in history. A matching `promptId` tells core to record nothing
+ * itself.
  */
 export interface UserTurnInput {
   promptId: string;
