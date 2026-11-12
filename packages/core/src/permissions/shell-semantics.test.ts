@@ -934,6 +934,13 @@ describe('extractShellOperationsAcrossCommand', () => {
       [uncertainWrite('/repo/settings.json')],
     ],
     [
+      // bash prints `a` and `{b` for `echo {a,'{'b}`: the quoted `{` does not
+      // nest, so the top-level comma still separates the group.
+      'marks a quoted opening brace after a separator',
+      "cd {a,'{'b} && echo x > settings.json",
+      [uncertainWrite('/repo/settings.json')],
+    ],
+    [
       // bash prints `a}b` and `c` for `echo {a}b,c}`: the first `}` leaves a
       // body with no separator, so the expansion happens at the second one.
       'marks a brace group that only separates after a later close',
