@@ -237,7 +237,7 @@ jobs, and move Java 17 to nightly only.
   which at least one of the two Hosted lanes failed.
 
   Over the 97 `sdk-java.yml` runs created between 2026-10-27T14:57Z and
-  2026-11-11T21:48Z, 70 had completed without cancellation and all 70 executed
+  2026-11-11T21:48:10Z, 70 had completed without cancellation and all 70 executed
   both Hosted lanes. Of those, 54 failed at least one lane (77%), and only 6 were
   green across every job in the run. In the newest 22 of them, 20 failed at least
   one lane (91%).
@@ -319,7 +319,7 @@ nightly plus dispatch and has no `pull_request` trigger; the gate's own runs are
 under `managed-agent-gate.yml`, where the reusable-workflow job names carry a
 `SDK Java (full) /` prefix (for example run `43019171265`). The figures in Risks
 are pinned to `sdk-java.yml` runs created between 2026-10-27T14:57Z and
-2026-11-11T21:48Z; a later reader will get a different denominator from the same
+2026-11-11T21:48:10Z; a later reader will get a different denominator from the same
 query. Main's required checks live in ruleset `main`, not in legacy branch
 protection, and adding the name there must not disturb its two-approval and
 dismiss-on-push rules.

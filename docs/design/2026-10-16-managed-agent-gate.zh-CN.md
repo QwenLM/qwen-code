@@ -193,7 +193,7 @@ issue 交给人工分诊而不是 autofix：一条过期的临时报告只需关
   `HostedShellLifecycleRecoveryIT` 这一个类的失败率，而下面的数字统计的是「两条
   Hosted 泳道中至少一条失败」的运行数。
 
-  在 2026-10-27T14:57Z 至 2026-11-11T21:48Z 之间创建的 97 次 `sdk-java.yml`
+  在 2026-10-27T14:57Z 至 2026-11-11T21:48:10Z 之间创建的 97 次 `sdk-java.yml`
   运行中，70 次已完成且未被取消，这 70 次都真正执行了两条 Hosted
   泳道。其中 54 次至少有一条泳道失败（77%），只有 6 次整个运行的所有 job 全绿。
   在这 70 次里最新的 22 次中，20 次至少有一条失败（91%）。
@@ -262,7 +262,7 @@ Hosted 泳道：
 新运行漂移。`sdk-java.yml` 是 nightly 加 dispatch，没有 `pull_request` 触发器；门禁
 自己的运行记在 `managed-agent-gate.yml` 下，其可复用工作流的 job 名带
 `SDK Java (full) /` 前缀（例如 run `43019171265`）。「风险」一节的数字钉在
-2026-10-27T14:57Z 至 2026-11-11T21:48Z 之间创建的 `sdk-java.yml` 运行；后来的人用同一
+2026-10-27T14:57Z 至 2026-11-11T21:48:10Z 之间创建的 `sdk-java.yml` 运行；后来的人用同一
 个查询会得到不同的分母。main 的必需检查位于 ruleset `main`，而不是旧的 branch
 protection；在那里添加名字时不得扰动它「两个 approve」与「push 后作废」这两条规则。
 
