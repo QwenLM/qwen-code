@@ -635,11 +635,31 @@ export interface NotificationRecordPayload {
     kind: 'agent' | 'monitor' | 'shell' | 'workflow' | 'peer';
     toolUseId?: string;
     sourceTurnId?: string;
+    /**
+     * Producer identity for `peer` items: the teammate whose report this is.
+     * Persisted so replay attributes the message structurally, the same way
+     * the live wire's `_meta.agent` does, instead of parsing the text.
+     */
+    agent?: {
+      agentName: string;
+      depth: number;
+      kind: 'teammate' | 'subagent';
+    };
     /** Structured fields for i18n rendering (persisted for page refresh). */
     description?: string;
     commandLabel?: string;
     eventCount?: number;
     droppedLines?: number;
+    // Activity frames (author/toolName/phase/success) are display-only by
+    // design and never enter the queue, so the persisted payload must not
+    // declare them — they live on BackgroundNotificationQueueItem.structured
+    // alone (R2-6).
+    /**
+     * Members of a coalesced teammate roster burst: the structural names a
+     * client retires (or admits) without parsing the row's prose. Persisted
+     * so a reload keeps the same membership evidence as the live frame.
+     */
+    rosterMembers?: Array<{ name: string; status?: string }>;
   };
 }
 

@@ -229,6 +229,68 @@ describe('createTranscriptReplayMachine', () => {
     expect(projected[0]._meta?.['backgroundTurn']).toBeUndefined();
   });
 
+  it('hoists a teammate identity onto the reloaded completion frame', () => {
+    // Live frames carry `_meta.agent`; a reload rebuilds the frame from the
+    // persisted record, and the reducer and Web Shell read `block.agent` — so
+    // without this hoist a reloaded peer report keeps
+    // `_meta.backgroundTask.agent` yet loses its `@name` chip.
+    const backgroundTask = {
+      taskId: 'teammate-message-1',
+      kind: 'peer',
+      status: 'message',
+      agent: { agentName: '/root/security', depth: 1, kind: 'teammate' },
+    };
+    const projected = updates(
+      createTranscriptReplayMachine(),
+      record('completed-2', 'system', {
+        subtype: 'background_task_completed',
+        systemPayload: {
+          displayText: 'security reported',
+          backgroundTask,
+        },
+      }),
+    );
+
+    expect(projected).toHaveLength(1);
+    expect(projected[0]).toMatchObject({
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: 'security reported' },
+      _meta: {
+        source: 'background_task_completed',
+        qwenDiscreteMessage: true,
+        backgroundTask,
+      },
+    });
+    expect(projected[0]._meta?.['agent']).toEqual(backgroundTask.agent);
+  });
+
+  it('does not hoist a subagent identity onto the reloaded completion frame', () => {
+    // The frame-level identity is teammate attribution; a subagent stays where
+    // it already is, inside `backgroundTask`.
+    const backgroundTask = {
+      taskId: 'Explore-2',
+      kind: 'agent',
+      status: 'completed',
+      agent: { agentName: 'explore', depth: 1, kind: 'subagent' },
+    };
+    const projected = updates(
+      createTranscriptReplayMachine(),
+      record('completed-3', 'system', {
+        subtype: 'background_task_completed',
+        systemPayload: {
+          displayText: 'Explore completed',
+          backgroundTask,
+        },
+      }),
+    );
+
+    expect(projected).toHaveLength(1);
+    expect(projected[0]._meta?.['agent']).toBeUndefined();
+    expect(projected[0]).toMatchObject({
+      _meta: { source: 'background_task_completed', backgroundTask },
+    });
+  });
+
   it('stamps stable segment identity across replayed text parts', () => {
     const projected = updates(
       createTranscriptReplayMachine(),
@@ -2021,6 +2083,68 @@ describe('createTranscriptReplayMachine', () => {
       expect(projected[0]).toHaveProperty('rawOutput', resultDisplay);
     },
   );
+
+  it('hoists a persisted peer identity onto the replayed notification frame', () => {
+    // The teammate's identity persists inside `backgroundTask.agent`; the
+    // frame-level `_meta.agent` is what the block reducer and the Web Shell
+    // read, so replay must lift it — otherwise a reloaded session renders
+    // peer notices unattributed.
+    const machine = createTranscriptReplayMachine();
+    const result = updates(
+      machine,
+      record('peer-notice', 'user', {
+        subtype: 'notification',
+        systemPayload: {
+          displayText: '[team] security: found an injection',
+          backgroundTask: {
+            taskId: 'teammate-message-2',
+            status: 'message',
+            kind: 'peer',
+            agent: {
+              agentName: '/root/security',
+              depth: 1,
+              kind: 'teammate',
+            },
+          },
+        },
+      }),
+    );
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({
+      sessionUpdate: 'user_message_chunk',
+      _meta: {
+        source: 'background_notification',
+        agent: {
+          agentName: '/root/security',
+          depth: 1,
+          kind: 'teammate',
+        },
+      },
+    });
+  });
+
+  it('keeps a malformed persisted identity off the frame', () => {
+    const machine = createTranscriptReplayMachine();
+    const result = updates(
+      machine,
+      record('peer-notice', 'user', {
+        subtype: 'notification',
+        systemPayload: {
+          displayText: '[team] security: found an injection',
+          backgroundTask: {
+            taskId: 'teammate-message-2',
+            status: 'message',
+            kind: 'peer',
+            agent: { agentName: '/root/security' },
+          },
+        },
+      }),
+    );
+    expect(result).toHaveLength(1);
+    expect(
+      (result[0] as { _meta?: Record<string, unknown> })._meta?.['agent'],
+    ).toBeUndefined();
+  });
 
   it('rebuilds agent identity on a replayed Agent result', () => {
     const machine = createTranscriptReplayMachine();

@@ -9,6 +9,34 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+// Compile-time pin for the persisted peer payload. Activity frames never
+// enter the queue, so their fields must stay OFF this payload (R2-6).
+{
+  const declared: NotificationRecordPayload['backgroundTask'] = {
+    taskId: 'teammate-activity-1',
+    status: 'message',
+    kind: 'peer',
+    agent: { agentName: '/root/writer', depth: 1, kind: 'teammate' },
+  };
+  void declared;
+  const undeclared: NotificationRecordPayload['backgroundTask'] = {
+    taskId: 'teammate-activity-2',
+    status: 'message',
+    kind: 'peer',
+    // @ts-expect-error - an undeclared field must still be rejected here
+    undeclaredActivityField: true,
+  };
+  void undeclared;
+  const activityOnly: NotificationRecordPayload['backgroundTask'] = {
+    taskId: 'teammate-activity-3',
+    status: 'message',
+    kind: 'peer',
+    // @ts-expect-error - activity fields are display-only, never persisted
+    toolName: 'read_file',
+  };
+  void activityOnly;
+}
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/approval-mode.js';
 import { AuthType } from '../utils/auth-type.js';
@@ -29,6 +57,7 @@ import {
   type AtCommandRecordPayload,
   type SessionModelRecordPayload,
   type TurnResultRecordPayload,
+  type NotificationRecordPayload,
 } from './chatRecordingService.js';
 import { MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS } from '../utils/toolResultDisplayCompaction.js';
 import * as jsonl from '../utils/jsonl-utils.js';
