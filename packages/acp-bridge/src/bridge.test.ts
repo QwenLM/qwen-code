@@ -33941,17 +33941,17 @@ describe('createAcpSessionBridge', () => {
     it('closes the session when a conditional close finds no active work', async () => {
       const handle = makeChannel({
         initializeImpl: () => activeWorkInitializeResponse(),
-        extMethodImpl: (method) =>
-          method === SERVE_CONTROL_EXT_METHODS.sessionClose
-            ? { closed: true, holds: [] }
-            : {},
+        extMethodImpl: activeWorkCloseImpl,
       });
       const bridge = makeBridge({ channelFactory: async () => handle.channel });
       const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
 
       const events: BridgeEvent[] = [];
-      const drain = (async () => {
-        for await (const ev of bridge.subscribeEvents(session.sessionId))
+      const abort = new AbortController();
+      const collecting = (async () => {
+        for await (const ev of bridge.subscribeEvents(session.sessionId, {
+          signal: abort.signal,
+        }))
           events.push(ev);
       })();
       await new Promise((r) => setImmediate(r));
@@ -33960,7 +33960,14 @@ describe('createAcpSessionBridge', () => {
         closeIfUnheld: true,
         reason: 'scheduled_task_deleted',
       });
-      await drain;
+      // A granted close that fails to tear the session down leaves the event
+      // bus open, so awaiting an unbounded drain would report a timeout
+      // instead of the `sessionCount` assertion below.
+      await vi.waitFor(() =>
+        expect(events.some((e) => e.type === 'session_closed')).toBe(true),
+      );
+      abort.abort();
+      await collecting;
 
       expect(bridge.sessionCount).toBe(0);
       expect(
