@@ -6665,13 +6665,32 @@ export function WebShellSidebar({
   const sessionActionButtonClassName =
     'size-8 shrink-0 cursor-pointer rounded-lg p-[7px] hover:bg-accent';
   const searchEnabled = !liveView && !hideProjectHeader;
-  const [managedSearchNode, setManagedSearchNode] =
+  const [managedSearchSlot, setManagedSearchSlot] =
     useState<HTMLDivElement | null>(null);
+  const [managedHomeNode, setManagedHomeNode] = useState<HTMLDivElement | null>(
+    null,
+  );
+  const [managedHostNode, setManagedHostNode] = useState<HTMLDivElement | null>(
+    null,
+  );
+  // The managed navigation is a portal target rendered by the host. Moving the
+  // wrapper between the sidebar and the dialog keeps the target node — and the
+  // portal mounted into it — alive; re-parenting the React element instead
+  // unmounts it and refetches the managed list on every open/close.
+  useLayoutEffect(() => {
+    if (!managedHostNode) return;
+    if (searchOpen && managedSearchSlot) {
+      managedSearchSlot.appendChild(managedHostNode);
+      return () => {
+        managedHomeNode?.appendChild(managedHostNode);
+      };
+    }
+  }, [searchOpen, managedSearchSlot, managedHomeNode, managedHostNode]);
   // Managed session rows are portaled into the dialog from another React
   // tree, so React never dispatches their synthetic events through this
   // wrapper. Only a native listener observes the row selection.
   useEffect(() => {
-    if (!managedSearchNode) return;
+    if (!managedHostNode || !searchOpen) return;
     const dismiss = (event: Event) => {
       const target = event.target;
       if (
@@ -6689,13 +6708,13 @@ export function WebShellSidebar({
       setSearchOpen(false);
       onSearchQueryChange?.('');
     };
-    managedSearchNode.addEventListener('click', dismiss);
-    managedSearchNode.addEventListener('keydown', dismiss);
+    managedHostNode.addEventListener('click', dismiss);
+    managedHostNode.addEventListener('keydown', dismiss);
     return () => {
-      managedSearchNode.removeEventListener('click', dismiss);
-      managedSearchNode.removeEventListener('keydown', dismiss);
+      managedHostNode.removeEventListener('click', dismiss);
+      managedHostNode.removeEventListener('keydown', dismiss);
     };
-  }, [managedSearchNode, onSearchQueryChange]);
+  }, [managedHostNode, searchOpen, onSearchQueryChange]);
   // The activity panel replaces the session list, so a query typed there
   // filters rows the panel never shows.
   const topRowSearchVisible =
@@ -7148,7 +7167,7 @@ export function WebShellSidebar({
           customContent={sessionContent}
           additionalContent={
             managedWorkspaces && !sectionView ? (
-              <div ref={setManagedSearchNode}>{managedWorkspaces}</div>
+              <div ref={setManagedSearchSlot} />
             ) : undefined
           }
           onQueryChange={(query) => {
@@ -8189,7 +8208,11 @@ export function WebShellSidebar({
               )}
               {/* Managed 历史由外部 App Host 注入，不受本地 Workspaces
                   折叠状态控制；否则折叠分组会把仍有效的 Managed 会话一起隐藏。 */}
-              {!channelView && !liveView && !searchOpen && managedWorkspaces}
+              {!channelView && !liveView && managedWorkspaces && (
+                <div ref={setManagedHomeNode}>
+                  <div ref={setManagedHostNode}>{managedWorkspaces}</div>
+                </div>
+              )}
               <div
                 className="flex flex-col"
                 hidden={liveView || !projectsExpanded}

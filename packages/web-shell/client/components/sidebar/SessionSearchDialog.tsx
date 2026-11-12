@@ -57,6 +57,7 @@ export function SessionSearchDialog({
   const [query, setQuery] = useState('');
   const [selected, setSelected] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const id = useId();
   const { entries, loading, failed, retry } = useSessionSearch({
@@ -73,12 +74,43 @@ export function SessionSearchDialog({
       document.getElementById(activeId)?.scrollIntoView?.({ block: 'nearest' });
   }, [activeId]);
 
+  useEffect(() => {
+    // Radix dismisses on document capture and prevents the native IME
+    // cancellation. Hide a composing Escape from that listener only, then
+    // restore it before the event reaches the focused input (the same shape as
+    // DialogShell's preserveImeEscape).
+    const preserveImeEscape = (event: KeyboardEvent) => {
+      if (
+        event.key !== 'Escape' ||
+        (!event.isComposing && event.keyCode !== 229)
+      ) {
+        return;
+      }
+      Object.defineProperty(event, 'key', {
+        configurable: true,
+        value: 'Process',
+      });
+      document.addEventListener(
+        'keydown',
+        (currentEvent) => {
+          if (currentEvent === event) Reflect.deleteProperty(event, 'key');
+        },
+        { capture: true, once: true },
+      );
+    };
+    window.addEventListener('keydown', preserveImeEscape, { capture: true });
+    return () =>
+      window.removeEventListener('keydown', preserveImeEscape, {
+        capture: true,
+      });
+  }, []);
+
   const select = (entry: SearchEntry) => {
     onClose();
     onSelect(entry);
   };
 
-  useListboxKeyboard({
+  const { keyboardMode } = useListboxKeyboard({
     itemCount: entries.length,
     activeIndex,
     onActiveIndexChange: setSelected,
@@ -87,6 +119,7 @@ export function SessionSearchDialog({
       if (entry) select(entry);
     },
     enabled: customContent === undefined,
+    scope: panelRef,
   });
 
   return (
@@ -97,6 +130,7 @@ export function SessionSearchDialog({
       }}
     >
       <DialogContent
+        ref={panelRef}
         showCloseButton={false}
         aria-describedby={undefined}
         className="flex w-[92vw] max-w-[48rem] flex-col gap-0 overflow-hidden rounded-2xl p-0 shadow-2xl sm:max-w-[48rem]"
@@ -201,7 +235,13 @@ export function SessionSearchDialog({
                       ])}
                       role="option"
                       aria-selected={index === activeIndex}
-                      className={`group flex cursor-pointer items-center gap-3 rounded-lg px-3 py-3 ${index === activeIndex ? 'bg-accent' : 'hover:bg-accent/60'}`}
+                      className={`group flex cursor-pointer items-center gap-3 rounded-lg px-3 py-3 ${
+                        index === activeIndex
+                          ? 'bg-accent'
+                          : keyboardMode
+                            ? ''
+                            : 'hover:bg-accent/60'
+                      }`}
                       onPointerMove={(event) => {
                         if (event.pointerType === 'mouse') setSelected(index);
                       }}

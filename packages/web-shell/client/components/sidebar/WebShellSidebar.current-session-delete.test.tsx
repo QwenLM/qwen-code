@@ -912,6 +912,76 @@ describe('WebShellSidebar current-session delete (issue #12619)', () => {
     expect(onSearchQueryChange).toHaveBeenLastCalledWith('');
   });
 
+  it('keeps the Managed navigation mounted across search open and close', async () => {
+    const mounts: number[] = [];
+
+    function ManagedNavigation() {
+      React.useEffect(() => {
+        mounts.push(1);
+      }, []);
+      return <div data-managed-session-id="managed-1">Managed session</div>;
+    }
+
+    function PortalHost() {
+      const [target, setTarget] = React.useState<HTMLElement | null>(null);
+      return (
+        <>
+          <I18nProvider language="en">
+            <McpAppGeneratedUiOwnerContext.Provider value={generatedUiOwner}>
+              <WebShellSidebar
+                archivedSessionsTarget={null}
+                collapsed={false}
+                onCollapsedChange={() => {}}
+                onOpenSettings={() => {}}
+                onOpenDaemonStatus={() => {}}
+                onOpenScheduledTasks={() => {}}
+                onOpenGoals={() => {}}
+                onOpenSessions={() => {}}
+                onOpenSplitView={() => {}}
+                onNewSession={() => false}
+                onLoadSession={loadSession}
+                onError={() => {}}
+                managedWorkspaces={<div ref={setTarget} />}
+                sessionActions={{ inlineItems: ['delete'] }}
+              />
+            </McpAppGeneratedUiOwnerContext.Provider>
+          </I18nProvider>
+          {target ? createPortal(<ManagedNavigation />, target) : null}
+        </>
+      );
+    }
+
+    act(() => root.render(<PortalHost />));
+    await flushSidebar();
+    expect(mounts).toHaveLength(1);
+
+    const searchButton = () =>
+      container.querySelector<HTMLButtonElement>(
+        'button[aria-label="Search sessions"]',
+      )!;
+    act(() => click(searchButton()));
+    await flushSidebar();
+    expect(mounts).toHaveLength(1);
+    expect(
+      document.querySelector('[data-managed-session-id="managed-1"]'),
+    ).not.toBeNull();
+
+    await act(async () => {
+      document
+        .querySelector<HTMLInputElement>('input[aria-label="Search sessions"]')!
+        .dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+        );
+    });
+    await flushSidebar();
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    expect(mounts).toHaveLength(1);
+
+    act(() => click(searchButton()));
+    await flushSidebar();
+    expect(mounts).toHaveLength(1);
+  });
+
   it('deletes the current session from the sidebar row when it is idle', async () => {
     active.sessions = [
       makeSession('session-current', { displayName: 'Current session' }),

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { act } from 'react';
+import { act, createRef } from 'react';
 import { DialogShell } from '../components/dialogs/DialogShell';
 import { I18nProvider } from '../i18n';
 import { ThemeProvider } from '../themeContext';
@@ -402,5 +402,42 @@ describe('useListboxKeyboard', () => {
     press('ArrowDown');
     expect(onTopMove).toHaveBeenCalledWith(1);
     expect(onBottomMove).not.toHaveBeenCalled();
+  });
+
+  it('ignores list keys while focus is outside an optional scope', () => {
+    const scopeRef = createRef<HTMLDivElement>();
+    const onActiveIndexChange = vi.fn();
+    const onConfirm = vi.fn();
+    function ScopedList() {
+      useListboxKeyboard({
+        itemCount: 3,
+        activeIndex: 0,
+        onActiveIndexChange,
+        onConfirm,
+        scope: scopeRef,
+      });
+      return (
+        <div ref={scopeRef}>
+          <input aria-label="inside scope" />
+        </div>
+      );
+    }
+
+    const outside = document.createElement('input');
+    document.body.appendChild(outside);
+    outside.focus();
+    mountNode(<ScopedList />);
+
+    press('Enter');
+    press('ArrowDown');
+    expect(onConfirm).not.toHaveBeenCalled();
+    expect(onActiveIndexChange).not.toHaveBeenCalled();
+
+    act(() => {
+      scopeRef.current!.querySelector('input')!.focus();
+    });
+    press('Enter');
+    expect(onConfirm).toHaveBeenCalledWith(0);
+    outside.remove();
   });
 });

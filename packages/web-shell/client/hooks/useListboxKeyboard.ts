@@ -1,4 +1,5 @@
 import { useContext, useEffect, useRef, useState } from 'react';
+import type { RefObject } from 'react';
 import {
   DialogShellIdContext,
   isTopDialogShellId,
@@ -15,6 +16,12 @@ export interface ListboxKeyboardOptions {
   onConfirm: (index: number) => void;
   /** Disable the listener without unmounting the host component. */
   enabled?: boolean;
+  /**
+   * Optional element that must contain the focused element for keys to act.
+   * Dialogs that are not `DialogShell`s have no stack identity, so they use
+   * this to stay inert while another dialog is stacked above them.
+   */
+  scope?: RefObject<HTMLElement | null>;
 }
 
 export interface ListboxKeyboardResult {
@@ -110,6 +117,7 @@ export function useListboxKeyboard({
   onActiveIndexChange,
   onConfirm,
   enabled = true,
+  scope,
 }: ListboxKeyboardOptions): ListboxKeyboardResult {
   const dialogShellId = useContext(DialogShellIdContext);
   // Keep latest values in a ref so the listener is bound once, not per keystroke.
@@ -135,6 +143,9 @@ export function useListboxKeyboard({
       // has a global listener. The shell id comes from DialogShell context, so
       // focus may sit on either the search input or the list itself.
       if (!isTopDialogShellId(dialogShellId)) return;
+      // Dialogs outside the DialogShell stack still need to yield while focus
+      // is in another dialog above them.
+      if (scope && !scope.current?.contains(document.activeElement)) return;
       // keyCode 229 is the cross-browser "this key belongs to the IME" marker.
       // WebKit fires `compositionend` BEFORE the committing Enter's keydown,
       // so that keydown arrives with isComposing === false — only the legacy
@@ -219,7 +230,7 @@ export function useListboxKeyboard({
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('mousemove', exitKeyboardMode);
     };
-  }, [dialogShellId, enabled]);
+  }, [dialogShellId, enabled, scope]);
 
   return { keyboardMode };
 }

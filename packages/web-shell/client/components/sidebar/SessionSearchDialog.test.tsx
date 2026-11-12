@@ -11,6 +11,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { I18nProvider } from '../../i18n';
 import { WebShellPortalRootContext } from '../../portalRoot';
+import { DialogShell } from '../dialogs/DialogShell';
 import { SessionSearchDialog } from './SessionSearchDialog';
 import { useSessionSearch } from './use-session-search';
 
@@ -204,6 +205,78 @@ it('does not open a result when Enter confirms an IME composition', async () => 
   await key('Enter', { keyCode: 229 });
   expect(props.onSelect).not.toHaveBeenCalled();
   expect(portal.querySelector('[role="dialog"]')).not.toBeNull();
+});
+
+it.each([
+  ['isComposing', { isComposing: true }],
+  ['keyCode 229', { keyCode: 229 }],
+])(
+  'keeps the dialog open when Escape cancels an IME composition (%s)',
+  async (_name, init) => {
+    await render();
+    await key('Escape', init);
+    expect(props.onClose).not.toHaveBeenCalled();
+    expect(portal.querySelector('[role="dialog"]')).not.toBeNull();
+  },
+);
+
+it('suppresses the resting row hover tint while navigating by keyboard', async () => {
+  await render();
+  await key('ArrowDown');
+  const rows = Array.from(
+    portal.querySelectorAll<HTMLElement>('[role="option"]'),
+  );
+  expect(rows[0].className).not.toContain('hover:bg-accent/60');
+  expect(rows[0].className).not.toContain('bg-accent');
+  expect(rows[1].className).toContain('bg-accent');
+});
+
+it('matches a typed regex metacharacter literally', async () => {
+  search.entries = [
+    {
+      session: { sessionId: 'paren', displayName: 'parse (legacy' },
+      workspaceCwd: '/a',
+    },
+  ];
+  await render();
+  await type('(');
+  expect(portal.querySelector('[role="dialog"]')).not.toBeNull();
+  expect(portal.querySelector('mark')?.textContent).toBe('(');
+});
+
+it('ignores list keys while a dialog shell above holds focus', async () => {
+  await render();
+  const shellContainer = document.createElement('div');
+  document.body.append(shellContainer);
+  const shellRoot = createRoot(shellContainer);
+  const closeShell = vi.fn();
+  await act(async () =>
+    shellRoot.render(
+      <I18nProvider language="en">
+        <DialogShell title="Rename session" onClose={closeShell}>
+          <input aria-label="Rename input" />
+        </DialogShell>
+      </I18nProvider>,
+    ),
+  );
+  const renameInput = document.querySelector<HTMLInputElement>(
+    'input[aria-label="Rename input"]',
+  )!;
+  expect(document.activeElement).toBe(renameInput);
+  await act(async () => {
+    window.dispatchEvent(
+      new KeyboardEvent('keydown', {
+        key: 'Enter',
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+  });
+  expect(props.onSelect).not.toHaveBeenCalled();
+  expect(props.onClose).not.toHaveBeenCalled();
+  expect(portal.querySelector('[role="dialog"]')).not.toBeNull();
+  await act(async () => shellRoot.unmount());
+  shellContainer.remove();
 });
 
 it('shows loading before the empty result and lets users retry partial failures', async () => {

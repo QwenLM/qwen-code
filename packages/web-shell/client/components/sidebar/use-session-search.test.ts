@@ -232,20 +232,23 @@ describe('useSessionSearch', () => {
     );
   });
 
-  it('degrades an unsupported content-search route to local-only', async () => {
-    searchWorkspaceSessions.mockRejectedValue(
-      new DaemonHttpError(404, undefined, '404 not found'),
-    );
-    await render({
-      query: 'needle',
-      initialSessions: [session('local')],
-    });
-    await advance();
-    expect(result.failed).toBe(false);
-    expect(result.entries.map((entry) => entry.session.sessionId)).toEqual([
-      'local',
-    ]);
-  });
+  it.each([404, 501])(
+    'degrades an unsupported content-search route (%s) to local-only',
+    async (status) => {
+      searchWorkspaceSessions.mockRejectedValue(
+        new DaemonHttpError(status, undefined, `${status} not found`),
+      );
+      await render({
+        query: 'needle',
+        initialSessions: [session('local')],
+      });
+      await advance();
+      expect(result.failed).toBe(false);
+      expect(result.entries.map((entry) => entry.session.sessionId)).toEqual([
+        'local',
+      ]);
+    },
+  );
 
   it('keeps real content-search failures as partial failures', async () => {
     searchWorkspaceSessions.mockRejectedValue(
@@ -334,7 +337,11 @@ describe('useSessionSearch', () => {
     expect(result.entries.map((entry) => entry.session.sessionId)).toEqual([
       'ghost',
     ]);
-    searchWorkspaceSessions.mockResolvedValue({ results: [] });
+    const callsBefore = searchWorkspaceSessions.mock.calls.length;
+    searchWorkspaceSessions.mockImplementation(async (cwd) => ({
+      results:
+        cwd === '/a' ? [{ session: session('kept'), snippet: 'needle' }] : [],
+    }));
     flushSync(() =>
       root.render(
         React.createElement(Host, {
@@ -345,7 +352,13 @@ describe('useSessionSearch', () => {
       ),
     );
     expect(result.entries).toEqual([]);
-    await act(async () => {});
+    await advance();
+    // The catalog change must re-issue the content search, not merely blank
+    // the list until the user retypes.
+    expect(searchWorkspaceSessions.mock.calls).toHaveLength(callsBefore + 2);
+    expect(result.entries.map((entry) => entry.session.sessionId)).toEqual([
+      'kept',
+    ]);
   });
 
   it('lets a fresh catalog snapshot win over a settled content hit', async () => {
@@ -356,12 +369,15 @@ describe('useSessionSearch', () => {
     await render({
       query: 'needle',
       catalogKey: '0:ghost',
-      initialSessions: [session('ghost')],
+      // The catalog title does not match the query, so only the content hit
+      // can surface this row.
+      initialSessions: [{ ...session('ghost'), displayName: 'Elsewhere' }],
     });
     await advance();
     expect(result.entries.map((entry) => entry.session.sessionId)).toEqual([
       'ghost',
     ]);
+    expect(result.entries[0].snippet).toBe('needle');
     await render({
       query: 'needle',
       catalogKey: '0:ghost',
