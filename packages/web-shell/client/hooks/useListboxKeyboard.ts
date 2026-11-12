@@ -65,8 +65,7 @@ const NON_TEXT_INPUT_TYPES = new Set([
  * but only a row the user visibly highlighted first (see the `active < 0`
  * guard in the Enter case).
  */
-function focusOwnsEnter(): boolean {
-  const el = typeof document !== 'undefined' ? document.activeElement : null;
+function focusOwnsEnter(el: Element | null): boolean {
   if (!el) return false;
   const tag = el.tagName;
   if (tag === 'BUTTON' || tag === 'A' || tag === 'TEXTAREA') return true;
@@ -82,8 +81,7 @@ function focusOwnsEnter(): boolean {
  * native caret behaviour (jump to start/end of the text) instead of being
  * hijacked to move the list highlight.
  */
-function focusOwnsHomeEnd(): boolean {
-  const el = typeof document !== 'undefined' ? document.activeElement : null;
+function focusOwnsHomeEnd(el: Element | null): boolean {
   if (!el) return false;
   const tag = el.tagName;
   if (tag === 'TEXTAREA') return true;
@@ -149,11 +147,15 @@ export function useListboxKeyboard({
       // the shadow host in portal mode, so resolve it from the panel's root;
       // body means focus was dropped on non-focusable dialog chrome, which
       // still belongs to this dialog.
-      if (scope) {
-        const active = getShadowAwareActiveElement(scope.current);
-        if (active !== document.body && !scope.current?.contains(active))
-          return;
-      }
+      const focused = scope
+        ? getShadowAwareActiveElement(scope.current)
+        : document.activeElement;
+      if (
+        scope &&
+        focused !== document.body &&
+        !scope.current?.contains(focused)
+      )
+        return;
       // keyCode 229 is the cross-browser "this key belongs to the IME" marker.
       // WebKit fires `compositionend` BEFORE the committing Enter's keydown,
       // so that keydown arrives with isComposing === false — only the legacy
@@ -182,20 +184,20 @@ export function useListboxKeyboard({
           break;
         case 'Home':
           // Let an editable field keep Home for caret-to-start.
-          if (focusOwnsHomeEnd()) return;
+          if (focusOwnsHomeEnd(focused)) return;
           event.preventDefault();
           enterKeyboardMode();
           stateRef.current.onActiveIndexChange(0);
           break;
         case 'End':
-          if (focusOwnsHomeEnd()) return;
+          if (focusOwnsHomeEnd(focused)) return;
           event.preventDefault();
           enterKeyboardMode();
           stateRef.current.onActiveIndexChange(count - 1);
           break;
         case 'Enter': {
           // Let a focused button/link/etc. handle its own Enter activation.
-          if (focusOwnsEnter()) return;
+          if (focusOwnsEnter(focused)) return;
           // No highlighted row → nothing to confirm. Searchable dialogs open
           // with activeIndex -1 and reset to -1 on filter edits, so Enter in
           // the search box only ever acts on a row the user visibly chose.
@@ -211,7 +213,7 @@ export function useListboxKeyboard({
           // focused button natively, so only treat it as "select" when the
           // list truly owns the key. preventDefault also stops the browser's
           // default page-scroll when focus sits on the scrollable list.
-          if (focusOwnsEnter() || focusOwnsHomeEnd()) return;
+          if (focusOwnsEnter(focused) || focusOwnsHomeEnd(focused)) return;
           if (active < 0) return;
           event.preventDefault();
           stateRef.current.onConfirm(clamp(active, count));

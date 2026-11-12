@@ -465,6 +465,24 @@ describe('useListboxKeyboard', () => {
 
     press('ArrowDown');
     expect(onActiveIndexChange).toHaveBeenLastCalledWith(1);
+
+    // The shadow-root input keeps text-field keys: Home/End move the caret and
+    // Space types a space instead of confirming the row.
+    press('Home');
+    press('End');
+    press(' ');
+    expect(onActiveIndexChange).toHaveBeenCalledTimes(1);
+    expect(onConfirm).not.toHaveBeenCalled();
+
+    // A focused control inside the shadow root keeps its own Enter/Space.
+    const action = document.createElement('button');
+    panel.appendChild(action);
+    action.focus();
+    press('Enter');
+    press(' ');
+    expect(onConfirm).not.toHaveBeenCalled();
+
+    inside.focus();
     press('Enter');
     expect(onConfirm).toHaveBeenCalledWith(0);
     host.remove();
