@@ -236,8 +236,8 @@ jobs, and move Java 17 to nightly only.
   `HostedShellLifecycleRecoveryIT` class, while the figures below count runs in
   which at least one of the two Hosted lanes failed.
 
-  Over the most recent 100 `sdk-java.yml` runs (2026-10-27T14:57Z →
-  2026-11-11T21:48Z), 70 had completed without cancellation and all 70 executed
+  Over the 97 `sdk-java.yml` runs created between 2026-10-27T14:57Z and
+  2026-11-11T21:48Z, 70 had completed without cancellation and all 70 executed
   both Hosted lanes. Of those, 54 failed at least one lane (77%), and only 6 were
   green across every job in the run. In the newest 22 of them, 20 failed at least
   one lane (91%).
@@ -246,32 +246,34 @@ jobs, and move Java 17 to nightly only.
   times and failover 8, and every one of those 8 failover failures was in a run
   where process-fault had also failed — failover never failed on its own. That
   "never" is a claim about this window, not about the lane: widened to
-  2026-10-16 through 2026-11-11T13:44Z under the same counting rule, 162 runs
+  2026-10-16 through 2026-11-11T13:44Z under the same counting rule, 163 runs
   executed both lanes and 3 of them failed failover while process-fault passed
   (runs 39091025824 and 39097018288 on 2026-10-18, 39201677644 on 2026-10-19), so
-  earlier windows do contain failover-only failures. The wider split is 109
-  process-fault failures against 10 failover, so the asymmetry survives the
-  window change and only the absolute "never" does not. The
-  split is 46 runs with process-fault alone failing, 8 with both failing, and 16
-  with both passing. An earlier revision of this note reported "26 process-fault,
-  26 failover" and concluded the lanes fail independently; that count did not
-  reproduce and the conclusion was backwards. Whoever picks up #14361 should
-  start from the process-fault lane.
+  earlier windows do contain failover-only failures. The wider split is 110
+  process-fault failures against 11 failover, so the asymmetry survives the
+  window change and only the absolute "never" does not. Within the pinned
+  window the split is 46 runs with process-fault alone failing, 8 with both
+  failing, and 16 with both passing, which is the same 70. An earlier revision of
+  this note reported "26 process-fault, 26 failover" and concluded the lanes fail
+  independently; that count did not reproduce and the conclusion was backwards.
+  Whoever picks up #14361 should start from the process-fault lane.
 
-  This series is nightly plus manual dispatch, not the gate's own runs: those 100
-  runs are 16 `schedule` and 84 `workflow_dispatch`, and `sdk-java.yml` has no
+  This series is nightly plus manual dispatch, not the gate's own runs: those 97
+  runs are 16 `schedule` and 81 `workflow_dispatch`, and `sdk-java.yml` has no
   `pull_request` trigger at all. The nightly arm is worse — 15 of 16 nightlies
   failed a Hosted lane and none was fully green, while all 6 fully green runs came
   from the 54 completed dispatch runs. Read it as the harness's background failure
   rate, which is what makes the gate unrequireable, not as the gate's pass rate.
 
-  The gate's own full tier is too young to give a rate. `managed-agent-gate.yml`
-  runs the lanes through reusable-workflow calls whose job names carry a
-  `SDK Java (full) /` prefix, and across its 500 most recent runs only 6 actually
-  executed both Hosted lanes. All 6 failed process-fault and passed failover —
-  the same shape as above, on far too small a sample to quote a percentage.
+  The gate's own full tier is too young to give a rate, and it is a separate run
+  list. `managed-agent-gate.yml` runs the lanes through reusable-workflow calls
+  whose job names carry a `SDK Java (full) /` prefix. Of the 40
+  `pull_request_review` runs of that workflow that finished success or failure
+  during 2026-11-11 (13:46Z → 23:43Z), 14 executed both Hosted lanes, and all 14
+  failed process-fault while passing failover — the same shape as above, on far
+  too small a sample to quote a percentage.
 
-  The refusal has also changed shape: the Runtime Broker now
+  The refusal itself has changed shape: the Runtime Broker now
   answers `409 managed_runtime_identity_conflict` where the original report had
   the Store answering `400 invalid_request`, freezing the turn the same way.
 
@@ -306,19 +308,21 @@ do not measure the Hosted lanes at all:
 
 Only runs that actually executed `Hosted process fault gates` and `Hosted
 failover E2E` measure step 2. Filter on both jobs being present _and_ not
-`skipped` — the gate emits both names on scoped-out PRs and skips them — and
-exclude cancelled runs before reading a pass rate.
+`skipped`, then exclude cancelled runs before reading a pass rate. The two ways a
+run fails to be a measurement differ: a scoped-out PR selects tier `none` and
+emits no Hosted job at all, while a `fast`-tier run emits both Hosted names and
+skips them, so filtering on presence alone counts fast runs as measurements.
 
 Name the run list and pin the window whenever quoting a rate, because the two
 lists differ and an unpinned count drifts as runs arrive. `sdk-java.yml` is
 nightly plus dispatch and has no `pull_request` trigger; the gate's own runs are
 under `managed-agent-gate.yml`, where the reusable-workflow job names carry a
 `SDK Java (full) /` prefix (for example run `43019171265`). The figures in Risks
-are pinned to the 100 most recent `sdk-java.yml` runs as of 2026-11-12, covering
-2026-10-27T14:57Z → 2026-11-11T21:48Z; a later reader will get a different
-denominator from the same query. Main's required checks live in ruleset `main`,
-not in legacy branch protection, and adding the name there must not disturb its
-two-approval and dismiss-on-push rules.
+are pinned to `sdk-java.yml` runs created between 2026-10-27T14:57Z and
+2026-11-11T21:48Z; a later reader will get a different denominator from the same
+query. Main's required checks live in ruleset `main`, not in legacy branch
+protection, and adding the name there must not disturb its two-approval and
+dismiss-on-push rules.
 
 Only step 3's single name is needed. The computed name is deliberate, not a
 defect to fix first: a touched PR shows `Managed Agent gate` as expected until
