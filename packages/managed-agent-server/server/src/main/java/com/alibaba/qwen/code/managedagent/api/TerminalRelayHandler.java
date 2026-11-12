@@ -44,10 +44,12 @@ public final class TerminalRelayHandler extends AbstractWebSocketHandler
      * The relay-owned non-retryable close code for irretrievable worker loss.
      * Kept in sync with NON_RETRYABLE_CLOSE_CODES in the Web Shell's
      * terminal-protocol.ts; the daemon's own terminal never sends 4003, so the
-     * shared local panel is unaffected. Reserved wire codes (1005/1006/1015)
-     * and transport errors map here so the panel renders the terminal-lost
-     * notice instead of reconnecting forever into a replacement worker's empty
-     * PTY.
+     * shared local panel is unaffected. Reserved wire codes (1005/1006/1015),
+     * transport errors, attach failures and post-attach send failures map here
+     * so the panel renders the terminal-lost notice instead of reconnecting
+     * forever into a replacement worker's empty PTY. Note: Live Voice also uses
+     * 4003 on its own disjoint routes (/live/web, /live/host); the terminal
+     * panels never connect to those, so the overlap is benign.
      */
     private static final int TERMINAL_LOST_CLOSE_CODE = 4003;
 
@@ -401,7 +403,11 @@ public final class TerminalRelayHandler extends AbstractWebSocketHandler
                 pendingBytes.addAndGet(-bytes);
                 if (error != null) {
                     fail();
-                    closeQuietly(browser, CloseStatus.SERVER_ERROR);
+                    // The worker is already attached and a send to it failed:
+                    // the worker is gone. Close with the terminal-lost code so
+                    // the panel ends instead of reconnecting into a replacement
+                    // worker's empty PTY.
+                    closeQuietly(browser, new CloseStatus(TERMINAL_LOST_CLOSE_CODE));
                 }
             });
         }

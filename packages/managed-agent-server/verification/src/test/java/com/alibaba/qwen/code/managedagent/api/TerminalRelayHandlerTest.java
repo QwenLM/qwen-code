@@ -346,6 +346,23 @@ class TerminalRelayHandlerTest {
     }
 
     @Test
+    void aFailedSendToTheAttachedWorkerClosesTheBrowserWithTheTerminalLostCode() throws Exception {
+        // The worker is already attached; a send to it failing means the worker
+        // is gone. The browser must see the terminal-lost code, not a retryable
+        // SERVER_ERROR that would reconnect into a replacement worker's empty
+        // PTY (the post-attach half of the worker-loss surface).
+        WebSocket worker = mock(WebSocket.class);
+        when(worker.sendBinary(any(ByteBuffer.class), eq(true)))
+                .thenReturn(CompletableFuture.failedFuture(
+                        new IllegalStateException("worker send failed")));
+        Attached attached = attach(worker);
+        attached.handler.handleBinaryMessage(attached.browser,
+                new BinaryMessage(new byte[] {1, 2, 3}));
+        verify(attached.browser, org.mockito.Mockito.timeout(2000))
+                .close(argThat(status -> status.getCode() == 4003));
+    }
+
+    @Test
     void browserCloseRacingWorkerRegistrationNeverOrphansTheWorkerSocket() throws Exception {
         RuntimeBrokerOperations broker = mock(RuntimeBrokerOperations.class);
         when(broker.admitTerminalHold("session-a", "term-1"))
