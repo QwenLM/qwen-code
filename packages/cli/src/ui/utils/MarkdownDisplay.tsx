@@ -43,6 +43,8 @@ interface MarkdownDisplayProps {
   contentWidth: number;
   textColor?: string;
   sourceCopyIndexOffsets?: MarkdownSourceCopyIndexOffsets;
+  /** Original Markdown when the row displays a rewrite. */
+  sourceCopyText?: string;
   /**
    * When true, enforce the rendered-height budget from `availableTerminalHeight`
    * even for non-pending content. Normally the height-aware pre-slice
@@ -69,18 +71,32 @@ export interface MarkdownSourceBlockCounts {
   mathBlockCount: number;
 }
 
+type SourceCopyKind = 'mermaid' | 'latex';
+type OriginalCopyHint = (
+  kind: SourceCopyKind,
+  content: string[],
+) => string | undefined;
+
 export function countMarkdownSourceBlocks(
   text: string,
+  onCopyableBlock?: (
+    kind: SourceCopyKind,
+    source: string,
+    index: number,
+  ) => void,
 ): MarkdownSourceBlockCounts {
   const codeBlockLanguageCounts = new Map<string, number>();
   const lines = text.split(/\r?\n/);
   const codeFenceRegex = CODE_FENCE_RE;
   const mathFenceRegex = /^ *\$\$ *$/;
   let activeCodeFence: string | null = null;
+  let codeLanguage: string | undefined;
   let inMathBlock = false;
   let mathBlockCount = 0;
+  let sourceStart = 0;
 
-  for (const line of lines) {
+  for (let index = 0; index < lines.length; index++) {
+    const line = lines[index];
     const codeFenceMatch = line.match(codeFenceRegex);
     if (activeCodeFence) {
       if (
@@ -89,6 +105,13 @@ export function countMarkdownSourceBlocks(
         codeFenceMatch[1].length >= activeCodeFence.length
       ) {
         activeCodeFence = null;
+        if (codeLanguage === 'mermaid') {
+          onCopyableBlock?.(
+            'mermaid',
+            lines.slice(sourceStart, index).join('\n'),
+            codeBlockLanguageCounts.get(codeLanguage)!,
+          );
+        }
       }
       continue;
     }
@@ -96,17 +119,23 @@ export function countMarkdownSourceBlocks(
     if (inMathBlock) {
       if (mathFenceRegex.test(line)) {
         inMathBlock = false;
+        onCopyableBlock?.(
+          'latex',
+          lines.slice(sourceStart, index).join('\n'),
+          mathBlockCount,
+        );
       }
       continue;
     }
 
     if (codeFenceMatch) {
       activeCodeFence = codeFenceMatch[1];
-      const lang = parseCodeFenceInfo(codeFenceMatch[2]).lang?.toLowerCase();
-      if (lang) {
+      sourceStart = index + 1;
+      codeLanguage = parseCodeFenceInfo(codeFenceMatch[2]).lang?.toLowerCase();
+      if (codeLanguage) {
         codeBlockLanguageCounts.set(
-          lang,
-          (codeBlockLanguageCounts.get(lang) ?? 0) + 1,
+          codeLanguage,
+          (codeBlockLanguageCounts.get(codeLanguage) ?? 0) + 1,
         );
       }
       continue;
@@ -114,11 +143,37 @@ export function countMarkdownSourceBlocks(
 
     if (mathFenceRegex.test(line)) {
       inMathBlock = true;
+      sourceStart = index + 1;
       mathBlockCount += 1;
     }
   }
 
   return { codeBlockLanguageCounts, mathBlockCount };
+}
+
+function originalCopyHint(
+  text: string,
+  offsets: MarkdownSourceCopyIndexOffsets | undefined,
+): OriginalCopyHint {
+  const hints = {
+    mermaid: new Map<string, string | undefined>(),
+    latex: new Map<string, string | undefined>(),
+  };
+  countMarkdownSourceBlocks(text, (kind, source, index) => {
+    const offset =
+      kind === 'mermaid'
+        ? offsets?.codeBlockLanguageCounts.get(kind)
+        : offsets?.mathBlockCount;
+    const bySource = hints[kind];
+    // A repeated source does not identify a unique position in the reply.
+    bySource.set(
+      source,
+      bySource.has(source)
+        ? undefined
+        : `/copy ${kind} ${index + (offset ?? 0)}`,
+    );
+  });
+  return (kind, content) => hints[kind].get(content.join('\n'));
 }
 
 // Constants for Markdown parsing and rendering
@@ -137,9 +192,17 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
   contentWidth,
   textColor = theme.text.primary,
   sourceCopyIndexOffsets,
+  sourceCopyText,
   enforceHeightBudget = false,
 }) => {
   const { renderMode } = useRenderMode();
+  const copyHint = React.useMemo(
+    () =>
+      sourceCopyText === undefined
+        ? undefined
+        : originalCopyHint(sourceCopyText, sourceCopyIndexOffsets),
+    [sourceCopyText, sourceCopyIndexOffsets],
+  );
   if (!text) return <></>;
 
   const renderVisualBlocks = renderMode === 'render';
@@ -426,6 +489,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
             lang={codeBlockLang}
             codeBlockIndex={currentCodeBlockIndex}
             codeBlockLangIndex={currentCodeBlockLangIndex}
+            originalCopyHint={copyHint}
             isPending={isPending}
             availableTerminalHeight={availableTerminalHeight}
             contentWidth={contentWidth}
@@ -450,7 +514,11 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
           <RenderMathBlock
             key={key}
             content={mathBlockContent}
-            sourceCopyCommand={`/copy latex ${currentMathBlockIndex}`}
+            sourceCopyCommand={
+              copyHint
+                ? copyHint('latex', mathBlockContent)
+                : `/copy latex ${currentMathBlockIndex}`
+            }
             contentWidth={contentWidth}
             isPending={isPending}
             availableTerminalHeight={availableTerminalHeight}
@@ -740,6 +808,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
         lang={codeBlockLang}
         codeBlockIndex={currentCodeBlockIndex}
         codeBlockLangIndex={currentCodeBlockLangIndex}
+        originalCopyHint={copyHint}
         isPending={isPending}
         availableTerminalHeight={availableTerminalHeight}
         contentWidth={contentWidth}
@@ -753,7 +822,11 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
       <RenderMathBlock
         key="math-eof"
         content={mathBlockContent}
-        sourceCopyCommand={`/copy latex ${currentMathBlockIndex}`}
+        sourceCopyCommand={
+          copyHint
+            ? copyHint('latex', mathBlockContent)
+            : `/copy latex ${currentMathBlockIndex}`
+        }
         contentWidth={contentWidth}
         isPending={isPending}
         availableTerminalHeight={availableTerminalHeight}
@@ -831,6 +904,7 @@ interface RenderCodeBlockProps {
   lang: string | null;
   codeBlockIndex: number;
   codeBlockLangIndex: number;
+  originalCopyHint?: OriginalCopyHint;
   isPending: boolean;
   availableTerminalHeight?: number;
   contentWidth: number;
@@ -844,6 +918,7 @@ const RenderCodeBlockInternal: React.FC<RenderCodeBlockProps> = ({
   lang,
   codeBlockIndex,
   codeBlockLangIndex,
+  originalCopyHint,
   isPending,
   availableTerminalHeight,
   contentWidth,
@@ -873,7 +948,11 @@ const RenderCodeBlockInternal: React.FC<RenderCodeBlockProps> = ({
     return (
       <MermaidDiagram
         source={content.join('\n')}
-        sourceCopyCommand={`/copy mermaid ${codeBlockLangIndex || codeBlockIndex}`}
+        sourceCopyCommand={
+          originalCopyHint
+            ? originalCopyHint('mermaid', content)
+            : `/copy mermaid ${codeBlockLangIndex || codeBlockIndex}`
+        }
         isPending={isPending}
         availableTerminalHeight={availableTerminalHeight}
         contentWidth={contentWidth}
@@ -976,7 +1055,7 @@ const RenderPendingMermaidBlock = React.memo(RenderPendingMermaidBlockInternal);
 
 interface RenderMathBlockProps {
   content: string[];
-  sourceCopyCommand: string;
+  sourceCopyCommand?: string;
   contentWidth: number;
   isPending: boolean;
   availableTerminalHeight?: number;
@@ -989,6 +1068,9 @@ const RenderMathBlockInternal: React.FC<RenderMathBlockProps> = ({
   isPending,
   availableTerminalHeight,
 }) => {
+  const title = sourceCopyCommand
+    ? `LaTeX block · source: ${sourceCopyCommand}`
+    : 'LaTeX block';
   // One row for the "LaTeX block · source:" header plus one row of headroom.
   // The third row used to hold a "... generating more ..." cue (removed with PR
   // #6170); reclaiming it shows an extra preview line at the same total height.
@@ -1008,7 +1090,7 @@ const RenderMathBlockInternal: React.FC<RenderMathBlockProps> = ({
           flexShrink={0}
         >
           <Text bold color={theme.text.accent}>
-            LaTeX block · source: {sourceCopyCommand}
+            {title}
           </Text>
           {previewLines.map((line, index) => (
             <Text key={index} color={theme.text.secondary} wrap="truncate-end">
@@ -1029,7 +1111,7 @@ const RenderMathBlockInternal: React.FC<RenderMathBlockProps> = ({
       flexShrink={0}
     >
       <Text bold color={theme.text.accent}>
-        LaTeX block · source: {sourceCopyCommand}
+        {title}
       </Text>
       <Text color={theme.text.accent} wrap="wrap">
         {rendered}

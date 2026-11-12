@@ -41,6 +41,49 @@ export function isWorkspaceToolCapability(digest: string): boolean {
 export const RESIDENT_WORKSPACE_PROFILE = 'resident-workspace-files/1';
 export const RESIDENT_WORKSPACE_CAPABILITY_DIGEST =
   'sha256:2cbf6f3825230848a65a546ec70714fbb2a53d1862a6caba73ae4cebf307b4ad';
+
+export interface ManagedShellPublisherModeInput {
+  readonly capabilityDigest: string;
+  readonly managedExtensions: boolean;
+  /** The effective capture flag: the worker passes publication ?? capturePublisher. */
+  readonly capturePublisher: boolean;
+  readonly remotePublishers: boolean;
+}
+
+export interface ManagedShellPublisherMode {
+  readonly resident: boolean;
+  readonly requiresActivation: boolean;
+  readonly remotePublisher: boolean;
+  readonly publisher: boolean;
+  readonly installRoute: boolean;
+}
+
+/**
+ * The one derivation of the Shell publisher surface, shared by the worker's
+ * route plan and the context worker's mounts so the gate and Express cannot
+ * drift apart.
+ */
+export function resolveManagedShellPublisherMode(
+  input: ManagedShellPublisherModeInput,
+): ManagedShellPublisherMode {
+  const resident =
+    input.capabilityDigest === RESIDENT_WORKSPACE_CAPABILITY_DIGEST;
+  const requiresActivation =
+    isWorkspaceToolCapability(input.capabilityDigest) ||
+    resident ||
+    input.managedExtensions;
+  const remotePublisher =
+    !input.capturePublisher && requiresActivation && !resident;
+  return {
+    resident,
+    requiresActivation,
+    remotePublisher,
+    publisher:
+      input.capturePublisher || input.remotePublishers || remotePublisher,
+    installRoute: remotePublisher,
+  };
+}
+
 export const WORKSPACE_ACTIVATION_ROUTE = Object.freeze({
   key: 'activation',
   method: 'POST',

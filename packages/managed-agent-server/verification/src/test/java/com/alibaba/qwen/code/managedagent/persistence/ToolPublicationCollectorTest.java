@@ -210,7 +210,7 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
     @ValueSource(strings = {"VERIFIED", "CANDIDATE", "QUARANTINED"})
     void failedPrefixAllowsCollectionOnlyWithVerifiedObjects(String objectState) {
         String failed = addOperation(OperationKind.OUTPUT_VERIFY, scope, "pub-1", session, "failed-prefix", "FAILED");
-        jdbc.update("UPDATE ma_operation SET slot_key = X'7072656669783a7374646f7574', execution_mode = 'ASYNC', is_verification_ready = TRUE,"
+        jdbc.update("UPDATE ma_operation SET slot_key = X'7072656669783a7374646f7574', is_verification_ready = TRUE,"
                 + " failure_status = 403, failure_code = 'managed_tool_publication_storage_denied' WHERE operation_key = ?", failed);
         addObject("one", "failed-prefix/exact-key", null);
         addObject("inline", null, new byte[] {8});

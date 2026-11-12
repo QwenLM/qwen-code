@@ -8,6 +8,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { FunctionDeclaration } from '@google/genai';
 import type { ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
+import type { ManagedSessionKey } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import type { ExtensionRun } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-record.js';
 import { parseHookExecution } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-record.js';
 import {
@@ -46,6 +47,29 @@ import type {
 
 function digest(value: unknown): string {
   return createHash('sha256').update(JSON.stringify(value)).digest('hex');
+}
+
+const DURABLE_MCP_OWNER_PREFIX = 'mcp-';
+
+/**
+ * The MCP owner named after the durable configuration ids. Every load of the
+ * same records recomputes it, so a terminal release tombstones the id the next
+ * load must re-acquire. One builder for the producer, beside the predicate
+ * that recognises it.
+ */
+export function hostedDurableMcpOwnerId(
+  sessionKey: ManagedSessionKey,
+  configurationIdsDigest: string | undefined,
+): string {
+  return `${DURABLE_MCP_OWNER_PREFIX}${digest([sessionKey, configurationIdsDigest])}`;
+}
+
+/**
+ * Recognises an id built by `hostedDurableMcpOwnerId`. Only trustworthy for
+ * ids the Harness constructed, never for a client-chosen input id.
+ */
+export function isHostedDurableMcpOwner(runtimeSessionId: string): boolean {
+  return runtimeSessionId.startsWith(DURABLE_MCP_OWNER_PREFIX);
 }
 
 export class HostedMcpRecoveryRequiredError extends Error {
@@ -162,7 +186,10 @@ export class HostedMcpSession {
         session.authority.sessionHeader.sessionKey,
         owners.values().next().value ??
           hookOwner ??
-          `mcp-${digest([session.authority.sessionHeader.sessionKey, previous])}`,
+          hostedDurableMcpOwnerId(
+            session.authority.sessionHeader.sessionKey,
+            previous,
+          ),
       );
   }
 
@@ -1136,9 +1163,14 @@ export class HostedMcpSession {
   }
 
   async closeResources(opts: { terminal?: boolean } = {}): Promise<void> {
-    // The rule lives on the owner, not the call site (R14-1): every non-delete
-    // close defaults to non-terminal, and only DELETE opts into the terminal
-    // release that persists a RELEASED tombstone.
+    // The default is non-terminal (R14-1), for a v1 detach or an extension
+    // discard, which a reload may follow; the branch below says why. A delete
+    // and a lifecycle close pass terminal, and the RELEASED tombstone it
+    // leaves meets no later acquire of this owner, or of a Hook owner sharing
+    // its broker: the release runs in settle_resources, the last phase; a
+    // reload of a closing Session carries its lifecycle authority, which sets
+    // mcpClosing; and a retried close finds the rows released, while the
+    // Broker answers a release of a released owner too.
     const terminal = opts.terminal ?? false;
     if (
       this.hasPendingOperations() ||

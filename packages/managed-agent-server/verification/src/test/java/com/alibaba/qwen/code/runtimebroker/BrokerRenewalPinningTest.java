@@ -1,9 +1,11 @@
 package com.alibaba.qwen.code.runtimebroker;
 
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryRuntimeBindingRepository;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryRuntimeSessionRepository;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryToolExecutionRepository;
+import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerService;
+import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -13,6 +15,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.CountDownLatch;
@@ -60,9 +63,14 @@ class BrokerRenewalPinningTest {
             throws Exception {
         int carriers = CarrierCount.resolve();
         int callerCount = carriers + 2;
+        var source = new JdbcDataSource();
+        source.setURL("jdbc:h2:mem:broker-renewal-" + UUID.randomUUID()
+                + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
+        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
         bindings = new LatchedBindingRepository(
-                new InMemoryRuntimeBindingRepository(), carriers,
-                firstFailure);
+                new JdbcRuntimeBindingRepository(source,
+                        new AesGcmSecretProtector("test", new byte[32])),
+                carriers, firstFailure);
         // One workspace per caller, so every warm() owns its own binding
         // and its own BindingRenewal guard.
         service = new RuntimeBrokerService(
@@ -70,8 +78,8 @@ class BrokerRenewalPinningTest {
                         new RuntimeScope("tenant", "workspace-" + harnessId,
                                 "1", "/control", "digest", "session")),
                 new DurableProvisioner(), new NoopTransport(), bindings,
-                new InMemoryRuntimeSessionRepository(),
-                new InMemoryToolExecutionRepository(), "broker-renewal",
+                new JdbcRuntimeSessionRepository(source),
+                new JdbcToolExecutionRepository(source), "broker-renewal",
                 Duration.ofMinutes(1), Duration.ofMinutes(1));
         AtomicInteger probeProgress = new AtomicInteger();
         List<Thread> callers = new ArrayList<>();
