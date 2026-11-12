@@ -296,9 +296,19 @@ sudo systemctl stop qwen-ephemeral-runner.service
 The existing CI routes untrusted fork PR build, Linux unit tests, lint and no-AK
 integration jobs directly to the formal ARM64 disposable label set. No
 repository-variable switch, configuration relay or manual smoke workflow is
-needed. Trusted and same-repository PRs retain their existing routes. GitHub
-queues excess jobs; the manager replaces completed runners within ten fixed
-slots, without demand-based autoscaling.
+needed. Under that first stage, trusted and same-repository PRs retained their
+existing routes. GitHub queues excess jobs; the manager replaces completed
+runners within ten fixed slots, without demand-based autoscaling.
+
+Update 2026-11-11: two more pool consumers, both credential-free PR jobs that
+run PR code with a read-only token. Web-shell Visuals capture uses this pool for
+every PR, and the Managed Host bundle build uses it on `pull_request` events
+only — its post-merge push and manual runs, and the credential-bearing Visuals
+publisher, stay GitHub-hosted. Size the pool for these lanes as well: they now
+arrive on same-repository PRs, not only untrusted forks. Their rollback lever is
+`MAINTAINER_ECS_RUNNER_DISABLED=true`, which the `ci.yml` `pr_test_runner`
+selector below does not control. Details:
+[disposable container runners design](../../../docs/design/2026-11-07-ephemeral-container-runners.md).
 
 Repository variables are unavailable in fork-triggered CI. Existing global
 overrides still work in contexts where their values are available, but cannot
@@ -309,3 +319,8 @@ already-selected work and trigger fresh CI using the updated workflow; reruns
 of saved older workflows retain their old routing. Jobs do not migrate
 automatically. Dedicated-host/network and runner-access-policy limitations
 remain tracked in #16514.
+
+The same fork limit applies to the two web-shell lanes: a fork run cannot read
+`MAINTAINER_ECS_RUNNER_DISABLED`, so its escape is editing that lane's `runs-on`
+selector on `main` and triggering a fresh event. The switch does reach their
+same-repository runs.
