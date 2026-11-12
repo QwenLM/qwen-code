@@ -2600,6 +2600,31 @@ describe('ManagedSessionsPage', () => {
     save.mockRestore();
   });
 
+  it('uses the current managed session workspace for model picker content', async () => {
+    const session = switchableSession({
+      workspace: { workspaceId: 'session-workspace', cwdRelative: 'src' },
+    });
+    modelApi(() => session);
+    await render('s1', 'en', provider, undefined, true, {
+      workspaceId: 'selected-workspace',
+    });
+    expect(mocks.editorProps?.modelPickerScope).toEqual({
+      sessionId: 's1',
+      workspaceId: 'session-workspace',
+    });
+    expect(mocks.editorProps?.sessionId).toBeUndefined();
+  });
+
+  it('uses the selected managed draft workspace for model picker content', async () => {
+    await render(undefined, 'en', provider, undefined, true, {
+      workspaceId: 'selected-workspace',
+    });
+    expect(mocks.editorProps?.modelPickerScope).toEqual({
+      sessionId: undefined,
+      workspaceId: 'selected-workspace',
+    });
+  });
+
   it('switches on the successful receipt despite stale readback, preserving the draft and blocking a same-frame send', async () => {
     const session = switchableSession();
     modelApi(() => session);
