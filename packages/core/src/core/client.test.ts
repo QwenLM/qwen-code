@@ -3083,7 +3083,7 @@ describe('Gemini Client (client.ts)', () => {
           },
         ],
       };
-      const record = recordUserTurn(mockConfig, {
+      recordUserTurn(mockConfig, {
         kind: 'user',
         message: 'raw input',
         payload,
@@ -3097,16 +3097,6 @@ describe('Gemini Client (client.ts)', () => {
         'prompt-host',
         'daemon-prompt',
       );
-      expect(record).toEqual({
-        kind: 'recorded',
-        record: {
-          kind: 'user',
-          message: 'raw input',
-          payload,
-          promptId: 'prompt-host',
-          daemonPromptId: 'daemon-prompt',
-        },
-      });
 
       await runTurn(
         SendMessageType.UserQuery,
@@ -3115,7 +3105,6 @@ describe('Gemini Client (client.ts)', () => {
         {
           userTurn: {
             promptId: 'prompt-host',
-            record,
             todoWorkChain: { promptId: 'prompt-host' },
           },
         },
@@ -3143,7 +3132,6 @@ describe('Gemini Client (client.ts)', () => {
         {
           userTurn: {
             promptId: 'prompt-host-retry',
-            record: { kind: 'existing', promptId: 'prompt-host' },
             todoWorkChain: {
               promptId: 'prompt-host-retry',
               continuedFrom: 'prompt-host',
@@ -11618,24 +11606,7 @@ Other open files:
 
         await run([{ text: 'tick' }], `prompt-host-${type}`, {
           type,
-          userTurn: {
-            promptId: `prompt-host-${type}`,
-            record:
-              type === SendMessageType.Cron
-                ? {
-                    kind: 'deferred',
-                    record: {
-                      kind: 'cron',
-                      message: [{ text: 'tick' }],
-                      displayText: 'scheduled tick',
-                    },
-                  }
-                : {
-                    kind: 'existing',
-                    promptId: 'notification-source',
-                    taskId: 'task-1',
-                  },
-          },
+          userTurn: { promptId: `prompt-host-${type}` },
         });
         expect(mockTurnRunFn).toHaveBeenCalledOnce();
         expect(recorder[record]).not.toHaveBeenCalled();
@@ -15620,7 +15591,6 @@ Other open files:
           type: SendMessageType.UserQuery,
           userTurn: {
             promptId: 'prompt-host',
-            record: { kind: 'existing', promptId: 'prompt-host' },
             fileHistory: { promptId: 'prompt-host', outcome: 'attempted' },
           },
         });
@@ -15640,7 +15610,6 @@ Other open files:
             type: SendMessageType.UserQuery,
             userTurn: {
               promptId,
-              record: { kind: 'existing', promptId: 'original-turn' },
               todoWorkChain: { promptId: 'other-turn' },
               fileHistory: { promptId: 'other-turn', outcome: 'attempted' },
             },

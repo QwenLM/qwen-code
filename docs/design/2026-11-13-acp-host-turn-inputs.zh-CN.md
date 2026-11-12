@@ -23,10 +23,6 @@
 ```ts
 type UserTurnInput = {
   promptId: string;
-  record:
-    | { kind: 'recorded'; record: UserTurnRecord }
-    | { kind: 'existing'; promptId: string; taskId?: string }
-    | { kind: 'deferred'; record: UserTurnRecord };
   todoWorkChain?: { promptId: string; continuedFrom?: string };
   fileHistory?: {
     promptId: string;
@@ -35,11 +31,11 @@ type UserTurnInput = {
 };
 ```
 
-`UserTurnRecord` 是带类型的数据联合，覆盖 `user`、`goal`、`cron` 和 `notification` 记录。三个 `record` 分支分别表示由 core 立即记录、宿主已经有记录，或携带记录数据延迟记录。
+`UserTurnRecord` 是带类型的数据联合，覆盖 `user`、`goal`、`cron` 和 `notification` 记录。它不属于该输入：宿主在既有时间点直接把它交给 `recordUserTurn`，`userTurn.promptId` 只用来告知 core 该记录已经写完。输入上的回执会是 core 从不读取的值。
 
 ## 记录与阶段所有权
 
-Core 导出 `recordUserTurn(config, record)`。它在宿主原有时机写入记录并返回 recorded receipt。该 receipt 不保证数据持久化：旧 writer 仍然是 best effort。
+移除 `userTurnRecordedByHost` 意味着两件事：宿主经 core 的 `recordUserTurn` 在既有时间点写入记录，并以 `userTurn.promptId` 告知 core 不再自行记录该回合。`recordUserTurn(config, record)` 写入记录后不返回任何值；旧 writer 仍然是 best effort。
 
 `todoWorkChain` 和 `fileHistory` 描述 ACP 已完成的准备工作；todo 与快照何时执行仍由 ACP 负责。只有对应阶段的 `promptId` 匹配时，core 才分别跳过记录、链创建和快照；一个阶段匹配不会抑制其他阶段，普通调用方继续使用原有默认行为。
 
@@ -51,9 +47,9 @@ Core 导出 `recordUserTurn(config, record)`。它在宿主原有时机写入记
 
 - slash 命令处理前的原始 user 记录继续保留显示文本、附件、资源引用和 `daemonPromptId`；`/clear` 仍会替换 recorder，同时保留已解析的 `/advisor` 例外。
 - 文件历史快照仍在发送前尝试，即使该回合已取消。
-- Retry、continue 和 restore 使用 existing record；Goal permit 行为保持不变。
-- 延迟 cron 记录仍仅在保留历史时执行，包括保留未发送输入的情况。
-- Notification 记录继续保留任务元数据和此前的持久化行为。
+- Retry、continue 和 restore 不再新增记录：它们的消息已在历史中，或在发送前已记录，因此该回合只带 `promptId`。Goal permit 行为保持不变。
+- 延迟 cron 记录仍只在内容进入模型后执行，并且仍仅在保留历史时执行，包括保留未发送输入的情况。
+- Notification 记录继续保留任务元数据和此前的持久化行为；已经持久化的后台通知不会被重复记录。
 
 ## 验证与验收
 

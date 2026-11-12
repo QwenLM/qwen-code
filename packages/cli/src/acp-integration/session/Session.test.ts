@@ -5005,10 +5005,7 @@ describe('Session', () => {
       expect(send.mock.calls[0][3]).toMatchObject({
         type: core.SendMessageType.UserQuery,
         userTurn: {
-          record: {
-            kind: 'recorded',
-            record: { kind: 'user', message: 'hello' },
-          },
+          promptId: send.mock.calls[0][2],
           todoWorkChain: { promptId: send.mock.calls[0][2] },
           fileHistory: {
             promptId: send.mock.calls[0][2],
@@ -5021,6 +5018,12 @@ describe('Session', () => {
         // Recall searches the prompt text, not the resolved request.
         memoryRecallQuery: 'hello',
       });
+      // The host recorded the user message before the send, so the client does
+      // not record it again.
+      expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledOnce();
+      expect(mockChatRecordingService.recordUserMessage.mock.calls[0][0]).toBe(
+        'hello',
+      );
       expect(mockConfig.prepareWorkflowMode).not.toHaveBeenCalled();
       // The client runs its own tool-call guards for the shared tool batch.
       expect(send.mock.calls[0][3]).not.toHaveProperty('toolLoopGuardsByHost');
@@ -6111,7 +6114,7 @@ describe('Session', () => {
           expect(send).toHaveBeenCalledOnce();
           expect(send.mock.calls[0][3]).toMatchObject({
             type: core.SendMessageType.Retry,
-            userTurn: { record: { kind: 'existing' } },
+            userTurn: { promptId: send.mock.calls[0][2] },
             historyPromptId: promptId,
           });
           // A retry runs UserPromptSubmit, as before; a continue does not.
@@ -6347,16 +6350,7 @@ describe('Session', () => {
         expect(sends[1][0]).toEqual([{ text: 'nightly report' }]);
         expect(sends[1][3]).toMatchObject({
           type: core.SendMessageType.Cron,
-          userTurn: {
-            record: {
-              kind: 'deferred',
-              record: {
-                kind: 'cron',
-                message: [{ text: 'nightly report' }],
-                displayText: 'nightly report',
-              },
-            },
-          },
+          userTurn: { promptId: sends[1][2] },
           interactionSpan: agentTelemetry.span,
           toolCallPreparations: true,
         });
@@ -6563,18 +6557,16 @@ describe('Session', () => {
         expect(sends).toHaveLength(1);
         expect(sends[0][3]).toMatchObject({
           type: core.SendMessageType.Notification,
-          userTurn: {
-            promptId: sends[0][2],
-            record: {
-              kind: 'existing',
-              promptId: sends[0][2],
-              taskId: 'task-1',
-            },
-          },
+          userTurn: { promptId: sends[0][2] },
         });
+        // Already persisted, so the turn tells the client not to record it and
+        // keeps the task identity on the strict record the host wrote.
         expect(
           mockChatRecordingService.recordNotificationStrict,
         ).toHaveBeenCalledOnce();
+        expect(
+          mockChatRecordingService.recordNotificationStrict.mock.calls[0]![2],
+        ).toMatchObject({ taskId: 'task-1' });
         expect(
           mockChatRecordingService.recordNotification,
         ).not.toHaveBeenCalled();
@@ -10709,7 +10701,7 @@ describe('Session', () => {
       expect(execute).toHaveBeenCalled();
       expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
       expect(send).toHaveBeenCalledOnce();
-      const [parts, , , options] = send.mock.calls[0] as unknown as [
+      const [parts, , promptId, options] = send.mock.calls[0] as unknown as [
         Part[],
         AbortSignal,
         string,
@@ -10719,7 +10711,7 @@ describe('Session', () => {
       expect(options).toMatchObject({
         type: core.SendMessageType.Retry,
         userTurn: {
-          record: { kind: 'existing' },
+          promptId,
           fileHistory: { outcome: 'restore-omitted' },
         },
       });
@@ -39463,12 +39455,7 @@ describe('Session', () => {
             goalPermit: permit,
             goalTurnKey: turnKey,
             goalOrigin: 'runtime',
-            userTurn: {
-              record: {
-                kind: 'recorded',
-                record: { kind: 'goal', goalPermit: permit },
-              },
-            },
+            userTurn: { promptId: sends[0][2] },
           });
           // The round's own signal: a cut or a cancel is left to the session.
           expect(sends[0][3]['goalSignal']).toBe(sends[0][1]);
@@ -39508,12 +39495,7 @@ describe('Session', () => {
             goalPermit: permit,
             goalTurnKey: expect.stringMatching(/^goal-user:/),
             goalOrigin: 'user',
-            userTurn: {
-              record: {
-                kind: 'recorded',
-                record: { kind: 'user', message: 'hello' },
-              },
-            },
+            userTurn: { promptId: sends[0][2] },
           });
           expect(
             mockChatRecordingService.recordUserMessage,

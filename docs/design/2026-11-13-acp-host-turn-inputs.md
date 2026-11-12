@@ -23,10 +23,6 @@ Out of scope: other ACP tool batches, a full per-round `runAgentLoop` migration,
 ```ts
 type UserTurnInput = {
   promptId: string;
-  record:
-    | { kind: 'recorded'; record: UserTurnRecord }
-    | { kind: 'existing'; promptId: string; taskId?: string }
-    | { kind: 'deferred'; record: UserTurnRecord };
   todoWorkChain?: { promptId: string; continuedFrom?: string };
   fileHistory?: {
     promptId: string;
@@ -35,11 +31,11 @@ type UserTurnInput = {
 };
 ```
 
-`UserTurnRecord` is typed data for `user`, `goal`, `cron`, or `notification` records. The three `record` variants describe whether core records now, the host already has a record, or recording is deferred with its record payload.
+`UserTurnRecord` is typed data for `user`, `goal`, `cron`, or `notification` records. It is not part of the input: the host passes it straight to `recordUserTurn` at its existing timing, and `userTurn.promptId` only tells core that the record is already written. A receipt on the input would be a value core never reads.
 
 ## Recording and phase ownership
 
-Core exports `recordUserTurn(config, record)`. It writes the record at the host's existing timing and returns a recorded receipt. The receipt is not a durability guarantee: the legacy writer remains best effort.
+Removing `userTurnRecordedByHost` means two things: the host writes its record through core's `recordUserTurn` at the timing it already had, and it tells core with `userTurn.promptId` not to record the turn itself. `recordUserTurn(config, record)` writes the record and returns nothing; the legacy writer remains best effort.
 
 `todoWorkChain` and `fileHistory` describe setup already completed by ACP; ACP still owns when todo and snapshot work happens. Core skips recording, chain creation, and snapshot work independently only when the supplied phase `promptId` matches. One matching phase does not suppress another, and ordinary callers retain their existing defaults.
 
@@ -51,9 +47,9 @@ Core exports `recordUserTurn(config, record)`. It writes the record at the host'
 
 - Early raw-user recording keeps display text, attachments, resource references, and `daemonPromptId` before slash-command handling; `/clear` still replaces the recorder, with the resolved `/advisor` exception.
 - The file-history snapshot is attempted before sending, even when the turn is cancelled.
-- Retry, continue, and restore use an existing record; Goal permit behavior remains intact.
-- Deferred cron recording remains conditional on keeping history, including retained unsent input.
-- Notification records retain task metadata and prior persistence behavior.
+- Retry, continue, and restore record nothing new: their message is already in history or recorded before the send, so the turn carries only `promptId`. Goal permit behavior remains intact.
+- Deferred cron recording still happens only once the block reached the model, and remains conditional on keeping history, including retained unsent input.
+- Notification records retain task metadata and prior persistence behavior; a background notification that was already persisted is not recorded twice.
 
 ## Validation and acceptance
 

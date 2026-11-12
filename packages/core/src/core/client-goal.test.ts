@@ -1101,17 +1101,7 @@ describe('LlmClient Goal admission', () => {
 
     await drain(
       goalTurn(client, 'Continue the Goal.', {
-        userTurn: {
-          promptId: 'goal-prompt',
-          record: {
-            kind: 'recorded',
-            record: {
-              kind: 'goal',
-              message: [{ text: 'Continue the Goal.' }],
-              goalPermit: permit,
-            },
-          },
-        },
+        userTurn: { promptId: 'goal-prompt' },
       }),
     );
 

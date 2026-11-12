@@ -7267,16 +7267,10 @@ export class Session implements SessionContext {
             // — so hold it (and a push-count snapshot) to restore on that path.
             let strippedOrphanEntries: Content[] | null = null;
             let orphanPushCountSnapshot = 0;
-            const userTurn: UserTurnInput = {
-              promptId,
-              record: {
-                kind: 'existing',
-                promptId: continuedPromptId ?? promptId,
-              },
-            };
+            const userTurn: UserTurnInput = { promptId };
             if (goalTurn?.origin === 'runtime') {
               void recordDaemonSessionApprovalModeFromConfig(this.config);
-              userTurn.record = recordUserTurn(this.config, {
+              recordUserTurn(this.config, {
                 kind: 'goal',
                 message: modelPromptBlocks
                   .filter((block) => block.type === 'text')
@@ -7355,7 +7349,7 @@ export class Session implements SessionContext {
               const resourceLinks = params.prompt
                 .filter((block) => block.type === 'resource_link')
                 .map((block) => structuredClone(block));
-              userTurn.record = recordUserTurn(this.config, {
+              recordUserTurn(this.config, {
                 kind: 'user',
                 message: promptText,
                 goalPermit: goalTurn?.permit,
@@ -7456,7 +7450,7 @@ export class Session implements SessionContext {
                 goalTurn?.origin !== 'runtime' &&
                 !isRetry
               ) {
-                userTurn.record = recordUserTurn(this.config, {
+                recordUserTurn(this.config, {
                   kind: 'user',
                   message: promptText,
                   goalPermit: goalTurn?.permit,
@@ -13131,10 +13125,7 @@ export class Session implements SessionContext {
                   message: { role: 'user', parts: [{ text: modelText }] },
                   type: SendMessageType.Cron,
                   options: {
-                    userTurn: {
-                      promptId,
-                      record: { kind: 'deferred', record: cronRecord },
-                    },
+                    userTurn: { promptId },
                     todoWorkChainId: item.todoWorkChainId,
                   },
                   interactionSpan: getActiveInteractionSpan(promptId),
@@ -14504,11 +14495,6 @@ export class Session implements SessionContext {
           if (droppedSummary) {
             notificationParts.unshift({ text: droppedSummary.modelText });
           }
-          let notificationRecord: UserTurnInput['record'] = {
-            kind: 'existing',
-            promptId,
-            taskId: item.taskId,
-          };
           if (!item.persisted) {
             if (droppedSummary) {
               recordUserTurn(this.config, {
@@ -14517,7 +14503,7 @@ export class Session implements SessionContext {
                 displayText: droppedSummary.displayText,
               });
             }
-            notificationRecord = recordUserTurn(this.config, {
+            recordUserTurn(this.config, {
               kind: 'notification',
               message: [{ text: item.modelText }],
               displayText: item.displayText,
@@ -14561,7 +14547,7 @@ export class Session implements SessionContext {
               message: nextMessage,
               type: SendMessageType.Notification,
               options: {
-                userTurn: { promptId, record: notificationRecord },
+                userTurn: { promptId },
                 todoWorkChainId: item.todoWorkChainId,
               },
               promptId,

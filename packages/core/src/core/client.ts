@@ -340,12 +340,13 @@ export type UserTurnRecord =
       deliveredTurn?: boolean;
     };
 
+/**
+ * What the host already recorded and set up for this turn. A matching
+ * `promptId` says the host wrote the record through {@link recordUserTurn}, so
+ * core records nothing itself.
+ */
 export interface UserTurnInput {
   promptId: string;
-  record:
-    | { kind: 'recorded'; record: UserTurnRecord }
-    | { kind: 'existing'; promptId: string; taskId?: string }
-    | { kind: 'deferred'; record: UserTurnRecord };
   todoWorkChain?: { promptId: string; continuedFrom?: string };
   fileHistory?: {
     promptId: string;
@@ -353,10 +354,8 @@ export interface UserTurnInput {
   };
 }
 
-export function recordUserTurn(
-  config: Config,
-  record: UserTurnRecord,
-): Extract<UserTurnInput['record'], { kind: 'recorded' }> {
+/** Writes the host's record at its existing timing. */
+export function recordUserTurn(config: Config, record: UserTurnRecord): void {
   const recorder = config.getChatRecordingService();
   switch (record.kind) {
     case 'user':
@@ -411,7 +410,6 @@ export function recordUserTurn(
     default:
       throw new Error('Unsupported user turn record');
   }
-  return { kind: 'recorded', record };
 }
 
 interface StopHookChain {
