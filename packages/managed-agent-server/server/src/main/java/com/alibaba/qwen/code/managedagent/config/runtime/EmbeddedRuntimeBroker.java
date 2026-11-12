@@ -464,6 +464,14 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
         return service;
     }
 
+    /** The resolver this Broker already built, or null when there is no
+     * workspace execution store. Exposed so the capability hint can share the
+     * very same placement authority instead of a provider lookup that finds no
+     * bean. */
+    public WorkspaceRuntimeResolver workspaceRuntimeResolver() {
+        return workspaces;
+    }
+
     @Override
     public void close() {
         if (recovery != null) {

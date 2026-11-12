@@ -67,6 +67,9 @@ class RuntimeBrokerDefaultOnTest {
     private ManagedAgentProperties properties;
     @MockitoSpyBean
     private RuntimeBindingRepository bindingRepository;
+    @Autowired
+    private org.springframework.beans.factory.ObjectProvider<
+            com.alibaba.qwen.code.managedagent.workspace.runtime.WorkspaceRuntimeResolver> terminalResolvers;
 
     @Test
     void defaultCombinationBootsWithTheYmlDefaultsBound() {
@@ -78,6 +81,17 @@ class RuntimeBrokerDefaultOnTest {
         ((EmbeddedRuntimeBroker) runtimeWarmer).recoverSavedRuntimes();
         verify(bindingRepository, atLeastOnce()).findRecoveryCandidates(
                 eq("local-process"), isNull(), eq(8));
+    }
+
+    @Test
+    void terminalPlacementResolverIsExposedAsTheBeanTheCapabilityHintReads() {
+        // R2-2: the resolver the Broker builds must be registered as a bean, or
+        // ManagedAgentService's ObjectProvider yields null and capabilities.terminal
+        // is pinned to false in every real deployment.
+        var brokerResolver =
+                ((EmbeddedRuntimeBroker) runtimeWarmer).workspaceRuntimeResolver();
+        assertThat(brokerResolver).isNotNull();
+        assertThat(terminalResolvers.getIfAvailable()).isSameAs(brokerResolver);
     }
 
     /** Removes the ambient copies of the two documented opt-out variables. */

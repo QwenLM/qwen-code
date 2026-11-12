@@ -166,7 +166,13 @@ public final class WorkspaceRuntimeResolver {
         if (residents.find(binding) != null) {
             return false;
         }
-        return mount(binding) != null;
+        try {
+            return mount(binding) != null;
+        } catch (com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException error) {
+            // A capability hint must never turn the session list into a 409:
+            // a non-local or unreadable placement is simply not terminal-capable.
+            return false;
+        }
     }
 
     private String extensionDigest(String platform) {
