@@ -617,6 +617,100 @@ describe('McpTransportPool', () => {
     },
   );
 
+  it.each(
+    ['single server', 'MCP catalog', 'all discovered tools'].flatMap((mode) =>
+      [false, true].map((reattach) => ({ mode, reattach })),
+    ),
+  )(
+    'detaches only the discarded replay listener (reattach=$reattach, $mode)',
+    async ({ mode, reattach }) => {
+      vi.useRealTimers();
+      mockMcpSuccess({ toolNames: ['alpha'] });
+      const pool = mkPool({ drainDelayMs: 0 });
+      const cfg = new MCPServerConfig('node');
+      function session(sessionId: string) {
+        const prompts = new PromptRegistry();
+        const resources = new ResourceRegistry();
+        const config = {
+          isTrustedFolder: () => true,
+          getMcpServers: () => ({ srv: cfg }),
+          getMcpServerCommand: () => undefined,
+          getToolDiscoveryCommand: () => undefined,
+          getTargetDir: () => process.cwd(),
+          getResourceRegistry: () => resources,
+          getPromptRegistry: () => prompts,
+          getWorkspaceContext: () => ({}),
+          getDebugMode: () => false,
+          getSessionId: () => sessionId,
+          isMcpServerDisabled: () => false,
+          getMcpToolIdleTimeoutMs: () => 0,
+          getDisabledTools: () => new Set<string>(),
+          getMcpTransportPool: () => pool,
+          getToolRegistry: () => registry,
+        } as unknown as Config;
+        const registry = new ToolRegistry(config);
+        return { config, registry, manager: registry.getMcpClientManager() };
+      }
+      const first = session('first');
+      const sibling = session('sibling');
+      const replacement = session('first');
+      let replacementDiscovery: Promise<void> | undefined;
+      let failReplay = false;
+      try {
+        await first.manager.discoverAllMcpTools(first.config);
+        await sibling.manager.discoverAllMcpTools(sibling.config);
+        const entry = [...entriesOf(pool).values()][0];
+        const emitter = (
+          entry as unknown as {
+            emitter: { listenerCount(event: string): number };
+          }
+        ).emitter;
+        expect(emitter.listenerCount('event')).toBe(2);
+        if (reattach) {
+          const remove = first.registry.removeMcpToolsByServer.bind(
+            first.registry,
+          );
+          vi.spyOn(first.registry, 'removeMcpToolsByServer').mockImplementation(
+            (name) => {
+              remove(name);
+              if (!failReplay) return;
+              failReplay = false;
+              pool.releaseSession('first');
+              replacementDiscovery = replacement.manager.discoverAllMcpTools(
+                replacement.config,
+              );
+              throw new Error('Registry rejected the old replay');
+            },
+          );
+        }
+        const rediscovery =
+          mode === 'single server'
+            ? first.registry.discoverToolsForServer('srv')
+            : mode === 'MCP catalog'
+              ? first.registry.discoverMcpTools()
+              : first.registry.discoverAllTools();
+        if (reattach) failReplay = true;
+        else pool.releaseSession('first');
+        await expect(rediscovery).resolves.toBeUndefined();
+        await replacementDiscovery;
+        expect(pool.getSnapshot().byName['srv'].entrySummary[0].refs).toBe(
+          reattach ? 2 : 1,
+        );
+        expect(sibling.registry.getToolsByServer('srv')).toHaveLength(1);
+        if (reattach) {
+          expect(replacement.registry.getToolsByServer('srv')).toHaveLength(1);
+        }
+        expect(emitter.listenerCount('event')).toBe(reattach ? 2 : 1);
+      } finally {
+        await replacementDiscovery;
+        await first.manager.stop();
+        await replacement.manager.stop();
+        await sibling.manager.stop();
+        await pool.drainAll({ timeoutMs: 1000 });
+      }
+    },
+  );
+
   describe('acquire / release lifecycle', () => {
     it('3 sessions acquiring same key share 1 entry (1 connect call)', async () => {
       const { mocked, pool, cfg, conn } = await acquireOne({

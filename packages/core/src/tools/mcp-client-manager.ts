@@ -34,7 +34,7 @@ import type { ReadResourceResult } from '@modelcontextprotocol/sdk/types.js';
 // mcp-pool-key.ts is pure utility (hash + string concat) with no
 // runtime side effects, so a static value import is fine.
 import { connectionIdOf } from './mcp-pool-key.js';
-import type { ConnectionId } from './mcp-pool-events.js';
+import type { ConnectionId, PoolEvent } from './mcp-pool-events.js';
 import type { PooledConnection } from './mcp-pool-entry.js';
 import {
   McpBudgetWouldExceedError,
@@ -536,6 +536,10 @@ export class McpClientManager {
    */
   private readonly pool?: import('./mcp-transport-pool.js').McpTransportPool;
   private readonly pooledConnections = new Map<string, PooledConnection>();
+  private readonly pooledConnectionListeners = new WeakMap<
+    PooledConnection,
+    (event: PoolEvent) => void
+  >();
   private catalogReplaysInFlight = 0;
   /**
    * re-entrancy guard
@@ -1799,7 +1803,7 @@ export class McpClientManager {
     name: string,
     connection: PooledConnection,
   ): void {
-    const onTerminated = (event: import('./mcp-pool-events.js').PoolEvent) => {
+    const onTerminated = (event: PoolEvent) => {
       // Restart disconnects keep the handle; only terminal events evict it.
       if (
         event.kind !== 'failed' &&
@@ -1807,13 +1811,25 @@ export class McpClientManager {
       ) {
         return;
       }
-      if (this.pooledConnections.get(name) === connection) {
-        this.pooledConnections.delete(name);
-      }
-      connection.off('event', onTerminated);
+      this.untrackPooledConnection(name, connection);
     };
+    this.pooledConnectionListeners.set(connection, onTerminated);
     connection.on('event', onTerminated);
     this.pooledConnections.set(name, connection);
+  }
+
+  private untrackPooledConnection(
+    name: string,
+    connection: PooledConnection,
+  ): void {
+    const listener = this.pooledConnectionListeners.get(connection);
+    if (listener) {
+      connection.off('event', listener);
+      this.pooledConnectionListeners.delete(connection);
+    }
+    if (this.pooledConnections.get(name) === connection) {
+      this.pooledConnections.delete(name);
+    }
   }
 
   private replayPooledSnapshot(
@@ -1826,9 +1842,8 @@ export class McpClientManager {
       debugLogger.error(
         `Pool catalog replay failed for ${name}: ${getErrorMessage(err)}`,
       );
-      if (this.pooledConnections.get(name) === connection) {
-        this.pooledConnections.delete(name);
-      }
+      // A stale handle's release could detach a newer ref for this session.
+      this.untrackPooledConnection(name, connection);
     }
   }
 

@@ -132,6 +132,7 @@ function mkConn(name: string, extra: Rec = {}) {
     release: vi.fn(),
     replaySnapshot: vi.fn(),
     on: vi.fn(),
+    off: vi.fn(),
     id: `${name}::abc`,
     serverName: name,
     entryIndex: 0,
@@ -429,6 +430,11 @@ describe('McpClientManager', () => {
 
       expect(priv(manager, 'pooledConnections').has('dead')).toBe(false);
       expect(priv(manager, 'pooledConnections').get('healthy')).toBe(healthy);
+      expect(dead.off).toHaveBeenCalledExactlyOnceWith(
+        'event',
+        dead.on.mock.calls[0][1],
+      );
+      expect(healthy.off).not.toHaveBeenCalled();
       expect(dead.release).not.toHaveBeenCalled();
       if (mode === 'bulk') {
         expect(healthy.replaySnapshot).toHaveBeenCalledOnce();
@@ -459,6 +465,11 @@ describe('McpClientManager', () => {
       manager.discoverAllMcpTools(config, true),
     ).resolves.toBeUndefined();
     expect(priv(manager, 'pooledConnections').get('srv')).toBe(replacement);
+    expect(connection.off).toHaveBeenCalledExactlyOnceWith(
+      'event',
+      connection.on.mock.calls[0][1],
+    );
+    expect(replacement.off).not.toHaveBeenCalled();
     expect(connection.release).not.toHaveBeenCalled();
     expect(replacement.release).not.toHaveBeenCalled();
   });
