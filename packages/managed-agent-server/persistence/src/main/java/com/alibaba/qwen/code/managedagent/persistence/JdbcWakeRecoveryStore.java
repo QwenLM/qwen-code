@@ -37,6 +37,7 @@ public class JdbcWakeRecoveryStore
     private final TransactionTemplate transactions;
     private final LinkedHashMap<Candidate, Proof> pendingProofs = new LinkedHashMap<>(128, 0.75f, true);
     private JdbcJournalPacks packs;
+    private java.util.function.LongSupplier nowMillis = System::currentTimeMillis;
 
     public JdbcWakeRecoveryStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc) {
         this.jdbc = jdbc;
@@ -46,6 +47,11 @@ public class JdbcWakeRecoveryStore
     @org.springframework.beans.factory.annotation.Autowired(required = false)
     void setJournalPacks(JdbcJournalPacks packs) {
         this.packs = packs;
+    }
+
+    /** Test hook: the clock the not-yet-due loop exemption compares against. */
+    void setNowMillis(java.util.function.LongSupplier nowMillis) {
+        this.nowMillis = nowMillis;
     }
 
     private record Chunk(String workspaceId, long revision, long firstSequence,
@@ -195,7 +201,7 @@ public class JdbcWakeRecoveryStore
                         if (turnId == null || turnId.isEmpty()) {
                             throw corrupt();
                         }
-                        if (!settled.contains(turnId)) {
+                        if (!settled.contains(turnId) && !isDeferredLoopInput(event)) {
                             pending.add(turnId);
                         }
                     }
@@ -270,6 +276,22 @@ public class JdbcWakeRecoveryStore
     static boolean isWakeInput(JsonNode event) {
         return "input.accepted".equals(event.path("kind").asText())
                 && SOURCES.contains(event.path("payload").path("source").asText());
+    }
+
+    /**
+     * A loop wakeup whose fire time is still in the future is deferred, not
+     * parked: it must not make wake recovery attach the Harness. A due or
+     * immediate loop input (no notBefore, or one already past) still counts.
+     * The proof is only cached complete when something is pending, so a
+     * future-only loop Session is re-proven each scan and attaches once due.
+     */
+    private boolean isDeferredLoopInput(JsonNode event) {
+        JsonNode payload = event.path("payload");
+        if (!"loop".equals(payload.path("source").asText())) {
+            return false;
+        }
+        JsonNode notBefore = payload.path("notBefore");
+        return notBefore.isIntegralNumber() && notBefore.longValue() > nowMillis.getAsLong();
     }
 
     private static IllegalStateException corrupt() {

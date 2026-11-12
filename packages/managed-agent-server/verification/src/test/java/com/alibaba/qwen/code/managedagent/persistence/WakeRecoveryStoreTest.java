@@ -466,6 +466,59 @@ public class WakeRecoveryStoreTest {
         return event;
     }
 
+    @Test
+    void futureOnlyLoopWakeupIsDeferredNotParked() {
+        store.setNowMillis(() -> 1_000_000L);
+        ObjectNode future = event("input.accepted", "loop-future", "loop");
+        ((ObjectNode) future.get("payload")).put("notBefore", 2_000_000L);
+        appendBatch(future);
+        // The only pending input is a not-yet-due wakeup: recovery must not attach.
+        assertThat(store.hasPendingInput(candidate())).contains(false);
+        // Once the fire time passes, the same journal attaches the Harness.
+        store.setNowMillis(() -> 3_000_000L);
+        assertThat(store.hasPendingInput(candidate())).contains(true);
+    }
+
+    @Test
+    void dueLoopWakeupStillAttaches() {
+        store.setNowMillis(() -> 1_000_000L);
+        ObjectNode due = event("input.accepted", "loop-due", "loop");
+        ((ObjectNode) due.get("payload")).put("notBefore", 500_000L);
+        appendBatch(due);
+        assertThat(store.hasPendingInput(candidate())).contains(true);
+    }
+
+    @Test
+    void immediateLoopWakeupWithoutNotBeforeStillAttaches() {
+        store.setNowMillis(() -> 1_000_000L);
+        append("input.accepted", "loop-now", "loop");
+        assertThat(store.hasPendingInput(candidate())).contains(true);
+    }
+
+    @Test
+    void nonLoopPendingInputIsUnaffectedByTheLoopExemption() {
+        store.setNowMillis(() -> 1_000_000L);
+        ObjectNode future = event("input.accepted", "loop-future", "loop");
+        ((ObjectNode) future.get("payload")).put("notBefore", 2_000_000L);
+        ObjectNode monitor = event("input.accepted", "monitor-turn", "monitor");
+        appendBatch(future, monitor);
+        assertThat(store.hasPendingInput(candidate())).contains(true);
+    }
+
+    @Test
+    void sentinelLoopWakeupReplaysWithNotBeforeParity() {
+        // A fire-time sentinel wakeup (the autonomous/loop.md sentinel prompt the
+        // Harness expands) is a loop input carrying notBefore; the Java replay
+        // proof must treat it exactly like the Harness's deferral, not attach early.
+        store.setNowMillis(() -> 1_000_000L);
+        ObjectNode sentinel = event("input.accepted", "loop:wakeup-sentinel", "loop");
+        ((ObjectNode) sentinel.get("payload")).put("notBefore", 5_000_000L);
+        appendBatch(sentinel);
+        assertThat(store.hasPendingInput(candidate())).contains(false);
+        store.setNowMillis(() -> 6_000_000L);
+        assertThat(store.hasPendingInput(candidate())).contains(true);
+    }
+
     private void append(String kind, String turn, String source) {
         appendBatch(event(kind, turn, source));
     }
