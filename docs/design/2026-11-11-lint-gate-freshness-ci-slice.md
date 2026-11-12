@@ -423,7 +423,7 @@ head commit` stay outside the slice. A `ref:` edit on its own is caught: the
 
 ## Test-suite accounting
 
-The suite is 1,468 lines and 69 cases. Review asked for a rewrite that removes the
+The suite is 1,489 lines and 69 cases. Review asked for a rewrite that removes the
 line model's spelling fixtures without touching behaviour coverage; this is the
 account of where it stopped, and why it is not smaller.
 
@@ -431,7 +431,7 @@ account of where it stopped, and why it is not smaller.
 | ----------------------------------------------------------- | ----- | ----- |
 | `main`, before this PR                                      | 962   | 47    |
 | Earlier revision of this PR (line model, spelling fixtures) | 2,009 | 83    |
-| **This revision**                                           | 1,468 | 69    |
+| **This revision**                                           | 1,489 | 69    |
 
 Of the 69 cases, 22 exercise the `ci.yml` gate document, its wiring and the
 shared verdict pins; the other 47 are the `eslint.config.js` and
@@ -448,11 +448,11 @@ went with the mechanism they tested. The script itself went from 975 lines to
 751, which is the parsed-document model plus the header explaining why a parser
 replaced the line scanner.
 
-**The total is −27%, not −50%**, because the remainder is not spelling: 47 of the
+**The total is −26%, not −50%**, because the remainder is not spelling: 47 of the
 69 cases are narrowing behaviour that earlier review rounds required, and
 deleting or merging them to reach a number would trade a model change for
 unrelated coverage loss. That cut needs its own review, so it is not made here.
-Against `main` the suite is +506 lines and +22 cases, all of it the `ci.yml`
+Against `main` the suite is +527 lines and +22 cases, all of it the `ci.yml`
 model, which `main` does not have.
 
 ## Validation plan
@@ -476,7 +476,7 @@ model, which `main` does not have.
    | trust the plumbing label without the linter check | red, 1          |
    | drop the workflow `env` from the slice            | red, 2          |
 
-   Four further witnesses cover the suite step this revision adds. Each was
+   Five further witnesses cover the suite step this revision adds. Each was
    applied to the real `ci.yml` alone, confirmed red here and green on the
    previous revision, then reverted:
 
@@ -486,6 +486,7 @@ model, which `main` does not have.
    | point the run line at another suite         | red, 1         |
    | add `continue-on-error: true`               | red, 1         |
    | move it back before `Install dependencies`  | red, 1         |
+   | append `\|\| true` (or `\|\| :`) to its run line | red, 1    |
 
 3. Equivalence against the line model this replaces, on thirteen historical
    `ci.yml` commits with their parents as fork points, content read at real refs.
@@ -529,8 +530,8 @@ model, which `main` does not have.
 
 ## Acceptance criteria
 
-- The suite passes, and all twelve mutations redden it — the eight on the model
-  and the four on the suite step's wiring.
+- The suite passes, and all thirteen mutations redden it — the eight on the
+  model and the five on the suite step's wiring.
 - Thirteen of thirteen historical `ci.yml` commits receive the same stale-or-fresh
   decision from the parser as from the line model it replaces, with neither side
   refusing a pair.

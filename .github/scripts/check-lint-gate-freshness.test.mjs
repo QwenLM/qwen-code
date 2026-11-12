@@ -271,6 +271,16 @@ test('ci.yml wires the check into lint_and_static before the lint lanes', () => 
     null,
     'the freshness suite must stay fatal',
   );
+  // The body half of the same pair the gate's own step is pinned for above:
+  // `|| true` (or `|| :`) leaves the profile arm, the run-line containment and
+  // the continue-on-error pin all intact while the suite exits 0 on a failure.
+  // This step is the only reason the suite runs on github_ci_only at all, so a
+  // silenced one restores exactly the coverage gap it was added to close.
+  assert.doesNotMatch(
+    suiteBlock,
+    /\|\|\s*(true|:)(\s|'|$)/,
+    'the freshness suite must not swallow its exit code',
+  );
   // The suite imports `yaml`, so it can only run once the install has happened.
   assert.ok(
     suiteStep > job.indexOf("- name: 'Install dependencies'"),
