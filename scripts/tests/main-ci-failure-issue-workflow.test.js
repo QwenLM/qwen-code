@@ -72,6 +72,22 @@ describe('main CI failure issue workflow', () => {
   const linuxAggregateStep = ciYml.jobs.test_ubuntu.steps.find((step) =>
     String(step.run ?? '').includes('BUILD_RESULT'),
   )?.name;
+  // The same join for the built-tree handoff: the signature admits those steps
+  // by NAME, so a rename in ci.yml leaves it matching no annotation while a
+  // hand-typed copy here keeps passing. Every job that fetches the tree uses
+  // the same two step names, so the dedupe is what turns six steps into two.
+  const handoffSteps = [
+    ...new Set(
+      Object.values(ciYml.jobs)
+        .flatMap((job) => job.steps ?? [])
+        .filter(
+          (step) =>
+            String(step.uses ?? '').startsWith('actions/download-artifact') &&
+            /built tree/i.test(String(step.name ?? '')),
+        )
+        .map((step) => step.name),
+    ),
+  ];
 
   it('watches main failures and Managed Agent PR failures', () => {
     expect(workflow).toContain('workflow_run:');
@@ -2716,12 +2732,15 @@ printf '%s\\n' '{"jobs":[]}'
       // runner for half an hour and then files a code-failure issue for a
       // commit that never ran.
       //
-      // These are the annotations the two steps actually emit, captured from
-      // job 131012882515.
-      for (const annotation of [
-        "The action 'Download the built tree' has timed out after 15 minutes.",
-        "The action 'Retry downloading the built tree' has timed out after 15 minutes.",
-      ]) {
+      // The wording of the annotation was captured from job 131012882515; the
+      // step names come from ci.yml, so a rename there reddens here instead of
+      // leaving the signature anchored to a name no run reports. The length pin
+      // is the fail-closed half: an empty derivation would make the loop below
+      // assert nothing at all.
+      expect(handoffSteps, 'built-tree handoff steps missing').toHaveLength(2);
+      for (const annotation of handoffSteps.map(
+        (step) => `The action '${step}' has timed out after 15 minutes.`,
+      )) {
         expect(
           new RegExp(infraStep.env.INFRA_FAILURE_SIGNATURES, 'i').test(
             annotation,
