@@ -74,10 +74,10 @@ export function ChannelQrLogin({
   // Closing the editor must therefore drop the session explicitly, or four
   // abandoned attempts reject every real bind until those sessions time out.
   //
-  // Only a login this panel CREATED is ours to drop. The web shell sends no
-  // client id on these routes, so the daemon reattaches across tabs and
-  // browsers (`undefined === undefined`) and hands back a peer's `loginId`
-  // with `attached: true`; cancelling that would pull the code out from under
+  // Only a login this panel CREATED is ours to drop. Without a client id on
+  // these routes the daemon reattaches across tabs and browsers
+  // (`undefined === undefined`) and hands back a peer's `loginId` with
+  // `attached: true`; cancelling that would pull the code out from under
   // another operator. Ownership is recorded where the id is learned, not
   // derived from what is on screen.
   const actionsRef = useRef(actions);
