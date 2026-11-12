@@ -166,11 +166,14 @@ is conditional on a measured benefit and passing gates, not the critical path
 for independent parity fixes.
 
 Upgrade checklist: once the `@opentui/core` pin reaches 0.8.4 or newer, drop
-the bare-URL preview mask (`maskTrailingAutolinks`) in
-`packages/cli/src/ui/opentui/markdown-heal.ts` — 0.8.4 already suppresses the
-`label (href)` suffix when the label equals the href. Keep the transcript's
-`internalBlockMode: 'top-level'` until a coalesced-mode streaming preview is
-verified to conceal ATX markers without flipping (0.8.4 still flips them).
+the bare-URL/email autolink mask (the `https://`, `www.` and email rules in
+`maskAutolinksInProse`) in `packages/cli/src/ui/opentui/markdown-heal.ts` —
+0.8.4 already suppresses the `label (href)` suffix when the label equals the
+href. Keep the shortcut-label strip (`[expr.add]` → `expr.add`): the settled
+renderer conceals those brackets and 0.8.4 does not change that. Keep
+stripping ATX heading markers from the streaming text until a coalesced-mode
+streaming preview is verified to conceal them without flipping (0.8.4 still
+flips them).
 
 ## Completion and rollout gates
 

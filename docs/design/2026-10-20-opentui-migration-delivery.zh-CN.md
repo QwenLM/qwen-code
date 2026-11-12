@@ -143,11 +143,12 @@ resize/scroll/diff，以及三组产品/产物测试。保持版本与原生 ABI
 长记录应用层保护。只有收益明确且门槛通过才升级；独立对齐修复不等待升版。
 
 升级清单：当 `@opentui/core` 版本达到 0.8.4 或更新时，移除
-`packages/cli/src/ui/opentui/markdown-heal.ts` 的裸 URL 预览遮罩
-（`maskTrailingAutolinks`）——0.8.4 已不再为 label 等于 href 的自动链接
-附加 `label (href)`。transcript 的 `internalBlockMode: 'top-level'` 则要
-保留，直到确认 coalesced 模式的流式预览能稳定隐藏 ATX 标记（0.8.4 仍会
-翻转）。
+`packages/cli/src/ui/opentui/markdown-heal.ts` 中 `maskAutolinksInProse`
+的裸 URL／email 自动链接遮罩（`https://`、`www.` 与 email 规则）——0.8.4
+已不再为 label 等于 href 的自动链接附加 `label (href)`。shortcut label 的
+括号剥离（`[expr.add]` → `expr.add`）要保留：settle 后的渲染会隐藏这些括号，
+0.8.4 不会改变这一点。流式文本中的 ATX 标题标记要继续剥离，直到确认
+coalesced 模式的流式预览能稳定隐藏这些标记（0.8.4 仍会翻转）。
 
 ## 完成与切换门槛
 

@@ -69,6 +69,14 @@ const mocks = vi.hoisted(() => {
           children,
         );
       }
+      if (type === 'markdown') {
+        const source = (config ?? {}) as Record<string, unknown>;
+        const dom: Record<string, unknown> = key === undefined ? {} : { key };
+        for (const name of ['content', 'internalBlockMode']) {
+          if (source[name] !== undefined) dom[name] = source[name];
+        }
+        return React.createElement('markdown', dom, children);
+      }
       return React.createElement(
         type as React.ElementType,
         config as Record<string, unknown>,
@@ -898,7 +906,7 @@ describe('OpenTuiTranscriptView', () => {
     expect(expanded.container.textContent).toContain('ctrl+o to collapse');
   });
 
-  it('renders a streaming thought as stable per-paragraph blocks', () => {
+  it('renders a streaming thought as one markdown element', () => {
     const items: LiveThinkingItem[] = [
       {
         kind: 'thinking',
@@ -911,18 +919,20 @@ describe('OpenTuiTranscriptView', () => {
     const { container } = render(
       <OpenTuiTranscriptView items={items} thoughtsExpanded />,
     );
-    const blocks = [...container.querySelectorAll('markdown')].map((element) =>
-      element.getAttribute('content'),
+    const elements = [...container.querySelectorAll('markdown')];
+    expect(elements).toHaveLength(1);
+    expect(elements[0].getAttribute('content')).toBe(
+      'FIRST_BLOCK\n\nSECOND_BLOCK',
     );
-    expect(blocks).toEqual(['FIRST_BLOCK', 'SECOND_BLOCK']);
+    expect(elements[0].getAttribute('internalBlockMode')).toBeNull();
   });
 
-  it('heals only the tail block of a streaming thought', () => {
+  it('masks every URL in a streaming thought', () => {
     const items: LiveThinkingItem[] = [
       {
         kind: 'thinking',
         id: 'th1',
-        text: 'see https://a.dev\n\nsee https://b.dev',
+        text: 'a https://a.dev\n\nb https://b.dev\n\nc https://c.dev\n\nd https://d.dev',
         done: false,
         startedAt: Date.now(),
       },
@@ -930,14 +940,35 @@ describe('OpenTuiTranscriptView', () => {
     const { container } = render(
       <OpenTuiTranscriptView items={items} thoughtsExpanded />,
     );
-    const blocks = [...container.querySelectorAll('markdown')].map((element) =>
-      element.getAttribute('content'),
-    );
-    expect(blocks[0]).toBe('see https://a.dev');
-    expect(blocks[1]).toBe('see https\u200B://b.dev');
+    const content =
+      container.querySelector('markdown')?.getAttribute('content') ?? '';
+    expect(content).toContain('a `https://a.dev`');
+    expect(content).toContain('b `https://b.dev`');
+    expect(content).toContain('c `https://c.dev`');
+    expect(content).toContain('d `https://d.dev`');
   });
 
-  it('applies the streaming markdown options only while streaming', () => {
+  it('does not apply the streaming mask or options to a settled thought', () => {
+    const items: LiveThinkingItem[] = [
+      {
+        kind: 'thinking',
+        id: 'th1',
+        text: 'see https://a.dev\n\nsee https://b.dev',
+        done: true,
+        durationMs: 12_000,
+      },
+    ];
+    const { container } = render(
+      <OpenTuiTranscriptView items={items} thoughtsExpanded />,
+    );
+    const markdown = container.querySelector('markdown');
+    expect(markdown?.getAttribute('content')).toBe(
+      'see https://a.dev\n\nsee https://b.dev',
+    );
+    expect(markdown?.getAttribute('internalBlockMode')).toBeNull();
+  });
+
+  it('uses the coalesced default in both streaming and settled states', () => {
     const item = (streaming: boolean): LiveAssistantItem => ({
       kind: 'assistant',
       id: 'a1',
@@ -949,7 +980,7 @@ describe('OpenTuiTranscriptView', () => {
       live.container
         .querySelector('markdown')
         ?.getAttribute('internalBlockMode'),
-    ).toBe('top-level');
+    ).toBeNull();
     live.unmount();
 
     const settled = render(<OpenTuiTranscriptView items={[item(false)]} />);
