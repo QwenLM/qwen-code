@@ -8,6 +8,7 @@ import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { MCP_MAX_TOOL_LIST_PAGES } from '@qwen-code/qwen-code-core/tools/mcp-client.js';
 import {
   CLIENT_FILES_MAX_CATALOG_PAGES,
   CLIENT_FILES_MAX_RESULT_BYTES,
@@ -280,6 +281,13 @@ describe('HostedClientFilesSession', () => {
       }),
     ).rejects.toThrow('page bound');
     expect(files.active).toBe(false);
+  });
+
+  it('pins the catalog page cap to core’s tools/list page bound', () => {
+    // The page-bound fixture above scales with the constant, so it proves a
+    // bound exists but not its value. Hold the cap to the producer it mirrors:
+    // drifting it to 50 (or any other number) must red here.
+    expect(CLIENT_FILES_MAX_CATALOG_PAGES).toBe(MCP_MAX_TOOL_LIST_PAGES);
   });
 
   it('refuses a tools/list cursor cycle instead of looping', async () => {

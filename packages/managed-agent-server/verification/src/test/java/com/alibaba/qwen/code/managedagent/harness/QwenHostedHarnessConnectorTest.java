@@ -1383,6 +1383,36 @@ class QwenHostedHarnessConnectorTest {
         assertThat(noSsh.supportsClientFiles(profileless)).isFalse();
     }
 
+    @Test
+    void sessionAwareClientFilesFailsClosedWhenSshStorageIsDegraded() {
+        var sessions = sessions();
+        var workspace = new ContextBinding("tenant-a", "selected-workspace", 1, "storage", ".",
+                WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1);
+        var actions = mock(JdbcManagedActionStore.class);
+        // The storage row exists but is not REGISTERED: runtimeStorage refuses
+        // with workspace_unavailable instead of returning a storage authority.
+        var ssh = mock(JdbcSshWorkspaceStore.class);
+        when(ssh.runtimeStorage("tenant-a", "storage"))
+                .thenThrow(WorkspaceExecutionStore.unavailable());
+        var client = mock(HostedHarnessClient.class);
+        var capabilities = mock(HostedHarnessCapabilities.class);
+        when(client.capabilities()).thenReturn(capabilities);
+        when(capabilities.getFeatures()).thenReturn(List.of("client-files/1"));
+        var session = new SessionRecord("tenant-a", SESSION_ID, "qwen-code", null, null, "ACTIVE",
+                null, null, 0, 0, 0, 1, 1, null, 1, workspace, "default", "hosted-workspace-files/1", null, 0);
+        var settings = properties();
+        settings.getExtensions().setEnabled(false);
+        settings.getManagedExtensions().setEnabled(false);
+        var connector = new QwenHostedHarnessConnector(settings, sessions,
+                mock(JdbcWorkspaceExecutionStore.class), actions, null, null, ssh);
+        ReflectionTestUtils.setField(connector, "client", client);
+        // The capability is computed for every Session in a list; a degraded
+        // storage authority must fail closed for this Session, not throw and
+        // fail the whole list. Removing the try/catch reds this with
+        // RuntimeBrokerException.
+        assertThat(connector.supportsClientFiles(session)).isFalse();
+    }
+
     @ParameterizedTest
     @NullAndEmptySource
     @ValueSource(strings = {" ", "plan", "unknown"})

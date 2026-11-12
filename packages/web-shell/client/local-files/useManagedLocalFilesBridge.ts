@@ -223,13 +223,12 @@ export function useManagedLocalFilesBridge(
           const permission = await ensureReadwritePermission(handle);
           if (stale()) return;
           if (permission.state !== 'granted') {
-            // Do not register on a handle the browser no longer allows, and do
-            // not report connected. Drop the retained handle so the next Connect
-            // reaches the picker for a fresh gesture instead of re-checking the
-            // same lapsed grant forever (a permanent no-op).
+            // Do not register on a handle the browser no longer allows. Drop the
+            // retained handle and fall through to the picker in this same
+            // gesture, so the Connect click is not a silent no-op that only
+            // reaches the picker on a second click.
             handleRef.current = undefined;
-            setStatus(IDLE);
-            return;
+            handle = undefined;
           }
         }
       }

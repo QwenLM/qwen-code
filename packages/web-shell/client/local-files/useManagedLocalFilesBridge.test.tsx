@@ -542,14 +542,9 @@ describe('useManagedLocalFilesBridge', () => {
     });
   });
 
-  it('does not register a retained handle whose permission lapsed to prompt', async () => {
+  it('reaches the picker in the same click when a retained handle’s permission lapsed', async () => {
     const peer = await startPeer();
     servers.push(peer.server);
-    let registerCalls = 0;
-    const countingFetch = ((url: string, init?: RequestInit) => {
-      if (String(url).endsWith('/client-files/register')) registerCalls += 1;
-      return nodeFetch(url, init);
-    }) as unknown as ManagedFetch;
     vi.mocked(ensureReadwritePermission).mockResolvedValue({
       state: 'granted',
       requested: false,
@@ -562,15 +557,16 @@ describe('useManagedLocalFilesBridge', () => {
       useManagedLocalFilesBridge({
         sessionId: 'session-1',
         baseUrl: peer.baseUrl,
-        fetch: countingFetch,
+        fetch: peerFetch,
         win: fakeWin,
       }),
     );
+    // Restore retains the granted handle without opening the picker.
     await act(async () => {
       await new Promise((resolve) => setTimeout(resolve, 50));
     });
-    // The grant is revoked while the tab stays open: Connect must not register
-    // on the retained handle nor report connected.
+    expect(vi.mocked(pickDirectoryHandle)).not.toHaveBeenCalled();
+    // The grant lapses while the tab stays open.
     vi.mocked(ensureReadwritePermission).mockResolvedValue({
       state: 'prompt',
       requested: false,
@@ -578,17 +574,9 @@ describe('useManagedLocalFilesBridge', () => {
     act(() => {
       void result.current.connect();
     });
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 50));
-    });
-    expect(registerCalls).toBe(0);
-    expect(result.current.status.phase).not.toBe('connected');
-    // The lapse must not wedge Connect permanently: the retained handle was
-    // dropped, so a fresh Connect reaches the picker instead of re-checking the
-    // same lapsed grant forever (the pre-fix permanent no-op turns this red).
-    act(() => {
-      void result.current.connect();
-    });
+    // The same Connect click must drop the lapsed handle and reach the picker,
+    // not silently return and only pick on a second click. Returning early on
+    // the lapse (the pre-fix no-op) turns this red.
     await waitFor(() =>
       expect(vi.mocked(pickDirectoryHandle)).toHaveBeenCalled(),
     );
