@@ -184,6 +184,53 @@ describe('extractShellOperations', () => {
       'date >> /var/log/app.log',
       [write('/var/log/app.log')],
     ],
+    // `>|` is the clobber override: the same write as `>`, spelled to defeat
+    // `noclobber`. Not reading it loses a write to a protected path.
+    [
+      'redirect >|: write_file',
+      'echo hello >| /tmp/out.txt',
+      [write('/tmp/out.txt')],
+    ],
+    [
+      'redirect >| without space: write_file',
+      'echo hello >|/tmp/out.txt',
+      [write('/tmp/out.txt')],
+    ],
+    [
+      'redirect 1>|: write_file',
+      'echo hello 1>| /tmp/out.txt',
+      [write('/tmp/out.txt')],
+    ],
+    [
+      'redirect 1>| without space: write_file',
+      'echo hello 1>|/tmp/out.txt',
+      [write('/tmp/out.txt')],
+    ],
+    [
+      'redirect 2>|: write_file',
+      'echo hi 2>| /tmp/err.txt',
+      [write('/tmp/err.txt')],
+    ],
+    [
+      'redirect 2>| without space: write_file',
+      'echo hi 2>|/tmp/err.txt',
+      [write('/tmp/err.txt')],
+    ],
+    [
+      'redirect >|: quoted target',
+      "echo hello >| '/tmp/my file.txt'",
+      [write('/tmp/my file.txt')],
+    ],
+    [
+      'redirect >|: network pseudo-device opens no file',
+      'echo hello >| /dev/tcp/example.com/80',
+      [],
+    ],
+    [
+      'redirect >|: a quoted operator stays a literal argument',
+      'echo "hi >| nope.txt"',
+      [],
+    ],
     [
       'curl: extracts domain',
       'curl https://api.example.com/data',
@@ -800,6 +847,39 @@ describe('extractShellOperationsAcrossCommand', () => {
     [
       'returns no ops when only `cd` segments are present',
       'cd .qwen && cd ..',
+      [],
+    ],
+    // bash runs `echo … >| file` as ONE command. Splitting at the `|` of the
+    // clobber override handed the permission path two segments and neither
+    // carried the write, so a protected-path write went unseen.
+    [
+      'reports the clobber redirect as a write to a protected path',
+      "echo '{}' >| .qwen/settings.json",
+      [write(REPO_SETTINGS)],
+    ],
+    [
+      'reports the clobber redirect without a space before the target',
+      "echo '{}' >|.qwen/settings.json",
+      [write(REPO_SETTINGS)],
+    ],
+    [
+      'tracks literal `cd` before a clobber redirect',
+      "cd .qwen && echo '{}' >| settings.json",
+      [write(REPO_SETTINGS)],
+    ],
+    [
+      'still splits the real pipe that follows a clobber redirect',
+      'echo hi >| out.txt | cat',
+      [write('/repo/out.txt')],
+    ],
+    [
+      'still splits the pipe after an escaped `>` (a literal argument)',
+      'echo hi \\>| cat',
+      [],
+    ],
+    [
+      'still splits the pipe after a quoted clobber operator',
+      "echo 'hi >| x' | cat",
       [],
     ],
   ])('%s', (_title, command, expected) => {

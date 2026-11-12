@@ -534,7 +534,15 @@ function extractRedirects(
     }
 
     // ── Separate-token redirect operators ─────────────────────────────────
-    if (syntax === '>' || syntax === '1>') {
+    // `>|` and `N>|` are bash's clobber override: the same write as `>` / `N>`,
+    // spelled to defeat `noclobber`. Reading them as anything else loses a
+    // write to a protected path.
+    if (
+      syntax === '>' ||
+      syntax === '1>' ||
+      syntax === '>|' ||
+      syntax === '1>|'
+    ) {
       const target = tokens[i + 1];
       if (target && looksLikePath(target)) {
         if (!isNetworkPseudoDevice(target)) {
@@ -574,7 +582,8 @@ function extractRedirects(
       syntax === '2>' ||
       syntax === '2>>' ||
       syntax === '&>' ||
-      syntax === '&>>'
+      syntax === '&>>' ||
+      syntax === '2>|'
     ) {
       // stderr / combined redirect — consume target
       const target = tokens[i + 1];
@@ -610,7 +619,7 @@ function extractRedirects(
       }
       const matchText = split > 0 ? redirectText : syntax;
       const m = matchText.match(
-        /^(<<-?|1>>|1>|>>|>|2>>|2>|&>>|&>|<)([\s\S]+)$/,
+        /^(<<-?|1>\||2>\||>\||1>>|1>|>>|>|2>>|2>|&>>|&>|<)([\s\S]+)$/,
       );
       if (m) {
         const op = m[1]!;

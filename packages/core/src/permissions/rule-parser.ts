@@ -1141,6 +1141,18 @@ function findOperatorBoundaries(
       if (op === '&' && (arithmeticDepth > 0 || !isAsyncOperator(command, i))) {
         continue;
       }
+      // `>|` is the clobber override, not a pipe: bash runs
+      // `echo '{}' >| .qwen/settings.json` as ONE command that writes the
+      // file. Splitting it here handed the permission path two segments and
+      // neither carried the write, so a protected-path write went unseen.
+      // An escaped `\>` is a literal argument, so the `|` after it still pipes.
+      if (
+        (op === '|' || op === '|&') &&
+        command[i - 1] === '>' &&
+        precedingBackslashCount(command, i - 1) % 2 === 0
+      ) {
+        continue;
+      }
       boundaries.push({ start: i, end: i + op.length, operator: op });
       i += op.length - 1; // -1 because the loop will i++
       break;

@@ -959,6 +959,37 @@ describe('splitCompoundCommandSegments', () => {
       { command: 'echo {} > settings.json', terminator: '' },
     ]);
   });
+
+  // `>|` is the clobber override, not a pipe: bash runs it as one command
+  // that writes the file. Splitting at its `|` dropped the write.
+  it('keeps a clobber redirect inside its command', async () => {
+    expect(segments("echo '{}' >| .qwen/settings.json")).toEqual([
+      { command: "echo '{}' >| .qwen/settings.json", terminator: '' },
+    ]);
+    expect(segments("echo '{}' >|.qwen/settings.json")).toEqual([
+      { command: "echo '{}' >|.qwen/settings.json", terminator: '' },
+    ]);
+    expect(segments('echo hi >| out.txt && cat out.txt')).toEqual([
+      { command: 'echo hi >| out.txt', terminator: '&&' },
+      { command: 'cat out.txt', terminator: '' },
+    ]);
+  });
+
+  it('still splits a real pipe after a clobber redirect', async () => {
+    expect(segments('echo hi >| out.txt | cat')).toEqual([
+      { command: 'echo hi >| out.txt', terminator: '|' },
+      { command: 'cat', terminator: '' },
+    ]);
+  });
+
+  // An escaped `\>` is a literal argument (bash prints `hi >`), so the `|`
+  // after it really is a pipe.
+  it('still splits the pipe after an escaped `>`', async () => {
+    expect(segments('echo hi \\>| cat')).toEqual([
+      { command: 'echo hi \\>', terminator: '|' },
+      { command: 'cat', terminator: '' },
+    ]);
+  });
 });
 
 // ─── resolvePathPattern ──────────────────────────────────────────────────────
@@ -3491,6 +3522,15 @@ describe('PermissionManager — compound shell write attribution', () => {
     ['df -hT / 2>&1', 'allow'],
     ['df -hT / >&2', 'allow'],
     ['printf TXT > other.txt', 'allow'],
+    // `>|` is the clobber override: the same write as `>`. The `|` used to
+    // split it into two segments, neither of which carried the write, so
+    // `Bash(*)` allowed a protected-path write with no rule seeing it.
+    ['printf TXT >| protected.txt', 'deny'],
+    ['printf TXT >|protected.txt', 'deny'],
+    ['printf TXT 1>| protected.txt', 'deny'],
+    ['printf TXT 2>|protected.txt', 'deny'],
+    ['printf TXT >| other.txt', 'allow'],
+    ['printf "TXT >| protected.txt"', 'allow'],
   ])('Bash(*) allow + file deny: %s → %s', async (command, expected) => {
     const pm = repoPm({
       permissionsAllow: ['Bash(*)'],
