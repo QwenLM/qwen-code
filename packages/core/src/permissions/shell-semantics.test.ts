@@ -231,6 +231,31 @@ describe('extractShellOperations', () => {
       'echo "hi >| nope.txt"',
       [],
     ],
+    // A `|` inside the operator is a literal filename character, not a shell
+    // pipe: `>"|"file` writes a file called `|file`, and `>"|" out.txt` writes a
+    // file called `|`. Masking `|` along with `<>&` keeps the quoted forms on
+    // the plain `>` branch (base parity) instead of reading them as `>|` and
+    // dropping the leading `|` from the reported target.
+    [
+      'redirect: a quoted pipe in the target is part of the filename',
+      'echo \'{}\' >"|"file',
+      [write(`${CWD}/|file`)],
+    ],
+    [
+      'redirect: a quoted pipe standing alone names the file',
+      'echo hi >"|" out.txt',
+      [write(`${CWD}/|`)],
+    ],
+    [
+      'redirect: an escaped pipe in the target is part of the filename',
+      'echo hi >\\|file',
+      [write(`${CWD}/|file`)],
+    ],
+    [
+      'redirect: a quoted pipe plus .. cannot climb out of a denied path',
+      'echo \'{}\' >"|/../".qwen/settings.json',
+      [write(SETTINGS)],
+    ],
     [
       'curl: extracts domain',
       'curl https://api.example.com/data',
@@ -912,6 +937,13 @@ describe('extractShellOperationsAcrossCommand', () => {
       'cd "$QWEN_HOME" && echo hi 1>/tmp/out.txt',
       'cd "$QWEN_HOME" && echo hi >&/tmp/out.txt',
       'cd "$QWEN_HOME" && echo hi 1>&/tmp/out.txt',
+      // `>|` is the same write as `>`, so it must reach the same verdict: the
+      // bare `>` alternative matched first here and left `|/tmp/out.txt`
+      // behind, which is not shell-absolute, so this form alone came out
+      // `pathMayDependOnCwd: true`.
+      'cd "$QWEN_HOME" && echo hi >|/tmp/out.txt',
+      'cd "$QWEN_HOME" && echo hi 1>|/tmp/out.txt',
+      'cd "$QWEN_HOME" && echo hi 2>|/tmp/out.txt',
     ]) {
       expect(across(command)).toEqual([uncertainWrite('/tmp/out.txt', false)]);
     }

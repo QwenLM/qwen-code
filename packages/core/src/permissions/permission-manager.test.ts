@@ -862,6 +862,11 @@ describe('splitCompoundCommand', () => {
       'cat >\r\necho hi',
       ['cat >\r', 'echo hi'],
     ],
+    [
+      'a CR target behind the clobber operator',
+      'cat >|\r\necho hi',
+      ['cat >|\r', 'echo hi'],
+    ],
   ])('splits on a newline with %s', async (_label, command, parts) => {
     expect(split(command)).toEqual(parts);
   });
@@ -3484,6 +3489,16 @@ describe('PermissionManager — compound shell write attribution', () => {
 
   it('deny rule matches a write after `cd` into a subdir', async () => {
     const ctx = sh("cd .qwen && echo '{}' > settings.json", '/repo');
+    expect(await repoPm(denySettings).evaluate(ctx)).toBe('deny');
+  });
+
+  // B1: a `|` inside the redirect operator is a filename character. Before the
+  // syntax mask included `|`, `>"|/../".qwen/settings.json` was read as the `>|`
+  // clobber and the reported target lost its leading `|`, so `|/../X`
+  // normalised to `X` and this deny never matched while the same write was
+  // denied on base.
+  it('deny rule matches a write hidden behind a quoted clobber operator', async () => {
+    const ctx = sh('echo \'{}\' >"|/../".qwen/settings.json', '/repo');
     expect(await repoPm(denySettings).evaluate(ctx)).toBe('deny');
   });
 

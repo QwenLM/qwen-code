@@ -477,8 +477,9 @@ function fdRedirectFile(word: string): string | undefined {
  *
  * Handles:
  *   `> file`   `>> file`  `< file`   (with or without space)
+ *   `>| file`  `N>| file`            (the clobber override: same write as `>`)
  *   `2> file`  `2>> file` `&> file`  `&>> file`
- *   Combined forms: `>file`, `>>file`, `1>file`, `2>/dev/null`
+ *   Combined forms: `>file`, `>>file`, `1>file`, `2>/dev/null`, `>|file`
  *
  * `fdRedirects` holds the indices that `tokenize` found to start with an
  * unquoted `>&`, `N>&` or `<&`, and `fdCloses` those of them that close the
@@ -504,7 +505,15 @@ function extractRedirects(
         : tok
             .split('')
             .map((character, index) =>
-              '<>&'.includes(character) && tokBare[index] !== '1'
+              // `|` belongs here: `>"|"file` and `>\|file` are plain writes to
+              // a file whose name starts with `|`, not shell pipes. Leaving it
+              // un-masked made the quoted form read as the `>|` clobber, and the
+              // reported target lost its leading `|` — `>"|/../".qwen/settings.json`
+              // normalised to `.qwen/settings.json`, which bypassed the deny.
+              // Masking keeps the pipe visible to bash but out of the syntax
+              // match, so the quoted forms fall back to the existing `>` branch
+              // and the target is sliced from the original token, as on base.
+              '<>&|'.includes(character) && tokBare[index] !== '1'
                 ? '\0'
                 : character,
             )
@@ -2719,7 +2728,11 @@ function hasAbsolutePathTokenForOperation(
     // relative `&/tmp/x`) can't match by mistake: the resolved path must
     // equal the operation's path.
     const redirectTarget = token.match(
-      /^(?:1>>|[12]?>&|<&|1>|>>|>|2>>|2>|&>>|&>|<)([\s\S]+)$/,
+      // `>|` / `N>|` are the clobber spellings and must be tried before the
+      // bare `>` alternatives, or `>|/abs/p.txt` yields `|/abs/p.txt` — not a
+      // shell-absolute path, so a `cd $D && … >|/abs/p.txt` was flagged
+      // `pathMayDependOnCwd` while the `>` form was not.
+      /^(?:1>>|[12]?>\||[12]?>&|<&|1>|>>|>|2>>|2>|&>>|&>|<)([\s\S]+)$/,
     )?.[1];
     const candidate = redirectTarget ?? token;
     if (

@@ -987,7 +987,10 @@ function isAsyncOperator(command: string, index: number): boolean {
  * shape and is still dropped as a line ending.
  */
 const CR_IS_WHOLE_REDIRECT_TARGET =
-  /(^|[ \t])(?:<<-?|1>>|1>|>>|>|2>>|2>|&>>|&>|<)\r$/;
+  // `>|` / `N>|` before the bare `>` alternatives: `cat >|\r\necho hi` names the
+  // file `\r` exactly as `>` does, and missing it dropped the target while
+  // leaving `>|` behind as a positional, which became a pseudo-operation.
+  /(^|[ \t])(?:<<-?|[12]?>\||1>>|1>|>>|>|2>>|2>|&>>|&>|<)\r$/;
 
 /**
  * One segment of a compound command, together with the operator that ended it.
