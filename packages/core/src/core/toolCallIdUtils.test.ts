@@ -15,6 +15,7 @@ import {
   getToolCallFingerprint,
   isReplayOfHandledToolCall,
   normalizeModelToolCallIds,
+  PROVIDER_TOOL_CALL_ID_METADATA,
   recordHandledToolCall,
   reserveModelToolCallId,
 } from './toolCallIdUtils.js';
@@ -80,6 +81,7 @@ describe('toolCallIdUtils', () => {
           name: 'read_file',
           args: { file_path: 'b.ts' },
         },
+        partMetadata: { [PROVIDER_TOOL_CALL_ID_METADATA]: 'dup_id_0001' },
       },
       { text: 'done' },
     ]);
@@ -87,6 +89,12 @@ describe('toolCallIdUtils', () => {
       'dup_id_0001',
     );
     expect(seenIds.has('dup_id_0001__qwen_dup_2')).toBe(true);
+    const compactedIds = collectToolCallIdsFromHistory([
+      { role: 'model', parts: normalized },
+    ]);
+    expect(reserveModelToolCallId('dup_id_0001', compactedIds, new Map())).toBe(
+      'dup_id_0001__qwen_dup_3',
+    );
   });
 
   it('generates stable non-empty ids for missing functionCall ids', () => {

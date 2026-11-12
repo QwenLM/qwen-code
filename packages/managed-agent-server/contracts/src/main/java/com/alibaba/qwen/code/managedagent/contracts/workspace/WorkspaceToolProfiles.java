@@ -6,6 +6,12 @@ public final class WorkspaceToolProfiles {
     public static final String FILES = "hosted-workspace-files/1";
     public static final String MCP = "hosted-workspace-mcp/1";
     public static final String SHELL = "hosted-workspace-shell/1";
+    /**
+     * Self-paced /loop revision: `shell/1` plus loop_wakeup and the cron
+     * union. `shell/2` was retired by the unified Shell lifecycle (#15330)
+     * and is deliberately not reused.
+     */
+    public static final String SHELL_V3 = "hosted-workspace-shell/3";
     /** #15076: `files/3` adds `todo_write`; enabling it is a rollout decision. */
     public static final String FILES_V3 = "hosted-workspace-files/3";
     public static final String INTERNAL_TEAM_LEAD = "hosted-workspace-team-lead/1";
@@ -19,7 +25,7 @@ public final class WorkspaceToolProfiles {
     }
 
     public static boolean isPublicShell(String profile) {
-        return SHELL.equals(profile);
+        return SHELL.equals(profile) || SHELL_V3.equals(profile);
     }
 
     public static boolean isShellOrMcp(String profile) {
@@ -31,7 +37,7 @@ public final class WorkspaceToolProfiles {
         if (FILES.equals(profile)) {
             return 1;
         }
-        if (SHELL.equals(profile) || MCP.equals(profile)) {
+        if (SHELL.equals(profile) || SHELL_V3.equals(profile) || MCP.equals(profile)) {
             return 2;
         }
         return 0;
