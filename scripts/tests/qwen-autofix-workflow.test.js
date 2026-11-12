@@ -1342,6 +1342,15 @@ describe('qwen-autofix workflow', () => {
     const INFRA_SIGNATURES =
       workflow.match(/INFRA_FAILURE_SIGNATURES: '([^']*)'/)?.[1] ?? '';
     expect(INFRA_SIGNATURES).toContain('lost communication with the server');
+    // The deterministic configuration class is a separate list: its members
+    // must be absent from the rerun class, and an empty extraction would make
+    // the skip branch match every annotation, so guard it here too.
+    const CONFIG_SIGNATURES =
+      workflow.match(/CONFIG_FAILURE_SIGNATURES: '([^']*)'/)?.[1] ?? '';
+    expect(CONFIG_SIGNATURES).toContain('HOST_LOAD_MAX_RATIO');
+    for (const token of CONFIG_SIGNATURES.split('|')) {
+      expect(INFRA_SIGNATURES).not.toContain(token);
+    }
 
     const run = ({
       checks,
@@ -1400,6 +1409,7 @@ describe('qwen-autofix workflow', () => {
             REVIEW_PR_LIVE: reviewLive ? 'true' : 'false',
             CHECKS_JSON: JSON.stringify(checks),
             INFRA_FAILURE_SIGNATURES: INFRA_SIGNATURES,
+            CONFIG_FAILURE_SIGNATURES: CONFIG_SIGNATURES,
             PATH: `${bin}:${process.env.PATH}`,
           },
           encoding: 'utf8',
@@ -1431,6 +1441,25 @@ describe('qwen-autofix workflow', () => {
       run({
         checks: [FAIL],
         annotations: 'sdk-java host lock not acquired within 40 minutes',
+      }),
+    ).toEqual({ reran: true, continued: true });
+    // A malformed repository variable is deterministic: a re-run fails
+    // identically, so the scan must not rerun it — and must not spend an agent
+    // round on a typo no branch can fix either. It skips the PR for a human
+    // while the gate's own refusal, which a re-run can move off the host,
+    // stays in the rerun class (#16987 R1-1).
+    expect(
+      run({
+        checks: [FAIL],
+        annotations:
+          "::error::HOST_LOAD_MAX_RATIO must be a positive number or 'off', got '0'",
+      }),
+    ).toEqual({ reran: false, continued: true });
+    expect(
+      run({
+        checks: [FAIL],
+        annotations:
+          '::error::Host load gate breached on ecs-qwen-hk1-4: five-minute load 145.00 on 64 CPUs',
       }),
     ).toEqual({ reran: true, continued: true });
     // A REAL failure (no infra signature in the annotation) → never rerun; the
