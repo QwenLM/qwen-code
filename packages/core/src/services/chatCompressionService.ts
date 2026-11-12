@@ -146,10 +146,7 @@ export const HARD_BUFFER = 3_000;
  */
 export const MAX_CONSECUTIVE_FAILURES = 3;
 
-function estimatePostCompactTokens(
-  contents: Content[],
-  imageTokenEstimate: number,
-): number {
+function estimatePostCompactCjkCorrection(contents: Content[]): number {
   const texts: string[] = [];
   const parts = contents.flatMap((content) => content.parts ?? []);
   for (const part of parts) {
@@ -167,11 +164,7 @@ function estimatePostCompactTokens(
     }
   }
   const text = texts.join('');
-  return (
-    estimateContentTokens(contents, imageTokenEstimate) +
-    estimateCjkTextTokens(text) -
-    Math.ceil(text.length / CHARS_PER_TOKEN)
-  );
+  return estimateCjkTextTokens(text) - Math.ceil(text.length / CHARS_PER_TOKEN);
 }
 
 /**
@@ -1306,6 +1299,7 @@ export class ChatCompressionService {
 
       // Use the new composer — assembles summary + ack + file restores +
       // image restore. No tail preservation, no continuation bridge.
+      let restoredBlockCount = 0;
       try {
         extraHistory = await composePostCompactHistory(
           historyForCompose,
@@ -1332,6 +1326,9 @@ export class ChatCompressionService {
                 : tuning.maxRecentFiles,
             maxImages: opts.requestPayloadTooLarge ? 0 : tuning.maxRecentImages,
             imageTokenEstimate: slimmingConfig.imageTokenEstimate,
+            onRestoredBlocks: (count) => {
+              restoredBlockCount = count;
+            },
             // Restore plan-mode reminder + running-subagent snapshot so the
             // post-compact agent does not lose either piece of mid-session
             // state. Both reduce to no-ops when the corresponding source is
@@ -1483,19 +1480,14 @@ export class ChatCompressionService {
       // The published count already carries pending results at char/4.
       // Apply CJK corrections only to this gate so the inflation guard keeps
       // comparing counts on the same basis as originalTokenCount.
-      const pendingTokenCorrection =
-        estimatePostCompactTokens(
-          visiblePendingHistory,
-          slimmingConfig.imageTokenEstimate,
-        ) - pendingToolResultTokenCount;
+      const pendingTokenCorrection = estimatePostCompactCjkCorrection(
+        visiblePendingHistory,
+      );
       const restorationTokenCorrection =
-        estimatePostCompactTokens(
-          restoredHistory,
-          slimmingConfig.imageTokenEstimate,
-        ) - restorationTokenCount;
+        estimatePostCompactCjkCorrection(restoredHistory);
       if (
         canCalculateNewTokenCount &&
-        extraHistory.length > 2 &&
+        restoredBlockCount > 0 &&
         newTokenCount + pendingTokenCorrection + restorationTokenCorrection >=
           restorationThreshold
       ) {
@@ -1534,6 +1526,7 @@ export class ChatCompressionService {
               `${tokenCountBeforeDroppingRestoration} + ${pendingTokenCorrection} pending CJK correction ` +
               `+ ${restorationTokenCorrection} restoration CJK correction ` +
               `reached the auto threshold ${restorationThreshold}; ` +
+              `removed ${restoredBlockCount} restoration blocks; ` +
               `post-compression count ${tokenCountBeforeDroppingRestoration} -> ${newTokenCount}`,
           );
         extraHistory = withoutRestoration;

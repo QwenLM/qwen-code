@@ -616,6 +616,8 @@ export interface ComposePostCompactOptions {
   fileTokenBudget?: number;
   /** Per-image cost shared with compression token accounting. */
   imageTokenEstimate?: number;
+  /** Reports attached file/reference blocks plus the optional image block. */
+  onRestoredBlocks?: (count: number) => void;
   /**
    * Max recent images to restore. Defaults to
    * `POST_COMPACT_MAX_IMAGES_TO_RESTORE`. Configurable via
@@ -892,5 +894,6 @@ export async function composePostCompactHistory(
     out.push({ role: 'model', parts: ackParts });
   }
 
+  options.onRestoredBlocks?.(fileBlocks.length + (imageBlock ? 1 : 0));
   return out;
 }

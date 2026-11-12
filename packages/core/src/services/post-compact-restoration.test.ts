@@ -25,7 +25,8 @@ import {
 } from './chatCompressionService.js';
 import { ApprovalMode } from '../config/config.js';
 import { buildFileRestorationBlocks } from './postCompactAttachments.js';
-import { estimateContentTokens } from './tokenEstimation.js';
+import * as tokenEstimation from './tokenEstimation.js';
+import * as postCompactAttachments from './postCompactAttachments.js';
 import * as sideQuery from '../utils/sideQuery.js';
 
 vi.mock('../telemetry/loggers.js');
@@ -386,14 +387,106 @@ function compressionFixture(
   return { files, history, config, logger, summary, run };
 }
 
+it('estimates the restored-content base once', async () => {
+  const estimate = vi.spyOn(tokenEstimation, 'estimateContentTokens');
+  const { run } = compressionFixture();
+  const result = await run();
+  const restored = result.newHistory!.slice(2);
+  expect(restored).not.toHaveLength(0);
+  const calls = estimate.mock.calls.filter(
+    ([contents]) =>
+      contents.length === restored.length &&
+      contents.every((entry, index) => entry === restored[index]),
+  );
+  expect(calls).toHaveLength(1);
+});
+
 it.each([
-  ['total', 'test-model'],
-  ['input', 'test-model'],
-  ['total', 'compact-model'],
-  ['input', 'compact-model'],
+  { plan: true, agent: false },
+  { plan: false, agent: true },
+  { plan: true, agent: true },
+])(
+  'keeps reminders without attempting attachment removal %j',
+  async ({ plan, agent }) => {
+    const { config, logger, run } = compressionFixture(16_000, 0);
+    vi.spyOn(config, 'getApprovalMode').mockReturnValue(
+      plan ? ApprovalMode.PLAN : ApprovalMode.DEFAULT,
+    );
+    Object.assign(config, {
+      getBackgroundTaskRegistry: () => ({
+        getAll: () =>
+          agent
+            ? [
+                {
+                  kind: 'agent',
+                  isBackgrounded: true,
+                  status: 'running',
+                  id: 'background-agent',
+                  description: 'Continue analysis',
+                  startTime: 0,
+                },
+              ]
+            : [],
+      }),
+    });
+    const compose = vi.spyOn(
+      postCompactAttachments,
+      'composePostCompactHistory',
+    );
+    const result = await run({ originalTokenCount: 40_000 });
+    expect(result.info.newTokenCount).toBeGreaterThan(
+      computeThresholds(16_000).auto,
+    );
+    expect(result.text.includes('<plan-mode-active>')).toBe(plan);
+    expect(result.text.includes('background-agent')).toBe(agent);
+    expect(compose).toHaveBeenCalledTimes(1);
+    expect(logger.debug).not.toHaveBeenCalledWith(
+      expect.stringContaining('dropped restored files and images'),
+    );
+  },
+);
+
+it('drops a references-only block while preserving reminders and a pending call', async () => {
+  const { files, history, config, logger, run } = compressionFixture(
+    16_000,
+    5,
+    '中',
+  );
+  vi.spyOn(config, 'getApprovalMode').mockReturnValue(ApprovalMode.PLAN);
+  history.push(content('model', fnCall('pending_tool', {}, 'pending-call')));
+  const compose = vi.spyOn(postCompactAttachments, 'composePostCompactHistory');
+  const result = await run({ originalTokenCount: 40_000, trigger: 'auto' });
+  expect(compose).toHaveBeenCalledTimes(2);
+  const initialHistory = await compose.mock.results[0].value;
+  const initialText = historyText(initialHistory);
+  for (const file of files) {
+    expect(initialText).toContain(file.path);
+    expect(initialText).not.toContain(file.body);
+    expect(result.text).not.toContain(file.path);
+  }
+  expect(result.text).toContain('<plan-mode-active>');
+  expect(result.newHistory?.at(-1)?.parts).toContainEqual(
+    expect.objectContaining({
+      functionCall: expect.objectContaining({ id: 'pending-call' }),
+    }),
+  );
+  expect(logger.debug).toHaveBeenCalledWith(
+    expect.stringContaining('removed 1 restoration blocks'),
+  );
+});
+
+it.each([
+  ['total', 'test-model', undefined],
+  ['input', 'test-model', undefined],
+  ['total', 'compact-model', undefined],
+  ['input', 'compact-model', undefined],
+  ['total', 'test-model', 'main-route'],
+  ['input', 'test-model', 'main-route'],
+  ['total', 'compact-model', 'main-route'],
+  ['input', 'compact-model', 'main-route'],
 ] as const)(
-  'bounds restoration against a server %s ceiling with summary model %s',
-  async (observedServerCeilingKind, compactionModel) => {
+  'bounds restoration against a server %s ceiling with summary model %s and route %s',
+  async (observedServerCeilingKind, compactionModel, requestRouteKey) => {
     const { files, config, summary, run } = compressionFixture(200_000, 9);
     Object.assign(config, { getCompactionModel: () => compactionModel });
     summary.mockResolvedValue({
@@ -404,6 +497,7 @@ it.each([
       originalTokenCount: 40_000,
       observedServerCeiling: 16_384,
       observedServerCeilingKind,
+      requestRouteKey,
     });
     expect(
       files.filter((file) => result.text.includes(file.body)),
@@ -522,7 +616,8 @@ it.each(['x', '中'])(
       trigger: 'auto',
       pendingUserMessage,
       originalTokenCount:
-        estimateContentTokens(history) + (character === 'x' ? 6000 : 8000),
+        tokenEstimation.estimateContentTokens(history) +
+        (character === 'x' ? 6000 : 8000),
     });
     expect(
       files.filter((file) => result.text.includes(file.body)),
@@ -629,6 +724,9 @@ it('logs the threshold, pending correction, and counts on attachment removal', a
   });
   expect(logger.debug).toHaveBeenCalledWith(
     expect.stringContaining('reached the auto threshold 13600'),
+  );
+  expect(logger.debug).toHaveBeenCalledWith(
+    expect.stringContaining('removed 3 restoration blocks'),
   );
   expect(logger.debug).toHaveBeenCalledWith(
     expect.stringContaining('5000 pending CJK correction'),
