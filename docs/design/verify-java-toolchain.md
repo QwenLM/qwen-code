@@ -153,7 +153,8 @@ database-backed integration tests under _Not covered_. A Java diff without
 The budget comment adds at most ~20 minutes for the toolchain, the restore,
 and the two capped `mvn install`s, and only on a Java diff. Worst case goes
 from ~180 minutes to ~200 minutes. `timeout-minutes` becomes 210, leaving
-the same 10 minutes of headroom.
+the same 10 minutes of headroom. The deepen-history step later added its own
+3-minute row, so the limit is now 213.
 
 ## Design decisions
 
@@ -205,9 +206,9 @@ the same 10 minutes of headroom.
   checksums, Maven pins shared with `sdk-java.yml` and the producer, the
   restore-only cache (same path, key, runner, and container), the stripped
   artifact set, `runuser` plus `timeout`, conditional agent environment, and
-  the 210-minute job limit.
+  the job limit (now 213 minutes).
 - `.github/scripts/qwen-triage-workflow.test.mjs` requires
-  `timeout-minutes >= 210`.
+  `timeout-minutes >= 213`.
 - A local `node:22-bookworm` rehearsal runs the download, the sibling
   install as `node`, and `mvn test` with only the agent environment.
 - After merge: two `/verify` runs on the same Java pull request. The second
