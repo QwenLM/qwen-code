@@ -30,8 +30,27 @@ void hook.release('login-1', 'peer-tab');
 // @ts-expect-error a per-call workspace must not be expressible either
 void hook.release('login-1', 'peer-tab', '/workspace-x');
 
+// The options-bag encoding has to be pinned too: a bare string would still be
+// rejected by `(name, options?: { clientId?: string })`, so a positional-only
+// pin would stay silent while a per-call id became expressible again.
+// @ts-expect-error a per-call client id must not be expressible as an option
+void hook.start('bot', { clientId: 'peer-tab' });
+// @ts-expect-error a per-call client id must not be expressible as an option
+void hook.state('login-1', { clientId: 'peer-tab' });
+// @ts-expect-error a per-call client id must not be expressible as an option
+void hook.cancel('login-1', { clientId: 'peer-tab' });
+// @ts-expect-error neither identity nor workspace may arrive as an option
+void hook.release('login-1', {
+  clientId: 'peer-tab',
+  workspaceCwd: '/workspace-x',
+});
+
 // The props that carry the handlers to the UI must not re-widen them.
 // @ts-expect-error the panel cannot attribute a login per call
 void panel.actions.start('bot', 'peer-tab');
+// @ts-expect-error the panel cannot attribute a login per call via an option
+void panel.actions.start('bot', { clientId: 'peer-tab' });
 // @ts-expect-error the editor cannot attribute a login per call
 void editor.qrLoginActions?.state('login-1', 'peer-tab');
+// @ts-expect-error the editor cannot attribute a login per call via an option
+void editor.qrLoginActions?.state('login-1', { clientId: 'peer-tab' });
