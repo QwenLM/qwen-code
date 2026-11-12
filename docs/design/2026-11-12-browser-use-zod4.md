@@ -131,6 +131,42 @@ resolve below `4.6.6`.
   of 8 levels × 8 children (2,097,152 nodes, ~131 MB of JSON) parses in about
   1 s. Work scales with input size rather than being amplified by the schema,
   and the 32-level depth cap still rejects deeper chains outright.
+- The bundled runtime grows about threefold. Same source tree, same esbuild
+  settings, only the resolved Zod swapped, measured from an esbuild metafile:
+
+  | `dist/index.js`   | Zod 3.25.76       | Zod 4.6.6          |
+  | ----------------- | ----------------- | ------------------ |
+  | total bytes       | 312,690           | 954,646            |
+  | Zod's share of it | 120,808 / 9 files | 751,128 / 95 files |
+
+  That is +641,956 B (~627 KB), of which 630,320 B is Zod itself. Half the
+  emitted runtime is code this package never executes:
+
+  | never called from here             | bytes in the output | share |
+  | ---------------------------------- | ------------------- | ----- |
+  | all 64 `v4/locales/*` translations | 366,095             | 38%   |
+  | `compile` + JSON-Schema conversion | 109,630             | 11%   |
+
+  The locales dominate, and they survive tree-shaking because
+  `zod/v4/classic/external.js` ends with `export * as locales from
+"../locales/index.js"` — a namespace re-export whose members cannot be
+  dropped individually. The same barrel re-exports `compile`, `toJSONSchema`
+  and `fromJSONSchema` unconditionally. Zod 3 shipped one English locale
+  inline, so this whole category is new with the major.
+
+  Searching the emitted file for non-English text finds nothing and is
+  misleading: esbuild writes those strings as `\uXXXX` escapes, so the file
+  has only 5 non-ASCII characters while carrying every translation. The
+  metafile's per-input `bytesInOutput` is what shows the cost.
+
+  Nothing gates this artifact's size — no byte ceiling in the asset-copy path
+  and no size assertion in the guard file — so the cost is download and load
+  size inside the bundled skill runtime, not a hard limit. Trimming it is out
+  of scope here: a narrower entry point does not drop either category, and
+  removing them would mean deep-importing internals or an esbuild alias,
+  trading a pinned public entry for a private one. That is a separate decision
+  needing its own measurement, and the alternative is shipping an
+  advisory-affected Zod.
 
 ## Validation plan
 
@@ -145,6 +181,14 @@ scripts/tests/browser-use-assets.test.js` for the new pin assertion, and
 - Run `npx tsc --noEmit` in `packages/browser-use`.
 - Confirm a `--frozen-lockfile` install succeeds and that this importer resolves
   Zod 4.
+- To re-measure the size cost in the Risks section, build this entry point with
+  `metafile: true` and the same options as `build.mjs` (`packages: 'bundle'`,
+  `external: ['playwright-core', 'playwright-core/*']`, `target: 'node22'`,
+  `format: 'esm'`), then sum `bytesInOutput` over the metafile inputs under
+  `node_modules/zod/`. For the Zod 3 side, resolve that major through its ESM
+  entry (`zod/index.js`) as well: an esbuild `alias` to the package directory
+  bypasses `exports` and picks the CommonJS build, which is not a like-for-like
+  comparison.
 
 ### Verified results
 
@@ -193,3 +237,7 @@ scripts/tests/browser-use-assets.test.js` for the new pin assertion, and
   depend on an upstream fix.
 - Whether the `shadcn` development path should also move off Zod 3. That is
   separate from the shipped-artifact concern this change addresses.
+- Whether the ~465 KB of bundled Zod that this package never executes (the 64
+  locales and the compile/JSON-Schema paths) is worth reclaiming, and by what
+  mechanism. Any answer has to keep a public entry point rather than
+  deep-importing Zod internals, and needs its own measurement.

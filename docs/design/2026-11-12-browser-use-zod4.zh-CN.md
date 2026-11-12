@@ -105,6 +105,37 @@ GHSA-mrhx-c7xc-m3w5 的版本），并要求 lockfile 中该 importer 解析出�
 - 对非常宽的 plan，单节点开销会上升，这在任何校验器上都一样：8 层 × 8 子节点
   （2,097,152 个节点、约 131 MB JSON）的 plan 约 1 s 完成解析。开销随输入体积线性增长，
   并未被 schema 放大，且 32 层深度上限仍会直接拒绝更深的链。
+- 打包后的运行时体积约增至三倍。同一棵源码树、同样的 esbuild 配置，只替换解析到的
+  Zod，用 esbuild metafile 测量：
+
+  | `dist/index.js` | Zod 3.25.76        | Zod 4.6.6           |
+  | --------------- | ------------------ | ------------------- |
+  | 总字节数        | 312,690            | 954,646             |
+  | 其中 Zod 占比   | 120,808 / 9 个文件 | 751,128 / 95 个文件 |
+
+  即增加 641,956 B（约 627 KB），其中 630,320 B 来自 Zod 本身。产出的运行时有一半是
+  本包从不执行的代码：
+
+  | 本包从不调用                   | 产物中的字节数 | 占比 |
+  | ------------------------------ | -------------- | ---- |
+  | 全部 64 个 `v4/locales/*` 翻译 | 366,095        | 38%  |
+  | `compile` + JSON-Schema 转换   | 109,630        | 11%  |
+
+  其中 locale 占主导，而它们之所以没被 tree-shaking 去掉，是因为
+  `zod/v4/classic/external.js` 末尾有 `export * as locales from
+"../locales/index.js"` —— namespace re-export 的成员无法被逐个剔除。同一个 barrel
+  也无条件 re-export 了 `compile`、`toJSONSchema` 与 `fromJSONSchema`。Zod 3 只内联一份
+  英文 locale，所以这整类开销是随该主版本新增的。
+
+  在产出文件里搜索非英文文案会一无所获，而这个判据是误导性的：esbuild 把这些字符串写成
+  `\uXXXX` 转义，因此文件里只有 5 个非 ASCII 字符，却携带了每一份翻译。真正能显示这项
+  开销的是 metafile 中每个输入文件的 `bytesInOutput`。
+
+  没有任何门禁约束该产物体积（资源拷贝路径没有字节上限，防护文件里也没有体积断言），
+  因此代价是随打包 skill 运行时交付的下载与加载体积，而不是硬限制。裁剪不在本次范围内：
+  换更窄的入口并不能去掉上述任一类；要去掉就得深导入内部路径或加 esbuild alias，那是用
+  「钉住公开入口」换「依赖私有入口」。这是需要独立测量的另一个决策，而其替代方案是继续
+  交付受公告影响的 Zod。
 
 ## 验证计划
 
@@ -116,6 +147,12 @@ scripts/tests/browser-use-assets.test.js` 验证新增的 pin 断言，并确认
   `^3.25.76` 时它会失败。
 - 在 `packages/browser-use` 中运行 `npx tsc --noEmit`。
 - 确认 `--frozen-lockfile` 安装成功，且该 importer 解析到 Zod 4。
+- 若要复测「风险」段的体积代价，可用 `metafile: true` 以及与 `build.mjs` 相同的选项
+  （`packages: 'bundle'`、`external: ['playwright-core', 'playwright-core/*']`、
+  `target: 'node22'`、`format: 'esm'`）构建该入口，再对 metafile 中位于
+  `node_modules/zod/` 下的输入累加 `bytesInOutput`。Zod 3 一侧同样要经由它的 ESM 入口
+  （`zod/index.js`）解析：用 esbuild `alias` 指向包目录会绕过 `exports` 而选到 CommonJS
+  构建，那不是对等口径的对照。
 
 ### 已验证结果
 
@@ -154,3 +191,6 @@ scripts/tests/browser-use-assets.test.js` 验证新增的 pin 断言，并确认
 - 是否把 `z.lazy()` 第二次 parse 的行为上报给上游 `colinhacks/zod`。仓库内的缓解已经到位，
   本次改动不依赖上游修复。
 - `shadcn` 开发路径是否也应移出 Zod 3。这与本次改动所解决的发布产物问题相互独立。
+- 本包从不执行的那约 465 KB 打包 Zod（64 个 locale 以及 compile/JSON-Schema 路径）
+  是否值得回收，以及用什么机制。任何方案都必须保留公开入口，而不是深导入 Zod 内部
+  路径，且需要自己的测量。
