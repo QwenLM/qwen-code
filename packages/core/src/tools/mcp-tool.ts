@@ -537,13 +537,17 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
       if (!tornDown) {
         return;
       }
-      detach();
       // A server its owner is stopping on purpose must stay stopped:
       // resurrecting it would leave a connected but untracked transport that
-      // nothing ever closes.
+      // nothing ever closes. Keep the listener armed for this one: the
+      // teardown may belong to a sibling connection that shares the name, and
+      // detaching here would spend this invocation's only listener on someone
+      // else's transition — the later drop that is this abort's damage would
+      // then never be repaired. The expiry still bounds the listener.
       if (isMCPServerTeardownIntent(this.serverName)) {
         return;
       }
+      detach();
       // Best-effort and detached from the caller: `attemptReconnect` needs
       // this invocation only for its name and config, and a late failure must
       // not surface anywhere.
