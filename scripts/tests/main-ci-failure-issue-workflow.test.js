@@ -2698,6 +2698,56 @@ printf '%s\\n' '{"jobs":[]}'
       );
     });
 
+    it('reruns on a disk floor refusal but files on its own malformed floor', () => {
+      // The disk floor gate is the same "re-run me" class as the host load
+      // gate, and it was missing from both lists while its sibling was
+      // present. Measured 2026-11-12: /tmp on the host behind
+      // ecs-qwen-hz3-10/hz3-12 held 10,3xx free inodes against a 100,000
+      // floor, so `web-shell E2E Smoke (shard 1/2)` failed at the gate on
+      // two PRs (#17022, #17011) before installing anything — every step
+      // after it skipped. A re-run lands on a host with headroom; an agent
+      // round cannot fix another machine's inode count.
+      //
+      // The inode arm is the one that reads as a code failure: the volume
+      // still reports 105 GiB free at 15% used, so neither `ENOSPC` nor
+      // `No space left on device` appears anywhere in the annotation.
+      for (const breach of [
+        '::error::Disk floor breached on ecs-qwen-hz3-12: /tmp has 10300 free inodes, below the 100000 floor. Failing before the heavy step instead of dying on ENOSPC mid-run — re-run the job to land on a host with headroom.',
+        '::error::Disk floor breached on ecs-qwen-hz3-10: /tmp has 1048576 KiB free, below the 2097152 KiB floor. Failing before the heavy step instead of dying on ENOSPC mid-run — re-run the job to land on a host with headroom.',
+        '::error::Disk floor breached on ecs-qwen-hk1-4: /data is 95% used, at or above the 94% ceiling.',
+      ]) {
+        expect(
+          new RegExp(infraStep.env.INFRA_FAILURE_SIGNATURES, 'i').test(breach),
+          breach,
+        ).toBe(true);
+      }
+      // A malformed floor is the opposite: the repository variable cannot
+      // change between attempts, so a re-run fails identically and the
+      // record belongs in an issue. These are check-disk-floor.sh's own
+      // messages, and none may contain the breach phrase.
+      const autofix = parse(
+        readFileSync('.github/workflows/qwen-autofix.yml', 'utf8'),
+      );
+      for (const annotation of [
+        '::error::DISK_FLOOR_MIN_FREE_KB must be a non-negative integer of at most 18 digits',
+        '::error::DISK_FLOOR_MIN_FREE_INODES must be a non-negative integer of at most 18 digits',
+        '::error::DISK_FLOOR_MAX_USED_PCT must be a percentage between 1 and 100',
+      ]) {
+        expect(
+          new RegExp(infraStep.env.INFRA_FAILURE_SIGNATURES, 'i').test(
+            annotation,
+          ),
+          annotation,
+        ).toBe(false);
+        expect(
+          new RegExp(autofix.env.CONFIG_FAILURE_SIGNATURES, 'i').test(
+            annotation,
+          ),
+          annotation,
+        ).toBe(true);
+      }
+    });
+
     it('recognises the CI configuration errors as infrastructure', () => {
       // A mistyped repository variable fails before any suite runs. Both
       // classifiers must see it as infrastructure, or a variable typo files a

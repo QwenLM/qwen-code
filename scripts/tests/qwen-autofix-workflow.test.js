@@ -1493,6 +1493,34 @@ describe('qwen-autofix workflow', () => {
           '::error::Host load gate breached on ecs-qwen-hk1-4: five-minute load 145.00 on 64 CPUs',
       }),
     ).toEqual({ reran: true, continued: true });
+    // The disk floor gate is the same class, and was missing while its
+    // sibling was here. Measured 2026-11-12: /tmp on the host behind
+    // ecs-qwen-hz3-10/hz3-12 was at 10,3xx free inodes against the 100,000
+    // floor, failing `web-shell E2E Smoke` at the gate on #17022 and #17011
+    // with every later step skipped. The inode arm is the one that reads as
+    // code: 105 GiB still free at 15% used, so no ENOSPC text appears at all
+    // and only the gate's own phrase identifies it. An agent cannot fix
+    // another host's inode count; a re-run can land elsewhere.
+    expect(
+      run({
+        checks: [FAIL],
+        annotations:
+          '::error::Disk floor breached on ecs-qwen-hz3-12: /tmp has 10300 free inodes, below the 100000 floor. Failing before the heavy step instead of dying on ENOSPC mid-run — re-run the job to land on a host with headroom.',
+      }),
+    ).toEqual({ reran: true, continued: true });
+    // …but its OWN malformed floor is deterministic, like the host load
+    // gate's: the variable cannot change between attempts, so this is a
+    // human's configuration fix and never a rerun.
+    for (const annotation of [
+      '::error::DISK_FLOOR_MIN_FREE_KB must be a non-negative integer of at most 18 digits',
+      '::error::DISK_FLOOR_MIN_FREE_INODES must be a non-negative integer of at most 18 digits',
+      '::error::DISK_FLOOR_MAX_USED_PCT must be a percentage between 1 and 100',
+    ]) {
+      expect(run({ checks: [FAIL], annotations: annotation })).toEqual({
+        reran: false,
+        continued: true,
+      });
+    }
     // A REAL failure (no infra signature in the annotation) → never rerun; the
     // agent/human handles it. This is the gate that stops masking real bugs.
     expect(
