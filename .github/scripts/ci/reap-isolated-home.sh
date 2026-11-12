@@ -53,6 +53,14 @@ DRY_RUN="${REAP_DRY_RUN:-}"
 # Unique per invocation, not the pid: a daemon whose pid was reused from an
 # earlier reaper run would otherwise carry a matching marker and be skipped.
 SELF_MARKER="${REAP_SELF_MARKER:-$$-$(date +%s%N 2>/dev/null)-${RANDOM}${RANDOM}}"
+# Exported, not just set: `carries_marker` reads the marker out of
+# `/proc/<pid>/environ`, so only a variable in the child's ENVIRONMENT can
+# exclude the helpers this script spawns (`cat`, `tr`, `grep`, and the daemons a
+# lane leaves behind). Unexported, the marker was invisible to that scan in
+# production — the workflows never pass `REAP_SELF_MARKER` — and self-exclusion
+# rested only on the helper's short lifetime relative to the glob expanding
+# before the loop. Exporting makes the protection independent of that timing.
+export REAP_SELF_MARKER="$SELF_MARKER"
 
 # The removal happens even when the reap is skipped or declines: the reap is an
 # improvement on the removal, never a precondition for it.

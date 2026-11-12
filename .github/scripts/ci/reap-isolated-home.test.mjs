@@ -5,6 +5,7 @@ import {
   existsSync,
   mkdtempSync,
   mkdirSync,
+  readFileSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -243,6 +244,20 @@ describe('reap-isolated-home selection', () => {
       assert.equal(r.status, 0);
       assert.deepEqual(reaped(r), [801]);
     });
+  });
+
+  it('exports the marker so helpers inherit it, rather than relying on timing', () => {
+    // `carries_marker` reads the marker out of /proc/<pid>/environ, so the
+    // variable has to be EXPORTED to reach the helpers this script spawns. It
+    // was set and never exported, and no workflow passes REAP_SELF_MARKER, so
+    // in production the marker matched nothing and self-exclusion rested only
+    // on the glob expanding before the helpers start — a timing invariant, not
+    // a guard. A behavioural test cannot see the difference here (the value is
+    // generated inside the script and the fabricated procs would have to know
+    // it in advance), so this pins the line itself, which is also what a
+    // "remove the unused variable" cleanup would drop.
+    const script = readFileSync(SCRIPT, 'utf8');
+    assert.match(script, /^export REAP_SELF_MARKER="\$SELF_MARKER"$/m);
   });
 
   it('reports the selection and signals nothing under REAP_DRY_RUN', () => {
