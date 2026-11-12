@@ -1477,9 +1477,16 @@ test('every legal spelling of continue-on-error is refused', () => {
   }
   // Flow style: the whole step becomes one mapping on one line, so there is no
   // `        continue-on-error:` line to find at any indentation.
+  // The whole step has to become the flow mapping: folding just the header
+  // leaves the block keys below it and the document stops parsing, which would
+  // trip the parse guard instead of the fatality pin this case is about. Scoped
+  // through the job's own span so a moved step reddens rather than yielding a
+  // no-op fixture.
   const flow = lintJobEdit((job) => {
     const at = job.indexOf("      - name: 'Check lint gate freshness'");
-    const next = job.indexOf('\n      - name:', at + 1);
+    assert.ok(at > 0, 'the gate step must be present');
+    const next = job.indexOf("\n      - name: '", at + 1);
+    assert.ok(next > at, 'the gate step must be followed by another step');
     return (
       job.slice(0, at) +
       "      - { name: 'Check lint gate freshness', continue-on-error: true, run: 'true' }" +
@@ -1487,6 +1494,19 @@ test('every legal spelling of continue-on-error is refused', () => {
     );
   });
   assert.notEqual(flow, realCi, 'flow-style fixture did not apply');
+  // The fixture must be legal YAML with the key actually set, or the case would
+  // pass by tripping the parse guard while proving nothing about flow style.
+  const flowDocument = parseDocument(flow, { uniqueKeys: true });
+  assert.equal(flowDocument.errors.length, 0, 'the flow fixture must parse');
+  assert.equal(
+    flowDocument
+      .toJS()
+      .jobs.lint_and_static.steps.find(
+        (step) => step.name === 'Check lint gate freshness',
+      )['continue-on-error'],
+    true,
+    'the flow fixture must really carry the key',
+  );
   assert.throws(
     () =>
       assertNoContinueOnError(
