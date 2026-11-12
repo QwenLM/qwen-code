@@ -13017,10 +13017,55 @@ describe('ACP WebSocket transport security', () => {
       'origin-not-allowed chrome-extension://abcdefghijklmnop',
     );
 
-    // A different reason is a different failure and still gets its own line.
+    // The key is the rejection category, not the rendered reason: a client
+    // that varies the Origin would otherwise mint a fresh key per attempt and
+    // never be throttled. The distinct detail is therefore folded into the
+    // same window, but the next emitted line still names the attempt count.
     const otherOrigin = await wsConnectRaw('127.0.0.1', 'https://evil.com');
     expect(otherOrigin.code).toBe(403);
-    expect(rejections().length - before).toBe(2);
+    expect(rejections().length - before).toBe(1);
+
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(Date.now() + 61_000);
+      expect(
+        (await wsConnectRaw('127.0.0.1', 'chrome-extension://abcdefghijklmnop'))
+          .code,
+      ).toBe(403);
+      expect(rejections().length - before).toBe(2);
+      expect(String(rejections().at(-1)![0])).toContain(
+        '(5 similar suppressed since the last line)',
+      );
+      // The detail is still reported on the line that does get written.
+      expect(String(rejections().at(-1)![0])).toContain(
+        'origin-not-allowed chrome-extension://abcdefghijklmnop',
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('logs an upgrade rejection again when the wall clock steps backwards', async () => {
+    await startServer();
+    const origin = 'chrome-extension://abcdefghijklmnop';
+    const rejections = () =>
+      stdioMocks.writeStderrLine.mock.calls.filter(([line]) =>
+        String(line).includes('WebSocket upgrade rejected'),
+      );
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      expect((await wsConnectRaw('127.0.0.1', origin)).code).toBe(403);
+      const before = rejections().length;
+
+      // A backwards NTP step makes `now - last` negative; without the clamp
+      // that satisfies `< interval` and pins the key suppressed until wall
+      // time catches back up.
+      vi.setSystemTime(Date.now() - 120_000);
+      expect((await wsConnectRaw('127.0.0.1', origin)).code).toBe(403);
+      expect(rejections().length).toBeGreaterThan(before);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('logs the same upgrade rejection again once the window elapses (#13966)', async () => {

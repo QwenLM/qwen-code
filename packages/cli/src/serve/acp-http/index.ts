@@ -1572,9 +1572,14 @@ export function mountAcpHttp(
   let upgradeListener:
     | ((req: IncomingMessage, socket: Duplex, head: Buffer) => void)
     | undefined;
-  // Last time each `reason@address` rejection was logged, so a client stuck in
-  // a retry loop cannot flood the journal (see UPGRADE_REJECT_LOG_INTERVAL_MS).
-  const upgradeRejectLoggedAt = new Map<string, number>();
+  // Last time each `reason@address` rejection was logged and how many of that
+  // key were dropped since, so a client stuck in a retry loop cannot flood the
+  // journal (see UPGRADE_REJECT_LOG_INTERVAL_MS) while the next line still
+  // tells an operator how hard it retried.
+  const upgradeRejectLoggedAt = new Map<
+    string,
+    { at: number; suppressed: number }
+  >();
   // A Set, not a single server: while Local Control is on, the same app is
   // served by both the primary listener and the LAN listener, and each needs
   // its own `'upgrade'` registration. The `ExtraWsRoute` invariant is
@@ -1625,22 +1630,37 @@ export function mountAcpHttp(
         'ws-unknown';
       const localPort = (socket as { localPort?: number }).localPort;
       const logReject = (reason: string) => {
-        const key = `${reason}@${rawAddr}`;
+        // Key on the rejection category, not the rendered message: four call
+        // sites embed client-controlled text (path, Host, Origin, selector),
+        // so a client that varies that detail would mint a fresh key per
+        // attempt and never be throttled. The full reason still appears in
+        // the line that gets written.
+        const category = reason.split(' ', 1)[0] || reason;
+        const key = `${category}@${rawAddr}`;
         const now = Date.now();
         const last = upgradeRejectLoggedAt.get(key);
-        if (last !== undefined && now - last < UPGRADE_REJECT_LOG_INTERVAL_MS) {
+        if (
+          last !== undefined &&
+          now >= last.at &&
+          now - last.at < UPGRADE_REJECT_LOG_INTERVAL_MS
+        ) {
+          last.suppressed += 1;
           return;
         }
         // Re-insert so the map stays in least-recently-logged order: a daemon
         // accumulating one entry per rejected client is otherwise unbounded.
         upgradeRejectLoggedAt.delete(key);
-        upgradeRejectLoggedAt.set(key, now);
+        upgradeRejectLoggedAt.set(key, { at: now, suppressed: 0 });
         if (upgradeRejectLoggedAt.size > MAX_UPGRADE_REJECT_LOG_KEYS) {
           const oldest = upgradeRejectLoggedAt.keys().next().value;
           if (oldest !== undefined) upgradeRejectLoggedAt.delete(oldest);
         }
+        const suppressedNote =
+          last === undefined || last.suppressed === 0
+            ? ''
+            : ` (${last.suppressed} similar suppressed since the last line)`;
         writeStderrLine(
-          `qwen serve: WebSocket upgrade rejected (${reason}) from ${rawAddr}`,
+          `qwen serve: WebSocket upgrade rejected (${reason}) from ${rawAddr}${suppressedNote}`,
         );
       };
       // `/cdp` is the Plan C CDP-tunnel endpoint (issue #5626): a loopback
