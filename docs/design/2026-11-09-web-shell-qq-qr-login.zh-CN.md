@@ -346,9 +346,10 @@ registry 对新能力的校验,含畸形与 null 的 `qrLogin` 取值;登录会�
 5. 关闭编辑器会取消**本面板创建**的登录,**终局性离开页面也会释放**:`pagehide` 监听器以
    `keepalive` 发出同一个释放请求,因此即使刷新或关标签页不执行 React 清理,请求仍能活过文档
    本身。两条路径都会停止上游轮询、释放名额。本面板只是从别的标签页重挂而来的登录,在两条
-   路径上都不动。其中「跨标签页」这一半的保证限定在本标签页会话所在的 workspace 内:只有被
-   管理的 workspace 就是该 workspace 时才发送 client id,因为 daemon 是按目标 workspace 的
-   bridge 校验它,外来 id 会被直接拒绝。前进/后退缓存冻结(`pagehide` 带 `persisted: true`)
+   路径上都不动。其中「跨标签页」这一半的保证限定在本标签页会话所在的 workspace 内:只有该
+   会话仍存活、且被管理的 workspace 就是该 workspace 时才发送 client id,因为 daemon 是按目标
+   workspace 的 bridge 校验它,已不认识的 id 会被直接拒绝。会话被清除后 client id 与 workspace
+   仍保留,因此必须在读取该 id 的地方判断会话是否存活。前进/后退缓存冻结(`pagehide` 带 `persisted: true`)
    **不释放**:按「返回」会把面板连同屏幕上的二维码一起恢复,因此这种可恢复的挂起仍由过期
    兜底,而不是去取消一个操作者从未放弃的登录。过期同样是客户端无法上报情况的兜底(标签页
    崩溃、网络中断、释放请求没送达)。

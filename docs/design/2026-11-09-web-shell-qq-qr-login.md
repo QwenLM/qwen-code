@@ -432,9 +432,11 @@ entries, including `requireMention` values the new control did not author.
    tab close runs no React cleanup. Upstream polling stops and the slot is freed
    on both paths. A login the panel merely reattached from another tab is left
    alone on either path. The cross-tab half of that guarantee is scoped to the
-   workspace the tab's session lives on: the client id is sent only when the
-   managed workspace is that same workspace, because the daemon validates it
-   against the target workspace's bridge and rejects a foreign id outright. A
+   workspace the tab's session lives on: the client id is sent only while that
+   session is alive and the managed workspace is that same workspace, because
+   the daemon validates it against the target workspace's bridge and rejects an
+   id it no longer knows outright. A cleared session keeps its client id and
+   workspace, so liveness has to be checked where the id is read. A
    back/forward-cache freeze (`pagehide` with `persisted: true`) does **not**
    release: pressing Back restores the panel with the code still on screen, so
    that suspension stays expiry-bounded rather than cancelling a login the
