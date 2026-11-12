@@ -15167,7 +15167,8 @@ export class Session implements SessionContext {
     }
 
     if (
-      this.requiresManagedConversationBinding &&
+      (this.requiresManagedConversationBinding ||
+        options.persistDefault === false) &&
       selectedAuthType === AuthType.QWEN_SUBSCRIPTION &&
       !resolvedRoute
     ) {
@@ -18004,7 +18005,9 @@ export class Session implements SessionContext {
               (outcome.reason === 'classifier_unavailable' ||
                 outcome.reason === 'external_write' ||
                 outcome.reason === 'external_directory' ||
-                isDenialFallbackReason(outcome.reason))
+                isDenialFallbackReason(outcome.reason) ||
+                (outcome.reason === 'safety_check' &&
+                  outcome.requiresHumanDecision === true))
             ) {
               autoModeFallback = {
                 reason: outcome.reason,
@@ -18508,9 +18511,11 @@ export class Session implements SessionContext {
             }
 
             // AUTO_EDIT mode: auto-approve edit and info tools
-            // (same as coreToolScheduler L5 — NOT delegated to the extension)
+            // (same as coreToolScheduler L5 — NOT delegated to the extension),
+            // except a call matching a user `permissions.ask` rule.
             if (
               !requiresUserInteraction &&
+              !pmForcedAsk &&
               approvalMode === ApprovalMode.AUTO_EDIT &&
               (confirmationDetails.type === 'edit' ||
                 confirmationDetails.type === 'info')

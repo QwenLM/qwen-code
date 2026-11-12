@@ -4,6 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { enableManagedSessionDiagnostics } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-diagnostics.js';
+import {
+  enableManagedExecutionDiagnostics,
+  type ManagedInvocationObservation,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-execution-diagnostics.js';
 import {
   parsePublicChildModelRoute,
   type PublicChildExtensionAgent,
@@ -142,6 +147,11 @@ import {
   harnessCheckpointIsCommandWait,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
 import { readHarnessCheckpoint } from '@qwen-code/qwen-code-core/managed-runtime/managed-checkpoint-history.js';
+import {
+  HostedMemorySession,
+  findHostedMemoryResults,
+  parseHostedMemoryStoreId,
+} from './hosted-memory-session.js';
 import { collectNestedResourceRefs } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 import { createManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
 import { MANAGED_MCP_MAX_CONNECTIONS } from '@qwen-code/qwen-code-core/managed-runtime/managed-mcp-protocol.js';
@@ -172,7 +182,14 @@ import {
   parseToolResultManifestBytes,
   type ToolResultManifest,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
-import { readManagedMessageBody } from '@qwen-code/qwen-code-core/managed-runtime/managed-message-chunks.js';
+import {
+  MANAGED_MESSAGE_KIND,
+  readManagedMessageBody,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-message-chunks.js';
+import {
+  HostedRestoreKeptBytes,
+  readerWithVerified,
+} from './hosted-restore-kept-bytes.js';
 import {
   isChildSessionRun,
   parseChildRun,
@@ -198,6 +215,7 @@ import {
   assertManagedSessionDurableRef,
   assertManagedSessionStableId,
   isChildNotificationSource,
+  managedSessionDurableRefsEqual,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import { ManagedSessionCommitRejectedError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-storage.js';
 import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
@@ -241,6 +259,8 @@ import {
   HostedHookRecoveryRequiredError,
   parseHostedHookPin,
   hostedHookOccurrenceId,
+  hostedConfigScopedOwnerId,
+  isHostedConfigScopedOwner,
 } from './hosted-hook-session.js';
 import { HostedChildRunSession } from './hosted-child-run-session.js';
 import { reconcileNeverStartedChildRuns } from './hosted-never-started-reconcile.js';
@@ -385,6 +405,7 @@ import {
   HostedMcpRecoveryRequiredError,
   HostedMcpConflictError,
   HostedMcpConnectionQuotaError,
+  isHostedDurableMcpOwner,
   parseHostedMcpServers,
   type HostedMcpServerPin,
 } from './hosted-mcp-session.js';
@@ -656,6 +677,74 @@ function blockRecovery(
       : undefined);
 }
 
+/**
+ * The owners this Session holds whose id the next load recomputes. A detach
+ * must never terminally release one: a RELEASED row makes that id
+ * unacquirable ever after (R13-1/R14-1/R28-1). Keyed on the owners the Harness
+ * constructed, never on a held entry's shape — a channel `inputId` is
+ * client-chosen and only length-bounded, so a turn can carry the same prefix
+ * without being an owner, and that turn's Runtime is still owed a drain.
+ *
+ * Both durable families qualify: the config-scoped `extensions-components-*`
+ * owner and the `mcp-<digest>` owner named after the durable configuration ids
+ * (R2-7). The per-load `hooks-activation-*` owner is the one a successor never
+ * recomputes, so it stays releasable (R14-1). Which object references the id
+ * says nothing about this — the load hands MCP's broker to Hooks, so a shared
+ * broker carrying a durable id must be exempt exactly as an owned one is.
+ */
+export function reloadStableOwnerIds(session: {
+  hooks?: { broker: { runtimeSessionId: string } };
+  mcp?: { broker: { runtimeSessionId: string } };
+  configScopedOwnerIds?: readonly string[];
+  durableMcpOwnerIds?: readonly string[];
+}): Set<string> {
+  return new Set(
+    [
+      session.hooks?.broker.runtimeSessionId,
+      session.mcp?.broker.runtimeSessionId,
+      ...(session.configScopedOwnerIds ?? []),
+      ...(session.durableMcpOwnerIds ?? []),
+    ].filter(
+      (id): id is string =>
+        id !== undefined &&
+        (isHostedConfigScopedOwner(id) || isHostedDurableMcpOwner(id)),
+    ),
+  );
+}
+
+/**
+ * The live objects alone are not enough: a passive load whose extension
+ * bootstrap never completed sets `blocked` and continues without building a
+ * Hooks or MCP session, while the restore still seeds the owner id from the
+ * Broker's hold rows. The durable config_install chain names every revision
+ * this Session has had, so its owner ids stay exempt on that resident too
+ * (R5-1). Still ids the Harness derives, never a held entry's shape.
+ */
+function sessionReloadStableOwnerIds(session: HostedSession): Set<string> {
+  return reloadStableOwnerIds({
+    hooks: session.hooks,
+    mcp: session.mcp,
+    configScopedOwnerIds: (session.extensions?.configRevisions ?? []).map(
+      (revision) =>
+        hostedConfigScopedOwnerId(
+          session.managed.authority.sessionHeader.sessionKey,
+          revision,
+        ),
+    ),
+    // The mcp-<digest> family needs the same durable source, or an apply that
+    // drops both the MCP servers and the Hook catalog leaves an owner the
+    // restore still seeds but this set no longer knows — and a detach would
+    // tombstone it (R8-2). These are the very rows the MCP constructor picks
+    // its owner from, so the ids are byte-identical to the ones a reload
+    // acquires; a released row is one no successor recomputes.
+    durableMcpOwnerIds: session.managed.authority
+      .extensionRecordsInDomain('mcp_configuration')
+      .map((entry) => parseMcpConfiguration(entry.record))
+      .filter((entry) => entry.releaseState !== 'released')
+      .map((entry) => entry.runtimeSessionId),
+  });
+}
+
 interface HostedSession {
   placement?: HostedHarnessPlacement;
   poolAccepting?: () => boolean;
@@ -672,6 +761,8 @@ interface HostedSession {
   agentDefinition?: HostedAgentDefinition;
   modelConfigDigest?: string;
   modelConfig?: HostedModelConfigReader;
+  memoryStoreId?: string;
+  memory?: HostedMemorySession;
   sessionSkillsRef?: ManagedSessionDurableRef;
   skills?: HostedSkillCatalog;
   baseSkills?: HostedSkillCatalog;
@@ -2685,8 +2776,52 @@ async function verifyWorkspaceRestore(
   toolResults: DurableToolResultResourceStore,
   throughSequence: number,
 ): Promise<boolean> {
-  const { authority, resources, sink } = session.managed;
-  const segmentStore = new ResourceToolResultSegmentStore(toolResults);
+  const { incomplete, messages } = await checkWorkspaceRestore(
+    session,
+    preverified,
+    toolResults,
+    throughSequence,
+  );
+  // Every check passed. The message bodies the checks kept go to the
+  // projection's cache, so projecting the history does not read them again.
+  for (const { ref, bytes } of messages.entries())
+    session.managed.sink.rememberMessageBody(ref, bytes);
+  messages.clear();
+  await session.managed.sink.project(throughSequence);
+  return incomplete;
+}
+
+/**
+ * The checks of `verifyWorkspaceRestore`. Returns whether a publication is
+ * incomplete, and the verified message bodies it kept for the projection.
+ * Everything else the checks hold, the kept manifests among it, is released
+ * when they return, before the projection fills the shared body cache.
+ */
+async function checkWorkspaceRestore(
+  session: HostedSession,
+  preverified: ReadonlyMap<string, ManagedSessionDurableRef>,
+  toolResults: DurableToolResultResourceStore,
+  throughSequence: number,
+): Promise<{ incomplete: boolean; messages: HostedRestoreKeptBytes }> {
+  const { authority, resources } = session.managed;
+  // Checkpoints are parsed from the bytes their verification read. The
+  // verified bytes of manifests and of message bodies are kept, each within
+  // its own budget: the manifests serve the manifest loop and the manifest
+  // reads of the content checks below, and the message bodies are returned
+  // for the projection.
+  const keptManifests = new HostedRestoreKeptBytes();
+  const keptMessages = new HostedRestoreKeptBytes();
+  const segmentStore = new ResourceToolResultSegmentStore({
+    // The checks only read through it.
+    publish: () =>
+      Promise.reject(new Error('The restore verification publishes nothing.')),
+    read: (ref) => {
+      const bytes = keptManifests.get(ref);
+      return bytes !== undefined
+        ? Promise.resolve(bytes)
+        : toolResults.read(ref);
+    },
+  });
   const manifests = new Map<string, ManagedSessionDurableRef>();
   // What opening the Session verified is checked for conflicting references
   // but not read again, except the kinds this verification descends into,
@@ -2705,12 +2840,7 @@ async function verifyWorkspaceRestore(
   function readRef(ref: ManagedSessionDurableRef): Promise<void> {
     const previous = verified.get(ref.resourceId);
     if (previous) {
-      if (
-        previous.ref.kind !== ref.kind ||
-        previous.ref.schemaVersion !== ref.schemaVersion ||
-        previous.ref.byteLength !== ref.byteLength ||
-        previous.ref.digest !== ref.digest
-      )
+      if (!managedSessionDurableRefsEqual(previous.ref, ref))
         return Promise.reject(
           new Error('Hosted resource references conflict.'),
         );
@@ -2722,8 +2852,11 @@ async function verifyWorkspaceRestore(
   }
   async function verifyRef(ref: ManagedSessionDurableRef): Promise<void> {
     const bytes = await resources.read(ref);
-    if (ref.kind === 'managed-tool-result-manifest')
+    if (ref.kind === MANAGED_MESSAGE_KIND) keptMessages.keep(ref, bytes);
+    if (ref.kind === 'managed-tool-result-manifest') {
       manifests.set(ref.resourceId, ref);
+      keptManifests.keep(ref, bytes);
+    }
     if (ref.kind === 'managed-todo_state') {
       parseHostedTodoState(bytes);
       const previous = object(JSON.parse(bytes.toString('utf8')))?.[
@@ -2805,7 +2938,12 @@ async function verifyWorkspaceRestore(
         );
     }
     if (ref.kind === 'managed-checkpoint') {
-      const checkpoint = await readHarnessCheckpoint(resources, ref);
+      // The checkpoint itself comes from the bytes just read; only its
+      // history pages, if any, are read through the Store.
+      const checkpoint = await readHarnessCheckpoint(
+        readerWithVerified(resources, ref, bytes),
+        ref,
+      );
       refs.push(...collectNestedResourceRefs(ref, bytes));
       if (
         checkpoint.resume.fileHistoryRef ||
@@ -3039,7 +3177,9 @@ async function verifyWorkspaceRestore(
     Array<{ ref: ManagedSessionDurableRef; manifest: ToolResultManifest }>
   >();
   for (const ref of manifests.values()) {
-    const manifest = parseToolResultManifestBytes(await toolResults.read(ref));
+    const manifest = parseToolResultManifestBytes(
+      keptManifests.get(ref) ?? (await toolResults.read(ref)),
+    );
     if (detached.get(manifest.executionCallId) !== undefined) {
       let members = lineages.get(manifest.executionCallId);
       if (members === undefined) {
@@ -3090,8 +3230,7 @@ async function verifyWorkspaceRestore(
     if (terminal.manifest.captureStatus === 'complete')
       await verifyContents(terminal.ref, terminal.manifest);
   }
-  await sink.project(throughSequence);
-  return incomplete;
+  return { incomplete, messages: keptMessages };
 }
 
 /**
@@ -3664,7 +3803,7 @@ async function executeHostedTurn(
   }
   if (resumeApproval) {
     const plan = resumeApproval.plan;
-    if (plan.runtime.provisionerKind) {
+    if (plan.runtime?.provisionerKind) {
       if (
         !brokerOptions ||
         session.mcp ||
@@ -3702,6 +3841,7 @@ async function executeHostedTurn(
             : undefined;
         onResumeReady?.();
         if (
+          plan.runtime &&
           questionRecoveryBroker &&
           original.state === 'requested' &&
           !abort.signal.aborted &&
@@ -3942,13 +4082,14 @@ async function executeHostedTurn(
             ChatRecord,
             'uuid' | 'timestamp' | 'clientInitiatedSkills'
           >,
+          diagnostics?: readonly ManagedInvocationObservation[],
         ) => {
           const message = messageRecord(type, parts, model, identity);
           if (type === 'assistant' && deltas) {
             const streamed = deltas.takeMessageId();
             if (streamed !== undefined) message.uuid = streamed;
           }
-          await session.managed.sink.write(message);
+          await session.managed.sink.write(message, diagnostics);
           parentUuid = message.uuid;
           return message.uuid;
         };
@@ -3965,7 +4106,8 @@ async function executeHostedTurn(
         // runner's own dispatch, and the Session's broker-backed tool
         // surface belongs to model turns.
         toolTurn =
-          workflowLaunch === undefined && session.toolProfile && brokerOptions
+          workflowLaunch === undefined &&
+          ((session.toolProfile && brokerOptions) || session.memory)
             ? new HostedWorkspaceToolTurn(
                 brokerOptions,
                 session.managed,
@@ -3982,6 +4124,8 @@ async function executeHostedTurn(
                 await hostedApprovalForTurn(session, promptId),
                 {
                   recoveryBroker: questionRecoveryBroker,
+                  memory: session.memory,
+                  memoryOnly: !session.toolProfile,
                   mcp: session.mcp,
                   hooks: session.hooks,
                   skills: session.skills,
@@ -4120,6 +4264,15 @@ async function executeHostedTurn(
                   workspaceContext,
                   agentDefinition: session.agentDefinition,
                   modelConfig: session.modelConfig,
+                  memory: session.memory,
+                  recallUserInput: authority
+                    .eventsInSequenceRange(1, authority.committedSequence)
+                    .some(
+                      (event) =>
+                        event.kind === 'input.accepted' &&
+                        event.payload['inputId'] === promptId &&
+                        event.payload['source'] === 'hosted-harness',
+                    ),
                   publicChildModelRoute: session.publicChildModelRoute,
                   modelSelection: await readHostedTurnModelSelection(
                     session.managed,
@@ -4344,7 +4497,11 @@ export function registerHostedHarnessSessionRoutes(
   contract: HostedHarnessContract,
   cwd: string,
   brokerOptions?: HostedWorkspaceBrokerOptions,
-): { owns: (id: string) => boolean } {
+): {
+  owns: (id: string) => boolean;
+  accepting: () => boolean;
+  beginOperation?: () => () => void;
+} {
   // The owed mount handbacks of recovery-blocked turns (#13800) outlive
   // their Session, whose close never frees a parked turn's mount; the
   // daemon owns them and stops them at shutdown.
@@ -4796,11 +4953,13 @@ export function registerHostedHarnessSessionRoutes(
     const sessionId = create ? body?.['sessionId'] : req.params['id'];
     let agentDefinition: HostedAgentDefinition | undefined;
     let modelConfigDigest: string | undefined;
+    let memoryStoreId: string | undefined;
     let sessionSkillsRef: ManagedSessionDurableRef | undefined;
     try {
       modelConfigDigest = parseHostedModelConfigDigest(
         body?.['modelConfigDigest'],
       );
+      memoryStoreId = parseHostedMemoryStoreId(body?.['memoryStoreId']);
       sessionSkillsRef = parseSessionSkillsRef(body?.['sessionSkillsRef']);
       agentDefinition = parseHostedAgentDefinition(
         body?.['agentDefinition'],
@@ -5073,7 +5232,8 @@ export function registerHostedHarnessSessionRoutes(
           resident.agentDefinition,
           agentDefinition,
         )) ||
-        resident.modelConfigDigest !== modelConfigDigest)
+        resident.modelConfigDigest !== modelConfigDigest ||
+        resident.memoryStoreId !== memoryStoreId)
     ) {
       error(res, 409, 'hosted_agent_definition_conflict');
       return;
@@ -5612,10 +5772,17 @@ export function registerHostedHarnessSessionRoutes(
           }
           const model = await findHostedModelRequest(resident.managed, parked);
           const approval =
-            resident.toolProfile && brokerOptions
+            (resident.toolProfile && brokerOptions) || resident.memory
               ? await findHostedApprovalContinuation(resident.managed, parked)
               : undefined;
-          if (model || approval) {
+          const memoryResults =
+            resident.memory &&
+            !model &&
+            !approval &&
+            (await parkNeedsNoRuntimeSettlement(resident.managed))
+              ? await findHostedMemoryResults(resident.managed, parked)
+              : undefined;
+          if (model || approval || memoryResults) {
             const user = (await resident.managed.sink.project()).find(
               (item) => item.type === 'user' && item.daemonPromptId === parked,
             );
@@ -5640,7 +5807,7 @@ export function registerHostedHarnessSessionRoutes(
               resident,
               sessionId,
               cwd,
-              { promptId: parked, text, parts: [] },
+              { promptId: parked, text, parts: memoryResults ?? [] },
               brokerOptions,
               approval,
               model,
@@ -5966,6 +6133,7 @@ export function registerHostedHarnessSessionRoutes(
                   sessionId,
                   ...(agentDefinition ? { agentDefinition } : {}),
                   ...(modelConfigDigest ? { modelConfigDigest } : {}),
+                  ...(memoryStoreId ? { memoryStoreId } : {}),
                   ...(publicChildAgentsVersion === 1
                     ? { publicChildAgentsVersion }
                     : {}),
@@ -6019,6 +6187,10 @@ export function registerHostedHarnessSessionRoutes(
           ? { create: refs, requireNew: true }
           : { retainVerifiedResources: true }),
       });
+      if (stores.supportsModelDiagnostics?.())
+        await enableManagedSessionDiagnostics(managed);
+      if (stores.supportsExecutionDiagnostics?.())
+        await enableManagedExecutionDiagnostics(managed);
       if (!acceptingWork()) {
         await managed.close();
         error(res, 409, 'hosted_harness_quiescing');
@@ -6056,6 +6228,11 @@ export function registerHostedHarnessSessionRoutes(
         ) {
           throw new Error('Session model configuration binding changed.');
         }
+        if (
+          parseHostedMemoryStoreId(definition?.['memoryStoreId']) !==
+          memoryStoreId
+        )
+          throw new Error('Session personal memory binding changed.');
         savedAgentDefinition = parseHostedAgentDefinition(
           definition?.['agentDefinition'],
         );
@@ -6198,6 +6375,12 @@ export function registerHostedHarnessSessionRoutes(
         storeBaseUrl: store.baseUrl,
         definition,
         agentDefinition: savedAgentDefinition,
+        ...(memoryStoreId
+          ? {
+              memoryStoreId,
+              memory: new HostedMemorySession(stores, memoryStoreId),
+            }
+          : {}),
         ...(modelConfigDigest
           ? {
               modelConfigDigest,
@@ -6443,14 +6626,10 @@ export function registerHostedHarnessSessionRoutes(
         if (extensionBundle)
           await HostedMcpSession.releaseSupersededDrained(
             managed,
-            `extensions-components-${createHash('sha256')
-              .update(
-                JSON.stringify([
-                  managed.authority.sessionHeader.sessionKey,
-                  extensionBundle.configRevision,
-                ]),
-              )
-              .digest('hex')}`,
+            hostedConfigScopedOwnerId(
+              managed.authority.sessionHeader.sessionKey,
+              extensionBundle.configRevision,
+            ),
           );
         session.mcp = new HostedMcpSession(
           { ...brokerOptions, lifecycleAuthority: () => session.lifecycle },
@@ -6469,14 +6648,10 @@ export function registerHostedHarnessSessionRoutes(
           session.mcp?.broker,
           () => session.lifecycleProtocolVersion === 2,
           extensionBundle
-            ? `extensions-components-${createHash('sha256')
-                .update(
-                  JSON.stringify([
-                    session.managed.authority.sessionHeader.sessionKey,
-                    extensionBundle.configRevision,
-                  ]),
-                )
-                .digest('hex')}`
+            ? hostedConfigScopedOwnerId(
+                session.managed.authority.sessionHeader.sessionKey,
+                extensionBundle.configRevision,
+              )
             : undefined,
         );
       if (extensionBundle && extensionManagement)
@@ -7390,10 +7565,13 @@ export function registerHostedHarnessSessionRoutes(
       // recoverable instead of 409'ing before this arm is consulted (R8-1).
       if (
         unsettled &&
-        session.toolProfile &&
-        ((takeover && !session.hooks && !session.mcp) ||
-          extensionsCommandStepTakeover) &&
-        brokerOptions
+        ((takeover &&
+          !session.hooks &&
+          !session.mcp &&
+          ((session.toolProfile && brokerOptions) || session.memory)) ||
+          (session.toolProfile &&
+            brokerOptions &&
+            extensionsCommandStepTakeover))
       ) {
         const verdict = await managed.authority.harnessRunAuthorization();
         if (
@@ -7426,7 +7604,7 @@ export function registerHostedHarnessSessionRoutes(
       if (
         takeover &&
         unsettled &&
-        session.skills &&
+        (session.skills || session.memory) &&
         !resume &&
         !resumeApproval &&
         !committedModelOutput &&
@@ -7442,15 +7620,24 @@ export function registerHostedHarnessSessionRoutes(
         const calls = assistant?.message?.parts?.flatMap((part) =>
           part.functionCall ? [part.functionCall] : [],
         );
-        if (calls?.length && calls.every((call) => call.name === 'skill')) {
-          await answerResumedTurnCalls({
-            session: managed,
-            sessionId,
-            cwd,
-            promptId: unsettled,
-            skills: session.skills,
-            hooks: session.hooks,
-          });
+        const memoryResults = session.memory
+          ? await findHostedMemoryResults(managed, unsettled)
+          : undefined;
+        if (
+          memoryResults ||
+          (session.skills &&
+            calls?.length &&
+            calls.every((call) => call.name === 'skill'))
+        ) {
+          if (!memoryResults)
+            await answerResumedTurnCalls({
+              session: managed,
+              sessionId,
+              cwd,
+              promptId: unsettled,
+              skills: session.skills,
+              hooks: session.hooks,
+            });
           const projected = (await managed.sink.project()).filter(
             (record) => record.daemonPromptId === unsettled,
           );
@@ -7462,7 +7649,7 @@ export function registerHostedHarnessSessionRoutes(
             .join('\n');
           if (!text)
             throw new HostedToolRecoveryRequiredError(
-              'Original Skill Prompt is missing.',
+              'Original Prompt is missing.',
             );
           const lastAssistant = projected.findLastIndex(
             (record) => record.type === 'assistant',
@@ -7470,9 +7657,11 @@ export function registerHostedHarnessSessionRoutes(
           resume = {
             promptId: unsettled,
             text,
-            parts: projected
-              .slice(lastAssistant + 1)
-              .flatMap((record) => record.message?.parts ?? []),
+            parts:
+              memoryResults ??
+              projected
+                .slice(lastAssistant + 1)
+                .flatMap((record) => record.message?.parts ?? []),
           };
         }
       }
@@ -7885,13 +8074,14 @@ export function registerHostedHarnessSessionRoutes(
       // rather than failing the load (the Workspace-level cascade stays
       // the backstop). The Broker answers Runtime Session ids, and
       // hostedRuntimeSessionId is idempotent, so the close's drain maps a
-      // restored entry back to itself. The restore stays off a lifecycle-v2
-      // load (#13986 R1-3). Its original reason — v2 had no drain — is gone
-      // now that settle_resources drains the set too (R24-1), but the gate
-      // stays for a different one: a restored id can be a deterministic Hook
-      // owner, and the v2 drain releases it terminally, which would tombstone
-      // the id a reload recomputes (R13-1/R14-1). Re-enabling the restore for
-      // v2 belongs with the keep-READY drain, not ahead of it.
+      // restored entry back to itself. The `!== 2` conjunct is the #13986 R1-3
+      // gate, and it is NOT what keeps a restored config-scoped owner safe:
+      // lifecycleProtocolVersion is only spread onto the resident when the
+      // load carries a lifecycle authority, so a bare attach leaves it
+      // undefined and this restore runs even for a Session that later settles
+      // as v2 (R28-1). A load cannot know which protocol will close it, so the
+      // protection lives at the release instead — both drains skip a
+      // config-scoped owner unless the close is terminal (R13-1/R14-1).
       if (
         !create &&
         brokerOptions &&
@@ -8372,6 +8562,10 @@ export function registerHostedHarnessSessionRoutes(
           let heldDrainUnproven = false;
           if (brokerOptions)
             for (const heldTurn of [...session.heldRuntimeTurns]) {
+              // No reload-stable exemption here: both v2 lifecycle operations
+              // end the Session (#16728/#16882), so nothing recomputes these
+              // ids afterwards. The v1 detach below keeps the exemption,
+              // because that is the route a reload can follow.
               try {
                 await new HostedWorkspaceBroker(
                   brokerOptions,
@@ -8406,10 +8600,15 @@ export function registerHostedHarnessSessionRoutes(
                 throw cause;
               }
             }
-          // Only a delete is terminal; a close keeps the deterministic owner
-          // re-acquirable across the reload (R14-1).
-          await session.hooks?.close({ terminal: kind === 'delete' });
-          await releaseLeaseNow(session);
+          // Both public lifecycle operations end the Session (#16728/#16882):
+          // nothing reopens a v2-closed Session, so the owner is released
+          // terminally here. The v1 detach below still keeps its owner
+          // re-acquirable — that is the route a reload can actually follow.
+          await session.hooks?.close({ terminal: true });
+          heldDrainUnproven =
+            (await releaseOrphanedConfigOwners(session)) || heldDrainUnproven;
+          heldDrainUnproven =
+            (await releaseLeaseNow(session, true)) || heldDrainUnproven;
           // Neither an unprovable drain nor a Session whose own settlement
           // already failed proved to the Runtime that anything stopped, so
           // both settle on the runtime_lost line — the only state
@@ -8426,7 +8625,9 @@ export function registerHostedHarnessSessionRoutes(
             await loop.stop(stopSettle);
           await session.shell?.publisher?.close();
           await session.backgroundLane?.publisher?.close();
-          await session.mcp?.closeResources({ terminal: kind === 'delete' });
+          // Terminal on a close as on a delete; HostedMcpSession.closeResources
+          // says why that is safe.
+          await session.mcp?.closeResources({ terminal: true });
         }
         res.json({
           protocolVersion: 2,
@@ -9377,14 +9578,10 @@ export function registerHostedHarnessSessionRoutes(
           }
         },
         enable: async (bundle, packages, operationId) => {
-          const ownerId = `extensions-components-${createHash('sha256')
-            .update(
-              JSON.stringify([
-                session.managed.authority.sessionHeader.sessionKey,
-                bundle.configRevision,
-              ]),
-            )
-            .digest('hex')}`;
+          const ownerId = hostedConfigScopedOwnerId(
+            session.managed.authority.sessionHeader.sessionKey,
+            bundle.configRevision,
+          );
           if (bundle.mcpServers.length && !session.mcp) {
             const broker =
               session.hooks?.broker ??
@@ -9483,6 +9680,185 @@ export function registerHostedHarnessSessionRoutes(
       .then(async (manager) => res.json(await manager.snapshot()))
       .catch(() => error(res, 409, 'hosted_extension_management_unavailable'));
   });
+
+  function skillBroker(
+    session: HostedSession,
+    owner?: { bindingId: string; generation: string },
+  ) {
+    if (
+      !brokerOptions ||
+      session.foregroundOnly ||
+      (session.childDepth ?? 0) !== 0 ||
+      !['hosted-workspace-shell/1', HOSTED_MCP_PROFILE].includes(
+        session.toolProfile ?? '',
+      ) ||
+      !contract.lifecycleV2Profiles?.includes(session.toolProfile!)
+    )
+      throw new Error('hosted_skill_import_unsupported');
+    const broker = new HostedWorkspaceBroker(
+      { ...brokerOptions, lifecycleAuthority: () => session.lifecycle },
+      session.managed.authority.sessionHeader.sessionKey,
+      'skill-management',
+    );
+    if (owner)
+      broker.expectExtensionRuntime({
+        runtimeBindingId: owner.bindingId,
+        generation: owner.generation,
+      });
+    return broker;
+  }
+
+  function skillOwner(value: unknown): {
+    bindingId: string;
+    generation: string;
+  } {
+    const owner = object(value);
+    if (
+      !owner ||
+      Object.keys(owner).sort().join(',') !== 'bindingId,generation' ||
+      typeof owner['bindingId'] !== 'string' ||
+      !/^[A-Za-z0-9._:-]{1,128}$/u.test(owner['bindingId']) ||
+      typeof owner['generation'] !== 'string' ||
+      !/^[1-9][0-9]{0,18}$/u.test(owner['generation']) ||
+      BigInt(owner['generation']) > 2n ** 63n - 1n
+    )
+      throw new Error('invalid_skill_owner');
+    return { bindingId: owner['bindingId'], generation: owner['generation'] };
+  }
+
+  app.get('/session/:id/extensions/skills/candidates', (req, res) => {
+    const session = identity(req, sessions);
+    if (!session) return error(res, 404, 'hosted_session_not_found');
+    void (async () => {
+      const broker = skillBroker(session);
+      const result = await broker.skillControl({
+        kind: 'extension-skill-candidates',
+        operationId: randomUUID(),
+      });
+      if (!broker.runtime || !Array.isArray(result['candidates']))
+        throw new Error('Invalid Skill response.');
+      res.json({
+        sessionId: session.managed.authority.sessionHeader.sessionKey.sessionId,
+        owner: {
+          bindingId: broker.runtime.bindingId,
+          generation: broker.runtime.generation,
+        },
+        candidates: result['candidates'],
+      });
+    })().catch((cause) =>
+      error(
+        res,
+        409,
+        cause instanceof HostedWorkspaceBrokerRejection &&
+          typeof cause.code === 'string'
+          ? cause.code
+          : 'hosted_skill_source_unavailable',
+      ),
+    );
+  });
+
+  app.post('/session/:id/extensions/skills/snapshot', (req, res) => {
+    const session = identity(req, sessions);
+    if (!session) return error(res, 404, 'hosted_session_not_found');
+    if (
+      session.active ||
+      session.hooksBusy ||
+      session.mcpBusy ||
+      session.mcpRecovering ||
+      session.blocked
+    )
+      return error(res, 409, 'hosted_turn_active');
+    const body = object(req.body);
+    if (
+      !body ||
+      Object.keys(body).sort().join(',') !== 'digest,operationId,owner,path' ||
+      typeof body['operationId'] !== 'string' ||
+      !HOSTED_UUID.test(body['operationId']) ||
+      typeof body['path'] !== 'string' ||
+      typeof body['digest'] !== 'string'
+    )
+      return error(res, 400, 'invalid_skill_snapshot');
+    let owner: { bindingId: string; generation: string };
+    try {
+      owner = skillOwner(body['owner']);
+    } catch {
+      return error(res, 400, 'invalid_skill_snapshot');
+    }
+    session.mcpBusy = true;
+    void (async () => {
+      const broker = skillBroker(session, owner);
+      const result = await broker.skillControl({
+        kind: 'extension-skill-snapshot',
+        operationId: body['operationId'] as string,
+        path: body['path'] as string,
+        digest: body['digest'] as string,
+      });
+      res.json({
+        sessionId: session.managed.authority.sessionHeader.sessionKey.sessionId,
+        owner,
+        ...result,
+      });
+    })()
+      .catch((cause) =>
+        error(
+          res,
+          409,
+          cause instanceof HostedWorkspaceBrokerRejection &&
+            typeof cause.code === 'string'
+            ? cause.code
+            : 'hosted_skill_source_unavailable',
+        ),
+      )
+      .finally(() => {
+        session.mcpBusy = false;
+      });
+  });
+
+  app.get(
+    '/session/:id/extensions/skills/archives/:preparationId',
+    (req, res) => {
+      const session = identity(req, sessions);
+      if (!session) return error(res, 404, 'hosted_session_not_found');
+      void (async () => {
+        const owner = skillOwner({
+          bindingId: req.query['bindingId'],
+          generation: req.query['generation'],
+        });
+        const operationId = req.query['operationId'];
+        const offset = req.query['offset'];
+        if (
+          typeof operationId !== 'string' ||
+          !HOSTED_UUID.test(operationId) ||
+          typeof offset !== 'string' ||
+          !/^(?:0|[1-9][0-9]*)$/u.test(offset) ||
+          !Number.isSafeInteger(Number(offset))
+        )
+          throw new Error('Invalid Skill chunk request.');
+        const broker = skillBroker(session, owner);
+        const result = await broker.skillControl({
+          kind: 'extension-skill-archive',
+          operationId,
+          preparationId: String(req.params['preparationId']),
+          offset: Number(offset),
+        });
+        res.json({
+          sessionId:
+            session.managed.authority.sessionHeader.sessionKey.sessionId,
+          owner,
+          ...result,
+        });
+      })().catch((cause) =>
+        error(
+          res,
+          409,
+          cause instanceof HostedWorkspaceBrokerRejection &&
+            typeof cause.code === 'string'
+            ? cause.code
+            : 'hosted_skill_snapshot_unavailable',
+        ),
+      );
+    },
+  );
 
   app.get(
     '/session/:id/extensions/management/operations/:operationId',
@@ -9984,7 +10360,8 @@ export function registerHostedHarnessSessionRoutes(
     options: HostedWorkspaceBrokerOptions,
     lease: NonNullable<HostedSession['runtimeLeaseHeld']>,
     drain = false,
-  ): Promise<'released' | 'held' | 'pending'> => {
+    terminal = false,
+  ): Promise<'released' | 'held' | 'pending' | 'deferred'> => {
     const { promptId, runtimeSessionId } = lease;
     session.cleanupHolds?.delete(promptId);
     const result = await reconcileHostedTurnCleanup(
@@ -9996,9 +10373,31 @@ export function registerHostedHarnessSessionRoutes(
     retainHostedCleanupHolds(session, result);
     if (result.held.has(promptId)) return 'held';
     if (result.states.get(promptId) === 'owed') return 'pending';
+    // A lease is a Turn's obligation; a reload-stable owner outlives the Turn.
+    // Releasing it here persists RELEASED under the id the next load
+    // recomputes — the tombstone the held-Runtime drains also refuse (R3-1).
+    // Only a Session that survives needs that protection. A delete has no
+    // next load, and the blocked resident R5-1 exempts builds no live owner
+    // object, so the close this used to defer to does not exist there:
+    // declining a terminal handback left the owner released by nobody (R6-1).
+    // The delete's drain and owner close already release the same id twice
+    // when both reach it, so handing it back here is the established shape.
+    const deferred =
+      !terminal && sessionReloadStableOwnerIds(session).has(runtimeSessionId);
+    // The lease carrier reaches this decision without passing either drain,
+    // so it names the id itself — otherwise the half of the invariant that
+    // leaves an owner READY is the half missing from the log (R4-1). Not
+    // "detach": a settled prompt and a recovery recheck hand back here too.
+    // A terminal handback is never deferred, so this only names a real park
+    // — never a leak the route already discharged (R4-1 follow-up).
+    if (deferred)
+      writeStderrLineSafe(
+        `qwen serve: Hosted Harness keeps reload-stable owner ${runtimeSessionId} running: release deferred, obligation still owed (#16579).`,
+      );
     if (
-      runtimeSessionId !== hostedRuntimeSessionId(promptId) ||
-      !result.states.has(promptId)
+      !deferred &&
+      (runtimeSessionId !== hostedRuntimeSessionId(promptId) ||
+        !result.states.has(promptId))
     ) {
       try {
         await new HostedWorkspaceBroker(
@@ -10017,7 +10416,7 @@ export function registerHostedHarnessSessionRoutes(
     }
     if (!hasHostedCleanupDebt(session.managed))
       await retryHostedCleanup(session, options);
-    return 'released';
+    return deferred ? 'deferred' : 'released';
   };
 
   // A recovery load may hold the Runtime Session. On the cancellation
@@ -10063,25 +10462,35 @@ export function registerHostedHarnessSessionRoutes(
   // the owed-lease comment at the blocked cancel refusal. The close drains:
   // a recovered Runtime can hold live background runs (#13856), and only
   // the drain arm may stop them. This exit swallows a refused release, so
-  // the owed file-history retirement must go first.
-  const releaseLeaseNow = async (session: HostedSession): Promise<void> => {
+  // the owed file-history retirement must go first. Answers whether it left a
+  // reload-stable owner running, which a non-terminal close must report as an
+  // unproven stop rather than certify (R3-1).
+  const releaseLeaseNow = async (
+    session: HostedSession,
+    terminal: boolean,
+  ): Promise<boolean> => {
     await retireOwedFileHistory(session, 'at close');
     const lease = session.runtimeLeaseHeld;
-    if (lease === undefined || !brokerOptions) return;
+    if (lease === undefined || !brokerOptions) return false;
     if (
       session.mcp &&
       lease.runtimeSessionId !== hostedRuntimeSessionId(lease.promptId)
     )
-      return;
+      return false;
+    let unproven = false;
     await releaseHeldRuntime(
       session,
       { ...brokerOptions, lifecycleAuthority: () => session.lifecycle },
       lease,
       true,
+      terminal,
     ).then(
       (outcome) => {
-        if (outcome !== 'released')
+        if (outcome !== 'released' && outcome !== 'deferred')
           throw new Error('Original Runtime cleanup is still owed.');
+        // Only a non-terminal handback can defer, so a deferral here always
+        // means the owner really was left running.
+        unproven = outcome === 'deferred';
         if (session.runtimeLeaseHeld === lease) {
           session.runtimeLeaseHeld = undefined;
           session.runtimeLeaseOwedByTerminalRoute = false;
@@ -10093,6 +10502,71 @@ export function registerHostedHarnessSessionRoutes(
         );
       },
     );
+    return unproven;
+  };
+
+  // A delete must release every reload-stable owner no live object will
+  // release. HostedHookSession.close() sweeps the earlier ones, so an apply
+  // that moves to a bundle with no Hook catalog — drain nils the session and
+  // enable does not rebuild it — leaves nothing to run that sweep, and the
+  // delete answers 204 having released nothing (R7-1). Reachable without any
+  // recovery: install hooks, fire one, then apply a hook-free revision.
+  const releaseOrphanedConfigOwners = async (
+    session: HostedSession,
+  ): Promise<boolean> => {
+    if (!brokerOptions) return false;
+    let unproven = false;
+    const sessionKey = session.managed.authority.sessionHeader.sessionKey;
+    // The very set the exemption uses, so the two sides cannot drift one
+    // owner family at a time (R9-1). Only a live broker id is skipped: that
+    // one has a close of its own. Everything else is swept even when a Hooks
+    // session exists — an owner `configure()` acquired but no Hook ever ran
+    // has no `hook_execution` record, so `releaseEarlierOwners` cannot name
+    // it (R8-1), and a delegated Hooks session sweeps nothing at all (R9-2).
+    // The redundant release of an owner Hooks did sweep is absorbed below.
+    const live = new Set(
+      [
+        session.hooks?.broker.runtimeSessionId,
+        session.mcp?.broker.runtimeSessionId,
+      ].filter((id): id is string => id !== undefined),
+    );
+    for (const id of sessionReloadStableOwnerIds(session)) {
+      if (live.has(id)) continue;
+      try {
+        await new HostedWorkspaceBroker(brokerOptions, sessionKey, id).release({
+          drain: true,
+        });
+      } catch (cause) {
+        // Exactly what both held-Runtime drains tolerate (R25-1/R17-1): a 404
+        // means nothing remains to stop, and a Broker restarted beside the
+        // Harness holds no resident Session and answers 503 — the Workspace
+        // cascade owns that Runtime. Rethrowing the 503 wedged the Session
+        // undeletable, because the state it answers from never changes.
+        // A hold fence is deliberately NOT absorbed: `HostedHookSession.close`
+        // names a remaining fence rather than answering 204, for the same
+        // reason — a delete that succeeded here would drop the only state
+        // that can retry the release.
+        if (
+          !(cause instanceof HostedWorkspaceBrokerRejection) ||
+          !(
+            (cause.status === 404 &&
+              cause.code === 'runtime_session_not_found') ||
+            (cause.status === 503 &&
+              cause.code === 'runtime_reconciliation_required')
+          )
+        )
+          throw cause;
+        // Tolerating the 503 is only half of what the drains do: the stop it
+        // could not prove must not settle as stop_requested (R8-1).
+        if (cause.status === 503) {
+          unproven = true;
+          writeStderrLineSafe(
+            `qwen serve: Hosted Harness delete could not prove config-scoped owner ${id} stopped: the Broker requires reconciliation, the Workspace cascade owns it.`,
+          );
+        }
+      }
+    }
+    return unproven;
   };
 
   /**
@@ -11274,13 +11748,14 @@ export function registerHostedHarnessSessionRoutes(
             ChatRecord,
             'uuid' | 'timestamp' | 'clientInitiatedSkills'
           >,
+          diagnostics?: readonly ManagedInvocationObservation[],
         ) => {
           const message = messageRecord(type, parts, model, identity);
           if (type === 'assistant') {
             const streamed = deltas.takeMessageId();
             if (streamed !== undefined) message.uuid = streamed;
           }
-          await session.managed.sink.write(message);
+          await session.managed.sink.write(message, diagnostics);
           parentUuid = message.uuid;
           return message.uuid;
         };
@@ -11307,6 +11782,8 @@ export function registerHostedHarnessSessionRoutes(
           session.shell,
           await hostedApprovalForTurn(session, promptId),
           {
+            memory: session.memory,
+            memoryOnly: !session.toolProfile,
             mcp: session.mcp,
             skills: session.skills,
             extensionConfig: session.extensionBundle
@@ -11559,6 +12036,7 @@ export function registerHostedHarnessSessionRoutes(
             },
             prompt: '',
             promptId,
+            memory: session.memory,
             ...(session.stores
               ? {
                   userMessages: {
@@ -13082,8 +13560,26 @@ export function registerHostedHarnessSessionRoutes(
         // tolerated so the close is not wedged, but it is not a proven stop
         // either — the loops below must still settle runtime_lost.
         let heldDrainUnproven = false;
+        const reloadStableOwners = sessionReloadStableOwnerIds(session);
         if (brokerOptions) {
           for (const heldTurn of [...session.heldRuntimeTurns]) {
+            // Same invariant as the v2 drain, and it predates it: the restore
+            // seeds reload-stable owners from the Broker's hold rows, and a
+            // detach must not tombstone an id the next load recomputes
+            // (R13-1/R14-1/R28-1). A DELETE is terminal and may release.
+            if (
+              req.method !== 'DELETE' &&
+              reloadStableOwners.has(hostedRuntimeSessionId(heldTurn))
+            ) {
+              // Unproven, not failed: a detach declines to certify the stop,
+              // it must not turn the park into a close failure at the rethrow
+              // below.
+              heldDrainUnproven = true;
+              writeStderrLineSafe(
+                `qwen serve: Hosted Harness detach keeps reload-stable owner ${hostedRuntimeSessionId(heldTurn)} running: release deferred, obligation still owed (#16579).`,
+              );
+              continue;
+            }
             try {
               await new HostedWorkspaceBroker(
                 brokerOptions,
@@ -13139,6 +13635,9 @@ export function registerHostedHarnessSessionRoutes(
         // The held-Runtime drain above ran first so a turn's background run no
         // longer fences the non-terminal mount handback (R14-2).
         await session.hooks?.close({ terminal: req.method === 'DELETE' });
+        if (req.method === 'DELETE')
+          heldDrainUnproven =
+            (await releaseOrphanedConfigOwners(session)) || heldDrainUnproven;
         // Deferred until the close is known terminal: a Hook fence refusal
         // above keeps the Session attached and retryable, and its wake pump
         // with it. wakeBusy() holds mcpClosing for the whole drain, so no
@@ -13149,7 +13648,9 @@ export function registerHostedHarnessSessionRoutes(
         // release retires a settled Turn's owed file-history marker first,
         // ahead of the unguarded loop stop below so that a throw there
         // cannot strand the retirement.
-        await releaseLeaseNow(session);
+        heldDrainUnproven =
+          (await releaseLeaseNow(session, req.method === 'DELETE')) ||
+          heldDrainUnproven;
         // A registered observation loop outlives its turn: only the Session
         // close ends it. Stop every live loop here, ahead of the publisher
         // close and the log close, so its settle write can still reach the
@@ -13579,6 +14080,8 @@ export function registerHostedHarnessSessionRoutes(
     void close(req, res, true);
   });
   return {
+    accepting: acceptingWork,
+    beginOperation: instance?.beginOperation,
     owns: (id) =>
       [...sessions.keys(), ...opening].some(
         (candidate) => candidate.toLowerCase() === id.toLowerCase(),

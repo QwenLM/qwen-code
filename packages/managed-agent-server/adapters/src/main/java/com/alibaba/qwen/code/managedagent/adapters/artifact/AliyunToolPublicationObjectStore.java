@@ -12,6 +12,7 @@ import com.aliyun.oss.common.comm.ResponseMessage;
 import com.aliyun.oss.common.comm.RetryStrategy;
 import com.aliyun.oss.model.BucketVersioningConfiguration;
 import com.aliyun.oss.model.CannedAccessControlList;
+import com.aliyun.oss.model.GetObjectRequest;
 import com.aliyun.oss.model.ObjectMetadata;
 import com.aliyun.oss.model.PutObjectRequest;
 
@@ -120,6 +121,22 @@ public final class AliyunToolPublicationObjectStore implements ToolPublicationOb
     public InputStream open(String key, Runnable guard) {
         validateConfiguration(guard);
         return read(() -> client.getObject(bucket, key), guard).getObjectContent();
+    }
+
+    @Override
+    public InputStream openRange(String key, long offset, long length, Runnable guard) {
+        validateConfiguration(guard);
+        if (offset < 0 || length < 0) {
+            throw new IllegalArgumentException("Invalid object range");
+        }
+        if (length == 0) {
+            return new ByteArrayInputStream(new byte[0]);
+        }
+        return read(() -> {
+            GetObjectRequest request = new GetObjectRequest(bucket, key);
+            request.setRange(offset, offset + length - 1);
+            return client.getObject(request);
+        }, guard).getObjectContent();
     }
 
     private <T> T read(Supplier<T> request, Runnable guard) {

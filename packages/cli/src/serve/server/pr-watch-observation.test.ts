@@ -37,6 +37,7 @@ import {
   prWatchFilePath,
   prWatchOwnerPath,
   readPrWatchStateSync,
+  prWatchFileKey,
   writePrWatchStateSync,
   type PrWatchIdentity,
   type PrWatchState,
@@ -1105,5 +1106,40 @@ describe('runPrWatchObservationTick', () => {
     );
     expect(result).toEqual({ claimed: true, observed: 0 });
     expect(view).not.toHaveBeenCalled();
+  });
+
+  it('drops a closed PR the listing covered and keeps one it did not', async () => {
+    scanMock.mockImplementation(async (_runtime, out) => {
+      out.push(binding(42, 'closed'));
+      return false;
+    });
+    const key = prWatchFileKey(prWatchIdentityFromUrl(prUrl(42))!);
+    const view = vi.fn(async (url: string) => okResult(url));
+    const deps = {
+      watchDir: dir,
+      locks,
+      allowedHosts: new Set(['github.com']),
+      viewPullRequest: view,
+      now: () => Date.parse(T1),
+    };
+
+    // Covered by this workspace's listing: the closed PR leaves the rotation.
+    const covered = await runPrWatchObservationTick([runtime('/ws')], deps, {
+      intervalMs: 300_000,
+      sweepOffsets: new Map(),
+      listedKeysByWorkspace: new Map([['/ws', new Set([key])]]),
+    });
+    expect(covered).toEqual({ claimed: true, observed: 0 });
+    expect(view).not.toHaveBeenCalled();
+
+    // The same key under a different workspace does not cover this one, so the
+    // PR stays in rotation to catch a reopen.
+    const uncovered = await runPrWatchObservationTick([runtime('/ws')], deps, {
+      intervalMs: 300_000,
+      sweepOffsets: new Map(),
+      listedKeysByWorkspace: new Map([['/other', new Set([key])]]),
+    });
+    expect(uncovered.observed).toBe(1);
+    expect(view).toHaveBeenCalledTimes(1);
   });
 });

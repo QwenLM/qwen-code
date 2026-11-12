@@ -1,10 +1,23 @@
 import { expect, type Page, type TestInfo } from '@playwright/test';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { installBootRetry } from './bootRetry';
+import {
+  BOOT_RELOAD_BACKOFF_MS,
+  installBootRetry,
+  MAX_BOOT_RELOADS,
+} from './bootRetry';
 import { createWebShellDaemonScenario, installMockDaemon } from './mockDaemon';
 
 const SHELL = '[data-web-shell-root]:not([data-web-shell-gate])';
+// The initial document plus one per allowed reload. Derived so the budget and
+// the counts that pin it cannot drift apart.
+const BOOT_ATTEMPTS = MAX_BOOT_RELOADS + 1;
+// Long enough that a further reload would have become observable: the last
+// backoff is the longest wait the harness can still be sitting in.
+const RELOAD_QUIET_WINDOW_MS = Math.max(...BOOT_RELOAD_BACKOFF_MS) + 1_000;
+// A reload the harness should never have scheduled is now deferred by the
+// first backoff, so a count read at the load event would miss it.
+const SPURIOUS_RELOAD_WINDOW_MS = BOOT_RELOAD_BACKOFF_MS[0] + 500;
 // Every mount assertion here allows for a second full boot of the graph: the
 // suite's 20 s visibility budget measures one, and a cold dev server measured
 // 26 s for the first here before the reload even started.
@@ -79,8 +92,61 @@ export const bootRetryScenarios: BootRetryScenario[] = [
     },
   },
   {
+    // A single abort is the easy case. The pool host produces storms: the
+    // notifier keeps firing for seconds, so attempts queued back-to-back all
+    // die inside the window that killed the first one. Reproduce that with a
+    // wall-clock window rather than a fixed attempt count — only spacing the
+    // retries out lands an attempt after the storm, so this pins the backoff
+    // and the budget together.
+    title: 'a boot outlasts an abort storm spanning several attempts @smoke',
+    async run(page, testInfo) {
+      const scenario = await openShell(page, testInfo);
+
+      // Anchored to the field, not to the ladder: run 42546153793 aborted
+      // scripts across four consecutive seconds. Deriving this from the
+      // backoffs would shrink the storm whenever the ladder shrank, and the
+      // case would keep passing while the real storm stranded the boot again.
+      // The ladder has to outlast this, so shortening it turns this red.
+      const STORM_MS = 5_000;
+      let stormEndsAt: number | null = null;
+      let abortedScripts = 0;
+      let entryRequests = 0;
+
+      await page.route('**/*', async (route) => {
+        const request = route.request();
+        if (
+          request.frame() !== page.mainFrame() ||
+          request.resourceType() !== 'script'
+        ) {
+          await route.fallback();
+          return;
+        }
+        if (new URL(request.url()).pathname === '/main.tsx') entryRequests += 1;
+        stormEndsAt ??= Date.now() + STORM_MS;
+        if (Date.now() < stormEndsAt) {
+          abortedScripts += 1;
+          await route.abort('failed');
+          return;
+        }
+        await route.fallback();
+      });
+
+      await page.goto(ENTRY_URL(scenario.sessionId));
+
+      await expect(page.locator(SHELL)).toBeVisible({
+        timeout: BOOT_VISIBLE_TIMEOUT_MS,
+      });
+      await expect(page.locator('[data-boot-fallback]')).toHaveCount(0);
+      // Without these the case passes vacuously on a host where the storm
+      // never bit: it would just be a normal boot.
+      expect(abortedScripts).toBeGreaterThan(0);
+      expect(entryRequests).toBeGreaterThan(1);
+    },
+  },
+  {
     // The budget is what keeps a genuinely broken entry module from reloading
-    // forever: three attempts, then the watchdog panel is the test's failure.
+    // forever: a bounded number of attempts, then the watchdog panel is the
+    // test's failure.
     title:
       'an entry module that never loads stops after the reload budget @smoke',
     async run(page, testInfo) {
@@ -98,12 +164,14 @@ export const bootRetryScenarios: BootRetryScenario[] = [
       // reload it triggers has even been issued, so the panel is not a signal
       // that the budget is spent. Poll the counter instead: engines differ by
       // tens to hundreds of milliseconds between the panel and the reload.
-      await expect.poll(() => entryRequests, { timeout: 30_000 }).toBe(3);
-      // Polling sees the third attempt the moment it happens, so the bound
+      await expect
+        .poll(() => entryRequests, { timeout: 30_000 })
+        .toBe(BOOT_ATTEMPTS);
+      // Polling sees the last attempt the moment it happens, so the bound
       // needs a quiet window as well: one more reload would follow within a
-      // cycle of the third attempt's load.
-      await page.waitForTimeout(4_000);
-      expect(entryRequests).toBe(3);
+      // cycle of that attempt's load.
+      await page.waitForTimeout(RELOAD_QUIET_WINDOW_MS);
+      expect(entryRequests).toBe(BOOT_ATTEMPTS);
       await expect(page.locator('[data-boot-fallback]')).toHaveCount(1);
     },
   },
@@ -163,6 +231,7 @@ export const bootRetryScenarios: BootRetryScenario[] = [
         timeout: BOOT_VISIBLE_TIMEOUT_MS,
       });
 
+      await page.waitForTimeout(SPURIOUS_RELOAD_WINDOW_MS);
       expect(documents).toHaveLength(1);
     },
   },
@@ -184,6 +253,7 @@ export const bootRetryScenarios: BootRetryScenario[] = [
         timeout: BOOT_VISIBLE_TIMEOUT_MS,
       });
 
+      await page.waitForTimeout(SPURIOUS_RELOAD_WINDOW_MS);
       expect(documents).toHaveLength(1);
     },
   },
@@ -237,6 +307,7 @@ export const bootRetryScenarios: BootRetryScenario[] = [
         timeout: BOOT_VISIBLE_TIMEOUT_MS,
       });
 
+      await page.waitForTimeout(SPURIOUS_RELOAD_WINDOW_MS);
       expect(documents).toHaveLength(1);
     },
   },
@@ -259,11 +330,13 @@ export const bootRetryScenarios: BootRetryScenario[] = [
       const documents = trackDocuments(page);
       await page.goto(ENTRY_URL(scenario.sessionId));
 
-      await expect.poll(() => entryRequests, { timeout: 30_000 }).toBe(3);
-      // The extra listener would fire its own reload immediately; hold the
-      // page quiet for one cycle so the count is final.
-      await page.waitForTimeout(4_000);
-      expect(documents).toHaveLength(3);
+      await expect
+        .poll(() => entryRequests, { timeout: 30_000 })
+        .toBe(BOOT_ATTEMPTS);
+      // The extra listener would fire its own reload on the same load event;
+      // hold the page quiet for one cycle so the count is final.
+      await page.waitForTimeout(RELOAD_QUIET_WINDOW_MS);
+      expect(documents).toHaveLength(BOOT_ATTEMPTS);
       await expect(page.locator('[data-boot-fallback]')).toHaveCount(1);
     },
   },
@@ -321,8 +394,9 @@ export const bootRetryScenarios: BootRetryScenario[] = [
         await installBootRetry(page);
         await page.goto(`${origin}/a.html`);
         await page.goto(`${origin}/b.html`);
-        // A spurious reload starts as the destination's load event fires.
-        await page.waitForTimeout(500);
+        // A spurious reload is scheduled at the destination's load event and
+        // fires one backoff later.
+        await page.waitForTimeout(SPURIOUS_RELOAD_WINDOW_MS);
         expect(destinationRequests).toHaveLength(1);
       } finally {
         server.close();

@@ -14422,15 +14422,14 @@ describe('Session', () => {
     );
 
     it.each([
-      [AuthType.USE_OPENAI, 'qwen3-coder-flash', false],
-      [AuthType.QWEN_SUBSCRIPTION, 'qwen3.8-max', true],
+      ['standalone', AuthType.USE_OPENAI, 'qwen3-coder-flash', false],
+      ['standalone', AuthType.QWEN_SUBSCRIPTION, 'qwen3.8-max', true],
+      [undefined, AuthType.QWEN_SUBSCRIPTION, 'qwen3.8-max', true],
     ] as const)(
-      'switches standalone %s using only the session config',
-      async (authType, modelId, refresh) => {
+      'switches %s session to %s using only the session config',
+      async (sourceType, authType, modelId, refresh) => {
         session.dispose();
-        vi.mocked(mockConfig.getSessionSourceType).mockReturnValue(
-          'standalone',
-        );
+        vi.mocked(mockConfig.getSessionSourceType).mockReturnValue(sourceType);
         const refreshSubscriptionModels = vi.fn().mockResolvedValue({
           models: [modelId],
           cached: false,
@@ -14448,7 +14447,7 @@ describe('Session', () => {
             sessionId: 'test-session-id',
             modelId: `${modelId}(${authType})`,
           },
-          { persistDefault: true },
+          { persistDefault: sourceType === 'standalone' },
         );
 
         expect(mockConfig.switchModel).toHaveBeenCalledWith(
@@ -42842,6 +42841,91 @@ describe('Session', () => {
       );
     });
 
+    it('keeps the amend approval human-only in ACP', async () => {
+      const command = 'git commit --amend --no-edit';
+      const onConfirm = vi.fn();
+      const invocation = {
+        params: { command },
+        getDefaultPermission: vi.fn().mockResolvedValue('ask'),
+        getConfirmationDetails: vi.fn().mockResolvedValue({
+          type: 'exec',
+          title: 'Confirm shell command',
+          command,
+          rootCommand: 'git',
+          onConfirm,
+        }),
+        getDescription: vi.fn().mockReturnValue('Amend commit'),
+        toolLocations: vi.fn().mockReturnValue([]),
+        execute: vi.fn(),
+      };
+      mockToolRegistry.getTool.mockReturnValue({
+        name: core.ToolNames.SHELL,
+        kind: core.Kind.Execute,
+        build: vi.fn().mockReturnValue(invocation),
+      });
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.AUTO);
+      mockConfig.getCwd = vi.fn().mockReturnValue('/repo');
+      mockConfig.getTargetDir = vi.fn().mockReturnValue('/repo');
+      mockConfig.getAutoModeDenialState = vi.fn().mockReturnValue({
+        consecutiveBlock: 0,
+        consecutiveUnavailable: 0,
+        totalBlock: 0,
+        totalUnavailable: 0,
+      });
+      mockConfig.setAutoModeDenialState = vi.fn();
+      mockConfig.getPermissionManager = vi.fn().mockReturnValue(null);
+      mockConfig.getAutoModeSettings = vi.fn().mockReturnValue({});
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
+      mockConfig.getLlmClient = vi.fn().mockReturnValue({
+        ...mockLlmClient,
+        getHistoryTail: () => [
+          { role: 'user', parts: [{ text: 'amend the commit' }] },
+        ],
+      });
+      mockClient.requestPermission = vi.fn().mockResolvedValue({
+        outcome: { outcome: 'selected', optionId: 'proceed_once' },
+      });
+      mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+        createStreamWithChunks([
+          {
+            type: core.StreamEventType.CHUNK,
+            value: {
+              functionCalls: [
+                {
+                  id: 'call-amend',
+                  name: core.ToolNames.SHELL,
+                  args: { command },
+                },
+              ],
+            },
+          },
+        ]),
+      );
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'amend the commit' }],
+      });
+
+      const request = vi.mocked(mockClient.requestPermission).mock.calls[0]![0];
+      expect(
+        request.options.every(
+          (option: { kind: string }) => option.kind !== 'allow_always',
+        ),
+      ).toBe(true);
+      expect(request.toolCall?.content).toContainEqual({
+        type: 'content',
+        content: {
+          type: 'text',
+          text: 'Rewriting a commit requires manual approval in AUTO mode.',
+        },
+      });
+      expect(onConfirm).toHaveBeenCalledWith(
+        core.ToolConfirmationOutcome.ProceedOnce,
+        { answers: undefined },
+      );
+    });
+
     it('never requests ACP permission for the trusted Live Appshot tool', async () => {
       const directory = path.join(os.tmpdir(), 'qwen-live-appshot');
       await fs.mkdir(directory, { recursive: true, mode: 0o700 });
@@ -43912,6 +43996,76 @@ describe('Session', () => {
       expect(addToolArgumentsAttributesSpy).not.toHaveBeenCalled();
       expect(addToolCallResultAttributesSpy).not.toHaveBeenCalled();
     });
+
+    it.each([
+      { askRule: true, prompted: true },
+      { askRule: false, prompted: false },
+    ])(
+      'AUTO_EDIT honours a permissions.ask rule (askRule=$askRule) (#16795)',
+      async ({ askRule, prompted }) => {
+        const executeSpy = vi.fn().mockResolvedValue({
+          llmContent: 'contents',
+          returnDisplay: 'contents',
+        });
+        const invocation = {
+          params: { path: '/home/u/.qwen/settings.json' },
+          getDefaultPermission: vi.fn().mockResolvedValue('ask'),
+          getConfirmationDetails: vi.fn().mockResolvedValue({
+            type: 'info',
+            title: 'Read file',
+            prompt: 'Allow?',
+            onConfirm: vi.fn(),
+          }),
+          getDescription: vi.fn().mockReturnValue('Read settings'),
+          toolLocations: vi.fn().mockReturnValue([]),
+          execute: executeSpy,
+        };
+        mockToolRegistry.getTool.mockReturnValue({
+          name: 'read_file',
+          kind: core.Kind.Read,
+          build: vi.fn().mockReturnValue(invocation),
+        });
+        mockConfig.getApprovalMode = vi
+          .fn()
+          .mockReturnValue(ApprovalMode.AUTO_EDIT);
+        mockConfig.getPermissionManager = vi.fn().mockReturnValue({
+          isToolEnabled: vi.fn().mockResolvedValue(true),
+          hasRelevantRules: vi.fn().mockReturnValue(true),
+          evaluate: vi.fn().mockResolvedValue('ask'),
+          hasMatchingAskRule: vi.fn().mockReturnValue(askRule),
+          findMatchingDenyRule: vi.fn(),
+        });
+        mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
+        mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                functionCalls: [
+                  {
+                    id: 'call-auto-edit-ask',
+                    name: 'read_file',
+                    args: { path: '/home/u/.qwen/settings.json' },
+                  },
+                ],
+              },
+            },
+          ]),
+        );
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'read settings' }],
+        });
+
+        if (prompted) {
+          expect(mockClient.requestPermission).toHaveBeenCalledOnce();
+        } else {
+          expect(mockClient.requestPermission).not.toHaveBeenCalled();
+          expect(executeSpy).toHaveBeenCalledOnce();
+        }
+      },
+    );
 
     it('threads MCP permission aliases into the L1 isToolEnabled gate', async () => {
       // A legacy-spelled MCP deny can only name the registered provider-safe

@@ -32,8 +32,11 @@ import {
   type ServerLlmStreamEvent,
   type ToolCallRequestInfo,
   type ToolCallResponseInfo,
-  type Turn,
+  Turn,
+  type TurnRunOptions,
 } from './turn.js';
+import type { LlmChat } from './llm-chat.js';
+import { runAgentLoopOnBus } from '../event-bus/adapter.js';
 
 type SchedulerOptions = ConstructorParameters<typeof CoreToolScheduler>[0];
 
@@ -106,6 +109,61 @@ export interface AgentLoopDuplicateState {
   responded: Set<string>;
 }
 
+/**
+ * What a surface returns for a model event: a stop reason ends the round
+ * there, as a stop event of the client does, and closes its stream.
+ */
+export type ModelEventResult = AgentLoopStopReason | void;
+
+/**
+ * Sends one model round. The main session's round is its `LlmClient`; an
+ * agent with its own `LlmChat` sends its rounds with {@link turnModelRound}.
+ * The iterator's return value is the round's `Turn`.
+ */
+export interface ModelRoundSource {
+  sendRound(
+    round: AgentLoopRound,
+    signal: AbortSignal,
+  ): AsyncIterator<ServerLlmStreamEvent, Turn | undefined>;
+}
+
+/**
+ * A round on a `Turn` over `chat`, for an agent that owns its chat: the
+ * stream's chunks are parsed into events only in `turn.ts`. `round.options`
+ * belong to the main session's client and are not used.
+ */
+export function turnModelRound(
+  chat: LlmChat,
+  model: string,
+  options?: TurnRunOptions,
+): ModelRoundSource {
+  return {
+    sendRound: (round, signal) =>
+      runTurn(
+        new Turn(chat, round.promptId),
+        model,
+        round.parts,
+        signal,
+        options,
+      ),
+  };
+}
+
+async function* runTurn(
+  turn: Turn,
+  model: string,
+  parts: PartListUnion,
+  signal: AbortSignal,
+  options: TurnRunOptions | undefined,
+): AsyncGenerator<ServerLlmStreamEvent, Turn> {
+  yield* turn.run(model, parts, signal, undefined, options);
+  return turn;
+}
+
+const isModelRoundSource = (
+  source: LlmClient | ModelRoundSource,
+): source is ModelRoundSource => 'sendRound' in source;
+
 /** Behavior the surface owns. Every hook is optional. */
 export interface AgentLoopHost {
   onRoundStart?(round: number, promptId: string): void;
@@ -117,7 +175,7 @@ export interface AgentLoopHost {
   onModelEvent?(
     event: ServerLlmStreamEvent,
     discardedCalls: readonly ToolCallRequestInfo[],
-  ): void | Promise<void>;
+  ): ModelEventResult | Promise<ModelEventResult>;
   onRoundEnd?(round: number): void;
   /** The request for a round after the first; defaults to the tool results. */
   nextRound?(round: number, parts: Part[]): AgentLoopRound;
@@ -189,6 +247,12 @@ export interface AgentLoopOptions {
   scheduler?: Partial<SchedulerOptions>;
   executor?: AgentLoopToolExecutor;
   runtimeView?: RuntimeContentGeneratorView;
+  /**
+   * Run the loop on the event-bus implementation instead of the procedural
+   * one. Opt-in; the two are behaviorally equivalent. See
+   * docs/design/2026-11-11-event-bus-agent-loop.md.
+   */
+  useEventBus?: boolean;
 }
 
 /**
@@ -200,6 +264,9 @@ export interface AgentLoopOptions {
 export async function runAgentLoop(
   options: AgentLoopOptions,
 ): Promise<AgentLoopResult> {
+  if (options.useEventBus) {
+    return runAgentLoopOnBus(options);
+  }
   const { client, config, signal, host = {} } = options;
   const duplicates = options.duplicates ?? {
     handled: new Map(client.getHistoryToolCallFingerprints()),
@@ -245,13 +312,19 @@ export async function runAgentLoop(
   }
 }
 
-const STOP_EVENTS: Partial<Record<LlmEventType, AgentLoopStopReason>> = {
-  [LlmEventType.UserCancelled]: 'cancelled',
-  [LlmEventType.LoopDetected]: 'loop_detected',
-  [LlmEventType.MaxSessionTurns]: 'max_session_turns',
-  [LlmEventType.SessionTokenLimitExceeded]: 'session_token_limit',
-  [LlmEventType.UserPromptSubmitBlocked]: 'user_prompt_blocked',
-};
+/**
+ * The stop reason of a client's terminal event. Built on first use: agent
+ * runtimes import this module while `turn.ts` may still be evaluating.
+ */
+let stopEvents: Partial<Record<LlmEventType, AgentLoopStopReason>> | undefined;
+const stopReasonOf = (type: LlmEventType) =>
+  (stopEvents ??= {
+    [LlmEventType.UserCancelled]: 'cancelled',
+    [LlmEventType.LoopDetected]: 'loop_detected',
+    [LlmEventType.MaxSessionTurns]: 'max_session_turns',
+    [LlmEventType.SessionTokenLimitExceeded]: 'session_token_limit',
+    [LlmEventType.UserPromptSubmitBlocked]: 'user_prompt_blocked',
+  })[type];
 
 /**
  * One model round of the loop: the events go to `host.onModelEvent`, the
@@ -260,7 +333,7 @@ const STOP_EVENTS: Partial<Record<LlmEventType, AgentLoopStopReason>> = {
  * its own tool step calls it directly.
  */
 export async function runModelRound(
-  client: LlmClient,
+  source: LlmClient | ModelRoundSource,
   round: AgentLoopRound,
   signal: AbortSignal,
   host: Pick<AgentLoopHost, 'onModelEvent'>,
@@ -271,12 +344,15 @@ export async function runModelRound(
 }> {
   const calls: ToolCallRequestInfo[] = [];
   let stop: AgentLoopStopReason | undefined;
-  const stream = client.sendMessageStream(
-    round.parts,
-    signal,
-    round.promptId,
-    round.options,
-  );
+  const stream: AsyncIterator<ServerLlmStreamEvent, Turn | undefined> =
+    isModelRoundSource(source)
+      ? source.sendRound(round, signal)
+      : source.sendMessageStream(
+          round.parts,
+          signal,
+          round.promptId,
+          round.options,
+        );
   let finished = false;
   try {
     for (;;) {
@@ -295,13 +371,15 @@ export async function runModelRound(
       } else if (event.type === LlmEventType.ToolCallRequest) {
         calls.push(event.value);
       } else if (event.type !== LlmEventType.UserCancelled || signal.aborted) {
-        stop ??= STOP_EVENTS[event.type];
+        stop ??= stopReasonOf(event.type);
       }
-      await host.onModelEvent?.(event, discardedCalls);
+      const surfaceStop = await host.onModelEvent?.(event, discardedCalls);
+      if (surfaceStop) return { calls, stop: stop ?? surfaceStop };
     }
   } finally {
-    // The surface threw out of an event: close the client's turn too.
-    if (!finished) await stream.return(undefined as unknown as Turn);
+    // The surface stopped the round or threw out of an event: close the
+    // client's turn too.
+    if (!finished) await stream.return?.(undefined);
   }
 }
 

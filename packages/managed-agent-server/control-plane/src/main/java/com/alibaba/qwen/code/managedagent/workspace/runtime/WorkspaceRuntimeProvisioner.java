@@ -38,7 +38,7 @@ public final class WorkspaceRuntimeProvisioner implements RuntimeProvisioner {
         }
         var resolved = resolver.resolve(harnessSessionId, scope.getLifecycleAuthority());
         if (!resolved.scope().equals(scope)) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
         var selected = delegate.createRequest(scope, isolationKey);
         return new RuntimeProvisionRequest(scope, isolationKey, selected.getProvisionerKind(), resolved.binding().getStorageId());
@@ -84,9 +84,9 @@ public final class WorkspaceRuntimeProvisioner implements RuntimeProvisioner {
         }
         if (request.getIsolationKey() != null) {
             var resolved = resolver.resolve(request.getIsolationKey(), request.getScope().getLifecycleAuthority());
-            if (!resolved.scope().equals(request.getScope())
+            if (!WorkspaceRuntimeResolver.matchesRecordedScope(resolved.scope(), request.getScope())
                     || !resolved.binding().getStorageId().equals(request.getStorageId())) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                throw WorkspaceExecutionStore.unavailable();
             }
             return;
         }

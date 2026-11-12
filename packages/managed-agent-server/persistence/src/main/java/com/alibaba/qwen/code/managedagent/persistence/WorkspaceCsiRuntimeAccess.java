@@ -21,6 +21,7 @@ import com.alibaba.qwen.code.runtimebroker.persistence.JdbcCsiExecutionAdmission
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcCsiFilesRetirementGuard;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.alibaba.qwen.code.runtimebroker.transport.CsiFileHistoryProtocol;
 import com.alibaba.qwen.code.runtimebroker.transport.CsiNativeReadbackProtocol;
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -72,7 +73,7 @@ public final class WorkspaceCsiRuntimeAccess implements HarnessSessionResolver, 
         this.transaction = new TransactionTemplate(manager);
         this.transaction.setTimeout(10);
         this.managed = new ManagedAgentStore(jdbc, json, Clock.systemUTC(), ignored -> {},
-                new ManagedWorkspaceRegistry(jdbc), properties, harnessRules);
+                new JdbcManagedWorkspaceRegistry(jdbc), properties, harnessRules);
         this.storage = new WorkspaceCsiReservationStore(jdbc, manager, json);
         this.registration = Objects.requireNonNull(registration);
         this.sessionId = sessionId;
@@ -155,7 +156,7 @@ public final class WorkspaceCsiRuntimeAccess implements HarnessSessionResolver, 
                 throw unavailable();
             }
             if (!continuation) {
-                JdbcRuntimeBindingRepository.requireHarnessAdmission(original, request.getScope(), sessionId, null);
+                RuntimeAdmissionFences.requireHarnessAdmission(original, request.getScope(), sessionId, null);
             }
             var binding = bindings.findByIdForUpdate(original, guard.bindingId());
             if (binding == null || binding.getGeneration() != guard.generation() || binding.getVersion() != guard.version()
