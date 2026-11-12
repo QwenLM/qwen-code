@@ -1618,6 +1618,14 @@ export interface ConfigParameters {
   autoCompactThreshold?: number;
   interactive?: boolean;
   trustedFolder?: boolean;
+  /**
+   * The trust file's decision for `dir` when a rule set strictly inside the
+   * IDE workspace root `ideRoot` decides it; such a rule wins over the IDE.
+   */
+  trustFileDecisionBelowIdeRoot?: (
+    dir: string,
+    ideRoot: string,
+  ) => boolean | undefined;
   defaultFileEncoding?: FileEncodingType;
   useRipgrep?: boolean;
   useBuiltinRipgrep?: boolean;
@@ -3331,6 +3339,9 @@ export class Config {
   private readonly autoCompactThreshold: number | undefined;
   private readonly interactive: boolean;
   private readonly trustedFolder: boolean | undefined;
+  private readonly trustFileDecisionBelowIdeRoot:
+    | ((dir: string, ideRoot: string) => boolean | undefined)
+    | undefined;
   private readonly useRipgrep: boolean;
   private readonly useBuiltinRipgrep: boolean;
   private readonly shouldUseNodePtyShell: boolean;
@@ -3790,6 +3801,7 @@ export class Config {
     this.autoCompactThreshold = params.autoCompactThreshold;
     this.interactive = params.interactive ?? false;
     this.trustedFolder = params.trustedFolder;
+    this.trustFileDecisionBelowIdeRoot = params.trustFileDecisionBelowIdeRoot;
     this.skipLoopDetection = params.skipLoopDetection ?? false;
     // Embedders bypass the CLI's check; an unknown mode would act as `off`.
     this.loopProtection = isLoopProtectionMode(params.loopProtection)
@@ -12349,9 +12361,13 @@ export class Config {
   }
 
   private getIdeWorkspaceTrust(): boolean | undefined {
-    return this.experimentalZedIntegration
-      ? ideContextStore.getWorkspaceTrust(this.getTargetDir())
+    const dir = this.getTargetDir();
+    const scope = ideContextStore.getWorkspaceTrustScope(dir);
+    const isTrusted = this.experimentalZedIntegration
+      ? scope?.isTrusted
       : ideContextStore.get()?.workspaceState?.isTrusted;
+    if (isTrusted === undefined || scope?.root === undefined) return isTrusted;
+    return this.trustFileDecisionBelowIdeRoot?.(dir, scope.root) ?? isTrusted;
   }
 
   isTrustedFolder(): boolean {

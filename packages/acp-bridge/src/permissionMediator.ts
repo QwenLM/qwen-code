@@ -649,12 +649,20 @@ export class MultiClientPermissionMediator implements PermissionMediator {
     this.cancelPending(sessionId, () => true, 'session_closed');
   }
 
-  cancelForPrompt(sessionId: string, promptId: string | undefined): void {
+  cancelForPrompt(sessionId: string, promptId: string): void {
     this.cancelPending(
       sessionId,
       (pending) =>
         pending.workflowApprovalToolCallId === undefined &&
         pending.promptId === promptId,
+      'agent_cancelled',
+    );
+  }
+
+  cancelForTurnCancel(sessionId: string): void {
+    this.cancelPending(
+      sessionId,
+      (pending) => pending.workflowApprovalToolCallId === undefined,
       'agent_cancelled',
     );
   }

@@ -132,7 +132,10 @@ import { isValidSessionId, normalizeSessionIdForLookup } from './session-id.js';
 
 export { isValidSessionId } from './session-id.js';
 
-import { isWorkspaceTrusted } from './trustedFolders.js';
+import {
+  getTrustFileDecisionBelowIdeRoot,
+  isWorkspaceTrusted,
+} from './trustedFolders.js';
 import { assembleMcpServers } from './mcpServers.js';
 import { getPendingGatedMcpServers } from './mcpApprovals.js';
 import {
@@ -2999,6 +3002,8 @@ export async function loadCliConfig(
     folderTrust,
     interactive,
     trustedFolder,
+    trustFileDecisionBelowIdeRoot: (dir, ideRoot) =>
+      getTrustFileDecisionBelowIdeRoot(settings, dir, ideRoot),
     useRipgrep: settings.tools?.useRipgrep,
     useBuiltinRipgrep: settings.tools?.useBuiltinRipgrep,
     workflowsEnabled: settings.tools?.workflowsEnabled,

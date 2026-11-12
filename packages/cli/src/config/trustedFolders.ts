@@ -420,6 +420,26 @@ function hasTrustRuleBelowRoot(
   );
 }
 
+/**
+ * The trust file's decision for `location` when its deciding rule sits
+ * strictly inside the IDE workspace root `root`, which then wins over the
+ * IDE's answer; `undefined` leaves the decision to the IDE.
+ */
+export function getTrustFileDecisionBelowIdeRoot(
+  settings: Settings,
+  location: string,
+  root: string | undefined,
+  trustConfig?: Record<string, TrustLevel>,
+): boolean | undefined {
+  if (
+    !isFolderTrustEnabled(settings) ||
+    !hasTrustRuleBelowRoot(trustConfig, location, root)
+  ) {
+    return undefined;
+  }
+  return loadTrustedFoldersWithOverrides(trustConfig).isPathTrusted(location);
+}
+
 export function getWorkspaceTrustStatus(
   settings: Settings,
   workspaceCwd: string,
@@ -490,7 +510,15 @@ export function isWorkspaceTrusted(
   if (workspacePath === undefined) {
     const ideTrust = ideContextStore.get()?.workspaceState?.isTrusted;
     if (ideTrust !== undefined) {
-      return { isTrusted: ideTrust, source: 'ide' };
+      const fileTrust = getTrustFileDecisionBelowIdeRoot(
+        settings,
+        process.cwd(),
+        ideContextStore.getWorkspaceTrustScope(process.cwd())?.root,
+        trustConfig,
+      );
+      return fileTrust === undefined
+        ? { isTrusted: ideTrust, source: 'ide' }
+        : { isTrusted: fileTrust, source: 'file' };
     }
   }
 

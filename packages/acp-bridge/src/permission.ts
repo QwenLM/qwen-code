@@ -177,10 +177,22 @@ export interface PermissionMediator {
   forgetSession(sessionId: string): void;
 
   /**
-   * Cancel requests for one turn, or requests without a turn for a legacy
-   * session cancel. Detached workflow approvals have their own owner.
+   * Cancel the pending requests belonging to one prompt within the
+   * session — called when an automatic background turn ends while its
+   * approval is still outstanding, so the orphaned request resolves as
+   * `{ kind: 'cancelled', reason: 'agent_cancelled' }` instead of pending
+   * for the life of the session. Requests attributed to any other prompt
+   * (a live user prompt sharing the session) are left alone, and so are
+   * detached workflow approvals, which have their own owner.
    */
-  cancelForPrompt(sessionId: string, promptId: string | undefined): void;
+  cancelForPrompt(sessionId: string, promptId: string): void;
+
+  /**
+   * Cancel every pending request of the session except detached workflow
+   * approvals — called when a turn is cancelled. MCP App call approvals,
+   * which carry their app call id rather than the turn's, end with it.
+   */
+  cancelForTurnCancel(sessionId: string): void;
 
   /** Withdraw the detached workflow's approval when its tool call ends. */
   cancelWorkflowApproval(sessionId: string, toolCallId: string): void;

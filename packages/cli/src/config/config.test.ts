@@ -34,7 +34,10 @@ import {
 } from './config.js';
 import type { Settings } from './settings.js';
 import * as ServerConfig from '@qwen-code/qwen-code-core';
-import { isWorkspaceTrusted } from './trustedFolders.js';
+import {
+  getTrustFileDecisionBelowIdeRoot,
+  isWorkspaceTrusted,
+} from './trustedFolders.js';
 import { resetMcpApprovalsForTesting } from './mcpApprovals.js';
 import { getProjectHooksApprovalState } from './hook-approvals.js';
 import { addCommand } from '../commands/mcp/add.js';
@@ -160,6 +163,7 @@ const createNativeLspServiceInstance = () => ({
 
 vi.mock('./trustedFolders.js', () => ({
   isWorkspaceTrusted: vi.fn(() => ({ isTrusted: true, source: 'file' })), // Default to trusted
+  getTrustFileDecisionBelowIdeRoot: vi.fn(() => undefined),
 }));
 
 const nativeLspServiceMock = vi.mocked(NativeLspService);
@@ -6090,6 +6094,36 @@ describe('loadCliConfig folderTrust', () => {
     ]);
     expect(config.isTrustedFolder()).toBe(false);
   });
+
+  it.each([
+    ['an ACP session', ['--acp']],
+    ['an interactive session', []],
+  ])(
+    'lets a trust rule below the IDE root decide the runtime trust of %s',
+    async (_label, flags) => {
+      process.argv = ['node', 'script.js', ...flags];
+      const argv = await parseArguments();
+      const ideRoot = path.dirname(process.cwd());
+      vi.mocked(getTrustFileDecisionBelowIdeRoot).mockImplementation(
+        (_settings, location, root) =>
+          location === process.cwd() && root === ideRoot ? false : undefined,
+      );
+      ServerConfig.ideContextStore.set(
+        { workspaceState: { isTrusted: true } },
+        [ideRoot],
+      );
+
+      const config = await loadCliConfig(
+        { security: { folderTrust: { enabled: true } } },
+        argv,
+        process.cwd(),
+        [],
+      );
+
+      expect(config.isTrustedFolder()).toBe(false);
+      expect(config.isExplicitlyTrustedFolder()).toBe(false);
+    },
+  );
 
   it('honors live IDE trust for an ACP session in the process workspace', async () => {
     process.argv = ['node', 'script.js', '--acp'];

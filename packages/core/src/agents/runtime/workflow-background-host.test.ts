@@ -4,8 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it } from 'vitest';
+import { realpathSync } from 'node:fs';
+import * as path from 'node:path';
+import { afterEach, describe, expect, it } from 'vitest';
 import { Config, type ConfigParameters } from '../../config/config.js';
+import { ideContextStore } from '../../ide/ideContext.js';
 import { WorkflowTool } from '../../tools/workflow/workflow.js';
 import { hostSupportsBackgroundWorkflows } from './workflow-runner.js';
 
@@ -28,6 +31,8 @@ function acpConfig(params: Partial<ConfigParameters> = {}): Config {
 }
 
 describe('hostSupportsBackgroundWorkflows on a real ACP Config', () => {
+  afterEach(() => ideContextStore.clear());
+
   it.each([
     ['folder trust off', {}, true],
     ['trusted workspace', { folderTrust: true, trustedFolder: true }, true],
@@ -36,6 +41,27 @@ describe('hostSupportsBackgroundWorkflows on a real ACP Config', () => {
   ] as const)('%s', (_label, params, expected) => {
     expect(hostSupportsBackgroundWorkflows(acpConfig(params))).toBe(expected);
   });
+
+  it.each([
+    ['refuses', false, false],
+    ['allows', true, true],
+  ] as const)(
+    '%s a workspace a trust rule below the IDE root decides as trusted=%s',
+    (_label, fileTrust, expected) => {
+      const ideRoot = path.dirname(realpathSync('/tmp'));
+      const config = acpConfig({
+        folderTrust: true,
+        trustedFolder: fileTrust,
+        trustFileDecisionBelowIdeRoot: (dir, root) =>
+          dir === '/tmp' && root === ideRoot ? fileTrust : undefined,
+      });
+      ideContextStore.set({ workspaceState: { isTrusted: !fileTrust } }, [
+        ideRoot,
+      ]);
+
+      expect(hostSupportsBackgroundWorkflows(config)).toBe(expected);
+    },
+  );
 
   it('refuses once a settings reload turns workflows off mid-session', () => {
     const config = acpConfig();

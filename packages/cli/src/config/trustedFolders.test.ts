@@ -698,6 +698,34 @@ describe('getWorkspaceTrustStatus', () => {
       },
     );
 
+    it.each([
+      [true, TrustLevel.DO_NOT_TRUST, false],
+      [false, TrustLevel.TRUST_FOLDER, true],
+    ] as const)(
+      'lets a nested rule beat IDE trust %s for the process workspace',
+      (isTrusted, level, expected) => {
+        vi.spyOn(process, 'cwd').mockReturnValue(nested);
+        ideContextStore.set({ workspaceState: { isTrusted } }, [root]);
+        mockRules[nested] = level;
+
+        expect(isWorkspaceTrusted(mockSettings)).toEqual({
+          isTrusted: expected,
+          source: 'file',
+        });
+      },
+    );
+
+    it('keeps the IDE decision for the process workspace at the root', () => {
+      vi.spyOn(process, 'cwd').mockReturnValue(root);
+      ideContextStore.set({ workspaceState: { isTrusted: true } }, [root]);
+      mockRules[root] = TrustLevel.DO_NOT_TRUST;
+
+      expect(isWorkspaceTrusted(mockSettings)).toEqual({
+        isTrusted: true,
+        source: 'ide',
+      });
+    });
+
     it('keeps the IDE decision over a rule on the root or above it', () => {
       ideContextStore.set({ workspaceState: { isTrusted: true } }, [root]);
       mockRules[root] = TrustLevel.DO_NOT_TRUST;

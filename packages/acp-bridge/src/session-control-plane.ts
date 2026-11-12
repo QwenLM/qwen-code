@@ -12106,10 +12106,7 @@ export function createSessionControlPlane(
                         // already ends the turn visibly; a phantom
                         // forward-failure line and prompt_cancelled broadcast
                         // would misreport it.
-                        permissionMediator.cancelForPrompt(
-                          sessionId,
-                          pendingEntry.promptId,
-                        );
+                        permissionMediator.cancelForTurnCancel(sessionId);
                         return;
                       }
                       writeStderrLine(
@@ -12122,10 +12119,7 @@ export function createSessionControlPlane(
                         originatorClientId,
                         'forward_failed',
                       );
-                      permissionMediator.cancelForPrompt(
-                        sessionId,
-                        pendingEntry.promptId,
-                      );
+                      permissionMediator.cancelForTurnCancel(sessionId);
                     },
                   )
                   .catch(() => {});
@@ -12141,10 +12135,7 @@ export function createSessionControlPlane(
                     pendingEntry.promptId,
                     originatorClientId,
                   );
-                  permissionMediator.cancelForPrompt(
-                    sessionId,
-                    pendingEntry.promptId,
-                  );
+                  permissionMediator.cancelForTurnCancel(sessionId);
                   if (byId.get(sessionId) === entry) {
                     void forwardRunningPromptCancel(entry, pendingEntry, {
                       sessionId,
@@ -12327,21 +12318,19 @@ export function createSessionControlPlane(
       // `...Once` dedups against the `sendPrompt` abort path by prompt id, so
       // a client that POSTs /cancel and then drops its socket doesn't emit two
       // `prompt_cancelled` frames for the same turn.
-      const promptId =
-        entry.activePromptId ??
-        entry.backgroundTurn?.turnId ??
-        runningPrompt?.promptId;
       broadcastPromptCancelledOnce(
         entry,
         sessionId,
-        promptId,
+        entry.activePromptId ??
+          entry.backgroundTurn?.turnId ??
+          runningPrompt?.promptId,
         cancelOriginatorClientId,
       );
       // ACP spec: cancelling a prompt MUST resolve outstanding
       // requestPermission calls with outcome.cancelled. Do this *before*
       // forwarding the notification so the agent's wind-down sees the
       // resolutions.
-      permissionMediator.cancelForPrompt(sessionId, promptId);
+      permissionMediator.cancelForTurnCancel(sessionId);
       // Cancel intentionally bypasses the prompt queue: it's a notification
       // that the agent uses to wind down the *currently active* prompt, not
       // something to wait behind queued work.
