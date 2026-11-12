@@ -240,6 +240,7 @@ import {
   ACP_EVENT_LOOP_STALL_RESTART_MS,
   CHANNEL_PROMPT_META_KEY,
   CHANNEL_OUTPUT_MODE_META_KEY,
+  CHANNEL_WORKFLOW_ORIGIN_META_KEY,
 } from '@qwen-code/channel-base';
 import { observeAcpToolResultWire } from '../nonInteractive/tool-result-boundary-diagnostics.js';
 import { Readable } from 'node:stream';
@@ -7302,6 +7303,8 @@ class QwenAgent implements Agent {
         : meta[SUBMITTED_PROMPT_META_KEY];
     const suppliedChannelPrompt = meta[CHANNEL_PROMPT_META_KEY];
     const suppliedChannelOutputMode = meta[CHANNEL_OUTPUT_MODE_META_KEY];
+    const suppliedChannelWorkflowOrigin =
+      meta[CHANNEL_WORKFLOW_ORIGIN_META_KEY];
     const suppliedGoalProposalApproval = meta['qwen.goalProposalApproval'];
     const suppliedChannelDelivery = meta[DAEMON_CHANNEL_DELIVERY_META_KEY];
     delete meta[INVOCATION_CONTEXT_META_KEY];
@@ -7315,6 +7318,7 @@ class QwenAgent implements Agent {
     }
     delete meta[CHANNEL_PROMPT_META_KEY];
     delete meta[CHANNEL_OUTPUT_MODE_META_KEY];
+    delete meta[CHANNEL_WORKFLOW_ORIGIN_META_KEY];
     delete meta['qwen.goalProposalApproval'];
     if (
       this.privateParentState === 'trusted' &&
@@ -7344,6 +7348,9 @@ class QwenAgent implements Agent {
       meta[CHANNEL_PROMPT_META_KEY] = true;
       if (suppliedChannelOutputMode === 'per_task') {
         meta[CHANNEL_OUTPUT_MODE_META_KEY] = suppliedChannelOutputMode;
+      }
+      if (suppliedChannelWorkflowOrigin !== undefined) {
+        meta[CHANNEL_WORKFLOW_ORIGIN_META_KEY] = suppliedChannelWorkflowOrigin;
       }
     }
     // Channel delivery is a daemon-managed side effect (the prompt route
@@ -11445,7 +11452,12 @@ class QwenAgent implements Agent {
         ) {
           throw RequestError.invalidParams(undefined, 'Invalid scope');
         }
-        if (!this.config.isManagedMemoryAvailable()) {
+        if (
+          this.config.getBareMode() ||
+          this.config.getShellExecutionSandbox() ||
+          (this.managedToolInvocationGuard &&
+            this.externalToolGuardProviderAttached)
+        ) {
           throw new RequestError(
             -32009,
             'Managed memory is unavailable for this daemon workspace',
@@ -15774,12 +15786,40 @@ class QwenAgent implements Agent {
 
         const results = await Promise.allSettled(
           sessions.map(async ([id, session]) => {
-            const reasoningError = session
-              .getConfig()
-              .stageReasoningOverrides?.(
-                newMerged.modelProviders,
-                newMerged.providerProtocol ?? {},
-              );
+            const config = session.getConfig();
+            // Workflow admission and controls follow the live flag even
+            // while a turn or a detached workflow is running.
+            const workflowsWereEnabled = config.isWorkflowsEnabled();
+            config.applyWorkflowsEnabledSetting(
+              newMerged.tools?.workflowsEnabled,
+            );
+            if (config.isWorkflowsEnabled() !== workflowsWereEnabled) {
+              if (!config.isWorkflowsEnabled()) {
+                // With the controls off, the tasks view hides a background
+                // run and cancel answers `disabled`; one admitted before
+                // the reload would keep running unseen, so end it here.
+                const cancelled = config
+                  .getWorkflowRunRegistry()
+                  .cancelBackgroundRuns(Date.now());
+                if (cancelled.length > 0) {
+                  debugLogger.info(
+                    `reload: workflows turned off; cancelled background workflow runs ${cancelled.join(', ')} in session ${id}`,
+                  );
+                }
+              }
+              try {
+                await session.sendAvailableCommandsUpdate();
+              } catch (err) {
+                debugLogger.warn(
+                  `reload: sendAvailableCommandsUpdate failed for session ${id}: ${err}`,
+                );
+              }
+            }
+
+            const reasoningError = config.stageReasoningOverrides?.(
+              newMerged.modelProviders,
+              newMerged.providerProtocol ?? {},
+            );
             if (reasoningError)
               await session
                 .sendUpdate({
@@ -15794,7 +15834,6 @@ class QwenAgent implements Agent {
               skipped.push(id);
               return;
             }
-            const config = session.getConfig();
             const authType = config.getAuthType();
 
             const sessionProvidersChanged =
@@ -15869,30 +15908,9 @@ class QwenAgent implements Agent {
               config.setDisabledTools(new Set(disabled));
             }
 
-            // `/capabilities` reads `tools.workflowsEnabled` live from
-            // the reloaded settings; a session alive before the reload
-            // was constructed with the old value and would keep
-            // answering canUseWorkflowControls with it, so the
-            // advertisement and the controls it gates would diverge.
-            // The merged view is already workspace-stripped, so a repo
-            // cannot self-grant here any more than at construction.
-            const workflowsWereEnabled = config.isWorkflowsEnabled();
-            config.setWorkflowsEnabled(newMerged.tools?.workflowsEnabled);
             config.setWorkflowKeywordTriggerEnabled(
               newMerged.ui?.disableWorkflowKeywordTrigger !== true,
             );
-            if (config.isWorkflowsEnabled() !== workflowsWereEnabled) {
-              // The `workflows` slash command comes and goes with the
-              // flag; a client holding the old list would keep offering
-              // (or hiding) it.
-              try {
-                await session.sendAvailableCommandsUpdate();
-              } catch (err) {
-                debugLogger.warn(
-                  `reload: sendAvailableCommandsUpdate failed for session ${id}: ${err}`,
-                );
-              }
-            }
 
             // Apply the reloaded approval mode only when it differs from
             // what this session last converged on (see the record's
