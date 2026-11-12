@@ -22,7 +22,6 @@ import com.alibaba.qwen.code.managedagent.persistence.JdbcSessionWorktreeStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
-import com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.session.HarnessCoordinator;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
@@ -1129,12 +1128,16 @@ class ManagedWorkspaceAdmissionTest {
                             String title) {
                     }
                 };
-        // actor-a admits the rename; the row stays PENDING until the
-        // dispatcher delivers it inside actor-b's raced call below.
-        String digest = new RequestDigests().digest(java.util.Map.of(
-                "sessionId", sessionId, "title", "new title"));
-        var admitted = gated.beginSessionRename(tenant, "rename", digest,
-                sessionId, "new title", "actor-a");
+        // actor-a settles the rename synchronously; the receipt is COMPLETED
+        // before actor-b's raced call below.
+        ManagedAgentService recorder = new ManagedAgentService(gated,
+                new RequestDigests(), mock(HarnessCoordinator.class), harness,
+                registry, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+        TransactionTemplate transaction = new TransactionTemplate(
+                transactionManager);
+        transaction.executeWithoutResult(status -> assertThat(
+                recorder.renameSession(tenant, "actor-a", "rename", sessionId,
+                        "new title").replayed()).isFalse());
         com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore racing =
                 mock(com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore.class,
                         org.mockito.AdditionalAnswers.delegatesTo(gated));
@@ -1152,45 +1155,12 @@ class ManagedWorkspaceAdmissionTest {
                 org.mockito.ArgumentMatchers.anyString(),
                 org.mockito.ArgumentMatchers.anyString(),
                 org.mockito.ArgumentMatchers.anyString());
-        // The raced admission answers exactly what the store's
-        // duplicate-key winner path answers when the recorder's receipt
-        // commits between the request's snapshot pre-read and its receipt
-        // insert: the winner's PENDING row, replayed, no actor gate on that
-        // path. Simulating the post-race answer here keeps the test
-        // deterministic; the entry gate's own refusal of a visible
-        // recorder row is covered by the store-level replay tests.
-        org.mockito.Mockito.doAnswer(call ->
-                new com.alibaba.qwen.code.managedagent.model.StoreModels.SessionMutationCommand(
-                        sessionId, "PENDING", true,
-                        admitted.renameRevision()))
-                .when(racing).beginSessionRename(
-                        org.mockito.ArgumentMatchers.anyString(),
-                        org.mockito.ArgumentMatchers.anyString(),
-                        org.mockito.ArgumentMatchers.anyString(),
-                        org.mockito.ArgumentMatchers.anyString(),
-                        org.mockito.ArgumentMatchers.anyString(),
-                        org.mockito.ArgumentMatchers.anyString());
-        // The dispatcher wins the claim actor-b's request just admitted
-        // and completes the delivery while the request waits.
-        org.mockito.Mockito.doAnswer(call -> {
-            var candidate = (com.alibaba.qwen.code.managedagent.model.StoreModels.RenameDelivery) call
-                    .getArgument(0);
-            var delivery = gated.claimRename(candidate, "dispatcher",
-                    Duration.ofMinutes(1)).orElseThrow();
-            gated.markRenameSubmitted(delivery, "dispatcher");
-            gated.completeSessionRename(delivery, "dispatcher", "boot");
-            return java.util.Optional.empty();
-        }).when(racing).claimRename(
-                org.mockito.ArgumentMatchers.any(),
-                org.mockito.ArgumentMatchers.anyString(),
-                org.mockito.ArgumentMatchers.any());
         ManagedAgentService settleService = new ManagedAgentService(racing,
                 new RequestDigests(), mock(HarnessCoordinator.class), harness,
                 registry, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
-        TransactionTemplate transaction = new TransactionTemplate(
-                transactionManager);
         // Through the settle arm: the live-Session creator refusal, not a
-        // 200 carrying the recorder's outcome.
+        // 200 carrying the recorder's outcome. The pre-read missed the row,
+        // so the settlement's own replay-owner gate must refuse actor-b.
         transaction.executeWithoutResult(status ->
                 assertThatThrownBy(() -> settleService.renameSession(tenant,
                         "actor-b", "rename", sessionId, "new title"))
@@ -1199,9 +1169,6 @@ class ManagedWorkspaceAdmissionTest {
                             assertThat(error.getCode())
                                     .isEqualTo("workspace_unavailable");
                         }));
-        // The refusal must come from the settle arm's creator gate, not an
-        // earlier admission gate: the dispatcher's delivery completed, so
-        // the request reached the claim and waited for the settle.
         assertThat(store.findCommand(tenant, "RENAME_SESSION", "rename")
                 .orElseThrow().status()).isEqualTo("COMPLETED");
         // The COMPLETED arm answers the identical request identically.
@@ -1371,12 +1338,11 @@ class ManagedWorkspaceAdmissionTest {
     }
 
     // The recorded rename's actor gate covers the UNFINISHED row too, not
-    // only the completed outcome: beginSessionRename compares key, Session
-    // and digest, never the actor, so without the gate a non-recorder
-    // OPERATOR replaying the key while the row is PENDING claims the
-    // recorder's delivery, drives harness.rename, flips the row to
-    // COMPLETED and answers 200 replayed — the recorded outcome the
-    // contract reserves for the actor who recorded it.
+    // only the completed outcome: the settlement compares key, Session and
+    // digest, never the actor, so without the gate a non-recorder OPERATOR
+    // replaying the key while the row is PENDING would settle the recorder's
+    // command to COMPLETED and answer 200 replayed — the recorded outcome
+    // the contract reserves for the actor who recorded it.
     @Test
     void aPendingRenameReplayKeepsTheRecorderGate() {
         String tenant = "tenant-" + UUID.randomUUID();
@@ -1408,12 +1374,13 @@ class ManagedWorkspaceAdmissionTest {
                 Clock.systemUTC(), ignored -> {}, registry, enabled, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         String digest = new RequestDigests().digest(Map.of("sessionId",
                 sessionId, "title", "new title"));
-        transaction.executeWithoutResult(status -> gated.beginSessionRename(
-                tenant, "rename", digest, sessionId, "new title", "actor-a"));
+        transaction.executeWithoutResult(status -> gated.beginSessionMutation(
+                tenant, "RENAME_SESSION", "rename", digest, sessionId,
+                SessionMutationKind.RENAME, "actor-a"));
 
         // The non-recorder OPERATOR's same-title replay meets the same
         // refusal the completed outcome answers, and the recorder's row
-        // and delivery stay untouched.
+        // stays untouched.
         transaction.executeWithoutResult(status ->
                 assertThatThrownBy(() -> service.renameSession(tenant,
                         "actor-b", "rename", sessionId, "new title"))
@@ -1429,12 +1396,12 @@ class ManagedWorkspaceAdmissionTest {
                         + " AND operation = 'RENAME_SESSION'"
                         + " AND idempotency_key = ?", String.class,
                 tenant, "rename")).isEqualTo("PENDING");
-        assertThat(jdbc.queryForObject("SELECT attempt_count FROM"
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
                         + " ma_operation WHERE operation_kind = 'RENAME'"
                         + " AND tenant_id = ? AND session_id = ?",
                 Integer.class, tenant, sessionId)).isZero();
 
-        // The recorder's own retry resumes the delivery to completion.
+        // The recorder's own retry resumes the settlement to completion.
         transaction.executeWithoutResult(status -> assertThat(
                 service.renameSession(tenant, "actor-a", "rename", sessionId,
                         "new title").replayed()).isTrue());
@@ -1474,8 +1441,9 @@ class ManagedWorkspaceAdmissionTest {
                 Clock.systemUTC(), ignored -> {}, registry, enabled, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         String digest = new RequestDigests().digest(Map.of("sessionId",
                 sessionId, "title", "new title"));
-        transaction.executeWithoutResult(status -> gated.beginSessionRename(
-                tenant, "rename", digest, sessionId, "new title", "actor-a"));
+        transaction.executeWithoutResult(status -> gated.beginSessionMutation(
+                tenant, "RENAME_SESSION", "rename", digest, sessionId,
+                SessionMutationKind.RENAME, "actor-a"));
 
         transaction.executeWithoutResult(status ->
                 assertThatThrownBy(() -> service.renameSession(tenant,
@@ -1864,7 +1832,7 @@ class ManagedWorkspaceAdmissionTest {
     }
 
     @Test
-    void refusedRenameRetiresItsCommandAndAdmitsTheNextOne() {
+    void aFailedTitleNotificationStillCompletesTheRenameAndAdmitsTheNextOne() {
         String tenant = "tenant-" + UUID.randomUUID();
         register(tenant, "ws-a", "storage-a",
                 WorkspaceExecutionProfile.CONFIG_REF,
@@ -1884,129 +1852,9 @@ class ManagedWorkspaceAdmissionTest {
         enabled.getHarness().setWorkspaceFilesEnabled(true);
         ManagedAgentStore gated = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, mapper,
                 Clock.systemUTC(), ignored -> {}, registry, enabled, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
-        // The Workspace authority refuses the first attach and admits the
-        // second, so a rename after the refused one is observable.
-        UnavailableHarnessConnector harness =
-                new UnavailableHarnessConnector() {
-                    private int attaches;
-
-                    @Override
-                    public boolean isAvailable() {
-                        return true;
-                    }
-
-                    @Override
-                    public boolean isWorkspaceFilesAvailable() {
-                        return true;
-                    }
-
-                    @Override
-                    public Attachment createOrLoad(String tenantId,
-                            String sessionId, boolean loadExisting) {
-                        if (attaches++ == 0) {
-                            throw WorkspaceExecutionStore.unavailable();
-                        }
-                        return new Attachment("boot");
-                    }
-
-                    @Override
-                    public boolean supportsFencedTitles() {
-                        return true;
-                    }
-
-                    @Override
-                    public void rename(String tenantId, String sessionId,
-                            String title) {
-                    }
-                };
-        ManagedAgentService service = new ManagedAgentService(gated,
-                new RequestDigests(), null, harness, registry, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
-        TransactionTemplate transaction = new TransactionTemplate(
-                transactionManager);
-
-        // The refusal answers its own permanent status, and the command row
-        // it wrote must not survive to wedge every later rename.
-        transaction.executeWithoutResult(status ->
-                assertThatThrownBy(() -> service.renameSession(tenant,
-                        "actor-a", "rename-1", sessionId, "first"))
-                        .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
-                            assertThat(error.getStatus())
-                                    .isEqualTo(HttpStatus.CONFLICT.value());
-                            assertThat(error.getCode())
-                                    .isEqualTo("workspace_unavailable");
-                        }));
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
-                        + " ma_request_receipt WHERE namespace = 'SESSION_COMMAND' AND tenant_id = ?"
-                        + " AND session_id = ? AND state = 'PENDING'",
-                Integer.class, tenant, sessionId)).isZero();
-
-        transaction.executeWithoutResult(status ->
-                assertThatThrownBy(() -> gated.beginWorkspaceClose(tenant, sessionId, "actor-a",
-                        "actor-digest", "close-while-rename-pending", digest, true))
-                        .isInstanceOfSatisfying(ManagedAgentException.class, error ->
-                                assertThat(error.getCode()).isEqualTo("session_operation_active")));
-        assertThat(jdbc.queryForObject("SELECT state FROM ma_request_receipt WHERE namespace = 'SESSION_COMMAND'"
-                        + " AND tenant_id = ? AND operation = 'RENAME_SESSION' AND idempotency_key = ?",
-                String.class, tenant, "rename-1")).isEqualTo("FAILED");
-
-        // The freed key stays re-usable: a same-key retry re-attempts the
-        // mutation instead of colliding on the requested event the refused
-        // attempt already published.
-        transaction.executeWithoutResult(status -> service.renameSession(
-                tenant, "actor-a", "rename-1", sessionId, "first"));
-        assertThat(jdbc.queryForObject("SELECT title FROM"
-                        + " ma_session WHERE tenant_id = ?"
-                        + " AND session_id = ?", String.class, tenant,
-                sessionId)).isEqualTo("first");
-
-        var blocker = transaction.execute(status -> gated.beginWorkspaceClose(tenant, sessionId,
-                "actor-a", "actor-digest", "close-blocker", digest, true)).operation();
-        transaction.executeWithoutResult(status ->
-                assertThatThrownBy(() -> service.renameSession(tenant,
-                        "actor-a", "rename-2", sessionId, "second"))
-                        .isInstanceOfSatisfying(ManagedAgentException.class, error ->
-                                assertThat(error.getCode()).isEqualTo("workspace_unavailable")));
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_request_receipt WHERE namespace = 'SESSION_COMMAND'"
-                        + " AND tenant_id = ? AND operation = 'RENAME_SESSION' AND idempotency_key = ?",
-                Integer.class, tenant, "rename-2")).isZero();
-        transaction.executeWithoutResult(status -> {
-            jdbc.update("DELETE FROM ma_operation WHERE tenant_id = ? AND session_id = ?"
-                    + " AND operation_kind = 'CLOSE' AND operation_id = ?", tenant, sessionId, blocker.operationId());
-            jdbc.update("UPDATE ma_session SET status = 'ACTIVE' WHERE tenant_id = ? AND session_id = ?", tenant, sessionId);
-        });
-
-        transaction.executeWithoutResult(status -> service.renameSession(
-                tenant, "actor-a", "rename-2", sessionId, "second"));
-        assertThat(jdbc.queryForObject("SELECT title FROM"
-                        + " ma_session WHERE tenant_id = ?"
-                        + " AND session_id = ?", String.class, tenant,
-                sessionId)).isEqualTo("second");
-    }
-
-    @Test
-    void aRenameFailureThatIsNotABrokerRefusalStillRetiresItsCommand() {
-        String tenant = "tenant-" + UUID.randomUUID();
-        register(tenant, "ws-a", "storage-a",
-                WorkspaceExecutionProfile.CONFIG_REF,
-                WorkspaceExecutionProfile.POLICY_REF);
-        grant(tenant, "ws-a", "actor-a", true);
-        String digest = "sha256:" + "a".repeat(64);
-        String sessionId = store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
-                .tenantId(tenant)
-                .actorId("actor-a")
-                .idempotencyKey("create")
-                .requestDigest(digest)
-                .agentId("qwen-code")
-                .selection(new WorkspaceSelection("ws-a", "."))
-                .build())
-                .sessionId();
-        ManagedAgentProperties enabled = new ManagedAgentProperties();
-        enabled.getHarness().setWorkspaceFilesEnabled(true);
-        ManagedAgentStore gated = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, mapper,
-                Clock.systemUTC(), ignored -> {}, registry, enabled, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
-        // A Harness that lost the Session answers the rename with a 4xx,
-        // which the client surfaces as a HarnessHttpFailure — a permanent
-        // failure, but not a broker refusal.
+        // A Harness that lost the Session answers the notification with a
+        // 4xx (a HarnessHttpFailure). The notification is best-effort, so the
+        // rename still completes synchronously.
         HarnessHttpFailure lost = mock(HarnessHttpFailure.class);
         UnavailableHarnessConnector harness =
                 new UnavailableHarnessConnector() {
@@ -2046,17 +1894,19 @@ class ManagedWorkspaceAdmissionTest {
         TransactionTemplate transaction = new TransactionTemplate(
                 transactionManager);
 
-        transaction.executeWithoutResult(status ->
-                assertThatThrownBy(() -> service.renameSession(tenant,
-                        "actor-a", "rename-1", sessionId, "first"))
-                        .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
-                            assertThat(error.getStatus())
-                                    .isEqualTo(HttpStatus.SERVICE_UNAVAILABLE.value());
-                            assertThat(error.getCode())
-                                    .isEqualTo("hosted_harness_unavailable");
-                        }));
-        // The answered mutation retired its command row too, so a fresh key
-        // is admitted instead of wedging on session_operation_active.
+        // The lost notification never fails the request: the SQL title is
+        // already durable, so the rename answers 200 and its receipt completes.
+        transaction.executeWithoutResult(status -> assertThat(
+                service.renameSession(tenant, "actor-a", "rename-1", sessionId,
+                        "first").replayed()).isFalse());
+        assertThat(jdbc.queryForObject("SELECT title FROM"
+                        + " ma_session WHERE tenant_id = ?"
+                        + " AND session_id = ?", String.class, tenant,
+                sessionId)).isEqualTo("first");
+        assertThat(jdbc.queryForObject("SELECT state FROM ma_request_receipt WHERE namespace = 'SESSION_COMMAND'"
+                        + " AND tenant_id = ? AND operation = 'RENAME_SESSION' AND idempotency_key = ?",
+                String.class, tenant, "rename-1")).isEqualTo("COMPLETED");
+        // No pending row survives to wedge a fresh key on session_operation_active.
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
                         + " ma_request_receipt WHERE namespace = 'SESSION_COMMAND' AND tenant_id = ?"
                         + " AND session_id = ? AND state = 'PENDING'",
