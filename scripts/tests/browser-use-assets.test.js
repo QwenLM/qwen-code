@@ -244,6 +244,29 @@ describe('isolated browser runtime fixtures', () => {
     ).toBeDefined();
   });
 
+  // The SDK bundles zod into dist/index.js and imports it from production
+  // source while declaring it as a devDependency, so the copy its tests and
+  // build resolve comes from the hoisted tree. Pin the major here: a root
+  // bump alone must not move this package back onto a zod whose recursive
+  // locator schema hangs on the second parse (#16816).
+  it('resolves the browser-use zod to the major its locator schema supports', () => {
+    const manifest = JSON.parse(
+      fs.readFileSync(
+        new URL('../../packages/browser-use/package.json', import.meta.url),
+        'utf8',
+      ),
+    );
+    const lock = parse(
+      fs.readFileSync(new URL('../../pnpm-lock.yaml', import.meta.url), 'utf8'),
+    );
+    const zod = lock.importers['packages/browser-use'].devDependencies.zod;
+
+    expect(manifest.devDependencies.zod).toMatch(/^\^4\./);
+    expect(zod.specifier).toBe(manifest.devDependencies.zod);
+    expect(zod.version).toMatch(/^4\./);
+    expect(lock.packages[`zod@${zod.version}`]).toBeDefined();
+  });
+
   function write(relativePath, contents) {
     const file = path.join(root, relativePath);
     fs.mkdirSync(path.dirname(file), { recursive: true });
