@@ -182,8 +182,8 @@ public final class JdbcCsiFilesRetirementGuard {
             // request-key pin, so no separate cross-check is needed.
             // ManagedSchemaCatalog.validateGeneratedColumns enforces that exact
             // expression at startup; do not copy this trust where it does not hold.
-            // null means the root vanished after the probe and must refuse, the
-            // opposite of readPin's "no pin, proceed" reading of the same helper.
+            // null means the root vanished after the non-locking probe and must
+            // refuse: treating it as "unpinned" would let binding control pass.
             Boolean rootPin = lockRootPin(connection, tenant, session);
             if (rootPin == null || rootPin || hasCsiRuntimeMarker(connection, tenant, session)) {
                 throw unavailable();
