@@ -1042,6 +1042,114 @@ describe('e2e workflow', () => {
     ).toBe(true);
   });
 
+  describe('agent-loop legs (#17045)', () => {
+    // The nightly signal each surface's default change waits on: a Linux
+    // sandbox:none leg and an OpenTUI leg with the shared loop on, and the
+    // same two legs with both switches on (the event-bus kernel). Pushes
+    // keep the current loop only. These pins evaluate the workflow's actual
+    // matrix and env expressions — a substring pin would pass on a leg that
+    // exists but wires the wrong switch.
+    const jobs = ['e2e-test-linux', 'e2e-interactive-opentui'];
+    const runStepName = {
+      'e2e-test-linux': 'Run E2E tests',
+      'e2e-interactive-opentui': 'Run interactive E2E tests (OpenTUI)',
+    };
+    const arms = ['current', 'unified', 'kernel'];
+    const stripExpression = (raw) => String(raw).trim().slice(3, -2).trim();
+    const evalExpression = (expression, context) =>
+      new Function(
+        ...Object.keys(context),
+        // GitHub expressions allow hyphenated property names
+        // (matrix.agent-loop); JavaScript reads that as subtraction.
+        `return (${expression.replace(/(\w+)\.([\w-]*-[\w-]*)/g, "$1['$2']")});`,
+      )(...Object.values(context));
+    const agentLoopValues = (job, eventName) =>
+      evalExpression(
+        stripExpression(yml.jobs[job].strategy.matrix['agent-loop']),
+        { github: { event_name: eventName }, fromJSON: JSON.parse },
+      );
+    const switchEnv = (job, arm) => {
+      const step = yml.jobs[job].steps.find(
+        (candidate) => candidate.name === runStepName[job],
+      );
+      return [
+        'QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP',
+        'QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP',
+      ].map((key) =>
+        evalExpression(stripExpression(step.env[key]), {
+          matrix: { 'agent-loop': arm },
+        }),
+      );
+    };
+
+    it.each(jobs)('%s runs only the current loop on push', (job) => {
+      expect(agentLoopValues(job, 'push')).toEqual(['current']);
+    });
+
+    it.each(jobs)(
+      '%s runs all three loop arms on schedule and dispatch',
+      (job) => {
+        for (const eventName of ['schedule', 'workflow_dispatch']) {
+          expect(agentLoopValues(job, eventName), eventName).toEqual(arms);
+        }
+      },
+    );
+
+    it('keeps both jobs on the identical matrix expression', () => {
+      // One expression, two jobs: a divergence would let one surface's
+      // nightly signal accrue on arms the other never runs.
+      expect(String(yml.jobs[jobs[0]].strategy.matrix['agent-loop'])).toBe(
+        String(yml.jobs[jobs[1]].strategy.matrix['agent-loop']),
+      );
+    });
+
+    it('excludes both switch legs from the docker sandbox', () => {
+      expect(yml.jobs['e2e-test-linux'].strategy.matrix.exclude).toEqual([
+        { sandbox: 'sandbox:docker', 'agent-loop': 'unified' },
+        { sandbox: 'sandbox:docker', 'agent-loop': 'kernel' },
+      ]);
+    });
+
+    it.each(jobs)('%s never cancels a sibling loop arm', (job) => {
+      expect(yml.jobs[job].strategy['fail-fast']).toBe(false);
+    });
+
+    it.each(jobs)('%s wires the switches per arm', (job) => {
+      expect(switchEnv(job, 'current')).toEqual(['', '']);
+      expect(switchEnv(job, 'unified')).toEqual(['1', '']);
+      expect(switchEnv(job, 'kernel')).toEqual(['1', '1']);
+    });
+
+    it.each(jobs)('%s names each leg after its loop', (job) => {
+      const name = (arm) =>
+        String(yml.jobs[job].name).replace(
+          /\$\{\{(.*?)\}\}/g,
+          (_, expression) =>
+            evalExpression(expression.trim(), {
+              matrix: {
+                sandbox: 'sandbox:none',
+                shard: '1/1',
+                'agent-loop': arm,
+              },
+            }),
+        );
+      expect(name('current')).not.toContain('unified agent loop');
+      expect(name('current')).not.toContain('event-bus kernel');
+      expect(name('unified')).toContain(' - unified agent loop');
+      expect(name('kernel')).toContain(' - event-bus kernel');
+    });
+
+    it('keeps the OpenTUI leg on the opentui renderer in every arm', () => {
+      // The matrix adds loop arms, not renderer arms: a leg that silently
+      // fell back to ink would pass as a false OpenTUI signal.
+      const step = yml.jobs['e2e-interactive-opentui'].steps.find(
+        (candidate) =>
+          candidate.name === runStepName['e2e-interactive-opentui'],
+      );
+      expect(step.run).toContain('QWEN_E2E_RENDERER=opentui');
+    });
+  });
+
   describe('sandbox image preparation', () => {
     const steps = yml.jobs['e2e-test-linux'].steps;
     const setupStep = steps.find((step) => step.name === 'Set up Docker');
