@@ -167,6 +167,17 @@ test('ci.yml wires the check into lint_and_static before the lint lanes', () => 
 
   const step = job.indexOf("- name: 'Check lint gate freshness'");
   assert.ok(step > 0, 'freshness step missing');
+  // The job's own keys, ahead of `steps:`. A job-level `continue-on-error`
+  // sits outside every step slice below, so the step pins cannot see it —
+  // and it swallows the whole required check, not just this gate.
+  const stepsAt = job.indexOf('\n    steps:');
+  assert.ok(stepsAt > 0, 'lint_and_static steps key not found');
+  const jobHead = job.slice(0, stepsAt);
+  assert.equal(
+    jobHead.match(/^ {4}continue-on-error:/m),
+    null,
+    'lint_and_static must stay fatal to the required check',
+  );
   // PRs only: merge_group validates the prospective merged tree (fresh by
   // construction) and push validates the base itself.
   const stepBlock = job.slice(step, job.indexOf('\n      - name:', step + 1));
@@ -191,6 +202,22 @@ test('ci.yml wires the check into lint_and_static before the lint lanes', () => 
     stepBlock.match(/^ {8}continue-on-error:/m),
     null,
     'freshness gate must stay fatal',
+  );
+  // Mutation witness: `run: 'node .github/scripts/check-lint-gate-freshness.mjs
+  // || true'` keeps the `if` literal, the command containment and the
+  // continue-on-error pin above all intact, and both this suite and
+  // ci-platform-lanes stayed green (47/47, 82/82) on the merged head — while
+  // the gate exits 0 on a stale lint configuration, re-opening the post-merge
+  // breakage class it exists to catch (#16872, #16918). Containment proves the
+  // command is present, not that its failure reaches the job; this is the
+  // body half of that pair, mirroring the convention the load-bearing lint
+  // gates already use in scripts/tests/ci-platform-lanes.test.js. `|| :` is
+  // the same hole spelled differently. A bare `||` is not matched: `|| {`
+  // is a legitimate retry shape elsewhere in this job.
+  assert.doesNotMatch(
+    stepBlock,
+    /\|\|\s*(true|:)/,
+    'freshness gate swallows its exit status',
   );
   assert.ok(
     stepBlock.includes('node .github/scripts/check-lint-gate-freshness.mjs'),
