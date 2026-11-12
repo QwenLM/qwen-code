@@ -201,4 +201,36 @@ setTimeout(() => {}, 120_000);`;
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it('lets a test own env override the forwarded loop switches', async () => {
+    // The parity suites pin their control arm by setting the switch in
+    // options.env; that value must win over the forwarded ambient one, or the
+    // control arm re-arms on the nightly legs. Removing the options.env spread
+    // after baseEnv reds this case.
+    vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', '1');
+    vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', '1');
+    const dir = mkdtempSync(join(tmpdir(), 'qwen-interactive-session-'));
+    const envFile = join(dir, 'env.json');
+    const stub = `require('node:fs').writeFileSync(${JSON.stringify(envFile)}, JSON.stringify({
+  unified: process.env.QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP ?? null,
+  kernel: process.env.QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP ?? null,
+}));
+console.log('Type your message');
+setTimeout(() => {}, 120_000);`;
+    try {
+      session = await InteractiveSession.start({
+        command: { bin: process.execPath, args: ['-e', stub] },
+        inheritEnv: false,
+        env: {
+          QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP: '',
+          QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP: '',
+        },
+      });
+      const captured = JSON.parse(readFileSync(envFile, 'utf8'));
+      expect(captured.unified).toBe('');
+      expect(captured.kernel).toBe('');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });

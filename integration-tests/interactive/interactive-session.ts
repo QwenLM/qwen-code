@@ -84,7 +84,12 @@ export interface InteractiveSessionOptions {
   args?: string[];
   /** Spawn this instead of the built CLI bundle (drives stub processes in tests). */
   command?: { bin: string; args: string[] };
-  /** Replace inherited environment for deterministic, credential-free fixtures. */
+  /**
+   * Replace inherited environment for deterministic, credential-free
+   * fixtures. The two agent-loop switches are still forwarded from the parent
+   * so the nightly loop legs reach the child; a test pins its own arm by
+   * setting them in `env`, which overrides the forwarded values.
+   */
   inheritEnv?: boolean;
   /** Preserve raw startup evidence when no session can be returned. */
   onStartupFailure?: (output: string) => void;
