@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/external-context",
-  "version": "0.27.1",
+  "version": "0.27.2",
   "private": true,
   "description": "Provider-bound external context for Qwen Code",
   "type": "module",
@@ -32,7 +32,7 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
     "undici": "^7.28.0",
-    "zod": "^3.25.0"
+    "zod": "^4.6.6"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

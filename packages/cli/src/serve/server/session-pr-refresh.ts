@@ -39,9 +39,26 @@ import {
 import { invalidateWorkspaceSessionListCache } from './session-list.js';
 import { pullRequestKey, samePullRequest } from './session-pr-url.js';
 import {
+  claimPrWatchOwnershipSync,
+  prWatchFileKey,
+  prWatchFilePath,
+  readPrWatchStateSync,
+  writePrWatchStateSync,
+  PR_WATCH_PENDING_CAP,
+  type PrWatchIdentity,
+} from './pr-watch-store.js';
+import type { PathMutexRegistry } from '../fs/path-mutex-registry.js';
+import {
   runPrWatchObservationTick,
   type PrWatchObservationTickDeps,
+  prWatchIdentityFromUrl,
+  detectPrTransitions,
+  normalizeWatchHost,
 } from './pr-watch-observation.js';
+import {
+  scanWorkspaceBindings,
+  type SessionPrBindingSummary,
+} from '../routes/session-pr-bindings.js';
 import {
   createPrWatchDrainState,
   runPrWatchDrainTick,
@@ -106,6 +123,23 @@ export interface SessionPrRefreshOptions {
   sweepStart?: number;
   /** Injectable clock for the aggregate view budget (tests substitute). */
   now?: () => number;
+  /**
+   * The PR watch's storage seam. Present only when the watch is enabled, so
+   * the listing records each listed PR's state in its watch file and returns
+   * the keys it covered. Omitted by every other caller, which keeps the
+   * refresh's own behaviour unchanged.
+   */
+  prWatch?: {
+    watchDir: string;
+    locks: PathMutexRegistry;
+    /**
+     * The same set the observation gates views on. The listing write needs it
+     * too: it now records transitions, and the drain delivers `pending`
+     * without any host check of its own.
+     */
+    allowedHosts: ReadonlySet<string>;
+    log?: (message: string) => void;
+  };
 }
 
 /**
@@ -149,6 +183,154 @@ export interface SessionPrRefreshResult {
    * GitHub path.
    */
   aoneConsumed?: number;
+  /**
+   * PR keys the slim listing returned this sweep. The timer carries them into
+   * the next tick's observation so a closed PR the listing covered leaves the
+   * view rotation, while a closed PR outside the listing stays to catch a
+   * reopen. Absent on the Aone path and when the listing did not run or failed.
+   */
+  listedKeys?: ReadonlySet<string>;
+}
+
+/**
+ * Records what the slim listing already observed, and returns the keys it
+ * covered. The listing is an observation of every PR it returns, so its state
+ * is recorded without spending a `gh pr view`; the returned keys are what lets
+ * the observation drop a closed PR from the view rotation while keeping one the
+ * listing did not cover. Only PRs with an active binding get a file — the keys
+ * still cover the whole listing.
+ *
+ * Writes only while this daemon holds the owner record — a non-owner records
+ * nothing, exactly as it views nothing — and each write takes the same per-PR
+ * lock the observation uses, so a listing write and a view write of one PR
+ * cannot interleave. A PR whose file cannot be read is skipped rather than
+ * overwritten: the same fail-closed rule the observation applies before it
+ * spends a view.
+ */
+async function recordListedPrStates(
+  listed: ReadonlyArray<{
+    number: number;
+    state: 'open' | 'closed' | 'merged' | 'draft';
+    url: string;
+  }>,
+  prWatch: NonNullable<SessionPrRefreshOptions['prWatch']>,
+  boundKeys: ReadonlySet<string>,
+  assertGenerationOpen: () => void,
+  now: () => number,
+): Promise<Set<string>> {
+  const keys = new Set<string>();
+  const rows: Array<{
+    identity: PrWatchIdentity;
+    state: 'open' | 'merged' | 'closed';
+  }> = [];
+  for (const pr of listed) {
+    const identity = prWatchIdentityFromUrl(pr.url);
+    if (!identity) continue;
+    const key = prWatchFileKey(identity);
+    keys.add(key);
+    // Only bound PRs get a watch file. The drain deletes unbound ones on a
+    // complete scan, so writing them would create and delete the same files
+    // every tick — and log a deletion for each.
+    if (!boundKeys.has(key)) continue;
+    // The observation refuses to view a non-allowed host, and the drain
+    // delivers `pending` with no host check of its own — so writing a
+    // transition for one would deliver an event the watch may not observe.
+    if (!prWatch.allowedHosts.has(normalizeWatchHost(identity.host))) continue;
+    // The watch snapshot has no 'draft' variant — a draft is still open.
+    const state = pr.state === 'draft' ? 'open' : pr.state;
+    rows.push({ identity, state });
+  }
+  if (rows.length === 0) return keys;
+  const log = prWatch.log ?? (() => {});
+  if (claimPrWatchOwnershipSync(prWatch.watchDir, log).kind === 'blocked') {
+    return keys;
+  }
+  // This advances the same baseline the observation's slow-view guard reads.
+  // Safe because the listing runs after the observation within a tick and
+  // ticks never overlap, so it is always the newer observation of the two.
+  const observedAt = new Date(now()).toISOString();
+  for (const { identity, state } of rows) {
+    try {
+      assertGenerationOpen();
+      // This ladder mirrors the one in observeWorkspacePrBindings, which owns
+      // the protocol: lock on the watch FILE PATH (not the logical key — that
+      // would take a different mutex entry and serialize with nothing), read,
+      // skip on a read error, log an invalid file, detect, log a pending
+      // overflow, write. Keep those steps in sync with it. The final write
+      // deliberately differs: the view path persists the detector's whole
+      // state, while a listing is a partial observation and must carry the
+      // fields it cannot see (title, headSha, checks) forward from the file.
+      await prWatch.locks.runExclusive(
+        prWatchFilePath(prWatch.watchDir, identity),
+        async () => {
+          const existing = readPrWatchStateSync(prWatch.watchDir, identity);
+          if (existing.kind === 'error') {
+            log(
+              `PR watch: read error for ${existing.filePath}; listing write skipped: ${String(existing.error)}`,
+            );
+            return;
+          }
+          if (existing.kind === 'invalid') {
+            // Same reason the observation logs it: a lost baseline must stay
+            // distinguishable from a PR that simply had no transitions.
+            log(
+              `PR watch: invalid watch file ${existing.filePath}; listing write re-initialising it`,
+            );
+          }
+          const base =
+            existing.kind === 'state' ? existing.state : { pr: identity };
+          // The listing is an observation too. When it is the first to see a
+          // baselined PR leave open, it must fire the state_change the view
+          // would have fired: the write below makes the observation skip that
+          // view, and the view is the only other producer of transitions, so
+          // without this the closure is recorded as a fait accompli and never
+          // delivered. Reuse the detector so the two producers cannot drift.
+          // Carrying the previous head/checks forward is what keeps it to
+          // state_change alone — no head_change, ci_failure or merge_conflict.
+          // A file with no headSha is not baselined and initialises silently,
+          // exactly as it does on the view path.
+          const detection =
+            base.headSha !== undefined
+              ? detectPrTransitions(
+                  identity,
+                  base,
+                  {
+                    state,
+                    headSha: base.headSha,
+                    checks: base.checks ?? 'none',
+                  },
+                  observedAt,
+                )
+              : undefined;
+          // Same diagnostic the view path emits: an evicted entry is a lost
+          // notification, and without this an operator cannot tell it apart
+          // from a transition that never happened.
+          if (
+            detection &&
+            (base.pending?.length ?? 0) + detection.transitions.length >
+              PR_WATCH_PENDING_CAP
+          ) {
+            log(
+              `PR watch: pending overflow for ${identity.repo}#${identity.number}; dropping the oldest entries (cap ${PR_WATCH_PENDING_CAP})`,
+            );
+          }
+          writePrWatchStateSync(prWatch.watchDir, identity, {
+            ...base,
+            state,
+            observedAt,
+            ...(detection?.state.pending !== undefined
+              ? { pending: detection.state.pending }
+              : {}),
+          });
+        },
+      );
+    } catch (error) {
+      log(
+        `PR watch: listing write failed for ${identity.repo}#${identity.number}: ${String(error)}`,
+      );
+    }
+  }
+  return keys;
 }
 
 /**
@@ -278,6 +460,7 @@ export async function refreshWorkspaceSessionPrStates(
     runtime.env.effectiveEnv,
   );
   let aoneConsumed: number | undefined;
+  let listedKeys: Set<string> | undefined;
   if (aoneRepo) {
     // A number whose every stored URL misses the detailUrl shape of THIS
     // repo — a foreign manual binding, a legacy fabricated entry awaiting
@@ -355,6 +538,40 @@ export async function refreshWorkspaceSessionPrStates(
         }
         const sample = result.pullRequests[0]?.url;
         if (sample !== undefined) repoKey = pullRequestKey(sample)?.repo;
+        // Only the watch consumes these keys, so a caller without the seam
+        // keeps the exact result shape it had before the watch existed.
+        if (options.prWatch) {
+          // Scanned here rather than at the top of the sweep: only this branch
+          // has a listing to record, so an Aone workspace or an empty pending
+          // list must not pay for a session-directory scan it discards.
+          // The binder set is the shared scan's own answer, not a re-derivation
+          // of it: that scan excludes archived, hidden-catalog and unreadable
+          // sessions, and the drain deletes a watch file it does not list.
+          const watchLog = options.prWatch.log ?? (() => {});
+          const bindings: SessionPrBindingSummary[] = [];
+          try {
+            await scanWorkspaceBindings(runtime, bindings);
+          } catch (error) {
+            // Unknown binders, not absent ones: write nothing rather than guess.
+            watchLog(
+              `PR watch: bindings scan failed for ${runtime.workspaceCwd}; listing write skipped: ${String(error)}`,
+            );
+          }
+          const boundKeys = new Set<string>();
+          for (const summary of bindings) {
+            for (const entry of summary.prs) {
+              const identity = prWatchIdentityFromUrl(entry.url);
+              if (identity) boundKeys.add(prWatchFileKey(identity));
+            }
+          }
+          listedKeys = await recordListedPrStates(
+            result.pullRequests,
+            options.prWatch,
+            boundKeys,
+            assertGenerationOpen,
+            options.now ?? Date.now,
+          );
+        }
       }
     }
     const issueNumbers = [
@@ -468,7 +685,12 @@ export async function refreshWorkspaceSessionPrStates(
     });
     runtime.bridge.markSessionCatalogChanged();
   }
-  return { scanned, updated, aoneConsumed };
+  return {
+    scanned,
+    updated,
+    aoneConsumed,
+    ...(listedKeys !== undefined ? { listedKeys } : {}),
+  };
 }
 
 /**
@@ -531,6 +753,11 @@ export function startSessionPrRefreshTimer(deps: {
   // observation, and a tick counter that rotates the workspace order so a
   // persistent deadline overrun starves no workspace (master design §1).
   const githubSweepOffsets = new Map<string, number>();
+  // The observation runs before the refresh, so the keys one tick's listing
+  // produced are consumed by the next tick's observation. Kept per workspace
+  // for the same reason the view offsets are.
+  const listedKeysByWorkspace = new Map<string, ReadonlySet<string>>();
+  let watchSeam: NonNullable<SessionPrRefreshOptions['prWatch']> | undefined;
   let watchTickCount = 0;
   // Retained binding rows, in-flight marks and restore slots for the delivery
   // drain, kept across ticks (master §4/§5).
@@ -556,6 +783,9 @@ export function startSessionPrRefreshTimer(deps: {
     try {
       // Anchor the watch deadline at the tick start (master §1).
       const tickStart = (deps.now ?? Date.now)();
+      // Resolved per tick, not carried: a tick whose watch deps have gone away
+      // must not keep writing watch files through the previous tick's seam.
+      watchSeam = undefined;
       const archiveCoordinator = deps.getArchiveCoordinator?.();
       const live = deps.workspaceRegistry.listAll();
       const liveCwds = new Set(live.map((r) => r.workspaceCwd));
@@ -573,6 +803,15 @@ export function startSessionPrRefreshTimer(deps: {
         const watchDeps = deps.getPrWatchDeps?.();
         if (watchDeps) {
           activeWatchDir = watchDeps.watchDir;
+          watchSeam = {
+            watchDir: watchDeps.watchDir,
+            locks: watchDeps.locks,
+            allowedHosts: watchDeps.allowedHosts,
+            // Without this the seam's `log` is a declared-and-read field with
+            // no setter, and every listing-write refusal stays silent — the
+            // claim's contract is that a blocked outcome is always logged.
+            ...(watchDeps.log ? { log: watchDeps.log } : {}),
+          };
           const watchWorkspaces = live.filter((r) => r.trusted || r.primary);
           const rotation = watchTickCount % Math.max(watchWorkspaces.length, 1);
           const ordered = [
@@ -584,6 +823,7 @@ export function startSessionPrRefreshTimer(deps: {
             await runPrWatchObservationTick(ordered, watchDeps, {
               intervalMs,
               sweepOffsets: githubSweepOffsets,
+              listedKeysByWorkspace,
               deadline: tickStart + intervalMs / 2,
             });
           } catch (error) {
@@ -598,6 +838,9 @@ export function startSessionPrRefreshTimer(deps: {
           }
           for (const cwd of [...githubSweepOffsets.keys()]) {
             if (!liveCwds.has(cwd)) githubSweepOffsets.delete(cwd);
+          }
+          for (const cwd of [...listedKeysByWorkspace.keys()]) {
+            if (!liveCwds.has(cwd)) listedKeysByWorkspace.delete(cwd);
           }
           // Delivery drain (master §4/§5): runs after the observation so it
           // can deliver the transitions this tick detected. Behind the same
@@ -641,8 +884,17 @@ export function startSessionPrRefreshTimer(deps: {
               sweepStart,
               aoneBackend: deps.aoneBackend,
               now: deps.now,
+              ...(watchSeam ? { prWatch: watchSeam } : {}),
             },
           );
+          // Only trusted workspaces are refreshed, so the untrusted primary
+          // never contributes keys. Its closed PRs therefore stay in the view
+          // rotation — more views, never a missed reopen.
+          if (result.listedKeys !== undefined) {
+            listedKeysByWorkspace.set(runtime.workspaceCwd, result.listedKeys);
+          } else {
+            listedKeysByWorkspace.delete(runtime.workspaceCwd);
+          }
           // Only the Aone path reports a consumed window — the GitHub path
           // never reads the offset, so don't write one for it.
           if (result.aoneConsumed !== undefined) {

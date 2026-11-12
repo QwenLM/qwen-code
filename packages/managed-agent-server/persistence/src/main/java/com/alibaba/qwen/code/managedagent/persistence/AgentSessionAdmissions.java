@@ -207,7 +207,7 @@ final class AgentSessionAdmissions {
                 throw new ManagedAgentException(409, "unsupported_feature",
                         "Extension configuration requires a negotiated Shell or MCP Session lifecycle profile.");
             }
-            extensionPackages.requireSelection(tenantId, actorId, workspace.binding().getWorkspaceId(), extensionPins);
+            extensionPackages.requireSelection(tenantId, actorId, workspace.binding().getWorkspaceId(), extensionPins, command.extensionSelection());
         }
         WorkspaceMigrationAdmission.requireOpen(jdbc, tenantId, workspace.binding().getStorageId());
         boolean sshWorkspace = sessionPolicies.isSshWorkspace(workspace.binding());
@@ -413,10 +413,6 @@ final class AgentSessionAdmissions {
         return request;
     }
 
-    static String childActorOf(String parentSessionId) {
-        return "child:" + parentSessionId;
-    }
-
     Admission insertChildSessionCommand(String tenantId,
             String parentSessionId, String idempotencyKey,
             String requestDigest, String title, List<Map<String, Object>> input,
@@ -452,7 +448,7 @@ final class AgentSessionAdmissions {
             String childCwdRelative, com.fasterxml.jackson.databind.JsonNode snapshot) {
         WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
         List<WorkspaceCommand> existing = findWorkspaceCommand(tenantId,
-                childActorOf(parentSessionId), idempotencyKey);
+                ChildSessionCreation.childActorOf(parentSessionId), idempotencyKey);
         if (existing.isEmpty()) {
             WorkspaceMigrationAdmission.requireSessionOpen(jdbc, tenantId, parentSessionId);
         }
@@ -587,7 +583,7 @@ final class AgentSessionAdmissions {
                         + " ?, ?, ?, ?"
                         + " FROM ma_session"
                         + " WHERE tenant_id = ? AND session_id = ?",
-                childInsertArgs(sessionId, title, now, childCwdRelative,
+                ChildSessionCreation.childInsertArgs(sessionId, title, now, childCwdRelative,
                         toolProfile, lineage, tenantId, parentSessionId));
         jdbc.update("INSERT INTO ma_event_stream"
                         + " (tenant_id, session_id, stream_kind, stream_id,"
@@ -608,9 +604,10 @@ final class AgentSessionAdmissions {
         if (turnId != null) {
             sessionCommands.insertTurn(tenantId, sessionId, turnId, promptId, input,
                     payloadDigest, now);
+            SideQueryConversation.mainInputAccepted(jdbc, tenantId, sessionId);
         }
         ManagedReceipts.insertCreation(jdbc, tenantId,
-                ManagedWorkspaceRegistry.actorKey(tenantId, childActorOf(parentSessionId)),
+                ManagedWorkspaceRegistry.actorKey(tenantId, ChildSessionCreation.childActorOf(parentSessionId)),
                 idempotencyKey, requestDigest, sessionId, turnId, now);
         var inheritedSkills = snapshot == null ? creationSkills.snapshot(tenantId, parentSessionId)
                 : creationSkills.fromLaunchReference(tenantId, parentSessionId, snapshot.path("skillsRef"));
@@ -624,23 +621,6 @@ final class AgentSessionAdmissions {
                     AgentEventJournal.acceptedData(turnId, input), false, null, now);
         }
         return new Admission(sessionId, turnId, false, true);
-    }
-
-    static Object[] childInsertArgs(String sessionId, String title,
-            long now, String childCwdRelative, String toolProfile,
-            StoreModels.SessionLineage lineage, String tenantId,
-            String parentSessionId) {
-        List<Object> args = new ArrayList<>(List.of(sessionId, title, now, now));
-        if (childCwdRelative != null) {
-            args.add(childCwdRelative);
-        }
-        if (toolProfile != null) {
-            args.add(toolProfile);
-        }
-        args.addAll(List.of(lineage.parentSessionId(), lineage.rootSessionId(),
-                lineage.parentChildRunId(), lineage.depth(), tenantId,
-                parentSessionId));
-        return args.toArray();
     }
 
     /**
@@ -703,7 +683,7 @@ final class AgentSessionAdmissions {
         }
         storeRows.requireLegacyMutation(tenantId, parentSessionId);
         List<WorkspaceCommand> existing = findWorkspaceCommand(tenantId,
-                childActorOf(parentSessionId), idempotencyKey);
+                ChildSessionCreation.childActorOf(parentSessionId), idempotencyKey);
         if (existing.isEmpty()) {
             throw new ManagedAgentException(409,
                     "idempotency_conflict", "The creation command is missing.");
@@ -877,6 +857,7 @@ final class AgentSessionAdmissions {
         if (turnId != null) {
             sessionCommands.insertTurn(tenantId, sessionId, turnId, promptId, input,
                     payloadDigest, now);
+            SideQueryConversation.mainInputAccepted(jdbc, tenantId, sessionId);
         }
         if (resolved == null) {
             sessionCommands.insertCommand(tenantId, operation, idempotencyKey, requestDigest,
