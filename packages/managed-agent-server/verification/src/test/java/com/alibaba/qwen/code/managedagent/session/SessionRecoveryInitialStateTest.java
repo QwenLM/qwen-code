@@ -92,10 +92,7 @@ class SessionRecoveryInitialStateTest {
 
     @Test
     void aPersistedEmptySessionRenameRemainsSendableAfterHarnessCacheLoss() throws Exception {
-        when(harness.createOrLoad(TENANT, sessionId, false, true)).thenAnswer(call -> {
-            genesis();
-            return new HarnessConnector.Attachment("boot", null, 0L, "epoch");
-        });
+        genesis();
         doAnswer(call -> {
             rename();
             return null;

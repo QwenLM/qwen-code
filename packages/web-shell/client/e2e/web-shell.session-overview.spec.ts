@@ -503,7 +503,6 @@ test('shadow portal details keep focus in the overview after hover replacement @
   page,
 }) => {
   await page.goto('/e2e/session-overview-shadow-dom.html');
-  await page.getByRole('button', { name: 'More', exact: true }).click();
   await page
     .getByRole('button', { name: 'Session Overview', exact: true })
     .click();
