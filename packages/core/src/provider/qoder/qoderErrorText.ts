@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { UiLocale } from '../../utils/locale.js';
+
 const QODER_ERROR_TEXTS: Readonly<Record<number, string>> = {
   105: 'Your authentication has expired. Please sign in again.',
   110: 'You have reached the daily usage limit. Please try again later.',
@@ -17,6 +19,7 @@ const QODER_ERROR_TEXTS: Readonly<Record<number, string>> = {
   119: 'The free usage limit for this model has been reached. Please select another model or check your plan.',
   122: 'Your Billing Group has reached its Credits limit for this billing cycle. Please contact admin to continue.',
   130: 'Your Credits have been exhausted. Please check your plan or contact your administrator.',
+  406: 'The model service rejected the conversation content. Use /clear to start a new conversation and restate your task.',
   80411:
     'The input is too long for this model. Please shorten it or start a new conversation.',
   80412:
@@ -25,8 +28,16 @@ const QODER_ERROR_TEXTS: Readonly<Record<number, string>> = {
     'The model is busy and could not complete the request. Please try again later.',
 };
 
+const QODER_ERROR_TEXTS_ZH: Readonly<Record<number, string>> = {
+  406: '模型服务拒绝了当前会话内容。请使用 /clear 新建会话后重新描述任务。',
+};
+
 export function getQoderErrorText(
   code: number | string | undefined,
+  locale: UiLocale = 'en',
 ): string | undefined {
+  if (locale === 'zh-CN') {
+    return QODER_ERROR_TEXTS_ZH[Number(code)] ?? QODER_ERROR_TEXTS[Number(code)];
+  }
   return QODER_ERROR_TEXTS[Number(code)];
 }

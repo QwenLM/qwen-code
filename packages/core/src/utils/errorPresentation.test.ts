@@ -17,6 +17,7 @@ import {
 import { ModelInferenceError } from '../provider/modelInferenceError.js';
 import { EmptyAssistantCompletionError } from '../model-request/empty-assistant-completion.js';
 import { CONTENT_FILTERED_MESSAGE } from '../core/query-event.js';
+import { getQoderErrorText } from '../provider/qoder/qoderErrorText.js';
 import {
   getResultErrorCode,
   getResultErrorCodeFromMessages,
@@ -26,9 +27,11 @@ import { formatApiErrorDisplayMessage } from './errorParsing.js';
 const getErrorCodeMessage = vi.hoisted(() =>
   vi.fn((_code: unknown, message: string) => `Configured: ${message}`),
 );
+const uiLocale = vi.hoisted(() => ({ value: 'en' }));
 
 vi.mock('../i18n/index.js', () => ({
   getI18nService: () => ({
+    locale: uiLocale.value,
     get: (key: string, params?: { message?: string }) =>
       getErrorCodeMessage(
         key.replace(/^error\.code\./, ''),
@@ -580,7 +583,33 @@ describe('SDK 错误呈现', () => {
       });
     },
   );
-  it('保留没有服务端文案的内容拒绝提示', () => {
+  it('仅 Qoder 的 406 提供本地化指引，保留错误码与诊断', () => {
+    const error = new ModelInferenceError('Session blocked', {
+      code: '406',
+      status: 406,
+      kind: 'invalid_request',
+      phase: 'before_output',
+    });
+    expect(resolveErrorPresentation(error, 'qoder')).toEqual({
+      displayErrorCode: '406',
+      fallbackMessage: getQoderErrorText(406),
+    });
+    expect(error.message).toBe('Session blocked');
+    expect(getResultErrorCode(error)).toBe('406');
+    expect(getQoderErrorText(406)).toContain('/clear');
+    for (const provider of ['custom-provider', undefined]) {
+      expect(resolveErrorPresentation(error, provider).fallbackMessage).toBe(
+        CONTENT_FILTERED_MESSAGE,
+      );
+    }
+    try {
+      uiLocale.value = 'zh-CN';
+      expect(resolveErrorPresentation(error, 'qoder').fallbackMessage).toBe(
+        '模型服务拒绝了当前会话内容。请使用 /clear 新建会话后重新描述任务。',
+      );
+    } finally {
+      uiLocale.value = 'en';
+    }
     expect(
       resolveErrorPresentation(
         Object.assign(new Error('HTTP 406'), { status: 406 }),
@@ -589,6 +618,14 @@ describe('SDK 错误呈现', () => {
       displayErrorCode: 406,
       fallbackMessage: CONTENT_FILTERED_MESSAGE,
     });
+    expect(
+      resolveErrorPresentation(
+        Object.assign(new Error(CONTENT_FILTERED_MESSAGE), {
+          code: 'MODEL_REFUSAL',
+        }),
+        'qoder',
+      ).fallbackMessage,
+    ).toBe(CONTENT_FILTERED_MESSAGE);
   });
   it('取消不伪装成服务故障', () => {
     const result = normalizeSdkErrorResult({
