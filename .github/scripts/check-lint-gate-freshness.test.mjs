@@ -1037,6 +1037,38 @@ test('extracts the lint gate slice from the real workflow', () => {
   assert.ok(slice.includes('  classify_pr:'));
   assert.ok(slice.includes('HELPER_TESTS_DEP_FREE'));
   assert.ok(slice.includes('ACTIONLINT_VERSION'));
+  // The job-level keys the whitelist's comment promises to keep. `env` carries
+  // LINT_BASE_SHA, which decides the incremental lint scope; `needs` decides
+  // which job's outputs the lane reads. Assert the VALUES reach the compared
+  // text, not merely that a key name appears somewhere in the file — widening
+  // CI_PLUMBING_JOB_KEYS replaces the whole region with a position marker, and
+  // a name-membership assertion would stay green through it.
+  assert.ok(
+    slice.includes('LINT_BASE_SHA'),
+    'job env decides the incremental lint base and must reach the slice',
+  );
+  assert.ok(
+    /^ {4}needs: 'classify_pr'$/m.test(slice),
+    "the lint job's needs edge must reach the slice",
+  );
+  assert.ok(
+    /^ {4}permissions:$/m.test(slice),
+    'job permissions must reach the slice',
+  );
+  // The toolchain steps stay in: a setup-node or pnpm-store bump can change lint
+  // semantics, and their bodies are the only place the version is recorded.
+  // `LINTER_INVOCATION` does not match a `uses:` body, so the plumbing refusal
+  // does not cover them — this does.
+  for (const toolchain of [
+    'actions/setup-node@',
+    './.github/actions/pnpm-store-cache',
+    './.github/actions/self-hosted-node',
+  ]) {
+    assert.ok(
+      slice.includes(toolchain),
+      `the toolchain step referencing ${toolchain} must reach the slice`,
+    );
+  }
   // Strictly smaller than the file: the point of the narrowing is that most of
   // ci.yml is not this gate.
   assert.ok(
@@ -1343,11 +1375,21 @@ test('a base-side helper-test list change still stales the branch', async () => 
 test('a base-side profile classifier change still stales the branch', async () => {
   // classify_pr decides which profile runs, and the profile decides which
   // linters run, so it belongs in the slice even though it is a different job.
-  const base = realCi.replace(
-    '            docs_only|github_ci_only|full) ;;',
-    '            docs_only|github_ci_only|java_only|full) ;;',
-  );
-  assert.notEqual(base, realCi, 'classifier anchor not found');
+  // Edited INSIDE classify_pr, at the arm that accepts the classifier's answer.
+  // The previous fixture edited `docs_only|github_ci_only|full) ;;`, which
+  // occurs only in lint_and_static's own `Use trusted CI profile` step — so this
+  // case pinned the lint job twice and left classify_pr's body unpinned. An
+  // extractor that emitted only classify_pr's header would have stayed green.
+  const span = jobSpan(realCi, 'classify_pr');
+  const from = '            docs_only|github_ci_only|java_only|full) ;;';
+  const to = '            docs_only|github_ci_only|full) ;;';
+  const body = realCi.slice(span.start, span.end);
+  assert.ok(body.includes(from), 'classifier arm not found inside classify_pr');
+  const base =
+    realCi.slice(0, span.start) +
+    body.replace(from, to) +
+    realCi.slice(span.end);
+  assert.notEqual(base, realCi, 'classifier fixture did not apply');
   const stale = await findStaleGateFiles({
     ...CI_OPTS,
     ...ciFetch(base, realCi),
