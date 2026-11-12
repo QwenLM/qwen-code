@@ -130,12 +130,18 @@ function scalarValue(workflow, key, name) {
   // A following line indented deeper than the key belongs to the same node.
   // Blank lines are skipped first: a folded plain scalar may be separated from
   // its continuation by one, and stopping at the blank line read the value as
-  // its first line while the tail of the list fell away unnoticed.
+  // its first line while the tail of the list fell away unnoticed. Comment
+  // lines are skipped too — a `#` line is never part of a scalar, however deep
+  // its indent, so refusing one rejected a legal document.
   const following = workflow
     .slice(match.index + match[0].length)
     .split('\n')
     .slice(1);
-  const nextContent = following.find((line) => line.trim() !== '') ?? '';
+  const nextContent =
+    following.find((line) => {
+      const content = line.trim();
+      return content !== '' && !content.startsWith('#');
+    }) ?? '';
   assert.ok(
     !new RegExp(`^[ \\t]{${indent.length + 1},}\\S`).test(nextContent),
     `${name}: ${key} continues on a deeper-indented line, which this reader cannot follow`,
@@ -548,6 +554,14 @@ describe('check-host-load', () => {
           'fixture.yml',
         ),
       /continues on a deeper-indented line/,
+    );
+    // A comment line is not a continuation, however deep it is indented: YAML
+    // gives a `#` line no part in the value, so a mapping annotated after a
+    // blank line is legal and must read. The sibling key below it is the next
+    // content line and sits at the key's own indent.
+    assert.equal(
+      scalarValue(`env:\n  K: v\n\n      # note\n  NEXT: w\n`, 'K', 'f.yml'),
+      'v',
     );
     // `KEY: ''` decodes to the empty string, and an empty pattern matches every
     // annotation: that is the fail-open case, so it has to throw.

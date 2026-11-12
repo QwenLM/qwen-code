@@ -2414,17 +2414,25 @@ facts decide that split.
 The first `Download the built tree` runs with `continue-on-error: true`, so
 its timeout cannot end the job, and its annotation STAYS on the check run
 after the retry recovers. Check run `131031419699` is the case in point: both
-handoff steps report `success`, nine annotations are genuine
-`AssertionError`s, and one stale
-`The action 'Download the built tree' has timed out after 15 minutes.` sits
-beside them. Admitted, that line would read a recovered run as infrastructure
-and swallow the real failure. What the base list did with that same run
-matters for how this is stated: it carried no handoff branch at all, so the
-run matched nothing and was filed as a code failure — the record was right.
-Adding the first download to the class would have been the regression;
-retry-only keeps the base behaviour and still covers the case below. (An
-earlier revision of this paragraph claimed the two-name form had already
-misclassified that run. It had not, and the claim is dropped.)
+handoff steps report `success`, and its nine annotations are six
+`AssertionError`s, one `Process completed with exit code 1.`, one warning (a
+502 while creating the deflake issue), and one stale
+`The action 'Download the built tree' has timed out after 15 minutes.` — that
+last line is the residue, and admitted it would read a recovered run as
+infrastructure and swallow the real failure.
+
+What the base list would have done with that same run is a statement about
+classification, not about a filing: the base carried no handoff branch at
+all, so this blob matched none of its signatures and was never infrastructure
+there. On that event the lane did not run either — the run is a pull request
+(43170847047, `fix/16675-exec-code-render`), and this workflow's `analyze` job
+covers only a main push or schedule, an SDK Java dispatch, and the Managed
+Agent gate's PR runs, so nothing was filed and there is no filing verdict to
+call right. Adding the first download to the class would have been the
+regression; retry-only keeps the classification that run had and still covers
+the case below. (An earlier revision of this paragraph claimed the two-name
+form had already misclassified that run. It had not, and the claim is
+dropped.)
 
 The retry is armed on `steps.download_tree.outcome == 'failure'`, so it runs
 whenever the first attempt failed, and a timeout there kills the job having
