@@ -135,16 +135,41 @@ Checkout trusted CI classifier
 ```
 
 At the job level only `runs-on` and `timeout-minutes` are dropped, with their
-continuation lines. `env`, `if`, `needs`, `outputs`, `permissions` and `steps`
-stay: they decide what runs, not where.
+region. `env`, `if`, `needs`, `outputs`, `permissions` and `steps` stay: they
+decide what runs, not where. `needs` in particular stays, so a base-side change
+to which jobs the lane waits for is compared.
 
-Whole-line comments and blank lines are dropped from the compared text, because
-`ci.yml` is comment-dense and much of its churn is prose. Only a line whose first
-non-space character is `#` is dropped, so a `#` inside a shell body is content
-and survives — the extractor never removes a line the runner would read.
+Nothing is dropped silently. Each excluded region — every non-gate job, every
+plumbing step, every dropped job key — leaves a `[[dropped ...]]` marker in the
+compared text, carrying the kind and the name at the position the region
+occupied. `[[...]]` is not a YAML comment, so a marker can never be mistaken for
+prose or collide with a real line. This is what makes the comparison complete
+rather than a survey of the parts someone remembered to model: a base-side edit
+that moves content into a dropped region — the install prelude relocated into a
+new job, a step renamed into the plumbing list — changes the markers and refuses
+the narrowing.
 
-Measured on the current file, the slice is 372 lines of 3514, and the lint job's
-42 steps contribute 29 (13 are plumbing).
+The one class left out of the comparison is prose: blank lines and whole-line
+comments outside a block scalar. That is this narrowing's premise — most of
+`ci.yml`'s traffic is commentary — and prose can carry no gate semantics, because
+the runner never reads it. It is removed in a single up-front pass, before any
+structure is read, so it cannot open a step, be absorbed into one, or truncate a
+job.
+
+Block-scalar content is the opposite case: `run: |` bodies are what the runner
+executes, so they are compared verbatim — blank lines excepted — including lines
+that begin with `#`, which are shell comments rather than YAML comments. The
+earlier model dropped them while the header claimed it "never removes a line the
+runner would read"; the claim was false and the line is now kept.
+
+Line breaks are `\r\n`, `\n`, a lone `\r`, and the Unicode separators
+`\u2028`/`\u2029`. Splitting on `\n` alone read a CR-terminated file as one line
+and dropped whatever followed a `#` on the far side of the CR — the #11117 →
+#11216 shape, with the flag flipped on the base and the branch certified fresh.
+
+Measured on the current file, the slice is 428 lines of 3560, 32 of them markers
+for the jobs and plumbing it excludes. The lint job's 42 steps contribute 29 (13
+are plumbing).
 
 ### Why the default is "keep"
 
@@ -155,9 +180,15 @@ asymmetry is deliberate, and two guards back it:
 
 - A step in the plumbing list whose body invokes a linter refuses the narrowing
   outright. The label is not trusted on its own — a step moved into the list
-  while still running `scripts/lint.js` is a contradiction, not a pass.
+  while still running `scripts/lint.js` is a contradiction, not a pass. The
+  pattern covers the way the lanes are actually reached: `npm run`, `pnpm run`,
+  `corepack pnpm run`, a bare `pnpm lint`, `npx`/`pnpx`. Anchoring on `npm run`
+  alone missed every `pnpm` spelling, since `pnpm` has no word boundary before
+  `npm`; a manager followed by `config`/`set` is configuration and still passes.
 - The suite reads the real workflow and requires every plumbing name to exist in
-  it, so a renamed step cannot leave a stale entry silently excluding nothing.
+  the two gate jobs, so a renamed step cannot leave a stale entry silently
+  excluding nothing. Scoping matters: a whole-file inventory can be kept alive
+  by a same-named step in a test lane after the gate job's copy is renamed.
 
 Node provisioning (`setup-node`, the pnpm store action, the self-hosted Node
 action) deliberately stays **in** the slice: those decide the toolchain the
@@ -173,15 +204,21 @@ profile never runs.
 `extractLintGateSlice` returns `null` — and the caller keeps the whole-file
 verdict — for any shape it does not model:
 
-- a step that is not `      - name: '<single-quoted name>'`, including an unnamed
-  `- uses:` step. This check runs **before** the step body is appended to the
-  current step, so an unnamed step following a plumbing step cannot be absorbed
-  as that step's content and vanish from the slice;
+- a sequence item that is not `      - name: '<single-quoted name>'`, including
+  an unnamed `- uses:` step and a bare `      -` whose name sits on the next
+  line. The item is refused before any body is appended, so it cannot be
+  absorbed as the previous step's content and vanish from the slice;
 - a duplicated job key, where YAML would take the last copy and a `Map` would
   silently keep whichever the parser reached;
 - a missing `jobs:`, `classify_pr`, or `lint_and_static`, so renaming the lint job
   cannot read as "no gate to compare";
-- content before the first job key that is neither a comment nor blank.
+- a job key off indent 2, a job body line outside a key's region, or content
+  after `jobs:` at column zero — shapes this line model cannot place;
+- a tab in the indent;
+- an anchor (`&name`) or an alias (`*name`) anywhere on a structural line. The
+  model is one line at a time and cannot follow a cross-reference: with the
+  anchor on a dropped step, `&lintcmd 'node scripts/lint.js --prettier'` and the
+  `--write` value render the same slice wherever `*lintcmd` is cited.
 
 `null` throws rather than returning `false`, so the existing fail-closed catch
 emits its `::warning::`. A silent `false` would disable the narrowing for every
@@ -197,9 +234,14 @@ The two sides are the **base tip** and the **merge base**, not the head.
 Comparing the head's slice would flag a branch for its own gate edit and keep
 flagging it after the rebase it asks for, because `main` will not carry that edit
 until the branch merges. The question is whether the gate moved _under_ this
-branch, so the branch's own version never enters the comparison. A branch that
-weakens the gate is caught by the whole-file rule on the gate file it edits, and
-by review.
+branch, so the branch's own version never enters the comparison.
+
+The branch's own edits are therefore outside this check, and **not** because
+another mechanism covers them: containment reads only a compare's status, never
+its file list, so a branch that deletes a lint step from its own copy passes even
+the whole-file rule. The division of labour is deliberate — a branch weakening
+the gate is a product decision, reviewed by humans on the diff and reddened by
+the post-merge lint on `main` — rather than a mechanical backstop.
 
 The merge base is taken from the containment compare the check **already made**,
 so the narrowing costs no additional compare. This was forced by measurement: a
@@ -280,10 +322,25 @@ head commit` stay outside the slice. A `ref:` edit on its own is caught: the
   `permissions` and `defaults.run.shell`, which do change how every step behaves.
   Left in the safe direction deliberately.
 
+- **Accepted over-rejection: the job roster.** Every non-gate job is named in the
+  compared text, so a base-side job added, removed or renamed refuses the
+  narrowing even when its content cannot touch the lint gate. The alternative —
+  dropping those jobs without a trace — is exactly the exposure the marker
+  removes: relocating the install prelude into a new job left the two gate jobs
+  identical. Job-list churn is rarer than step churn, so the cost is an
+  occasional rebase rather than the weekly treadmill this narrowing removes.
+- **Residual risk, dependency closure.** `needs:` is compared, so a base-side
+  change to WHICH jobs the lane depends on is seen. The extractor does not walk
+  that dependency graph: if the lint job ever needed a non-gate job, that job's
+  content would be dropped while its name and its `needs:` entry stayed
+  identical. No such edge exists today — the lint job needs only `classify_pr`,
+  which is itself in the slice — and adding one would make this hole live, so the
+  list of gate jobs and the lane's `needs:` have to be read together.
+
 ## Validation plan
 
-1. `node --test .github/scripts/check-lint-gate-freshness.test.mjs` — 62 cases,
-   including the 15 added here. CI corroborates this on Linux through
+1. `node --test .github/scripts/check-lint-gate-freshness.test.mjs` — 71 cases,
+   including the 9 added by this revision. CI corroborates this on Linux through
    `Run .github/scripts helper tests`, which collects the suite from
    `${{ env.HELPER_TESTS }}`.
 2. Mutation witnesses: each of eight deliberate defects must redden the suite —
@@ -291,12 +348,21 @@ head commit` stay outside the slice. A `ref:` edit on its own is caught: the
    keeping headers only, comparing the head instead of the merge base, absorbing
    an unnamed step, treating a missing merge base as fresh, trusting the plumbing
    label without the linter check, and dropping the job `env` from the slice.
-3. Slice completeness against the real workflow: every `scripts/lint.js` lane
+3. Model-completeness witnesses, one per shape the line-absorbing model used to
+   compare as identical: a bare `-` step, a comment at the head of the step list
+   and between steps, a `#` line inside a `run: |` body, a job-level key placed
+   after `steps:`, a lone-CR line break hiding a changed flag, and an anchor
+   defined in a dropped job with its alias cited in a kept step. Each returns
+   `null` or a different slice, and removing the corresponding guard reddens it.
+4. The job roster is part of the compared text: adding a job on the base side
+   changes the slice, so the `needs:`-relocation shape (install prelude split
+   into a new job the gate job then depends on) refuses the narrowing.
+5. Slice completeness against the real workflow: every `scripts/lint.js` lane
    flag must survive in the slice.
-4. Live API, thirteen historical base tips with a fork point one commit behind
+6. Live API, thirteen historical base tips with a fork point one commit behind
    each, content read at real refs: six plumbing-only commits must pass and
    seven gate-changing commits must stay stale.
-5. Live API on the branch that motivated the report (#16939 at `07d89196bd21`):
+7. Live API on the branch that motivated the report (#16939 at `07d89196bd21`):
    it must stay stale, because #16920 really did change the Prettier lane.
 
 ## Acceptance criteria

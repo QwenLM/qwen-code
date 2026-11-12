@@ -83,18 +83,24 @@ Verify trusted classifier checkout is clean
 Checkout trusted CI classifier
 ```
 
-在 job 层面只丢弃 `runs-on` 与 `timeout-minutes`，并连带丢弃它们的续行。`env`、`if`、`needs`、`outputs`、`permissions` 与 `steps` 保留：它们决定运行什么，而不是在哪里运行。
+在 job 层面只丢弃 `runs-on` 与 `timeout-minutes`，并连带丢弃它们的整段区域。`env`、`if`、`needs`、`outputs`、`permissions` 与 `steps` 保留：它们决定运行什么，而不是在哪里运行。`needs` 尤其保留，因此 base 侧改动「这条 lane 依赖哪些 job」会被比对到。
 
-比对文本中会去掉整行注释与空行，因为 `ci.yml` 注释密集，且大量改动只是文字说明。只有首个非空白字符为 `#` 的行才被丢弃，因此 shell 正文里的 `#` 属于内容并会保留——提取器绝不会移除 runner 会读取的行。
+**没有任何区域被静默丢弃。** 每一块被排除的内容——每个非闸门 job、每个 plumbing 步骤、每个被丢弃的 job key——都会在比对文本中留下一个 `[[dropped ...]]` 标记，携带类别与名称，并留在该区域原本的位置。`[[...]]` 不是 YAML 注释，因此标记既不会被误当作 prose，也不会与真实行冲突。这才让比对成为**完整**模型而不是「记得建模的部分」的抽样：base 侧把内容挪进被丢弃区域的改动（安装前置步骤拆进新 job、步骤改名成 plumbing 名单里的名字）会改变标记序列，从而拒绝 narrowing。
 
-在当前文件上测量，切片为 3514 行中的 372 行，lint job 的 42 个步骤中贡献 29 个（13 个属 plumbing）。
+唯一不进入比对的一类是 prose：block scalar 之外的空白行与整行注释。这是本 narrowing 的前提——`ci.yml` 的改动大多是文字说明——而且 prose 不可能承载闸门语义，因为 runner 从不读取它。它在读取任何结构**之前**用一次前置遍历移除，因此既不能开启步骤、不能被吸收进步骤，也不能截断某个 job。
+
+block scalar 正文正好相反：`run: |` 的内容是 runner 实际执行的脚本，因此逐字比对（空行除外），包括以 `#` 开头的行——那是 shell 注释，不是 YAML 注释。旧模型会丢弃它们，而文件头却声称「绝不会移除 runner 会读取的行」；那句话是假的，现在这类行保留。
+
+行分隔符为 `\r\n`、`\n`、单独的 `\r`，以及 Unicode 分隔符 `\u2028`/`\u2029`。只按 `\n` 切分会把 CR 结尾的文件读成一行，并丢掉 CR 另一侧 `#` 之后的所有内容——这正是 #11117 → #11216 的形态：base 上 flag 被改，分支却被认证为 fresh。
+
+在当前文件上测量，切片为 3560 行中的 428 行，其中 32 行是被排除的 job 与 plumbing 的标记。lint job 的 42 个步骤中贡献 29 个（13 个属 plumbing）。
 
 ### 为什么默认是「保留」
 
 白名单列出的是**可以被忽略**的部分，而不是重要的部分。漏掉对某个新闸门步骤的分类，会让它留在切片里，代价最多是今天的过度拒绝；而白名单里的错误条目会隐藏真实的闸门改动。这种不对称是刻意的，并由两道保护支撑：
 
-- 若白名单中某个步骤的正文调用了 linter，则直接拒绝 narrowing。标签本身不被信任——一个仍在运行 `scripts/lint.js` 的步骤被移入白名单是矛盾，而不是通过。
-- 测试会读取真实 workflow，要求每个 plumbing 名称都存在其中，因此步骤改名不会留下一个「静默地什么都没排除」的过期条目。
+- 若白名单中某个步骤的正文调用了 linter，则直接拒绝 narrowing。标签本身不被信任——一个仍在运行 `scripts/lint.js` 的步骤被移入白名单是矛盾，而不是通过。匹配覆盖实际调用的写法：`npm run`、`pnpm run`、`corepack pnpm run`、裸 `pnpm lint`、`npx`/`pnpx`。只锚定 `npm run` 会漏掉所有 `pnpm` 写法，因为 `pnpm` 里 `npm` 前面没有词边界；而管理器后面跟 `config`/`set` 属于配置，仍然通过。
+- 测试会读取真实 workflow，要求每个 plumbing 名称都存在于**两个闸门 job** 中，因此步骤改名不会留下一个「静默地什么都没排除」的过期条目。限定范围是必要的：全文件清单会被某个 test lane 里的同名步骤续命，即使闸门 job 里那份已经改名。
 
 Node 供给相关步骤（`setup-node`、pnpm store action、self-hosted Node action）刻意**保留**在切片中：它们决定 linter 运行所用的工具链，因此版本升级可能改变 lint 语义。只排除缓存位置与 npm 重试设置。
 
@@ -104,10 +110,12 @@ Node 供给相关步骤（`setup-node`、pnpm store action、self-hosted Node ac
 
 对任何它未建模的形态，`extractLintGateSlice` 返回 `null`，调用方随即保留整文件判定：
 
-- 步骤不是 `      - name: '<单引号名称>'` 的形态，包括未命名的 `- uses:` 步骤。该检查在把行追加进当前步骤**之前**执行，因此跟在某个 plumbing 步骤之后的未命名步骤不会被当作该步骤的内容吸收、从而从切片中消失；
+- 序列项不是 `      - name: '<单引号名称>'` 的形态，包括未命名的 `- uses:` 步骤，以及名字写在下一行的裸 `      -`。该检查在把任何正文追加进当前步骤**之前**执行，因此它不会被当作上一步骤的内容吸收、从而从切片中消失；
 - 重复的 job key——YAML 会取最后一份，而 `Map` 会静默保留解析器最后到达的那份；
 - 缺少 `jobs:`、`classify_pr` 或 `lint_and_static`，因此给 lint job 改名不会被读成「没有闸门需要比对」；
-- 第一个 job key 之前出现既非注释也非空行的内容。
+- job key 不在缩进 2、job 正文行落在任何 key 区域之外、或 `jobs:` 之后出现列 0 的内容——这些是本行模型无法定位的形态；
+- 缩进里出现制表符；
+- 任何结构行上出现锚点（`&name`）或别名（`*name`）。本模型逐行处理、无法跟随跨行引用：当锚点落在被丢弃的步骤上时，`&lintcmd 'node scripts/lint.js --prettier'` 与 `--write` 两种取值，在引用 `*lintcmd` 的地方会渲染出完全相同的切片。
 
 `null` 会抛出而不是返回 `false`，以便既有的 fail-closed catch 输出其 `::warning::`。静默返回 `false` 会让 narrowing 对每个 PR 都失效，而除了一个无人能解释的 stale 判定之外不留任何痕迹。
 
@@ -115,7 +123,9 @@ Node 供给相关步骤（`setup-node`、pnpm store action、self-hosted Node ac
 
 ### 比对基线是 merge base
 
-两侧分别是 **base tip** 与 **merge base**，而不是 head。比对 head 的切片会因为分支自身的闸门改动而判定失败，并且在它按要求 rebase 之后仍然失败，因为 `main` 要等该分支合入才会带上那次改动。真正要问的是闸门是否在这个分支**下面**移动了，所以分支自己的版本从不进入比对。削弱闸门的分支会由它所修改的那个闸门文件的整文件规则、以及 review 拦住。
+两侧分别是 **base tip** 与 **merge base**，而不是 head。比对 head 的切片会因为分支自身的闸门改动而判定失败，并且在它按要求 rebase 之后仍然失败，因为 `main` 要等该分支合入才会带上那次改动。真正要问的是闸门是否在这个分支**下面**移动了，所以分支自己的版本从不进入比对。
+
+因此分支自身的改动不在本检查范围内，而且**并不是**因为有别的机制兜住：包含判定只读 compare 的 status，从不读它的文件列表，所以一个删掉自己那份 lint 步骤的分支，连整文件规则也照样通过。这是刻意的分工——削弱闸门属于产品决定，由人在 diff 上 review、并由合入后 `main` 上的 lint 变红来兜——而不是机械兜底。
 
 merge base 取自该检查**已经做过**的包含比较，因此 narrowing 不额外付出一次比较调用。这是被测量逼出来的结论：在本仓库上新发一次 `GET /compare/main...head` 会返回约 4 MB 的 commits 与 files，对一个真实的一周前分支在 curl 的 30 秒上限处超时。该失败会到达 `main()` 的 fail-open，把其他所有闸门文件的判定一并丢弃——把一个可选的精化变成无条件放行。
 
@@ -140,13 +150,18 @@ merge base 取自该检查**已经做过**的包含比较，因此 narrowing 不
 - **接受的残余风险：** 缓存相关的 plumbing 在切片之外。本 lane 的 `Create isolated HOME` 导出 `COREPACK_HOME` 与 `XDG_CACHE_HOME`，别处的 `Configure persistent npm cache (self-hosted)` 导出 `NPM_CONFIG_CACHE`。若 base 侧改动把 corepack 的 home 指向共享目录，就形成本检查看不见的缓存投毒通道——每次运行独立 home 正是为阻断它。
 - **接受的残余过度拒绝：** `jobs:` 之上的内容整体保留，因此 base 侧对 `on:` 或 `concurrency:` 的改动仍会让所有在途 PR 变 stale，尽管它不可能改变 lint 检查什么。把这段前置内容收窄到只有 `env` 也能消掉这些红，但它同时承载 `permissions` 与 `defaults.run.shell`，而这两者确实会改变每个步骤的行为。刻意留在安全方向。
 
+- **接受的过度拒绝：job 名单。** 每个非闸门 job 都会在比对文本中留下名字，因此 base 侧新增、删除或改名一个 job 都会拒绝 narrowing，哪怕它的内容碰不到 lint 闸门。另一种做法——不加痕迹地丢弃这些 job——正是标记要消除的暴露面：把安装前置步骤拆进新 job 时，两个闸门 job 看起来完全相同。job 名单的变动比步骤变动稀少，所以代价是偶尔一次 rebase，而不是本 narrowing 要消除的每周跑步机。
+- **残余风险：依赖闭包。** `needs:` 会被比对，因此 base 侧改动「这条 lane 依赖哪些 job」可见。但提取器不走依赖图：若 lint job 将来 `needs:` 某个非闸门 job，那个 job 的内容会被丢弃，而它的名字与 `needs:` 条目却完全相同。今天不存在这样的边——lint job 只依赖 `classify_pr`，它本身在切片内——一旦新增这种依赖，这个洞就会生效，因此闸门 job 名单与这条 lane 的 `needs:` 必须一起读。
+
 ## 验证计划
 
-1. `node --test .github/scripts/check-lint-gate-freshness.test.mjs`——62 个用例，含本次新增的 15 个。CI 通过 `Run .github/scripts helper tests` 在 Linux 上佐证这一点，该步骤从 `${{ env.HELPER_TESTS }}` 收集本测试。
+1. `node --test .github/scripts/check-lint-gate-freshness.test.mjs`——71 个用例，含本次修订新增的 9 个。CI 通过 `Run .github/scripts helper tests` 在 Linux 上佐证这一点，该步骤从 `${{ env.HELPER_TESTS }}` 收集本测试。
 2. mutation witness：八个刻意植入的缺陷都必须让测试变红——从 `NARROWINGS` 移除 `ci.yml`、把整个文件当作切片返回、只保留 header、比对 head 而非 merge base、吸收未命名步骤、把缺失 merge base 当作 fresh、去掉 linter 检查而只信任 plumbing 标签，以及把 job `env` 从切片中移除。
-3. 针对真实 workflow 的切片完整性：每个 `scripts/lint.js` lane 参数都必须在切片中存活。
-4. 真实 API：取十三个历史 base tip，各自的分叉点落后一个提交，内容按真实 ref 读取——六个纯 plumbing 提交必须通过，七个改变闸门的提交必须保持 stale。
-5. 真实 API 验证触发本次报告的那个分支（#16939 在 `07d89196bd21`）：它必须保持 stale，因为 #16920 确实改了 Prettier lane。
+3. 模型完备性 witness，每个对应一种「旧的行吸收模型会比对成相同」的形态：裸 `-` 步骤、步骤清单头部与步骤之间的注释、`run: |` 正文里以 `#` 开头的行、放在 `steps:` 之后的 job 级 key、只用一个 CR 隐藏被改 flag 的换行、以及锚点定义在被丢弃 job 而别名被保留步骤引用。每一例都必须返回 `null` 或不同的切片，且去掉对应守卫时该例变红。
+4. job 名单本身进入比对：base 侧新增一个 job 会改变切片，因此「把安装前置步骤拆进新 job、再让闸门 job `needs:` 它」这种形态会拒绝 narrowing。
+5. 针对真实 workflow 的切片完整性：每个 `scripts/lint.js` lane 参数都必须在切片中存活。
+6. 真实 API：取十三个历史 base tip，各自的分叉点落后一个提交，内容按真实 ref 读取——六个纯 plumbing 提交必须通过，七个改变闸门的提交必须保持 stale。
+7. 真实 API 验证触发本次报告的那个分支（#16939 在 `07d89196bd21`）：它必须保持 stale，因为 #16920 确实改了 Prettier lane。
 
 ## 验收标准
 
