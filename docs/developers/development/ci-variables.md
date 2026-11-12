@@ -31,14 +31,14 @@ this page in the same change.
 
 ## Variables
 
-| Variable                                 | Default | Used in                 | Controls                                                                                  |
-| ---------------------------------------- | ------- | ----------------------- | ----------------------------------------------------------------------------------------- |
-| `QWEN_CI_VITEST_RETRY`                   | `2`     | `ci.yml`                | Retry count for the main CI workspace and script test step                                |
+| Variable                                 | Default | Used in                 | Controls                                                                                          |
+| ---------------------------------------- | ------- | ----------------------- | ------------------------------------------------------------------------------------------------- |
+| `QWEN_CI_VITEST_RETRY`                   | `2`     | `ci.yml`                | Retry count for the main CI workspace and script test step                                        |
 | `QWEN_CI_HOST_LOAD_MAX_RATIO`            | `2.0`   | `ci.yml`                | Load-per-CPU ceiling at or above which a self-hosted Linux host is refused before the unit suites |
-| `QWEN_CI_RPC_RETRY`                      | `1`     | `ci.yml`                | Re-runs of an all-green workspace suite that failed only on Vitest's worker RPC timeout   |
-| `QWEN_RELEASE_VITEST_RETRY`              | `2`     | `release.yml`           | Retry count for the release workspace test shards                                         |
-| `QWEN_RELEASE_WORKSPACE_TIMEOUT_MINUTES` | `45`    | `release.yml`           | Job timeout of each release workspace test shard                                          |
-| `QWEN_CI_VITEST_MAX_WORKERS`             | `4`     | `ci.yml`, `release.yml` | Worker cap for main CI unit tests and release workspace/quality tests on reserved runners |
+| `QWEN_CI_RPC_RETRY`                      | `1`     | `ci.yml`                | Re-runs of an all-green workspace suite that failed only on Vitest's worker RPC timeout           |
+| `QWEN_RELEASE_VITEST_RETRY`              | `2`     | `release.yml`           | Retry count for the release workspace test shards                                                 |
+| `QWEN_RELEASE_WORKSPACE_TIMEOUT_MINUTES` | `45`    | `release.yml`           | Job timeout of each release workspace test shard                                                  |
+| `QWEN_CI_VITEST_MAX_WORKERS`             | `4`     | `ci.yml`, `release.yml` | Worker cap for main CI unit tests and release workspace/quality tests on reserved runners         |
 
 ### Retry counts
 
