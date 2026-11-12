@@ -2071,8 +2071,18 @@ jobs:
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
         run: 'node scripts/lint.js --setup'
 
+      # Also run on github_ci_only, for the same reason Run Prettier below
+      # does: the post-merge push lint lints every file, and ESLint's scope
+      # includes `.github/scripts/**/*.{js,mjs,cjs}` — which is where the
+      # whitelisted helpers live. A PR touching only those files used to pass
+      # its required Lint & Static and redden the next main push (#16958 item
+      # 3; #16899/#16920 closed this for Prettier). Not docs_only: a
+      # documentation-only change contains nothing ESLint opens. ESLint comes
+      # from node_modules, so the install prelude above — already widened to
+      # this profile — is all it needs; `Install linters` fetches the external
+      # actionlint/shellcheck/yamllint binaries and stays full-gated.
       - name: 'Run ESLint'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && (steps.ci_profile.outputs.ci_profile == 'full' || steps.ci_profile.outputs.ci_profile == 'github_ci_only') }}"
         run: 'node scripts/lint.js --eslint'
 
       - name: 'Run actionlint'

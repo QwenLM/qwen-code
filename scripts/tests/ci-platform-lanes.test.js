@@ -1652,22 +1652,33 @@ describe('post-merge push lane', () => {
     ).toEqual([...FULL_PAYLOAD].sort());
     // Whole literal, not the `ci_profile == 'full'` substring filtered above:
     // an appended `&&` clause still matches that substring while dropping the
-    // step from the unattended post-merge lane. Fourteen gates are identical;
+    // step from the unattended post-merge lane. Thirteen gates are identical;
     // Run Prettier also runs on docs_only and github_ci_only, because the
     // post-merge push lint checks every file with the lockfile's Prettier and
     // a profile that skips this lane lets a formatting-only break merge green
-    // and redden main (#16872, #16899). Its widened gate still contains the
-    // `ci_profile == 'full'` substring, so it stays in FULL_PAYLOAD above;
-    // only the literal differs.
+    // and redden main (#16872, #16899). Run ESLint also runs on
+    // github_ci_only, for the same reason on the same whitelist: ESLint's
+    // scope covers `.github/scripts/**/*.{js,mjs,cjs}`, so a PR touching only
+    // a whitelisted helper used to pass this required check and redden the
+    // next main push (#16958 item 3). It does NOT take docs_only — a
+    // documentation-only change contains nothing ESLint opens. Both widened
+    // gates still contain the `ci_profile == 'full'` substring, so both stay
+    // in FULL_PAYLOAD above; only the literals differ.
     const FULL_GATE =
       "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}";
     const PRETTIER_GATE =
       "${{ needs.classify_pr.outputs.skip_ci != 'true' && (steps.ci_profile.outputs.ci_profile == 'full' || steps.ci_profile.outputs.ci_profile == 'docs_only' || steps.ci_profile.outputs.ci_profile == 'github_ci_only') }}";
+    const ESLINT_GATE =
+      "${{ needs.classify_pr.outputs.skip_ci != 'true' && (steps.ci_profile.outputs.ci_profile == 'full' || steps.ci_profile.outputs.ci_profile == 'github_ci_only') }}";
+    const WIDENED_GATES = {
+      'Run Prettier': PRETTIER_GATE,
+      'Run ESLint': ESLINT_GATE,
+    };
     for (const n of FULL_PAYLOAD) {
       const step = stepByName.get(n);
       expect(testNames.has(n), `${n} leaked back into test`).toBe(false);
       expect(String(step.if), `${n} gate drifted`).toBe(
-        n === 'Run Prettier' ? PRETTIER_GATE : FULL_GATE,
+        WIDENED_GATES[n] ?? FULL_GATE,
       );
       expect(
         String(step.run ?? ''),
