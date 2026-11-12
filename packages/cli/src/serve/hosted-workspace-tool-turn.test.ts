@@ -2185,6 +2185,17 @@ it('cron_list and cron_delete drive the loop funnel end to end on shell/3', asyn
     // An unknown id answers not-cancelled rather than throwing.
     const missing = await drive('cron_delete', { id: 'loop:does-not-exist' });
     expect(missing?.['cancelled']).toBe(false);
+    // A padded id is trimmed to the exact wakeup id before cancel (D4): the
+    // funnel matches by exact id, so an untrimmed dispatch would silently
+    // answer not-cancelled.
+    const arm2 = await drive('loop_wakeup', {
+      delaySeconds: 60,
+      prompt: '/loop padded id',
+    });
+    const id2 = arm2?.['id'] as string;
+    const paddedDel = await drive('cron_delete', { id: `  ${id2}  ` });
+    expect(paddedDel?.['cancelled']).toBe(true);
+    expect((await drive('cron_list', {}))?.['wakeups']).toEqual([]);
   } finally {
     if (gateBefore === undefined) delete process.env[gateKey];
     else process.env[gateKey] = gateBefore;

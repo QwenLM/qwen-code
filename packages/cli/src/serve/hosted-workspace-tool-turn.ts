@@ -4655,7 +4655,9 @@ export class HostedWorkspaceToolTurn {
           if (typeof id !== 'string' || !id.trim()) {
             validationError = 'cron_delete requires a nonempty id.';
           }
-          input = { id };
+          // The funnel cancels by exact id, so dispatch the trimmed id the
+          // nonempty check validated — a padded id must not silently no-op.
+          input = { id: typeof id === 'string' ? id.trim() : id };
         } else if (call.name === 'monitor') {
           const args = call.args;
           const unsupportedKey = Object.keys(args).find(
