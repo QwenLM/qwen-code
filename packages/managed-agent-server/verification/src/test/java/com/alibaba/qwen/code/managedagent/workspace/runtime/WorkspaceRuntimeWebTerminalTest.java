@@ -41,7 +41,8 @@ class WorkspaceRuntimeWebTerminalTest {
     private Path temporary;
 
     private record Fixture(ManagedAgentProperties properties,
-            WorkspaceRuntimeResolver resolver, String sessionId) {
+            WorkspaceRuntimeResolver resolver, String sessionId,
+            ManagedAgentStore store) {
     }
 
     private Fixture fixture(boolean toolMeasurements, boolean webTerminal)
@@ -102,7 +103,7 @@ class WorkspaceRuntimeWebTerminalTest {
                                     .build())
                             .sessionId();
                 });
-        return new Fixture(properties, resolver, sessionId);
+        return new Fixture(properties, resolver, sessionId, store);
     }
 
     @Test
@@ -130,5 +131,36 @@ class WorkspaceRuntimeWebTerminalTest {
         assertThatThrownBy(() -> fixture(false, true))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("tool measurements");
+    }
+
+    @Test
+    void capabilityHintRequiresTheRecordedTerminalDigest() throws Exception {
+        Fixture fixture = fixture(true, true);
+        var session = fixture.store().requireSession(TENANT, fixture.sessionId());
+        // Without a wired repository the placement check stands.
+        assertThat(fixture.resolver().terminalCapable(session)).isTrue();
+        // A binding recorded at the measured digest is refused by the relay's
+        // admission, so the hint must not advertise a terminal for it.
+        var repository = org.mockito.Mockito.mock(
+                com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository.class);
+        var binding = org.mockito.Mockito.mock(
+                com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord.class);
+        var request = org.mockito.Mockito.mock(
+                com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest.class);
+        org.mockito.Mockito.when(binding.getState())
+                .thenReturn(com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord.State.READY);
+        org.mockito.Mockito.when(binding.getRequest()).thenReturn(request);
+        org.mockito.Mockito.when(request.getScope()).thenReturn(
+                new com.alibaba.qwen.code.runtimebroker.RuntimeScope(
+                        TENANT, WS, "1", "/workspace",
+                        WorkspaceExecutionProfile.MEASURED_CAPABILITY_DIGEST, "session"));
+        org.mockito.Mockito.when(repository.findByHarnessSession(
+                org.mockito.ArgumentMatchers.eq(TENANT),
+                org.mockito.ArgumentMatchers.eq(fixture.sessionId()),
+                org.mockito.ArgumentMatchers.isNull(),
+                org.mockito.ArgumentMatchers.anyInt()))
+                .thenReturn(List.of(binding));
+        fixture.resolver().setBindingRepository(repository);
+        assertThat(fixture.resolver().terminalCapable(session)).isFalse();
     }
 }

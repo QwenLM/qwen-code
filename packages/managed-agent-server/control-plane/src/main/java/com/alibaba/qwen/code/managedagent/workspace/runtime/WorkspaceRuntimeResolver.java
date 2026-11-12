@@ -30,6 +30,15 @@ public final class WorkspaceRuntimeResolver {
     private final boolean measuredTools;
     private final boolean webTerminal;
     private final ManagedAgentSettings.ManagedExtensions managedExtensions;
+    // Optional: when wired, the capability hint also requires the Session's
+    // recorded binding to already carry the terminal digest, so it never
+    // advertises a terminal the relay's admission would refuse.
+    private volatile com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository bindingRepository;
+
+    public void setBindingRepository(
+            com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository bindingRepository) {
+        this.bindingRepository = bindingRepository;
+    }
 
     public WorkspaceRuntimeResolver(SessionQueryStore sessions, WorkspaceExecutionStore authority,
             ManagedAgentSettings properties) {
@@ -167,10 +176,38 @@ public final class WorkspaceRuntimeResolver {
             return false;
         }
         try {
-            return mount(binding) != null;
+            if (mount(binding) == null) {
+                return false;
+            }
         } catch (com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException error) {
             // A capability hint must never turn the session list into a 409:
             // a non-local or unreadable placement is simply not terminal-capable.
+            return false;
+        }
+        // The relay admits only a binding already recorded at the terminal
+        // digest; the hint must not be wider than that admission. Without a
+        // wired repository (isolated unit contexts) the placement check stands.
+        var repository = this.bindingRepository;
+        if (repository == null) {
+            return true;
+        }
+        try {
+            // findByHarnessSession is binding-id ascending; the last READY row
+            // is the latest READY binding the relay's admission would read.
+            com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord latest = null;
+            for (var recorded : repository.findByHarnessSession(
+                    session.tenantId(), session.sessionId(), null, 100)) {
+                if (recorded.getState()
+                        == com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord.State.READY) {
+                    latest = recorded;
+                }
+            }
+            return latest != null
+                    && !latest.isDrainRequested()
+                    && latest.getRequest() != null
+                    && WorkspaceExecutionProfile.TERMINAL_CAPABILITY_DIGEST.equals(
+                            latest.getRequest().getScope().getCapabilityDigest());
+        } catch (RuntimeException error) {
             return false;
         }
     }
@@ -194,9 +231,12 @@ public final class WorkspaceRuntimeResolver {
         if (resolved.equals(recorded)) {
             return true;
         }
-        // Existing ordinary leases retain their attested profile across a measurement rollout.
+        // Existing ordinary leases retain their attested profile across a measurement
+        // rollout and across the web-terminal opt-in, which substitutes the terminal
+        // digest on the same local-mount measured path.
         var ordinary = java.util.Set.of(WorkspaceExecutionProfile.CAPABILITY_DIGEST,
-                WorkspaceExecutionProfile.MEASURED_CAPABILITY_DIGEST);
+                WorkspaceExecutionProfile.MEASURED_CAPABILITY_DIGEST,
+                WorkspaceExecutionProfile.TERMINAL_CAPABILITY_DIGEST);
         return ordinary.contains(resolved.getCapabilityDigest())
                 && ordinary.contains(recorded.getCapabilityDigest())
                 && resolved.getTenantId().equals(recorded.getTenantId())

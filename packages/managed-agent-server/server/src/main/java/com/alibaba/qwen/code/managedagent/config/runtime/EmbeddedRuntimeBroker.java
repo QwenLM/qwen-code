@@ -184,6 +184,11 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
         this.extensionTransport = http;
         this.workspaces = workspaceExecutionStore == null ? null
                 : new WorkspaceRuntimeResolver(store, workspaceExecutionStore, properties, ssh);
+        if (this.workspaces != null) {
+            // Let the capability hint require the same recorded terminal digest
+            // the relay's admission checks, so it never advertises a refused terminal.
+            this.workspaces.setBindingRepository(bindingRepository);
+        }
         WorkspaceRuntimeResolver workspaces = this.workspaces;
         this.childWorkspaces = broker.isChildWorkspacesEnabled()
                 ? childWorkspaces(workspaces, broker) : null;
