@@ -541,6 +541,14 @@ describe('ManagedSessionsPage', () => {
       }
     }
     vi.stubGlobal('WebSocket', FakeWs);
+    // The panel only connects inside requestAnimationFrame; fake timers queue
+    // that frame but never run it, so without this stub the socket is never
+    // constructed and the no-release assertion below stays vacuous.
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+      cb(16);
+      return 1;
+    });
+    vi.stubGlobal('cancelAnimationFrame', () => {});
     provider = {
       ...provider,
       terminal: {
@@ -572,6 +580,16 @@ describe('ManagedSessionsPage', () => {
     mocks.client.getSession.mockResolvedValue(summary('s1', {}));
     await render('s1', 'en', provider, null, true);
     expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+    // Positive witness that the socket was constructed and opened: the onopen
+    // handler sends a resize control frame. Without it the no-release assertion
+    // below could pass simply because no socket ever existed.
+    expect(
+      sent.some(
+        (message) =>
+          typeof message === 'string' &&
+          message.startsWith('\x00{"type":"resize"'),
+      ),
+    ).toBe(true);
     expect(sent).not.toContain('\x00{"type":"release"}');
     vi.unstubAllGlobals();
     vi.useRealTimers();
