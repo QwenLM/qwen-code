@@ -115,8 +115,12 @@ class ManagedUserMessageStoreTest {
     }
 
     @Test
-    void admitsClaimedSeedThroughTheRealSchemaAdapterAndKeepsTheQueueBarrier() {
+    void admitsClaimedSeedThroughTheRealSchemaAdapterAndKeepsTheQueueBarrier() throws Exception {
+        seedConversationBoundary();
         Message first = command("first", submit("first")).messages().getFirst();
+        assertThat(conversationBoundary()).isEqualTo(1);
+        command("first", submit("first"));
+        assertThat(conversationBoundary()).isEqualTo(1);
         assertCode("user_message_queue_pending", () -> store.insertTurnCommand(TENANT, "queue-test", "ordinary-key",
                 "digest", session, first.input(), "sha256:" + "0".repeat(64), ACTOR));
         jdbc.update("UPDATE ma_user_message SET state = 'claimed' WHERE tenant_id = ? AND session_id = ?", TENANT, session);
@@ -124,6 +128,16 @@ class ManagedUserMessageStoreTest {
         var admission = store.insertTurnCommand(TENANT, "queue-test", "user-queue:" + first.id(),
                 "digest", session, first.input(), "sha256:" + "0".repeat(64), ACTOR);
         assertThat(admission.turnId()).isNotBlank();
+        assertThat(conversationBoundary()).isEqualTo(1);
+    }
+
+    @Test
+    void ordinaryInputWithAQueueLikeIdempotencyKeyStillAdvancesTheBoundary() throws Exception {
+        seedConversationBoundary();
+        var admission = store.insertTurnCommand(TENANT, "queue-test", "user-queue:ordinary-input", "digest", session,
+                agents.userMessageInput(text("ordinary")), "sha256:" + "0".repeat(64), ACTOR);
+        assertThat(admission.turnId()).isNotBlank();
+        assertThat(conversationBoundary()).isEqualTo(1);
     }
 
     @Test
@@ -301,6 +315,20 @@ class ManagedUserMessageStoreTest {
 
     private Command submit(String text) {
         return new Command("submit", null, null, text(text));
+    }
+
+    private void seedConversationBoundary() {
+        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(TENANT, session);
+        jdbc.update("INSERT INTO ma_session_record (session_scope_key,record_key,tenant_id,session_id,domain,record_id,"
+                        + "revision,record_kind,options_json,gmt_create) VALUES (?,?,?,?,?,?,1,'CONVERSATION',?,1)",
+                scope, com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(scope, "side_query_conversation"),
+                TENANT, session, "side_query_conversation", "side_query_conversation", "{\"mainInputBoundary\":0}");
+    }
+
+    private long conversationBoundary() throws Exception {
+        return json.readTree(jdbc.queryForObject("SELECT options_json FROM ma_session_record"
+                        + " WHERE tenant_id=? AND session_id=? AND record_kind='CONVERSATION'", String.class, TENANT, session))
+                .path("mainInputBoundary").asLong();
     }
 
     private List<InputBlock> text(String text) {

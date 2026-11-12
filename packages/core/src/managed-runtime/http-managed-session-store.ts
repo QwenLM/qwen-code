@@ -5,6 +5,10 @@
  */
 
 import {
+  MANAGED_TOOL_MEASUREMENTS_KIND,
+  parseManagedToolMeasurementEvidence,
+} from './managed-tool-measurements.js';
+import {
   EXECUTION_DIAGNOSTICS_KIND,
   parseManagedExecutionEvidence,
 } from './managed-execution-diagnostics.js';
@@ -272,6 +276,20 @@ function isUncertainStoreFailure(error: unknown): boolean {
   );
 }
 
+/**
+ * True when the Store refused this seal, with a 4xx other than 429, so it
+ * did not land. Any other failure, including one raised after a 2xx answer,
+ * may have left the head sealed.
+ */
+function sealRefused(error: unknown): boolean {
+  return (
+    error instanceof ManagedSessionStoreHttpError &&
+    error.status >= 400 &&
+    error.status < 500 &&
+    error.status !== 429
+  );
+}
+
 function asError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
 }
@@ -335,7 +353,7 @@ export function readOnlyManagedSessionSnapshot(value: unknown) {
   );
   const head = parseRestoreHead(snapshot['head']);
   if (
-    ![1, 2, 3, 4].includes(head.storageVersion) ||
+    ![1, 2, 3, 4, 5].includes(head.storageVersion) ||
     !['ACTIVE', 'SEALED'].includes(head.state) ||
     head.recoveryStatus !== 'READY' ||
     head.compactedThroughRevision !== 0
@@ -497,6 +515,13 @@ export function readOnlyManagedSessionSnapshot(value: unknown) {
   if (resources.size !== references.size) {
     throw corrupt('snapshot resource enumeration conflicts.');
   }
+  if (
+    head.storageVersion < 5 &&
+    [...resources.values()].some(
+      ({ ref }) => ref.kind === MANAGED_TOOL_MEASUREMENTS_KIND,
+    )
+  )
+    throw corrupt('Tool measurements require storage version 5.');
   const executionPresent = [...resources.values()].some(
     ({ ref }) => ref.kind === EXECUTION_DIAGNOSTICS_KIND,
   );
@@ -690,7 +715,7 @@ const LEGACY_EXTENSION_CLOSURE_KINDS = new Set([
 class HttpManagedSessionResourceStore implements ManagedSessionResourceStore {
   private readonly staged = new Map<
     string,
-    { ref: ManagedSessionDurableRef; bytes: Buffer }
+    { ref: ManagedSessionDurableRef; bytes: Buffer; external?: boolean }
   >();
   private client: ManagedSessionStoreHttpClient | undefined;
 
@@ -704,11 +729,6 @@ class HttpManagedSessionResourceStore implements ManagedSessionResourceStore {
   ): Promise<ManagedSessionDurableRef> {
     const safeKind = assertManagedSessionStableId(kind, 'resource kind');
     const maxBytes = managedSessionInlineResourceBytes(safeKind);
-    if (source.byteLength > maxBytes) {
-      throw new ManagedSessionRecordError(
-        `resource bytes exceed the ${maxBytes}-byte inline limit (kind=${safeKind}, bytes=${source.byteLength}); OSS storage is not enabled.`,
-      );
-    }
     const bytes = Buffer.from(source);
     const ref: ManagedSessionDurableRef = {
       resourceId: randomUUID(),
@@ -717,6 +737,16 @@ class HttpManagedSessionResourceStore implements ManagedSessionResourceStore {
       byteLength: bytes.byteLength,
       digest: sha256(bytes),
     };
+    if (source.byteLength > maxBytes) {
+      if (this.client === undefined) {
+        throw new ManagedSessionRecordError(
+          `resource bytes exceed the ${maxBytes}-byte inline limit (kind=${safeKind}, bytes=${source.byteLength}); OSS storage is not enabled.`,
+        );
+      }
+      await this.client.externalizeResource(ref, bytes);
+      this.staged.set(ref.resourceId, { ref, bytes, external: true });
+      return ref;
+    }
     this.staged.set(ref.resourceId, { ref, bytes });
     return ref;
   }
@@ -823,7 +853,7 @@ class HttpManagedSessionResourceStore implements ManagedSessionResourceStore {
         schemaVersion: ref.schemaVersion,
         byteLength: ref.byteLength,
         digest: ref.digest,
-        ...(staged === undefined
+        ...(staged === undefined || staged.external
           ? {}
           : { bytesBase64: staged.bytes.toString('base64') }),
       };
@@ -940,6 +970,14 @@ class ManagedSessionStoreHttpClient {
     preparedCommitSha256: string;
   };
   private sealed = false;
+  /** Settles once every seal started so far has answered. */
+  private sealsAnswered?: Promise<void>;
+  /**
+   * The last failure of a seal that may have landed; acquireWriter refuses
+   * while it is set. A writer-conflict refusal clears it, and once a seal
+   * succeeds `sealed` refuses first.
+   */
+  private uncertainSeal?: Error;
   private locallyStopped = false;
   private lifecycleAuthority?: ManagedSessionLifecycleAuthority;
   /**
@@ -1257,6 +1295,11 @@ class ManagedSessionStoreHttpClient {
         'the HTTP Managed Session writer is already opened or sealed.',
       );
     }
+    // A seal that failed without the Store refusing it may have landed, and
+    // the Store gives a sealed head a new writer generation on acquire. Stay
+    // unsettled until a later seal succeeds or meets a writer conflict.
+    if (this.uncertainSeal !== undefined)
+      throw new ManagedSessionAppendUnsettledError(this.uncertainSeal);
     const grant = parseWriterGrant(
       await this.json('/writers:acquire', 'POST', {
         workspaceId: this.sessionKey.workspaceId,
@@ -1323,6 +1366,13 @@ class ManagedSessionStoreHttpClient {
         this.sessionKey,
       );
       requireStoredTransactionMatches(transaction, descriptor);
+      if (
+        head.storageVersion < 5 &&
+        descriptor.refs.some(
+          (ref) => ref.kind === MANAGED_TOOL_MEASUREMENTS_KIND,
+        )
+      )
+        throw corrupt('Tool measurements require storage version 5.');
       if (
         head.storageVersion < 4 &&
         descriptor.refs.some((ref) => ref.kind === EXECUTION_DIAGNOSTICS_KIND)
@@ -1559,7 +1609,7 @@ class ManagedSessionStoreHttpClient {
       raw['sessionId'] !== this.sessionKey.sessionId ||
       snapshot.snapshotId.length === 0 ||
       Buffer.byteLength(snapshot.snapshotId, 'utf8') > 512 ||
-      ![1, 2, 3, 4].includes(storageVersion) ||
+      ![1, 2, 3, 4, 5].includes(storageVersion) ||
       storageVersion > head.storageVersion ||
       snapshot.coveredJournalRevision < 1 ||
       snapshot.coveredJournalRevision > head.journalRevision ||
@@ -1672,6 +1722,11 @@ class ManagedSessionStoreHttpClient {
         const nested: typeof declared = [];
         for (const resource of added) {
           const body = await this.readResource(resource);
+          if (
+            storageVersion < 5 &&
+            resource.kind === MANAGED_TOOL_MEASUREMENTS_KIND
+          )
+            throw corrupt('Tool measurements require storage version 5.');
           if (
             storageVersion < 4 &&
             resource.kind === EXECUTION_DIAGNOSTICS_KIND
@@ -2115,6 +2170,13 @@ class ManagedSessionStoreHttpClient {
       grant.supportedStorageVersion < 4
     )
       throw corrupt('Execution diagnostics require storage version 4.');
+    if (
+      descriptor.refs.some(
+        (ref) => ref.kind === MANAGED_TOOL_MEASUREMENTS_KIND,
+      ) &&
+      grant.supportedStorageVersion < 5
+    )
+      throw corrupt('Tool measurements require storage version 5.');
     const publicationIds = new Set(
       descriptor.refs.flatMap((ref) => {
         const id = this.publicationAdmissions.get(ref.resourceId);
@@ -2392,7 +2454,7 @@ class ManagedSessionStoreHttpClient {
           method,
           headers: {
             Accept: 'application/json',
-            'X-Qwen-Managed-Max-Readable-Storage-Version': '4',
+            'X-Qwen-Managed-Max-Readable-Storage-Version': '5',
             ...(readOnly ? {} : { 'Content-Type': 'application/json' }),
             [HTTP_MANAGED_SESSION_STORE_CONTRACT.tenantHeader]:
               this.sessionKey.tenantId,
@@ -2430,6 +2492,49 @@ class ManagedSessionStoreHttpClient {
       },
       contentionDeadline,
     );
+  }
+
+  async externalizeResource(
+    ref: ManagedSessionDurableRef,
+    bytes: Buffer,
+  ): Promise<void> {
+    await this.ensureWriter();
+    const grant = this.requireGrant();
+    const query =
+      `workspaceId=${encodeURIComponent(this.sessionKey.workspaceId)}` +
+      `&writerId=${encodeURIComponent(this.writerId)}` +
+      `&writerGeneration=${grant.writerGeneration}`;
+    const allocatePath = '/resources:allocate';
+    await this.withRetry(true, 'POST', allocatePath, async (timeoutMs) => {
+      await this.request(
+        allocatePath,
+        'POST',
+        {
+          workspaceId: this.sessionKey.workspaceId,
+          writerId: this.writerId,
+          writerGeneration: grant.writerGeneration,
+          resourceId: ref.resourceId,
+          kind: ref.kind,
+          schemaVersion: ref.schemaVersion,
+          byteLength: ref.byteLength,
+          digest: ref.digest,
+        },
+        timeoutMs,
+      );
+    });
+    const uploadPath = `/resources/${encodeURIComponent(ref.resourceId)}:upload?${query}`;
+    await this.withRetry(true, 'POST', uploadPath, async (timeoutMs) => {
+      await this.request(
+        uploadPath,
+        'POST',
+        { bytesBase64: bytes.toString('base64') },
+        timeoutMs,
+      );
+    });
+    const finalizePath = `/resources/${encodeURIComponent(ref.resourceId)}:finalize?${query}`;
+    await this.withRetry(true, 'POST', finalizePath, async (timeoutMs) => {
+      await this.request(finalizePath, 'POST', undefined, timeoutMs);
+    });
   }
 
   async readResource(ref: ManagedSessionDurableRef): Promise<Buffer> {
@@ -2567,8 +2672,31 @@ class ManagedSessionStoreHttpClient {
   async seal(): Promise<void> {
     if (this.retirementJoin)
       throw corrupt('original CSI retirement owns the final boundary.');
-    await this.acquirePromise?.catch(() => undefined);
-    return this.sealGrant();
+    // The seal joins sealsAnswered before it waits on acquirePromise, so a
+    // reacquire that starts meanwhile still waits for it.
+    const sealing = (async () => {
+      await this.acquirePromise?.catch(() => undefined);
+      await this.sealGrant();
+    })();
+    const answered = sealing.then(
+      () => undefined,
+      (error: unknown) => {
+        if (!sealRefused(error)) this.uncertainSeal = asError(error);
+        // Most refusals come before the Store replays a seal that landed, so
+        // they say nothing about an earlier one. A writer conflict comes
+        // after that replay: the head has left this writer generation, so no
+        // seal of it can still decide the Session.
+        else if (
+          error instanceof ManagedSessionStoreHttpError &&
+          error.remoteCode === 'managed_session_writer_conflict'
+        )
+          this.uncertainSeal = undefined;
+      },
+    );
+    this.sealsAnswered = Promise.all([this.sealsAnswered, answered]).then(
+      () => undefined,
+    );
+    return sealing;
   }
 
   private async sealGrant(): Promise<void> {
@@ -2754,6 +2882,19 @@ class ManagedSessionStoreHttpClient {
     const expired = this.grant;
     this.stopRenewal();
     await this.renewPromise?.catch(() => undefined);
+    // A seal on its way to the Store decides this writer's end first. The
+    // Store gives a sealed head a new writer generation on acquire, so an
+    // acquire that lands after the seal would reopen the Session behind it,
+    // and one that lands first would make the seal meet a newer writer. A
+    // seal that starts during this wait replaces sealsAnswered, so wait
+    // again until none has. Then acquireWriter refuses a sealed client, and
+    // one whose seal may have landed.
+    let answered = this.sealsAnswered;
+    while (answered !== undefined) {
+      await answered;
+      answered =
+        answered === this.sealsAnswered ? undefined : this.sealsAnswered;
+    }
     // A renewal in flight may have answered after the caller saw the lease
     // lapse; it moved the lease forward and re-armed the timer, so keep that
     // grant. Dropping it for an acquire, which a Store holding the Session's
@@ -2943,7 +3084,7 @@ class ManagedSessionStoreHttpClient {
     const grant = this.requireGrant();
     if (
       head.state !== 'ACTIVE' ||
-      ![1, 2, 3, 4].includes(head.storageVersion) ||
+      ![1, 2, 3, 4, 5].includes(head.storageVersion) ||
       head.storageVersion > grant.supportedStorageVersion ||
       head.writerGeneration !== grant.writerGeneration ||
       head.recoveryStatus !== 'READY' ||
@@ -3157,7 +3298,7 @@ class ManagedSessionStoreHttpClient {
         redirect: 'error',
         headers: {
           Accept: accept,
-          'X-Qwen-Managed-Max-Readable-Storage-Version': '4',
+          'X-Qwen-Managed-Max-Readable-Storage-Version': '5',
           [HTTP_MANAGED_SESSION_STORE_CONTRACT.tenantHeader]:
             this.sessionKey.tenantId,
           [HTTP_MANAGED_SESSION_STORE_CONTRACT.writerTokenHeader]:
@@ -3655,6 +3796,12 @@ export function collectNestedResourceRefs(
     return hostedRecoveryReferences(
       parseHostedRecoveryResource(bytes, undefined, ref.kind),
     );
+  }
+  if (ref.kind === MANAGED_TOOL_MEASUREMENTS_KIND) {
+    if (ref.schemaVersion !== 1)
+      throw corrupt('Unsupported tool measurements version.');
+    parseManagedToolMeasurementEvidence(bytes);
+    return [];
   }
   if (ref.kind === EXECUTION_DIAGNOSTICS_KIND) {
     if (ref.schemaVersion !== 1)

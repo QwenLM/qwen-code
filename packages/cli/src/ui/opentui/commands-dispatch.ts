@@ -78,6 +78,7 @@ import {
 } from '../../utils/userPromptExpansionHook.js';
 import type { RecentSlashCommand } from '../hooks/useSlashCompletion.js';
 import { loadInteractiveCommands } from './slash-dispatch.js';
+import { isExitInProgress } from './exit-lifecycle.js';
 import {
   getInteractiveModSession,
   isModRecoveryCommand,
@@ -246,6 +247,7 @@ export class OpenTuiSlashDispatcher {
   private activeCommand: {
     controller: AbortController;
     canCancel: boolean;
+    committing: boolean;
   } | null = null;
   private recentCommands = new Map<string, RecentSlashCommand>();
   private readonly extensionRefreshState: ExtensionRefreshState;
@@ -498,13 +500,17 @@ export class OpenTuiSlashDispatcher {
     return !(trimmed.startsWith('/') && hasSlashCommandPathSeparator(trimmed));
   }
 
+  isCommitInProgress(): boolean {
+    return this.activeCommand?.committing === true;
+  }
+
   /**
    * Parity of `cancelSlashCommand` in slashCommandProcessor.ts: ESC while a
    * slash command runs aborts it and reports the cancellation.
    */
   cancel(): void {
     this.host.cancelBtw();
-    if (!this.activeCommand?.canCancel) {
+    if (!this.activeCommand?.canCancel || this.activeCommand.committing) {
       return;
     }
     this.activeCommand.controller.abort();
@@ -528,6 +534,8 @@ export class OpenTuiSlashDispatcher {
     if (!this.takesAsSlashCommand(trimmed)) {
       return false;
     }
+    // The gateway may have waited for the registry after the shell admitted input.
+    if (isExitInProgress()) return { kind: 'handled' };
     this.services.onInputProcessed?.();
     return this.run(trimmed, { recordRecall: true, typed });
   }
@@ -639,7 +647,11 @@ export class OpenTuiSlashDispatcher {
       options.wasIdleBeforeDispatch ?? this.host.isIdle();
     this.host.setIsProcessing(true);
     const abortController = new AbortController();
-    const activeCommand = { controller: abortController, canCancel: true };
+    const activeCommand = {
+      controller: abortController,
+      canCancel: true,
+      committing: false,
+    };
     this.activeCommand = activeCommand;
     const releaseOwnership = () => {
       if (this.activeCommand === activeCommand) {
@@ -936,6 +948,18 @@ export class OpenTuiSlashDispatcher {
             },
             overwriteConfirmed: options.overwriteConfirmed,
             abortSignal: abortController.signal,
+            beginCommit: () => {
+              if (
+                this.activeCommand !== activeCommand ||
+                abortController.signal.aborted ||
+                isExitInProgress() ||
+                !fullCommandContext.ui.isIdleRef.current
+              ) {
+                return false;
+              }
+              activeCommand.committing = true;
+              return true;
+            },
           };
 
           // Parity: a "Proceed" confirmation temporarily augments the session
@@ -1032,14 +1056,16 @@ export class OpenTuiSlashDispatcher {
                 return { kind: 'handled' };
               }
               case 'dialog': {
-                if (result.dialog === 'resume') {
-                  if (result.sessionId) {
+                if (result.dialog === 'resume' && result.sessionId) {
+                  if (fullCommandContext.beginCommit?.() !== false) {
                     await this.host.handleResume(result.sessionId);
-                    return { kind: 'handled' };
                   }
+                  return { kind: 'handled' };
                 }
                 if (result.dialog === 'branch') {
-                  await this.host.handleBranch(result.name);
+                  if (fullCommandContext.beginCommit?.() !== false) {
+                    await this.host.handleBranch(result.name);
+                  }
                   return { kind: 'handled' };
                 }
                 return {

@@ -389,6 +389,8 @@ export default {
     'Open the skills panel (browse, search, toggle, pick).',
   'Move this session to a new working directory':
     'Move this session to a new working directory',
+  'Wait for background agents to finish or stop them in /tasks before changing directories.':
+    'Wait for background agents to finish or stop them in /tasks before changing directories.',
   // SkillsManagerDialog (the panel `/skills` opens)
   'Manage Skills': 'Manage Skills',
   'Skills configuration saved.': 'Skills configuration saved.',

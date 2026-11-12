@@ -17,6 +17,7 @@ import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcCsiActivationAdmission;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.springframework.dao.DuplicateKeyException;
@@ -186,7 +187,7 @@ final class JournalWriterLifecycle {
         // Materialize the key before any locking read: missing-key RR locks can
         // deadlock independent tenants when both first writers insert a head.
         jdbc.update("INSERT IGNORE INTO ma_session_head (tenant_key, harness_key, tenant_id, harness_session_id, session_id, head_kind, phase, gmt_create, gmt_modified) VALUES (?, ?, ?, ?, ?, 'HARNESS', 'OPEN', " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ")",
-                JdbcRuntimeBindingRepository.harnessDrainKey(tenantId), JdbcRuntimeBindingRepository.harnessDrainKey(sessionId),
+                RuntimeAdmissionFences.harnessDrainKey(tenantId), RuntimeAdmissionFences.harnessDrainKey(sessionId),
                 tenantId, sessionId, sessionId);
         if (authority != null) {
             JdbcWorkspaceLifecycleStore.requireClaim(jdbc, tenantId, sessionId, authority,
@@ -212,8 +213,8 @@ final class JournalWriterLifecycle {
                         "SELECT head_kind FROM ma_session_head WHERE tenant_key = ? AND harness_key"
                             + " = ? AND tenant_id = ? AND session_id = ? FOR UPDATE",
                         String.class,
-                        JdbcRuntimeBindingRepository.harnessDrainKey(tenantId),
-                        JdbcRuntimeBindingRepository.harnessDrainKey(sessionId),
+                        RuntimeAdmissionFences.harnessDrainKey(tenantId),
+                        RuntimeAdmissionFences.harnessDrainKey(sessionId),
                         tenantId,
                         sessionId);
         if (!kinds.isEmpty() && "HARNESS".equals(kinds.getFirst())) {
@@ -225,18 +226,18 @@ final class JournalWriterLifecycle {
                     initialLeaseUntil.getTime(),
                     tokenHash,
                     createdAt.getTime(),
-                    JdbcRuntimeBindingRepository.harnessDrainKey(tenantId),
-                    JdbcRuntimeBindingRepository.harnessDrainKey(sessionId),
+                    RuntimeAdmissionFences.harnessDrainKey(tenantId),
+                    RuntimeAdmissionFences.harnessDrainKey(sessionId),
                     tenantId,
                     sessionId);
-            return new WriterGrant(1, JournalStoreRows.epochMillis(initialLeaseUntil), 0, 0, null, 0, false);
+            return new WriterGrant(1, JournalStoreRows.epochMillis(initialLeaseUntil), 0, 0, null, 0, false, supportedStorage(csiOriginal));
         }
         try {
             jdbc.update(
                     "INSERT INTO ma_session_head (tenant_key, harness_key, harness_session_id, head_kind, tenant_id, workspace_id, session_id, storage_version, state, writer_generation, writer_id, writer_lease_until, lease_token_hash, journal_revision, wake_head_revision, cleanup_head_revision, committed_sequence, activation_epoch, compacted_through_revision, recovery_status, gmt_create, gmt_modified) VALUES (?, ?, ?, 'MANAGED_SESSION', ?, ?, ?, ?, 'ACTIVE', 1, ?, ?, ?, 0, 0, 0, 0, 0, 0, 'READY', ?, ?)",
-                    com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository
+                    RuntimeAdmissionFences
                             .harnessDrainKey(tenantId),
-                    com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository
+                    RuntimeAdmissionFences
                             .harnessDrainKey(sessionId),
                     sessionId,
                     tenantId,
@@ -249,7 +250,7 @@ final class JournalWriterLifecycle {
                     createdAt.getTime(),
                     createdAt.getTime());
             return new WriterGrant(1, JournalStoreRows.epochMillis(initialLeaseUntil), 0, 0,
-                    null, 0, false);
+                    null, 0, false, supportedStorage(csiOriginal));
         } catch (DuplicateKeyException ignored) {
             // A prior acquire created the row; lock and inspect it below.
         }
@@ -285,11 +286,11 @@ final class JournalWriterLifecycle {
                     "UPDATE ma_session_head SET writer_lease_until = ?, gmt_modified = ? WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ?",
                     leaseUntil.getTime(),
                     now.getTime(),
-                    JdbcRuntimeBindingRepository.harnessDrainKey(tenantId),
-                    JdbcRuntimeBindingRepository.harnessDrainKey(sessionId),
+                    RuntimeAdmissionFences.harnessDrainKey(tenantId),
+                    RuntimeAdmissionFences.harnessDrainKey(sessionId),
                     tenantId,
                     sessionId);
-            return grant(head, leaseUntil, true);
+            return grant(head, leaseUntil, true, supportedStorage(csiOriginal));
         }
         long generation = JournalStoreRows.increment(head.writerGeneration(),
                 "writer generation");
@@ -322,13 +323,13 @@ final class JournalWriterLifecycle {
                 leaseUntil.getTime(),
                 tokenHash,
                 now.getTime(),
-                JdbcRuntimeBindingRepository.harnessDrainKey(tenantId),
-                JdbcRuntimeBindingRepository.harnessDrainKey(sessionId),
+                RuntimeAdmissionFences.harnessDrainKey(tenantId),
+                RuntimeAdmissionFences.harnessDrainKey(sessionId),
                 tenantId,
                 sessionId);
         return new WriterGrant(generation, JournalStoreRows.epochMillis(leaseUntil),
                 head.journalRevision(), head.committedSequence(),
-                head.lastCommitDigest(), head.activationEpoch(), false);
+                head.lastCommitDigest(), head.activationEpoch(), false, supportedStorage(csiOriginal));
     }
 
     WriterGrant renewWriter(String tenantId, String sessionId, String writerToken,
@@ -365,8 +366,8 @@ final class JournalWriterLifecycle {
                 "UPDATE ma_session_head SET writer_lease_until = ?, gmt_modified = ? WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ?",
                 leaseUntil.getTime(),
                 now.getTime(),
-                JdbcRuntimeBindingRepository.harnessDrainKey(tenantId),
-                JdbcRuntimeBindingRepository.harnessDrainKey(sessionId),
+                RuntimeAdmissionFences.harnessDrainKey(tenantId),
+                RuntimeAdmissionFences.harnessDrainKey(sessionId),
                 tenantId,
                 sessionId);
         if (request.activation() != null) {
@@ -396,16 +397,16 @@ final class JournalWriterLifecycle {
                         until, activation.renewalSeq(), tenantId, sessionId, row.revision());
                 jdbc.update("UPDATE ma_session_head SET activation_expires_at = ?"
                                 + " WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ?",
-                        until, JdbcRuntimeBindingRepository.harnessDrainKey(tenantId),
-                        JdbcRuntimeBindingRepository.harnessDrainKey(sessionId), tenantId, sessionId);
+                        until, RuntimeAdmissionFences.harnessDrainKey(tenantId),
+                        RuntimeAdmissionFences.harnessDrainKey(sessionId), tenantId, sessionId);
             }
             var lease = new ManagedSessionStoreModels.ActivationLease(
                     activation.activationId(), activation.epoch(), activation.renewalSeq(), until);
             return new WriterGrant(head.writerGeneration(), JournalStoreRows.epochMillis(leaseUntil), head.journalRevision(),
                     head.committedSequence(), head.lastCommitDigest(), head.activationEpoch(), false,
-                    com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedStorageVersions.SUPPORTED, true, lease);
+                    supportedStorage(csiOriginal), true, lease);
         }
-        return grant(head, leaseUntil, false);
+        return grant(head, leaseUntil, false, supportedStorage(csiOriginal));
     }
 
     SealReceipt sealWriter(String tenantId, String sessionId, String writerToken,
@@ -441,8 +442,8 @@ final class JournalWriterLifecycle {
                 "UPDATE ma_session_head SET state = 'SEALED', gmt_modified = ? WHERE tenant_key = ?"
                     + " AND harness_key = ? AND tenant_id = ? AND session_id = ?",
                 now.getTime(),
-                JdbcRuntimeBindingRepository.harnessDrainKey(tenantId),
-                JdbcRuntimeBindingRepository.harnessDrainKey(sessionId),
+                RuntimeAdmissionFences.harnessDrainKey(tenantId),
+                RuntimeAdmissionFences.harnessDrainKey(sessionId),
                 tenantId,
                 sessionId);
         return new SealReceipt(head.writerGeneration(), "SEALED", false);
@@ -553,7 +554,7 @@ final class JournalWriterLifecycle {
                 scope, recordKey, resourceKey, tenantId, request.workspaceId(), sessionId, resourceId, now.getTime());
         jdbc.update("UPDATE ma_session_head SET state = 'SEALED', gmt_modified = ? WHERE tenant_key = ? AND harness_key = ?"
                 + " AND tenant_id = ? AND session_id = ? AND head_kind = 'MANAGED_SESSION'", now.getTime(),
-                JdbcRuntimeBindingRepository.harnessDrainKey(tenantId), JdbcRuntimeBindingRepository.harnessDrainKey(sessionId), tenantId, sessionId);
+                RuntimeAdmissionFences.harnessDrainKey(tenantId), RuntimeAdmissionFences.harnessDrainKey(sessionId), tenantId, sessionId);
         jdbc.update("UPDATE ma_session SET harness_placement_state = 'RELEASED' WHERE tenant_id = ? AND session_id = ?",
                 tenantId, sessionId);
         return receipt;
@@ -610,8 +611,8 @@ final class JournalWriterLifecycle {
                 request.recoveryStatus(),
                 request.recoveryDetailCode(),
                 now.getTime(),
-                JdbcRuntimeBindingRepository.harnessDrainKey(tenantId),
-                JdbcRuntimeBindingRepository.harnessDrainKey(sessionId),
+                RuntimeAdmissionFences.harnessDrainKey(tenantId),
+                RuntimeAdmissionFences.harnessDrainKey(sessionId),
                 tenantId,
                 sessionId);
         return new RecoveryStateReceipt(head.writerGeneration(),
@@ -631,8 +632,8 @@ final class JournalWriterLifecycle {
                             + " harness_key = ? AND tenant_id = ? AND session_id = ? AND state ="
                             + " 'ACTIVE' FOR UPDATE",
                         (result, row) -> ManagedSchemaTime.timestamp(result, "writer_lease_until"),
-                        JdbcRuntimeBindingRepository.harnessDrainKey(tenantId),
-                        JdbcRuntimeBindingRepository.harnessDrainKey(sessionId),
+                        RuntimeAdmissionFences.harnessDrainKey(tenantId),
+                        RuntimeAdmissionFences.harnessDrainKey(sessionId),
                         tenantId,
                         sessionId);
         return !leases.isEmpty() && leases.getFirst() != null
@@ -640,10 +641,19 @@ final class JournalWriterLifecycle {
     }
 
     WriterGrant grant(JournalStoreRows.HeadRow head, Timestamp leaseUntil,
-            boolean replayed) {
+            boolean replayed, int supportedStorageVersion) {
         return new WriterGrant(head.writerGeneration(), JournalStoreRows.epochMillis(leaseUntil),
                 head.journalRevision(), head.committedSequence(),
-                head.lastCommitDigest(), head.activationEpoch(), replayed);
+                head.lastCommitDigest(), head.activationEpoch(), replayed, supportedStorageVersion);
+    }
+
+    private static int supportedStorage(com.alibaba.qwen.code.runtimebroker.persistence.JdbcCsiFilesRetirementGuard.Original original) {
+        if (original == null) {
+            return com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedStorageVersions.SUPPORTED;
+        }
+        var scope = original.request().getScope();
+        return com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile.hasActivityDiagnostics(scope) ? 4
+                : com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile.hasDiagnostics(scope) ? 3 : 1;
     }
 
     static Timestamp plusMillis(Timestamp timestamp, long millis) {
