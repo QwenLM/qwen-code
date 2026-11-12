@@ -123,9 +123,10 @@ static envelope rather than changing that builder's output.
 
 Reuse the pure `splitByTables` logic through a small export, preserving the
 application-bot card structure and transport. Its fence recognition needs a
-small correction: only backtick or tilde fences at the start of a line, allowing
-spaces or tabs before the marker, change code-block state. Closing fences must
-match the opener. This preserves nested list code blocks and prevents table-like
+small correction: backtick or tilde fences may open at the start of a line after
+spaces, tabs or list markers. Closing fences must match the opener and may have
+only whitespace before them; list markers inside code remain literal text.
+This preserves nested list code blocks and prevents table-like
 content inside a tilde fence from being separated into broken card elements. This puts table
 segments and surrounding text in separate Markdown elements within the same
 card. It does not split delivery into multiple requests. The official schema 2.0

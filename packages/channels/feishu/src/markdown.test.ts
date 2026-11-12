@@ -93,6 +93,50 @@ describe('Feishu markdown utilities', () => {
       expect(splitByTables(`${code}\n${table}`)).toEqual([code, table]);
     });
 
+    it.each(
+      ['- ', '* ', '+ ', '1. ', '2) ', '\t-\t', '- 1. '].flatMap((prefix) =>
+        ['```', '~~~'].map((fence) => ({ prefix, fence })),
+      ),
+    )(
+      'preserves $prefix$fence list fences between tables',
+      ({ prefix, fence }) => {
+        const indent = ' '.repeat(prefix.replaceAll('\t', '    ').length);
+        const code = [
+          `${prefix}${fence}text`,
+          ...table.split('\n').map((line) => `${indent}${line}`),
+          `${indent}${fence}`,
+        ].join('\n');
+        const markdown = `${table}\n${code}\n${table}\nAfter`;
+        const segments = [table, code, table, 'After'];
+        expect(splitByTables(markdown)).toEqual(segments);
+        const card = buildCardContent(markdown) as unknown as CardStructure;
+        expect(card.body.elements).toEqual(
+          segments.map((content) => ({ tag: 'markdown', content })),
+        );
+      },
+    );
+
+    it.each(['```', '~~~'])(
+      'does not close a %s fence on a list-prefixed literal delimiter',
+      (fence) => {
+        const code = [fence, `- ${fence}`, table, fence].join('\n');
+        expect(splitByTables(`${code}\n${table}`)).toEqual([code, table]);
+      },
+    );
+
+    it.each([
+      '- Use ``` literally.',
+      '1. ```invalid`info',
+      '-```',
+      '1234567890. ```',
+    ])('does not open a fence from %s', (prose) => {
+      expect(splitByTables(`${prose}\n${table}\nAfter`)).toEqual([
+        prose,
+        table,
+        'After',
+      ]);
+    });
+
     it.each(['```', '~~~'])(
       'preserves %s fences and table-like text with CRLF line endings',
       (fence) => {

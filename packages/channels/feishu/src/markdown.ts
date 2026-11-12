@@ -22,7 +22,12 @@ export function splitByTables(text: string): string[] {
   let codeFence: { marker: string; length: number } | undefined;
 
   for (const line of lines) {
-    const fence = /^[ \t]*(`{3,}|~{3,})(.*)$/.exec(line.replace(/\r$/, ''));
+    const fenceLine = codeFence
+      ? line
+      : line.replace(/^[ \t]*(?:(?:[-*+]|\d{1,9}[.)])[ \t]+)+/, '');
+    const fence = /^[ \t]*(`{3,}|~{3,})(.*)$/.exec(
+      fenceLine.replace(/\r$/, ''),
+    );
     if (codeFence) {
       if (
         fence &&

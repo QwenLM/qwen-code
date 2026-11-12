@@ -48,20 +48,22 @@ describe('Feishu webhook workspace proxy', () => {
         await vi.importActual<typeof import('undici')>('undici');
       const directConnections: Array<{ hostname: string; protocol: string }> =
         [];
-      vi.spyOn(undici, 'EnvHttpProxyAgent').mockImplementation(
-        (options) =>
-          new realUndici.EnvHttpProxyAgent({
-            ...options,
-            // Preserve routing decisions, but stop direct sockets before external I/O.
-            connect: (target, callback) => {
-              directConnections.push({
-                hostname: target.hostname,
-                protocol: target.protocol,
-              });
-              callback(new Error('Direct socket blocked by fixture'), null);
-            },
-          }),
-      );
+      const dispatchers: Array<import('undici').EnvHttpProxyAgent> = [];
+      vi.spyOn(undici, 'EnvHttpProxyAgent').mockImplementation((options) => {
+        const dispatcher = new realUndici.EnvHttpProxyAgent({
+          ...options,
+          // Preserve routing decisions, but stop direct sockets before external I/O.
+          connect: (target, callback) => {
+            directConnections.push({
+              hostname: target.hostname,
+              protocol: target.protocol,
+            });
+            callback(new Error('Direct socket blocked by fixture'), null);
+          },
+        });
+        dispatchers.push(dispatcher);
+        return dispatcher;
+      });
       vi.mocked(undici.fetch).mockImplementation(realUndici.fetch);
       const connects: Array<{ authority: string; authorization?: string }> = [];
       const sockets = new Set<Socket>();
@@ -127,9 +129,14 @@ describe('Feishu webhook workspace proxy', () => {
         expect(directConnections).toEqual(
           bypass ? [{ hostname: 'open.feishu.cn', protocol: 'https:' }] : [],
         );
+        expect(dispatchers).toHaveLength(1);
+        expect(dispatchers[0]).toHaveProperty('destroyed', true);
       } finally {
         channel?.disconnect();
         await channel?.waitForDisconnect();
+        await Promise.all(
+          dispatchers.map((dispatcher) => dispatcher.destroy()),
+        );
         for (const socket of sockets) socket.destroy();
         await new Promise<void>((resolve) => proxy.close(() => resolve()));
       }
