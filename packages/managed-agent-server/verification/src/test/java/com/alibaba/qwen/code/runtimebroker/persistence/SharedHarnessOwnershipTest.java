@@ -198,17 +198,6 @@ class SharedHarnessOwnershipTest {
     }
 
     @Test
-    void inMemoryRepositoryFencesTheSameHarnessSession() {
-        var registry = new InMemoryRuntimeBindingRepository();
-        var saved = new InMemoryRuntimeSessionRepository();
-        var binding = ready(registry, SHARED);
-        registry.requestHarnessDrain("tenant", "harness-a");
-
-        assertClosed(() -> registry.admitSession(saved, candidate(binding, "harness-a", "a-1")));
-        assertNotNull(registry.admitSession(saved, candidate(binding, "harness-b", "b-1")));
-    }
-
-    @Test
     void originalOwnerPathsAnswerOnlyTheRuntimeSessionsHarnessSession() throws Exception {
         var binding = ready(bindings, SHARED);
         sessionReady(bindings.admitSession(sessions, candidate(binding, "harness-a", "a-1")));

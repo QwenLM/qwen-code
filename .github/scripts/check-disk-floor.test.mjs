@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
@@ -278,5 +278,97 @@ describe('check-disk-floor', () => {
 
     assert.equal(result.status, 1);
     assert.ok(result.stdout.includes('between 1 and 100'));
+  });
+
+  it("emits breaches the infrastructure classifiers recognise, and config errors they don't", () => {
+    // The sibling gate (check-host-load) has pinned this since #16987; this
+    // one had no such test, and its phrase was in NEITHER list. Measured
+    // 2026-11-12: /tmp on the host behind ecs-qwen-hz3-10/hz3-12 sat at
+    // 10,3xx free inodes against the 100,000 floor, so `web-shell E2E Smoke
+    // (shard 1/2)` died HERE on #17022 and #17011 with every later step
+    // skipped — and the scan had no signature for it, so a re-run that
+    // could have landed on a healthy host was spent on an agent round
+    // instead. The inode arm is why the existing ENOSPC tokens don't cover
+    // it: the volume still had 105 GiB free at 15% used.
+    //
+    // Read the lists from the workflows, and compare what the gate PRINTS:
+    // a literal copied here would pass while the gate's wording drifted.
+    const readEnv = (file, key) => {
+      const text = readFileSync(
+        fileURLToPath(new URL(`../workflows/${file}`, import.meta.url)),
+        'utf8',
+      );
+      const line = text
+        .split('\n')
+        .find((l) => new RegExp(`^\\s*${key}:`).test(l));
+      assert.ok(line, `${file}: ${key} not found`);
+      const value = line.slice(line.indexOf(':') + 1).trim();
+      const quote = value[0];
+      assert.ok(
+        quote === '"' || quote === "'",
+        `${file}: ${key} is not a quoted scalar this reader can take`,
+      );
+      assert.ok(value.endsWith(quote), `${file}: ${key} is not one line`);
+      return quote === '"' ? JSON.parse(value) : value.slice(1, -1);
+    };
+    const autofix = readEnv('qwen-autofix.yml', 'INFRA_FAILURE_SIGNATURES');
+    const issue = readEnv(
+      'main-ci-failure-issue.yml',
+      'INFRA_FAILURE_SIGNATURES',
+    );
+    const config = readEnv('qwen-autofix.yml', 'CONFIG_FAILURE_SIGNATURES');
+    // main-ci-failure-issue promises the two infra strings stay equal.
+    assert.equal(issue, autofix);
+
+    // All three breach arms, from the gate itself rather than from prose.
+    const breaches = [
+      runGateWithDf({
+        mountLine: '/dev/sda1 1000000000 999999000 1000 100% /',
+        env: { DISK_FLOOR_MIN_FREE_KB: '2097152' },
+      }),
+      runGateWithDf({
+        mountLine: '/dev/sda1 1000000000 100000000 900000000 10% /',
+        env: {
+          DISK_FLOOR_MIN_FREE_KB: '1',
+          DISK_FLOOR_MIN_FREE_INODES: '999999999999',
+        },
+      }),
+      runGateWithDf({
+        mountLine: '/dev/sda1 1000000000 950000000 50000000 95% /',
+        env: { DISK_FLOOR_MIN_FREE_KB: '1', DISK_FLOOR_MAX_USED_PCT: '94' },
+      }),
+    ];
+    for (const result of breaches) {
+      assert.equal(result.status, 1, result.stdout);
+      assert.match(result.stdout, /::error::Disk floor breached/);
+      assert.ok(
+        new RegExp(autofix, 'i').test(result.stdout),
+        `qwen-autofix must classify this as infrastructure: ${result.stdout}`,
+      );
+      assert.ok(
+        !new RegExp(config, 'i').test(result.stdout),
+        `a breach is not a configuration error: ${result.stdout}`,
+      );
+    }
+
+    // Every knob's own refusal, printed by the gate: deterministic, so
+    // qwen-autofix must claim it as config (skip the PR for a human) and
+    // NEITHER infra list may claim it — a re-run cannot change a variable.
+    for (const env of [
+      { DISK_FLOOR_MIN_FREE_KB: '2G' },
+      { DISK_FLOOR_MIN_FREE_INODES: '9223372036854775808' },
+      { DISK_FLOOR_MAX_USED_PCT: '0' },
+    ]) {
+      const result = runGate({ env });
+      assert.equal(result.status, 1, result.stdout);
+      assert.ok(
+        new RegExp(config, 'i').test(result.stdout),
+        `qwen-autofix CONFIG_FAILURE_SIGNATURES must claim: ${result.stdout}`,
+      );
+      assert.ok(
+        !new RegExp(autofix, 'i').test(result.stdout),
+        `a malformed floor must not be rerun as infrastructure: ${result.stdout}`,
+      );
+    }
   });
 });

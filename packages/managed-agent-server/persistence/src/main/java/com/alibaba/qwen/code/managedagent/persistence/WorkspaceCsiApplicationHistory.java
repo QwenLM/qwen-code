@@ -69,7 +69,7 @@ final class WorkspaceCsiApplicationHistory {
             var value = WorkspaceCsiApplicationStore.savedEnvelope(saved.binding(), context, retirement,
                     evidence.sealedBindingVersion(), saved.frozen());
             byte[] body = WorkspaceCsiApplicationJson.base64(value.path("commitBodyBase64"),
-                    com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof.TERMINAL_BODY_LIMIT);
+                    CsiNativeActivationProof.TERMINAL_BODY_LIMIT);
             WorkspaceCsiApplicationWorkerMatch.verify(evidence, WorkspaceCsiApplicationStore.savedObservation(value),
                     WorkspaceCsiApplicationStore.workerRequest(saved.binding(), context, retirement, "observe", hash(body), null, null));
             var finalize = WorkspaceCsiApplicationStore.workerRequest(saved.binding(), context, retirement, "finalize",
