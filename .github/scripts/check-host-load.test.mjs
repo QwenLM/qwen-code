@@ -97,6 +97,18 @@ function withoutAwk() {
   return bin;
 }
 
+// The two workflows promise their INFRA_FAILURE_SIGNATURES lists stay equal;
+// read them from the workflows themselves instead of restating them.
+function readSignatures(name) {
+  const workflow = readFileSync(
+    fileURLToPath(new URL(`../workflows/${name}`, import.meta.url)),
+    'utf8',
+  );
+  const signatures = /INFRA_FAILURE_SIGNATURES: '([^']*)'/.exec(workflow)?.[1];
+  assert.ok(signatures, `${name}: INFRA_FAILURE_SIGNATURES not found`);
+  return signatures;
+}
+
 describe('check-host-load', () => {
   it('admits a host below the ceiling and emits a tagged sample', () => {
     // A host that passed its suites: hk3-28 at load 40 on 64 CPUs, 0.62.
@@ -428,17 +440,6 @@ describe('check-host-load', () => {
       env: { HOST_LOAD_MAX_WAIT_TRIES: '1' },
     });
     assert.equal(result.status, 1, result.stdout);
-    const readSignatures = (name) => {
-      const workflow = readFileSync(
-        fileURLToPath(new URL(`../workflows/${name}`, import.meta.url)),
-        'utf8',
-      );
-      const signatures = /INFRA_FAILURE_SIGNATURES: '([^']*)'/.exec(
-        workflow,
-      )?.[1];
-      assert.ok(signatures, `${name}: INFRA_FAILURE_SIGNATURES not found`);
-      return signatures;
-    };
     const signatures = readSignatures('qwen-autofix.yml');
     const issueSignatures = readSignatures('main-ci-failure-issue.yml');
     assert.match(result.stdout, /::error::Host load gate breached/);
@@ -451,5 +452,55 @@ describe('check-host-load', () => {
       'the breach annotation must match main-ci-failure INFRA_FAILURE_SIGNATURES',
     );
     assert.equal(issueSignatures, signatures);
+  });
+
+  it('prints configuration errors that both classifiers claim', () => {
+    // R2-1: these annotations were pinned as literals copied into another
+    // file, so renaming one in the gate passed unseen. Read what the gate
+    // actually prints, match it against each classifier's own list, and
+    // require one printed line per knob.
+    const envs = [
+      { HOST_LOAD_MAX_RATIO: '0' },
+      { HOST_LOAD_MAX_RATIO: '2,0' },
+      { HOST_LOAD_MAX_WAIT_TRIES: '0' },
+      { HOST_LOAD_WAIT_SECONDS: 'many' },
+    ];
+    const emitted = envs.map((env) => {
+      const result = runGate({ env });
+      assert.equal(
+        result.status,
+        1,
+        `${JSON.stringify(env)}: ${result.stdout}`,
+      );
+      const errors = result.stdout
+        .split('\n')
+        .filter((line) => line.startsWith('::error::'));
+      assert.equal(
+        errors.length,
+        1,
+        `${JSON.stringify(env)}: ${result.stdout}`,
+      );
+      return errors[0];
+    });
+
+    for (const name of ['qwen-autofix.yml', 'main-ci-failure-issue.yml']) {
+      const pattern = new RegExp(readSignatures(name), 'i');
+      for (const line of emitted) {
+        assert.match(line, pattern, `${name} does not classify: ${line}`);
+      }
+    }
+
+    // One printed line per knob, so dropping a token from either list reds
+    // here rather than leaving the knob silently unclassified.
+    for (const knob of [
+      'HOST_LOAD_MAX_RATIO must be a positive number',
+      'HOST_LOAD_MAX_WAIT_TRIES must be a positive integer',
+      'HOST_LOAD_WAIT_SECONDS must be a positive integer',
+    ]) {
+      assert.ok(
+        emitted.some((line) => line.includes(knob)),
+        `no printed error covers "${knob}": ${emitted.join(' | ')}`,
+      );
+    }
   });
 });
