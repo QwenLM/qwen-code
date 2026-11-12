@@ -131,7 +131,10 @@ final class AgentSessionPolicies {
     }
 
     static void requireSshToolProfile(String profile) {
-        if (!WorkspaceToolProfiles.FILES.equals(profile) && !WorkspaceToolProfiles.SHELL.equals(profile)) {
+        // The loop revision shell/3 is a public shell too: its journal-based
+        // loop_wakeup/cron union is runtime-agnostic, so the SSH lane admits it
+        // exactly like shell/1 (D3).
+        if (!WorkspaceToolProfiles.FILES.equals(profile) && !WorkspaceToolProfiles.isPublicShell(profile)) {
             throw workspaceExecutionUnavailable();
         }
     }
