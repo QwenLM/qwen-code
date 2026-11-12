@@ -43,7 +43,7 @@ class ManagedLegacySessionGuardMySqlIT {
         jdbc = new ManagedSchemaJdbcTemplate(database.source());
         transactions = new TransactionTemplate(new DataSourceTransactionManager(database.source()));
         agents = VerificationFixtures.managedAgentStore(jdbc, new ObjectMapper(), Clock.systemUTC(),
-                events -> { }, mock(JdbcManagedWorkspaceRegistry.class), new ManagedAgentProperties(),
+                events -> {}, mock(JdbcManagedWorkspaceRegistry.class), new ManagedAgentProperties(),
                 new SdkHarnessRules());
     }
 
