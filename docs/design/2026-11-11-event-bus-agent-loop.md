@@ -2,7 +2,7 @@
 
 [English](2026-11-11-event-bus-agent-loop.md) | [简体中文](2026-11-11-event-bus-agent-loop.zh-CN.md)
 
-- **Status**: proposed. Implementation starts with PR 1 (bus primitives); no surface default changes.
+- **Status**: PRs 1–3 merged (#16935 primitives, #16938 handlers, #16949 streaming evaluation). PR 4 adds the headless opt-in setting; no surface default changes.
 - **Date**: 2026-11-11, against `origin/main` `da270e434957`.
 - **Related**:
   - [Unified agent loop](2026-10-23-unified-agent-loop.md) — the accepted design this one re-architects internally; tracking issue #15327, accepted in #15343, headless merged in #15369, ACP model round merged in #15509;
@@ -155,7 +155,8 @@ Each slice keeps the parity suites green and changes no surface default.
 1. **PR 1 — primitives.** `event-bus/{bus,events,state}.ts` + unit tests (port preview's `bus.test.ts`; add serial-delivery, cross-run isolation, failure-republication, late-round tests). Nothing consumes the module yet; zero behavior change. This design doc lands here. `runtime.ts` (handler wiring) and `handler-support.ts` arrive with the handlers in PR 2.
 2. **PR 2 — handlers behind an opt-in flag.** Re-express `runAgentLoop` internals as Conversation/Llm/Tool handlers plus the host adapter, selected by a new `AgentLoopOptions.useEventBus` flag (default off, so the procedural path stays the default within the unified loop until parity is proven). `runModelRound`/`runToolBatch` keep their exports and signatures (ACP #15509 depends on them) and are reused unchanged by the handlers. An equivalence test runs both paths over scripted scenarios and asserts identical results and host-callback order; the headless parity suite and the ACP round tests are the acceptance gate.
 3. **PR 3 — streaming dispatch evaluation (optional, separate gate).** Preview executes a `tool_use` block while the stream is still running. Main runs the batch after the round ends, and approvals are batch-ordered; streaming dispatch changes approval timing and output interleaving. This slice first writes down the parity differences and gets an explicit decision; it is not required for the architecture port.
-4. **Later — surface convergence** continues under the unified-agent-loop program (TUI, OpenTUI, AgentCore, speculation, Hosted). The bus makes loop-level attachments (hooks, Mods, protection, recording) single-place, which is that program's stated goal; no surface work is scheduled here.
+4. **PR 4 — headless opt-in.** A new `experimental.eventBusAgentLoop` setting (env override `QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP=1`, read by `Config.isEventBusAgentLoopEnabled()`) makes the headless shared-loop path pass `useEventBus`. The flag only applies where the full shared loop runs: headless is today's only `runAgentLoop` caller, while ACP, Ink TUI and OpenTUI use `runModelRound` directly and are unaffected. The adapter logs an `[EVENT_BUS]` execution marker through `debugLogger`, so with `QWEN_DEBUG_LOG_FILE` on, a run's path is provable from the debug log instead of assumed. Default off; the procedural path stays the default, and the flag alone (without `experimental.unifiedAgentLoop`) changes nothing.
+5. **Later — surface convergence** continues under the unified-agent-loop program (TUI, OpenTUI, AgentCore, speculation, Hosted). The bus makes loop-level attachments (hooks, Mods, protection, recording) single-place, which is that program's stated goal; no surface work is scheduled here.
 
 ## Testing
 
@@ -168,7 +169,8 @@ Each slice keeps the parity suites green and changes no surface default.
 - PR 1 (primitives): the bus/state/events module lands with unit tests, no runtime consumer, and zero behaviour change (the loop path is unchanged while nothing consumes it); `tsc --build`, ESLint and Prettier are clean.
 - PR 2 (handlers, opt-in): the equivalence suite proves identical results and ordered callback logs between the bus and procedural paths across the scripted scenarios, and the existing agent-loop tests stay green; the flag defaults off so no surface's behaviour changes; `tsc --build`, ESLint and Prettier are clean.
 - Each slice lands its implementation and its tests in the same PR, and the bilingual design doc stays synchronized (structure, decisions, constraints, and this acceptance-criteria section).
-- Real headless scenarios (single turn, tool loop, retry, cancellation) produce parity between the procedural and bus paths with the flag on and off, with the bus path confirmed by an execution marker rather than assumed. (Belongs to a later slice: no surface enables the flag in this PR.)
+- PR 4 (headless opt-in): the setting defaults off and changes no surface default; with both experimental flags on, the headless run takes the bus path, confirmed by the adapter's `[EVENT_BUS]` debug marker; the real-scenario parity below holds; `tsc --build`, ESLint and Prettier are clean.
+- Real headless scenarios (single turn, tool loop, retry, cancellation) produce parity between the procedural and bus paths with the flag on and off, with the bus path confirmed by an execution marker rather than assumed. PR 4 delivers the enablement and the marker; the scenario evidence is recorded in the E2E plan under `.qwen/e2e-tests/`.
 
 ## Risks and open questions
 
@@ -182,4 +184,5 @@ Each slice keeps the parity suites green and changes no surface default.
 
 - New: `packages/core/src/event-bus/{bus,events,state}.ts` and collocated tests (PR 1); `runtime.ts`, `handler-support.ts`, `conversation.ts`, `llm.ts`, `tool.ts`, `adapter.ts` (PR 2).
 - Modified: `packages/core/src/core/agent-loop.ts` internals (PR 2); its public types and exports unchanged.
+- PR 4: `packages/core/src/config/config.ts` (parameter + `isEventBusAgentLoopEnabled`), `packages/core/src/event-bus/adapter.ts` (debug execution marker), `packages/cli/src/config/config.ts` and `settingsSchema.ts` (setting + wiring), `packages/cli/src/nonInteractiveCli.ts` (`useEventBus`), `packages/web-shell/client/settings.ts` and `settings/messages.ts` (public alias + zh-CN entries), and the regenerated `packages/vscode-ide-companion/schemas/settings.schema.json`; tests collocated with each change.
 - Docs: this pair; the unified-agent-loop doc gains a cross-reference once PR 2 lands.
