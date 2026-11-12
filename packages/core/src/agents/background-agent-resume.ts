@@ -1423,7 +1423,12 @@ export class BackgroundAgentResumeService {
             } else {
               const failureText =
                 finalText || `Agent terminated with mode: ${terminateMode}`;
-              registry.fail(meta.agentId, failureText, stats);
+              registry.fail(
+                meta.agentId,
+                failureText,
+                stats,
+                finalText || undefined,
+              );
               patchAgentMeta(metaPath, {
                 status: 'failed',
                 lastUpdatedAt: new Date().toISOString(),
@@ -1457,7 +1462,8 @@ export class BackgroundAgentResumeService {
             );
           } else {
             const stats = getCompletionStats(subagent, liveToolCallCount);
-            registry.fail(meta.agentId, errorMessage, stats);
+            const partialResult = subagent.getFinalText() || undefined;
+            registry.fail(meta.agentId, errorMessage, stats, partialResult);
             patchAgentMeta(metaPath, {
               status: 'failed',
               lastUpdatedAt: new Date().toISOString(),

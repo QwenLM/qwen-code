@@ -4500,7 +4500,12 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
                     `Agent terminated with mode: ${terminateMode}`) +
                   wtSuffix +
                   externalSuffix;
-                registry.fail(hookOpts.agentId, failureText, completionStats);
+                registry.fail(
+                  hookOpts.agentId,
+                  failureText,
+                  completionStats,
+                  finalText || undefined,
+                );
                 patchAgentMeta(metaPath, {
                   status: 'failed',
                   lastUpdatedAt: new Date().toISOString(),
@@ -4572,7 +4577,13 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
               );
             } else {
               const completionStats = getCompletionStats();
-              registry.fail(hookOpts.agentId, errorMsg, completionStats);
+              const partialResult = bgSubagent?.getFinalText() || undefined;
+              registry.fail(
+                hookOpts.agentId,
+                errorMsg,
+                completionStats,
+                partialResult,
+              );
               patchAgentMeta(metaPath, {
                 status: 'failed',
                 lastUpdatedAt: new Date().toISOString(),

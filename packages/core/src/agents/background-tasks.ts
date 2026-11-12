@@ -441,6 +441,7 @@ export interface NotificationMeta {
   status: TaskStatus;
   stats?: AgentCompletionStats;
   toolUseId?: string;
+  recentActivities?: readonly BackgroundActivity[];
   todoWorkChainId?: string;
   label?: string;
 }
@@ -1075,7 +1076,12 @@ export class BackgroundTaskRegistry {
   }
 
   // See complete() for the cancelled → terminal path rationale.
-  fail(agentId: string, error: string, stats?: AgentCompletionStats): void {
+  fail(
+    agentId: string,
+    error: string,
+    stats?: AgentCompletionStats,
+    partialResult?: string,
+  ): void {
     const entry = this.agents.get(agentId);
     if (!entry) return;
     if (entry.status !== 'running' && entry.status !== 'cancelled') return;
@@ -1085,6 +1091,7 @@ export class BackgroundTaskRegistry {
     entry.endTime = Date.now();
     entry.error = error;
     entry.stats = stats;
+    if (partialResult) entry.result = partialResult;
     this.releaseFinishingWaiters(agentId, true);
     debugLogger.info(`Background agent failed: ${agentId}`);
 
@@ -2090,6 +2097,19 @@ export class BackgroundTaskRegistry {
         `<output-file>${escapeXml(entry.outputFile)}</output-file>`,
       );
     }
+    if (entry.recentActivities && entry.recentActivities.length > 0) {
+      xmlParts.push('<recent-activities>');
+      for (const activity of entry.recentActivities) {
+        xmlParts.push(
+          '<activity>',
+          `<name>${escapeXml(activity.name)}</name>`,
+          `<description>${escapeXml(activity.description)}</description>`,
+          `<at>${activity.at}</at>`,
+          '</activity>',
+        );
+      }
+      xmlParts.push('</recent-activities>');
+    }
     if (entry.stats) {
       xmlParts.push(
         '<usage>',
@@ -2110,6 +2130,7 @@ export class BackgroundTaskRegistry {
       status: entry.status,
       stats: entry.stats,
       toolUseId: entry.toolUseId,
+      recentActivities: entry.recentActivities,
       todoWorkChainId: entry.todoWorkChainId,
       label: buildBackgroundEntryLabel(entry, { includePrefix: false }),
     };
